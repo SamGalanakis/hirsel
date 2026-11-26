@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 
-from wire_process import stop_process
+from wire_process import in_docker_loopback, start_listening, stop_process
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,15 +26,13 @@ HAPROXY = 'haproxy:3.2.27-alpine'
 NGINX = 'nginx:1.31.4-alpine'
 CLIENT = '127.0.0.5'  # not the front's address, so a direct dial is untrusted
 FRONT = ('127.0.0.1', 443)
-STREAM = ('127.0.0.1', 18202)
-WEB = ('127.0.0.1', 18201)
 CC = ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang'
 
 
 def build(compiler, runtime, work):
     built = {}
     for entry, grants in [('haproxy', ['Stdout']),
-                          ('listener', ['Stdout', 'Clock', 'Net=Listen 127.0.0.0/8 18202-18202'])]:
+                          ('listener', ['Stdout', 'Clock', 'Net=Listen 127.0.0.1/32 0-65535'])]:
         command = [str(compiler), 'build', str(ROOT / 'core/programs/wire'), '--libraries', str(ROOT / 'core'),
                    '--source-core', '--store', str(work / 'store'),
                    '--entry', 'wire@1/front/' + entry, '--backend', 'cranelift', '--runtime', str(runtime),
@@ -46,7 +44,7 @@ def build(compiler, runtime, work):
     return built
 
 
-def loopback_only(text, old, new, count):
+def replace_exact(text, old, new, count):
     assert text.count(old) == count, (old, text.count(old))
     return text.replace(old, new)
 
@@ -75,7 +73,7 @@ class Lines:
 
     def pump(self, stream):
         for line in stream:
-            self.queue.put(line.strip())
+            self.queue.put(line.decode().strip())
 
     def next(self, timeout=5):
         return self.queue.get(timeout=timeout)
@@ -128,11 +126,11 @@ def law(front, lines, forwarded, port):
     print(f'{front}: PASS no SNI and other.test reached no listener', flush=True)
 
 
-def direct(lines):
+def direct(lines, stream_port):
     # A connection from outside the trusted front is closed before any byte is read.
     with socket.socket() as s:
         s.bind((CLIENT, 0))
-        s.connect(STREAM)
+        s.connect(('127.0.0.1', stream_port))
         port = s.getsockname()[1]
         s.sendall(b'\r\n\r\n\x00\r\nQUIT\n\x21\x11\x00\x0c\x7f\x00\x00\x05\x7f\x00\x00\x01\x9c\x41\x01\xbb')
         assert lines.next() == f'accept {CLIENT}:{port}'
@@ -145,9 +143,9 @@ def direct(lines):
     print('direct: PASS a non-front peer was refused Untrusted and closed', flush=True)
 
 
-def run_front(name, image, mounts, lines, forwarded, port, user=()):
+def run_front(network, name, image, mounts, lines, forwarded, port, user=()):
     container = f'ingress-front-{os.getpid()}-{name}'
-    subprocess.run(['docker', 'run', '-d', '--rm', '--name', container, '--network', 'host', '--cpuset-cpus', '8-11',
+    subprocess.run(['docker', 'run', '-d', '--rm', '--name', container, '--network', network,
                     *user, *[arg for mount in mounts for arg in ('-v', mount)], image], check=True, stdout=subprocess.DEVNULL)
     try:
         for _ in range(100):
@@ -172,6 +170,9 @@ def main():
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--haproxy-config', type=Path, help='run this HAProxy configuration instead of the committed one')
     args = parser.parse_args()
+    network = os.environ.get('HIRSEL_WIRE_DOCKER_NETWORK')
+    if network is None:
+        return in_docker_loopback(NGINX)
     with tempfile.TemporaryDirectory(prefix='ingress-front-') as scratch:
         work = Path(scratch)
         work.chmod(0o755)
@@ -182,12 +183,10 @@ def main():
         committed = (INGRESS / 'haproxy.cfg').read_text()
         assert generated == committed, 'deploy/ingress/haproxy.cfg differs from the generator; regenerate it'
         haproxy = (args.haproxy_config or INGRESS / 'haproxy.cfg').read_text()
-        # Containers share the host network, so bind 443 on loopback only.
-        (work / 'haproxy.cfg').write_text(loopback_only(haproxy, '    bind :443 ', '    bind 127.0.0.1:443 ', 1))
-        (work / 'nginx.conf').write_text(loopback_only((INGRESS / 'nginx.conf').read_text(),
-                                                       '        listen 443 ssl', '        listen 127.0.0.1:443 ssl', 3))
-        for file in ('haproxy.cfg', 'nginx.conf'):
-            (work / file).chmod(0o644)
+        # Keep the PROXY header's destination on port 443 in the private namespace.
+        haproxy = replace_exact(haproxy, '    bind :443 ', '    bind 127.0.0.1:443 ', 1)
+        nginx = replace_exact((INGRESS / 'nginx.conf').read_text(),
+                              '        listen 443 ssl', '        listen 127.0.0.1:443 ssl', 3)
         certs = certificates(work)
 
         forwarded = []
@@ -202,26 +201,33 @@ def main():
             def log_message(self, *_):
                 pass
 
-        web = http.server.HTTPServer(WEB, Web)
+        web = http.server.HTTPServer(('127.0.0.1', 0), Web)
         thread = threading.Thread(target=web.serve_forever, daemon=True)
         thread.start()
-        listener = subprocess.Popen([str(built['listener'])], stdout=subprocess.PIPE, text=True)
         try:
-            lines = Lines(listener)
-            assert lines.next(30) == 'listening'
-            direct(lines)
-            run_front('haproxy', HAPROXY, [f'{work / "haproxy.cfg"}:/usr/local/etc/haproxy/haproxy.cfg:ro',
-                                           f'{certs / "haproxy"}:/usr/local/etc/haproxy/certs:ro'],
-                      lines, forwarded, 40100, user=('--user', '0'))
-            run_front('nginx', NGINX, [f'{work / "nginx.conf"}:/etc/nginx/nginx.conf:ro', f'{certs}:/etc/nginx/certs:ro'],
-                      lines, forwarded, 40200)
+            listener, stream_port = start_listening(built['listener'], stderr=None)
+            try:
+                for name, config in [('haproxy.cfg', haproxy), ('nginx.conf', nginx)]:
+                    config = replace_exact(config, '127.0.0.1:18201', f'127.0.0.1:{web.server_port}', 1)
+                    config = replace_exact(config, '127.0.0.1:18202', f'127.0.0.1:{stream_port}', 1)
+                    (work / name).write_text(config)
+                    (work / name).chmod(0o644)
+                lines = Lines(listener)
+                direct(lines, stream_port)
+                run_front(network, 'haproxy', HAPROXY, [f'{work / "haproxy.cfg"}:/usr/local/etc/haproxy/haproxy.cfg:ro',
+                                               f'{certs / "haproxy"}:/usr/local/etc/haproxy/certs:ro'],
+                          lines, forwarded, 40100, user=('--user', '0'))
+                run_front(network, 'nginx', NGINX, [f'{work / "nginx.conf"}:/etc/nginx/nginx.conf:ro', f'{certs}:/etc/nginx/certs:ro'],
+                          lines, forwarded, 40200)
+            finally:
+                stop_process(listener)
         finally:
-            stop_process(listener)
             web.shutdown()
             web.server_close()
             thread.join()
     print('tls_front_stream: PASS', flush=True)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

@@ -26,6 +26,15 @@ const SIGNATURE: usize = 64;
 /// The most blobs one record names.
 const MOST_BLOBS: usize = 1 << 16;
 
+/// The complete record's encoded length, including the signature.
+pub(super) fn envelope_len(blobs: usize, payload_bytes: u64) -> Option<u64> {
+    if blobs > MOST_BLOBS {
+        return None;
+    }
+    let overhead = HEAD + 4 + 40 * blobs + 8 + SIGNATURE;
+    (overhead as u64).checked_add(payload_bytes)
+}
+
 /// The kinds of record that travel, in G1's order. The tag is the byte the
 /// record carries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,7 +83,8 @@ pub(crate) fn unsigned(
     blobs: &[(ContentHash, u64)],
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(HEAD + 12 + 40 * blobs.len() + payload.len() + SIGNATURE);
+    let len = envelope_len(blobs.len(), payload.len() as u64).expect("admitted signed record");
+    let mut bytes = Vec::with_capacity(len as usize);
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&super::VERSION.to_le_bytes());
     bytes.push(kind as u8);
@@ -156,10 +166,11 @@ impl Store {
         kind: Kind,
         key: ContentHash,
         listed: &[Builder],
+        limit: u64,
     ) -> io::Result<Option<Signed>> {
         for builder in listed {
             let path = self.signed_path(builder.id, key);
-            if let Some(bytes) = self.read_whole(&path, true, None)?
+            if let Some(bytes) = self.read_whole(&path, true, None, Some(limit))?
                 && let Some(signed) = verify(&bytes, kind, key, listed)
             {
                 return Ok(Some(signed));

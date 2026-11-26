@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-from wire_process import accept_from, stop_listener, stop_process
+from wire_process import accept_from, owned_by, start_listening, stop_process
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,7 +63,7 @@ def read_frame(s, masked=False):
     return opcode & 15, bytes(x ^ mask[i % 4] for i, x in enumerate(payload))
 
 
-def connect(port=18089):
+def connect(port):
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
     s.settimeout(8)
@@ -71,8 +71,8 @@ def connect(port=18089):
     return s
 
 
-def upgrade(tail=b''):
-    s = connect()
+def upgrade(port, tail=b''):
+    s = connect(port)
     s.sendall(REQUEST + tail)
     response = head(s)
     assert b'HTTP/1.1 101 ' in response
@@ -80,7 +80,7 @@ def upgrade(tail=b''):
     return s
 
 
-def wait_ready(process, port=18089):
+def wait_ready(process, port):
     for _ in range(100):
         assert process.poll() is None, process.returncode
         try:
@@ -91,8 +91,25 @@ def wait_ready(process, port=18089):
     raise AssertionError('echo did not listen')
 
 
-def session_with_hello():
-    s = connect(18094)
+def concurrent_copies_own_bound_endpoints(first, first_port, executable, env, stderr):
+    second, second_port = start_listening(executable, env=env, stderr=stderr)
+    try:
+        assert first_port != second_port
+        for process, port, payload in ((first, first_port, b'first'), (second, second_port, b'second')):
+            wait_ready(process, port)
+            with upgrade(port, frame(2, payload)) as peer:
+                assert owned_by(process.pid, peer), (process.pid, port)
+                assert read_frame(peer) == (2, payload)
+                peer.sendall(frame(8, b'\x03\xe8'))
+                assert read_frame(peer) == (8, b'\x03\xe8')
+                assert peer.recv(1) == b''
+        print('concurrent_copies_own_bound_endpoints: PASS', flush=True)
+    finally:
+        stop_process(second)
+
+
+def session_with_hello(port):
+    s = connect(port)
     try:
         hello = struct.pack('<III', 0, 1, 8) + b'deadline' + struct.pack('<I', 0)
         s.sendall(REQUEST + frame(2, hello))
@@ -104,8 +121,8 @@ def session_with_hello():
         raise
 
 
-def incomplete_deadline():
-    with session_with_hello() as s:
+def incomplete_deadline(port):
+    with session_with_hello(port) as s:
         s.sendall(frame(2, b'abc', fin=False))
         start = time.monotonic()
         for at in (12, 24):
@@ -128,8 +145,8 @@ def max_batch_call():
     return call, batch
 
 
-def blocked_write_deadline():
-    with session_with_hello() as s:
+def blocked_write_deadline(port):
+    with session_with_hello(port) as s:
         call, _ = max_batch_call()
         s.sendall(frame(2, call))
         time.sleep(37)
@@ -153,26 +170,28 @@ def main():
     session_mode.add_argument('--session-deadlines-only', action='store_true')
     parser.add_argument('--cc', default='cc')
     parser.add_argument('--idle-echo', type=Path)
-    parser.add_argument('--client-only', action='store_true')
+    echo_mode = parser.add_mutually_exclusive_group()
+    echo_mode.add_argument('--client-only', action='store_true')
+    echo_mode.add_argument('--concurrent-only', action='store_true')
     args = parser.parse_args()
     if args.session:
         with tempfile.TemporaryDirectory(prefix='wire-session-') as tmp:
             shim = Path(tmp) / 'socket.so'
             subprocess.run([args.cc, '-shared', '-fPIC', str(ROOT/'core/tools/std_socket.c'), '-ldl', '-o', str(shim)], check=True)
             with (Path(tmp)/'stderr').open('wb') as errors:
-                process = subprocess.Popen([str(args.session.resolve())], env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
+                process, port = start_listening(args.session, env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
                 try:
-                    wait_ready(process, 18094)
+                    wait_ready(process, port)
                     if args.session_deadlines_only:
                         with ThreadPoolExecutor(max_workers=2) as executor:
-                            checks = [executor.submit(law) for law in (incomplete_deadline, blocked_write_deadline)]
+                            checks = [executor.submit(law, port) for law in (incomplete_deadline, blocked_write_deadline)]
                             for check in checks:
                                 check.result()
                         return 0
                     if not args.session_codes_only:
-                        with connect(18094) as stalled:
+                        with connect(port) as stalled:
                             stalled.sendall(b'GET')
-                            with connect(18094) as s:
+                            with connect(port) as s:
                                 s.sendall(REQUEST + frame(2, struct.pack('<II', 3, 7)))
                                 assert b'HTTP/1.1 101 ' in head(s)
                                 assert read_frame(s) == (2, struct.pack('<IQI', 8, 0, 0))
@@ -184,7 +203,7 @@ def main():
                         print('session concurrent upgrades, tail, dispatch, Pong, Close: PASS', flush=True)
 
                         call, batch = max_batch_call()
-                        with connect(18094) as s:
+                        with connect(port) as s:
                             s.sendall(REQUEST)
                             assert b'HTTP/1.1 101 ' in head(s)
                             s.sendall(frame(2, call) + frame(8, b'\x03\xe8') + b'x' * 65536)
@@ -195,7 +214,7 @@ def main():
                             assert s.recv(1) == b''
                         print('session Close behind blocked data, unread input drained: PASS', flush=True)
 
-                        with connect(18094) as s:
+                        with connect(port) as s:
                             s.sendall(REQUEST)
                             assert b'HTTP/1.1 101 ' in head(s)
                             s.sendall(frame(2, call) + frame(2, struct.pack('<III', 0, 0, 0)) + frame(9, b'late'))
@@ -208,7 +227,7 @@ def main():
                         print('session local Close stays ahead of later Ping: PASS', flush=True)
 
                         for payload, code in [(struct.pack('<I', 8), 1007), (struct.pack('<III', 0, 0, 0), 1013)]:
-                            with connect(18094) as s:
+                            with connect(port) as s:
                                 s.sendall(REQUEST + frame(2, payload))
                                 assert b'HTTP/1.1 101 ' in head(s)
                                 assert read_frame(s) == (8, struct.pack('!H', code))
@@ -216,7 +235,7 @@ def main():
                                 s.shutdown(socket.SHUT_WR)
                                 assert s.recv(1) == b''
                             print(f'session Close {code}: PASS', flush=True)
-                    with connect(18094) as s:
+                    with connect(port) as s:
                         s.sendall(REQUEST + frame(1, b'hello'))
                         assert b'HTTP/1.1 101 ' in head(s)
                         assert read_frame(s) == (8, struct.pack('!H', 1003))
@@ -225,13 +244,13 @@ def main():
                         assert s.recv(1) == b''
                     print('session text message Close 1003: PASS', flush=True)
                 finally:
-                    stop_listener(process, 18094)
+                    stop_process(process)
             if args.idle_session:
                 with (Path(tmp)/'idle-stderr').open('wb') as errors:
-                    process = subprocess.Popen([str(args.idle_session.resolve())], env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
+                    process, port = start_listening(args.idle_session, env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
                     try:
-                        wait_ready(process, 18094)
-                        with connect(18094) as s:
+                        wait_ready(process, port)
+                        with connect(port) as s:
                             s.sendall(REQUEST)
                             assert b'HTTP/1.1 101 ' in head(s)
                             assert read_frame(s) == (9, b'')
@@ -241,20 +260,23 @@ def main():
                             assert s.recv(1) == b''
                         print('session idle Ping then Close 1001: PASS', flush=True)
                     finally:
-                        stop_listener(process, 18094)
+                        stop_process(process)
         return 0
-    if args.echo is None or args.client is None:
-        parser.error('--echo and --client are required unless --session is selected')
+    if args.echo is None or (args.client is None and not args.concurrent_only):
+        parser.error('--echo and --client are required unless --session or --concurrent-only is selected')
     with tempfile.TemporaryDirectory(prefix='wire-wsock-') as tmp:
         shim = Path(tmp) / 'socket.so'
         subprocess.run([args.cc, '-shared', '-fPIC', str(ROOT/'core/tools/std_socket.c'), '-ldl', '-o', str(shim)], check=True)
         if not args.client_only:
             with (Path(tmp)/'stderr').open('wb') as errors:
-                process = subprocess.Popen([str(args.echo.resolve())], env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
+                env = os.environ | {'LD_PRELOAD': str(shim)}
+                process, port = start_listening(args.echo, env=env, stderr=errors)
                 try:
-                    wait_ready(process)
+                    concurrent_copies_own_bound_endpoints(process, port, args.echo, env, errors)
+                    if args.concurrent_only:
+                        return 0
                     # RFC 6455 hand vector and read-ahead handoff.
-                    with upgrade(frame(2, b'abc')) as s:
+                    with upgrade(port, frame(2, b'abc')) as s:
                         assert read_frame(s) == (2, b'abc')
                         s.sendall(frame(8, b'\x03\xe8'))
                         assert read_frame(s) == (8, b'\x03\xe8')
@@ -263,18 +285,18 @@ def main():
 
                     # Extra raw bytes after Close must drain before final close,
                     # otherwise Linux can reset the peer and lose our Close.
-                    with upgrade() as s:
+                    with upgrade(port) as s:
                         s.sendall(frame(8, b'\x03\xe8') + b'x' * 65536)
                         s.shutdown(socket.SHUT_WR)
                         assert read_frame(s) == (8, b'\x03\xe8')
                         assert s.recv(1) == b''
                     print('close_deadline drain: PASS Close retained with unread input', flush=True)
 
-    
+
                     # With an 8192-byte kernel send buffer a 256 KiB response must
                     # retain a cursor. The Ping arrives while that response is blocked.
                     payload = b'a' * 262144
-                    with upgrade() as s:
+                    with upgrade(port) as s:
                         s.sendall(frame(2, payload) + frame(9, b'p'))
                         time.sleep(.1)
                         assert read_frame(s) == (2, payload)
@@ -283,9 +305,9 @@ def main():
                         assert read_frame(s) == (8, b'\x03\xe8')
                         assert s.recv(1) == b''
                     print('blocked_pong_drains: PASS full kernel buffer, frame before Pong', flush=True)
-    
+
                     # Locally initiated close, with a peer that never answers.
-                    with upgrade() as s:
+                    with upgrade(port) as s:
                         before = time.monotonic()
                         s.sendall(frame(3))
                         assert read_frame(s) == (8, b'\x03\xea')
@@ -293,34 +315,34 @@ def main():
                         # SHUT_WR gives EOF immediately, while finish keeps the
                         # read owner until its absolute deadline. The sequential
                         # listener admits this probe only after full release.
-                        with upgrade() as probe:
+                        with upgrade(port) as probe:
                             elapsed = time.monotonic() - before
                             assert 4.8 <= elapsed < 7, elapsed
                             probe.sendall(frame(8, b'\x03\xe8'))
                             assert read_frame(probe) == (8, b'\x03\xe8')
                     print(f'close_deadline local: PASS {elapsed:.3f}s', flush=True)
-    
+
                     # Peer Close behind one data message. It is decoded while the
                     # sole writer is blocked, and the peer never resumes reading.
-                    with upgrade() as stalled:
+                    with upgrade(port) as stalled:
                         before = time.monotonic()
                         stalled.sendall(frame(2, payload) + frame(8, b'\x03\xe8'))
                         time.sleep(.2)
-                        with upgrade() as probe:
+                        with upgrade(port) as probe:
                             elapsed = time.monotonic() - before
                             assert 4.8 <= elapsed < 7, elapsed
                             probe.sendall(frame(8, b'\x03\xe8'))
                             assert read_frame(probe) == (8, b'\x03\xe8')
                     print(f'close_deadline blocked flush: PASS {elapsed:.3f}s', flush=True)
-    
+
                     # Absolute accept-to-head expiry; a fresh upgrade is admitted.
-                    with connect() as slow:
+                    with connect(port) as slow:
                         before = time.monotonic()
                         slow.sendall(b'GET /hirsel HTTP/1.1\r\n')
                         assert slow.recv(1) == b''
                         elapsed = time.monotonic() - before
                         assert 4.8 <= elapsed < 7, elapsed
-                    with upgrade() as s:
+                    with upgrade(port) as s:
                         s.sendall(frame(8, b'\x03\xe8'))
                         assert read_frame(s) == (8, b'\x03\xe8')
                     print(f'pending_released loopback: PASS upgrade expired at {elapsed:.3f}s', flush=True)
@@ -328,15 +350,15 @@ def main():
                     stop_process(process)
                 errors.flush()
                 assert (Path(tmp)/'stderr').read_bytes() == b'', (Path(tmp)/'stderr').read_text()
-    
+
         # Independent Python peer validates the client's own random challenge,
         # required subprotocol, masks on data/Ping/Pong/Close, and frame tail.
         with socket.socket() as listener:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(('127.0.0.1', 18090))
+            listener.bind(('127.0.0.1', 0))
             listener.listen(1)
             listener.settimeout(8)
-            client = subprocess.Popen([str(args.client.resolve())], stderr=subprocess.PIPE)
+            client = subprocess.Popen([str(args.client.resolve()), str(listener.getsockname()[1])], stderr=subprocess.PIPE)
             try:
                 peer = accept_from(listener, client.pid)
                 with peer:
@@ -360,10 +382,10 @@ def main():
                 if client.poll() is None:
                     stop_process(client)
     if args.idle_echo:
-        process = subprocess.Popen([str(args.idle_echo.resolve())], stderr=subprocess.PIPE)
+        process, port = start_listening(args.idle_echo)
         try:
-            wait_ready(process)
-            with upgrade() as s:
+            wait_ready(process, port)
+            with upgrade(port) as s:
                 s.sendall(frame(1, b'a', fin=False))
                 for byte in b'bcdef':
                     time.sleep(.1)

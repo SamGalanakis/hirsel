@@ -253,13 +253,21 @@ fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: s
     Ok(())
 }
 
-fn serve(n: Net, clock: Clock, tasks: Tasks, config: std.wsock.Config) -> Result[(), std.wsock.Error] waits {
+fn announce(out: Stdout, port: u16) waits {
+    let mut line = string.from("listening ")
+    string.push_u64(mut line, int.widen(port))
+    string.push(mut line, "\n")
+    let _ = stdout.write(out, line)
+}
+
+fn serve(n: Net, clock: Clock, tasks: Tasks, out: Stdout, config: std.wsock.Config) -> Result[(), std.wsock.Error] waits {
     let pool = std.wsock.pending(config)?
-    let listened = host.listen(n, Addr(ip: V4(0x7f000001), port: 18089), 128)
-    let (listener, _) = match listened {
+    let listened = host.listen(n, Addr(ip: V4(0x7f000001), port: 0u16), 128)
+    let (listener, address) = match listened {
         Ok(take pair) => take pair,
         Error(e) => return Error(Network(e))
     }
+    announce(out, address.port)
     let mut accepting = take listener
     loop {
         let accepted = host.accept(mut accepting, Never)
@@ -287,26 +295,34 @@ fn serve(n: Net, clock: Clock, tasks: Tasks, config: std.wsock.Config) -> Result
     }
 }
 
-pub fn main(n: Net, clock: Clock, tasks: Tasks) -> Result[(), std.wsock.Error] waits {
+pub fn main(n: Net, clock: Clock, tasks: Tasks, out: Stdout) -> Result[(), std.wsock.Error] waits {
     let mut config = std.wsock.defaults()
     config.max_frame = 16777216
-    serve(n, clock, tasks, config)
+    serve(n, clock, tasks, out, config)
 }
 
-pub fn idle_probe(n: Net, clock: Clock, tasks: Tasks) -> Result[(), std.wsock.Error] waits {
+pub fn idle_probe(n: Net, clock: Clock, tasks: Tasks, out: Stdout) -> Result[(), std.wsock.Error] waits {
     let mut config = std.wsock.defaults()
     config.max_frame = 16777216
     config.idle_ms = 250
-    serve(n, clock, tasks, config)
+    serve(n, clock, tasks, out, config)
 }
 
 // Used by the same wire harness against an independent RFC 6455 peer.
-pub fn client_probe(n: Net, clock: Clock, random: Random) -> Result[(), std.wsock.Error] waits {
-    let socket = match host.connect(n, Addr(ip: V4(0x7f000001), port: 18090), At(clock, host.mono_ns(clock) + 5000000000)) {
+pub fn client_probe(n: Net, clock: Clock, random: Random, a: Args) -> Result[(), std.wsock.Error] waits {
+    let arg = option.unwrap(args.get(a, 0u64))
+    let wide = result.unwrap(std.int.parse_uint(arg, 10u32))
+    if wide == 0u64 || wide > 65535u64 {
+        return Error(Protocol(1002u16))
+    }
+    let port: u16 = int.truncate(wide)
+    let socket = match host.connect(n, Addr(ip: V4(0x7f000001), port: port), At(clock, host.mono_ns(clock) + 5000000000)) {
         Ok(take s) => take s,
         Error(e) => return Error(Network(e))
     }
-    let connected = std.wsock.client(take socket, string.as_bytes("localhost:18090"), std.wsock.defaults(), clock, random)?
+    let mut authority = string.from("localhost:")
+    string.push(mut authority, arg)
+    let connected = std.wsock.client(take socket, string.as_bytes(authority), std.wsock.defaults(), clock, random)?
     let std.wsock.Connected(reader: input, writer: output, outgoing: encoding, timers: time) = take connected
     let mut receiving = take input
     let mut writing = take output

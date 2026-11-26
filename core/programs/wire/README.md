@@ -24,8 +24,10 @@ python3 tools/tests/wire_autobahn.py \
 ```
 
 `--backend cranelift` builds the other native engine's fixtures. Each test
-script starts and stops only its own direct children. The loopback harness
-requires ports 18089-18091 to be free. Its test-only accept4 interposer reduces
+script starts and stops only its own direct children. The loopback fixtures
+use kernel-assigned ports and report their bound port to the checks. The echo
+check runs two copies together and checks which process owns each connection.
+Its test-only accept4 interposer reduces
 the accepted socket's send buffer to force real prefix sends and blocked output.
 The protocol endpoint and normal provider retain their normal socket options.
 
@@ -41,10 +43,12 @@ splits the UTF-8 section into bounded invocations. `--resume` retains completed
 sections when report cleanup or the runner is interrupted. Use a new report
 directory after changing protocol behavior. Compression sections are excluded.
 The proxy examples have their own real-container check in tools/tests/wire_proxy.py.
+That check and the TLS ingress check use private Docker network namespaces.
+They use `sudo -n nsenter` to run the local peers in those namespaces.
 
 W3b's dormant runner session has a service fixture in `session.hirsel`. Build it
 with the same compiler, runtime and linker, using `wire_build.py --session-only`
-and either native backend. It listens on loopback port 18094 under a 64 MiB
+and either native backend. It listens on loopback under a 64 MiB
 logical root. Run `wire_wsock.py --session <output>/session-<backend>` for
 concurrent upgrades, strict Frame decoding, blocked output and bounded Close.
 Add --idle-session <output>/session-idle-<backend> to check idle Ping and Close;
@@ -55,7 +59,7 @@ the production service is exercised by the W3c fixture below.
 
 W3c's `admission.hirsel` starts the shared ingress policy and real store head.
 Build with `wire_build.py --admission-only` and run `wire_admission.py --server
-<output>/admission-<backend>`. It uses port 18094 and a 1.5 GiB logical root
+<output>/admission-<backend>`. It uses a 1.5 GiB logical root
 inside the unchanged 2 GiB process ceiling, covering the 32-session admission
 law's reservations. The hand-written codec derives identities from PROG-9 and
 fingerprints from SEM-10 schema bytes; store versions and reply sizes are fixed

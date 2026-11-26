@@ -628,7 +628,7 @@ impl Store {
     /// its checksums check; a short, long, foreign or damaged file is `None`.
     pub(crate) fn get_body(&self, key: ContentHash) -> io::Result<Option<Body>> {
         let image = crate::meter::ImageRead::start(self.image);
-        let Some(bytes) = self.read_whole(&self.path(key), true, image.as_ref())? else {
+        let Some(bytes) = self.read_whole(&self.path(key), true, image.as_ref(), None)? else {
             return Ok(None);
         };
         if self.image {
@@ -724,6 +724,7 @@ impl Store {
         path: &Path,
         own: bool,
         image: Option<&crate::meter::ImageRead>,
+        limit: Option<u64>,
     ) -> io::Result<Option<Vec<u8>>> {
         let mut file = match File::open(path) {
             Ok(f) => f,
@@ -734,10 +735,20 @@ impl Store {
         if let Some(image) = image {
             image.opened();
         }
-        let size = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
+        let size = file.metadata()?.len();
+        if limit.is_some_and(|limit| size > limit) {
+            return Ok(None);
+        }
+        let size = usize::try_from(size).map_err(io::Error::other)?;
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(size).map_err(io::Error::other)?;
-        file.read_to_end(&mut bytes)?;
+        if let Some(limit) = limit {
+            (&mut file)
+                .take(limit.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+        } else {
+            file.read_to_end(&mut bytes)?;
+        }
         if own && self.cas.is_some() && bytes.len() == size {
             collect::touch(&file);
         }
@@ -784,7 +795,7 @@ impl Store {
         key: ContentHash,
     ) -> io::Result<Option<(Vec<u8>, usize)>> {
         let image = crate::meter::ImageRead::start(self.image);
-        let Some(bytes) = self.read_whole(path, own, image.as_ref())? else {
+        let Some(bytes) = self.read_whole(path, own, image.as_ref(), None)? else {
             return Ok(None);
         };
         let size = bytes.len();

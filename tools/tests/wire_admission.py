@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 import time
 import traceback
 
-from wire_process import accept_from, stop_listener, stop_process
+from wire_process import accept_from, start_listening, stop_process
 from wire_wsock import GUID, REQUEST, connect, frame, head, read_frame, wait_ready
 
 
@@ -65,6 +65,7 @@ TEST_BIRTH = time.time_ns() // 1000000
 TRACE = []
 # The compiler, runtime and linker for the hirsel call laws, set by main.
 CLI = {}
+PORT = 0
 
 
 def hello(names=(), credential=CREDENTIAL):
@@ -170,7 +171,7 @@ def receive(s):
 
 
 def upgraded(tail=b''):
-    s = connect(18094)
+    s = connect(PORT)
     s.sendall(REQUEST + tail)
     response = head(s)
     assert response.startswith(b'HTTP/1.1 101 '), response
@@ -349,7 +350,7 @@ def welcome_samples_store_stream_time():
 def faulted_owner_releases_slot():
     def next_owner():
         for _ in range(100):
-            s = connect(18094)
+            s = connect(PORT)
             try:
                 s.sendall(REQUEST)
                 response = head(s)
@@ -425,7 +426,7 @@ def cli_call_exact_value():
     # Some(n + 2)), nested: Some(None), total: n + 2). For n = 2^53 + 1 an f64
     # decoder prints 9007199254740992 and 9007199254740996 instead.
     n = 2**53 + 1
-    process = hirsel_call('ws://127.0.0.1:18094/hirsel', 'admission/shape', '--arg', str(n))
+    process = hirsel_call(f'ws://127.0.0.1:{PORT}/hirsel', 'admission/shape', '--arg', str(n))
     try:
         out, err = process.communicate(timeout=120)
     finally:
@@ -578,19 +579,19 @@ def main():
             fixture = Path(__file__).resolve().parents[2] / 'core/tools/std_socket.c'
             subprocess.run(['cc', '-shared', '-fPIC', '-DWIRE_CUT_OUTCOME', str(fixture), '-ldl', '-o', str(shim)], check=True)
             environment = os.environ | {'LD_PRELOAD': str(shim)}
-        process = subprocess.Popen([str(args.server.resolve()), name, str(TEST_BIRTH)],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment)
+        global PORT
+        process, PORT = start_listening(args.server, name, str(TEST_BIRTH), env=environment)
         try:
-            wait_ready(process, 18094)
+            wait_ready(process, PORT)
             TRACE.clear()
             CASES[name]()
             if name == 'welcome_with_small_budget':
-                stop_listener(process, 18094)
-                refused = subprocess.Popen([str(args.server.resolve()), 'wire_control_budget_too_small'])
+                stop_process(process)
+                refused, _ = start_listening(args.server, 'wire_control_budget_too_small')
                 try:
                     assert refused.wait(timeout=8) == 0, 'mandatory control budget was not refused at serve'
                 finally:
-                    stop_listener(refused, 18094)
+                    stop_process(refused)
             rows.append({'law': name, 'passed': True})
             print(f'{name}: PASS', flush=True)
         except Exception as error:
@@ -598,7 +599,7 @@ def main():
             print(f'{name}: FAIL {error}; received {repr(TRACE)[-3000:]}', flush=True)
             traceback.print_exc()
         finally:
-            stop_listener(process, 18094)
+            stop_process(process)
             if temporary:
                 temporary.cleanup()
             stderr = process.stderr.read().decode(errors='replace')

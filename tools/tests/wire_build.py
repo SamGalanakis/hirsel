@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[2]
 MODES = {
     'default': ([('main', 'echo/main'), ('client_probe', 'echo/client_probe'),
                  ('idle_probe', 'echo/idle_probe'), ('finish', 'finish/probe')],
-                268435456, 'Net=Listen 127.0.0.0/8 18089-18089;Connect 127.0.0.0/8 18090-18091'),
+                268435456, 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535'),
     'session': ([('session', 'session/main'), ('session-idle', 'session/idle')],
-                67108864, 'Net=Listen 127.0.0.0/8 18094-18094'),
-    'admission': ([('admission', 'admission/main')], 1610612736, 'Net=Listen 127.0.0.0/8 18094-18094'),
+                67108864, 'Net=Listen 127.0.0.0/8 0-65535'),
+    'admission': ([('admission', 'admission/main')], 1610612736, 'Net=Listen 127.0.0.0/8 0-65535'),
     'migration': ([('migration', 'migration/main')], 1610612736, 'Net=Listen 127.0.0.0/8 0-65535'),
 }
 
@@ -51,6 +51,8 @@ def main():
                    '--entry', 'wire@1/' + entry, '--backend', args.backend,
                    '--runtime', str(args.runtime.resolve()), '--limit', str(limit),
                    '--grant', 'Clock', '--grant', net, '--json', '-o', str(output / stem)]
+        if name in ('main', 'idle_probe', 'session', 'session-idle', 'admission'):
+            command.extend(['--grant', 'Stdout'])
         if name not in ('client_probe', 'finish'):
             command.extend(['--grant', 'Tasks'])
         if name in ('client_probe', 'admission'):

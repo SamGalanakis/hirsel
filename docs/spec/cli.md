@@ -33,7 +33,20 @@ A build or test request can also read a remote cache, configured in
 url = "https://cache.example.test"  # http:// or https://
 trusted = ["<64 hex digits: an Ed25519 public key>"]  # default: none
 signing-key = "/path/to/builder.pk8"  # optional: PKCS#8 Ed25519; uploads
+
+[cache.remote.transfer]
+record-bytes = 268435456
+blob-bytes = 1073741824
+work-bytes = 2147483648
 ```
+
+Every configured remote requires a transfer policy. `record-bytes` bounds the
+whole signed envelope, including its signature. `blob-bytes` bounds each blob
+or std side pack, including temporary storage for that body. `work-bytes`
+bounds the sum of blob lengths named by one record. All three are positive
+and `work-bytes` is at least `blob-bytes`. The same limits apply to reads and
+uploads. Blobs and packs stream through bounded buffers. A size refusal does
+not mark the endpoint down.
 
 An unknown field in `[cache.remote]` is an error. The remote is a plain HTTP
 store: `GET`, `HEAD` and `PUT` of `o/<sha256>` blobs and of

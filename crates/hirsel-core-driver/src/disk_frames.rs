@@ -174,7 +174,7 @@ fn remote_fixture(files: Files) -> String {
 /// its signer, signature and kind.
 #[test]
 fn remote_bytes_and_records_are_used_only_when_they_check() {
-    use crate::store::remote::{Config, Remote};
+    use crate::store::remote::Remote;
     use crate::store::signed::{self, Builder, Kind};
     use hirsel_core_net::key_wrap;
     let listed = key_wrap::ed25519_generate();
@@ -214,11 +214,11 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
         files.lock().unwrap().insert(record_path, record.to_vec());
         let blob_path = format!("o/{}", bare.address);
         files.lock().unwrap().insert(blob_path, blob.to_vec());
-        let config = Config {
-            url: remote_fixture(files),
-            trusted: vec![hirsel_core_ids::hex::encode(&builder(&listed).public)],
-            signing_key: None,
-        };
+        let url = remote_fixture(files);
+        let trusted = hirsel_core_ids::hex::encode(&builder(&listed).public);
+        let config = toml::from_str(&format!(
+            "url = {url:?}\ntrusted = [{trusted:?}]\n[transfer]\nrecord-bytes = 4096\nblob-bytes = 1024\nwork-bytes = 1024"
+        )).unwrap();
         let remote = Remote::new(config).unwrap().unwrap();
         let local = tempfile::tempdir().unwrap();
         let store = Store::cas(local.path()).unwrap();
@@ -232,7 +232,7 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
                 assert!(read_bare == bare && read.bytes == object, "{name}");
                 assert!(
                     store
-                        .signed(Kind::Object, key, &[builder(&listed)])
+                        .signed(Kind::Object, key, &[builder(&listed)], 4096)
                         .unwrap()
                         .is_some()
                 );
@@ -271,5 +271,88 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
     for tag in (0..=u8::MAX).filter(|&tag| tag != Kind::Object as u8) {
         let forbidden = sign(&listed, id, tag, key, &blobs, &payload);
         case(&format!("kind tag {tag}"), id, &forbidden, &object, false);
+    }
+}
+
+#[test]
+fn remote_transfer_policy_bounds_both_directions() {
+    use crate::store::{
+        remote::{Config, Remote},
+        signed::{Builder, Kind},
+    };
+    use hirsel_core_net::key_wrap;
+
+    assert!(toml::from_str::<Config>("url = 'http://127.0.0.1'").is_err());
+    let dir = tempfile::tempdir().unwrap();
+    let pkcs8 = key_wrap::ed25519_generate();
+    let signing_key = dir.path().join("builder.pk8");
+    std::fs::write(&signing_key, &pkcs8).unwrap();
+    let builder = Builder::new(key_wrap::ed25519_public(&pkcs8).unwrap());
+    let trusted = hirsel_core_ids::hex::encode(&builder.public);
+    let source = Store::cas(&dir.path().join("source")).unwrap();
+    let object = b"\x7fELF object at its byte limit";
+    let native = hirsel_core_ir::source::NativeObject {
+        bytes: object.to_vec(),
+        debug: None,
+        coverage: None,
+    };
+    let key = ContentHash::of_bytes(b"one bounded remote object");
+    let bare = crate::native_object::publish(&source, key, &native).unwrap();
+    let payload = source.get(key).unwrap().unwrap();
+    let record_bytes = 193 + payload.len(); // Header, one blob row, lengths and signature.
+    let blob_bytes = object.len();
+    let files = Files::default();
+    let url = remote_fixture(files.clone());
+    let remote = |record, blob, work| {
+        let config = toml::from_str(&format!(
+            "url = {url:?}\ntrusted = [{trusted:?}]\nsigning-key = {signing_key:?}\n[transfer]\nrecord-bytes = {record}\nblob-bytes = {blob}\nwork-bytes = {work}"
+        )).unwrap();
+        Remote::new(config)
+    };
+    assert!(remote(record_bytes, blob_bytes, blob_bytes - 1).is_err());
+
+    for (record, blob) in [
+        (record_bytes - 1, blob_bytes),
+        (record_bytes, blob_bytes - 1),
+    ] {
+        let remote = remote(record, blob, blob).unwrap().unwrap();
+        remote.offer(Kind::Object, &source, key);
+        remote.finish_uploads();
+        assert!(files.lock().unwrap().is_empty());
+    }
+    let exact = remote(record_bytes, blob_bytes, blob_bytes)
+        .unwrap()
+        .unwrap();
+    exact.offer(Kind::Object, &source, key);
+    exact.finish_uploads();
+    let record_path = format!("r/{}/{key}", builder.id);
+    let blob_path = format!("o/{}", bare.address);
+    let record = files.lock().unwrap()[&record_path].clone();
+    assert_eq!(record.len(), record_bytes);
+    assert_eq!(files.lock().unwrap()[&blob_path], object);
+
+    let local = Store::cas(&dir.path().join("reader")).unwrap();
+    let too_big = |bytes: &[u8]| [bytes, &[0]].concat();
+    files
+        .lock()
+        .unwrap()
+        .insert(record_path.clone(), too_big(&record));
+    assert!(exact.object(&local, key).unwrap().is_none());
+    files.lock().unwrap().insert(record_path, record);
+    files
+        .lock()
+        .unwrap()
+        .insert(blob_path.clone(), too_big(object));
+    assert!(exact.object(&local, key).unwrap().is_none());
+    assert!(!local.blob_path(bare.address).exists());
+    files.lock().unwrap().insert(blob_path, object.to_vec());
+    assert_eq!(exact.object(&local, key).unwrap().unwrap().1.bytes, object);
+
+    for (record, blob) in [
+        (record_bytes - 1, blob_bytes),
+        (record_bytes, blob_bytes - 1),
+    ] {
+        let remote = remote(record, blob, blob).unwrap().unwrap();
+        assert!(remote.object(&local, key).unwrap().is_none());
     }
 }

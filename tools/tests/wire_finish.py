@@ -17,10 +17,10 @@ def main():
     for continuous in [False, True]:
         with socket.socket() as listener:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(('127.0.0.1', 18091))
+            listener.bind(('127.0.0.1', 0))
             listener.listen(1)
             listener.settimeout(5)
-            process = subprocess.Popen([str(args.probe.resolve())], stderr=subprocess.PIPE)
+            process = subprocess.Popen([str(args.probe.resolve()), str(listener.getsockname()[1])], stderr=subprocess.PIPE)
             try:
                 peer = accept_from(listener, process.pid)
                 with peer:

@@ -89,6 +89,7 @@ type Server: send {
     tasks: Tasks,
     random: Random,
     args: Args,
+    out: Stdout,
     head: Sender[runner.HeadInput],
     post: Sender[runner.PubIn]
 }
@@ -110,9 +111,15 @@ fn random_grant(r: Random, _h: (), _bind: ()) -> Result[Random, Capacity] {
 }
 
 fn server(take seed: Server) -> () waits {
-    let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
-    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
-        Ok((take l, _)) => take l,
+    let Server(net: n, clock: c, tasks: tasks, random: random, args: a, out: out, head: take head, post: take post) = take seed
+    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 128u16) {
+        Ok((take l, address)) => {
+            let mut line = string.from("listening ")
+            string.push_u64(mut line, int.widen(address.port))
+            string.push(mut line, "\n")
+            let _ = stdout.write(out, line)
+            take l
+        },
         Error(_) => return
     }
     let mut config = runner.wire_defaults(1048576u64)
@@ -150,9 +157,15 @@ fn fault_service() -> runner.Service[()] {
     }, retirement: None, flush_subscriptions: fn(mut context: (), mut work: runner.WireWork) -> () {})
 }
 
-fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Exit] waits {
-    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
-        Ok((take l, _)) => take l,
+fn fault_listener(n: Net, c: Clock, tasks: Tasks, out: Stdout, reject: bool) -> Result[(), Exit] waits {
+    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 128u16) {
+        Ok((take l, address)) => {
+            let mut line = string.from("listening ")
+            string.push_u64(mut line, int.widen(address.port))
+            string.push(mut line, "\n")
+            let _ = stdout.write(out, line)
+            take l
+        },
         Error(_) => return Error(Exit(status: 1u8)),
     }
     let mail = result.unwrap(runner.mailbox(1u64))
@@ -179,19 +192,19 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
 
 // launch_server answers --hirsel-describe before any grant is used, so hirsel call
 // can read this place's entries from the executable.
-pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, out: Stdout) -> Result[(), Exit] waits {
     runner.launch_server(a, c, code.describe(place), code.describe(schema), scoped fn() -> Result[(), Exit] waits {
-        serve_place(n, c, random, tasks, a)
+        serve_place(n, c, random, tasks, a, out)
     })
 }
 
-fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, out: Stdout) -> Result[(), Exit] waits {
     if let Some(mode) = args.get(a, 0u64) {
         if mode == "faulted_owner_releases_slot" {
-            return fault_listener(n, c, tasks, false)
+            return fault_listener(n, c, tasks, out, false)
         }
         if mode == "wire_control_budget_too_small" {
-            return fault_listener(n, c, tasks, true)
+            return fault_listener(n, c, tasks, out, true)
         }
     }
     let mut options = result.unwrap(store.sized(Memory, 1074790400u64))
@@ -219,7 +232,7 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(retired(), list.new())))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))
-    let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: runner.post(mail))
+    let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, out: out, head: take head, post: runner.post(mail))
     let h = task.spawn(tasks, bytes 1073741824u64, take seed, server)
     let _ = runner.place_head(take db, code.describe(place), 1048576u64, None, code.describe(schema), take inbox, take mail, tasks, 8388608u64)
     let _ = task.join(take h)

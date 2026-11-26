@@ -69,18 +69,20 @@ fn echo(take s: Socket) -> String waits {
     take line
 }
 
-// One connection at a time on 127.0.0.1:18202. Only the front at 127.0.0.1 is trusted.
+// One connection at a time on loopback. Only the front at 127.0.0.1 is trusted.
 // Every accept is logged, so a test can prove a name never reached this listener.
 pub fn listener(n: Net, clock: Clock, out: Stdout) -> Result[(), ()] waits {
     let mut trusted: List[std.ingress_policy.Prefix] = list.new()
     list.push(mut trusted, option.unwrap(std.ingress_policy.parse_prefix("127.0.0.1/32")))
     let config = std.proxy.config(trusted, std.proxy.DEFAULT_HEADER_MAX, std.proxy.DEFAULT_HEADER_MS)?
-    let (take l, _) = match host.listen(n, Addr(ip: V4(0x7f000001), port: 18202), 16) {
+    let (take l, address) = match host.listen(n, Addr(ip: V4(0x7f000001), port: 0), 16) {
         Ok(take pair) => take pair,
         Error(_) => return Error(())
     }
     let mut accepting = take l
-    log(out, "listening")?
+    let mut ready = string.from("listening ")
+    string.push_u64(mut ready, int.widen(address.port))
+    log(out, take ready)?
     loop {
         let (take socket, peer) = match host.accept(mut accepting, Never) {
             Ok(take pair) => take pair,

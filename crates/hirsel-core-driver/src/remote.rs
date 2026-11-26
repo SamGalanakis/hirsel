@@ -22,9 +22,10 @@ use crate::instances::{Location, Records};
 use crate::native_object::{self, Instance};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::source::NativeObject;
+use sha2::Digest;
 use std::collections::{BTreeSet, HashMap};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -37,9 +38,32 @@ const DOWN: Duration = Duration::from_secs(15);
 const MISSING: Duration = Duration::from_secs(30);
 const CONNECT: Duration = Duration::from_secs(5);
 const READ: Duration = Duration::from_secs(30);
-/// The largest signed record read.
-const RECORD_LIMIT: u64 = 256 << 20;
 const STD_MANIFEST_SCHEMA: u32 = 1;
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct TransferPolicy {
+    record_bytes: u64,
+    blob_bytes: u64,
+    work_bytes: u64,
+}
+
+impl TransferPolicy {
+    fn allows_blobs(self, sizes: impl IntoIterator<Item = u64>) -> bool {
+        let mut remaining = self.work_bytes;
+        for size in sizes {
+            if size > self.blob_bytes || size > remaining {
+                return false;
+            }
+            remaining -= size;
+        }
+        true
+    }
+
+    fn allows_record(self, count: usize, payload_bytes: u64) -> bool {
+        signed::envelope_len(count, payload_bytes).is_some_and(|len| len <= self.record_bytes)
+    }
+}
 
 /// `config.toml`: only the `cache.remote` table is read, and every field of
 /// it is known.
@@ -64,6 +88,7 @@ pub(crate) struct Config {
     pub trusted: Vec<String>,
     /// A PKCS#8 Ed25519 private key file; with it, this host uploads.
     pub signing_key: Option<PathBuf>,
+    transfer: TransferPolicy,
 }
 
 /// The signing key this host uploads with.
@@ -94,6 +119,7 @@ pub(crate) struct Remote {
     trusted: Vec<Builder>,
     signer: Option<Signer>,
     agent: ureq::Agent,
+    policy: TransferPolicy,
     /// The builders whose records this session used.
     used: Mutex<BTreeSet<ContentHash>>,
     uploads: Mutex<Option<(Sender<Offer>, JoinHandle<()>)>>,
@@ -116,10 +142,7 @@ pub(crate) fn finish() {
     let Some(remote) = SESSION.lock().unwrap().take() else {
         return;
     };
-    if let Some((offers, worker)) = remote.uploads.lock().unwrap().take() {
-        drop(offers);
-        let _ = worker.join();
-    }
+    remote.finish_uploads();
 }
 
 /// The session a build reads and writes, when it has one: none for a
@@ -213,6 +236,12 @@ impl Remote {
     /// The remote `config` describes, or none when it would read nothing
     /// and write nothing.
     pub(crate) fn new(config: Config) -> Result<Option<Self>, String> {
+        if config.transfer.record_bytes == 0
+            || config.transfer.blob_bytes == 0
+            || config.transfer.blob_bytes > config.transfer.work_bytes
+        {
+            return Err("cache.remote.transfer requires positive record-bytes and blob-bytes, and work-bytes at least blob-bytes".into());
+        }
         let trusted = (config.trusted.iter())
             .map(|hex| public_key(hex).map(Builder::new))
             .collect::<Result<Vec<_>, _>>()?;
@@ -247,6 +276,7 @@ impl Remote {
             trusted,
             signer,
             agent,
+            policy: config.transfer,
             used: Mutex::new(BTreeSet::new()),
             uploads: Mutex::new(None),
         }))
@@ -289,11 +319,11 @@ impl Remote {
         builder: &Builder,
     ) -> io::Result<Option<Signed>> {
         let listed = std::slice::from_ref(builder);
-        let signed = match store.signed(kind, key, listed)? {
+        let signed = match store.signed(kind, key, listed, self.policy.record_bytes)? {
             Some(signed) => signed,
             None => {
                 let path = record_path(builder.id, key);
-                let Some(bytes) = self.get(&path, RECORD_LIMIT) else {
+                let Some(bytes) = self.get_record(&path) else {
                     return Ok(None);
                 };
                 match store.keep_signed(&bytes, kind, key, listed)? {
@@ -302,19 +332,20 @@ impl Remote {
                 }
             }
         };
+        if !self
+            .policy
+            .allows_blobs(signed.blobs.iter().map(|&(_, len)| len))
+        {
+            return Ok(None);
+        }
         for &(address, len) in &signed.blobs {
             let path = store.blob_path(address);
             if fs::metadata(&path).is_ok_and(|m| m.len() == len) {
                 continue;
             }
-            let Some(bytes) = self.get(&blob_path(address), len.saturating_add(1)) else {
-                return Ok(None);
-            };
-            let bare = Bare::of(&bytes);
-            if bytes.len() as u64 != len || bare.address != address {
+            if !self.get_blob(store, address, len)? {
                 return Ok(None);
             }
-            store.write_blob(bare, &bytes)?;
         }
         self.used.lock().unwrap().insert(builder.id);
         Ok(Some(signed))
@@ -349,6 +380,14 @@ impl Remote {
     pub(crate) fn offer_side(&self, side: &Store, key: ContentHash) {
         self.send(Offer::Side(side.clone(), key));
     }
+
+    pub(crate) fn finish_uploads(&self) {
+        if let Some((offers, worker)) = self.uploads.lock().unwrap().take() {
+            drop(offers);
+            let _ = worker.join();
+        }
+    }
+
     fn send(&self, offer: Offer) {
         if self.signer.is_none() {
             return;
@@ -364,6 +403,7 @@ impl Remote {
                     id: s.id,
                 }),
                 agent: self.agent.clone(),
+                policy: self.policy,
                 used: Mutex::new(BTreeSet::new()),
                 uploads: Mutex::new(None),
             };
@@ -391,48 +431,103 @@ impl Remote {
         let Some(bares) = native_object::blobs(&payload, kind == Kind::Instance) else {
             return;
         };
+        if !self.policy.allows_record(bares.len(), payload.len() as u64) {
+            return;
+        }
         let mut blobs = Vec::with_capacity(bares.len());
+        let mut files = Vec::with_capacity(bares.len());
+        let mut remaining = self.policy.work_bytes;
         for bare in bares {
-            let Ok(Some(bytes)) = store.get_blob(bare) else {
+            let Some(file) = store
+                .layers(store.blob_path(bare.address))
+                .find_map(|(path, own)| {
+                    let mut file = File::open(path).ok()?;
+                    let len = file.metadata().ok()?.len();
+                    if len > self.policy.blob_bytes.min(remaining)
+                        || digest_copy(&mut file, &mut io::sink(), len)
+                            .ok()
+                            .flatten()?
+                            != bare.address
+                    {
+                        return None;
+                    }
+                    file.rewind().ok()?;
+                    if own && store.cas.is_some() {
+                        super::collect::touch(&file);
+                    }
+                    Some((file, len))
+                })
+            else {
                 return;
             };
-            if !self.put_blob(bare.address, &bytes) {
+            blobs.push((bare.address, file.1));
+            remaining -= file.1;
+            files.push(file.0);
+        }
+        for ((address, len), mut file) in blobs.iter().copied().zip(files) {
+            if !self.put_blob(address, &mut file, len) {
                 return;
             }
-            blobs.push((bare.address, bytes.len() as u64));
         }
         self.put_record(kind, key, &blobs, &payload);
     }
 
-    /// Pack the side under `key`: its records and its blobs, the blobs one
-    /// pack the manifest indexes.
+    /// Pack the side under `key` on disk, with the per-blob transfer limit
+    /// bounding the temporary file and the HTTP body in both directions.
     fn upload_side(&self, side: &Store, key: ContentHash) {
         let signer = self.signer.as_ref().expect("an uploading session");
         if self.has(&record_path(signer.id, key)) {
             return;
         }
-        let mut records = Vec::new();
+        let (Ok(mut pack), mut index, mut records) = (side.temporary(), Vec::new(), Vec::new())
+        else {
+            return;
+        };
+        let mut len = 0;
+        for address in names(side.root(), super::collect::BLOBS) {
+            let Ok(mut source) = File::open(side.blob_path(address)) else {
+                return;
+            };
+            let Ok(bytes) = source.metadata().map(|m| m.len()) else {
+                return;
+            };
+            if bytes > self.policy.blob_bytes - len
+                || !matches!(digest_copy(&mut source, &mut pack.file, bytes), Ok(Some(hash)) if hash == address)
+            {
+                return;
+            }
+            index.push((address, bytes));
+            len += bytes;
+        }
+        let mut retained_bytes = 0;
         for name in names(side.root(), super::collect::RECORDS) {
             if let Ok(Some(payload)) = side.get(name) {
+                let bytes = payload.len() as u64;
+                if bytes > self.policy.record_bytes - retained_bytes {
+                    return;
+                }
+                retained_bytes += bytes;
                 records.push((name, payload));
             }
         }
-        let (mut pack, mut index) = (Vec::new(), Vec::new());
-        for name in names(side.root(), super::collect::BLOBS) {
-            let Ok(bytes) = fs::read(side.blob_path(name)) else {
-                continue;
-            };
-            if Bare::of(&bytes).address == name {
-                index.push((name, bytes.len() as u64));
-                pack.extend(bytes);
-            }
-        }
-        let Ok(manifest) = crate::encode(&(STD_MANIFEST_SCHEMA, records, index)) else {
+        let manifest = (STD_MANIFEST_SCHEMA, records, index);
+        let Ok(payload_bytes) = hirsel_core_ids::encoding::fixed_size(&manifest) else {
             return;
         };
-        let address = Bare::of(&pack).address;
-        if self.put_blob(address, &pack) {
-            self.put_record(Kind::Std, key, &[(address, pack.len() as u64)], &manifest);
+        if !self.policy.allows_record(1, payload_bytes) {
+            return;
+        }
+        let Ok(payload) = crate::encode(&manifest) else {
+            return;
+        };
+        if pack.file.rewind().is_err() {
+            return;
+        }
+        let Ok(Some(address)) = digest_copy(&mut pack.file, &mut io::sink(), len) else {
+            return;
+        };
+        if pack.file.rewind().is_ok() && self.put_blob(address, &mut pack.file, len) {
+            self.put_record(Kind::Std, key, &[(address, len)], &payload);
         }
     }
 
@@ -444,6 +539,9 @@ impl Remote {
         payload: &[u8],
     ) {
         let signer = self.signer.as_ref().expect("an uploading session");
+        if !self.policy.allows_record(blobs.len(), payload.len() as u64) {
+            return;
+        }
         let mut bytes = signed::unsigned(kind, key, signer.id, blobs, payload);
         let Ok(signature) = hirsel_core_net::key_wrap::sign(
             hirsel_core_net::key_wrap::SignAlg::Ed25519,
@@ -454,12 +552,12 @@ impl Remote {
             return;
         };
         bytes.extend(signature);
-        self.put(&record_path(signer.id, key), &bytes);
+        self.put(&record_path(signer.id, key), &bytes[..], bytes.len() as u64);
     }
 
-    fn put_blob(&self, address: ContentHash, bytes: &[u8]) -> bool {
+    fn put_blob(&self, address: ContentHash, file: &mut File, len: u64) -> bool {
         let path = blob_path(address);
-        self.has(&path) || self.put(&path, bytes)
+        self.has(&path) || self.put(&path, ureq::SendBody::from_reader(&mut file.take(len)), len)
     }
 
     /// Whether the remote holds `path`.
@@ -476,16 +574,21 @@ impl Remote {
         }
     }
 
-    fn put(&self, path: &str, bytes: &[u8]) -> bool {
+    fn put(&self, path: &str, body: impl ureq::AsSendBody, len: u64) -> bool {
         if self.down() {
             return false;
         }
-        let put = self.agent.put(format!("{}/{path}", self.url)).send(bytes);
+        let put = self
+            .agent
+            .put(format!("{}/{path}", self.url))
+            .header("Content-Length", len.to_string())
+            .send(body);
         match put {
             Ok(response) if response.status().is_success() => {
                 self.health(|h| h.missing.remove(path));
                 true
             }
+            Ok(response) if response.status().as_u16() == 413 => false,
             _ => {
                 self.trip();
                 false
@@ -493,40 +596,76 @@ impl Remote {
         }
     }
 
-    /// The body at `path`, at most `limit` bytes; none when the remote is
-    /// down, lacks it, or fails.
-    fn get(&self, path: &str, limit: u64) -> Option<Vec<u8>> {
-        let missing = self.health(|h| {
+    fn response(&self, path: &str) -> Option<ureq::http::Response<ureq::Body>> {
+        let unavailable = self.health(|h| {
             h.down_until.is_some_and(|until| Instant::now() < until)
                 || h.missing
                     .get(path)
                     .is_some_and(|until| Instant::now() < *until)
         });
-        if missing {
+        if unavailable {
             return None;
         }
-        let response = self.agent.get(format!("{}/{path}", self.url)).call();
-        match response {
-            Ok(mut response) => match response.status().as_u16() {
-                200 => {
-                    let body = response.body_mut().with_config().limit(limit).read_to_vec();
-                    body.inspect_err(|_| self.trip()).ok()
-                }
-                404 => {
-                    let until = Instant::now() + MISSING;
-                    self.health(|h| h.missing.insert(path.to_owned(), until));
-                    None
-                }
-                _ => {
-                    self.trip();
-                    None
-                }
-            },
-            Err(_) => {
+        match self.agent.get(format!("{}/{path}", self.url)).call() {
+            Ok(response) if response.status().as_u16() == 200 => Some(response),
+            Ok(response) if response.status().as_u16() == 404 => {
+                let until = Instant::now() + MISSING;
+                self.health(|h| h.missing.insert(path.to_owned(), until));
+                None
+            }
+            Ok(response) if response.status().as_u16() == 413 => None,
+            _ => {
                 self.trip();
                 None
             }
         }
+    }
+
+    fn get_record(&self, path: &str) -> Option<Vec<u8>> {
+        let mut response = self.response(path)?;
+        match response
+            .body_mut()
+            .with_config()
+            .limit(self.policy.record_bytes)
+            .read_to_vec()
+        {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                self.body_error(error);
+                None
+            }
+        }
+    }
+
+    fn body_error(&self, error: ureq::Error) {
+        if !matches!(error, ureq::Error::BodyExceedsLimit(_)) {
+            self.trip();
+        }
+    }
+
+    fn get_blob(&self, store: &Store, address: ContentHash, len: u64) -> io::Result<bool> {
+        let Some(mut response) = self.response(&blob_path(address)) else {
+            return Ok(false);
+        };
+        let mut reader = response.body_mut().with_config().limit(len).reader();
+        publish_blob(store, address, len, |file| {
+            let hash = match digest_copy(&mut reader, file, len) {
+                Ok(hash) => hash,
+                Err(BlobIo::Read(error)) => {
+                    self.body_error(error.into());
+                    return Ok(false);
+                }
+                Err(BlobIo::Write(error)) => return Err(error),
+            };
+            match reader.read(&mut [0]) {
+                Ok(0) => Ok(hash == Some(address)),
+                Ok(_) => unreachable!("the body reader limits bytes to the declared length"),
+                Err(error) => {
+                    self.body_error(error.into());
+                    Ok(false)
+                }
+            }
+        })
     }
 
     fn down(&self) -> bool {
@@ -553,35 +692,100 @@ fn unpack(side: &Store, signed: &Signed) -> io::Result<bool> {
     else {
         return Ok(false);
     };
-    let [(pack, _)] = signed.blobs[..] else {
+    let [(pack, len)] = signed.blobs[..] else {
         return Ok(false);
     };
-    let bytes = fs::read(side.blob_path(pack))?;
-    if Bare::of(&bytes).address != pack {
+    let mut file = File::open(side.blob_path(pack))?;
+    if file.metadata()?.len() != len
+        || digest_copy(&mut file, &mut io::sink(), len).map_err(BlobIo::into_io)? != Some(pack)
+    {
         return Ok(false);
     }
-    let mut rest = &bytes[..];
+    file.rewind()?;
+    let mut remaining = len;
+    let pack_is_blob = index.iter().any(|&(address, _)| address == pack);
     for (address, len) in index {
-        let Some((blob, tail)) = usize::try_from(len)
-            .ok()
-            .and_then(|n| rest.split_at_checked(n))
-        else {
-            return Ok(false);
-        };
-        rest = tail;
-        let bare = Bare::of(blob);
-        if bare.address != address {
+        if len > remaining
+            || !publish_blob(side, address, len, |out| {
+                Ok(digest_copy(&mut file, out, len).map_err(BlobIo::into_io)? == Some(address))
+            })?
+        {
             return Ok(false);
         }
-        side.write_blob(bare, blob)?;
+        remaining -= len;
     }
-    if !rest.is_empty() {
+    if remaining != 0 {
         return Ok(false);
     }
     for (key, payload) in records {
         side.put_keyed(key, &payload)?;
     }
-    let _ = fs::remove_file(side.blob_path(pack));
+    if !pack_is_blob {
+        let _ = fs::remove_file(side.blob_path(pack));
+    }
+    Ok(true)
+}
+
+enum BlobIo {
+    Read(io::Error),
+    Write(io::Error),
+}
+
+impl BlobIo {
+    fn into_io(self) -> io::Error {
+        match self {
+            Self::Read(error) | Self::Write(error) => error,
+        }
+    }
+}
+
+/// Copy and hash exactly `len` bytes, leaving any following bytes unread.
+fn digest_copy(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    len: u64,
+) -> Result<Option<ContentHash>, BlobIo> {
+    let mut input = input.take(len);
+    let mut sha = sha2::Sha256::new();
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        let read = match input.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(BlobIo::Read(error)),
+        };
+        output.write_all(&chunk[..read]).map_err(BlobIo::Write)?;
+        sha.update(&chunk[..read]);
+    }
+    Ok((input.limit() == 0).then(|| ContentHash(sha.finalize().into())))
+}
+
+fn publish_blob(
+    store: &Store,
+    address: ContentHash,
+    len: u64,
+    write: impl FnOnce(&mut File) -> io::Result<bool>,
+) -> io::Result<bool> {
+    let mut rejected = false;
+    let published = store.publish_to(|file| {
+        if !write(file)? {
+            rejected = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "remote blob failed verification",
+            ));
+        }
+        Ok((store.blob_path(address), ()))
+    });
+    if rejected {
+        return Ok(false);
+    }
+    published?;
+    if let Some(cas) = &store.cas {
+        cas.wrote(len as usize);
+    }
+    super::wrote("bare");
     Ok(true)
 }
 

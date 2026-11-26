@@ -5,11 +5,10 @@ from collections import Counter
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
-import time
 
-from wire_process import stop_process
+from wire_process import start_listening, stop_process
+from wire_wsock import wait_ready
 
 IMAGE = 'crossbario/autobahn-testsuite@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074'
 
@@ -32,23 +31,15 @@ def main():
     ]
     summary = []
     with (reports/'endpoint.stderr').open('wb') as errors:
-        endpoint = subprocess.Popen([str(args.echo.resolve())], stderr=errors)
+        endpoint, port = start_listening(args.echo, stderr=errors)
         try:
-            for _ in range(100):
-                assert endpoint.poll() is None, endpoint.returncode
-                try:
-                    with socket.create_connection(('127.0.0.1', 18089), .2):
-                        break
-                except OSError:
-                    time.sleep(.02)
-            else:
-                raise AssertionError('echo did not listen')
+            wait_ready(endpoint, port)
             for index, cases in enumerate(groups):
                 group = reports/str(index)
                 group.mkdir(exist_ok=True)
                 (group/'config.json').write_text(json.dumps({
                     'outdir':'/reports/results',
-                    'servers':[{'url':'ws://127.0.0.1:18089/hirsel', 'agent':'Hirsel-W2'}],
+                    'servers':[{'url':f'ws://127.0.0.1:{port}/hirsel', 'agent':'Hirsel-W2'}],
                     'cases':cases, 'exclude-cases':[], 'exclude-agent-cases':{},
                 }))
                 completed = (group/'results/index.json').is_file()

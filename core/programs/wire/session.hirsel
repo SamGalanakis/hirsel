@@ -36,11 +36,17 @@ fn service() -> runner.Service[()] {
     runner.Service(context: (), step: step, ready: ready, finish: finish, check: inspect, retirement: None, flush_subscriptions: fn(mut context: (), mut work: runner.WireWork) -> () {})
 }
 
-fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[(), Exit] waits {
+fn run(n: Net, tasks: Tasks, clock: Clock, out: Stdout, config: runner.WireConfig) -> Result[(), Exit] waits {
     let mut c = config
     c.n_pool = 16777216u64
-    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
-        Ok((take l, _)) => take l,
+    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 128u16) {
+        Ok((take l, address)) => {
+            let mut line = string.from("listening ")
+            string.push_u64(mut line, int.widen(address.port))
+            string.push(mut line, "\n")
+            let _ = stdout.write(out, line)
+            take l
+        },
         Error(_) => return Error(Exit(status: 1u8)),
     }
     let mail = result.unwrap(runner.mailbox(64u64))
@@ -54,13 +60,13 @@ fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[
     }
 }
 
-pub fn main(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
-    run(n, tasks, clock, runner.wire_defaults(65536u64))
+pub fn main(n: Net, tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    run(n, tasks, clock, out, runner.wire_defaults(65536u64))
 }
 
-pub fn idle(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
+pub fn idle(n: Net, tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
     let mut config = runner.wire_defaults(65536u64)
     config.socket.idle_ms = 100u64
     config.socket.close_ms = 500u64
-    run(n, tasks, clock, config)
+    run(n, tasks, clock, out, config)
 }

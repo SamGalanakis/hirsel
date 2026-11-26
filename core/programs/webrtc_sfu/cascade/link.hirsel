@@ -8,13 +8,22 @@ pub const MIN_MTU_PAYLOAD: u64 = 1400
 
 pub const MAX_LAYER_NUM: u32 = 0xffffffff
 
+/// CAS-6: maximum stream/media `LinkEvent`s emitted by one `process_events` / `drive_links` drain.
+pub const MAX_EVENTS_PER_DRAIN: u64 = 256
+
+/// Unread bytes a stream receive buffer holds before the hub stops reading from QUIC:
+/// one maximal frame and its header, so a full frame always fits.
+const MAX_RX_BUFFERED: u64 = MAX_FRAME_LEN + 16
+
 const MTU_PROBE_TAG: u64 = 0xffffffffffffffff
 
-const ERR_MALFORMED_CTRL: u64 = 0xca01
+pub const ERR_MALFORMED_CTRL: u64 = 0xca01
 
-const ERR_MALFORMED_ROOM: u64 = 0xca02
+pub const ERR_MALFORMED_ROOM: u64 = 0xca02
 
-const ERR_ALPN: u64 = 0xca03
+pub const ERR_ALPN: u64 = 0xca03
+
+pub const ERR_BAD_PEER: u64 = 0xca04
 
 pub type LinkLimits {
     rooms: u32,
@@ -45,7 +54,8 @@ pub type LinkCounts: key {
     mtu_refused: u64,
     streams_opened: u64,
     datagrams_sent: u64,
-    datagrams_received: u64
+    datagrams_received: u64,
+    rx_bytes_shifted: u64
 }
 
 pub type LinkEvent = LinkUp(peer: NodeId, handle: quic.ConnectionHandle) | LinkDown(peer: Option[NodeId], handle: quic.ConnectionHandle, reason: quic.CloseReason) | LinkMtuReady(handle: quic.ConnectionHandle) | ControlIn(handle: quic.ConnectionHandle, msg: LinkMsg) | RoomIn(handle: quic.ConnectionHandle, room_num: u32, msg: RoomMsg) | RoomDetached(handle: quic.ConnectionHandle, room_num: u32, malformed: bool) | MediaIn(handle: quic.ConnectionHandle, room_num: u32, layer_num: u32, layer: LayerInfo, rtp: Bytes)
@@ -55,6 +65,8 @@ type RoomStream {
     term: u64,
     stream: Option[quic.StreamId],
     rx: Bytes,
+    rx_at: u64,
+    rx_more: bool,
     tx_queue: Bytes,
     next_layer: u32,
     last_rx_layer: Option[u32],
@@ -62,16 +74,27 @@ type RoomStream {
     rx_layers: List[LayerInfo]
 }
 
+type UnboundStream {
+    stream: quic.StreamId,
+    rx: Bytes,
+    rx_at: u64,
+    rx_more: bool
+}
+
 type PeerLink {
     handle: quic.ConnectionHandle,
     dialed: bool,
+    expected_peer: Option[NodeId],
     peer: Option[NodeId],
+    closing: bool,
     connected: bool,
     mtu_ready: bool,
     ctrl_stream: Option[quic.StreamId],
     ctrl_rx: Bytes,
+    ctrl_rx_at: u64,
+    ctrl_rx_more: bool,
     ctrl_tx: Bytes,
-    unbound_streams: List[(quic.StreamId, Bytes)],
+    unbound_streams: List[UnboundStream],
     rooms: List[RoomStream],
     next_room_num: u32
 }
@@ -81,6 +104,7 @@ pub opaque type LinkHub {
     node: NodeId,
     limits: LinkLimits,
     ep: quic.Endpoint,
+    peer_pins: List[PeerPins],
     links: List[PeerLink],
     counts: LinkCounts,
     mtu_probe: Shared[Bytes],
@@ -113,19 +137,76 @@ pub fn cascade_endpoint_config(r: Random, max_connections: u32) -> quic.Endpoint
     quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1472, retry: Never, reset_key: take reset_key, token_key: take token_key, limits: quic.EndpointLimits(connections: max_connections, unvalidated: max_connections, datagram_bytes: 1048576))
 }
 
-/// Create a `LinkHub` for `local_node`, accepting mutually-authenticated links pinned to `client_pins`.
-pub fn link_hub(local_node: NodeId, r: Random, limits: LinkLimits, take identity: quic.handshake.Identity, take client_pins: List[quic.handshake.Pin], max_connections: u32) -> Result[LinkHub, LinkError] {
+fn flatten_peer_pins(bindings: List[PeerPins]) -> List[quic.handshake.Pin] {
+    let mut flat: List[quic.handshake.Pin] = list.new()
+    for entry in bindings {
+        for p in entry.pins {
+            list.push(mut flat, clone(p))
+        }
+    }
+    take flat
+}
+
+fn pin_eq(a: quic.handshake.Pin, b: quic.handshake.Pin) -> bool {
+    match a {
+        Cert(da) => match b {
+            Cert(db) => da == db,
+            Spki(_) => false,
+        },
+        Spki(da) => match b {
+            Spki(db) => da == db,
+            Cert(_) => false,
+        },
+    }
+}
+
+fn pin_in_list(pin: quic.handshake.Pin, pins: List[quic.handshake.Pin]) -> bool {
+    for p in pins {
+        if pin_eq(pin, p) {
+            return true
+        }
+    }
+    false
+}
+
+/// CAS-2: a `Hello` naming `claimed` binds link `i` only if, on a dialed link, `claimed`
+/// is the dialed peer (whose pins QUIC already enforced), or, on an accepted link, the
+/// certificate QUIC authenticated matches one of `claimed`'s listed pins.
+fn hello_allowed(hub: LinkHub, i: u64, claimed: NodeId) -> bool {
+    if claimed == hub.node {
+        return false
+    }
+    if let Some(expected) = hub.links[i].expected_peer {
+        return expected == claimed
+    }
+    let Some(actual) = quic.peer_pin(hub.ep, hub.links[i].handle) else {
+        return false
+    }
+    for entry in hub.peer_pins {
+        if entry.node == claimed {
+            return pin_in_list(actual, entry.pins)
+        }
+    }
+    false
+}
+
+/// Create a `LinkHub` for `local_node`, accepting mutually-authenticated links bound to
+/// each listed peer's `PeerPins` from the directory (CAS-2).
+pub fn link_hub(local_node: NodeId, r: Random, limits: LinkLimits, take identity: quic.handshake.Identity, take bindings: List[PeerPins], max_connections: u32) -> Result[LinkHub, LinkError] {
     let cfg = cascade_endpoint_config(r, max_connections)
-    let transport = cascade_transport(limits, Some(take client_pins))
+    let flat_pins = flatten_peer_pins(bindings)
+    let transport = cascade_transport(limits, Some(take flat_pins))
     let ep = quic.endpoint(r, take cfg, Some((take identity, take transport))) ?=> |e| Quic(e)
     let mut probe: Bytes = list.with_capacity(MIN_MTU_PAYLOAD)
     list.fill(mut probe, MIN_MTU_PAYLOAD, 0)
-    Ok(LinkHub(node: local_node, limits: limits, ep: take ep, links: list.new(), counts: LinkCounts(unknown_layer: 0, malformed_datagram: 0, mtu_refused: 0, streams_opened: 0, datagrams_sent: 0, datagrams_received: 0), mtu_probe: shared.new(take probe), quic_events: list.new()))
+    Ok(LinkHub(node: local_node, limits: limits, ep: take ep, peer_pins: take bindings, links: list.new(), counts: LinkCounts(unknown_layer: 0, malformed_datagram: 0, mtu_refused: 0, streams_opened: 0, datagrams_sent: 0, datagrams_received: 0, rx_bytes_shifted: 0), mtu_probe: shared.new(take probe), quic_events: list.new()))
 }
 
-/// Update the accepting side's allowed client pins (e.g. from `directory.all_pins`).
-pub fn set_client_pins(mut hub: LinkHub, take pins: List[quic.handshake.Pin]) {
-    quic.set_client_pins(mut hub.ep, Some(take pins))
+/// Update the accepting side's allowed `(NodeId, pins)` bindings (e.g. from `directory.peer_pins`).
+pub fn set_peer_pins(mut hub: LinkHub, take bindings: List[PeerPins]) {
+    let flat_pins = flatten_peer_pins(bindings)
+    quic.set_client_pins(mut hub.ep, Some(take flat_pins))
+    hub.peer_pins = take bindings
 }
 
 pub fn link_counts(hub: LinkHub) -> LinkCounts {
@@ -151,7 +232,7 @@ pub fn find_link(hub: LinkHub, peer: NodeId) -> Option[quic.ConnectionHandle] {
     None
 }
 
-/// Peer `NodeId` of link `h`, once `Hello` has arrived.
+/// Peer `NodeId` of link `h`, once a verified `Hello` has arrived.
 pub fn link_peer(hub: LinkHub, h: quic.ConnectionHandle) -> Option[NodeId] {
     let i = link_at(hub, h)?
     hub.links[i].peer
@@ -190,8 +271,12 @@ pub fn dial_addr(mut hub: LinkHub, peer: NodeId, addr: Addr, take pins: List[qui
     Ok(h)
 }
 
-fn new_link(h: quic.ConnectionHandle, dialed: bool, peer: Option[NodeId]) -> PeerLink {
-    PeerLink(handle: h, dialed: dialed, peer: peer, connected: false, mtu_ready: false, ctrl_stream: None, ctrl_rx: list.new(), ctrl_tx: list.new(), unbound_streams: list.new(), rooms: list.new(), next_room_num: 1)
+fn new_link(h: quic.ConnectionHandle, dialed: bool, expected_peer: Option[NodeId]) -> PeerLink {
+    PeerLink(handle: h, dialed: dialed, expected_peer: expected_peer, peer: None, closing: false, connected: false, mtu_ready: false, ctrl_stream: None, ctrl_rx: list.new(), ctrl_rx_at: 0, ctrl_rx_more: false, ctrl_tx: list.new(), unbound_streams: list.new(), rooms: list.new(), next_room_num: 1)
+}
+
+fn new_room(room_num: u32, term: u64, stream: Option[quic.StreamId], take rx: Bytes, rx_at: u64, take tx: Bytes) -> RoomStream {
+    RoomStream(room_num: room_num, term: term, stream: stream, rx: take rx, rx_at: rx_at, rx_more: false, tx_queue: take tx, next_layer: 1, last_rx_layer: None, tx_layers: list.new(), rx_layers: list.new())
 }
 
 fn link_at(hub: LinkHub, h: quic.ConnectionHandle) -> Option[u64] {
@@ -259,7 +344,7 @@ pub fn attach_room_stream(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: 
         encode_room_msg(RoomOpen(room_num: room_num, term: term, seq: 0), mut tx) ?=> |e| Wire(e)
         sid = Some(s)
     }
-    list.push(mut hub.links[i].rooms, RoomStream(room_num: room_num, term: term, stream: sid, rx: list.new(), tx_queue: take tx, next_layer: 1, last_rx_layer: None, tx_layers: list.new(), rx_layers: list.new()))
+    list.push(mut hub.links[i].rooms, new_room(room_num, term, sid, list.new(), 0, take tx))
     let ri = list.len(hub.links[i].rooms) - 1
     flush_room(mut hub, i, ri)
     Ok(())
@@ -402,7 +487,16 @@ fn detach_room_internal(mut hub: LinkHub, i: u64, ri: u64) {
 
 /// Close link `h` cleanly.
 pub fn close_link(mut hub: LinkHub, h: quic.ConnectionHandle, code: u64) {
+    if let Some(i) = link_at(hub, h) {
+        hub.links[i].closing = true
+    }
     quic.close(mut hub.ep, h, code, b"")
+}
+
+/// Close link `i` for a protocol violation; nothing it sent afterwards is read.
+fn fail_link(mut hub: LinkHub, i: u64, code: u64, take why: Bytes) {
+    hub.links[i].closing = true
+    quic.close(mut hub.ep, hub.links[i].handle, code, take why)
 }
 
 /// Drive the underlying QUIC endpoint for one round over `sock` and emit `LinkEvent`s.
@@ -415,17 +509,29 @@ pub fn drive_links(mut hub: LinkHub, clock: Clock, mut sock: UdpSocket, until: u
 }
 
 /// Sans-IO step: process QUIC events into `LinkEvent`s (also used after `quic.receive_datagram`).
+/// `Readable` only marks a stream; each marked stream is then drained once per call and
+/// emits at most `MAX_EVENTS_PER_DRAIN` events. Frames past the cap stay buffered, the
+/// stream is not read from QUIC meanwhile, and it resumes on the next call.
 pub fn process_events(mut hub: LinkHub, take raw: List[quic.Event], mut out: List[LinkEvent]) {
     for take ev in take raw {
         match take ev {
             Connected(c: h, alpn: alpn) => on_connected(mut hub, h, alpn),
             Opened(h, s) => on_opened(mut hub, h, s),
-            Readable(h, s) => on_readable(mut hub, h, s, mut out),
+            Readable(h, s) => on_readable(mut hub, h, s),
             Writable(h, s) => on_writable(mut hub, h, s),
             Datagram(h, take data) => on_datagram(mut hub, h, take data, mut out),
-            Closed(h, reason) => on_closed(mut hub, h, reason, mut out),
+            Closed(h, reason) => {
+                // Deliver what the link sent before it closed, then report the close.
+                if let Some(i) = link_at(hub, h) {
+                    serve_pending(mut hub, i, mut out)
+                }
+                on_closed(mut hub, h, reason, mut out)
+            },
             _ => (),
         }
+    }
+    for i in 0u64 .. list.len(hub.links) {
+        serve_pending(mut hub, i, mut out)
     }
     // Check DPLPMTUD readiness on connected links not yet marked ready.
     for i in 0u64 .. list.len(hub.links) {
@@ -436,6 +542,62 @@ pub fn process_events(mut hub: LinkHub, take raw: List[quic.Event], mut out: Lis
             }
         }
     }
+}
+
+/// Drain once each stream of link `i` marked readable or left with buffered bytes: control
+/// first, then room and unbound streams once the link's `Hello` is verified.
+fn serve_pending(mut hub: LinkHub, i: u64, mut out: List[LinkEvent]) {
+    if hub.links[i].closing {
+        return
+    }
+    if hub.links[i].ctrl_rx_more {
+        serve_ctrl(mut hub, i, mut out)
+    }
+    if hub.links[i].closing || hub.links[i].peer == None {
+        return
+    }
+    let mut room_streams: List[quic.StreamId] = list.new()
+    for r in hub.links[i].rooms {
+        if r.rx_more {
+            if let Some(s) = r.stream {
+                list.push(mut room_streams, s)
+            }
+        }
+    }
+    for s in room_streams {
+        if let Some(ri) = room_by_stream(hub.links[i], s) {
+            serve_room(mut hub, i, ri, mut out)
+        }
+    }
+    let mut unbound: List[quic.StreamId] = list.new()
+    for u in hub.links[i].unbound_streams {
+        if u.rx_more {
+            list.push(mut unbound, u.stream)
+        }
+    }
+    for s in unbound {
+        if let Some(ui) = unbound_by_stream(hub.links[i], s) {
+            serve_unbound(mut hub, i, ui, mut out)
+        }
+    }
+}
+
+fn room_by_stream(l: PeerLink, s: quic.StreamId) -> Option[u64] {
+    for ri in 0u64 .. list.len(l.rooms) {
+        if l.rooms[ri].stream == Some(s) {
+            return Some(ri)
+        }
+    }
+    None
+}
+
+fn unbound_by_stream(l: PeerLink, s: quic.StreamId) -> Option[u64] {
+    for ui in 0u64 .. list.len(l.unbound_streams) {
+        if l.unbound_streams[ui].stream == s {
+            return Some(ui)
+        }
+    }
+    None
 }
 
 fn on_connected(mut hub: LinkHub, h: quic.ConnectionHandle, alpn: String) {
@@ -473,7 +635,7 @@ fn on_opened(mut hub: LinkHub, h: quic.ConnectionHandle, s: quic.StreamId) {
         flush_ctrl(mut hub, i)
         return
     }
-    list.push(mut hub.links[i].unbound_streams, (s, list.new()))
+    list.push(mut hub.links[i].unbound_streams, UnboundStream(stream: s, rx: list.new(), rx_at: 0, rx_more: false))
 }
 
 fn on_writable(mut hub: LinkHub, h: quic.ConnectionHandle, s: quic.StreamId) {
@@ -501,10 +663,7 @@ fn flush_ctrl(mut hub: LinkHub, i: u64) {
         return
     }
     if let Ok(n) = quic.write(mut hub.ep, h, s, hub.links[i].ctrl_tx, false) {
-        if n > 0 {
-            let rest: Bytes = clone(list.slice(hub.links[i].ctrl_tx, n, list.len(hub.links[i].ctrl_tx)))
-            hub.links[i].ctrl_tx = take rest
-        }
+        list.drop_prefix(mut hub.links[i].ctrl_tx, n)
     }
 }
 
@@ -517,137 +676,132 @@ fn flush_room(mut hub: LinkHub, i: u64, ri: u64) {
         return
     }
     if let Ok(n) = quic.write(mut hub.ep, h, s, hub.links[i].rooms[ri].tx_queue, false) {
-        if n > 0 {
-            let rest: Bytes = clone(list.slice(hub.links[i].rooms[ri].tx_queue, n, list.len(hub.links[i].rooms[ri].tx_queue)))
-            hub.links[i].rooms[ri].tx_queue = take rest
-        }
+        list.drop_prefix(mut hub.links[i].rooms[ri].tx_queue, n)
     }
 }
 
-fn read_stream_chunk(mut ep: quic.Endpoint, h: quic.ConnectionHandle, s: quic.StreamId, mut dst: Bytes) -> bool {
+/// Read stream `s` into `dst` until QUIC has nothing more or `dst` holds
+/// `MAX_RX_BUFFERED` unread bytes past `at`. Returns true when it stopped at that bound,
+/// so QUIC may still hold bytes and flow control holds the sender back.
+fn fill_rx(mut ep: quic.Endpoint, h: quic.ConnectionHandle, s: quic.StreamId, mut dst: Bytes, at: u64) -> bool {
     let mut tmp: Bytes = list.with_capacity(4096)
-    let mut got_any = false
     loop {
+        if list.len(dst) - at >= MAX_RX_BUFFERED {
+            return true
+        }
         list.clear(mut tmp)
         match quic.read(mut ep, h, s, mut tmp) {
             Ok((n, _)) => {
                 if n == 0 {
-                    break
+                    return false
                 }
                 list.append(mut dst, tmp)
-                got_any = true
             },
-            Error(_) => break,
+            Error(_) => return false,
         }
     }
-    got_any
 }
 
-fn on_readable(mut hub: LinkHub, h: quic.ConnectionHandle, s: quic.StreamId, mut out: List[LinkEvent]) {
+/// Mark stream `s` for the call's drain pass. CAS-2: room streams are not read until the
+/// link's `Hello` is verified; QUIC orders nothing across streams, so their bytes wait unread.
+fn on_readable(mut hub: LinkHub, h: quic.ConnectionHandle, s: quic.StreamId) {
     let Some(i) = link_at(hub, h) else {
         return
     }
     if hub.links[i].ctrl_stream == Some(s) {
-        let _ = read_stream_chunk(mut hub.ep, h, s, mut hub.links[i].ctrl_rx)
-        drain_ctrl(mut hub, i, mut out)
+        hub.links[i].ctrl_rx_more = true
         return
     }
-    for ri in 0u64 .. list.len(hub.links[i].rooms) {
-        if hub.links[i].rooms[ri].stream == Some(s) {
-            let _ = read_stream_chunk(mut hub.ep, h, s, mut hub.links[i].rooms[ri].rx)
-            drain_room(mut hub, i, ri, mut out)
+    if let Some(ri) = room_by_stream(hub.links[i], s) {
+        hub.links[i].rooms[ri].rx_more = true
+        return
+    }
+    if let Some(ui) = unbound_by_stream(hub.links[i], s) {
+        hub.links[i].unbound_streams[ui].rx_more = true
+    }
+}
+
+fn serve_ctrl(mut hub: LinkHub, i: u64, mut out: List[LinkEvent]) {
+    let Some(s) = hub.links[i].ctrl_stream else {
+        return
+    }
+    let h = hub.links[i].handle
+    let mut budget = MAX_EVENTS_PER_DRAIN
+    loop {
+        if hub.links[i].closing {
             return
         }
-    }
-    for ui in 0u64 .. list.len(hub.links[i].unbound_streams) {
-        let sid = hub.links[i].unbound_streams[ui].0
-        if sid == s {
-            let mut buf = replace(mut hub.links[i].unbound_streams[ui].1, list.new())
-            let _ = read_stream_chunk(mut hub.ep, h, s, mut buf)
-            let frame = take_raw_frame(mut buf)
-            match take frame {
-                Ok(Some((tag, take body))) => {
-                    match decode_room_msg(tag, take body) {
-                        Ok(RoomOpen(room_num: rn, term: term, seq: _)) => {
-                            let _ = list.remove(mut hub.links[i].unbound_streams, ui)
-                            let ri = match link_room_at(hub.links[i], rn) {
-                                Some(existing) => {
-                                    hub.links[i].rooms[existing].stream = Some(s)
-                                    list.append(mut hub.links[i].rooms[existing].rx, buf)
-                                    existing
-                                },
-                                None => {
-                                    if list.len(hub.links[i].rooms) >= int.widen(hub.limits.rooms) {
-                                        let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
-                                        let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
-                                        return
-                                    }
-                                    list.push(mut hub.links[i].rooms, RoomStream(room_num: rn, term: term, stream: Some(s), rx: take buf, tx_queue: list.new(), next_layer: 1, last_rx_layer: None, tx_layers: list.new(), rx_layers: list.new()))
-                                    list.len(hub.links[i].rooms) - 1
-                                },
-                            }
-                            let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 1, order: int.widen(rn), then: 0))
-                            flush_room(mut hub, i, ri)
-                            drain_room(mut hub, i, ri, mut out)
-                        },
-                        _ => {
-                            let _ = list.remove(mut hub.links[i].unbound_streams, ui)
-                            let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
-                            let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
-                        },
-                    }
-                },
-                Ok(None) => {
-                    hub.links[i].unbound_streams[ui].1 = take buf
-                },
-                Error(_) => {
-                    let _ = list.remove(mut hub.links[i].unbound_streams, ui)
-                    let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
-                    let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
-                },
-            }
+        let at = hub.links[i].ctrl_rx_at
+        let more = fill_rx(mut hub.ep, h, s, mut hub.links[i].ctrl_rx, at)
+        drain_ctrl(mut hub, i, mut budget, mut out)
+        let (new_at, moved) = compact_frame_buf(mut hub.links[i].ctrl_rx, hub.links[i].ctrl_rx_at)
+        hub.links[i].ctrl_rx_at = new_at
+        hub.counts.rx_bytes_shifted += moved
+        if budget == 0 {
+            hub.links[i].ctrl_rx_more = true
+            return
+        }
+        if !more {
+            hub.links[i].ctrl_rx_more = false
             return
         }
     }
 }
 
-fn drain_ctrl(mut hub: LinkHub, i: u64, mut out: List[LinkEvent]) {
+fn drain_ctrl(mut hub: LinkHub, i: u64, mut budget: u64, mut out: List[LinkEvent]) {
     let h = hub.links[i].handle
-    loop {
-        match take_raw_frame(mut hub.links[i].ctrl_rx) {
-            Ok(Some((tag, take body))) => {
-                match decode_link_msg(tag, take body) {
-                    Ok(Hello(version: v, node: peer)) => {
-                        if v != WIRE_VERSION {
-                            quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"bad version")
-                            return
-                        }
-                        hub.links[i].peer = Some(peer)
-                        list.push(mut out, LinkUp(peer: peer, handle: h))
-                    },
-                    Ok(Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)) => {
-                        if !record_rx_layer(mut hub, i, rn, term, ln, p, ep, k, clone(rid)) {
-                            quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"bad layer")
-                            return
-                        }
-                        list.push(mut out, ControlIn(handle: h, msg: Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)))
-                    },
-                    Ok(take msg) => {
-                        list.push(mut out, ControlIn(handle: h, msg: take msg))
-                    },
-                    Error(_) => {
-                        // CAS-2 / CAS-7: malformed message on link control stream closes the link.
-                        quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"malformed control")
-                        return
-                    },
-                }
-            },
+    while budget > 0 && !hub.links[i].closing {
+        let mut at = hub.links[i].ctrl_rx_at
+        let (tag, start, end) = match take_raw_frame(hub.links[i].ctrl_rx, mut at) {
+            Ok(Some(span)) => span,
             Ok(None) => return,
             Error(_) => {
-                quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"malformed control frame")
+                fail_link(mut hub, i, ERR_MALFORMED_CTRL, b"malformed control frame")
                 return
             },
         }
+        hub.links[i].ctrl_rx_at = at
+        let decoded = decode_link_msg(tag, hub.links[i].ctrl_rx, start, end)
+        match take decoded {
+            Ok(Hello(version: v, node: claimed)) => {
+                if v != WIRE_VERSION {
+                    fail_link(mut hub, i, ERR_MALFORMED_CTRL, b"bad version")
+                    return
+                }
+                // CAS-2: one `Hello` per link, naming the node its certificate is pinned to.
+                if hub.links[i].peer != None || !hello_allowed(hub, i, claimed) {
+                    fail_link(mut hub, i, ERR_BAD_PEER, b"bad hello")
+                    return
+                }
+                hub.links[i].peer = Some(claimed)
+                list.push(mut out, LinkUp(peer: claimed, handle: h))
+            },
+            Ok(Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)) => {
+                if hub.links[i].peer == None {
+                    fail_link(mut hub, i, ERR_BAD_PEER, b"message before hello")
+                    return
+                }
+                if !record_rx_layer(mut hub, i, rn, term, ln, p, ep, k, clone(rid)) {
+                    fail_link(mut hub, i, ERR_MALFORMED_CTRL, b"bad layer")
+                    return
+                }
+                list.push(mut out, ControlIn(handle: h, msg: Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)))
+            },
+            Ok(take msg) => {
+                // CAS-2: nothing on the control stream counts before a verified `Hello`.
+                if hub.links[i].peer == None {
+                    fail_link(mut hub, i, ERR_BAD_PEER, b"message before hello")
+                    return
+                }
+                list.push(mut out, ControlIn(handle: h, msg: take msg))
+            },
+            Error(_) => {
+                // CAS-2 / CAS-7: malformed message on link control stream closes the link.
+                fail_link(mut hub, i, ERR_MALFORMED_CTRL, b"malformed control")
+                return
+            },
+        }
+        budget -= 1
     }
 }
 
@@ -661,7 +815,7 @@ fn record_rx_layer(mut hub: LinkHub, i: u64, room_num: u32, term: u64, layer_num
             if list.len(hub.links[i].rooms) >= int.widen(hub.limits.rooms) {
                 return false
             }
-            list.push(mut hub.links[i].rooms, RoomStream(room_num: room_num, term: term, stream: None, rx: list.new(), tx_queue: list.new(), next_layer: 1, last_rx_layer: None, tx_layers: list.new(), rx_layers: list.new()))
+            list.push(mut hub.links[i].rooms, new_room(room_num, term, None, list.new(), 0, list.new()))
             list.len(hub.links[i].rooms) - 1
         },
     }
@@ -675,35 +829,114 @@ fn record_rx_layer(mut hub: LinkHub, i: u64, room_num: u32, term: u64, layer_num
     true
 }
 
-fn drain_room(mut hub: LinkHub, i: u64, ri: u64, mut out: List[LinkEvent]) {
+type RoomDrain = RoomEnded | RoomCapped | RoomIdle
+
+fn serve_room(mut hub: LinkHub, i: u64, ri: u64, mut out: List[LinkEvent]) {
+    let Some(s) = hub.links[i].rooms[ri].stream else {
+        return
+    }
     let h = hub.links[i].handle
-    let rn = hub.links[i].rooms[ri].room_num
+    let mut budget = MAX_EVENTS_PER_DRAIN
     loop {
-        match take_raw_frame(mut hub.links[i].rooms[ri].rx) {
-            Ok(Some((tag, take body))) => {
-                match decode_room_msg(tag, take body) {
-                    Ok(take msg) => {
-                        list.push(mut out, RoomIn(handle: h, room_num: rn, msg: take msg))
-                    },
-                    Error(_) => {
-                        // CAS-2 / CAS-7: malformed message on a room stream detaches only that room.
-                        detach_room_internal(mut hub, i, ri)
-                        list.push(mut out, RoomDetached(handle: h, room_num: rn, malformed: true))
-                        return
-                    },
-                }
-            },
-            Ok(None) => return,
-            Error(_) => {
-                detach_room_internal(mut hub, i, ri)
-                list.push(mut out, RoomDetached(handle: h, room_num: rn, malformed: true))
-                return
-            },
+        let at = hub.links[i].rooms[ri].rx_at
+        let more = fill_rx(mut hub.ep, h, s, mut hub.links[i].rooms[ri].rx, at)
+        match drain_room(mut hub, i, ri, mut budget, mut out) {
+            RoomEnded => return,
+            _ => (),
+        }
+        let (new_at, moved) = compact_frame_buf(mut hub.links[i].rooms[ri].rx, hub.links[i].rooms[ri].rx_at)
+        hub.links[i].rooms[ri].rx_at = new_at
+        hub.counts.rx_bytes_shifted += moved
+        if budget == 0 {
+            hub.links[i].rooms[ri].rx_more = true
+            return
+        }
+        if !more {
+            hub.links[i].rooms[ri].rx_more = false
+            return
         }
     }
 }
 
+/// Drain whole frames from room `ri`'s receive buffer while `budget` lasts. Returns
+/// `RoomEnded` once the room was detached for a malformed frame.
+fn drain_room(mut hub: LinkHub, i: u64, ri: u64, mut budget: u64, mut out: List[LinkEvent]) -> RoomDrain {
+    let h = hub.links[i].handle
+    let rn = hub.links[i].rooms[ri].room_num
+    while budget > 0 {
+        let mut at = hub.links[i].rooms[ri].rx_at
+        let (tag, start, end) = match take_raw_frame(hub.links[i].rooms[ri].rx, mut at) {
+            Ok(Some(span)) => span,
+            Ok(None) => return RoomIdle,
+            Error(_) => {
+                detach_room_internal(mut hub, i, ri)
+                list.push(mut out, RoomDetached(handle: h, room_num: rn, malformed: true))
+                return RoomEnded
+            },
+        }
+        hub.links[i].rooms[ri].rx_at = at
+        match decode_room_msg(tag, hub.links[i].rooms[ri].rx, start, end) {
+            Ok(take msg) => {
+                list.push(mut out, RoomIn(handle: h, room_num: rn, msg: take msg))
+            },
+            Error(_) => {
+                // CAS-2 / CAS-7: malformed message on a room stream detaches only that room.
+                detach_room_internal(mut hub, i, ri)
+                list.push(mut out, RoomDetached(handle: h, room_num: rn, malformed: true))
+                return RoomEnded
+            },
+        }
+        budget -= 1
+    }
+    RoomCapped
+}
+
+/// Bind a peer-opened stream to its room once its first frame, `RoomOpen`, is whole.
+fn serve_unbound(mut hub: LinkHub, i: u64, ui: u64, mut out: List[LinkEvent]) {
+    let h = hub.links[i].handle
+    let s = hub.links[i].unbound_streams[ui].stream
+    let start_at = hub.links[i].unbound_streams[ui].rx_at
+    let more = fill_rx(mut hub.ep, h, s, mut hub.links[i].unbound_streams[ui].rx, start_at)
+    hub.links[i].unbound_streams[ui].rx_more = more
+    let mut at = hub.links[i].unbound_streams[ui].rx_at
+    let opened = match take_raw_frame(hub.links[i].unbound_streams[ui].rx, mut at) {
+        Ok(Some((tag, start, end))) => match decode_room_msg(tag, hub.links[i].unbound_streams[ui].rx, start, end) {
+            Ok(RoomOpen(room_num: rn, term: term, seq: _)) => Some((rn, term)),
+            _ => None,
+        },
+        Ok(None) => return,
+        Error(_) => None,
+    }
+    let UnboundStream(rx: take buf, ..) = list.remove(mut hub.links[i].unbound_streams, ui)
+    let Some((rn, term)) = opened else {
+        let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
+        let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
+        return
+    }
+    let ri = match link_room_at(hub.links[i], rn) {
+        Some(existing) => {
+            hub.links[i].rooms[existing].stream = Some(s)
+            list.append(mut hub.links[i].rooms[existing].rx, list.slice(buf, at, list.len(buf)))
+            existing
+        },
+        None => {
+            if list.len(hub.links[i].rooms) >= int.widen(hub.limits.rooms) {
+                let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
+                let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
+                return
+            }
+            list.push(mut hub.links[i].rooms, new_room(rn, term, Some(s), take buf, at, list.new()))
+            list.len(hub.links[i].rooms) - 1
+        },
+    }
+    let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 1, order: int.widen(rn), then: 0))
+    flush_room(mut hub, i, ri)
+    serve_room(mut hub, i, ri, mut out)
+}
+
 fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take data: Bytes, mut out: List[LinkEvent]) {
+    // Media datagrams sit outside `MAX_EVENTS_PER_DRAIN`: each is one QUIC event already
+    // bounded by QUIC-7's datagram buffer, and one not routed at once is dropped, never queued.
     let Some((room_num, layer_num)) = read_media_datagram(data) else {
         hub.counts.malformed_datagram += 1
         return

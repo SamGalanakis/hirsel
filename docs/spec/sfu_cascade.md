@@ -83,6 +83,11 @@ pub fn commit_fence(mut d: RoomDirectory, room: Bytes, term: u64, participant: u
 
 ```hirsel signatures webrtc_sfu/cascade
 pub type NodeId: key = NodeId(Inline[u8, 16])
+pub type PeerPins: send {
+    node: NodeId,
+    pins: List[quic.handshake.Pin]
+}
+pub const MAX_EVENTS_PER_DRAIN: u64 = 256
 pub type LinkLimits {
     rooms: u32,
     layers: u32,
@@ -95,16 +100,25 @@ pub opaque type LinkHub
 pub opaque type CascadeRouter
 pub type CascadeError = Term(u64) | Router(router.RouterError)
 
-pub fn link_hub(local_node: NodeId, r: Random, limits: LinkLimits, take identity: quic.handshake.Identity, take client_pins: List[quic.handshake.Pin], max_connections: u32) -> Result[LinkHub, LinkError]
+pub fn link_hub(local_node: NodeId, r: Random, limits: LinkLimits, take identity: quic.handshake.Identity, take bindings: List[PeerPins], max_connections: u32) -> Result[LinkHub, LinkError]
 pub fn cascade_router(local_node: NodeId, limits: LinkLimits) -> CascadeRouter
 pub fn begin_revoke(mut cr: CascadeRouter, mut hub: LinkHub, mut dir: RoomDirectory, room_name: Bytes, participant: u64, epoch: u64, now_ms: u64) -> Result[u64, CascadeError] waits
 pub fn poll_revoke(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Bytes, fence_seq: u64, now_ms: u64) -> bool
 ```
 
 A link is mutually authenticated: each side presents its node certificate and pins the
-other's from the directory's `NodeEntry.pins`, through `quic`'s `client_pins` on the
-accepting side and the pin list on the dialing side (QUIC-3). An unknown peer is refused at
-the handshake, before any stream opens. A link uses ALPN `hirsel-cascade-1`.
+other's from the directory's `NodeEntry.pins`, through `quic`'s `client_pins` (the union of
+listed `PeerPins`) on the accepting side and the pin list on the dialing side (QUIC-3). An
+unknown peer is refused at the handshake, before any stream opens. A link uses ALPN
+`hirsel-cascade-1`.
+
+On `Hello`, the receiver binds the link's `NodeId` to the authenticated certificate:
+`quic.peer_pin` must appear in the claimed node's `NodeEntry.pins` (`PeerPins`), and on a
+dialed link `Hello`'s `NodeId` must equal the dialed peer. A mismatched pin or peer, a
+second `Hello`, or any other control message arriving before a verified `Hello` closes the
+link with `ERR_BAD_PEER`. Room streams are not read until `Hello` is verified: QUIC orders
+nothing across streams, so a room stream's bytes may honestly arrive first, and they wait
+unread, held by flow control, until the link's `Hello` binds its peer.
 
 **Planned attachment to the pool.** The cascade integration adds `Pool.cascade` to RTC-10. Link
 control runs on the pool's control unit (Unit 0) beside the room clients; each link's QUIC
@@ -327,7 +341,14 @@ stream's buffers and its RTP-12 histories for the layers it may receive, from th
 charged QUIC-9's cost, and the home's grant ledger one entry per edge per room.
 `limits.rooms` and `limits.layers` bound what one peer node can ask for, and an attach past
 either is refused by name, as RTC-10 refuses an Open. Datagrams a node cannot route at once
-are dropped and counted, never queued, as RTC-5's ingress does.
+are dropped and counted, never queued, as RTC-5's ingress does. Stream frame extraction
+advances a read offset in place and compacts only once at least half the buffer is
+consumed, keeping drain work linear in bytes read. Each `process_events` call (and so each
+`drive_links` round) drains every readable stream once and emits at most
+`MAX_EVENTS_PER_DRAIN` (256) events per stream; frames past the cap stay buffered and resume
+on the next call. A stream is not read from QUIC while more than one maximum frame of
+unread bytes is buffered, so flow control, not the receive buffer, absorbs a backlog.
+Datagrams sit outside the cap: each is one QUIC event already bounded by QUIC-9.
 
 ## CAS-7: Faults
 
@@ -409,10 +430,16 @@ under `sim.udp` with three simulated nodes and `sim_directory` unless named.
   *Oracle:* CAS-3, from the per-link forward logs.
 - **K8 `attach_cost_is_exact`.** Attaching a room charges exactly `room_cost`'s cascade term,
   and detaching returns it. An attach past `limits.rooms` is refused by name. *Oracle:* the
-  MEM ledger, as W34.
-- **K9 `unpinned_node_refused`.** A node presenting a certificate the directory does not list
-  gets no link, whether it dials or is dialled, and opens no stream. *Oracle:* QUIC-3, with
-  `Refused(Pin)`.
+  MEM ledger, as W34. `room_stream_drain_linear`: a 64 KiB burst of 5-byte frames on one
+  room stream is delivered exactly once, no call emits more than `MAX_EVENTS_PER_DRAIN`
+  frames from it, and compaction moves no more bytes than the stream carried. *Oracle:* CAS-6.
+- **K9 `unpinned_node_refused`, `listed_node_hello_bound_to_pin`,
+  `impostor_hello_keeps_fence_waiting`.** A node presenting a certificate the directory does not list
+  gets no link, whether it dials or is dialled, and opens no stream. A listed node presenting
+  its own valid pin cannot claim another node's `NodeId` in `Hello`, send a control
+  message before `Hello`, or send a second `Hello`; each closes the link without disturbing
+  the impersonated node's grant ledger or pending revokes. *Oracle:* QUIC-3 (`Refused(Pin)`),
+  CAS-2, CAS-4, and CAS-5.
 - **K10 `three_node_room_on_boat`** (nightly, real hosts). 3 nodes in two regions and 30
   browsers: every browser receives every other's audio and video, measured end to end. The
   mouth-to-ear p95 is at most the single-node p95 plus the inter-region RTT plus 20 ms.

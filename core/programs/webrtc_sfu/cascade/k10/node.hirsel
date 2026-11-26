@@ -6,7 +6,7 @@
 //
 // Usage:
 //   k10-node single <p_count> <duration_ms>
-//   k10-node home <bind_ip:port> <p_start> <p_count> <total> <duration_ms> <pin_hex>...
+//   k10-node home <bind_ip:port> <p_start> <p_count> <total> <duration_ms> (<edge_name> <edge_pin_hex>)...
 //   k10-node edge <bind_ip:port> <home_ip:port> <node_name> <p_start> <p_count> <total> <duration_ms> <home_pin_hex>
 //
 // Directory grant (required for `home` and `edge`): directory holding `cert.der` and `key.der`.
@@ -398,11 +398,14 @@ fn run_home(a: Args, net: Net, dir: Dir, clock: Clock, random: Random, out: Stdo
     let p_count = parse_u64_arg(a, 3)
     let total = parse_u64_arg(a, 4)
     let duration_ms = parse_u64_arg(a, 5)
-    let mut pins: List[quic.handshake.Pin] = list.new()
+    let mut pins: List[webrtc_sfu.cascade.PeerPins] = list.new()
     let mut idx = 6u64
-    while idx < args.len(a) {
-        list.push(mut pins, parse_pin(str_arg(a, idx)))
-        idx += 1
+    while idx + 1 < args.len(a) {
+        let edge = webrtc_sfu.cascade.node_id(string.as_bytes(str_arg(a, idx)))
+        let mut edge_pins: List[quic.handshake.Pin] = list.with_capacity(1)
+        list.push(mut edge_pins, parse_pin(str_arg(a, idx + 1)))
+        list.push(mut pins, webrtc_sfu.cascade.PeerPins(node: edge, pins: take edge_pins))
+        idx += 2
     }
     let lim = webrtc_sfu.cascade.default_link_limits()
     let nid = webrtc_sfu.cascade.node_id(b"home")
@@ -480,8 +483,10 @@ fn run_edge(a: Args, net: Net, dir: Dir, clock: Clock, random: Random, out: Stdo
     let hid = webrtc_sfu.cascade.node_id(b"home")
     let id1 = load_identity(dir)
     let id2 = load_identity(dir)
-    let mut hp1: List[quic.handshake.Pin] = list.with_capacity(1)
-    list.push(mut hp1, clone(home_pin))
+    let mut home_pins: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut home_pins, clone(home_pin))
+    let mut hp1: List[webrtc_sfu.cascade.PeerPins] = list.with_capacity(1)
+    list.push(mut hp1, webrtc_sfu.cascade.PeerPins(node: hid, pins: take home_pins))
     let mut hp2: List[quic.handshake.Pin] = list.with_capacity(1)
     list.push(mut hp2, take home_pin)
     let mut hub = result.unwrap(webrtc_sfu.cascade.link_hub(nid, random, lim, take id1, take hp1, 4))

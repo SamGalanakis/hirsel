@@ -94,6 +94,12 @@ pub fn fence_stats(cr: CascadeRouter) -> (u64, u64, u64, u64) {
     (cr.fence.dropped_fenced_media, cr.fence.dropped_expired_media, cr.fence.stale_msgs_ignored, cr.fence.late_grants_ignored)
 }
 
+/// Current connection handle recorded in the home grant ledger for `(room_name, peer)`.
+pub fn ledger_handle(cr: CascadeRouter, room_name: Bytes, peer: NodeId) -> Option[quic.ConnectionHandle] {
+    let idx = find_ledger(cr.fence, room_name, peer)?
+    cr.fence.ledger[idx].handle
+}
+
 fn find_lease(fs: FenceState, room_name: Bytes) -> Option[u64] {
     for i in 0u64 .. list.len(fs.leases) {
         if list.compare_bytes(fs.leases[i].room_name, room_name) == Equal {

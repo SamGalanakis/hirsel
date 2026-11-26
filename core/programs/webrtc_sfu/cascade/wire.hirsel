@@ -316,20 +316,21 @@ fn zigzag_decode(u: u64) -> i64 {
     }
 }
 
-/// Extract one complete `[tag][len][body]` frame from `buf`, advancing `buf` on success.
+/// Find one complete `[tag][len][body]` frame in `buf` at `at`, returning
+/// `(tag, body_start, body_end)` and advancing `at` past it; nothing is copied.
 /// Returns `Ok(None)` if more bytes are needed, `Error(Malformed)` on bad framing.
-pub fn take_raw_frame(mut buf: Bytes) -> Result[Option[(u64, Bytes)], WireError] {
+pub fn take_raw_frame(buf: Bytes, mut at: u64) -> Result[Option[(u64, u64, u64)], WireError] {
     let total = list.len(buf)
-    if total == 0 {
+    if at >= total {
         return Ok(None)
     }
-    let mut at = 0u64
-    let tag = match quic.codec.read_varint(buf, mut at, total) {
+    let mut cur = at
+    let tag = match quic.codec.read_varint(buf, mut cur, total) {
         Ok(v) => v,
         Error(Truncated) => return Ok(None),
         Error(_) => return Error(Malformed),
     }
-    let len = match quic.codec.read_varint(buf, mut at, total) {
+    let len = match quic.codec.read_varint(buf, mut cur, total) {
         Ok(v) => v,
         Error(Truncated) => return Ok(None),
         Error(_) => return Error(Malformed),
@@ -337,19 +338,34 @@ pub fn take_raw_frame(mut buf: Bytes) -> Result[Option[(u64, Bytes)], WireError]
     if len > MAX_FRAME_LEN {
         return Error(Malformed)
     }
-    if total - at < len {
+    if total - cur < len {
         return Ok(None)
     }
-    let body: Bytes = clone(list.slice(buf, at, at + len))
-    let rest: Bytes = clone(list.slice(buf, at + len, total))
-    buf = take rest
-    Ok(Some((tag, take body)))
+    let start = cur
+    let end = cur + len
+    at = end
+    Ok(Some((tag, start, end)))
 }
 
-/// Decode one link control message from `(tag, body)`.
-pub fn decode_link_msg(tag: u64, body: Bytes) -> Result[LinkMsg, WireError] {
-    let end = list.len(body)
-    let mut at = 0u64
+/// Drop the consumed prefix `[0 .. at)` of a frame receive buffer once at least half of
+/// it is consumed, so each unread byte moves at most as often as an equal count of bytes
+/// was consumed before it. Returns the new read offset and the count of unread bytes moved.
+pub fn compact_frame_buf(mut buf: Bytes, at: u64) -> (u64, u64) {
+    let total = list.len(buf)
+    if at == 0 || at * 2 < total {
+        return (at, 0)
+    }
+    let moved = total - at
+    list.drop_prefix(mut buf, at)
+    (0, moved)
+}
+
+/// Decode one link control message from `body[start .. end]` without copying the body.
+pub fn decode_link_msg(tag: u64, body: Bytes, start: u64, end: u64) -> Result[LinkMsg, WireError] {
+    if start > end || end > list.len(body) {
+        return Error(Malformed)
+    }
+    let mut at = start
     let msg: LinkMsg = match tag {
         1 => {
             let v = get_u32(body, mut at, end)?
@@ -456,10 +472,12 @@ pub fn decode_link_msg(tag: u64, body: Bytes) -> Result[LinkMsg, WireError] {
     Ok(take msg)
 }
 
-/// Decode one room stream message from `(tag, body)`.
-pub fn decode_room_msg(tag: u64, body: Bytes) -> Result[RoomMsg, WireError] {
-    let end = list.len(body)
-    let mut at = 0u64
+/// Decode one room stream message from `body[start .. end]` without copying the body.
+pub fn decode_room_msg(tag: u64, body: Bytes, start: u64, end: u64) -> Result[RoomMsg, WireError] {
+    if start > end || end > list.len(body) {
+        return Error(Malformed)
+    }
+    let mut at = start
     let msg: RoomMsg = match tag {
         1 => {
             let r = get_u32(body, mut at, end)?

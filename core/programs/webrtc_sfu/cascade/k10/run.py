@@ -233,7 +233,7 @@ def cmd_exec(args):
         dur = str(args.duration_ms)
         home_cmd = pfx_r1 + [
             str(binary), 'home', f'{home_ip}:15001', '1', '10', '30', dur,
-            home_pin, edge_a_pin, edge_b_pin,
+            'edge-a', edge_a_pin, 'edge-b', edge_b_pin,
         ]
         edge_a_cmd = pfx_r1 + [
             str(binary), 'edge', f'{edge_a_ip}:15002', f'{home_ip}:15001',

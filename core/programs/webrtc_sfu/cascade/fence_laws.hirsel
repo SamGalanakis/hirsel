@@ -30,7 +30,7 @@ type K1HomePlan: send {
     node_id: cascade.NodeId,
     key: Secret,
     cert: Bytes,
-    pins: List[quic.handshake.Pin],
+    pins: List[cascade.PeerPins],
     b_id: cascade.NodeId,
     cut_ms: u64,
     revoke_ms: u64,
@@ -121,7 +121,7 @@ fn k1_edge_b_task(take cfg: K1EdgeBPlan) -> K1EdgeBRes waits {
     let lim = cascade.default_link_limits()
     let id1 = rebuild_id(secret.share(k), clone(c))
     let id2 = rebuild_id(take k, take c)
-    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(1002), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(1002), lim, take id1, node_pins(hid, clone(hpin)), 4))
     let mut cr = cascade.cascade_router(nid, lim)
     let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
     let mut attached = false
@@ -231,9 +231,8 @@ fn run_k1_drift_arm(tasks: Tasks, seed: u64, home_ppm: i64, edge_ppm: i64) waits
     let b_pin: quic.handshake.Pin = Cert(std.sha256.hash(bc))
     let home_id = cascade.node_id(b"home-k1")
     let b_id = cascade.node_id(b"edge-b-k1")
-    let mut pins: List[quic.handshake.Pin] = list.with_capacity(2)
-    list.push(mut pins, clone(home_pin))
-    list.push(mut pins, take b_pin)
+    let mut pins: List[cascade.PeerPins] = list.with_capacity(1)
+    push_node_pin(mut pins, b_id, take b_pin)
     let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K1_HOME_ADDR, K_SOCKET))
     let (take s_b, _) = result.unwrap(host.udp_bind(vnet, K1_EDGE_B_ADDR, K_SOCKET))
     let t_home = task.spawn(tasks, bytes 14680064, K1HomePlan(home_clock: home_clock, base_clock: base_clock, socket: take s_home, vnet: vnet, node_id: home_id, key: take hk, cert: take hc, pins: take pins, b_id: b_id, cut_ms: 900, revoke_ms: 1000, end_ms: 4000), k1_home_task)
@@ -443,7 +442,7 @@ fn k2_edge_task(take cfg: K7EdgeCfg) -> K2EdgeOut waits {
     let lim = cascade.default_link_limits()
     let id1 = rebuild_id(secret.share(k), clone(c))
     let id2 = rebuild_id(take k, take c)
-    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(seed), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(seed), lim, take id1, node_pins(hid, clone(hpin)), 4))
     let mut cr = cascade.cascade_router(nid, lim)
     let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, daddr, single_pin(hpin), 0, take id2))
     let mut attached = false
@@ -507,10 +506,9 @@ fn fence_reaches_every_node(tasks: Tasks) -> Result[(), ()] waits {
     let home_id = cascade.node_id(b"home-k2")
     let a_id = cascade.node_id(b"edge-a-k2")
     let b_id = cascade.node_id(b"edge-b-k2")
-    let mut pins: List[quic.handshake.Pin] = list.with_capacity(3)
-    list.push(mut pins, clone(home_pin))
-    list.push(mut pins, take a_pin)
-    list.push(mut pins, take b_pin)
+    let mut pins: List[cascade.PeerPins] = list.with_capacity(2)
+    push_node_pin(mut pins, a_id, take a_pin)
+    push_node_pin(mut pins, b_id, take b_pin)
     let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K2_HOME_ADDR, K_SOCKET))
     let (take s_a, _) = result.unwrap(host.udp_bind(vnet, K2_EDGE_A_ADDR, K_SOCKET))
     let (take s_b, _) = result.unwrap(host.udp_bind(vnet, K2_EDGE_B_ADDR, K_SOCKET))
@@ -538,6 +536,165 @@ fn fence_reaches_every_node(tasks: Tasks) -> Result[(), ()] waits {
     }
     if !hs.stale_home_err_term {
         fail("old home that lost its term did not receive Error(Term(2))")
+    }
+    Ok(())
+}
+
+// ---- K9 (fence case): an impostor's `Hello` cannot take over another edge's grant ledger ----
+const K9F_HOME_ADDR: Addr = Addr(ip: V4(0x0a0a0001), port: 4590)
+
+type K9FEdgeCfg: send {
+    clock: Clock,
+    socket: UdpSocket,
+    claim_id: cascade.NodeId,
+    key: Secret,
+    cert: Bytes,
+    home_id: cascade.NodeId,
+    home_pin: quic.handshake.Pin,
+    start_ms: u64,
+    stop_ms: u64,
+    seed: u64
+}
+
+type K9FHomeOut: send {
+    b_handle_before: Option[quic.ConnectionHandle],
+    b_handle_after: Option[quic.ConnectionHandle],
+    revoke_settled: bool
+}
+
+/// An edge that claims `claim_id` in its `Hello`, attaches `room-k9f` once linked, acks
+/// what the home sends until `stop_ms`, then falls silent. Returns the home's
+/// application close code on its link, or 0.
+fn k9f_edge_task(take cfg: K9FEdgeCfg) -> u64 waits {
+    let K9FEdgeCfg(clock: clock, socket: take given, claim_id: claim, key: take k, cert: take c, home_id: hid, home_pin: hpin, start_ms: start_ms, stop_ms: stop_ms, seed: seed) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    host.sleep_until(clock, start_ms * MS)
+    let id1 = rebuild_id(secret.share(k), clone(c))
+    let id2 = rebuild_id(take k, take c)
+    let mut hub = result.unwrap(cascade.link_hub(claim, provide.random(seed), lim, take id1, node_pins(hid, clone(hpin)), 4))
+    let mut cr = cascade.cascade_router(claim, lim)
+    let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, K9F_HOME_ADDR, single_pin(hpin), host.mono_ns(clock), take id2))
+    let mut attached = false
+    let mut code = 0u64
+    let mut events: List[cascade.LinkEvent] = list.new()
+    while host.mono_ns(clock) < stop_ms * MS {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 10 * MS, stop_ms * MS), mut events))
+        let mut got_up = false
+        for ev in events {
+            match ev {
+                LinkUp(handle: h, ..) => {
+                    if h == h_home {
+                        got_up = true
+                    }
+                },
+                LinkDown(handle: h, reason: Application(code: got), ..) => {
+                    if h == h_home {
+                        code = got
+                    }
+                },
+                _ => (),
+            }
+        }
+        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        events = list.new()
+        if got_up && !attached {
+            if let Ok(_) = cascade.attach_edge_room(mut cr, mut hub, b"room-k9f", h_home, 1, k_room_limits()) {
+                cascade.enable_leases(mut cr, b"room-k9f", 0, list.new())
+            }
+            attached = true
+        }
+    }
+    code
+}
+
+fn k9f_home_task(take cfg: K3HomeCfg) -> K9FHomeOut waits {
+    let K3HomeCfg(clock: clock, socket: take given, node_id: nid, key: take k, cert: take c, pins: take pins) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let b_id = cascade.node_id(b"edge-b-k9f")
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(9101), lim, rebuild_id(take k, take c), take pins, 8))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let mut dir = cascade.sim_directory(clock, lim.drift_ppm)
+    let _ = result.unwrap(cascade.claim(mut dir, b"room-k9f", nid, 0))
+    result.unwrap(cascade.open_home_room(mut cr, b"room-k9f", 1, k_room_limits()))
+    cascade.enable_leases(mut cr, b"room-k9f", 10000, list.new())
+    let mut out = K9FHomeOut(b_handle_before: None, b_handle_after: None, revoke_settled: false)
+    let mut revoke_seq: Option[u64] = None
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 1300 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 10 * MS, end), mut events))
+        let ms = host.mono_ns(clock) / MS
+        cascade.handle_events(mut cr, mut hub, take events, ms)
+        events = list.new()
+        if ms >= 450 && out.b_handle_before == None {
+            out.b_handle_before = cascade.ledger_handle(cr, b"room-k9f", b_id)
+        }
+        if revoke_seq == None && ms >= 1000 {
+            revoke_seq = Some(result.unwrap(cascade.begin_revoke(mut cr, mut hub, mut dir, b"room-k9f", 5, 1, ms)))
+        }
+        if let Some(fseq) = revoke_seq {
+            if cascade.poll_revoke(mut cr, mut hub, b"room-k9f", fseq, ms) {
+                out.revoke_settled = true
+            }
+        }
+    }
+    out.b_handle_after = cascade.ledger_handle(cr, b"room-k9f", b_id)
+    out
+}
+
+/// bug: a listed node holding only its own certificate says `Hello(node: B)` and is
+/// believed, so its `Attach` rebinds B's grant-ledger entry to its link, the revoke's
+/// `Fence` goes to it, its `FenceAck` settles the revoke, and B never sees the fence.
+/// oracle: docs/spec/sfu_cascade.md CAS-2 (`Hello` binds the certificate's `NodeId`),
+/// CAS-4 (revoke waits for every edge in the grant ledger) and CAS-5, K9: the impostor's
+/// link is closed with `ERR_BAD_PEER`, B's ledger handle is unchanged, and the revoke
+/// still waits for the silent B.
+@test
+fn impostor_hello_keeps_fence_waiting(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 929, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    let (take sim_world, clock) = std.sim.world.new(929, 0, 0)
+    let (vnet, take net_task) = std.sim.udp.start(tasks, config, std.sim.world.plan_from(script, 0), take sim_world, clock, list.new(), 2097152)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(provide.random(9111), clock))
+    let home_pin: quic.handshake.Pin = Cert(std.sha256.hash(hc))
+    let (take ak, take ac) = result.unwrap(signal.unit_certificate(provide.random(9112), clock))
+    let a_pin: quic.handshake.Pin = Cert(std.sha256.hash(ac))
+    let (take bk, take bc) = result.unwrap(signal.unit_certificate(provide.random(9113), clock))
+    let b_pin: quic.handshake.Pin = Cert(std.sha256.hash(bc))
+    let home_id = cascade.node_id(b"home-k9f")
+    let a_id = cascade.node_id(b"edge-a-k9f")
+    let b_id = cascade.node_id(b"edge-b-k9f")
+    let mut pins: List[cascade.PeerPins] = list.with_capacity(2)
+    push_node_pin(mut pins, a_id, take a_pin)
+    push_node_pin(mut pins, b_id, take b_pin)
+    let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K9F_HOME_ADDR, K_SOCKET))
+    let (take s_a, _) = result.unwrap(host.udp_bind(vnet, Addr(ip: V4(0x0a0a0002), port: 4591), K_SOCKET))
+    let (take s_b, _) = result.unwrap(host.udp_bind(vnet, Addr(ip: V4(0x0a0a0003), port: 4592), K_SOCKET))
+    let t_home = task.spawn(tasks, bytes 14680064, K3HomeCfg(clock: clock, socket: take s_home, node_id: home_id, key: take hk, cert: take hc, pins: take pins), k9f_home_task)
+    // B attaches honestly, then falls silent at 400 ms, before the revoke.
+    let t_b = task.spawn(tasks, bytes 14680064, K9FEdgeCfg(clock: clock, socket: take s_b, claim_id: b_id, key: take bk, cert: take bc, home_id: home_id, home_pin: clone(home_pin), start_ms: 0, stop_ms: 400, seed: 9121), k9f_edge_task)
+    // A, with its own listed certificate, claims B's NodeId and stays to ack the fence.
+    let t_a = task.spawn(tasks, bytes 14680064, K9FEdgeCfg(clock: clock, socket: take s_a, claim_id: b_id, key: take ak, cert: take ac, home_id: home_id, home_pin: take home_pin, start_ms: 500, stop_ms: 1300, seed: 9122), k9f_edge_task)
+    let hs = result.unwrap(task.join(take t_home))
+    let _ = result.unwrap(task.join(take t_b))
+    let a_code = result.unwrap(task.join(take t_a))
+    result.unwrap(task.join(take net_task))
+    if hs.b_handle_before == None {
+        fail("honest B never entered the home's grant ledger")
+    }
+    if a_code != cascade.ERR_BAD_PEER {
+        fail("home did not close the link whose Hello claimed B with A's certificate")
+    }
+    if hs.b_handle_after != hs.b_handle_before {
+        fail("an impostor's link replaced B's handle in the grant ledger")
+    }
+    if hs.revoke_settled {
+        fail("revoke settled although B, the only real holder of a grant, never acked the fence")
     }
     Ok(())
 }

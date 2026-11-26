@@ -14,6 +14,12 @@ pub type NodeEntry {
     pins: List[quic.handshake.Pin]
 }
 
+/// Directory binding from one peer `NodeId` to its allowed certificate pins (CAS-2).
+pub type PeerPins: send {
+    node: NodeId,
+    pins: List[quic.handshake.Pin]
+}
+
 pub type DirError = Stale(term: u64) | Held(until_ms: u64) | Unknown | Unavailable
 
 pub const DEFAULT_LEASE_MS: u32 = 2000
@@ -107,15 +113,13 @@ pub fn register_node(mut d: RoomDirectory, n: NodeId, addr: Addr, take pins: Lis
     list.push(mut d.nodes, NodeRecord(id: n, entry: NodeEntry(addr: addr, pins: take pins)))
 }
 
-/// Every pin currently listed across all nodes in the directory, for `client_pins`.
-pub fn all_pins(d: RoomDirectory) -> List[quic.handshake.Pin] {
-    let mut pins: List[quic.handshake.Pin] = list.new()
+/// Every listed node's `(NodeId, pins)` binding from the directory, for `link_hub`.
+pub fn peer_pins(d: RoomDirectory) -> List[PeerPins] {
+    let mut out: List[PeerPins] = list.with_capacity(list.len(d.nodes))
     for rec in d.nodes {
-        for p in rec.entry.pins {
-            list.push(mut pins, clone(p))
-        }
+        list.push(mut out, PeerPins(node: rec.id, pins: clone(rec.entry.pins)))
     }
-    take pins
+    take out
 }
 
 fn dir_now_ms(d: RoomDirectory) -> u64 {

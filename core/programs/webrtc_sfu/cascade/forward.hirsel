@@ -759,11 +759,11 @@ fn on_ctrl_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
                 let _ = send_control(mut hub, h, AttachAck(room_num: rn, term: cr.rooms[ri].term, seq: seq, ok: false, reason: REFUSE_ROOMS_LIMIT))
                 return
             }
-            let _ = attach_room_stream(mut hub, h, rn, cr.rooms[ri].term, false)
-            let peer = match link_peer(hub, h) {
-                Some(p) => p,
-                None => node_id(b""),
+            let Some(peer) = link_peer(hub, h) else {
+                close_link(mut hub, h, ERR_MALFORMED_CTRL)
+                return
             }
+            let _ = attach_room_stream(mut hub, h, rn, cr.rooms[ri].term, false)
             list.push(mut cr.rooms[ri].edges, EdgeAttachment(peer: peer, handle: h, room_num: rn, attached: true, outbound_layers: list.new(), wanted: list.new()))
             let ei = list.len(cr.rooms[ri].edges) - 1
             let _ = send_control(mut hub, h, AttachAck(room_num: rn, term: cr.rooms[ri].term, seq: seq, ok: true, reason: REFUSE_OK))

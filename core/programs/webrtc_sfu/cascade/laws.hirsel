@@ -17,13 +17,24 @@ fn single_pin(take p: quic.handshake.Pin) -> List[quic.handshake.Pin] {
     take xs
 }
 
+/// The one `(node, pin)` binding a hub that only dials or is dialled by `node` needs.
+fn node_pins(node: cascade.NodeId, take p: quic.handshake.Pin) -> List[cascade.PeerPins] {
+    let mut xs: List[cascade.PeerPins] = list.with_capacity(1)
+    list.push(mut xs, cascade.PeerPins(node: node, pins: single_pin(take p)))
+    take xs
+}
+
+fn push_node_pin(mut xs: List[cascade.PeerPins], node: cascade.NodeId, take p: quic.handshake.Pin) {
+    list.push(mut xs, cascade.PeerPins(node: node, pins: single_pin(take p)))
+}
+
 type K9HomePlan: send {
     clock: Clock,
     socket: UdpSocket,
     home_id: cascade.NodeId,
     home_key: Secret,
     home_cert: Bytes,
-    allowed_pins: List[quic.handshake.Pin]
+    allowed_pins: List[cascade.PeerPins]
 }
 
 type K9EdgePlan: send {
@@ -138,7 +149,7 @@ fn k9_edge_task(take cfg: K9EdgePlan) -> Result[K9EdgeOut, String] waits {
     let id1 = rebuild_id(secret.share(ek), clone(ec))
     let id2 = rebuild_id(secret.share(ek), clone(ec))
     let id3 = rebuild_id(take ek, take ec)
-    let mut hub = cascade.link_hub(edge_id, provide.random(902), cascade.default_link_limits(), take id1, single_pin(clone(home_pin)), 8) ?=> |_| "link_hub"
+    let mut hub = cascade.link_hub(edge_id, provide.random(902), cascade.default_link_limits(), take id1, node_pins(home_id, clone(home_pin)), 8) ?=> |_| "link_hub"
     let h_home = cascade.dial_addr(mut hub, home_id, home_addr, single_pin(home_pin), 0, take id2) ?=> |_| "dial_home"
     let h_rogue = cascade.dial_addr(mut hub, rogue_id, rogue_addr, single_pin(bad_pin), 0, take id3) ?=> |_| "dial_rogue"
     let mut out = K9EdgeOut(connected: false, mtu_ready: false, dial_rogue_refused_pin: false, dial_rogue_streams: 0)
@@ -220,7 +231,7 @@ fn k9_rogue_task(take cfg: K9RoguePlan) -> bool waits {
     let id_srv = rebuild_id(secret.share(rk), clone(rc))
     let id_cli = rebuild_id(take rk, take rc)
     // Rogue runs as both server (dialed by edge) and client (dialing home).
-    let mut hub = result.unwrap(cascade.link_hub(rogue_id, provide.random(903), cascade.default_link_limits(), take id_srv, single_pin(edge_pin), 8))
+    let mut hub = result.unwrap(cascade.link_hub(rogue_id, provide.random(903), cascade.default_link_limits(), take id_srv, node_pins(cascade.node_id(b"edge-a"), edge_pin), 8))
     let h_dial = result.unwrap(cascade.dial_addr(mut hub, home_id, home_addr, single_pin(home_pin), 0, take id_cli))
     let mut closed_dial_alert = false
     let mut events: List[cascade.LinkEvent] = list.new()
@@ -300,7 +311,7 @@ fn unpinned_node_refused(tasks: Tasks) -> Result[(), ()] waits {
     let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K_HOME_ADDR, K_SOCKET))
     let (take s_edge, _) = result.unwrap(host.udp_bind(vnet, K_EDGE_ADDR, K_SOCKET))
     let (take s_rogue, _) = result.unwrap(host.udp_bind(vnet, K_ROGUE_ADDR, K_SOCKET))
-    let allowed = cascade.all_pins(dir)
+    let allowed = cascade.peer_pins(dir)
     let t_home = task.spawn(tasks, bytes 16777216, K9HomePlan(clock: clock, socket: take s_home, home_id: home_id, home_key: take hk, home_cert: take hc, allowed_pins: take allowed), k9_home_task)
     let t_edge = task.spawn(tasks, bytes 16777216, K9EdgePlan(clock: clock, socket: take s_edge, edge_id: edge_id, edge_key: take ek, edge_cert: take ec, home_id: home_id, home_addr: K_HOME_ADDR, home_pin: clone(home_pin), rogue_id: rogue_id, rogue_addr: K_ROGUE_ADDR, expected_rogue_pin: clone(edge_pin)), k9_edge_task)
     let t_rogue = task.spawn(tasks, bytes 16777216, K9RoguePlan(clock: clock, socket: take s_rogue, rogue_id: rogue_id, rogue_key: take rk, rogue_cert: take rc, home_id: home_id, home_addr: K_HOME_ADDR, home_pin: take home_pin, edge_pin: take edge_pin), k9_rogue_task)
@@ -329,6 +340,180 @@ fn unpinned_node_refused(tasks: Tasks) -> Result[(), ()] waits {
     }
     if !e_out.dial_rogue_refused_pin || e_out.dial_rogue_streams != 2 {
         fail("edge dialing unpinned rogue was not refused with Refused(Pin) and 0 streams on h_rogue")
+    }
+    Ok(())
+}
+
+// ---- K9: a listed node's `Hello` is bound to its own certificate ----
+const K9B_HOME_ADDR: Addr = Addr(ip: V4(0x0a010011), port: 4510)
+
+const K9B_END: u64 = 3000 * MS
+
+type K9RawPlan: send {
+    clock: Clock,
+    socket: UdpSocket,
+    key: Secret,
+    cert: Bytes,
+    home_addr: Addr,
+    home_pin: quic.handshake.Pin,
+    script: Bytes,
+    seed: u64
+}
+
+type K9BindOut: send {
+    ups: List[cascade.NodeId],
+    control_in: u64,
+    downs: u64
+}
+
+/// Dial the home with raw QUIC, write `script` on the first stream once connected, and
+/// return the application close code the home answers with (0 if the link stays open).
+fn k9_raw_task(take cfg: K9RawPlan) -> u64 waits {
+    let K9RawPlan(clock: clock, socket: take given, key: take k, cert: take c, home_addr: haddr, home_pin: hpin, script: take script, seed: seed) = take cfg
+    let mut sock = take given
+    let mut ep = result.unwrap(quic.endpoint(provide.random(seed), cascade.cascade_endpoint_config(provide.random(seed + 1), 2), None))
+    let h = result.unwrap(quic.connect(mut ep, host.mono_ns(clock), haddr, "cascade", single_pin(hpin), Some(rebuild_id(take k, take c)), cascade.cascade_transport(cascade.default_link_limits(), None)))
+    let mut events: List[quic.Event] = list.new()
+    let mut sent = false
+    let mut code = 0u64
+    let mut closed = false
+    while !closed && host.mono_ns(clock) < K9B_END {
+        let now = host.mono_ns(clock)
+        result.unwrap(quic.drive(mut ep, clock, mut sock, order.min(now + 20 * MS, K9B_END), mut events))
+        for take ev in take events {
+            match take ev {
+                Connected(..) => {
+                    if !sent {
+                        let s = result.unwrap(quic.open(mut ep, h, true))
+                        if result.unwrap(quic.write(mut ep, h, s, script, false)) != list.len(script) {
+                            fail("raw client could not write its whole script")
+                        }
+                        sent = true
+                    }
+                },
+                Closed(ch, reason) => {
+                    if ch == h {
+                        closed = true
+                        if let Application(code: got) = reason {
+                            code = got
+                        }
+                    }
+                },
+                _ => (),
+            }
+        }
+        events = list.new()
+    }
+    code
+}
+
+fn k9_bind_home_task(take cfg: K9HomePlan) -> K9BindOut waits {
+    let K9HomePlan(clock: clock, socket: take given, home_id: home_id, home_key: take hk, home_cert: take hc, allowed_pins: take pins) = take cfg
+    let mut sock = take given
+    let mut hub = result.unwrap(cascade.link_hub(home_id, provide.random(921), cascade.default_link_limits(), rebuild_id(take hk, take hc), take pins, 8))
+    let mut out = K9BindOut(ups: list.new(), control_in: 0, downs: 0)
+    let mut events: List[cascade.LinkEvent] = list.new()
+    while out.downs < 3 && host.mono_ns(clock) < K9B_END {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 20 * MS, K9B_END), mut events))
+        for take ev in take events {
+            match take ev {
+                LinkUp(peer: p, ..) => list.push(mut out.ups, p),
+                ControlIn(..) => {
+                    out.control_in += 1
+                },
+                LinkDown(..) => {
+                    out.downs += 1
+                },
+                _ => (),
+            }
+        }
+        events = list.new()
+    }
+    out
+}
+
+fn hello_bytes(node: cascade.NodeId, mut out: Bytes) {
+    result.unwrap(cascade.encode_link_msg(Hello(version: cascade.WIRE_VERSION, node: node), mut out))
+}
+
+/// bug: a link's `NodeId` is taken from whatever its `Hello` claims, so a listed node
+/// holding only its own certificate can speak as another listed node; or control messages
+/// count before any `Hello`; or a second `Hello` rebinds the link.
+/// oracle: docs/spec/sfu_cascade.md CAS-2 ("On `Hello`, the receiver binds the link's
+/// `NodeId` to the authenticated certificate ...") and K9: each of the three links below
+/// is closed with `ERR_BAD_PEER`, and the home reports exactly one `LinkUp`, for A, from
+/// the one well-formed first `Hello`, and no control message.
+@test
+fn listed_node_hello_bound_to_pin(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 919, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    let (take sim_world, clock) = std.sim.world.new(919, 0, 0)
+    let (vnet, take net_task) = std.sim.udp.start(tasks, config, std.sim.world.plan_from(script, 0), take sim_world, clock, list.new(), 1048576)
+    let mut dir = cascade.sim_directory(clock, cascade.DEFAULT_DRIFT_PPM)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(provide.random(931), clock))
+    let home_pin: quic.handshake.Pin = Cert(std.sha256.hash(hc))
+    let (take ak, take ac) = result.unwrap(signal.unit_certificate(provide.random(932), clock))
+    let a_pin: quic.handshake.Pin = Cert(std.sha256.hash(ac))
+    let (_, take bc) = result.unwrap(signal.unit_certificate(provide.random(933), clock))
+    let b_pin: quic.handshake.Pin = Cert(std.sha256.hash(bc))
+    let home_id = cascade.node_id(b"home-k9b")
+    let a_id = cascade.node_id(b"node-a-k9b")
+    let b_id = cascade.node_id(b"node-b-k9b")
+    cascade.register_node(mut dir, home_id, K9B_HOME_ADDR, single_pin(clone(home_pin)))
+    cascade.register_node(mut dir, a_id, Addr(ip: V4(0x0a010012), port: 4511), single_pin(take a_pin))
+    cascade.register_node(mut dir, b_id, Addr(ip: V4(0x0a010013), port: 4512), single_pin(take b_pin))
+    // A, with its own certificate, claims to be B.
+    let mut impersonate: Bytes = list.new()
+    hello_bytes(b_id, mut impersonate)
+    // A sends `Attach` before any `Hello`.
+    let mut early: Bytes = list.new()
+    result.unwrap(cascade.encode_link_msg(Attach(room_num: 1, term: 1, seq: 1, room_name: b"room-k9b"), mut early))
+    // A sends its own `Hello` twice.
+    let mut twice: Bytes = list.new()
+    hello_bytes(a_id, mut twice)
+    hello_bytes(a_id, mut twice)
+    let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K9B_HOME_ADDR, K_SOCKET))
+    let t_home = task.spawn(tasks, bytes 16777216, K9HomePlan(clock: clock, socket: take s_home, home_id: home_id, home_key: take hk, home_cert: take hc, allowed_pins: cascade.peer_pins(dir)), k9_bind_home_task)
+    let mut raws: List[Task[u64]] = list.with_capacity(3)
+    let mut scripts: List[Bytes] = list.with_capacity(3)
+    list.push(mut scripts, take impersonate)
+    list.push(mut scripts, take early)
+    list.push(mut scripts, take twice)
+    let mut n = 0u64
+    for take sc in take scripts {
+        let addr = Addr(ip: V4(0x0a010020u32 + int.narrow(n)), port: 4520)
+        let (take s, _) = result.unwrap(host.udp_bind(vnet, addr, K_SOCKET))
+        list.push(mut raws, task.spawn(tasks, bytes 8388608, K9RawPlan(clock: clock, socket: take s, key: secret.share(ak), cert: clone(ac), home_addr: K9B_HOME_ADDR, home_pin: clone(home_pin), script: take sc, seed: 940 + 2 * n), k9_raw_task))
+        n += 1
+    }
+    let mut codes: List[u64] = list.with_capacity(3)
+    for take t in take raws {
+        match task.join(take t) {
+            Ok(code) => list.push(mut codes, code),
+            Error(e) => fail(join_msg("raw client", e)),
+        }
+    }
+    let h_out = match task.join(take t_home) {
+        Ok(v) => v,
+        Error(e) => fail(join_msg("home", e)),
+    }
+    result.unwrap(task.join(take net_task))
+    if codes[0] != cascade.ERR_BAD_PEER {
+        fail("home did not close the link of a node whose Hello claims another node's NodeId")
+    }
+    if codes[1] != cascade.ERR_BAD_PEER {
+        fail("home did not close a link that sent Attach before Hello")
+    }
+    if codes[2] != cascade.ERR_BAD_PEER {
+        fail("home did not close a link that sent a second Hello")
+    }
+    if list.len(h_out.ups) != 1 || h_out.ups[0] != a_id {
+        fail("home reported a LinkUp other than A's single first Hello")
+    }
+    if h_out.control_in != 0 {
+        fail("home passed up a control message from an unbound link")
     }
     Ok(())
 }

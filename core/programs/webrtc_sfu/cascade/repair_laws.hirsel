@@ -61,7 +61,7 @@ fn k4_edge_a_task(take cfg: K3EdgeACfg) -> K4EdgeAOut waits {
     let lim = cascade.default_link_limits()
     let id1 = rebuild_id(secret.share(k), clone(c))
     let id2 = rebuild_id(take k, take c)
-    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(4002), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(4002), lim, take id1, node_pins(hid, clone(hpin)), 4))
     let mut cr = cascade.cascade_router(nid, lim)
     let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
     let mut attached = false
@@ -142,7 +142,7 @@ fn k4_edge_b_task(take cfg: K3EdgeBCfg) -> K4EdgeBOut waits {
     let lim = cascade.default_link_limits()
     let id1 = rebuild_id(secret.share(k), clone(c))
     let id2 = rebuild_id(take k, take c)
-    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(4003), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(4003), lim, take id1, node_pins(hid, clone(hpin)), 4))
     let mut cr = cascade.cascade_router(nid, lim)
     let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
     let mut attached = false
@@ -230,7 +230,7 @@ fn repair_is_edge_local(tasks: Tasks) -> Result[(), ()] waits {
     let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K4_HOME_ADDR, K_SOCKET))
     let (take s_a, _) = result.unwrap(host.udp_bind(vnet, K4_EDGE_A_ADDR, K_SOCKET))
     let (take s_b, _) = result.unwrap(host.udp_bind(vnet, K4_EDGE_B_ADDR, K_SOCKET))
-    let pins = cascade.all_pins(dir)
+    let pins = cascade.peer_pins(dir)
     let t_home = task.spawn(tasks, bytes 14680064, K3HomeCfg(clock: clock, socket: take s_home, node_id: home_id, key: take hk, cert: take hc, pins: take pins), k4_home_task)
     let t_a = task.spawn(tasks, bytes 14680064, K3EdgeACfg(clock: clock, socket: take s_a, node_id: a_id, key: take ak, cert: take ac, home_id: home_id, home_addr: K4_HOME_ADDR, home_pin: clone(home_pin)), k4_edge_a_task)
     let t_b = task.spawn(tasks, bytes 14680064, K3EdgeBCfg(clock: clock, socket: take s_b, node_id: b_id, key: take bk, cert: take bc, home_id: home_id, home_addr: K4_HOME_ADDR, home_pin: take home_pin), k4_edge_b_task)

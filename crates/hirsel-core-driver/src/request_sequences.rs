@@ -221,6 +221,7 @@ fn materialize(
                 package: package_id(spec),
                 dependencies: vec![],
                 sources: vec![],
+                toolchain: false,
             },
         };
         manifest.dependencies = p.deps.iter().map(|d| package_id(d)).collect();
@@ -2228,6 +2229,7 @@ fn checkout_for(root: &Path, step: &Step) -> PathBuf {
                 package: package_id("app"),
                 dependencies: vec![package("core")],
                 sources,
+                toolchain: false,
             },
         ],
     };

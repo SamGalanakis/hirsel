@@ -464,6 +464,7 @@ pub(crate) fn environment(
                 &package.dependencies,
                 namespace.and_then(|namespace| namespace.root),
                 namespace.map_or(no_foreign, |namespace| namespace.foreign),
+                package.toolchain,
             )
         })
         .collect();

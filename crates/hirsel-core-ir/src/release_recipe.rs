@@ -6,11 +6,11 @@ use crate::normal::{
     encode_identity, uleb,
     wire::{Read, Wire, invalid},
 };
-use hirsel_core_ids::{ContentHash, DefPath};
+use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 
-const MAGIC: &[u8] = b"HIRRECIP\0\x02\x00";
+const MAGIC: &[u8] = b"HIRRECIP\0\x03\x00";
 const NORMAL_FORM: u16 = crate::normal::VERSION;
-pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v2";
+pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRef {
@@ -130,6 +130,10 @@ pub struct Recipe {
     pub foreign_modules: Vec<ForeignLeaf>,
     /// In strictly increasing order of raw SHA-256.
     pub foreign_archives: Vec<ObjectRef>,
+    /// The units' packages the installed toolchain supplied, in strictly
+    /// increasing order: where each package came from, which its name never
+    /// says. Only the toolchain's `runner@1` reads the place-only words.
+    pub toolchain: Vec<PackageId>,
     pub launch: Launch,
 }
 
@@ -288,6 +292,11 @@ impl Recipe {
         for archive in &self.foreign_archives {
             archive.encode(&mut bytes);
         }
+        uleb(&mut bytes, self.toolchain.len() as u64);
+        for package in &self.toolchain {
+            text(&mut bytes, &package.name);
+            text(&mut bytes, &package.version);
+        }
         let launch = &self.launch;
         bytes.push(launch.backend as u8);
         text(&mut bytes, &launch.target);
@@ -370,6 +379,27 @@ impl Recipe {
             ordered(&mut prev, object.hash, "unordered foreign archives")?;
             Ok(object)
         })?;
+        let mut prev: Option<PackageId> = None;
+        let count = input.count()?;
+        let toolchain = input.read_vec(count, |input| {
+            let package = PackageId {
+                name: Wire::read(input)?,
+                version: Wire::read(input)?,
+            };
+            let version = &package.version;
+            if package.name.is_empty()
+                || version.is_empty()
+                || !version.bytes().all(|b| b.is_ascii_digit())
+                || (version.len() > 1 && version.starts_with('0'))
+            {
+                return Err(invalid("invalid toolchain package"));
+            }
+            if prev.as_ref().is_some_and(|prior| *prior >= package) {
+                return Err(invalid("unordered toolchain packages"));
+            }
+            prev = Some(package.clone());
+            Ok(package)
+        })?;
         let backend = match u8::read(&mut input)? {
             0 => Backend::Cranelift,
             1 => Backend::Llvm,
@@ -431,6 +461,7 @@ impl Recipe {
             bodies,
             foreign_modules,
             foreign_archives,
+            toolchain,
             launch: Launch {
                 backend,
                 target,
@@ -505,6 +536,16 @@ mod tests {
                     len: 12,
                 },
             ],
+            toolchain: vec![
+                PackageId {
+                    name: "runner".into(),
+                    version: "1".into(),
+                },
+                PackageId {
+                    name: "store".into(),
+                    version: "1".into(),
+                },
+            ],
             launch: Launch {
                 backend: Backend::Cranelift,
                 target: "target".into(),
@@ -533,7 +574,7 @@ mod tests {
             },
         };
         // Independent frame, including two-byte ULEB for the group's length.
-        let mut bytes = b"HIRRECIP\0\x02\0\x05\0\x0fapp@1/main/main\0\0".to_vec();
+        let mut bytes = b"HIRRECIP\0\x03\0\x05\0\x0fapp@1/main/main\0\0".to_vec();
         bytes.extend_from_slice(&[1; 32]);
         bytes.push(1);
         bytes.extend_from_slice(&[2; 32]);
@@ -551,6 +592,7 @@ mod tests {
             bytes.extend_from_slice(&[hash; 32]);
             bytes.push(size);
         }
+        bytes.extend_from_slice(b"\x02\x06runner\x011\x05store\x011");
         bytes.extend_from_slice(b"\0\x06target");
         bytes.extend_from_slice(&9u64.to_le_bytes());
         bytes.extend_from_slice(&10u64.to_le_bytes());
@@ -562,7 +604,7 @@ mod tests {
         assert_eq!(decode(&bytes), Ok(recipe.clone()));
 
         let mut version_one = bytes.clone();
-        version_one[9] = 1;
+        version_one[9] = 2;
         assert_eq!(
             decode(&version_one),
             Err(DecodeError::Unsupported("code frame version"))
@@ -582,6 +624,13 @@ mod tests {
         assert_eq!(
             decode(&trailing),
             Err(invalid("trailing normal form bytes"))
+        );
+
+        let mut unordered = recipe.clone();
+        unordered.toolchain.swap(0, 1);
+        assert_eq!(
+            decode(&unordered.encode()),
+            Err(invalid("unordered toolchain packages"))
         );
 
         let mut duplicate = recipe;

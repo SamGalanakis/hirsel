@@ -194,6 +194,14 @@ impl PackageId {
     pub fn package_is(&self, name: &str, version: &str) -> bool {
         self.name_is(name) && self.version == version
     }
+
+    /// The toolchain's runner package, which alone binds the private launch
+    /// transport and reads the place-only launch words (launch.md, "Private
+    /// prefix"). `supplied_by_toolchain` is where the package came from: a
+    /// package a manifest or archive names `runner@1` is not the runner.
+    pub fn is_toolchain_runner(&self, supplied_by_toolchain: bool) -> bool {
+        supplied_by_toolchain && self.package_is("runner", "1")
+    }
 }
 /// Canonical name; module components come from the definition manifest, not files (PROG-1).
 #[derive(

@@ -832,6 +832,7 @@ mod tests {
             bodies: vec![],
             foreign_modules: vec![],
             foreign_archives: vec![],
+            toolchain: vec![],
             launch: Launch {
                 backend: Backend::Cranelift,
                 target: "t".into(),

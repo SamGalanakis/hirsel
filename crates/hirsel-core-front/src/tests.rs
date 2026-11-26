@@ -64,6 +64,7 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
             signatures: false,
         }],
         dependencies: vec![package("core")],
+        toolchain: false,
     };
     core.intern(&mut symbols);
     app.intern(&mut symbols);

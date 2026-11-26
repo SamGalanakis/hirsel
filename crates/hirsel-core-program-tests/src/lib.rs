@@ -57,6 +57,7 @@ fn library_manifest(name: &str) -> PackageManifest {
         package: package(name),
         sources,
         dependencies,
+        toolchain: true,
     }
 }
 
@@ -92,6 +93,7 @@ pub(crate) fn source_manifest(
             modules: vec![module.into()],
             signatures: false,
         }],
+        toolchain: false,
     });
     CorpusManifest {
         core: package("core"),
@@ -206,6 +208,7 @@ pub(crate) fn checked_inputs(
                 },
                 package: path.package.clone(),
                 sources: vec![],
+                toolchain: false,
             });
         package.sources.push(ModuleSource {
             foreign: false,

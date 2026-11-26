@@ -96,6 +96,7 @@ fn product(dir: &Path) -> Arc<CheckProduct> {
                 signatures: false,
             }],
             dependencies: vec![crate::package("core"), crate::package("std")],
+            toolchain: false,
         });
     let product = Driver::default()
         .check(request, &mut Meter::new(false))

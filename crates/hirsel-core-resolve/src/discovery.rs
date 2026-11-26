@@ -58,6 +58,12 @@ pub struct PackageManifest {
     pub dependencies: Vec<PackageId>,
     #[serde(skip)]
     pub namespace: Option<PackageNamespace>,
+    /// The installed toolchain supplied this package (its core-packages
+    /// archive), or the invoker said so in an `--inputs` manifest. A
+    /// `hirsel.toml` member or a published archive never is, whatever its name
+    /// (launch.md, "Private prefix").
+    #[serde(default)]
+    pub toolchain: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -196,6 +202,7 @@ impl PackageManifest {
             sources,
             dependencies: vec![],
             namespace: None,
+            toolchain: false,
         })
     }
     pub fn read(&self, symbols: &mut Symbols) -> std::io::Result<Vec<ParsedModule>> {
@@ -246,6 +253,7 @@ impl NameIndex {
                 self.add_package(
                     self.symbols.find(&m.package.name).unwrap(),
                     self.symbols.find(&m.package.version).unwrap(),
+                    m.toolchain,
                 )
             })
             .collect();

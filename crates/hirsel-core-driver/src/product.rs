@@ -49,6 +49,7 @@ impl PackageProduct {
                     signatures: true,
                 })
                 .collect(),
+            toolchain: false,
         }
     }
     pub fn bundled_std_digest() -> ContentHash {
@@ -462,6 +463,7 @@ mod tests {
                 modules: vec![name.into()],
                 signatures: true,
             }],
+            toolchain: false,
         };
         assert!(bundled_std_selection(&manifest).is_some());
         std::fs::write(&file, format!("{text} ")).unwrap();
@@ -484,6 +486,7 @@ mod tests {
                     modules: vec!["core".into()],
                     signatures: true,
                 }],
+                toolchain: false,
             }],
         }
     }
@@ -840,6 +843,7 @@ mod tests {
                 modules: vec!["std_only".into()],
                 signatures: true,
             }],
+            toolchain: false,
         });
         request.inputs.packages[0].dependencies = vec![package("core"), package("std")];
         let custom = Driver::default()
@@ -985,6 +989,7 @@ mod agreement {
                             modules: vec!["case".into()],
                             signatures: false,
                         }],
+                        toolchain: false,
                     },
                 ],
             };
@@ -1086,6 +1091,7 @@ mod indexed_tests {
                         modules: vec!["core".into()],
                         signatures: true,
                     }],
+                    toolchain: false,
                 }],
             };
             let product = PackageProduct::sources(

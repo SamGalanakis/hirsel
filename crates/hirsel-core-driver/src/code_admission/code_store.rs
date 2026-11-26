@@ -114,6 +114,7 @@ impl Fixture {
                 bodies: vec![],
                 foreign_modules: vec![],
                 foreign_archives: vec![],
+                toolchain: vec![],
                 launch: Launch {
                     backend: Backend::Cranelift,
                     target: TARGET.into(),
@@ -553,7 +554,7 @@ fn m6_requires_canonical_object_frames() {
     });
     let mut uleb = fixture.recipe.encode();
     // The first identity text starts immediately after the recipe headers.
-    let len = b"HIRRECIP\0\x02\x00\x04\x00".len();
+    let len = b"HIRRECIP\0\x03\x00\x04\x00".len();
     uleb.splice(len..=len, [uleb[len] | 128, 0]);
     let mut trailing = fixture.recipe.encode();
     trailing.push(0);

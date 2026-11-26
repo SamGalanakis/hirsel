@@ -144,7 +144,7 @@ impl Fixture {
             ])
             .arg(&self.runtime)
             .arg("--libraries")
-            .arg(&self.law.libraries)
+            .arg(self.law.path("libraries"))
             .args(args)
             .current_dir(self.law.dir.path())
             .env("XDG_RUNTIME_DIR", self.law.path("run"))

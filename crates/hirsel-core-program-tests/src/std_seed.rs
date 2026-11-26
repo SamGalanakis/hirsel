@@ -109,6 +109,7 @@ fn core_contract_directory_is_not_part_of_the_std_seed() {
         package: package("core"),
         sources: selected,
         dependencies: vec![],
+        toolchain: false,
     };
     assert!(
         !package.read(&mut symbols).unwrap()[0]
@@ -136,6 +137,7 @@ fn manifest() -> CorpusManifest {
                 package: core.clone(),
                 sources: sources(&root.join("core/core"), &[], true),
                 dependencies: vec![],
+                toolchain: false,
             },
             std,
         ],

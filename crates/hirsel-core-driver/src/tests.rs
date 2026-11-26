@@ -29,6 +29,7 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
                     signatures: false,
                 }],
                 dependencies: vec![],
+                toolchain: false,
             }],
         },
         store: dir.join("store"),
@@ -93,6 +94,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
             crate::package("std"),
             crate::package("store"),
         ],
+        toolchain: true,
     };
     request.inputs.packages.push(store);
     if let Some(path) = runner_override {
@@ -1602,6 +1604,7 @@ fn reachable_census_retains_a_named_function_without_a_native_body() {
             signatures: true,
         }],
         dependencies: vec![],
+        toolchain: false,
     });
     let product = Driver::default()
         .check(req, &mut Meter::new(false))
@@ -1849,6 +1852,7 @@ fn lowered_runtime_operation_needs_no_outside_body() {
             signatures: true,
         }],
         dependencies: vec![],
+        toolchain: false,
     });
     let product = Driver::default()
         .check(req, &mut Meter::new(false))
@@ -1958,6 +1962,7 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
                 modules: vec![module.into()],
                 signatures: name != "app",
             }],
+            toolchain: false,
         }
     }
     let core = input(
@@ -2758,6 +2763,7 @@ fn m2b_requests(root: &Path, dir: &Path) -> Vec<(String, CheckRequest)> {
             })
             .collect(),
         dependencies,
+        toolchain: false,
     };
     let packages = manifest["packages"].as_array().unwrap();
     let by_name = |name: &str| {
@@ -2844,6 +2850,7 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
                         package: package(owner),
                         sources: vec![],
                         dependencies: vec![],
+                        toolchain: false,
                     },
                 );
                 let app = req.inputs.packages.len() - 1;
@@ -3395,18 +3402,21 @@ pub(crate) fn langarena_inputs(root: &Path, core: &Path, langarena: &Path) -> Co
                 package: package("core"),
                 sources: corpus_files(core, false),
                 dependencies: vec![],
+                toolchain: false,
             },
             PackageManifest {
                 namespace: None,
                 package: package("std"),
                 sources: corpus_files(&root.join("core/std"), false),
                 dependencies: vec![package("core")],
+                toolchain: false,
             },
             PackageManifest {
                 namespace: None,
                 package: package("langarena"),
                 sources: corpus_files(langarena, true),
                 dependencies: vec![package("core"), package("std")],
+                toolchain: false,
             },
         ],
     }

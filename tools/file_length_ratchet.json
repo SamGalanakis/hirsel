@@ -152,7 +152,9 @@
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/code_admission/code_store.rs": {
-    "lines": 1203
+    "lines": 1063,
+    "raise_revision": 1,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/core_ops_native.rs": {
     "lines": 2474,
@@ -160,7 +162,9 @@
     "reason": "coverage-c1-2551"
   },
   "crates/hirsel-core-driver/src/launcher/laws.rs": {
-    "lines": 1410
+    "lines": 1249,
+    "raise_revision": 1,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/launcher/mod.rs": {
     "lines": 1866,
@@ -171,19 +175,19 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
-    "lines": 1621,
-    "raise_revision": 5,
-    "reason": "git-deps-build-2704"
+    "lines": 1476,
+    "raise_revision": 6,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/native.rs": {
     "lines": 2756,
-    "raise_revision": 11,
-    "reason": "cli-s1a-launch-2709"
+    "raise_revision": 12,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/product.rs": {
-    "lines": 1126,
-    "raise_revision": 1,
-    "reason": "native-std-mix-2059"
+    "lines": 1132,
+    "raise_revision": 2,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/reach.rs": {
     "lines": 1141
@@ -192,9 +196,9 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 1862,
-    "raise_revision": 6,
-    "reason": "cli-s1a-launch-2709"
+    "lines": 1834,
+    "raise_revision": 7,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 4070,
@@ -202,19 +206,19 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1802,
-    "raise_revision": 14,
-    "reason": "cas-s5-remote-2798"
+    "lines": 1801,
+    "raise_revision": 15,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
-    "lines": 2649,
-    "raise_revision": 1,
-    "reason": "comptime-phase2-2693"
+    "lines": 2530,
+    "raise_revision": 2,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/reuse.rs": {
-    "lines": 1427,
-    "raise_revision": 1,
-    "reason": "law-signature-scope-2443"
+    "lines": 1418,
+    "raise_revision": 2,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
     "lines": 1168,
@@ -230,9 +234,9 @@
     "reason": "git-deps-build-2704"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
-    "lines": 3936,
-    "raise_revision": 2,
-    "reason": "comptime-eval-split-2612"
+    "lines": 3946,
+    "raise_revision": 3,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
     "lines": 2587,
@@ -314,9 +318,9 @@
     "reason": "dod-columns-soa-2533"
   },
   "crates/hirsel-core-front/src/tests.rs": {
-    "lines": 1372,
-    "raise_revision": 2,
-    "reason": "comptime-phase2-2693"
+    "lines": 1373,
+    "raise_revision": 3,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-front/src/types.rs": {
     "lines": 1164
@@ -371,9 +375,9 @@
     "lines": 2003
   },
   "crates/hirsel-core-program-tests/src/cases.rs": {
-    "lines": 2728,
-    "raise_revision": 5,
-    "reason": "comptime-e3-flat-ir-2631"
+    "lines": 2731,
+    "raise_revision": 6,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-program-tests/tests/llvm_source.rs": {
     "lines": 4698,
@@ -381,15 +385,17 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-resolve/src/index.rs": {
-    "lines": 1060,
-    "raise_revision": 2,
-    "reason": "comptime-phase2-2693"
+    "lines": 1076,
+    "raise_revision": 3,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-resolve/src/resolve.rs": {
     "lines": 1543
   },
   "crates/hirsel-core-resolve/src/tests.rs": {
-    "lines": 1285
+    "lines": 1292,
+    "raise_revision": 1,
+    "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-rt/src/abi.rs": {
     "lines": 1441

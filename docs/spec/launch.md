@@ -198,8 +198,17 @@ by `runner.launch_selection`, so they come after every private option. Four word
 from the first argument after the prefix, and only in a place: `--hirsel-dry-run <dir>`<!-- doc-ref: external -->,
 `--hirsel-store-verify <dir>`<!-- doc-ref: external -->, `--hirsel-store-repair <dir>`<!-- doc-ref: external --> (launch word 20, below) and
 `--hirsel-prepare`<!-- doc-ref: external --> (below). The linker bakes a `place` bit into the executable's launch
-configuration when the program reaches the `runner` package, which holds every reader of these
-words. `hirsel dry-run`, `hirsel store verify --release` and `hirsel store repair --release` read
+configuration when the program reaches the toolchain's `runner` package, which holds every
+reader of these words. The link decides by where the package came from, never by its name: the
+runner is the toolchain's when the installed toolchain supplied it (its `core-packages` archive),
+when it is a workspace member whose directory is `programs/<name>` under the library root the
+invoker names (`--libraries ROOT`, or a checkout's `core` when the compiler is not installed), or
+when the invoker's `--inputs` manifest marks it `"toolchain": true`. The library root and the
+`"toolchain"` mark are the invoker's trust, exactly as supplying `core@1` is: whoever chooses them
+already chooses the core the program is built on. Any other `hirsel.toml` member or published
+archive named `runner@1` is a plain package, its program gets no bit, and its `launch_*`
+functions are not bound to the launch words. The native link reads the provenance from the
+check, the recipe link from the recipe's toolchain part (below). `hirsel dry-run`, `hirsel store verify --release` and `hirsel store repair --release` read
 the bit from the executable before touching the store or starting the program. If the bit is
 clear or absent, the command names the executable on stderr and exits 104. In a directly launched
 executable without the bit these words are ordinary `Args`: the program keeps its own
@@ -360,6 +369,9 @@ version and these parts:
 - the **foreign archives** (FFI-3): the distinct archives the leaves and Foreign bindings
   select for the recipe's target, each its SHA-256 and byte length, in strictly ascending
   order of hash. An archive's bytes are a code-store object named by that SHA-256;
+- the **toolchain packages**: each package of the closure the installed toolchain supplied
+  (above), as its name and version, in strictly ascending order; the recipe link sets the
+  `place` bit from this part alone;
 - the launch inputs: the backend (Cranelift or LLVM release), the target, the root limit,
   `n_place`, and the **grant bindings**.
 
@@ -379,8 +391,8 @@ So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.
 
-Its root is `R = H("hirsel.release-recipe.v2", recipe)`; the version is 2, and version 1, which
-had no foreign parts, is never read or written. A place's `place`, `migrate`, handle
+Its root is `R = H("hirsel.release-recipe.v3", recipe)`; the version is 3, and versions 1 (no
+foreign parts) and 2 (no toolchain part) are never read or written. A place's `place`, `migrate`, handle
 and launch code is reached from `main`, so the closure covers it. The annexes hold the site
 maps failures report, so a comment that moves lines changes R but no address. The optimized
 native link stores coordinates for the site words its retained sections reference. Each

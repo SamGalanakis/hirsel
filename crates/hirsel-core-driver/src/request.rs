@@ -1075,6 +1075,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         (test_owner, package_root) = (Some(app.package.package.clone()), app.manifest.clone());
         manifest_runs = app.tests.take();
         app.program_grants(command, &mut grants, &mut root_limit, explicit_limit)?;
+        if let Some(root) = libraries {
+            app.trust_library_root(root);
+        }
         let program =
             native_command || installed.is_some() || inspection.is_some() || image.is_some();
         let libraries = if source_libraries || !program {

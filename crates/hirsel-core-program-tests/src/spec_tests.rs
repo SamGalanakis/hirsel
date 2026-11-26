@@ -275,6 +275,7 @@ fn check_fences<'a>(fences: &[&'a Fence]) -> Vec<(Option<&'a Fence>, String)> {
                 package: name.clone(),
                 sources: vec![source],
                 dependencies,
+                toolchain: false,
             });
             name
         };

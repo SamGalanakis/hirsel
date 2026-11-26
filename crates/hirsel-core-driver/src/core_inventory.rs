@@ -203,6 +203,7 @@ mod tests {
                 modules: vec!["lib".into()],
                 signatures: false,
             }],
+            toolchain: false,
         };
         let product = check(&root, vec![lib], &dir.path().join("store"));
         let reached = core_inventory(&product, "lib", &[]).unwrap();

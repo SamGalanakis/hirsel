@@ -1000,6 +1000,7 @@ impl CheckProduct {
         )?
         .with_place(crate::native_entry::reaches_place(
             instances.iter().map(|i| &i.definition),
+            |package| self.index.supplied_by_toolchain(package),
         ))
         .with_foreign(foreign_modules.values());
         link_objects(
@@ -1845,6 +1846,7 @@ pub(crate) mod tests {
                 signatures: true,
             }],
             dependencies: vec![],
+            toolchain: false,
         });
         request.entry = Some(DefPath::from_full("app@1/main/main").unwrap());
         request

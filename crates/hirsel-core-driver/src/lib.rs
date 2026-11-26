@@ -216,10 +216,13 @@ impl CheckRequest {
     }
 
     pub(crate) fn from_app(
-        app: package_dir::PackageDir,
+        mut app: package_dir::PackageDir,
         libraries: Option<&Path>,
         store: &Path,
     ) -> io::Result<Self> {
+        if let Some(root) = libraries {
+            app.trust_library_root(root);
+        }
         let mut packages = Self::library_packages(libraries, app.needs_std())?;
         packages.extend(app.dependencies);
         packages.push(app.package);

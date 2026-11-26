@@ -494,8 +494,10 @@ operations! {
     ("schedule", "srtp", Lane::Runtime(Kernel::Media(HostOp::ScheduleSrtp)), "A", "media-w0-crypto-build-2282", false),
 }
 
-pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
-    if f.path.package_is("runner", "1")
+/// The core operation `f` binds; `toolchain` is whether the installed toolchain
+/// supplied `f`'s package, so only its runner binds the launch transport.
+pub(crate) fn binding(f: &FnDecl, toolchain: bool) -> Option<u16> {
+    if f.path.0.package.is_toolchain_runner(toolchain)
         && f.path.0.modules == ["runner"]
         && matches!(
             f.path.0.name.as_str(),

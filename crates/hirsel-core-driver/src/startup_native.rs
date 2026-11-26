@@ -395,6 +395,138 @@ fn dry_run_refuses_a_plain_program_without_running_it() {
     );
 }
 
+/// Bug: the place word was set for any program reaching a package named
+/// `runner@1`, so a user's own `runner` package made a plain program a place
+/// and `hirsel dry-run` ran it. launch.md, "Private prefix": only the
+/// toolchain's runner package reads the place words; the link decides by
+/// where the package came from, the native link from the check's packages and
+/// the recipe link from the recipe's toolchain table.
+#[test]
+#[ignore = "explicit native integration target"]
+fn a_user_package_named_runner_is_not_a_place() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::write(store.join("LOCK"), []).unwrap();
+    let runner = dir.path().join("runner.hirsel");
+    std::fs::write(&runner, "pub fn note() -> String { \"plain program entered\\n\" }\n").unwrap();
+    let source = r#"pub fn main(output: Stderr) -> Result[(), Exit] waits {
+        result.unwrap(stderr.write(output, runner.note()))
+        Ok(())
+    }"#;
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let code = crate::code_store::CodeStore::new(dir.path().join("recipe-code"));
+    // The package from a user and, as the control, from the toolchain.
+    for toolchain in [false, true] {
+        let mut request = source_request(source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        request.inputs.packages[0].dependencies.push(package("runner"));
+        request.inputs.packages.push(PackageManifest {
+            namespace: None,
+            package: package("runner"),
+            sources: vec![hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
+                file: runner.clone(),
+                modules: vec!["runner".into()],
+                signatures: false,
+            }],
+            dependencies: vec![package("core")],
+            toolchain,
+        });
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(product.accepted(), "{:?}", product.diagnostics);
+        let mut options = native_options(Backend::Cranelift, dir.path());
+        options.grant_mask = 1 << grant_kind("Stderr").unwrap();
+        // The native link, from the check.
+        options.output = dir.path().join(format!("native-{toolchain}"));
+        let native = product.build(&entry, &options).unwrap().executable;
+        // The recipe link, from the recipe read back from the code store.
+        options.output = dir.path().join(format!("recipe-{toolchain}"));
+        let reached = product.reachable(&entry, options.instance_limit).unwrap();
+        let published = product
+            .publish_release(&entry, &reached, &options, &code, hirsel_core_ids::launch::DEFAULT_N_PLACE)
+            .unwrap();
+        let recipe = crate::native::recipe_build::Publication::open(&code, published.root, &crate::request::local_admission_limits())
+            .unwrap()
+            .assemble_with(&options, reached.counters, Some(&product), None)
+            .unwrap()
+            .executable;
+        for executable in [native, recipe] {
+            let file = std::fs::File::open(&executable).unwrap();
+            assert_eq!(
+                crate::native_entry::launch_config::is_place(&file),
+                toolchain,
+                "{} toolchain {toolchain}",
+                executable.display()
+            );
+            if toolchain {
+                continue;
+            }
+            let (status, stdout, stderr) = process::tape_request(
+                &[
+                    "dry-run".into(),
+                    "--exe".into(),
+                    executable.display().to_string(),
+                    "--store".into(),
+                    store.display().to_string(),
+                ],
+                dir.path(),
+            );
+            assert_eq!(status, Some(104), "{stdout}{stderr}");
+            assert_eq!(
+                stderr,
+                format!("hirsel: {} is not a place\n", executable.display())
+            );
+        }
+    }
+    // A workspace member named `runner@1` outside the invoker's library root
+    // is a plain package, however the workspace binds it.
+    let workspace = dir.path().join("workspace");
+    for (member, manifest, file, text) in [
+        (
+            "app",
+            "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[dependencies]\nrunner = { major = 1, path = \"../runner\" }\n\n[sources]\n\"main.hirsel\" = \"main\"\n",
+            "main.hirsel",
+            source,
+        ),
+        (
+            "runner",
+            "[package]\nname = \"runner\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"runner.hirsel\" = \"runner\"\n",
+            "runner.hirsel",
+            "pub fn note() -> String { \"plain program entered\\n\" }\n",
+        ),
+    ] {
+        std::fs::create_dir_all(workspace.join(member)).unwrap();
+        std::fs::write(workspace.join(member).join("hirsel.toml"), manifest).unwrap();
+        std::fs::write(workspace.join(member).join(file), text).unwrap();
+    }
+    std::fs::write(
+        workspace.join("hirsel.toml"),
+        "[workspace]\nmembers = [\"app\", \"runner\"]\n",
+    )
+    .unwrap();
+    let request =
+        CheckRequest::directory(&workspace.join("app"), &root.join("core"), &dir.path().join("member-store"))
+            .unwrap();
+    assert!(request.inputs.packages.iter().all(|package| !package.toolchain));
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = 1 << grant_kind("Stderr").unwrap();
+    options.output = dir.path().join("member");
+    let member = product.build(&entry, &options).unwrap().executable;
+    assert!(!crate::native_entry::launch_config::is_place(
+        &std::fs::File::open(&member).unwrap()
+    ));
+}
+
 #[test]
 fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     use crate::package_content::{archive_digest, hex};

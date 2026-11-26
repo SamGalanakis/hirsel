@@ -92,6 +92,7 @@ fn stamp(
             &package.package,
             &package.dependencies,
             &package.namespace,
+            package.toolchain,
             files,
             owner,
         ))?[..]],
@@ -486,6 +487,7 @@ fn source_package_image_uses_the_captured_text_and_name() {
                         test: false,
                     }),
                 }],
+                toolchain: false,
             }],
         };
         let product =

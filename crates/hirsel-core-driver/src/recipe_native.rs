@@ -324,6 +324,14 @@ impl CheckProduct {
             bodies,
             foreign_modules: foreign.modules,
             foreign_archives: foreign.archives,
+            toolchain: addresses
+                .keys()
+                .map(|identity| &identity.definition.0.package)
+                .filter(|package| self.index.supplied_by_toolchain(package))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
             launch,
         };
         let root = store.put(ObjectKind::Recipe, &recipe.encode())?.hash;
@@ -1721,6 +1729,7 @@ impl Publication {
         )?
         .with_place(crate::native_entry::reaches_place(
             self.addresses.keys().map(|i| &i.definition),
+            |package| self.recipe.toolchain.contains(package),
         ))
         .with_release_sites(&release_sites, &release_debug_sites, &remarks)
         .with_foreign(&self.recipe.foreign_modules);

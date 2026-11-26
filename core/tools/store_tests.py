@@ -31,6 +31,12 @@ BYTE_LAWS = ('refused_reply',
              'streams', 'request_digest', 'keyset_pages')
 
 
+# package_content::TOOLCHAIN in hirsel-core-driver, std aside.
+TOOLCHAIN_PACKAGES = {'store', 'runner', 'media_bits', 'sframe', 'media_container', 'rtp', 'srtp', 'dtls',
+                      'stun_ice', 'turn', 'webrtc_sfu', 'rtp_jitter', 'media_record', 'platform', 'search',
+                      'mcp', 'cli'}
+
+
 def inputs(root, tests=False, package='store', with_tests=()):
     """Core, std and a package of core/programs with the program packages it binds by path,
     each before the packages that bind it, the selected package last; `tests` adds the
@@ -64,6 +70,9 @@ def inputs(root, tests=False, package='store', with_tests=()):
                              for name, dep in manifest['dependencies'].items()],
             'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
                         for file, module in listed.items()],
+            # These are the toolchain's own package sources, which the installed toolchain
+            # supplies: only a package so marked is the toolchain's runner (launch.md).
+            'toolchain': manifest['package']['name'] in TOOLCHAIN_PACKAGES,
         })
 
     place((root / 'core/programs' / package).resolve(), True)

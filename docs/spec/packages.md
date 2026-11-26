@@ -446,6 +446,10 @@ each by name bytewise and then by major numerically. A path is written with ` ->
 reachable from X and nothing else from the workspace, as today's compiler input (the
 `CorpusManifest` of `--inputs`). Each package has its identity, its sources (a member's files,
 or a published package's verified bytes) and its dependencies: its bindings and `core@1`.
+A package also records whether the toolchain supplied it: an installed toolchain archive, a
+member under the invoker's library root `programs/`, or an `--inputs` package marked
+`"toolchain": true`. Any other member or published package never is, whatever its name. These
+are the invoker's trust, as `core@1` is ([launch](launch.md), the `place` bit).
 X's `[tests.sources]` join X's modules in X's test runs and in the queries about X's tests
 (`hirsel inspect --affected-tests`), and in no other build. `hirsel test` runs the tests
 declared in X's own `[sources]` and `[tests.sources]`, including tests with capability

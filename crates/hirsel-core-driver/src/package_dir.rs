@@ -4,7 +4,7 @@
 //! convention: package `app`, one module per file, `main` in `main`.
 use crate::NativeOptions;
 use crate::package_content::{Content, Id, PackageArchive, Root, Source};
-use hirsel_core_ids::DefPath;
+use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_net::{EnvPatterns, GrantRule, NetGrant, RULE_SYNTAX, SecretGrant};
 use hirsel_core_resolve::{ModuleSource, PackageManifest};
 use std::collections::BTreeMap;
@@ -333,6 +333,9 @@ pub(crate) struct PackageDir {
     pub(crate) manifest: Option<PathBuf>,
     pub(crate) tests: Option<TestRuns>,
     pub(crate) program: Option<ProgramGrants>,
+    /// The directory of each workspace member whose identity is a toolchain
+    /// package's: `trust_library_root` decides whether the toolchain supplied it.
+    toolchain_members: Vec<(PackageId, PathBuf)>,
 }
 
 impl PackageDir {
@@ -363,7 +366,36 @@ impl PackageDir {
             manifest: None,
             tests: None,
             program: None,
+            toolchain_members: Vec::new(),
         })
+    }
+
+    /// Marks the members the invoker's library root `root` holds as supplied
+    /// by the toolchain: a member with a toolchain package's identity whose
+    /// directory is `root/programs/<name>` (after symlinks). The root already
+    /// supplies `core@1` and `std@1`, so this is that same trust; a member
+    /// anywhere else is a plain package whatever it is named (launch.md,
+    /// "Private prefix").
+    pub(crate) fn trust_library_root(&mut self, root: &Path) {
+        let Ok(entries) = std::fs::read_dir(root.join("programs")) else {
+            return;
+        };
+        let held: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok()?.path().canonicalize().ok())
+            .collect();
+        for (id, directory) in &self.toolchain_members {
+            let Ok(directory) = directory.canonicalize() else {
+                continue;
+            };
+            if !held.contains(&directory) {
+                continue;
+            }
+            for package in std::iter::once(&mut self.package).chain(&mut self.dependencies) {
+                if package.package == *id {
+                    package.toolchain = true;
+                }
+            }
+        }
     }
 
     pub(crate) fn from_resolution(
@@ -375,6 +407,7 @@ impl PackageDir {
         use std::collections::BTreeSet;
 
         let selected_member = resolution.workspace.members.get(selected);
+        let mut toolchain_members = Vec::new();
         let mut seen = BTreeSet::new();
         let mut pending = vec![selected.clone()];
         let mut dependencies = Vec::new();
@@ -385,7 +418,14 @@ impl PackageDir {
             }
             let root = resolution.published.get(&id).copied();
             let toolchain_package;
+            let mut supplied = false;
             let (content, bindings) = if let Some(member) = resolution.workspace.members.get(&id) {
+                if crate::package_content::toolchain_bindings(&id).is_some() {
+                    toolchain_members.push((
+                        id.compiler_id(),
+                        resolution.workspace.directory.join(&member.directory),
+                    ));
+                }
                 let bindings = member
                     .edges
                     .iter()
@@ -401,6 +441,7 @@ impl PackageDir {
             } else {
                 let content = if resolution.toolchain.contains(&id) {
                     toolchain_package = crate::installation::Installed::toolchain_package(&id)?;
+                    supplied = true;
                     &toolchain_package
                 } else {
                     &resolution.libraries[&root.unwrap()].content
@@ -420,7 +461,8 @@ impl PackageDir {
             } else {
                 None
             };
-            let package = Self::manifest_from_content(content, selected, root, bindings, tests);
+            let mut package = Self::manifest_from_content(content, selected, root, bindings, tests);
+            package.toolchain = supplied;
             if &id == selected {
                 main = Some(package);
             } else {
@@ -466,6 +508,7 @@ impl PackageDir {
             )),
             tests,
             program,
+            toolchain_members,
         })
     }
 
@@ -512,13 +555,15 @@ impl PackageDir {
                 )));
             }
             let supplied = crate::installation::Installed::toolchain_package(&id)?;
-            dependencies.push(Self::manifest_from_content(
+            let mut package = Self::manifest_from_content(
                 &supplied,
                 &head.id,
                 None,
                 supplied.bindings.iter().map(|(id, pin)| (id, *pin)),
                 None,
-            ));
+            );
+            package.toolchain = true;
+            dependencies.push(package);
         }
         Ok(Self {
             package: manifest(head, archive.head),
@@ -527,6 +572,7 @@ impl PackageDir {
             manifest: None,
             tests: None,
             program: None,
+            toolchain_members: Vec::new(),
         })
     }
 
@@ -587,6 +633,7 @@ impl PackageDir {
             package: content.id.compiler_id(),
             dependencies,
             sources,
+            toolchain: false,
         }
     }
 

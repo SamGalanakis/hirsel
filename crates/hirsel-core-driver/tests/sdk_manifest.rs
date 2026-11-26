@@ -55,6 +55,7 @@ fn sdk_manifest_round_trips_the_packed_consumer() {
                 .collect(),
             dependencies: dependencies.iter().map(|name| package(name)).collect(),
             namespace: None,
+            toolchain: false,
         }
     };
     let mut runner = library("runner", &["core", "std", "store"]);

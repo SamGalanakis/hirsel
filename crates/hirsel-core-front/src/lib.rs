@@ -645,7 +645,9 @@ impl<'a> Program<'a> {
         test_functions::check(&mut p);
 
         for f in p.fns.base_len()..p.fns.len() {
-            p.core_operations.push(body::core_ops::binding(&p.fns[f]));
+            let toolchain = p.index.supplied_by_toolchain(&p.fns[f].path.0.package);
+            p.core_operations
+                .push(body::core_ops::binding(&p.fns[f], toolchain));
         }
         p
     }

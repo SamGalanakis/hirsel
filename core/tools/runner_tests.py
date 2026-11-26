@@ -546,8 +546,8 @@ def host_law(args, root, work, engine, name):
         frame = (recipe_prefix + text(entry) + b'\0\0' + bytes(32) + b'\0\0\x01'
                  + text('ffi_laws@1/native') + text('hfl_') + b'\x01' + text(target) + archive
                  + b'\x01' + text(callee) + b'\0\0' + text('(core@1/core/Foreign[ffi_laws@1/laws/Laws])->i32')
-                 + b'\x01' + archive + bytes([engine == 'llvm']) + text(target) + bytes(18))
-        foreign = framed_hash('hirsel.release-recipe.v2', frame)
+                 + b'\x01' + archive + b'\0' + bytes([engine == 'llvm']) + text(target) + bytes(18))
+        foreign = framed_hash('hirsel.release-recipe.v3', frame)
         (publish_store / 'recipes' / foreign.hex()).write_bytes(frame)
         with running_host():
             outcome([*register, '--record', str(work / 'recordings')], f'{name}:register')

@@ -1369,6 +1369,7 @@ fn recovered_header_cases() -> Vec<String> {
                     modules: vec!["main".into()],
                     signatures: false,
                 }],
+                toolchain: false,
             });
             ("app", "main", DefPath::from_full("app@1/main/main"))
         };
@@ -1445,6 +1446,7 @@ fn flow_transform_rejects() {
             modules: vec!["api".into()],
             signatures: false,
         }],
+        toolchain: false,
     });
     let mut driver = Driver::default();
     let mut check = |helper| {
@@ -1524,6 +1526,7 @@ pub fn worker() -> u64 { 0 }
         package: package("dep"),
         dependencies: vec![package("core")],
         sources,
+        toolchain: false,
     });
 
     // An image overlay can discover the sibling after the root member is indexed.

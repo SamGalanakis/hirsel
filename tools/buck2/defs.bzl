@@ -625,7 +625,7 @@ def _dev_fixture_cache_impl(ctx):
         'build() {',
         '  sed "s/DEV_FIXTURE_RELEASE: u64 = 0u64/DEV_FIXTURE_RELEASE: u64 = $1u64/" "$testdata/dev_place.hirsel" > "$work/workspace/runner/dev_place.hirsel"',
         '  XDG_CACHE_HOME="$cache" "$compiler" build "$work/workspace/runner" --store "$dev/compiler" --dir "$dev/stores/1"'
-        + ' --backend "$2" --source-core --source-std --runtime "$runtime" --libraries "$libraries" --limit 1610612736'
+        + ' --backend "$2" --source-core --source-std --runtime "$runtime" --libraries "$work/workspace/libraries" --limit 1610612736'
         + ' --grant Clock --grant Random --grant Tasks --grant Process --grant Stderr --grant "Net=Listen 127.0.0.1/32 0-65535"'
         + ' --output "$work/place" > /dev/null',
         '}',
@@ -633,6 +633,8 @@ def _dev_fixture_cache_impl(ctx):
         # persistence_and_fencing reopens with --backend llvm.
         'for release in 0 1 2 3; do build $release cranelift; done',
         'build 2 llvm',
+        # The library root's symlinks leave the sandbox; scratch is not uploaded with them.
+        'rm -rf "$work/workspace/libraries"',
     ])
     llvm = ctx.attrs._llvm[DefaultInfo].default_outputs[0]
     ctx.actions.run(

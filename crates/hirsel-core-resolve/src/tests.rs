@@ -34,6 +34,7 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
                 package: package(pkg),
                 sources: vec![],
                 dependencies: vec![],
+                toolchain: false,
             });
         }
     }
@@ -457,6 +458,7 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
                 signatures: false,
             }],
             dependencies: vec![],
+            toolchain: false,
         },
         PackageManifest {
             namespace: None,
@@ -469,6 +471,7 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
                 signatures: false,
             }],
             dependencies: vec![package("core")],
+            toolchain: false,
         },
     ];
     let c = Corpus {
@@ -740,12 +743,14 @@ fn clean_measurement_preserves_module_ids_after_removing_a_whole_file() {
         package: package("core"),
         sources: vec![],
         dependencies: vec![],
+        toolchain: false,
     };
     let mut app = PackageManifest {
         namespace: None,
         package: package("app"),
         sources: vec![],
         dependencies: vec![package("core")],
+        toolchain: false,
     };
     let mut sources = vec![];
     for (pkg, name, text) in [
@@ -1121,6 +1126,7 @@ fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
                     package: package("core"),
                     sources: vec![],
                     dependencies: vec![],
+                    toolchain: false,
                 },
                 PackageManifest {
                     namespace: None,
@@ -1133,6 +1139,7 @@ fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
                         signatures: false,
                     }],
                     dependencies: vec![],
+                    toolchain: false,
                 },
             ],
         },

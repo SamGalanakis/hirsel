@@ -30,12 +30,14 @@ fn prebuild_corpus(image: &Arc<CoreImage>, store: &Path) -> (Arc<CheckProduct>, 
                 source(m1.join("bfs/matched.hirsel"), "matched"),
             ],
             dependencies: libraries.iter().cloned().chain([package("m1")]).collect(),
+            toolchain: false,
         },
         PackageManifest {
                     namespace: None,
             package: package("m1"),
             sources: vec![source(m1.join("support.hirsel"), "support")],
             dependencies: libraries,
+            toolchain: false,
         },
     ];
     prebuild_check(image, store, packages, Some("bfs@1/main/main"))

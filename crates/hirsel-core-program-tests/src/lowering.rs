@@ -118,6 +118,7 @@ fn sibling_main_wrapper_executes_the_sibling_body() {
                 signatures: false,
             })
             .collect(),
+        toolchain: false,
     };
     let mut symbols = Symbols::default();
     manifest.intern(&mut symbols);

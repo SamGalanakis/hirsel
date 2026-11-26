@@ -44,14 +44,18 @@ struct Requirement<'a> {
 }
 
 /// Whether a program reaching these definitions reads the place-only launch
-/// words: only the `runner` package's launch reads them (launch.md, "Private
-/// prefix"), so any other program receives them in `Args`.
+/// words: only the toolchain's runner package's launch reads them (launch.md,
+/// "Private prefix"), so any other program receives them in `Args`.
+/// `supplied_by_toolchain` says where each package came from; a package that
+/// only names itself `runner@1` is not the runner.
 pub(crate) fn reaches_place<'d>(
     definitions: impl IntoIterator<Item = &'d hirsel_core_ids::DefPath>,
+    supplied_by_toolchain: impl Fn(&hirsel_core_ids::PackageId) -> bool,
 ) -> bool {
-    definitions
-        .into_iter()
-        .any(|d| d.0.package.name_is("runner"))
+    definitions.into_iter().any(|d| {
+        let package = &d.0.package;
+        package.is_toolchain_runner(supplied_by_toolchain(package))
+    })
 }
 
 /// A cheap link-key input. Machine code is emitted only after a link-cache miss.
@@ -84,7 +88,7 @@ pub(crate) struct Plan<'a> {
     /// encoding, which is the encoding it had before coverage.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     coverage: bool,
-    /// The program reaches the `runner` package, so the entry reads the
+    /// The program reaches the toolchain's `runner` package, so the entry reads the
     /// place-only launch words (launch.md, "Private prefix"). Absent from a
     /// plain plan's encoding, which keeps every other program's link key.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -288,7 +292,7 @@ impl<'a> Plan<'a> {
         self
     }
 
-    /// Marks a program that reaches the `runner` package.
+    /// Marks a program that reaches the toolchain's `runner` package.
     pub(crate) fn with_place(mut self, place: bool) -> Self {
         self.place = place;
         self

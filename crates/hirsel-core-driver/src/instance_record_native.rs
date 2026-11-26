@@ -319,6 +319,7 @@ fn library_request(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -
             signatures: false,
         }],
         dependencies: vec![package("core")],
+        toolchain: false,
     });
     request
 }

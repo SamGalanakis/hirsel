@@ -269,6 +269,9 @@ pub struct Package {
     pub version: Symbol,
     pub root: ModuleId,
     dependencies: Rows,
+    /// The manifest's `toolchain` mark: the installed toolchain supplied this
+    /// package. It decides the runner's private launch bindings, never the name.
+    pub toolchain: bool,
 }
 /// One compilation's flat header index. No body or owning path is stored here.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -351,7 +354,7 @@ impl NameIndex {
             diagnostics: vec![],
         }
     }
-    pub fn add_package(&mut self, name: Symbol, version: Symbol) -> PackageKey {
+    pub fn add_package(&mut self, name: Symbol, version: Symbol, toolchain: bool) -> PackageKey {
         if let Some(&p) = self.package_ids.get(&(name, version)) {
             return p;
         }
@@ -369,12 +372,25 @@ impl NameIndex {
             version,
             root,
             dependencies: Rows::default(),
+            toolchain,
         });
         self.package_ids.insert((name, version), id);
         id
     }
     pub fn package(&self, name: Symbol, version: Symbol) -> Option<PackageKey> {
         self.package_ids.get(&(name, version)).copied()
+    }
+    /// Whether the installed toolchain supplied `package` to this compilation.
+    pub fn supplied_by_toolchain(&self, package: &hirsel_core_ids::PackageId) -> bool {
+        let Some((name, version)) = self
+            .symbols
+            .find(&package.name)
+            .zip(self.symbols.find(&package.version))
+        else {
+            return false;
+        };
+        self.package(name, version)
+            .is_some_and(|key| self.packages[key.0 as usize].toolchain)
     }
     pub fn set_dependencies(&mut self, p: PackageKey, ds: impl IntoIterator<Item = PackageKey>) {
         let start = self.dependencies.len() as u32;

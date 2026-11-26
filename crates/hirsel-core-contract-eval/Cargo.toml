@@ -17,7 +17,6 @@ hirsel-core-materialize = { path = "../hirsel-core-materialize" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-core-eval = { path = "../hirsel-core-eval" }
 hirsel-core-ir = { path = "../hirsel-core-ir", features = ["wf"] }
-hirsel-core-net = { path = "../hirsel-core-net" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-guard = { path = "../hirsel-guard" }

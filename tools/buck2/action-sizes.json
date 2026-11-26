@@ -275,81 +275,6 @@
           1794359492
         ]
       },
-      "hirsel-span": {
-        "cpu_count": 1,
-        "mean_cores": 1.13891206185567,
-        "memory_kb": 262144,
-        "p95_cores": 1.3640223684210526,
-        "p99_peak_bytes": 66187264,
-        "phases": {
-          "check": {
-            "cpu_seconds": 3.155,
-            "max_wall_seconds": 0.882,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 5,
-            "wall_seconds": 3.579
-          },
-          "diag": {
-            "cpu_seconds": 1.187,
-            "max_wall_seconds": 0.839,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 2,
-            "wall_seconds": 1.349
-          },
-          "metadata [pic]": {
-            "cpu_seconds": 15.952,
-            "max_wall_seconds": 1.449,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 22,
-            "wall_seconds": 18.494
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 34.943,
-            "max_wall_seconds": 2.141,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 23,
-            "wall_seconds": 30.202
-          }
-        },
-        "pss_peak_bytes": 193333248,
-        "samples": 52,
-        "window": [
-          1794312547,
-          1794349501
-        ]
-      },
-      "hirsel-span-unittest-harness": {
-        "cpu_count": 1,
-        "mean_cores": 0.9343955112219452,
-        "memory_kb": 196608,
-        "p95_cores": 1.4220545454545455,
-        "p99_peak_bytes": 80748544,
-        "phases": {
-          "link [pic]": {
-            "cpu_seconds": 3.747,
-            "max_wall_seconds": 3.291,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 2,
-            "wall_seconds": 4.369
-          }
-        },
-        "pss_peak_bytes": 121682944,
-        "samples": 2,
-        "window": [
-          1794346048,
-          1794349495
-        ]
-      },
       "hirsel-test-tool-profile-harness": {
         "cpu_count": 1,
         "mean_cores": 0.6456999999999999,
@@ -3238,66 +3163,6 @@
           1794361993
         ]
       },
-      "hirsel-span": {
-        "cpu_count": 1,
-        "mean_cores": 0.9952045647969051,
-        "memory_kb": 196608,
-        "p95_cores": 1.2128774193548386,
-        "p99_peak_bytes": 61616128,
-        "phases": {
-          "check": {
-            "cpu_seconds": 3.375,
-            "max_wall_seconds": 1.876,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 4,
-            "wall_seconds": 4.079
-          },
-          "metadata [pic]": {
-            "cpu_seconds": 2.976,
-            "max_wall_seconds": 1.973,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 3,
-            "wall_seconds": 3.542
-          },
-          "metadata [static]": {
-            "cpu_seconds": 5.948,
-            "max_wall_seconds": 1.421,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 7,
-            "wall_seconds": 6.978
-          },
-          "rlib": {
-            "cpu_seconds": 9.7,
-            "max_wall_seconds": 2.058,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 8,
-            "wall_seconds": 10.881
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 3.728,
-            "max_wall_seconds": 2.091,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 3,
-            "wall_seconds": 3.446
-          }
-        },
-        "pss_peak_bytes": 151400448,
-        "samples": 25,
-        "window": [
-          1794312547,
-          1794349505
-        ]
-      },
       "third-party:allocator-api2-0.2": {
         "cpu_count": 1,
         "mean_cores": 1.0047938775510206,
@@ -5642,12 +5507,6 @@
       "phase": "metadata [pic]",
       "profile": "dev",
       "samples": 1,
-      "target": "hirsel-span"
-    },
-    {
-      "phase": "metadata [pic]",
-      "profile": "dev",
-      "samples": 1,
       "target": "third-party:cranelift-codegen-0.136"
     },
     {
@@ -5751,12 +5610,6 @@
       "profile": "release",
       "samples": 4,
       "target": "hirsel-rt-archives-system-allocator-measurement"
-    },
-    {
-      "phase": "metadata [static]",
-      "profile": "release",
-      "samples": 1,
-      "target": "hirsel-span"
     },
     {
       "phase": "rlib",

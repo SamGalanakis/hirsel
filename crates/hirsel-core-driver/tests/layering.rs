@@ -27,7 +27,6 @@ enum Class {
 const CRATES: &[(&str, Class)] = &[
     ("hirsel-guard", Class::LeafUtility),
     ("hirsel-stack", Class::LeafUtility),
-    ("hirsel-span", Class::Data),
     ("hirsel-intern", Class::Data),
     ("hirsel-core-ids", Class::Data),
     ("hirsel-core-diag", Class::Data),

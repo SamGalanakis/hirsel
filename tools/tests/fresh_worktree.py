@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'tools/buck2'))
 import generated  # noqa: E402
 
-TARGET = '//:hirsel-span'
+TARGET = '//:hirsel-intern'
 
 
 def git(*arguments, **kwargs):

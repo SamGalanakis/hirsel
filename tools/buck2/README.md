@@ -159,7 +159,7 @@ daemon indefinitely.
 
 Validation on 2026-10-20 used a disposable copy of `fs-watch-mmap/buck-out`,
 with a consistent read-only SQLite backup, in `buck-clean-stale`. After building
-`//:hirsel-toolchain` and `//:hirsel-span` and testing `//:hirsel-span-unittest`,
+`//:hirsel-toolchain` and a small data crate and testing its unit test,
 allocated `buck-out` size (`du -s -B1`) fell from **22,952,734,720 bytes
 (21.376 GiB)** to **3,068,723,200 bytes (2.858 GiB)**, an **86.63%** reduction:
 

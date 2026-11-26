@@ -596,7 +596,6 @@ dependencies = [
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-core-materialize",
- "hirsel-core-net",
  "hirsel-core-resolve",
  "hirsel-guard",
  "serde_json",
@@ -898,7 +897,6 @@ dependencies = [
  "hirsel-guard",
  "libc",
  "object",
- "serde",
 ]
 
 [[package]]
@@ -914,15 +912,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
-]
-
-[[package]]
-name = "hirsel-span"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-intern",
- "serde",
 ]
 
 [[package]]

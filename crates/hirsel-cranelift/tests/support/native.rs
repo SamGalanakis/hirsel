@@ -20,7 +20,6 @@ use hirsel_core_ir::{self as c, *};
 use hirsel_cranelift::core::*;
 use std::{fmt::Write as _, fs, path::PathBuf, process::Command};
 
-#[allow(dead_code)] // The shared fixture also exposes the pre-site ABI for LLVM's cutover.
 #[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
 use host_memory::NativeArtifacts;

@@ -82,15 +82,6 @@ impl IndexLayout {
             physical,
         })
     }
-
-    pub fn group_offset(self, group: u64) -> Option<u64> {
-        if group >= self.groups {
-            return None;
-        }
-        self.header
-            .checked_add(HEADER_BYTES)?
-            .checked_add(group.checked_mul(self.group_bytes)?)
-    }
 }
 
 pub fn derive(key: &[u8; 16]) -> (u64, u64, [u8; 16]) {

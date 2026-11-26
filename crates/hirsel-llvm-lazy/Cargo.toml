@@ -14,4 +14,3 @@ hirsel-core-ir = { path = "../hirsel-core-ir" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-guard = { path = "../hirsel-guard" }
 libc = "0.2"
-serde = { version = "1", features = ["derive"] }

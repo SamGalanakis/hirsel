@@ -1,6 +1,6 @@
 {
   "bench/awfy/board.py": {
-    "lines": 1446
+    "lines": 1430
   },
   "core/core/tests/provide.hirsel": {
     "lines": 2422,
@@ -179,7 +179,7 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1804,
+    "lines": 1796,
     "raise_revision": 17,
     "reason": "self-edit-begin-source-2849: --source and --package-root"
   },
@@ -472,7 +472,7 @@
     "lines": 1602
   },
   "crates/hirsel-cranelift/tests/support/native.rs": {
-    "lines": 1261,
+    "lines": 1248,
     "raise_revision": 1,
     "reason": "macos-s2-target-2570"
   },
@@ -508,7 +508,7 @@
     "lines": 1120
   },
   "crates/hirsel-llvm/src/core/tests.rs": {
-    "lines": 3088,
+    "lines": 2964,
     "raise_revision": 2,
     "reason": "comptime-eval-split-2612"
   },

@@ -32,30 +32,23 @@ impl Drop for NativeArtifacts {
     }
 }
 
-#[allow(dead_code)] // Each engine uses one of these ABIs during the site cutover.
-pub fn check(emit: impl FnOnce(&Module) -> Vec<u8>, symbol: impl Fn(&Module, FuncId) -> String) {
-    check_abi(emit, symbol, false, false);
-}
 /// FORM#91 internal caller-site argument; the test process ABI is unchanged.
-#[allow(dead_code)]
 pub fn check_with_site(
     emit: impl FnOnce(&Module) -> Vec<u8>,
     symbol: impl Fn(&Module, FuncId) -> String,
 ) {
-    check_abi(emit, symbol, true, false);
+    check_abi(emit, symbol, false);
 }
 /// The same real-null oracle on ARM, where QEMU ignores guest RLIMIT_AS.
-#[allow(dead_code)]
 pub fn check_aarch64(
     emit: impl FnOnce(&Module) -> Vec<u8>,
     symbol: impl Fn(&Module, FuncId) -> String,
 ) {
-    check_abi(emit, symbol, true, true);
+    check_abi(emit, symbol, true);
 }
 fn check_abi(
     emit: impl FnOnce(&Module) -> Vec<u8>,
     symbol: impl Fn(&Module, FuncId) -> String,
-    with_site: bool,
     aarch64: bool,
 ) {
     let module = hirsel_core_ir::text::parse(include_str!("host_memory.core")).unwrap();
@@ -90,7 +83,7 @@ fn check_abi(
     let names: Vec<_> = (0..module.functions.len())
         .map(|n| symbol(&module, FuncId(n as u32)))
         .collect();
-    let site_parameter = if with_site { ", uint64_t" } else { "" };
+    let site_parameter = ", uint64_t";
     let declarations = names
         .iter()
         .map(|name| {
@@ -102,7 +95,7 @@ fn check_abi(
     let source = include_str!("host_memory.c")
         .replace("@@DECLARATIONS@@", &declarations)
         .replace("@@SITE_PARAMETER@@", site_parameter)
-        .replace("@@SITE_ARGUMENT@@", if with_site { ", 0" } else { "" })
+        .replace("@@SITE_ARGUMENT@@", ", 0")
         .replace("@@SYMBOLS@@", &names.join(","));
     fs::write(directory.join("caller.c"), source).unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

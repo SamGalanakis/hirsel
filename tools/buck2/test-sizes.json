@@ -78,28 +78,6 @@
       1792529542
     ]
   },
-  "hirsel-span-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 4,
-    "pss_runs": 8,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 8,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792519814
-    ]
-  },
   "hirsel-test-tool-profile": {
     "cpu_class": "",
     "cpu_count": 1,

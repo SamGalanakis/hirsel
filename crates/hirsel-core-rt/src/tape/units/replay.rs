@@ -541,11 +541,20 @@ pub(in crate::tape) fn packed(
         i += 1 + inner.len();
     }
     held.sort_by_key(|o| o.0[0]);
+    // Only padding and case guards within a list's elements: no owner words,
+    // whose parts follow the list's and are not counted above.
+    let owner = |r: &[u64; 4]| r[1] & !ELEMENT != PADDING && r[1] & CASE == 0;
+    if held
+        .iter()
+        .any(|(row, inner)| row[1] == SEQ && inner.iter().any(owner))
+    {
+        return Err(Unpacked::Unsupported(HELD));
+    }
     if held.len() as u64 != parts {
         return Err(Unpacked::Layout);
     }
     let mut lists = BTreeMap::new();
-    for ([at, kind, element, _], inner) in held {
+    for ([at, kind, element, _], _) in held {
         if kind != SEQ {
             let w = word(kind, &mut c)?;
             let at = at as usize;
@@ -553,11 +562,6 @@ pub(in crate::tape) fn packed(
                 .ok_or(Unpacked::Layout)?
                 .copy_from_slice(&w.to_le_bytes());
             continue;
-        }
-        // Only padding and case guards within the elements: no owner words.
-        let owner = |r: &[u64; 4]| r[1] & !ELEMENT != PADDING && r[1] & CASE == 0;
-        if inner.iter().any(owner) {
-            return Err(Unpacked::Unsupported(HELD));
         }
         if c.u8() != Ok(0) {
             return Err(Unpacked::Layout);

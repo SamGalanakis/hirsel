@@ -954,3 +954,5 @@ include!("recording_spawn_entries_native.rs");
 include!("recording_unit_replay_native.rs");
 // Replay of clients that cross between units.
 include!("recording_unit_clients_native.rs");
+// Replay of items whose content lies past their flat bytes.
+include!("recording_unit_kinds_native.rs");

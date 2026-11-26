@@ -81,17 +81,21 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
                 continue;
             }
             Some(tape::Due::End { key, outcome }) => (key, outcome),
-            Some(tape::Due::Item { conn, flat }) => {
+            Some(tape::Due::Item { conn, mut flat }) => {
                 let Some(&ih) = u.inboxes.get(&conn) else {
                     tape::refuse_take(Some(group), "an item for a dropped inbox");
                     return;
                 };
                 // SAFETY: a registered inbox is live while registered; the
-                // packed item has its connection's layout.
+                // packed item has its connection's layout, and `flat` stays
+                // put until the item is published.
                 let admitted = unsafe {
                     let c = &(*ih).inbox.0;
-                    let bytes = item_charge(flat.as_ptr(), &c.seqs);
-                    u.ctx.replay_item(c, CrossSend::new(flat.as_ptr()), bytes)
+                    let live = unpack_in_place(&mut flat, c.stride, &c.rows, c.guarded);
+                    let bytes = item_charge(flat.as_ptr(), live.as_deref().unwrap_or(&c.seqs));
+                    let mut source = CrossSend::new(flat.as_ptr());
+                    source.rows = live;
+                    u.ctx.replay_item(c, source, bytes)
                 };
                 if !admitted {
                     tape::refuse_take(Some(group), "an item its connection cannot admit");

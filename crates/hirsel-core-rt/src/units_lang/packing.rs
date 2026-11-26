@@ -161,6 +161,36 @@ unsafe fn content(value: *const u8, [offset, _, stride, _]: &[u64; 4]) -> (*cons
     }
 }
 
+/// A value in `pack`'s form (its `stride` flat bytes, then each sequence's
+/// elements in row order) made a live one in place: each sequence word that
+/// holds for it points at its elements. The rows that hold for it, when
+/// `rows` are guarded; the buffer must not move while the value is read.
+///
+/// # Safety
+/// `packed` holds a value laid out as `rows` describe, and each holding
+/// sequence's elements after its flat bytes.
+pub(super) unsafe fn unpack_in_place(
+    packed: &mut [u8],
+    stride: usize,
+    rows: &[[u64; 4]],
+    guarded: bool,
+) -> Option<Vec<[u64; 4]>> {
+    let base = packed.as_mut_ptr();
+    // SAFETY: by the contract, each sequence word and its elements lie in
+    // `packed`.
+    unsafe {
+        let live = guarded.then(|| live_rows(base, rows).into_owned());
+        let mut at = stride;
+        for (o, _) in cross::sequences(live.as_deref().unwrap_or(rows)) {
+            let word_at = base.add(o[0] as usize);
+            let n = (word(word_at.add(8)) * o[2]) as usize;
+            ptr::write_unaligned(word_at.cast::<u64>(), base.add(at).addr() as u64);
+            at += n;
+        }
+        live
+    }
+}
+
 /// Copy `value` and its owners' content into one buffer.
 pub(super) unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> Vec<u8> {
     // SAFETY: `value` holds the live fields and sequences of the item.

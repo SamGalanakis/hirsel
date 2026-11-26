@@ -842,19 +842,27 @@ task bit is 0, because a take names no task. Then:
   7), then for kinds 2 and 7 the designation's origin kind `u8`, then the stream `u32` that
   names it, its ordinal `varint` and its amount `u64`. The stream is the one that made the
   survivor, or its home: for kinds 0, 1, 5 and 6 the stream whose object ordinal it is, for
-  kinds 2 and 7 the designation's stream, and for kinds 3 and 4 the stream of the delivery
-  that made it. A helper passes up charges it kept from its own helpers, so that stream need
-  not be the helper's. The ordinal is the object ordinal in that stream, for kinds 2 and 7
-  the designation's ordinal there, and for kinds 3 and 4 the position there of the delivery
-  that made it. A later `last release`, `shared release`, `RETIRED` or refund then names one
-  survivor, however many helper levels it passed through. Any other kind is `Corrupt`.
-  The owner that keeps a kind 2, 4 or 7 survivor is its paying unit from then on, and takes
-  its refund as above. Every designation narrowed from sealed bytes keeps their origin, so
-  two narrowed designations of the same bytes are two kind 2 survivors with one name, each
-  with its own amount. A kind 5 survivor is a socket's pool (a group's intake included) and
-  a kind 6 survivor a group member's queue; the owner that keeps one records its later
-  `RETIRED`. A survivor lists only the charges the owner took over at the end take: one
-  released between the helper's end and the take is not a survivor.
+  kinds 2 and 7 the designation's stream, and for kinds 3 and 4 the stream of the unit that
+  admitted the charge. A helper passes up charges it kept from its own helpers, so that
+  stream need not be the helper's. The ordinal is the object ordinal in that stream, for
+  kinds 2 and 7 the designation's ordinal there, and for kinds 3 and 4 the charge's number
+  among the key object and registry entry charges that unit admitted, from 0 in its own
+  order. Each charge of [packet ciphers and key
+  agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)'s table is numbered, so a
+  sealer's cipher and domain ledger are two names, and a charge admitted for a construction
+  later refused takes its number too. The count is taken in record and replay alike, as a
+  unit's seal count is. A delivery position would not do: a key object of a virtual
+  `Random`, a `quic_initial` schedule and every object derived from a schedule of one have
+  no delivery, and one delivery can admit several charges. A later `last release`, `shared
+  release`, `RETIRED` or refund then names one survivor, however many helper levels it
+  passed through. Any other kind is `Corrupt`. The owner that keeps a kind 2, 4 or 7
+  survivor is its paying unit from then on, and takes its refund as above. Every designation
+  narrowed from sealed bytes keeps their origin, so two narrowed designations of the same
+  bytes are two kind 2 survivors with one name, each with its own amount. A kind 5 survivor
+  is a socket's pool (a group's intake included) and a kind 6 survivor a group member's
+  queue; the owner that keeps one records its later `RETIRED`. A survivor lists only the
+  charges the owner took over at the end take: one released between the helper's end and the
+  take is not a survivor.
 - A settlement's position must name a `CONN_SEND` `ISSUE` of this stream that is still
   outstanding. The settlement completes it, as a `DONE` would, and its task may issue
   again. Any other position is `Corrupt`.

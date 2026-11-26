@@ -1,6 +1,6 @@
 //! TLS agreement constructors consume a share only after admitting both charges.
 use super::{
-    schedule::{Schedule, admit, before_issue, owned, refusal, track},
+    schedule::{Schedule, admit, before_issue, owned, refusal, track, track_as},
     take,
 };
 use crate::{
@@ -155,9 +155,10 @@ impl Constructor<'_> {
                 });
             }
         };
-        let registry_charge = track(
+        let registry_charge = track_as(
             unsafe { &*context },
             schedule_charge.partition(REGISTRY_CHARGE),
+            crate::media::REGISTRY_ENTRY,
         );
         let Share {
             mut key,

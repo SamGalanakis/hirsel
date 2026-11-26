@@ -53,9 +53,14 @@ pub(crate) struct Payment {
     cell: Arc<ChargeCell>,
 }
 
+/// A key object's survivor kind, and an agreement or send-key registry entry's.
+pub(crate) const KEY_OBJECT: u8 = 3;
+pub(crate) const REGISTRY_ENTRY: u8 = 4;
+
 impl Charges {
-    pub(crate) fn track(self: &Arc<Self>, charge: Charge) -> Payment {
-        let cell = ChargeCell::new(charge);
+    /// Track `charge`, naming it as a survivor of `kind`.
+    pub(crate) fn track(self: &Arc<Self>, charge: Charge, kind: u8) -> Payment {
+        let cell = ChargeCell::made(charge, kind);
         self.0
             .lock()
             .unwrap()

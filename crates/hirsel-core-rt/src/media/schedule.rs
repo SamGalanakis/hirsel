@@ -76,12 +76,17 @@ pub(super) fn admit(context: &Context, requested: u64) -> Result<Charge, u64> {
     Ok(Charge::new(payer, requested))
 }
 
+/// Track a key object's charge.
 pub(super) fn track(context: &Context, charge: Charge) -> Paid {
+    track_as(context, charge, media::KEY_OBJECT)
+}
+
+pub(super) fn track_as(context: &Context, charge: Charge, kind: u8) -> Paid {
     // SAFETY: the caller entered with a running context.
     unsafe {
         super::run_state((*context.host_files).registry.run_grants())
             .charges
-            .track(charge)
+            .track(charge, kind)
     }
 }
 

@@ -32,6 +32,8 @@ pub(super) struct Takes {
     /// the unit's own order (recording.md, "Designations across units").
     seals: u64,
     unwraps: u64,
+    /// The key object and registry entry charges the unit tracked so far.
+    made: u64,
 }
 
 /// What every unit of the run knows of a connection made while recording: the
@@ -219,6 +221,20 @@ pub(crate) fn next_designation(unwrap: bool) -> (u32, u64) {
                 };
                 *count += 1;
                 (stream, *count - 1)
+            })
+        })
+        .unwrap_or((0, 0))
+}
+
+/// The running unit's stream and the number of its next tracked key object
+/// or registry entry charge, counted in record and replay alike: the name
+/// of its helper-end survivor (recording.md, "Unit stream format").
+pub(crate) fn next_made() -> (u32, u64) {
+    crate::tasks::current_group()
+        .and_then(|group| {
+            group.with(|live| {
+                live.takes.made += 1;
+                (stream(live), live.takes.made - 1)
             })
         })
         .unwrap_or((0, 0))

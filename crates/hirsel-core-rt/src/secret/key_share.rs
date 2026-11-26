@@ -80,7 +80,7 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
         let grants = (*(*context).host_files).registry.run_grants();
         let charge = crate::media::run_state(grants)
             .charges
-            .track(Charge(payer, BYTES));
+            .track(Charge(payer, BYTES), crate::media::KEY_OBJECT);
         let mut call = Generation {
             random,
             group,

@@ -1,5 +1,5 @@
 //! Import a traffic direction, an SRTP master or an SFrame base key from Secret storage.
-use super::schedule::{Schedule, admit, owned, refusal, track};
+use super::schedule::{Schedule, admit, owned, refusal, track, track_as};
 use crate::{
     Context,
     provider::{IoError, Outcome},
@@ -114,7 +114,7 @@ unsafe fn import(
             };
             if let Some(charge) = entry.take() {
                 // SAFETY: the context is running; the entry lasts for the run.
-                let paid = track(unsafe { &*context }, charge);
+                let paid = track_as(unsafe { &*context }, charge, super::REGISTRY_ENTRY);
                 let registry = unsafe {
                     &super::run_state((*(*context).host_files).registry.run_grants()).send_keys
                 };
@@ -201,7 +201,7 @@ unsafe fn import(
     if let Some(charge) = entry {
         // A replayed send import: its entry is held as live, never looked up.
         // SAFETY: the context is running; the entry lasts for the run.
-        let paid = track(unsafe { &*context }, charge);
+        let paid = track_as(unsafe { &*context }, charge, super::REGISTRY_ENTRY);
         unsafe { super::run_state((*(*context).host_files).registry.run_grants()) }
             .send_keys
             .replayed(paid);

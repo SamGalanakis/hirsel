@@ -225,6 +225,10 @@ pub(crate) struct ChargeCell {
     retirement: Mutex<Option<crate::tape::Retirement>>,
     #[cfg(feature = "record")]
     retired: std::sync::atomic::AtomicBool,
+    /// A key object's or registry entry's survivor name: kind, stream and
+    /// its number among the charges that unit tracked.
+    #[cfg(feature = "record")]
+    pub(crate) made: Option<(u8, u32, u64)>,
 }
 
 // SAFETY: an outstanding charge pins its payer slot, and a refund settles from
@@ -241,7 +245,22 @@ impl ChargeCell {
             retirement: Mutex::new(None),
             #[cfg(feature = "record")]
             retired: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "record")]
+            made: None,
         })
+    }
+
+    /// A media charge's cell, named as its helper-end survivor.
+    #[cfg_attr(not(feature = "record"), allow(unused_variables))]
+    pub(crate) fn made(charge: Charge, kind: u8) -> Arc<Self> {
+        #[cfg_attr(not(feature = "record"), allow(unused_mut))]
+        let mut cell = Self::new(charge);
+        #[cfg(feature = "record")]
+        {
+            let (stream, ordinal) = crate::tape::units::next_made();
+            Arc::get_mut(&mut cell).unwrap().made = Some((kind, stream, ordinal));
+        }
+        cell
     }
 
     pub(crate) fn take_charge(&self, payer: Payer) -> Option<Charge> {
@@ -337,10 +356,10 @@ impl HandedCharge {
             weak: Arc::downgrade(cell),
             bytes,
             #[cfg(feature = "record")]
-            name: retirement.map(|r| {
-                let (kind, stream, ordinal) = r.survivor();
-                (kind, None, stream, ordinal)
-            }),
+            name: retirement
+                .map(|r| r.survivor())
+                .or(cell.made)
+                .map(|(kind, stream, ordinal)| (kind, None, stream, ordinal)),
             #[cfg(feature = "record")]
             retiring: retirement.is_some().then(|| cell.clone()),
         }

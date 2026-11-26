@@ -1,5 +1,5 @@
 // Capabilities inside plain variants that cross units (docs/recording.md,
-// "Values", unit tapes U3).
+// "Values"), and the survivors a helper's key objects leave (unit tapes U3).
 // Included from recording_handles_native.rs, whose helpers it uses.
 
 /// Capabilities inside plain variants cross: the root sends itself an
@@ -124,5 +124,69 @@ fn rl9_variant_capabilities_cross() {
             [u64::from(g + 3), u64::from(g + 6)],
             "{backend:?}: draws"
         );
+    }
+}
+
+/// A helper draws a key share from the run's host `Random` and returns it.
+const RL9_KEY_SURVIVOR: &str = r#"
+fn sharer(take r: Random) -> secret.KeyShare {
+    let mut point: Bytes = list.with_capacity(32)
+    result.unwrap(secret.key_share(r, X25519, mut point))
+}
+
+pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, r, sharer))
+    let kept = result.unwrap(task.join(take h))
+    drop(take kept)
+    result.unwrap(stdout.write(out, "kept"))
+    Ok(())
+}
+"#;
+
+/// A key object a helper paid for and its owner keeps is a survivor of the
+/// owner's end take, named by the stream that made it and its number among
+/// that unit's tracked key object and registry entry charges (recording.md,
+/// "Unit stream format": kind 3), hand-derived before the first run. The
+/// helper, stream 1, tracks one charge, the key share's 64 bytes (TLS-8:
+/// `KeyShare` 64), so the root's end take lists kind 3, stream 1, ordinal
+/// 0, amount 64, with no origin kind. On main a kept key object cuts the
+/// root's end take ("a helper end keeps a key object ..."), so there is no
+/// `HelperEnd` take.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_helper_key_object_survives_by_name() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, Survivor};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_KEY_SURVIVOR,
+            dir.path(),
+            "keykept",
+            backend,
+            "kept",
+            &["Tasks", "Random", "Stdout"],
+        );
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let ends: Vec<_> = streams[0]
+            .1
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } => match body.arrival() {
+                    Arrival::HelperEnd(_, _, survivors) => Some(survivors),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let share = Survivor {
+            kind: 3,
+            origin_kind: None,
+            stream: 1,
+            ordinal: 0,
+            amount: 64,
+        };
+        assert_eq!(ends, [vec![share]], "{backend:?}: the helper end's survivors");
     }
 }

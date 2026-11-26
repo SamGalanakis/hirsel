@@ -274,5 +274,4 @@ pub(super) unsafe fn end_take(
 }
 
 #[cfg(feature = "record")]
-const UNNAMED_CHARGE: &str =
-    "a helper end keeps a key object or agreement registry entry, which this build does not name";
+const UNNAMED_CHARGE: &str = "a helper end keeps a charge with no survivor name";

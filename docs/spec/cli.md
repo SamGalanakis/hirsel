@@ -140,12 +140,14 @@ and the server drops every remembered derivation, since the request may
 have left one half made, and serves the next request. After each request,
 the server releases the derivations its working set last used before its
 previous request, then evicts least recently used working sets until its
-resident memory fits `--max-memory BYTES` (default 1.75 GiB). An exact
-memo entry shared by several working sets stays cached while any of those
-sets uses it. The working sets' remembered development links together hold
-at most 256 MiB; past that, the sets that linked least recently forget
-theirs and link afresh. If the limit is still exceeded after eviction, the
-server exits when its launched clients finish. A server returns its free
+resident memory fits `--max-memory BYTES` (default 1.75 GiB). It never
+evicts the working set it just served: the limit bounds the sets kept
+beside the one in use, so an edit loop on a working set larger than the
+limit keeps its derivations and its remembered link. An exact memo entry
+shared by several working sets stays cached while any of those sets uses
+it. The working sets' remembered development links together hold at most
+256 MiB; past that, the sets that linked least recently forget theirs and
+link afresh. A server returns its free
 memory to the system after a second without requests, and exits after ten
 minutes without requests or launched clients. `hirsel serve --stop` stops
 the toolchain's server.

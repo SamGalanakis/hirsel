@@ -1,8 +1,8 @@
 //! Exact derivations can be shared between resident working sets. Each set
 //! owns the entries its last two requests used: after a request its older
 //! entries are released (an edit's stale derivations), and under memory
-//! pressure whole sets are released, least recently used first. An entry
-//! stays while any set owns it.
+//! pressure whole sets are released, least recently used first, except the
+//! set just served. An entry stays while any set owns it.
 
 use super::serving;
 use hirsel_core_ids::ContentHash;
@@ -111,24 +111,19 @@ impl WorkingSets {
         release(&|_, _| true);
     }
 
-    /// Try to get below the cap, and say if even empty memos are too large.
-    fn trim(
-        &mut self,
-        mut over_budget: impl FnMut() -> bool,
-        mut evict: impl FnMut(SetId),
-    ) -> bool {
-        while over_budget() {
-            let Some(set) = self.age.pop_front() else {
-                return false;
-            };
-            evict(set.id);
+    /// Evict the least recently used sets while over budget, but never the
+    /// set just served: its next request is the likeliest, and the cap bounds
+    /// the sets kept beside it, not the one in use.
+    fn trim(&mut self, mut over_budget: impl FnMut() -> bool, mut evict: impl FnMut(SetId)) {
+        while self.age.len() > 1 && over_budget() {
+            evict(self.age.pop_front().unwrap().id);
         }
-        true
     }
 
-    pub(super) fn fit(&mut self, max_memory: u64) -> bool {
+    /// Evict other sets until the resident memory fits `max_memory`.
+    pub(super) fn fit(&mut self, max_memory: u64) {
         if super::resident_bytes() <= max_memory {
-            return true;
+            return;
         }
         release_unused_pages();
         self.trim(
@@ -494,16 +489,17 @@ mod tests {
             links.insert(5, Value::new("A link", (a, 0)));
         }
 
-        assert!(sets.trim(|| false, |_| panic!("evicted under budget")));
+        sets.trim(|| false, |_| panic!("evicted under budget"));
+        // Always over budget: every set goes but A, the one just served.
         let evictions = RefCell::new(Vec::new());
-        assert!(sets.trim(
-            || evictions.borrow().len() < 2,
+        sets.trim(
+            || true,
             |id| {
                 evictions.borrow_mut().push(id);
                 parses.release(&|owner, _| owner == id);
                 links.release(&|owner, _| owner == id);
             },
-        ));
+        );
         assert_eq!(evictions.into_inner(), [b, c]);
         let parses = parses.entries.lock().unwrap();
         assert_eq!(parses.len(), 1);

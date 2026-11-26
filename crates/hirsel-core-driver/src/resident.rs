@@ -18,9 +18,12 @@
 //! while it runs. It re-reads its executable's identity on each request and
 //! exits once that changed. A request that panics fails alone: its client is
 //! answered 101, and the server forgets every working set, since what the
-//! request was deriving may be half made. The server returns its free pages
-//! to the system after a second without requests and exits after
-//! [`IDLE_EXIT`] without any.
+//! request was deriving may be half made. After each request the server
+//! evicts least recently used working sets until it fits `--max-memory`,
+//! never the set just served, so an edit loop on a working set larger than
+//! the cap still finds its previous request's derivations and link. The
+//! server returns its free pages to the system after a second without
+//! requests and exits after [`IDLE_EXIT`] without any.
 //!
 //! A `run` request's program runs in the client, under the client's
 //! terminal and signals; the server keeps the program's scratch directory
@@ -51,8 +54,9 @@ pub(crate) use memo::{
 };
 
 const PROTOCOL: u32 = 2;
-/// Cold Place builds peaked at 1,168 MiB. Add 512 MiB for retained sets
-/// and round up to a 256 MiB boundary.
+/// What the working sets beside the one just served may bring the server to:
+/// cold Place builds peaked at 1,168 MiB; add 512 MiB for retained sets and
+/// round up to a 256 MiB boundary.
 pub(crate) const DEFAULT_MAX_MEMORY: u64 = 1792 << 20;
 /// How long a server without requests or launched clients stays: sccache's.
 const IDLE_EXIT: Duration = Duration::from_secs(600);
@@ -645,9 +649,8 @@ impl Serve {
     }
 }
 
-/// `hirsel serve`: serve this toolchain's requests until stopped, idle, over
-/// its memory with its caches dropped, or its executable replaced. The exit
-/// status of the command.
+/// `hirsel serve`: serve this toolchain's requests until stopped, idle, or
+/// its executable replaced. The exit status of the command.
 pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
     let toolchain = Toolchain::loaded()?;
     if serve.stop {
@@ -769,8 +772,7 @@ fn serve_requests(
     // Launched programs' scratch directories, until their clients hang up.
     let mut launched: Vec<(UnixStream, Option<crate::store::Scratch>)> = Vec::new();
     let mut sets = memo::WorkingSets::default();
-    let mut retire_when_idle = false;
-    while let Some(mut stream) = accept(listener, &mut launched, retire_when_idle)? {
+    while let Some(mut stream) = accept(listener, &mut launched)? {
         let Ok((bytes, fds)) = read_message(&mut stream) else {
             continue;
         };
@@ -839,8 +841,7 @@ fn serve_requests(
         } else {
             sets.settle();
         }
-        // A launched program's scratch must survive until its client is done.
-        retire_when_idle = !sets.fit(max_memory);
+        sets.fit(max_memory);
     }
     Ok(0)
 }
@@ -901,19 +902,18 @@ fn refuse(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
 }
 
 /// The next connection, releasing each launched program's scratch once its
-/// client has hung up. None once the server retires: over its memory, or
-/// [`IDLE_EXIT`] without a request, with no launched client left. A second
-/// without a request returns the allocator's free pages.
+/// client has hung up. None once the server retires: [`IDLE_EXIT`] without a
+/// request, with no launched client left. A second without a request returns
+/// the allocator's free pages.
 fn accept(
     listener: &UnixListener,
     launched: &mut Vec<(UnixStream, Option<crate::store::Scratch>)>,
-    retire_when_idle: bool,
 ) -> io::Result<Option<UnixStream>> {
     let quiet = Instant::now();
     let mut collected = false;
     loop {
         let idle = quiet.elapsed() >= IDLE_EXIT;
-        if (retire_when_idle || idle) && launched.is_empty() {
+        if idle && launched.is_empty() {
             return Ok(None);
         }
         let timeout = if !collected {
@@ -954,7 +954,7 @@ fn accept(
             index += 1;
             polls[index].revents == 0
         });
-        if polls[0].revents != 0 && (!retire_when_idle || !launched.is_empty()) {
+        if polls[0].revents != 0 {
             return listener.accept().map(|(stream, _)| Some(stream));
         }
     }

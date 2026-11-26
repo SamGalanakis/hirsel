@@ -357,17 +357,32 @@ fn resident_child() {
     }
     // SAFETY: no other thread of this child reads or writes the environment yet.
     unsafe { std::env::remove_var("RESIDENT_CHILD") };
-    crate::request::main(vec!["serve".into()])
+    let mut args = vec!["serve".to_owned()];
+    if let Some(serve) = std::env::var_os("RESIDENT_CHILD_SERVE") {
+        args.extend(serde_json::from_str::<Vec<String>>(serve.to_str().unwrap()).unwrap());
+    }
+    crate::request::main(args)
 }
 
 /// Start the resident laws' server in `directory` under `runtime`, and wait
 /// until it listens.
 fn start_resident(runtime: &Path, directory: &Path, shared: impl Fn(&mut std::process::Command)) -> std::process::Child {
+    start_resident_serving(runtime, directory, &[], shared)
+}
+
+/// [`start_resident`], with `serve`'s options after `hirsel serve`.
+fn start_resident_serving(
+    runtime: &Path,
+    directory: &Path,
+    serve: &[&str],
+    shared: impl Fn(&mut std::process::Command),
+) -> std::process::Child {
     let mut server = std::process::Command::new(std::env::current_exe().unwrap());
     server
         .args(["--exact", "native::tests::resident_child", "--ignored", "--nocapture", "--test-threads=1"])
         .env("REQUEST_CHILD_ARGS", "[]")
         .env("RESIDENT_CHILD", "1")
+        .env("RESIDENT_CHILD_SERVE", serde_json::to_string(serve).unwrap())
         .env("XDG_RUNTIME_DIR", runtime)
         .env("PWD", directory)
         .current_dir(directory)
@@ -575,6 +590,85 @@ fn resident_server_answers_every_directory_and_contains_a_panic() {
     assert!(stderr.contains("hirsel-request-phases"), "one was not served after the panic: {stderr}");
     assert_eq!(answer, one_shot[0].0, "{stderr}");
     stop_resident(&runtime, &elsewhere, server);
+}
+
+/// Bug law: memory pressure never takes the working set a server just
+/// served. A server whose `--max-memory` (1 byte) is below any working set
+/// builds a program, then two same-length edits of its output; each edit is
+/// patched into the remembered link (`link_patched`), the server lives
+/// through every request, and each patched program prints the edited text,
+/// byte for byte the program a one-shot build of the same source makes. Red
+/// where the cap evicts the served set (its link is gone, so the edit is
+/// linked afresh) or retires the server once the set alone exceeds it (the
+/// next request finds no server).
+#[test]
+fn resident_server_keeps_the_served_set_over_its_memory_cap() {
+    let law = PackageLaw::new();
+    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+    let source = |text: &str| {
+        law.write(
+            "app/main.hirsel",
+            format!("pub fn main(out: Stdout) -> Result[(), Exit] waits {{\n    result.unwrap(stdout.write(out, \"{text}\\n\"))\n    Ok(())\n}}\n"),
+        );
+    };
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let path = |path: PathBuf| path.canonicalize().unwrap().to_str().unwrap().to_owned();
+    let args: Vec<String> = vec![
+        "build".into(),
+        "app".into(),
+        "--output".into(),
+        "program".into(),
+        "--json".into(),
+        "--libraries".into(),
+        law.libraries.to_str().unwrap().into(),
+        "--runtime".into(),
+        path(options.runtime),
+        "--cc".into(),
+        path(cc),
+    ];
+    let runtime = law.path("runtime");
+    let shared = |command: &mut std::process::Command| {
+        command.env("XDG_CACHE_HOME", law.path("cache")).env("XDG_RUNTIME_DIR", &runtime);
+    };
+    let directory = law.dir.path().to_owned();
+    // The build's patched-link count, its program's bytes and the program's output.
+    let build = || {
+        let _ = std::fs::remove_file(directory.join("program"));
+        let mut request = process::tape_request_command(&args, &directory);
+        shared(&mut request);
+        request.env("PWD", &directory).env("HIRSEL_TRACE_REQUEST_PHASES", "1");
+        let (status, stdout, stderr) = process::tape_request_output(request);
+        assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+        let report: serde_json::Value =
+            serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}\n{stderr}"));
+        let patched = report["native"]["reach"]["link_patched"].as_u64();
+        let program = std::fs::read(directory.join("program")).unwrap();
+        let ran = std::process::Command::new(directory.join("program")).output().unwrap();
+        (patched, program, ran.stdout, stderr)
+    };
+
+    source("one");
+    let mut server = start_resident_serving(&runtime, &directory, &["--max-memory", "1"], shared);
+    let (_, _, ran, stderr) = build();
+    assert_eq!(ran, b"one\n", "{stderr}");
+    let mut served = Vec::new();
+    for text in ["two", "six"] {
+        source(text);
+        let (patched, program, ran, stderr) = build();
+        assert!(stderr.contains("hirsel-request-phases"), "{text} was not served: {stderr}");
+        assert_eq!(patched, Some(1), "{text} was not patched: {stderr}");
+        assert_eq!(ran, format!("{text}\n").into_bytes(), "{stderr}");
+        assert!(server.try_wait().unwrap().is_none(), "the server retired over its cap");
+        served.push(program);
+    }
+    stop_resident(&runtime, &directory, server);
+    // The one-shot build of the last edit makes the patched program.
+    let (_, program, _, stderr) = build();
+    assert!(!stderr.contains("hirsel-request-phases"), "{stderr}");
+    assert_eq!(served.pop().unwrap(), program, "the patched program is not the one-shot build's");
 }
 
 #[test]

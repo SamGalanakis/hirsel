@@ -172,7 +172,10 @@ unsafe fn connect(
         };
         #[cfg(not(feature = "record"))]
         let source = Some(provider);
-        if state.roots.is_none() && source.as_ref().is_some_and(crate::os::owns) {
+        if state.roots.is_none()
+            && !crate::host::trust::platform_tls()
+            && source.as_ref().is_some_and(crate::os::owns)
+        {
             if crate::tasks::check_cancel(context, site) != 0 {
                 net::hirsel_core_socket_drop(context, key);
                 return CANCELLED;

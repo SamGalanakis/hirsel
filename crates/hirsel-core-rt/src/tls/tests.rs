@@ -1,6 +1,7 @@
 mod authority;
+#[cfg(target_vendor = "apple")]
+mod platform;
 mod server;
-
 use super::*;
 use crate::{entry::*, host_file::Files, net::*, tasks::*};
 use hirsel_core_net::{Rule, RuleView, TlsRule};
@@ -16,7 +17,6 @@ use std::{
     sync::{Arc, mpsc},
     thread,
 };
-
 const CA: &[u8] = include_bytes!("../../testdata/tls/ca.pem");
 const UNRELATED: &[u8] = include_bytes!("../../testdata/tls/unrelated-ca.pem");
 const ALPHA: &[u8] = include_bytes!("../../testdata/tls/alpha.pem");

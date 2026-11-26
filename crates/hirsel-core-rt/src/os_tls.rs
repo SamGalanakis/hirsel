@@ -1,6 +1,7 @@
 //! The OS provider's TLS sessions. Socket reads and writes never block.
 mod gcm;
 pub(crate) mod packet_cipher;
+pub(crate) mod platform;
 mod records;
 mod rustls_stream;
 pub(crate) mod server;
@@ -136,10 +137,33 @@ impl Cache {
     }
 }
 
-pub(crate) struct Stream(rustls_stream::RustlsStream);
+pub(crate) enum Handshake {
+    Done,
+    Socket { write: bool },
+    Trust,
+}
+
+pub(crate) struct Stream {
+    trust: Option<platform::Job>,
+    tls: rustls_stream::RustlsStream,
+    verifier: Option<Arc<platform::Deferred>>,
+}
 
 impl Stream {
     pub(crate) fn new(name: Name, config: Arc<ClientConfig>) -> Result<Self, Outcome> {
+        Self::with_config(name, config, None)
+    }
+
+    pub(crate) fn platform(name: Name, alpn: Vec<Vec<u8>>) -> Result<Self, Outcome> {
+        let (config, verifier) = platform::configure(alpn)?;
+        Self::with_config(name, config, Some(verifier))
+    }
+
+    fn with_config(
+        name: Name,
+        config: Arc<ClientConfig>,
+        verifier: Option<Arc<platform::Deferred>>,
+    ) -> Result<Self, Outcome> {
         let server_name = match &name {
             Name::Ip(ip) => ServerName::from(*ip),
             Name::Dns(dns) => {
@@ -148,14 +172,40 @@ impl Stream {
         };
         let connection =
             UnbufferedClientConnection::new(config, server_name).map_err(protocol_error)?;
-        Ok(Self(rustls_stream::RustlsStream::new(connection)))
+        Ok(Self {
+            tls: rustls_stream::RustlsStream::new(connection),
+            verifier,
+            trust: None,
+        })
     }
 
-    /// Pending carries the desired direction, false for read or true for write.
-    pub(crate) fn handshake(&mut self, fd: i32) -> Result<Result<(), bool>, Outcome> {
-        let result = self.0.advance(&mut SocketIo(fd), true);
-        self.0.rx.release();
-        result
+    pub(crate) fn waiting_for_trust(&self) -> bool {
+        self.trust.is_some()
+    }
+
+    pub(crate) fn handshake(&mut self, fd: i32, token: u64) -> Result<Handshake, Outcome> {
+        if let Some(job) = &self.trust {
+            let Some(answer) = job.answer() else {
+                return Ok(Handshake::Trust);
+            };
+            answer?;
+            self.trust = None;
+        }
+        let result = self
+            .tls
+            .advance(&mut SocketIo(fd), true, self.verifier.as_deref());
+        self.tls.rx.release();
+        let result = result?;
+        if let Some(verifier) = &self.verifier {
+            self.trust = platform::Job::begin(verifier, token)?;
+            if self.trust.is_some() {
+                return Ok(Handshake::Trust);
+            }
+        }
+        Ok(match result {
+            Ok(()) => Handshake::Done,
+            Err(write) => Handshake::Socket { write },
+        })
     }
 
     pub(crate) fn finish(
@@ -163,22 +213,22 @@ impl Stream {
         protocol: &mut [u8],
         peer: &mut [u8; 32],
     ) -> Result<(usize, Binding, Box<dyn SecureStream>), Outcome> {
-        let chosen = self.0.connection.alpn_protocol().unwrap_or_default();
+        let chosen = self.tls.connection.alpn_protocol().unwrap_or_default();
         let len = chosen.len();
         protocol[..len].copy_from_slice(chosen);
-        let leaf = &self.0.connection.peer_certificates().unwrap()[0];
+        let leaf = &self.tls.connection.peer_certificates().unwrap()[0];
         peer.copy_from_slice(sha256(leaf.as_ref()).as_ref());
         let binding = certificate_binding(leaf.as_ref()).unwrap_or_default();
         let stream: Box<dyn SecureStream> =
-            if self.0.connection.protocol_version() == Some(ProtocolVersion::TLSv1_3) {
+            if self.tls.connection.protocol_version() == Some(ProtocolVersion::TLSv1_3) {
                 let (secrets, kernel) = self
-                    .0
+                    .tls
                     .connection
                     .dangerous_into_kernel_connection()
                     .map_err(protocol_error)?;
-                Box::new(records::Records::new(secrets, kernel, self.0.rx)?)
+                Box::new(records::Records::new(secrets, kernel, self.tls.rx)?)
             } else {
-                Box::new(self.0)
+                Box::new(self.tls)
             };
         Ok((len, binding, stream))
     }

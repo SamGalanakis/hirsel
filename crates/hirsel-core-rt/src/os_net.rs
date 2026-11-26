@@ -9,8 +9,9 @@ pub(crate) use tls_server::{ACCEPT_OPERATIONS, HELLO_OPERATIONS};
 use crate::{
     entry::SocketActivation,
     host::inherited::{adopt_listener, receive_listener, receive_operator},
-    host::trust::system_roots,
+    host::trust::{platform_tls, system_roots},
     net::{Address, NetworkRequest, RulesStorage},
+    os_tls::{Handshake, Stream},
     provider::*,
     tls::{HandshakeState, TlsRequest},
     units::{HostCall, off_slot},
@@ -757,38 +758,20 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
             if let Some(outcome) = refusal {
                 return tls_finish(tls, key, outcome);
             }
-            let cache = (*s.cache).get();
-            let roots = match s.roots.take() {
-                Some(roots) => roots,
-                None => {
-                    if cache.system.get().is_none() {
-                        // Loaded off the slot, outside the cell: no unit waits
-                        // in `get_or_init` for another's load.
-                        let _ = cache.system.set(off_slot(HostCall::Bounded, system_roots));
-                    }
-                    match cache.system.get().unwrap() {
-                        Ok(roots) => roots.clone(),
-                        Err(code) => return tls_finish(tls, key, error(*code)),
-                    }
-                }
-            };
-            // Building a client configuration can take milliseconds of CPU.
-            let (alpn, cacheable, name) = (std::mem::take(&mut s.alpn), s.cacheable, s.name.take());
-            let stream = off_slot(HostCall::Bounded, || {
-                cache
-                    .client_config(roots, alpn, cacheable)
-                    .and_then(|config| crate::os_tls::Stream::new(name.unwrap(), config))
-            });
-            match stream {
+            match client_stream(s) {
                 Ok(stream) => s.stream = Some(stream),
                 Err(outcome) => return tls_finish(tls, key, outcome),
+            }
+        } else if s.stream.as_ref().unwrap().waiting_for_trust() {
+            if deadline(n.until, token) == Due::Passed {
+                return tls_finish(tls, key, signal(6));
             }
         } else {
             sockets.disarm(key, s.pending_write);
         }
         let stream = s.stream.as_mut().unwrap();
-        match stream.handshake(sockets.fd(key)) {
-            Ok(Ok(())) => {
+        match stream.handshake(sockets.fd(key), token) {
+            Ok(Handshake::Done) => {
                 let protocol = &mut *tls.protocol_out;
                 let out = std::slice::from_raw_parts_mut(protocol.data, protocol.capacity);
                 let (len, binding, stream) =
@@ -811,7 +794,7 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                     ..Step::default()
                 }
             }
-            Ok(Err(write)) => {
+            Ok(Handshake::Socket { write }) => {
                 let due = deadline(n.until, token);
                 if due == Due::Passed {
                     return tls_finish(tls, key, signal(6));
@@ -828,9 +811,48 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                     ..Step::default()
                 }
             }
+            Ok(Handshake::Trust) => {
+                let due = deadline(n.until, token);
+                if due == Due::Passed {
+                    return tls_finish(tls, key, signal(6));
+                }
+                Step {
+                    kind: STEP_PENDING,
+                    deadline_ns: due.host().unwrap_or(0),
+                    ..Step::default()
+                }
+            }
             Err(outcome) => tls_finish(tls, key, outcome),
         }
     }
+}
+
+unsafe fn client_stream(state: &mut HandshakeState) -> Result<Stream, Outcome> {
+    let name = state.name.take().unwrap();
+    let alpn = std::mem::take(&mut state.alpn);
+    if state.roots.is_none() && platform_tls() {
+        return off_slot(HostCall::Bounded, || Stream::platform(name, alpn));
+    }
+    // SAFETY: the issued handshake pins its run's TLS cache through delivery.
+    let cache = unsafe { (*state.cache).get() };
+    let roots = match state.roots.take() {
+        Some(roots) => roots,
+        None => {
+            if cache.system.get().is_none() {
+                // Loaded off the slot, outside the cell: no unit waits in
+                // get_or_init for another unit's load.
+                let _ = cache.system.set(off_slot(HostCall::Bounded, system_roots));
+            }
+            cache.system.get().unwrap().clone().map_err(error)?
+        }
+    };
+    // Building a client configuration can take milliseconds of CPU.
+    let cacheable = state.cacheable;
+    off_slot(HostCall::Bounded, || {
+        cache
+            .client_config(roots, alpn, cacheable)
+            .and_then(|config| Stream::new(name, config))
+    })
 }
 
 unsafe fn tls_finish(tls: &mut TlsRequest, key: u64, outcome: Outcome) -> Step {

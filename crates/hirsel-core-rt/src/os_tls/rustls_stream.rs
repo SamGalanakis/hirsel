@@ -30,6 +30,7 @@ impl RustlsStream {
         &mut self,
         socket: &mut SocketIo,
         handshake: bool,
+        verifier: Option<&platform::Deferred>,
     ) -> Result<Result<(), bool>, Outcome> {
         loop {
             let status = self.connection.process_tls_records(
@@ -37,6 +38,18 @@ impl RustlsStream {
             );
             Slot::consume_cursor(&mut self.rx.start, &mut self.rx.end, status.discard);
             self.offered -= status.discard;
+            // EncodeTlsData consumes a rustls chunk, so encode it into our
+            // buffer. Until the chain is accepted, never flush that buffer,
+            // read ahead or return a usable TLS session.
+            if matches!(
+                &status.state,
+                Ok(ConnectionState::TransmitTlsData(_)
+                    | ConnectionState::WriteTraffic(_)
+                    | ConnectionState::BlockedHandshake)
+            ) && verifier.is_some_and(platform::Deferred::has_input)
+            {
+                return Ok(Err(false));
+            }
             match status.state {
                 Ok(ConnectionState::EncodeTlsData(mut data)) => {
                     self.tx.compact();
@@ -147,7 +160,7 @@ impl RustlsStream {
         if self.plaintext.end != 0 || self.read_end.is_some() {
             return true;
         }
-        let ready = match self.advance(socket, false) {
+        let ready = match self.advance(socket, false, None) {
             Ok(Ok(())) => true,
             Ok(Err(_)) => false,
             Err(error) => {

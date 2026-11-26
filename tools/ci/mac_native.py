@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 
 SUITES = {
+    "hirsel-core-rt": ("--lib", (
+        "tls::tests::platform::system_trust_laws",
+    )),
     "hirsel-llvm": ("--lib", (
         "core::target_tests::linux_c_results_execute_with_mixed_fields_padding_and_hfas",
         "core::target_tests::checked_arithmetic_preserves_status_context_and_cause_copies",
@@ -25,7 +28,12 @@ def build(destination):
     for package, (selection, _) in SUITES.items():
         command = ["cargo", "test", "--locked", "--no-run", "-p", package,
                    selection, "--message-format=json"]
-        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as cargo:
+        env = os.environ.copy()
+        if package == "hirsel-core-rt":
+            command.append("--target=aarch64-apple-darwin")
+            env["RUSTC_BOOTSTRAP"] = "1"
+            env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} -Zsanitizer=address"
+        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, env=env) as cargo:
             candidates = []
             for line in cargo.stdout:
                 event = json.loads(line)

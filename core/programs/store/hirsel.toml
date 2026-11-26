@@ -134,6 +134,7 @@ dirs = ["."]
 
 [tests.sources]
 "store_capture_laws.hirsel" = "store"
+"store_trust_laws.hirsel" = "store"
 "store_size_laws.hirsel" = "store"
 "location_laws.hirsel" = "store"
 "assembly_laws.hirsel" = "store"

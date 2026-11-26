@@ -30,7 +30,8 @@ fn disk_crash_live_read_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Ar
     }
     let raw_floor = option.unwrap(args.get(argv, 3))
     let floor: u64 = result.unwrap(int.parse(raw_floor))
-    let db = open(tasks, d, c, r, disk_crash_options("checkpoint")) ?=> |_| Exit(status: 33)
+    let mut db = open(tasks, d, c, r, disk_crash_options("checkpoint")) ?=> |_| Exit(status: 33)
+    trust_store(mut db) ?=> |_| Exit(status: 33)
     let head = version(snapshot(db))
     close(take db) ?=> |_| Exit(status: 33)
     if head < floor {
@@ -301,7 +302,8 @@ type RestartOwner: send {
 }
 
 fn disk_crash_restart_owner(take job: RestartOwner) -> Result[(), Error] waits {
-    let db = open(job.tasks, job.d, job.c, job.r, disk_crash_options("checkpoint"))?
+    let mut db = open(job.tasks, job.d, job.c, job.r, disk_crash_options("checkpoint"))?
+    trust_store(mut db)?
     result.unwrap(channel.send(job.opened, version(snapshot(db))))
     let _ = channel.receive(job.stop)
     close(take db)

@@ -757,6 +757,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let mut options = journal_crash_options()
     options.create = false
     let mut db = open(tasks, d, c, r, options)?
+    trust_store(mut db)?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if let Some(fork_case) = journal_fork_case(scenario) {
         let valid = journal_crash_fork_read(mut db, t, minimum, fork_case)?

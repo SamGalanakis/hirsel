@@ -24,6 +24,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         Error(take e) => return Error(take e)
     }
     if scenario == "genesis" && db.heads[0].head == 0 {
+        trust_store(mut db)?
         let empty = page_row_count(db.heads[0].roots.collections) == 0 && page_row_count(db.heads[0].roots.catalog) == 0
         close(take db)?
         return Ok(empty && !required_new)
@@ -168,6 +169,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     } else if scenario == "genesis" {
         good = old && db.heads[0].head >= 1 && db.heads[0].head <= 97 && (!required_new || db.heads[0].head == 97)
     }
+    trust_store(mut db)?
     close(take db)?
     Ok(good)
 }
@@ -390,6 +392,10 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
         return Ok(false)
     }
     let installed = v == 98
+    if installed {
+        bind_declaration(mut db, Open, installed_schema)?
+    }
+    trust_store(mut db)?
     let activated = system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
     let release = system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_bytes())?
     let found = option.unwrap(get(result.unwrap(reader(db, 0u64)), snap, activated, 0u8)?)
@@ -423,14 +429,16 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
         if list.len(index_catalog(db, other.id)?) != 1 || page_row_count(db.heads[0].roots.streams) != 0u64 {
             return Ok(false)
         }
-        let _ = declare_after(mut db)?
+        let _ = declare_after(mut db, Migrate)?
         let after = system_table(db, "after", std.codec.key_u64(), std.codec.of_u64())?
         if after.id != 10u32 {
             return Ok(false)
         }
         let _ = checkpoint(mut db)?
         close(take db)?
-        let reopened = open(tasks, d, c, r, disk_crash_options("install"))?
+        let mut reopened = open(tasks, d, c, r, disk_crash_options("install"))?
+        let _ = declare_after(mut reopened, Open)?
+        trust_store(mut reopened)?
         for k in 0u64 .. 96u64 {
             if get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), t, k)? != Some(k + 1001u64) {
                 return Ok(false)
@@ -586,16 +594,13 @@ fn disk_crash_read_only(d: Dir, c: Clock, torn: bool) -> Result[(), Error] waits
     let opened = open_read_only(d, c, disk_crash_options("checkpoint"))
     if torn {
         match opened {
-            Error(Corrupt(f)) => if f.file == "MANIFEST" {
-                if let Truncated = f.why {
-                    return Ok(())
-                }
-            },
+            Error(problem) if trust_expected_reopen_fault("read-only/torn-manifest", problem) => return Ok(()),
             _ => (),
         }
         fail("read-only open accepted a published torn MANIFEST or lost its fault")
     }
     let read_source = opened?
+    trust_directory(d)?
     let rows = read_only_table(read_source, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if version(read_source.snapshot) != 161 {
         fail("read-only open recovered the wrong journal prefix")
@@ -965,6 +970,7 @@ fn index_build_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Er
 fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
     let (take opened, t, take ix) = index_build_open(d, c, r, tasks, false)?
     let mut db = take opened
+    trust_store(mut db)?
     let mut good = lix_serves(db, ix, "by_v")? || !required_new
     for k in 0u64 .. 96 {
         lix_write(mut db, t, k, Some(k + 2000))?
@@ -979,6 +985,7 @@ fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: boo
         list.push(mut expected, take logical)
     }
     good = good && lix_entries(db, ix.id)? == expected
+    trust_indexes(mut db)?
     close(take db)?
     Ok(good)
 }

@@ -714,6 +714,10 @@ fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fa
         (fx.cover.id, "cover")
     }
     walk_edit(mut fx.db, id, edited, val)?
+    match trust_store(mut fx.db) {
+        Error(Drift(found_name)) if found_name == name => (),
+        _ => fail("§1.2 walker: the trust check must reject the corrupted index"),
+    }
     // Report mode (hirsel store verify) walks the index on past a finding, so
     // an entry wrong from both sides is reported again by the entries phase
     // (`also`); it changes nothing: every index still serves, no drift, no commit.
@@ -804,11 +808,25 @@ fn test_index_walker_clean(c: Clock) -> Result[(), Error] waits {
     if !walk_serves(fx.db, fx.bucket)? || !walk_serves(fx.db, fx.uniq)? || !walk_serves(fx.db, fx.cover)? {
         fail("§1.2 walker: a clean walk demoted an index")
     }
-    Ok(())
+    trust_store(mut fx.db)
 }
 
 @test
-fn test_index_walker_corruptions(c: Clock) -> Result[(), Error] waits {
+fn test_index_walker_corruptions(c: Clock, d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let child = disk_test_directory(d)
+    disk_crash_init(child, c, r, tasks, "checkpoint")?
+    trust_directory(child)?
+    // Change the first payload byte of a pack frame that MANIFEST points to.
+    let (_, take manifest) = read_page_manifest_file(child)?
+    let root = manifest.branches[0u64].roots.catalog
+    let pack = paged_pack_path(root.pack)?
+    let mut raw = disk_read_paged_file(child, pack, 67108864)?
+    raw[root.offset + 16] = raw[root.offset + 16] ^ 1u8
+    disk_write_synced(child, pack, raw)?
+    match trust_directory(child) {
+        Error(Corrupt(Fault(file: found_file, offset: found_at, why: Checksum))) if found_file == pack && found_at == root.offset => (),
+        _ => fail("store trust: the structural walk must reject the damaged pack frame"),
+    }
     let fx = walk_fixture(c)?
     // Row 2 (26): bucket 2, uniq 26, cover 1. Row 3 (39): uniq 39. Row 4 (52): cover 2.
     let any_bucket = walk_stored(fx.db, fx.bucket.id, walk_entry(2, Some(2)))?

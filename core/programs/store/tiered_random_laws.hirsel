@@ -833,6 +833,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
     let mut reopened = open(tasks, d, c, r, options)?
     let _ = checkpoint(mut reopened)?
     random_check(d, reopened, rows, Some(clone(marks)), model)?
+    trust_store(mut reopened)?
     close(take reopened)
 }
 

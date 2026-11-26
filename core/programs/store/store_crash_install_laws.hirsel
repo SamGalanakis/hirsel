@@ -29,21 +29,23 @@ fn install_next(mut phase: Migration) -> Result[(), Error] {
 // other with the index `empty`.
 fn stage_next(source: Preparation, tasks: Tasks) -> Result[StagedMigration, Error] waits {
     let mut d = declare_export(source, tasks, Some(code.describe(install_next)))?
+    installed_schema(mut d)?
+    finish_export_declaration(source, take d)
+}
+
+fn installed_schema(mut d: Declare) -> Result[(), Error] {
     crash_schema(mut d)?
     let mut other = declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
     let _ = index(mut d, mut other, "empty", Many, code.describe(crash_value), std.codec.key_u64())?
     let _ = finish(mut d, take other)?
-    finish_export_declaration(source, take d)
+    Ok(())
 }
 
 // The installed schema with the new table "after": the read phase's later
 // Migrate must declare every table stage_next installed.
-fn declare_after(mut db: Db) -> Result[Table[u64, u64], Error] waits {
-    let mut d = declare(db, Migrate)?
-    crash_schema(mut d)?
-    let mut other = declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
-    let _ = index(mut d, mut other, "empty", Many, code.describe(crash_value), std.codec.key_u64())?
-    let _ = finish(mut d, take other)?
+fn declare_after(mut db: Db, mode: Mode) -> Result[Table[u64, u64], Error] waits {
+    let mut d = declare(db, mode)?
+    installed_schema(mut d)?
     let after = declare_table(mut d, "after", std.codec.key_u64(), std.codec.of_u64())?
     let t = finish(mut d, take after)?
     let _ = seal(mut db, take d)?

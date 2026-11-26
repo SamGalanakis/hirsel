@@ -82,8 +82,14 @@ fn lcu_public(db: Db, id: u32) -> Result[bool, Error] {
 
 // The release the child prepares: rows with by_v (and by_id), and other.
 fn lcu_stage(source: Preparation, tasks: Tasks, unique: bool) -> Result[(StagedMigration, u32, u32), Error] waits {
-    let key = std.codec.key_u64()
     let mut d = declare_export(source, tasks, None)?
+    let (by_v, by_id) = lcu_schema(mut d, unique)?
+    let staged = finish_export_declaration(source, take d)?
+    Ok((take staged, by_v, by_id))
+}
+
+fn lcu_schema(mut d: Declare, unique: bool) -> Result[(u32, u32), Error] {
+    let key = std.codec.key_u64()
     let mut rows = declare_table(mut d, "rows", key, std.codec.of_u64())?
     let by_v = index(mut d, mut rows, "by_v", Many, code.describe(lix_keys), key)?
     let by_id = if unique {
@@ -95,8 +101,7 @@ fn lcu_stage(source: Preparation, tasks: Tasks, unique: bool) -> Result[(StagedM
     let _ = finish(mut d, take rows)?
     let other = declare_table(mut d, "other", key, std.codec.of_u64())?
     let _ = finish(mut d, take other)?
-    let staged = finish_export_declaration(source, take d)?
-    Ok((take staged, by_v.id, by_id))
+    Ok((by_v.id, by_id))
 }
 
 // The untouched release: rows is only redeclared, while by_v stays an
@@ -752,7 +757,7 @@ fn lcu_crash_phase(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: S
 }
 
 // None for OLD, by_v's id for NEW; a mix fails.
-fn lcu_crash_state(db: Db) -> Result[Option[u32], Error] waits {
+fn lcu_crash_state(mut db: Db) -> Result[Option[u32], Error] waits {
     let t = system_table(db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let indexes = index_catalog(db, t.id)?
     let other = match system_table(db, "other", std.codec.key_u64(), std.codec.of_u64()) {
@@ -778,12 +783,16 @@ fn lcu_crash_state(db: Db) -> Result[Option[u32], Error] waits {
     if !lcu_public(db, by_v)? || lix_entries(db, by_v)? != lix_expected(by_v, model)? {
         fail("catch-up crash: by_v differs from a next_value extraction of the model")
     }
+    let mut d = declare(db, Open)?
+    let _ = lcu_schema(mut d, false)?
+    let _ = seal(mut db, take d)?
     Ok(Some(by_v))
 }
 
 fn lcu_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
     let mut db = open(tasks, d, c, r, lcu_crash_options())?
-    let installed = lcu_crash_state(db)?
+    let installed = lcu_crash_state(mut db)?
+    trust_store(mut db)?
     if required_new && installed == None {
         return Ok(false)
     }
@@ -792,10 +801,11 @@ fn lcu_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool)
         return Ok(false)
     }
     close(take db)?
-    let reopened = open(tasks, d, c, r, lcu_crash_options())?
-    if lcu_crash_state(reopened)? != installed || !lcu_no_import_pin(reopened) {
+    let mut reopened = open(tasks, d, c, r, lcu_crash_options())?
+    if lcu_crash_state(mut reopened)? != installed || !lcu_no_import_pin(reopened) {
         return Ok(false)
     }
+    trust_store(mut reopened)?
     close(take reopened)?
     Ok(true)
 }

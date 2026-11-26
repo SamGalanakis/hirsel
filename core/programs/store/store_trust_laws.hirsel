@@ -1,0 +1,44 @@
+// The structure and index checks are read-only. Run them while the law still
+// owns the reopened Db, before a write can replace the recovered state.
+fn trust_directory(d: Dir) -> Result[(), Error] waits {
+    let (_, id, take manifest) = read_only_manifest(d)?
+    let _ = validate_directory_graph(d, id, take manifest, true)?
+    Ok(())
+}
+
+fn trust_indexes(mut db: Db) -> Result[(), Error] waits {
+    for coverage in walk_coverage(db)? {
+        if let Unbound = coverage.coverage {
+            return Error(Undeclared(clone(coverage.index)))
+        }
+    }
+    let mut walk = begin_verify(Report)
+    loop {
+        let report = verify_step(mut db, mut walk, 128u64)?
+        if list.len(report.findings) != 0 {
+            return Error(Drift(clone(report.findings[0u64].index)))
+        }
+        if report.done {
+            return Ok(())
+        }
+    }
+}
+
+fn trust_store(mut db: Db) -> Result[(), Error] waits {
+    healthy(db)?
+    if let Some(state) = view db.disk {
+        if let Some(d) = state.d {
+            trust_directory(d)?
+        }
+    }
+    trust_indexes(mut db)
+}
+
+// The single registry of intentional damage at checked reopen points.
+fn trust_expected_reopen_fault(case: String, problem: Error) -> bool {
+    // The W2 read-only law publishes a MANIFEST with its last byte removed.
+    match problem {
+        Corrupt(Fault(file: file, why: Truncated, ..)) => case == "read-only/torn-manifest" && file == "MANIFEST",
+        _ => false,
+    }
+}

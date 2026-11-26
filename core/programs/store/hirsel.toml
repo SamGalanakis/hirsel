@@ -591,3 +591,11 @@ limit = 536870912
 
 [tests.runs."store@1/store/test_l88_hot_slot_takes_the_sealed_copy_crash_after_rename"]
 limit = 536870912
+
+# L90-K: the sim, the service's budget (about 51 MiB) and 32 Place tasks of
+# 16 MiB each.
+[tests.runs."store@1/store/bucket_stream_cost_no_wait"]
+limit = 1073741824
+
+[tests.runs."store@1/store/bucket_stream_cost_window"]
+limit = 1073741824

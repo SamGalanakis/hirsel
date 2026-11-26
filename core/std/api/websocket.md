@@ -12,7 +12,9 @@ offset and selected protocol. An offer containing `hirsel.4` selects
 `Retired(token)`. A missing header or an offer with no supported token gives
 HTTP 400. The Runner sends Close 1009 with reason `hirsel.4` on a retired
 upgrade before reading any frames. `client` checks the 101 challenge and
-requires the selected `hirsel.4` protocol. Preserve `input[end..]` as the
+requires the selected `hirsel.4` protocol. A 4xx or 5xx answer fails with the
+server's status, so a full place's refusal reads as 503; any other answer that
+is not a valid 101 fails with 400. Preserve `input[end..]` as the
 initial frame input for the current protocol. `request` constructs the fixed
 `/hirsel` request and returns `Result[Bytes, u16]`. Refused 426 requires a
 `Sec-WebSocket-Version: 13` response header. Allocation refusal raises Capacity.

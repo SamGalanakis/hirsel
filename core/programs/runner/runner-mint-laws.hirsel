@@ -185,7 +185,7 @@ fn mn_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take backin
     } else {
         None
     }
-    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(mn_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: session, max_sessions: 3u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take binding, grants: take grants, triggers: take configured, idle: None)
+    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(mn_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: session, max_sessions: 3u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take binding, grants: take grants, triggers: take configured, idle: None)
 }
 
 fn next_arrival(clock: Clock, arrivals: Receiver[Sender[()]]) -> Option[Sender[()]] waits {

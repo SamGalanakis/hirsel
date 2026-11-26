@@ -1,16 +1,6 @@
 # WebSocket socket driver
 
-`source` selects the normalized IP key used by admission. `Prefix` is trusted
-ingress policy, separate from Net's direction and port authority. Untrusted
-peers' forwarded fields are ignored. Trusted peers must supply exactly one
-X-Forwarded-For field with one canonical IP literal of at most 256 bytes.
-Missing, repeated, list-valued or malformed fields return HTTP 400. IPv4
-mapped IPv6 addresses share their IPv4 key. IPv6 spelling follows RFC 5952.
-The parser uses eight inline words and allocates nothing.
-
-This adapts Go's reverse proxy replacement policy and Rust's typed IP and
-prefix comparisons. Goose's hypothetical socket sketch supplies no ingress
-policy. Deployment examples in deploy/wire replace client-provided XFF.
+Source admission (`Prefix`, `source`, `trusted`) is [ingress_policy](ingress_policy.md).
 
 `defaults` supplies max_frame 262144, pending_max 1024 and upgrade/Hello/
 close/idle durations 5000/10000/5000/30000 milliseconds. `pending` allocates
@@ -106,7 +96,17 @@ unrepresentable deadline raises Overflow rather than silently shortening the
 configured duration. The idle_probe fixture uses a 250 ms interval to qualify
 fragment activity against real sockets.
 
-`source_for_head(bytes, head, peer, ingress)` applies the same source policy to a parsed head. It borrows the existing head and performs no I/O.
-
-`trusted(peer, ingress)` checks the transport peer against the ingress prefixes,
-including the IPv4 form of an IPv4-mapped IPv6 peer.
+In-process sessions (RUNNER-SPEC §14.11) carry the same WebSocket bytes over a
+pair of `conn` connections instead of a socket. A `Dialer` is the cross handle
+a host gives out for one place; `local_client` sends a `Dial` holding the
+dialer's receiving client and an answer client, and returns `Connected` once
+the place answers 101, `Http(code)` on a refusal and `Eof` when the place
+stopped without answering. The place answers with `local_server` (source
+loopback, timers started at the answer) or `local_refuse`/`try_refuse` with the
+code a TCP upgrade refusal sends (503). Each direction holds 16 items of at
+most `max_frame + 14` bytes, so a frame the socket path would refuse is refused
+the same way. Frames, masks, Hello and close are unchanged; only the halves
+differ, so the reader's refill and the writer's put are the only transport
+branches. A session over `conn` has no refill deadline: `receive` waits until
+an item or the peer's close, so reader-side idle probing and the message
+deadline are TCP-only; the owner's Hello, auth and close alarms apply to both.

@@ -985,7 +985,7 @@ fn http_first_phase_refund(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 fn http_trusted_source_caps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut cfg = test_config()
     cfg.ip_sockets_max = 1
-    list.push(mut cfg.ingress, wsock.Prefix(ip: V4(2130706433), bits: 32))
+    list.push(mut cfg.ingress, ingress_policy.Prefix(ip: V4(2130706433), bits: 32))
     let (server, addr) = listen_for_law(n, c, tasks, take cfg)
     let left = result.unwrap(host.connect(n, addr, Never))
     let (r, w) = net.split(take left)

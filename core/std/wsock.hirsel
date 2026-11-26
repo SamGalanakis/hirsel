@@ -1,188 +1,4 @@
-// Socket driver for websocket. Ingress policy is independent of Net authority.
-pub type Prefix: shareable + send {
-    ip: Ip,
-    bits: u8
-}
-
-fn normalize(ip: Ip) -> Ip {
-    match ip {
-        V6(0, lo) => if lo >> 32 == 65535 {
-            V4(int.truncate(lo))
-        } else {
-            ip
-        },
-        _ => ip
-    }
-}
-
-pub fn parse_ip(s: String) -> Option[Ip] {
-    literal(string.as_bytes(s))
-}
-
-pub fn parse_prefix(s: String) -> Option[Prefix] {
-    let Some((address, length)) = string.split_once(s, "/") else {
-        return None
-    }
-    let Ok(bits) = (int.parse(length) : Result[u8, ParseError]) else {
-        return None
-    }
-    let Some(ip) = parse_ip(address) else {
-        return None
-    }
-    let maximum: u8 = match ip {
-        V4(_) => 32,
-        V6(_, _) => 128
-    }
-    if bits > maximum {
-        return None
-    }
-    Some(Prefix(ip, bits))
-}
-
-fn contains(prefix: Prefix, ip: Ip) -> bool {
-    match (prefix.ip, ip) {
-        (V4(a), V4(b)) => prefix.bits <= 32 && (prefix.bits == 0 || a >> int.widen(32 - prefix.bits) == b >> int.widen(32 - prefix.bits)),
-        (V6(ah, al), V6(bh, bl)) => prefix.bits <= 128 && if prefix.bits == 0 {
-            true
-        } else if prefix.bits <= 64 {
-            ah >> int.widen(64 - prefix.bits) == bh >> int.widen(64 - prefix.bits)
-        } else {
-            ah == bh && al >> int.widen(128 - prefix.bits) == bl >> int.widen(128 - prefix.bits)
-        },
-        _ => false
-    }
-}
-
-// RFC 5952 canonical spelling. RFC 4291 mapped addresses normalize to V4.
-fn literal(b: Bytes) -> Option[Ip] {
-    let n = list.len(b)
-    if n > 256 {
-        return None
-    }
-    let (hi, lo) = match net.parse_ip(b) {
-        Ok(V4(addr)) => return Some(V4(addr)),
-        Ok(V6(hi, lo)) => (hi, lo),
-        Error(_) => return None,
-    }
-    let mut explicit: u64 = 0
-    let mut gap: Option[u64] = None
-    let mut dotted = false
-    for i in 0u64 .. n {
-        let c = b[i]
-        if c >= b'A' && c <= b'F' {
-            return None
-        }
-        if c == b'0' && (i == 0 || b[i - 1] == b':') && i + 1 < n && b[i + 1] != b':' && b[i + 1] != b'.' {
-            return None
-        }
-        if c == b':' {
-            if i != 0 && b[i - 1] != b':' {
-                explicit += 1
-            }
-            if i + 1 < n && b[i + 1] == b':' {
-                gap = Some(explicit)
-            }
-        } else if c == b'.' {
-            dotted = true
-        }
-    }
-    if dotted && !(hi == 0 && lo >> 32 == 65535) {
-        return None
-    }
-    if b[n - 1] != b':' {
-        explicit += 1
-    }
-    if dotted {
-        explicit += 1
-    }
-    let mut words: Inline[u16, 8] =[0; 8]
-    for i in 0u64 .. 4u64 {
-        let shift = (3 - i) * 16
-        words[i] = int.truncate(hi >> shift)
-        words[i + 4] = int.truncate(lo >> shift)
-    }
-    // Compress the longest zero run, taking the first on ties and requiring
-    // at least two groups. The numeric parser already checked the placement.
-    let mut best: u64 = 8
-    let mut length: u64 = 1
-    let mut i: u64 = 0
-    while i < 8 {
-        let start = i
-        while i < 8 && words[i] == 0 {
-            i += 1
-        }
-        if i - start > length {
-            best = start
-            length = i - start
-        }
-        if i == start {
-            i += 1
-        }
-    }
-    if best == 8 {
-        if gap != None {
-            return None
-        }
-    } else if gap != Some(best) || 8 - explicit != length {
-        return None
-    }
-    Some(normalize(V6(hi, lo)))
-}
-
-/// Tests the ingress prefixes against the peer and its IPv4-mapped equivalent.
-pub fn trusted(peer: Ip, ingress: List[Prefix]) -> bool {
-    for p in ingress {
-        if contains(p, peer) || contains(p, normalize(peer)) {
-            return true
-        }
-    }
-    false
-}
-
-fn forwarded_source(b: Bytes, h: http1.Head) -> Result[Ip, u16] {
-    let mut value: Option[http1.Span] = None
-    for i in 0u64 .. h.count {
-        let f = h.fields[i]
-        if http1.equal_ascii(list.slice(b, f.name.start, f.name.end), string.as_bytes("x-forwarded-for")) {
-            if value != None {
-                return Error(400)
-            }
-            value = Some(f.value)
-        }
-    }
-    let span = match value {
-        Some(s) => s,
-        None => return Error(400)
-    }
-    match literal(list.slice(b, span.start, span.end)) {
-        Some(ip) => Ok(ip),
-        None => Error(400)
-    }
-}
-
-/// Source key from a head the caller has already parsed. Error is HTTP 400.
-pub fn source_for_head(b: Bytes, h: http1.Head, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
-    if trusted(peer, ingress) {
-        forwarded_source(b, h)
-    } else {
-        Ok(normalize(peer))
-    }
-}
-
-/// Source key for a complete HTTP request. Trusted ingress must supply one
-/// canonical XFF literal; other peers' XFF is ignored. Error is HTTP 400.
-/// O(head + ingress prefixes), no allocation. Ex: `wsock.source(b, peer, ingress)`.
-pub fn source(b: Bytes, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
-    if !trusted(peer, ingress) {
-        return Ok(normalize(peer))
-    }
-    let mut h = http1.head()
-    if http1.request(b, mut h) != Complete {
-        return Error(400)
-    }
-    forwarded_source(b, h)
-}
-
+// Socket driver for websocket. Ingress policy is in `ingress_policy`.
 pub type Config: send {
     max_frame: u64,
     upgrade_ms: u64,
@@ -350,8 +166,15 @@ fn expired(deadline: Until) -> bool {
     }
 }
 
+/// The two transports under a Reader and a Writer. `Local` is Hirsel's in-process
+/// transport (RUNNER-SPEC §14.11): each item is the bytes of one write, the same
+/// bytes a socket would carry, so framing, limits and masks are unchanged.
+pub type In: send = Stream(ReadHalf) | Local(Inbox[Bytes])
+
+pub type Out: send = Stream(WriteHalf) | Local(Client[Bytes])
+
 pub opaque type Reader: send {
-    half: ReadHalf,
+    half: In,
     input: Bytes,
     cursor: u64,
     decoder: websocket.Decoder,
@@ -360,7 +183,7 @@ pub opaque type Reader: send {
 }
 
 pub opaque type Writer: send {
-    half: WriteHalf,
+    half: Out,
     buffer: WriteBuffer
 }
 
@@ -462,7 +285,7 @@ pub fn flush(mut w: Writer, mut out: Outbound, deadline: Until) -> Result[bool, 
     if prepare(mut w.buffer, mut out)? {
         return Ok(true)
     }
-    let sent = host.send_pair(mut w.half, remaining(w.buffer), string.as_bytes(""), deadline)
+    let sent = put(mut w.half, remaining(w.buffer), deadline)
     match sent {
         Ok(n) => {
             wrote(mut w.buffer, n)
@@ -620,10 +443,35 @@ pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
         },
         None => deadline
     }
+    r.input = list.new()
+    r.cursor = 0
+    let late = match r.message_end {
+        Some(end) => end,
+        None => 0xffffffffffffffff
+    }
+    let clock = r.clock
+    match r.half {
+        // An in-process peer that ends cleans its client, which this receive sees as
+        // Closed. `deadline` bounds socket reads only: CONC-17 has no timed receive,
+        // so idle probing and the message deadline are TCP liveness checks. Hello,
+        // auth expiry and close are the owner's own alarms on both transports, and the
+        // owner ends a session by cancelling this read (RUNNER-SPEC §14.11).
+        Local(inbox) => match conn.receive(inbox) {
+            Ok(take item) => {
+                r.input = take item
+                Ok(())
+            },
+            Error(Closed) => Error(Eof),
+            Error(Capacity(c)) => Error(Allocation(c)),
+        },
+        Stream(mut half) => refill_socket(mut half, mut r.input, read_until, clock, late),
+    }
+}
+
+fn refill_socket(mut half: ReadHalf, mut input: Bytes, read_until: Until, clock: Clock, late: u64) -> Result[(), Error] waits {
     loop {
-        r.input = list.new()
-        r.cursor = 0
-        let ready = match host.recv_ready(mut r.half, read_until) {
+        input = list.new()
+        let ready = match host.recv_ready(mut half, read_until) {
             Ok(()) => true,
             Error(TimedOut) => false,
             Error(e) => return Error(Network(e))
@@ -632,10 +480,10 @@ pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
             // The loan is the reader's own input, released by assignment, so
             // nothing here is promoted to frame storage and the reader's task
             // gives its stack back while it waits (ir returnable.rs).
-            if let Error(c) = list.try_reserve(mut r.input, RECEIVE_LOAN_BYTES) {
+            if let Error(c) = list.try_reserve(mut input, RECEIVE_LOAN_BYTES) {
                 return Error(Allocation(c))
             }
-            match host.recv_bounded(mut r.half, mut r.input, RECEIVE_LOAN_BYTES, read_until) {
+            match host.recv_bounded(mut half, mut input, RECEIVE_LOAN_BYTES, read_until) {
                 Ok(0) => return Error(Eof),
                 Ok(_) => return Ok(()),
                 Error(TimedOut) => if !expired(read_until) {
@@ -644,8 +492,8 @@ pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
                 Error(e) => return Error(Network(e))
             }
         }
-        r.input = list.new()
-        return if message_expired(r, host.mono_ns(r.clock)) {
+        input = list.new()
+        return if host.mono_ns(clock) >= late {
             Error(Protocol(1001u16))
         } else {
             Error(Network(TimedOut))
@@ -719,14 +567,14 @@ pub fn refuse_socket(take socket: Socket, code: u16, deadline: Until) -> Result[
 /// Accept-to-head absolute deadline, sanitized ingress and preserved read-ahead.
 /// The lease is consumed on every error path and returned with success until
 /// Hello acceptance. The accept loop acquires it before spawning session state.
-pub fn server(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64) -> Result[Upgraded, Error] waits {
+pub fn server(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[ingress_policy.Prefix], config: Config, clock: Clock, accepted_ns: u64) -> Result[Upgraded, Error] waits {
     server_with(take socket, take slot, peer, ingress, config, clock, accepted_ns, scoped fn(ip: Ip) -> bool {
         true
     })
 }
 
 /// Runs the source admission policy after sanitization and before writing 101.
-pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
+pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[ingress_policy.Prefix], config: Config, clock: Clock, accepted_ns: u64, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
     let request = receive_request(take socket, config, clock, accepted_ns)?
     upgrade_request(take request, take slot, peer, ingress, config, clock, admit)
 }
@@ -800,12 +648,12 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
 
 /// Serve one request. The raw GET and HEAD handler runs before the upgrade's source policy.
 /// Raw and static responses close the connection.
-pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
+pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[ingress_policy.Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
     server_with_site_report(take socket, take slot, peer, ingress, config, clock, accepted_ns, site, raw, admit, None)
 }
 
 /// As server_with_site, with optional stderr authority for static response failures.
-pub fn server_with_site_report(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits, report: Option[Stderr]) -> Result[Option[Upgraded], Error] waits {
+pub fn server_with_site_report(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[ingress_policy.Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits, report: Option[Stderr]) -> Result[Option[Upgraded], Error] waits {
     let request = receive_request(take socket, config, clock, accepted_ns)?
     let (head_only, fetch) = {
         let method = list.slice(request.input, request.head.method.start, request.head.method.end)
@@ -843,7 +691,7 @@ pub fn server_with_site_report(take socket: Socket, take slot: Pending, peer: Ip
     Ok(None)
 }
 
-fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
+fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[ingress_policy.Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
     let Request(reader: take reader, writer: take output, input: take input, head: take parsed, path_end, deadline) = take request
     let mut writer = take output
     let mut head = take parsed
@@ -851,7 +699,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
     let upgraded = websocket.server_head(input, head)
     match take upgraded {
         Upgraded(end, selected, take response) => {
-            let ip = match source_for_head(input, head, peer, ingress) {
+            let ip = match ingress_policy.source_for_head(input, head, peer, ingress) {
                 Ok(ip) => ip,
                 Error(code) => {
                     let _ = refuse(mut writer, code, deadline)
@@ -864,7 +712,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
             }
             wsock_site.send_response(mut writer, response, string.as_bytes(""), deadline)?
             let kept = unread(input, end)?
-            Ok(Upgraded(protocol: selected, read_ahead: list.len(kept), reader: Reader(half: take reader, input: take kept, cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+            Ok(Upgraded(protocol: selected, read_ahead: list.len(kept), reader: Reader(half: Stream(take reader), input: take kept, cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: Stream(take writer), buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
         },
         Refused(code) => {
             let _ = refuse(mut writer, code, deadline)
@@ -906,7 +754,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
         match websocket.client(input, key, true) {
             Ready(end, true) => {
                 let kept = unread(input, end)?
-                return Ok(Connected(reader: Reader(half: take input_half, input: take kept, cursor: 0, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock))))
+                return Ok(Connected(reader: Reader(half: Stream(take input_half), input: take kept, cursor: 0, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: Stream(take output_half), buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock))))
             },
             Ready(_, false) => return Error(Http(400)),
             Failed(code) => return Error(Http(code)),
@@ -927,25 +775,75 @@ pub fn drained(w: Writer) -> bool {
     idle(w.buffer)
 }
 
-fn read_half(take reader: Reader) -> ReadHalf {
+fn read_half(take reader: Reader) -> In {
     let Reader(half: input, ..) = take reader
     take input
 }
 
-fn write_half(take writer: Writer) -> WriteHalf {
+fn write_half(take writer: Writer) -> Out {
     let Writer(half: output, ..) = take writer
     take output
+}
+
+/// One write: a socket send, or one item on the in-process connection. An item is
+/// accepted whole, so the count is the slice's length.
+fn put(mut half: Out, data: Bytes, deadline: Until) -> Result[u64, NetError] waits {
+    match half {
+        Stream(mut w) => host.send_pair(mut w, data, string.as_bytes(""), deadline),
+        Local(c) => {
+            let n = order.min(list.len(data), LOCAL_CHUNK)
+            let mut item: Bytes = list.new()
+            if let Error(_) = list.try_reserve(mut item, n) {
+                return Error(Exhausted)
+            }
+            list.append(mut item, list.slice(data, 0, n))
+            put_local(c, take item, deadline)
+        }
+    }
+}
+
+// A full connection is the peer not reading, as a full socket buffer is. `conn` has no
+// timed send, so a send with a deadline retries until it, backing off from 1 ms to
+// 16 ms; past the deadline it is TimedOut, which the owner's write timeout turns into
+// its close as over TCP. Without a deadline it waits in `conn.send`.
+fn put_local(c: Client[Bytes], take item: Bytes, deadline: Until) -> Result[u64, NetError] waits {
+    let n = list.len(item)
+    let mut queued = take item
+    let mut pause: u64 = 1000000
+    loop {
+        match conn.try_send(c, take queued) {
+            Ok(()) => return Ok(n),
+            Error(Closed(_)) => return Error(Reset),
+            Error(Full(take back)) => match deadline {
+                Never => return match conn.send(c, take back) {
+                    Ok(()) => Ok(n),
+                    Error(_) => Error(Reset),
+                },
+                At(clock, end) => {
+                    let now = host.mono_ns(clock)
+                    if now >= end {
+                        return Error(TimedOut)
+                    }
+                    host.sleep_until(clock, now + order.min(pause, end - now))
+                    pause = order.min(pause * 2, 16000000)
+                    queued = take back
+                },
+            },
+        }
+    }
 }
 
 /// After Close is flushed and the reader has returned ownership, drain raw TCP
 /// under the same absolute close deadline. Reader assembly and scratch are
 /// released before net.finish allocates its bounded scratch.
 pub fn finish(take writer: Writer, take reader: Reader, clock: Clock, deadline_ns: u64) -> Result[(), Error] waits {
-    let input = read_half(take reader)
-    let output = write_half(take writer)
-    match net.finish(take output, take input, clock, deadline_ns) {
-        Ok(_) => Ok(()),
-        Error(Network(e)) => Error(Network(e))
+    match (read_half(take reader), write_half(take writer)) {
+        (Stream(take input), Stream(take output)) => match net.finish(take output, take input, clock, deadline_ns) {
+            Ok(_) => Ok(()),
+            Error(Network(e)) => Error(Network(e))
+        },
+        // Dropping both ends closes an in-process session; there is no stream to drain.
+        _ => Ok(())
     }
 }
 
@@ -960,7 +858,116 @@ pub fn flush_bytes(mut w: Writer, payload: Bytes, mut cursor: u64, deadline: Unt
     if cursor == total {
         return Ok(true)
     }
-    let sent = host.send_pair(mut w.half, list.slice(payload, cursor, total), string.as_bytes(""), deadline) ?=> Network
+    let sent = put(mut w.half, list.slice(payload, cursor, total), deadline) ?=> Network
     cursor += sent
     Ok(cursor == total)
+}
+
+/// A dial on an in-process place (RUNNER-SPEC §14.11): `back` carries the place's
+/// bytes to the dialer, and the place answers on `accept`.
+pub type Dial: cross {
+    back: Client[Bytes],
+    accept: Client[Accepted]
+}
+
+/// 101 with the place's own client, or a refusal code with the dialer's `back`
+/// returned unused. A refusal is the code a TCP upgrade refusal answers (503).
+pub type Accepted: cross {
+    code: u16,
+    to: Client[Bytes]
+}
+
+/// One direction of an in-process session. A put sends at most `LOCAL_CHUNK` bytes, the
+/// receive loan a socket read fills, so a reader holds no more input than over TCP and
+/// any frame up to `max_frame` passes in pieces, as over a stream.
+pub fn local_conn(config: Config) -> Result[(Client[Bytes], Inbox[Bytes]), Error] {
+    if !valid(config) {
+        return Error(Configuration)
+    }
+    let made: Result[(Client[Bytes], Inbox[Bytes]), Capacity] = conn.new(LOCAL_ITEMS, bytes LOCAL_ROOM)
+    Ok(made ?=> Allocation)
+}
+
+const LOCAL_CHUNK: u64 = RECEIVE_LOAN_BYTES
+
+const LOCAL_ITEMS: u64 = 8u64
+
+const LOCAL_ROOM: u64 = 4u64 * LOCAL_CHUNK
+
+/// What one direction of an in-process session admits (CONC-17): each end of a session
+/// pays this for the connection it receives on, the place's owner on top of its floor.
+pub fn local_session_bytes() -> u64 {
+    64u64 + LOCAL_ITEMS * bytes[Bytes] + LOCAL_ROOM
+}
+
+/// The place's side of an admitted dial. The source is loopback, so no binding
+/// trusts an in-process session more than a local TCP client.
+pub fn local_server(take dial: Dial, take slot: Pending, config: Config, clock: Clock) -> Result[Upgraded, Error] waits {
+    let (to, inbox) = local_conn(config)?
+    let Dial(back: take back, accept: take accept) = take dial
+    if let Error(_) = conn.send(accept, Accepted(code: 101, to: take to)) {
+        return Error(Eof)
+    }
+    Ok(Upgraded(protocol: Current, read_ahead: 0, reader: Reader(half: Local(take inbox), input: list.new(), cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: Local(take back), buffer: write_buffer()), source: V4(0x7f000001), timers: timers(config, host.mono_ns(clock)), pending: take slot))
+}
+
+/// Refuses a dial with `code`, as a TCP upgrade refusal does.
+pub fn local_refuse(take dial: Dial, code: u16) -> () waits {
+    let Dial(back: take back, accept: take accept) = take dial
+    let _ = conn.send(accept, Accepted(code: code, to: take back))
+}
+
+/// `local_refuse` without waiting. The dialer's answer connection holds one item and
+/// receives only this answer, so it never refuses for room; a dropped answer reads as
+/// Closed, which a dialer treats as a refusal too.
+pub fn try_refuse(take dial: Dial, code: u16) -> bool {
+    let Dial(back: take back, accept: take accept) = take dial
+    match conn.try_send(accept, Accepted(code: code, to: take back)) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+/// The handle a host hands out for one in-process place: dialing it is the in-process
+/// connect. It is `cross`, so any unit may hold a copy.
+pub type Dialer: cross {
+    to: Client[Dial]
+}
+
+/// A place's dial connection: the dialer its host hands out and the inbox its serve loop
+/// takes dials from. A Dial holds only clients, so the connection has no room.
+pub fn dials(cap: u64) -> Result[(Dialer, Inbox[Dial]), Capacity] {
+    let made: Result[(Client[Dial], Inbox[Dial]), Capacity] = conn.new(cap, bytes 0u64)
+    let (to, inbox) = made?
+    Ok((Dialer(to: take to), take inbox))
+}
+
+/// Another dialer of the same place.
+pub fn copy_dialer(d: Dialer) -> Dialer {
+    Dialer(to: conn.client(d.to))
+}
+
+/// The dialer's side: sends the dial and waits for the place's answer. A refused
+/// dial is `Http(code)`, and a dial the place never took (it stopped) is `Eof`. The
+/// wait has no deadline (CONC-17 has no timed receive); the place answers or drops
+/// every dial it takes, and a caller that wants a bound cancels the waiting task.
+/// The dialer pays `local_session_bytes()` for its receive connection.
+pub fn local_client(dialer: Dialer, config: Config, clock: Clock, random: Random) -> Result[Connected, Error] waits {
+    let (back, inbox) = local_conn(config)?
+    let opened: Result[(Client[Accepted], Inbox[Accepted]), Capacity] = conn.new(1u64, bytes 0u64)
+    let (answer, answers) = opened ?=> Allocation
+    let sent: Result[(), Closed[Dial]] = conn.send(dialer.to, Dial(back: take back, accept: take answer))
+    if let Error(_) = sent {
+        return Error(Eof)
+    }
+    let accepted: Accepted = match conn.receive(answers) {
+        Ok(take a) => take a,
+        Error(Capacity(c)) => return Error(Allocation(c)),
+        Error(Closed) => return Error(Eof),
+    }
+    let Accepted(code: code, to: take to) = take accepted
+    if code != 101 {
+        return Error(Http(code))
+    }
+    Ok(Connected(reader: Reader(half: Local(take inbox), input: list.new(), cursor: 0, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: Local(take to), buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock))))
 }

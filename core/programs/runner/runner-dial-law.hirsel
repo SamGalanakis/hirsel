@@ -1,0 +1,71 @@
+// local_dial_parity (RUNNER-SPEC §14.11): a session dialed in process is checked and
+// refused as a TCP session is. bind_granted's place (max_sessions 2, credential [b]
+// binds Caller(b, [b]), any other length is Rejected) runs once on loopback TCP and once
+// dialed, and each run must give the hand-derived outcomes:
+// - credential [2] binds Caller(2, [2]);
+// - with two sessions held, a third is refused HTTP 503 at transport admission (§9
+//   "excess sessions");
+// - credential [2, 2] closes 1008 before Welcome (§3 "Binding").
+// Wrong implementations it catches: a dial admitted without the session limit (the third
+// connects), and a dial whose Hello skips the binding (credential [2, 2] binds).
+const REFUSED_HTTP: u64 = 1000u64
+
+const REFUSED_CLOSE: u64 = 2000u64
+
+// 0 for a connection the place admitted (it is closed again), else the refusal's code
+// offset by its kind, so both transports' answers compare as numbers.
+fn attempt_code(take attempt: Result[wire_client.Conn, std.wsock.Error]) -> u64 waits {
+    match take attempt {
+        Ok(take c) => {
+            let _ = wire_client.close(take c)
+            0u64
+        },
+        Error(Http(code)) => REFUSED_HTTP + int.widen(code),
+        Error(Protocol(code)) => REFUSED_CLOSE + int.widen(code),
+        Error(_) => 1u64,
+    }
+}
+
+fn parity_arm(take wired: fixture.Fixture, clock: Clock, reports: Receiver[u64]) -> bool waits {
+    let first = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
+    let held = fixture.bound_caller(first)
+    let welcomed = held.issuer == 2u8 && held.subject == b"\x02"
+    let second = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
+    let full = attempt_code(fixture.connect(wired, Some(b"\x02"), 5000u64)) == REFUSED_HTTP + 503u64
+    fixture.close(take second)
+    // The closed session's slot is released by its owner, so a refusal for room here
+    // means only that the release has not landed yet.
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
+    let mut rejected = attempt_code(fixture.connect(wired, Some(b"\x02\x02"), 5000u64))
+    while rejected == REFUSED_HTTP + 503u64 && host.mono_ns(clock) < deadline {
+        std.clock.sleep_ns(clock, 5000000u64)
+        rejected = attempt_code(fixture.connect(wired, Some(b"\x02\x02"), 5000u64))
+    }
+    fixture.close(take first)
+    let stopped = match fixture.end(take wired, 5000u64) {
+        Ok(Stopped(None)) => true,
+        _ => false
+    }
+    // `reports` stays open until here: a bind mint unwraps its report.
+    let _ = channel.try_receive(reports)
+    welcomed && full && rejected == REFUSED_CLOSE + 1008u64 && stopped
+}
+
+pub fn law_local_dial_parity(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let (socket_report, socket_reports): (Sender[u64], Receiver[u64]) = channel.new(16u64)
+    let socketed = result.unwrap(fixture.start(probe_settings(clock, random, tasks, net, socket_report, false), 5000u64))
+    let over_tcp = parity_arm(take socketed, clock, socket_reports)
+    let (dial_report, dial_reports): (Sender[u64], Receiver[u64]) = channel.new(16u64)
+    let dialed = result.unwrap(fixture.start_dialed(probe_settings(clock, random, tasks, net, dial_report, false), 5000u64))
+    let over_dial = parity_arm(take dialed, clock, dial_reports)
+    over_tcp && over_dial
+}
+
+@test
+fn test_local_dial_parity(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_dial_parity(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

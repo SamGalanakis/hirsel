@@ -128,7 +128,7 @@ fn read_frames(take seed: Read) -> () waits {
                 Ok(Need) => (),
                 Error(Network(TimedOut)) if !probing => {
                     probing = true;
-                    if let Error(_) = channel.send(control, Control(9u8, std.websocket.Control(data: [0u8; 125], len: 0u64))) {
+                    if let Error(_) = channel.send(control, Control(9u8, std.websocket.Control(data:[0u8; 125], len: 0u64))) {
                         return
                     }
                 },
@@ -236,7 +236,21 @@ pub fn open(n: Net, address: Addr, authority: Bytes, c: Clock, random: Random, k
 }
 
 fn open_socket(take socket: Socket, authority: Bytes, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, until: Until) -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller, store.StreamId), std.wsock.Error] waits {
-    let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = std.wsock.client(take socket, authority, config, c, random)?
+    let connected = std.wsock.client(take socket, authority, config, c, random)?
+    greet(take connected, c, random, keys, take token, until)
+}
+
+/// `open` on an in-process place (RUNNER-SPEC §14.11): the dial replaces connect and
+/// the HTTP upgrade, and the Hello, Welcome and Placed exchange is the same. It takes no
+/// deadline: an in-process read has none (CONC-17), and the place's Hello alarm answers
+/// or closes the session. A caller that wants a bound cancels the task that opens.
+pub fn open_dial(dialer: std.wsock.Dialer, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config) -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller, store.StreamId), std.wsock.Error] waits {
+    let connected = std.wsock.local_client(dialer, config, c, random)?
+    greet(take connected, c, random, keys, take token, Never)
+}
+
+fn greet(take connected: std.wsock.Connected, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], until: Until) -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller, store.StreamId), std.wsock.Error] waits {
+    let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = take connected
     let mut r = take input
     let mut w = take output
     let mut out = take outgoing
@@ -268,7 +282,22 @@ pub fn connect_for(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random
 }
 
 pub fn connect_socket(tasks: Tasks, take socket: Socket, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, until: Until, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
-    let (take r, take w, take out, take who, minted) = open_socket(take socket, string.as_bytes("127.0.0.1"), c, random, keys, take token, config, until)?
+    let made = open_socket(take socket, string.as_bytes("127.0.0.1"), c, random, keys, take token, config, until)?
+    conn_over(tasks, take made, c, idle_ms)
+}
+
+/// `connect_socket` on an in-process place, through its dial client. Its reads have no
+/// idle bound (`open_dial`), so it takes none.
+pub fn connect_dial(tasks: Tasks, dialer: std.wsock.Dialer, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config) -> Result[Conn, std.wsock.Error] waits {
+    let made = open_dial(dialer, c, random, keys, take token, config)?
+    conn_over(tasks, take made, c, NO_IDLE_MS)
+}
+
+// The idle bound of an in-process connection's reads: none, as CONC-17 has no timed receive.
+const NO_IDLE_MS: u64 = 0xffffffffffffffffu64
+
+fn conn_over(tasks: Tasks, take made: (std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller, store.StreamId), c: Clock, idle_ms: u64) -> Result[Conn, std.wsock.Error] {
+    let (take r, take w, take out, take who, minted) = take made
     let (to, commands): (Sender[Command], Receiver[Command]) = channel.new(64u64)
     let (frames, from): (Sender[Incoming], Receiver[Incoming]) = channel.new(64u64)
     let wake = channel.sender(frames)

@@ -1,0 +1,195 @@
+// The text a failed start prints: each StartError and the causes under it.
+fn push_hex_prefix(mut line: String, digest: Bytes) {
+    let short = if list.len(digest) > 6u64 {
+        list.slice(digest, 0u64, 6u64)
+    } else {
+        list.slice(digest, 0u64, list.len(digest))
+    }
+    string.push(mut line, std.hex.encode(short))
+}
+
+fn push_store_error(mut line: String, problem: store.Error) {
+    match problem {
+        Held => string.push(mut line, "the store directory is held by another process (its LOCK)"),
+        NotFound => string.push(mut line, "the store directory has no store"),
+        Corrupt(fault) => {
+            string.push(mut line, "the store is corrupt at ");
+            string.push(mut line, fault.file);
+            string.push(mut line, " offset ");
+            string.push_u64(mut line, fault.offset)
+        },
+        Unsupported(version) => {
+            string.push(mut line, "the store's format version ");
+            string.push_u64(mut line, version);
+            string.push(mut line, " is not this build's")
+        },
+        Io(_) => string.push(mut line, "an I/O error in the store directory"),
+        Poisoned(_) => string.push(mut line, "an earlier write failed, so the store refuses further writes"),
+        Full(Journal(cap)) => {
+            string.push(mut line, "the journal options do not fit: ");
+            push_capacity(mut line, cap)
+        },
+        Full(Resident(cap)) => {
+            string.push(mut line, "the store's resident bound is full: ");
+            push_capacity(mut line, cap)
+        },
+        Full(Allocation(cap)) => {
+            string.push(mut line, "out of memory opening the store: ");
+            push_capacity(mut line, cap)
+        },
+        Full(Cache(cap)) => {
+            string.push(mut line, "the store's cache partition is full: ");
+            push_capacity(mut line, cap)
+        },
+        Limit(_) => string.push(mut line, "a store limit was exceeded"),
+        Schema(_) => string.push(mut line, "a table's stored schema differs from this build's handles"),
+        Stale(_) => string.push(mut line, "a stale table handle"),
+        Decode(_) => string.push(mut line, "a stored value does not decode with this build's codec"),
+        Exists(name) => {
+            string.push(mut line, "already exists: ");
+            string.push(mut line, name)
+        },
+        Missing(name) => {
+            string.push(mut line, "missing: ");
+            string.push(mut line, name)
+        },
+        Changed(name) => {
+            string.push(mut line, "changed index: ");
+            string.push(mut line, name)
+        },
+        Conflict(name) => {
+            string.push(mut line, "unique index conflict: ");
+            string.push(mut line, name)
+        },
+        NotReady(name) => {
+            string.push(mut line, "index is still building: ");
+            string.push(mut line, name)
+        },
+        Drift(name) => {
+            string.push(mut line, "index drifted from its table and was demoted: ");
+            string.push(mut line, name)
+        },
+        Undeclared(name) => push_undeclared_schema(mut line, name),
+        NoLevel(name) => {
+            string.push(mut line, "unknown durability level ");
+            string.push(mut line, name)
+        },
+        Behind(_) => string.push(mut line, "the follower has not applied the requested version"),
+        Gone(id) => {
+            string.push(mut line, "deleted branch ");
+            string.push_u64(mut line, int.widen(id))
+        },
+        Unseen(id) => {
+            string.push(mut line, "unseen branch ");
+            string.push_u64(mut line, int.widen(id))
+        },
+        Diverged(_) => string.push(mut line, "the store diverged"),
+        Foreign => string.push(mut line, "a handle from another store"),
+        MigrationFault => string.push(mut line, "the migration faulted"),
+        ExportDirectory => string.push(mut line, "an export directory, not a place store"),
+        Fenced(_) => string.push(mut line, "another writer claimed the bucket store"),
+        Lost => string.push(mut line, "the bucket store writer claim was lost"),
+        Undecided => string.push(mut line, "the object store head write has an unknown outcome"),
+        Declared(_) => string.push(mut line, "the durability level differs from the store declaration"),
+        NotCurrent(version) => {
+            string.push(mut line, "the store is at activation ");
+            string.push_u64(mut line, version)
+        },
+        Endpoint(reason) => string.push(mut line, store.endpoint_refusal_text(reason)),
+        HistoryMissing(_, _) => string.push(mut line, "the object store history is missing an object"),
+        Reclaimed(_) => string.push(mut line, "the requested object store history was reclaimed"),
+        Retired => string.push(mut line, "the Store follower worker has stopped"),
+        Missed => string.push(mut line, "a read is waiting for a store frame"),
+        Remote(_) => string.push(mut line, "a bucket operation failed"),
+        Tiered(reason) => string.push(mut line, store.tiered_refusal_text(reason)),
+    }
+}
+
+fn push_capacity(mut line: String, cap: Capacity) {
+    string.push_u64(mut line, cap.requested)
+    string.push(mut line, " bytes requested, ")
+    string.push_u64(mut line, cap.available)
+    string.push(mut line, " available")
+}
+
+// One line naming why a place did not start and what to change (RUNNER-SPEC §12.1).
+pub fn start_text(problem: StartError) -> String {
+    let mut line = string.from("place: ")
+    match problem {
+        Missing(name) => {
+            string.push(mut line, "missing or invalid ");
+            string.push(mut line, name)
+        },
+        Exceeds(over) => {
+            string.push(mut line, over.name)
+            string.push(mut line, " is ")
+            string.push_u64(mut line, over.value)
+            string.push(mut line, ", above the most this place accepts, ")
+            string.push_u64(mut line, over.limit)
+        },
+        Full(cap) => {
+            string.push(mut line, "the executable's root limit cannot hold this place: ")
+            push_capacity(mut line, cap)
+            string.push(mut line, "; rebuild with a larger --limit (runner.operate_bytes(config) is what operate spends)")
+        },
+        Listen(_) => string.push(mut line, "could not listen"),
+        Open(Store(e)) => {
+            string.push(mut line, "store: ");
+            push_store_error(mut line, e)
+        },
+        Open(Place(_)) => string.push(mut line, "place registration failed"),
+        Open(Migrate(e)) => {
+            string.push(mut line, "migration failed: ");
+            push_store_error(mut line, e)
+        },
+        Open(NotCurrent(Empty)) => string.push(mut line, "the store is empty, but --hirsel-activation named a version; start without --hirsel-activation for genesis"),
+        Open(NotCurrent(Legacy)) => string.push(mut line, "the store holds data without an activation; start it once with --hirsel-install"),
+        Open(NotCurrent(Active(version, description, _))) => {
+            string.push(mut line, "the store is at activation ")
+            string.push_u64(mut line, version)
+            let codec: std.codec.Codec[Describe] = std.codec.of()
+            match std.codec.decode(codec, description) {
+                Ok(take stored) => {
+                    string.push(mut line, " of image ")
+                    push_hex_prefix(mut line, stored.digest)
+                    string.push(mut line, " with n_place ")
+                    string.push_u64(mut line, stored.n_place)
+                },
+                Error(_) => (),
+            }
+            string.push(mut line, ", and this launch is image ")
+            match launch_digest() {
+                Ok(take digest) => push_hex_prefix(mut line, digest),
+                Error(_) => string.push(mut line, "?"),
+            }
+            string.push(mut line, "; start the build that wrote it, or stop it and start this build once with --hirsel-install to migrate the store to it")
+        },
+        Open(IdentityUnknown) => string.push(mut line, "release identity is unavailable"),
+        Open(StoreMismatch(expected, actual)) => string.push(mut line, store_mismatch(expected, actual)),
+        Open(PublisherStopped) => string.push(mut line, "publisher stopped"),
+        Open(KeyedOpDropped(dropped)) => keyed_open_report(mut line, dropped.op, "has an unbound live claim"),
+        Open(KeyedOpQuotaChanged(name, declared, saved)) => {
+            keyed_open_report(mut line, name, "declares keys_max ")
+            string.push_u64(mut line, declared)
+            string.push(mut line, ", stored keys_max ")
+            string.push_u64(mut line, saved)
+        },
+        Open(KeyedOpChanged(name, field)) => keyed_open_report(mut line, name, field),
+        Open(KeyedNoGrant(name)) => keyed_open_report(mut line, name, "needs a claim mint"),
+        Open(BindNoGrant) => string.push(mut line, "the place has a wire and no bind mint"),
+        Open(TriggerNoGrant(path)) => grant_open_report(mut line, "trigger entry ", path, " is granted and the place has no attempt mint"),
+        Open(CallNotGranted(path)) => grant_open_report(mut line, "call mint entry ", path, " names no registered granted entry"),
+        Open(InstallUncertain(e)) => {
+            string.push(mut line, "install outcome unknown: ");
+            push_store_error(mut line, e)
+        },
+        Open(PredecessorChanged(_)) => string.push(mut line, "the installed predecessor changed"),
+        Open(InstallVersion(next)) => {
+            string.push(mut line, "the next install activation is ")
+            string.push_u64(mut line, next)
+        },
+        Open(Unsettled(report)) => fate.push_report(mut line, report),
+        Open(Operator(refusal)) => push_operator_refusal(mut line, refusal),
+    }
+    take line
+}

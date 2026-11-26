@@ -85,14 +85,20 @@ pub opaque type Doorway: send {
     inbox: Receiver[In]
 }
 
-// A lease is a view of one child's status: its phase and address. It does not hold the
-// child; the host drains an idle child whether or not a lease on it lives.
+// A lease is a view of one child's status and, once the child is Ready, its dialer: a
+// place here binds no listener and is reached in process (RUNNER-SPEC §14.11). It does not
+// hold the child; the host drains an idle child whether or not a lease on it lives, and a
+// dial after that drain reads as the place's close.
 pub opaque type Lease: send {
-    status: Latest[runner.Status]
+    status: Latest[runner.Status],
+    dialer: Option[std.wsock.Dialer]
 }
 
 // The child task's own bytes on top of operate's: the operate task's charge, the phase
-// handoff and its last message.
+// handoff, its dial connection (64 + DIALS × size(Dial), no room: a Dial holds only
+// clients) and its last message.
+const DIALS: u64 = 16u64
+
 const PLACE_TASK_BYTES: u64 = 65536u64
 
 // The host task's own bytes on top of the place budget, its catalog store and the store a
@@ -153,10 +159,11 @@ type ReadReply = Sender[Result[Bytes, Refused]]
 
 type Downs = Sender[Result[u64, Refused]]
 
-type In: send = Host(platform.Input) | Up(String, u64) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
+type In: send = Host(platform.Input) | Up(String, u64, std.wsock.Dialer) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
 
 type PlaceJob[G: send, H: shareable + inert + send, S: send]: send {
     config: runner.PlaceConfig[G, H, S],
+    dialer: std.wsock.Dialer,
     stop: Receiver[()],
     status: Latest[runner.Status],
     to: Sender[In],
@@ -182,6 +189,7 @@ type Kid {
     expect: Option[(u64, u64)],
     ready: bool,
     selected: launcher.Selection,
+    dialer: Option[std.wsock.Dialer],
 }
 
 type Catalog: send {
@@ -294,6 +302,12 @@ fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take reque
     config.selection = selection
     config.idle = Some(idle)
     config.max_sessions = sessions
+    // The place is dialed in process, and its sizing counts each session's dial room.
+    let (dialing, dials) = match std.wsock.dials(DIALS) {
+        Ok(take pair) => take pair,
+        Error(_) => return Error(Full)
+    }
+    config.listen = InProcess(take dials)
     let overhead = match runner.operate_bytes(config) {
         Ok(total) => total,
         Error(_) => return Error(Full)
@@ -303,7 +317,7 @@ fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take reque
     if charge > available {
         return Error(Full)
     }
-    let job = PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
+    let job = PlaceJob(config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
     let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
     let running = task.spawn(supplied.tasks, bytes charge, take job, run)
     Ok(Started(task: take running, charge: charge))
@@ -320,7 +334,7 @@ fn run_place[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G
 }
 
 fn operated[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
-    let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need) = take job
+    let PlaceJob(config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let request = Operated(config: take config, stop: take halt, status: take root, watch: take handoff)
@@ -329,7 +343,7 @@ fn operated[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G,
     if let Ok(take phases) = channel.receive(phases_from) {
         while let Ok(phase) = channel.receive(phases) {
             if let Ready = phase {
-                let _ = channel.send(to, Up(string.from(name), gen))
+                let _ = channel.send(to, Up(string.from(name), gen, std.wsock.copy_dialer(dialing)))
             }
         }
     }
@@ -432,7 +446,7 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
         Ok(take begun) => {
             let Started(task: take running, charge: charged) = take begun
             a.used += charged
-            list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged, expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly)))
+            list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged, expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly), dialer: None))
             list.push(mut events, Launched(take child, Started))
         },
         Error(take why) => refuse_start(mut a, take child, take why, mut events),
@@ -557,7 +571,11 @@ fn apply[T: send](mut a: Actor[T], take reqs: List[launcher.Request]) waits {
 }
 
 fn lease_of(k: Kid) -> Lease {
-    Lease(status: latest.handle(k.status))
+    let dialing = match k.dialer {
+        Some(d) => Some(std.wsock.copy_dialer(d)),
+        None => None,
+    }
+    Lease(status: latest.handle(k.status), dialer: take dialing)
 }
 
 // A child a lease may name: accepted by the host, not asked to stop and not draining by
@@ -628,7 +646,7 @@ fn routed[T: send](a: Actor[T], name: String) -> bool {
 // A child reached Ready: the launcher reports the store it opened, as a hosted place does
 // on its private endpoint. A store other than the one the host recorded for the group is
 // reported as a mismatch and the child is stopped.
-fn on_up[T: send](mut a: Actor[T], name: String, gen: u64) waits {
+fn on_up[T: send](mut a: Actor[T], name: String, gen: u64, take dialing: std.wsock.Dialer) waits {
     let Some(i) = kid_of(a, name, gen) else {
         return
     }
@@ -648,6 +666,7 @@ fn on_up[T: send](mut a: Actor[T], name: String, gen: u64) waits {
         list.push(mut events, Placed(take child, PlaceStoreMismatch(want.0, want.1, s.store_id.0, s.store_id.1)))
     } else {
         a.kids[i].ready = true
+        a.kids[i].dialer = Some(take dialing)
         let ready = runner.PlaceReady(version: s.activation, store_hi: s.store_id.0, store_lo: s.store_id.1, release: clone(s.release), retain_from: s.retain_from, ready_ns: host.mono_ns(a.clock), read: list.new())
         list.push(mut events, Placed(take child, PlaceOpened(take ready)))
         if let Some(id) = id_of(name) {
@@ -846,7 +865,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
                 let reqs = platform.step(mut a.h, mut a.driving, take i, n)
                 apply(mut a, take reqs)
             },
-            Up(take name, gen) => on_up(mut a, name, gen),
+            Up(take name, gen, take dialing) => on_up(mut a, name, gen, take dialing),
             Down(take name, gen, take ended) => on_down(mut a, name, gen, take ended),
             Create(take key, take seeding, take reply) => {
                 let answer: Result[u64, Refused] = if a.halting {

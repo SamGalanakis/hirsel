@@ -160,13 +160,13 @@ fn proxy_clock(take input: sim.world.World) waits {
 
 fn proxy_accept_cases(tasks: Tasks, take stream: Bytes) -> u64 waits {
     let trusted_ip = V4(0x7f000001)
-    let mut trusted: List[wsock.Prefix] = list.with_capacity(1)
-    list.push(mut trusted, option.unwrap(wsock.parse_prefix("127.0.0.1/32")))
+    let mut trusted: List[ingress_policy.Prefix] = list.with_capacity(1)
+    list.push(mut trusted, option.unwrap(ingress_policy.parse_prefix("127.0.0.1/32")))
     let cap = proxy.DEFAULT_HEADER_MAX
     if proxy.DEFAULT_HEADER_MS != 3000 {
         return 10
     }
-    let empty: List[wsock.Prefix] = list.new()
+    let empty: List[ingress_policy.Prefix] = list.new()
     if let Ok(_) = proxy.config(empty, cap, 3) {
         return 11
     }

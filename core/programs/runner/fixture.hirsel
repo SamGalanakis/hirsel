@@ -49,6 +49,7 @@ pub opaque type Fixture {
     clock: Clock,
     random: Random,
     socket: std.wsock.Config,
+    dialer: Option[std.wsock.Dialer],
 }
 
 type Sub: send {
@@ -173,13 +174,32 @@ fn run_operate[G: send, H: shareable + inert + send, S: send](take request: Oper
 }
 
 pub fn start[G: send, H: shareable + inert + send, S: send](take p: runner.PlaceConfig[G, H, S], within_ms: u64) -> Result[Fixture, FixtureError] waits {
+    match p.listen {
+        Tcp(at) => if !loopback_any(at) {
+            return Error(Start(Missing("listen")))
+        },
+        InProcess(_) => return Error(Start(Missing("listen"))),
+    }
+    started(take p, None, within_ms)
+}
+
+// `start` for a place reached in process (RUNNER-SPEC §14.11): the fixture makes the
+// place's dial connection, replaces `listen` with it, and its clients dial.
+pub fn start_dialed[G: send, H: shareable + inert + send, S: send](take p: runner.PlaceConfig[G, H, S], within_ms: u64) -> Result[Fixture, FixtureError] waits {
+    let (dialer, dials) = match std.wsock.dials(16u64) {
+        Ok(take pair) => take pair,
+        Error(cap) => return Error(Full(cap)),
+    }
+    let mut placed = take p
+    placed.listen = InProcess(take dials)
+    started(take placed, Some(take dialer), within_ms)
+}
+
+fn started[G: send, H: shareable + inert + send, S: send](take p: runner.PlaceConfig[G, H, S], take dialer: Option[std.wsock.Dialer], within_ms: u64) -> Result[Fixture, FixtureError] waits {
     match p.backing {
         Memory => (),
         Temp(_) => (),
         _ => return Error(Start(Missing("backing")))
-    }
-    if !loopback_any(p.listen) {
-        return Error(Start(Missing("listen")))
     }
     let keys = match place_keys(p.place) {
         Ok(take k) => take k,
@@ -238,7 +258,7 @@ pub fn start[G: send, H: shareable + inert + send, S: send](take p: runner.Place
         }
     }
     let _ = task.cancel_join(take alarm)
-    Ok(Fixture(stop: take stop_to, events: take events, me: take me, place: take place, status: take root, keys: take keys, net: net, tasks: tasks, clock: clock, random: random, socket: socket))
+    Ok(Fixture(stop: take stop_to, events: take events, me: take me, place: take place, status: take root, keys: take keys, net: net, tasks: tasks, clock: clock, random: random, socket: socket, dialer: take dialer))
 }
 
 pub fn status(f: Fixture) -> runner.Status {
@@ -282,11 +302,28 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[runner.Ended, FixtureError
 const IDLE_MS: u64 = 0xffffffffffffffffu64
 
 pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[Client, CallError] waits {
-    let address = match latest.read(f.status).addr {
-        Some(a) => a,
-        None => return Error(Closed)
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(f.clock), within_ms)
+    match connect(f, take token, within_ms) {
+        Ok(take c) => Ok(Client(conn: take c, keys: clone(f.keys), next_p: 0u64, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: f.tasks, clock: f.clock)),
+        Error(_) => if host.mono_ns(f.clock) >= deadline {
+            Error(Deadline(within_ms))
+        } else {
+            Error(Closed)
+        },
     }
-    client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, take token, None, within_ms)
+}
+
+// One connection to this fixture's place over the transport it was started with, and the
+// transport's own error when it is refused. `within_ms` bounds a TCP open; a dial has no
+// deadline (RUNNER-SPEC §14.11), and the place's Hello alarm ends a session it never binds.
+pub fn connect(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[wire_client.Conn, std.wsock.Error] waits {
+    match f.dialer {
+        Some(d) => wire_client.connect_dial(f.tasks, std.wsock.copy_dialer(d), f.clock, f.random, f.keys, take token, f.socket),
+        None => match latest.read(f.status).addr {
+            Some(a) => wire_client.connect_for(f.tasks, f.net, a, f.clock, f.random, f.keys, take token, f.socket, within_ms, IDLE_MS),
+            None => Error(Eof),
+        },
+    }
 }
 
 // The entry keys a client of a place registered by `place` may call.
@@ -299,7 +336,7 @@ pub fn entry_keys[G: send, H: shareable + inert + send](place: StaticFn[fn(mut r
 // earlier connection of the same Caller called on, at that stream's next position.
 pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, take token: Option[Bytes], resume: Option[wire_client.Resume], within_ms: u64) -> Result[Client, CallError] waits {
     let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), within_ms)
-    let mut conn = match wire_client.connect_for(tasks, net, address, clock, random, keys, take token, socket, within_ms, IDLE_MS) {
+    let conn = match wire_client.connect_for(tasks, net, address, clock, random, keys, take token, socket, within_ms, IDLE_MS) {
         Ok(take c) => take c,
         Error(_) => return if host.mono_ns(clock) >= deadline {
             Error(Deadline(within_ms))
@@ -307,13 +344,29 @@ pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: Lis
             Error(Closed)
         },
     }
+    Ok(fixture_client(take conn, keys, resume, tasks, clock))
+}
+
+// `client_at` on an in-process place, through the dialer its lease carries
+// (`platform.local.dialer`). It takes no deadline: an in-process read has none (CONC-17),
+// and the place's Hello alarm answers or closes the session.
+pub fn client_dial(tasks: Tasks, dialer: std.wsock.Dialer, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, take token: Option[Bytes], resume: Option[wire_client.Resume]) -> Result[Client, CallError] waits {
+    let conn = match wire_client.connect_dial(tasks, dialer, clock, random, keys, take token, socket) {
+        Ok(take c) => take c,
+        Error(_) => return Error(Closed),
+    }
+    Ok(fixture_client(take conn, keys, resume, tasks, clock))
+}
+
+fn fixture_client(take opened: wire_client.Conn, keys: List[Bytes], resume: Option[wire_client.Resume], tasks: Tasks, clock: Clock) -> Client {
+    let mut conn = take opened
     let held: List[Bytes] = clone(keys)
     let mut next_p = 0u64
     if let Some(r) = resume {
         conn.stream = r.stream;
         next_p = r.next
     }
-    Ok(Client(conn: take conn, keys: take held, next_p: next_p, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
+    Client(conn: take conn, keys: take held, next_p: next_p, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock)
 }
 
 // Identity returned by the place in Welcome after binding the credential.

@@ -8,7 +8,7 @@ pub type Refusal = Untrusted | Missing | Malformed | Local | Family | TooLong | 
 pub type Step = Need(u64) | Done(Header, u64)
 
 pub type Config: shareable + send {
-    trusted: List[wsock.Prefix],
+    trusted: List[ingress_policy.Prefix],
     header_max: u64,
     header_ms: u64
 }
@@ -21,12 +21,12 @@ const fixed_size: u64 = 16
 
 /// Checks the trusted prefixes and the byte limit for required PROXY v2 headers.
 /// Use DEFAULT_HEADER_MAX and DEFAULT_HEADER_MS for the standard limits.
-pub fn config(trusted: List[wsock.Prefix], header_max: u64, header_ms: u64) -> Result[Config, ()] {
+pub fn config(trusted: List[ingress_policy.Prefix], header_max: u64, header_ms: u64) -> Result[Config, ()] {
     let count = list.len(trusted)
     if count == 0 || header_max < 28 || header_max > 65551 {
         return Error(())
     }
-    let mut prefixes: List[wsock.Prefix] = list.with_capacity(count)
+    let mut prefixes: List[ingress_policy.Prefix] = list.with_capacity(count)
     list.append(mut prefixes, trusted)
     Ok(Config(trusted: take prefixes, header_max, header_ms))
 }
@@ -35,7 +35,7 @@ pub fn config(trusted: List[wsock.Prefix], header_max: u64, header_ms: u64) -> R
 /// Checks the peer before reading and closes the socket on every refusal.
 /// Waits under one deadline from accepted_ns. Allocates the header buffer.
 pub fn accept(take s: Socket, peer: Addr, c: Config, time: Clock, accepted_ns: u64) -> Result[(Socket, Header), Refusal] waits {
-    if !wsock.trusted(peer.ip, c.trusted) {
+    if !ingress_policy.trusted(peer.ip, c.trusted) {
         return Error(Untrusted)
     }
     let deadline = clock.deadline_after_ms(accepted_ns, c.header_ms)

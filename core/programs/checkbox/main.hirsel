@@ -97,13 +97,13 @@ fn asset(path: Bytes) -> Option[std.wsock.Asset] {
 
 type Settings {
     listen: Addr,
-    proxies: List[std.wsock.Prefix],
+    proxies: List[std.ingress_policy.Prefix],
 }
 
 fn settings(a: Args) -> Result[Settings, Exit] {
     let invalid = Exit(status: 2u8)
     let mut listen = Addr(ip: V4(0x7f000001u32), port: 7700u16)
-    let mut proxies: List[std.wsock.Prefix] = list.new()
+    let mut proxies: List[std.ingress_policy.Prefix] = list.new()
     let mut i = 0u64
     while i < args.len(a) {
         let name = option.unwrap(args.get(a, i))
@@ -118,7 +118,7 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             let Some((address, port_text)) = std.string.split_once(value, ":") else {
                 return Error(invalid)
             }
-            let Some(ip) = std.wsock.parse_ip(address) else {
+            let Some(ip) = std.ingress_policy.parse_ip(address) else {
                 return Error(invalid)
             }
             let Ok(port) = (int.parse(port_text) : Result[u16, ParseError]) else {
@@ -126,7 +126,7 @@ fn settings(a: Args) -> Result[Settings, Exit] {
             }
             listen = Addr(ip: ip, port: port)
         } else if name == "--ingress" {
-            let Some(prefix) = std.wsock.parse_prefix(value) else {
+            let Some(prefix) = std.ingress_policy.parse_prefix(value) else {
                 return Error(invalid)
             }
             list.push(mut proxies, prefix)
@@ -143,10 +143,10 @@ const STOP_GRACE_MS: u64 = 5000u64
 
 // runner.operate owns the place from store open to store close; a SIGINT or SIGTERM closes
 // `stop` (runner.main), which drains and closes the store.
-fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, take selection: runner.Selection, listen: Addr, take proxies: List[std.wsock.Prefix]) -> runner.PlaceConfig[(), Handles, ()] {
+fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, take selection: runner.Selection, listen: Addr, take proxies: List[std.ingress_policy.Prefix]) -> runner.PlaceConfig[(), Handles, ()] {
     let mut session = runner.wire_defaults(65536u64)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: take selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64, listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
+    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: take selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64, listen: Tcp(listen), net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
 }
 
 fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, errors: Stderr, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {

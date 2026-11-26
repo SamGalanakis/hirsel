@@ -129,7 +129,12 @@ pub fn entry_keys[G: send, H: shareable + inert + send](place: StaticFn[fn(mut r
 // A client on a fresh stream, or with `resume` (from `resume_at`) on the stream an earlier
 // connection of the same Caller called on, at that stream's next position.
 pub fn client_at(net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, authority: Bytes, take token: Option[Bytes], resume: Option[wire_client.Resume], within_ms: u64) -> Result[Client, CallError] waits {
-    let (take input, take output, take outgoing, take caller, minted) = match wire_client.open(net, address, authority, clock, random, keys, take token, socket, within_ms) {
+    let made = wire_client.open(net, address, authority, clock, random, keys, take token, socket, within_ms)
+    client_over(take made, clock, keys, resume)
+}
+
+fn client_over(take made: Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller, store.StreamId), std.wsock.Error], clock: Clock, keys: List[Bytes], resume: Option[wire_client.Resume]) -> Result[Client, CallError] {
+    let (take input, take output, take outgoing, take caller, minted) = match take made {
         Ok(take connected) => take connected,
         Error(_) => return Error(Closed),
     }
@@ -140,6 +145,14 @@ pub fn client_at(net: Net, clock: Clock, random: Random, keys: List[Bytes], sock
         Some(r) => r.next,
         None => 0u64,
     }, next_sub: 0u32, subs: map.new(), version: 0u64, clock: clock))
+}
+
+// `client_at` on an in-process place, through the dialer its host's lease holds
+// (RUNNER-SPEC §14.11). The checks and the client are the TCP ones; the open has no
+// deadline (`wire_client.open_dial`).
+pub fn client_dial(dialer: std.wsock.Dialer, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, take token: Option[Bytes], resume: Option[wire_client.Resume]) -> Result[Client, CallError] waits {
+    let made = wire_client.open_dial(dialer, clock, random, keys, take token, socket)
+    client_over(take made, clock, keys, resume)
 }
 
 // Where a later connection of this Caller continues this client's stream.

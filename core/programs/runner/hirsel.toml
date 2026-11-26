@@ -37,6 +37,7 @@ store = { major = 1, path = "../store" }
 "runner-publisher-groups.hirsel" = "runner"
 "runner-wire-protocol.hirsel" = "runner"
 "runner-budget.hirsel" = "runner"
+"runner-start-text.hirsel" = "runner"
 "runner-head-wakes.hirsel" = "runner"
 "runner-head-loop.hirsel" = "runner"
 "runner-head-calls.hirsel" = "runner"
@@ -98,6 +99,7 @@ dirs = ["."]
 "runner_hung_laws.hirsel" = "runner_calls"
 "runner-idle-law.hirsel" = "runner_calls"
 "runner-bind-law.hirsel" = "runner_calls"
+"runner-dial-law.hirsel" = "runner_calls"
 "runner-mint-laws.hirsel" = "runner_calls"
 "runner-expiry-law.hirsel" = "runner_calls"
 "runner-managed-law.hirsel" = "runner_calls"
@@ -153,6 +155,9 @@ limit = 1342177280
 limit = 1342177280
 
 [tests.runs."runner@1/runner_calls/test_bind_granted"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner_calls/test_local_dial_parity"]
 limit = 1342177280
 
 [tests.runs."runner@1/runner_calls/test_mint_per_use"]

@@ -1,12 +1,12 @@
 hirsel.laws 1
 platform@1/launcher/session_vectors src=6ff6990653cc98e5 sig=3aa0c99d733f9c74 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_genesis_recovers src=7d0e0db6ac7b6a73 sig=a6ca8541693d859b run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_idle_unload src=984eab2ecd530f33 sig=eb5ff373c65dff7a run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_one_head src=99dde38cb247423f sig=a03bd1d7575c2d3e run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_reopen_keeps src=6d11fee0d8d1477a sig=e86439f8e7119f30 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_route_during_unload src=24355ca346ed3de7 sig=fab3ceae35b2fbf3 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_start_full src=e4623f11ec490fc1 sig=6dddf0b0c4f3173f run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_platform_serve_budgets src=41bb1210dcd9d7ad sig=5e16e274017a7779 run=b8c2d9d0b4181905 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=2368a23502d6283c sig=e2543cb995b7ffe4 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_idle_unload src=5b99bd9a657c5b0a sig=325cf06f459014a5 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_one_head src=e079b37d11c345da sig=368668bda9342b79 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_reopen_keeps src=39cf32c4ca5bd277 sig=03b7517431685807 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_route_during_unload src=0df6e97b0ca9e40d sig=8d425812f752ba62 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_start_full src=70d454c103222a2e sig=ae9c11a2e036564b run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_platform_serve_budgets src=e0cbda9af8c5677e sig=036747ba4fd3993c run=b8c2d9d0b4181905 bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=252690889fb2c939 sig=f4d1137e6ad7602f run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=d5952778d488ffdc sig=9aa13a43e9467e2e run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_activation_witness_distinguishes_prepared src=cf3e4691a7a23752 sig=d020ef53fbaecaae run=1fd273d65cab0cd3 bug=- oracle=- rows=pending

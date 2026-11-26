@@ -8,7 +8,7 @@ fn local_wire() -> runner.WireConfig {
 }
 
 fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], schema_fn: StaticFn[fn(mut store.Declare) -> Result[Hd, store.Error]], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, ()] {
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install(runner.fate.none()), place: place_fn, n_place: N_PLACE, on_migrate: None, schema: schema_fn, session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install(runner.fate.none()), place: place_fn, n_place: N_PLACE, on_migrate: None, schema: schema_fn, session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
 }
 
 // A place that stops at once.
@@ -91,9 +91,11 @@ fn lease_phase(l: local.Lease) -> runner.Phase {
     latest.read(local.status(l)).phase
 }
 
-fn lease_port(l: local.Lease) -> u16 {
-    match latest.read(local.status(l)).addr {
-        Some(address) => address.port,
+// 1 for a lease that can dial its child, else 0: a route answers only a Ready child, whose
+// lease has its dialer (RUNNER-SPEC §14.11).
+fn dialable(l: local.Lease) -> u16 {
+    match local.dialer(l) {
+        Some(_) => 1u16,
         None => 0u16
     }
 }
@@ -114,7 +116,7 @@ fn next_change(changes: Receiver[local.Change]) -> local.Change waits {
     }
 }
 
-// Sends the port of the child this route leased, or 0 if it was refused, and holds the
+// Sends 1 when this route leased a child it can dial, or 0 if it was refused, and holds the
 // lease until `release` closes, so both routes hold theirs at once.
 type Opening: send {
     door: local.Door,
@@ -125,7 +127,7 @@ type Opening: send {
 fn open_port(take job: Opening) -> () waits {
     match local.route(job.door, A) {
         Ok(take held) => {
-            let _ = channel.send(job.port, lease_port(held))
+            let _ = channel.send(job.port, dialable(held))
             let _ = channel.receive(job.release)
         },
         Error(_) => {
@@ -169,7 +171,10 @@ pub fn law_local_one_head(parent: Dir, clock: Clock, random: Random, tasks: Task
     let _ = take second_to
     let _ = task.join(take first)
     let _ = task.join(take second)
-    end_local(parent, take run) && started && once && a != 0u16 && a == b
+    // Both leases name one child: the host saw it start once and never end.
+    let seen = local.marks(run.door, A)
+    let one_child = seen.ups == 1u64 && seen.downs == 0u64
+    end_local(parent, take run) && started && once && a != 0u16 && b != 0u16 && one_child
 }
 
 @test
@@ -430,8 +435,8 @@ fn kept_keys() -> List[Bytes] {
 }
 
 fn connect_lease(l: local.Lease, tasks: Tasks, net: Net, clock: Clock, random: Random, wanted: List[Bytes]) -> runner.wire_client.Conn waits {
-    let address = option.unwrap(latest.read(local.status(l)).addr)
-    match runner.wire_client.connect(tasks, net, address, clock, random, wanted, Some(runner.ingress.credential(random)), local_wire().socket) {
+    let dialer = option.unwrap(local.dialer(l))
+    match runner.wire_client.connect_dial(tasks, take dialer, clock, random, wanted, Some(runner.ingress.credential(random)), local_wire().socket) {
         Ok(take connected) => take connected,
         Error(_) => fail("local: connection refused"),
     }
@@ -615,7 +620,7 @@ fn budget_schema(mut declaration: store.Declare) -> Result[(), store.Error] {
 }
 
 fn serve_budget_config(take backing: runner.Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> runner.PlaceConfig[(), (), ()] {
-    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(budget_place), n_place: 262144u64, on_migrate: None, schema: code.describe(budget_schema), session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(budget_place), n_place: 262144u64, on_migrate: None, schema: code.describe(budget_schema), session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
 type ServeReady: send {

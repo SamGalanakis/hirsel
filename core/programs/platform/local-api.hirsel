@@ -64,6 +64,15 @@ pub fn status(l: Lease) -> Latest[runner.Status] {
     latest.handle(l.status)
 }
 
+// The place's dialer, for `client.client_dial` or `wire_client.open_dial`: a lease a route
+// answers always has one; a peek of a child not yet Ready has none.
+pub fn dialer(l: Lease) -> Option[std.wsock.Dialer] {
+    match l.dialer {
+        Some(d) => Some(std.wsock.copy_dialer(d)),
+        None => None,
+    }
+}
+
 fn ask[A: send](d: Door, take m: In, answer: Receiver[A], take stopped: A) -> A waits {
     if let Error(_) = channel.send(d.to, take m) {
         return take stopped

@@ -4,7 +4,9 @@
 pub type Role: key + send = Server | Client
 
 pub type RetiredToken: key + send = One | Two
+
 pub type Protocol: key + send = Current | Retired(RetiredToken) | NoProtocol
+
 pub type Upgrade = Waiting | Upgraded(u64, Protocol, Bytes) | Refused(u16)
 
 // Ready carries the consumed head offset and whether hirsel.4 was selected.
@@ -50,14 +52,24 @@ fn protocol(b: Bytes) -> Protocol {
     let mut at = 0u64
     let mut selected: Protocol = NoProtocol
     while at < n {
-        while at < n && (b[at] == 44 || b[at] == 32 || b[at] == 9) { at += 1u64 }
+        while at < n && (b[at] == 44 || b[at] == 32 || b[at] == 9) {
+            at += 1u64
+        }
         let start = at
-        while at < n && b[at] != 44 && b[at] != 32 && b[at] != 9 { at += 1u64 }
+        while at < n && b[at] != 44 && b[at] != 32 && b[at] != 9 {
+            at += 1u64
+        }
         let token = list.slice(b, start, at)
-        if token == b"hirsel.4" { return Current }
+        if token == b"hirsel.4" {
+            return Current
+        }
         if selected == NoProtocol {
-            if token == b"hirsel.1" { selected = Retired(One) }
-            if token == b"hirsel.2" { selected = Retired(Two) }
+            if token == b"hirsel.1" {
+                selected = Retired(One)
+            }
+            if token == b"hirsel.2" {
+                selected = Retired(Two)
+            }
         }
     }
     selected
@@ -100,7 +112,9 @@ fn route_checks(b: Bytes, h: http1.Head) -> Result[Protocol, u16] {
         Some(span) => protocol(part(b, span)),
         None => NoProtocol,
     }
-    if offered == NoProtocol { return Error(400) }
+    if offered == NoProtocol {
+        return Error(400)
+    }
     // No HTTP body is consumed by an upgrade, so its framing cannot create
     // a second interpretation of the read-ahead as body bytes.
     if field(b, h, "transfer-encoding")? != None {
@@ -163,7 +177,8 @@ pub fn server_head(b: Bytes, h: http1.Head) -> Upgrade {
     Upgraded(h.end, offered, take out)
 }
 
-/// Validates the client's bounded 101 response against its sent key. The
+/// Validates the client's bounded 101 response against its sent key; a 4xx or 5xx
+/// refusal is Failed with the server's status. The
 /// only supported offer is hirsel.4; no extensions are offered. Ready also
 /// reports selection, so the caller decides whether a protocol is required. O(head).
 /// Ex: `websocket.client(input, key, true)`.
@@ -174,6 +189,11 @@ pub fn client(b: Bytes, key: Bytes, offered_protocol: bool) -> Checked {
         Bad => return Failed(400),
         TooLarge => return Failed(431),
         Complete => {}
+    }
+    // A server's 4xx or 5xx answer is its refusal and is reported as sent (a full place
+    // answers 503); any other answer that is not a valid 101 is the client's 400.
+    if h.version == 1 && h.status >= 400 && h.status <= 599 {
+        return Failed(h.status)
     }
     if h.status != 101 || h.version != 1 || !connection(b, h) || !is_field(b, h, "upgrade", "websocket") {
         return Failed(400)

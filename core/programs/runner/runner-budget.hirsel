@@ -28,6 +28,15 @@ fn publisher_bytes(n_place: u64, n_publisher: u64) -> Result[u64, Capacity] {
     add_place_bytes(n_place, n_publisher)
 }
 
+// An owner's room for its transport on top of its floor: a dialed session's receive
+// connection (RUNNER-SPEC §14.11); a socket's buffers are the kernel's.
+fn listen_owner_bytes(l: Listen) -> u64 {
+    match l {
+        Tcp(_) => 0u64,
+        InProcess(_) => std.wsock.local_session_bytes(),
+    }
+}
+
 pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
     room_serving_bytes(c, owners, n_place, no_rooms(), 0u64)
 }
@@ -88,7 +97,7 @@ fn place_reservations[G: send, H: shareable + inert + send](place: StaticFn[fn(m
 fn operate_reservation[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], n_place: u64, claims: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
     let head = place_head_bytes(n_place, p.n_publisher, place_grant_bytes(p.grants)?)?
     let funded_head = add_place_bytes(head, claims)?
-    let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms, wire_owner_bind_bytes(p.wire))?
+    let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms, int.saturating_add(wire_owner_bind_bytes(p.wire), listen_owner_bytes(p.listen)))?
     let tasks = add_place_bytes(funded_head, serving)?
     let hosted = add_place_bytes(tasks, host_control_bytes(n_place)?)?
     add_place_bytes(hosted, OPERATE_OWN_BYTES)

@@ -19,7 +19,7 @@ fn sfu_place(c: Clock, random: Random, tasks: Tasks, net: Net) -> runner.PlaceCo
     let mut config = runner.wire_defaults(262144u64)
     config.n_pool = 33554432u64
     config.n_relay = 4194304u64
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(sfu_room), n_place: 1048576u64, on_migrate: None, schema: code.describe(sfu_schema), session: config, max_sessions: 4u64, proxies: list.new(), n_publisher: 4194304u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net, tasks, clock: c, random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(sfu_room), n_place: 1048576u64, on_migrate: None, schema: code.describe(sfu_schema), session: config, max_sessions: 4u64, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net, tasks, clock: c, random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
 fn sfu_dial(tasks: Tasks, net: Net, c: Clock, random: Random, address: Addr) -> runner.room_client.Dial {

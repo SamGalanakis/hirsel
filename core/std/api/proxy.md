@@ -1,7 +1,7 @@
 # PROXY protocol v2 headers
 
 Use `std.proxy.config(trusted, header_max, header_ms)` to configure a listener
-that requires PROXY v2. Supply the front's trusted `wsock.Prefix` values.
+that requires PROXY v2. Supply the front's trusted `ingress_policy.Prefix` values.
 `config` refuses an empty list or a byte limit outside 28–65,551.
 `proxy.DEFAULT_HEADER_MAX` is 536 bytes and `proxy.DEFAULT_HEADER_MS` is
 3,000 milliseconds.

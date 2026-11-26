@@ -638,7 +638,7 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
 }
 
 pub type Config: shareable + send {
-    ingress: List[wsock.Prefix],
+    ingress: List[ingress_policy.Prefix],
     sockets_max: u64,
     http_max: u64,
     upgrades_max: u64,
@@ -1841,7 +1841,7 @@ fn run_connection[S: send](take socket: Socket, c: Clock, cfg: Config, peer: Ip,
         }
         let completed = host.mono_ns(c)
         if first && list.len(cfg.ingress) != 0 {
-            let source = match wsock.source_for_head(input, head, peer, cfg.ingress) {
+            let source = match ingress_policy.source_for_head(input, head, peer, cfg.ingress) {
                 Ok(ip) => ip,
                 Error(status) => {
                     if write_succeeded(reply_error_until(mut writer, status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {

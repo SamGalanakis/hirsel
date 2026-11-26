@@ -69,7 +69,7 @@ fn address(value: String) -> Option[Addr] {
     let Some((ip_text, port_text)) = std.string.split_once(value, ":") else {
         return None
     }
-    let Some(ip) = std.wsock.parse_ip(ip_text) else {
+    let Some(ip) = std.ingress_policy.parse_ip(ip_text) else {
         return None
     }
     let Ok(port) = (int.parse(port_text) : Result[u16, ParseError]) else {
@@ -158,7 +158,7 @@ fn place_config(n: Net, web: Dir, c: Clock, random: Random, tasks: Tasks, listen
     session.n_pool = 33554432u64
     session.n_relay = 4194304u64
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(room), n_place: 1048576u64, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 32u64, proxies: list.new(), n_publisher: 4194304u64, listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(room), n_place: 1048576u64, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 32u64, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(listen), net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
 // ---- The TURN relay place (TURN-11) ----

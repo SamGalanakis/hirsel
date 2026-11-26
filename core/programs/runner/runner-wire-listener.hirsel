@@ -1,12 +1,15 @@
 // The accept loop retains at most max_sessions owner handles and reaps completed
 // ones on the next acceptance. Upgrade runs in the owner, so a stalled HTTP
 // client cannot prevent the listener accepting another connection.
+// One session's transport as it arrives: an accepted socket and its peer, or an
+// in-process dial (RUNNER-SPEC §14.11). Both take the same admission and owner.
+type Arrival: send = Socket(Socket, Ip) | Dial(std.wsock.Dial)
+
 type WireAccept[C: send]: send {
-    socket: Socket,
-    peer: Ip,
+    arrival: Arrival,
     accepted: u64,
     wire_slot: std.wsock.Pending,
-    proxies: List[std.wsock.Prefix],
+    proxies: List[std.ingress_policy.Prefix],
     service: Box[Service[C]],
     publisher: Sender[PubIn],
     c: WireConfig,
@@ -19,7 +22,7 @@ type WireAccept[C: send]: send {
 }
 
 fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] waits {
-    let WireAccept(completion: take completion, socket: take socket, peer: peer, accepted: accepted, wire_slot: take wire_slot, proxies: take proxies, service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, control: take control, allocation: take allocation, report: report) = take x
+    let WireAccept(completion: take completion, arrival: take arrival, accepted: accepted, wire_slot: take wire_slot, proxies: take proxies, service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, control: take control, allocation: take allocation, report: report) = take x
     let admission = scoped fn(ip: Ip) -> bool {
         match control {
             Some(life) => !closing_at(life.drain, clock),
@@ -35,7 +38,20 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
             None => Ok(None),
         }
     }
-    let received = std.wsock.server_with_site_report(take socket, take wire_slot, peer, proxies, c.socket, clock, accepted, c.site, raw, admission, report)
+    let received = match take arrival {
+        Socket(take socket, peer) => std.wsock.server_with_site_report(take socket, take wire_slot, peer, proxies, c.socket, clock, accepted, c.site, raw, admission, report),
+        // A dial has no HTTP request: `/hirsel/status` is not served in-process, and drain
+        // admission refuses with the 503 a TCP upgrade refusal answers.
+        Dial(take dial) => if admission(V4(0x7f000001u32)) {
+            match std.wsock.local_server(take dial, take wire_slot, c.socket, clock) {
+                Ok(take up) => Ok(Some(take up)),
+                Error(e) => Error(e),
+            }
+        } else {
+            std.wsock.local_refuse(take dial, 503u16)
+            Error(Http(503u16))
+        },
+    }
     let _ = take proxies
     let ended: Result[(), std.wsock.Error] = match take received {
         Ok(Some(take up)) => {
@@ -52,7 +68,7 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
     ended
 }
 
-type ServeInput: send = AcceptedSocket(Socket, Ip, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake | ServeRetire | CheckServeIdle | AcceptIdle
+type ServeInput: send = Arrived(Arrival, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake | ServeRetire | CheckServeIdle | AcceptIdle
 
 type OwnerControl: send {
     id: u64,
@@ -95,7 +111,7 @@ fn accept_sockets(take seed: Acceptor) -> () waits {
             At(interrupt, at)
         }
         match host.accept(mut bound_listener, until) {
-            Ok((take socket, peer)) => if let Error(_) = channel.send(to, AcceptedSocket(take socket, peer.ip, host.mono_ns(clock))) {
+            Ok((take socket, peer)) => if let Error(_) = channel.send(to, Arrived(Socket(take socket, peer.ip), host.mono_ns(clock))) {
                 return
             },
             Error(TimedOut) if at != 0u64 => if let Error(_) = channel.send(to, AcceptIdle) {
@@ -105,6 +121,26 @@ fn accept_sockets(take seed: Acceptor) -> () waits {
                 let _ = channel.send(to, AcceptEnded(problem));
                 return
             },
+        }
+    }
+}
+
+type DialForward: send {
+    dials: Inbox[std.wsock.Dial],
+    clock: Clock,
+    to: Sender[ServeInput]
+}
+
+// Moves each dial into the serve loop, as accept_sockets moves each socket. Cancelling
+// it cleans the inbox, so a dial still queued there answers its dialer Closed.
+fn forward_dials(take seed: DialForward) -> () waits {
+    let DialForward(dials: take dials, clock: clock, to: take to) = take seed
+    loop {
+        match conn.receive(dials) {
+            Ok(take dial) => if let Error(_) = channel.send(to, Arrived(Dial(take dial), host.mono_ns(clock))) {
+                return
+            },
+            Error(_) => return,
         }
     }
 }
@@ -128,15 +164,26 @@ type SessionTask {
     retirement: Option[WireRetirement]
 }
 
+// A place's sessions arrive as accepted sockets or as in-process dials (RUNNER-SPEC §14.11).
+type Intake: send = Sockets(Listener) | Dials(Inbox[std.wsock.Dial])
+
+// `listen_owner_bytes` for the intake the serve loop was given.
+fn intake_owner_bytes(i: Intake) -> u64 {
+    match i {
+        Sockets(_) => 0u64,
+        Dials(_) => std.wsock.local_session_bytes(),
+    }
+}
+
 type ServeTransport {
-    listener: Listener,
+    listener: Intake,
     config: WireConfig,
     tasks: Tasks,
     clock: Clock,
     limit: u64,
     room_owner_bytes: u64,
     bind_owner_bytes: u64,
-    proxies: List[std.wsock.Prefix],
+    proxies: List[std.ingress_policy.Prefix],
     publisher: Sender[PubIn],
     inbox: Receiver[ServeInput],
     to: Sender[ServeInput],
@@ -159,7 +206,7 @@ fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
 }
 
 type ServePlace[G: send, H: shareable + inert + send]: send {
-    listener: Listener,
+    listener: Intake,
     config: WireConfig,
     tasks: Tasks,
     clock: Clock,
@@ -167,7 +214,7 @@ type ServePlace[G: send, H: shareable + inert + send]: send {
     wire: Option[BindGrant[G]],
     grants: Option[CallGrant[G]],
     max_sessions: u64,
-    proxies: List[std.wsock.Prefix],
+    proxies: List[std.ingress_policy.Prefix],
     target: String,
     publisher: Sender[PubIn],
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
@@ -208,7 +255,8 @@ fn supervise_serve[G: send, H: shareable + inert + send](take seed: ServePlace[G
         }
         take service
     }
-    let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, limit: limit, room_owner_bytes: rooms.owner_bytes, bind_owner_bytes: bind_owner_bytes(session_wire), proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
+    let owner_term = int.saturating_add(bind_owner_bytes(session_wire), intake_owner_bytes(listener))
+    let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, limit: limit, room_owner_bytes: rooms.owner_bytes, bind_owner_bytes: owner_term, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
     let served = serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write, report: report)), make, wire_allocator(take registered, n_place))
     if let Some((_, take relay_task)) = take relay {
         let _ = task.cancel_join(take relay_task)
@@ -237,8 +285,16 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
         Some(control) if !none(control.idle) => 1u64,
         _ => 0u64
     }
-    let acceptor = Acceptor(listener: take listener, clock: time, interrupt: interrupt, to: channel.sender(to), permit: take permits)
-    let mut accepting: Option[Task[()]] = Some(task.spawn(tasks, bytes 8192u64, take acceptor, accept_sockets))
+    // An in-process place has no accept to interrupt: its forwarder only moves dials into
+    // this loop, so an idle vote is answered here at once (RUNNER-SPEC §14.11).
+    let dialing = match listener {
+        Dials(_) => true,
+        Sockets(_) => false,
+    }
+    let mut accepting: Option[Task[()]] = match take listener {
+        Sockets(take socket_listener) => Some(task.spawn(tasks, bytes 8192u64, Acceptor(listener: take socket_listener, clock: time, interrupt: interrupt, to: channel.sender(to), permit: take permits), accept_sockets)),
+        Dials(take dials) => Some(task.spawn(tasks, bytes 8192u64, DialForward(dials: take dials, clock: time, to: channel.sender(to)), forward_dials)),
+    }
     if let Some(control) = lifecycle {
         if let Error(_) = channel.send(control.events, ServePrepared) {
             return Ok(0u64)
@@ -300,9 +356,13 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
             ServeStart => (),
             CheckServeIdle => if let Some(control) = lifecycle {
                 if idle && none(drain_window(latest.read(control.window))) {
-                    checking_idle = true
-                    clock.advance_to(mut accept_clock, accept_at)
-                    accept_at += 1u64
+                    if dialing {
+                        idle_vote(control.events, false, true)
+                    } else {
+                        checking_idle = true
+                        clock.advance_to(mut accept_clock, accept_at)
+                        accept_at += 1u64
+                    }
                 } else {
                     idle_vote(control.events, false, false)
                 }
@@ -349,7 +409,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     let _ = task.join(take handle)
                 }
             },
-            AcceptedSocket(take socket, peer, at) => {
+            Arrived(take arrival, at) => {
                 if checking_idle {
                     checking_idle = false
                     if let Some(control) = lifecycle {
@@ -379,11 +439,11 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 let wire_slot = match take pending {
                     Some(take wire_slot) => take wire_slot,
                     None => {
-                        start_socket_refusal(tasks, take socket, time, at, config, to, id, mut refusing);
+                        start_socket_refusal(tasks, take arrival, time, at, config, to, id, mut refusing);
                         continue
                     },
                 }
-                let copied: List[std.wsock.Prefix] = clone(proxies)
+                let copied: List[std.ingress_policy.Prefix] = clone(proxies)
                 let prefixes = take copied
                 let made = bound bytes config.n_service {
                     make()
@@ -391,7 +451,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 let service = match take made {
                     Ok(take instance) => take instance,
                     Error(_) => {
-                        start_socket_refusal(tasks, take socket, time, at, config, to, id, mut refusing);
+                        start_socket_refusal(tasks, take arrival, time, at, config, to, id, mut refusing);
                         continue
                     }
                 }
@@ -406,7 +466,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window), status: latest.handle(life.status), first_write: copy_write_notice(life.first_write))),
                     _ => None,
                 }
-                let job = WireAccept(socket: take socket, peer: peer, accepted: at, wire_slot: take wire_slot, proxies: take prefixes, service: take boxed, publisher: channel.sender(pub_to), c: config, clock: time, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle {
+                let job = WireAccept(arrival: take arrival, accepted: at, wire_slot: take wire_slot, proxies: take prefixes, service: take boxed, publisher: channel.sender(pub_to), c: config, clock: time, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle {
                     Some(life) => life.report,
                     None => None
                 })
@@ -418,7 +478,16 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
     }
 }
 
-fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64, config: WireConfig, to: Sender[ServeInput], id: u64, mut refusing: Map[u64, Task[()]]) {
+fn start_socket_refusal(tasks: Tasks, take arrival: Arrival, clock: Clock, at: u64, config: WireConfig, to: Sender[ServeInput], id: u64, mut refusing: Map[u64, Task[()]]) {
+    // A dial is answered at once: its answer connection holds one item, so the send
+    // never waits. A socket's 503 is written by a refusal task, at most 16 at a time.
+    let socket = match take arrival {
+        Socket(take socket, _) => take socket,
+        Dial(take dial) => {
+            let _ = std.wsock.try_refuse(take dial, 503u16)
+            return
+        },
+    }
     if map.len(refusing) >= 16u64 {
         return
     }
@@ -428,7 +497,7 @@ fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64
     }
 }
 
-pub fn serve_wire[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], bind_term: u64, make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[(), std.wsock.Error] waits {
+pub fn serve_wire[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.ingress_policy.Prefix], bind_term: u64, make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[(), std.wsock.Error] waits {
     if max_sessions == 0u64 || max_sessions > WIRE_OWNER_LIMIT || !wire_configuration(c) {
         return Error(Configuration)
     }
@@ -439,7 +508,7 @@ pub fn serve_wire[C: send](take listener: Listener, tasks: Tasks, clock: Clock, 
     }
     let served: Result[Result[(), std.wsock.Error], Capacity] = bound bytes required {
         let (to, inbox): (Sender[ServeInput], Receiver[ServeInput]) = channel.new(serve_inbox_capacity(max_sessions))
-        let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock, limit: max_sessions, room_owner_bytes: 0u64, bind_owner_bytes: bind_term, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
+        let transport = ServeTransport(listener: Sockets(take listener), config: c, tasks: tasks, clock: clock, limit: max_sessions, room_owner_bytes: 0u64, bind_owner_bytes: bind_term, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
         match serve_sockets(take transport, None, make, take allocate) {
             Ok(_) => Ok(()),
             Error(problem) => Error(problem)

@@ -1,17 +1,25 @@
 // L58 exercises the first bytes sent by a real accept owner. Its Hello and
 // expected Close are literal wire bytes, independent of the frame codec.
-fn protocol_asset(_path: Bytes) -> Option[std.wsock.Asset] { None }
+fn protocol_asset(_path: Bytes) -> Option[std.wsock.Asset] {
+    None
+}
 
 @test
 fn frame_sizer_matches_vectors() -> Result[(), u64] {
     let outcome: Outcome = Refused(Budget(Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64)))
     let done_size = wire_done_size(outcome)
-    if done_size != 48u64 { return Error(done_size) }
+    if done_size != 48u64 {
+        return Error(done_size)
+    }
     let mut outcomes: List[Done] = list.new()
     list.push(mut outcomes, Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: take outcome))
     let size = wire_output_size(Batch(0x6162636465666768u64, list.new(), list.new(), take outcomes))
-    if size != 72u64 { return Error(size) }
-    if !runner_wire.law_frame_vectors() { return Error(0u64) }
+    if size != 72u64 {
+        return Error(size)
+    }
+    if !runner_wire.law_frame_vectors() {
+        return Error(0u64)
+    }
     Ok(())
 }
 
@@ -36,10 +44,11 @@ fn protocol_stream_time(mut requests: Receiver[HeadInput], clock: Clock) -> () w
     }
 }
 
-fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net,
-    routed: bool, offered: Bytes, selected: Bytes) -> bool waits {
+fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net, routed: bool, offered: Bytes, selected: Bytes) -> bool waits {
     let mut config = wire_defaults(0u64)
-    if routed { config.site = Some(std.wsock.Site(dir: d, find: protocol_asset)) }
+    if routed {
+        config.site = Some(std.wsock.Site(dir: d, find: protocol_asset))
+    }
     let pending = result.unwrap(std.wsock.pending(config.socket))
     let pending_slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
     let (take listening, address) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
@@ -55,17 +64,13 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     let allocate = fn(mut context: WireSession[()], take plan: ServiceAllocation) -> Result[ServicePlan, u16] {
         wire_service_allocate(mut context, held, take plan)
     }
-    let allocation: Result[(Sender[WireAllocation[WireSession[()]]], Task[()]), Capacity] =
-        start_wire_pool(tasks, config, clock, wire_connection_pool_bytes(config), 2u64, take allocate)
+    let allocation: Result[(Sender[WireAllocation[WireSession[()]]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, wire_connection_pool_bytes(config), 2u64, take allocate)
     let (take pool, take pooling) = result.unwrap(take allocation)
     let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), head, clock, tasks, config, string.new())
     let completion = result.unwrap(OwnerCompletion(to: take to, id: 1u64, abandoned: 0u64))
-    let job = WireAccept(socket: take socket, peer: peer.ip, accepted: host.mono_ns(clock), wire_slot: take pending_slot,
-        proxies: list.new(), service: box.new(take service), publisher: take pub_input, c: config, clock: clock, tasks: tasks,
-        control: None, completion: take completion, allocation: take pool, report: None)
+    let job = WireAccept(arrival: Socket(take socket, peer.ip), accepted: host.mono_ns(clock), wire_slot: take pending_slot, proxies: list.new(), service: box.new(take service), publisher: take pub_input, c: config, clock: clock, tasks: tasks, control: None, completion: take completion, allocation: take pool, report: None)
     let allowance = WIRE_OWNER_FLOOR + wire_connection_pool_bytes(config)
     let serve: fn(take WireAccept[WireSession[()]]) -> Result[(), std.wsock.Error] waits = wire_accepted
-
     let mut request: Bytes = clone(b"GET /hirsel HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")
     if list.len(offered) != 0u64 {
         list.append(mut request, b"Sec-WebSocket-Protocol: ")
@@ -97,7 +102,11 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     }
     let mut reader = take input
     let mut response: Bytes = list.with_capacity(1024u64)
-    let complete = list.len(expected) + (if current { 6u64 } else { 1u64 })
+    let complete = list.len(expected) + (if current {
+        6u64
+    } else {
+        1u64
+    })
     while list.len(response) < complete {
         let remaining = complete - list.len(response)
         match host.recv_bounded(mut reader, mut response, remaining, deadline) {
@@ -113,17 +122,16 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     let _ = task.join(take time_answers)
     let _ = take pooling
     let at = list.len(expected)
-    if !current { return response == expected }
-    list.len(response) == complete && list.slice(response, 0u64, at) == expected
-        && response[at] == 130u8 && list.slice(response, at + 2u64, complete) == b"\x04\x00\x00\x00"
+    if !current {
+        return response == expected
+    }
+    list.len(response) == complete && list.slice(response, 0u64, at) == expected && response[at] == 130u8 && list.slice(response, at + 2u64, complete) == b"\x04\x00\x00\x00"
 }
 
 @test
 fn test_retired_token_close(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net) -> Result[(), (bool, u64)] waits {
-    let cases = [(b"hirsel.1, hirsel.2", b"hirsel.1"), (b"hirsel.2, hirsel.1", b"hirsel.2"),
-        (b"hirsel.1, hirsel.4, hirsel.2", b"hirsel.4"), (b"hirsel.4, hirsel.2", b"hirsel.4"),
-        (b"hirsel.2, hirsel.4", b"hirsel.4"), (b"", b""), (b"unrelated", b""), (b"hirsel.3", b"")]
-    for routed in [false, true] {
+    let cases =[(b"hirsel.1, hirsel.2", b"hirsel.1"), (b"hirsel.2, hirsel.1", b"hirsel.2"), (b"hirsel.1, hirsel.4, hirsel.2", b"hirsel.4"), (b"hirsel.4, hirsel.2", b"hirsel.4"), (b"hirsel.2, hirsel.4", b"hirsel.4"), (b"", b""), (b"unrelated", b""), (b"hirsel.3", b"")]
+    for routed in[false, true] {
         for i in 0u64 .. 8u64 {
             if !protocol_exchange(d, tasks, clock, random, network, routed, cases[i].0, cases[i].1) {
                 return Error((routed, i))
@@ -142,7 +150,9 @@ fn conflict_key(_key: u64, value: u32) -> Result[List[u32], Capacity] {
 fn conflict_call(mut tx: store.Tx, data: store.Table[u64, u32], caller: Caller, take value: u32) -> Result[(), u32] {
     store.put(mut tx, data, 1u64, value) ?=> |_| 1u32
     if let Error(Conflict(name)) = store.put(mut tx, data, 2u64, value) {
-        if name == "unique_value" { return Ok(()) }
+        if name == "unique_value" {
+            return Ok(())
+        }
     }
     Error(2u32)
 }
@@ -161,37 +171,43 @@ fn test_unique_conflict_wire(clock: Clock, random: Random) -> Result[(), String]
         conflict_call(mut tx, bound_data, store.Caller(issuer: 1u8, subject: list.new()), 7u32)
     }))
     if let Failed(Conflict(name)) = attempt {
-        if name != "unique_value" { return Error("store.run conflict name") }
-    } else { return Error("store.run did not report Conflict") }
-
+        if name != "unique_value" {
+            return Error("store.run conflict name")
+        }
+    } else {
+        return Error("store.run did not report Conflict")
+    }
     let run = code.describe(conflict_call)
     let mut entries: Registry[(), store.Table[u64, u32]] = registry()
     result.unwrap(transact(mut entries, run, 65536u64, DEFAULT_STEPS))
     let reply_codec: std.codec.Codec[Result[(), u32]] = std.codec.of()
     let (take key, _) = result.unwrap(described(code.identity(run), code.revision(run), Transact, std.codec.of_u32(), reply_codec))
     let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
-    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(),
-        h: arc.new(clone(data)), out: take release_to, busy: map.new(), waiting: list.new(),
-        group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(clone(data)), out: take release_to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
-    let request = head_request(store.Caller(issuer: 1u8, subject: list.new()), store.StreamId(t: store.keyed_time(head.db), n: 1u64), 0u64,
-        take key, clone(b"\x07\x00\x00\x00"), take to)
+    let request = head_request(store.Caller(issuer: 1u8, subject: list.new()), store.StreamId(t: store.keyed_time(head.db), n: 1u64), 0u64, take key, clone(b"\x07\x00\x00\x00"), take to)
     result.unwrap(head_arrival(mut head, take request, false, false))
     result.unwrap(gate(mut head))
     let PubIn(e: take event) = result.unwrap(channel.receive(releases))
     let Released(Release(version: version, snapshot: Some(take snapshot), answers: take answers)) = take event else {
         return Error("missing reply-only release")
     }
-    if store.version(snapshot) != version || list.len(answers) != 1u64 { return Error("reply-only release version") }
+    if store.version(snapshot) != version || list.len(answers) != 1u64 {
+        return Error("reply-only release version")
+    }
     let reads = result.unwrap(store.reader(head.db, 0u64))
     for row_key in 1u64 .. 3u64 {
-        if result.unwrap(store.get(reads, snapshot, data, row_key)) != None { return Error("failed transaction published a row") }
+        if result.unwrap(store.get(reads, snapshot, data, row_key)) != None {
+            return Error("failed transaction published a row")
+        }
     }
     let mut wire_reply: Bytes = list.new()
     let codec: std.codec.Codec[Outcome] = std.codec.of()
     if let CallAnswer(_, row) = answers[0u64] {
         result.unwrap(std.codec.encode(codec, row.outcome, mut wire_reply))
-    } else { return Error("expected a wire answer") }
+    } else {
+        return Error("expected a wire answer")
+    }
     if wire_reply != b"\x01\x00\x00\x00\x04\x00\x00\x00\x0c\x00\x00\x00unique_value" {
         return Error("wire Conflict must use Fault tag 4 and carry the index name")
     }

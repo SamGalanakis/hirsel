@@ -58,8 +58,7 @@ fn rfc6455_accept() -> bool {
 fn server_response() -> bool {
     let b = request_bytes()
     match websocket.server(b) {
-        Upgraded(end, Current, out) => end == list.len(b) &&
-            out == b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
+        Upgraded(end, Current, out) => end == list.len(b) && out == b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
         _ => false
     }
 }
@@ -93,10 +92,10 @@ fn upgrade_tail_kept() -> bool {
 }
 
 // httparse a0fa552e src/lib.rs:1705, the response 101 vector's tab reason.
-// RFC 6455 client checks, F18. Mutants: status_only, skip_accept, unsolicited_protocol.
+// RFC 6455 client checks, F18; a 503 refusal reports 503, as a dialed one does (RUNNER-SPEC §14.11). Mutants: status_only, skip_accept, unsolicited_protocol.
 // expect: run client_checks() = true
 fn client_checks() -> bool {
-    client_status(response_bytes(), false) == 101 && client_status(b"HTTP/1.1 101 Switching Protocols\t\r\nUpgrade: WebSocket\r\nConnection: keep-alive, upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n", false) == 101 && client_status(b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n", false) == 400 && client_status(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n", false) == 400 && client_status(b"HTTP/1.1 200 OK\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n", false) == 400
+    client_status(response_bytes(), false) == 101 && client_status(b"HTTP/1.1 101 Switching Protocols\t\r\nUpgrade: WebSocket\r\nConnection: keep-alive, upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n", false) == 101 && client_status(b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n", false) == 400 && client_status(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n", false) == 400 && client_status(b"HTTP/1.1 200 OK\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n", false) == 400 && client_status(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", false) == 503
 }
 
 // RFC 6455 section 4.1: an offer may be declined. The runner requires its
@@ -190,8 +189,8 @@ fn ingress_request(extra: String) -> Bytes {
 // expect: run ingress_sanitized() = true
 fn ingress_sanitized() -> bool {
     let peer = V4(0x7f000001)
-    let mut trusted: List[wsock.Prefix] = list.new()
-    list.push(mut trusted, wsock.Prefix(ip: peer, bits: 32))
+    let mut trusted: List[ingress_policy.Prefix] = list.new()
+    list.push(mut trusted, ingress_policy.Prefix(ip: peer, bits: 32))
     let a = ingress_request("X-Forwarded-For: 1.1.1.1\r\n")
     let b = ingress_request("X-Forwarded-For: 2.2.2.2\r\n")
     let outside = V4(0x03030303)
@@ -201,8 +200,8 @@ fn ingress_sanitized() -> bool {
     canonical_mapped && mixed_ipv6 && overlong && ingress_value(a, peer, trusted) == (4u16, 0u64, 0x01010101u64) && ingress_value(b, peer, trusted) == (4u16, 0u64, 0x02020202u64) && ingress_value(a, outside, trusted) == (4u16, 0u64, 0x03030303u64) && ingress_value(ingress_request(""), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 1.1.1.1\r\nX-Forwarded-For: 2.2.2.2\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 1.1.1.1, 2.2.2.2\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 1.1.1.01\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: ::ffff:1.1.1.1\r\n"), peer, trusted) == (4u16, 0u64, 0x01010101u64) && ingress_value(ingress_request("X-Forwarded-For: 2001:db8::1\r\n"), peer, trusted) == (6u16, 0x20010db800000000u64, 1u64) && ingress_value(ingress_request("X-Forwarded-For: 2001:0db8::1\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 2001:db8:0:0:1::1\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: ::\r\n"), peer, trusted) == (6u16, 0u64, 0u64)
 }
 
-fn ingress_value(b: Bytes, peer: Ip, trusted: List[wsock.Prefix]) -> (u16, u64, u64) {
-    match wsock.source(b, peer, trusted) {
+fn ingress_value(b: Bytes, peer: Ip, trusted: List[ingress_policy.Prefix]) -> (u16, u64, u64) {
+    match ingress_policy.source(b, peer, trusted) {
         Ok(V4(v)) => (4, 0, int.widen(v)),
         Ok(V6(hi, lo)) => (6, hi, lo),
         Error(code) => (code, 0, 0)

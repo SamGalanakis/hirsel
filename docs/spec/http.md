@@ -160,7 +160,7 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 
 | Field | Meaning | Value set by Hirsel's runner (§3) |
 |---|---|---|
-| `ingress` | Trusted proxy prefixes (`List[wsock.Prefix]`) for `X-Forwarded-For` source-IP resolution | configured proxies |
+| `ingress` | Trusted proxy prefixes (`List[ingress_policy.Prefix]`) for `X-Forwarded-For` source-IP resolution | configured proxies |
 | `sockets_max` | Admitted sockets this `serve` owns, counted from the supervisor's admission at `Accepted` until the socket's last task ends: connection, stream and upgraded alike. A refused socket is never admitted, so it is not counted here; refusal tasks are their own population, at most `refuse_max` | 4096 |
 | `http_max` | Connection tasks, each holding C for its whole life, first request and keep-alive alike | 1024 |
 | `upgrades_max` | Upgraded protocol tasks | 3072 |
@@ -1653,7 +1653,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 | Today (fbdb7d69) | After |
 |---|---|
 | `websocket.server(b)` parses the head itself (core/std/websocket.hirsel:126) | `websocket.accept(head: Head, b) -> Result[Accept, Refused(u16)]` checks the `Head` the connection task already parsed. `server` is deleted. |
-| `wsock.source(b, peer, ingress)` parses the head a second time (core/std/wsock.hirsel:210) | `wsock.source(head: Head, b, peer, ingress)` reads the same `Head`. |
+| `ingress_policy.source(b, peer, ingress)` parses the head a second time (core/std/wsock.hirsel:210) | `ingress_policy.source(head: Head, b, peer, ingress)` reads the same `Head`. |
 | The runner's upgrade, Hello and session path (WIRE-SPEC W3, not yet on main) would own its own accept loop and head read | The runner registers `GET /hirsel` as a raw route that returns `Upgrade`. The supervisor admits the session (U) before the 101 is committed; `upgrade.start` writes the whole 101, then the session starts from `Taken` (HTTP-10): the halves, plus the read buffer with the exact tail. |
 | bench/wire/reference/mod.rs has a hand HTTP server | It stays as a reference bench outside the product. No product path calls it. |
 | The `websocket_upgrade` tests call `websocket.server` | They move to `http.serve`, and each case goes through the connection task. The `http1` head-limit cases stay in `core/std/tests/http1.hirsel`. |

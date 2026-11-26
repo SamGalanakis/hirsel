@@ -125,7 +125,7 @@ fn probe_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, report: 
         runner.Grants(attempt: Some(take attempt), call: None, claim: None, bind: Some(take bind_mint))
     }
     let (entries, _) = probe_entries()
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(probe_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(take binding), grants: Some(take grants), triggers: Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))), idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(probe_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(take binding), grants: Some(take grants), triggers: Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))), idle: None)
 }
 
 fn quiet(reports: Receiver[u64]) -> bool {

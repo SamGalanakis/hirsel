@@ -167,7 +167,7 @@ fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, wired:
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, grants: take grants, triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, grants: take grants, triggers: None, idle: None)
 }
 
 // RUNNER-SPEC §12.3: a fixture's typed Callee names the key registration computes, a

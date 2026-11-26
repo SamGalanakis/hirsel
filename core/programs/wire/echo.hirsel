@@ -277,7 +277,7 @@ fn serve(n: Net, clock: Clock, tasks: Tasks, config: std.wsock.Config) -> Result
                 continue
             }
         }
-        let ingress: List[std.wsock.Prefix] = list.new()
+        let ingress: List[std.ingress_policy.Prefix] = list.new()
         match std.wsock.server(take socket, take slot, peer.ip, ingress, config, clock, now) {
             Ok(take upgraded) => {
                 let _ = echo(take upgraded, clock, tasks, config)

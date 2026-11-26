@@ -1,0 +1,185 @@
+// Trusted ingress policy: which peer may name a request's source, and the source key
+// admission uses. Independent of Net authority; `wsock` and `http` apply it.
+pub type Prefix: shareable + send {
+    ip: Ip,
+    bits: u8
+}
+
+fn normalize(ip: Ip) -> Ip {
+    match ip {
+        V6(0, lo) => if lo >> 32 == 65535 {
+            V4(int.truncate(lo))
+        } else {
+            ip
+        },
+        _ => ip
+    }
+}
+
+pub fn parse_ip(s: String) -> Option[Ip] {
+    literal(string.as_bytes(s))
+}
+
+pub fn parse_prefix(s: String) -> Option[Prefix] {
+    let Some((address, length)) = string.split_once(s, "/") else {
+        return None
+    }
+    let Ok(bits) = (int.parse(length) : Result[u8, ParseError]) else {
+        return None
+    }
+    let Some(ip) = parse_ip(address) else {
+        return None
+    }
+    let maximum: u8 = match ip {
+        V4(_) => 32,
+        V6(_, _) => 128
+    }
+    if bits > maximum {
+        return None
+    }
+    Some(Prefix(ip, bits))
+}
+
+fn contains(prefix: Prefix, ip: Ip) -> bool {
+    match (prefix.ip, ip) {
+        (V4(a), V4(b)) => prefix.bits <= 32 && (prefix.bits == 0 || a >> int.widen(32 - prefix.bits) == b >> int.widen(32 - prefix.bits)),
+        (V6(ah, al), V6(bh, bl)) => prefix.bits <= 128 && if prefix.bits == 0 {
+            true
+        } else if prefix.bits <= 64 {
+            ah >> int.widen(64 - prefix.bits) == bh >> int.widen(64 - prefix.bits)
+        } else {
+            ah == bh && al >> int.widen(128 - prefix.bits) == bl >> int.widen(128 - prefix.bits)
+        },
+        _ => false
+    }
+}
+
+// RFC 5952 canonical spelling. RFC 4291 mapped addresses normalize to V4.
+fn literal(b: Bytes) -> Option[Ip] {
+    let n = list.len(b)
+    if n > 256 {
+        return None
+    }
+    let (hi, lo) = match net.parse_ip(b) {
+        Ok(V4(addr)) => return Some(V4(addr)),
+        Ok(V6(hi, lo)) => (hi, lo),
+        Error(_) => return None,
+    }
+    let mut explicit: u64 = 0
+    let mut gap: Option[u64] = None
+    let mut dotted = false
+    for i in 0u64 .. n {
+        let c = b[i]
+        if c >= b'A' && c <= b'F' {
+            return None
+        }
+        if c == b'0' && (i == 0 || b[i - 1] == b':') && i + 1 < n && b[i + 1] != b':' && b[i + 1] != b'.' {
+            return None
+        }
+        if c == b':' {
+            if i != 0 && b[i - 1] != b':' {
+                explicit += 1
+            }
+            if i + 1 < n && b[i + 1] == b':' {
+                gap = Some(explicit)
+            }
+        } else if c == b'.' {
+            dotted = true
+        }
+    }
+    if dotted && !(hi == 0 && lo >> 32 == 65535) {
+        return None
+    }
+    if b[n - 1] != b':' {
+        explicit += 1
+    }
+    if dotted {
+        explicit += 1
+    }
+    let mut words: Inline[u16, 8] =[0; 8]
+    for i in 0u64 .. 4u64 {
+        let shift = (3 - i) * 16
+        words[i] = int.truncate(hi >> shift)
+        words[i + 4] = int.truncate(lo >> shift)
+    }
+    // Compress the longest zero run, taking the first on ties and requiring
+    // at least two groups. The numeric parser already checked the placement.
+    let mut best: u64 = 8
+    let mut length: u64 = 1
+    let mut i: u64 = 0
+    while i < 8 {
+        let start = i
+        while i < 8 && words[i] == 0 {
+            i += 1
+        }
+        if i - start > length {
+            best = start
+            length = i - start
+        }
+        if i == start {
+            i += 1
+        }
+    }
+    if best == 8 {
+        if gap != None {
+            return None
+        }
+    } else if gap != Some(best) || 8 - explicit != length {
+        return None
+    }
+    Some(normalize(V6(hi, lo)))
+}
+
+/// Tests the ingress prefixes against the peer and its IPv4-mapped equivalent.
+pub fn trusted(peer: Ip, ingress: List[Prefix]) -> bool {
+    for p in ingress {
+        if contains(p, peer) || contains(p, normalize(peer)) {
+            return true
+        }
+    }
+    false
+}
+
+fn forwarded_source(b: Bytes, h: http1.Head) -> Result[Ip, u16] {
+    let mut value: Option[http1.Span] = None
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(list.slice(b, f.name.start, f.name.end), string.as_bytes("x-forwarded-for")) {
+            if value != None {
+                return Error(400)
+            }
+            value = Some(f.value)
+        }
+    }
+    let span = match value {
+        Some(s) => s,
+        None => return Error(400)
+    }
+    match literal(list.slice(b, span.start, span.end)) {
+        Some(ip) => Ok(ip),
+        None => Error(400)
+    }
+}
+
+/// Source key from a head the caller has already parsed. Error is HTTP 400.
+pub fn source_for_head(b: Bytes, h: http1.Head, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
+    if trusted(peer, ingress) {
+        forwarded_source(b, h)
+    } else {
+        Ok(normalize(peer))
+    }
+}
+
+/// Source key for a complete HTTP request. Trusted ingress must supply one
+/// canonical XFF literal; other peers' XFF is ignored. Error is HTTP 400.
+/// O(head + ingress prefixes), no allocation. Ex: `ingress_policy.source(b, peer, ingress)`.
+pub fn source(b: Bytes, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
+    if !trusted(peer, ingress) {
+        return Ok(normalize(peer))
+    }
+    let mut h = http1.head()
+    if http1.request(b, mut h) != Complete {
+        return Error(400)
+    }
+    forwarded_source(b, h)
+}

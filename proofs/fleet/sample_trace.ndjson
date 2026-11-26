@@ -1,0 +1,12 @@
+{"seed":3045,"index":0,"event":{"tag":"Sm1AuthPrimary","value":2},"actions":[],"state":{"epoch":1,"holder":1,"origin_epoch":1,"permit_attempt":0,"incumbent":1,"open_count":1}}
+{"seed":3045,"index":1,"event":{"tag":"Sm1AuthRecovery","value":3},"actions":[],"state":{"epoch":1,"holder":1,"origin_epoch":1,"permit_attempt":0,"incumbent":1,"open_count":2}}
+{"seed":3045,"index":2,"event":{"tag":"Sm1SpawnContinue","value":[]},"actions":[],"state":{"epoch":1,"holder":1,"origin_epoch":1,"permit_attempt":0,"incumbent":1,"open_count":2}}
+{"seed":3045,"index":3,"event":{"tag":"Sm1ExecCas","value":[2,1]},"actions":[],"state":{"epoch":2,"holder":2,"origin_epoch":2,"permit_attempt":2,"incumbent":1,"open_count":2}}
+{"seed":3045,"index":4,"event":{"tag":"Sm1ExecCas","value":[1,1]},"actions":[],"state":{"epoch":2,"holder":2,"origin_epoch":2,"permit_attempt":2,"incumbent":1,"open_count":2}}
+{"seed":3045,"index":5,"event":{"tag":"Sm1ExecCas","value":[1001,1]},"actions":[],"state":{"epoch":2,"holder":2,"origin_epoch":2,"permit_attempt":2,"incumbent":1,"open_count":2}}
+{"seed":3045,"index":6,"event":{"tag":"Sm1ReadSettle","value":[]},"actions":[],"state":{"epoch":2,"holder":2,"origin_epoch":2,"permit_attempt":2,"incumbent":3,"open_count":0}}
+{"seed":3045,"index":7,"event":{"tag":"Sm1SpawnContinue","value":[]},"actions":[],"state":{"epoch":2,"holder":2,"origin_epoch":2,"permit_attempt":2,"incumbent":3,"open_count":0}}
+{"seed":3045,"index":8,"event":{"tag":"Sm1ExecCas","value":[1002,2]},"actions":[],"state":{"epoch":3,"holder":3,"origin_epoch":3,"permit_attempt":2,"incumbent":3,"open_count":0}}
+{"seed":3045,"index":9,"event":{"tag":"Sm1AuthPrimary","value":1},"actions":[],"state":{"epoch":3,"holder":3,"origin_epoch":3,"permit_attempt":2,"incumbent":3,"open_count":1}}
+{"seed":3045,"index":10,"event":{"tag":"Sm1ExecCas","value":[3,3]},"actions":[],"state":{"epoch":4,"holder":4,"origin_epoch":4,"permit_attempt":3,"incumbent":3,"open_count":1}}
+{"seed":3045,"index":11,"event":{"tag":"Sm1ReadSettle","value":[]},"actions":[],"state":{"epoch":4,"holder":4,"origin_epoch":4,"permit_attempt":3,"incumbent":1,"open_count":0}}

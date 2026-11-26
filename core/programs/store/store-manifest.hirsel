@@ -9,9 +9,9 @@ fn manifest_limit(l: StoreLimits) -> u64 {
     MANIFEST_FIXED_BYTES + l.meta
 }
 
-const PAGE_LIMIT: u64 = 8384
+const PAGE_LIMIT: u64 = std.page.PAGE_MAX
 
-const BLOB_LIMIT: u64 = 16711688
+const BLOB_LIMIT: u64 = VALUE_LIMIT + bytes[u64]
 
 const UNKNOWN_ROOM: u64 = 1048576
 

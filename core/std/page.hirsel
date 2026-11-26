@@ -3,13 +3,13 @@ const HEADER: u64 = 24
 
 const TARGET: u64 = 4096
 
-const PAGE_MAX: u64 = 8384
+pub const PAGE_MAX: u64 = 8384
 
 const PRIVATE_MAX: u64 = 16384
 
 const INLINE_MAX: u64 = 1024
 
-const VALUE_MAX: u64 = 16711680
+pub const VALUE_MAX: u64 = 16711680
 
 const PTR_BYTES: u64 = 36
 
@@ -185,7 +185,7 @@ pub fn encode_blob(id: u64, value: Bytes) -> Result[Bytes, Error] {
     if id == 0 || n == 0 || n > VALUE_MAX {
         return Error(MalformedPage)
     }
-    let mut raw: Bytes = list.with_capacity(8 + n)
+    let mut raw: Bytes = list.with_capacity(bytes[u64] + n)
     list.put_word_le(mut raw, id)
     list.append(mut raw, value)
     Ok(take raw)
@@ -193,15 +193,15 @@ pub fn encode_blob(id: u64, value: Bytes) -> Result[Bytes, Error] {
 
 pub fn decode_blob(take raw: Bytes) -> Result[Blob, Error] {
     let n = list.len(raw)
-    if n <= 8 || n > 8 + VALUE_MAX {
+    if n <= bytes[u64] || n > bytes[u64] + VALUE_MAX {
         return Error(MalformedPage)
     }
     let id: u64 = list.word_le(raw, 0)
     if id == 0 {
         return Error(MalformedPage)
     }
-    list.copy_within(mut raw, 8, 0, n - 8)
-    list.truncate(mut raw, n - 8)
+    list.copy_within(mut raw, bytes[u64], 0, n - bytes[u64])
+    list.truncate(mut raw, n - bytes[u64])
     Ok(Blob(stamp: id, value: take raw))
 }
 

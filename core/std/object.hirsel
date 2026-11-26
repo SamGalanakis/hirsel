@@ -1,8 +1,10 @@
-const PART_BYTES: u64 = 8388608
-
 const DEFAULT_LANES: u64 = 8
 
 const MAX_ATTEMPTS: u64 = 5
+
+const THROTTLE_BACKOFF_NS: u64 = 100000000
+
+const TRANSPORT_BACKOFF_NS: u64 = 10000000
 
 const MAX_U64: u64 = 18446744073709551615
 
@@ -1364,11 +1366,13 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
 
 const IDLE_NS: u64 = 4000000000
 
-const FRESH_NS: u64 = 1000000000
+const CONDITIONAL_IDLE_NS: u64 = 1000000000
+
+const DNS_RESOLVE_SLICE_NS: u64 = 1000000000
 
 const RESOLVE_NS: u64 = 300000000000
 
-const COOL_DOWN_NS: u64 = 100000000
+const PEER_COOLDOWN_NS: u64 = 100000000
 
 type Held: send {
     connection: http_client.Connection,
@@ -1470,7 +1474,7 @@ fn dns_loop(take dns: Dns) waits {
     loop {
         host.sleep_until(dns.clock, next)
         let now = host.mono_ns(dns.clock)
-        if let Ok(take ips) = resolve_ips(dns.network, dns.clock, dns.name, int.saturating_add(now, FRESH_NS)) {
+        if let Ok(take ips) = resolve_ips(dns.network, dns.clock, dns.name, int.saturating_add(now, DNS_RESOLVE_SLICE_NS)) {
             if let Error(_) = channel.send(dns.output, Resolved(take ips)) {
                 return
             }
@@ -1614,7 +1618,7 @@ fn pool_loop(take setup: Pool) waits {
                     pool.peers[i].open -= 1
                     if blocked {
                         pool.peers[i].health = ConnectFailed
-                        pool.peers[i].blocked = int.saturating_add(host.mono_ns(pool.clock), COOL_DOWN_NS)
+                        pool.peers[i].blocked = int.saturating_add(host.mono_ns(pool.clock), PEER_COOLDOWN_NS)
                     }
                     if pool.peers[i].open == 0 && !pool.peers[i].listed {
                         let _ = list.remove(mut pool.peers, i)
@@ -1921,7 +1925,7 @@ fn release(mut lane: Lane) waits {
 fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgress, crc: Option[u32]) -> Exchange waits {
     let at = host.mono_ns(lane.clock)
     let idle_limit = if op == PutConditional || op == PutIf || op == Complete || op == CompleteConditional {
-        FRESH_NS
+        CONDITIONAL_IDLE_NS
     } else {
         IDLE_NS
     }
@@ -2066,9 +2070,9 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Opt
 
 fn wait_retry(mut lane: Lane, attempt: u64, throttle: bool, deadline: u64) waits {
     let base = if throttle {
-        100000000u64
+        THROTTLE_BACKOFF_NS
     } else {
-        10000000u64
+        TRANSPORT_BACKOFF_NS
     }
     let span = base << (attempt - 1)
     list.clear(mut lane.jitter)
@@ -2802,8 +2806,10 @@ pub fn erase(mut c: Client, key: String, deadline_ns: u64) -> Result[(), Error] 
     as_unit(take result)
 }
 
+pub const LIST_PAGE_MAX: u64 = 1000
+
 pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry], deadline_ns: u64) -> Result[Page, Error] waits {
-    let room = order.min(1000u64, list.capacity(into) - list.len(into))
+    let room = order.min(LIST_PAGE_MAX, list.capacity(into) - list.len(into))
     if room == 0 {
         return Error(TooLarge)
     }
@@ -3107,30 +3113,38 @@ pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], dea
         Ok(take meta) => take meta,
         Error(take e) => return (Error(take e), take buffers),
     }
-    let count = info.size / PART_BYTES + if info.size % PART_BYTES == 0 {
-        0
-    } else {
-        1
+    let mut remaining = info.size
+    let mut count = 0u64
+    let mut prefix = 0u64
+    while remaining != 0 && prefix < list.len(buffers) {
+        let spare = int.saturating_sub(list.capacity(buffers[prefix]), list.len(buffers[prefix]))
+        if spare != 0 {
+            count += 1
+            remaining -= order.min(remaining, spare)
+        }
+        prefix += 1
     }
-    if count > list.len(buffers) {
+    if remaining != 0 {
         return (Error(TooLarge), take buffers)
     }
     if count > 0 && info.etag.len == 0 {
         return (Error(Fatal(Malformed)), take buffers)
     }
-    for i in 0u64 .. count {
-        let n = order.min(PART_BYTES, info.size - i * PART_BYTES)
-        if n > list.capacity(buffers[i]) - list.len(buffers[i]) {
-            return (Error(TooLarge), take buffers)
-        }
-    }
     let mut queued: List[Option[Job]] = list.with_capacity(count)
-    for i in 0u64 .. count {
+    let mut slots: List[u64] = list.with_capacity(count)
+    let mut offset = 0u64
+    for i in 0u64 .. prefix {
+        let spare = int.saturating_sub(list.capacity(buffers[i]), list.len(buffers[i]))
+        if spare == 0 {
+            continue
+        }
         let data = list.set(mut buffers, i, list.new())
         let mut request = new_job(FetchRange, clone(path), take data, deadline_ns)
-        request.lo = i * PART_BYTES
-        request.hi = request.lo + order.min(PART_BYTES, info.size - request.lo)
+        request.lo = offset
+        offset += order.min(spare, info.size - offset)
+        request.hi = offset
         request.tag = info.etag
+        list.push(mut slots, i)
         list.push(mut queued, Some(take request))
     }
     let mut status: Result[(), Error] = Ok(())
@@ -3138,7 +3152,7 @@ pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], dea
     let mut i = 0u64
     for take slot in rv {
         let Reply(result: take part, data: take data, ..) = option.unwrap(take slot)
-        let _ = list.set(mut buffers, i, take data)
+        let _ = list.set(mut buffers, slots[i], take data)
         match as_meta(take part) {
             Ok(part_meta) => {
                 if part_meta.size != info.size {

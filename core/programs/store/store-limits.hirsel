@@ -2,9 +2,9 @@
 // (STORE-SPEC §11.1 AP4a).
 pub const FRAME_LIMIT: u64 = 16777296
 
-pub const VALUE_LIMIT: u64 = 16711680
+pub const VALUE_LIMIT: u64 = FORMAT_VALUE_MAX
 
-const FORMAT_VALUE_MAX: u64 = 16711680
+const FORMAT_VALUE_MAX: u64 = std.page.VALUE_MAX
 
 /// A store's own limits (§11.1 AP4a). Genesis records them in the MANIFEST,
 /// every later open reads them back, and every limit check uses them:

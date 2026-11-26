@@ -49,7 +49,7 @@ the operation uses a no-clobber precondition.
 | `fetch_if_changed(key, unchanged, take into, deadline_ns)` | Uses `If-None-Match`. Returns `None` on HTTP 304, or the new metadata and body on success. |
 | `bucket_location(deadline_ns)` | Reads the location constraint of the configured bucket. |
 | `fetch_range(key, lo, hi, take into, deadline_ns)` | Appends the requested half-open interval. Metadata includes the full object's size. |
-| `fetch_parts(key, take buffers, deadline_ns)` | Reads the object as 8 MiB ranges with an ETag pinned across the lanes. The last range can be shorter. Returns the original list and keeps the ranges in separate buffers. Any unused buffers are left as supplied. |
+| `fetch_parts(key, take buffers, deadline_ns)` | Reads contiguous ranges sized by each buffer’s spare capacity, with a single ETag pinned across the lanes. Appends bytes to the original buffers in order and leaves unused buffers as supplied. |
 | `store(key, take body, deadline_ns)` | Overwrites a key and returns metadata and the caller's buffer. |
 | `store_no_clobber(key, take body, deadline_ns)` | Conditionally creates the key and returns `Created` or `Exists` with the caller's buffer. |
 | `store_if(key, pre, take body, deadline_ns)` | Sends `If-Match` for `Match(etag)` or `If-None-Match: *` for `Absent`. Returns `Applied(meta)` or `Mismatch` with the original body. |

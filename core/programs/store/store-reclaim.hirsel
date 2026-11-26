@@ -214,10 +214,8 @@ fn history_abort_reclaimed_uploads(mut lane: ObjectJournalSession, pass: Reclaim
     }
 }
 
-const HISTORY_LIST_PAGE: u64 = 1000
-
 fn reclaim_page_bytes() -> u64 {
-    option.unwrap(charge.seq(bytes[std.object.Entry], HISTORY_LIST_PAGE))
+    option.unwrap(charge.seq(bytes[std.object.Entry], std.object.LIST_PAGE_MAX))
 }
 
 fn sweep_start() -> SweepCursor {
@@ -364,7 +362,7 @@ fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimC
     history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
     let pass = reclaim_pass_for_lane(mut lane, fixed, deadline, true)?
     let mut members = disk_allocation(fn() -> Result[List[std.object.Entry], Error] {
-        Ok(list.with_capacity(HISTORY_LIST_PAGE))
+        Ok(list.with_capacity(std.object.LIST_PAGE_MAX))
     })?
     history_sweep_entries(mut lane, pass, mut members, deadline)?
     let start_live = history_entry_cursor(SweepCursor(position: pass.floor, epoch: 0, digest: 0))
@@ -492,7 +490,7 @@ fn preview_on_lane(mut lane: ObjectJournalSession, store_id: StoreId, fixed: Obj
     let pass = reclaim_pass_for_lane(mut lane, fixed, deadline, false)?
     let private_cursor = lane.sweep
     let mut members = disk_allocation(fn() -> Result[List[std.object.Entry], Error] {
-        Ok(list.with_capacity(HISTORY_LIST_PAGE))
+        Ok(list.with_capacity(std.object.LIST_PAGE_MAX))
     })?
     let mut acc = PreviewAcc(items: list.new(), total_bytes: 0u64, max_items, omitted: 0u64)
     preview_sweep_entries(mut lane, pass, private_cursor, mut members, mut acc, deadline)?

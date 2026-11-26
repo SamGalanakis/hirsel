@@ -1,3 +1,31 @@
+@test
+fn bucket_fetch_parts_uses_spare_capacity(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 123, None, list.new())
+    let checked = check_fetch_parts(sim, tasks)
+    let _ = bucket_law_finish(take sim)
+    checked
+}
+
+fn check_fetch_parts(sim: BucketSim, tasks: Tasks) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 2)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let (saved, _) = std.object.store(mut client, "parts", clone(b"abcdefg"), due)
+    let _ = saved ?=> Remote
+    let mut first: Bytes = list.with_capacity(4)
+    list.push(mut first, b'!')
+    let mut buffers: List[Bytes] = list.with_capacity(4)
+    list.push(mut buffers, take first)
+    list.push(mut buffers, list.new())
+    list.push(mut buffers, list.with_capacity(4))
+    list.push(mut buffers, clone(b"unused"))
+    let (fetched, parts) = std.object.fetch_parts(mut client, "parts", take buffers, due)
+    let meta = fetched ?=> Remote
+    if meta.size != 7 || parts[0] != b"!abc" || list.len(parts[1]) != 0 || parts[2] != b"defg" || parts[3] != b"unused" {
+        fail("range bodies did not follow the supplied buffers' spare capacity")
+    }
+    Ok(())
+}
+
 fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let first_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = history_reader(take first_client, 0)

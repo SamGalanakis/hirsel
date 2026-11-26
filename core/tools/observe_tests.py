@@ -16,12 +16,16 @@ from std_native import ROOT
 # OBSERVERS-SPEC §6 requires a client log. R1 also exercises startup,
 # reserves and direct head requests outside the traced client session.
 UNOBSERVED_CALLS = NATIVE_ONLY_CALLS | {
-    # The grant laws use fixture.client or wire_client directly.
-    'atomic_migration', 'bind_granted', 'drain_answers_once', 'duplicate_own_reply',
-    'granted_copied', 'ready_after_activation', 'release_digest', 'serve_bounded_and_settled',
+    'atomic_migration', 'drain_answers_once', 'duplicate_own_reply',
+    'ready_after_activation', 'release_digest', 'serve_bounded_and_settled',
 }
 LIVE_CASES = (*(case for case in CALLS if case not in UNOBSERVED_CALLS), 'observe_early_then_late')
 CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
+GRANT_CALL_COUNTS = {'bind_granted': 4, 'granted_copied': 2}
+WIRE_ROOT_BYTES = 64 * 1024 * 1024
+# The full Place fixture reserves 1,074,790,400 bytes for its Memory backing,
+# plus the configured Place, publisher and session shares.
+BIND_ROOT_BYTES = 1280 * 1024 * 1024
 
 
 def replace(text, old, new):
@@ -52,6 +56,8 @@ def traced_calls(files, work):
     """Rewrite the whole runner_calls module, whichever files its manifest lists."""
     text = without_tests('\n'.join(Path(f).read_text() for f in files))
     text = replace(text, 'type Conn =', 'type Transport =')
+    text = replace(text, 'Socket(wire_client.Conn, Task[Result[(), std.wsock.Error]], u64)',
+                   'Socket(wire_client.Conn, Option[Task[Result[(), std.wsock.Error]]], u64)')
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
     text = text.replace('let d = Drive(', 'let d = Drive(out: out, err: err, ')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
@@ -59,8 +65,8 @@ def traced_calls(files, work):
         text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ')
         text = re.sub(rf'(?<!fn )\b{name}\(', f'{name}(out, err, ', text)
     text = replace(text, 'Some(Socket(take cn, take h, d.birth))',
-                   'Some(trace_conn(d, Socket(take cn, take h, d.birth)))')
-    text = replace(text, 'Socket(take cn, take h, d.birth)\n}', 'trace_conn(d, Socket(take cn, take h, d.birth))\n}')
+                   'Some(trace_conn(d, Socket(take cn, Some(take h), d.birth)))')
+    text = replace(text, 'Socket(take cn, take h, d.birth)\n}', 'trace_conn(d, Socket(take cn, Some(take h), d.birth))\n}')
     text = re.sub(r'Held\(runner\.fixture_owner\(d\.post, (\w+\(\w+\))\)\)',
                   r'trace_conn(d, Held(runner.fixture_owner(d.post, \1)))', text)
     text = text.replace('match cn {', 'match cn.link {')
@@ -73,10 +79,19 @@ def traced_calls(files, work):
     text = re.sub(r'(?<![\w.])ask\((\w+),', r'ask(mut \1,', text)
     text = re.sub(r'let (\w+)(: Conn)? = (conn\(|try_conn\(|trace_conn\()', r'let mut \1\2 = \3', text)
     text = replace(text, 'let Some(take cn) = try_conn', 'let Some(take available) = try_conn')
-    text = replace(text, '    let stream: u32 = int.narrow(s)',
-                   '    let digest = send_digest(mut cn, key, arg)\n'
-                   '    trace_event(cn, Sent(observe.Send(conn: cn.id, stream: sid(s), p: p, digest: take digest, deadline: host.mono_ns(clock) + after, at: host.mono_ns(clock))))\n'
-                   '    let stream: u32 = int.narrow(s)')
+    text = replace(text, '''    let stream: u32 = int.narrow(s)
+    let ms: u32 = int.narrow(after / 1000000u64)
+    match cn.link {
+        Socket(wire, _, birth) => wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: int.widen(stream)), p, wire_client.slot(client_keys(), key), ms, take arg)),
+        _ => fail("calls: synthetic owner cannot call")
+    }''', '''    let stream: u32 = int.narrow(s)
+    let ms: u32 = int.narrow(after / 1000000u64)
+    let birth = match cn.link {
+        Socket(_, _, birth) => birth,
+        _ => fail("calls: synthetic owner cannot call"),
+    }
+    let slot = wire_client.slot(client_keys(), key)
+    trace_send(mut cn, store.StreamId(t: birth, n: int.widen(stream)), p, key, slot, take arg, ms, after)''')
     text = replace(text, '    let bad = string_arg(4096u64, true)', '    let mut cn = take available\n    let bad = string_arg(4096u64, true)')
     # Record all decoded batches, including malformed-frame probes and try_down.
     text = replace(text, '        Ok(take d) => take d,',
@@ -95,7 +110,7 @@ def traced_calls(files, work):
     text = replace(text, '''    wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: 7u64), 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
     let observed = match wire_client.next(wire) {
         Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 => if done[0u64].stream == store.StreamId(t: birth, n: 7u64) && done[0u64].p == 0u64 {''', '''
-    let mut cn = trace_conn(d, Socket(take wire, take session, birth))
+    let mut cn = trace_conn(d, Socket(take wire, Some(take session), birth))
     ask(mut cn, d.clock, 7u64, 0u64, k_write(), u64_arg(5u64), LATER)
     let got = match cn.link {
         Socket(raw_wire, _, _) => wire_client.next(raw_wire),
@@ -109,14 +124,98 @@ def traced_calls(files, work):
     let _ = task.join(take session)
     observed''', '''    let _ = finish(take cn, 1000u64)
     observed''')
+    text = replace(text, '''    // The minted offset is 40. Each call independently returns offset + input.
+    for p in 0u64 .. 2u64 {
+        wire_client.send_frame(wire, Call(wire.stream, p, 0u32, 10000u32, u64_arg(p + 1u64)))
+        let returned = match wire_client.next(wire) {
+            Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == p => match done[0u64].outcome {
+                Returned(raw) => match std.codec.decode(std.codec.of_u64(), raw) {
+                    Ok(value) => value == 41u64 + p,
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        }
+        want(returned, "wire granted: each call receives a minted grant")
+    }
+    let _ = wire_client.close(take wire)
+    let _ = task.join(take session)''', '''    // The minted offset is 40. Each call independently returns offset + input.
+    let birth = wire.stream.t
+    let mut cn = trace_conn(d, Socket(take wire, Some(take session), birth))
+    let key = key_of(code.identity(code.describe(stamp_wire)), std.codec.of_u64(), std.codec.of_u64())
+    for p in 0u64 .. 2u64 {
+        let returned = match traced_call(mut cn, requested, p, key, u64_arg(p + 1u64), 10000u32) {
+            Returned(raw) => match std.codec.decode(std.codec.of_u64(), raw) {
+                Ok(value) => value == 41u64 + p,
+                _ => false,
+            },
+            _ => false,
+        }
+        want(returned, "wire granted: each call receives a minted grant")
+    }
+    want(finish(take cn, 1000u64), "wire granted: session closes")''')
+    text = replace(text, '''let put_entry = fixture.transact_entry(code.describe(write))
+    let arm_entry = fixture.transact_entry(code.describe(arm_probe))
+    let probe_entry = fixture.granted_entry(code.describe(probed))''', '''let probe_keys = result.unwrap(fixture.entry_keys(code.describe(probe_place)))
+    let arm_key = key_of(code.identity(code.describe(arm_probe)), std.codec.of_u64(), reply())
+    let probe_codec: std.codec.Codec[ProbeReply] = std.codec.of()
+    let probe_key = key_of(code.identity(code.describe(probed)), std.codec.of_u64(), probe_codec)''')
+    text = replace(text, '''let mut c = result.unwrap(fixture.client(wired, Some(b"\\x02"), 5000u64))
+    let welcome = fixture.bound_caller(c)''', '''let wire = result.unwrap(fixture.connect(wired, Some(b"\\x02"), 5000u64))
+    let welcome: runner.Caller = clone(wire.caller)
+    let mut c = trace_fixture(out, err, clock, take wire)''')
+    text = replace(text, '''let pure = match result.unwrap(fixture.call(mut c, put_entry, 5u64, 2000u32)).answer {
+        Returned(Ok(_)) => quiet(reports),
+        _ => false
+    }''', '''let pure = match ok_value(traced_call(mut c, probe_keys, 0u64, k_write(), u64_arg(5u64), 2000u32)) {
+        Some(_) => quiet(reports),
+        None => false,
+    }''')
+    text = replace(text, '''let armed = match result.unwrap(fixture.call(mut c, arm_entry, 3u64, 2000u32)).answer {
+        Returned(Ok(_)) => true,
+        _ => false
+    }''', '''let armed = match ok_value(traced_call(mut c, probe_keys, 1u64, arm_key, u64_arg(3u64), 2000u32)) {
+        Some(_) => true,
+        None => false,
+    }''')
+    text = replace(text, '''let called = match result.unwrap(fixture.call(mut c, probe_entry, 0u64, 2000u32)).answer {
+        Returned(r) => r.seed == 7u64 && r.kind == 1u64 && r.serial == 1u64 && r.caller.issuer == 2u8 && r.caller.subject == b"\\x02",
+        _ => false,
+    }''', '''let called = match traced_call(mut c, probe_keys, 2u64, probe_key, u64_arg(0u64), 2000u32) {
+        Returned(raw) => match std.codec.decode(probe_codec, raw) {
+            Ok(r) => r.seed == 7u64 && r.kind == 1u64 && r.serial == 1u64 && r.caller.issuer == 2u8 && r.caller.subject == b"\\x02",
+            _ => false,
+        },
+        _ => false,
+    }''')
+    text = replace(text, '''let probe_keys = result.unwrap(fixture.entry_keys(code.describe(probe_place)))
+    let address''', 'let address')
+    text = replace(text, 'fixture.close(take c)\n    let stopped = match fixture.end(take wired',
+                   'want(finish(take c, 1000u64), "bind granted: wired session closes")\n    let stopped = match fixture.end(take wired')
+    text = replace(text, 'let mut d = result.unwrap(fixture.client(bare, Some(b"\\x02"), 5000u64))',
+                   'let mut d = trace_fixture(out, err, clock, result.unwrap(fixture.connect(bare, Some(b"\\x02"), 5000u64)))')
+    text = replace(text, '''let refused = match result.unwrap(fixture.call(mut d, probe_entry, 0u64, 2000u32)).answer {
+        Refused(NotAllowed) => quiet(reports),
+        _ => false
+    }''', '''let refused = match traced_call(mut d, probe_keys, 0u64, probe_key, u64_arg(0u64), 2000u32) {
+        Refused(NotAllowed) => quiet(reports),
+        _ => false,
+    }''')
+    text = replace(text, 'fixture.close(take d)\n    let bare_stopped',
+                   'want(finish(take d, 1000u64), "bind granted: bare session closes")\n    let bare_stopped')
     text += '''
 type Conn { id: u64, clock: Clock, out: Stdout, err: Stderr, log: Log[observe.Obs], digests: Map[Bytes, Bytes], link: Transport }
 
 fn trace_conn(d: Drive, take link: Transport) -> Conn waits {
+    open_trace(d.out, d.err, d.clock, take link)
+}
+
+fn open_trace(out: Stdout, err: Stderr, clock: Clock, take link: Transport) -> Conn waits {
     let entries: Log[observe.Obs] = log.new()
-    let id = host.mono_ns(d.clock)
-    emit(d.out, Opened(id))
-    Conn(id: id, clock: d.clock, out: d.out, err: d.err,
+    let id = host.mono_ns(clock)
+    emit(out, Opened(id))
+    Conn(id: id, clock: clock, out: out, err: err,
         log: take entries, digests: map.new(), link: take link)
 }
 
@@ -135,8 +234,11 @@ fn finish(take cn: Conn, code: u64) -> bool waits {
     let Conn(id: id, clock: clock, out: out, err: err, log: take entries, digests: _, link: take link) = take cn
     let ended = match take link {
         Socket(take wire, take session, _) => {
-            let _ = wire_client.close(take wire)
-            match task.join(take session) { Ok(Ok(())) => true, _ => false }
+            let closed = wire_client.close(take wire)
+            match take session {
+                Some(take running) => match task.join(take running) { Ok(Ok(())) => true, _ => false },
+                None => closed,
+            }
         },
         Held(take owner) => { runner.fixture_close(take owner); true },
     }
@@ -194,6 +296,33 @@ fn send_digest(mut cn: Conn, key: Bytes, arg: Bytes) -> Bytes {
     map.insert(mut cn.digests, take cache_key, clone(d))
     d
 }
+
+fn trace_fixture(out: Stdout, err: Stderr, clock: Clock, take wire: wire_client.Conn) -> Conn waits {
+    let birth = wire.stream.t
+    open_trace(out, err, clock, Socket(take wire, None, birth))
+}
+
+fn trace_send(mut cn: Conn, stream: store.StreamId, p: u64, key: Bytes, slot: u32, take arg: Bytes, ms: u32, after: u64) -> () waits {
+    let digest = send_digest(mut cn, key, arg)
+    let at = host.mono_ns(cn.clock)
+    trace_event(cn, Sent(observe.Send(conn: cn.id, stream: sid(stream.n), p: p, digest: take digest, deadline: at + after, at: at)))
+    match cn.link {
+        Socket(wire, _, _) => wire_client.send_frame(wire, Call(stream, p, slot, ms, take arg)),
+        _ => fail("calls: synthetic owner cannot call"),
+    }
+}
+
+fn traced_call(mut cn: Conn, offered: List[Bytes], p: u64, key: Bytes, take arg: Bytes, ms: u32) -> runner.Outcome waits {
+    let stream: store.StreamId = match cn.link {
+        Socket(wire, _, _) => clone(wire.stream),
+        _ => fail("calls: synthetic owner cannot call"),
+    }
+    let widened: u64 = int.widen(ms)
+    trace_send(mut cn, stream, p, key, wire_client.slot(offered, key), take arg, ms, widened * 1000000u64)
+    let Got(version: _, stream: take got_stream, p: got_p, outcome: take outcome) = frame(cn)
+    want(got_p == p && got_stream == sid(stream.n), "calls: answer names its send")
+    outcome
+}
 '''
     path = work / 'runner_calls.hirsel'
     path.write_text(text)
@@ -214,7 +343,11 @@ class CallEvaluator:
             return self.native(inputs_path, definition, progress)
 
     def native(self, inputs_path, definition, progress):
-        if inputs_path not in self.binaries:
+        law = definition.rsplit('/', 1)[1]
+        binding = law == 'law_bind_granted'
+        root_limit = BIND_ROOT_BYTES if binding else WIRE_ROOT_BYTES
+        cache_key = (inputs_path, root_limit)
+        if cache_key not in self.binaries:
             m = json.loads(inputs_path.read_text())
             sources = m['packages'][-1]['sources']
             source = Path(next(s['file'] for s in sources if s['modules'] == ['runner_calls']))
@@ -222,13 +355,14 @@ class CallEvaluator:
                         '    let name = option.unwrap(args.get(argv, 0))', '    let good = false']
             names = dict(Stdout='out', Stderr='err', Clock='c', Random='r', Tasks='tasks', Net='n', Dir='d')
             selected_cases = {f'law_{case}' for case in (self.args.case or LIVE_CASES)}
-            for law, parameters in re.findall(r'pub fn (law_\w+)\(([^)]*)\)', source.read_text()):
-                if law not in selected_cases:
+            for name, parameters in re.findall(r'pub fn (law_\w+)\(([^)]*)\)', source.read_text()):
+                if name not in selected_cases or (name == 'law_bind_granted') != binding:
                     continue
                 arguments = ', '.join(names[p.split(':')[1].strip()] for p in parameters.split(',') if p.strip())
-                dispatch.append(f'        || (name == "{law}" && runner_calls.{law}({arguments}))')
+                dispatch.append(f'        || (name == "{name}" && runner_calls.{name}({arguments}))')
             dispatch += [ '    if good { Ok(()) } else { Error(Exit(status: 1)) }', '}']
-            entry = self.work / (inputs_path.stem + '-entry.hirsel')
+            suffix = '-bind-entry.hirsel' if binding else '-entry.hirsel'
+            entry = self.work / (inputs_path.stem + suffix)
             entry.write_text('\n'.join(dispatch) + '\n')
             sources.append(dict(file=str(entry), modules=['observe_entry'], signatures=False))
             selected = entry.with_suffix('.json')
@@ -238,7 +372,7 @@ class CallEvaluator:
             command = [str(self.args.compiler.resolve()), 'build', '--inputs', str(selected),
                        '--source-core', '--source-std', '--backend', 'cranelift',
                        '--runtime', str(self.args.runtime.resolve()), '--cc', str(self.cc),
-                       '--store', str(store), '--limit', str(64 * 1024 * 1024),
+                       '--store', str(store), '--limit', str(root_limit),
                        '--entry', 'runner@1/observe_entry/main', '-o', str(binary),
                        '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                        '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
@@ -246,8 +380,8 @@ class CallEvaluator:
             built = progress.run(command, capture_output=True, text=True)
             if built.returncode:
                 return None, dict(error=built.stderr, command=command)
-            self.binaries[inputs_path] = binary
-        run = progress.run([str(self.binaries[inputs_path]), definition.rsplit('/', 1)[1]], capture_output=True)
+            self.binaries[cache_key] = binary
+        run = progress.run([str(self.binaries[cache_key]), law], capture_output=True)
         return (1 if run.returncode == 0 else 0 if run.returncode == 1 else None,
                 dict(outcome=dict(kind='returned' if run.returncode in (0, 1) else 'failed'),
                      stdout=list(run.stdout), stderr=list(run.stderr) if run.returncode in (0, 1) else [],
@@ -381,9 +515,15 @@ def live_evidence(case, t, verdicts):
     assessed = {v['conn'] for v in verdicts}
     complete = (t['header']['complete'] and opened == assessed
                 and len(verdicts) == len(opened) * len(CLAUSES))
+    if not complete or any(v['status'] in ('Failed', 'Incomplete') for v in verdicts):
+        return False
+    if case in GRANT_CALL_COUNTS:
+        # J2 counts replies and J3 counts sends. Require every call in the law
+        # to reach the oracle, including the refused call in bind_granted.
+        return all(sum(v['hits'] for v in verdicts if v['clause'] == c and v['status'] == 'Held')
+                   == GRANT_CALL_COUNTS[case] for c in ('J2', 'J3'))
     held = {v['clause'] for v in verdicts if v['status'] == 'Held' and v['hits'] > 0}
-    return (complete and all(v['status'] not in ('Failed', 'Incomplete') for v in verdicts)
-            and (case != 'calls_two_streams' or {'J2', 'J3'} <= held))
+    return case != 'calls_two_streams' or {'J2', 'J3'} <= held
 
 
 def observed_manifest(root, work):

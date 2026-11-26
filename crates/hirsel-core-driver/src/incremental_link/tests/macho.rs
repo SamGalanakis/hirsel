@@ -154,7 +154,7 @@ fn a_patched_macho_link_is_the_lld_link_of_the_edited_objects() {
             Slot::Keyed((ContentHash::of_bytes(&unit), 0), &member),
         ];
         let want = lld(dir, &[&main, &unit]);
-        let image = match linker.patch(frame, &objects).unwrap() {
+        let image = match linker.patch(frame, &objects, &|| Ok(Vec::new())).unwrap() {
             Some(image) => {
                 assert!(patches, "{name}: patched an edit lld must link");
                 assert!(*image == want, "{name}: the patched image is not lld's");
@@ -211,8 +211,8 @@ _shared_fn:
 }
 
 /// Law: lld keeps the first of two weak copies, so an edit to the second
-/// copy leaves the image as it was; the patch never writes the edit over
-/// the copy lld kept.
+/// copy leaves the image as it was and falls back to lld; patching it would
+/// write the edit over the copy lld kept.
 #[test]
 fn an_edited_weak_copy_is_not_patched_over_the_copy_lld_kept() {
     let dir = tempfile::tempdir().unwrap();
@@ -234,7 +234,7 @@ fn an_edited_weak_copy_is_not_patched_over_the_copy_lld_kept() {
             Slot::Keyed((ContentHash::of_bytes(&second), 0), &members[1]),
         ];
         let want = lld(dir, &[&main, &first, &second]);
-        let patched = linker.patch(frame, &objects).unwrap();
+        let patched = linker.patch(frame, &objects, &|| Ok(Vec::new())).unwrap();
         if patched.is_none() {
             linker
                 .remember(frame, &objects, &Arc::new(want.clone()))
@@ -244,17 +244,69 @@ fn an_edited_weak_copy_is_not_patched_over_the_copy_lld_kept() {
     };
     assert!(link(1).0.is_none());
     let (patched, want) = link(2);
-    if let Some(patched) = patched {
-        assert!(*patched == want, "the patch wrote over the kept weak copy");
-    }
+    assert!(patched.is_none(), "patched the weak copy lld did not keep");
     runs(dir, "weak", &want, 1);
 }
 
+/// A member defining `_shared_fn` strong, returning `n`.
+fn strong(n: u8) -> String {
+    weak(n).replace(".weak_definition _shared_fn\n", "")
+}
+
+/// Law: lld keeps a strong definition over a weak one, from a later slot or
+/// from an input outside the slots, so an edit to the weak copy leaves the
+/// image as it was and falls back to lld; patching it would write over the
+/// strong copy, whose bytes are the same.
+#[test]
+fn an_edited_weak_copy_under_a_strong_definition_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let frame = ContentHash::of_bytes(b"frame");
+    let main = assemble(
+        dir,
+        "main",
+        ".section __TEXT,__text,regular,pure_instructions\n.build_version macos, 26, 0\n.globl _main\n.p2align 2\n_main:\n    b _shared_fn\n.subsections_via_symbols\n",
+    );
+    let strong_copy = assemble(dir, "strong", &strong(1));
+    let outside = dir.join("outside.o");
+    std::fs::write(&outside, &strong_copy).unwrap();
+    for (name, in_slots) in [("second-strong", true), ("outside-strong", false)] {
+        let mut linker = Incremental::default();
+        for n in [1, 2] {
+            let first = assemble(dir, &format!("{name}-{n}"), &weak(n));
+            let members: [Arc<[u8]>; 2] = [first.as_slice().into(), strong_copy.as_slice().into()];
+            let mut objects = vec![
+                Slot::Bytes(&main),
+                Slot::Keyed((ContentHash::of_bytes(&first), 0), &members[0]),
+            ];
+            let mut paths = Vec::new();
+            if in_slots {
+                objects.push(Slot::Keyed(
+                    (ContentHash::of_bytes(&strong_copy), 0),
+                    &members[1],
+                ));
+            } else {
+                paths.push(outside.clone());
+            }
+            let want = Arc::new(lld(dir, &[&main, &first, &strong_copy]));
+            let patched = linker
+                .patch(frame, &objects, &|| Ok(paths.clone()))
+                .unwrap();
+            assert!(
+                patched.is_none(),
+                "{name}: patched a weak copy lld did not keep"
+            );
+            linker.remember(frame, &objects, &want).unwrap();
+            runs(dir, name, &want, 1);
+        }
+    }
+}
+
 /// A Cranelift arm64 Darwin unit with one static, `d0`, holding `byte`,
-/// which its function names.
-fn cranelift_unit(name: &str, byte: u8) -> Vec<u8> {
+/// which its function names; the function returns `value`.
+fn cranelift_unit(name: &str, byte: u8, value: u8) -> Vec<u8> {
     let text = format!(
-        "core v1\nstatic d0 = align 1 hex {byte:02x}\nsig g0 = () -> (u64)\ninst n0 = app@1/main/{name} [] []\nfn f0 = n0 g0 {{\nb0():\n  v0: ptr = static d0\n  v1: u64 = const 0\n  return v1\n}}\n"
+        "core v1\nstatic d0 = align 1 hex {byte:02x}\nsig g0 = () -> (u64)\ninst n0 = app@1/main/{name} [] []\nfn f0 = n0 g0 {{\nb0():\n  v0: ptr = static d0\n  v1: u64 = const {value}\n  return v1\n}}\n"
     );
     let module = hirsel_core_ir::text::parse(&text).unwrap();
     let options = hirsel_cranelift::core::Options {
@@ -280,7 +332,7 @@ fn an_edited_static_patches_a_macho_image() {
         "start",
         ".section __TEXT,__text,regular,pure_instructions\n.build_version macos, 26, 0\n.globl _main\n.p2align 2\n_main:\n    mov w0, #0\n    ret\n.subsections_via_symbols\n",
     );
-    let left = cranelift_unit("left", 5);
+    let left = cranelift_unit("left", 5, 0);
     let mut linker = Incremental::default();
     let mut link = |right: &[u8]| {
         let members: [Arc<[u8]>; 2] = [left.as_slice().into(), right.into()];
@@ -290,15 +342,69 @@ fn an_edited_static_patches_a_macho_image() {
             Slot::Keyed((ContentHash::of_bytes(right), 0), &members[1]),
         ];
         let want = Arc::new(lld(dir, &[&start, &left, right]));
-        let patched = linker.patch(frame, &objects).unwrap();
+        let patched = linker.patch(frame, &objects, &|| Ok(Vec::new())).unwrap();
         if patched.is_none() {
             linker.remember(frame, &objects, &want).unwrap();
         }
         (patched, want)
     };
-    assert!(link(&cranelift_unit("right", 5)).0.is_none());
-    let (patched, want) = link(&cranelift_unit("right", 6));
+    assert!(link(&cranelift_unit("right", 5, 0)).0.is_none());
+    let (patched, want) = link(&cranelift_unit("right", 6, 0));
     let patched = patched.expect("the edited static fell back to lld");
     assert!(patched == want, "the patched image is not lld's");
     runs(dir, "static", &patched, 0);
+}
+
+/// Law: as for ELF, a function-body edit to a Cranelift member patches the
+/// arm64 image to lld's link of the edited objects when lld keeps that
+/// member's weak copy, and the patched image verifies and runs the new body.
+#[test]
+fn a_function_body_edit_patches_a_macho_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let frame = ContentHash::of_bytes(b"frame");
+    let left = cranelift_unit("left", 5, 0);
+    let right = |value| cranelift_unit("right", 5, value);
+    // The one weak function the right member defines, which `_main` calls.
+    let function = super::super::globals(&right(1))
+        .unwrap()
+        .into_iter()
+        .find(|&(_, weak)| weak)
+        .map(|(name, _)| String::from_utf8(name.to_vec()).unwrap())
+        .unwrap();
+    let main = assemble(
+        dir,
+        "main",
+        &format!(
+            ".section __TEXT,__text,regular,pure_instructions\n.build_version macos, 26, 0\n.globl _main\n.p2align 2\n_main:\n    b \"{function}\"\n.subsections_via_symbols\n"
+        ),
+    );
+    let mut linker = Incremental::default();
+    let mut patched = 0;
+    for value in [1, 2, 3] {
+        let right = right(value);
+        let members: [Arc<[u8]>; 2] = [left.as_slice().into(), right.as_slice().into()];
+        let objects = [
+            Slot::Bytes(&main),
+            Slot::Keyed((ContentHash::of_bytes(&left), 0), &members[0]),
+            Slot::Keyed((ContentHash::of_bytes(&right), 0), &members[1]),
+        ];
+        let want = Arc::new(lld(dir, &[&main, &left, &right]));
+        let image = match linker.patch(frame, &objects, &|| Ok(Vec::new())).unwrap() {
+            Some(image) => {
+                assert!(
+                    image == want,
+                    "const {value}: the patched image is not lld's"
+                );
+                patched += 1;
+                image
+            }
+            None => {
+                linker.remember(frame, &objects, &want).unwrap();
+                want
+            }
+        };
+        runs(dir, &format!("body-{value}"), &image, value.into());
+    }
+    assert_eq!(patched, 2, "a function-body edit fell back to lld");
 }

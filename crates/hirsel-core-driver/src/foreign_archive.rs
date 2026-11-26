@@ -264,18 +264,7 @@ impl ForeignDefinitions<'_> {
         recipe: &crate::tool_inputs::LinkRecipe,
     ) -> Result<(), AdmissionError> {
         self.check_link_input(&std::fs::read(runtime)?, "the runtime")?;
-        let binaries = if self.macho {
-            recipe
-                .files
-                .iter()
-                .map(|file| file.path.clone())
-                .filter(|path| *path != recipe.linker)
-                .collect()
-        } else {
-            crate::link_closure::closure(&recipe.args, crate::tool_inputs::INPUT_MARKER, true)?
-                .binaries
-        };
-        for input in binaries {
+        for input in recipe_binaries(recipe, self.macho)? {
             self.check_link_input(
                 &std::fs::read(&input)?,
                 &format!("link input {}", input.display()),
@@ -327,10 +316,29 @@ impl ForeignDefinitions<'_> {
     }
 }
 
+/// The toolchain's own link inputs a recipe names: the libc and system
+/// libraries of an ELF recipe's closure, or a Mach-O recipe's text stubs,
+/// which are its files besides the linker.
+pub(crate) fn recipe_binaries(
+    recipe: &crate::tool_inputs::LinkRecipe,
+    macho: bool,
+) -> std::io::Result<Vec<PathBuf>> {
+    Ok(if macho {
+        recipe
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .filter(|path| *path != recipe.linker)
+            .collect()
+    } else {
+        crate::link_closure::closure(&recipe.args, crate::tool_inputs::INPUT_MARKER, true)?.binaries
+    })
+}
+
 /// Visit each global or weak symbol `bytes` defines: an ELF object or shared
 /// object, a Mach-O object, an `ar` archive of objects, or a TBD text stub.
 /// `None` when the bytes are none of these.
-fn input_definitions(
+pub(crate) fn input_definitions(
     bytes: &[u8],
     defined: &mut dyn FnMut(&[u8]) -> Result<(), AdmissionError>,
 ) -> Option<Result<(), AdmissionError>> {

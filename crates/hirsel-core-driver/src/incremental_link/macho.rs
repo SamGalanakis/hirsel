@@ -21,13 +21,15 @@
 //! signature equal lld's own.
 //!
 //! lld splits a section at each symbol (`subsections_via_symbols`) and
-//! keeps one copy of a weak definition. So each piece is placed by a symbol
-//! of its own that the image holds once, and a piece that defines a weak
-//! symbol is never patched. Any edit outside these rules is linked again by
-//! lld.
+//! keeps one copy of a weak definition, dropping the pieces of the others.
+//! So each piece is placed by a symbol of its own that the image holds once,
+//! and a piece that defines a weak symbol is patched only when lld provably
+//! kept that piece's copy (`super::Previous::kept`). Any edit outside these
+//! rules is linked again by lld.
 use super::Edit;
 use rustc_hash::FxHashMap;
 use sha2::Digest as _;
+use std::cell::OnceCell;
 
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
@@ -411,7 +413,7 @@ impl Symbols {
 /// An arm64 Mach-O image the resident link patches.
 pub(super) struct Resident {
     seal: Seal,
-    symbols: Option<Symbols>,
+    symbols: OnceCell<Option<Symbols>>,
 }
 
 impl Resident {
@@ -420,20 +422,24 @@ impl Resident {
     pub(super) fn of(image: &[u8]) -> Option<Self> {
         Some(Self {
             seal: Seal::of(image)?,
-            symbols: None,
+            symbols: OnceCell::new(),
         })
     }
     pub(super) fn is_macho(image: &[u8]) -> bool {
         u32_at(image, 0) == Some(MH_MAGIC_64)
     }
     /// The edits that turn `image`, linked with `old`, into lld's link with
-    /// `new` in its place.
-    pub(super) fn edit(&mut self, image: &[u8], old: &[u8], new: &[u8]) -> Option<Vec<Edit>> {
-        let symbols = match &mut self.symbols {
-            Some(symbols) => symbols,
-            none => none.insert(Symbols::of(image)?),
-        };
-        edit(image, symbols, old, new)
+    /// `new` in its place. `kept` says whether lld kept this slot's
+    /// definition of a weak name.
+    pub(super) fn edit(
+        &self,
+        image: &[u8],
+        old: &[u8],
+        new: &[u8],
+        kept: &dyn Fn(&[u8]) -> bool,
+    ) -> Option<Vec<Edit>> {
+        let symbols = self.symbols.get_or_init(|| Symbols::of(image)).as_ref()?;
+        edit(image, symbols, old, new, kept)
     }
     pub(super) fn apply(&mut self, image: &mut [u8], edits: Vec<Edit>) {
         let mut dirty = Vec::new();
@@ -444,7 +450,7 @@ impl Resident {
                     dirty.push((at, at + bytes.len()));
                 }
                 Edit::Rename(old, new) => {
-                    let symbols = self.symbols.as_mut().unwrap();
+                    let symbols = self.symbols.get_mut().unwrap().as_mut().unwrap();
                     let (count, n) = symbols.by_name.remove(&old).unwrap();
                     let at = symbols.stroff + symbols.symbols[n].strx as usize;
                     image[at..at + new.len()].copy_from_slice(&new);
@@ -502,7 +508,8 @@ fn cut_section(file: &MachO<'_>, symbols: &[Nlist], index: usize) -> Vec<Piece> 
 
 /// Where in the image lld put `piece` of the old object's section
 /// `index`: by a symbol in it that the image holds once. A piece with a
-/// weak definition may be another object's copy, so it has no place.
+/// weak definition lld did not provably keep (`kept`) may be dropped for
+/// another copy, so it has no place.
 fn place(
     image: &MachO<'_>,
     held: &Symbols,
@@ -510,8 +517,13 @@ fn place(
     symbols: &[Nlist],
     index: usize,
     piece: &Piece,
+    kept: &dyn Fn(&[u8]) -> bool,
 ) -> Option<usize> {
-    if piece.symbols.iter().any(|&n| symbols[n].weak()) {
+    if piece
+        .symbols
+        .iter()
+        .any(|&n| symbols[n].weak() && !object.name(&symbols[n]).is_some_and(kept))
+    {
         return None;
     }
     let start = object.sections[index].addr + piece.start;
@@ -553,7 +565,24 @@ fn fixed(object: &MachO<'_>, index: usize) -> Option<Vec<bool>> {
     Some(fixed)
 }
 
-fn edit(image: &[u8], held: &Symbols, old: &[u8], new: &[u8]) -> Option<Vec<Edit>> {
+/// The global and weak names a Mach-O object defines, each with whether it
+/// is weak.
+pub(super) fn globals(object: &[u8]) -> Option<Vec<(&[u8], bool)>> {
+    let file = MachO::parse(object, MH_OBJECT)?;
+    file.symbols()?
+        .iter()
+        .filter(|s| s.defined() && s.kind & N_EXT != 0)
+        .map(|s| Some((file.name(s)?, s.weak())))
+        .collect()
+}
+
+fn edit(
+    image: &[u8],
+    held: &Symbols,
+    old: &[u8],
+    new: &[u8],
+    kept: &dyn Fn(&[u8]) -> bool,
+) -> Option<Vec<Edit>> {
     let image = MachO::parse(image, MH_EXECUTE)?;
     let (o, n) = (MachO::parse(old, MH_OBJECT)?, MachO::parse(new, MH_OBJECT)?);
     if old.len() != new.len() {
@@ -607,7 +636,7 @@ fn edit(image: &[u8], held: &Symbols, old: &[u8], new: &[u8]) -> Option<Vec<Edit
         let piece = pieces.iter().rfind(|p| p.start <= offset)?;
         let at = (*placed
             .entry((index, piece.start))
-            .or_insert_with(|| place(&image, held, &o, &symbols, index, piece)))?;
+            .or_insert_with(|| place(&image, held, &o, &symbols, index, piece, kept)))?;
         let image_symbol = held.unique(an)?;
         // The image's symbol of this name is this one, and lld shares a
         // string between symbols of one name.
@@ -638,7 +667,7 @@ fn edit(image: &[u8], held: &Symbols, old: &[u8], new: &[u8]) -> Option<Vec<Edit
             }
             let at = (*placed
                 .entry((index, piece.start))
-                .or_insert_with(|| place(&image, held, &o, &symbols, index, piece)))?;
+                .or_insert_with(|| place(&image, held, &o, &symbols, index, piece, kept)))?;
             let held = image.bytes.get(at..at + range.len())?;
             let mut d = range.start;
             while d < range.end {

@@ -19,15 +19,30 @@
 //! full link of the same objects makes, so a build in an empty store and an
 //! incremental build deliver the same bytes.
 //!
+//! The compiler defines every function weak, by its code identity, so a
+//! function-body edit lies under a weak name. The linker keeps one definition
+//! of a weak name, so the patch places a weak definition only where that
+//! choice is provably the edited slot's ([`Previous::kept`]): no earlier slot
+//! defines the name, no slot defines it strong, no input outside the slots
+//! (the runtime, foreign archives, the C library or the system's stubs)
+//! defines it, and the linker reads the slots in slot order. Any other weak
+//! definition is linked by lld.
+//!
 //! Each working set remembers one link. Together they keep at most
 //! [`IMAGE_BUDGET`] bytes of images and objects: past it, the sets that
 //! linked least recently forget theirs, and their next link is lld's.
 use hirsel_core_ids::ContentHash;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::OnceCell;
 use std::io;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 /// One object a link reads, in link order: bytes made for this link, or
-/// checked bytes with the key they are a function of.
+/// checked bytes with the key they are a function of. The linker loads
+/// every slot whole and in this order (the entry object, then the bundle's
+/// members in order: `link_input::Bundle`), so among the slots the first
+/// weak definition of a name is the one it keeps.
 pub(crate) enum Slot<'a> {
     Bytes(&'a [u8]),
     Keyed((ContentHash, u64), &'a Arc<[u8]>),
@@ -45,12 +60,142 @@ struct Previous {
     /// Publication may still hold the previous bytes when a new edit arrives.
     image: Arc<Vec<u8>>,
     format: Format,
+    /// Every slot's global definitions, made when a patch first asks which
+    /// copy of a weak name the linker kept; `None` inside when a slot's
+    /// symbols cannot be read.
+    definitions: OnceCell<Option<Definitions>>,
+    /// The names defined weak in a slot that an input outside the slots
+    /// also defines; `None` inside when one of those inputs cannot be read.
+    /// The frame names those inputs, so this holds until the next full link.
+    outside: OnceCell<Option<FxHashSet<Vec<u8>>>>,
+}
+
+/// The inputs of a link besides its slots: the runtime, foreign archives and
+/// the recipe's own binaries (the C library, its start files, the system's
+/// text stubs).
+pub(crate) type Outside<'a> = &'a dyn Fn() -> io::Result<Vec<PathBuf>>;
+
+/// The inputs outside the slots of a link whose inputs after the entry
+/// object are `after_entry` (foreign archives and the runtime): those, and
+/// the recipe's own binaries. The slots are the entry object and the
+/// bundle's members in bundle order (`native::link`).
+pub(crate) fn outside(
+    after_entry: &[PathBuf],
+    recipe: &crate::tool_inputs::LinkRecipe,
+    format: hirsel_core_layout::ObjectFormat,
+) -> io::Result<Vec<PathBuf>> {
+    let macho = match format {
+        hirsel_core_layout::ObjectFormat::Elf => false,
+        hirsel_core_layout::ObjectFormat::MachO => true,
+    };
+    let mut outside = after_entry.to_vec();
+    outside.extend(crate::foreign_archive::recipe_binaries(recipe, macho)?);
+    Ok(outside)
+}
+
+/// Each global name the slots define: the slots that define it, in slot
+/// order, and whether each definition is weak.
+#[derive(Default)]
+struct Definitions(FxHashMap<Vec<u8>, Vec<(usize, bool)>>);
+
+impl Definitions {
+    fn of(objects: &[Remembered]) -> Option<Self> {
+        let mut definitions = Self::default();
+        for (n, object) in objects.iter().enumerate() {
+            definitions.add(n, &object.bytes)?;
+        }
+        Some(definitions)
+    }
+    fn add(&mut self, slot: usize, object: &[u8]) -> Option<()> {
+        for (name, weak) in globals(object)? {
+            let slots = self.0.entry(name.to_vec()).or_default();
+            let at = slots.partition_point(|&(n, _)| n < slot);
+            slots.insert(at, (slot, weak));
+        }
+        Some(())
+    }
+    fn remove(&mut self, slot: usize, object: &[u8]) -> Option<()> {
+        for (name, _) in globals(object)? {
+            let slots = self.0.get_mut(name)?;
+            slots.retain(|&(n, _)| n != slot);
+            if slots.is_empty() {
+                self.0.remove(name);
+            }
+        }
+        Some(())
+    }
+}
+
+/// The global and weak names an object defines, each with whether it is
+/// weak.
+fn globals(object: &[u8]) -> Option<Vec<(&[u8], bool)>> {
+    if macho::Resident::is_macho(object) {
+        return macho::globals(object);
+    }
+    let elf = Elf::parse(object)?;
+    let (strings, symbols) = elf.symtab()?;
+    symbols
+        .iter()
+        .filter(|s| s.shndx != 0 && matches!(s.info >> 4, STB_GLOBAL | STB_WEAK | STB_GNU_UNIQUE))
+        .map(|s| Some((elf.string(&strings, s.name)?, s.info >> 4 == STB_WEAK)))
+        .collect()
+}
+
+impl Previous {
+    /// Whether the linker kept slot `slot`'s weak definition of `name`: the
+    /// first definition among the slots is that slot's, every slot's is weak
+    /// (lld keeps the first of weak definitions, and a strong one over them),
+    /// and no input outside the slots defines it. A shared library's or a
+    /// text stub's definition never displaces an object's, but it is counted
+    /// too.
+    fn kept(&self, outside: Outside<'_>, name: &[u8], slot: usize) -> bool {
+        let Some(definitions) = self
+            .definitions
+            .get_or_init(|| Definitions::of(&self.objects))
+        else {
+            return false;
+        };
+        let Some(slots) = definitions.0.get(name) else {
+            return false;
+        };
+        if slots[0].0 != slot || slots.iter().any(|&(_, weak)| !weak) {
+            return false;
+        }
+        let Some(defined) = self
+            .outside
+            .get_or_init(|| outside_names(definitions, outside))
+        else {
+            return false;
+        };
+        !defined.contains(name)
+    }
+}
+
+/// The names that a slot defines weak and an input outside the slots also
+/// defines.
+fn outside_names(definitions: &Definitions, outside: Outside<'_>) -> Option<FxHashSet<Vec<u8>>> {
+    let mut names = FxHashSet::default();
+    for path in outside().ok()? {
+        let bytes = std::fs::read(path).ok()?;
+        crate::foreign_archive::input_definitions(&bytes, &mut |name| {
+            if definitions
+                .0
+                .get(name)
+                .is_some_and(|slots| slots.iter().any(|&(_, weak)| weak))
+            {
+                names.insert(name.to_vec());
+            }
+            Ok(())
+        })?
+        .ok()?;
+    }
+    Some(names)
 }
 
 /// What the patch knows of the remembered image, by its object format.
 enum Format {
     /// An x86-64 ELF image's symbols, made by the first patch over it.
-    Elf(Option<Symbols>),
+    Elf(OnceCell<Symbols>),
     /// An arm64 Mach-O image's seal and symbols ([`macho`]).
     MachO(Box<macho::Resident>),
 }
@@ -71,9 +216,13 @@ const IMAGE_BUDGET: u64 = 256 << 20;
 /// Every set's link, least recently used first.
 static LINKS: Mutex<Vec<Weak<Mutex<Incremental>>>> = Mutex::new(Vec::new());
 
-pub(crate) fn patch(frame: ContentHash, objects: &[Slot<'_>]) -> io::Result<Option<Arc<Vec<u8>>>> {
+pub(crate) fn patch(
+    frame: ContentHash,
+    objects: &[Slot<'_>],
+    outside: Outside<'_>,
+) -> io::Result<Option<Arc<Vec<u8>>>> {
     let link = RESIDENT.previous_or_default();
-    let patched = link.lock().unwrap().patch(frame, objects);
+    let patched = link.lock().unwrap().patch(frame, objects, outside);
     bound(&link, IMAGE_BUDGET);
     patched
 }
@@ -120,6 +269,7 @@ impl Incremental {
         &mut self,
         frame: ContentHash,
         objects: &[Slot<'_>],
+        outside: Outside<'_>,
     ) -> io::Result<Option<Arc<Vec<u8>>>> {
         let Some(previous) = self.0.as_mut() else {
             return Ok(None);
@@ -140,13 +290,14 @@ impl Incremental {
         let mut edits = Vec::new();
         for (n, new) in &changed {
             let old = &previous.objects[*n].bytes;
-            let more = match &mut previous.format {
+            let kept = |name: &[u8]| previous.kept(outside, name, *n);
+            let more = match &previous.format {
                 Format::Elf(symbols) => {
-                    let symbols = symbols
-                        .get_or_insert_with(|| Symbols::of(&previous.image).unwrap_or_default());
-                    edit(&previous.image, symbols, old, new)
+                    let symbols =
+                        symbols.get_or_init(|| Symbols::of(&previous.image).unwrap_or_default());
+                    edit(&previous.image, symbols, old, new, &kept)
                 }
-                Format::MachO(resident) => resident.edit(&previous.image, old, new),
+                Format::MachO(resident) => resident.edit(&previous.image, old, new, &kept),
             };
             match more {
                 Some(more) => edits.extend(more),
@@ -166,7 +317,7 @@ impl Incremental {
             let image = Arc::make_mut(&mut previous.image);
             match &mut previous.format {
                 Format::Elf(symbols) => {
-                    let symbols = symbols.as_mut().unwrap();
+                    let symbols = symbols.get_mut().unwrap();
                     for edit in edits {
                         match edit {
                             Edit::Bytes(at, bytes) => {
@@ -177,6 +328,18 @@ impl Incremental {
                     }
                 }
                 Format::MachO(resident) => resident.apply(image, edits),
+            }
+        }
+        if let Some(Some(definitions)) = previous.definitions.get_mut() {
+            for (n, new) in &changed {
+                if definitions
+                    .remove(*n, &previous.objects[*n].bytes)
+                    .and_then(|()| definitions.add(*n, new))
+                    .is_none()
+                {
+                    previous.definitions = OnceCell::new();
+                    break;
+                }
             }
         }
         for (n, new) in changed {
@@ -213,7 +376,7 @@ impl Incremental {
             {
                 return Ok(());
             }
-            Format::Elf(None)
+            Format::Elf(OnceCell::new())
         };
         let objects = objects
             .iter()
@@ -235,6 +398,8 @@ impl Incremental {
             objects,
             image: Arc::clone(image),
             format,
+            definitions: OnceCell::new(),
+            outside: OnceCell::new(),
         });
         Ok(())
     }
@@ -260,6 +425,8 @@ const STT_FILE: u8 = 4;
 const STT_TLS: u8 = 6;
 const STB_LOCAL: u8 = 0;
 const STB_GLOBAL: u8 = 1;
+const STB_WEAK: u8 = 2;
+const STB_GNU_UNIQUE: u8 = 10;
 const STV_DEFAULT: u8 = 0;
 
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
@@ -447,7 +614,14 @@ fn window(kind: u32) -> Option<(i64, i64)> {
 /// The edits that turn the image linked with `old` into the one lld links
 /// with `new` in its place, if `new` differs from `old` only as this module
 /// patches.
-fn edit(image: &[u8], symbols: &Symbols, old: &[u8], new: &[u8]) -> Option<Vec<Edit>> {
+/// `kept` says whether lld kept this slot's definition of a weak name.
+fn edit(
+    image: &[u8],
+    symbols: &Symbols,
+    old: &[u8],
+    new: &[u8],
+    kept: &dyn Fn(&[u8]) -> bool,
+) -> Option<Vec<Edit>> {
     let image = Elf::parse(image)?;
     let (o, n) = (Elf::parse(old)?, Elf::parse(new)?);
     if o.sections.len() != n.sections.len()
@@ -472,7 +646,7 @@ fn edit(image: &[u8], symbols: &Symbols, old: &[u8], new: &[u8]) -> Option<Vec<E
     let mut place = |index: usize| -> Option<usize> {
         *placed
             .entry(index)
-            .or_insert_with(|| locate(&image, symbols, &o, &old_symbols, &old_strings, index))
+            .or_insert_with(|| locate(&image, symbols, &o, &old_symbols, &old_strings, index, kept))
     };
     for (a, b) in old_symbols.iter().zip(&new_symbols) {
         let (an, bn) = (
@@ -587,7 +761,9 @@ fn edit(image: &[u8], symbols: &Symbols, old: &[u8], new: &[u8]) -> Option<Vec<E
 
 /// Where in the image lld put the old object's section `index`: by a
 /// symbol in it that the image holds once, or, for a section outside
-/// memory, by the image's one section of its name and size.
+/// memory, by the image's one section of its name and size. A weak symbol
+/// places it only when lld kept this object's definition (`kept`); lld
+/// copies a section whose weak definitions it did not keep all the same.
 fn locate(
     image: &Elf<'_>,
     symbols: &Symbols,
@@ -595,6 +771,7 @@ fn locate(
     object_symbols: &[Sym],
     object_strings: &Section,
     index: usize,
+    kept: &dyn Fn(&[u8]) -> bool,
 ) -> Option<usize> {
     let section = object.sections.get(index)?;
     if section.flags & SHF_ALLOC == 0 {
@@ -610,12 +787,12 @@ fn locate(
         let (bind, kind) = (symbol.info >> 4, symbol.info & 15);
         if symbol.shndx as usize != index
             || matches!(kind, STT_SECTION | STT_FILE | STT_TLS)
-            || !matches!(bind, STB_LOCAL | STB_GLOBAL)
+            || !matches!(bind, STB_LOCAL | STB_GLOBAL | STB_WEAK)
         {
             continue;
         }
         let name = object.string(object_strings, symbol.name)?;
-        if name.is_empty() || name.starts_with(b".L") {
+        if name.is_empty() || name.starts_with(b".L") || (bind == STB_WEAK && !kept(name)) {
             continue;
         }
         let Some(held) = symbols.unique(name) else {

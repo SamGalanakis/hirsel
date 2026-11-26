@@ -1678,9 +1678,8 @@ fn link_objects(
             std::fs::write(&debug_path, debug)?;
             inputs.push(debug_path);
         }
-        // A resident compiler links a development edit by patching its last
-        // link's executable when it can (crate::incremental_link).
-        // The incremental link's frames do not carry the coverage switch.
+        // A resident compiler patches its last link's executable when it can
+        // (crate::incremental_link); its frames omit the coverage switch.
         let incremental = !options.optimize
             && !options.debug_lines
             && options.coverage.is_none()
@@ -1721,7 +1720,8 @@ fn link_objects(
                     .transpose()?;
                 if let Some((frame, objects)) = &incremental {
                     let _phase = crate::meter::trace::span("link patch");
-                    if let Some(image) = crate::incremental_link::patch(*frame, objects)? {
+                    let rest = || crate::incremental_link::outside(&inputs[1..], recipe, format);
+                    if let Some(image) = crate::incremental_link::patch(*frame, objects, &rest)? {
                         patched.set(true);
                         return Ok(image);
                     }

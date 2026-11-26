@@ -7,6 +7,7 @@ store@1/store/bucket_stream_attached_head_refused src=9c7a9b288a5f1387 sig=1c146
 store@1/store/bucket_stream_batch_objects src=03e4c970bf9ec7e8 sig=4874db46ffb45678 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_register_q5 src=b621610f7ca73301 sig=05b7458bc118f842 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_register_rules src=dc01824edafa24e6 sig=800b373f8949a5ea run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/bucket_stream_zero_cost src=812a57fab9302f87 sig=254637408b686597 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_test_claim_cut src=629896efc4c22ce6 sig=01e97927f781d4d2 run=57538e9471c5f788 bug=- oracle=- rows=pending
 store@1/store/bucket_test_fence src=374f1b70d4991209 sig=2d0df308fc953b38 run=6677ce756ba8a915 bug=- oracle=- rows=pending
 store@1/store/bucket_test_ignored_conditions_refuse_genesis src=7480b5dc02cfdaaa sig=b3bfaafeb2b2d536 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending

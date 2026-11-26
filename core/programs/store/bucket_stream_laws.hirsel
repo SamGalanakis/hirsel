@@ -360,3 +360,70 @@ fn bucket_stream_ack_after_lost_read(c: Clock, r: Random, tasks: Tasks) -> Resul
     }
     Ok(())
 }
+
+type Z0Step {
+    method: String,
+    lead: String,
+    status: u16,
+    applied: bool
+}
+
+fn z0_step(take method: String, take lead: String, status: u16, done: bool) -> Z0Step {
+    Z0Step(method: take method, lead: take lead, status, applied: done)
+}
+
+// L90-Z0 (§12.11.15): with no journal_service, a Place's genesis, one commit
+// and close send exactly §12.3's requests. Genesis steps 1–6 are GET `head`
+// 404, the LIST, the MANIFEST create, the entry 1 create, step 5a's two
+// refused probes of entry 1, and the `head` create. Then each advance, the
+// CLAIM included, is one entry create and one head replace. No `s-` key is
+// sent, and the last head carries no ATTACH. Red for stream machinery in
+// the default path.
+@test
+fn bucket_stream_zero_cost(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 71, None, list.new())
+    let opened = bucket_order_open(tasks, r, s.time, s.endpoint, 71, true)
+    let mut db = match take opened {
+        Ok(take found) => take found,
+        Error(take problem) => {
+            let _ = bucket_law_report(take s)
+            return Error(take problem)
+        },
+    }
+    let committed = bucket_order_commit(mut db)
+    let closed = close(take db)
+    let report = bucket_law_report(take s)
+    let _ = committed?
+    closed?
+    let mut expected: List[Z0Step] = list.new()
+    list.push(mut expected, z0_step("GET", "head", 404, false))
+    list.push(mut expected, z0_step("LIST", "", 200, true))
+    list.push(mut expected, z0_step("PUT", "m-00000000000000000001-", 200, true))
+    list.push(mut expected, z0_step("PUT", "e-00000000000000000001-", 200, true))
+    list.push(mut expected, z0_step("PUT", "e-00000000000000000001-", 412, false))
+    list.push(mut expected, z0_step("PUT", "e-00000000000000000001-", 412, false))
+    list.push(mut expected, z0_step("PUT", "head", 200, true))
+    list.push(mut expected, z0_step("PUT", "e-00000000000000000002-", 200, true))
+    list.push(mut expected, z0_step("PUT", "head", 200, true))
+    list.push(mut expected, z0_step("PUT", "e-00000000000000000003-", 200, true))
+    list.push(mut expected, z0_step("PUT", "head", 200, true))
+    if list.len(report.requests) != list.len(expected) {
+        fail("the default path sent other than §12.3's requests")
+    }
+    for i in 0u64 .. list.len(expected) {
+        let want = expected[i]
+        let got = report.requests[i]
+        if got.method != want.method || !string.starts_with(got.key, want.lead) || got.status != want.status || got.applied != want.applied || (want.lead == "head" && got.key != "head") {
+            fail("the default path sent other than §12.3's requests")
+        }
+        if string.starts_with(got.key, "s-") {
+            fail("the default path sent a stream key")
+        }
+    }
+    let n = list.len(report.head_writes)
+    let (_, take attach) = history_decode_head_attach(report.head_writes[n - 1].data)?
+    if let Some(_) = attach {
+        fail("the default path wrote ATTACH")
+    }
+    Ok(())
+}

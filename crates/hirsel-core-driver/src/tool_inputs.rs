@@ -643,7 +643,7 @@ fn find_llvm_library(cc: &Path) -> Option<PathBuf> {
 /// driver handed to it with `--cc` links with that ld.lld, never with one the
 /// driver finds on PATH.
 fn installed_linker() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
+    let executable = crate::installation::compiler_executable().ok()?;
     let installed = crate::installation::Installed::discover(&executable).ok()??;
     Some(installed.root.join(INSTALLED_LINKER)).filter(|linker| linker.is_file())
 }

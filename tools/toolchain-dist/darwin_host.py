@@ -78,11 +78,6 @@ def require_host():
         raise SystemExit(f'--host {TARGET} runs on an Apple Silicon Mac')
 
 
-def sha256(path):
-    with open(path, 'rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-
 # --- Mach-O load commands -------------------------------------------------
 
 MH_MAGIC_64 = 0xfeedfacf
@@ -353,9 +348,7 @@ def build(output, work):
     run(['/bin/sh', programs, 'pack', compiler, ROOT / 'core/programs', output / 'core-packages', scratch / 'packs',
          *bzl_list(ROOT / 'tools/buck2/defs.bzl', 'TOOLCHAIN_PACKAGES')], env=install)
     run(['/bin/sh', programs, 'helpers', output, ROOT / 'core/programs/platform', scratch], env=install)
-    for relative in ('bin/ld.lld', LIBLLVM):
-        if sha256(output / relative) != sha256(llvm / relative):
-            raise SystemExit(f'{relative} differs from the pinned LLVM tree')
+    return llvm
 
 
 # --- Check ------------------------------------------------------------------

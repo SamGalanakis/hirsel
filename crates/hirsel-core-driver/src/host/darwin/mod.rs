@@ -202,7 +202,7 @@ pub fn close_inherited_descriptors() {
 
 /// The running executable's path.
 pub(crate) fn current_image() -> io::Result<PathBuf> {
-    std::env::current_exe()
+    crate::installation::compiler_executable()
 }
 
 /// A file that, once sealed, no one can change: Darwin has no memfd, so it

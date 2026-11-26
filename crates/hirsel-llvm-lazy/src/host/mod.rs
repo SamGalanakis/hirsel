@@ -5,7 +5,11 @@
 mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{Component, LLVM_SCOPE, open_component};
+#[cfg(target_os = "linux")]
+pub use std::env::current_exe as compiler_executable;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::compiler_executable;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{Component, LLVM_SCOPE, open_component};

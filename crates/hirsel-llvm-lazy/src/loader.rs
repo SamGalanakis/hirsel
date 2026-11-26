@@ -170,7 +170,7 @@ pub fn llvm_library() -> Result<&'static Path, String> {
 }
 
 fn resolve_engine() -> Result<PathBuf, String> {
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let executable = crate::compiler_executable().map_err(|error| error.to_string())?;
     let origin = executable
         .parent()
         .ok_or("compiler has no installation directory")?;

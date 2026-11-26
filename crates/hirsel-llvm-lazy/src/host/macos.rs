@@ -1,8 +1,28 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+
+/// The kernel path of the running compiler. dyld can report the installer
+/// symlink, whose target can change when a different version is installed.
+pub fn compiler_executable() -> io::Result<PathBuf> {
+    let mut bytes = [0; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: proc_pidpath writes at most the supplied size into this buffer.
+    let length = unsafe {
+        libc::proc_pidpath(
+            libc::getpid(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len() as u32,
+        )
+    };
+    if length <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let path = CStr::from_bytes_until_nul(&bytes).map_err(io::Error::other)?;
+    Ok(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
+}
 
 /// How libLLVM is opened. dyld leaves RTLD_LOCAL images out of weak-definition
 /// coalescing, and LLVM exports some data (`APFloatBase::semPPCDoubleDouble`) as
@@ -28,7 +48,7 @@ pub(crate) fn open_component(
         return Err(error(io::Error::last_os_error()));
     }
     template.pop();
-    let directory = std::path::PathBuf::from(std::ffi::OsString::from_vec(template));
+    let directory = PathBuf::from(std::ffi::OsString::from_vec(template));
     let image = directory.join("engine.dylib");
     let loaded = (|| {
         let mut file = OpenOptions::new()

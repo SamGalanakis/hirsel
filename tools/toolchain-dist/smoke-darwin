@@ -1,0 +1,36 @@
+#!/bin/bash
+set -euo pipefail
+tag=$1
+release=$2
+witness=$3
+tools=$(cd "$(dirname "$0")" && pwd)
+
+os=$(uname -s)
+arch=$(uname -m)
+if [[ "$os" != Darwin || "$arch" != arm64 ]]; then
+    echo "Expected arm64 macOS, got $os/$arch" >&2
+    exit 1
+fi
+version=$(sw_vers -productVersion)
+major=${version%%.*}
+if [[ ! "$major" =~ ^[0-9]+$ ]] || (( major < 26 )); then
+    echo "Expected macOS 26 or later, got $version" >&2
+    exit 1
+fi
+echo "macOS $version on $arch"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/hirsel-release-smoke.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+export HOME="$scratch/home" XDG_CACHE_HOME="$scratch/cache"
+unset HIRSEL_INSTALL_DIR SDKROOT DEVELOPER_DIR
+mkdir "$HOME"
+cd "$scratch"
+HIRSEL_VERSION=$tag HIRSEL_DOWNLOAD_BASE="file://$release" /bin/sh "$release/install.sh" --no-modify-path
+"$tools/smoke" "$tag" matched-runtime "$witness"
+prefix="$HOME/.hirsel/current"
+codesign -v --strict "$prefix/hirsel" "$prefix/bin/ld.lld" "$prefix/lib/libLLVM.23.1.dylib" \
+    "$prefix/libexec/hirsel/platform_main" "$prefix/libexec/hirsel/pin_reader" \
+    "$prefix/libexec/hirsel/store_tool" demo/program demo/program-llvm demo/matched-program "$witness/app-mac"
+demo/program-llvm
+cmp demo/matched-program "$witness/app-mac"
+"$witness/app-mac"

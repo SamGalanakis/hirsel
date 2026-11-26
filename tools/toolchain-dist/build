@@ -328,21 +328,24 @@ def train(output, work, options, cpu, profdata):
     pin(fdata, output, '.fdata')
 
 
-def manifest(output, mode, fdata):
+def manifest(output, mode, fdata, *, darwin_llvm=None):
     try:
-        notices.collect(output, mode)
+        if darwin_llvm is None:
+            notices.collect(output, mode)
+        else:
+            notices.collect_darwin(output, darwin_llvm)
     except Exception:
         shutil.rmtree(output)
         raise
     def command(*args):
         return subprocess.check_output(args, cwd=ROOT, text=True).strip()
-    def digest(path):
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = notices.sha256
+    rustc = str(ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc') if darwin_llvm is None else 'rustc'
     record = dict(commit=command('git', 'rev-parse', 'HEAD'),
                   patch_sha256=hashlib.sha256(command('git', 'diff', 'HEAD').encode()).hexdigest(),
-                  rustc=command(str(ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'), '-vV'),
+                  rustc=command(rustc, '-vV'),
                   profile='dist', pgo=mode, lto='fat', codegen_units=1,
-                  training='hirsel new project: check, Cranelift, LLVM',
+                  training='hirsel new project: check, Cranelift, LLVM' if darwin_llvm is None else None,
                   hirsel_sha256=digest(output / 'hirsel'),
                   core_packages_sha256=hashlib.sha256(json.dumps({str(p.relative_to(output / 'core-packages')): digest(p) for p in sorted((output / 'core-packages').rglob('*')) if p.is_file()}, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
                   notices_sha256=digest(output / 'notices/manifest.json'))
@@ -403,7 +406,8 @@ def main():
         if output.exists() or output.is_relative_to(ROOT):
             parser.error('output must be a fresh directory outside the checkout')
         work = args.work.resolve() if args.work else output.with_name(output.name + '-work')
-        darwin_host.build(output, work)
+        llvm = darwin_host.build(output, work)
+        manifest(output, 'off', None, darwin_llvm=llvm)
         darwin_host.check(output, FRESH_SEQUENCE, accept, relocation_witness)
         return
     if args.check_glibc is not None:

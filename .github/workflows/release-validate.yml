@@ -1,0 +1,157 @@
+name: Release validation
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  linux:
+    if: github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.latest.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Resolve and install the latest release on Linux
+        id: latest
+        run: |
+          export HOME="$RUNNER_TEMP/install-home"
+          mkdir "$HOME"
+          dash tools/toolchain-dist/install.sh --no-modify-path
+          version=$(readlink "$HOME/.hirsel/current")
+          version=v${version#versions/}
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Run the Linux smoke and cross-build the Mac witness
+        env:
+          RELEASE_TAG: ${{ steps.latest.outputs.version }}
+        run: |
+          export HOME="$RUNNER_TEMP/install-home"
+          mkdir "$RUNNER_TEMP/smoke" "$RUNNER_TEMP/witness"
+          cd "$RUNNER_TEMP/smoke"
+          "$GITHUB_WORKSPACE/tools/toolchain-dist/smoke" "$RELEASE_TAG" cross "$RUNNER_TEMP/witness"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-witness
+          path: |
+            ${{ runner.temp }}/witness/app-mac
+            ${{ runner.temp }}/witness/libhirsel_core_rt.a
+          if-no-files-found: error
+
+  installer:
+    needs: linux
+    if: ${{ !cancelled() && needs.linux.outputs.version != '' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Compare the served installer with the released asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.linux.outputs.version }}
+        run: |
+          mkdir "$RUNNER_TEMP/witness"
+          cd "$RUNNER_TEMP/witness"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" -p install.sh -p SHA256SUMS
+          curl --proto '=https' --tlsv1.2 -fsSL https://hirsel.ai/install.sh -o "$RUNNER_TEMP/served-installer"
+          cmp install.sh "$RUNNER_TEMP/served-installer"
+          awk '$2 == "install.sh" {print}' SHA256SUMS | sha256sum --check --strict -
+
+  darwin:
+    needs: linux
+    if: ${{ !cancelled() && needs.linux.outputs.version != '' }}
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the latest release on macOS
+        env:
+          RELEASE_TAG: ${{ needs.linux.outputs.version }}
+        run: |
+          export HOME="$RUNNER_TEMP/install-home"
+          mkdir "$HOME"
+          sh tools/toolchain-dist/install.sh --no-modify-path
+          test "$(readlink "$HOME/.hirsel/current")" = "versions/${RELEASE_TAG#v}"
+          reported=$("$HOME/.hirsel/bin/hirsel" --version)
+          test "$(printf '%s\n' "$reported" | sed -n '1p')" = "hirsel ${RELEASE_TAG#v}"
+      - if: needs.linux.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-witness
+          path: ${{ runner.temp }}/witness
+      - name: Run the macOS release smoke
+        if: needs.linux.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.linux.outputs.version }}
+        run: |
+          mkdir "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            -p install.sh -p SHA256SUMS -p "hirsel-$RELEASE_TAG-aarch64-apple-darwin.tar.gz"
+          unset GH_TOKEN
+          awk '$2 == "install.sh" {print}' SHA256SUMS | shasum -a 256 --check --strict
+          chmod +x "$RUNNER_TEMP/witness/app-mac"
+          "$GITHUB_WORKSPACE/tools/toolchain-dist/smoke-darwin" "$RELEASE_TAG" "$PWD" "$RUNNER_TEMP/witness"
+
+  repro:
+    needs: linux
+    if: ${{ !cancelled() && needs.linux.outputs.version != '' }}
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ needs.linux.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.linux.outputs.version }}
+          persist-credentials: false
+      - name: Fetch the published profiles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/profiles"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/profiles" -p '*.profdata' -p '*.fdata'
+      - name: Free runner disk for the reproducibility builds
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Check Linux reproducibility with the published profiles
+        run: |
+          docker run --rm --cpus 4 --memory 8g --memory-swap 8g \
+            --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
+            -w /src -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/profiles:/profiles:ro" \
+            -e RELEASE_TAG quay.io/pypa/manylinux_2_28_x86_64@sha256:55a36963bc0504cdf004011001c1072306402f0b8b83be5a5eba7068f93eec53 \
+            bash -euxo pipefail -c '
+              . tools/toolchain-dist/linux-release-setup.sh
+              profdata=(/profiles/*.profdata)
+              fdata=(/profiles/*.fdata)
+              [[ ${#profdata[@]} == 1 && ${#fdata[@]} == 1 ]]
+              tools/toolchain-dist/check-repro --output /tmp/repro --num-threads 4 \
+                --pgo "${profdata[0]}" --bolt "${fdata[0]}"
+            '
+
+  report:
+    if: failure()
+    needs: [linux, installer, darwin, repro]
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: File a release validation issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.linux.outputs.version }}
+          LINUX: ${{ needs.linux.result }}
+          INSTALLER: ${{ needs.installer.result }}
+          DARWIN: ${{ needs.darwin.result }}
+          REPRO: ${{ needs.repro.result }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "Release validation failed (${RELEASE_TAG:-latest})" \
+            --body "Linux: $LINUX. Served installer: $INSTALLER. macOS: $DARWIN. Reproducibility: $REPRO.
+
+          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

@@ -1,0 +1,52 @@
+#!/bin/sh
+# Run in an empty working directory with the installation's HOME.
+set -eu
+version=${1#v}
+mode=${2:-native}
+witness=${3:-}
+stderr=$PWD/smoke.stderr
+exec 3>&2 2>"$stderr"
+trap 'cat "$stderr" >&3' EXIT
+
+# shellcheck source=/dev/null
+. "$HOME/.hirsel/env"
+test "$(command -v hirsel)" = "$HOME/.hirsel/bin/hirsel"
+case "$(command -v ld.lld || :)" in
+    "$HOME/.hirsel/"*) exit 1 ;;
+esac
+reported=$(hirsel --version)
+printf '%s\n' "$reported"
+test "$(printf '%s\n' "$reported" | sed -n '1p')" = "hirsel $version"
+
+hirsel new demo
+cd demo
+hirsel test
+hirsel run
+hirsel build
+case "$mode" in
+    native) ;;
+    cross)
+        target=aarch64-apple-darwin
+        report=$(hirsel env --target "$target")
+        runtime=$(printf '%s\n' "$report" | sed -n 's/^runtime: //p')
+        cp "$runtime" "$witness/libhirsel_core_rt.a"
+        hirsel build --target "$target" -o "$witness/app-mac"
+        ;;
+    matched-runtime)
+        hirsel build --backend llvm -o program-llvm
+        # Keep the runtime input identical to the one used by the cross build.
+        hirsel build --runtime "$witness/libhirsel_core_rt.a" -o matched-program
+        ;;
+    *) echo "Unknown smoke mode: $mode" >&2; exit 2 ;;
+esac
+sed '/^\[dependencies\]/a\
+store = { major = 1 }
+' hirsel.toml > hirsel.toml.tmp
+mv hirsel.toml.tmp hirsel.toml
+sed '/^pub fn main/a\
+    let _ = result.unwrap(store.sized(Directory, 2147483648u64))
+' main.hirsel > main.hirsel.tmp
+mv main.hirsel.tmp main.hirsel
+hirsel lock 2>&3
+hirsel check --locked
+test ! -s "$stderr"

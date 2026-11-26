@@ -1,0 +1,21 @@
+#!/bin/bash
+# Prepare the exact asset list in a directory holding the two build artifacts.
+set -euo pipefail
+shopt -s dotglob nullglob
+tag=$1
+checksummed=("hirsel-$tag-x86_64-unknown-linux-gnu.tar.gz" "hirsel-$tag-aarch64-apple-darwin.tar.gz" install.sh)
+expected=("${checksummed[@]}" "$2.profdata" "$3.fdata")
+present=(*)
+if (( ${#present[@]} != ${#expected[@]} )); then
+    printf 'Unexpected release directory inventory: %s\n' "${present[*]}" >&2
+    exit 1
+fi
+for asset in "${expected[@]}"; do
+    if [[ ! -f "$asset" || -L "$asset" || ! -s "$asset" ]]; then
+        echo "Missing, empty or non-regular release asset: $asset" >&2
+        exit 1
+    fi
+done
+sha256sum -- "${checksummed[@]}" > SHA256SUMS
+sha256sum --check --strict SHA256SUMS >&2
+printf '%s\n' "${expected[@]}" SHA256SUMS

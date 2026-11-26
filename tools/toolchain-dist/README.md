@@ -146,7 +146,13 @@ tree, the runtimes and link kit for `aarch64-apple-darwin` only, the core and st
 images, the toolchain packages and the helpers in `libexec/hirsel/`. The last two
 come from `toolchain-programs.sh`, which Buck2's bundle runs too. Every Mach-O is
 built with `MACOSX_DEPLOYMENT_TARGET` from `link_kit.DARWIN_FLOOR` and carries an
-ad-hoc signature. The bundle has no notices directory and no `hirsel-build.json` yet.
+ad-hoc signature. The bundle includes `notices/` and `hirsel-build.json` with the
+compiler, core package and notice digests. Its crate notices cover the compiler
+and runtime's Darwin link inputs.
+
+Release smoke builds with the Mac bundle's own runtime. For the byte comparison,
+it also links the same demo using the Darwin runtime archive from the Linux
+bundle and compares that image with the Linux cross build.
 
 The build then checks the bundle, as
 `tools/toolchain-dist/build --host aarch64-apple-darwin --check-fresh PREFIX` does

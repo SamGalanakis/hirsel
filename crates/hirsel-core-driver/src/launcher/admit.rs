@@ -832,7 +832,8 @@ fn assemble<'a>(
     lease.publish(&ad.code, verified.recipe_bytes())?;
     let publication = Publication::from_verified(verified);
     let launch = &publication.recipe().launch;
-    let installed = crate::installation::Installed::discover(&std::env::current_exe()?)?
+    let executable = crate::installation::compiler_executable()?;
+    let installed = crate::installation::Installed::discover(&executable)?
         .ok_or("launcher assembly requires an installed toolchain")?;
     let runtime = installed
         .runtime(

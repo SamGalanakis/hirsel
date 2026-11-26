@@ -45,7 +45,7 @@ const BUSY_WAIT: Duration = Duration::from_secs(60);
 const CHUNK: usize = 256 << 10;
 
 pub(crate) fn installed(name: &str) -> Result<PathBuf, Error> {
-    let executable = std::env::current_exe()?;
+    let executable = crate::installation::compiler_executable()?;
     let installation = crate::installation::Installed::discover(&executable)?
         .ok_or("hirsel is not running from an installation")?;
     Ok(installation.libexec(name))

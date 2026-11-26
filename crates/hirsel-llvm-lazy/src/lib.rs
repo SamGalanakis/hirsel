@@ -9,6 +9,7 @@ mod construction;
 pub mod core;
 mod host;
 mod loader;
+pub use host::compiler_executable;
 pub use loader::llvm_library;
 
 /// Compile compiler-produced LLVM text through the same once-loaded component.

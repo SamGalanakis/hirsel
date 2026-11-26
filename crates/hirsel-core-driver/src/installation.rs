@@ -25,6 +25,7 @@
 //! (glibc, libstdc++, libgcc_s) stay the system's.
 use crate::{CoreImage, Meter, PackageProduct};
 use hirsel_core_ids::ContentHash;
+pub(crate) use hirsel_llvm_lazy::compiler_executable;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -219,7 +220,7 @@ impl Installed {
 
         let expected = toolchain_bindings(id)
             .ok_or_else(|| io::Error::other(format!("the toolchain supplies no {id}")))?;
-        let executable = std::env::current_exe()?;
+        let executable = compiler_executable()?;
         let installed = Self::discover(&executable)?
             .ok_or_else(|| io::Error::other(format!("{id} requires an installed toolchain")))?;
         let path = installed
@@ -360,7 +361,7 @@ pub(crate) fn spec_url_for(release: Option<&str>, spec_file: &str, anchor: &str)
 mod compiler_source;
 
 pub(crate) fn print_version() -> io::Result<()> {
-    let executable = std::env::current_exe()?;
+    let executable = compiler_executable()?;
     let installed = Installed::discover(&executable)?;
     let compiler = crate::reuse::compiler_identity();
     println!("hirsel {}", version());
@@ -809,7 +810,7 @@ fn prebuild(
 /// Copy this compiler into the prefix, made ready by the host to load its shipped
 /// libraries from there, including when an installer puts it in the prefix's `bin/`.
 fn install_executable(root: &Path) -> io::Result<()> {
-    let source = std::env::current_exe()?;
+    let source = compiler_executable()?;
     let bytes = crate::host::installed_executable(std::fs::read(&source)?, &source)?;
     install_file(&bytes, &root.join(EXECUTABLE), 0o755)
 }

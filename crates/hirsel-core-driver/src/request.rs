@@ -764,7 +764,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     if test_command && entry.is_some() {
         return Err("test selects marked functions with --filter or --exact, not --entry".into());
     }
-    let executable = std::env::current_exe()?;
+    let executable = crate::installation::compiler_executable()?;
     let installed = crate::installation::Installed::discover(&executable)?;
     let observe = profile
         .as_ref()

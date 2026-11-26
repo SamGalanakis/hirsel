@@ -67,8 +67,8 @@
 //! every thread waits with no timeout pending while a goal is unmet (stuck
 //! for ever), or when the bound passes.
 use super::{
-    BASE, Base, POOL, RUN, RunFn, TABLE, UNTIED_ON, USTATS, create_unit, cur, enable_pool,
-    maybe_yield, park as unit_park, pool, take_xready, wake_id, worker_main,
+    BASE, Base, POOL, RUN, RunFn, UNTIED_ON, USTATS, create_unit, cur, enable_pool, maybe_yield,
+    park as unit_park, pool, take_xready, wake_id, worker_main,
 };
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -438,7 +438,7 @@ pub(crate) mod seam;
 /// trace and dumps (which run while the scheduler lock is held).
 fn unit_raw(id: u32) -> Option<&'static super::Unit> {
     // SAFETY: unit records are leaked; a published pointer stays valid.
-    unsafe { super::TABLE.get(id as usize)?.raw().as_ref() }
+    unsafe { pool().units.slot(id)?.raw().as_ref() }
 }
 fn unit_name(addr: usize) -> String {
     if addr == 0 {
@@ -1212,7 +1212,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     }
     for id in 0..case.units {
         let u = unit_raw(id).unwrap();
-        n(addr(&TABLE[id as usize]), format!("unit table {id}"));
+        n(addr(p.units.slot(id).unwrap()), format!("unit table {id}"));
         n(addr(&u.state), format!("unit {id} state"));
         n(addr(&u.status), format!("unit {id} exit status"));
         n(addr(&u.xpending), format!("unit {id} xpending"));

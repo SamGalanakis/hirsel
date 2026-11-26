@@ -24,6 +24,10 @@ pub(crate) use memory::{Memory, SharedMemory};
 #[cfg(test)]
 #[path = "units_check.rs"]
 mod check;
+#[path = "units_directory.rs"]
+mod directory;
+use directory::{UnitDirectory, create_unit};
+pub(crate) use directory::{spawn_job, spawn_language_job};
 #[path = "units_env.rs"]
 mod env;
 pub(crate) use env::workers;
@@ -177,8 +181,6 @@ macro_rules! moved_tls {
 pub(crate) use moved_tls;
 
 pub(crate) const NONE: u32 = u32::MAX;
-/// Unit ids end below this; helpers take theirs from HELPER_BASE up.
-const ID_END: u32 = 0xffff;
 const WAKE_TAG: u64 = u64::MAX;
 const CONNECTION_SPINS: u64 = 16;
 const SLICE_NS: u64 = 500_000;
@@ -280,8 +282,6 @@ pub(crate) struct Unit {
     config: crate::entry::OsConfig,
     /// A helper unit's body (CONC-15), run in place of main.
     job: Cell<Option<Job>>,
-    /// A helper unit's record is reused by a later helper once it ends.
-    helper: bool,
 }
 /// A helper unit's body.
 pub(crate) type Job = Box<dyn FnOnce() + Send>;
@@ -290,11 +290,8 @@ pub(crate) type Job = Box<dyn FnOnce() + Send>;
 unsafe impl Sync for Unit {}
 unsafe impl Send for Unit {}
 
-static TABLE: [AtomicPtr<Unit>; 65536] = [const { AtomicPtr::new(std::ptr::null_mut()) }; 65536];
 fn unit_ref(id: u32) -> Option<&'static Unit> {
-    let p = TABLE.get(id as usize)?.load(Ordering::Acquire);
-    // SAFETY: unit records are leaked; a published pointer stays valid.
-    unsafe { p.as_ref() }
+    POOL.get()?.units.get(id)
 }
 
 thread_local! {
@@ -333,6 +330,7 @@ pub(crate) struct Pool {
     lifo: Vec<AtomicPtr<Unit>>,
     lifo_runs: Vec<AtomicU32>,
     plan: UntiedPlan,
+    units: UnitDirectory,
     injector: Mutex<VecDeque<UP>>,
     memory: Memory,
     /// Units in the local queues and the injector. The LIFO slots are not
@@ -421,124 +419,6 @@ static WORST: AtomicU8 = AtomicU8::new(0);
 
 fn now() -> u64 {
     sync::monotonic_ns()
-}
-
-/// Count one more live unit, unless the pool has decided to stop. Admission
-/// and the stop decision are the same count, so an admitted unit runs to its
-/// end before any worker leaves, and a refused one never starts.
-fn admit() -> bool {
-    LIVE.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-        (n > 0).then_some(n + 1)
-    })
-    .is_ok()
-}
-
-/// Make unit `id`, admitted already, and queue it. The record is made here;
-/// its stack is taken and its program starts on its first run.
-fn create_unit(id: u32) {
-    publish_unit(new_unit(id, false));
-}
-
-/// Helper units take ids from here up, recycled with their records.
-const HELPER_BASE: u32 = 0x8000;
-static HELPER_NEXT: AtomicU32 = AtomicU32::new(HELPER_BASE);
-/// Ended helper units, whose records and ids the next helpers reuse.
-static SPARE_HELPERS: std::sync::Mutex<Vec<UP>> = std::sync::Mutex::new(Vec::new());
-
-/// Run `job` as a new unit on the pool, beside the calling unit (CONC-15).
-/// Hands `job` back when no pool runs: the caller places the helper itself.
-pub(crate) fn spawn_job(job: Job) -> Result<(), Job> {
-    if !untied() || cur().is_null() {
-        return Err(job);
-    }
-    let p = pool();
-    // The running spawner is live, so the pool cannot have decided to stop.
-    if !admit() {
-        crate::process::stop(b"UnitAfterStop");
-    }
-    let spare = SPARE_HELPERS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pop();
-    if let Some(up) = spare {
-        // SAFETY: an ended helper's leaked record; no worker is inside it and
-        // its stack was returned. A late wake of its old run is a spurious
-        // turn of the new one.
-        let u = unsafe { &*up.0 };
-        u.after.set(After::Run);
-        u.status.store(0, Ordering::Relaxed);
-        u.stop_fd.set(2);
-        u.first_park.set(false);
-        u.timer_at.store(u64::MAX, Ordering::Relaxed);
-        u.alone_depth.set(0);
-        u.job.set(Some(job));
-        u.state.store(QUEUED, Ordering::SeqCst);
-        bump(S_CREATED);
-        enqueue(p, u);
-        return Ok(());
-    }
-    let id = HELPER_NEXT.fetch_add(1, Ordering::Relaxed);
-    if id >= ID_END {
-        crate::process::stop(b"UnitIdSpace");
-    }
-    let unit = new_unit(id, true);
-    unit.job.set(Some(job));
-    publish_unit(unit);
-    Ok(())
-}
-
-// A helper's job is set by its spawner before publication. Keeping the job
-// out of the shared constructor also keeps its vtable out of the root path.
-fn new_unit(id: u32, helper: bool) -> Box<Unit> {
-    let t0 = now();
-    let config = BASE.get().unwrap().0;
-    Box::new(Unit {
-        id,
-        #[cfg(feature = "testing")]
-        observed_queue_ns: AtomicU64::new(0),
-        #[cfg(feature = "testing")]
-        observed_queue_cpu: AtomicU32::new(u32::MAX),
-        sp: UnsafeCell::new(std::ptr::null_mut()),
-        host: UnsafeCell::new(std::ptr::null_mut()),
-        stack: UnsafeCell::new(None),
-        heap: UnsafeCell::new(std::cell::OnceCell::new()),
-        state: AtomicU8::new(QUEUED),
-        inside: AtomicBool::new(false),
-        after: Cell::new(After::Run),
-        xready: Mutex::new(Vec::new()),
-        xpending: AtomicBool::new(false),
-        xspare: UnsafeCell::new(Vec::new()),
-        status: AtomicU8::new(0),
-        stop_fd: Cell::new(2),
-        slice_start: Cell::new(None),
-        created_ns: t0,
-        first_park: Cell::new(false),
-        timer_at: AtomicU64::new(u64::MAX),
-        timer_slot: AtomicUsize::new(0),
-        alone: std::sync::OnceLock::new(),
-        alone_depth: Cell::new(0),
-        config,
-        helper,
-        job: Cell::new(None),
-    })
-}
-
-fn publish_unit(unit: Box<Unit>) {
-    let unit: &'static Unit = Box::leak(unit);
-    if !TABLE[unit.id as usize]
-        .compare_exchange(
-            std::ptr::null_mut(),
-            (unit as *const Unit).cast_mut(),
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .is_ok()
-    {
-        crate::process::stop(b"UnitIdTaken");
-    }
-    bump(S_CREATED);
-    add_stat(S_CREATE_NS, now() - unit.created_ns);
-    enqueue(pool(), unit);
 }
 
 /// Give a unit about to run for the first time its stack and initial frame.
@@ -1194,13 +1074,7 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 // rejects further wakes, and nothing can resume this stack.
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
                 *u.sp.get() = std::ptr::null_mut();
-                if u.helper {
-                    SPARE_HELPERS
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(up);
-                }
-                if LIVE.fetch_sub(1, Ordering::SeqCst) == 1 {
+                if p.units.retire(up) {
                     p.stop.store(true, Ordering::SeqCst);
                     let parked = std::mem::take(&mut *p.idle.lock().unwrap());
                     for w in parked {

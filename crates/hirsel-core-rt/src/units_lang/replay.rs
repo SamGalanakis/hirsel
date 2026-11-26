@@ -230,12 +230,7 @@ pub(crate) unsafe fn start_helper(
         );
     };
     let start: crate::units::Job = Box::new(start);
-    if let Err(start) = crate::units::spawn_job(start) {
-        std::thread::Builder::new()
-            .name("hirsel-unit".into())
-            .spawn(start)
-            .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
-    }
+    crate::units::spawn_language_job(start);
 }
 
 /// A replay's stand-in for a client that arrived from another unit: a

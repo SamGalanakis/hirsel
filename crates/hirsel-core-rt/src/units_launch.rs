@@ -40,6 +40,17 @@ fn try_launch(
     if !uring && !plan.reactor.force_epoll {
         plan = UntiedPlan::derive(k, w, input.root_limit, host, ReactorChoice::Readiness)?;
     }
+    launch_planned(plan, pollers, input, run, spin_ns)
+}
+
+pub(super) fn launch_planned(
+    plan: UntiedPlan,
+    pollers: Vec<Arc<hirsel_core_net::Poller>>,
+    input: &crate::entry::OsConfig,
+    run: &(dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
+    spin_ns: u64,
+) -> Result<u8, String> {
+    let (k, w) = (plan.initial_units, plan.workers);
     let _ = POOL.set(new_pool(plan, pollers, spin_ns));
     // SAFETY: the launch joins every worker before `run` goes out of scope.
     let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) =
@@ -107,6 +118,7 @@ pub(super) fn new_pool(
             .collect(),
         lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
         plan,
+        units: UnitDirectory::new(plan.initial_units, plan.max_units),
         injector: Mutex::new(VecDeque::new()),
         memory: Memory::new(),
         queued: AtomicUsize::new(0),

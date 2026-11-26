@@ -928,3 +928,7 @@ fn reactor_plan_single_source_and_memlock_fallback() {
             .all(|event| event.token() >> SHARED_UNIT_SHIFT == 0x10_000)
     );
 }
+
+#[cfg(target_os = "linux")]
+#[path = "unit_tag_tests.rs"]
+mod unit_tag_tests;

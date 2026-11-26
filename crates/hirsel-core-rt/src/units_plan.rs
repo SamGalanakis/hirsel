@@ -177,14 +177,10 @@ impl UntiedPlan {
             address_left.map(|a| a / (unit_stack + task_reserve + 2 * page)),
         )
         .unwrap_or(usize::MAX);
-        let logical_units = (k as u64).saturating_add(root_limit / 288);
-        let max_units = logical_units
-            .min(physical_units as u64)
-            .min(u64::from(RESERVED_UNIT))
-            .max(k as u64) as u32;
-        let unit_limit = u64::from(max_units);
-        let physical_unit_limit =
-            physical_units as u64 <= unit_limit && unit_limit < u64::from(RESERVED_UNIT);
+        // The language charge bounds active language jobs, but a replay starts
+        // historical streams together and a flow can use extra engine units.
+        let max_units = physical_units.min(RESERVED_UNIT as usize).max(k) as u32;
+        let physical_unit_limit = physical_units < RESERVED_UNIT as usize;
 
         let scale = host.memory_limit.map_or(root_limit, |m| root_limit.min(m));
         let worker_retention = (64 * MIB)

@@ -1053,12 +1053,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         // On the pool the helper is a unit beside its owner; without one it
         // has a thread of its own.
         let start: crate::units::Job = Box::new(start);
-        if let Err(start) = crate::units::spawn_job(start) {
-            std::thread::Builder::new()
-                .name("hirsel-unit".into())
-                .spawn(start)
-                .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
-        }
+        crate::units::spawn_language_job(start);
         SpawnUnit {
             task,
             requested: 0,

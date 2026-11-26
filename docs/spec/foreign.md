@@ -1113,16 +1113,30 @@ inside an embedded Wasmtime, and the module has no access to the process or the 
 wrapper syntax does not change: the module's functions are still bodyless headers, the
 capability is still `Foreign[I]`, and handles are still `foreign.Ptr[K]`. What changes is what
 the run promises. FFI-1 trusts an archive with the whole process. A contained module is trusted
-with nothing. Its bytes, its time and its memory are bounded by the program's own `bound bytes`
-and `bound steps`. It cannot touch the process, so it needs no audit and no launch-time trust
-line. Its results are a function of its inputs, so a program that reaches only contained code
-keeps SEM-8, recording, replay and reused test passes.
+with nothing. Its time is bounded by the program's own `bound steps`, and its linear memory and
+tables are charged to the program's own limits (`bound bytes` or the root limit). Its stack and
+the engine's state for it are host memory outside every limit, as FFI-6's handle table is
+(FFI-13). It cannot touch the process, so it needs no audit and no launch-time trust line. Its
+results are a function of its inputs, so a program that reaches only contained code keeps
+SEM-8, recording and replay. A test that calls contained code takes `Foreign[I]`, so PROG-4
+never reuses its pass (FFI-14).
 
 **Status: written, not built.** Until build slice W1 is green, a manifest that holds
 `containment` is refused at the key with `FFI-10: containment = "wasm" is not built yet`.
 Nothing parses the key and goes on to ignore it.
 
-The section has one acceptance consumer, the fixture package `wasm_laws` (laws FW1 to FW20).
+Amended 2026-11-26 (contained-foreign-spec-fix-2923) for the soundness review
+contained-foreign-review-2903: the artifact is loaded in place from the image's executable
+segment through a custom code memory (FFI-15 Loading); one fuel-granule mechanism gives exact
+steps at return, a bounded charge at a trap, a bound enforced before each bulk operation, and
+slice ends that follow the build (FFI-13 Steps); the cache key holds the toolchain image
+(FFI-15 Caching); contained tests are not reused (FFI-14 Replay); the fixture and laws FW3,
+FW7 to FW12, FW16 and FW17 are rebuilt, and FW21 to FW28 added (contained laws); the runtime
+links no compiler (FFI-15 The pin); the admitted feature set is one named constant (FFI-11);
+and the opening claim on memory is narrowed (above). The open items O1 to O17 are ruled
+(Rulings).
+
+The section has one acceptance consumer, the fixture package `wasm_laws` (laws FW1 to FW28).
 It is not a port of `sqlite`. SQLite's slice 2 needs a `Dir`, and a contained module has none
 (FFI-12).
 
@@ -1184,6 +1198,14 @@ that name. The build's last step adds the ABI text instead, as `llvm-objcopy
 prints. A Rust module can instead use `#[link_section = "hirsel_abi"]`
 on a byte array. FFI-11 then binds the module to its headers, as FFI-3 binds an archive.
 
+**What containment promises.** A contained module runs in the program's process, beside its
+secrets (`Secret`, TLS keys). Containment promises that the module reads and writes only its
+own linear memory, its loans and the null imports' fixed answers. It does not promise that
+the module cannot learn anything through timing: the guest has no clock, no threads and no
+shared memory, so it has no timer of its own, and Cranelift's heap Spectre mitigations stay on
+(FFI-15), but timing channels are not a promise (O4). A module that must not run beside the
+program's secrets is not a case this section serves.
+
 ### FFI-11: A contained module is admitted by its pin and its shape
 
 A build whose checked reach holds a function of contained module `M` checks `M` before it
@@ -1195,21 +1217,31 @@ build. Sites and `P`, `F` and `S` are as in FFI-3.
 | its SHA-256 equals the pin (first, before any byte is parsed) | `FFI-11: module F of P does not match its pin: expected sha256 E, found sha256 O` |
 | it starts with `\0asm` and has version 1: a core module, not a component (layer 1) | `FFI-11: module F of P is not a core WebAssembly module` |
 | it validates under exactly the **admitted features** (below), with Wasmtime's `wasmparser` at the pinned version (FFI-15) | `FFI-11: module F of P is not valid with the admitted features: D`, `D` being the validator's first error |
-| it defines exactly one memory and imports none: 32-bit indexes, not shared, with a minimum of at most 65,536 pages; the memory is exported as `memory` | `FFI-11: module F of P: X`, where `X` is `no memory`, `two memories`, `an imported memory`, `a shared memory` or `a 64-bit memory` |
+| it defines exactly one memory and imports none, and the memory is exported as `memory` (validation has already refused a second memory, a shared memory and a 64-bit memory) | `FFI-11: module F of P: X`, where `X` is `no memory`, `an imported memory` or `a memory not exported as memory` |
 | it imports no table, global or tag, and each function it imports is a **null import** (FFI-12) with the type that FFI-12 gives | `FFI-11: module F of P imports MOD.NAME, which is not a null import` |
 | it has no start function, exports no `_start`, and exports `_initialize` only as `[] -> []` | `FFI-11: module F of P has a start function` (or `exports _start`) |
 | every function it exports, other than `_initialize`, starts with `M`'s prefix | `FFI-11: module F of P exports NAME, which does not start with the prefix X` |
 | for each reached foreign function, `S` is exported as a function whose core type is the one FFI-12 derives from the header; when any reached function has a `Bytes` parameter, `<prefix>loan_area` is exported as `[i32] -> [i32]` | `FFI-11: module F of P does not export S, declared at SITE`, or `… exports S as T, but its header gives U` |
 | it has exactly one custom section `hirsel_abi`, and for each reached function its line equals the ABI text line, with `MODE` set to `contained` | `FFI-11: module F of P has no ABI text`, or `… the ABI of S is L, but its header declares A` |
 
-**Admitted features.** The admitted features are the WebAssembly 2.0 core set: mutable
-globals, sign-extension operators, non-trapping float-to-int conversions, multi-value, bulk
-memory, reference types and fixed-width SIMD. Tail calls and extended constant expressions are
-admitted too. Every other proposal is turned off when the engine is configured, and so is
-refused by validation: threads, with shared memory and atomics; relaxed SIMD; memory64;
-multi-memory; exception handling; GC; function references; stack switching; wide arithmetic;
-custom page sizes; and the component model. The set is closed, so a feature this list does not
-name is refused, not ignored.
+**Admitted features.** The admitted features are one constant of the pinned `wasmparser`
+(0.254, the version Wasmtime 48.0.10 requires): `WASM2 | TAIL_CALL | EXTENDED_CONST` with
+`GC_TYPES` removed. `WASM2` is the WebAssembly 2.0 core set: mutable globals, bulk memory,
+reference types, sign-extension operators, non-trapping float-to-int conversions, multi-value
+and fixed-width SIMD (`WasmFeatures::WASM2` in wasmparser's `src/features.rs` <!-- doc-ref: external -->). With `GC_TYPES` off,
+`funcref` is the only reference type: `externref` needs `GC_TYPES` (wasmparser's `MVP` constant
+holds it), so a module with an `externref` table, global or parameter is refused by
+validation, whatever reference types otherwise admit. The engine's `Config` first turns every
+feature off by name (`Config::wasm_features(WasmFeatures::all(), false)`) and then turns on
+exactly this constant, so nothing comes from Wasmtime's defaults (Wasmtime builds its set from
+`WASM3` and its cargo features, then applies the `wasm_*` calls: `Config::features`,
+`crates/wasmtime/src/config.rs` <!-- doc-ref: external --> lines 2516-2578). The admission
+check's validator is given the same constant. Everything else is refused by validation:
+threads, with shared memory and atomics; relaxed SIMD; memory64; multi-memory; exception
+handling; GC; function references; stack switching; wide arithmetic; custom page sizes; and
+the component model. A pin move that adds a proposal to Wasmtime's defaults admits nothing
+new. (Checked on Wasmtime 48.0.10 with this `Config`: a module with one `externref` table is
+refused with "gc types are disallowed but found type which requires gc".)
 
 A contained module adds no link input and is never handed to the system linker. The driver
 reads its bytes from the package resolution's capture, checks them in a sealed memory file, as
@@ -1294,7 +1326,11 @@ contained module has no clock, no randomness, no file, no environment and no out
 interface `I` instantiates `I`'s module in a new Wasmtime `Store` that belongs to the task.
 Every later call by that task uses this **instance**, and no other task ever reaches it.
 Instantiation runs `_initialize` when the module exports it. Its memory and fuel are charged to
-that first call, under the limit and step bound current at the call. Because the instance is
+that first call, under the limit and step bound current at the call. A trap during
+instantiation (an active data or element segment out of range, or a trap in `_initialize`)
+fails that first call with FFI-14's text for it, and no instance is made: the task's next call
+instantiates again. A flow stage (CONC-14) never calls contained code, because a stage body
+holds no capability and so no `Foreign[I]`. Because the instance is
 task-private and its handles are not `send`, the order of calls into any instance is its task's
 program order. No event is added to CONC-10, and nothing here depends on the order between
 tasks. When the task ends, after its finalizers have run, the run drops the instance and
@@ -1334,29 +1370,96 @@ refuses the pages a granted grow needs stops the run with `HostMemory` (FAIL-15)
 for any engine memory. The run reserves the address space before the call, so the guest
 never sees that refusal.
 
-**Steps.** A contained call takes one step, as every foreign call does (FFI-2), plus
-⌈`u` / 16⌉ steps, where `u` is the Wasmtime fuel that the call consumes: in `loan_area`,
-instantiation, `_initialize` and the function itself. The fuel cost of each operator is the
-**pinned cost table**, which is Wasmtime 48.0.10's `default_operator_cost`. `nop`, `drop` and
-the structural control operators (`block`, `loop`, `unreachable`, `return`, `else`, `end`) cost
-0, and every other operator costs 1. On top of that flat cost, the table's
+Only linear memory and tables are charged. The call's fiber stack (below), the instance's
+context and its address-space reservation are host memory outside every limit, as FFI-6's
+handle table is. Each instance reserves 4 GiB plus a 32 MiB guard of address space, so a
+process holds about 30,000 live instances in a 47-bit user address space; the next
+instantiation's reservation is refused by the host and stops the run with `HostMemory`. A
+program that needs more live instances spawns fewer tasks that call contained code.
+
+**Steps.** A contained call takes one step, as every foreign call does (FFI-2). Before anything
+is copied in, it takes one step for each 16 KiB, or part, of each loan it copies in, and one
+more for each 16 KiB, or part, of each exclusive loan it will copy back, as `crc32c.update`
+does (MEM-30). So a 4 GiB loan costs what a 4 GiB checksum costs, not one step. Then it takes
+⌈`u` / 16⌉ steps, where `u` is the Wasmtime fuel that the call consumes in its **entries**:
+instantiation with `_initialize`, `loan_area`, and the function itself. The fuel cost of each
+operator is the **pinned cost table**, which is Wasmtime 48.0.10's `default_operator_cost`.
+`nop`, `drop` and the structural control operators (`block`, `loop`, `unreachable`, `return`,
+`else`, `end`) cost 0, and every other operator costs 1. On top of that flat cost, the table's
 `VariableOperatorCost::new()` charges 1 per byte of `memory.copy`, `memory.fill` and
 `memory.init`, 1 per page of `memory.grow`, and 1 per element of `table.copy`, `table.fill`,
-`table.init` and `table.grow` (`crates/environ/src/tunables.rs` <!-- doc-ref: external --> in Wasmtime 48.0.10). The driver passes it with `Config::operator_cost`, so a later
-Wasmtime default cannot move it. Without a per-byte cost, a single `memory.copy` of 4 GiB
-would cost one unit. The rate of 16 fuel per step keeps a step close in size to a Hirsel loop
-iteration. With a step bound current, the call starts with fuel equal to 16 × the bound's
-remaining steps. Wasmtime charges fuel per operator but checks it only at function entries and loop headers
-(`fuel_function_entry`, `fuel_check` in `crates/cranelift/src/func_environ.rs` <!-- doc-ref: external -->,
-48.0.10). So when the fuel is spent, the call stops at the next
-such check, the steps taken are those of all fuel consumed up to that check, the instance is
-discarded, and `OutOfTime` is raised at the call site (MEM-30). The stopping point is a
-function of the code alone, so it is the same on every run of one build. An `isolate` does not catch it
-there, and the bound's scope does. While a bound is current, each 65,536th step the task takes,
-inside the call or outside it, is a slice end. Inside the call, it falls at the first fuel check at or after the
-fuel point where that step is taken. The call runs as a Wasmtime async call, and
-`Store::fuel_async_yield_interval` yields to the scheduler there. With no bound current, the
-call takes its steps unbounded and has no slice end, as Hirsel code does.
+`table.init` and `table.grow` (`crates/environ/src/tunables.rs` <!-- doc-ref: external --> in
+Wasmtime 48.0.10). The driver passes it with `Config::operator_cost`, so a later Wasmtime
+default cannot move it. The rate of 16 fuel per step keeps a step close in size to a Hirsel
+loop iteration.
+
+**Fuel checks.** The Wasmtime source cited in this paragraph and the next is
+`crates/cranelift/src/func_environ.rs` <!-- doc-ref: external --> and
+`crates/wasmtime/src/runtime/` <!-- doc-ref: external --> at tag v48.0.10. Compiled code adds
+each operator's cost to a counter held in a register and compares it with the fuel only at a
+**fuel check**: at each function entry (`fuel_function_entry`), at each loop header
+(`translate_loop_header`), and before each bulk operation whose cost is not a constant of at
+most 128 (`pre_translate_bulk_op`, func_environ.rs:5002-5066). A bulk operation's whole cost
+is added before its check, so an operation the fuel cannot pay never runs. Nothing is checked
+at a return: a function with no loop and no call adds its cost when it returns
+(`fuel_function_exit`, func_environ.rs:481-486). The counter is written to the store only
+before a call, a return or `unreachable`, and on the way into the out-of-fuel path
+(func_environ.rs:514-525 and 627-660).
+
+**Granules.** Each entry runs as a Wasmtime async call on a store configured with
+`Store::fuel_async_yield_interval(G)`, where the **granule** `G` is 16,384 fuel, 1,024 steps.
+Before each entry the run sets the store's fuel with `Store::set_fuel` to `F + 1`, where `F` is
+16 × the steps left in the current bound (at most `2^64 − 2`), or to `2^64 − 1` with no bound
+current. So each entry starts a fresh granule, whatever earlier entries consumed. Wasmtime
+injects at most `G` fuel at a time and keeps the rest in a reserve. When a fuel check finds the
+injected fuel spent, `out_of_gas` refills it from the reserve with the smaller of `G` and what
+the reserve holds, then yields (`out_of_gas`, vm/libcalls.rs:676-687; `refuel` and `set_fuel`,
+store.rs:1506-1538). A **granule end** is each point at which the entry's future returns
+pending. Nothing else in an entry returns pending: the resource limiter (FFI-13 Bytes) and the
+null imports are synchronous. Between an entry's start and its first granule end, and between
+two granule ends, at least `G` fuel is consumed. At a bulk operation it can be far more,
+because one check pays the whole operation and the entry returns pending once.
+
+**Bounds.** With a bound current, the store holds exactly one unit of fuel more than the bound
+pays for. A call **runs out** in two cases:
+
+- an entry reaches a fuel check after consuming more than `F`. The reserve cannot refill it,
+  and Wasmtime raises `Trap::OutOfFuel` at that check;
+- an entry returns normally and `Store::get_fuel` reads 0. It then consumed at least `F + 1`,
+  because `get_fuel` saturates at 0 for any overdraw (store.rs:1501). When it reads more than
+  0, the entry consumed exactly `F + 1 − get_fuel`.
+
+A call that runs out raises `OutOfTime` at its call site (MEM-30). Its result is dropped,
+nothing is copied back, the instance is discarded, and the call takes exactly the steps its
+bound had left. An `isolate` does not catch it there. The bound's scope does. A call that does
+not run out takes ⌈`u` / 16⌉ steps for its exact `u`, and the next entry's `F` is computed
+after them. So a contained call never takes more steps than its bound has left, and its work
+past the bound is at most one straight-line run: the operators after its last fuel check, up to
+the next check or the return. A bulk operation that would pass the bound is stopped before it
+runs. With no bound current, `Trap::OutOfFuel` needs `2^64 − 1` fuel in one entry (over five
+centuries at 10⁹ fuel a second). It is handled as an unlisted trap is (FFI-14).
+
+**Slice ends.** The entry's future holds the store, so the run cannot read the fuel at a
+granule end. It counts each granule end as exactly `G` fuel, 1,024 steps, toward the task's
+step count. While a bound is current, if that count has crossed a multiple of 65,536 since the
+task's last slice end, the task takes exactly one slice end there (MEM-30), and the scheduler
+may run another task before it polls the entry again. With no bound current, it polls again at
+once. When the entry ends, the run adds the steps that the granule ends did not count: at a
+return, the exact steps less those counted; at a trap, the trap's steps (FFI-14) less those
+counted. The task's next slice end then follows MEM-30 from the new count. So inside a
+contained call a slice end can fall late, by the fuel that bulk operations consumed past
+their granule's `G`, and there is at most one slice end per granule end. Where a slice end
+falls is a function of the code path alone, so it is the same on every run of one build. A
+bound's exhaustion is never late, because the store's fuel decides it.
+
+This mechanism was checked with a scratch program against Wasmtime 48.0.10 on x86-64 Linux,
+with `G` = 16,384 and fuel reset before each entry. A loop of 10⁶ iterations consumed 9,000,006
+fuel and returned pending 549 times (⌊9,000,006 / `G`⌋ = 549). A 128 KiB `memory.fill`
+consumed 131,077 fuel and returned pending once. A function of 4,000 straight-line operators
+(2,000 adds), called with fuel 33, returned normally and `get_fuel` read 0. The same `memory.fill`, called
+with fuel 1,601, raised `Trap::OutOfFuel`, and the first byte of memory was unchanged. A loop
+of 10⁵ iterations that then divided by zero left a stored consumption of 885,007 against
+884,736 counted from 54 granule ends (true consumption about 900,000).
 
 Wasmtime's `consume_fuel` docs say fuel "can be used to deterministically prevent
 infinitely-executing WebAssembly code", and its `epoch_interruption` docs say epoch
@@ -1367,7 +1470,12 @@ yielding or trapping is needed". Epoch interruption is not used.
 (`Config::async_stack_size`), with `Config::max_wasm_stack` set to 1 MiB. A guest that recurses
 past that traps as `stack overflow`. It does not touch the task's thread stack, so the docs'
 warning that exhausting the thread stack "typically leads to an abort of the process" does not
-apply. The fiber stack is host memory outside every limit, like FFI-6's handle table.
+apply. The fiber stack is host memory outside every limit, like FFI-6's handle table (FFI-13
+Bytes). The overflow point is the stack pointer at the entry less `max_wasm_stack`
+(`crates/wasmtime/src/runtime/func.rs` <!-- doc-ref: external --> lines 1578-1579), so the depth at which a guest
+overflows, and the steps it has taken there, depend on the frames below it. On the fiber those
+are Wasmtime's own frames, the same in every run of one build. Two targets may differ, which
+SEM-8's per-build scope allows.
 
 ### FFI-14: Determinism, traps and replay
 
@@ -1408,20 +1516,30 @@ Nothing else enters it. The engine is configured to make that true:
 | `IntegerDivisionByZero` | `integer division by zero` |
 | `BadConversionToInteger` | `bad conversion to integer` |
 | `StackOverflow` | `stack overflow` |
-| `proc_exit(c)` (FFI-12) | `exit c`, with `c` in decimal |
-| `OutOfFuel` | not a trap here: it is `OutOfTime` (FFI-13) |
+| `proc_exit(c)` (FFI-12) | `exit c`, with `c` printed as an unsigned 32-bit number in decimal |
+| `OutOfFuel` | not a trap here: with a bound current it is `OutOfTime` (FFI-13 Bounds) |
 
-Every other variant belongs to a feature that FFI-11 refuses, so a module that reaches one is
-an engine bug. The run stops with `Provider` and does not report a trap (the name is open, O15). FAIL-2's `Fail` row
+Every other variant belongs to a feature that FFI-11 refuses, so a module that reaches one
+means Wasmtime broke its own feature set. That is a failed runtime invariant, not a property of
+the guest, and the process aborts as on any failed invariant of the runtime. No run stop name
+and no `Fail` text is given to it. `Trap::OutOfFuel` with no bound current (FFI-13 Bounds) is
+handled the same way. FAIL-2's `Fail` row
 lists these texts, and FFI-12's and FFI-13's. A trap is a failure, not environmental
 termination. It runs every cleanup that FAIL-8 runs, and an `isolate` catches it. This is the
 difference from FFI-1, where a native crash takes the process.
 
 **Fuel at a trap.** Wasmtime's docs say "fuel accounting is not precise when WebAssembly
-traps." So the steps a trapping call takes are defined without the fuel left over: the call
-takes one step and ⌈`u` / 16⌉ more, where `u` is the fuel that Wasmtime reports consumed at the
-trap. That number is a property of one build. It is the same on every run of that build (law
-FW8), and nothing compares it across builds (SEM-8).
+traps." The store's value lags the code: it holds the counter as last written, at a call, a
+return, `unreachable` or a granule end (FFI-13 Fuel checks). So a loop with no call writes it
+only at its granule ends. Let `s` be the fuel the store reports consumed at the trap entry
+(`F + 1 − get_fuel`, or `2^64 − 1 − get_fuel` with no bound). The entry is charged `s + G`
+fuel, and with a bound current at most `F`: the trapping call takes ⌈(`s` + `G`) / 16⌉ steps
+for that entry, capped at the steps its bound has left, beside its other entries' exact steps
+and its copy steps. Since `s` is at least the fuel counted at the entry's granule ends, a
+trapping call gets less than one granule plus one straight-line run of work free, so a caller
+that catches the trap and calls again under `bound steps n` does `O(n)` work, not `O(n²)`.
+`s` is a function of the code path alone. It is the same on every run of one build (law FW8),
+and nothing compares it across builds (SEM-8).
 
 **Replay.** A program is **native-reaching** when its checked reach holds a function of a
 native foreign module (FFI-8 then applies, and nothing below does). A program that reaches only
@@ -1432,9 +1550,10 @@ foreign code:
   compute, so replay recomputes it and nothing is recorded for it;
 - its steps, slice ends, charges, refusals and failures are SEM-8 observables, and they are
   the same on every run of one build;
-- a test that reaches only contained code may have its pass reused (PROG-4). Its program
-  holds the module's address (FFI-16), and so its bytes. Whether the reuse key also covers the
-  Wasmtime pin is O16.
+- a test that calls contained code takes `Foreign[I]` (Grants, below), so it is not a test
+  that takes no parameters, and PROG-4 never reuses its pass. The driver agrees: it keeps a
+  pass only for a test with no parameters whose reach holds no foreign function. A test that
+  reaches contained code is run every time.
 
 A program that reaches both kinds is native-reaching, and FFI-8 refuses its recording build in
 full.
@@ -1443,64 +1562,117 @@ full.
 FFI-4's launch rules do not apply to it: no `--grant` is needed on the command line, no
 `foreign:` line is written, and no deploy refusal applies. Its grant `Foreign=D` is an ordinary
 entry grant (CAP-4). It is given by the run's configuration, a test configuration's grant
-string, or a recipe binding, like every other grant that is not `Foreign`. Whether a contained
-interface needs a grant at all is open for review (O6).
+string, or a recipe binding, like every other grant that is not `Foreign`. The grant is kept
+(O6): one rule for `Foreign[I]` treats like things alike, and an ambient contained call would be
+the only call without a capability.
 
 ### FFI-15: Wasmtime, compilation and caching
 
 **The pin.** Hirsel embeds the `wasmtime` crate at exactly `=48.0.10`, with default features
-off and these features on: `cranelift`, `runtime`, `async` and `std`. Wasmtime calls every
-release that is a multiple of 12 an LTS, "supported for 24 months", and security fixes are
-"guaranteed to be backported to all supported releases". A pin moves only to a later patch of
-48, or to the next LTS. The pin is a toolchain input, so a change moves the compiler identity
-and every contained object key (below). The native backend's Cranelift (`=0.136.3`, the
-Wasmtime 49 line) is a separate pin. Wasmtime 48 brings its own Cranelift (`0.135`), so the
-toolchain builds two Cranelifts. Moving both onto one release is open for review (O9).
+off, in two builds. The driver builds it with `cranelift` and `std`, so it can validate and
+precompile. The runtime builds it with `runtime`, `async` and `std` only, so it can load,
+instantiate and call. `Engine::precompile_module` and `Engine::precompile_compatibility_hash`
+exist only with `cranelift` (or `winch`) on (`crates/wasmtime/src/engine.rs` <!-- doc-ref: external -->
+lines 675 and 867), so an image holds no code generator, and "the run never compiles" is a fact
+of its link, not a promise. Wasmtime calls every release that is a multiple of 12 an LTS,
+"supported for 24 months", and security fixes are "guaranteed to be backported to all supported
+releases". A pin moves only to a later patch of 48, or to the next LTS. The pin is a toolchain
+input, so a change moves the toolchain image identity, and with it every contained object key
+(below). The native backend's Cranelift (`=0.136.3`, the Wasmtime 49 line) is a separate pin.
+Wasmtime 48 brings its own Cranelift (`0.135`), so the driver builds two Cranelifts. The runtime
+builds none of Wasmtime's. Both pins stay (O9).
 
-**Configuration.** One `Config`, written in one place, is part of the pin: `consume_fuel(true)`
-with the pinned cost table; `epoch_interruption(false)`; `cranelift_nan_canonicalization(true)`;
-`wasm_relaxed_simd(false)`, `wasm_threads(false)`, `wasm_memory64(false)`,
-`wasm_multi_memory(false)`, `wasm_exceptions(false)`, `wasm_gc(false)`,
-`wasm_function_references(false)`, `wasm_component_model(false)` and the other proposals of
-FFI-11 off; `memory_init_cow(false)`; `max_wasm_stack(1 MiB)`; `async_stack_size(2 MiB)`;
-`signals_based_traps(true)` with the default 4 GiB reservation and 32 MiB guard; and
-`target(T)` for the build's target, with the CPU features named in full, never taken from the
-host. Wasmtime's `target` docs say "target-specific flags (such as CPU features) will not be
-inferred by default". The x86-64 features are the native backend's baseline for `T`, and
-AArch64 uses the base Armv8.0-A set.
+Containment rests on Wasmtime's validator, its Cranelift lowering and its runtime (O12). An
+advisory against this configuration moves the pin, and every image that holds a contained
+artifact is rebuilt and redeployed.
+
+**Configuration.** One function in the toolchain writes the `Config`, and both builds call it.
+Its settings are of two kinds.
+
+- **Compile settings**, which shape the artifact and which only the driver's engine reads:
+  `cranelift_nan_canonicalization(true)`; and `target(T)` for the build's target, with the CPU
+  features named in full, never taken from the host. Wasmtime's `target` docs say
+  "target-specific flags (such as CPU features) will not be inferred by default". The x86-64
+  features are the native backend's baseline for `T`, and AArch64 uses the base Armv8.0-A set.
+  Cranelift's NaN canonicalization is a shared flag that a load does not check
+  (`check_compatible_with_shared_flag`, engine.rs:436-520, lists `enable_nan_canonicalization`
+  among the flags that "don't change semantics" for loading). So the artifact's code carries it,
+  and the runtime need not repeat it.
+- **Engine settings**, which both engines set identically: `consume_fuel(true)` with the pinned
+  cost table (`Config::operator_cost`); `epoch_interruption(false)`; the admitted features of
+  FFI-11, set by name; `memory_init_cow(false)`; `signals_based_traps(true)` with the default
+  4 GiB reservation and 32 MiB guard; `max_wasm_stack(1 MiB)` and `async_stack_size(2 MiB)`.
+  A load checks the artifact's triple, its shared and ISA flags, its tunables (fuel, the cost
+  table, the reservation, the guard, signals-based traps and `memory_init_cow` among them) and
+  its features against the runtime's engine, and refuses a mismatch
+  (`check_compatible`, `crates/wasmtime/src/engine/serialization.rs` <!-- doc-ref: external -->
+  lines 204-211 and 278-445). The two stack sizes are runtime settings that no artifact
+  records. The runtime's engine also sets the custom code memory (Loading, below).
 
 **Signals.** Signals-based traps stay on. Turning them off makes code "up to 2x slower", and it
 also needs Cranelift's heap Spectre mitigations off, since those "rely on faults from loading
 from the null address". On Linux, Wasmtime installs handlers for `SIGSEGV`, `SIGBUS` and
 `SIGILL`, and `SIGFPE` on x86-64. It saves each previous action and passes a fault outside Wasm
 code to it (`crates/wasmtime/src/runtime/vm/sys/unix/signals.rs` <!-- doc-ref: external -->,
-48.0.10), so the runtime must install its own first. On macOS it uses Mach exception ports, Wasmtime's default
-there, which forward "any non-guest faults" to the process-level handlers. How these meet the
-runtime's own stack-overflow and signal handling (FAIL-15 `SignalStack`, `Signal`) is open for
-review (O2).
+48.0.10), so the runtime installs its own handlers first and Wasmtime's chain to them. On macOS
+it uses Mach exception ports, Wasmtime's default there, which forward "any non-guest faults" to
+the process-level handlers. That the two meet correctly on Linux is law FW28 (O2): a guest
+out-of-bounds trap on one scheduler thread while another overflows a Hirsel stack, each
+reported as its own rule says. The macOS case, and Mach ports across `fork()`, belong to W2.
 
 **Compiling and cross-compiling.** The driver compiles each contained module once per target,
 with `Engine::precompile_module` on an engine configured for that target. The same code builds
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and `aarch64-apple-darwin` artifacts on
 any host, because Wasmtime's `target` "can be used, for example, to cross-compile from one
 platform to another". A cross build never creates a `Module` for a foreign target: it only
-precompiles. The artifact is embedded read-only in the executable image, as one object of the
-link. At the task's first call, the run loads it with `Module::deserialize_raw` from the
-image's own memory. Wasmtime marks `deserialize` `unsafe` because a modified artifact can run
-arbitrary code, and says it may be "considered safe" only for the unmodified output of
-`precompile_module`. The image is the toolchain's own output, as its native code is. The run
-never deserializes bytes from a cache, a package or the network.
+precompiles.
+
+**What the image ships, and loading.** The artifact is one object of the link: the bytes that
+`precompile_module` returned, unchanged, placed in a read-and-execute segment of the image
+(`PT_LOAD` with `R E` on ELF, `__TEXT` on Mach-O) and aligned to 64 KiB. The artifact's own
+text section is aligned within it to the target's page size as Wasmtime sees it: 4 KiB on
+x86-64, 64 KiB on AArch64 Linux, 16 KiB on AArch64 macOS (`page_size_align`,
+`crates/environ/src/compile/mod.rs` <!-- doc-ref: external --> lines 370-394). So the text
+lands on an executable page boundary in the image. The runtime's `Config` holds a custom code
+memory (`Config::with_custom_code_memory`, config.rs:1731) whose `required_alignment` is that
+page size and whose `publish_executable` changes no protection, because the pages are already
+executable; on AArch64 it performs the instruction-cache maintenance the target needs, and
+`unpublish_executable` is never called. At the task's first call, the run loads the artifact in
+place with `Module::deserialize_raw`, passing the object's address and length. Wasmtime wraps
+that memory as externally owned, which supports no virtual-memory operation, so without a
+custom code memory its publish step fails with "this target requires virtual memory to be
+enabled" (`CodeMemory::publish`, `crates/wasmtime/src/runtime/code_memory.rs` <!-- doc-ref: external -->
+lines 415-475, the bail at 452; `MmapVec::supports_virtual_memory`, vm/mmap_vec.rs:157-164). With it, publish
+calls the custom memory and writes nothing to the text. An artifact whose text has relocations
+is refused at load (code_memory.rs:178-192), and `precompile_module` makes none. So no
+executable memory is mapped or written at run time, on any target (O3).
+
+This loader was checked with a scratch program on x86-64 Linux only: a runtime-only build
+(`runtime`, `async`, `std`) loaded a 11,168-byte artifact from a 64 KiB-aligned object in the
+image's `.text`, instantiated it and ran it. The AArch64 rows are checked at W1 and W2.
+
+Wasmtime marks `deserialize_raw` `unsafe` because a modified artifact can run arbitrary code,
+and says it may be "considered safe" only for the unmodified output of `precompile_module`.
+The image is the toolchain's own output, as its native code is. The run never deserializes
+bytes from a cache, a package or the network.
 
 **Caching.** A compiled artifact is a build part. It is kept in the driver's part cache, under
-the key `H("hirsel.contained-object.v1", m ‖ t ‖ c)`. `m` is the module's 32-byte pin, `t` is
-the target triple as a text, and `c` is Wasmtime's `Engine::precompile_compatibility_hash` of
-the pinned configuration for `t`. Since the pin is in the key, the cache follows the package
-identity: two packages with one module share an entry, and a changed module misses. Since the
-configuration is in the key, a changed pin, cost table or CPU feature set misses too. The cache
-is trusted as every compiled part is. It is the build user's own output, and nothing guards it
-against that user ("trust our own implementation"). In a recipe build, the module's bytes come
-from the code store, checked by hash, and are compiled there. Compiled artifacts are never
-moved between hosts.
+the key `H("hirsel.contained-object.v1", m ‖ t ‖ c ‖ i)`. `m` is the module's 32-byte pin. `t`
+is the target triple as a text. `c` is the SHA-256 of the bytes that
+`Engine::precompile_compatibility_hash` of the pinned configuration for `t` writes to a hasher
+(it hashes the triple, the Cranelift and ISA flags, the tunables, which hold the cost table,
+the features and the crate's version text: `HashedEngineCompileEnv`,
+`crates/wasmtime/src/compile/code_builder.rs` <!-- doc-ref: external --> lines 848-865).
+`i` is the toolchain image identity, the one the test pass key holds. `c` alone does not cover
+Wasmtime's or Cranelift's code: a toolchain rebuilt with a patched Cranelift, still at version
+48.0.10, keeps `c`, and only `i` makes its key miss. Since the pin is in the key, the cache
+follows the package identity: two packages with one module share an entry, and a changed
+module misses. The cache is trusted as every compiled part is. It is the build user's own
+output, and nothing guards it against that user ("trust our own implementation"). A contained
+artifact comes only from the build user's own part cache, or is compiled in place. Kiln RE and
+the code store carry module bytes, never artifacts, and compiled artifacts are never moved
+between hosts. In a recipe build, the module's bytes come from the code store, checked by hash,
+and are compiled there. No signature binds an artifact (O1).
 
 ### FFI-16: Contained code in addresses and recipes
 
@@ -1528,27 +1700,56 @@ Each law's expected value comes from this section, the WebAssembly specification
 documented behaviour, or the fixture's own source. None comes from a run's output. Each law runs
 on both native backends, on x86-64 and AArch64 Linux. The fixture package `wasm_laws`, with
 interface `Box` and kind `Cell`, has a module `box.wasm` built by its `build.sh` from `box.c`
-with prefix `hwl_`. It exports:
+with prefix `hwl_`. Its `build.sh` compiles `box.c` with the pinned clang as FFI-10 says, and
+assembles `box_traps.s`, written in LLVM's WebAssembly assembly, with the same clang. `wasm-ld`
+links both with `--initial-memory=131072` <!-- doc-ref: external -->, `-z stack-size=16384` <!-- doc-ref: external --> and
+`--stack-first` <!-- doc-ref: external -->, so the
+memory's 2 pages are a stated link input, and the stack and static data lie in the first page.
+The functions whose operators a law counts are written in `box_traps.s`, so no optimizer
+folds a loop, removes a recursion or chooses the trapping operator: at `-O2`, a C loop that
+returns `n` folds to `return n`, and signed overflow, a wild load and a mistyped indirect call
+are undefined behaviour in C. The module imports exactly two null imports,
+`wasi_snapshot_preview1.clock_time_get` and `wasi_snapshot_preview1.proc_exit` (declared in
+`box.c` with clang's `import_module` and `import_name` attributes), defines one table of 4
+`funcref` elements (slot 0 null, slot 1 a function of type `[] -> []`, slots 2 and 3 null), and
+exports:
 
 - `make(f) -> Option[foreign.Ptr[Cell]]` and `free(f, take p) -> i32`, which use a static pool
-  of 8 cells, and `live(f) -> u64`, the number of cells in use;
-- `spin(f, n: u64) -> u64`, which loops `n` times and returns `n`;
+  of 8 cells, and `live(f) -> u64`, the number of cells in use (`box.c`);
+- `spin(f, n: u64) -> u64`, which loops `n` times and returns `n` (`box_traps.s`);
+- `straight(f) -> i32`, which runs 2,000 `i32.const 1; i32.add` pairs, 4,000 straight-line
+  operators with no loop and no call, from 0, and returns 2,000 (`box_traps.s`);
+- `loop_div(f, n: u64) -> i32`, which loops `n` times with no call and then executes
+  `i32.div_u` of 1 by 0 (`box_traps.s`);
+- `fill_mem(f, n: u32) -> u32`, which executes one `memory.fill` of `n` bytes of `0xAB` at
+  address 65,536 and returns the byte there (`box_traps.s`);
 - `grow(f, pages: u32) -> i32`, which returns `memory.grow`'s result;
 - `fill(f, mut b: Bytes) -> u64`, which writes `0xAB` to each byte, and `sum(f, b: Bytes) ->
   u64`;
-- `nan32(f) -> f32` and `nan_bits(f, x: f64) -> u64`, which stores `x` and reads its bits back;
-- `trap(f, k: u32) -> i32`, which traps as the kind of number `k` in FFI-14's table;
+- `nan32(f) -> f32`, which returns `f32.reinterpret_i32(0x7fa00001)`, a NaN that no float
+  operator made (`box_traps.s`);
+- `div_bits(f, a: f64, b: f64) -> u64`, which executes `f64.div` of `a` by `b` in the guest,
+  stores the quotient to memory and returns its bits read back as an `i64` (`box_traps.s`);
+- `trap(f, k: u32) -> i32`, which for `k` from 1 to 10 traps as row `k` of FFI-14's table, in
+  its order (`box_traps.s`): `unreachable`; an `i32.load` at `0xFFFFFFF0`; `call_indirect` of
+  slot 4; of slot 0; of slot 1 with type `[] -> [i32]`; `i32.div_s` of `-2^31` by `-1`;
+  `i32.div_u` by 0; `i32.trunc_f32_s` of a NaN; a call of `recurse` with depth `2^32 − 1`; and
+  `proc_exit(7)`;
+- `clock(f) -> i32`, which calls `clock_time_get(0, 1, a)` with an address `a` in its static
+  data and returns the answer;
 - `count(f) -> u64`, the number of entries so far into the instance's exported functions other
   than `loan_area`, this one included;
 - `fill_trap(f, mut b: Bytes) -> u64`, which writes `0xAB` to each byte and then executes
   `unreachable`;
 - `set_area(f, mode: u32) -> i32`: with mode 1, `loan_area` from then on returns the memory's
   size in bytes minus 8, which is a multiple of 8 but leaves no room for 16 bytes;
-- `recurse(f, d: u32) -> u32`, which recurses `d` frames deep;
-- `loan_area(n)`, which in mode 0 returns the address of a static 1 MiB area, and traps when
-  `n` is larger.
+- `recurse(f, d: u32) -> u32`, which recurses `d` frames deep and returns `d`, holding its
+  depth in Wasm locals only (`box_traps.s`);
+- `loan_area(n)`, which in mode 0 returns the address of a static 4,096-byte area, and traps
+  when `n` is larger.
 
-`box.wasm` declares an initial memory of 2 pages, no maximum and no table.
+`box.wasm` declares an initial memory of 2 pages and no maximum, and one table of 4 elements.
+At instantiation they are charged 131,072 + 32 = 131,104 bytes (FFI-13 Bytes).
 
 Refusal cases live under `core/front/cases/ffi/` in the existing case harness, with real
 manifests.
@@ -1556,34 +1757,44 @@ manifests.
 | law | bug | oracle and setup |
 |---|---|---|
 | **FW1** a wrong module digest | a pin checked after parsing or not at all | The row names a file of exactly `abc` pinned to the empty string's SHA-256. The build is refused with `FFI-11: module F of wasm_laws@1/native does not match its pin: expected sha256 e3b0…b855, found sha256 ba78…15ad` (FIPS 180-2). With the true pin, it is refused as `not a core WebAssembly module`. |
-| **FW2** a component, or a disabled proposal | a validator run with Wasmtime's default features | A component-layer file with its true pin is refused as not a core module. A module using one `i32.atomic.rmw.add` on a shared memory is refused with `not valid with the admitted features`. So are one `f32x4.relaxed_madd` and one `memory64` memory. |
-| **FW3** an OS import | a module that reaches a clock, a file or randomness | A module importing `wasi_snapshot_preview1.path_open` is refused with `imports wasi_snapshot_preview1.path_open, which is not a null import`. So is `env.getenv`. A module importing `clock_time_get` is admitted, and its call returns 52 (`ENOSYS`, WASI preview 1). |
+| **FW2** a component, or a disabled proposal | a validator run with Wasmtime's default features | A component-layer file with its true pin is refused as not a core module. A module using one `i32.atomic.rmw.add` on a shared memory is refused with `not valid with the admitted features`. So are one `f32x4.relaxed_madd`, one `memory64` memory, and one `externref` table, which is valid WebAssembly 2.0 but needs `GC_TYPES` (FFI-11). |
+| **FW3** an OS import | a module that reaches a clock, a file or randomness | A module importing `wasi_snapshot_preview1.path_open` is refused with `imports wasi_snapshot_preview1.path_open, which is not a null import`. So is `env.getenv`. `box.wasm`, which imports `clock_time_get`, is admitted, and `clock(f)` returns 52 (`ENOSYS`, WASI preview 1). |
 | **FW4** a header that disagrees with its module | an export of the wrong type, or ABI text that does not bind | Exporting `hwl_fill` as `[i32] -> [i64]` is refused with `… exports hwl_fill as [i32] -> [i64], but its header gives [i32 i32] -> [i64]`. A module with no `hirsel_abi` section is refused with `has no ABI text`. A header with `waits` is refused with FFI-12's text. |
 | **FW5** loans are copies | a loan passed by pointer, copied back after a trap, or measured by capacity | `b = list.with_capacity(16)` filled to 4 zeros: `fill(f, mut b)` returns 4, `list.len(b)` is 4, and every byte is `0xAB`. `c` is the bytes 0..11: `sum(f, list.slice(c, 4, 8))` returns 22. An empty `b` gives `fill` 0. With `d` of four zeros, `fill_trap(f, mut d)` fails with `Fail("contained trap: unreachable")`, and `d` is still four zeros. |
 | **FW6** a loan area outside memory | a write past linear memory into host memory | In a fresh task, `set_area(f, 1)`, then `sum(f, b)` with a 16-byte `b` fails with `Fail("contained loan area out of bounds")`. Then `count(f)` returns 2 (`set_area` and itself): `sum` was never entered, and the instance was not discarded. |
 | **FW7** a step bound around contained code | fuel not tied to `bound steps`, or tied to wall time | `bound steps 1000 { spin(f, 10⁹) }` returns `Error(OutOfTime(steps: 1000))`. `bound steps 10⁶ { spin(f, 10) }` returns `Ok(10)`. In one build, `spin(f, n)` for n = 10⁴ takes the same steps on 3 runs: read with a step bound searched by bisection, and compared only within the build. |
-| **FW8** fuel and traps are deterministic per build | a count read from the leftover fuel at a trap | `trap(f, 6)` (integer division by zero) after a fixed prologue: the bisected smallest `n` with `bound steps n { trap(f, 6) }` failing with the trap, not `OutOfTime`, is the same on 3 runs of one build. |
+| **FW8** fuel and traps are deterministic per build | a count read from leftover fuel that varies by run at a trap | `trap(f, 7)` (integer division by zero) after a fixed prologue: the bisected smallest `n` with `bound steps n { trap(f, 7) }` failing with the trap, not `OutOfTime`, is the same on 3 runs of one build. |
 | **FW9** slice ends inside a contained call | a contained call that holds a scheduler thread past a slice end | On a 1-thread scheduler, task A runs `bound steps 10⁹ { spin(f, 10⁸) }`, and task B prints a line and ends. B's line appears before A's result. With no bound current, the same order is not required. |
-| **FW10** bytes charged to the program's limit | linear memory outside every limit, or growth past a refused admission | In a task that has already called `count(f)`, `bound bytes 2²⁰ { (grow(f, 32), grow(f, 1)) }` returns `Ok((-1, 2))`: 32 × 65,536 > 2²⁰ is refused and the guest sees −1, and one page is admitted, the old size being 2 pages. In a fresh task, `isolate { bound bytes 65536 { count(f) } }` returns `Ok(Error(causes))` with primary cause `Capacity`, because 2 initial pages are 131,072 bytes. A following `count(f)` outside it returns 1, so no instance was made. A task that grows by 16 pages and ends returns its charge: its spawner's limit then admits `bound bytes` of what it had before the spawn. |
-| **FW11** NaN bits | a non-canonical NaN reaching Hirsel or linear memory | `float.to_bits32(nan32(f))` is `0x7fc00000` (SEM-2). `nan_bits(f, 0.0/0.0)`, computed inside the guest by `f64.div`, returns `0x7ff8000000000000`, on x86-64 and on AArch64. |
-| **FW12** the trap map | a trap that aborts the process, is caught as the wrong text, or leaves the instance live | For each `k` in FFI-14's table, `isolate { trap(f, k) }` returns `Ok(Error(causes))` with primary cause `Fail("contained trap: X")` and the listed `X`. Then `count(f)` returns 1, because the instance was discarded and the new generation's counter starts again. |
+| **FW10** bytes charged to the program's limit | linear memory outside every limit, or growth past a refused admission | In a task that has already called `count(f)`, `bound bytes 2²⁰ { (grow(f, 32), grow(f, 1)) }` returns `Ok((-1, 2))`: 32 × 65,536 > 2²⁰ is refused and the guest sees −1, and one page is admitted, the old size being 2 pages. In a fresh task, `isolate { bound bytes 65536 { count(f) } }` returns `Ok(Error(causes))` with primary cause `Capacity`, because 2 initial pages and a 4-element table are 131,104 bytes. A following `count(f)` outside it returns 1, so no instance was made. A task that grows by 16 pages and ends returns its charge: its spawner's limit then admits `bound bytes` of what it had before the spawn. |
+| **FW11** NaN bits | a non-canonical NaN reaching Hirsel or linear memory | `float.to_bits32(nan32(f))` is `0x7fc00000` (SEM-2): the guest returns `0x7fa00001` unchanged by any float operator, so the boundary rule (FFI-5) is what makes it canonical. `div_bits(f, 0.0, 0.0)` divides inside the guest by `f64.div` and returns `0x7ff8000000000000`, on x86-64 and on AArch64. x86-64's own NaN for that division is `0xfff8000000000000`, so the law is red without NaN canonicalization. |
+| **FW12** the trap map | a trap that aborts the process, is caught as the wrong text, or leaves the instance live | For each `k` from 1 to 10 (rows 1 to 10 of FFI-14's table; row 10 is `proc_exit(7)`, so its `X` is `exit 7`), `isolate { trap(f, k) }` returns `Ok(Error(causes))` with primary cause `Fail("contained trap: X")` and the listed `X`. Then `count(f)` returns 1, because the instance was discarded and the new generation's counter starts again. |
 | **FW13** a discarded instance's handles | a use of a handle into freed linear memory, or a release run on a discarded instance | `p = make(f)`, then `trap(f, 1)`, then `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`, and a second `isolate { free(f, p) }` gives `Fail("foreign handle released")`. An `ObjBox` holding a handle made before a trap, when dropped, reports its finalizer's cause `Fail("foreign instance discarded")`, and `count(f)` shows no entry into `free`. |
 | **FW14** instances are per task | state shared between tasks, or a handle crossing tasks | Two tasks each call `count(f)` 3 times, and each sees 1, 2, 3. A refusal case declares `pub opaque resource type CellBox: send { f: Foreign[Box], p: foreign.Ptr[Cell] }` and is refused at the type (FFI-12, CONC-2). |
 | **FW15** a resource's mechanical release | a contained handle that a dropped resource leaks or releases twice | `ObjBox { f, p }` with `drop(o) { let _ = free(o.f, o.p) }`. Make two boxes: `live` is 2. Drop one: `live` is 1. Destructure the other, call `free` on its handle, then drop nothing more: `live` is 0, and the test passes with no cause. A box whose finalizer fails (`fail("x")`) still leaves `live` one lower, through the mechanical release. |
 | **FW16** guest stack overflow | a guest overflow that aborts the process | `recurse(f, 10⁷)` fails with `Fail("contained trap: stack overflow")`, and the run goes on to print a following line. |
-| **FW17** replay of a contained program | a contained call that changes replay, or a test denied reuse | `hirsel test --replay` of a test calling `spin`, `fill`, `grow` under `bound bytes`, and `trap` inside `isolate` replays `Sealed`. `hirsel test` twice with one cache reports the test reused on the second run. A test that reaches both `wasm_laws` and `ffi_laws` is refused as in FL7. |
+| **FW17** replay of a contained program | a contained call that changes replay, or a contained test's pass reused | `hirsel test --replay` of a test calling `spin`, `fill`, `grow` under `bound bytes`, and `trap` inside `isolate` replays `Sealed`. `hirsel test` twice with one cache runs the test both times and reports no reuse: it takes `Foreign[Box]`, so PROG-4 never reuses its pass. A test that reaches both `wasm_laws` and `ffi_laws` is refused as in FL7. |
 | **FW18** addresses and recipes | a recipe that does not pin the module, or an address that ignores it | Changing one byte of `box.c`'s output and its pin changes the caller's revision (FFI-16). `hirsel build --recipe R --code-store DIR` with the package deleted builds and runs `count`. A recipe with the module's object missing is refused as `Missing`. |
 | **FW19** cross-compiled artifacts | a host-inferred CPU feature, or an artifact that differs by host | The `aarch64-unknown-linux-gnu` artifact precompiled on an x86-64 host and on an AArch64 host is byte-identical. The image built on x86-64 runs FW5 and FW11 on AArch64. |
 | **FW20** an unbuilt key refuses | a parsed and ignored `containment` | Until slice W1, a manifest with `containment = "wasm"` is refused with `FFI-10: containment = "wasm" is not built yet`. After W1, `containment = "native"` is refused as a bad field. |
+| **FW21** a straight-line call past its bound | a call that returns with its fuel overdrawn and is taken as `Ok` (no fuel check at a return) | `bound steps 2 { straight(f) }` returns `Error(OutOfTime(steps: 2))`: after the call's own step, the entry starts with 17 fuel, passes its entry check and consumes about 4,000 before it returns (FFI-13 Bounds). `bound steps 300 { straight(f) }` returns `Ok(2000)`: 4,000 operators cost at most 4,016 fuel (the pinned cost table), 251 steps, plus the call's one step. |
+| **FW22** a trapping call's charge | a trap charged the store's stale fuel, so a caller that catches it and calls again does quadratic work | Let `L` be the fuel of `loop_div(f, 10⁵)` up to its division, counted from `box_traps.s` with the pinned cost table. The bisected smallest `n` with `bound steps n { (isolate { loop_div(f, 10⁵) }, isolate { loop_div(f, 10⁵) }) }` returning two traps, not `OutOfTime`, lies between 2⌈`L` / 16⌉ and 2⌈`L` / 16⌉ + 1,030 (FFI-14 Fuel at a trap: each call is charged within one granule of its work). Charging the stale value puts it near ⌈`L` / 16⌉. |
+| **FW23** a bulk operation under a bound | a dropped per-byte cost, or a bulk operation's check placed after it | `bound steps 100 { fill_mem(f, 65536) }` returns `Error(OutOfTime(steps: 100))`: one `memory.fill` of 65,536 bytes costs 65,536 fuel, 4,096 steps, and the entry starts with 16 × 99 + 1 = 1,585 fuel. `bound steps 10⁴ { fill_mem(f, 65536) }` returns `Ok(0xAB)`. |
+| **FW24** `OutOfTime` discards the instance | a call stopped by its bound whose instance is entered again | `p = make(f)`, then `bound steps 1000 { spin(f, 10⁹) }` returns `Error(OutOfTime(steps: 1000))`. Then `count(f)` returns 1, and `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`. |
+| **FW25** the pointer index is per instance | one pointer index shared by every instance, so equal addresses collide | Two tasks each call `make(f)` and get `Some(p)`, then `free(f, p)`, which returns 0. Both cells sit at the same address in their own instance (the pool's first cell), and neither `make` fails with `foreign pointer already held`. |
+| **FW26** a handle's generation is checked | a handle of a discarded generation that releases a live cell at the same address | `p = make(f)`, then `isolate { trap(f, 1) }`, then `q = make(f)`, which is `Some` at `p`'s address in the new generation. `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`, and `live(f)` then returns 1: `q`'s cell is still in use. |
+| **FW27** a guest overflow replays | a stack overflow point that depends on the run, not the build | `hirsel test --replay` of a test that runs `isolate { recurse(f, 10⁷) }` under `bound steps 10⁹`, beside a task that prints a line, on a 2-thread scheduler, replays `Sealed`: the steps at the overflow, and so the slice ends around it, are those of the recording. |
+| **FW28** Wasmtime's signal handlers beside the runtime's | a guest fault taken as a host crash, or a Hirsel stack overflow taken as a guest trap | On a 2-thread scheduler, task A runs `isolate { trap(f, 2) }` 1,000 times and prints each primary cause, while task B recurses in Hirsel with no bound. Every line A prints is `contained trap: memory out of bounds`, and the run ends with status 102 and `run stop: Stack` (FAIL-15), not a signal. |
 
 ### Contained build slices
 
 - **W1.** FFI-10 to FFI-16 on `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, with
-  laws FW1 to FW18 and FW20. W1 is done only when every one passes on both native backends.
+  laws FW1 to FW18 and FW20 to FW28. W1 is done only when every one passes on both native
+  backends.
 - **W2.** `aarch64-apple-darwin` and FW19. W2 waits on the macOS native gate (R5) and on O3.
 
-A red law whose cause is containment (FW3, FW5, FW6, FW12, FW14, FW16), determinism (FW7,
-FW8, FW11, FW17) or a release (FW13, FW15) blocks its slice.
+A red law whose cause is containment (FW3, FW5, FW6, FW12, FW14, FW16, FW25, FW26, FW28),
+determinism or the step bound (FW7, FW8, FW11, FW17, FW21, FW22, FW23, FW27) or a release
+(FW13, FW15, FW24) blocks its slice.
 
 ### Prior art
 
@@ -1593,75 +1804,67 @@ FW8, FW11, FW17) or a release (FW13, FW15) blocks its slice.
 | Wasmtime's deterministic-execution guide (`docs.wasmtime.dev/examples-deterministic-wasm-execution.html`) and its `Config`/`Store` docs at 48.0.10 | NaN canonicalization, relaxed SIMD made deterministic or off, fuel rather than epochs, `memory_init_cow` off for fuel, growth limited by a store limiter, no nondeterministic imports | **ADOPTED**: each item. **ADAPTED**: growth is decided by Hirsel limits through `ResourceLimiter` rather than by rejecting grow, so C allocators work. **REPLACED**: `relaxed_simd_deterministic` by refusing relaxed SIMD outright. | FFI-13, FFI-14, FFI-15 |
 | Shopify Functions (`shopify.dev`, WebAssembly for Functions) | untrusted merchant code as Wasm under Wasmtime, one export per target, input through imported read functions, stderr ignored | **NOT TAKEN**: its host-read import API. Contained calls take typed arguments and copied loans, so no import exists to audit. The published page states no fuel or memory limits, and none is quoted here. | none |
 
-### Open for review
+### Rulings
 
-- **O1. A modified artifact is code execution.** `Module::deserialize_raw` trusts its bytes. The
-  spec holds that the image is our own output and that the part cache is the build user's own,
-  with the same trust as compiled native parts. Review whether a shared or remote part cache
-  (Kiln RE, a code store) can ever supply a contained artifact. If so, the artifact needs to be
-  recompiled at the consumer or bound by a signature, not by a key.
-- **O2. Signal handlers.** Wasmtime's `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` handlers sit beside
-  the runtime's stack-overflow and `SignalStack` handling. Install order, chaining, the
-  alternate signal stack, and a fault on a scheduler thread while Wasm runs on a fiber all need
-  proof. On macOS the Mach-port handler does not survive `fork()`, and launch's child processes
-  fork. The fallback is `signals_based_traps(false)`: up to 2× slower, and Spectre heap
-  mitigations off.
-- **O3. Executable memory on macOS arm64.** Loading precompiled code maps pages executable at
-  run time. Whether a Hirsel Mac image needs `MAP_JIT`, the `allow-jit` or
-  `allow-unsigned-executable-memory` entitlements, or a hardened-runtime exemption has not been
-  checked. W2 waits on it.
-- **O4. Spectre and side channels.** A contained module shares the process address space and
-  CPU with the program's secrets (`Secret`, TLS keys). Cranelift's heap mitigations are kept on,
-  but a hostile module could still time cache or branch state. Is in-process containment enough
-  for untrusted modules that run beside secrets, or do those also need a separate process?
-- **O5. Steps across a trap.** FFI-14 charges the fuel that Wasmtime reports at a trap, which
-  its docs call imprecise. FW8 checks that the charge repeats within one build. Confirm that
-  Wasmtime's reported consumption at a trap is a function of the code and the trap point alone,
-  not of register allocation or of how code is placed on the fiber.
-- **O6. Does a contained interface need a grant?** It has no authority, and its cost is
-  bounded by the program's own limits. Requiring `Foreign=D` keeps the capability rule (CAP-1)
-  and the syntax uniform. Making it ambient would let libraries use contained code without
-  passing a capability. This spec keeps the grant.
-- **O7. Address space per instance.** Each instance reserves 4 GiB plus a 32 MiB guard of
-  virtual memory. A program with 30,000 tasks that each call a contained interface needs about
-  120 TiB, close to a 47-bit user space, and then stops with `HostMemory`. Should the instance
-  be per unit with a task-local lease, or should the reservation shrink and take explicit bounds
-  checks?
-- **O8. Per-task instances cost the shared-handle model.** A contained `Db` is not `send`. A
-  per-unit instance with calls ordered by CONC-10 events would allow it, but it adds to the
-  total-order promise, which this lane may not do. Review whether that cost is acceptable for
-  the target libraries (image codecs, parsers, compression), which hold no cross-task state.
-- **O9. Two Cranelifts.** Wasmtime 48 LTS brings Cranelift 0.135, and the native backend pins
-  0.136.3 (the Wasmtime 49 line, out of support since 51.0.0 shipped on 2026-11-20). The options
-  are: build both (binary size and compile time); move the backend to 0.135 (a downgrade); or
-  pin Wasmtime 51 with Cranelift 0.138 and move the backend with it (supported for 2 months
-  only).
-- **O10. `loan_area` is guest code.** It can return overlapping or stale regions. The bounds
-  check makes any answer harmless to Hirsel, but a guest that returns memory it is using
-  corrupts itself. Is that the guest's own business, as the spec says, or should the run own a
-  scratch region (an extra exported memory, which needs multi-memory)?
-- **O11. Unbounded calls.** With no step bound current, an unaudited module runs unbounded and
-  with no slice end on a scheduler thread. Native code leans on its audit for that, and
-  contained code has none. Should a contained call outside every bound take a slice end every
-  65,536 steps anyway, as an event that only contained calls add?
-- **O12. Trusting Wasmtime and Cranelift.** Containment is only as good as Wasmtime's
-  validator, its Cranelift lowering and its runtime. Images embed compiled artifacts, so a
-  Wasmtime CVE means rebuilding and redeploying every image that holds one. The driver also
-  compiles hostile modules at build time, so a compiler bug is a build-host bug.
-- **O13. Loan copies cost no steps.** A call that copies up to 4 GiB of loans in and back
-  takes no step for the copy. MEM-30 charges a step per 16 KiB for `crc32c.update` and the UDP
-  batches. Should the copy take one step per 16 KiB?
-- **O14. `OutOfTime` takes the instance.** A `bound steps` that runs out inside a contained call
-  discards the instance, orphaning every handle the task holds for that interface. A wrapper
-  that bounds a single decode loses its open handles too. Should instances be resumable after
-  `OutOfTime`, which fuel allows and a trap does not?
-- **O15. The `Provider` stop.** A trap variant outside FFI-14's table stops the run with
-  `Provider`, a FAIL-15 name whose row speaks of host providers. Either the row grows a clause,
-  or a new stop name, such as `Contained`, is added.
-- **O16. Pass keys and the toolchain.** FFI-14 lets a contained-only test's pass be reused. The
-  steps and refusals of contained code depend on the Wasmtime pin, its configuration and the cost
-  table. Confirm that PROG-4's reuse key holds the toolchain identity, so a pin change never
-  reuses a pass that the old Wasmtime made.
-- **O17. Mixed programs.** A program that reaches native and contained code is refused
-  recording in full (FFI-14). A provider contract for native calls (R5) would lift that.
-  Contained code does not.
+The items left open in the first text are ruled here, after the soundness review
+contained-foreign-review-2903. Where this text differs from the review, it says so.
+
+- **O1. A modified artifact is code execution.** The trust is accepted as written. A contained
+  artifact comes only from the build user's own part cache or is compiled in place. Kiln RE and
+  the code store carry module bytes, never artifacts. The cache key holds the toolchain image
+  identity (FFI-15 Caching). No signature binds an artifact.
+- **O2. Signal handlers.** `signals_based_traps(true)` stays. The runtime installs its handlers
+  before Wasmtime's, and their coexistence on Linux is law FW28, a W1 law, not an open
+  question. Mach exception ports on macOS, and their loss across `fork()`, belong to W2.
+- **O3. Executable memory on macOS arm64.** Closed by the loader (FFI-15): the artifact's code
+  sits in the image's signed `__TEXT`, and no executable memory is mapped or written at run
+  time. W2 confirms it on a Mac.
+- **O4. Spectre and side channels.** In-process containment is enough for v1. The guest has no
+  clock, no threads and no shared memory, so it has no timer to read a cache channel with. The
+  heap mitigations stay on, and FFI-10 says timing channels are not a promise.
+- **O5. Steps across a trap.** The reported value is deterministic but was wrong by an unbounded
+  amount: a loop with no call never wrote the counter. A trapping entry is now charged its
+  stored fuel plus one granule, capped at the bound (FFI-14 Fuel at a trap), and the granule
+  makes the stored value lag by less than one granule plus one straight-line run. Laws FW8 and
+  FW22.
+- **O6. Does a contained interface need a grant?** Yes (FFI-14 Grants).
+- **O7. Address space per instance.** Per-task instances and the 4 GiB reservation stay for
+  W1. The ceiling, about 30,000 live instances and then `HostMemory`, is stated in FFI-13
+  Bytes. A per-unit lease would add CONC-10 events.
+- **O8. Per-task instances cost the shared-handle model.** Accepted. The target libraries
+  hold no state across tasks, and the other design adds to the total-order promise, which is
+  not allowed.
+- **O9. Two Cranelifts.** Both are built, in the driver only (FFI-15 The pin). The backend is
+  not downgraded and Wasmtime stays on the LTS line.
+- **O10. `loan_area` is guest code.** The guest's own business, as FFI-12 says. A run-owned
+  region needs multi-memory, which widens the feature set for no safety gain.
+- **O11. Unbounded calls.** Kept: no slice end without a bound, exactly as for Hirsel code. A
+  caller that runs an untrusted module wraps the call in `bound steps`.
+- **O12. Trusting Wasmtime and Cranelift.** Accepted as the price of in-process containment
+  (FFI-15 The pin).
+- **O13. Loan copies cost no steps.** They now do: one step for each 16 KiB, or part, copied
+  in and again copied back, all taken at the call before anything is copied (FFI-13 Steps,
+  MEM-30).
+- **O14. `OutOfTime` takes the instance.** The discard stays. The stopped call's state is
+  partway through an update, and resuming it after its scope has exited would be a
+  continuation. A wrapper puts its bound outside the handle's lifetime. Law FW24.
+- **O15. The `Provider` stop.** Neither a clause nor a new name. An unlisted trap under a closed
+  feature set is a failed runtime invariant and aborts as one (FFI-14 Traps).
+- **O16. Pass keys and the toolchain.** Already met: the pass key holds the toolchain image. The
+  real defect was that FFI-14 promised reuse for tests that take `Foreign[I]`, which PROG-4
+  never reuses. This text differs from the review here. The review recommended amending PROG-4
+  so that a test whose only parameters are contained `Foreign[I]` could be reused. This lane
+  was directed to keep PROG-4 and the driver (`crates/hirsel-core-driver/src/test_run.rs`
+  lines 342-349) as they are, so FFI-14 and FW17 now say a contained test is run every time.
+  Extending reuse to contained tests stays possible later, as a PROG-4 change.
+- **O17. Mixed programs.** Agreed. Nothing changes here.
+
+The review's fuel mechanism is adopted with one change. The review gave the store the bound's
+fuel plus `2^40`, counted the bound at granule ends, and never used `Trap::OutOfFuel`. A granule
+end counts one granule however much a bulk operation charged, though. Under `bound steps 10⁹`,
+about 65,000 fills of 16 MiB pass the `2^40` margin while the granule ends count only about
+6.7 × 10⁷ steps, so the bound would have run far over before anything stopped it. Here the
+store holds the bound's fuel plus one. Wasmtime's own check before each bulk operation, and at
+every function entry and loop header, then enforces the bound exactly (`Trap::OutOfFuel` is
+`OutOfTime`), and a return reads 0 fuel exactly when the bound was passed. Granule counting
+decides only slice ends.

@@ -762,8 +762,8 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
         if replay.state.tips[0u64].id != 0u32 || int.checked_add(replay.state.tips[0u64].head, 1) != Some(step.version) {
             return Error(disk_fault(file, 0, Gap(step.version)))
         }
-        journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.catalog, step.catalog, mut replay.tiered)?
-        journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.collections, step.rows, mut replay.tiered)?
+        journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.catalog, step.catalog, mut replay.tiered, false)?
+        journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.collections, step.rows, mut replay.tiered, false)?
         replay.state.tips[0u64].head = step.version
         stepped += 1
     }

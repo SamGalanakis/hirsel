@@ -112,7 +112,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let mut tree = take first
     let mut ids = db.next_node
     let mut tiered = ReplayTieredAccount(total: 0, exact: true)
-    match journal_apply_ops(path, mut ids, mut tree, invalid.data, mut tiered) {
+    match journal_apply_ops(path, mut ids, mut tree, invalid.data, mut tiered, false) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => return Error(Missing("contradictory prior refusal")),
     }
@@ -496,7 +496,7 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
         let first = live_ids
         materialize_ordered_rows(mut live_tree, ops, order, false, first, mut live_ids)?
         canonical_tree(mut live_tree)?
-        journal_apply_ops("batch", mut replay_ids, mut replay, frame.data, mut account)?
+        journal_apply_ops("batch", mut replay_ids, mut replay, frame.data, mut account, false)?
         if !page_result(std.page.canonical(live_tree.root))? || !page_result(std.page.canonical(replay.root))? {
             return Error(Missing("batch canonical form"))
         }
@@ -504,4 +504,68 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
         batch_law_compare(replay, oracle)?
     }
     Ok(())
+}
+
+fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir, Db, u64), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut db = open(tasks, directory, c, r, journal_crash_options())?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(written) = run(mut db, None, copy_env(rows), fn(mut tx, target) -> Result[(), Error] {
+        for i in 0u64 .. 10000 {
+            let key = (i * 733) % 10000
+            put(mut tx, target, key, key * 7 + 5)?
+        }
+        Ok(())
+    })? else {
+        return Error(Missing("10,000-row journal commit"))
+    }
+    durable(mut db, written.ticket)?
+    Ok((directory, take db, written.info.id.version))
+}
+
+@test
+fn read_only_replay_step_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut base = new_page_tree(CollectionMap, 1024)
+    let mut ids = 0u64
+    define_store_collection(mut base, 1, 1, mut ids)?
+    let mut wrong: List[JournalOp] = list.new()
+    list.push(mut wrong, JournalOp(key: logical_key(1, key_word(0))?, value: Some(key_word(1)), prior: 0, trim: None))
+    list.push(mut wrong, JournalOp(key: logical_key(1, key_word(1))?, value: None, prior: 1, trim: None))
+    let mut account = ReplayTieredAccount(total: 0, exact: true)
+    match journal_apply_ops("bulk prior", mut ids, mut base, wrong, mut account, true) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => return Error(Missing("empty collection accepted a prior")),
+    }
+    let (directory, take writer, version_wanted) = replay_budget_write(d, c, r, tasks)?
+    let options = journal_crash_options()
+    // One fifth of the 12,130,750 steps on 11bafba2 with this journal.
+    let tested = bound steps 2426150 {
+        open_read_only(directory, c, journal_crash_options())
+    }
+    let Ok(capture_result) = tested else {
+        return Error(Missing("read-only capture exceeded 2,426,150 steps"))
+    }
+    let captured = capture_result?
+    close(take writer)?
+    let mut eager = open(tasks, directory, c, r, options)?
+    let read_table = read_only_table(captured, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let eager_table = table(mut eager, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let held = read_only_snapshot(captured)
+    let eager_snapshot = snapshot(eager)
+    if version(held) != version_wanted || version(eager_snapshot) != version_wanted {
+        return Error(Missing("journal head"))
+    }
+    let eager_reader = reader(eager, 0)?
+    let held_reader = read_only_reader(captured, 0)?
+    if count_at(held_reader, held, read_table, Unbounded, Unbounded)? != 10000 || count_at(eager_reader, eager_snapshot, eager_table, Unbounded, Unbounded)? != 10000 {
+        return Error(Missing("journal row count"))
+    }
+    for key in 0u64 .. 10000 {
+        let want = Some(key * 7 + 5)
+        if get(held_reader, held, read_table, key)? != want || get(eager_reader, eager_snapshot, eager_table, key)? != want {
+            return Error(Missing("journal row value"))
+        }
+    }
+    close(take eager)
 }

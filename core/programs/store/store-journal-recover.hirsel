@@ -287,7 +287,49 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
     Ok(take replay)
 }
 
-fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount) -> Result[(), Error] {
+fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: JournalCommit) -> Result[(), Error] {
+    // Section 3.4 step 6: the branch must exist, and the version is its head + 1.
+    let total_count = list.len(replay.state.tips)
+    let mut i = total_count
+    for k in 0u64 .. total_count {
+        if replay.state.tips[k].id == commit.branch {
+            i = k
+        }
+    }
+    if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
+        return Error(disk_fault(file, 0, Gap(commit.version)))
+    }
+    replay_within_limits(file, replay.limits, commit)?
+    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered, replay.immutable)?
+    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered, replay.immutable)?
+    if list.len(commit.keyed) != 0 {
+        let before = keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
+        let mut draw = stamp_after(replay.next_node)?
+        materialize_keyed_edits(mut replay.state.tips[i].roots, commit.keyed, 0, mut draw)?
+        if !replay.immutable {
+            canonical_roots(mut replay.state.tips[i].roots)?
+        }
+        replay.next_node = draw - 1
+        replay.record_bytes = replay.record_bytes - before + keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
+        if replay.record_bytes > replay.limits.meta {
+            return Error(disk_fault(file, 0, Malformed))
+        }
+    }
+    replay.state.tips[i].head = commit.version
+    replay.state.tips[i].at = commit.at
+    Ok(())
+}
+
+fn journal_apply(file: String, mut replay: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+    match take event {
+        Commit(take commit) => journal_apply_commit(file, mut replay, commit),
+        Fork(take encoded) => journal_apply_fork(file, mut replay, take encoded),
+    }
+}
+
+// Replay settles the Memory union from the final roots. A put can make
+// the head and a pin share a row version again, lowering that union.
+fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount, immutable: bool) -> Result[(), Error] {
     if list.len(ops) == 0 {
         return Ok(())
     }
@@ -303,7 +345,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             if list.len(op.key) < 4 {
                 return Error(disk_fault(file, 0, Malformed))
             }
-            let (kind, tiered_descriptor) = {
+            let (kind, tiered_descriptor, row_count) = {
                 let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
                     return Error(disk_fault(file, 0, Malformed))
                 }
@@ -340,6 +382,10 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             if kind == TableCollection || kind == IndexCollection {
                 processed = journal_sorted_run(ops, slot)
                 if processed > slot + 1 {
+                    if immutable && row_count == 0 {
+                        journal_collection_bulk(file, mut tree, kind, ops, slot, processed, mut next_stamp)?
+                        continue
+                    }
                     journal_collection_batch(file, mut tree, ops, slot, processed, mut next_stamp)?
                     continue
                 }
@@ -373,7 +419,9 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             },
         }
     }
-    canonical_tree(mut tree)?
+    if !immutable {
+        canonical_tree(mut tree)?
+    }
     ids = next_stamp - 1
     Ok(())
 }
@@ -410,4 +458,23 @@ fn journal_collection_batch(file: String, mut tree: PageTree, ops: List[JournalO
         Error(MalformedPage) => Error(disk_fault(file, 0, Malformed)),
         Error(problem) => Error(page_error(problem)),
     }
+}
+
+fn journal_collection_bulk(file: String, mut tree: PageTree, kind: std.page_descriptor.CollectionKind, ops: List[JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
+    let mut rows: List[std.page.Row] = list.new()
+    for slot in start .. end {
+        let op = view ops[slot]
+        if op.prior != 0 {
+            return Error(disk_fault(file, 0, Malformed))
+        }
+        if let Some(raw) = view op.value {
+            let key = copied(list.slice(op.key, 4, list.len(op.key)))?
+            let charge = entry(op.key, raw)
+            list.push(mut rows, std.page.Row(key: take key, value: copied(raw)?, charge: charge))
+        }
+    }
+    if list.len(rows) == 0 {
+        return Ok(())
+    }
+    bulk_collection(mut tree, list.word_be(ops[start].key, 0), descriptor_kind_byte(kind), rows, 0, mut draw)
 }

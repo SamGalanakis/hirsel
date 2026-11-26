@@ -22,14 +22,14 @@ type ReplayDescriptor {
     seq_bounds: Option[LogBounds]
 }
 
-fn journal_collection_descriptor(raw: Bytes) -> (std.page_descriptor.CollectionKind, Option[ReplayDescriptor]) {
+fn journal_collection_descriptor(raw: Bytes) -> (std.page_descriptor.CollectionKind, Option[ReplayDescriptor], u64) {
     let descriptor = collection_descriptor(raw)
     let counts = if descriptor.residency == ResidentTiered {
         Some(tiered_replay_descriptor(raw, descriptor))
     } else {
         None
     }
-    (descriptor.kind, counts)
+    (descriptor.kind, counts, descriptor.rows)
 }
 
 fn tiered_replay_descriptor(raw: Bytes, fields: CollectionDescriptor) -> ReplayDescriptor {

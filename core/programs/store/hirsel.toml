@@ -664,3 +664,6 @@ limit = 536870912
 
 [tests.runs."store@1/store/describe_suffix_free"]
 limit = 536870912
+
+[tests.runs."store@1/store/read_only_replay_step_budget"]
+limit = 134217728

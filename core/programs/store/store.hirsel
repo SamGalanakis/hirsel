@@ -3849,7 +3849,8 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
             restarted = false
             continue
         }
-        let initial = read_only_checkpoint(d, id, take manifest)?
+        let mut initial = read_only_checkpoint(d, id, take manifest)?
+        initial.immutable = true
         let replay = capture_scan(id, take walk, take initial)?
         over_ceiling(journal_account(replay)?, options.resident_limit)?
         let main = view replay.state.tips[0u64]
@@ -4600,6 +4601,7 @@ fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64,
 
 type JournalReplay {
     state: State,
+    immutable: bool,
     names: Map[String, u32],
     record_bytes: u64,
     next_node: u64,
@@ -4624,49 +4626,9 @@ fn journal_replay(take state: State, next_node: u64, limits: StoreLimits) -> Res
         Ok((take names, total))
     })?
     let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0)
-    Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new(), limits: limits))
+    Ok(JournalReplay(state: take state, immutable: false, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new(), limits: limits))
 }
 
-fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: JournalCommit) -> Result[(), Error] {
-    // Section 3.4 step 6: the branch must exist, and the version is its head + 1.
-    let total_count = list.len(replay.state.tips)
-    let mut i = total_count
-    for k in 0u64 .. total_count {
-        if replay.state.tips[k].id == commit.branch {
-            i = k
-        }
-    }
-    if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
-        return Error(disk_fault(file, 0, Gap(commit.version)))
-    }
-    replay_within_limits(file, replay.limits, commit)?
-    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered)?
-    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered)?
-    if list.len(commit.keyed) != 0 {
-        let before = keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
-        let mut draw = stamp_after(replay.next_node)?
-        materialize_keyed_edits(mut replay.state.tips[i].roots, commit.keyed, 0, mut draw)?
-        canonical_roots(mut replay.state.tips[i].roots)?
-        replay.next_node = draw - 1
-        replay.record_bytes = replay.record_bytes - before + keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
-        if replay.record_bytes > replay.limits.meta {
-            return Error(disk_fault(file, 0, Malformed))
-        }
-    }
-    replay.state.tips[i].head = commit.version
-    replay.state.tips[i].at = commit.at
-    Ok(())
-}
-
-fn journal_apply(file: String, mut replay: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
-    match take event {
-        Commit(take commit) => journal_apply_commit(file, mut replay, commit),
-        Fork(take encoded) => journal_apply_fork(file, mut replay, take encoded),
-    }
-}
-
-// Replay settles the Memory union from the final roots. A put can make
-// the head and a pin share a row version again, lowering that union.
 fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
         capacity(state_account(replay.state))

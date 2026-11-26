@@ -5,6 +5,7 @@
 //
 // Arguments: mode n size, then
 //   x_pingpong: [warm], round trips before the timed n
+//   x_ephemeral, c_ephemeral: warm, lifecycles before the timed n
 //   x_pipe, c_pingpong: nothing more
 //   c_pipe: depth
 //   x_fanin, c_fanin: grain producers (c_fanin: producers grain)
@@ -59,6 +60,45 @@ fn report(err: Stderr, name: String, n: u64, ns: u64, check: u64) waits {
 // charged its content, round8(size).
 fn room(cap: u64, size: u64) -> u64 {
     cap * ((size + 7) / 8 * 8)
+}
+
+fn ephemeral_conn(take buf: Bytes, size: u64) -> Bytes waits {
+    let (to, inbox): (Client[Bytes], Inbox[Bytes]) = result.unwrap(conn.new(1, bytes room(1, size)))
+    result.unwrap(conn.send(to, take buf))
+    result.unwrap(conn.receive(inbox))
+}
+
+fn ephemeral_channel(take buf: Bytes) -> Bytes waits {
+    let (to, inbox): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
+    result.unwrap(channel.send(to, take buf))
+    result.unwrap(channel.receive(inbox))
+}
+
+fn ephemeral(clock: Clock, err: Stderr, mode: String, n: u64, size: u64, warm: u64) waits {
+    if size == 0 {
+        fail("ephemeral: expected a nonempty payload")
+    }
+    let use_conn = mode == "x_ephemeral"
+    let mut buf = payload(size, 7)
+    let mut check = 0u64
+    let mut started = host.mono_ns(clock)
+    for i in 0 .. warm + n {
+        if i == warm {
+            started = host.mono_ns(clock)
+        }
+        let next = if use_conn {
+            ephemeral_conn(take buf, size)
+        } else {
+            ephemeral_channel(take buf)
+        }
+        buf = take next
+        let got: u8 = buf[0]
+        if got != 7u8 || list.len(buf) != size {
+            fail("ephemeral: bad reply")
+        }
+        check = int.wrapping_add(check, int.widen(got))
+    }
+    report(err, mode, n, host.mono_ns(clock) - started, check)
 }
 
 // ---- request/reply: the root asks, a helper unit echoes (first byte + 1).
@@ -419,6 +459,8 @@ pub fn main(tasks: Tasks, clock: Clock, err: Stderr, argv: Args) -> Result[(), E
         x_svc(tasks, clock, err, n)
     } else if mode == "x_ring" {
         x_ring(tasks, clock, err, n, size, arg(argv, 3))
+    } else if mode == "x_ephemeral" || mode == "c_ephemeral" {
+        ephemeral(clock, err, mode, n, size, arg(argv, 3))
     } else {
         return Error(Exit(status: 2))
     }

@@ -1,0 +1,230 @@
+// One broker, with workers making two synchronous requests per turn.
+// Arguments: <conn|conn-reuse|conn-local|conn-units|channel|channel-reuse>
+// <turns> <workers> <payload bytes>. HIRSEL_UNTIED controls pool workers.
+// conn places the broker in a helper unit and all requesting tasks in the
+// root unit. conn-units gives each requester its own unit in the same pool.
+// conn-local keeps the conn transport and runs all tasks in the root unit.
+// Each reuse mode keeps a reply pair per requesting task.
+const TASK_BYTES: u64 = 131072
+
+const BROKER_BYTES: u64 = 2097152
+
+const REQUEST_SLOTS: u64 = 256
+
+const REPLY_ROOM: u64 = 4096
+
+type Reply: cross {
+    id: u64,
+    body: Bytes,
+    action: u64
+}
+
+type CrossRequest: cross {
+    id: u64,
+    body: Bytes,
+    reply: Client[Reply]
+}
+
+type LocalRequest: send {
+    id: u64,
+    body: Bytes,
+    reply: Sender[Reply]
+}
+
+type Broker: cross {
+    hello: Client[Client[CrossRequest]],
+    size: u64
+}
+
+type LocalBroker: send {
+    requests: Receiver[LocalRequest],
+    size: u64
+}
+
+type CrossWorker: cross {
+    server: Client[CrossRequest],
+    turns: u64,
+    size: u64,
+    reuse: bool
+}
+
+type LocalWorker: send {
+    server: Sender[LocalRequest],
+    turns: u64,
+    size: u64,
+    reuse: bool
+}
+
+fn payload(size: u64, id: u64) -> Bytes {
+    let mut body: Bytes = list.with_capacity(size)
+    for i in 0 .. size {
+        list.push(mut body, int.truncate(id + i))
+    }
+    take body
+}
+
+fn response(id: u64, body: Bytes, size: u64) -> Reply {
+    if list.len(body) != (id % 2) * size {
+        fail("broker: bad request")
+    }
+    Reply(id: id, body: payload(size, id), action: id % 2)
+}
+
+fn cross_broker(take seed: Broker) -> u64 waits {
+    let (tx, rx): (Client[CrossRequest], Inbox[CrossRequest]) = result.unwrap(conn.new(REQUEST_SLOTS, bytes REQUEST_SLOTS * REPLY_ROOM))
+    result.unwrap(conn.send(seed.hello, take tx))
+    let mut handled = 0u64
+    while let Ok(take req) = conn.receive(rx) {
+        result.unwrap(conn.send(req.reply, response(req.id, req.body, seed.size)))
+        handled += 1
+    }
+    handled
+}
+
+fn local_broker(take seed: LocalBroker) -> u64 waits {
+    let mut handled = 0u64
+    while let Ok(take req) = channel.receive(seed.requests) {
+        result.unwrap(channel.send(req.reply, response(req.id, req.body, seed.size)))
+        handled += 1
+    }
+    handled
+}
+
+fn check_reply(reply: Reply, id: u64, size: u64) {
+    if reply.id != id || reply.action != id % 2 || list.len(reply.body) != size || reply.body[0] != int.truncate(id) {
+        fail("broker: bad reply")
+    }
+}
+
+fn cross_request(server: Client[CrossRequest], take tx: Client[Reply], rx: Inbox[Reply], id: u64, size: u64) waits {
+    result.unwrap(conn.send(server, CrossRequest(id: id, body: payload((id % 2) * size, id), reply: take tx)))
+    check_reply(result.unwrap(conn.receive(rx)), id, size)
+}
+
+fn local_request(server: Sender[LocalRequest], take tx: Sender[Reply], rx: Receiver[Reply], id: u64, size: u64) waits {
+    result.unwrap(channel.send(server, LocalRequest(id: id, body: payload((id % 2) * size, id), reply: take tx)))
+    check_reply(result.unwrap(channel.receive(rx)), id, size)
+}
+
+fn cross_worker(take w: CrossWorker) waits {
+    if w.reuse {
+        let (tx, rx): (Client[Reply], Inbox[Reply]) = result.unwrap(conn.new(1, bytes REPLY_ROOM))
+        for id in 0 .. w.turns * 2 {
+            cross_request(w.server, conn.client(tx), rx, id, w.size)
+        }
+    } else {
+        for id in 0 .. w.turns * 2 {
+            let (tx, rx): (Client[Reply], Inbox[Reply]) = result.unwrap(conn.new(1, bytes REPLY_ROOM))
+            cross_request(w.server, take tx, rx, id, w.size)
+        }
+    }
+}
+
+fn local_worker(take w: LocalWorker) waits {
+    if w.reuse {
+        let (tx, rx): (Sender[Reply], Receiver[Reply]) = channel.new(1)
+        for id in 0 .. w.turns * 2 {
+            local_request(w.server, channel.sender(tx), rx, id, w.size)
+        }
+    } else {
+        for id in 0 .. w.turns * 2 {
+            let (tx, rx): (Sender[Reply], Receiver[Reply]) = channel.new(1)
+            local_request(w.server, take tx, rx, id, w.size)
+        }
+    }
+}
+
+fn turns_for(n: u64, workers: u64, worker: u64) -> u64 {
+    n / workers + if worker < n % workers {
+        1
+    } else {
+        0
+    }
+}
+
+fn join_workers(take workers: List[Task[()]]) waits {
+    let mut jobs = take workers
+    while let Some(take job) = list.pop(mut jobs) {
+        result.unwrap(task.join(take job))
+    }
+}
+
+fn cross_run(tasks: Tasks, mode: String, n: u64, workers: u64, size: u64) -> u64 waits {
+    let (hello, ready): (Client[Client[CrossRequest]], Inbox[Client[CrossRequest]]) = result.unwrap(conn.new(1, bytes 0))
+    let seed = Broker(hello: take hello, size: size)
+    let service = if mode == "conn-local" {
+        task.spawn(tasks, bytes BROKER_BYTES, take seed, cross_broker)
+    } else {
+        result.unwrap(task.spawn_unit(tasks, bytes BROKER_BYTES, take seed, cross_broker))
+    }
+    let server = result.unwrap(conn.receive(ready))
+    let separate = mode == "conn-units"
+    let reuse = mode == "conn-reuse"
+    let mut jobs: List[Task[()]] = list.with_capacity(workers)
+    for worker in 0 .. workers {
+        let w = CrossWorker(server: conn.client(server), turns: turns_for(n, workers, worker), size: size, reuse: reuse)
+        let h = if separate {
+            result.unwrap(task.spawn_unit(tasks, bytes TASK_BYTES, take w, cross_worker))
+        } else {
+            task.spawn(tasks, bytes TASK_BYTES, take w, cross_worker)
+        }
+        list.push(mut jobs, take h)
+    }
+    let _ = take server
+    join_workers(take jobs)
+    result.unwrap(task.join(take service))
+}
+
+fn local_run(tasks: Tasks, reuse: bool, n: u64, workers: u64, size: u64) -> u64 waits {
+    let (server, requests): (Sender[LocalRequest], Receiver[LocalRequest]) = channel.new(REQUEST_SLOTS)
+    let service = task.spawn(tasks, bytes BROKER_BYTES, LocalBroker(requests: take requests, size: size), local_broker)
+    let mut jobs: List[Task[()]] = list.with_capacity(workers)
+    for worker in 0 .. workers {
+        let w = LocalWorker(server: channel.sender(server), turns: turns_for(n, workers, worker), size: size, reuse: reuse)
+        list.push(mut jobs, task.spawn(tasks, bytes TASK_BYTES, take w, local_worker))
+    }
+    let _ = take server
+    join_workers(take jobs)
+    result.unwrap(task.join(take service))
+}
+
+fn arg(argv: Args, i: u64) -> u64 {
+    let Some(v) = args.get(argv, i) else {
+        fail("missing argument")
+    }
+    result.unwrap(int.parse(v))
+}
+
+pub fn main(tasks: Tasks, clock: Clock, err: Stderr, argv: Args) -> Result[(), Exit] waits {
+    let Some(mode) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let n = arg(argv, 1)
+    let workers = arg(argv, 2)
+    let size = arg(argv, 3)
+    if n == 0 || workers == 0 || size == 0 || size > REPLY_ROOM {
+        return Error(Exit(status: 2))
+    }
+    let started = host.mono_ns(clock)
+    let check = if mode == "channel" || mode == "channel-reuse" {
+        local_run(tasks, mode == "channel-reuse", n, workers, size)
+    } else if mode == "conn" || mode == "conn-reuse" || mode == "conn-local" || mode == "conn-units" {
+        cross_run(tasks, mode, n, workers, size)
+    } else {
+        return Error(Exit(status: 2))
+    }
+    let ns = host.mono_ns(clock) - started
+    if check != n * 2 {
+        fail("broker: incomplete run")
+    }
+    let mut line = string.from(mode)
+    string.push(mut line, " n=")
+    string.push_u64(mut line, n)
+    string.push(mut line, " ns=")
+    string.push_u64(mut line, ns)
+    string.push(mut line, " check=")
+    string.push_u64(mut line, check)
+    string.push(mut line, "\n")
+    result.unwrap(stderr.write(err, line))
+    Ok(())
+}

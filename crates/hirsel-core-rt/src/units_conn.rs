@@ -72,7 +72,7 @@ struct Slow {
 
 /// The owner's side, touched only by the owner.
 pub(crate) struct Side {
-    pub(crate) taken: VecDeque<Taken>,
+    pub(crate) taken: TakenQueue,
     /// Items that have come into the owner, and of those, received or cleaned.
     pub(crate) intaken: u64,
     freed: u64,
@@ -114,6 +114,81 @@ enum FlatSlots {
 impl Taken {
     pub(crate) fn value(&self) -> &Value {
         &self.value
+    }
+}
+
+/// The owner can have at most one taken item for a one-slot connection. A
+/// take retains the sender's reservation until receive or cleanup releases it.
+pub(crate) enum TakenQueue {
+    One(Option<Taken>),
+    Many(VecDeque<Taken>),
+}
+
+impl TakenQueue {
+    fn new(cap: u64) -> Self {
+        if cap == 1 {
+            Self::One(None)
+        } else {
+            Self::Many(VecDeque::new())
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::One(slot) => usize::from(slot.is_some()),
+            Self::Many(queue) => queue.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.front().is_none()
+    }
+
+    fn front(&self) -> Option<&Taken> {
+        match self {
+            Self::One(slot) => slot.as_ref(),
+            Self::Many(queue) => queue.front(),
+        }
+    }
+
+    pub(crate) fn back(&self) -> Option<&Taken> {
+        match self {
+            Self::One(slot) => slot.as_ref(),
+            Self::Many(queue) => queue.back(),
+        }
+    }
+
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &Taken> {
+        let (first, rest) = match self {
+            Self::One(slot) => (slot.as_slice(), &[][..]),
+            Self::Many(queue) => queue.as_slices(),
+        };
+        first.iter().chain(rest)
+    }
+
+    pub(super) fn push_back(&mut self, item: Taken) {
+        match self {
+            Self::One(slot) => {
+                debug_assert!(slot.is_none());
+                *slot = Some(item);
+            }
+            Self::Many(queue) => queue.push_back(item),
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<Taken> {
+        match self {
+            Self::One(slot) => slot.take(),
+            Self::Many(queue) => queue.pop_front(),
+        }
+    }
+
+    fn pop_back(&mut self) -> Option<Taken> {
+        match self {
+            Self::One(slot) => slot.take(),
+            Self::Many(queue) => queue.pop_back(),
+        }
     }
 }
 
@@ -512,7 +587,7 @@ impl UnitCtx {
                 retained: 0,
             }),
             side: UnsafeCell::new(Side {
-                taken: VecDeque::new(),
+                taken: TakenQueue::new(cap),
                 intaken: 0,
                 freed: 0,
                 seal_due: 0,

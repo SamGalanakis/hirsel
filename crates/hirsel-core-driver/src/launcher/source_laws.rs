@@ -428,19 +428,28 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         .join("../../core")
         .canonicalize()
         .unwrap();
-    let exe = std::env::current_exe().unwrap();
     let user_cache = root.join("cache");
     let home = user_cache.clone();
-    let options = crate::native::tests::native_options(crate::native::Backend::Cranelift, &root);
-    let crate::native::Link::Driver(cc) = options.link else {
-        unreachable!()
-    };
-    let native = |path: &Path| path.canonicalize().unwrap().to_string_lossy().into_owned();
-    let (runtime, cc) = (native(&options.runtime), native(&cc));
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").unwrap());
+    let kit = PathBuf::from(std::env::var_os("HIRSEL_LINK_KIT").unwrap());
+    let prefix = root.join("toolchain");
+    let target = crate::host::HOST_TARGET.triple();
+    crate::installation::publish(
+        &prefix,
+        false,
+        Some((&runtime, target)),
+        Default::default(),
+        Some(&kit),
+        &mut crate::Meter::new(false),
+    )
+    .unwrap();
+    let exe = prefix.join("hirsel");
     let compiler: super::Compiler = Arc::new(move |args: &[String]| {
         let mut args = args.to_vec();
         if args[0] == "test" {
-            args.extend(["--runtime", &runtime, "--cc", &cc].map(String::from));
+            args.extend(["--target", target].map(String::from));
         }
         if args[0] != "lock" {
             args.extend(["--libraries".into(), core.to_string_lossy().into_owned()]);

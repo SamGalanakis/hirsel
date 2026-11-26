@@ -23,6 +23,10 @@ pub(crate) use install::{
     INSTALLED_LINKER_LIBRARY, installation_linker, installed_executable, loaded_libraries,
 };
 
+#[cfg(test)]
+pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
+    hirsel_core_layout::Target::Aarch64Darwin;
+
 /// Darwin has no cgroups: the launcher runs without a delegated subtree.
 pub(crate) const CGROUPS: bool = false;
 

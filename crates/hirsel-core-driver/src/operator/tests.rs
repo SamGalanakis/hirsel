@@ -131,6 +131,7 @@ fn operator_vectors() {
             "050000001000000031313131313131313131313131313131",
         ),
         (Ask::Lookup("g".into()), "060000000100000067"),
+        (Ask::Backup("g".into()), "090000000100000067"),
         (
             Ask::Decide(
                 d(),
@@ -282,6 +283,11 @@ fn operator_vectors() {
             Answer::Part(10, 0, vec![1, 2]),
             "060000000a000000000000000000000000000000020000000102",
         ),
+        (
+            Answer::Backup(group(), 1, 2, 9, "b".into()),
+            "07000000010000006703000000000000000100000000000000020000000000000009000000000000000100000062",
+        ),
+        (Answer::BackupOffline("/s".into()), "08000000020000002f73"),
     ];
     for (value, expected) in &asks {
         assert_eq!(value.encode(), hex(expected), "{value:?}");

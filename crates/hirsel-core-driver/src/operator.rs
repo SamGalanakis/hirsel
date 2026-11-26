@@ -96,6 +96,8 @@ pub(crate) enum Ask {
     Register(Vec<u8>, Box<Registration>, Input, Vec<String>, Vec<String>),
     /// The operator's verdict on a request that awaits exactly this decision.
     Decide(Vec<u8>, Box<Decision>, Verdict),
+    /// Back up the named group's store through its running serving place.
+    Backup(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -530,6 +532,8 @@ pub(crate) enum Answer {
     Error(Class, String),
     Group(Group),
     Part(u64, u64, Vec<u8>),
+    Backup(Group, u64, u64, u64, String),
+    BackupOffline(String),
 }
 
 impl Wire for Registration {
@@ -631,6 +635,7 @@ impl Wire for Ask {
                 decision.put(w);
                 verdict.put(w);
             }
+            Self::Backup(name) => (w.u32(9), w.bytes(name.as_bytes())).1,
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -657,6 +662,7 @@ impl Wire for Ask {
                 r.strings()?,
             ),
             8 => Self::Decide(r.bytes()?, Box::new(Decision::get(r)?), Verdict::get(r)?),
+            9 => Self::Backup(r.string()?),
             _ => return Err(malformed("operator ask tag")),
         })
     }
@@ -798,6 +804,15 @@ impl Wire for Answer {
                 w.u64(*offset);
                 w.bytes(bytes);
             }
+            Self::Backup(g, hi, lo, head, name) => {
+                w.u32(7);
+                g.put(w);
+                w.u64(*hi);
+                w.u64(*lo);
+                w.u64(*head);
+                w.bytes(name.as_bytes());
+            }
+            Self::BackupOffline(store) => (w.u32(8), w.bytes(store.as_bytes())).1,
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -813,6 +828,8 @@ impl Wire for Answer {
             4 => Self::Error(Class::get(r)?, r.string()?),
             5 => Self::Group(Group::get(r)?),
             6 => Self::Part(r.u64()?, r.u64()?, r.bytes()?),
+            7 => Self::Backup(Group::get(r)?, r.u64()?, r.u64()?, r.u64()?, r.string()?),
+            8 => Self::BackupOffline(r.string()?),
             _ => return Err(malformed("operator answer tag")),
         })
     }

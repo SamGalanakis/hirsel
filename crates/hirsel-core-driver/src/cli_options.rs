@@ -110,7 +110,15 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         HostState,
         ["--state"],
         Some("DIR"),
-        ["host", "register", "deploy", "decide", "replay", "launcher"],
+        [
+            "host",
+            "register",
+            "deploy",
+            "decide",
+            "replay",
+            "launcher",
+            "store backup"
+        ],
         "Private host state directory; the operator socket is STATE/operator.sock."
     ),
     option!(
@@ -222,8 +230,8 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         GroupName,
         ["--group"],
         Some("NAME"),
-        ["register", "deploy"],
-        "The group to register or deploy to."
+        ["register", "deploy", "store backup"],
+        "The group to register, deploy to, or back up."
     ),
     option!(
         Tenant,

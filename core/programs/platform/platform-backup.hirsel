@@ -1,0 +1,134 @@
+// Online store backup through a live serving place (STORE-SPEC §15.4).
+// The operator sends `BackupAsk(name)` on operator.sock; when the group has a Ready
+// serving place and no deploy or backup in flight, the host forwards `HostBackup(attempt)`
+// to that place without stopping it and relays `PlaceBackedUp` back as `BackupAnswer`.
+// When the registered group is cold (no running serving child), the host answers
+// `BackupOfflineAnswer(g.store)` so the CLI backs up the stopped store directly.
+fn empty_vol() -> Vol {
+    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false, cause: None, prep: None, admit: None, backup: None)
+}
+
+// The volatile state of one group, by value: read it, change it, put it back.
+fn vol_read(h: Host, name: String) -> Vol {
+    match map.get(h.vol, name) {
+        Some(v) => clone(v),
+        None => empty_vol()
+    }
+}
+
+fn vol_put(mut h: Host, name: String, take v: Vol) {
+    let _ = map.remove(mut h.vol, name)
+    map.insert(mut h.vol, string.from(name), take v)
+}
+
+type BackupWait {
+    conn: u64,
+    incarnation: u64,
+    gen: u64,
+    attempt: launcher.Attempt,
+}
+
+fn backup_of(h: Host, name: String) -> Option[BackupWait] {
+    match vol_read(h, name).backup {
+        Some(b) => Some(clone(b)),
+        None => None,
+    }
+}
+
+fn set_backup(mut h: Host, name: String, take b: Option[BackupWait]) {
+    let mut v = vol_read(h, name)
+    v.backup = take b
+    vol_put(mut h, name, take v)
+}
+
+fn backup_ask(mut h: Host, conn: u64, name: String, mut out: List[launcher.Request]) waits {
+    let g = match group_row(h, name) {
+        Ok(Some(_)) if registering(h, name) => {
+            refuse(mut h, conn, UnknownGroupClass, "the group is still registering")
+            return
+        },
+        Ok(Some(take row)) => take row,
+        Ok(None) => {
+            refuse(mut h, conn, UnknownGroupClass, "no group has this name")
+            return
+        },
+        Error(_) => {
+            refuse(mut h, conn, StoreClass, "the catalog could not be read")
+            return
+        },
+    }
+    if let Some(_) = g.retiring {
+        refuse(mut h, conn, ConflictClass, "the group is retiring")
+        return
+    }
+    let v = vol_read(h, name)
+    if !is_none(v.backup) || !is_none(v.prep) || !is_none(v.cut) {
+        refuse(mut h, conn, BusyClass, "a deploy or backup is already in progress for this group")
+        return
+    }
+    match v.run {
+        Some(Run(gen: gen, phase: Ready(_), ..)) => {
+            let seq = h.next_backup
+            h.next_backup += 1u64
+            let a = launcher.Attempt(hi: 1u64, lo: seq)
+            set_backup(mut h, name, Some(BackupWait(conn: conn, incarnation: g.incarnation, gen: gen, attempt: a)))
+            list.push(mut out, Command(child_of(name, g.incarnation, gen), HostBackup(attempt_bytes(a))))
+        },
+        Some(_) => refuse(mut h, conn, BusyClass, "the group's serving place is starting"),
+        None => say(mut h, conn, BackupOfflineAnswer(string.from(g.store)), true),
+    }
+}
+
+fn backup_placed(mut h: Host, name: String, incarnation: u64, gen: u64, reply: runner.HostReply) -> bool {
+    let Some(b) = backup_of(h, name) else {
+        return false
+    }
+    if b.incarnation != incarnation || b.gen != gen {
+        return false
+    }
+    match reply {
+        PlaceBackedUp(hi, lo, head, export) => {
+            set_backup(mut h, name, None)
+            if export_name(export) {
+                say(mut h, b.conn, BackupAnswer(group_of(name, incarnation), hi, lo, head, string.from(export)), true)
+            } else {
+                refuse(mut h, b.conn, StoreClass, "backup: an invalid export name")
+            }
+            true
+        },
+        PlaceRefused(why) => {
+            set_backup(mut h, name, None)
+            let class: operator.Class = if why == "Busy" {
+                BusyClass
+            } else {
+                StoreClass
+            }
+            refuse(mut h, b.conn, class, string.from(why))
+            true
+        },
+        _ => false,
+    }
+}
+
+fn backup_ended(mut h: Host, name: String, incarnation: u64, gen: u64) {
+    if let Some(b) = backup_of(h, name) {
+        if b.incarnation == incarnation && b.gen == gen {
+            set_backup(mut h, name, None)
+            refuse(mut h, b.conn, BusyClass, "the serving place ended during backup")
+        }
+    }
+}
+
+fn backup_detach(mut h: Host, conn: u64) {
+    let mut clear: List[String] = list.new()
+    for (name, v) in h.vol {
+        if let Some(b) = v.backup {
+            if b.conn == conn {
+                list.push(mut clear, string.from(name))
+            }
+        }
+    }
+    for name in clear {
+        set_backup(mut h, name, None)
+    }
+}

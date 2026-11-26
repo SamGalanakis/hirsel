@@ -476,6 +476,9 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
         }
         list.push(mut out, Command(clone(c), HostStoreAccepted))
     }
+    if backup_placed(mut h, name, c.group.incarnation, gen, reply) {
+        return
+    }
     let preparing = prep_of(h, name)
     if let Some(take p) = take preparing {
         if p.old == gen {

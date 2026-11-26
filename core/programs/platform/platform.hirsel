@@ -329,7 +329,8 @@ type Vol {
     // only an exit status.
     cause: Option[String],
     prep: Option[Prep],
-    admit: Option[Admitting]
+    admit: Option[Admitting],
+    backup: Option[BackupWait]
 }
 
 // A collection the host runs (launch.md "Collect"): none, or asked for and not yet
@@ -360,6 +361,7 @@ pub opaque type Host {
     // and whether a sync failed, after which nothing leaves.
     unsynced: Option[store.Ticket],
     failed: bool,
+    next_backup: u64,
 }
 
 const READY_RESET_NS: u64 = 300000000000u64
@@ -485,7 +487,7 @@ pub fn open_declared(take opened: store.Db, take t: Tables, first: Config) -> Re
         }
         Ok(())
     })
-    let mut h = Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new(), unsynced: None, failed: false)
+    let mut h = Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new(), unsynced: None, failed: false, next_backup: 1u64)
     decided(mut h, take made)?
     synced(mut h)?
     let mut out: List[launcher.Request] = list.new()
@@ -592,23 +594,6 @@ pub fn wake_row(h: Host, name: String) -> Option[WakeRow] waits {
         Ok(Some(w)) => Some(w),
         _ => None
     }
-}
-
-fn empty_vol() -> Vol {
-    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false, cause: None, prep: None, admit: None)
-}
-
-// The volatile state of one group, by value: read it, change it, put it back.
-fn vol_read(h: Host, name: String) -> Vol {
-    match map.get(h.vol, name) {
-        Some(v) => clone(v),
-        None => empty_vol()
-    }
-}
-
-fn vol_put(mut h: Host, name: String, take v: Vol) {
-    let _ = map.remove(mut h.vol, name)
-    map.insert(mut h.vol, string.from(name), take v)
 }
 
 fn run_gen(h: Host, name: String) -> Option[u64] {
@@ -1047,6 +1032,7 @@ fn ended(mut h: Host, c: launcher.Child, e: launcher.End, now: Now, mut out: Lis
         return
     }
     let name = string.from(c.group.name)
+    backup_ended(mut h, name, c.group.incarnation, gen)
     // OLD's end ends its export and any kept import: a Preparing deploy fails with it.
     let preparing = prep_of(h, name)
     if let Some(take p) = take preparing {
@@ -1885,7 +1871,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
         return Error(Busy(0u64))
     }
     let v = vol_read(h, name)
-    if !is_none(v.cut) || !is_none(v.prep) {
+    if !is_none(v.cut) || !is_none(v.prep) || !is_none(v.backup) {
         return Error(Busy(old))
     }
     let made = {
@@ -2465,6 +2451,8 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
         },
         RegisterAsk(_, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         RegisterAsk(d, spec, input, foreign, exec) => register(mut h, conn, ask, d, spec, input, foreign, exec, now, mut out),
+        BackupAsk(_) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        BackupAsk(name) => backup_ask(mut h, conn, name, mut out),
     }
     notify(mut h)
     drain_later(mut h, mut out)
@@ -2510,6 +2498,7 @@ fn confirm(mut h: Host, conn: u64, d: Bytes, a: launcher.Attempt, hash: Bytes, m
 // still missing loses its admission: the launcher releases the attempt, and an identical
 // Begin repeats it under a fresh one. A complete input goes on without its observer.
 pub fn detach(mut h: Host, conn: u64) -> List[launcher.Request] waits {
+    backup_detach(mut h, conn)
     let mut out: List[launcher.Request] = list.new()
     let mut mine: List[Bytes] = list.new()
     for (d, c) in h.owners {

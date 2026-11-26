@@ -95,7 +95,7 @@ pub fn begin_parts(input: BeginInput) -> (Input, bool) {
 pub type Verdict: codec + send = Approve(runner.fate.Fates) | Refuse
 
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,
-// 5 ResolvePin, 6 LookupGroup, 7 Register, 8 Decide (operator.sock only).
+// 5 ResolvePin, 6 LookupGroup, 7 Register, 8 Decide, 9 Backup (operator.sock only).
 pub type Ask: codec + send =
 // Begin(D, group, input, foreign, exec, held): deploy `input` to the group's current
 // incarnation, approving exactly these sorted Foreign and Exec lines, with `held` the fate of
@@ -123,6 +123,9 @@ BeginAsk(Bytes, launcher.Group, BeginInput, List[String], List[String], runner.f
 // approved set; when the decision shows a held group or an unmatched path its fates replace
 // D's, and otherwise they are `fate.none()`. A refusal fails D Denied.
     | DecideAsk(Bytes, Decision, Verdict)
+// Backup(group): back up the named group's store through its running serving place, or
+// return its store path when the group is cold (STORE-SPEC §15.4).
+    | BackupAsk(String)
 
 // What a pin lookup finds: the assembly a recording ran, or Gone for an absent, expired
 // or removed pin. A store error is an error, never Gone.
@@ -234,7 +237,8 @@ pub fn shows_held(d: Decision) -> bool {
 // the operator's Decide on exactly that decision.
 pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report) | AwaitDecision(Decision)
 
-// One host reply. Tags: 0 State, 1 Need, 2 Display, 3 Pin, 4 Error, 5 GroupInfo, 6 Part.
+// One host reply. Tags: 0 State, 1 Need, 2 Display, 3 Pin, 4 Error, 5 GroupInfo, 6 Part,
+// 7 Backup, 8 BackupOffline.
 pub type Answer: codec + send =
 // State(D, group, input, phase): a committed snapshot.
 StateAnswer(Bytes, launcher.Group, Input, Phase)
@@ -244,6 +248,12 @@ StateAnswer(Bytes, launcher.Group, Input, Phase)
     | DisplayAnswer(Bytes, launcher.Attempt, Bytes, String) | PinAnswer(Resolved) | ErrorAnswer(Class, String) | GroupAnswer(launcher.Group)
 // Part(total, offset, bytes): one in-order chunk of an encoded reply larger than a frame.
     | PartAnswer(u64, u64, Bytes)
+// Backup(group, store_hi, store_lo, head, export_name): a live place copied its backup image
+// into its scratch directory under `export_name` and released its lease.
+    | BackupAnswer(launcher.Group, u64, u64, u64, String)
+// BackupOffline(store_path): the registered group has no running serving place; the CLI backs
+// up `store_path` offline.
+    | BackupOfflineAnswer(String)
 
 pub fn terminal(p: Phase) -> bool {
     match p {

@@ -1,0 +1,98 @@
+// Platform host laws for online store backup through a running serving place
+// (STORE-SPEC §15.4).
+fn backup_commands(r: Rig) -> u64 {
+    let mut n = 0u64
+    for q in r.asked {
+        if let Command(_, HostBackup(_)) = q {
+            n += 1u64
+        }
+    }
+    n
+}
+
+fn stop_commands(r: Rig, name: String) -> u64 {
+    let mut n = 0u64
+    for q in r.asked {
+        match q {
+            Stop(c) => if c.group.name == name {
+                n += 1u64
+            },
+            Kill(c) => if c.group.name == name {
+                n += 1u64
+            },
+            _ => (),
+        }
+    }
+    n
+}
+
+@test
+fn host_online_backup_routes_through_serving_place(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 2u64)
+    // Register a group with a store path; while cold, BackupAsk answers BackupOfflineAnswer.
+    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: Trusted, listen: "127.0.0.1:0", front: None, store: "/var/hirsel/g", memory: None, assembly: image(), activation: 1u64, args: list.new(), record: None)
+    let reqs = must(add_group(mut r.h, spec), "add_group")
+    pump(mut r, take reqs)
+    r.conns += 1u64
+    let cold_conn = r.conns
+    send(mut r, cold_conn, BackupAsk("g"))
+    let cold_got = got_on(r, cold_conn)
+    expect(list.len(cold_got) == 1u64, "cold backup should get one answer")
+    match cold_got[0u64] {
+        BackupOfflineAnswer(path) => expect(path == "/var/hirsel/g", "cold backup should return registered store path"),
+        _ => fail("cold backup did not return BackupOfflineAnswer"),
+    }
+    // Wake the group and bring its serving place to Ready.
+    op_wake(mut r, "g")
+    let live = last(r, "g")
+    let ready = runner.PlaceReady(version: 1u64, store_hi: 11u64, store_lo: 22u64, release: image(), retain_from: 1u64, ready_ns: SECOND_NS, read: list.new())
+    old_says(mut r, live, PlaceOpened(ready))
+    // Send BackupAsk while Ready: host forwards HostBackup without stopping the child.
+    r.conns += 1u64
+    let online_conn = r.conns
+    send(mut r, online_conn, BackupAsk("g"))
+    expect(backup_commands(r) == 1u64, "host did not forward HostBackup to serving child")
+    expect(stop_commands(r, "g") == 0u64, "host stopped or killed the serving place for backup")
+    // A second concurrent BackupAsk while the first is in flight is refused BusyClass.
+    r.conns += 1u64
+    let busy_conn = r.conns
+    send(mut r, busy_conn, BackupAsk("g"))
+    expect(errored(r, busy_conn, BusyClass), "concurrent backup was not refused Busy")
+    expect(backup_commands(r) == 1u64, "concurrent backup forwarded a second HostBackup")
+    // Place replies PlaceBackedUp -> host answers BackupAnswer on online_conn.
+    old_says(mut r, live, PlaceBackedUp(11u64, 22u64, 42u64, "backup-abc123"))
+    let online_got = got_on(r, online_conn)
+    expect(list.len(online_got) == 1u64, "online backup should get one answer")
+    match online_got[0u64] {
+        BackupAnswer(grp, hi, lo, head, name) => {
+            expect(grp.name == "g" && hi == 11u64 && lo == 22u64 && head == 42u64 && name == "backup-abc123", "BackupAnswer fields disagreed with PlaceBackedUp")
+        },
+        _ => fail("online backup did not return BackupAnswer"),
+    }
+    expect(stop_commands(r, "g") == 0u64, "serving place was stopped after online backup")
+    // Operator hangup mid-backup clears the slot so a subsequent backup can run.
+    r.conns += 1u64
+    let dropped_conn = r.conns
+    send(mut r, dropped_conn, BackupAsk("g"))
+    expect(backup_commands(r) == 2u64, "second backup did not forward HostBackup")
+    hang_up(mut r, dropped_conn)
+    r.conns += 1u64
+    let after_drop = r.conns
+    send(mut r, after_drop, BackupAsk("g"))
+    expect(backup_commands(r) == 3u64, "backup after operator disconnect was wedged")
+    old_says(mut r, live, PlaceBackedUp(11u64, 22u64, 43u64, "backup-def456"))
+    let final_got = got_on(r, after_drop)
+    expect(list.len(final_got) == 1u64, "backup after hangup should get one answer")
+    match final_got[0u64] {
+        BackupAnswer(_, _, _, head, name) => expect(head == 43u64 && name == "backup-def456", "wrong BackupAnswer after hangup"),
+        _ => fail("backup after hangup did not return BackupAnswer"),
+    }
+    // Unknown group refuses UnknownGroupClass.
+    r.conns += 1u64
+    let missing_conn = r.conns
+    send(mut r, missing_conn, BackupAsk("nope"))
+    expect(errored(r, missing_conn, UnknownGroupClass), "unknown group backup was not refused UnknownGroup")
+    let Rig(h: take h, ..) = take r
+    let _ = close(take h)
+    Ok(())
+}

@@ -130,6 +130,7 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_request(Command(serving(), HostAbort(option.unwrap(std.hex.decode(b"aa")), Some(option.unwrap(std.hex.decode(b"bb"))))), "07000000010000006703000000000000000100000007000000000000000300000001000000aa0100000001000000bb") && ok
     ok = vector_request(Command(serving(), HostImport(option.unwrap(std.hex.decode(b"aa")), option.unwrap(std.hex.decode(b"bb")), option.unwrap(std.hex.decode(b"cc")), option.unwrap(std.hex.decode(b"dd")))), "07000000010000006703000000000000000100000007000000000000000100000001000000aa01000000bb01000000cc01000000dd") && ok
     ok = vector_request(Command(serving(), HostStoreAccepted), "070000000100000067030000000000000001000000070000000000000004000000") && ok
+    ok = vector_request(Command(serving(), HostBackup(option.unwrap(std.hex.decode(b"aa")))), "07000000010000006703000000000000000100000007000000000000000500000001000000aa") && ok
     ok = vector_request(Retire(group()), "0800000001000000670300000000000000") && ok
     ok = vector_request(Release(attempt()), "0900000008070605040302011817161514131211") && ok
     ok = vector_request(CollectBegin, "0a000000") && ok
@@ -149,6 +150,7 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_event(Placed(serving(), PlaceImported(option.unwrap(std.hex.decode(b"aa")), runner.ImportedMigration(digest: option.unwrap(std.hex.decode(b"bb")), changes: one(option.unwrap(std.hex.decode(b"74")))))), "09000000010000006703000000000000000100000007000000000000000400000001000000aa01000000bb010000000100000074") && ok
     ok = vector_event(Placed(serving(), PlaceStoreMismatch(1u64, 2u64, 3u64, 4u64)), "09000000010000006703000000000000000100000007000000000000000a0000000100000000000000020000000000000003000000000000000400000000000000") && ok
     ok = vector_event(Placed(Child(group: group(), role: Install(1u64)), PlaceInstallRefused(InstallWrongVersion(2u64))), "09000000010000006703000000000000000000000001000000000000000b000000080000000200000000000000") && ok
+    ok = vector_event(Placed(serving(), PlaceBackedUp(1u64, 2u64, 9u64, "b")), "09000000010000006703000000000000000100000007000000000000000c0000000100000000000000020000000000000009000000000000000100000062") && ok
     ok = vector_event(Answered(preparing(), option.unwrap(std.hex.decode(b"0102"))), "0c000000010000006703000000000000000400000008070605040302011817161514131211020000000102") && ok
     ok = vector_event(Fenced, "0a000000") && ok
     ok = vector_event(Collected(3u64), "0b0000000300000000000000") && ok

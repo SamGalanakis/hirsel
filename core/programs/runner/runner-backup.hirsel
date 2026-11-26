@@ -1,0 +1,63 @@
+// Online backup through a live serving Place (STORE-SPEC §15.4).
+// Takes the online lease via `store.begin_backup`, runs `store.export_copy` on the
+// host-control reader task while the head keeps serving, and unconditionally releases
+// the lease before replying `PlaceBackedUp(store_hi, store_lo, head, name)`.
+pub fn store_mismatch(expected: (u64, u64), actual: (u64, u64)) -> String {
+    let mut msg = string.from("store identity mismatch (expected ")
+    string.push_uint(mut msg, expected.0, 16u32, 16u64, '0')
+    string.push_uint(mut msg, expected.1, 16u32, 16u64, '0')
+    string.push(mut msg, ", found ")
+    string.push_uint(mut msg, actual.0, 16u32, 16u64, '0')
+    string.push_uint(mut msg, actual.1, 16u32, 16u64, '0')
+    string.push(mut msg, ")")
+    take msg
+}
+
+pub type BackupCommand: send {
+    target: Dir,
+    attempt: Bytes,
+    answer: Sender[Result[store.ExportCopy, store.DeployError]],
+}
+
+fn release_backup_lease(head: Sender[HeadInput], attempt: Bytes) waits {
+    let _ = host_head(head, scoped fn(take done: Sender[()]) -> Result[HeadInput, Capacity] {
+        Ok(ReleaseExport(clone(attempt), take done))
+    })
+}
+
+fn host_backup(head: Sender[HeadInput], scratch: Dir, attempt: Bytes) -> HostReply waits {
+    if list.len(attempt) != 16u64 {
+        return PlaceRefused("ExportMismatch")
+    }
+    let mut name = string.with_capacity(64u64)
+    string.push(mut name, "backup-")
+    let target = match host.mkdtemp(scratch, mut name) {
+        Ok(d) => d,
+        Error(_) => return PlaceRefused("Scratch"),
+    }
+    let response = host_head(head, scoped fn(take answer: Sender[Result[store.ExportCopy, store.DeployError]]) -> Result[HeadInput, Capacity] {
+        let payload = BackupCommand(target: target, attempt: clone(attempt), answer: take answer)
+        let command = box.new(take payload)
+        Ok(BackupCommand(take command))
+    })
+    let Some(take started) = take response else {
+        let _ = std.dir.remove_all(scratch, name)
+        return PlaceRefused("Busy")
+    }
+    let job = match take started {
+        Ok(take job_copy) => take job_copy,
+        Error(why) => {
+            let _ = std.dir.remove_all(scratch, name)
+            return PlaceRefused(host_refusal(why))
+        },
+    }
+    let copied = store.export_copy(take job)
+    release_backup_lease(head, attempt)
+    match take copied {
+        Ok(take done) => PlaceBackedUp(done.stamp.store_hi, done.stamp.store_lo, done.stamp.head, take name),
+        Error(why) => {
+            let _ = std.dir.remove_all(scratch, name)
+            PlaceRefused(host_refusal(why))
+        },
+    }
+}

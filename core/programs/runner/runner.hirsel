@@ -1599,7 +1599,7 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
     }
 }
 
-pub type HeadInput: send = RunRequest(Req) | RetireCaller(Caller) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome]) | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64) | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle | SyncWake | ParkWake | RecoveryTick | StoreUnhealthy | InboxEnded | ReadStreamTime(Sender[StreamTime])
+pub type HeadInput: send = RunRequest(Req) | RetireCaller(Caller) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome]) | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64) | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle | SyncWake | ParkWake | RecoveryTick | StoreUnhealthy | InboxEnded | ReadStreamTime(Sender[StreamTime]) | BackupCommand(Box[BackupCommand]) | ReleaseExport(Bytes, Sender[()])
 
 pub type StreamTime: send {
     now_ms: u64,
@@ -1630,7 +1630,7 @@ pub type KeepImport: send {
     answer: Sender[Result[Inline[u8, 32], store.DeployError]]
 }
 
-pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes, Bytes) | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes, Option[Bytes]) | HostStoreAccepted
+pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes, Bytes) | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes, Option[Bytes]) | HostStoreAccepted | HostBackup(Bytes)
 
 pub type PlaceReady: codec + send {
     version: u64,
@@ -1642,20 +1642,9 @@ pub type PlaceReady: codec + send {
     read: Bytes
 }
 
-pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes, ImportedMigration) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal)
+pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes, ImportedMigration) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal) | PlaceBackedUp(u64, u64, u64, String)
 
 pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64) | InstallPredecessor(Bytes) | InstallUnsettled
-
-pub fn store_mismatch(expected: (u64, u64), actual: (u64, u64)) -> String {
-    let mut msg = string.from("store identity mismatch (expected ")
-    string.push_uint(mut msg, expected.0, 16u32, 16u64, '0')
-    string.push_uint(mut msg, expected.1, 16u32, 16u64, '0')
-    string.push(mut msg, ", found ")
-    string.push_uint(mut msg, actual.0, 16u32, 16u64, '0')
-    string.push_uint(mut msg, actual.1, 16u32, 16u64, '0')
-    string.push(mut msg, ")")
-    take msg
-}
 
 type HostControl {
     answer: Sender[HostReply],
@@ -1842,6 +1831,7 @@ fn host_reader(take reader: HostReader) -> () waits {
                 let _ = channel.send(life, StoreAccepted)
                 continue
             },
+            HostBackup(attempt) => host_backup(head, scratch, attempt),
             HostAbort(attempt, retry_of) => {
                 let releasing = match exported {
                     Some(held) => abort_matches(held.stamp.attempt, attempt, retry_of),

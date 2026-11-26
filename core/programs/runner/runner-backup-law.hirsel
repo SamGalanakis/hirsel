@@ -1,0 +1,104 @@
+// Runner online backup law (STORE-SPEC §15.4): `host_backup` takes the online lease
+// through a live `serve_head`, copies while the Place keeps serving, releases the lease,
+// and produces a backup directory that `store.restore` recovers to the exact stamped head.
+fn backup_law_attempt(byte: u8) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(16u64)
+    list.fill(mut raw, 16u64, byte)
+    take raw
+}
+
+fn backup_law_drive(take args: (Sender[HeadInput], Dir)) -> (HostReply, HostReply, HostReply) waits {
+    let (take to_head, scratch_dir) = take args
+    let r1 = host_backup(to_head, scratch_dir, backup_law_attempt(1u8))
+    let r2 = host_backup(to_head, scratch_dir, backup_law_attempt(2u8))
+    let r3 = host_backup(to_head, scratch_dir, b"short")
+    let _ = channel.send(to_head, HeadClose)
+    let _ = channel.send(to_head, HeadFinish)
+    (take r1, take r2, take r3)
+}
+
+@test
+fn runner_online_backup_copies_without_stopping_head(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut store_name = string.with_capacity(64u64)
+    string.push(mut store_name, "runner-backup-store-")
+    let store_dir = result.unwrap(host.mkdtemp(d, mut store_name))
+    let mut scratch_name = string.with_capacity(64u64)
+    string.push(mut scratch_name, "runner-backup-scratch-")
+    let scratch_dir = result.unwrap(host.mkdtemp(d, mut scratch_name))
+    let mut restored1_name = string.with_capacity(64u64)
+    string.push(mut restored1_name, "runner-backup-restored1-")
+    let restored1_dir = result.unwrap(host.mkdtemp(d, mut restored1_name))
+    let mut restored2_name = string.with_capacity(64u64)
+    string.push(mut restored2_name, "runner-backup-restored2-")
+    let restored2_dir = result.unwrap(host.mkdtemp(d, mut restored2_name))
+    let opts = result.unwrap(store.sized(Directory, 268435456u64))
+    let mut db = store.open(tasks, store_dir, c, r, opts)?
+    let mut schema = store.declare(db, Migrate)?
+    let decl = store.declare_table(mut schema, "items", std.codec.key_u64(), std.codec.of_u64())?
+    let items = store.finish(mut schema, take decl)?
+    let schema_ticket = store.seal(mut db, take schema)?
+    store.durable(mut db, schema_ticket)?
+    let seed = store.run(mut db, None, items, fn(mut tx, t) -> Result[(), store.Error] {
+        store.put(mut tx, t, 1u64, 10u64)?
+        store.put(mut tx, t, 2u64, 20u64)
+    })?
+    let Committed(seed_done) = seed else {
+        fail("seed write did not commit")
+    }
+    store.durable(mut db, seed_done.ticket)?
+    let snap1 = store.snapshot(db)
+    let expected_head1 = store.version(snap1)
+    let expected_id = store.snapshot_identity(snap1)
+    let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let Mailbox(to: take out, from: _published, ..) = result.unwrap(mailbox(8u64))
+    let entries: Registry[(), ()] = registry()
+    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let driving = task.spawn(tasks, bytes 16777216u64, (take to_head, scratch_dir), backup_law_drive)
+    let mut no_triggers: Option[triggers.Tables] = None
+    let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?
+    let (take reply1, take reply2, take bad_reply) = result.unwrap(task.join(take driving))
+    let Head(db: take kept, ..) = take hd
+    store.close(take kept)?
+    let PlaceBackedUp(hi1, lo1, head1, name1) = take reply1 else {
+        fail("first online backup through live head failed")
+    }
+    if hi1 != expected_id.hi || lo1 != expected_id.lo || head1 != expected_head1 {
+        fail("first online backup stamped wrong store identity or head")
+    }
+    let PlaceBackedUp(hi2, lo2, head2, name2) = take reply2 else {
+        fail("second online backup failed: lease was not released or head stopped")
+    }
+    if hi2 != expected_id.hi || lo2 != expected_id.lo || head2 != expected_head1 || name1 == name2 {
+        fail("second online backup produced wrong metadata or collided directory")
+    }
+    let PlaceRefused(_) = take bad_reply else {
+        fail("short backup attempt was not refused")
+    }
+    // Restore both backups and verify each opens with the exact store identity, head, and rows.
+    let dir1 = result.unwrap(std.dir.narrow(scratch_dir, name1))
+    let stamp1 = result.unwrap(store.restore(dir1, restored1_dir, c, opts))
+    if stamp1.head != expected_head1 || stamp1.store_hi != expected_id.hi || stamp1.store_lo != expected_id.lo {
+        fail("first restored stamp disagreed with live head")
+    }
+    let dir2 = result.unwrap(std.dir.narrow(scratch_dir, name2))
+    let stamp2 = result.unwrap(store.restore(dir2, restored2_dir, c, opts))
+    if stamp2.head != expected_head1 {
+        fail("second restored stamp disagreed with live head")
+    }
+    let mut reopened = store.open(tasks, restored1_dir, c, r, opts)?
+    let mut r_schema = store.declare(reopened, Open)?
+    let r_decl = store.declare_table(mut r_schema, "items", std.codec.key_u64(), std.codec.of_u64())?
+    let r_items = store.finish(mut r_schema, take r_decl)?
+    let _ = store.seal(mut reopened, take r_schema)?
+    let snap = store.snapshot(reopened)
+    let rdr = result.unwrap(store.reader(reopened, 0u64))
+    if store.version(snap) != expected_head1 || store.get(rdr, snap, r_items, 1u64)? != Some(10u64) || store.get(rdr, snap, r_items, 2u64)? != Some(20u64) || store.get(rdr, snap, r_items, 3u64)? != None {
+        fail("restored online backup rows disagreed with live source")
+    }
+    store.close(take reopened)?
+    let _ = std.dir.remove_all(d, store_name)
+    let _ = std.dir.remove_all(d, scratch_name)
+    let _ = std.dir.remove_all(d, restored1_name)
+    let _ = std.dir.remove_all(d, restored2_name)
+    Ok(())
+}

@@ -144,6 +144,24 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                 let _ = channel.try_send(host_result, take exported)
                 continue
             },
+            Some(BackupCommand(take command)) => {
+                let BackupCommand(target: target, attempt: take attempt, answer: take host_result) = box.unbox(take command)
+                let backed: Result[store.ExportCopy, store.DeployError] = if closed || !none(pause) {
+                    Error(AttemptBusy)
+                } else {
+                    store.begin_backup(mut head.db, target, take attempt)
+                }
+                if let Error(Store(Poisoned(e))) = backed {
+                    return Error(Poisoned(e))
+                }
+                let _ = channel.try_send(host_result, take backed)
+                continue
+            },
+            Some(ReleaseExport(attempt, done)) => {
+                store.release_export(mut head.db, attempt)
+                let _ = channel.try_send(done, ())
+                continue
+            },
             Some(ReserveImport(take command)) => {
                 let ReserveImport(checked: take checked, image: take image, fates: take fates, answer: take host_result) = box.unbox(take command)
                 let reserved = match settlement_check(head.db, checked, image, fates) {

@@ -46,7 +46,7 @@ commands! {
     "store stats", "store stats DIR", "Print each collection's rows and bytes and the store's journal and pack files, beside a live writer.";
     "store verify", "store verify DIR [--release EXE]", "Scrub a copy of the store; with --release, also walk every index the release binds against its table.";
     "store repair", "store repair DIR --release EXE", "With the store stopped, demote each index the release proves wrong and rebuild every unbuilt index.";
-    "store backup", "store backup DIR TARGET", "Copy the store at DIR, at a durable head, into the empty or new directory TARGET.";
+    "store backup", "store backup DIR TARGET | store backup --state DIR --group NAME TARGET", "Copy a stopped store at DIR, or a served group's store through its running host, into the empty or new directory TARGET.";
     "store restore", "store restore BACKUP DIR", "Restore a backup into the empty or new directory DIR, keeping the store's identity.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [--max-memory BYTES] [--stop]", "Serve this toolchain's build, run and test requests from every directory.";

@@ -327,7 +327,7 @@ class Repository(unittest.TestCase):
     """The checked-in NOTICES.md against this tree's lock files and the built installation."""
 
     def test_notices_cover_every_locked_crate_and_shipped_file(self):
-        sources = json.loads((ROOT / 'tools/toolchain-dist/notice-sources.json').read_text())
+        sources, _ = notices.notice_sources()
         written, text = notices.recorded(ROOT)
         derived = notices.inventory(ROOT, sources, written)
         crates = lambda inventory: {(row['crate'], row['checksum']) for row in inventory['crates']}

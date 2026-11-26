@@ -22,11 +22,10 @@ import shutil
 import subprocess
 import tempfile
 
-from engine_llvm import CC, ROOT, arena, m1_programs, shadow, shadow_engine, shadow_environment
+from engine_llvm import CC, ENGINE, ROOT, arena, m1_programs, shadow, shadow_engine, shadow_environment
 
-ENGINE = 'libLLVM.so.23.1'
 TARGET = 'x86_64-unknown-linux-gnu'
-LLVM = ROOT / 'tools/buck2/toolchains/llvm-files/engine' / ENGINE
+LLVM = ROOT / 'tools/buck2/toolchains/llvm-files' / ENGINE
 OBJCOPY = CC.with_name('llvm-objcopy')
 # BOLT keeps the disassembled functions and their instrumentation tables in
 # memory. Profile 16 MiB of the engine's text at a time under the 8 GiB cap.

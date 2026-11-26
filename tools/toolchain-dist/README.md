@@ -1,5 +1,10 @@
 # Distribution compiler experiments
 
+`product.toml` declares the published hosts and their LLVM library paths, the
+supported runtime targets and feature variants, and the installed helper
+entries and socket names. To render the standalone installer from this checkout,
+run `python3 tools/toolchain-dist/product.py installer > install.sh`.
+
 The `//tools/buck2:dist` platform and Cargo `--profile dist` use fat LTO and
 one codegen unit. The CLI already uses mimalloc v3 (`mimalloc 0.1.52`,
 `libmimalloc-sys 0.1.49`, Buck2's v3/static.c fixup). Developer dev/release,
@@ -147,7 +152,7 @@ archives (fat-LTO staticlibs of `hirsel-core-rt` against the trace-only std, wit
 bundle ships `hirsel`, `bin/ld.lld` and `lib/libLLVM.23.1.dylib` from the pinned
 tree, the runtimes and link kit for `aarch64-apple-darwin` only, the core and std
 images, the toolchain packages and the helpers in `libexec/hirsel/`. The last two
-come from `toolchain-programs.sh`, which Buck2's bundle runs too. Every Mach-O is
+come from `toolchain_programs.py`, which Buck2's bundle runs too. Every Mach-O is
 built with `MACOSX_DEPLOYMENT_TARGET` from `link_kit.DARWIN_FLOOR` and carries an
 ad-hoc signature. The bundle includes `notices/` and `hirsel-build.json` with the
 compiler, core package and notice digests. Its crate notices cover the compiler

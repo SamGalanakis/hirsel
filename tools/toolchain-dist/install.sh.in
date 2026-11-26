@@ -118,9 +118,12 @@ if [ "$platform" = Darwin-x86_64 ] &&
     platform=Darwin-arm64
 fi
 case "$platform" in
-    Linux-x86_64)
-        target=x86_64-unknown-linux-gnu
-        llvm_library=libLLVM.so.23.1
+@HOSTS@
+    Linux-*) fail 'Hirsel requires an x86_64 host' ;;
+    *) fail 'Hirsel requires x86_64 Linux or an Apple silicon Mac' ;;
+esac
+case "${platform%%-*}" in
+    Linux)
         libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=
         case "$libc" in
             'glibc '*) glibc=${libc#glibc } ;;
@@ -129,15 +132,11 @@ case "$platform" in
         version_at_least "$glibc" "$glibc_floor" ||
             fail "Hirsel requires glibc $glibc_floor or later (found $glibc)"
         ;;
-    Darwin-arm64)
-        target=aarch64-apple-darwin
-        llvm_library=libLLVM.23.1.dylib
+    Darwin)
         macos=$(sw_vers -productVersion 2>/dev/null) || fail 'cannot determine macOS version'
         version_at_least "$macos" "$macos_floor" ||
             fail "Hirsel requires macOS $macos_floor or later (found $macos)"
         ;;
-    Linux-*) fail 'Hirsel requires an x86_64 host' ;;
-    *) fail 'Hirsel requires x86_64 Linux or an Apple silicon Mac' ;;
 esac
 
 fetch() {
@@ -251,7 +250,7 @@ printf '%s\n' "$version" |
     LC_ALL=C awk 'NR != 1 || $0 !~ /^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$/ { exit 1 }' ||
     fail 'expected a release version such as v1.2.3'
 base=${HIRSEL_DOWNLOAD_BASE:-"$release_url/download/v$version"}
-archive=hirsel-v$version-$target.tar.gz
+archive=@ARCHIVE@
 fetch "${base%/}/SHA256SUMS" "$download_dir/SHA256SUMS" || fail 'cannot download SHA256SUMS'
 expected=$(LC_ALL=C awk -v asset="$archive" '
     $2 == asset || $2 == "*" asset {
@@ -264,8 +263,8 @@ expected=$(LC_ALL=C awk -v asset="$archive" '
         print digest
     }
 ' "$download_dir/SHA256SUMS") || {
-    if [ "$?" -eq 3 ] && [ "$target" = aarch64-apple-darwin ]; then
-        fail "v$version has no aarch64-apple-darwin build in this release"
+    if [ "$?" -eq 3 ] && [ "${platform%%-*}" = Darwin ]; then
+        fail "v$version has no $target build in this release"
     fi
     fail "SHA256SUMS must list exactly one valid digest for $archive"
 }
@@ -286,7 +285,7 @@ actual=$(hash_command "$download_dir/$archive") || fail 'cannot compute SHA-256'
 has_bundle() {
     [ -x "$1/hirsel" ] && [ -x "$1/bin/ld.lld" ] &&
         [ -d "$1/link/kit" ] &&
-        [ -f "$1/lib/$llvm_library" ] && [ -f "$1/hirsel-core-toolchain.json" ]
+        [ -f "$1/$llvm_library" ] && [ -f "$1/hirsel-core-toolchain.json" ]
 }
 
 if [ -L "$prefix/versions" ] || [ -L "$prefix/bin" ]; then

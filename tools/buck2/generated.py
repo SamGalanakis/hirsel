@@ -29,7 +29,8 @@ import sys
 PARTS = {
     'third-party': ('third-party/BUCK', 'third-party/Cargo.toml', 'third-party/Cargo.lock', 'third-party/lib.rs', 'third-party/units.json'),
     'first-party': ('BUCK', 'tools/buck2/exec_sizes.bzl', 'tools/buck2/test_sizes.bzl',
-                    'tools/buck2/workspace-metadata.json', 'tools/native-toolchain/pins.bzl'),
+                    'tools/buck2/workspace-metadata.json', 'tools/native-toolchain/pins.bzl',
+                    'tools/toolchain-dist/product.bzl'),
 }
 BUILD_INPUTS = tuple(sorted(path for outputs in PARTS.values() for path in outputs))
 STAMP = '.buck2/sync-stamp.json'

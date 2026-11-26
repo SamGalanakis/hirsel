@@ -1152,8 +1152,8 @@ as `Arrived(group)`, and the host wakes the group (RUNNER-SPEC §14.3). Clients 
 address from the host's routing table. The host never proxies bytes.
 
 **Running the host.** The launcher starts the host as its first group. Its granted `Dir`
-is its store, and its one Unix endpoint is the launcher's control socket; its arguments are
-that socket's root label and path, `max_places` and `idle_ms`. The host opens its catalog,
+is its store. Its arguments are the Unix root label, the path to the launcher's control
+socket, `max_places`, `idle_ms`, and the operator socket's path. The host opens its catalog,
 connects, sends `Hello`, and then runs one loop over one queue. A reader task posts each
 launcher event into the queue in stream order, beside the host's two alarms: one absolute
 wall-time alarm on the earliest due time (RUNNER-SPEC §14.3) or source upload deadline,
@@ -1178,7 +1178,7 @@ the platform host. Passing either option or `--idle-ms` without `--operator-list
 N and M are positive decimals. `--idle-ms` defaults to 30000. The launcher binds both sockets
 mode 0600, creates `S/catalog`, and
 starts the installed executable with working directory S and the program-visible argv
-`platform_main ctl launcher.sock N M`. The host's grants are compiled into that executable:
+`platform_main ctl launcher.sock N M operator.sock`. The host's grants are compiled into that executable:
 its `Dir` is `/proc/self/cwd/catalog` on Linux and `./catalog` on macOS. Its Net root `ctl`
 is `/proc/self/cwd` on Linux and `.` on macOS, with `UnixConnect ctl launcher.sock` and
 `UnixListen ctl operator.sock`, beside Clock, Random and Tasks. The offline pin reader

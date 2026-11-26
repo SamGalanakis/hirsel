@@ -22,26 +22,24 @@ def distribution_license_paths(reads):
     return sorted({path for runtime in sources["host_runtimes"].values() for path in runtime["texts"]})
 
 
-def distribution_gates(out, call, Raw, reads):
+def distribution_gates(out, call, Raw, reads, slots):
     out.append("\n" + call("hirsel_toolchain_packages", name="toolchain-packages", hirsel="//:hirsel-core-driver-bin-hirsel",
                             packages=toolchain_packages(reads, reads.root)))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
-                            runtimes="//:hirsel-core-rt-archives",
-                            recording_runtimes="//:hirsel-core-rt-record-archives",
-                            prof_runtimes="//:hirsel-core-rt-prof-archives",
-                            prof_recording_runtimes="//:hirsel-core-rt-prof-record-archives",
-                            observed_runtimes="//:hirsel-core-rt-observed-archives",
-                            observed_recording_runtimes="//:hirsel-core-rt-observed-record-archives",
+                            runtimes={flag: "//:hirsel-core-rt" + slot["buck_suffix"] + "-archives"
+                                      for flag, slot in slots.items()},
                             toolchain_packages="//:toolchain-packages",
                             platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="check-installer", script="//tools/toolchain-dist:check-installer",
-                            data=["//tools/toolchain-dist:install.sh", ".github/workflows/release.yml"]))
+                            data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py",
+                                  "//tools/toolchain-dist:product.toml"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present(reads)],
                             data=["tools/tests/distribution_notices.py", "//tools/toolchain-dist:build",
                                   "//tools/toolchain-dist:darwin_host.py", "//tools/buck2/native-toolchain:link-kit-source",
-                                  "//tools/toolchain-dist:install.sh", "NOTICES.md", "Cargo.lock",
+                                  "//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.toml",
+                                  "NOTICES.md", "Cargo.lock",
                                   *("tools/tests/fixtures/glibc-gate/" + name for name in ("strong-glibc239", "weak-dynsym", "weak-symtab")),
                                   "//third-party:NOTICES.md", "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
                                   *("//tools/toolchain-dist:" + path.removeprefix("tools/toolchain-dist/") for path in distribution_license_paths(reads))],

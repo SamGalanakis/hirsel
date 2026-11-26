@@ -1,3 +1,4 @@
+load("@root//tools/toolchain-dist:product.bzl", "HOSTS")
 load("@prelude//toolchains:cxx.bzl", "cxx_tools_info_toolchain")
 load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
@@ -5,6 +6,10 @@ load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_to
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
 load(":llvm.bzl", "llvm_cxx_tools", "llvm_tree", "source_files")
 load(":rust.bzl", "rust_toolchain", "trace_std")
+
+LLVM_HOST = HOSTS["x86_64-unknown-linux-gnu"]
+LLVM_LIBRARY = LLVM_HOST["llvm_library"]
+LLVM_SONAME = LLVM_LIBRARY.split("/")[-1]
 
 # Both trees are ignored local state that tools/buck2/bootstrap.py installs.
 RUST_FILES = {p.removeprefix("rust-files/"): p for p in glob(["rust-files/**"], exclude = [
@@ -100,13 +105,13 @@ llvm_tree(
 # source paths.
 source_files(
     name = "llvm-libraries",
-    srcs = glob(["llvm-files/engine/*.so*", "llvm-files/lib/*.so*"]),
+    srcs = glob(["llvm-files/{}/*.so*".format(LLVM_HOST["llvm_engine_dir"]), "llvm-files/{}/*.so*".format(LLVM_LIBRARY.rsplit("/", 1)[0])]),
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "engine-llvm",
-    src = "llvm-files/engine/libLLVM.so.23.1",
+    src = "llvm-files/{}/{}".format(LLVM_HOST["llvm_engine_dir"], LLVM_SONAME),
     visibility = ["PUBLIC"],
 )
 
@@ -158,8 +163,8 @@ cxx_library(
 # libLLVM and its C headers, for llvm-sys (tools/buck2/fixups/llvm-sys).
 prebuilt_cxx_library(
     name = "libllvm",
-    shared_lib = "llvm-files/lib/libLLVM.so.23.1",
-    soname = "libLLVM.so.23.1",
+    shared_lib = "llvm-files/" + LLVM_LIBRARY,
+    soname = LLVM_SONAME,
     header_dirs = ["llvm-files/include", "llvm-files/sysroot"],
     preferred_linkage = "shared",
     visibility = ["PUBLIC"],

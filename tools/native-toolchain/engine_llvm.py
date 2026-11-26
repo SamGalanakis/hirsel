@@ -41,10 +41,11 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT / 'core/tools'), str(ROOT / 'core/langarena/layout')]
+sys.path[:0] = [str(ROOT / 'core/tools'), str(ROOT / 'core/langarena/layout'), str(ROOT / 'tools/toolchain-dist')]
 import langarena  # noqa: E402
 import m1  # noqa: E402
 import m2b  # noqa: E402
+import product  # noqa: E402
 import service_build  # noqa: E402
 
 # core/langarena/run.py by path: service_build imports the layout directory's own run module.
@@ -52,6 +53,7 @@ _spec = importlib.util.spec_from_file_location('arena_run', ROOT / 'core/langare
 arena_run = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(arena_run)
 
+ENGINE = product.llvm_engine(product.load()['hosts']['x86_64-unknown-linux-gnu'])
 PIN = ROOT / 'tools/buck2/toolchains/llvm-files/lib'
 CC = ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang'
 
@@ -124,8 +126,8 @@ def held_out(out):
 def shadow(library, compiler, out):
     """A compiler copy whose build-tree engine is LIBRARY's libLLVM.so.23.1."""
     tree = out / 'tools/buck2/toolchains/llvm-files'
-    (tree / 'engine').mkdir(parents=True)
-    shutil.copyfile(library / 'libLLVM.so.23.1', tree / 'engine/libLLVM.so.23.1')
+    (tree / ENGINE.parent).mkdir(parents=True)
+    shutil.copyfile(library / ENGINE.name, tree / ENGINE)
     (tree / 'lib').symlink_to(PIN.resolve())
     copy = out / 'a/b/c/d/e/f/hirsel'
     copy.parent.mkdir(parents=True)
@@ -134,7 +136,7 @@ def shadow(library, compiler, out):
 
 
 def shadow_engine(compiler):
-    return compiler.parents[6] / 'tools/buck2/toolchains/llvm-files/engine/libLLVM.so.23.1'
+    return compiler.parents[6] / 'tools/buck2/toolchains/llvm-files' / ENGINE
 
 
 def shadow_environment(compiler):

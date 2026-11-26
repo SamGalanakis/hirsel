@@ -9,12 +9,13 @@ use std::{
 
 /// The pins the compiler is built with: the workspace and its lockfile, the
 /// Rust release, the LLVM tree and the link kit.
-pub const PINS: [&str; 5] = [
+pub const PINS: [&str; 6] = [
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
     "tools/native-toolchain/llvm-23.lock",
     "tools/native-toolchain/native.lock.json",
+    "tools/toolchain-dist/product.toml",
 ];
 /// Directories a closure crate's build script compiles that sit outside the
 /// closure: hirsel-llvm-lazy's component is built from hirsel-llvm's bridge.

@@ -40,12 +40,19 @@ import bootstrap_store
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools/toolchain-dist"))
+import product  # noqa: E402
+
 LOCK = ROOT / "tools/native-toolchain/llvm-23.lock"
 CXX_LOCK = pathlib.Path(__file__).with_name("llvm-cxx-headers-lock.json")
 DEFAULT_OUTPUT = pathlib.Path(__file__).with_name("toolchains") / "llvm-files"
 RECEIPT = ".hirsel-llvm.json"
 LAYOUT = 10
 DARWIN = sys.platform == "darwin"
+HOSTS = product.load()["hosts"]
+LINUX = HOSTS["x86_64-unknown-linux-gnu"]
+MACOS = HOSTS["aarch64-apple-darwin"]
+LINUX_ENGINE = product.llvm_engine(LINUX).as_posix()
 LINUX_REQUIRED = (
     "sysroot/usr/include/c++/13/vector",
     "sysroot/usr/include/features.h",
@@ -53,10 +60,10 @@ LINUX_REQUIRED = (
     "bin/clang-23",
     "bin/llvm-config",
     "bin/ld.lld",
-    "lib/libLLVM.so.23.1",
+    LINUX["llvm_library"],
     "lib/libLLVM-23.so",
     "lib/libclang-cpp.so.23.1",
-    "engine/libLLVM.so.23.1",
+    LINUX_ENGINE,
     "lib/clang/23/include/stddef.h",
     "include/llvm-c/Core.h",
     "bin/hirsel-clang",
@@ -68,7 +75,7 @@ DARWIN_REQUIRED = (
     "bin/llvm-config",
     "bin/llvm-ar",
     "bin/llvm-objdump",
-    "lib/libLLVM.23.1.dylib",
+    MACOS["llvm_library"],
     "lib/libLLVM-23.dylib",
     "include/llvm-c/Core.h",
 )
@@ -192,7 +199,7 @@ def build_linux(stage: pathlib.Path) -> None:
         linker.chmod(0o755)
         place(linker, stage / "bin/ld.lld")
         place(linker, stage / "bin/lld")
-        place(fetch_built("engine_llvm", scratch), stage / "engine/libLLVM.so.23.1")
+        place(fetch_built("engine_llvm", scratch), stage / LINUX_ENGINE)
         headers = scratch / "cxx-headers"
         for pin in json.loads(CXX_LOCK.read_text())["debs"]:
             unpack_headers(fetch(pin, scratch), headers)

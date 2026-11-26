@@ -12,6 +12,7 @@ names the crate from any package directory, locally or on the pool, and so do
 CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
+load("@root//tools/toolchain-dist:product.bzl", "HOSTS", "RUNTIME_TARGETS")
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
 load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
@@ -80,9 +81,11 @@ def _cargo_env(package_name, crate, version):
 # also when a test runs it with a cleared environment. DT_RPATH, unlike
 # DT_RUNPATH, also serves libLLVM's own dependencies. Tests on the pool carry
 # both directories (toolchains//:llvm-libraries).
+LLVM_HOST = HOSTS["x86_64-unknown-linux-gnu"]
+LLVM_TREE = "$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files"
 LLVM_RPATH = [
     "-Clink-arg=-Wl,--disable-new-dtags",
-    "-Clink-arg=-Wl,-rpath,$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files/engine:$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files/lib",
+    "-Clink-arg=-Wl,-rpath,{}/{}:{}/{}".format(LLVM_TREE, LLVM_HOST["llvm_engine_dir"], LLVM_TREE, LLVM_HOST["llvm_library"].rsplit("/", 1)[0]),
 ]
 
 # Line tables were 61% of a whole-compiler executable (128 of 210 MB), which
@@ -543,12 +546,12 @@ def _program_sources(ctx, name, sources):
 def _toolchain_packages_impl(ctx):
     # The toolchain packages other than std, each
     # packed alone from core/programs/<name> as <name>-<major>.hpkg with its dependencies bound
-    # from the toolchain, by tools/toolchain-dist/toolchain-programs.sh.
+    # from the toolchain, by tools/toolchain-dist/toolchain_programs.py.
     sources = _program_sources(ctx, "package-sources", ctx.attrs.sources)
     packages = ctx.actions.declare_output("packages", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     ctx.actions.run(
-        cmd_args("/bin/sh", ctx.attrs._programs, "pack", ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
+        cmd_args("python3", ctx.attrs._programs, "pack", ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
                  sources, packages.as_output(), scratch.as_output(), ctx.attrs.packages,
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
@@ -563,7 +566,7 @@ _toolchain_packages = rule(
         "packages": attrs.list(attrs.string()),
         "sources": attrs.list(attrs.source()),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
-        "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain-programs.sh"),
+        "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain_programs.py"),
     },
 )
 
@@ -647,17 +650,11 @@ def _toolchain_bundle_impl(ctx):
     # loads, ld.lld and the link kit, the runtime archive for each target, and the core and std
     # images, recorded in hirsel-core-toolchain.json, and the toolchain package archives. The compiler copies
     # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
-    # builds the helpers in libexec/hirsel (tools/toolchain-dist/toolchain-programs.sh helpers).
+    # builds the helpers in libexec/hirsel (tools/toolchain-dist/toolchain_programs.py helpers).
     # The launcher starts the platform host in the state directory, and the driver starts the
     # pin reader there.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
-    runtimes = ctx.attrs.runtimes[DefaultInfo].sub_targets
-    recording_runtimes = ctx.attrs.recording_runtimes[DefaultInfo].sub_targets
-    prof_runtimes = ctx.attrs.prof_runtimes[DefaultInfo].sub_targets
-    prof_recording_runtimes = ctx.attrs.prof_recording_runtimes[DefaultInfo].sub_targets
-    observed_runtimes = ctx.attrs.observed_runtimes[DefaultInfo].sub_targets
-    observed_recording_runtimes = ctx.attrs.observed_recording_runtimes[DefaultInfo].sub_targets
     compiler = ctx.attrs.hirsel[DefaultInfo].default_outputs[0]
     if DIST_BOLT == "use":
         # Keep the build-tree RPATH valid. Install products with the final
@@ -665,40 +662,29 @@ def _toolchain_bundle_impl(ctx):
         compiler = ctx.actions.copy_file("hirsel", ctx.attrs._bolt_compiler, executable_bit_override = True)
     script = ctx.actions.write("install.sh", [
         "set -eu",
-        'mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
-        '"$1" core-product --install "$root" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --observed-runtime "${15}" --observed-recording-runtime "${17}" --target x86_64-unknown-linux-gnu --link-kit "$8" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --observed-runtime "${16}" --observed-recording-runtime "${18}" --target aarch64-unknown-linux-gnu --link-kit "$8" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "${19}" --recording-runtime "${20}" --prof-runtime "${21}" --prof-recording-runtime "${22}" --observed-runtime "${23}" --observed-recording-runtime "${24}" --target aarch64-apple-darwin --link-kit "$8" > /dev/null',
-        'cp "${13}"/*.hpkg "$root/core-packages/"',
-        '/bin/sh "${25}" helpers "$root" "${14}/platform" "$TMPDIR"',
+        'compiler="$1"; mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
+        'kit="$4"; packages="$5"; platform="$6"; programs="$7"; product="$8"; shift 8',
+        '"$compiler" core-product --install "$root" > /dev/null',
+    ] + [
+        '"$compiler" std-product --install "$root" --link-kit "$kit" --target "$1" ' +
+        " ".join(['--{} "${{{}}}"'.format(slot, i + 2) for i, slot in enumerate(ctx.attrs.runtimes)]) +
+        ' > /dev/null; shift {}'.format(len(ctx.attrs.runtimes) + 1)
+        for _ in RUNTIME_TARGETS
+    ] + [
+        'cp "$packages"/*.hpkg "$root/core-packages/"',
+        'python3 "$programs" helpers "$product" "$root" "$platform/platform" "$TMPDIR"',
     ])
     platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
+    runtimes = []
+    for triple in RUNTIME_TARGETS:
+        runtimes.append(triple)
+        for dep in ctx.attrs.runtimes.values():
+            runtimes.append(dep[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
     ctx.actions.run(
-        cmd_args("/bin/sh", script, compiler,
-                 bundle.as_output(), scratch.as_output(),
-                 runtimes["x86_64"][DefaultInfo].default_outputs[0],
-                 runtimes["aarch64"][DefaultInfo].default_outputs[0],
-                 recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
-                 recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
+        cmd_args("/bin/sh", script, compiler, bundle.as_output(), scratch.as_output(),
                  ctx.attrs._link_kit[DefaultInfo].default_outputs[0],
-                 prof_runtimes["x86_64"][DefaultInfo].default_outputs[0],
-                 prof_runtimes["aarch64"][DefaultInfo].default_outputs[0],
-                 prof_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
-                 prof_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  ctx.attrs.toolchain_packages[DefaultInfo].default_outputs[0],
-                 platform_sources,
-                 observed_runtimes["x86_64"][DefaultInfo].default_outputs[0],
-                 observed_runtimes["aarch64"][DefaultInfo].default_outputs[0],
-                 observed_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
-                 observed_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
-                 runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
-                 recording_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
-                 prof_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
-                 prof_recording_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
-                 observed_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
-                 observed_recording_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
-                 ctx.attrs._programs,
+                 platform_sources, ctx.attrs._programs, ctx.attrs._product, runtimes,
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
@@ -712,17 +698,13 @@ hirsel_toolchain_bundle = rule(
     impl = _toolchain_bundle_impl,
     attrs = {
         "hirsel": attrs.dep(),
-        "runtimes": attrs.dep(),
-        "recording_runtimes": attrs.dep(),
-        "prof_runtimes": attrs.dep(),
-        "prof_recording_runtimes": attrs.dep(),
-        "observed_runtimes": attrs.dep(),
-        "observed_recording_runtimes": attrs.dep(),
+        "runtimes": attrs.dict(attrs.string(), attrs.dep(), sorted = False),
         "toolchain_packages": attrs.dep(),
         "platform_sources": attrs.list(attrs.source()),
+        "_product": attrs.source(default = "root//tools/toolchain-dist:product.toml"),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
-        "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain-programs.sh"),
+        "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain_programs.py"),
     } | ({"_bolt_compiler": attrs.source(default = "root//tools/toolchain-dist:hirsel-bolt")} if DIST_BOLT == "use" else {}),
 )
 
@@ -801,12 +783,6 @@ def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest
         package_name = package_name,
         version = version,
     )
-
-RUNTIME_TARGETS = {
-    "aarch64-apple-darwin": "root//tools/buck2:runtime-darwin",
-    "aarch64-unknown-linux-gnu": "root//tools/buck2:runtime-aarch64",
-    "x86_64-unknown-linux-gnu": "root//tools/buck2:runtime-x86_64",
-}
 
 def runtime_target_key(triple):
     """A runtime target's name in aliases and sub-targets.

@@ -1,9 +1,12 @@
 #!/bin/bash
-# Prepare the exact asset list in a directory holding the two build artifacts.
+# Prepare the exact asset list in a directory holding the published host artifacts.
 set -euo pipefail
 shopt -s dotglob nullglob
 tag=$1
-checksummed=("hirsel-$tag-x86_64-unknown-linux-gnu.tar.gz" "hirsel-$tag-aarch64-apple-darwin.tar.gz" install.sh)
+tools=$(cd "$(dirname "$0")" && pwd)
+manifest=$(python3 "$tools/product.py" assets "$tag")
+mapfile -t checksummed <<< "$manifest"
+checksummed+=(install.sh)
 expected=("${checksummed[@]}" "$2.profdata" "$3.fdata")
 present=(*)
 if (( ${#present[@]} != ${#expected[@]} )); then

@@ -23,7 +23,8 @@ pub(crate) fn installation_linker(_kit: &Path, library: &Path) -> io::Result<Pat
     Ok(prefix.join("bin/ld.lld"))
 }
 
-pub(crate) const INSTALLED_LINKER_LIBRARY: Option<&str> = Some("lib/libLLVM.23.1.dylib");
+pub(crate) const INSTALLED_LINKER_LIBRARY: Option<&str> =
+    Some(crate::product::bundled::DARWIN_LLVM_LIBRARY);
 
 /// The directories a dylib's LC_RPATH commands name, with `@loader_path` as
 /// `origin`, and the names of the dylibs it loads through `@rpath`. System dylibs,

@@ -28,6 +28,8 @@ jobs:
       fdata: ${{ steps.profiles.outputs.fdata }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Choose the version
         id: version
         shell: bash
@@ -70,66 +72,75 @@ jobs:
           path: ${{ runner.temp }}/profiles
           compression-level: 0
 
-  build:
-    needs: train
+  hosts:
     runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.hosts.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check installer release resolution
+      - id: hosts
+        run: echo "matrix=$(python3 tools/toolchain-dist/product.py matrix)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [train, hosts]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.hosts.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ needs.train.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        name: Check installer release resolution
         run: dash tools/toolchain-dist/check-installer
-      - uses: actions/download-artifact@v4
+      - if: runner.os == 'Linux'
+        uses: actions/download-artifact@v4
         with:
           name: profiles
           path: ${{ runner.temp }}/profiles
-      - name: Free runner disk
+      - if: runner.os == 'Linux'
+        name: Free runner disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - name: Build from the pinned profiles and qualify the Linux distribution
+      - if: runner.os == 'Linux'
+        name: Build from the pinned profiles and qualify the Linux distribution
         env:
-          RELEASE_TAG: ${{ needs.train.outputs.version }}
           PROFDATA: ${{ needs.train.outputs.profdata }}
           FDATA: ${{ needs.train.outputs.fdata }}
         run: |
           mkdir "$RUNNER_TEMP/release"
           # shellcheck disable=SC2086 # DOCKER_OPTIONS is a word list.
           docker run $DOCKER_OPTIONS -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/profiles:/profiles:ro" \
-            -v "$RUNNER_TEMP/release:/release" -e PROFDATA -e FDATA "$IMAGE" bash -euxo pipefail -c '
+            -v "$RUNNER_TEMP/release:/release" -e PROFDATA -e FDATA -e TARGET "$IMAGE" bash -euxo pipefail -c '
             . tools/toolchain-dist/linux-release-setup.sh
             tools/toolchain-dist/build --pgo "/profiles/$PROFDATA.profdata" --bolt "/profiles/$FDATA.fdata" \
               --local --num-threads 4 --output /tmp/hirsel-prefix
             tools/toolchain-dist/build --check-fresh /tmp/hirsel-prefix
-            asset=hirsel-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz
+            asset=$(python3 tools/toolchain-dist/product.py asset "$RELEASE_TAG" "$TARGET")
             tar -czf "/release/$asset" -C /tmp/hirsel-prefix .
-            cp tools/toolchain-dist/install.sh "/profiles/$PROFDATA.profdata" "/profiles/$FDATA.fdata" /release/
+            python3 tools/toolchain-dist/product.py installer > /release/install.sh
+            cp "/profiles/$PROFDATA.profdata" "/profiles/$FDATA.fdata" /release/
           '
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-release
-          path: ${{ runner.temp }}/release
-          compression-level: 0
-
-  build-darwin:
-    needs: train
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Build and package the macOS distribution
+      - if: runner.os == 'macOS'
+        name: Build and package the macOS distribution
         env:
-          RELEASE_TAG: ${{ needs.train.outputs.version }}
           CARGO_BUILD_JOBS: 4
         run: |
           rustup toolchain install --no-self-update
-          tools/toolchain-dist/build --host aarch64-apple-darwin \
+          tools/toolchain-dist/build --host "$TARGET" \
             --output "$RUNNER_TEMP/prefix" --work "$RUNNER_TEMP/build-work"
-          mkdir "$RUNNER_TEMP/darwin-release"
-          tar -czf "$RUNNER_TEMP/darwin-release/hirsel-$RELEASE_TAG-aarch64-apple-darwin.tar.gz" \
-            -C "$RUNNER_TEMP/prefix" .
+          mkdir "$RUNNER_TEMP/release"
+          asset=$(python3 tools/toolchain-dist/product.py asset "$RELEASE_TAG" "$TARGET")
+          tar -czf "$RUNNER_TEMP/release/$asset" -C "$RUNNER_TEMP/prefix" .
       - uses: actions/upload-artifact@v4
         with:
-          name: darwin-release
-          path: ${{ runner.temp }}/darwin-release
+          name: release-${{ matrix.target }}
+          path: ${{ runner.temp }}/release
           compression-level: 0
           if-no-files-found: error
 
@@ -142,84 +153,13 @@ jobs:
         image: [ubuntu:22.04, debian:bookworm-slim, ubuntu:24.04, debian:trixie-slim]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-release
-          path: ${{ runner.temp }}/release
-      - name: Exercise the installer on ${{ matrix.image }}
-        env:
-          HIRSEL_VERSION: ${{ needs.train.outputs.version }}
-          IMAGE: ${{ matrix.image }}
-        run: |
-          mkdir "$RUNNER_TEMP/witness"
-          (cd "$RUNNER_TEMP/release" && sha256sum "hirsel-$HIRSEL_VERSION-x86_64-unknown-linux-gnu.tar.gz" > SHA256SUMS)
-          export SMOKE_MODE=native
-          if [[ "$IMAGE" == ubuntu:22.04 ]]; then
-            SMOKE_MODE=cross
-          fi
-          # The executable writer uses unshare(CLONE_FILES), which Docker's default filter denies.
-          docker run --rm --cpus 4 --memory 8g --memory-swap 8g \
-            --security-opt seccomp=unconfined \
-            -v "$RUNNER_TEMP/release:/release:ro" -v "$RUNNER_TEMP/witness:/witness" \
-            -v "$GITHUB_WORKSPACE/tools/toolchain-dist/smoke:/smoke:ro" \
-            -e HIRSEL_VERSION -e SMOKE_MODE -e HIRSEL_DOWNLOAD_BASE=file:///release "$IMAGE" dash -ec '
-              packages=$(dpkg-query -W -f="\${Package} \${Status}\n")
-              if printf "%s\n" "$packages" | grep -E "^(libc6-dev|libgcc-[0-9]+-dev) install ok installed$"; then
-                exit 1
-              fi
-              dash /release/install.sh --no-modify-path
-              cd /tmp
-              dash /smoke "$HIRSEL_VERSION" "$SMOKE_MODE" /witness
-            '
-      - uses: actions/upload-artifact@v4
-        if: matrix.image == 'ubuntu:22.04'
-        with:
-          name: linux-cross-witness
-          path: |
-            ${{ runner.temp }}/witness/app-mac
-            ${{ runner.temp }}/witness/libhirsel_core_rt.a
-          if-no-files-found: error
-
-  smoke-darwin:
-    needs: [train, build-darwin, smoke]
-    runs-on: macos-26
-    steps:
+      - id: host
+        run: echo "target=$(python3 tools/toolchain-dist/product.py target)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: darwin-release
-          path: ${{ runner.temp }}/release
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-cross-witness
-          path: ${{ runner.temp }}/witness
-      - name: Exercise the installer and compare the native and cross-built programs
-        env:
-          HIRSEL_VERSION: ${{ needs.train.outputs.version }}
-        run: |
-          cp tools/toolchain-dist/install.sh "$RUNNER_TEMP/release/"
-          (cd "$RUNNER_TEMP/release" && shasum -a 256 "hirsel-$HIRSEL_VERSION-aarch64-apple-darwin.tar.gz" install.sh > SHA256SUMS)
-          chmod +x "$RUNNER_TEMP/witness/app-mac"
-          tools/toolchain-dist/smoke-darwin "$HIRSEL_VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/witness"
-
-  publish:
-    needs: [train, build, build-darwin, smoke, smoke-darwin]
-    # A dispatch publishes only when asked, and never from a branch.
-    if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-release
-          path: ${{ runner.temp }}/release
-      - uses: actions/download-artifact@v4
-        with:
-          name: darwin-release
+          pattern: release-*
+          merge-multiple: true
           path: ${{ runner.temp }}/release
       - name: Publish the tagged release
         env:

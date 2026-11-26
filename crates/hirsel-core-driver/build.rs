@@ -138,6 +138,24 @@ fn main() {
     // compiler's source closure and pins, the library sources it bundles, and
     // the toolchain package bindings it supplies.
     let repository = root.parent().unwrap();
+    let product = manifest(&repository.join("tools/toolchain-dist/product.toml"));
+    for (symbol, socket) in [
+        ("LAUNCHER_SOCKET", "launcher"),
+        ("OPERATOR_SOCKET", "operator"),
+    ] {
+        let name = product["sockets"][socket].as_str().unwrap();
+        writeln!(generated, "pub(crate) const {symbol}: &str = {name:?};").unwrap();
+    }
+    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos") {
+        let library = product["hosts"]["aarch64-apple-darwin"]["llvm_library"]
+            .as_str()
+            .unwrap();
+        writeln!(
+            generated,
+            "pub(crate) const DARWIN_LLVM_LIBRARY: &str = {library:?};"
+        )
+        .unwrap();
+    }
     let (source, watched) =
         compiler_source::digest(repository, "crates/hirsel-core-driver").unwrap();
     for path in watched {

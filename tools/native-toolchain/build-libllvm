@@ -54,6 +54,8 @@ dir="$(cd "$1" && pwd)"
 artifacts="$(realpath "$2")"
 jobs=${JOBS:-4}
 version="$(lock_value llvm_version)"
+library_path="$(python3 "$here/../toolchain-dist/product.py" llvm-path x86_64-unknown-linux-gnu)"
+soname="${library_path##*/}"
 cc="$(command -v "${CC:-clang}")"
 cxx="$(command -v "${CXX:-clang++}")"
 tool_bin="$(dirname "$cc")"
@@ -150,7 +152,7 @@ benchmark_script() {
 }
 
 train() {
-  [[ -f "$dir/instr/lib/libLLVM.so.23.1" ]] || fail "no instrumented library: run the instr stage"
+  [[ -f "$dir/instr/$library_path" ]] || fail "no instrumented library: run the instr stage"
   local benchmark
   benchmark=$(benchmark_script)
   # The arena opens more than Docker's default soft limit of 1024 descriptors.
@@ -195,17 +197,17 @@ bolt-tools() {
 }
 
 bolt() (
-  local input="$dir/opt/lib/libLLVM.so.23.1"
+  local input="$dir/opt/$library_path"
   [[ -f "$input" ]] || fail "no profile-guided library: run the opt stage"
   local output
   output=$(mktemp -d "$dir/.bolt.XXXXXXXX")
   trap 'rm -rf "$output"' EXIT
   PATH="$dir/bolt-install/bin:$PATH" capped \
-    python3 "$here/bolt.py" engine "$input" "$output/libLLVM.so.23.1" --artifacts "$artifacts"
-  local library="$output/libLLVM.so.23.1"
+    python3 "$here/bolt.py" engine "$input" "$output/$soname" --artifacts "$artifacts"
+  local library="$output/$soname"
   "$tool_bin/llvm-strip" --strip-debug "$library"
-  [[ "$(readelf -d "$library" | awk '/\(SONAME\)/ { print $NF }')" == '[libLLVM.so.23.1]' ]] \
-    || fail "the library's soname is not libLLVM.so.23.1"
+  [[ "$(readelf -d "$library" | awk '/\(SONAME\)/ { print $NF }')" == "[$soname]" ]] \
+    || fail "the library's soname is not $soname"
   [[ "$(readelf -n "$library" | awk '/Build ID:/ { print $NF }')" =~ ^[0-9a-f]{40}$ ]] \
     || fail "the library has no SHA-1 build ID"
   local needed
@@ -220,11 +222,11 @@ bolt() (
   # No search path of its own: the loading executable's RPATH finds libz, never the
   # build tree's lib/ or, through an empty entry, the working directory.
   ! readelf -d "$library" | grep -qE '\((RPATH|RUNPATH)\)' || fail "the library carries a search path"
-  mv "$library" "$dir/libLLVM.so.23.1"
+  mv "$library" "$dir/$soname"
 )
 
 guard() (
-  [[ -f "$dir/libLLVM.so.23.1" ]] || fail "no engine library: run the bolt stage"
+  [[ -f "$dir/$soname" ]] || fail "no engine library: run the bolt stage"
   local benchmark reference sha256 size asset package
   benchmark=$(benchmark_script)
   reference=$(mktemp -d "$dir/.guard-deb.XXXXXXXX")
@@ -241,7 +243,7 @@ guard() (
     python3 "$benchmark" guard "$reference/root/usr/lib/x86_64-linux-gnu" "$dir" "$dir/guard" \
     --artifacts "$artifacts" --previous-warm "$(lock_value engine_llvm_guard)" \
     || fail "the engine library fails its guard (see $dir/guard/guard.json)"
-  echo "engine_llvm $(sha256sum "$dir/libLLVM.so.23.1" | cut -d ' ' -f 1) $(stat -c %s "$dir/libLLVM.so.23.1") libLLVM-$version-engine-bolt-manylinux_2_28-x86_64.so"
+  echo "engine_llvm $(sha256sum "$dir/$soname" | cut -d ' ' -f 1) $(stat -c %s "$dir/$soname") libLLVM-$version-engine-bolt-manylinux_2_28-x86_64.so"
 )
 
 plain() {

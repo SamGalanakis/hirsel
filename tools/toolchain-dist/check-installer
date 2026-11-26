@@ -5,6 +5,7 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/bin" "$work/home"
+python3 "$root/tools/toolchain-dist/product.py" installer > "$work/install.sh"
 export HOME="$work/home" PATH="$work/bin:$PATH"
 export HIRSEL_INSTALL_DIR="$work/home/.hirsel" HIRSEL_DOWNLOAD_BASE='' HIRSEL_VERSION=''
 export RELEASES="$work/releases" NEXT_RELEASES="$work/next-releases" EXPECTED_TAG=''
@@ -51,7 +52,7 @@ chmod +x "$work/bin/uname" "$work/bin/getconf" "$work/bin/sw_vers" "$work/bin/sy
 ln -s curl "$work/bin/wget"
 
 run_installer() {
-    dash "$root/tools/toolchain-dist/install.sh" --no-modify-path
+    dash "$work/install.sh" --no-modify-path
 }
 
 check_error() {
@@ -107,38 +108,10 @@ HOST_ARCH=aarch64 check_error 'Hirsel requires an x86_64 host'
 export HIRSEL_VERSION=v1.2.3 HIRSEL_DOWNLOAD_BASE="file://$work"
 linux_asset=hirsel-$HIRSEL_VERSION-x86_64-unknown-linux-gnu.tar.gz
 darwin_asset=hirsel-$HIRSEL_VERSION-aarch64-apple-darwin.tar.gz
-workflow=$root/.github/workflows/release.yml
-assets=$(LC_ALL=C awk -v tag="$HIRSEL_VERSION" '
-    /^[[:space:]]*#/ { next }
-    {
-        for (i = 1; i <= NF; i++) {
-            asset = $i
-            sub(/^[[:alnum:]_]+=/, "", asset)
-            sub(/^.*\//, "", asset)
-            gsub(/^["\047]|["\047]$/, "", asset)
-            if (asset ~ /^[[:alnum:]_.+-]+-(\$\{RELEASE_TAG\}|\$RELEASE_TAG)-[[:alnum:]_.+-]+\.tar\.gz$/) {
-                sub(/\$\{RELEASE_TAG\}|\$RELEASE_TAG/, tag, asset)
-                print asset
-            }
-        }
-    }
-' "$workflow" | LC_ALL=C sort -u)
-case "$assets" in
-    "$linux_asset")
-        # Until R5 publishes Darwin, a Linux-only release is valid.
-        if grep -Eq '^  build-darwin:' "$workflow"; then
-            printf 'release.yml is missing the Darwin asset %s\n' "$darwin_asset" >&2
-            exit 1
-        fi ;;
-    "$darwin_asset
-$linux_asset") ;;
-    *) printf 'unexpected release.yml assets:\n%s\n' "$assets" >&2; exit 1 ;;
-esac
-
 make_bundle() {
-    touch "$work/bundle/lib/$2"
+    touch "$work/bundle/$2"
     tar -czf "$work/$1" -C "$work/bundle" .
-    rm "$work/bundle/lib/$2"
+    rm "$work/bundle/$2"
     (cd "$work" && sha256sum "$1") > "$work/SHA256SUMS"
 }
 
@@ -146,7 +119,9 @@ mkdir -p "$work/bundle/bin" "$work/bundle/lib" "$work/bundle/link/kit"
 touch "$work/bundle/bin/ld.lld" "$work/bundle/hirsel-core-toolchain.json"
 printf '%s\n' '#!/bin/sh' 'printf "%s\n" "bundle v1.2.3"' > "$work/bundle/hirsel"
 chmod +x "$work/bundle/hirsel" "$work/bundle/bin/ld.lld"
-make_bundle "$linux_asset" libLLVM.so.23.1
+linux_llvm=$(python3 "$root/tools/toolchain-dist/product.py" llvm-path x86_64-unknown-linux-gnu)
+darwin_llvm=$(python3 "$root/tools/toolchain-dist/product.py" llvm-path aarch64-apple-darwin)
+make_bundle "$linux_asset" "$linux_llvm"
 run_installer
 [ "$("$HIRSEL_INSTALL_DIR/bin/hirsel")" = 'bundle v1.2.3' ]
 
@@ -157,9 +132,9 @@ HOST_ARCH=x86_64 check_error 'Hirsel requires x86_64 Linux or an Apple silicon M
 check_error 'v1.2.3 has no aarch64-apple-darwin build in this release'
 printf 'invalid  %s\n' "$darwin_asset" > "$work/SHA256SUMS"
 check_error "SHA256SUMS must list exactly one valid digest for $darwin_asset"
-make_bundle "$darwin_asset" libLLVM.so.23.1
+make_bundle "$darwin_asset" "$linux_llvm"
 check_error 'release bundle is incomplete'
-make_bundle "$darwin_asset" libLLVM.23.1.dylib
+make_bundle "$darwin_asset" "$darwin_llvm"
 run_installer
 [ "$("$HIRSEL_INSTALL_DIR/bin/hirsel")" = 'bundle v1.2.3' ]
 HOST_ARCH=x86_64 TRANSLATED=1 HOST_MACOS=26.0.1 run_installer

@@ -22,7 +22,8 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/install-home"
           mkdir "$HOME"
-          dash tools/toolchain-dist/install.sh --no-modify-path
+          python3 tools/toolchain-dist/product.py installer > "$RUNNER_TEMP/install.sh"
+          dash "$RUNNER_TEMP/install.sh" --no-modify-path
           version=$(readlink "$HOME/.hirsel/current")
           version=v${version#versions/}
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]
@@ -74,7 +75,8 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/install-home"
           mkdir "$HOME"
-          sh tools/toolchain-dist/install.sh --no-modify-path
+          python3 tools/toolchain-dist/product.py installer > "$RUNNER_TEMP/install.sh"
+          sh "$RUNNER_TEMP/install.sh" --no-modify-path
           test "$(readlink "$HOME/.hirsel/current")" = "versions/${RELEASE_TAG#v}"
           reported=$("$HOME/.hirsel/bin/hirsel" --version)
           test "$(printf '%s\n' "$reported" | sed -n '1p')" = "hirsel ${RELEASE_TAG#v}"
@@ -91,8 +93,9 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/release"
           cd "$RUNNER_TEMP/release"
+          asset=$(python3 "$GITHUB_WORKSPACE/tools/toolchain-dist/product.py" asset "$RELEASE_TAG")
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            -p install.sh -p SHA256SUMS -p "hirsel-$RELEASE_TAG-aarch64-apple-darwin.tar.gz"
+            -p install.sh -p SHA256SUMS -p "$asset"
           unset GH_TOKEN
           awk '$2 == "install.sh" {print}' SHA256SUMS | shasum -a 256 --check --strict
           chmod +x "$RUNNER_TEMP/witness/app-mac"

@@ -259,6 +259,9 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
     let Some(path) = args.get(argv, 1u64) else {
         return Error(Exit(status: 64u8))
     }
+    let Some(operator_path) = args.get(argv, 4u64) else {
+        return Error(Exit(status: 64u8))
+    }
     let config = platform.Config(max_places: number(argv, 2u64)?, idle_ms: number(argv, 3u64)?)
     let db = match store.open(tasks, d, c, r, result.unwrap(store.sized(Directory, 2147483648u64))) {
         Ok(take db) => take db,
@@ -272,7 +275,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
         Ok(take s) => take s,
         Error(_) => return Error(Exit(status: 75u8))
     }
-    let listener = match host.listen_unix(n, root, operator.PATH, 16u16) {
+    let listener = match host.listen_unix(n, root, operator_path, 16u16) {
         Ok(take l) => take l,
         Error(_) => return Error(Exit(status: 74u8))
     }

@@ -8,13 +8,13 @@ Linux, from the same pins and flags:
 
 - the compiler, Cargo's `dist` profile against the pinned LLVM tree
   (tools/buck2/bootstrap_llvm.py), whose ld.lld and libLLVM.23.1.dylib ship;
-- the six runtime archives, each a fat-LTO staticlib of hirsel-core-rt against
+- the runtime archives, each a fat-LTO staticlib of hirsel-core-rt against
   the trace-only std (tools/buck2/toolchains/raw_backtrace_std.py), with the
   runtime profile of tools/buck2/profile.bzl;
 - the Darwin link kit, the text stubs link_kit.py makes from Hirsel's allowlists
   and the pinned Zig libSystem.tbd;
 - the core and std images, the toolchain packages and the helpers, installed by
-  the bundle's own compiler (toolchain-programs.sh).
+  the bundle's own compiler (toolchain_programs.py).
 
 Every Mach-O is built for the macOS floor, MACOSX_DEPLOYMENT_TARGET taken from
 link_kit.DARWIN_FLOOR, and carries an ad-hoc signature. The check reads every
@@ -44,23 +44,15 @@ import link_kit  # noqa: E402
 
 TARGET = link_kit.DARWIN
 FLOOR = link_kit.DARWIN_FLOOR
-# std-product's runtime slots and the hirsel-core-rt features of each
-# (tools/buck2/sync.py). std-product checks each archive's features by symbol.
-RUNTIMES = {
-    'runtime': ['standalone'],
-    'recording-runtime': ['standalone', 'record'],
-    'prof-runtime': ['standalone', 'prof'],
-    'prof-recording-runtime': ['standalone', 'prof', 'record'],
-    'observed-runtime': ['standalone', 'charge-observation'],
-    'observed-recording-runtime': ['standalone', 'charge-observation', 'record'],
-}
+PRODUCT = tomllib.loads(Path(__file__).with_name('product.toml').read_text())
+RUNTIMES = {slot: config['features'] for slot, config in PRODUCT['runtime_slots'].items()}
 SYSTEM = {name: path for name, path in link_kit.DARWIN_LIBRARIES.items()}
 LIBSYSTEM = SYSTEM['libSystem']
 LIBCXX = '/usr/lib/libc++.1.dylib'
 LIBZ = '/usr/lib/libz.1.dylib'
 LIBICONV = '/usr/lib/libiconv.2.dylib'
-LIBLLVM = 'lib/libLLVM.23.1.dylib'
-LIBLLVM_ID = '@rpath/libLLVM.23.1.dylib'
+LIBLLVM = PRODUCT['hosts'][TARGET]['llvm_library']
+LIBLLVM_ID = '@rpath/' + Path(LIBLLVM).name
 
 
 def bzl_list(path, name):
@@ -283,7 +275,7 @@ def trace_sysroot(work, env):
 
 
 def runtimes(work, env):
-    """The six runtime archives, with tools/buck2/profile.bzl's runtime flags."""
+    """The runtime archives, with tools/buck2/profile.bzl's runtime flags."""
     sysroot = trace_sysroot(work, env)
     profile = 'profile.hirsel-runtime'
     settings = [f'{profile}.inherits="release"', f'{profile}.opt-level=3', f'{profile}.debug=0',
@@ -345,11 +337,11 @@ def build(output, work, release_tag):
     run([compiler, 'std-product', '--install', output,
          *[option for slot, archive in archives.items() for option in (f'--{slot}', archive)],
          '--target', TARGET, '--link-kit', kit], env=install, stdout=subprocess.DEVNULL)
-    programs = ROOT / 'tools/toolchain-dist/toolchain-programs.sh'
+    programs = ROOT / 'tools/toolchain-dist/toolchain_programs.py'
     packages = tomllib.loads((ROOT / 'core/programs/toolchain-packages.toml').read_text())['packages']
-    run(['/bin/sh', programs, 'pack', compiler, ROOT / 'core/programs', output / 'core-packages', scratch / 'packs',
+    run([sys.executable, programs, 'pack', compiler, ROOT / 'core/programs', output / 'core-packages', scratch / 'packs',
          *packages], env=install)
-    run(['/bin/sh', programs, 'helpers', output, ROOT / 'core/programs/platform', scratch], env=install)
+    run([sys.executable, programs, 'helpers', Path(__file__).with_name('product.toml'), output, ROOT / 'core/programs/platform', scratch], env=install)
     return llvm
 
 

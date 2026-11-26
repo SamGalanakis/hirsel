@@ -1221,6 +1221,7 @@ dependencies = [
  "hirsel-guard",
  "libc",
  "object 0.40.0",
+ "toml",
 ]
 
 [[package]]

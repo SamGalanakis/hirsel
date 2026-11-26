@@ -2,6 +2,7 @@
 
 
 def python_gates(out, call, Raw):
+    product = ["//tools/toolchain-dist:product.py", "//tools/toolchain-dist:product.toml"]
     out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", host=True,
                            data=["//tools/buck2:fmt.py"],
                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
@@ -9,7 +10,7 @@ def python_gates(out, call, Raw):
                            data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
                                  "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
                                  "//tools/buck2:llvm-cxx-headers-lock.json",
-                                 "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
+                                 "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock", *product]))
     std_inputs = ["core/tools/std_native.py", "core/tools/std_contracts.py", "core/tools/case_progress.py", "tools/loopback_peer.py"]
     python_units = [
         ("test-merging", "tools/tests/merging.py", ["//tools/buck2:merging.py"]),
@@ -18,9 +19,9 @@ def python_gates(out, call, Raw):
           "core/tools/langarena.py", "core/tools/m1.py", "core/tools/m2b.py",
           "core/tools/measure.py", "core/tools/measurement_artifacts.py",
           "core/langarena/run.py", "core/langarena/layout/measure.py", "core/langarena/layout/run.py",
-          "core/langarena/layout/service.py", "core/langarena/layout/service_build.py"] + std_inputs),
+          "core/langarena/layout/service.py", "core/langarena/layout/service_build.py"] + std_inputs + product),
         ("test-prelude-overlay", "tools/tests/prelude_overlay.py", ["//tools/buck2:prelude_overlay.py"]),
-        ("test-bootstrap-llvm", "tools/tests/bootstrap_llvm.py", ["//tools/buck2:bootstrap_llvm.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:pins.json", "//tools/buck2:llvm-cxx-headers-lock.json", "tools/native-toolchain/llvm-23.lock"]),
+        ("test-bootstrap-llvm", "tools/tests/bootstrap_llvm.py", ["//tools/buck2:bootstrap_llvm.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:pins.json", "//tools/buck2:llvm-cxx-headers-lock.json", "tools/native-toolchain/llvm-23.lock", *product]),
         ("test-action-sizes", "tools/tests/action_sizes.py", ["//tools/buck2:action_sizes_from_log.py"]),
         ("test-pool-usage", "tools/tests/pool_usage.py", ["//tools/buck2:pool_usage.py", "//tools/buck2:event_logs.py", "//tools/buck2:action_sizes_from_log.py"]),
         ("test-sizes-from-usage", "tools/tests/test_sizes_from_usage.py", ["//tools/buck2:test_sizes_from_usage.py"]),

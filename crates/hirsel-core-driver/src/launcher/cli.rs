@@ -100,18 +100,11 @@ pub(crate) fn run(
     launcher.admit_with(admission.expect("opened with the stores"))?;
     launcher.listen(bind_control(&control)?)?;
     if let Some((operator, program, max_places, idle_ms)) = bootstrap_spec {
-        // The host's argv names the control socket by its name in STATE, which is the
-        // host's working directory (launch.md "Starting the host").
+        // The host's argv names both sockets relative to its working directory, STATE.
         let name = control
             .file_name()
             .filter(|_| control.parent().and_then(|p| p.canonicalize().ok()) == Some(state.clone()))
             .ok_or("--control must name a socket directly in --state")?;
-        let args = vec![
-            OsString::from("ctl"),
-            name.to_owned(),
-            OsString::from(max_places.to_string()),
-            OsString::from(idle_ms.to_string()),
-        ];
         let program = std::path::absolute(program)?;
         if !program.is_file() {
             eprintln!(
@@ -120,13 +113,24 @@ pub(crate) fn run(
             );
             std::process::exit(74);
         }
+        let operator = std::path::absolute(operator)?;
+        let operator_name = operator
+            .file_name()
+            .ok_or("--operator-listen must name a socket")?;
+        let args = vec![
+            OsString::from("ctl"),
+            name.to_owned(),
+            OsString::from(max_places.to_string()),
+            OsString::from(idle_ms.to_string()),
+            operator_name.to_owned(),
+        ];
         // The host's one Dir is STATE/catalog; it creates the catalog store inside it.
         std::fs::create_dir_all(state.join("catalog"))?;
         launcher.bootstrap = Some(bootstrap::Bootstrap::new(
             program,
             args,
             state.clone(),
-            bind_control(&std::path::absolute(operator)?)?,
+            bind_control(&operator)?,
         ));
     }
     loop {

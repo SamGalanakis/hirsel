@@ -41,15 +41,29 @@ fn main() {
         println!("cargo:rustc-link-lib=hirsel-metadata-check-builds-no-engine");
         std::fs::write(
             out.join("component.rs"),
-            "static COMPONENT: &[u8] = &[];\nconst CARGO_ENGINE: Option<(&str, &str)> = None;\nconst LLVM_BUILD_ID: &str = \"\";\nconst LLVM_LIBRARY: &str = \"\";\n",
+            "static COMPONENT: &[u8] = &[];\nconst CARGO_ENGINE: Option<(&str, &str)> = None;\nconst LLVM_BUILD_ID: &str = \"\";\nconst LLVM_LIBRARY: &str = \"\";\nconst BUCK_ENGINE: Option<&str> = None;\n",
         )
         .unwrap();
         return;
     }
-    let host = Host::of(&prefix);
+    let product_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/toolchain-dist/product.toml");
+    println!("cargo:rerun-if-changed={}", product_path.display());
+    let product: toml::Table = std::fs::read_to_string(product_path)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let target = env::var("TARGET").unwrap();
+    let host = Host::of(&prefix, &product["hosts"][&target]);
+    let buck_engine = match host.os {
+        Os::Linux => Some(
+            Path::new("../../../../../../tools/buck2/toolchains/llvm-files").join(&host.engine),
+        ),
+        Os::Macos => None,
+    };
     println!(
         "cargo:rerun-if-changed={}",
-        prefix.join("lib").join(host.library).display()
+        prefix.join(host.library).display()
     );
     let shared_objects = ["checked_copy", "release_pipeline", "pass_cost"].map(|name| {
         let source = shared.join(format!("{name}.cpp"));
@@ -118,15 +132,15 @@ fn main() {
             .args(&compose_objects)
             .arg(host.cxx_runtime)
             .arg("-L")
-            .arg(prefix.join("lib"))
-            .arg(host.link_llvm)
+            .arg(prefix.join(host.library.parent().unwrap()))
+            .arg(host.link_llvm())
             .arg("-o")
             .arg(&component)
             .status()
             .unwrap()
             .success()
     );
-    let engine = prefix.join(host.engine).canonicalize().unwrap();
+    let engine = prefix.join(&host.engine).canonicalize().unwrap();
     println!("cargo:rerun-if-changed={}", engine.display());
     let build_id = host.identity(&prefix, &engine);
     let profile = out
@@ -136,25 +150,24 @@ fn main() {
         .canonicalize()
         .unwrap();
     std::fs::write(out.join("component.rs"), format!(
-        "static COMPONENT: &[u8] = include_bytes!({:?});\nconst CARGO_ENGINE: Option<(&str, &str)> = Some(({:?}, {:?}));\nconst LLVM_BUILD_ID: &str = {build_id:?};\nconst LLVM_LIBRARY: &str = {:?};\n",
-        host.component, profile.to_str().unwrap(), engine.to_str().unwrap(), host.library,
+        "static COMPONENT: &[u8] = include_bytes!({:?});\nconst CARGO_ENGINE: Option<(&str, &str)> = Some(({:?}, {:?}));\nconst LLVM_BUILD_ID: &str = {build_id:?};\nconst LLVM_LIBRARY: &str = {:?};\nconst BUCK_ENGINE: Option<&str> = {buck_engine:?};\n",
+        host.component, profile.to_str().unwrap(), engine.to_str().unwrap(), host.library.file_name().unwrap(),
     )).unwrap();
 }
 
 /// How this host builds the engine component. The driver is a host binary, so the
 /// target OS Cargo builds for is the host the compiler runs on.
-struct Host {
+struct Host<'a> {
     os: Os,
     sysroot: PathBuf,
     /// The component's file name, embedded in the driver.
     component: &'static str,
-    /// The engine's file name in an installation's lib directory.
-    library: &'static str,
+    /// The shared library path in both a pinned tree and an installation.
+    library: &'a Path,
     /// The engine inside the LLVM prefix the build checks the component against.
-    engine: &'static str,
+    engine: PathBuf,
     shared: &'static [&'static str],
     cxx_runtime: &'static str,
-    link_llvm: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -165,8 +178,13 @@ enum Os {
     Macos,
 }
 
-impl Host {
-    fn of(prefix: &Path) -> Self {
+impl<'a> Host<'a> {
+    fn of(prefix: &Path, artifacts: &'a toml::Value) -> Self {
+        let library = Path::new(artifacts["llvm_library"].as_str().unwrap());
+        let engine = artifacts.get("llvm_engine_dir").map_or_else(
+            || library.to_owned(),
+            |dir| Path::new(dir.as_str().unwrap()).join(library.file_name().unwrap()),
+        );
         match env::var("CARGO_CFG_TARGET_OS").unwrap().as_str() {
             "linux" => {
                 let sysroot = prefix.join("sysroot");
@@ -178,11 +196,10 @@ impl Host {
                     os: Os::Linux,
                     sysroot,
                     component: "libhirsel_llvm_engine.so",
-                    library: "libLLVM.so.23.1",
-                    engine: "engine/libLLVM.so.23.1",
+                    library,
+                    engine,
                     shared: &["-shared", "-Wl,--build-id=sha1", "-Wl,-z,defs"],
                     cxx_runtime: "-l:libstdc++.so.6",
-                    link_llvm: "-l:libLLVM.so.23.1",
                 }
             }
             "macos" => {
@@ -196,14 +213,28 @@ impl Host {
                     os: Os::Macos,
                     sysroot: PathBuf::from(sdk.trim()),
                     component: "libhirsel_llvm_engine.dylib",
-                    library: "libLLVM.23.1.dylib",
-                    engine: "lib/libLLVM.23.1.dylib",
+                    library,
+                    engine,
                     shared: &["-dynamiclib", "-Wl,-undefined,error"],
                     cxx_runtime: "-lc++",
-                    link_llvm: "-lLLVM.23.1",
                 }
             }
             os => panic!("no LLVM engine build for host OS {os}"),
+        }
+    }
+
+    fn link_llvm(&self) -> String {
+        let name = self.library.file_name().unwrap().to_str().unwrap();
+        match self.os {
+            Os::Linux => format!("-l:{name}"),
+            Os::Macos => {
+                let name = name
+                    .strip_prefix("lib")
+                    .unwrap()
+                    .strip_suffix(".dylib")
+                    .unwrap();
+                format!("-l{name}")
+            }
         }
     }
 

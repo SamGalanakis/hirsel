@@ -56,9 +56,10 @@ def build_script(reads, root: pathlib.Path, start: str, nodes: dict, packages: d
     pins, extra, skipped = lists(reads, root)
     roots = closure(root, start, nodes, packages, members) + extra
     manifests = [f"core/programs/{name}/hirsel.toml" for name in toolchain_packages(reads, root)]
-    globs = BUNDLED + manifests + pins + [f"{r}/**" for r in roots]
+    product = "tools/toolchain-dist/product.toml"
+    globs = BUNDLED + manifests + [path for path in pins if path != product] + [f"{r}/**" for r in roots]
     exclude = ["core/std/tests/**"] + [f"{r}/{skip}/**" for r in roots for skip in skipped]
-    paths = {}
+    paths = {product: "//tools/toolchain-dist:product.toml"}
     for r in roots:
         for package in reads.glob(root / r, "**/BUCK"):
             directory = str(package.parent.relative_to(root))

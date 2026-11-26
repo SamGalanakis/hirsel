@@ -412,55 +412,37 @@ def declared_deps(package: dict, packages: dict) -> list[str]:
                   if d["kind"] is None and not d["optional"])
 
 
-def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
+def release_product(reads):
+    return tomllib.loads(reads.text(ROOT / "tools/toolchain-dist/product.toml"))
+
+
+def static_archive_rule(package: dict, packages: dict, attrs: dict, slots=None) -> str:
     name = package['name']
-    if name == 'hirsel-core-rt':
-        # A language executable owns its process allocator. The ordinary
-        # rlib remains embeddable beside a host's allocator or hirsel_guard.
-        return (call('hirsel_library', name=f'{name}-standalone',
-                     deps=declared_deps(package, packages),
-                     **{**attrs, 'features': ['standalone']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-archives',
-                              library=f'//:{name}-standalone',
-                              archive_name=f"lib{attrs['crate']}.a")
-                + '\n' + call('hirsel_library', name=f'{name}-standalone-allocation-count',
-                              deps=declared_deps(package, packages),
-                              **{**attrs, 'features': ['standalone', 'allocation-count']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-allocation-count-archives',
-                              library=f'//:{name}-standalone-allocation-count',
-                              archive_name=f"lib{attrs['crate']}.a")
-                + '\n' + call('hirsel_library', name=f'{name}-standalone-record',
-                              deps=declared_deps(package, packages),
-                              **{**attrs, 'features': ['standalone', 'record']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-record-archives',
-                              library=f'//:{name}-standalone-record',
-                              archive_name=f"lib{attrs['crate']}.a")
-                + '\n' + call('hirsel_library', name=f'{name}-standalone-prof',
-                              deps=declared_deps(package, packages),
-                              **{**attrs, 'features': ['standalone', 'prof']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-prof-archives',
-                              library=f'//:{name}-standalone-prof',
-                              archive_name=f"lib{attrs['crate']}.a")
-                + '\n' + call('hirsel_library', name=f'{name}-standalone-prof-record',
-                              deps=declared_deps(package, packages),
-                              **{**attrs, 'features': ['standalone', 'prof', 'record']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-prof-record-archives',
-                              library=f'//:{name}-standalone-prof-record',
-                              archive_name=f"lib{attrs['crate']}.a")
-                + '\n' + call('hirsel_library', name=f'{name}-standalone-observed-record',
-                              deps=declared_deps(package, packages),
-                              **{**attrs, 'features': ['standalone', 'charge-observation', 'record']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-observed-record-archives',
-                              library=f'//:{name}-standalone-observed-record',
-                              archive_name=f"lib{attrs['crate']}.a"))
-    return call('hirsel_core_runtime_archives', name=f'{name}-archives',
-                library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
+    archive = f"lib{attrs['crate']}.a"
+    if name != 'hirsel-core-rt':
+        return call('hirsel_core_runtime_archives', name=f'{name}-archives',
+                    library=f'//:{name}', archive_name=archive)
+    # A language executable owns its process allocator. The ordinary
+    # rlib remains embeddable beside a host's allocator or hirsel_guard.
+    slots = release_product(READS)["runtime_slots"] if slots is None else slots
+    deps = declared_deps(package, packages)
+    rules = []
+    for slot in [*slots.values(), {"buck_suffix": "-allocation-count",
+                                  "features": ["standalone", "allocation-count"]}]:
+        suffix = slot['buck_suffix']
+        library = f'{name}-standalone{suffix}'
+        rules.append(call('hirsel_library', name=library, deps=deps,
+                          **{**attrs, 'features': slot['features']}))
+        rules.append(call('hirsel_core_runtime_archives', name=f'{name}{suffix}-archives',
+                          library=f'//:{library}', archive_name=archive))
+    return '\n'.join(rules)
 
 
 def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     members = set(meta["workspace_members"])
+    slots = release_product(READS)["runtime_slots"]
     unguarded = []
     out = [
         HEADER,
@@ -473,7 +455,8 @@ def first_party(meta: dict) -> str:
                            data=["//tools/buck2:sync.py", "//tools/buck2:prepare.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py",
                                  "//tools/buck2:supply_chain.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:runner_gates.py",
-                                 "//tools/buck2:test_inputs.py", "//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py", "//tools/buck2:python_gates.py"]))
+                                 "//tools/buck2:test_inputs.py", "//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py", "//tools/buck2:python_gates.py",
+                                 "//tools/toolchain-dist:product.toml"]))
     out.append("\n" + call("hirsel_script_test", name="test-filter", script="tools/tests/test_filter.py",
                            data=["tools/test-filter", "tools/consumers", "//tools/buck2:event_logs.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py",
@@ -564,7 +547,7 @@ def first_party(meta: dict) -> str:
             out.append("\n" + call("hirsel_library", name=name, deps=normal, doctests=has_doctests(package_dir) or None,
                                     **attrs))
             if "staticlib" in lib["crate_types"]:
-                out.append("\n" + static_archive_rule(package, packages, attrs))
+                out.append("\n" + static_archive_rule(package, packages, attrs, slots))
             if lib.get("test", True) and f"{name}-unittest" not in EMPTY_UNIT_HARNESSES:
                 binary = "hirsel-intern-id-salt" if name == "hirsel-intern" else f"{name}-unittest"
                 test_attrs_for_lib = attrs | {"features": sorted(set(features) | {"id-salt"})} if name == "hirsel-intern" else attrs
@@ -637,10 +620,6 @@ def first_party(meta: dict) -> str:
             args=arguments, bin_exes=binaries, production=True, native_tools=True, host=True,
             files_env=env,
             data=Raw('glob(["core/core/**", "core/std/**", "core/front/runtime/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/aarch64.py", "core/tools/front_native.py", "core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"] + ["core/tools/case_progress.py"]' + tls)))
-    out.append("\n" + call("hirsel_library", name="hirsel-core-rt-observed", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
-        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["standalone", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
-        manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
-    out.append("\n" + call("hirsel_core_runtime_archives", name="hirsel-core-rt-observed-archives", library=":hirsel-core-rt-observed", archive_name="libhirsel_core_rt.a"))
     out.append("\n" + call("hirsel_script_test", name="core-aarch64-provider", script="tools/tests/core_aarch64_provider.py", host=True,
         files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
                    "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
@@ -681,7 +660,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_pic_staticlib", name="core-native-runtime-fixture-pic", library=":core-llvm-runtime-fixture"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-runtime-pic", library=":hirsel-core-rt"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-record-runtime-pic", library=":hirsel-core-rt-record"))
-    out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-observed-runtime-pic", library=":hirsel-core-rt-observed"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-observed-runtime-pic", library=":hirsel-core-rt-standalone-observed"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a", shipped=False))
     if unguarded:
         raise SystemExit("these binary and test roots do not install the memory guard; add "
@@ -691,7 +670,7 @@ def first_party(meta: dict) -> str:
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_dev_fixture_cache", name="dev-fixture-cache", hirsel="//:hirsel-core-driver-bin-hirsel", runtime="//:core-driver-runtime-pic"))
-    distribution_gates(out, call, Raw, READS)
+    distribution_gates(out, call, Raw, READS, slots)
     out.append("\n" + call("hirsel_script_test", name="core-evaluator", script="core/tools/gate_evaluator.py",
                             production=True, native_tools=True,
                             bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
@@ -864,6 +843,9 @@ def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, 
     """Write the named parts' outputs under `out_root`, each only where its
     bytes change; returns what each part read."""
     found = {}
+    product_inputs = generated.Reads(ROOT)
+    slots = release_product(product_inputs)["runtime_slots"]
+    runtime_features = [slot["features"] for slot in slots.values()]
     env = rust_environment.environment(ROOT)
     cargo_home = rust_environment.cargo_home(ROOT, env)
     with tempfile.TemporaryDirectory(prefix="hirsel-sync-cargo-") as temporary:
@@ -871,7 +853,7 @@ def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, 
             pathlib.Path(temporary), env, cargo_home, rust_environment.cargo_config(cargo_home),
         )
         meta = metadata(ROOT / "Cargo.toml", offline, cargo_home)
-        resolution = Resolution(ROOT, meta)
+        resolution = Resolution(ROOT, meta, runtime_features)
         if "third-party" in parts:
             found["third-party"] = write_third_party(meta, out_root / "third-party", resolution, offline, cargo_home)
     # Both generators use the same Cargo identities. When only first-party
@@ -881,6 +863,8 @@ def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, 
             resolution.load_external((out_root / "third-party/units.json").read_text())
         found["first-party"] = write_first_party(meta, out_root, resolution)
     for reads in found.values():
+        for path, digest in product_inputs.files.items():
+            reads.note(reads.files, path, digest)
         code_reads(reads)
     return found
 
@@ -890,6 +874,7 @@ def write_first_party(meta: dict, out_root: pathlib.Path, resolution: Resolution
     READS = generated.Reads(ROOT)
     READS.text(out_root / "third-party/units.json")
     cargo_reads(READS, meta, layout=True)
+    product = release_product(READS)
     workspace = {p["id"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
     packages = [{"name": p["name"], "dependencies": [
         {key: (str(pathlib.Path(value).relative_to(ROOT)) if key == "path" and value else value)
@@ -901,6 +886,8 @@ def write_first_party(meta: dict, out_root: pathlib.Path, resolution: Resolution
         "tools/buck2/exec_sizes.bzl": execution_sizes(),
         "tools/buck2/test_sizes.bzl": requests_bzl(json.loads(READS.text(HERE / "test-sizes.json"))),
         "tools/native-toolchain/pins.bzl": native_toolchain_pins(),
+        "tools/toolchain-dist/product.bzl": HEADER + "".join(
+            f"{name.upper()} = {starlark(product[name], 0)}\n" for name in ("runtime_targets", "hosts")),
     }
     assert set(contents) == set(generated.PARTS["first-party"])
     for path, content in contents.items():

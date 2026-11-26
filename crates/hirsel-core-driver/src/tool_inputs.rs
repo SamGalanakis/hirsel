@@ -99,7 +99,7 @@ impl LinkRecipe {
                         )
                     )
                     || matches!(link, Link::Installed(_))
-                        && matches!(
+                        && (matches!(
                             file.path.file_name().and_then(OsStr::to_str),
                             Some(
                                 "libunwind.a"
@@ -109,9 +109,9 @@ impl LinkRecipe {
                                     | "libutil.so.1"
                                     | "libresolv.so.2"
                                     | "libSystem.tbd"
-                                    | "libLLVM.23.1.dylib"
                             )
-                        )
+                        ) || crate::host::INSTALLED_LINKER_LIBRARY
+                            .is_some_and(|library| file.path.ends_with(library)))
             })
             && !self.args.iter().any(|arg| {
                 let name = arg.trim_start_matches('-').split('=').next().unwrap();

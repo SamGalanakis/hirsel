@@ -236,7 +236,7 @@ def sources(root, staged):
 LINK_KIT = 'tools/buck2/native-toolchain/link_kit.py'
 TOOLCHAIN_BUCK = 'tools/buck2/toolchains/BUCK'
 DRIVER_MACHO = 'crates/hirsel-core-driver/src/foreign_archive/macho.rs'
-INSTALL_SH = 'tools/toolchain-dist/install.sh'
+INSTALL_SH = 'tools/toolchain-dist/install.sh.in'
 DARWIN_FLOOR_FILES = (LINK_KIT, TOOLCHAIN_BUCK, DRIVER_MACHO, INSTALL_SH)
 DARWIN_FLOOR_ASSIGNMENT = re.compile(r'^DARWIN_FLOOR\s*=\s*"(\d+)\.(\d+)"\s*$', re.MULTILINE)
 MACOS_FLOOR_ASSIGNMENT = re.compile(r'^const\s+MACOS_FLOOR:\s*u32\s*=\s*([^;]+);', re.MULTILINE)

@@ -1,3 +1,8 @@
+load("@root//tools/toolchain-dist:product.bzl", "HOSTS")
+
+LLVM_HOST = HOSTS["x86_64-unknown-linux-gnu"]
+LLVM_SONAME = LLVM_HOST["llvm_library"].split("/")[-1]
+
 cxx_library(
     name = "engine",
     srcs = ["engine.c"],
@@ -66,8 +71,9 @@ test -n "$id" || exit 1
 printf '%s\\n' 'static COMPONENT: &[u8] = include_bytes!("engine.so");' \
     'const CARGO_ENGINE: Option<(&str, &str)> = None;' \
     "const LLVM_BUILD_ID: &str = \\"$id\\";" \
-    'const LLVM_LIBRARY: &str = "libLLVM.so.23.1";' > "$OUT/component.rs"
-""",
+    'const LLVM_LIBRARY: &str = "@LLVM_SONAME@";' \
+    'const BUCK_ENGINE: Option<&str> = Some("../../../../../../tools/buck2/toolchains/llvm-files/@ENGINE_DIR@/@LLVM_SONAME@");' > "$OUT/component.rs"
+""".replace("@ENGINE_DIR@", LLVM_HOST["llvm_engine_dir"]).replace("@LLVM_SONAME@", LLVM_SONAME),
     visibility = ["PUBLIC"],
 )
 

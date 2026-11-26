@@ -43,3 +43,5 @@ __pycache__/
 /bench/**/reports/
 /bench/**/results/
 /bench/**/RESULTS-*
+
+/tools/toolchain-dist/product.bzl

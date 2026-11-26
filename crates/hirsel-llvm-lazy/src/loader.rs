@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 include!(concat!(env!("OUT_DIR"), "/component.rs"));
-const BUCK_ENGINE: &str = "../../../../../../tools/buck2/toolchains/llvm-files/engine";
 #[repr(C)]
 struct Output {
     data: *mut u8,
@@ -176,12 +175,12 @@ fn resolve_engine() -> Result<PathBuf, String> {
         .ok_or("compiler has no installation directory")?;
     let bundled = origin.join("lib").join(LLVM_LIBRARY);
     let prefix = origin.join("../lib").join(LLVM_LIBRARY);
-    let buck = origin.join(BUCK_ENGINE).join(LLVM_LIBRARY);
+    let buck = BUCK_ENGINE.map(|path| origin.join(path));
     let (path, expected) = if bundled.exists() {
         (bundled, LLVM_BUILD_ID.into())
     } else if origin.file_name().is_some_and(|name| name == "bin") && prefix.exists() {
         (prefix, LLVM_BUILD_ID.into())
-    } else if buck.is_file() {
+    } else if let Some(buck) = buck.filter(|path| path.is_file()) {
         let expected = std::env::var("HIRSEL_LLVM_EXPERIMENT_BUILD_ID")
             .unwrap_or_else(|_| LLVM_BUILD_ID.into());
         (buck, expected)

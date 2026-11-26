@@ -43,7 +43,7 @@
     "libexec/hirsel/.hirsel-debug/*.debug": {
       "contents": "detached debug information for the platform executables"
     },
-    "lib/libLLVM.so.23.1": {
+    "@llvm_library@": {
       "native": "engine_llvm",
       "contents": "the compiler's LLVM library (tools/native-toolchain/build-libllvm)"
     },
@@ -110,7 +110,7 @@
         "lld"
       ],
       "static": [],
-      "static_note": "A Mac host's lib/libLLVM.23.1.dylib and bin/ld.lld, built by tools/native-toolchain/build-libllvm-darwin with the Xcode command line tools against the macOS SDK. They load libSystem, libc++ and libz from the system and link no third-party runtime statically."
+      "static_note": "A Mac host's compiler LLVM library and bin/ld.lld, built by tools/native-toolchain/build-libllvm-darwin with the Xcode command line tools against the macOS SDK. They load libSystem, libc++ and libz from the system and link no third-party runtime statically."
     }
   },
   "native_text_rule": "From the locked source archive (source_url, source_sha256): each component's licenses, every file under its source_dirs named LICENSE/COPYING/COPYRIGHT/NOTICE, and every text file there that contains 'copyright', outside test, unittests, docs and utils directories.",

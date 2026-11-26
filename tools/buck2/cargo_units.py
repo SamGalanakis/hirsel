@@ -225,7 +225,7 @@ def unit_graphs(root, meta, platform_source, commands):
 
 
 class Resolution:
-    def __init__(self, root: Path, meta: dict):
+    def __init__(self, root: Path, meta: dict, runtime_features=()):
         self.root = root
         self.packages = {p['id']: p for p in meta['packages']}
         self.members = set(meta['workspace_members'])
@@ -233,6 +233,7 @@ class Resolution:
         self.names = {}
         self.preferred = {}
         self.test_binaries = {}
+        self.runtime_variants = {}
         platform_source = (root / 'third-party/reindeer.toml').read_text()
         self.platforms = tomllib.loads(platform_source)['platform']
         self.host_platform = next(name for name, config in self.platforms.items() if config.get('execution-platform'))
@@ -241,12 +242,12 @@ class Resolution:
             name = self.packages[member]['name']
             modes = [(False, []), (True, [])]
             if name == 'hirsel-core-rt':
-                # The unit harness includes Openat2 recording cases. Keep the
-                # default archive separate and resolve the optional deps of
-                # record and prof, which the runtime's variants enable.
-                # The same harness exercises the runtime profiler's chunks.
-                optional = ['--features', 'record,prof']
-                modes = [(False, []), (True, optional), (False, optional)]
+                # Empty features affect rustc's cfgs but add no Cargo edges.
+                self.runtime_graph_features = {feature for feature, dependencies
+                                               in self.packages[member]['features'].items() if dependencies}
+                variants = {self.runtime_graph_key(features) for features in runtime_features} - {()}
+                modes = [(False, []), (True, ['--features', 'record,prof'])]
+                modes.extend((False, ['--features', ','.join(variant)]) for variant in sorted(variants))
             for testing, feature_args in modes:
                 builds.append((member, testing, feature_args))
                 for config in self.platforms.values():
@@ -262,7 +263,7 @@ class Resolution:
             keys = target_keys[self.host_platform]
             if feature_args and not testing:
                 root_index, = graph['roots']
-                self.record_runtime = keys[root_index]
+                self.runtime_variants[tuple(feature_args[-1].split(','))] = keys[root_index]
                 continue
             if testing:
                 binaries = {u['target']['name']: keys[i] for i, u in enumerate(graph['units'])
@@ -287,6 +288,9 @@ class Resolution:
                 self.names[key] = base if self.preferred.get(base) == key else base + '-features-' + key[:12]
         if len(set(self.names.values())) != len(self.names):
             raise ValueError('Cargo unit label collision')
+
+    def runtime_graph_key(self, features):
+        return tuple(sorted(self.runtime_graph_features.intersection(features)))
 
     def add(self, graph):
         keys = {}
@@ -421,8 +425,10 @@ class Resolution:
                     key = self.preferred.get(package)
                     if (call.func.id == 'hirsel_library' and key is not None
                             and self.root / literal(call, 'crate_root') == Path(self.units[key]['target']['src_path'])):
-                        if package == 'hirsel-core-rt' and {'record', 'prof'} & set(ast.literal_eval(attrs['features'])):
-                            key = self.record_runtime
+                        if package == 'hirsel-core-rt':
+                            variant = self.runtime_graph_key(ast.literal_eval(attrs['features']))
+                            if variant:
+                                key = self.runtime_variants[variant]
                         deps = self.values(key, lambda u: sorted(
                             self.label(dep) for _, dep in u['edges'] if dep in self.names
                             and self.units[dep]['target']['kind'] != ['custom-build']))

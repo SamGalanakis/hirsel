@@ -846,7 +846,7 @@ pub(crate) fn check_state(state: &Path) -> io::Result<()> {
 /// private, and the listener must run as the operator.
 pub(crate) fn connect(state: &Path) -> io::Result<Connection> {
     check_state(state)?;
-    let stream = UnixStream::connect(state.join("operator.sock"))?;
+    let stream = UnixStream::connect(state.join(crate::product::bundled::OPERATOR_SOCKET))?;
     if peer_uid(&stream)? != operator_uid() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

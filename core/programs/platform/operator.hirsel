@@ -11,8 +11,6 @@
 //
 // D is the client's random 16-byte request ID, A a host-generated launcher.Attempt, and a
 // hash H is 32 bytes. A known D names the same group and input for its whole life.
-pub const PATH: String = "operator.sock"
-
 pub const MAX_FRAME: u64 = 16777216u64
 
 // The largest logical reply a client reassembles from `Part` chunks.
@@ -321,8 +319,8 @@ pub fn send_frame(mut output: WriteHalf, body: Bytes, until: Until) -> bool wait
 
 // Open one operator exchange and read its first answer. Source Begin carries its whole
 // input, so a complete admission keeps running after this connection closes.
-pub fn exchange(n: Net, root: String, ask: Ask, until: Until) -> Option[Answer] waits {
-    let Ok(take socket) = host.connect_unix(n, root, PATH, until) else {
+pub fn exchange(n: Net, root: String, path: String, ask: Ask, until: Until) -> Option[Answer] waits {
+    let Ok(take socket) = host.connect_unix(n, root, path, until) else {
         return None
     }
     let (take rd, take wr) = net.split(take socket)

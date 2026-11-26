@@ -28,6 +28,15 @@ NATIVE_SKIP = {'test', 'tests', 'unittests', 'docs', 'utils'}
 OPTIONAL_ENTRIES = {'hirsel.profdata'}
 
 
+def notice_sources(target='x86_64-unknown-linux-gnu'):
+    sources = json.loads(SOURCES.read_text())
+    product = tomllib.loads(SOURCES.with_name('product.toml').read_text())
+    llvm = product['hosts'][target]['llvm_library']
+    files = sources['files']
+    files[llvm] = files.pop('@llvm_library@')
+    return sources, llvm
+
+
 def sha256(path):
     with path.open('rb') as handle:
         return hashlib.file_digest(handle, 'sha256').hexdigest()
@@ -414,7 +423,7 @@ def check_bundle(bundle, sources, inventory, llvm_tree=None):
 
 def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None, archive=None, *, llvm_tree=None):
     """Only add notices; refuse missing inputs without leaving a partial directory."""
-    sources = sources or json.loads(SOURCES.read_text())
+    sources = sources or notice_sources()[0]
     cargo_home = cargo_home or Path(os.environ.get('CARGO_HOME', Path.home() / '.cargo'))
     packages = {p['name'] + '-' + p['version']: p for p in metadata['packages'] if p['source']}
     lock = tomllib.loads((root / 'Cargo.lock').read_text())
@@ -539,7 +548,7 @@ def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None, 
 
 def facts(mode='off'):
     """The link graph of every `crates` root and Cargo's metadata: the inputs only Buck and Cargo know."""
-    sources = json.loads(SOURCES.read_text())
+    sources, _ = notice_sources()
     roots = [entry['crates'] for entry in sources['files'].values() if 'crates' in entry]
     configuration = ['--target-platforms', '//tools/buck2:dist', '-c', 'hirsel.dist_pgo=' + mode]
     graph = json.loads(subprocess.check_output([
@@ -559,12 +568,12 @@ def collect(bundle, mode):
 def collect_darwin(bundle, llvm_tree):
     from darwin_host import RUNTIMES, TARGET
 
-    sources = json.loads(SOURCES.read_text())
+    sources, llvm = notice_sources(TARGET)
     files = sources['files']
-    del files['lib/libLLVM.so.23.1'], files['libexec/hirsel/.hirsel-debug/*.debug']
+    del files['libexec/hirsel/.hirsel-debug/*.debug']
     del files['link/kit/*-linux-gnu/*'], files['hirsel.profdata']
     files['bin/ld.lld'] = dict(native='darwin_llvm', contents='the Mach-O linker')
-    files['lib/libLLVM.23.1.dylib'] = dict(native='darwin_llvm', contents="the compiler's LLVM library")
+    files[llvm] = dict(native='darwin_llvm', contents="the compiler's LLVM library")
     files['libexec/hirsel/*.dSYM/*'] = dict(contents='detached debug information for the platform executables')
     sources.update(
         scope='Apple Silicon macOS installation prefix. Crate notices cover the compiler and runtime link inputs.',
@@ -582,7 +591,7 @@ def collect_darwin(bundle, llvm_tree):
 
 def write(bundle):
     """Rewrite NOTICES.md from the lock files, Buck, Cargo, the source archive and an installation."""
-    sources = json.loads(SOURCES.read_text())
+    sources, _ = notice_sources()
     graph, metadata = facts()
     linked = {pattern: linked_crates(graph, entry['crates']) for pattern, entry in sources['files'].items() if 'crates' in entry}
     pins = lock_records(ROOT / sources['llvm_lock'])

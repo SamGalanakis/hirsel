@@ -28,7 +28,8 @@ cd "$scratch"
 HIRSEL_VERSION=$tag HIRSEL_DOWNLOAD_BASE="file://$release" /bin/sh "$release/install.sh" --no-modify-path
 "$tools/smoke" "$tag" matched-runtime "$witness"
 prefix="$HOME/.hirsel/current"
-codesign -v --strict "$prefix/hirsel" "$prefix/bin/ld.lld" "$prefix/lib/libLLVM.23.1.dylib" \
+llvm=$(python3 "$tools/product.py" llvm-path)
+codesign -v --strict "$prefix/hirsel" "$prefix/bin/ld.lld" "$prefix/$llvm" \
     "$prefix/libexec/hirsel/platform_main" "$prefix/libexec/hirsel/pin_reader" \
     "$prefix/libexec/hirsel/store_tool" demo/program demo/program-llvm demo/matched-program "$witness/app-mac"
 demo/program-llvm

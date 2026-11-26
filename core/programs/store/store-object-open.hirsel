@@ -180,7 +180,8 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
         check_limits(options.limits, replay.limits)?
         let admitted_state = prepare_writer(selected.head.store, replay)?
         let head = selected.head
-        let authority = copied(list.slice(workspace.witness, 240, list.len(workspace.witness)))?
+        let authority_end = history_authority_end(workspace.witness)?
+        let authority = copied(list.slice(workspace.witness, 240, authority_end))?
         if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
         }

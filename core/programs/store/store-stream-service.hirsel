@@ -373,8 +373,8 @@ fn stream_decide_pending(mut lane: StreamLane, deadline: u64) -> Result[List[Sli
 // `stream_decide_pending`.
 fn stream_cycle(mut lane: StreamLane, slices: List[BatchSlice], deadline: u64) -> Result[List[SliceDecision], Error] waits {
     stream_latched(lane)?
-    stream_batch_put(mut lane, slices, deadline)?
     capacity(list.try_reserve(mut lane.pending, list.len(slices)))?
+    stream_batch_put(mut lane, slices, deadline)?
     for s in slices {
         list.push(mut lane.pending, PendingSlice(seq: lane.seq, store: s.store, epoch: s.epoch))
     }

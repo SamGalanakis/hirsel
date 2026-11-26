@@ -31,10 +31,29 @@ fn history_write_head(mut client: std.object.Client, precondition: std.object.Pr
     }
 }
 
+// `attach` is the head's ATTACH while the Place is attached to a host stream
+// (§12.11.2); every head write carries it after AUTHORITY.
 type HistoryRegister: send {
     head: HistoryHead,
     tag: std.object.ETag,
-    terminal: Option[HistoryTerminal]
+    terminal: Option[HistoryTerminal],
+    attach: Option[Attach]
+}
+
+// Encodes `head` with AUTHORITY and, when attached, ATTACH.
+fn history_encode_register_head(mut raw: Bytes, head: HistoryHead, authority: Bytes, attach: Option[Attach]) -> Result[(), Error] {
+    history_encode_head(mut raw, head, authority)?
+    if let Some(a) = attach {
+        stream_attach_append(mut raw, DiskContext(store: head.store, role: 7, seq: head.entry.seq), a)?
+    }
+    Ok(())
+}
+
+// The end of AUTHORITY's frame in a decoded head: the authority bytes a new
+// head copies, never a trailing ATTACH.
+fn history_authority_end(raw: Bytes) -> Result[u64, Error] {
+    let (context, field) = history_head_frame(raw)?
+    Ok(history_frame("head", context, raw, field.end, 0x00D0)?.end)
 }
 
 type HistoryTerminal: send = HistoryFault(Error) | HistoryUnknown
@@ -116,7 +135,7 @@ fn history_register_publish(mut client: std.object.Client, mut register: History
         }
     }
     history_fill_key(mut buffers.key, "e-", candidate.entry)
-    history_encode_head(mut buffers.body, candidate, authority)?
+    history_encode_register_head(mut buffers.body, candidate, authority, register.attach)?
     if let Error(take problem) = history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline) {
         register.terminal = Some(HistoryFault(clone(problem)))
         return Error(take problem)
@@ -227,7 +246,7 @@ fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: Stor
     let head = HistoryHead(authority_kind: kind, store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
     history_encode_head(mut buffers.body, head, authority)?
     match history_write_head(mut client, Absent, mut buffers.body, mut buffers.witness, deadline) {
-        HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None)),
+        HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None, attach: None)),
         HistoryConflict(_) => Error(Exists("head")),
         HistoryRefused(take problem) => Error(Remote(take problem)),
         HistoryUndecided => Error(Undecided),
@@ -283,13 +302,14 @@ fn history_claim_changed(head: HistoryHead, observed: Bytes, backoff: bool) -> R
 fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryClaimResult, Error] waits {
     let candidate = history_claim_head(admitted, holder)?
     let saved = history_claim_saved(buffers.witness)
-    history_encode_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, list.len(buffers.witness)))?
+    let authority_end = history_authority_end(buffers.witness)?
+    history_encode_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end))?
     let observed = history_fetch(mut client, "head", mut buffers.witness, deadline)?
     if !history_claim_same(buffers.body, saved, buffers.witness) {
         return history_claim_changed(admitted, buffers.witness, false)
     }
     match history_write_head(mut client, Match(observed.etag), mut buffers.body, mut buffers.witness, deadline) {
-        HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None))),
+        HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None, attach: None))),
         HistoryConflict(_) => history_claim_changed(admitted, buffers.witness, true),
         HistoryRefused(take problem) => Error(Remote(take problem)),
         HistoryUndecided => Ok(HistoryClaimUncertain),

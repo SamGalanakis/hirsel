@@ -751,7 +751,7 @@ fn object_conflict_race(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] wa
     }
     let seen = history_fetch(mut second, "head", mut b_buf.witness, due)?
     let captured = history_decode_head(b_buf.witness)?
-    let mut b = HistoryRegister(head: captured.head, tag: seen.etag, terminal: None)
+    let mut b = HistoryRegister(head: captured.head, tag: seen.etag, terminal: None, attach: None)
     bucket_m2_law_commit_packet(mut a_buf.packet, a.head, 1)?
     bucket_m2_law_commit_packet(mut b_buf.packet, b.head, 2)?
     // Both candidates use generation 2's tag. A sees 409, then loses the

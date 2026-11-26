@@ -836,7 +836,7 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
     let HistoryApplied(tag) = history_write_head(mut source.client, Absent, mut workspace.body, mut workspace.witness, source.deadline) else {
         fail("could not publish the checkpoint fixture")
     }
-    let mut incumbent = HistoryRegister(head, tag, terminal: None)
+    let mut incumbent = HistoryRegister(head, tag, terminal: None, attach: None)
     let mut requested = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     requested.create = false
     requested.expect = Some(head.store)

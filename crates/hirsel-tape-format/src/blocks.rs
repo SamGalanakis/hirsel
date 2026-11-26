@@ -139,6 +139,21 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
     Ok(out)
 }
 
+/// The rules a [`net_snapshot`] holds, which a narrowing may leave empty.
+pub fn read_net_snapshot(bytes: &[u8]) -> Result<Vec<GrantRule>, Corrupt> {
+    let mut c = Cursor::new(bytes);
+    let rules = if bytes.first() == Some(&0) {
+        c.varint()?;
+        Vec::new()
+    } else {
+        read_net_rules(&mut c)?
+    };
+    if !c.done() {
+        return Err(Corrupt);
+    }
+    Ok(rules)
+}
+
 /// A `Net` capability's rules as the header's grant snapshot writes them
 /// after the `Net` kind byte: the rule count, then each rule. A capability
 /// snapshot (docs/recording.md, "Snapshots", tag 5) holds these bytes, and

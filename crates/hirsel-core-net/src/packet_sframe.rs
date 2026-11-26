@@ -241,6 +241,12 @@ impl<C> Sframe<C> {
         self.ledger.keys().copied()
     }
 
+    pub(super) fn restore_domain(&mut self, kid: u64, entry: C) -> Result<(), IssueError> {
+        self.check_sealer(0, kid)?;
+        self.ledger.insert(kid, entry);
+        Ok(())
+    }
+
     pub(crate) fn into_ledger(self) -> impl Iterator<Item = C> {
         self.ledger.into_values()
     }

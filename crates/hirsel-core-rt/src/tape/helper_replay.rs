@@ -181,6 +181,16 @@ unsafe fn open(
     let data = match packed(body.value.bytes(), flat, span, &owners[1..], &mut word) {
         Ok(data) => data,
         Err(Unpacked::Layout) => return Err(at_zero(Fault::Corrupt)),
+        Err(Unpacked::MissingCode) => {
+            let fault = Fault::Diverged(Divergence {
+                at: 0,
+                kind: Mismatch::Op,
+            });
+            return Err(Opened::Verdict(format!(
+                "{} [event 0: frame ENTRY; expected a function matching its code descriptor; observed none]",
+                format_verdict(fault, 0, &unit)
+            )));
+        }
         Err(Unpacked::Unsupported(why)) => return Err(Opened::Refused(why)),
     };
     let (n, steps) = (body.n, body.bound);

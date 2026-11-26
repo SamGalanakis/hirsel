@@ -2,7 +2,8 @@
 //! its result or an item, made from its recorded part (docs/recording.md,
 //! "Handle snapshots"). It takes the receiving unit's next object ordinal, as
 //! the recorder numbered it there. A `Secret` or `KeyShare` arrives with no
-//! bytes and no charge: the stream that made it delivers its operations. A
+//! bytes and no charge, as do the other media handles: replay takes their
+//! key-dependent operations from the tape. A
 //! granted capability arrives as a grant of the receiving unit's registry on
 //! its own cell, so its operations are that unit's.
 use super::super::super::*;
@@ -24,8 +25,7 @@ pub(in crate::tape) struct Receiver<'a> {
 
 /// The word of one owner part of `kind`, read from `c`: a function's code
 /// word, a granted capability's new grant, a `Secret`'s new designation in
-/// the run's secrets, or a key share with no key, both with no bytes behind
-/// them. Each other handle is refused by name.
+/// the run's secrets, or an arriving media handle with no key.
 pub(in crate::tape) fn word(
     live: &mut Live,
     at: Receiver<'_>,
@@ -36,7 +36,7 @@ pub(in crate::tape) fn word(
     match (kind, c.u8()?) {
         (FUNCTION, 2) => {
             let identity = c.bytes()?;
-            run::identities::code_of(identity).ok_or(Unpacked::Unsupported(NO_CODE))
+            run::identities::code_of(identity).ok_or(Unpacked::MissingCode)
         }
         (SECRET, 1) => {
             if c.u8()? != 7 || c.varint()? != live.unit_object() {
@@ -68,11 +68,7 @@ pub(in crate::tape) fn word(
                 .arrived(Origin { made, stream }, policy))
         }
         (CAPABILITY, 1) => capability(live, at, c),
-        (MEDIA, 1) => match c.u8()? {
-            8 => key_share(live, grants, c),
-            9..=12 => Err(Unpacked::Unsupported(KEY_OBJECT)),
-            _ => Err(Unpacked::Layout),
-        },
+        (MEDIA, 1) => media(live, grants, c),
         (CLIENT, 1) => client(live, c),
         (SHARED, 1) => shared(live, at, c),
         (SOCKET, 1) => socket(live, c),
@@ -96,15 +92,28 @@ fn capability(
     }
     let ordinal = c.varint()?;
     let kind = c.u8()?;
-    // Net, Env, Exec and Cred replay against the rules the root's startup
+    // Env, Exec and Cred replay against the grants the root's startup
     // installs by its own ordinals, which an arriving grant's lacks.
-    if matches!(kind, 1 | 7 | 13 | 14) {
+    if matches!(kind, 7 | 13 | 14) {
         return Err(Unpacked::Unsupported(RULED_GRANT));
     }
     let stored = c.bytes()?.to_vec();
     let registry = at.registry.ok_or(Unpacked::Unsupported(NO_FILES))?;
     if ordinal != live.unit_object() {
         return Err(Unpacked::Layout);
+    }
+    // A Net's snapshot holds its rules: the run pins them, and its
+    // operations here read them by this ordinal.
+    if kind == crate::entry::NET {
+        let rules = crate::net::RulesStorage::new(format::read_net_snapshot(&stored)?);
+        live.replay_net_rules
+            .insert(ordinal as usize, rules.handle());
+        registry
+            .run_grants()
+            .unit_net_rules
+            .lock()
+            .unwrap()
+            .push(rules);
     }
     let grant = super::super::item_grants::CrossGrant::granted(kind, stored);
     live.grants.insert(ordinal as usize, grant);
@@ -157,14 +166,13 @@ fn client(live: &mut Live, c: &mut format::Cursor<'_>) -> Result<u64, Unpacked> 
     Ok(word)
 }
 
-/// A `KeyShare` from its snapshot after the tag (recording.md, "Snapshots"):
-/// its ordinal, media origin and group. Its agreement takes the recorded
-/// verdict, so it holds no key, and the sending unit paid for it.
-fn key_share(
+/// A keyless media slot, using its birth and its ordinal in the receiving stream.
+fn media(
     live: &mut Live,
     grants: Option<&RunGrants>,
     c: &mut format::Cursor<'_>,
 ) -> Result<u64, Unpacked> {
+    let tag = c.u8()?;
     let ordinal = c.varint()?;
     if ordinal != live.unit_object() {
         return Err(Unpacked::Layout);
@@ -172,15 +180,20 @@ fn key_share(
     let stream = c.u32()?;
     let delivery = c.varint()?;
     let admission = if delivery == 0 { c.varint()? } else { 0 };
-    let group = Group::from_case(c.u8()?.into()).ok_or(Unpacked::Layout)?;
     let grants = grants.ok_or(Unpacked::Unsupported(NO_FILES))?;
+    let origin = crate::media::Origin::arrived((stream, delivery, admission), ordinal);
+    let group = match tag {
+        8 => Group::from_case(c.u8()?.into()).ok_or(Unpacked::Layout)?,
+        9..=12 => return Ok(crate::media::restore(tag, origin, c)?),
+        _ => return Err(Unpacked::Layout),
+    };
     let ticket = crate::media::run_state(grants).agreements.arrived_share();
     Ok(crate::media::hold(crate::secret::key_share::Share {
         key: None,
         ticket,
         origin: (2, ordinal),
         charge: None,
-        tape: crate::media::Origin::arrived((stream, delivery, admission), ordinal),
+        tape: origin,
         group,
     }))
 }
@@ -254,13 +267,11 @@ fn socket(live: &mut Live, c: &mut format::Cursor<'_>) -> Result<u64, Unpacked> 
     Ok(key)
 }
 
-const NO_CODE: &str = "a value holding a function the replaying build does not have";
 const DERIVED: &str = "a value holding a Secret derived or unwrapped in another unit";
 const NO_FILES: &str =
-    "a value holding a capability, a Secret or a key share in a unit without host files";
+    "a value holding a capability, a Secret or a media handle in a unit without host files";
 const VIRTUAL: &str = "a value holding a capability of virtual construction";
-const RULED_GRANT: &str = "a value holding a Net, Env, Exec or Cred capability";
-const KEY_OBJECT: &str = "a value holding a schedule, a sealer, an opener or a header mask";
+const RULED_GRANT: &str = "a value holding an Env, Exec or Cred capability";
 const FOREIGN_SHARED: &str = "a foreign Shared holder whose payload holds owners";
 const UDP_SOCKET: &str = "a value holding a UdpSocket";
 const ACROSS_CLIENT: &str = "a client arriving in a replay of another revision";

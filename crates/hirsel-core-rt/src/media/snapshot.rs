@@ -1,13 +1,111 @@
 //! Public state of the five media handles that move between units.
 use super::{
-    Head, Operand, Origin, Resource, Slot,
+    Head, Operand, Origin, Payment, Resource, Slot, hold,
     schedule::{Mask, Opener, Schedule, Sealer},
 };
 use crate::secret::key_share::Share;
-use hirsel_core_net::SframeDirection;
-use hirsel_tape_format::put_varint;
+use hirsel_core_net::{
+    SframeDirection,
+    packet_nonce::{NonceFormat, ReceiverNonce, SenderCounter},
+    packet_schedule::{self, Space, snapshot_packet_profile},
+};
+use hirsel_tape_format::{Corrupt, Cursor, put_varint};
 
 pub(super) type Part = Result<Vec<u8>, &'static str>;
+
+/// Restore a media key object from the public state after its origin.
+pub(crate) fn restore(tag: u8, origin: Origin, c: &mut Cursor<'_>) -> Result<u64, Corrupt> {
+    let profile = [c.u8()?, c.u8()?];
+    if tag == Schedule::TAG {
+        let side = c.u8()?;
+        let application = c.u8()? != 0;
+        let generations = [c.u64()?, c.u64()?];
+        let retired = c.u8()?;
+        let exported = c.u8()? != 0;
+        let mut domains = Vec::new();
+        for _ in 0..c.varint()? {
+            domains.push((read_space(c)?, c.u64()?));
+        }
+        let send_block = if profile[0] == 7 && side == 2 {
+            Some((c.u64()?, c.u8()?))
+        } else {
+            None
+        };
+        let snapshot =
+            packet_schedule::Snapshot::from_parts(application, retired, exported, domains)
+                .ok_or(Corrupt)?;
+        let state = packet_schedule::Schedule::from_snapshot(
+            profile,
+            side,
+            snapshot,
+            send_block,
+            Payment::arrived,
+        )
+        .ok_or(Corrupt)?;
+        return Ok(hold(Schedule {
+            state,
+            origin,
+            profile,
+            side,
+            generations,
+            _charge: Payment::arrived(),
+        }));
+    }
+
+    let space = read_space(c)?;
+    let (format, algorithm) = snapshot_packet_profile(profile, space).ok_or(Corrupt)?;
+    let charge = Payment::arrived();
+    Ok(match tag {
+        Sealer::TAG => {
+            let domain = c.u64()?;
+            let floor = c.u64()?;
+            let highest = if c.u8()? == 0 { None } else { Some(c.u64()?) };
+            let sframe_kid = (format == NonceFormat::Sframe).then_some(domain);
+            let nonce_domain = if sframe_kid.is_some() { 0 } else { domain };
+            let counter = SenderCounter::from_snapshot(format, nonce_domain, floor, highest)
+                .ok_or(Corrupt)?;
+            hold(Sealer {
+                counter,
+                algorithm,
+                cipher: None,
+                origin,
+                space,
+                profile,
+                sframe_kid,
+                _charge: charge,
+            })
+        }
+        Opener::TAG => hold(Opener {
+            nonce: ReceiverNonce::from_snapshot(format),
+            space,
+            profile,
+            algorithm,
+            cipher: None,
+            origin,
+            _charge: charge,
+        }),
+        Mask::TAG
+            if matches!(
+                format,
+                NonceFormat::Quic | NonceFormat::QuicMultipath | NonceFormat::Dtls13
+            ) =>
+        {
+            hold(Mask {
+                key: None,
+                space,
+                profile,
+                local: c.u8()? != 0,
+                origin,
+                _charge: charge,
+            })
+        }
+        _ => return Err(Corrupt),
+    })
+}
+
+fn read_space(c: &mut Cursor<'_>) -> Result<Space, Corrupt> {
+    Space::from_tag(c.u8()?.into()).map_err(|_| Corrupt)
+}
 
 /// An arrival assigns the operand name for later operations in the receiver.
 /// Its birth and payer stay with it.

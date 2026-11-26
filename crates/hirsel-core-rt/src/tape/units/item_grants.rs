@@ -31,6 +31,8 @@ struct Grant {
     grant: CrossGrant,
     inner: Option<Inner>,
     exec: Option<Arc<ExecRules>>,
+    /// On replay, a Net with no live source: its run-pinned rules.
+    replay_net: Option<u64>,
 }
 
 /// A capability's grant as a value that carries it to another unit
@@ -150,6 +152,11 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
         .ok_or(UNGRANTED)?;
     let o = ordinal_of(h);
     let inner = live.objects[o - 1].inner;
+    // On replay a Net has no source; its rules are the ones replay pinned.
+    let replay_net = inner
+        .is_none()
+        .then(|| live.replay_net_rules.get(&o).copied())
+        .flatten();
     let grant = match live.grants.get(&o).cloned() {
         Some(grant @ CrossGrant::Homed { .. }) => grant,
         Some(CrossGrant::Granted { kind, stored }) => CrossGrant::Granted {
@@ -157,7 +164,7 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
             stored: match kind {
                 0 | 2..=6 | 8 | 9 | 13 => stored,
                 // A Net's rules, granted or narrowed, are its source's handle.
-                1 => net_rules(inner.ok_or(NET_RULES)?.handle)?,
+                1 => net_rules(inner.map(|i| i.handle).or(replay_net).ok_or(NET_RULES)?)?,
                 _ => return Err(UNGRANTED),
             },
         },
@@ -174,6 +181,7 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
         grant,
         inner,
         exec: live.exec_rules.get(&o).cloned(),
+        replay_net,
     })
 }
 
@@ -191,6 +199,7 @@ fn host(provider: &Provider, h: u64, kind: u8) -> Result<Grant, &'static str> {
             },
             inner: None,
             exec: None,
+            replay_net: None,
         });
     }
     // SAFETY: a Cred word's handle is a `cred::Granted` the run pins.
@@ -208,6 +217,7 @@ fn host(provider: &Provider, h: u64, kind: u8) -> Result<Grant, &'static str> {
         },
         inner: live.objects[ordinal_of(granted.handle) - 1].inner,
         exec: None,
+        replay_net: None,
     })
 }
 
@@ -301,6 +311,9 @@ pub(in crate::tape) fn arrived(
     let ordinal = live.objects.len();
     if let Some(rules) = &g.exec {
         live.exec_rules.insert(ordinal, rules.clone());
+    }
+    if let Some(rules) = g.replay_net {
+        live.replay_net_rules.insert(ordinal, rules);
     }
     live.grants.insert(ordinal, g.grant.clone());
     // An Env is read through the run's own grant wherever it is used, so its

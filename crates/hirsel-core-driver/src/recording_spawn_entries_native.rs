@@ -53,3 +53,57 @@ fn spawn_entries_start_each_helper_as_its_spawn_does() {
         }
     }
 }
+
+const CROSS_FUNCTION: &str = r#"
+fn old(take n: u64) -> u64 { n + 1 }
+
+fn produce(take n: u64) -> fn(take u64) -> u64 { old }
+
+fn consume(take f: fn(take u64) -> u64) -> u64 { f(7) }
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, 0, produce))
+    let f = result.unwrap(task.join(take h))
+    if f(7) != 8 { return Error(Exit(status: 3)) }
+    let g = result.unwrap(task.spawn_unit(tasks, bytes 65536, old, consume))
+    if result.unwrap(task.join(take g)) != 8 { return Error(Exit(status: 4)) }
+    // Spawning `old` gives it a code descriptor, so a value can carry it.
+    let o = result.unwrap(task.spawn_unit(tasks, bytes 65536, 1, old))
+    if result.unwrap(task.join(take o)) != 2 { return Error(Exit(status: 5)) }
+    result.unwrap(stdout.write(out, "functions"))
+    Ok(())
+}
+"#;
+
+/// A replaying build without `old` cannot resolve the descriptor a value
+/// carries: the root's take of root.0's end is `Diverged(Take)` and
+/// root.1's entry `Diverged(Op)` at 0.
+#[test]
+#[ignore = "explicit native integration target"]
+fn missing_cross_function_diverges_at_take_and_entry() {
+    crate::openat2_required::require();
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record(CROSS_FUNCTION, dir.path(), "functions", backend, "functions");
+        let different = rl9_record(
+            &CROSS_FUNCTION.replace("old", "new"),
+            dir.path(),
+            "no-old-function",
+            backend,
+            "functions",
+        );
+        let program = different.with_extension("");
+        for (unit, verdict) in [
+            ("root", "replay: Diverged(Take)"),
+            ("root.1", "replay: Diverged(Op) at 0 in root.1"),
+        ] {
+            let argv = ["--hirsel-replay-recording", "diagnose", path.to_str().unwrap(), unit];
+            let (code, out, err) = tape_run(&program, &argv, None);
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} {unit}: {err}");
+            assert!(err.lines().any(|line| line.starts_with(verdict)),
+                "{backend:?} {unit}: {err}");
+            assert!(err.contains("function") && err.contains("descriptor"),
+                "{backend:?} {unit}: {err}");
+        }
+    }
+}

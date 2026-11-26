@@ -16,6 +16,10 @@ impl Group {
         self.with(|live| live.schedule.chooser == format::CHOOSER_FIFO)
             .unwrap_or(false)
     }
+
+    pub(crate) fn abort_corrupt(self) {
+        self.with(|live| live.abort_replay(Fault::Corrupt, 0));
+    }
 }
 
 pub(super) struct TapeHooks;
@@ -226,12 +230,11 @@ impl Hooks for TapeHooks {
         if inner.is_none() {
             live.replay_net_rules.insert(ordinal, rules);
         }
-        if live.mode == super::Mode::Record {
-            // A narrowed Net is a Net grant of its own: a value that carries
-            // it snapshots its rules (docs/recording.md, "Snapshots").
-            let net = super::units::item_grants::CrossGrant::granted(crate::entry::NET, vec![]);
-            live.grants.insert(ordinal, net);
-        }
+        // A narrowed Net is a Net grant of its own: a value that carries it
+        // snapshots its rules (docs/recording.md, "Snapshots"), on replay as
+        // when recorded.
+        let net = super::units::item_grants::CrossGrant::granted(crate::entry::NET, vec![]);
+        live.grants.insert(ordinal, net);
         live.objects.push(Object {
             inner,
             open_resource: false,

@@ -458,13 +458,11 @@ pub(crate) fn due(
                             live.refuse_replay(why);
                             None
                         }
-                        Err(Unpacked::Layout) => {
+                        Err(error @ (Unpacked::Layout | Unpacked::MissingCode)) => {
                             let rep = live.replayer.as_mut().unwrap();
-                            let fault = rep.compared(
-                                Mismatch::Take,
-                                &frame,
-                                format_args!("an item of another layout"),
-                            );
+                            let observed = error.observed("an item of another layout");
+                            let fault =
+                                rep.compared(Mismatch::Take, &frame, format_args!("{observed}"));
                             live.stop_replay(fault);
                             None
                         }
@@ -627,7 +625,7 @@ pub(crate) fn due(
                 live.refuse_replay(why);
                 None
             }
-            (key, _) => {
+            (key, outcome) => {
                 let rep = live.replayer.as_mut().unwrap();
                 let fault = match key {
                     None => rep.compared(
@@ -635,11 +633,13 @@ pub(crate) fn due(
                         &frame,
                         format_args!("no helper with ordinal {ordinal}"),
                     ),
-                    Some(_) => rep.compared(
-                        Mismatch::Take,
-                        &frame,
-                        format_args!("a result of another layout"),
-                    ),
+                    Some(_) => {
+                        let observed = outcome
+                            .err()
+                            .unwrap()
+                            .observed("a result of another layout");
+                        rep.compared(Mismatch::Take, &frame, format_args!("{observed}"))
+                    }
                 };
                 live.stop_replay(fault);
                 None
@@ -853,7 +853,17 @@ pub(crate) fn refund_mismatch(group: Group, frame: &Frame, why: &'static str) {
 pub(in crate::tape) enum Unpacked {
     /// The value does not have the receiving type's layout.
     Layout,
+    MissingCode,
     Unsupported(&'static str),
+}
+
+impl Unpacked {
+    fn observed(self, layout: &str) -> &str {
+        match self {
+            Self::MissingCode => "a function descriptor the replaying build does not have",
+            _ => layout,
+        }
+    }
 }
 
 impl From<format::Corrupt> for Unpacked {

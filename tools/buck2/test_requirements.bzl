@@ -148,6 +148,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl9_helper_key_object_survives_by_name",
         "native::tests::rl9_accepted_socket_crosses",
         "native::tests::rl9_key_objects_cross_as_snapshots",
+        "native::tests::missing_cross_function_diverges_at_take_and_entry",
         "native::tests::test_replay_flag_records_and_replays",
         "native::tests::contained_tests_record_and_replay",
         "native::tests::package_cred_grants_are_per_test_and_replay_uses_the_tape",

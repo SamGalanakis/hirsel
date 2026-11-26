@@ -188,6 +188,10 @@ pub(crate) struct RunGrants {
     /// capability crossed into it, pinned for the run.
     #[cfg(feature = "record")]
     pub(crate) unit_creds: Mutex<Vec<Box<crate::cred::Granted>>>,
+    /// The rules of each `Net` that arrived in a value on replay, pinned for
+    /// the run: its operations read them as a recorded Net reads its source's.
+    #[cfg(feature = "record")]
+    pub(crate) unit_net_rules: Mutex<Vec<crate::net::RulesStorage>>,
 }
 
 impl RunGrants {

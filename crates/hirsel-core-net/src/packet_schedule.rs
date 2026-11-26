@@ -15,6 +15,9 @@ use crate::{
     },
 };
 
+mod snapshot;
+pub use snapshot::snapshot_packet_profile;
+
 /// Packet-number space in the order of `core.packet.Space` and tape tags.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

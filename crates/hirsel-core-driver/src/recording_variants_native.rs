@@ -214,7 +214,23 @@ pub fn main(tasks: Tasks, random: Random, out: Stdout) -> Result[(), Exit] waits
     let (c, i): (Client[(schedule.Schedule, packet.Sealer, packet.Opener, packet.HeaderMask)], Inbox[(schedule.Schedule, packet.Sealer, packet.Opener, packet.HeaderMask)]) = result.unwrap(conn.new(1, bytes 0))
     let worker = result.unwrap(task.spawn_unit(tasks, bytes 65536, (take host_share, take c), send_keys))
     let returned = result.unwrap(task.join(take worker))
-    let (take keys, take sealer, take opener, take mask) = result.unwrap(conn.try_receive(i))
+    let (take arrived_keys, take arrived_sealer, take opener, take mask) = result.unwrap(conn.try_receive(i))
+    let mut keys = take arrived_keys
+    let mut sealer = take arrived_sealer
+    let info = result.unwrap(schedule.inspect(keys, Handshake))
+    if !info.send || !info.receive { return Error(Exit(status: 3)) }
+    if let Error(Issued) = schedule.sealer(mut keys, Handshake, 0, 8) {} else {
+        return Error(Exit(status: 4))
+    }
+    let mut data: Bytes = list.with_capacity(16)
+    if let Error(Reused) = packet.seal(mut sealer, 7, mut data, 0, 0, string.as_bytes("")) {} else {
+        return Error(Exit(status: 5))
+    }
+    result.unwrap(packet.seal(mut sealer, 8, mut data, 0, 0, string.as_bytes("")))
+    let mut empty: Bytes = list.with_capacity(16)
+    if let Error(Tampered) = packet.open(opener, 0, 8, mut empty, 0, 0, string.as_bytes("")) {} else {
+        return Error(Exit(status: 6))
+    }
     let _ = packet.mask(mask, string.as_bytes("0123456789abcdef"), 0)
     drop(take older)
     drop(take returned)
@@ -245,6 +261,15 @@ fn rl9_key_objects_cross_as_snapshots() {
             &["Tasks", "Random", "Stdout"],
         );
         let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let program = path.with_extension("");
+        for unit in [None, Some("root"), Some("root.0")] {
+            let (code, out, err) = u4_replay(&program, &path, unit);
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (Some(0), "", ""),
+                "{backend:?} {unit:?}"
+            );
+        }
         let root = &streams[0].1;
         let helper = &streams[1].1;
         let grant_count = root
@@ -301,16 +326,23 @@ fn rl9_key_objects_cross_as_snapshots() {
         else {
             panic!("{backend:?}: expected three packet handle deliveries");
         };
-        let mut items = root.iter().filter_map(|f| match f {
+        let mut items = root.iter().enumerate().filter_map(|(pos, f)| match f {
             Frame::Take { body, .. } => match body.arrival() {
-                Arrival::Item(_, value) => Some(value),
+                Arrival::Item(_, value) => Some((pos + 1, value)),
                 _ => None,
             },
             _ => None,
         });
-        let item = items.next().unwrap();
+        let (take_at, item) = items.next().unwrap();
         assert!(items.next().is_none());
         let mut bytes = Cursor::new(item.bytes());
+        let tape = std::fs::read(&path).unwrap();
+        let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+            std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+        })
+        .unwrap()
+        .1
+        .tape_id;
         assert_eq!(bytes.bytes().unwrap(), [0; 32], "{backend:?}: item words");
         assert_eq!(bytes.varint().unwrap(), 4);
         for (index, tag, at) in [
@@ -320,6 +352,7 @@ fn rl9_key_objects_cross_as_snapshots() {
             (3, 12, Some(mask_at)),
         ] {
             assert_eq!(bytes.take(2).unwrap(), [1, tag]);
+            let ordinal_at = bytes.at;
             assert_eq!(bytes.varint().unwrap(), grant_count + 4 + index);
             assert_eq!(bytes.u32().unwrap(), stream);
             let position = bytes.varint().unwrap();
@@ -346,6 +379,24 @@ fn rl9_key_objects_cross_as_snapshots() {
                 12 => assert_eq!(bytes.take(2).unwrap(), [1, 1]), // Handshake, local
                 _ => unreachable!(),
             }
+            // Keep the block valid and corrupt this snapshot's receiving ordinal.
+            let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+                let value = item.bytes();
+                let Some(at) = payload.windows(value.len()).position(|w| w == value) else {
+                    return false;
+                };
+                payload[at + ordinal_at] = 99;
+                true
+            });
+            let corrupt = dir.path().join(format!("media-{backend:?}-tag-{tag}.tape"));
+            std::fs::write(&corrupt, wrong).unwrap();
+            let (code, out, err) = u4_replay(&program, &corrupt, Some("root"));
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} tag {tag}: {err}");
+            let expected = format!("replay: Diverged(Take) at {take_at} in root ");
+            assert!(
+                matches!(err.lines().collect::<Vec<_>>().as_slice(), [line] if line.starts_with(&expected)),
+                "{backend:?} tag {tag}: {err}"
+            );
         }
         assert!(bytes.done());
         let args = Args::of_parts(&[&item.canonical()]);

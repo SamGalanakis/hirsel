@@ -142,6 +142,22 @@ impl SenderCounter {
         (self.domain, self.floor, self.last)
     }
 
+    /// Restore public counter state. Replay captures the packet operation,
+    /// so it uses the nonce format for validation and never uses the nonce bytes.
+    pub fn from_snapshot(
+        format: NonceFormat,
+        domain: u64,
+        floor: u64,
+        highest: Option<u64>,
+    ) -> Option<Self> {
+        let mut counter = Self::new(format, [0; 12], domain, floor)?;
+        if let Some(highest) = highest {
+            counter.packet_nonce(highest).ok()?;
+            counter.commit(highest);
+        }
+        Some(counter)
+    }
+
     /// Validation does not advance the counter. The adapter commits only
     /// after it validates lengths and reserves the caller's destination and
     /// any AAD scratch, at the same point where the operation issues.
@@ -180,6 +196,11 @@ pub struct ReceiverNonce {
 impl ReceiverNonce {
     pub fn new(format: NonceFormat, base: [u8; 12]) -> Self {
         Self::with_base(format, Base::Aead(Zeroizing::new(base)))
+    }
+
+    /// Replay uses the nonce format for validation and takes the packet output from tape.
+    pub fn from_snapshot(format: NonceFormat) -> Self {
+        Self::new(format, [0; 12])
     }
 
     pub(super) fn with_base(format: NonceFormat, base: Base) -> Self {

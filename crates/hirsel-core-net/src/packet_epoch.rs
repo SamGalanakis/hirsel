@@ -214,6 +214,12 @@ impl<C> Epoch<C> {
             .flat_map(|domains| domains.keys().copied())
     }
 
+    pub(super) fn restore_domain(&mut self, domain: u64, entry: C) -> Result<(), IssueError> {
+        self.check_sealer(domain)?;
+        self.domains.as_mut().unwrap().insert(domain, entry);
+        Ok(())
+    }
+
     /// The evaluator applies refunds through its task scheduler.
     pub fn into_ledger(self) -> impl Iterator<Item = C> {
         self.domains.into_iter().flat_map(BTreeMap::into_values)

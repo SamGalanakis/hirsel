@@ -80,6 +80,10 @@ fn rl9_net_crosses_in_an_item_and_an_entry() {
             &["Listen 127.0.0.0/8 0-65535"],
         );
         let streams = rl9_streams(&path, &format!("{backend:?}"));
+        // Replay sends the root-granted Net and the narrowing again: their
+        // snapshots read the rules replay pins, as the live sources did.
+        let (code, out, err) = u4_replay(&path.with_extension(""), &path, Some("root"));
+        assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "", ""), "{backend:?}: replay");
         let root = &streams[0].1;
         let g = root
             .iter()

@@ -904,7 +904,8 @@ A capability (tag 5) that arrives gets its new ordinal in the receiving unit, an
 operations there belong to that unit, on that ordinal. If the same word arrives again, the
 latest ordinal is the one used. An `Env` is read through the run's own grant wherever it is
 used, so it gets an ordinal but no operation names it. A `Cred` is rebound to the receiving
-unit's ordinal, so a fetch through it is written in that unit's stream. A narrowed `Exec`,
+unit's ordinal, so a fetch through it is written in that unit's stream. A `Net` that arrives
+on replay checks its operations against the rules its snapshot holds. A narrowed `Exec`,
 whose profile no snapshot holds, is a capability of virtual construction (tag 6) whose home
 is the unit that narrowed it; a unit it reaches keeps that home when it sends it on. The
 recording unit that takes it gets its profile from the cell that recorded the narrowing,

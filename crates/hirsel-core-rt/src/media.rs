@@ -13,7 +13,7 @@ mod sframe;
 #[cfg(feature = "record")]
 mod snapshot;
 #[cfg(feature = "record")]
-pub(crate) use snapshot::snapshot;
+pub(crate) use snapshot::{restore, snapshot};
 mod transitions;
 // The tape laws drive SFrame imports and seals through the host ops (TLS-8 PC9).
 use crate::{
@@ -55,8 +55,15 @@ pub(crate) fn run_state(grants: &crate::host_file::RunGrants) -> &RunState {
 pub(crate) struct Charges(Mutex<BTreeMap<usize, Weak<ChargeCell>>>);
 
 pub(crate) struct Payment {
-    charges: Arc<Charges>,
-    cell: Arc<ChargeCell>,
+    tracked: Option<(Arc<Charges>, Arc<ChargeCell>)>,
+}
+
+impl Payment {
+    /// The sender paid for an arriving object and its ledger entries.
+    #[cfg(feature = "record")]
+    fn arrived() -> Self {
+        Self { tracked: None }
+    }
 }
 
 /// What a tracked charge is as a helper-end survivor: a key object, or an
@@ -78,8 +85,7 @@ impl Charges {
             .unwrap()
             .insert(Arc::as_ptr(&cell) as usize, Arc::downgrade(&cell));
         Payment {
-            charges: self.clone(),
-            cell,
+            tracked: Some((self.clone(), cell)),
         }
     }
 
@@ -100,11 +106,13 @@ impl Charges {
 
 impl Drop for Payment {
     fn drop(&mut self) {
-        self.charges
-            .0
-            .lock()
-            .unwrap()
-            .remove(&(Arc::as_ptr(&self.cell) as usize));
+        if let Some((charges, cell)) = &self.tracked {
+            charges
+                .0
+                .lock()
+                .unwrap()
+                .remove(&(Arc::as_ptr(cell) as usize));
+        }
     }
 }
 
@@ -124,6 +132,8 @@ impl<T: Send> Resource for T {}
 struct Head {
     drop: unsafe fn(*mut u8),
     #[cfg(feature = "record")]
+    tag: u8,
+    #[cfg(feature = "record")]
     snapshot: unsafe fn(u64, Option<u64>) -> snapshot::Part,
 }
 
@@ -141,6 +151,8 @@ pub(crate) fn hold<T: Resource>(value: T) -> u64 {
     Box::into_raw(Box::new(Slot {
         head: Head {
             drop: drop_slot::<T>,
+            #[cfg(feature = "record")]
+            tag: T::TAG,
             #[cfg(feature = "record")]
             snapshot: snapshot::write::<T>,
         },
@@ -167,8 +179,9 @@ impl Origin {
         #[cfg(feature = "record")]
         {
             let birth = payment
-                .cell
-                .made
+                .tracked
+                .as_ref()
+                .and_then(|(_, cell)| cell.made)
                 .map(|name| (name.stream, delivery, name.ordinal));
             Self {
                 birth,
@@ -226,21 +239,48 @@ impl Origin {
 }
 
 /// # Safety
-/// The live handle's slot contains T and stays borrowed through the call.
-unsafe fn loan<'a, T>(handle: u64) -> &'a T {
+/// The live media handle stays borrowed through the call.
+unsafe fn loan<'a, T: Resource>(handle: u64) -> &'a T {
+    #[cfg(feature = "record")]
+    unsafe {
+        check_snapshot_type::<T>(handle)
+    };
     unsafe { &(*(handle as *const Slot<T>)).value }
 }
 
 /// # Safety
-/// The live handle's slot contains T and the caller lends it exclusively.
-unsafe fn loan_mut<'a, T>(handle: u64) -> &'a mut T {
+/// The caller lends the live media handle exclusively.
+unsafe fn loan_mut<'a, T: Resource>(handle: u64) -> &'a mut T {
+    #[cfg(feature = "record")]
+    unsafe {
+        check_snapshot_type::<T>(handle)
+    };
     unsafe { &mut (*(handle as *mut Slot<T>)).value }
 }
 
 /// # Safety
-/// The uniquely owned handle contains T and moves to this call.
-unsafe fn take<T>(handle: u64) -> T {
+/// The uniquely owned media handle moves to this call.
+unsafe fn take<T: Resource>(handle: u64) -> T {
+    #[cfg(feature = "record")]
+    unsafe {
+        check_snapshot_type::<T>(handle)
+    };
     unsafe { Box::from_raw(handle as *mut Slot<T>) }.value
+}
+
+/// The crossing layout gives each media type the same owner row. Check its
+/// recorded tag before a typed use of the slot.
+///
+/// # Safety
+/// The word names a live media slot.
+#[cfg(feature = "record")]
+unsafe fn check_snapshot_type<T: Resource>(handle: u64) {
+    if unsafe { (*(handle as *const Head)).tag } != T::TAG {
+        if let Some(group) = crate::tasks::current_group() {
+            group.abort_corrupt();
+        }
+        crate::process::stop(b"MediaType");
+    }
 }
 
 /// # Safety

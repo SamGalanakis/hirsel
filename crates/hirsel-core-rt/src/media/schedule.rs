@@ -86,7 +86,7 @@ pub(super) struct Mask {
     #[cfg(feature = "record")]
     pub(super) local: bool,
     pub(super) origin: Origin,
-    _charge: Paid,
+    pub(super) _charge: Paid,
 }
 
 pub(super) fn refusal(error: IssueError) -> Outcome {

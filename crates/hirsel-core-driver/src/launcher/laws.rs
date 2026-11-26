@@ -581,7 +581,7 @@ fn launcher_restart_stateless() {
 #[test]
 fn collect_reservation_handoff() {
     let mut rig = rig(&[]);
-    let objects = rig.launcher.images.objects.clone();
+    let objects = rig.launcher.objects.images.objects.clone();
     let name = |n: u8| [n; 32];
     let exists = |n: u8| objects.join(hex::encode(&name(n))).exists();
     for n in [1, 2, 3] {

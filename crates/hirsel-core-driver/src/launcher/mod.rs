@@ -38,7 +38,7 @@ pub(crate) use cli::{parse_lifecycle, resolve_lifecycle, run};
 use control_session::{Conn, ControlSession, PeerPolicy};
 #[cfg(test)]
 use hirsel_core_ids::hex;
-use lifecycle::StoreClaims;
+use lifecycle::ObjectLifecycle;
 use ready::{READ, Readiness, ReadyEvent, Watch};
 use session::{
     Approvals, Attempt, Child, Event, Failure, Group, HostCommand, HostReply, Input, Launch,
@@ -148,14 +148,10 @@ struct Admitting {
 }
 
 pub(crate) struct Launcher<I> {
-    images: I,
     poll: Readiness,
     supervisor: ChildSupervisor,
-    store_claims: StoreClaims,
+    pub(super) objects: ObjectLifecycle<I>,
     session: ControlSession,
-    fenced: bool,
-    reservations: BTreeMap<Attempt, BTreeSet<[u8; 32]>>,
-    deferred: Vec<Attempt>,
     admitting: Option<Admitting>,
     cutovers: BTreeMap<(Child, Attempt), Forwarded>,
     /// The platform host, when this launcher starts it; then only its process may hold the
@@ -255,14 +251,10 @@ impl<I: Images> Launcher<I> {
         }
         std::fs::create_dir_all(&scratch)?;
         Ok(Self {
-            images,
             poll,
             supervisor: ChildSupervisor::new(cgroup_root, scratch),
-            store_claims: StoreClaims::default(),
+            objects: ObjectLifecycle::new(images),
             session: ControlSession::default(),
-            fenced: false,
-            reservations: BTreeMap::new(),
-            deferred: Vec::new(),
             admitting: None,
             cutovers: BTreeMap::new(),
             bootstrap: None,
@@ -297,10 +289,7 @@ impl<I: Images> Launcher<I> {
     /// Keep the objects that `attempt` synced until the host releases it. Admission calls
     /// this once steps 1-3 of "Durable publication" are synced.
     pub(crate) fn reserve(&mut self, attempt: Attempt, objects: BTreeSet<[u8; 32]>) {
-        self.reservations
-            .entry(attempt)
-            .or_default()
-            .extend(objects);
+        self.objects.reserve(attempt, objects);
     }
 
     /// The events not yet sent, for a caller that drives the launcher without a session.
@@ -384,7 +373,7 @@ impl<I: Images> Launcher<I> {
         for notice in notices {
             match notice {
                 ChildNotice::Event(event) => self.session.emit(event),
-                ChildNotice::ClaimReleased(child) => self.store_claims.release(&child),
+                ChildNotice::ClaimReleased(child) => self.objects.release_claim(&child),
                 ChildNotice::Reply(child, reply) => {
                     // OLD's next answer after a forwarded cutover is that cutover's; a held-write
                     // acknowledgement is a notice.
@@ -464,14 +453,10 @@ impl<I: Images> Launcher<I> {
                 if let Some(admitting) = &mut self.admitting {
                     admitting.workers.remove(&attempt);
                 }
-                if self.fenced {
-                    self.deferred.push(attempt);
-                } else {
-                    self.reservations.remove(&attempt);
-                }
+                self.objects.release(attempt);
             }
             Request::CollectBegin => {
-                self.fenced = true;
+                self.objects.fence();
                 self.emit(Event::Fenced);
             }
             Request::Collect(roots) => self.collect(&roots),
@@ -483,7 +468,7 @@ impl<I: Images> Launcher<I> {
             Request::Assemble(attempt) => self.assemble(attempt),
             Request::CutoverAck(child, attempt) => drop(self.cutovers.remove(&(child, attempt))),
             Request::CollectAbort => {
-                self.unfence();
+                self.objects.unfence();
                 self.emit(Event::Collected(0));
             }
         }
@@ -698,21 +683,12 @@ impl<I: Images> Launcher<I> {
         })
     }
 
-    /// End the fence and apply the releases it deferred.
-    fn unfence(&mut self) {
-        self.fenced = false;
-        for attempt in std::mem::take(&mut self.deferred) {
-            self.reservations.remove(&attempt);
-        }
-    }
-
     fn hello(&mut self) {
         // Hello ends the old session: its unsent events are dropped, and its fence ends
         // without removing anything.
         self.session.clear_out();
-        self.unfence();
         // A new session ends every reservation and admission of the old one (§14.5).
-        self.reservations.clear();
+        self.objects.new_session();
         if let Some(admitting) = &mut self.admitting {
             admitting.workers.clear();
         }
@@ -738,18 +714,10 @@ impl<I: Images> Launcher<I> {
             StartCheck::Refused(why) => return self.emit(Event::Refused(child, why)),
             StartCheck::Ready => {}
         }
-        if !self.store_claims.try_claim(&launch) {
-            return self.emit(Event::Refused(child, Refusal::Held));
-        }
-        let image = match self
-            .images
-            .resolve(launch.assembly.as_slice().try_into().unwrap())
-        {
-            Ok(image) => image,
-            Err(why) => {
-                self.store_claims.release(&child);
-                return self.emit(Event::Refused(child, Refusal::Image(why)));
-            }
+        let image = match self.objects.claim_image(&launch) {
+            None => return self.emit(Event::Refused(child, Refusal::Held)),
+            Some(Err(why)) => return self.emit(Event::Refused(child, Refusal::Image(why))),
+            Some(Ok(image)) => image,
         };
         let mut notices = Vec::new();
         self.supervisor
@@ -802,7 +770,7 @@ impl<I: Images> Launcher<I> {
     }
 
     fn collect(&mut self, roots: &[Vec<u8>]) {
-        if !self.fenced {
+        if !self.objects.is_fenced() {
             return self.emit(Event::Collected(0));
         }
         // No worker writes a record while the roots are read and removed, and every
@@ -812,27 +780,7 @@ impl<I: Images> Launcher<I> {
             .as_ref()
             .map(|a| a.publish.lock().unwrap_or_else(|e| e.into_inner()));
         self.notes();
-        let mut keep = BTreeSet::new();
-        let mut whole = true;
-        for root in roots {
-            match <[u8; 32]>::try_from(root.as_slice()) {
-                Ok(root) => drop(keep.insert(root)),
-                Err(_) => whole = false,
-            }
-        }
-        for objects in self.reservations.values() {
-            keep.extend(objects);
-        }
-        // A launcher without a whole root set removes nothing.
-        // Code objects an admission has reserved but not yet published stay, under the
-        // admission store's collection lock.
-        let removed = match (&admission, whole) {
-            (_, false) => Ok(0),
-            (Some(a), true) => a.under_collection(|reserved| self.images.collect(&keep, reserved)),
-            (None, true) => self.images.collect(&keep, &|_| false),
-        };
-        let removed = removed.unwrap_or(0);
-        self.unfence();
+        let removed = self.objects.collect(roots, admission.as_deref());
         self.emit(Event::Collected(removed));
     }
 
@@ -865,7 +813,7 @@ impl<I: Images> Launcher<I> {
             .as_ref()
             .map_or(PeerPolicy::Any, |b| PeerPolicy::Only(b.pid()));
         if self.session.accept_if_ready(&self.poll, events, policy) {
-            self.unfence();
+            self.objects.unfence();
         }
         self.pump();
         self.notes();
@@ -887,7 +835,7 @@ impl<I: Images> Launcher<I> {
         if self.session.flush() {
             // The session is lost: the children keep running, the fence ends without
             // removing anything, and the next host learns the rest from Hello.
-            self.unfence();
+            self.objects.unfence();
         }
     }
 }

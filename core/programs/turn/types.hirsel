@@ -1,3 +1,5 @@
+const NEVER: u64 = 0xffffffffffffffff
+
 pub type Family: key = V4 | V6
 
 /// RFC 8489 section 18.5.1's password algorithms.

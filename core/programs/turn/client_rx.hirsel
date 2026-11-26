@@ -156,8 +156,7 @@ fn set_lifetime(mut c: Client, now_ns: u64, lifetime: u32) {
     } else {
         life / 2
     }
-    c.refresh_ns = now_ns + ahead
-    c.refreshing = false
+    c.renewal = Due(now_ns + ahead)
     if let Allocated(a) = c.state {
         c.state = Allocated(Allocation(relayed: a.relayed, mapped: a.mapped, expires_ns: now_ns + life))
     }
@@ -181,16 +180,12 @@ fn succeeded(mut c: Client, i: u64, packet: Bytes, fields: List[stun_ice.Attr], 
             set_lifetime(mut c, now_ns, lifetime)
         },
         PermitJob(peer) => if let Some(p) = find_perm(c, peer) {
-            c.perms[p].installed = true
-            c.perms[p].busy = false
-            c.perms[p].refresh_ns = now_ns + PERMISSION_REFRESH_NS
+            c.perms[p].phase = Installed(now_ns + PERMISSION_REFRESH_NS)
         },
         BindJob(number, _) => {
             for k in 0u64 .. list.len(c.chans) {
-                if c.chans[k].live && c.chans[k].number == number {
-                    c.chans[k].confirmed = true
-                    c.chans[k].busy = false
-                    c.chans[k].refresh_ns = now_ns + CHANNEL_REFRESH_NS
+                if chan_live(c.chans[k].phase) && c.chans[k].number == number {
+                    c.chans[k].phase = Bound(now_ns + CHANNEL_REFRESH_NS)
                 }
             }
         },
@@ -342,7 +337,7 @@ fn channel_data(mut c: Client, packet: Bytes) -> Received {
     }
     for i in 0u64 .. list.len(c.chans) {
         let ch = c.chans[i]
-        if ch.live && ch.confirmed && ch.number == number {
+        if chan_confirmed(ch.phase) && ch.number == number {
             return Data(ch.peer, stun_ice.Range(lo: 4, hi: 4 + wide))
         }
     }

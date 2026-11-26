@@ -16,8 +16,6 @@ const FIRST_CHANNEL: u16 = 0x4000
 
 const LAST_CHANNEL: u16 = 0x4fff
 
-const NEVER: u64 = 0xffffffffffffffff
-
 /// Every request this client builds fits here; poll grows out to it.
 const REQUEST_MAX: u64 = 512
 
@@ -65,23 +63,59 @@ type Tx {
     start_ns: u64
 }
 
+type PermPhase = Installing | Installed(u64) | Refreshing
+
 type Perm {
     peer: Addr,
-    installed: bool,
-    busy: bool,
-    refresh_ns: u64
+    phase: PermPhase
 }
 
-/// A channel number in use (live) or lapsed at lapsed_ns and not reusable for 300 s.
+fn perm_installed(phase: PermPhase) -> bool {
+    match phase {
+        Installing => false,
+        _ => true,
+    }
+}
+
+fn perm_refresh_at(phase: PermPhase) -> Option[u64] {
+    match phase {
+        Installed(at) => Some(at),
+        _ => None,
+    }
+}
+
+type ChanPhase = Binding | Bound(u64) | Rebinding | Lapsed(u64)
+
+/// A channel number in use, or lapsed and not reusable for 300 s.
 type Chan {
     number: u16,
     peer: Addr,
-    live: bool,
-    confirmed: bool,
-    busy: bool,
-    refresh_ns: u64,
-    lapsed_ns: u64
+    phase: ChanPhase
 }
+
+fn chan_live(phase: ChanPhase) -> bool {
+    match phase {
+        Lapsed(_) => false,
+        _ => true,
+    }
+}
+
+fn chan_confirmed(phase: ChanPhase) -> bool {
+    match phase {
+        Bound(_) => true,
+        Rebinding => true,
+        _ => false,
+    }
+}
+
+fn chan_refresh_at(phase: ChanPhase) -> Option[u64] {
+    match phase {
+        Bound(at) => Some(at),
+        _ => None,
+    }
+}
+
+type Renewal = Due(u64) | InFlight
 
 pub opaque type Client {
     c: ClientConfig,
@@ -101,8 +135,7 @@ pub opaque type Client {
     started: bool,
     last_ns: u64,
     txs: List[Tx],
-    refreshing: bool,
-    refresh_ns: u64,
+    renewal: Renewal,
     perms: List[Perm],
     chans: List[Chan],
     ind_high: u32,
@@ -131,7 +164,7 @@ pub fn client(c: ClientConfig, server: Addr, take username: Bytes, take password
     let mut scratch: Bytes = list.new()
     list.try_reserve(mut scratch, REQUEST_MAX) ?=> Capacity
     list.fill(mut scratch, REQUEST_MAX, 0)
-    Ok(Client(c: c, server: server, username: take username, password: take password, realm: list.new(), nonce: list.new(), algorithms: list.new(), seen_algorithms: false, anonymity: false, algorithm: Md5, key: None, key_realm: list.new(), derivations: 0, state: Allocating, started: false, last_ns: 0, txs: list.new(), refreshing: false, refresh_ns: NEVER, perms: list.new(), chans: list.new(), ind_high: 0, ind_low: 0, close_pending: false, discards: ClientDiscards(malformed: 0, stray: 0, tampered: 0, unauthenticated: 0, unbound_channel: 0, refused: 0), scratch: take scratch))
+    Ok(Client(c: c, server: server, username: take username, password: take password, realm: list.new(), nonce: list.new(), algorithms: list.new(), seen_algorithms: false, anonymity: false, algorithm: Md5, key: None, key_realm: list.new(), derivations: 0, state: Allocating, started: false, last_ns: 0, txs: list.new(), renewal: Due(0), perms: list.new(), chans: list.new(), ind_high: 0, ind_low: 0, close_pending: false, discards: ClientDiscards(malformed: 0, stray: 0, tampered: 0, unauthenticated: 0, unbound_channel: 0, refused: 0), scratch: take scratch))
 }
 
 pub fn client_state(c: Client) -> ClientState {
@@ -235,7 +268,7 @@ pub fn permit(mut c: Client, peer: Addr, now: Now) -> Result[(), TurnError] {
     // (TURN-7), while the permission it installs covers the IP.
     list.try_reserve(mut c.perms, 1) ?=> Capacity
     list.try_reserve(mut c.txs, 1) ?=> Capacity
-    list.push(mut c.perms, Perm(peer: peer, installed: false, busy: true, refresh_ns: NEVER))
+    list.push(mut c.perms, Perm(peer: peer, phase: Installing))
     let tx = new_tx(c, PermitJob(peer))
     list.push(mut c.txs, tx)
     Ok(())
@@ -244,8 +277,15 @@ pub fn permit(mut c: Client, peer: Addr, now: Now) -> Result[(), TurnError] {
 fn number_free(c: Client, n: u16, now_ns: u64) -> bool {
     for i in 0u64 .. list.len(c.chans) {
         let ch = c.chans[i]
-        if ch.number == n && (ch.live || now_ns < ch.lapsed_ns + QUARANTINE_NS) {
-            return false
+        if ch.number == n {
+            match ch.phase {
+                Lapsed(at) => {
+                    if now_ns < at + QUARANTINE_NS {
+                        return false
+                    }
+                },
+                _ => return false,
+            }
         }
     }
     true
@@ -258,15 +298,19 @@ pub fn bind(mut c: Client, peer: Addr, now: Now) -> Result[u16, TurnError] {
     let mut i = 0u64
     while i < list.len(c.chans) {
         let ch = c.chans[i]
-        if ch.live && ch.peer == peer {
-            return Ok(ch.number)
-        }
-        if !ch.live && now.mono_ns >= ch.lapsed_ns + QUARANTINE_NS {
-            let _ = list.swap_remove(mut c.chans, i)
-            continue
-        }
-        if ch.live {
-            live += 1
+        match ch.phase {
+            Lapsed(at) => {
+                if now.mono_ns >= at + QUARANTINE_NS {
+                    let _ = list.swap_remove(mut c.chans, i)
+                    continue
+                }
+            },
+            _ => {
+                if ch.peer == peer {
+                    return Ok(ch.number)
+                }
+                live += 1
+            },
         }
         i += 1
     }
@@ -284,7 +328,7 @@ pub fn bind(mut c: Client, peer: Addr, now: Now) -> Result[u16, TurnError] {
     permit(mut c, peer, now)?
     list.try_reserve(mut c.chans, 1) ?=> Capacity
     list.try_reserve(mut c.txs, 1) ?=> Capacity
-    list.push(mut c.chans, Chan(number: n, peer: peer, live: true, confirmed: false, busy: true, refresh_ns: NEVER, lapsed_ns: 0))
+    list.push(mut c.chans, Chan(number: n, peer: peer, phase: Binding))
     let tx = new_tx(c, BindJob(n, peer))
     list.push(mut c.txs, tx)
     Ok(n)
@@ -322,14 +366,14 @@ pub fn send_to(mut c: Client, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> 
     let Some(p) = find_perm(c, peer) else {
         return Error(Unpermitted(peer))
     }
-    if !c.perms[p].installed {
+    if !perm_installed(c.perms[p].phase) {
         return Error(Unpermitted(peer))
     }
     let len = hi - lo
     let len16: u16 = int.narrow(len)
     for i in 0u64 .. list.len(c.chans) {
         let ch = c.chans[i]
-        if ch.live && ch.confirmed && ch.peer == peer {
+        if chan_confirmed(ch.phase) && ch.peer == peer {
             list.set_word_be(mut slot, lo - 4, ch.number)
             list.set_word_be(mut slot, lo - 2, len16)
             let end = if c.c.transport == Stream {
@@ -497,10 +541,8 @@ fn drop_perm(mut c: Client, peer: Addr) {
 
 fn lapse_chan(mut c: Client, number: u16, now_ns: u64) {
     for i in 0u64 .. list.len(c.chans) {
-        if c.chans[i].live && c.chans[i].number == number {
-            c.chans[i].live = false
-            c.chans[i].confirmed = false
-            c.chans[i].lapsed_ns = now_ns
+        if chan_live(c.chans[i].phase) && c.chans[i].number == number {
+            c.chans[i].phase = Lapsed(now_ns)
         }
     }
 }
@@ -528,50 +570,64 @@ fn refreshes(mut c: Client, now_ns: u64) -> Result[(), TurnError] {
     if !allocated(c) {
         return Ok(())
     }
-    if !c.refreshing && now_ns >= c.refresh_ns {
-        list.try_reserve(mut c.txs, 1) ?=> Capacity
-        let tx = new_tx(c, RefreshJob(c.c.lifetime_s))
-        list.push(mut c.txs, tx)
-        c.refreshing = true
+    if let Due(at) = c.renewal {
+        if now_ns >= at {
+            list.try_reserve(mut c.txs, 1) ?=> Capacity
+            let tx = new_tx(c, RefreshJob(c.c.lifetime_s))
+            list.push(mut c.txs, tx)
+            c.renewal = InFlight
+        }
     }
     for i in 0u64 .. list.len(c.perms) {
-        if c.perms[i].installed && !c.perms[i].busy && now_ns >= c.perms[i].refresh_ns {
-            list.try_reserve(mut c.txs, 1) ?=> Capacity
-            let tx = new_tx(c, PermitJob(c.perms[i].peer))
-            list.push(mut c.txs, tx)
-            c.perms[i].busy = true
+        if let Some(at) = perm_refresh_at(c.perms[i].phase) {
+            if now_ns >= at {
+                list.try_reserve(mut c.txs, 1) ?=> Capacity
+                let tx = new_tx(c, PermitJob(c.perms[i].peer))
+                list.push(mut c.txs, tx)
+                c.perms[i].phase = Refreshing
+            }
         }
     }
     for i in 0u64 .. list.len(c.chans) {
         let ch = c.chans[i]
-        if ch.live && ch.confirmed && !ch.busy && now_ns >= ch.refresh_ns {
-            list.try_reserve(mut c.txs, 1) ?=> Capacity
-            let tx = new_tx(c, BindJob(ch.number, ch.peer))
-            list.push(mut c.txs, tx)
-            c.chans[i].busy = true
+        if let Some(at) = chan_refresh_at(ch.phase) {
+            if now_ns >= at {
+                list.try_reserve(mut c.txs, 1) ?=> Capacity
+                let tx = new_tx(c, BindJob(ch.number, ch.peer))
+                list.push(mut c.txs, tx)
+                c.chans[i].phase = Rebinding
+            }
         }
     }
     Ok(())
 }
 
-fn earliest(c: Client) -> u64 {
-    let mut at = NEVER
+fn sooner(current: Option[u64], at: u64) -> Option[u64] {
+    if let Some(t) = current {
+        if t < at {
+            return current
+        }
+    }
+    Some(at)
+}
+
+fn earliest(c: Client) -> Option[u64] {
+    let mut at: Option[u64] = None
     for i in 0u64 .. list.len(c.txs) {
-        at = order.min(at, tx_due(c, c.txs[i]))
+        at = sooner(at, tx_due(c, c.txs[i]))
     }
     if allocated(c) {
-        if !c.refreshing {
-            at = order.min(at, c.refresh_ns)
+        if let Due(t) = c.renewal {
+            at = sooner(at, t)
         }
         for i in 0u64 .. list.len(c.perms) {
-            if c.perms[i].installed && !c.perms[i].busy {
-                at = order.min(at, c.perms[i].refresh_ns)
+            if let Some(t) = perm_refresh_at(c.perms[i].phase) {
+                at = sooner(at, t)
             }
         }
         for i in 0u64 .. list.len(c.chans) {
-            let ch = c.chans[i]
-            if ch.live && ch.confirmed && !ch.busy {
-                at = order.min(at, ch.refresh_ns)
+            if let Some(t) = chan_refresh_at(c.chans[i].phase) {
+                at = sooner(at, t)
             }
         }
     }
@@ -615,11 +671,9 @@ fn step(mut c: Client, now: Now, r: Random, mut out: Bytes) -> Result[Poll, Turn
         }
         i += 1
     }
-    let at = earliest(c)
-    if at == NEVER {
-        Ok(Idle)
-    } else {
-        Ok(WakeAt(at))
+    match earliest(c) {
+        Some(at) => Ok(WakeAt(at)),
+        None => Ok(Idle),
     }
 }
 

@@ -57,7 +57,12 @@ type Early {
     len: u64
 }
 
-type PairState: key = Frozen | Waiting | Running | Valid | Failed
+type Proof {
+    mapped: Addr,
+    valid_until: u64
+}
+
+type PairState = Frozen | Waiting | Checking(Flight) | Valid(Proof) | Nominating(Proof, Flight) | Failed
 
 type Pair {
     path: Path,
@@ -66,10 +71,43 @@ type Pair {
     local_foundation: u64,
     remote_foundation: Option[u64],
     state: PairState,
-    nominate: bool,
-    mapped: Option[Addr],
-    flight: Option[Flight],
-    valid_until: u64
+    nominate: bool
+}
+
+fn pair_flight(state: PairState) -> Option[Flight] {
+    match state {
+        Checking(f) => Some(f),
+        Nominating(_, f) => Some(f),
+        _ => None,
+    }
+}
+
+fn pair_waiting(state: PairState) -> bool {
+    match state {
+        Waiting => true,
+        _ => false,
+    }
+}
+
+fn pair_frozen(state: PairState) -> bool {
+    match state {
+        Frozen => true,
+        _ => false,
+    }
+}
+
+fn pair_failed(state: PairState) -> bool {
+    match state {
+        Failed => true,
+        _ => false,
+    }
+}
+
+fn pair_valid(state: PairState) -> Option[Proof] {
+    match state {
+        Valid(proof) => Some(proof),
+        _ => None,
+    }
 }
 
 type Flight {
@@ -171,7 +209,7 @@ fn find_pair(pairs: List[Pair], path: Path) -> Option[u64] {
 }
 
 fn new_pair(local: LocalCandidate, peer: Addr, priority: u32, foundation: Option[u64]) -> Pair {
-    Pair(path: path_for(local, peer), local_priority: local.candidate.priority, remote_priority: priority, local_foundation: local.candidate.foundation, remote_foundation: foundation, state: Frozen, nominate: false, mapped: None, flight: None, valid_until: 0)
+    Pair(path: path_for(local, peer), local_priority: local.candidate.priority, remote_priority: priority, local_foundation: local.candidate.foundation, remote_foundation: foundation, state: Frozen, nominate: false)
 }
 
 /// Add a signaled candidate. Pairs with the same base and remote address are pruned.
@@ -329,10 +367,8 @@ fn switch_role(mut agent: Agent, next: Role) {
     agent.role = next
     for i in 0u64 .. list.len(agent.pairs) {
         let mut p = agent.pairs[i]
-        if let Some(_) = p.flight {
-            p.flight = None
+        if let Some(_) = pair_flight(p.state) {
             p.state = Waiting
-            p.mapped = None
         }
         p.nominate = false
         agent.pairs[i] = p
@@ -368,16 +404,17 @@ fn apply_check(mut agent: Agent, local: LocalCandidate, peer: Addr, priority: u3
     }
     let mut pair = agent.pairs[index]
     pair.nominate = pair.nominate || (nominate && agent.role == Controlled)
-    if pair.state == Valid && now < pair.valid_until {
-        if pair.nominate {
-            if let Some(mapped) = pair.mapped {
-                select(mut agent, pair.path, mapped, now, pair.valid_until, jitter)
+    let mut valid = false
+    if let Some(proof) = pair_valid(pair.state) {
+        if now < proof.valid_until {
+            valid = true
+            if pair.nominate {
+                select(mut agent, pair.path, proof.mapped, now, proof.valid_until, jitter)
             }
         }
-    } else {
+    }
+    if !valid {
         pair.state = Waiting
-        pair.flight = None
-        pair.mapped = None
         enqueue(mut agent, index)
     }
     agent.pairs[index] = pair

@@ -36,10 +36,10 @@ fn same_foundation(a: Pair, b: Pair) -> bool {
 
 fn eligible(pairs: List[Pair], index: u64, role: Role) -> bool {
     let p = pairs[index]
-    if p.state == Waiting {
+    if pair_waiting(p.state) {
         return true
     }
-    if p.state != Frozen {
+    if !pair_frozen(p.state) {
         return false
     }
     let priority = pair_priority(p, role)
@@ -49,13 +49,16 @@ fn eligible(pairs: List[Pair], index: u64, role: Role) -> bool {
         if j == index || !same_foundation(p, peer) {
             continue
         }
-        if peer.state == Valid {
+        if let Some(_) = pair_valid(peer.state) {
             return true
         }
-        if peer.state == Running || peer.state == Waiting {
+        if let Some(_) = pair_flight(peer.state) {
             earlier = true
         }
-        if peer.state == Frozen && (peer.path.component < p.path.component || (peer.path.component == p.path.component && (pair_priority(peer, role) > priority || (pair_priority(peer, role) == priority && j < index)))) {
+        if pair_waiting(peer.state) {
+            earlier = true
+        }
+        if pair_frozen(peer.state) && (peer.path.component < p.path.component || (peer.path.component == p.path.component && (pair_priority(peer, role) > priority || (pair_priority(peer, role) == priority && j < index)))) {
             earlier = true
         }
     }
@@ -64,16 +67,19 @@ fn eligible(pairs: List[Pair], index: u64, role: Role) -> bool {
 
 fn can_nominate(pairs: List[Pair], index: u64, role: Role) -> bool {
     let p = pairs[index]
-    if role != Controlling || p.state != Valid {
+    if role != Controlling {
+        return false
+    }
+    if let None = pair_valid(p.state) {
         return false
     }
     let priority = pair_priority(p, role)
     for j in 0u64 .. list.len(pairs) {
         let other = pairs[j]
-        if j == index || other.path.component != p.path.component || other.state == Failed {
+        if j == index || other.path.component != p.path.component || pair_failed(other.state) {
             continue
         }
-        if let Some(f) = other.flight {
+        if let Some(f) = pair_flight(other.state) {
             if f.check.nominate {
                 return false
             }
@@ -116,23 +122,32 @@ fn fail_pair(mut agent: Agent, i: u64) {
     let mut p = agent.pairs[i]
     p.state = Failed
     p.nominate = false
-    p.flight = None
-    p.mapped = None
     agent.pairs[i] = p
 }
 
 fn set_flight(mut agent: Agent, i: u64, f: Flight) {
     let mut p = agent.pairs[i]
-    p.state = Running
-    p.flight = Some(f)
+    if f.check.nominate {
+        match p.state {
+            Valid(proof) => {
+                p.state = Nominating(proof, f)
+            },
+            Nominating(proof, _) => {
+                p.state = Nominating(proof, f)
+            },
+            _ => {
+                p.state = Checking(f)
+            },
+        }
+    } else {
+        p.state = Checking(f)
+    }
     agent.pairs[i] = p
 }
 
 fn requeue(mut agent: Agent, i: u64) {
     let mut p = agent.pairs[i]
     p.state = Waiting
-    p.flight = None
-    p.mapped = None
     agent.pairs[i] = p
     enqueue(mut agent, i)
 }
@@ -169,7 +184,7 @@ fn pop_trigger(mut queue: List[u64]) {
 
 fn outstanding(agent: Agent, tx: Transaction) -> bool {
     for p in agent.pairs {
-        if let Some(f) = p.flight {
+        if let Some(f) = pair_flight(p.state) {
             if f.transaction == tx {
                 return true
             }
@@ -217,7 +232,7 @@ pub fn full_poll(mut agent: Agent, now: u64, entropy: Entropy, mut out: Bytes, m
         if has_selection(agent.seats, p.path.component) {
             continue
         }
-        if let Some(f) = p.flight {
+        if let Some(f) = pair_flight(p.state) {
             if f.attempt == 7 {
                 if now >= f.due {
                     fail_pair(mut agent, i)
@@ -236,14 +251,14 @@ pub fn full_poll(mut agent: Agent, now: u64, entropy: Entropy, mut out: Bytes, m
                 return write_check(mut agent, i, retry, now, mut out, mut scratch)
             }
             wake = earlier_at(wake, due)
-        } else if p.state == Waiting {
+        } else if pair_waiting(p.state) {
             active_checks += 1
         }
     }
     while list.len(agent.triggered) != 0 {
         let index = agent.triggered[0]
         let p = agent.pairs[index]
-        if p.state != Waiting || has_selection(agent.seats, p.path.component) {
+        if !pair_waiting(p.state) || has_selection(agent.seats, p.path.component) {
             pop_trigger(mut agent.triggered)
             continue
         }
@@ -384,7 +399,7 @@ fn full_response(mut agent: Agent, base: Addr, peer: Addr, msg: Message, now: u6
     }
     for i in 0u64 .. list.len(agent.pairs) {
         let p = agent.pairs[i]
-        let Some(f) = p.flight else {
+        let Some(f) = pair_flight(p.state) else {
             continue
         }
         if f.transaction != msg.transaction || has_selection(agent.seats, p.path.component) {
@@ -415,13 +430,11 @@ fn full_response(mut agent: Agent, base: Addr, peer: Addr, msg: Message, now: u6
             return Ok(Processed)
         }
         let mut next = p
-        next.state = Valid
-        next.flight = None
-        next.mapped = Some(mapped)
-        next.valid_until = int.saturating_add(now, CONSENT_LIFE)
+        let valid_until = int.saturating_add(now, CONSENT_LIFE)
+        next.state = Valid(Proof(mapped: mapped, valid_until: valid_until))
         agent.pairs[i] = next
         if (f.check.nominate && agent.role == Controlling) || (p.nominate && agent.role == Controlled) {
-            select(mut agent, p.path, mapped, now, next.valid_until, entropy.jitter)
+            select(mut agent, p.path, mapped, now, valid_until, entropy.jitter)
         }
         return Ok(Processed)
     }

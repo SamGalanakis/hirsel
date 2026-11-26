@@ -15,12 +15,9 @@ became compat-only (`matherr` in 2.27) cannot bind a new link. Zig's pinned
 `abilists` at 2.28 must name exactly the same versioned symbols, and the linked
 stub must define exactly them.
 
-The Darwin kit is one text stub per library (TBD v4) generated from Hirsel's own
-allowlists, tools/native-toolchain/darwin/<library>.symbols, so a name off a list
-is unlinkable. No Apple file is copied. Every libSystem name must be exported for
-arm64 macOS by Zig's pinned libSystem.tbd, and `fsync`/`fdatasync` are refused.
-CoreFoundation and Security carry only what Trust.System's Keychain read calls;
-Zig ships no stub for them, so their names are checked on the Mac day.
+The Apple kit generates TBD v4 stubs from Hirsel's own symbol lists. Zig's
+pinned libSystem.tbd checks the macOS libSystem names. The iOS SDK link checks
+the iOS names using a generated symbol-reference object. No Apple file is copied.
 """
 from pathlib import Path
 import argparse
@@ -30,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -252,15 +250,17 @@ def tbd_exports(text, platform):
     return found
 
 
-def darwin_library(library, allowlist, zig_tbd, platform):
-    """The kit's `<library>.tbd` text from its allowlist, refusing a banned name, an
-    unsorted list and, for libSystem, a name Zig's libSystem.tbd does not export for
-    arm64 macOS."""
-    names = [line.strip() for line in allowlist.splitlines() if line.strip() and not line.startswith("#")]
+def symbol_names(path):
+    return [line for line in map(str.strip, Path(path).read_text().splitlines())
+            if line and not line.startswith("#")]
+
+
+def darwin_library(library, names, zig_tbd, platform, install_name):
+    """Generate a stub from a sorted allowlist of unique Mach-O names."""
     problems = [f"{name}: never importable on Darwin; use {use}" for name, use in DARWIN_BANNED.items() if name in names]
     if names != sorted(set(names)):
         problems.append(f"{library}.symbols is not sorted and unique")
-    if library == "libSystem":
+    if library == "libSystem" and zig_tbd is not None:
         exported = tbd_exports(zig_tbd, platform)
         problems += [f"{name}: not exported by libSystem for arm64 macOS (Zig's libSystem.tbd)"
                      for name in names if name not in exported]
@@ -268,28 +268,39 @@ def darwin_library(library, allowlist, zig_tbd, platform):
         raise SystemExit("\n".join(problems))
     listed = ", ".join(f"'{name}'" for name in names)
     return (f"--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-{platform} ]\n"
-            f"install-name: '{DARWIN_LIBRARIES[library]}'\ncurrent-version: 1\nexports:\n"
-            f"  - targets: [ arm64-{platform} ]\n    symbols: [ {listed} ]\n...\n"), len(names)
+            f"install-name: '{install_name}'\ncurrent-version: 1\nexports:\n"
+            f"  - targets: [ arm64-{platform} ]\n    symbols: [ {listed} ]\n...\n")
 
 
 def darwin_kit(output, allowlists, zig_tbd, apple):
-    """Write the aarch64-apple-darwin row's text stubs under `output` and return
-    its manifest row. Both the Linux kit and a Mac host's own kit
-    (tools/toolchain-dist/darwin_host.py) are made here."""
+    """Write one Apple target's stubs under `output` and return its manifest row."""
+    ios = apple["family"] == "ios"
+    lists = "ios" if ios else "darwin"
+    if ios:
+        zig_tbd = None  # Zig has no iOS exports to check against.
     if set(allowlists) != set(DARWIN_LIBRARIES):
-        raise SystemExit(f"--darwin-symbols must name exactly {sorted(DARWIN_LIBRARIES)}")
+        raise SystemExit(f"{lists} symbol lists must name exactly {sorted(DARWIN_LIBRARIES)}")
     target = output / apple["triple"]
     target.mkdir()
     platform = apple["platform_version_name"]
     files = {}
-    for library in DARWIN_LIBRARIES:
-        tbd, count = darwin_library(library, Path(allowlists[library]).read_text(), zig_tbd, platform)
-        (target / f"{library}.tbd").write_text(tbd)
-        files[f"{library}.tbd"] = {
-            "sha256": sha256(target / f"{library}.tbd"), "symbols": count,
-            "source": f"tools/native-toolchain/darwin/{library}.symbols",
-            "checked": ("exported for arm64 macOS by Zig's libSystem.tbd; no fsync or fdatasync"
-                        if library == "libSystem" else "no Zig stub; checked on the Mac day")}
+    for library, install_name in DARWIN_LIBRARIES.items():
+        names = symbol_names(allowlists[library])
+        stub = target / f"{library}.tbd"
+        if ios:
+            # iOS frameworks have a flat bundle layout.
+            install_name = install_name.replace("/Versions/A/", "/")
+            checked = "Apple SDK link in the simulator gate"
+        elif library == "libSystem":
+            checked = "exported for arm64 macOS by Zig's libSystem.tbd; no fsync or fdatasync"
+        else:
+            checked = "no Zig stub; checked on the Mac day"
+        stub.write_text(darwin_library(library, names, zig_tbd, platform, install_name))
+        files[stub.name] = {
+            "sha256": sha256(stub), "symbols": len(names),
+            "source": f"tools/native-toolchain/{lists}/{library}.symbols",
+            "checked": checked,
+        }
     return {
         "floor": apple["floor"],
         "llvm_triple": apple["llvm_triple"],
@@ -297,6 +308,32 @@ def darwin_kit(output, allowlists, zig_tbd, apple):
         "libraries": [f"{library}.tbd" for library in DARWIN_LIBRARIES],
         "files": files,
     }
+
+
+def symbol_fixture(clang, kit, triple, output):
+    """Write a Mach-O object with a retained relocation to every stub export."""
+    row = json.loads((kit / "manifest.json").read_text())["targets"][triple]
+    names = set()
+    for library in row["libraries"]:
+        names.update(tbd_exports((kit / triple / library).read_text(), row["platform_version_name"]))
+    if not names:
+        raise SystemExit(f"{triple}: no stub exports for symbol fixture")
+    table = "_hirsel_ios_symbol_references"
+    assembly = [".data", ".p2align 3", f".globl {table}", f".no_dead_strip {table}", f"{table}:"]
+    assembly.extend(f".quad {name}" for name in sorted(names))
+    run([clang, f"--target={row['llvm_triple']}", "-x", "assembler", "-c", "-", "-o", output],
+        input="\n".join(assembly) + "\n", text=True)
+
+
+def fixture_main(argv):
+    parser = argparse.ArgumentParser(description="Generate an iOS object for an SDK symbol link.")
+    parser.add_argument("--llvm", type=Path, required=True)
+    parser.add_argument("--kit", type=Path, required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    os.environ["LD_LIBRARY_PATH"] = str(args.llvm / "lib")
+    symbol_fixture(args.llvm / "bin/clang", args.kit, args.target, args.output)
 
 
 def write_manifest(output, manifest):
@@ -314,8 +351,10 @@ def main():
     parser.add_argument("--compiler-rt", type=Path, required=True)
     parser.add_argument("--darwin-symbols", action="append", required=True,
                         help="<library>=<allowlist>, once for each of DARWIN_LIBRARIES")
+    parser.add_argument("--ios-symbols", action="append", required=True,
+                        help="<library>=<allowlist>, once for each of DARWIN_LIBRARIES")
     parser.add_argument("--zig-libsystem", type=Path, required=True, help="Zig's libSystem.tbd")
-    parser.add_argument("--apple-target", type=Path, required=True)
+    parser.add_argument("--apple-targets", type=Path, required=True)
     parser.add_argument("--deb", action="append", default=[], help="<role>:<arch>=<deb>")
     parser.add_argument("--pins", type=Path, required=True, help="the lock naming each input's URL")
     parser.add_argument("--output", type=Path, required=True)
@@ -482,13 +521,16 @@ def main():
                 },
                 "files": files,
             }
-    # aarch64-apple-darwin: one generated text stub; S5's recipe links it with
-    # `ld.lld -flavor darwin -platform_version macos <floor> <floor>`.
-    allowlists = dict(spec.split("=", 1) for spec in args.darwin_symbols)
-    apple = json.loads(args.apple_target.read_text())
-    manifest["targets"][apple["triple"]] = darwin_kit(output, allowlists, args.zig_libsystem.read_text(), apple)
+    allowlists = {"macos": dict(spec.split("=", 1) for spec in args.darwin_symbols),
+                  "ios": dict(spec.split("=", 1) for spec in args.ios_symbols)}
+    zig_tbd = args.zig_libsystem.read_text()
+    for apple in json.loads(args.apple_targets.read_text()).values():
+        manifest["targets"][apple["triple"]] = darwin_kit(output, allowlists[apple["family"]], zig_tbd, apple)
     write_manifest(output, manifest)
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["symbol-fixture"]:
+        fixture_main(sys.argv[2:])
+    else:
+        main()

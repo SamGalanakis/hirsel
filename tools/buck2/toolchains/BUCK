@@ -73,6 +73,17 @@ rust_toolchain(
     visibility = ["PUBLIC"],
 )
 
+# Compiler and device std for the native toolchain proof's verifier object.
+llvm_tree(
+    name = "ios-rustc",
+    srcs = {p.removeprefix("rust-files/"): p for p in glob([
+        "rust-files/bin/rustc",
+        "rust-files/lib/*.so*",
+        "rust-files/lib/rustlib/{}/lib/*".format(APPLE_TARGETS["ios"]["triple"]),
+    ])},
+    visibility = ["root//tools/buck2/native-toolchain:"],
+)
+
 # Everything clang and lld need to run: the C toolchain and every link.
 llvm_tree(
     name = "clang",

@@ -41,6 +41,12 @@ def distribution_license_paths(reads):
 
 
 def distribution_gates(out, call, Raw, reads, slots):
+    for family in ("darwin", "ios"):
+        for library in ("libSystem", "CoreFoundation", "Security"):
+            out.append("\n" + call("export_file", name=f"{family}-{library.lower()}-symbols",
+                                   src=f"tools/native-toolchain/{family}/{library}.symbols", visibility=["PUBLIC"]))
+    out.append("\n" + call("export_file", name="apple-trust-source",
+                           src="crates/hirsel-core-rt/src/host/trust/apple.rs", mode="reference", visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_toolchain_packages", name="toolchain-packages", hirsel="//:hirsel-core-driver-bin-hirsel",
                             packages=toolchain_packages(reads, reads.root)))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",

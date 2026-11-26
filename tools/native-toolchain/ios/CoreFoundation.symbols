@@ -1,0 +1,9 @@
+# CoreFoundation imports of the iOS Trust.System verifier (EMB-7).
+_CFArrayCreate
+_CFDataCreate
+_CFDateCreate
+_CFDateGetAbsoluteTime
+_CFErrorGetCode
+_CFRelease
+_CFStringCreateWithBytes
+_kCFTypeArrayCallBacks

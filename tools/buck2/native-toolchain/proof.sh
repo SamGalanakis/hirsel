@@ -101,4 +101,5 @@ link_darwin -DPROOF_KEYCHAIN
 loads=$("$llvm/bin/llvm-objdump" --macho --private-headers "$build/darwin" | grep -E '^ +name /' | awk '{print $2}' | sort | tr '\n' ' ')
 [[ "$loads" == "/System/Library/Frameworks/Security.framework/Versions/A/Security /usr/lib/dyld /usr/lib/libSystem.B.dylib " ]] || fail "a Keychain read loads $loads, not Security and libSystem"
 echo 'aarch64-apple-darwin: a Keychain read loads Security.framework; a program without one does not'
+python3 "$7" "$llvm" "$kit" "$build" "${@:8}"
 echo 'native toolchain proof: clang, lld (ELF and Mach-O), cross gcc, qemu and Valgrind passed; planted leak refused with exit 97'

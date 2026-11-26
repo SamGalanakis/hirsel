@@ -1,0 +1,9 @@
+# Security imports of the iOS Trust.System verifier (EMB-7).
+_SecCertificateCopyNotValidAfterDate
+_SecCertificateCopyNotValidBeforeDate
+_SecCertificateCreateWithData
+_SecPolicyCreateSSL
+_SecTrustCreateWithCertificates
+_SecTrustEvaluateWithError
+_SecTrustSetNetworkFetchAllowed
+_SecTrustSetVerifyDate

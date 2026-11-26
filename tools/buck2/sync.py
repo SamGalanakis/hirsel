@@ -431,7 +431,7 @@ def first_party(meta: dict) -> str:
         'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_toolchain_packages", "hirsel_test", "hirsel_toolchain_bundle", "hirsel_dev_fixture_cache")\n',
     ]
 
-    out.append("\n" + "\n".join(call("export_file", name=f"darwin-{library.lower()}-symbols", src=f"tools/native-toolchain/darwin/{library}.symbols", visibility=["PUBLIC"]) for library in ("libSystem", "CoreFoundation", "Security")) + "\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])')))
+    out.append("\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])')))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py",
                            args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration", "AppleTargetRecords"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:prepare.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",

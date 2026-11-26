@@ -176,11 +176,19 @@ records the macOS floor (26.0). `:glibc_floor` unpacks the same `libc6` packages
 `<triple>/` loader and library directories for running executables at the
 floor through that loader (never a link input).
 
-The iOS rows (`aarch64-apple-ios`, `aarch64-apple-ios-sim`) are specified in
-`docs/spec/embed.md` (EMB-6) and not built: per-variant `libSystem.tbd`,
-`CoreFoundation.tbd` and `Security.tbd` stubs (the last two for Trust.System's SecTrust
-evaluation) from Hirsel-authored iOS symbol lists, checked against the iOS SDK on the
-simulator gate.
+The iOS rows (`aarch64-apple-ios`, `aarch64-apple-ios-sim`) each hold `libSystem.tbd`,
+`CoreFoundation.tbd` and `Security.tbd` from `ios/<library>.symbols` (EMB-6). Both rows
+take their platform and floor from the Apple target records. `libSystem` drops the macOS
+symbols for operations excluded by EMB-7. The frameworks cover the iOS SecTrust verifier.
+For each variant, generate the SDK-link fixture from a built kit:
+
+```sh
+python3 tools/buck2/native-toolchain/link_kit.py symbol-fixture \
+  --llvm "$LLVM" --kit "$KIT" --target "$TRIPLE" --output "$OBJECT"
+```
+
+The object has a retained reference to every export. Link it as a dylib with the
+variant's iOS SDK and both frameworks to check the lists against Apple (EMB-9).
 
 ```sh
 .buck2/bin/buck2 test //tools/buck2/native-toolchain:proof
@@ -193,7 +201,10 @@ floor, load commands, signature and imports (that an `fsync` import fails to lin
 and that only a Keychain read loads Security.framework), then checks the C executable with the input Valgrind and
 `VALGRIND_LIB`. It checks the pinned clang/lld versions, requires output markers from both
 executables and an explicit zero-error Valgrind summary, then requires
-Valgrind to refuse a planted 32-byte leak with exit 97. A skipped step fails.
+Valgrind to refuse a planted 32-byte leak with exit 97. For iOS it reads the device
+verifier object's undefined symbols with `llvm-nm`, checks the EMB-7 removals, and
+links the reference object for each variant against the corresponding kit stubs.
+A skipped step fails.
 Run it after a pin or unpacking change, so the change exercises the tools on a
 worker.
 

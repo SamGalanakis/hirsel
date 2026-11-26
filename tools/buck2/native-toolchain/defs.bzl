@@ -11,6 +11,10 @@ app/buck2_execute/src/re/uploader.rs `find_missing`)."""
 load("//tools/buck2:platforms.bzl", "budget_constraint", "test_budget_name", "test_executor", "test_request")
 load("@toolchains//:apple.bzl", "APPLE_TARGETS")
 
+LIBRARIES = ["libSystem", "CoreFoundation", "Security"]
+DARWIN_SYMBOLS = {library: "root//:darwin-{}-symbols".format(library.lower()) for library in LIBRARIES}
+IOS_SYMBOLS = {library: "root//:ios-{}-symbols".format(library.lower()) for library in LIBRARIES}
+
 def _unpack(ctx):
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     ctx.actions.run(
@@ -32,7 +36,7 @@ unpack_toolchain = rule(impl = _unpack, attrs = {
 def _link_kit(ctx):
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     pins = ctx.actions.write_json("pins.json", ctx.attrs.pins)
-    apple_target = ctx.actions.write_json("apple-target.json", APPLE_TARGETS["macos"])
+    apple_targets = ctx.actions.write_json("apple-targets.json", APPLE_TARGETS)
     source = lambda name: ctx.attrs.sources[name][DefaultInfo].default_outputs[0]
     command = cmd_args(
         "python3", ctx.attrs._script,
@@ -42,8 +46,9 @@ def _link_kit(ctx):
         "--libunwind", source("libunwind"),
         "--compiler-rt", source("compiler-rt"),
         "--zig-libsystem", source("libSystem-tbd"),
-        "--apple-target", apple_target,
+        "--apple-targets", apple_targets,
         [cmd_args("--darwin-symbols", cmd_args(library, "=", path, delimiter = "")) for library, path in sorted(ctx.attrs._darwin_symbols.items())],
+        [cmd_args("--ios-symbols", cmd_args(library, "=", path, delimiter = "")) for library, path in sorted(ctx.attrs._ios_symbols.items())],
         "--pins", pins,
         "--output", output.as_output(),
     )
@@ -61,15 +66,19 @@ link_kit = rule(impl = _link_kit, attrs = {
     "sources": attrs.dict(attrs.string(), attrs.dep()),
     "pins": attrs.dict(attrs.string(), attrs.dict(attrs.string(), attrs.any())),
     "_script": attrs.source(default = "//tools/buck2/native-toolchain:link_kit.py"),
-    "_darwin_symbols": attrs.dict(attrs.string(), attrs.source(), default = {
-        library: "root//:darwin-{}-symbols".format(library.lower())
-        for library in ["libSystem", "CoreFoundation", "Security"]
-    }),
+    "_darwin_symbols": attrs.dict(attrs.string(), attrs.source(), default = DARWIN_SYMBOLS),
+    "_ios_symbols": attrs.dict(attrs.string(), attrs.source(), default = IOS_SYMBOLS),
 })
 
 def _proof(ctx):
     trees = [dep[DefaultInfo].default_outputs[0] for dep in ctx.attrs.tools]
-    command = cmd_args(ctx.attrs.interpreter, ctx.attrs.script, trees, APPLE_TARGETS["macos"]["triple"])
+    ios_targets = ctx.actions.write_json("ios-targets.json", [row for row in APPLE_TARGETS.values() if row["family"] == "ios"])
+    command = cmd_args(
+        ctx.attrs.interpreter, ctx.attrs.script, trees, APPLE_TARGETS["macos"]["triple"],
+        ctx.attrs._ios_proof, ctx.attrs._link_kit_source, ios_targets,
+        ctx.attrs._ios_rustc[DefaultInfo].default_outputs[0], ctx.attrs._verifier, ctx.attrs._probe,
+        ctx.attrs._macos_libsystem, [ctx.attrs._ios_symbols[library] for library in LIBRARIES],
+    )
     return [DefaultInfo(), ExternalRunnerTestInfo(
         type = "custom", command = [command], env = {"HIRSEL_PLATFORM_CAPTURE": "cold"}, labels = ["gate"],
         run_from_project_root = True, use_project_relative_paths = True,
@@ -81,6 +90,13 @@ _toolchain_proof = rule(impl = _proof, attrs = {
     "tools": attrs.list(attrs.dep()), "script": attrs.source(),
     "request": attrs.list(attrs.string()),
     "interpreter": attrs.string(default = "bash"),
+    "_ios_proof": attrs.source(default = "//tools/buck2/native-toolchain:ios_proof.py"),
+    "_link_kit_source": attrs.source(default = "//tools/buck2/native-toolchain:link-kit-source"),
+    "_ios_rustc": attrs.dep(default = "@toolchains//:ios-rustc"),
+    "_verifier": attrs.source(default = "root//:apple-trust-source"),
+    "_probe": attrs.source(default = "//tools/buck2/native-toolchain:ios_probe.rs"),
+    "_macos_libsystem": attrs.source(default = DARWIN_SYMBOLS["libSystem"]),
+    "_ios_symbols": attrs.dict(attrs.string(), attrs.source(), default = IOS_SYMBOLS),
 })
 
 def toolchain_proof(name, tools, script, interpreter = "bash"):

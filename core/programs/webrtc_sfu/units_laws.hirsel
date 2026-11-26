@@ -290,7 +290,7 @@ fn model_step(mut x: World, case: Case, who: u8, k: u64, negative: bool) {
                     Publisher => Revoke(room: room, id: 1, epoch: 1),
                     Rebound => Revoke(room: room, id: 1, epoch: 1),
                     Subscriber => Revoke(room: room, id: 3, epoch: 1),
-                    Suspend => Suspend(room: room, on: true),
+                    Suspend => Suspend(room: room, cause: Signaling, on: true),
                 }
                 result.unwrap(units.begin(mut x.w.u0, now, change))
             },

@@ -114,7 +114,7 @@ fn w7_reoffered(mut r: router.Router, who: peer.Gen) -> (u64, Bytes) {
     let mut found: Option[(u64, Bytes)] = None
     for take n in router.take_notices(mut r) {
         match take n {
-            Offer(who: w, version: v, text: take t) if w == who => {
+            Offer(who: w, version: v, text: take t) if w.gen == who && w.room == room_id() => {
                 if found != None {
                     fail("one change raised two re-offers")
                 }
@@ -134,7 +134,7 @@ fn w7_shut(mut r: router.Router, who: peer.Gen) -> bool {
     let mut shut = false
     for take n in router.take_notices(mut r) {
         if let Shut(who: w) = n {
-            if w == who {
+            if w.gen == who && w.room == room_id() {
                 shut = true
             }
         }
@@ -371,7 +371,7 @@ fn offered_now(mut r: router.Router, who: peer.Gen) -> Option[(u64, sdp.Descript
     let mut count = 0u64
     for take n in router.take_notices(mut r) {
         match take n {
-            Offer(who: w, version: v, text: take t) if w == who => {
+            Offer(who: w, version: v, text: take t) if w.gen == who && w.room == room_id() => {
                 count += 1
                 if count > 1 {
                     fail("one subscribe raised two re-offers")

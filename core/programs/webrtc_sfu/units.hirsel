@@ -39,7 +39,7 @@ pub type Sent {
     data: Bytes
 }
 
-pub type Event = Fenced(peer.Participant) | Layers(publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Gen, version: u64, text: Bytes) | Shut(who: peer.Gen)
+pub type Event = Fenced(peer.Participant) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
 
 pub opaque type Unit {
     r: router.Router,
@@ -66,6 +66,7 @@ pub opaque type Unit {
     // The control unit's call in flight: its change, the unit that applies it first,
     // whether that unit has answered, the units it still waits on and the answer.
     seq: u64,
+    last_room: u64,
     change: Option[router.Change],
     home: u16,
     rest: bool,
@@ -104,7 +105,7 @@ pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[Contr
     for d in doors {
         list.push(mut all, Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr))
     }
-    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), seq: 0, change: None, home: 0, rest: false, waiting: 0, answer: None, events: list.new()))
+    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), seq: 0, last_room: 0, change: None, home: 0, rest: false, waiting: 0, answer: None, events: list.new()))
 }
 
 pub fn router_of(u: Unit) -> View[router.Router] in u {
@@ -143,7 +144,36 @@ pub fn answer_reoffer(mut u: Unit, room: peer.RoomId, who: peer.Gen, version: u6
 }
 
 pub fn take_events(mut u: Unit) -> List[Event] {
-    replace(mut u.events, list.new())
+    let mut events = replace(mut u.events, list.new())
+    list.retain(mut events, scoped fn(e: Event) -> bool {
+        router.room_open(u.r, event_room(e))
+    })
+    take events
+}
+
+pub fn event_room(e: Event) -> peer.RoomId {
+    match e {
+        Fenced(who) => who.room,
+        Offer(who: who, ..) => who.room,
+        Shut(who: who) => who.room,
+        Layers(room: room, ..) => room,
+        Speakers(room: room, ..) => room,
+    }
+}
+
+/// Allocate the next room identity on unit 0, even after every room has closed.
+pub fn next_room(mut u: Unit) -> Option[peer.RoomId] {
+    if u.index != 0 {
+        return None
+    }
+    let id = int.checked_add(u.last_room, 1u64)?
+    u.last_room = id
+    Some(RoomId(id))
+}
+
+/// Whether the queued build still has an open room on this unit.
+pub fn take_build(mut u: Unit, room: peer.RoomId) -> bool {
+    router.take_build(mut u.r, room)
 }
 
 /// Park a session opened on this unit, its home, until a control call admits it.
@@ -376,7 +406,7 @@ fn deal(mut u: Unit) {
     // The control unit's RTC-6 notices become events.
     for take n in router.take_notices(mut u.r) {
         match take n {
-            Layers(publication: p, mask: mask) => list.push(mut u.events, Layers(publication: p, mask: mask)),
+            Layers(room: room, publication: p, mask: mask) => list.push(mut u.events, Layers(room: room, publication: p, mask: mask)),
             Speakers(room: room, top: top, count: count) => list.push(mut u.events, Speakers(room: room, top: top, count: count)),
             Offer(who: who, version: version, text: take text) => list.push(mut u.events, Offer(who: who, version: version, text: take text)),
             Shut(who: who) => list.push(mut u.events, Shut(who: who)),

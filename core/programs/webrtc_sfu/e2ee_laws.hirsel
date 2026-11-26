@@ -548,7 +548,7 @@ fn e2_notices(mut t: E2Trace, mut r: router.Router) {
         let mut e: Bytes = list.new()
         list.push(mut e, 253u8)
         match n {
-            Layers(publication: _, mask: mask) => {
+            Layers(room: _, publication: _, mask: mask) => {
                 list.push(mut e, 1u8)
                 list.push(mut e, mask)
             },

@@ -81,6 +81,11 @@ pub fn send_log(slots: u32) -> Result[SendLog, Capacity] {
     Ok(SendLog(ring: ring, next: 0, reference: 0))
 }
 
+/// The heap bytes `send_log(slots)` reserves beyond the `SendLog` value (RTC-10 `room_cost`).
+pub fn send_log_heap(slots: u32) -> u64 {
+    option.unwrap(charge.seq(bytes[Sent], int.widen(slots)))
+}
+
 pub fn assign(mut s: SendLog, sent_ns: u64, size: u32) -> u16 {
     let index = s.next
     s.ring[index % list.len(s.ring)] = Sent(tag: index + 1, sent_ns: sent_ns, size: size, state: Unreported)
@@ -312,6 +317,11 @@ pub fn recv_log(slots: u32) -> Result[RecvLog, Capacity] {
         i += 1
     }
     Ok(RecvLog(ring: ring, seen: false, origin: 0, highest: 0, next: 0, reported: false, count: 0))
+}
+
+/// The heap bytes `recv_log(slots)` reserves beyond the `RecvLog` value (RTC-10 `room_cost`).
+pub fn recv_log_heap(slots: u32) -> u64 {
+    option.unwrap(charge.seq(bytes[Arrival], int.widen(slots)))
 }
 
 fn quantize(at_ns: u64, origin: u64) -> i64 {

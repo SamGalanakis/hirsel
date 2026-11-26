@@ -185,7 +185,7 @@ fn flexfec_recovers_drops_without_nack() -> Result[(), router.RouterError] {
     let mut reoffer: Option[(u64, Bytes)] = None
     for take n in router.take_notices(mut r) {
         if let Offer(who: w, version: v, text: take t) = take n {
-            if w == s.who {
+            if w.gen == s.who && w.room == room {
                 reoffer = Some((v, take t))
             }
         }
@@ -365,7 +365,7 @@ fn flexfec_churn_keeps_legs_sending() -> Result[(), router.RouterError] {
         let mut reoffer: Option[(u64, Bytes)] = None
         for take n in router.take_notices(mut r) {
             if let Offer(who: w, version: v, text: take t) = take n {
-                if w == s.who {
+                if w.gen == s.who && w.room == room {
                     reoffer = Some((v, take t))
                 }
             }

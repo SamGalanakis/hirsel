@@ -1,5 +1,5 @@
 // RTC-5's control order and RTC-7's fence: the fence table, the tag check, and what
-// a revoke and a suspend do on a unit.
+// a revoke, a suspend and a close (RTC-10) do on a unit.
 // ---- RTC-7: the fence table and the tag check ----
 fn entry_of(r: Router, ri: u64, id: u64) -> Option[u64] {
     for i in 0u64 .. list.len(r.rooms[ri].ids) {
@@ -15,6 +15,10 @@ pub fn fenced(r: Router, room: peer.RoomId, g: peer.Gen) -> bool {
     let Some(ri) = room_at(r, room) else {
         return false
     }
+    fenced_at(r, ri, g)
+}
+
+fn fenced_at(r: Router, ri: u64, g: peer.Gen) -> bool {
     let Gen(id: id, epoch: epoch) = g
     let Some(e) = entry_of(r, ri, id) else {
         return false
@@ -28,19 +32,49 @@ pub fn fenced(r: Router, room: peer.RoomId, g: peer.Gen) -> bool {
 /// Whether `room` is suspended on this router (RTC-7 `Suspend`).
 pub fn suspended(r: Router, room: peer.RoomId) -> bool {
     match room_at(r, room) {
-        Some(ri) => r.rooms[ri].suspended,
+        Some(ri) => r.rooms[ri].causes != 0,
         None => false,
     }
 }
 
-/// RTC-7's check of one queue entry: its `src` or `dst` is fenced, or its room is
-/// suspended and it carries a `src` (media or repair).
+/// Whether this unit still has the room open.
+pub fn room_open(r: Router, room: peer.RoomId) -> bool {
+    room_at(r, room) != None
+}
+
+/// Stale messages or builds for an open room. After close, late drops still
+/// contribute to Counts.stale and no room record is retained for them.
+pub fn room_stale(r: Router, room: peer.RoomId) -> Option[u64] {
+    let ri = room_at(r, room)?
+    Some(r.rooms[ri].stale)
+}
+
+/// Check room identity before allocating a session for a queued build.
+pub fn take_build(mut r: Router, room: peer.RoomId) -> bool {
+    if room_open(r, room) {
+        return true
+    }
+    count_stale(mut r, None)
+    false
+}
+
+fn count_stale(mut r: Router, ri: Option[u64]) {
+    r.counts.stale += 1
+    if let Some(i) = ri {
+        r.rooms[i].stale += 1
+    }
+}
+
+/// Drop a queue entry for a closed room, a fenced generation, or suspended media.
 pub fn dead(r: Router, t: peer.Tag) -> bool {
-    if fenced(r, t.room, t.dst) {
+    let Some(ri) = room_at(r, t.room) else {
+        return true
+    }
+    if fenced_at(r, ri, t.dst) {
         return true
     }
     match t.src {
-        Some(g) => fenced(r, t.room, g) || suspended(r, t.room),
+        Some(g) => fenced_at(r, ri, g) || r.rooms[ri].causes != 0,
         None => false,
     }
 }
@@ -122,6 +156,10 @@ fn change(mut r: Router, now: u64, take c: Change, fmtp: Option[Shared[Bytes]], 
             open(mut r, room, limits)?
             Ok(Done)
         },
+        Close(room: room) => {
+            close_room(mut r, room, mut out)?
+            Ok(Done)
+        },
         // A refused admission drops the session its home unit parked for it, so a
         // refused or fenced join leaves nothing that answers its credentials.
         Admit(who: who, home: home) => {
@@ -164,8 +202,8 @@ fn change(mut r: Router, now: u64, take c: Change, fmtp: Option[Shared[Bytes]], 
             fence(mut r, room, id, epoch, mut out)?
             Ok(Done)
         },
-        Suspend(room: room, on: on) => {
-            hold(mut r, room, on, mut out)?
+        Suspend(room: room, cause: cause, on: on) => {
+            hold(mut r, room, cause, on, mut out)?
             Ok(Done)
         },
         Playout(room: room, who: who, p: p, delay: delay) => {
@@ -184,6 +222,45 @@ pub fn published_opus_fmtp(r: Router, c: Change) -> Option[Shared[Bytes]] {
         }
     }
     None
+}
+
+/// Fence and erase the room at this unit, including sessions awaiting admission.
+pub fn close_room(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
+    }
+    let _ = list.remove(mut r.rooms, ri)
+    list.retain(mut r.roster, scoped fn(s: Seat) -> bool {
+        s.who.room != room
+    })
+    list.retain(mut r.members, scoped fn(m: Member) -> bool {
+        m.who.room != room
+    })
+    list.retain(mut r.parked, scoped fn(m: Member) -> bool {
+        m.who.room != room
+    })
+    list.retain(mut r.publications, scoped fn(p: Publication) -> bool {
+        p.room != room
+    })
+    list.retain(mut r.downs, scoped fn(d: Down) -> bool {
+        d.room != room
+    })
+    list.retain(mut r.rows, scoped fn(w: Row) -> bool {
+        w.room != room
+    })
+    list.retain(mut r.posts, scoped fn(p: Post) -> bool {
+        carry_room(p.carried.carry) != room
+    })
+    list.retain(mut r.notices, scoped fn(n: Notice) -> bool {
+        match n {
+            Layers(room: id, ..) => id != room,
+            Speakers(room: id, ..) => id != room,
+            Offer(who: who, ..) => who.room != room,
+            Shut(who: who) => who.room != room,
+        }
+    })
+    let _ = purge(r, mut out)
+    Ok(())
 }
 
 // ---- Revoke and suspend on a unit ----
@@ -225,12 +302,22 @@ fn fence(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: peer.Ou
 
 // RTC-7 Suspend and resume: routing stops for the room, and every queued entry with
 // a `src` goes from `out` and from the room's pacers. Ingress stays up.
-fn hold(mut r: Router, room: peer.RoomId, on: bool, mut out: peer.Outbox) -> Result[(), RouterError] {
+fn hold(mut r: Router, room: peer.RoomId, cause: Cause, on: bool, mut out: peer.Outbox) -> Result[(), RouterError] {
     let Some(ri) = room_at(r, room) else {
         return Error(NoRoom)
     }
-    r.rooms[ri].suspended = on
-    if on {
+    let bit: u8 = match cause {
+        Signaling => 1,
+        Lease => 2,
+        Term => 4,
+    }
+    let before = r.rooms[ri].causes
+    r.rooms[ri].causes = if on {
+        before | bit
+    } else {
+        before & ~bit
+    }
+    if on && before == 0 {
         for d in 0u64 .. list.len(r.downs) {
             if r.downs[d].room != room || r.downs[d].home != r.unit {
                 continue

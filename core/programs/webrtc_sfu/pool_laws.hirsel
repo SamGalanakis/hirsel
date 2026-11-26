@@ -1,0 +1,145 @@
+// ---- RTC-10 pooled rooms (W35) ----
+// A browser of `room` on a unit, parked there until a control call admits it.
+fn pool_browser(mut u: units.Unit, seed: u64, id: u64, room: peer.RoomId) -> Client {
+    let at = addr_of(int.narrow(id))
+    let who = peer.Participant(gen: gen_of(id), room: room)
+    let Rig(p: take p, c: _, cs: take cs, out: _) = established_with(seed, session_offer(), who, at, 64)
+    result.unwrap(units.park(mut u, take p))
+    Client(who: gen_of(id), at: at, cs: take cs)
+}
+
+/// Run a control call to its end while unit 1 takes only control: its media inbox
+/// holds whatever was posted to it.
+fn settle_holding(mut w: Units, now: u64, take c: router.Change, mut log: List[Wire]) -> router.Answer {
+    result.unwrap(units.begin(mut w.u0, now, take c))
+    let mut held: List[Wire] = list.new()
+    for _ in 0u64 .. 8 {
+        units.take_control(mut w.u1, now)
+        drain(mut w.u2, now)
+        drain(mut w.u0, now)
+        write(mut w.u1, now, 0, false, mut log, mut held, false)
+        write(mut w.u2, now, 0, false, mut log, mut held, false)
+        write(mut w.u0, now, 0, false, mut log, mut held, false)
+        if let Some(a) = units.finished(mut w.u0) {
+            return result.unwrap(a)
+        }
+    }
+    fail("a control call did not finish")
+}
+
+fn wires_to(log: List[Wire], at: Addr) -> u64 {
+    let mut n = 0u64
+    for wire in log {
+        if wire.to == at {
+            n += 1
+        }
+    }
+    n
+}
+
+// Whether any datagram to `c` opens as RTP under its SRTP end.
+fn got_rtp(mut c: Client, log: List[Wire]) -> bool {
+    for wire in log {
+        if wire.to != c.at || rtcp_like(wire.data) {
+            continue
+        }
+        let mut b = copy_of(wire.data)
+        if let Ok(_) = srtp.unprotect_rtp(mut c.cs, mut b) {
+            return true
+        }
+    }
+    false
+}
+
+/// bug: a closed room's uncommitted datagram is sent after the close, or a message
+/// posted before the close is routed into the room reopened under the same name.
+/// oracle: docs/spec/webrtc.md RTC-10 W35 and Close (a closed room's parked datagrams and
+/// in-flight messages are discarded), with the wire and stale counts derived by hand.
+@test
+fn pool_reopened_room_takes_no_stale_message() -> Result[(), router.RouterError] {
+    let mut log: List[Wire] = list.new()
+    let mut held: List[Wire] = list.new()
+    let mut w = three_units(2930)
+    let a = option.unwrap(units.next_room(mut w.u0))
+    let _ = settle(mut w, 0, Open(room: a, limits: room_limits()), mut log)
+    // Room `a`: publisher P and subscriber Q on unit 0, subscriber S on unit 1.
+    let mut p = pool_browser(mut w.u0, 2931, 1, a)
+    let q = pool_browser(mut w.u0, 2932, 2, a)
+    let s = pool_browser(mut w.u1, 2933, 3, a)
+    let _ = settle(mut w, 0, Admit(who: peer.Participant(gen: p.who, room: a), home: 0), mut log)
+    let _ = settle(mut w, 0, Admit(who: peer.Participant(gen: q.who, room: a), home: 0), mut log)
+    let _ = settle(mut w, 0, Admit(who: peer.Participant(gen: s.who, room: a), home: 1), mut log)
+    let pa = published(settle(mut w, 0, Publish(room: a, who: p.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let _ = settle(mut w, 0, Subscribe(room: a, who: q.who, p: pa, section: 2, target: base), mut log)
+    let _ = settle(mut w, 0, Subscribe(room: a, who: s.who, p: pa, section: 2, target: base), mut log)
+    let mut now = 10 * MS
+    let warm = marked(mut p.cs, 10, MARK_P, false)
+    result.unwrap(units.take_datagram(mut w.u0, now, p.at, warm))
+    quiesce(mut w, now, 2, false, mut log)
+    // Two packets of P: unit 0 queues both for Q and posts two `Media` to unit 1 for
+    // S, where they wait in the inbox. Unit 0's `udp_send` commits one of Q's datagrams.
+    now += 20 * MS
+    for seq in 11u16 .. 13u16 {
+        let pkt = marked(mut p.cs, seq, MARK_P, false)
+        result.unwrap(units.take_datagram(mut w.u0, now, p.at, pkt))
+    }
+    // The pacer lets both out.
+    now += 10 * MS
+    let _ = units.take_timers(mut w.u0, now)
+    list.clear(mut log)
+    write(mut w.u0, now, 1, false, mut log, mut held, false)
+    let suffix = {
+        let queued = units.queued(w.u0)
+        let mut n = 0u64
+        for x in queued.pkts {
+            let UdpTx(to, at: _, len: _, ecn: _) = x
+            if to == q.at {
+                n += 1
+            }
+        }
+        n
+    }
+    if suffix == 0 {
+        fail("no datagram of the room was left uncommitted before the close")
+    }
+    // Close `a`: its uncommitted suffix on unit 0 is purged, not sent.
+    list.clear(mut log)
+    now += MS
+    let _ = settle_holding(mut w, now, Close(room: a), mut log)
+    if wires_to(log, q.at) != 0 {
+        fail("a closed room's uncommitted datagram survived the send fence")
+    }
+    // Reopen under the same name: a new id, and two peers with P's and S's ids and
+    // epochs, homed as they were.
+    let b = option.unwrap(units.next_room(mut w.u0))
+    if b == a {
+        fail("a reopened room reused its room id")
+    }
+    let _ = settle_holding(mut w, now, Open(room: b, limits: room_limits()), mut log)
+    let p2 = pool_browser(mut w.u0, 2934, 1, b)
+    let mut s2 = pool_browser(mut w.u1, 2935, 3, b)
+    let _ = settle_holding(mut w, now, Admit(who: peer.Participant(gen: p2.who, room: b), home: 0), mut log)
+    let _ = settle_holding(mut w, now, Admit(who: peer.Participant(gen: s2.who, room: b), home: 1), mut log)
+    let pb = published(settle_holding(mut w, now, Publish(room: b, who: p2.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let _ = settle_holding(mut w, now, Subscribe(room: b, who: s2.who, p: pb, section: 2, target: base), mut log)
+    // Unit 1 now takes the held messages.
+    list.clear(mut log)
+    let taken = units.counts(w.u1).media
+    let stale = router.counts(units.router_of(w.u1)).stale
+    result.unwrap(units.take_media(mut w.u1, now))
+    write(mut w.u1, now, 0, false, mut log, mut held, false)
+    if units.counts(w.u1).media != taken + 2 {
+        fail("unit 1 did not hold P's two messages until after the reopen")
+    }
+    if router.counts(units.router_of(w.u1)).stale != stale + 2 {
+        fail("the closed room's messages were not counted stale")
+    }
+    if router.room_stale(units.router_of(w.u1), b) != Some(0) {
+        fail("the closed room's messages were counted against the reopened room")
+    }
+    if got_rtp(mut s2, log) {
+        fail("the reopened room's subscriber received the closed room's packet")
+    }
+    Ok(())
+}

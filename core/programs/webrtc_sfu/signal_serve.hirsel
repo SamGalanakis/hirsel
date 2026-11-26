@@ -14,7 +14,6 @@ pub type Service[M] {
     clock: Clock,
     random: Random,
     dial: runner.room_client.Dial,
-    room: peer.RoomId,
     limits: router.RoomLimits,
     embed: Embed[M],
     binds: List[Addr],
@@ -195,6 +194,9 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
         }
         wake = units.turn(mut u, clock, mut sock, wait_until(wake, now)) ?=> |take e| Router(e)
         while let Ok(b) = conn.try_receive(wanted) {
+            if !units.take_build(mut u, b.who.room) {
+                continue
+            }
             let who: peer.Participant = b.who
             let outcome: Result[Built, u32] = match build_on(mut u, home, random, b) {
                 Ok(take made) => Ok(take made),
@@ -211,7 +213,7 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
 /// `Lost` the adapter suspends the room and the client rejoins, every `REJOIN_NS` until
 /// it gets a session, while unit 0 keeps turning.
 pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
-    let Service(tasks: tasks, net: net, clock: clock, random: random, dial: take dial, room: room_id, limits: limits, embed: take embed, binds: binds, policy: policy, session: session, unit_bytes: unit_bytes, until: until, relay: take linked) = take s
+    let Service(tasks: tasks, net: net, clock: clock, random: random, dial: take dial, limits: limits, embed: take embed, binds: binds, policy: policy, session: session, unit_bytes: unit_bytes, until: until, relay: take linked) = take s
     let n: u16 = int.narrow(list.len(binds))
     if n == 0 {
         return Error(Units)
@@ -268,7 +270,10 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
     }
     let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS) ?=> |take e| Router(e)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
-    let mut a = adapter(room_id, limits, take embed, n)
+    let Some(room) = units.next_room(mut u) else {
+        return Error(Units)
+    }
+    let mut a = adapter(room, limits, take embed, n)
     let mut revokes_to: Option[Sender[RelayRevoke]] = None
     if let Some(take link) = take linked {
         let RelayLink(master: take master, plan: take plan, revokes: take to) = take link
@@ -349,6 +354,9 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
         for take b in take_builds(mut a) {
             let who = b.who
             if b.home == 0 {
+                if !units.take_build(mut u, who.room) {
+                    continue
+                }
                 let made = build_on(mut u, home, random, b)
                 built(mut a, who, take made, mut out)
             } else {
@@ -385,4 +393,41 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
         let _ = task.join(take t)
     }
     Ok(())
+}
+
+// ---- RTC-10 Sizing ----
+/// The memory terms of one room (RTC-10): what every unit replicates, what one homed
+/// participant and one remote down-track add, and what the room holds on the control
+/// unit. `bridge` and `cascade` are 0: a room's MoQ bridge (MOQ-8) and cascade links
+/// (CAS-6) are attached after it opens, and their sizes are not functions of these
+/// limits.
+pub type RoomCost {
+    replicated: u64,
+    per_session: u64,
+    per_remote: u64,
+    control: u64,
+    bridge: u64,
+    cascade: u64
+}
+
+/// Price a room from the bounds the router, the sessions and the adapter allocate
+/// with (RTC-10 Sizing). `control` is the adapter and its tables at the room's bounds.
+/// It leaves out what the caller owns or the peers size: the room client's membership,
+/// its Dial, Embed and WebSocket buffers, and SDP and ICE text (`peer.session_heap`).
+pub fn room_cost(limits: router.RoomLimits, session: peer.PeerLimits) -> RoomCost {
+    let per_session = int.saturating_add(router.member_bytes(limits, session), peer.session_heap(session))
+    RoomCost(replicated: router.room_replicated(limits), per_session: per_session, per_remote: router.remote_bytes(session), control: control_bytes(limits), bridge: 0, cascade: 0)
+}
+
+// The adapter and its tables at the room's bounds: a seat and a fence entry per id,
+// a build and a gone entry per participant, a publication per participant and slot.
+fn control_bytes(limits: router.RoomLimits) -> u64 {
+    let ids: u64 = int.widen(limits.ids)
+    let participants: u64 = int.widen(limits.participants)
+    let pubs = participants * int.widen(limits.publications)
+    bytes[Adapter[u8]] + priced(bytes[Seat], ids) + priced(bytes[(peer.Gen, u32)], ids) + priced(bytes[Build], participants) + priced(bytes[peer.Gen], participants) + priced(bytes[Pub], pubs)
+}
+
+fn priced(element: u64, capacity: u64) -> u64 {
+    option.unwrap(charge.seq(element, capacity))
 }

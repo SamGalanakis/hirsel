@@ -98,6 +98,9 @@ pub type Relaying {
     random: Random
 }
 
+// An adapter serves one room, `room`: every `peer.Gen` it keeps (seats, publications,
+// jobs, `fencing`, `gone`, `answers`) names a participant of that room (RTC-10, Every
+// key carries its room).
 pub opaque type Adapter[M] {
     room: peer.RoomId,
     limits: router.RoomLimits,
@@ -432,11 +435,11 @@ fn lose[M](mut a: Adapter[M]) {
     a.scratch_revision = a.applied
     list.retain(mut a.jobs, scoped fn(j: Job) -> bool {
         match j.change {
-            Suspend(room: _, on: false) => false,
+            Suspend(room: _, cause: Signaling, on: false) => false,
             _ => true,
         }
     })
-    list.insert(mut a.jobs, 0, Job(change: Suspend(room: a.room, on: true), after: Quiet))
+    list.insert(mut a.jobs, 0, Job(change: Suspend(room: a.room, cause: Signaling, on: true), after: Quiet))
 }
 
 // The scratch roster is complete at the `PartEnd` of a Part with `snapshot` set: compare
@@ -461,7 +464,7 @@ fn settle[M](mut a: Adapter[M], mut out: List[runner.room_client.RoomOut[M]]) {
     for p in present {
         admit_new(mut a, p, mut out)
     }
-    list.push(mut a.jobs, Job(change: Suspend(room: a.room, on: false), after: Quiet))
+    list.push(mut a.jobs, Job(change: Suspend(room: a.room, cause: Signaling, on: false), after: Quiet))
 }
 
 /// Take one entry of the room (RTC-8), in the order the room client appended them.
@@ -667,6 +670,9 @@ fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.roo
 /// The home unit's outcome for a `Build`: the session is parked there under `who`, or
 /// the build failed and nothing is parked.
 pub fn built[M](mut a: Adapter[M], who: peer.Participant, take result: Result[Built, router.RouterError], mut out: List[runner.room_client.RoomOut[M]]) {
+    if who.room != a.room {
+        return
+    }
     let g = who.gen
     let Gen(id: gid, epoch: gepoch) = g
     let mut was_gone = false
@@ -729,11 +735,14 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
         }
     }
     for take e in units.take_events(mut u) {
+        if units.event_room(e) != a.room {
+            continue
+        }
         match take e {
             Fenced(who) => fenced(mut a, who.gen, mut out),
             // A published mask goes to the publication's owner only (Unicast). While the
             // room is lost the roster is not proven, so neither Layers nor Speakers goes out.
-            Layers(publication: PublicationId(id), mask: mask) => {
+            Layers(room: _, publication: PublicationId(id), mask: mask) => {
                 if a.lost {
                     continue
                 }
@@ -761,7 +770,7 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
             // A re-offer after a collision goes to its peer. While the room is lost it
             // cannot, so the session is treated as refused and rejoins.
             Offer(who: who, version: version, text: take text) => {
-                let Some(i) = seat_of(a, who) else {
+                let Some(i) = seat_of(a, who.gen) else {
                     continue
                 }
                 if a.lost {
@@ -773,7 +782,7 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
                 to_peer(a, p, Offer(version, take text), mut out)
             },
             Shut(who: who) => {
-                if let Some(i) = seat_of(a, who) {
+                if let Some(i) = seat_of(a, who.gen) {
                     rejoin_seat(mut a, i, mut out)
                 }
             },

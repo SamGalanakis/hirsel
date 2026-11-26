@@ -127,7 +127,7 @@ pub fn control(mut rec: Recorder, now: u64, take c: webrtc_sfu.router.Control) -
     match take c {
         Order(seq: seq, change: take change) => {
             let paused = match change {
-                Suspend(room: room, on: true) => Some(room),
+                Suspend(room: room, cause: _, on: true) => Some(room),
                 _ => None,
             }
             let answer = webrtc_sfu.router.apply(mut rec.r, now, take change, mut rec.out)

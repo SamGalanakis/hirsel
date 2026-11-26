@@ -747,10 +747,12 @@ pub opaque type Router
 pub type PublicationId: key = PublicationId(u64)
 pub type Target: key + codec = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
 pub type RoomLimits { participants: u16, ids: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32, pause: bool }
+pub type Cause = Signaling | Lease | Term
 pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Unrepresentable | Peer(peer.PeerError) | Capacity(Capacity)
 
 pub fn router(r: Random) -> Router
 pub fn open_room(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), RouterError]
+pub fn close_room(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError]
 pub fn join(mut r: Router, take session: peer.PeerSession) -> Result[(), RouterError]
 pub fn subscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError]
 pub fn set_target(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError]
@@ -759,13 +761,13 @@ pub fn rebind(mut r: Router, room: peer.RoomId, who: peer.Gen, from: Publication
 pub fn unsubscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Result[(), RouterError]
 pub fn leave(mut r: Router, room: peer.RoomId, who: peer.Gen, mut out: peer.Outbox) -> Result[(), RouterError]
 pub fn revoke(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: peer.Outbox) -> Result[(), RouterError]
-pub fn suspend(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError]
-pub fn resume(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn suspend(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn resume(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outbox) -> Result[(), RouterError]
 ```
 
 ```hirsel signatures webrtc_sfu/units
 pub opaque type Unit
-pub type Event = Fenced(peer.Participant) | Layers(publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Gen, version: u64, text: Bytes) | Shut(who: peer.Gen)
+pub type Event = Fenced(peer.Participant) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
 pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError]
 pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64) -> Result[Unit, router.RouterError]
 pub fn begin(mut u: Unit, now: u64, take c: router.Change) -> Result[(), router.RouterError]
@@ -1329,9 +1331,7 @@ epoch, and it makes a new PeerSession with fresh ICE credentials, a new DTLS ass
 new SRTP schedule.
 
 **Suspend.** `suspend(r, room, cause)` uses the same machinery for a whole room without revoking
-anyone. (The listing in RTC-5 is the built `suspend(r, room, out)`; slice P1 adds `cause:
-Cause`, with `pub type Cause = Signaling | Lease | Term`, to `suspend`, `resume` and
-`router.Change.Suspend`.) A room keeps a set of suspension causes: `Signaling` (RTC-8's signaling loss),
+anyone. `router.Change.Suspend` carries the cause to each unit. A room keeps a set of suspension causes: `Signaling` (RTC-8's signaling loss),
 `Lease` (a cascade edge whose lease ran out, [SFU cascade](sfu_cascade.md) CAS-5) and `Term`
 (a cascade home change, CAS-7). The room is suspended while the set is not empty. Every unit, at its fence point, stops routing media and repair for every session of
 the room, and removes every queued entry whose tag names the room and has a `src`, in step 2's
@@ -1603,8 +1603,8 @@ ffmpeg decode the files in `test-vectors.sh`.
 ## RTC-10: Pooled rooms
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 1); design review
-applied the same day (media-w2-spec-fix-2918). Not built. Slices P1 to P4 and laws W34 to W39
-below.*
+applied the same day (media-w2-spec-fix-2918). Slice P1 built 2026-11-26
+(rtc10-p1-room-keys-2930, law W35); P2 to P4 not built. Slices and laws W34 to W39 below.*
 
 `signal.serve` (S7) serves **one** room: its `Service` names one `RoomId`, one `Dial` and one
 `RoomLimits`, binds `u` ports, and every unit of that service routes only that room. A host
@@ -1693,7 +1693,13 @@ two exact numbers from the same sizes the router allocates with:
   ([SFU cascade](sfu_cascade.md) CAS-6), else 0.
 
 `room_cost` is computed from the same constants the allocations use, never from a table of
-estimates, and law W34 checks it against the charges the units actually record. Each unit
+estimates, and law W34 checks it against the charges the units actually record. As built
+in P1, `signal.room_cost` prices each term from the router's, the session's and the
+adapter's allocation bounds (each `rtp` constructor has a `*_heap` price beside it), and
+leaves out what is sized by input rather than by a bound: a session's agreed SDP, mids,
+ICE credentials and DTLS and SRTP state, and the caller's room-client, Dial, Embed and
+WebSocket buffers. `bridge` and `cascade` are 0 until P3 attaches them. W34 (P3) closes
+the exactness. Each unit
 keeps a **ledger**: `unit_bytes` minus the fixed per-unit cost (socket pool `slots` ×
 `slot_bytes`, out buffers, inboxes, and the router's six pool-wide lists, `rooms`, `roster`,
 `members`, `publications`, `downs` and `rows`, reserved at pool start to their bounds for
@@ -1798,8 +1804,7 @@ that guard against the router itself being wrong. A bug in the router is fixed i
    entry and message of the room as dead. RTC-7's tag check `dead(r, t)` answers `true` for
    any tag whose room the unit does not have open, so the uncommitted suffix of a partial
    `udp_send` and every message posted before the close are purged, not sent.
-   (`router_fence.hirsel`'s `dead` answers `false` there today, because `fenced` and
-   `suspended` answer `false` for an unknown room; slice P1 fixes it.) A `Build` still queued
+   A `Build` still queued
    for the room is discarded when taken and its reservation refunded. A `revoke` or
    `suspend` in flight when its room faults returns `Ok(())` once the `Close` fence has
    completed, because a closed room routes nothing.

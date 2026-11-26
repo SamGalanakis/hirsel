@@ -34,6 +34,11 @@ pub fn group() -> Result[Group, Capacity] {
     Ok(Group(ssrc: 0, base: 0, mask: 0, count: 0, size: 0, head: 0, length: 0, ts: 0, last: 0, body: take body))
 }
 
+/// The heap bytes `group` reserves beyond the `Group` value (RTC-10 `room_cost`).
+pub fn group_heap() -> u64 {
+    option.unwrap(charge.seq(1u64, LONGEST))
+}
+
 /// How many packets the group holds.
 pub fn count(g: Group) -> u8 {
     g.count

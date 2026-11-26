@@ -49,6 +49,13 @@ pub fn counter(width: u8, mode: Mode, slots: u32) -> Result[Counter, Capacity] {
     Ok(Counter(width: width, mode: mode, keys: keys, outs: outs, states: states, cursor: 0, evicted: false, evicted_max: 0, next: 0, emitted: false, high: None, offset: None))
 }
 
+/// The heap bytes `counter(_, _, slots)` reserves beyond the `Counter` value
+/// (RTC-10 `room_cost`).
+pub fn counter_heap(slots: u32) -> u64 {
+    let n: u64 = int.widen(slots)
+    option.unwrap(charge.seq(bytes[i64], n)) + option.unwrap(charge.seq(bytes[u64], n)) + option.unwrap(charge.seq(bytes[u8], n))
+}
+
 fn period(c: Counter) -> u64 {
     let w: u64 = int.widen(c.width)
     1u64 << w

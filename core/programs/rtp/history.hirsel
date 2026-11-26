@@ -30,6 +30,12 @@ pub fn history[P](slots: u32, max_age_ns: u64) -> Result[History[P], Capacity] {
     Ok(History(slots: rows, max_age_ns: max_age_ns, gate: 0))
 }
 
+/// The heap bytes `history(slots, _)` reserves beyond the `History[P]` value (RTC-10
+/// `room_cost`); `of` only names `P`. A `Columns` charges as a `List` of its rows (MEM-24).
+pub fn history_heap[P](slots: u32, of: Option[P]) -> u64 {
+    option.unwrap(charge.seq(bytes[Slot[P]], int.widen(slots)))
+}
+
 pub fn put[P](mut h: History[P], index: u64, at_ns: u64, take p: P) -> Option[P] {
     let i = index % columns.len(h.slots)
     let Slot(value: take old, ..) = columns.set(mut h.slots, i, Slot(index: index, sent: at_ns, resent: EMPTY, value: Some(p)))

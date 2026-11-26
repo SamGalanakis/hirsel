@@ -242,7 +242,7 @@ fn layers(mut r: Router, pi: u64) {
     }
     let id = r.publications[pi].id
     if r.unit == 0 {
-        list.push(mut r.notices, Layers(publication: id, mask: int.narrow(mask)))
+        list.push(mut r.notices, Layers(room: r.publications[pi].room, publication: id, mask: int.narrow(mask)))
     } else {
         let room = r.publications[pi].room
         let owner = r.publications[pi].owner

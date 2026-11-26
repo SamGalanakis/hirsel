@@ -97,7 +97,7 @@ fn service_answers_over_the_room(c: Clock, random: Random, tasks: Tasks, net: Ne
     let mut binds: List[Addr] = list.new()
     list.push(mut binds, loopback(0))
     list.push(mut binds, loopback(0))
-    let service = signal.Service(tasks: tasks, net: net, clock: c, random: random, dial: sfu_dial(tasks, net, c, random, address), room: room_id(), limits: revoke_limits(), embed: take embed, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000), unit_bytes: 16777216, until: until, relay: None)
+    let service = signal.Service(tasks: tasks, net: net, clock: c, random: random, dial: sfu_dial(tasks, net, c, random, address), limits: revoke_limits(), embed: take embed, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000), unit_bytes: 16777216, until: until, relay: None)
     let served = signal.serve(take service)
     let answer = result.unwrap(task.join(take browser))
     let _ = runner.fixture.end(take running, 5000u64)

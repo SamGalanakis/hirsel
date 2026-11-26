@@ -247,7 +247,7 @@ fn dynacast_mask() -> Result[(), router.RouterError] {
         list.clear(mut log)
         for event in units.take_events(mut f.u0) {
             match event {
-                Layers(publication: id, mask: bits) => list.push(mut seen, (k, id, bits)),
+                Layers(room: _, publication: id, mask: bits) => list.push(mut seen, (k, id, bits)),
                 _ => fail("only Layers events are raised"),
             }
         }
@@ -440,7 +440,7 @@ fn allocation_drops_a_stream() -> Result[(), router.RouterError] {
         list.clear(mut log)
         for event in units.take_events(mut f.u0) {
             match event {
-                Layers(publication: id, mask: bits) => {
+                Layers(room: _, publication: id, mask: bits) => {
                     list.push(mut seen, (k, id, bits))
                     // The publisher follows the published mask (RTC-6): a stream it
                     // stops or starts again changes its allocation.

@@ -122,6 +122,12 @@ pub fn ring(depth: u8) -> Result[Ring, Capacity] {
     Ok(Ring(slots: take slots, index: take index, ts: take ts))
 }
 
+/// The heap bytes `ring(depth)` reserves beyond the `Ring` value (RTC-10 `room_cost`).
+pub fn ring_heap(depth: u8) -> u64 {
+    let n: u64 = int.widen(depth)
+    option.unwrap(charge.seq(bytes[Bytes], n)) + n * option.unwrap(charge.seq(1u64, MAX_BLOCK)) + option.unwrap(charge.seq(bytes[u64], n)) + option.unwrap(charge.seq(bytes[u32], n))
+}
+
 /// Keep the primary `pkt[from .. from + len]` of the packet at `index` and
 /// timestamp `ts`. A primary too long for a redundant block clears its slot.
 pub fn keep(mut r: Ring, index: u64, ts: u32, pkt: Bytes, from: u64, len: u64) {

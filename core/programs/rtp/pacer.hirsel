@@ -92,6 +92,12 @@ pub fn pacer[Q](slots: u32, factor: f64, queue_limit_ns: u64, header: u32) -> Re
     Ok(Pacer(factor: factor, queue_limit_ns: queue_limit_ns, header: header, target_bps: 0, padding_bps: 0, debt: 0.0, padding_debt: 0.0, last_ns: None, cluster: None, queued: 0, count: 0, pushed_hi: 0, pushed_lo: 0, entries: entries, ends: ends, free: 0))
 }
 
+/// The heap bytes `pacer(slots, ..)` reserves beyond the `Pacer[Q]` value (RTC-10
+/// `room_cost`); `of` only names `Q`. A `Columns` charges as a `List` of its rows (MEM-24).
+pub fn pacer_heap[Q](slots: u32, of: Option[Q]) -> u64 {
+    option.unwrap(charge.seq(bytes[Entry[Q]], int.widen(slots))) + option.unwrap(charge.seq(bytes[Ends], CLASSES))
+}
+
 pub fn set_rate[Q](mut p: Pacer[Q], target_bps: u64, padding_bps: u64) {
     p.target_bps = target_bps
     p.padding_bps = padding_bps

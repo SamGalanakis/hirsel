@@ -1,0 +1,46 @@
+// RTC-10 Sizing: the memory terms of one room, from the bounds the router allocates
+// with. `signal.room_cost` adds the control unit's terms.
+/// What every unit allocates for a room at `Open` and as the room fills to its
+/// bounds: the room record with its fence table and top speakers, a roster row per
+/// participant, a down-track row per down-track the room allows, and every
+/// publication row with its encodings and its Opus RED ring (RTP-13), which every unit
+/// keeps.
+pub fn room_replicated(limits: RoomLimits) -> u64 {
+    let ids: u64 = int.widen(limits.ids)
+    let participants: u64 = int.widen(limits.participants)
+    let rows = participants * int.widen(limits.publications)
+    let downs: u64 = int.widen(limits.down_tracks)
+    let publication = bytes[Publication] + cost_seq(bytes[Encoding], ENCODINGS_MAX) + rtp.red.ring_heap(rtp.red.MAX_DISTANCE)
+    bytes[Room] + cost_seq(bytes[u64], ids) + cost_seq(bytes[Option[u64]], ids) + cost_seq(bytes[u64], TOP) + participants * bytes[Seat] + downs * bytes[Down] + rows * publication
+}
+
+/// What one admitted participant adds on its home unit beyond its session's heap
+/// (`peer.session_heap`): its member row with the session value, its 5-tuple row, and
+/// the ingress RTX ring of each publication it may make (`floor(rtx_bytes / 1500)`
+/// slots of 1,500 bytes). It saturates: `rtx_bytes` is the caller's.
+pub fn member_bytes(limits: RoomLimits, session: peer.PeerLimits) -> u64 {
+    let n = session.rtx_bytes / RING_SLOT
+    let slots = int.saturating_mul(n, cost_seq(1, RING_SLOT))
+    let rtx_ring = int.saturating_add(int.saturating_add(saturated(charge.seq(bytes[Bytes], n)), slots), saturated(charge.seq(bytes[u64], n)))
+    int.saturating_add(bytes[Member] + bytes[Row], int.saturating_mul(int.widen(limits.publications), rtx_ring))
+}
+
+/// What one down-track on a unit other than its publisher's home adds there: the
+/// `Shared` packets the home's fan-out hands it, up to its pacer's bound (RTC-5 step
+/// 3), each at most one ring slot. The RED ring is in `room_replicated`.
+pub fn remote_bytes(session: peer.PeerLimits) -> u64 {
+    let packet = saturated(charge.shared(bytes[Bytes])) + cost_seq(1, RING_SLOT)
+    let n: u64 = int.widen(session.pacer_packets)
+    n * packet
+}
+
+fn cost_seq(element: u64, capacity: u64) -> u64 {
+    option.unwrap(charge.seq(element, capacity))
+}
+
+fn saturated(x: Option[u64]) -> u64 {
+    match x {
+        Some(v) => v,
+        None => 0xffffffffffffffff,
+    }
+}

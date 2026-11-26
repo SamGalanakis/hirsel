@@ -397,6 +397,11 @@ const RTP_HEADER: u32 = 12
 
 const STUN_BUFFER: u64 = 576
 
+// Each session's transport-wide congestion control logs (RTP-12), in packets.
+const TWCC_SLOTS: u32 = 1024
+
+const CNAME_BYTES: u64 = 16
+
 /// RFC 9443 section 3 (updating RFC 7983 section 7) and RFC 5761 section 4, from
 /// at most the first two bytes.
 pub fn classify(prefix: Bytes) -> Class {
@@ -509,6 +514,34 @@ fn copied(b: Bytes) -> Bytes {
     out
 }
 
+/// The heap bytes one session at `limits` reserves beyond its `PeerSession` value
+/// (RTC-10 `room_cost`), from the bounds `open` and `add_track` allocate with: its
+/// sections, congestion logs, pacer and payload slab, egress scratch, and a full set of
+/// down-tracks. Not included, because their size is the peer's input and not a bound:
+/// the agreed SDP and section mids, ICE credentials, and DTLS and SRTP state.
+pub fn session_heap(limits: PeerLimits) -> u64 {
+    let n: u64 = int.widen(limits.pacer_packets)
+    let tracks: u64 = int.widen(limits.down_tracks)
+    let paced: Option[Paced] = None
+    let mut sum = seq_of(bytes[Section], int.widen(limits.sections))
+    sum += rtp.twcc.recv_log_heap(TWCC_SLOTS) + rtp.twcc.send_log_heap(TWCC_SLOTS) + seq_of(1, CNAME_BYTES)
+    sum += rtp.pacer.pacer_heap(limits.pacer_packets, paced)
+    sum += seq_of(bytes[Bytes], n) + n * seq_of(1, SLOT) + seq_of(bytes[u32], n) + seq_of(bytes[Paced], n)
+    sum += seq_of(1, SLOT + 128) + 2 * seq_of(1, SLOT) + seq_of(1, 2) + seq_of(1, DD_LIMIT)
+    sum + seq_of(bytes[Track], tracks) + tracks * track_heap()
+}
+
+// What one down-track's `Track` reserves beyond its value: its history, rewrite,
+// codec counters and FlexFEC group.
+fn track_heap() -> u64 {
+    let record: Option[Record] = None
+    rtp.history.history_heap(HISTORY_SLOTS, record) + rtp.rewrite.rewrite_heap(REWRITE_RANGES, REWRITE_FRAMES) + 3 * rtp.counter.counter_heap(COUNTER_SLOTS) + rtp.fec.group_heap()
+}
+
+fn seq_of(element: u64, capacity: u64) -> u64 {
+    option.unwrap(charge.seq(element, capacity))
+}
+
 /// Open the session for one participant on its home unit's socket `base`.
 /// `cert` is the unit's DTLS identity (`dtls.share_identity`), `r` its randomness.
 pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base: Addr, limits: PeerLimits, agreed: sdp.Negotiated, participant: Participant) -> Result[PeerSession, PeerError] {
@@ -517,9 +550,9 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
     let mut bases: List[stun_ice.Local] = list.new()
     list.push(mut bases, stun_ice.Local(component: 1, base: base))
     let ice = stun_ice.lite(take credentials, take bases) ?=> |take e| Ice(e)
-    let recv_log = rtp.twcc.recv_log(1024) ?=> |c| Capacity(c)
-    let send_log = rtp.twcc.send_log(1024) ?=> |c| Capacity(c)
-    let mut cname: Bytes = list.with_capacity(16)
+    let recv_log = rtp.twcc.recv_log(TWCC_SLOTS) ?=> |c| Capacity(c)
+    let send_log = rtp.twcc.send_log(TWCC_SLOTS) ?=> |c| Capacity(c)
+    let mut cname: Bytes = list.with_capacity(CNAME_BYTES)
     list.append(mut cname, b"hirsel-sfu")
     let pacer: rtp.pacer.Pacer[Paced] = rtp.pacer.pacer(limits.pacer_packets, PACE_FACTOR, QUEUE_LIMIT_NS, RTP_HEADER) ?=> |c| Capacity(c)
     let n: u64 = int.widen(limits.pacer_packets)

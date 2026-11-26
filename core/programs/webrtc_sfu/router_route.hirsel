@@ -131,7 +131,7 @@ fn reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen) {
         Ok(None) => (),
         Ok(Some(version)) => {
             if r.unit == 0 {
-                list.push(mut r.notices, Offer(who: who, version: version, text: take text))
+                list.push(mut r.notices, Offer(who: peer.Participant(gen: who, room: room), version: version, text: take text))
             } else {
                 post(mut r, 0, Offer(room: room, src: who, version: version), shared.new(take text))
             }
@@ -144,7 +144,7 @@ fn reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen) {
 // the participant, which closes the session, and the participant rejoins.
 fn shut(mut r: Router, room: peer.RoomId, who: peer.Gen) {
     if r.unit == 0 {
-        list.push(mut r.notices, Shut(who: who))
+        list.push(mut r.notices, Shut(who: peer.Participant(gen: who, room: room)))
     } else {
         post_bare(mut r, 0, Shut(room: room, src: who))
     }
@@ -569,24 +569,44 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
     Ok(())
 }
 
+fn carry_room(c: Carry) -> peer.RoomId {
+    match c {
+        Media(room: room, ..) => room,
+        Wanted(room: room, ..) => room,
+        Layers(room: room, ..) => room,
+        Score(room: room, ..) => room,
+        Ask(room: room, ..) => room,
+        Reply(room: room, ..) => room,
+        Key(room: room, ..) => room,
+        Sender(room: room, ..) => room,
+        Offer(room: room, ..) => room,
+        Shut(room: room, ..) => room,
+        Answer(room: room, ..) => room,
+    }
+}
+
 /// Take one message another unit posted (RTC-5), checked against this unit's fences
 /// first (RTC-7 step 4): a `Media`, `Ask` or `Reply` whose `src` or `dst` is fenced,
 /// or that carries media of a suspended room, is dropped and counted `stale`.
 pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) -> Result[(), RouterError] {
     let Carried(carry: carry, packet: packet) = take msg
+    let Some(ri) = room_at(r, carry_room(carry)) else {
+        count_stale(mut r, None)
+        return Ok(())
+    }
     match carry {
         Media(room: room, publication: publication, src: src, m: m, handle: handle, speaking: talking, rate: rate, dropped: dropped) => {
-            if fenced(r, room, src) || suspended(r, room) {
-                r.counts.stale += 1
+            if fenced_at(r, ri, src) || r.rooms[ri].causes != 0 {
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             let Some(pi) = publication_at(r, room, publication) else {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             let e: u64 = int.widen(m.encoding)
             if e >= list.len(r.publications[pi].encodings) {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             r.publications[pi].encodings[e].ssrc = m.ssrc
@@ -605,25 +625,25 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             spread(mut r, now, pi, m, handle, talking, packet, mut out)
         },
         Wanted(room: room, publication: publication, src: src, unit: unit, mask: mask) => {
-            let Some(pi) = live(mut r, room, publication, src) else {
+            let Some(pi) = live(mut r, ri, room, publication, src) else {
                 return Ok(())
             }
             if r.publications[pi].home != r.unit {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             wanted(mut r, pi, unit, mask, now)
             Ok(())
         },
         Layers(room: room, publication: publication, src: src, mask: mask) => {
-            let Some(_) = live(mut r, room, publication, src) else {
+            let Some(_) = live(mut r, ri, room, publication, src) else {
                 return Ok(())
             }
-            list.push(mut r.notices, Layers(publication: publication, mask: mask))
+            list.push(mut r.notices, Layers(room: room, publication: publication, mask: mask))
             Ok(())
         },
         Score(room: room, publication: publication, src: src, score: score, murmur: murmur) => {
-            let Some(pi) = live(mut r, room, publication, src) else {
+            let Some(pi) = live(mut r, ri, room, publication, src) else {
                 return Ok(())
             }
             r.publications[pi].voice.score = score
@@ -632,12 +652,12 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             gate(mut r, room, now, mut out)
         },
         Ask(room: room, publication: publication, src: src, dst: dst, ask: ask) => {
-            if fenced(r, room, src) || fenced(r, room, dst) || suspended(r, room) {
-                r.counts.stale += 1
+            if fenced_at(r, ri, src) || fenced_at(r, ri, dst) || r.rooms[ri].causes != 0 {
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             let Some(pi) = publication_at(r, room, publication) else {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             if !holds(r.publications[pi].ring, ask.handle) {
@@ -649,7 +669,7 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             list.try_reserve(mut plain, list.len(r.publications[pi].ring.slots[k])) ?=> |c| Capacity(c)
             list.append(mut plain, r.publications[pi].ring.slots[k])
             let Some(si) = seat_at(r, room, dst) else {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             let to = r.roster[si].home
@@ -659,12 +679,12 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
         Reply(room: room, publication: publication, src: src, dst: dst, ask: ask) => {
             // Both ends again: the home checked `src` when it answered, and either
             // may have been fenced here since (RTC-5).
-            if fenced(r, room, src) || fenced(r, room, dst) || suspended(r, room) {
-                r.counts.stale += 1
+            if fenced_at(r, ri, src) || fenced_at(r, ri, dst) || r.rooms[ri].causes != 0 {
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             let Some(mi) = member_at(r, room, dst) else {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             let _ = peer.resend(mut r.members[mi].session, now, ask, packet, mut out) ?=> |take e| Peer(e)
@@ -672,42 +692,42 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
         },
         Key(room: room, publication: publication, encoding: encoding, why: why) => {
             let Some(pi) = publication_at(r, room, publication) else {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             if r.publications[pi].home != r.unit {
-                r.counts.stale += 1
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             keyframe(mut r, now, pi, encoding, why, mut out)
         },
         Offer(room: room, src: src, version: version) => {
-            if fenced(r, room, src) {
-                r.counts.stale += 1
+            if fenced_at(r, ri, src) || seat_at(r, room, src) == None {
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
-            list.push(mut r.notices, Offer(who: src, version: version, text: clone(packet)))
+            list.push(mut r.notices, Offer(who: peer.Participant(gen: src, room: room), version: version, text: clone(packet)))
             Ok(())
         },
         Answer(room: room, dst: dst, version: version) => {
-            if fenced(r, room, dst) {
-                r.counts.stale += 1
+            if fenced_at(r, ri, dst) || member_at(r, room, dst) == None {
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             settle_answer(mut r, room, dst, version, packet)
             Ok(())
         },
         Shut(room: room, src: src) => {
-            if fenced(r, room, src) {
-                r.counts.stale += 1
+            if fenced_at(r, ri, src) || seat_at(r, room, src) == None {
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
-            list.push(mut r.notices, Shut(who: src))
+            list.push(mut r.notices, Shut(who: peer.Participant(gen: src, room: room)))
             Ok(())
         },
         Sender(room: room, publication: publication, owner: owner, source: origin, info: info) => {
-            if fenced(r, room, owner) {
-                r.counts.stale += 1
+            if fenced_at(r, ri, owner) {
+                count_stale(mut r, Some(ri))
                 return Ok(())
             }
             for d in 0u64 .. list.len(r.downs) {
@@ -720,23 +740,22 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             }
             Ok(())
         },
-        _ => Ok(()),
     }
 }
 
 // The publication an RTC-6 message names, unless a fence covers its publisher or it
 // is gone, which counts the message `stale` (RTC-7 step 4).
-fn live(mut r: Router, room: peer.RoomId, publication: PublicationId, src: peer.Gen) -> Option[u64] {
-    if fenced(r, room, src) {
-        r.counts.stale += 1
+fn live(mut r: Router, ri: u64, room: peer.RoomId, publication: PublicationId, src: peer.Gen) -> Option[u64] {
+    if fenced_at(r, ri, src) {
+        count_stale(mut r, Some(ri))
         return None
     }
     let Some(pi) = publication_at(r, room, publication) else {
-        r.counts.stale += 1
+        count_stale(mut r, Some(ri))
         return None
     }
     if r.publications[pi].owner != src {
-        r.counts.stale += 1
+        count_stale(mut r, Some(ri))
         return None
     }
     Some(pi)

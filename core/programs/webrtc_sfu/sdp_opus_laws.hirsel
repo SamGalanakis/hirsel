@@ -21,7 +21,7 @@ fn opus_wire_section(s: sdp.Section, mid: u8, dir: sdp.Direction, pt: u8, fmtp: 
 fn opus_reoffer(mut u: units.Unit, who: peer.Gen, mut d: sdp.Description) -> Result[u64, sdp.SdpError] {
     for take notice in units.take_events(mut u) {
         if let Offer(who: dst, version: version, text: text) = notice {
-            if dst == who {
+            if dst.gen == who && dst.room == room_id() {
                 sdp.parse(text, mut d)?
                 return Ok(version)
             }
@@ -172,7 +172,7 @@ fn sdp_opus_reused_section_announces_ssrc() -> Result[(), sdp.SdpError] {
     let mut third = 0u64
     for take notice in units.take_events(mut w.u0) {
         if let Offer(who: dst, version: version, text: text) = notice {
-            if dst == b.who {
+            if dst.gen == b.who && dst.room == room {
                 sdp.parse(text, mut d)?
                 third = version
             }

@@ -168,7 +168,8 @@ type Member {
 type Room {
     id: peer.RoomId,
     limits: RoomLimits,
-    suspended: bool,
+    causes: u8,
+    stale: u64,
     // Fence entries (RTC-7): one per admitted id, reserved at its first join and
     // kept until the room closes. `fenced` is the highest revoked epoch, if any.
     ids: List[u64],
@@ -200,7 +201,9 @@ pub type Shape: key {
 /// call as one change on the unit that holds the session it touches first, then on
 /// every other unit, in one order. A session is opened on its home unit and parked
 /// there (`park`); `Admit` admits it.
-pub type Change: cross = Open(room: peer.RoomId, limits: RoomLimits) | Admit(who: peer.Participant, home: u16) | Publish(room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, shape: Option[Shape]) | Subscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target) | Retarget(room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target) | Rebind(room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target) | Unsubscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId) | Leave(room: peer.RoomId, who: peer.Gen) | Revoke(room: peer.RoomId, id: u64, epoch: u64) | Suspend(room: peer.RoomId, on: bool) | Playout(room: peer.RoomId, who: peer.Gen, p: PublicationId, delay: Option[peer.Delay])
+pub type Cause = Signaling | Lease | Term
+
+pub type Change: cross = Open(room: peer.RoomId, limits: RoomLimits) | Close(room: peer.RoomId) | Admit(who: peer.Participant, home: u16) | Publish(room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, shape: Option[Shape]) | Subscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target) | Retarget(room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target) | Rebind(room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target) | Unsubscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId) | Leave(room: peer.RoomId, who: peer.Gen) | Revoke(room: peer.RoomId, id: u64, epoch: u64) | Suspend(room: peer.RoomId, cause: Cause, on: bool) | Playout(room: peer.RoomId, who: peer.Gen, p: PublicationId, delay: Option[peer.Delay])
 
 /// What a unit answers when it has applied a change.
 pub type Answer: cross = Done | Shaped(id: PublicationId, shape: Shape)
@@ -251,7 +254,7 @@ pub type Post: cross {
 
 /// What the control unit raises for the signaling adapter (RTC-6): a publication's
 /// published wanted mask, and a room's top speakers by participant id.
-pub type Notice: cross = Layers(publication: PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Gen, version: u64, text: Bytes) | Shut(who: peer.Gen)
+pub type Notice: cross = Layers(room: peer.RoomId, publication: PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
 
 pub opaque type Router {
     random: Random,
@@ -464,12 +467,12 @@ pub fn revoke(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: pe
 }
 
 /// Stop routing media and repair for the whole room (RTC-7, Suspend); ingress stays up.
-pub fn suspend(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError] {
-    hold(mut r, room, true, mut out)
+pub fn suspend(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outbox) -> Result[(), RouterError] {
+    hold(mut r, room, cause, true, mut out)
 }
 
-pub fn resume(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError] {
-    hold(mut r, room, false, mut out)
+pub fn resume(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outbox) -> Result[(), RouterError] {
+    hold(mut r, room, cause, false, mut out)
 }
 
 // ---- What each change does on a unit ----
@@ -495,7 +498,7 @@ fn open(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), Rout
     list.try_reserve(mut ids, n) ?=> |c| Capacity(c)
     list.try_reserve(mut fences, n) ?=> |c| Capacity(c)
     list.try_reserve(mut r.rooms, 1) ?=> |c| Capacity(c)
-    list.push(mut r.rooms, Room(id: room, limits: limits, suspended: false, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
+    list.push(mut r.rooms, Room(id: room, limits: limits, causes: 0, stale: 0, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
     Ok(())
 }
 
@@ -506,7 +509,7 @@ fn admit(mut r: Router, who: peer.Participant, home: u16) -> Result[(), RouterEr
     let Some(ri) = room_at(r, who.room) else {
         return Error(NoRoom)
     }
-    if r.rooms[ri].suspended {
+    if r.rooms[ri].causes != 0 {
         return Error(Suspended)
     }
     let Gen(id: id, epoch: epoch) = who.gen
@@ -759,7 +762,7 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
     let Some(ri) = room_at(r, room) else {
         return Error(NoRoom)
     }
-    if r.rooms[ri].suspended {
+    if r.rooms[ri].causes != 0 {
         return Error(Suspended)
     }
     let Some(si) = seat_at(r, room, who) else {

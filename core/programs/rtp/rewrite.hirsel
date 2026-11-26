@@ -108,6 +108,12 @@ pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u
     Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, ranges: range_rows, range_count: 0, range_head: 0, frames: frame_rows, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, at_end: false, switch_at: None))
 }
 
+/// The heap bytes `rewrite(_, ranges, frames, ..)` reserves beyond the `Rewrite` value
+/// (RTC-10 `room_cost`). A `Columns` charges as a `List` of its rows (MEM-24).
+pub fn rewrite_heap(ranges: u32, frames: u32) -> u64 {
+    option.unwrap(charge.seq(bytes[Range], int.widen(ranges))) + option.unwrap(charge.seq(bytes[Frame], int.widen(frames)))
+}
+
 pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError] {
     match t {
         Off => {

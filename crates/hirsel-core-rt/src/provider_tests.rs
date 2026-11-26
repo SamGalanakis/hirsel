@@ -1964,21 +1964,37 @@ fn exec_provider_runs_the_sealed_image_and_uses_directional_pipes() {
     std::fs::write(
         &source,
         r#"
-#include <openssl/evp.h>
 #include <stdio.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <CommonCrypto/CommonDigest.h>
+#include <mach-o/dyld.h>
+#else
+#include <openssl/evp.h>
+#endif
 
 int main(void) {
     if (getchar() != 'x' || getchar() != 'y' || getchar() != EOF) return 1;
+    unsigned char block[4096], digest[32];
+    size_t n;
+#ifdef __APPLE__
+    char path[4096];
+    uint32_t size = sizeof path;
+    CC_SHA256_CTX state;
+    if (_NSGetExecutablePath(path, &size)) return 2;
+    FILE *self = fopen(path, "rb");
+    if (!self || !CC_SHA256_Init(&state)) return 2;
+    while ((n = fread(block, 1, sizeof block, self))) CC_SHA256_Update(&state, block, n);
+    if (ferror(self) || !CC_SHA256_Final(digest, &state)) return 4;
+#else
     FILE *self = fopen("/proc/self/exe", "rb");
     EVP_MD_CTX *state = EVP_MD_CTX_new();
     if (!self || !state || !EVP_DigestInit_ex(state, EVP_sha256(), NULL)) return 2;
-    unsigned char block[4096], digest[32];
-    size_t n;
     while ((n = fread(block, 1, sizeof block, self))) {
         if (!EVP_DigestUpdate(state, block, n)) return 3;
     }
     if (ferror(self) || !EVP_DigestFinal_ex(state, digest, NULL)) return 4;
+#endif
     for (int i = 0; i < 32; ++i) printf("%02x", digest[i]);
     fputs("digest", stderr);
     return 23;
@@ -1986,11 +2002,16 @@ int main(void) {
 "#,
     )
     .unwrap();
+    // The digest comes from OpenSSL on Linux and from libSystem on Darwin.
+    #[cfg(target_os = "linux")]
+    let library: &[&str] = &["-lcrypto"];
+    #[cfg(target_os = "macos")]
+    let library: &[&str] = &[];
     let compilation = Command::new("cc")
         .arg(&source)
         .args(["-o"])
         .arg(&image)
-        .arg("-lcrypto")
+        .args(library)
         .output()
         .unwrap();
     assert!(
@@ -2050,21 +2071,22 @@ fn exec_provider_law(image: &std::path::Path) {
         .unwrap();
     let rules = policy.rules();
     let (profiles, approval) = policy.pin_images().unwrap();
-    let expected_interpreter = if cfg!(target_arch = "aarch64") {
+    // An ELF image names its loader; a Mach-O's dyld is implicit.
+    #[cfg(target_os = "linux")]
+    let expected_interpreter = Some(if cfg!(target_arch = "aarch64") {
         "/lib/ld-linux-aarch64.so.1"
     } else {
         "/lib64/ld-linux-x86-64.so.2"
-    };
+    });
+    #[cfg(target_os = "macos")]
+    let expected_interpreter: Option<&str> = None;
+    let interpreter = profiles["digest"].image.interpreter.as_deref();
     assert_eq!(
-        profiles["digest"]
-            .image
-            .interpreter
-            .as_deref()
-            .unwrap()
-            .to_bytes(),
-        expected_interpreter.as_bytes()
+        interpreter.map(std::ffi::CStr::to_bytes),
+        expected_interpreter.map(str::as_bytes)
     );
-    assert!(approval[0].contains(&format!("interpreter {expected_interpreter}, policy ")));
+    let named = expected_interpreter.unwrap_or("none");
+    assert!(approval[0].contains(&format!("interpreter {named}, policy ")));
 
     // A regular file at the original path now contains an entirely different
     // image. A path-based launch cannot run the program that reports this pin.

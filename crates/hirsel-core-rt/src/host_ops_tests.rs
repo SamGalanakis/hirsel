@@ -1047,5 +1047,5 @@ fn ffi_abort_is_a_reported_failure_and_later_bodies_continue() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("1 passed; 1 failed"), "{stdout}");
     assert!(stdout.contains("later host body executed"), "{stdout}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("code: 38"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("code: {}", libc::ENOSYS)));
 }

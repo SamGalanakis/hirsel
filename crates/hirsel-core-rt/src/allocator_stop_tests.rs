@@ -20,9 +20,11 @@ fn native_refusal_child() {
     };
     // SAFETY: lower only this isolated child's limits. Native Linux refuses the
     // 64MiB request. Pinned qemu-user accepts guest RLIMIT_AS=0 but leaves the
-    // guest limit infinite, so ARM instead requests a valid 1EiB Layout beyond
-    // its address space. Both exercise a real allocator null, never a test hook.
+    // guest limit infinite, and Darwin refuses to set it, so ARM instead requests
+    // a valid 1EiB Layout beyond its address space. Both exercise a real
+    // allocator null, never a test hook.
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &denied) }, 0);
+    #[cfg(not(target_arch = "aarch64"))]
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_AS, &denied) }, 0);
     #[cfg(target_arch = "aarch64")]
     let bytes = 1usize << 60;

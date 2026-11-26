@@ -11,6 +11,7 @@ import sys
 
 from sim_campaign import CANARY
 from vopr_failure_groups import expected_canary, publish, result_rows
+from vopr_nightly_negative import CONTROL_NAMES
 
 
 NOT_COVERED = (
@@ -19,6 +20,10 @@ NOT_COVERED = (
     "laws, fault classes, and schedules outside this run's recorded evidence",
 )
 PROBE_DIVISOR = 20_000
+STORE_CRASH_PROBES = {
+    "crash before the rename": "power-cut-before-rename",
+    "crash after the rename": "power-cut-after-rename",
+}
 
 
 def frequency_missed(hits, runs):
@@ -94,7 +99,12 @@ def summarize(run, manifest, commit):
     observed_runs = Counter()
     probes = defaultdict(Counter)
     declarations = run / "probe-declarations.json"
-    declared = json.loads(declarations.read_text()) if declarations.exists() else {}
+    declared = {}
+    if declarations.exists():
+        try:
+            declared = json.loads(declarations.read_text())
+        except (OSError, ValueError) as error:
+            errors.append(f"{declarations.name}: {error}")
     for law, labels in declared.items():
         for label in labels:
             probes[law, label]
@@ -133,8 +143,11 @@ def summarize(run, manifest, commit):
                     probe = probes[law, label]
                     probe["hits"] += calls > 0
                     probe["true_calls"] += calls
-                    if calls and label.startswith("fault:"):
-                        faults.add(label.removeprefix("fault:"))
+                    if calls:
+                        if label.startswith("fault:"):
+                            faults.add(label.removeprefix("fault:"))
+                        elif law == "store@1/store/test_l69_random_arm" and label in STORE_CRASH_PROBES:
+                            faults.add(STORE_CRASH_PROBES[label])
         good = sorted(canaries) == [(0, True), (1, True)]
         canary_red = good if canary_red is None else canary_red and good
     frequencies = []
@@ -161,6 +174,10 @@ def summarize(run, manifest, commit):
         "probes_missed": sorted(misses),
         "fault_classes_sampled": sorted(faults),
         "canary_red": canary_red,
+        "negative_controls": [
+            {field: row[field] for field in ("oracle", "rejected", "exit_status")}
+            for row in read_evidence(run / "negative.jsonl", errors)
+        ],
         "evidence_errors": errors,
     }
 
@@ -181,13 +198,17 @@ def append_once(path, receipt):
 
 def finish(run, manifest, commit, phase, status):
     evidence = summarize(run, manifest, commit)
+    focused = (run / "focused").exists()
+    negative_passed = {row["oracle"] for row in evidence["negative_controls"] if row["rejected"] is True}
+    negatives_missing = [] if focused else sorted(set(CONTROL_NAMES) - negative_passed)
+    evidence["negative_controls_unproven"] = negatives_missing
     if phase in ("finished", "sweep-failed"):
         probe_reds = ({**probe, "kind": "reach_red", "build": commit} for probe in evidence["probes"]
                       if probe.get("severity") is not None)
         try:
             group_status = publish(run, require_canary=True, probe_reds=probe_reds)
             if phase == "finished" and group_status in (0, 3):
-                marker = "focused-complete" if (run / "focused").exists() else "complete"
+                marker = "focused-complete" if focused else "complete"
                 (run / marker).touch()
             status = group_status or status
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -198,11 +219,13 @@ def finish(run, manifest, commit, phase, status):
         "seeds_failed", "deterministic_reds", "trace_diversity_reds", "replays_diverged", "probes_missed"
     )):
         status = status or 1
+    if negatives_missing:
+        status = status or 1
     receipt = {
         "night": run.name,
         "commit": commit,
         "finished_utc": datetime.now(timezone.utc).isoformat(),
-        "scope": "focused" if (run / "focused").exists() else "full",
+        "scope": "focused" if focused else "full",
         "phase": phase,
         "status": status,
         "not_covered": NOT_COVERED,

@@ -306,6 +306,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     char scenario[64]={0};
     if(input->args[0].len>=sizeof scenario) return 120;
     memcpy(scenario,input->args[0].data,input->args[0].len);
+    int false_ack=!strcmp(raw_cut,"false-ack");
+    if(false_ack && (strcmp(scenario,"genesis") || input->args_len!=2)) return 120;
+    if(false_ack) cut=0;
     /* BL12/BL13 (d1)/(d2), BL14 (d3) and G1: the cut argument is readable:complete:power_cut,
      * schedule points of the new owner's or follower's run; count takes 1:2 and no cut. */
     int late_failed=!strcmp(scenario,"late-group-failed") || !strcmp(scenario,"late-follow-failed");
@@ -409,6 +412,11 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         int torn_manifest=phase==2 && read_only && input->args_len==4
             && store_crash_manifest_inode(state)!=original_manifest;
         const char *expected=store_crash_acked(state)||torn_manifest?"new":"prefix";
+        if(false_ack && phase==2) {
+            if(!store_crash_intercepted(state) || store_crash_acked(state)) {status=120;break;}
+            fprintf(stderr,"W2 false ack: no durable creation, requiring new\n");
+            expected="new";
+        }
         char issued[32], floor[32];
         if(window.enabled) {
             snprintf(issued,sizeof issued,"%llu",(unsigned long long)window.issued);

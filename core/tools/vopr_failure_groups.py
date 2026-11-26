@@ -102,6 +102,13 @@ def publish(run, *, require_canary=False, probe_reds=()):
         samples[key] = {"receipt": "receipts.ndjson", "build": row["build"],
                         "seed": None, "hits": row["hits"], "runs": row["runs"],
                         "severity": row["severity"]}
+    negatives = run / "negative.jsonl"
+    if negatives.is_file():
+        for row in result_rows(negatives):
+            if not row["rejected"]:
+                key = row["oracle"], "negative_control_red", None
+                counts[key] = 1
+                samples[key] = {"receipt": negatives.name, "seed": None, "exit_status": row["exit_status"]}
     output = run / "failure-groups.tmp"
     with output.open("w") as report:
         for key in counts:

@@ -12,6 +12,27 @@ from sim_campaign import CANARY
 
 
 class NightlyReceipt(unittest.TestCase):
+    def test_negative_controls_reject_survival_and_infrastructure_errors(self):
+        from vopr_nightly_negative import run_controls
+
+        def outcome(status, stderr=""):
+            return subprocess.CompletedProcess([], status, "", stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "negative.jsonl"
+            checks = {
+                "expected": lambda: (outcome(33, "store phase read: status 33\n"), True),
+                "survived": lambda: (outcome(0), False),
+                "wrong red": lambda: (outcome(120, "cut not reached\n"), False),
+                "unstarted": lambda: (_ for _ in ()).throw(FileNotFoundError("missing executable")),
+            }
+            self.assertEqual(run_controls(log, checks), 1)
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([(row["oracle"], row["rejected"]) for row in rows],
+                             [("expected", True), ("survived", False), ("wrong red", False),
+                              ("unstarted", False)])
+            self.assertIsNone(rows[-1]["exit_status"])
+
     def test_frequency_gate_includes_a_never_visited_rare_probe(self):
         from sim_campaign import selected_laws
         from vopr_nightly_receipt import frequency_missed, summarize

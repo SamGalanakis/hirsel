@@ -1718,12 +1718,12 @@ Unit 0's ledger also carries each room's `control`, `bridge` and `cascade`.
 inboxes at their byte budgets, its outbox, its receive, batch and slot buffers, the socket's
 slots, and `router.pool_bytes`: the router's pool-wide row lists, which `router.reserve_pool`
 allocates at exactly their bounds (`list.with_capacity`) before the unit serves any room.
-The bounds (`router.pool_bounds`) are `rooms` rooms; `min(rooms × PEERS_MAX, units ×
-sessions)` seats, since unit 0 admits a participant only once its session is reserved on a
-ledger; `sessions` members, parked sessions and 5-tuple rows on the unit; and per seat
-`PUBLICATIONS_MAX` publications and `min(session.down_tracks, DOWN_TRACKS_MAX)`
-down-tracks. A router holding its pool bounds refuses a seat's down-track past that bound
-with `Limit` on every unit alike. Without the reservation each list grew as rooms filled,
+The bounds (`router.pool_bounds`) are `rooms` rooms, up to `units × sessions` seats
+subject to the `u16` participant field per room, and `sessions` members, parked sessions
+and 5-tuple rows on each unit. Unit 0 admits a participant once its session is reserved on
+a ledger. A seat has at most `session.sections` publications, one per negotiated section,
+and at most `session.down_tracks` down-tracks. The router enforces these together with
+each room's own bounds. Without the reservation each list grew as rooms filled,
 by its growth's slack and by the capacity it keeps once rows go: W34 measured a join's
 charge at 31,440 bytes against 5,473 priced. So `replicated` prices only what is
 per room beyond those rows (the fence table, top speakers, and each publication's

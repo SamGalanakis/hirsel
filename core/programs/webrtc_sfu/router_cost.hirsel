@@ -1,36 +1,31 @@
 // RTC-10 Sizing: the memory terms of one room, from the bounds the router allocates
 // with. `signal.room_cost` adds the control unit's terms.
 /// A pool's bounds on the rows every unit's router holds at once (RTC-10 Sizing): its
-/// live rooms, the seats of all of them, the sessions one unit homes, and the
-/// down-tracks one seat holds. The control unit admits a participant only once its
-/// session is reserved on its home unit's ledger, so the seats are at most
-/// `units × sessions`, and at most `PEERS_MAX` a room. Once a router holds them, it
-/// refuses a seat's down-track past `downs` on every unit alike (`Limit`).
+/// live rooms, their seats, the sessions one unit homes, and the publications and
+/// down-tracks one seat holds. Each seat has a session reservation on its home
+/// unit's ledger. Each publication uses a distinct negotiated section.
 pub type PoolBounds: key {
     rooms: u64,
     seats: u64,
     sessions: u64,
+    publications: u64,
     downs: u64
 }
 
 /// The bounds of a pool of `units` units, `rooms` live rooms and `sessions` sessions
-/// a unit, each of `session`'s size: a seat holds at most `session.down_tracks`
-/// down-tracks.
+/// a unit, each of `session`'s size. The room's participant field is `u16`.
 pub fn pool_bounds(units: u64, rooms: u64, sessions: u64, session: peer.PeerLimits) -> PoolBounds {
-    let peers: u64 = int.widen(PEERS_MAX)
-    let by_rooms = int.saturating_mul(rooms, peers)
+    let by_rooms = int.saturating_mul(rooms, 65535u64)
     let by_units = int.saturating_mul(units, sessions)
-    let tracks: u64 = int.widen(session.down_tracks)
-    let most: u64 = int.widen(DOWN_TRACKS_MAX)
-    PoolBounds(rooms: rooms, seats: order.min(by_rooms, by_units), sessions: sessions, downs: order.min(tracks, most))
+    PoolBounds(rooms: rooms, seats: order.min(by_rooms, by_units), sessions: sessions, publications: int.widen(session.sections), downs: int.widen(session.down_tracks))
 }
 
 /// What `reserve_pool` allocates: every pool-wide row list at its bound. A seat has at
-/// most `PUBLICATIONS_MAX` publications and `downs` down-tracks; a unit
+/// most `publications` publications and `downs` down-tracks; a unit
 /// parks and seats at most `sessions` members, each with one 5-tuple row. `None` when
 /// the bounds overflow.
 pub fn pool_bytes(b: PoolBounds) -> Option[u64] {
-    let pubs = int.checked_mul(b.seats, int.widen(PUBLICATIONS_MAX))?
+    let pubs = int.checked_mul(b.seats, b.publications)?
     let downs = int.checked_mul(b.seats, b.downs)?
     let mut sum = charge.seq(bytes[Room], b.rooms)?
     sum = int.checked_add(sum, charge.seq(bytes[Seat], b.seats)?)?
@@ -48,7 +43,7 @@ pub fn pool_bytes(b: PoolBounds) -> Option[u64] {
 /// `pool_bytes(b)`; the caller checks that fits before it calls this. Rows the router
 /// already holds are kept.
 pub fn reserve_pool(mut r: Router, b: PoolBounds) {
-    let pubs = int.saturating_mul(b.seats, int.widen(PUBLICATIONS_MAX))
+    let pubs = int.saturating_mul(b.seats, b.publications)
     let downs = int.saturating_mul(b.seats, b.downs)
     let rooms = sized(replace(mut r.rooms, list.new()), b.rooms)
     r.rooms = take rooms

@@ -363,8 +363,8 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
 /// a pool with one `Open` queued.
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits {
     let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, orders: take orders, reports: take reports, until: until, relay: take linked) = take p
-    let n: u16 = int.narrow(list.len(binds))
-    if n == 0 || n > 64 || n != limits.units {
+    let n = limits.units
+    if n == 0 || n > router.UNITS_MAX || list.len(binds) != int.widen(n) {
         return Error(Units)
     }
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)

@@ -345,3 +345,50 @@ fn pool_room_cost_is_exact() -> Result[(), router.RouterError] {
     }
     Ok(())
 }
+
+/// bug: a funded room with a 257th participant, ninth publication, or 65th
+/// down-track is refused by a hardcoded topology limit.
+/// oracle: the room's declared limits and the session's section and track counts.
+@test
+fn funded_pool_admits_declared_topology() -> Result[(), router.RouterError] {
+    // Fund each case independently. A large signaling room does not need a full
+    // set of 65 media tracks at every seat to exercise its participant limit.
+    let mut wide = topology_room(257, 1, 1)?
+    let id = room_id()
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let Error(Limit(257)) = router.apply(mut wide, 0, Admit(who: peer.Participant(gen: gen_of(258), room: id), home: 0), mut out) else {
+        fail("the room did not enforce the declared participant count")
+    }
+    let mut tracks = topology_room(9, 9, 65)?
+    let sub = gen_of(9)
+    for k in 0u64 .. 65u64 {
+        let publisher = gen_of(1 + k / 9)
+        let publication: router.PublicationId = PublicationId(k + 1)
+        let shape = router.Shape(codec: Vp8, pli: true, fir: false, encodings: 1)
+        let _ = router.apply(mut tracks, 0, Publish(room: id, who: publisher, section: int.narrow(k % 9), id: publication, shape: Some(shape)), mut out)?
+        router.subscribe(mut tracks, id, sub, publication, 0, Off, 0, mut out)?
+    }
+    Ok(())
+}
+
+fn topology_room(participants: u16, sections: u8, tracks: u16) -> Result[router.Router, router.RouterError] {
+    let limits = router.RoomLimits(participants: participants, ids: participants, publications: int.widen(sections), down_tracks: int.widen(tracks), audio_forward: 0, pause_delay_ms: 5000, pause: false)
+    let session = peer.PeerLimits(sections: sections, down_tracks: tracks, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000)
+    let count: u64 = int.widen(participants)
+    let rows = router.pool_bounds(2, 1, (count + 1) / 2, session)
+    let mut r = router.observer(provide.random(35000))
+    let held = option.unwrap(router.pool_bytes(rows))
+    let reserved = bound bytes held {
+        router.reserve_pool(mut r, rows)
+    }
+    let Ok(()) = reserved else {
+        fail("pool rows did not fit their grant")
+    }
+    let id = room_id()
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    router.open_room(mut r, id, limits)?
+    for k in 1u64 .. count + 1 {
+        let _ = router.apply(mut r, 0, Admit(who: peer.Participant(gen: gen_of(k), room: id), home: int.narrow(k % 2)), mut out)?
+    }
+    Ok(take r)
+}

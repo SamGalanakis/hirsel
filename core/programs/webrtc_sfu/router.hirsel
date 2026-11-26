@@ -298,19 +298,14 @@ pub opaque type Router {
     pool: Option[PoolBounds]
 }
 
-const PEERS_MAX: u16 = 256
-
-const PUBLICATIONS_MAX: u16 = 8
-
-const DOWN_TRACKS_MAX: u32 = 64
-
 const ENCODINGS_MAX: u64 = 4
 
 const RING_SLOT: u64 = 1500
 
 const MIN_INTERVAL_NS: u64 = 100000000
 
-const UNITS_MAX: u16 = 64
+/// Unit indices are bits in the fan-out and doorbell masks.
+pub const UNITS_MAX: u16 = 64
 
 const NO_HANDLE: u64 = 0xffffffffffffffff
 
@@ -496,17 +491,8 @@ fn open(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), Rout
     if let Some(_) = room_at(r, room) {
         return Error(Exists)
     }
-    if limits.participants > PEERS_MAX {
-        return Error(Limit(int.widen(PEERS_MAX)))
-    }
     if limits.ids < limits.participants {
         return Error(Limit(int.widen(limits.participants)))
-    }
-    if limits.publications > PUBLICATIONS_MAX {
-        return Error(Limit(int.widen(PUBLICATIONS_MAX)))
-    }
-    if limits.down_tracks > DOWN_TRACKS_MAX {
-        return Error(Limit(DOWN_TRACKS_MAX))
     }
     let n: u64 = int.widen(limits.ids)
     let mut ids: List[u64] = list.new()
@@ -621,7 +607,12 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     let Some(si) = seat_at(r, room, who) else {
         return Error(NoParticipant)
     }
-    let limit = r.rooms[ri].limits.publications
+    let mut limit = r.rooms[ri].limits.publications
+    if let Some(b) = r.pool {
+        if b.publications < int.widen(limit) {
+            limit = int.narrow(b.publications)
+        }
+    }
     if r.roster[si].publications >= limit {
         return Error(Limit(int.widen(limit)))
     }

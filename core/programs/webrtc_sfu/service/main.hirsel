@@ -140,7 +140,7 @@ fn settings(a: Args) -> Option[Settings] {
         }
         i += 2
     }
-    if s.units == 0 || s.units > 64 || s.rooms == 0 || s.participants == 0 || s.unit_bytes == 0 || s.down_tracks == 0 {
+    if s.units == 0 || s.units > webrtc_sfu.router.UNITS_MAX || s.rooms == 0 || s.participants == 0 || s.unit_bytes == 0 || s.down_tracks == 0 {
         return None
     }
     Some(s)

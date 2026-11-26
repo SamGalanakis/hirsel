@@ -12,6 +12,7 @@ webrtc_sfu@1/laws/fanout_across_units src=1d2ff766d580cb95 sig=7a25fc578a8e6902 
 webrtc_sfu@1/laws/flexfec_churn_keeps_legs_sending src=91c9d77921f1ac59 sig=4450040c06009869 run=c2c0c6612d4cbb79 bug=c71db7505c780680 oracle=6623755749fc4d47 rows=pending
 webrtc_sfu@1/laws/flexfec_recovers_drops_without_nack src=1cd2ce60193cd592 sig=60b99c518b4a02bf run=c2c0c6612d4cbb79 bug=3c5c7c6898f64b46 oracle=c64ace6bb3efa6bd rows=pending
 webrtc_sfu@1/laws/forward_allocates_nothing src=e786568c5551438a sig=e8ebfa31557b1766 run=c2c0c6612d4cbb79 bug=e98263cf14d24b42 oracle=f3ed3a7cbf0bfdf1 rows=pending
+webrtc_sfu@1/laws/funded_pool_admits_declared_topology src=de938d8315916176 sig=e1145a2583ff7c47 run=c2c0c6612d4cbb79 bug=c92c64d152b11f7a oracle=a05b611acb4c27d2 rows=pending
 webrtc_sfu@1/laws/glare_settles_in_one_round src=110aaa2076c0fece sig=35f36e5aede5eff7 run=c2c0c6612d4cbb79 bug=5bb9015e28ddca38 oracle=4c240daa0eae4636 rows=pending
 webrtc_sfu@1/laws/initial_probes_retry_each_second src=c9700c9eb86d1b4e sig=495f8fb494412574 run=c2c0c6612d4cbb79 bug=f3522f7c3b9479dd oracle=76825776bef819b8 rows=pending
 webrtc_sfu@1/laws/keyframe_request_coalesces_across_subscribers src=2e22071b80851c4a sig=a8fcbaed85576cb6 run=c2c0c6612d4cbb79 bug=68f7cda61498ca81 oracle=5a452fa691864cc9 rows=pending

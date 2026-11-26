@@ -187,8 +187,8 @@ pub fn inboxes(addr: Addr, index: u16, units: u16, plane: Plane) -> Result[(Door
 /// Unit `index` of `list.len(doors)` units, over its own inboxes. `doors` names every
 /// unit's doors in unit order, its own included.
 pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64, plane: Plane) -> Result[Unit, router.RouterError] {
-    if list.len(doors) > 64 {
-        return Error(Limit(64))
+    if list.len(doors) > int.widen(router.UNITS_MAX) {
+        return Error(Limit(int.widen(router.UNITS_MAX)))
     }
     let out = peer.outbox(out_bytes, out_packets) ?=> |take e| Peer(e)
     let mut rx: Bytes = list.new()

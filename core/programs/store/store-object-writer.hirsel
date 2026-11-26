@@ -15,7 +15,9 @@ type ObjectWriterState {
     entries: u64,
     failed: Option[Error],
     // The host stream the Place is attached to (§12.11.5).
-    stream: Option[HostStreamId]
+    stream: Option[HostStreamId],
+    has_sealed: bool,
+    drop_attach_on_cut: bool
 }
 
 fn log_directory(db: Db) -> Result[Dir, Error] {
@@ -168,8 +170,9 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         None => false,
     }
     // An attached Place has no idle head poll: the service's `reg` GET
-    // stands in for it (§12.11.13).
-    let timer = if !attached {
+    // stands in for it (§12.11.13). Instead its timer slot holds the reply
+    // relay task started once open finishes.
+    let mut timer = if !attached {
         let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: idle_ns)
         match task.try_spawn(tasks, bytes OBJECT_TIMER_GRANT, take timer_input, journal_idle_timer) {
             Ok(take running) => Some(take running),
@@ -213,6 +216,15 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         rebuild_keyed_credit(mut prepared, 0, options.journal_limit)?
         Ok(take prepared)
     })?
+    if let Some(mut attaching) = link {
+        if let Some(take answers) = replace(mut attaching.answers, None) {
+            let relay_input = SlotRelayInput(answers: take answers, journal: channel.sender(frames))
+            timer = match task.try_spawn(tasks, bytes OBJECT_TIMER_GRANT, take relay_input, slot_relay) {
+                Ok(take running) => Some(take running),
+                Error((problem, _)) => return Error(Full(Allocation(problem))),
+            }
+        }
+    }
     // The journaled forks after the checkpoint wait for the next cut's rows.
     let JournalReplay(forked: take forked, ..) = take opened
     if let Some(mut admitted) = read_source.admitted_base {
@@ -248,12 +260,12 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     let ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, options: take held_options, levels: take names_in_order, weak: take weak, link: take link) = take prepared
     let mut db = take started
     let head = register.head
-    let attached_sid = match register.attach {
-        Some(a) => match a.live {
+    let (attached_sid, has_sealed) = match register.attach {
+        Some(a) => (match a.live {
             Some(tail) => Some(tail.sid),
             None => None,
-        },
-        None => None,
+        }, list.len(a.sealed) != 0),
+        None => (None, false),
     }
     let ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
     let (take requests, take workers) = std.object.split(take owned_client)
@@ -275,7 +287,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.fence = fence
     db.file_seq = head.entry.seq
     db.page_resident = resident_location_charge(pages.locations)
-    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid)
+    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, has_sealed, drop_attach_on_cut: false)
     db.disk = Some(DiskState(lock: None, d: None, open: head.pair.epoch, options: take held_options, lease: None, steps: list.new(), scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: head.checkpoint.seq, recorded_after: recorded_after, pages: take pages, object: Some(take object), acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take work, journal_idle_task: take timer, creation: list.new(), pager_task: None, tasks, restamp: None, unload: None))
     Ok(take db)
 }
@@ -292,13 +304,51 @@ pub fn claim_of(db: Db) -> Result[Claim, Error] {
     Error(Missing("head"))
 }
 
+fn object_stream_close(mut db: Db) -> Result[(), Error] waits {
+    let (reply_send, reply_receive): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
+    let closed = match channel.send(disk_state(db).journal, ObjectClose(take reply_send)) {
+        Ok(()) => false,
+        Error(_) => true,
+    }
+    if closed {
+        journal_poll(mut db)?
+        return Error(Io(Closed))
+    }
+    match channel.receive(reply_receive) {
+        Ok(take outcome) => take outcome,
+        Error(_) => {
+            journal_poll(mut db)?
+            Error(Io(Closed))
+        },
+    }
+}
+
+fn object_cut_close(mut db: Db) -> Result[(), Error] waits {
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        if let Some(mut object_writer) = state.object {
+            object_writer.drop_attach_on_cut = true
+        }
+    })
+    let result = cut_install(mut db, NoHolderChange)
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        if let Some(mut object_writer) = state.object {
+            object_writer.drop_attach_on_cut = false
+        }
+    })
+    let _ = result?
+    Ok(())
+}
+
 fn take_object_journal(mut db: Db) -> Result[(ObjectJournalSession, Sender[ObjectJournalStart]), Error] waits {
-    // A cut or export of an attached Place must carry its stream tail into
-    // the history (§12.11.11), which is not built: it refuses, so no tail
-    // is lost.
-    if let Some(object_writer) = disk_state(db).object {
-        if let Some(sid) = object_writer.stream {
-            return Error(Attached(Some(sid)))
+    take_object_journal_with(mut db, false)
+}
+
+fn take_object_journal_with(mut db: Db, allow_attached: bool) -> Result[(ObjectJournalSession, Sender[ObjectJournalStart]), Error] waits {
+    if !allow_attached {
+        if let Some(object_writer) = disk_state(db).object {
+            if let Some(sid) = object_writer.stream {
+                return Error(Attached(Some(sid)))
+            }
         }
     }
     let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
@@ -333,7 +383,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     let latest_receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, latest_receipt)?
     prepare_holder_slot(mut db, delta)?
-    let (take paused, take resume) = take_object_journal(mut db)?
+    let (take paused, take resume) = take_object_journal_with(mut db, true)?
     let mut lane = take paused
     let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, target, pack_bytes, limit)
     if let Error(problem) = outcome {
@@ -419,10 +469,42 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         }
         let locate_root = history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, old.authority_kind, take refs, object_state(db).locator, mut candidate_locator, mut workspace, now)?
         let installed = history_create_manifest(mut lane.client, old.store, old.pair.epoch, old.authority_kind, manifest, mut workspace, now)?
-        let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)?
-        match advanced {
-            HistoryApplied(_) => Ok((take pages, take candidate_locator, generation)),
-            _ => Error(Undecided),
+        // A cut of an attached Place consumes every sealed tail and the live
+        // tail into the checkpoint (§12.11.11): a normal cut resets ATTACH to
+        // `sealed := []`, `live := (S, inc, (next_seq, 0))`; a close cut drops
+        // ATTACH completely. Restore the previous ATTACH if publish does not apply.
+        let drop_on_cut = object_state(db).drop_attach_on_cut
+        let prior_attach = replace(mut lane.register.attach, None)
+        let cut_attach: Option[Attach] = match prior_attach {
+            Some(old_attach) => if drop_on_cut {
+                None
+            } else {
+                match lane.stream {
+                    Some(link) => Some(Attach(settles: old_attach.settles, live: Some(StreamRef(sid: link.sid, inc: link.inc, from_seq: link.last_batch_seq + 1, from_frame: 0)), sealed: list.new())),
+                    None => Some(clone(old_attach)),
+                }
+            },
+            None => None,
+        }
+        lane.register.attach = take cut_attach
+        let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)
+        match take advanced {
+            Ok(HistoryApplied(_)) => {
+                if drop_on_cut {
+                    if let Some(link) = lane.stream {
+                        slot_report(link, ReportDetached(link.slot, old.pair.epoch))
+                    }
+                }
+                Ok((take pages, take candidate_locator, generation))
+            },
+            Ok(_) => {
+                lane.register.attach = take prior_attach
+                Error(Undecided)
+            },
+            Error(take problem) => {
+                lane.register.attach = take prior_attach
+                Error(take problem)
+            },
         }
     })
     db.next_node = next_stamp - 1
@@ -432,6 +514,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         ReplaceMain(main, _) => main.head,
         _ => db.heads[0].head,
     }
+    let dropped_attach = object_state(db).drop_attach_on_cut
     write_disk(mut db.disk, (take pages, take locator), scoped fn(mut state: DiskState, take installation: (PageDisk, HistoryLocator)) {
         let (take installed, take installed_locator) = take installation
         state.pages = take installed
@@ -442,6 +525,10 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         if let Some(mut object_writer) = state.object {
             object_writer.entries = 0
             object_writer.locator = take installed_locator
+            object_writer.has_sealed = false
+            if dropped_attach {
+                object_writer.stream = None
+            }
         }
     })
     db.file_seq = seq

@@ -17,6 +17,7 @@ fn health_failure(problem: Error) -> Health {
     match problem {
         Fenced(e) => Fenced(e),
         Undecided => Undecided,
+        Latched(cause) => Latched(cause),
         Remote(cause) => Remote(clone(cause)),
         Poisoned(io) => Poisoned(io),
         Io(io) => Poisoned(io),

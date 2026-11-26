@@ -187,6 +187,100 @@ fn stream_open_attached[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     }
 }
 
+// Reads one sealed tail in history order (§12.11.9): discovers its epoch from
+// X's unique row in `st.cutoff` (Fable §3 guarantees it exists), then applies
+// X's slices in `[st.tail.from_seq, st.cutoff]` at that epoch.
+fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuffers, root: String, st: SealedTail, store: StoreId, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
+    let dir = stream_key(root, stream_dir(st.tail.sid))
+    let mut cut_name = string.with_capacity(48)
+    stream_batch_key(mut cut_name, st.tail.inc, st.cutoff)
+    let cut_key = stream_key(dir, cut_name)
+    let tail_epoch = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[u64, Error] waits {
+        if let None = stream_tail_range(mut c, cut_key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+            return Error(disk_fault(cut_key, 0, Absent))
+        }
+        let mut batch_index = match stream_batch_head(cut_key, buffers.index, st.tail.sid, st.tail.inc, st.cutoff)? {
+            Rows(take found) => take found,
+            Term(_, _) => return Error(disk_fault(cut_key, 72, Malformed)),
+        }
+        if list.len(buffers.index) < batch_index.byte_len {
+            if let None = stream_tail_range(mut c, cut_key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
+                return Error(disk_fault(cut_key, 0, Absent))
+            }
+            batch_index = match stream_batch_head(cut_key, buffers.index, st.tail.sid, st.tail.inc, st.cutoff)? {
+                Rows(take found) => take found,
+                Term(_, _) => return Error(disk_fault(cut_key, 72, Malformed)),
+            }
+        }
+        for row in batch_index.rows {
+            if same(row.store, store) {
+                if st.cutoff == st.tail.from_seq && row.frames <= int.widen(st.tail.from_frame) {
+                    return Error(disk_fault(cut_key, 0, Malformed))
+                }
+                return Ok(row.epoch)
+            }
+        }
+        Error(disk_fault(cut_key, 0, Malformed))
+    })?
+    let mut seq = st.tail.from_seq
+    while seq <= st.cutoff {
+        let skip: u64 = if seq == st.tail.from_seq {
+            int.widen(st.tail.from_frame)
+        } else {
+            0
+        }
+        stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
+            match stream_tail_batch(mut c, mut buffers, dir, st.tail.sid, st.tail.inc, seq, store, tail_epoch, skip, 18446744073709551615u64, mut replay, ceiling, deadline)? {
+                TailRead(_) => Ok(()),
+                TailAbsent => Error(disk_fault(cut_key, 0, Absent)),
+                TailBeyond => Error(disk_fault(cut_key, 0, Malformed)),
+            }
+        })?
+        seq += 1
+    }
+    Ok(())
+}
+
+// Loads the settled part in exact §12.11.9 history order: checkpoint c, then
+// entries interleaved with `attach.sealed` at each `st.at`, then the entries
+// past the last sealed tail through `head.entry.seq`.
+fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attach: Attach, root: String, mut buffers: TailBuffers, ceiling: u64) -> Result[JournalReplay, Error] waits {
+    if list.len(attach.sealed) == 0 {
+        return history_load_admitted(mut read_source, head, ceiling)
+    }
+    let deadline = read_source.deadline
+    let chain = history_suffix(mut read_source.client, head, head.checkpoint, deadline)?
+    let (take mark, take checkpoint_data) = history_checkpoint(mut read_source.client, head, deadline)?
+    let manifest = history_read_manifest(mut read_source.client, head.store, mark, head.checkpoint.seq, deadline)?
+    let (take replay, take checkpoint_state) = history_open_checkpoint(mut read_source, head, mark, checkpoint_data, take manifest, ceiling)?
+    let owners = disk_allocation(scoped fn() -> Result[Map[IncomingEdge, u64], Error] {
+        Ok(located_owners(checkpoint_state.manifest))
+    })?
+    let LoadedPageStore(manifest: take loaded_manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
+    let pages = PageDisk(next_pack: loaded_manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
+    read_source.admitted_base = Some(HistoryOpenBase(generation: loaded_manifest.generation, fence: loaded_manifest.fence, recorded_after: loaded_manifest.branches[0].version, sweep: loaded_manifest.sweep, pages: take pages))
+    let mut recovered = take replay
+    let base_seq = head.checkpoint.seq
+    let mut done_seq = base_seq
+    for st in attach.sealed {
+        if st.at > done_seq {
+            let lo = done_seq - base_seq
+            let hi = st.at - base_seq
+            let part = list.slice(chain, lo, hi)
+            history_apply_suffix(mut read_source.client, head, done_seq, part, mut recovered, ceiling, deadline)?
+            done_seq = st.at
+        }
+        stream_apply_sealed_tail(mut read_source.client, mut buffers, root, st, head.store, mut recovered, ceiling, deadline)?
+    }
+    if head.entry.seq > done_seq {
+        let lo = done_seq - base_seq
+        let hi = head.entry.seq - base_seq
+        let rest = list.slice(chain, lo, hi)
+        history_apply_suffix(mut read_source.client, head, done_seq, rest, mut recovered, ceiling, deadline)?
+    }
+    Ok(take recovered)
+}
+
 // One attempt, steps 1–7. `None`: the claim's pair moved position, the row
 // is abandoned, and the claim restarts from a fresh head.
 fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, mut side: ClaimStream, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(HistoryRegister, JournalReplay, T, Bytes)], Error] waits {
@@ -201,22 +295,24 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         // Direct service: §12.3's claim with ATTACH copied.
         return Error(Exists("head"))
     }
-    if !stream_same(tail.sid, link.sid) || list.len(attach.sealed) != 0 {
-        return Error(Exists("head"))
+    if !stream_same(side.lane.sid, tail.sid) {
+        let mut next_lane = stream_lane(tail.sid, authority_kind, link.max_rows, holder)?
+        next_lane.dir = stream_key(link.root, stream_dir(tail.sid))
+        side.lane = take next_lane
     }
     let head = capture.head
     let store = head.store
     let epoch = head.pair.epoch
-    // Step 2: the settled part, then the pre-scan of the live tail, both
-    // admitted before the hold.
-    let mut replay = history_load_admitted(mut read_source, head, options.resident_limit)?
+    // Step 2: the settled part in history order, then the pre-scan of the live
+    // tail, both admitted before the hold.
+    let mut replay = stream_load_settled(mut read_source, head, attach, link.root, mut side.buffers, options.resident_limit)?
     check_limits(options.limits, replay.limits)?
     let mut cursor = TailScan(next: tail.from_seq, last_x: None)
     let ceiling = options.resident_limit
     stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
         stream_reg_read(mut side.lane, mut c, deadline)?
         if side.lane.reg.inc != tail.inc || side.lane.reg.collecting {
-            // The no-hold rule and a Collecting register are not built.
+            // The no-hold rule and a Collecting register are built in 2c/2e.
             return Error(Exists("head"))
         }
         stream_tail_scan(mut c, mut side.buffers, side.lane.dir, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)
@@ -224,7 +320,8 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     let (inc_b, next_b) = match side.granted {
         Some(grant) => grant,
         None => {
-            let grant = slot_attach(mut link, store, epoch + 1)?
+            let place_prefix = std.object.bucket_config(read_source.client).prefix
+            let grant = slot_attach(mut link, store, epoch + 1, place_prefix)?
             side.granted = Some(grant)
             grant
         },
@@ -258,12 +355,24 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             return Error(take problem)
         },
     }
-    // Step 6: H, the one authoritative publication.
-    let mut sealed: List[SealedTail] = list.new()
+    // Step 6: H, the one authoritative publication. Copy `old.sealed` and
+    // append the incumbent's tail only when non-empty (Fable §3).
+    let mut sealed: List[SealedTail] = disk_allocation(scoped fn() -> Result[List[SealedTail], Error] {
+        let mut out: List[SealedTail] = list.with_capacity(list.len(attach.sealed) + 1)
+        for st in attach.sealed {
+            list.push(mut out, st)
+        }
+        Ok(take out)
+    })?
     if let Some(k) = cursor.last_x {
         list.push(mut sealed, SealedTail(tail, cutoff: k, at: head.entry.seq))
     }
-    let attach_next = Attach(settles: attach.settles, live: Some(StreamRef(sid: link.sid, inc: inc_b, from_seq: next_b, from_frame: 0)), sealed: take sealed)
+    let next_live: Option[StreamRef] = if list.len(sealed) >= ATTACH_SEALED_MAX {
+        None
+    } else {
+        Some(StreamRef(sid: link.sid, inc: inc_b, from_seq: next_b, from_frame: 0))
+    }
+    let attach_next = Attach(settles: attach.settles, live: next_live, sealed: take sealed)
     let claimed = history_claim_head(head, holder)?
     let authority_end = history_authority_end(workspace.witness)?
     let authority = copied(list.slice(workspace.witness, 240, authority_end))?
@@ -286,7 +395,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     // Step 7: the CLAIM is X's first frame on S_B.
     slot_claim_frame(mut workspace.packet, claimed.pair.epoch, holder)
     slot_send(link, workspace.packet, 0)?
-    match slot_wait(link, 0) {
+    match slot_wait(mut link, 0) {
         Ok(()) => (),
         Error(Fenced(_)) => return Error(Lost),
         Error(take problem) => return Error(take problem),

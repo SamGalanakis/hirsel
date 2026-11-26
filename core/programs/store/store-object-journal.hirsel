@@ -105,13 +105,25 @@ fn object_journal_add(mut lane: ObjectJournalSession, ctx: DiskContext, frame: B
     history_group_append(mut lane.buffers.packet, ctx, frame)
 }
 
-// An attached Place's group (§12.11.4): its frames go to the slot unsealed,
-// and the group is durable once the service acks its last ticket.
-fn object_journal_stream(link: SlotLink, input: ObjectJournalTask, take raw: Bytes, sequence: u64, mut deferred: Option[JournalMsg]) -> Result[(u64, u64), Error] waits {
+// Sends one streamed group to the slot without waiting on the reply connection;
+// the relay task delivers `SlotAck` back into `object_journal_loop`.
+fn object_journal_stream_send(link: SlotLink, input: ObjectJournalTask, take raw: Bytes, sequence: u64, mut queued: List[(Bytes, u64)], mut deferred: Option[JournalMsg]) -> Result[(u64, u64), Error] waits {
     slot_send(link, raw, sequence)?
     let mut group_size = list.len(raw)
     let mut last_sequence = sequence
-    for _ in 1u64 .. input.group_commits {
+    let mut taken = 1u64
+    while taken < input.group_commits && list.len(queued) != 0 {
+        let width = list.len(queued[0u64].0)
+        if group_size + width > input.group_bytes {
+            break
+        }
+        let (take next_raw, next_seq) = list.remove(mut queued, 0u64)
+        slot_send(link, next_raw, next_seq)?
+        group_size += width
+        last_sequence = next_seq
+        taken += 1
+    }
+    while taken < input.group_commits {
         match channel.try_receive(input.receive) {
             Ok(Frame(take follower_frame, following)) => {
                 let width = list.len(follower_frame)
@@ -122,6 +134,7 @@ fn object_journal_stream(link: SlotLink, input: ObjectJournalTask, take raw: Byt
                 slot_send(link, follower_frame, following)?
                 group_size += width
                 last_sequence = following
+                taken += 1
             },
             Ok(take control) => {
                 deferred = Some(take control)
@@ -130,8 +143,35 @@ fn object_journal_stream(link: SlotLink, input: ObjectJournalTask, take raw: Byt
             Error(_) => break,
         }
     }
-    slot_wait(link, last_sequence)?
+    slot_ring(link)
     Ok((last_sequence, group_size))
+}
+
+fn object_journal_stream_advance_batch(mut lane: ObjectJournalSession, batch_seq: u64, record_commit: bool) {
+    if let Some(mut link) = lane.stream {
+        link.last_batch_seq = order.max(link.last_batch_seq, batch_seq)
+        if record_commit && batch_seq != 0 {
+            let n = list.len(link.commit_batches)
+            if n == 0 || link.commit_batches[n - 1] != batch_seq {
+                if let Ok(()) = list.try_reserve(mut link.commit_batches, 1) {
+                    list.push(mut link.commit_batches, batch_seq)
+                }
+            }
+        }
+    }
+}
+
+fn object_journal_stream_trim_batches(mut lane: ObjectJournalSession, from_seq: u64) {
+    if let Some(mut link) = lane.stream {
+        let mut i = 0u64
+        while i < list.len(link.commit_batches) {
+            if link.commit_batches[i] < from_seq {
+                let _ = list.remove(mut link.commit_batches, i)
+            } else {
+                i += 1
+            }
+        }
+    }
 }
 
 fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJournalStart) -> Result[(), Error] waits {
@@ -145,6 +185,11 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut failed_reclaims = 0u64
     // The pending reclaim failed and waits for a retry (`attention`).
     let mut reclaim_failed = false
+    // Attached Place streaming state (§12.11.4, §12.11.6, §12.11.12).
+    let mut stream_in_flight: Option[(u64, u64)] = None
+    let mut is_stalled = false
+    let mut stream_awaiting_fence = false
+    let mut stream_queued: List[(Bytes, u64)] = list.new()
     loop {
         if let Some(terminal) = lane.register.terminal {
             return match terminal {
@@ -199,12 +244,13 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
         match take selected {
             Frame(take raw, sequence) => {
                 if let Some(link) = lane.stream {
-                    let (last_sequence, group_size) = object_journal_stream(link, input, take raw, sequence, mut deferred)?
-                    written += group_size
-                    if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
-                        return Ok(())
+                    if stream_in_flight != None || is_stalled || stream_awaiting_fence {
+                        capacity(list.try_reserve(mut stream_queued, 1))?
+                        list.push(mut stream_queued, (take raw, sequence))
+                        continue
                     }
-                    let _ = channel.try_send(input.synced, ())
+                    let (last_sequence, group_size) = object_journal_stream_send(link, input, take raw, sequence, mut stream_queued, mut deferred)?
+                    stream_in_flight = Some((last_sequence, group_size))
                     continue
                 }
                 let ctx = history_group_context(lane.register.head)?
@@ -248,6 +294,131 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                         emit_health(signal, Ok(0))
                     }
                 }
+            },
+            StreamAnswer(take ack) => {
+                match take ack {
+                    SlotAcked(through, batch_seq) => {
+                        object_journal_stream_advance_batch(mut lane, batch_seq, through > 0)
+                        is_stalled = false
+                        if let Some((in_seq, in_bytes)) = stream_in_flight {
+                            if through >= in_seq {
+                                stream_in_flight = None
+                                written += in_bytes
+                                if let Error(_) = channel.send(input.acks, ObjectJournaled(in_seq, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
+                                    return Ok(())
+                                }
+                                let _ = channel.try_send(input.synced, ())
+                            }
+                        }
+                        if !stream_awaiting_fence && stream_in_flight == None && list.len(stream_queued) != 0 {
+                            if let Some(link) = lane.stream {
+                                let (take next_raw, next_seq) = list.remove(mut stream_queued, 0u64)
+                                let (last_sequence, group_size) = object_journal_stream_send(link, input, take next_raw, next_seq, mut stream_queued, mut deferred)?
+                                stream_in_flight = Some((last_sequence, group_size))
+                            }
+                        }
+                    },
+                    SlotPollHead => {
+                        is_stalled = true
+                        if !stream_awaiting_fence {
+                            if let Ok(Some((moved_epoch, cutoff))) = stream_poll_head(mut lane) {
+                                stream_awaiting_fence = true
+                                if let Some(link) = lane.stream {
+                                    slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                                }
+                            }
+                        }
+                    },
+                    SlotSettle(settle_id, through_seq, next_seq) => {
+                        is_stalled = true
+                        if !stream_awaiting_fence {
+                            let settled = stream_settle(mut lane, through_seq, next_seq, false, input.group_bytes, input.group_commits)
+                            match take settled {
+                                Ok(SettleApplied) => {
+                                    object_journal_stream_advance_batch(mut lane, through_seq, false)
+                                    let (fseq, fframe) = match lane.register.attach {
+                                        Some(a) => match a.live {
+                                            Some(r) => (r.from_seq, r.from_frame),
+                                            None => (0u64, 0u32),
+                                        },
+                                        None => (0u64, 0u32),
+                                    }
+                                    object_journal_stream_trim_batches(mut lane, fseq)
+                                    if let Some(link) = lane.stream {
+                                        slot_report(link, ReportSettled(link.slot, settle_id, true, lane.register.head.entry.seq, fseq, fframe))
+                                    }
+                                },
+                                Ok(SettleFenced(moved_epoch, cutoff)) => {
+                                    stream_awaiting_fence = true
+                                    if let Some(link) = lane.stream {
+                                        slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                                    }
+                                },
+                                _ => {
+                                    if let Some(link) = lane.stream {
+                                        slot_report(link, ReportSettled(link.slot, settle_id, false, 0, 0, 0))
+                                    }
+                                },
+                            }
+                        }
+                    },
+                    SlotFenced(epoch, ok_through, missing) => {
+                        if !missing && ok_through > 0 {
+                            if let Some((_, in_bytes)) = stream_in_flight {
+                                written += in_bytes
+                            }
+                            let _ = channel.send(input.acks, ObjectJournaled(ok_through, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq))
+                            let _ = channel.try_send(input.synced, ())
+                        }
+                        if missing {
+                            return Error(Undecided)
+                        }
+                        return Error(Fenced(epoch))
+                    },
+                    SlotLatched(cause) => return Error(Latched(cause)),
+                    SlotGranted(_, _) => (),
+                }
+            },
+            ObjectClose(take close_reply) => {
+                let close_info: Option[u64] = match lane.stream {
+                    Some(link) => match lane.register.attach {
+                        Some(_) => Some(link.last_batch_seq),
+                        None => None,
+                    },
+                    None => None,
+                }
+                if let Some(last_seq) = close_info {
+                    let closed = stream_settle(mut lane, last_seq, last_seq + 1, true, input.group_bytes, input.group_commits)
+                    match take closed {
+                        Ok(SettleApplied) => {
+                            if let Some(link) = lane.stream {
+                                slot_report(link, ReportDetached(link.slot, lane.register.head.pair.epoch))
+                            }
+                            let done_ok: Result[(), Error] = Ok(())
+                            let _ = channel.send(close_reply, take done_ok)
+                            return Ok(())
+                        },
+                        Ok(SettleFenced(moved_epoch, cutoff)) => {
+                            if let Some(link) = lane.stream {
+                                slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                            }
+                            let problem: Error = Fenced(lane.register.head.pair.epoch)
+                            let _ = channel.send(close_reply, Error(clone(problem)))
+                            return Error(take problem)
+                        },
+                        Ok(SettleNotApplied) => {
+                            let _ = channel.send(close_reply, Error(Undecided))
+                            return Error(Undecided)
+                        },
+                        Error(take problem) => {
+                            let _ = channel.send(close_reply, Error(clone(problem)))
+                            return Error(take problem)
+                        },
+                    }
+                }
+                let done_ok: Result[(), Error] = Ok(())
+                let _ = channel.send(close_reply, take done_ok)
+                return Ok(())
             },
             Barrier => {
                 let _ = channel.try_send(input.notices, Written)

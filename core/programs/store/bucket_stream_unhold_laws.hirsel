@@ -1,0 +1,652 @@
+// L90-H, L90-O (variant 1) and L90-X laws for hold, unhold, settle, rule (c),
+// rule (f) and crash points (STORE-SPEC §12.11.5, §12.11.6, §12.11.11, §12.11.15).
+// Each oracle is derived from the spec's request schedule and register state.
+const UNHOLD_OP_MS: u64 = 2000
+
+const UNHOLD_HOLD_MS: u64 = 8000
+
+const UNHOLD_IDLE_MS: u64 = 1000
+
+fn stream_unhold_plan(max_slots: u32) -> StreamPlan {
+    let mut limits = stream_limits()
+    limits.max_slots = max_slots
+    limits.hold_ms = UNHOLD_HOLD_MS
+    limits.idle_poll_ms = UNHOLD_IDLE_MS
+    StreamPlan(sid: stream_law_sid(), prefix: string.from(STREAM_SERVICE_ROOT), batching: Batching(max_wait_ms: 0, max_batch_bytes: FRAME_LIMIT + 4096), limits: take limits)
+}
+
+fn stream_unhold_service(s: BucketSim, tasks: Tasks, r: Random, max_slots: u32) -> Result[JournalService, Error] waits {
+    let plan = stream_unhold_plan(max_slots)
+    let client = stream_service_client(s, tasks, 81, "", "us-east-1")?
+    let authority = object_authority(take client, "bucket", UNHOLD_OP_MS)
+    Ok(journal_service(tasks, take authority, plan, stream_service_budget(plan), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn stream_unhold_options(create: bool) -> Options {
+    let mut options = bucket_order_options(create)
+    options.head_poll_ms = 1000
+    options.claim_ms = 60000
+    options
+}
+
+fn stream_unhold_make_place(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let client = stream_service_client(s, tasks, 84, "p1/", "us-east-1")?
+    let mut made = open_authority(tasks, object_authority(take client, "bucket", UNHOLD_OP_MS), s.time, r, stream_unhold_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    let _ = bucket_law_rows_table(mut made)?
+    close(take made)
+}
+
+fn stream_unhold_open_attached(s: BucketSim, tasks: Tasks, r: Random, mut service: JournalService, seed: u64) -> Result[Db, Error] waits {
+    let slot = journal_slot(mut service)?
+    let client = stream_service_client(s, tasks, seed, "p1/", "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", UNHOLD_OP_MS), take slot)?
+    Ok(open_authority(tasks, take attached, s.time, r, stream_unhold_options(false)) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn stream_unhold_commit_ticket(mut db: Db, k: u64) -> Result[Ticket, Error] waits {
+    let rows = bucket_law_rows_table(mut db)?
+    let value = bucket_law_value(k)
+    let done = run(mut db, None, (copy_env(k), copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.1, call_env.0, call_env.2)
+    })?
+    let Committed(take receipt) = take done else {
+        return Error(Foreign)
+    }
+    Ok(receipt.ticket)
+}
+
+type UnholdClaimant: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    r: Random,
+    slot: JournalSlot,
+    seed: u64,
+    expect_rows: Option[u64],
+    close_after: bool
+}
+
+fn stream_unhold_claim_task(take job: UnholdClaimant) -> Result[(), Error] waits {
+    let UnholdClaimant(endpoint, clock, tasks, r, slot: take slot, seed, expect_rows, close_after) = take job
+    let client = stream_endpoint_client(endpoint, clock, tasks, seed, "p1/", "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", UNHOLD_OP_MS), take slot)?
+    let mut db = open_authority(tasks, take attached, clock, r, stream_unhold_options(false)) ?=> |Refusal(error: take problem, ..)| take problem
+    if let Some(want) = expect_rows {
+        if bucket_law_rows(mut db)? != want {
+            let _ = close(take db)
+            fail("claimant recovered unexpected row count")
+        }
+    }
+    if close_after {
+        close(take db)?
+    }
+    Ok(())
+}
+
+// Writes a raw Held row for (store, epoch, token) in `streams/s-<sid>/reg`
+// without running a full claim, simulating a claimant that crashed after step 3.
+fn stream_unhold_raw_hold(s: BucketSim, tasks: Tasks, seed: u64, store: StoreId, epoch: u64, token: StoreId) -> Result[(), Error] waits {
+    let mut client = stream_service_client(s, tasks, seed, "", "us-east-1")?
+    let mut lane = stream_lane(stream_law_sid(), 1, 8, token)?
+    lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(stream_law_sid()))
+    let due = std.object.deadline_after_ms(client, UNHOLD_OP_MS)
+    stream_reg_read(mut lane, mut client, due)?
+    let against = lane.reg.inc
+    let Written = stream_reg_write(mut lane, mut client, Hold(RegRow(store, epoch, token, rev_hold: 0, abandoned: false), against), due)? else {
+        fail("raw hold saw unexpected incarnation move")
+    }
+    Ok(())
+}
+
+fn stream_unhold_reg_rows(report: std.sim.s3.Report, reg: String) -> Result[List[RegRow], Error] {
+    let Some(final) = map.get(report.objects, reg) else {
+        fail("reg object is missing")
+    }
+    let body = stream_register_decode(final.data, stream_law_sid(), 0)?
+    let StreamRegister(rows: take rows, ..) = take body
+    Ok(take rows)
+}
+
+fn stream_unhold_head_status(report: std.sim.s3.Report, nth: u64) -> Option[u16] {
+    let mut seen = 0u64
+    for q in report.requests {
+        if q.method == "PUT" && q.key == "p1/head" {
+            seen += 1
+            if seen == nth {
+                return Some(q.status)
+            }
+        }
+    }
+    None
+}
+
+// L90-H(i) (§12.11.6, §12.11.15): A's settle and B's H race at one tag, in
+// both orders. Order 1: A's settle applies first, B gets 412 and retries with
+// nothing applied twice. Order 2: B's H applies first, A's settle gets 412,
+// A's ticket in batch <= k ends Ok and A's ticket above k ends Fenced, and
+// rule (c) clears B's Held row.
+@test
+fn bucket_stream_unhold_race(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    stream_unhold_race_a_wins(c, r, tasks)?
+    stream_unhold_race_b_wins(c, r, tasks)
+}
+
+fn stream_unhold_race_a_wins(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    // PUT p1/head #1-3: standalone setup; #4: A attach; #5: B's first H; #6: A's settle.
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1, until: Applied("PUT", string.from("p1/head"), 6), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 101, None, list.new(), take holds, std.sim.world.plan(101))
+    let outcome = stream_unhold_race_a_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    // Completion order in report.requests: A's settle (200) completes before the
+    // held H (412), followed by B's retry H (200).
+    if stream_unhold_head_status(report, 5) != Some(200u16) || stream_unhold_head_status(report, 6) != Some(412u16) || stream_unhold_head_status(report, 7) != Some(200u16) {
+        fail("L90-H(i) order 1: expected settle 200, held H 412, and retry H 200")
+    }
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-H(i) order 1: Held row remained after B's H applied")
+    }
+    Ok(())
+}
+
+fn stream_unhold_race_a_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    bucket_law_commit(mut a, 2)?
+    let slot_b = journal_slot(mut service)?
+    let claimant = UnholdClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 201, expect_rows: Some(2), close_after: true)
+    let running = task.spawn(tasks, bytes 33554432, take claimant, stream_unhold_claim_task)
+    match task.join(take running) {
+        Ok(take ended) => ended?,
+        Error(_) => fail("L90-H(i) order 1: B task failed"),
+    }
+    std.clock.sleep_ns(s.time, (UNHOLD_IDLE_MS + UNHOLD_HOLD_MS) * 1000000)
+    let _ = close(take a)
+    close_journal_service(take service)
+}
+
+fn stream_unhold_race_b_wins(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let b3 = stream_service_key(string.from("b-00000000000000000001-00000000000000000003"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(4)
+    // B's hold (PUT reg #3) waits for A's batch 3 PUT to be requested; batch 3 waits for
+    // B's hold to apply, so batch 3 has seen_rev < rev_hold (included in B's cutoff k = 3)
+    // while A's GET reg after batch 3 sees B's hold and stalls t1.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(reg), from: 3, count: 1, until: Requested("PUT", clone(b3), 1), then: Apply))
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(b3), from: 1, count: 1, until: Applied("PUT", clone(reg), 3), then: Apply))
+    // Race B's H (#5) and A's settle (#6) at the same tag, letting B's H (#5) win.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1, until: Requested("PUT", string.from("p1/head"), 6), then: Apply))
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 6, count: 1, until: Applied("PUT", string.from("p1/head"), 5), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 102, None, list.new(), take holds, std.sim.world.plan(102))
+    let outcome = stream_unhold_race_b_run(s, tasks, r, reg)
+    let report = bucket_law_report(take s)
+    outcome?
+    if stream_unhold_head_status(report, 5) != Some(200u16) || stream_unhold_head_status(report, 6) != Some(412u16) {
+        fail("L90-H(i) order 2: expected B's H #5 applied and A's settle #6 412")
+    }
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-H(i) order 2: rule (c) did not remove B's Held row")
+    }
+    Ok(())
+}
+
+fn stream_unhold_race_b_run(s: BucketSim, tasks: Tasks, r: Random, reg: String) -> Result[(), Error] waits {
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    let slot_b = journal_slot(mut service)?
+    let claimant = UnholdClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 202, expect_rows: Some(2), close_after: true)
+    let running = task.spawn(tasks, bytes 33554432, take claimant, stream_unhold_claim_task)
+    result.unwrap(std.sim.s3.requested(s.endpoint, "PUT", reg, 3))
+    let t1 = stream_unhold_commit_ticket(mut a, 2)?
+    result.unwrap(std.sim.s3.requested(s.endpoint, "PUT", string.from("p1/head"), 5))
+    let t2 = stream_unhold_commit_ticket(mut a, 3)?
+    match task.join(take running) {
+        Ok(take ended) => ended?,
+        Error(_) => fail("L90-H(i) order 2: B task failed"),
+    }
+    durable(mut a, t1)?
+    match durable(mut a, t2) {
+        Error(Fenced(2)) => (),
+        _ => fail("L90-H(i) order 2: ticket above cutoff k did not end Fenced(2)"),
+    }
+    let _ = close(take a)
+    close_journal_service(take service)
+}
+
+// L90-H(ii) (§12.11.6 M1 token pinning): after A's settle applies, C's hold
+// lands before A's removal CAS. A's retry removes only B's fixed token and
+// keeps C's row, so X stays stalled until C's row is gone; when C stalls past
+// hold_ms, A's second settle applies and C's H gets Mismatch.
+@test
+fn bucket_stream_unhold_token_pinning(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    // PUT reg #3: B's hold. PUT reg #4: A's first removal CAS (for B), held until
+    // C's hold (PUT reg #5) applies so A's CAS gets 412 and retries with M1 fixed set.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(reg), from: 4, count: 1, until: Applied("PUT", clone(reg), 5), then: Apply))
+    // PUT p1/head #5: A's first settle. PUT p1/head #6: C's first H, held until A's
+    // second settle (#7) applies so C's H gets 412 Mismatch.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 6, count: 1, until: Applied("PUT", string.from("p1/head"), 7), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 103, None, list.new(), take holds, std.sim.world.plan(103))
+    let outcome = stream_unhold_pinning_run(s, tasks, r, reg)
+    let report = bucket_law_report(take s)
+    outcome?
+    // Completion order: A's first settle (200), A's second settle (200), then C's held H (412).
+    if stream_unhold_head_status(report, 5) != Some(200u16) || stream_unhold_head_status(report, 6) != Some(200u16) || stream_unhold_head_status(report, 7) != Some(412u16) {
+        fail("L90-H(ii): expected first settle 200, second settle 200, C's held H 412")
+    }
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-H(ii): final reg still holds a row")
+    }
+    Ok(())
+}
+
+fn stream_unhold_pinning_run(s: BucketSim, tasks: Tasks, r: Random, reg: String) -> Result[(), Error] waits {
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    let store_id = a.store
+    let epoch_a = claim_of(a)?.epoch
+    stream_unhold_raw_hold(s, tasks, 210, store_id, epoch_a, StoreId(hi: 90, lo: 1))?
+    let t1 = stream_unhold_commit_ticket(mut a, 2)?
+    // Wait for A's first settle to apply and its removal CAS (PUT reg #4) to arrive.
+    result.unwrap(std.sim.s3.requested(s.endpoint, "PUT", reg, 4))
+    let slot_c = journal_slot(mut service)?
+    let claimant = UnholdClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_c, seed: 211, expect_rows: Some(2), close_after: true)
+    let running = task.spawn(tasks, bytes 33554432, take claimant, stream_unhold_claim_task)
+    // Wait for C's first H (#6) to arrive (held); A's retry CAS (#6 on reg) has applied
+    // keeping C's row, so t1 must still be stalled!
+    result.unwrap(std.sim.s3.requested(s.endpoint, "PUT", string.from("p1/head"), 6))
+    if durable_now(mut a, t1)? {
+        fail("L90-H(ii): A acked a stalled batch while C's row stood in reg")
+    }
+    // Wait for A's second settle (after hold_ms) to apply, remove C's first row,
+    // and ack t1 while C's first H (#6) gets 412 Mismatch.
+    durable(mut a, t1)?
+    match task.join(take running) {
+        Ok(take ended) => ended?,
+        Error(_) => fail("L90-H(ii): C task failed"),
+    }
+    std.clock.sleep_ns(s.time, (UNHOLD_IDLE_MS + UNHOLD_HOLD_MS) * 1000000)
+    let _ = close(take a)
+    close_journal_service(take service)
+}
+
+// L90-H(iii) (§12.11.6 M1 idle settle): with an empty tail, A's settle writes
+// 0 GROUP entries and 1 head PUT that raises `settles`, changing the tag so
+// a slow claimant's H gets 412 Mismatch.
+@test
+fn bucket_stream_unhold_idle_settle(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1, until: Applied("PUT", string.from("p1/head"), 6), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 104, None, list.new(), take holds, std.sim.world.plan(104))
+    let outcome = stream_unhold_idle_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let mut entries_in_window = 0u64
+    let mut in_window = false
+    for q in report.requests {
+        if q.method == "GET" && q.key == "idle-start" {
+            in_window = true
+        }
+        if q.method == "GET" && q.key == "idle-end" {
+            in_window = false
+        }
+        if in_window && q.method == "PUT" && string.starts_with(q.key, "p1/e-") {
+            entries_in_window += 1
+        }
+    }
+    if entries_in_window != 0 {
+        fail("L90-H(iii): idle settle with an empty tail wrote a GROUP entry")
+    }
+    // Completion order: A's idle settle (200), then B's held slow H (412).
+    if stream_unhold_head_status(report, 5) != Some(200u16) || stream_unhold_head_status(report, 6) != Some(412u16) {
+        fail("L90-H(iii): idle settle did not win against slow H")
+    }
+    // Check that head write #6 (0-indexed: #5 among applied head writes) raised `settles` to 1.
+    let mut saw_settles = false
+    for w in report.head_writes {
+        if let Ok((_, Some(a))) = history_decode_head_attach(w.data) {
+            if a.settles == 1 {
+                saw_settles = true
+            }
+        }
+    }
+    if !saw_settles {
+        fail("L90-H(iii): idle settle did not raise ATTACH.settles to 1")
+    }
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-H(iii): final reg still holds a row")
+    }
+    Ok(())
+}
+
+fn stream_unhold_idle_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    stream_service_marker(s, tasks, string.from("idle-start"))?
+    let slot_b = journal_slot(mut service)?
+    let claimant = UnholdClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 220, expect_rows: Some(0), close_after: true)
+    let running = task.spawn(tasks, bytes 33554432, take claimant, stream_unhold_claim_task)
+    match task.join(take running) {
+        Ok(take ended) => ended?,
+        Error(_) => fail("L90-H(iii): B task failed"),
+    }
+    stream_service_marker(s, tasks, string.from("idle-end"))?
+    std.clock.sleep_ns(s.time, (UNHOLD_IDLE_MS + UNHOLD_HOLD_MS) * 1000000)
+    let _ = close(take a)
+    close_journal_service(take service)
+}
+
+// L90-O variant 1 (§12.11.6 A2, rule f): B pre-scans, A closes X (ATTACH
+// dropped), B's hold lands, B crashes. A removes the row by rule (f) at its
+// orphan-row head poll within `idle_poll_ms` of the hold.
+@test
+fn bucket_stream_orphan_hold_close(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let s = bucket_law_sim_holds(tasks, c, 105, None, list.new(), list.new(), std.sim.world.plan(105))
+    let outcome = stream_orphan_close_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let mut hold_ns = 0u64
+    let mut clear_ns = 0u64
+    let mut reg_puts = 0u64
+    for q in report.requests {
+        if q.method == "PUT" && q.key == reg && q.applied {
+            reg_puts += 1
+            if reg_puts == 3 {
+                hold_ns = q.at_ns
+            } else if reg_puts == 4 {
+                clear_ns = q.at_ns
+            }
+        }
+    }
+    if reg_puts != 4 || clear_ns < hold_ns || clear_ns - hold_ns > UNHOLD_IDLE_MS * 1000000 {
+        fail("L90-O(1): orphan Held row was not removed by rule (f) within idle_poll_ms")
+    }
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-O(1): orphan Held row remained in reg")
+    }
+    // Check that A's close dropped ATTACH on p1/head.
+    let Some(final_head) = map.get(report.objects, "p1/head") else {
+        fail("L90-O(1): p1/head missing")
+    }
+    let (_, take attach) = history_decode_head_attach(final_head.data)?
+    if let Some(_) = attach {
+        fail("L90-O(1): close did not drop ATTACH")
+    }
+    Ok(())
+}
+
+fn stream_orphan_close_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    let store_id = a.store
+    let epoch_a = claim_of(a)?.epoch
+    close(take a)?
+    // B's hold lands after A's close dropped ATTACH, then B crashes.
+    stream_unhold_raw_hold(s, tasks, 230, store_id, epoch_a, StoreId(hi: 91, lo: 1))?
+    std.clock.sleep_ns(s.time, (2 * UNHOLD_IDLE_MS) * 1000000)
+    // Verify standalone reopen sees the committed row settled by close.
+    let client = stream_service_client(s, tasks, 231, "p1/", "us-east-1")?
+    let mut reopened = open_authority(tasks, object_authority(take client, "bucket", UNHOLD_OP_MS), s.time, r, stream_unhold_options(false)) ?=> |Refusal(error: take problem, ..)| take problem
+    if bucket_law_rows(mut reopened)? != 1 {
+        fail("L90-O(1): standalone reopen after close settle missed committed row")
+    }
+    close(take reopened)?
+    close_journal_service(take service)
+}
+
+// L90-X (§12.11.6 table, §12.11.15): crashes after each claim and unhold step.
+@test
+fn bucket_stream_crash_steps(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    stream_crash_after_hold(c, r, tasks)?
+    stream_crash_after_h_before_claim(c, r, tasks)?
+    stream_crash_h_undecided_dropped(c, r, tasks)?
+    stream_crash_h_undecided_applied(c, r, tasks)?
+    stream_crash_concurrent_claims(c, r, tasks)
+}
+
+// Crash after step 3 (hold): Held row, head unchanged; A unholds by (a) after hold_ms.
+fn stream_crash_after_hold(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let s = bucket_law_sim_holds(tasks, c, 110, None, list.new(), list.new(), std.sim.world.plan(110))
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    stream_unhold_raw_hold(s, tasks, 240, a.store, claim_of(a)?.epoch, StoreId(hi: 92, lo: 1))?
+    bucket_law_commit(mut a, 2)?
+    close(take a)?
+    let mut c_db = stream_unhold_open_attached(s, tasks, r, mut service, 241)?
+    if bucket_law_rows(mut c_db)? != 2 {
+        fail("L90-X(step 3): next open missed acked rows")
+    }
+    close(take c_db)?
+    close_journal_service(take service)?
+    let report = bucket_law_report(take s)
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-X(step 3): Held row remained after (a) unhold")
+    }
+    Ok(())
+}
+
+// Crash after step 6 (H applied) before step 7 (CLAIM acked): head at e + 1,
+// S_A's tail sealed at k, empty live tail. Next claimant C copies `sealed`,
+// reads every acked row once, and A clears the Held row by (c).
+fn stream_crash_after_h_before_claim(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let s = bucket_law_sim_holds(tasks, c, 111, None, list.new(), list.new(), std.sim.world.plan(111))
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    bucket_law_commit(mut a, 2)?
+    let store_id = a.store
+    let epoch_a = claim_of(a)?.epoch
+    // Simulate B writing its hold and H (sealing batches 1..=3) then crashing before CLAIM.
+    stream_unhold_raw_hold(s, tasks, 250, store_id, epoch_a, StoreId(hi: 93, lo: 1))?
+    let mut raw_client = stream_service_client(s, tasks, 251, "p1/", "us-east-1")?
+    let due = std.object.deadline_after_ms(raw_client, UNHOLD_OP_MS)
+    let mut head_bytes: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let tag = match history_fetch_head(mut raw_client, mut head_bytes, due) {
+        Ok(t) => t,
+        Error(e) => return Error(Remote(e)),
+    }
+    let (take capture, take attached) = history_decode_head_attach(head_bytes)?
+    let Some(old_attach) = take attached else {
+        fail("L90-X(step 6): expected ATTACH")
+    }
+    let Some(old_live) = old_attach.live else {
+        fail("L90-X(step 6): expected live tail")
+    }
+    let mut sealed: List[SealedTail] = list.with_capacity(1)
+    list.push(mut sealed, SealedTail(tail: old_live, cutoff: 3, at: capture.head.entry.seq))
+    let new_attach = Attach(settles: old_attach.settles, live: Some(StreamRef(sid: stream_law_sid(), inc: 1, from_seq: 4, from_frame: 0)), sealed: take sealed)
+    let claimed = history_claim_head(capture.head, StoreId(hi: 93, lo: 2))?
+    let auth_end = history_authority_end(head_bytes)?
+    let authority = copied(list.slice(head_bytes, 240, auth_end))?
+    let mut out_head: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    history_encode_register_head(mut out_head, claimed, authority, Some(take new_attach))?
+    let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    match history_write_head(mut raw_client, Match(tag), mut out_head, mut witness, due) {
+        HistoryApplied(_) => (),
+        _ => fail("L90-X(step 6): simulated B's H did not apply"),
+    }
+    let _ = take raw_client
+    // Wait for A's stall poll to detect epoch e + 1 and clear B's row by rule (c).
+    std.clock.sleep_ns(s.time, (UNHOLD_IDLE_MS + UNHOLD_HOLD_MS) * 1000000)
+    // Next claimant C opens X: copies sealed, appends no empty tail, reads 2 rows.
+    let mut c_db = stream_unhold_open_attached(s, tasks, r, mut service, 252)?
+    if bucket_law_rows(mut c_db)? != 2 {
+        fail("L90-X(step 6): C did not read A's 2 sealed rows")
+    }
+    close(take c_db)?
+    let _ = close(take a)
+    close_journal_service(take service)?
+    let report = bucket_law_report(take s)
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-X(step 6): Held row remained after rule (c)")
+    }
+    Ok(())
+}
+
+type UndecidedClaimant: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    r: Random,
+    slot: JournalSlot,
+    seed: u64
+}
+
+fn stream_unhold_expect_undecided(take job: UndecidedClaimant) -> Result[(), Error] waits {
+    let UndecidedClaimant(endpoint, clock, tasks, r, slot: take slot, seed) = take job
+    let client = stream_endpoint_client(endpoint, clock, tasks, seed, "p1/", "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", UNHOLD_OP_MS), take slot)?
+    let mut options = stream_unhold_options(false)
+    options.claim_ms = 6000
+    match open_authority(tasks, take attached, clock, r, options) {
+        Error(Refusal(error: Undecided, ..)) => Ok(()),
+        Error(Refusal(error: Remote(_), ..)) => Ok(()),
+        Ok(take db) => {
+            let _ = close(take db)
+            fail("L90-X(Undecided): claimant opened despite dropped/lost H")
+        },
+        Error(Refusal(error: take other, ..)) => Error(take other),
+    }
+}
+
+// H is Undecided (dropped): row stays Held, A's (a) settle applies and A keeps serving.
+fn stream_crash_h_undecided_dropped(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // Hold B's H (#5) past B's 6 s claim_ms deadline and then drop it so B ends
+    // Undecided without touching A's settle (#6) at 8 s.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1, until: At(7000 * 1000000), then: Drop))
+    let s = bucket_law_sim_holds(tasks, c, 112, None, list.new(), take holds, std.sim.world.plan(112))
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    let slot_b = journal_slot(mut service)?
+    let job = UndecidedClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 260)
+    let running = task.spawn(tasks, bytes 33554432, take job, stream_unhold_expect_undecided)
+    match task.join(take running) {
+        Ok(take ended) => ended?,
+        Error(_) => fail("L90-X(Undecided dropped): B task failed"),
+    }
+    // A unholds by (a) and commits row 2.
+    bucket_law_commit(mut a, 2)?
+    close(take a)?
+    close_journal_service(take service)?
+    let report = bucket_law_report(take s)
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-X(Undecided dropped): Held row remained after A's settle")
+    }
+    Ok(())
+}
+
+// H is Undecided (applied, reply lost): row stays Held, A's (a) settle is fenced
+// and removes row by (c), C reads A's acked row.
+fn stream_crash_h_undecided_applied(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // Hold B's H (#5) past B's 6 s claim_ms deadline and then apply with lost reply.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1, until: At(7000 * 1000000), then: ApplyLoseReply))
+    let s = bucket_law_sim_holds(tasks, c, 113, None, list.new(), take holds, std.sim.world.plan(113))
+    let mut service = stream_unhold_service(s, tasks, r, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    let slot_b = journal_slot(mut service)?
+    let job = UndecidedClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 261)
+    let running = task.spawn(tasks, bytes 33554432, take job, stream_unhold_expect_undecided)
+    match task.join(take running) {
+        Ok(take ended) => ended?,
+        Error(_) => fail("L90-X(Undecided applied): B task failed"),
+    }
+    // Wait for A to observe B's applied H and clear the Held row by (c).
+    std.clock.sleep_ns(s.time, (UNHOLD_IDLE_MS + UNHOLD_HOLD_MS) * 1000000)
+    let mut c_db = stream_unhold_open_attached(s, tasks, r, mut service, 262)?
+    if bucket_law_rows(mut c_db)? != 1 {
+        fail("L90-X(Undecided applied): C missed A's acked row")
+    }
+    close(take c_db)?
+    let _ = close(take a)
+    close_journal_service(take service)?
+    let report = bucket_law_report(take s)
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-X(Undecided applied): Held row remained after rule (c)")
+    }
+    Ok(())
+}
+
+type RaceWinner: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    r: Random,
+    slot: JournalSlot,
+    seed: u64
+}
+
+fn stream_unhold_race_claim(take job: RaceWinner) -> Result[bool, Error] waits {
+    let RaceWinner(endpoint, clock, tasks, r, slot: take slot, seed) = take job
+    let client = stream_endpoint_client(endpoint, clock, tasks, seed, "p1/", "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", UNHOLD_OP_MS), take slot)?
+    match open_authority(tasks, take attached, clock, r, stream_unhold_options(false)) {
+        Ok(take db) => {
+            let mut owned = take db
+            if bucket_law_rows(mut owned)? != 1 {
+                let _ = close(take owned)
+                fail("L90-X(concurrent): winner missed row 1")
+            }
+            close(take owned)?
+            Ok(true)
+        },
+        Error(Refusal(error: Lost, ..)) => Ok(false),
+        Error(Refusal(error: take other, ..)) => Error(take other),
+    }
+}
+
+// Concurrent B and C claim at epoch e: two rows, at most one H applies, loser abandons.
+fn stream_crash_concurrent_claims(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // Hold the first H (#5) until the second H (#6) is requested, so both race at one tag.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1, until: Requested("PUT", string.from("p1/head"), 6), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 114, None, list.new(), take holds, std.sim.world.plan(114))
+    let mut service = stream_unhold_service(s, tasks, r, 5)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut service, 85)?
+    bucket_law_commit(mut a, 1)?
+    let slot_b = journal_slot(mut service)?
+    let slot_c = journal_slot(mut service)?
+    let tb = task.spawn(tasks, bytes 33554432, RaceWinner(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 270), stream_unhold_race_claim)
+    let tc = task.spawn(tasks, bytes 33554432, RaceWinner(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_c, seed: 271), stream_unhold_race_claim)
+    let wb = result.unwrap(task.join(take tb))?
+    let wc = result.unwrap(task.join(take tc))?
+    if wb == wc {
+        fail("L90-X(concurrent): expected exactly one winner between B and C")
+    }
+    std.clock.sleep_ns(s.time, (UNHOLD_IDLE_MS + UNHOLD_HOLD_MS) * 1000000)
+    let _ = close(take a)
+    close_journal_service(take service)?
+    let report = bucket_law_report(take s)
+    if list.len(stream_unhold_reg_rows(report, reg)?) != 0 {
+        fail("L90-X(concurrent): rows remained after concurrent claims")
+    }
+    Ok(())
+}

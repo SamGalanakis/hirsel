@@ -1,7 +1,7 @@
-// The host stream's service task (STORE-SPEC §12.11.4, §12.11.12): it drains
-// the slots the doorbell names, packs their frames into one batch, runs the
-// writer cycle and answers each Place. Package-private until the claim and
-// the terminal fence land.
+// The host stream's service task (STORE-SPEC §12.11.4, §12.11.6, §12.11.12):
+// it drains the slots the doorbell names, packs their frames into one batch,
+// runs the writer cycle, answers each Place, handles stalls/settles/rules
+// (a)/(b)/(c)/(f) and runs the idle register and orphan-row head polls.
 type StreamServiceInput: send {
     requests: std.object.Requests,
     clock: Clock,
@@ -12,6 +12,7 @@ type StreamServiceInput: send {
     op_ms: u64,
     control: Receiver[ServiceControl],
     rings: Inbox[u32],
+    reports: Inbox[SlotReport],
     ready: Sender[Result[(), Error]],
     tasks: Tasks,
     bell: Client[u32]
@@ -22,10 +23,15 @@ type StreamServiceEnd: send {
     result: Result[(), Error]
 }
 
-// One attached Place on a slot: its (store, epoch) and its answer client.
+// One attached Place on a slot: its (store, epoch), whether it was fenced,
+// the `live.from_seq` established by its own Applied settles (every stalled
+// batch strictly below it is already durable in a GROUP entry on `head`),
+// and its answer client.
 type SlotPlace {
     store: StoreId,
     epoch: u64,
+    fenced: bool,
+    settled_from: u64,
     answers: Client[SlotAck]
 }
 
@@ -37,15 +43,43 @@ type ServiceSlot {
 }
 
 // A stalled Place's outstanding tickets (§12.11.4): its slot, its (store,
-// epoch) and the last ticket sequence among its unacked frames.
+// epoch), the batch seq carrying its frames, and the last ticket sequence
+// among those frames (kept per batch seq for cutoff verdicts).
 type StallTicket {
     slot: u64,
     store: StoreId,
     epoch: u64,
+    batch_seq: u64,
     through: u64
 }
 
-// The stall poll's alarm: it rings the service's own bell once at `at`.
+// First-observation monotonic timestamp of a Held row (§12.11.6 rule a).
+type ObservedRow {
+    store: StoreId,
+    epoch: u64,
+    token: StoreId,
+    first_seen_ns: u64
+}
+
+// An in-flight unhold settle requested from X's head task, pinned to the
+// fixed token set observed before the settle was issued (§12.11.6 M1).
+type ActiveSettle {
+    id: u64,
+    slot: u64,
+    store: StoreId,
+    epoch: u64,
+    tokens: List[StoreId]
+}
+
+// Next stall head-poll deadline (`hold_ms / 4`) for a stalled Place.
+type StallPoll {
+    slot: u64,
+    store: StoreId,
+    epoch: u64,
+    next_poll_ns: u64
+}
+
+// The service's alarm: it rings the service's own bell once at `at`.
 type StreamTimer: send {
     c: Clock,
     at: u64,
@@ -74,11 +108,18 @@ type StreamService {
     op_ms: u64,
     slots: List[ServiceSlot],
     rings: Inbox[u32],
+    reports: Inbox[SlotReport],
     control: Receiver[ServiceControl],
     // The slots of the created batch whose ack is undecided, with each
     // slice's last ticket sequence, in `lane.pending` order.
     waiting: List[(u64, u64)],
     tickets: List[StallTicket],
+    prefixes: Map[StoreId, String],
+    observed_rows: List[ObservedRow],
+    active_settles: List[ActiveSettle],
+    stall_polls: List[StallPoll],
+    next_settle_id: u64,
+    last_reg_ns: u64,
     tasks: Tasks,
     bell: Client[u32],
     timer: Option[Task[()]],
@@ -86,7 +127,7 @@ type StreamService {
 }
 
 fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits {
-    let StreamServiceInput(requests: take requests, clock, plan: take plan, dir: take dir, authority_kind, holder, op_ms, control: take control, rings: take rings, ready: take ready, tasks, bell: take bell) = take input
+    let StreamServiceInput(requests: take requests, clock, plan: take plan, dir: take dir, authority_kind, holder, op_ms, control: take control, rings: take rings, reports: take reports, ready: take ready, tasks, bell: take bell) = take input
     let mut client = std.object.attach(take requests, None)
     let slot_count: u64 = int.widen(plan.limits.max_slots)
     let rows = 2 * slot_count
@@ -106,8 +147,15 @@ fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits
         return StreamServiceEnd(requests: take returned, result: Error(clone(problem)))
     }
     let _ = channel.send(ready, Ok(()))
-    let mut service = StreamService(lane: take lane, client: take client, clock, plan: take plan, op_ms, slots: list.new(), rings: take rings, control: take control, waiting: list.new(), tickets: list.new(), tasks, bell: take bell, timer: None, poll_at: 0)
+    let now = host.mono_ns(clock)
+    let mut service = StreamService(lane: take lane, client: take client, clock, plan: take plan, op_ms, slots: list.new(), rings: take rings, reports: take reports, control: take control, waiting: list.new(), tickets: list.new(), prefixes: map.new(), observed_rows: list.new(), active_settles: list.new(), stall_polls: list.new(), next_settle_id: 1, last_reg_ns: now, tasks, bell: take bell, timer: None, poll_at: 0)
+    stream_service_arm_next(mut service)
     let result = stream_service_loop(mut service)
+    if let Some(take running) = replace(mut service.timer, None) {
+        let mut t = take running
+        task.cancel(mut t)
+        let _ = task.join(take t)
+    }
     let StreamService(client: take back, ..) = take service
     let (take returned, _) = std.object.split(take back)
     StreamServiceEnd(requests: take returned, result: take result)
@@ -126,21 +174,21 @@ fn stream_service_loop(mut s: StreamService) -> Result[(), Error] waits {
     }
 }
 
-// One wake: control, attachments, then batches until no slot has a frame.
-// A frame held for want of batch room rings no bell again, so the wake
-// goes on to the next batch rather than waiting. False once the service is
-// stopped.
+// One wake: control, reports, polls, then batches until no slot has a frame.
+// False once the service is stopped.
 fn stream_service_wake(mut s: StreamService) -> Result[bool, Error] waits {
     stream_drain_rings(s)
     if !stream_service_control(mut s)? {
         return Ok(false)
     }
     stream_flush_acks(mut s)
+    stream_service_reports(mut s)?
     stream_service_poll(mut s)?
     loop {
         let mut batch: List[BatchEntry] = list.new()
         stream_gather(mut s, mut batch)?
         if list.len(batch) == 0 {
+            stream_service_arm_next(mut s)
             return Ok(true)
         }
         if s.plan.batching.max_wait_ms != 0 {
@@ -149,6 +197,7 @@ fn stream_service_wake(mut s: StreamService) -> Result[bool, Error] waits {
             stream_gather(mut s, mut batch)?
         }
         stream_service_batch(mut s, take batch)?
+        stream_service_reports(mut s)?
     }
 }
 
@@ -183,8 +232,6 @@ fn stream_new_slot(mut s: StreamService) -> Result[(Client[SlotMsg], u32), Error
     let slot_count: u64 = int.widen(s.plan.limits.max_slots)
     let ordinary = slot_count - 1
     if list.len(s.slots) >= ordinary {
-        // A slot whose Place dropped it is free once its inbox reads Closed;
-        // anything still queued stays held for the next batch.
         for i in 0u64 .. list.len(s.slots) {
             if stream_slot_closed(mut s.slots[i]) {
                 let _ = replace(mut s.slots[i], ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))
@@ -278,9 +325,7 @@ fn stream_entry_of(batch: List[BatchEntry], slot: u64) -> Option[u64] {
 fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[(), Error] waits {
     for i in 0u64 .. list.len(s.slots) {
         if let Some(place) = s.slots[i].place {
-            if stream_stalled(s.lane, place.store, place.epoch) {
-                // A stalled Place goes into no batch; its frames wait in
-                // its slot (§12.11.4).
+            if place.fenced || stream_stalled(s.lane, place.store, place.epoch) {
                 continue
             }
         }
@@ -305,8 +350,11 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                 },
             }
             match take message {
-                SlotAttach(hi, lo, epoch, take answers) => {
-                    s.slots[i].place = Some(SlotPlace(store: StoreId(hi, lo), epoch, answers: take answers))
+                SlotAttach(hi, lo, epoch, take place_prefix, take answers) => {
+                    let store = StoreId(hi, lo)
+                    let _ = map.try_reserve(mut s.prefixes, 1)
+                    map.insert(mut s.prefixes, store, take place_prefix)
+                    s.slots[i].place = Some(SlotPlace(store, epoch, fenced: false, settled_from: 0, answers: take answers))
                     let answer = match s.lane.latched {
                         Some(cause) => SlotLatched(cause),
                         None => SlotGranted(s.lane.inc, s.lane.seq),
@@ -320,8 +368,6 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                     }
                     let at = stream_entry_of(batch, i)
                     if at == None && stream_store_in(batch, owner) {
-                        // INDEX rows are one per store: another slot's
-                        // epoch of this store is already in the batch.
                         s.slots[i].held = Some(SlotFrame(width, sequence, take first))
                         break
                     }
@@ -374,8 +420,6 @@ fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, widt
             Ok(SlotMore(take piece)) => list.append(mut filling.slice.octets, piece),
             Ok(_) => fail("stream service: a frame cut short"),
             Error(_) => {
-                // The Place dropped its slot mid-frame: the partial frame
-                // leaves with it.
                 list.truncate(mut filling.slice.octets, at)
                 s.slots[i].inbox = None
                 return Ok(())
@@ -391,8 +435,6 @@ fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, widt
 }
 
 // Runs the writer cycle on `batch` and answers each Place by the ack rule.
-// A read that fails leaves the batch pending; it is decided, every
-// `idle_poll_ms`, before anything else is created.
 fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> Result[(), Error] waits {
     let mut ordered = take batch
     list.sort(mut ordered, scoped fn(a: BatchEntry, b: BatchEntry) -> Order {
@@ -414,7 +456,9 @@ fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> R
     loop {
         match take outcome {
             Ok(take decided) => {
+                s.last_reg_ns = host.mono_ns(s.clock)
                 stream_service_decided(mut s, decided)
+                stream_process_reg(mut s, std.object.deadline_after_ms(s.client, s.op_ms))?
                 return Ok(())
             },
             Error(take problem) => {
@@ -423,8 +467,6 @@ fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> R
                     return Ok(())
                 }
                 if list.len(s.lane.pending) == 0 {
-                    // The create itself failed before any pending slice:
-                    // nothing was written at this seq.
                     return Error(take problem)
                 }
             },
@@ -434,9 +476,6 @@ fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> R
     }
 }
 
-// Acks each acked slice's tickets. A stalled slice's tickets stay
-// outstanding until the Place is unheld (§12.11.6), and the stall poll is
-// armed.
 fn stream_service_decided(mut s: StreamService, decided: List[SliceDecision]) {
     let waiting = replace(mut s.waiting, list.new())
     for i in 0u64 .. list.len(decided) {
@@ -445,23 +484,16 @@ fn stream_service_decided(mut s: StreamService, decided: List[SliceDecision]) {
         }
         let (slot, through) = waiting[i]
         if decided[i].acked {
-            stream_answer(mut s.slots[slot], SlotAcked(through))
+            stream_answer(mut s.slots[slot], SlotAcked(through, decided[i].seq))
         } else {
-            stream_ticket_stall(mut s, slot, decided[i].store, decided[i].epoch, through)
+            stream_ticket_stall(mut s, slot, decided[i].store, decided[i].epoch, decided[i].seq, through)
         }
-    }
-    let idle = match s.timer {
-        Some(_) => false,
-        None => true,
-    }
-    if list.len(s.tickets) != 0 && idle {
-        stream_service_arm(mut s)
     }
 }
 
-fn stream_ticket_stall(mut s: StreamService, slot: u64, store: StoreId, epoch: u64, through: u64) {
+fn stream_ticket_stall(mut s: StreamService, slot: u64, store: StoreId, epoch: u64, batch_seq: u64, through: u64) {
     for i in 0u64 .. list.len(s.tickets) {
-        if s.tickets[i].slot == slot && same(s.tickets[i].store, store) && s.tickets[i].epoch == epoch {
+        if s.tickets[i].slot == slot && same(s.tickets[i].store, store) && s.tickets[i].epoch == epoch && s.tickets[i].batch_seq == batch_seq {
             s.tickets[i].through = order.max(s.tickets[i].through, through)
             return
         }
@@ -469,118 +501,17 @@ fn stream_ticket_stall(mut s: StreamService, slot: u64, store: StoreId, epoch: u
     if let Error(_) = list.try_reserve(mut s.tickets, 1) {
         return
     }
-    list.push(mut s.tickets, StallTicket(slot, store, epoch, through))
+    list.push(mut s.tickets, StallTicket(slot, store, epoch, batch_seq, through))
 }
 
-// Arms the stall poll `idle_poll_ms` from now (§12.11.13). A timer that
-// cannot start leaves the poll to the next ring.
-fn stream_service_arm(mut s: StreamService) {
-    s.poll_at = clock.deadline_after_ms(host.mono_ns(s.clock), s.plan.limits.idle_poll_ms)
-    let job = StreamTimer(c: s.clock, at: s.poll_at, bell: conn.client(s.bell))
-    s.timer = match task.try_spawn(s.tasks, bytes STREAM_TIMER_BYTES, take job, stream_timer) {
-        Ok(take started) => Some(take started),
-        Error(_) => None,
-    }
-}
-
-// The stall poll (§12.11.6 rule b): one `reg` GET; for each stalled (X, e)
-// whose rows are all Abandoned, one CAS removes exactly the tokens that GET
-// showed, and its result acks X's stalled tickets by the ack rule. A row
-// still Held keeps X stalled and the poll armed.
-fn stream_service_poll(mut s: StreamService) -> Result[(), Error] waits {
-    if list.len(s.lane.stalled) == 0 || host.mono_ns(s.clock) < s.poll_at {
-        return Ok(())
-    }
-    s.timer = None
-    let deadline = std.object.deadline_after_ms(s.client, s.op_ms)
-    match stream_reg_read(mut s.lane, mut s.client, deadline) {
-        Ok(()) => (),
-        Error(Corrupt(_)) => {
-            s.lane.latched = Some(Register)
-            stream_service_latched(mut s, Register)
-            return Ok(())
-        },
-        Error(_) => {
-            stream_service_arm(mut s)
-            return Ok(())
-        },
-    }
-    let stalled = replace(mut s.lane.stalled, list.new())
-    let mut kept: List[PendingSlice] = list.new()
-    capacity(list.try_reserve(mut kept, list.len(stalled)))?
-    for p in stalled {
-        let mut tokens: List[StoreId] = list.new()
-        let mut held = false
-        for row in s.lane.reg.rows {
-            if same(row.store, p.store) && row.epoch == p.epoch {
-                capacity(list.try_reserve(mut tokens, 1))?
-                list.push(mut tokens, row.token)
-                held = held || !row.abandoned
-            }
-        }
-        if !held && list.len(tokens) != 0 {
-            match stream_reg_write(mut s.lane, mut s.client, Unhold(take tokens), deadline) {
-                Ok(Written) => (),
-                Ok(Moved) => {
-                    s.lane.latched = Some(Superseded)
-                    stream_service_latched(mut s, Superseded)
-                    return Ok(())
-                },
-                Error(_) => {
-                    if let Some(cause) = s.lane.latched {
-                        stream_service_latched(mut s, cause)
-                        return Ok(())
-                    }
-                    held = true
-                },
-            }
-        }
-        if held {
-            list.push(mut kept, p)
-            continue
-        }
-        match stream_ack_rule(s.lane.reg, s.lane.inc, s.lane.holder, p.store, p.epoch) {
-            Ack => stream_service_unstall(mut s, p.store, p.epoch),
-            Stall => list.push(mut kept, p),
-            Superseded => {
-                s.lane.latched = Some(Superseded)
-                stream_service_latched(mut s, Superseded)
-                return Ok(())
-            },
-        }
-    }
-    s.lane.stalled = take kept
-    if list.len(s.lane.stalled) != 0 {
-        stream_service_arm(mut s)
-    }
-    Ok(())
-}
-
-// Acks every stalled ticket of (store, epoch) on the slot that still
-// serves it.
-fn stream_service_unstall(mut s: StreamService, store: StoreId, epoch: u64) {
-    let mut i = 0u64
-    while i < list.len(s.tickets) {
-        if same(s.tickets[i].store, store) && s.tickets[i].epoch == epoch {
-            let t = list.remove(mut s.tickets, i)
-            let serving = match s.slots[t.slot].place {
-                Some(place) => same(place.store, store) && place.epoch == epoch,
-                None => false,
-            }
-            if serving {
-                stream_answer(mut s.slots[t.slot], SlotAcked(t.through))
-            }
-        } else {
-            i += 1
-        }
-    }
-}
-
-// The incarnation latched (§12.11.10): every attached Place's outstanding
-// tickets end `Undecided` at its next answer.
-fn stream_service_latched(mut s: StreamService, cause: StreamLatch) {
-    list.clear(mut s.waiting)
+// Finds the active non-fenced slot serving (store, epoch).
+fn stream_serving_slot(s: StreamService, store: StoreId, epoch: u64) -> Option[u64] {
     for i in 0u64 .. list.len(s.slots) {
-        stream_answer(mut s.slots[i], SlotLatched(cause))
+        if let Some(place) = s.slots[i].place {
+            if !place.fenced && same(place.store, store) && place.epoch == epoch {
+                return Some(i)
+            }
+        }
     }
+    None
 }

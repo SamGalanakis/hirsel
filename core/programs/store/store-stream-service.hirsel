@@ -121,8 +121,11 @@ fn stream_reg_read(mut lane: StreamLane, mut client: std.object.Client, deadline
 // already done and rebuild it over a fresh body (§12.11.3 rule 3). A hold
 // names the incarnation it was taken against (§12.11.5 step 3). `Abandon`
 // marks the writer's own row (rule e). `Unhold` removes the fixed set: the
-// tokens one completed GET showed for (store, epoch) (§12.11.6 b, M1).
-type RegIntent: send = Hold(RegRow, u64) | Abandon(StoreId) | Unhold(List[StoreId])
+// tokens one completed GET showed for (store, epoch) (§12.11.6 a/b, M1).
+// `ClearEpoch` removes every row for (store, epoch < observed_epoch) (rule c).
+// `ClearDetached` removes every row for (store, epoch <= observed_epoch) once
+// the head at observed_epoch no longer names (S, inc) as live (rule f).
+type RegIntent: send = Hold(RegRow, u64) | Abandon(StoreId) | Unhold(List[StoreId]) | ClearEpoch(StoreId, u64) | ClearDetached(StoreId, u64)
 
 // `Moved`: the register's incarnation rose past the one a hold was taken
 // against, so no row was written and the claim takes the no-hold rule.
@@ -170,12 +173,28 @@ fn stream_intent_present(intent: RegIntent, reg: StreamRegister) -> bool {
             }
             true
         },
+        ClearEpoch(store, observed_epoch) => {
+            for row in reg.rows {
+                if same(row.store, store) && row.epoch < observed_epoch {
+                    return false
+                }
+            }
+            true
+        },
+        ClearDetached(store, observed_epoch) => {
+            for row in reg.rows {
+                if same(row.store, store) && row.epoch <= observed_epoch {
+                    return false
+                }
+            }
+            true
+        },
     }
 }
 
 // The body the intent writes over `base`: rev + 1, and only the writer's own
-// row added or marked, or the fixed set removed, so every other row stands
-// (rule 4).
+// row added or marked, or the fixed set / ruled rows removed, so every other
+// row stands (rule 4).
 fn stream_intent_apply(intent: RegIntent, base: StreamRegister, max_rows: u64) -> Result[StreamRegister, Error] {
     let mut built = disk_allocation(scoped fn() -> Result[StreamRegister, Error] {
         Ok(clone(base))
@@ -207,6 +226,26 @@ fn stream_intent_apply(intent: RegIntent, base: StreamRegister, max_rows: u64) -
                 }
             }
         },
+        ClearEpoch(store, observed_epoch) => {
+            let mut i = 0u64
+            while i < list.len(built.rows) {
+                if same(built.rows[i].store, store) && built.rows[i].epoch < observed_epoch {
+                    let _ = list.remove(mut built.rows, i)
+                } else {
+                    i += 1
+                }
+            }
+        },
+        ClearDetached(store, observed_epoch) => {
+            let mut i = 0u64
+            while i < list.len(built.rows) {
+                if same(built.rows[i].store, store) && built.rows[i].epoch <= observed_epoch {
+                    let _ = list.remove(mut built.rows, i)
+                } else {
+                    i += 1
+                }
+            }
+        },
     }
     Ok(take built)
 }
@@ -223,6 +262,8 @@ fn stream_intent_moved(intent: RegIntent, reg: StreamRegister, inc: u64) -> bool
         Hold(_, against) => reg.inc > against,
         Abandon(_) => false,
         Unhold(_) => reg.inc != inc,
+        ClearEpoch(_, _) => reg.inc != inc,
+        ClearDetached(_, _) => reg.inc != inc,
     }
 }
 

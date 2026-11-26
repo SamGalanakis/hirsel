@@ -1,4 +1,4 @@
-type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile, Bytes) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), Error]], u64) | ObjectExportRead(ObjectExportFetch)
+type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile, Bytes) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), Error]], u64) | ObjectExportRead(ObjectExportFetch) | StreamAnswer(SlotAck) | ObjectClose(Sender[Result[(), Error]])
 
 type WriteNotice: send = Written | WriteFailed(IoError)
 
@@ -269,6 +269,8 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                 Some(ObjectFresh(..)) => fail("log journal received an object head probe"),
                 Some(ObjectExportRead(..)) => fail("log journal received an object export read"),
                 Some(IdleCheck) => fail("log journal received an idle-buffer timer"),
+                Some(StreamAnswer(..)) => fail("log journal received a stream answer"),
+                Some(ObjectClose(..)) => fail("log journal received an object close"),
             }
             match channel.try_receive(receive) {
                 Ok(take msg) => {

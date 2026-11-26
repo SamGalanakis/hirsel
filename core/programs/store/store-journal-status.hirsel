@@ -69,6 +69,28 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
             failure = Some(take e)
         }
     }
+    if let None = failure {
+        let (attached, has_sealed) = match owned.disk {
+            Some(state) => match state.object {
+                Some(w) => (match w.stream {
+                    Some(_) => true,
+                    None => false,
+                }, w.has_sealed),
+                None => (false, false),
+            },
+            None => (false, false),
+        }
+        if attached {
+            let settled = if has_sealed {
+                object_cut_close(mut owned)
+            } else {
+                object_stream_close(mut owned)
+            }
+            if let Error(take e) = settled {
+                failure = Some(take e)
+            }
+        }
+    }
     let connection = replace(mut owned.disk, None)
     let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task, lock: take lock, object: take object_writer, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
     // A Reader may still hold the pager's requests, so the pager is cancelled
@@ -81,7 +103,11 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
         task.cancel(mut pager)
         let _ = task.join(take pager)
     }
-    let _ = take timer
+    if let Some(take running) = take timer {
+        let mut t = take running
+        task.cancel(mut t)
+        let _ = task.join(take t)
+    }
     let _ = take frames
     let mut poison = fault
     let remaining: Option[Receiver[Ack]] = if let Some(_) = poison {
@@ -121,7 +147,9 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     }
     if let Some(take held_lock) = take lock {
         if let Error(e) = host.close(take held_lock) {
-            if let None = poison { poison = Some(e) }
+            if let None = poison {
+                poison = Some(e)
+            }
         }
     }
     match poison {

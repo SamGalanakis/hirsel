@@ -71,10 +71,12 @@ fn service_step(take method: String, take key: String, exact: bool, status: u16)
     ServiceStep(method: take method, key: take key, exact, status)
 }
 
-// The §12.11.5 and §12.11.4 schedule from the Place's first request: genesis
-// with no 5a probes and no CLAIM entry, the CLAIM's batch and its `reg` GET
-// before open returns, then per commit one batch create and one `reg` GET
-// and no head write; and no idle head GET over three head-poll periods.
+// The §12.11.5, §12.11.4, §12.11.11 and §12.11.13 schedule from the Place's
+// first request: genesis with no 5a probes and no CLAIM entry, the CLAIM's
+// batch and its `reg` GET before open returns, then per commit one batch create
+// and one `reg` GET and no head write; three idle `reg` GETs over 3.5 s with
+// no Place idle head GET; then close's settle reading the batches, writing one
+// GROUP entry and one head write that drops ATTACH (2 A).
 fn stream_service_expected(commits: u64) -> List[ServiceStep] {
     let mut steps: List[ServiceStep] = list.new()
     list.push(mut steps, service_step("GET", "p1/head", true, 404))
@@ -92,7 +94,22 @@ fn stream_service_expected(commits: u64) -> List[ServiceStep] {
         list.push(mut steps, service_step("GET", stream_service_key("reg"), true, 200))
     }
     list.push(mut steps, service_step("GET", "marker-2", true, 404))
+    // Three idle `reg` polls over 3.5 s (idle_poll_ms = 1,000 ms), zero head GETs.
+    for _ in 0u64 .. 3 {
+        list.push(mut steps, service_step("GET", stream_service_key("reg"), true, 200))
+    }
     list.push(mut steps, service_step("GET", "marker-3", true, 404))
+    // Close settle: reads each commit batch of the live tail (INDEX + slice),
+    // writes 1 GROUP entry and 1 head PUT dropping ATTACH (2 A).
+    for k in 0u64 .. commits {
+        let mut name = string.with_capacity(48)
+        stream_batch_key(mut name, 1, k + 2)
+        let key = stream_service_key(take name)
+        list.push(mut steps, service_step("GET", clone(key), true, 206))
+        list.push(mut steps, service_step("GET", take key, true, 206))
+    }
+    list.push(mut steps, service_step("PUT", "p1/e-00000000000000000002-", false, 200))
+    list.push(mut steps, service_step("PUT", "p1/head", true, 200))
     take steps
 }
 
@@ -131,14 +148,10 @@ fn bucket_stream_streamed_genesis(c: Clock, r: Random, tasks: Tasks) -> Result[(
             fail("the streamed Place sent other than §12.11.5's and §12.11.4's requests")
         }
     }
-    let mut head_bytes: Option[Bytes] = None
-    for w in report.head_writes {
-        head_bytes = Some(clone(w.data))
+    if list.len(report.head_writes) != 2 {
+        fail("expected genesis head write and close settle head write")
     }
-    let Some(raw) = head_bytes else {
-        fail("the streamed genesis wrote no head")
-    }
-    let (_, take attach) = history_decode_head_attach(raw)?
+    let (_, take attach) = history_decode_head_attach(report.head_writes[0u64].data)?
     let Some(a) = attach else {
         fail("the streamed genesis head has no ATTACH")
     }
@@ -148,6 +161,10 @@ fn bucket_stream_streamed_genesis(c: Clock, r: Random, tasks: Tasks) -> Result[(
     // Incarnation 1 is the stream's first election; its first batch is seq 1.
     if a.settles != 0 || list.len(a.sealed) != 0 || !stream_same(tail.sid, stream_law_sid()) || tail.inc != 1 || tail.from_seq != 1 || tail.from_frame != 0 {
         fail("the streamed genesis ATTACH is not {0, (S, 1, (1, 0)), []}")
+    }
+    let (_, take closed_attach) = history_decode_head_attach(report.head_writes[1u64].data)?
+    if let Some(_) = closed_attach {
+        fail("the close settle head still carries ATTACH")
     }
     Ok(())
 }
@@ -166,7 +183,7 @@ fn stream_service_genesis_run(s: BucketSim, tasks: Tasks, c: Clock, r: Random, p
         durable(mut db, receipt)?
     }
     stream_service_marker(s, tasks, string.from("marker-2"))?
-    std.clock.sleep_ns(s.time, 3 * 1000 * 1000000)
+    std.clock.sleep_ns(s.time, 3500 * 1000000)
     stream_service_marker(s, tasks, string.from("marker-3"))?
     close(take db)?
     close_journal_service(take service)
@@ -369,6 +386,8 @@ fn stream_cost_place(take p: CostPlace) -> Result[(), Error] waits {
         durable(mut db, receipt)?
         i += STREAM_COST_PLACES
     }
+    // Close after the measurement window ends so close settles stay outside it.
+    host.sleep_until(clock, std.clock.deadline_after_ms(start, STREAM_COST_COMMITS * STREAM_COST_SPACING_MS + 1000))
     close(take db)
 }
 
@@ -389,7 +408,9 @@ fn bucket_stream_cost_window(c: Clock, r: Random, tasks: Tasks) -> Result[(), Er
 
 fn stream_cost_law(c: Clock, r: Random, tasks: Tasks, wait_ms: u64, batches: u64) -> Result[(), Error] waits {
     let s = bucket_law_sim(tasks, c, 87, None, list.new())
-    let start = std.clock.deadline_after_ms(host.mono_ns(s.time), 10000)
+    // Start strictly between two 1 s idle reg polls so the pre-window poll does
+    // not land at `start` itself.
+    let start = std.clock.deadline_after_ms(host.mono_ns(s.time), 10500)
     let outcome = stream_cost_run(s, tasks, r, wait_ms, start)
     let report = bucket_law_report(take s)
     outcome?

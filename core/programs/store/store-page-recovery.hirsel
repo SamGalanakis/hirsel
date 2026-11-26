@@ -93,6 +93,19 @@ fn recovered_tiered_inventory(locations: PageLocations, locator: Option[View[His
     Ok(arc.new(TieredReadInventory(packs: take packs, generation: generation, next_stamp: next_stamp)))
 }
 
+fn manifest_tiered_inventory(inventory: Map[u64, PagePack], generation: u64, next_stamp: u64) -> Result[Arc[TieredReadInventory], Error] {
+    let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let mut ids = 0u64
+    for (seq, pack) in inventory {
+        if pack.class < 3 {
+            continue
+        }
+        let (take revised, _) = std.omap.insert_owned(mut ids, take packs, seq, TieredPagerPack(inventory: clone(pack), object: None))
+        packs = take revised
+    }
+    Ok(arc.new(TieredReadInventory(packs: take packs, generation: generation, next_stamp: next_stamp)))
+}
+
 fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[LoadedPageStore, Error] {
     let locations = disk_allocation(scoped fn() -> Result[PageLocations, Error] {
         rebuild_page_locations(validated)

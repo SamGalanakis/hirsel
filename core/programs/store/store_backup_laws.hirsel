@@ -512,3 +512,116 @@ fn backup_offline_routes_and_packs(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     backup_writer_route(d, c, r, tasks, options, false)?
     backup_mutilations(d, c, r, tasks, options)
 }
+
+fn l96_memory_exact_and_below(target: Dir, d: Dir, c: Clock, options: Options, resident_exact: u64) -> Result[(), DeployError] waits {
+    let mut exact_opts: Options = clone(options)
+    exact_opts.resident_limit = resident_exact
+    let restored_ok = disk_test_directory(d)
+    let _stamp = restore(target, restored_ok, c, exact_opts)?
+    let mut below_opts: Options = clone(options)
+    below_opts.resident_limit = resident_exact - 1
+    let restored_bad = disk_test_directory(d)
+    match restore(target, restored_bad, c, below_opts) {
+        Error(Store(Full(Resident(Capacity(requested, available))))) if requested == resident_exact && available == resident_exact - 1 => (),
+        _ => return Error(ExportMismatch),
+    }
+    if !deploy_result(disk_exists(restored_bad, "EXPORT"))? {
+        return Error(ExportMismatch)
+    }
+    Ok(())
+}
+
+// L96 (e) Memory half (DESIGN-v2 §2.2, §6): Memory-only store + repeated-class-2
+// fixture keep exact lease list, R4 resident figure, exact vs one-below
+// Full(Resident(Capacity)) fields, and tight copy task budget.
+@test
+fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let source = disk_test_directory(d)
+    let target = disk_test_directory(d)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.pack_bytes = 65536
+    backup_law_seed(tasks, source, c, r, options)?
+    let mut db = deploy_result(open(tasks, source, c, r, options))?
+    let mut schema = deploy_result(declare(db, Open))?
+    let (items, _, _, _, _) = deploy_result(backup_law_schema(mut schema))?
+    let _ = deploy_result(seal(mut db, take schema))?
+    // Produce several packs across cuts so the pack list holds multiple rows
+    // and class-2 packs carry multiple list pages.
+    for round in 0u64 .. 6 {
+        for i in 0u64 .. 16 {
+            if !typed_put(mut db, items, 200 + round * 16 + i, round * 100 + i) {
+                return Error(ExportMismatch)
+            }
+        }
+        let _ = deploy_result(checkpoint(mut db))?
+    }
+    let resident_exact = db.resident
+    let want_packs = live_pack_sequences(disk_state(db).pages.locations)
+    let mut attempt: Bytes = list.with_capacity(16)
+    list.fill(mut attempt, 16, 17u8)
+    let job = begin_backup(mut db, target, result.unwrap(copied(attempt)))?
+    let leased_ok = match disk_state(db).lease {
+        Some(held_lease) => held_lease.packs == want_packs,
+        None => false,
+    }
+    if !leased_ok {
+        return Error(ExportMismatch)
+    }
+    let _ = export_copy(take job)?
+    release_export(mut db, attempt)
+    l96_memory_exact_and_below(target, d, c, options, resident_exact)?
+    // Tight copy task budget: binary-search the exact byte boundary for the
+    // spawned copy task and verify exact passes while exact - 1 fails.
+    let mut low = 0u64
+    let mut high = 4194304u64
+    while low < high {
+        let mid = low + (high - low) / 2
+        let probe_dir = disk_test_directory(d)
+        let probe_job = begin_backup(mut db, probe_dir, result.unwrap(copied(attempt)))?
+        let passed = match task.try_spawn(tasks, bytes mid, take probe_job, export_copy) {
+            Ok(take running) => match task.join(take running) {
+                Ok(Ok(_)) => true,
+                Ok(Error(_)) => return Error(ExportMismatch),
+                Error(_) => false,
+            },
+            Error(_) => false,
+        }
+        release_export(mut db, attempt)
+        if passed {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    if low == 0 || low >= 4194304 {
+        return Error(ExportMismatch)
+    }
+    let exact_dir = disk_test_directory(d)
+    let exact_job = begin_backup(mut db, exact_dir, result.unwrap(copied(attempt)))?
+    let exact_ok = match task.try_spawn(tasks, bytes low, take exact_job, export_copy) {
+        Ok(take running) => match task.join(take running) {
+            Ok(Ok(_)) => true,
+            _ => false,
+        },
+        Error(_) => false,
+    }
+    release_export(mut db, attempt)
+    if !exact_ok {
+        return Error(ExportMismatch)
+    }
+    let below = low - 1
+    let below_dir = disk_test_directory(d)
+    let below_job = begin_backup(mut db, below_dir, result.unwrap(copied(attempt)))?
+    let below_failed = match task.try_spawn(tasks, bytes below, take below_job, export_copy) {
+        Ok(take running) => match task.join(take running) {
+            Error(_) => true,
+            _ => false,
+        },
+        Error(_) => true,
+    }
+    release_export(mut db, attempt)
+    if !below_failed {
+        return Error(ExportMismatch)
+    }
+    deploy_result(close(take db))
+}

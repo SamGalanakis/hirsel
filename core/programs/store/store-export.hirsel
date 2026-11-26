@@ -618,6 +618,13 @@ pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result
 // A deploy export comes from a runner store, so its FENCE level is 1. A backup
 // (§15.3 R4) keeps whatever supported level its source had.
 fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool) -> Result[Preparation, DeployError] waits {
+    open_copied_with(d, c, attempt, options, deploy, false)
+}
+
+// Lazy AP21-T opener over the read-only recovery core (§13.7, §13.10a):
+// attaches only the Memory graph, keeps Tiered roots Cold with their read
+// inventory, and takes the Tiered plan reserve iff a Tiered collection is held.
+fn open_copied_with(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool, allow_tiered: bool) -> Result[Preparation, DeployError] waits {
     if let Bucket(_) = options.authority {
         return Error(Store(Unsupported(1)))
     }
@@ -629,22 +636,51 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     if id.hi != stamp.store_hi || id.lo != stamp.store_lo || (deploy && manifest.fence != 1) || manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
         return Error(ExportMismatch)
     }
-    deploy_result(require_memory_manifest(manifest))?
-    let validated = deploy_result(validate_export_manifest(d, id, take manifest, false, !deploy))?
-    let mut decoded_packs = deploy_result(disk_loaded(id, take validated))?
-    let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
-    list.clear(mut decoded_packs.all)
-    let replay = deploy_result(journal_replay(take initial, decoded_packs.manifest.next_stamp - 1, decoded_packs.manifest.limits))?
-    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, 72, stamp.terminal, stamp.end, list.new(), take replay))?
+    if !allow_tiered {
+        deploy_result(require_memory_manifest(manifest))?
+    }
+    let validated = deploy_result(validate_export_manifest(d, id, take manifest, allow_tiered, !deploy))?
+    let ValidatedPageManifest(manifest: take selected, inventory: take inventory, graph: take resolved, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = deploy_result(disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    }))?
+    let pages = deploy_result(attach_page_graph(mut graph, empty_collection))?
+    let (take initial, has_tiered) = deploy_result(disk_allocation(scoped fn() -> Result[(State, bool), Error] {
+        let mut holders = attach_manifest_holders(selected, pages, empty_collection)
+        let tiered = holders_tiered(holders)
+        if tiered && !tiered_open_funded(options) {
+            return Error(Missing("cache_bytes"))
+        }
+        if allow_tiered && tiered {
+            let paging = manifest_tiered_inventory(inventory, selected.generation, selected.next_stamp)?
+            for slot in 0u64 .. list.len(holders) {
+                if tiered_collections(holders[slot].collections.root) {
+                    holders[slot].collections.paging = Some(arc.share(paging))
+                }
+            }
+        }
+        let state = capacity(manifest_state(selected, holders))?
+        Ok((take state, tiered))
+    }))?
+    let replay = deploy_result(journal_replay_manifest(take initial, selected))?
+    let replayed = deploy_result(replay_export(d, id, selected.first_live, 72, stamp.terminal, stamp.end, list.new(), take replay))?
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)
     }
     let live_bytes = deploy_result(journal_account(replayed))?
-    let JournalReplay(state: take state, next_node: ids, ..) = take replayed
-    deploy_result(over_ceiling(live_bytes, options.resident_limit))?
+    let JournalReplay(state: take state, next_node: ids, tiered: tiered_account, ..) = take replayed
+    let admitted = if has_tiered {
+        int.saturating_add(live_bytes, tiered_plan_reserve(options))
+    } else {
+        live_bytes
+    }
+    deploy_result(over_ceiling(admitted, options.resident_limit))?
     let mut db = empty_db(c, id, options)
     deploy_result(open_heads(mut db, take state))?
     db.resident = live_bytes
+    db.tiered = tiered_account.total
+    db.limits = selected.limits
     db.next_node = ids
     db.next_table = stamp.next_table
     Ok(Preparation(db: take db, stamp: take stamp, shipped: None))

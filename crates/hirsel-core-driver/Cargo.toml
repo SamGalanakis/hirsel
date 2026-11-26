@@ -30,6 +30,7 @@ cranelift-module = { version = "=0.136.3", default-features = false, features = 
 cranelift-object = { version = "=0.136.3", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false, features = ["override"] }
 rustc-hash = "2"
+rustix = { version = "1.1.6", features = ["fs"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-diag = { path = "../hirsel-core-diag" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }

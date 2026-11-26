@@ -193,6 +193,7 @@ pub enum SdkOption {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TapeOption {
     IncludeCredentials,
+    Json,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,6 +287,7 @@ pub enum CompilerOption {
     Release,
     ReleaseManifest(String),
     Replay,
+    ReplayOutputs(String),
     ReplayUnit(String),
     Rerun,
     Resident,

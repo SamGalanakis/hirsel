@@ -206,13 +206,13 @@ commands! {
         Coverage(CoverageOption), Many: HELP, Json, Output, CoverageMap, MergeBase, MergeTargets;
     "coverage diff", "coverage diff BASE NEW [--json] | coverage diff PROFILE --test DEFINITION [--json]", "Report the sites one coverage profile reached and the other did not, or one test and the rest of its profile.";
         Coverage(CoverageOption), Pair: HELP, Json, CoverageTest;
-    "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
+    "replay", "replay PACKAGE --tape TAPE [--diagnose] [--outputs DIR] [options]", "Replay a recorded program with no host grants.";
         Compiler(CompilerOption), One:
-            PackageStore, Locked, Frozen, HostState, Tape, ReplayUnit, Diagnose, HELP, Json, SourceCore,
+            PackageStore, Locked, Frozen, HostState, Tape, ReplayUnit, ReplayOutputs, Diagnose, HELP, Json, SourceCore,
             SourceStd, CoreProduct, Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
             Cc, Target, Emulator, Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image;
-    "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
-        Tape(TapeOption), One: IncludeCredentials, HELP;
+    "tape", "tape show TAPE --include-credentials [--json]", "Export the header and frames stored in a credential-bearing tape.";
+        Tape(TapeOption), One: IncludeCredentials, Json, HELP;
     "tapes", "tapes <check>", "Check recorded calls in an offline Place store.";
         Simple(NoOption), One: HELP;
     "tapes check", "tapes check DIR --recorded EXE --release EXE", "Re-execute calls in the live journal with the other compiler backend.";

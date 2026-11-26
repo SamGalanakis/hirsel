@@ -18,6 +18,7 @@ NATIVE_EXEC_TEST_CASES = [
     "provider_tests::exec_supervisor_preserves_inputs_and_only_reaps_its_children",
     "provider_tests::exec_provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
     "native::tests::exec_unix_recording_replays_without_host_resources",
+    "native::tests::exec_child_records_its_own_replayable_output",
 ]
 
 # These bodies use the real Linux OS Dir provider. Compile on the pool, execute

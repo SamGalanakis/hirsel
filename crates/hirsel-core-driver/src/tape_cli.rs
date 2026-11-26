@@ -4,7 +4,7 @@ use hirsel_tape_format::{self as format, Blocks, Frame, Header, Index, ReadError
 use std::os::unix::fs::FileExt;
 use std::{
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::Path,
 };
 fn damaged(error: impl std::fmt::Debug) -> io::Error {
@@ -56,7 +56,57 @@ pub(crate) fn run_route(path: &Path) -> io::Result<([u8; 16], Vec<u8>)> {
     let mut file = File::open(path)?;
     format::run_route(|buf| read(&mut file, buf)).map_err(replay_header_error)
 }
-pub(crate) fn show(path: &Path) -> io::Result<()> {
+#[path = "tape_json.rs"]
+mod json;
+
+enum Record<'a> {
+    Header(&'a Header),
+    Stream(u32, &'a str),
+    Entry(format::Entry),
+    Frame(u64, Frame),
+    Truncated,
+}
+
+#[path = "replay_outputs.rs"]
+pub(crate) mod outputs;
+
+pub(crate) fn show(
+    request: crate::cli::Request<crate::cli::TapeOption>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::cli::TapeOption;
+    let path = request
+        .positional
+        .as_deref()
+        .ok_or("tape show requires a tape file")?;
+    if !request.options.contains(&TapeOption::IncludeCredentials) {
+        return Err("tape show requires --include-credentials".into());
+    }
+    render(Path::new(path), request.options.contains(&TapeOption::Json))?;
+    Ok(())
+}
+
+fn render(path: &Path, json: bool) -> io::Result<()> {
+    let out = io::stdout();
+    let mut out = io::BufWriter::new(out.lock());
+    if json {
+        let mut first = true;
+        out.write_all(b"[")?;
+        inspect(path, |record| {
+            if !first {
+                out.write_all(b",")?;
+            }
+            first = false;
+            serde_json::to_writer(&mut out, &json::record(record))?;
+            Ok(())
+        })?;
+        out.write_all(b"]\n")?;
+    } else {
+        inspect(path, |record| write_text(&mut out, record))?;
+    }
+    out.flush()
+}
+
+fn inspect(path: &Path, mut emit: impl FnMut(Record<'_>) -> io::Result<()>) -> io::Result<()> {
     let file = File::open(path)?;
     let read_at = |offset, buf: &mut [u8]| loop {
         match file.read_at(buf, offset) {
@@ -65,39 +115,24 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
         }
     };
     let (mut index, h) = Index::open(read_at).map_err(block_error)?;
-    println!("format {}  kind {}", format::FORMAT, h.kind);
-    println!("identity {}", String::from_utf8_lossy(&h.identity));
-    println!("revision {}", hirsel_core_ids::hex::encode(&h.revision));
-    println!("tape_id {}", hirsel_core_ids::hex::encode(&h.tape_id));
-    println!(
-        "limit {}  charge_policy {}  bound {}  chooser {}  arg_bytes {}",
-        h.limit,
-        h.charge_policy,
-        h.bound,
-        h.chooser,
-        h.arg.len()
-    );
-    println!("arg {:?}  grants {:?}", h.arg, h.net_rules);
-    for grant in &h.secret_grants {
-        println!("grant `{}` [secret] for {}", grant.parameter, grant.policy);
-    }
+    emit(Record::Header(&h))?;
     let paths: Vec<_> = index.paths().collect();
     for (id, path) in paths {
-        println!("{path}");
+        emit(Record::Stream(id, &path))?;
         let mut blocks = index.take(id).expect("indexed stream");
         let mut decoder = blocks.decoder(read_at).map_err(block_error)?;
         if let Some(entry) = decoder.take_entry() {
-            println!("ENTRY {:?}", entry.body());
+            emit(Record::Entry(entry))?;
         }
         decoder.physical = true;
         // Count REPEAT positions as replay does, so the line starts at its first CHOOSE.
-        let mut at = 0;
+        let mut at = 0u64;
         loop {
             let (flags, payload) = match blocks.next(read_at) {
                 Ok(Some(block)) => block,
                 Ok(None) => break,
                 Err(ReadError::Format(Stop::Missing | Stop::Truncated)) => {
-                    println!("TRUNCATED");
+                    emit(Record::Truncated)?;
                     break;
                 }
                 Err(error) => return Err(block_error(error)),
@@ -106,74 +141,134 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
                 .block(payload, flags & format::END != 0)
                 .map_err(damaged)?;
             if let Some(entry) = decoder.take_entry() {
-                println!("ENTRY {:?}", entry.body());
+                emit(Record::Entry(entry))?;
             }
             for frame in frames {
-                at += 1;
-                print!("{at} ");
-                match frame {
-                    Frame::Wait { gap, task } => println!("WAIT gap={gap} task={task}"),
-                    Frame::Retired {
-                        gap,
-                        task,
-                        stream,
-                        pool,
-                    } => {
-                        println!(
-                            "RETIRED gap={gap} task={task} stream={stream} ordinal={} intake={}",
-                            pool >> 1,
-                            pool & 1 != 0
-                        );
-                    }
-                    Frame::Wake { gap, task } => println!("WAKE gap={gap} task={task}"),
-                    Frame::Cancel { gap, task } => println!("CANCEL gap={gap} task={task}"),
-                    Frame::Choose { gap, index } => println!("CHOOSE gap={gap} index={index}"),
-                    Frame::Grant { gap, kind, args } => {
-                        println!("GRANT gap={gap} kind={kind} args={args:?}")
-                    }
-                    Frame::Issue {
-                        task,
-                        op,
-                        object,
-                        args,
-                    } => println!("ISSUE task={task} op={op} object={object} args={args:?}"),
-                    Frame::Done { gap, task, out } => println!(
-                        "DONE gap={gap} task={task} status={} value={} error={:?} written={} payload={:?}",
-                        out.status, out.value, out.error, out.written, out.payload
-                    ),
-                    Frame::Op {
-                        task,
-                        op,
-                        object,
-                        args,
-                        out,
-                    } => println!(
-                        "OP task={task} op={op} object={object} args={args:?} status={} value={} error={:?} written={} payload={:?}",
-                        out.status, out.value, out.error, out.written, out.payload
-                    ),
-                    Frame::Repeat { count } => {
-                        println!("REPEAT count={count}");
-                        at += count - 1;
-                    }
-                    Frame::Take {
-                        gap,
-                        point,
-                        count,
-                        body,
-                    } => println!(
-                        "TAKE gap={gap} point={point:?} count={count} arrival={:?}",
-                        body.arrival()
-                    ),
-                    Frame::HelperEnd { gap, ending } => println!(
-                        "END gap={gap} kind={} outcome={:?}",
-                        ending.kind(),
-                        ending.outcome()
-                    ),
-                    Frame::End { gap, ending } => println!(
-                        "END gap={gap} kind={} outcome={:?}",
-                        ending.kind, ending.outcome
-                    ),
+                at = at
+                    .checked_add(1)
+                    .ok_or_else(|| damaged("frame position overflow"))?;
+                let count = match &frame {
+                    Frame::Repeat { count } => *count,
+                    _ => 1,
+                };
+                emit(Record::Frame(at, frame))?;
+                at = at
+                    .checked_add(count - 1)
+                    .ok_or_else(|| damaged("frame position overflow"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_text(writer: &mut impl Write, record: Record) -> io::Result<()> {
+    match record {
+        Record::Header(h) => {
+            writeln!(writer, "format {}  kind {}", format::FORMAT, h.kind)?;
+            writeln!(writer, "identity {}", String::from_utf8_lossy(&h.identity))?;
+            writeln!(
+                writer,
+                "revision {}",
+                hirsel_core_ids::hex::encode(&h.revision)
+            )?;
+            writeln!(
+                writer,
+                "tape_id {}",
+                hirsel_core_ids::hex::encode(&h.tape_id)
+            )?;
+            writeln!(
+                writer,
+                "limit {}  charge_policy {}  bound {}  chooser {}  arg_bytes {}",
+                h.limit,
+                h.charge_policy,
+                h.bound,
+                h.chooser,
+                h.arg.len()
+            )?;
+            writeln!(writer, "arg {:?}  grants {:?}", h.arg, h.net_rules)?;
+            for grant in &h.secret_grants {
+                writeln!(
+                    writer,
+                    "grant `{}` [secret] for {}",
+                    grant.parameter, grant.policy
+                )?;
+            }
+        }
+        Record::Stream(_, path) => writeln!(writer, "{path}")?,
+        Record::Entry(entry) => writeln!(writer, "ENTRY {:?}", entry.body())?,
+        Record::Truncated => writeln!(writer, "TRUNCATED")?,
+        Record::Frame(at, frame) => {
+            write!(writer, "{at} ")?;
+            match frame {
+                Frame::Wait { gap, task } => writeln!(writer, "WAIT gap={gap} task={task}")?,
+                Frame::Retired {
+                    gap,
+                    task,
+                    stream,
+                    pool,
+                } => {
+                    writeln!(
+                        writer,
+                        "RETIRED gap={gap} task={task} stream={stream} ordinal={} intake={}",
+                        pool >> 1,
+                        pool & 1 != 0
+                    )?;
                 }
+                Frame::Wake { gap, task } => writeln!(writer, "WAKE gap={gap} task={task}")?,
+                Frame::Cancel { gap, task } => writeln!(writer, "CANCEL gap={gap} task={task}")?,
+                Frame::Choose { gap, index } => writeln!(writer, "CHOOSE gap={gap} index={index}")?,
+                Frame::Grant { gap, kind, args } => {
+                    writeln!(writer, "GRANT gap={gap} kind={kind} args={args:?}")?
+                }
+                Frame::Issue {
+                    task,
+                    op,
+                    object,
+                    args,
+                } => writeln!(
+                    writer,
+                    "ISSUE task={task} op={op} object={object} args={args:?}"
+                )?,
+                Frame::Done { gap, task, out } => writeln!(
+                    writer,
+                    "DONE gap={gap} task={task} status={} value={} error={:?} written={} payload={:?}",
+                    out.status, out.value, out.error, out.written, out.payload
+                )?,
+                Frame::Op {
+                    task,
+                    op,
+                    object,
+                    args,
+                    out,
+                } => writeln!(
+                    writer,
+                    "OP task={task} op={op} object={object} args={args:?} status={} value={} error={:?} written={} payload={:?}",
+                    out.status, out.value, out.error, out.written, out.payload
+                )?,
+                Frame::Repeat { count } => {
+                    writeln!(writer, "REPEAT count={count}")?;
+                }
+                Frame::Take {
+                    gap,
+                    point,
+                    count,
+                    body,
+                } => writeln!(
+                    writer,
+                    "TAKE gap={gap} point={point:?} count={count} arrival={:?}",
+                    body.arrival()
+                )?,
+                Frame::HelperEnd { gap, ending } => writeln!(
+                    writer,
+                    "END gap={gap} kind={} outcome={:?}",
+                    ending.kind(),
+                    ending.outcome()
+                )?,
+                Frame::End { gap, ending } => writeln!(
+                    writer,
+                    "END gap={gap} kind={} outcome={:?}",
+                    ending.kind, ending.outcome
+                )?,
             }
         }
     }

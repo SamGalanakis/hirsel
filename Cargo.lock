@@ -966,6 +966,7 @@ dependencies = [
  "miniz_oxide",
  "object 0.40.0",
  "rustc-hash",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",

@@ -206,8 +206,8 @@ fn spent_steps() -> u64 {
 fn refused_literal() -> bool {
     let attempt = isolate(fn() -> Result[u64, Capacity] {
         bound bytes 15 {
-            let literal: FrozenBytes = b"abcdefghi"
-            list.len(bytebuf.as_bytes(literal))
+            let literal: Bytes = b"abcdefghi"
+            list.len(literal)
         }
     })
     let Ok(Error(take causes)) = take attempt else { return false }
@@ -870,140 +870,7 @@ fn recording_schedule_replays_across_engines() {
     );
 }
 
-/// S6's JSON/Args/Tasks run replays after its input grant is removed; diagnose
-/// names the first divergent request's rebound source, and show is standalone.
-#[test]
-#[ignore = "explicit native integration target"]
-fn recording_cli_replays() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let app = dir.path().join("app");
-    let data = dir.path().join("data");
-    std::fs::create_dir(&app).unwrap();
-    std::fs::create_dir(&data).unwrap();
-    let source = include_str!("../../../core/front/fixtures/recording/cli.hirsel");
-    std::fs::write(app.join("main.hirsel"), source).unwrap();
-    std::fs::write(data.join("input.json"), b"{\"answer\":42}\n").unwrap();
-    let tape = dir.path().join("run.tape");
-    let runtime = env_record_runtime();
-    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-    let common = vec![
-        "--runtime".to_owned(),
-        runtime.display().to_string(),
-        "--cc".into(),
-        llvm.join("bin/clang").display().to_string(),
-        "--libraries".into(),
-        root.join("core").display().to_string(),
-        "--source-core".into(),
-        "--source-std".into(),
-        "--store".into(),
-        dir.path().join("cache").display().to_string(),
-    ];
-    let invoke = |command: &str, extra: Vec<String>| {
-        let mut args = vec![command.to_owned(), app.display().to_string()];
-        args.extend(common.clone());
-        args.extend(extra);
-        process::tape_request(&args, dir.path())
-    };
-    let record = vec![
-        "--dir".into(),
-        data.display().to_string(),
-        "--grant".into(),
-        "Clock".into(),
-        "--grant".into(),
-        "Tasks".into(),
-        "--grant".into(),
-        "Stdout".into(),
-        "--record".into(),
-        tape.display().to_string(),
-        "--".into(),
-        "recorded".into(),
-    ];
-    let (code, out, err) = invoke("run", record.clone());
-    assert_eq!(
-        (code, out),
-        (Some(0), "{\"answer\":42}\n".to_owned()),
-        "record: {err}"
-    );
-    let bytes = std::fs::read(&tape).unwrap();
-    let (code, _, _) = invoke("run", record);
-    assert_ne!(code, Some(0), "record never overwrites an existing tape");
-    assert_eq!(std::fs::read(&tape).unwrap(), bytes);
-    std::fs::remove_dir_all(&data).unwrap();
-    let replay = vec!["--tape".into(), tape.display().to_string()];
-    let (code, out, err) = invoke("replay", replay.clone());
-    assert_eq!(
-        (code, out),
-        (Some(0), String::new()),
-        "replay with no grants: {err}"
-    );
-    assert_eq!(std::fs::read(&tape).unwrap(), bytes);
-    profile_fixture_replay(&common, &app, &tape);
-
-    let shown = vec![
-        "tape".to_owned(),
-        "show".into(),
-        tape.display().to_string(),
-        "--include-credentials".into(),
-    ];
-    let (code, out, err) = process::tape_request(&shown, dir.path());
-    assert_eq!(code, Some(0), "show: {err}");
-    assert!(
-        out.contains(&format!("format {}", hirsel_tape_format::FORMAT))
-            && out.contains("GRANT")
-            && out.contains("END")
-    );
-    assert!(!out.contains("site"));
-    // Random already exists in the provider ABI. Its payload must also replay,
-    // including DATA continuation, rather than leave the carrier empty.
-    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = list.with_capacity(70000); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
-    std::fs::write(app.join("main.hirsel"), random).unwrap();
-    let random_tape = dir.path().join("random.tape");
-    let (code, _, err) = invoke(
-        "run",
-        vec![
-            "--grant".into(),
-            "Random".into(),
-            "--grant".into(),
-            "Stdout".into(),
-            "--record".into(),
-            random_tape.display().to_string(),
-        ],
-    );
-    assert_eq!(code, Some(0), "random record: {err}");
-    let (code, out, err) = invoke(
-        "replay",
-        vec!["--tape".into(), random_tape.display().to_string()],
-    );
-    assert_eq!(
-        (code, out),
-        (Some(0), String::new()),
-        "random replay: {err}"
-    );
-    profile_fixture_replay(&common, &app, &random_tape);
-    std::fs::write(
-        app.join("main.hirsel"),
-        source.replace("\"input.json\"", "\"other.json\""),
-    )
-    .unwrap();
-    let (code, _, err) = invoke("replay", replay.clone());
-    assert_eq!(code, Some(2), "{err}");
-    assert!(err.contains("replay: refused: revision"), "{err}");
-    let mut across = replay;
-    across.push("--diagnose".into());
-    let (code, _, err) = invoke("replay", across);
-    assert_eq!(code, Some(1), "{err}");
-    assert!(
-        err.contains("replay: revision differs")
-            && err.contains("replay: Diverged(Arg) at ")
-            && err.contains("file.hirsel:"),
-        "{err}"
-    );
-    assert_eq!(std::fs::read(&tape).unwrap(), bytes);
-}
+include!("recording_cli_native.rs");
 
 #[test]
 fn run_tape_replays_process_stop() {
@@ -1257,6 +1124,7 @@ fn tape_http_replays_both_native_engines() {
         }
         drop(connection);
 
+        let fast_reply_len = wire.len();
         let mut slow = BufReader::new(connect(server));
         slow.get_mut()
             .write_all(b"GET /incomplete HTTP/1.1\r\nHost: ")
@@ -1292,6 +1160,17 @@ fn tape_http_replays_both_native_engines() {
         assert_eq!(code, Some(0), "{engine} replay: {sent}");
         assert!(stdout.is_empty(), "{engine}: {stdout}");
         assert_eq!(sent.as_bytes(), wire, "{engine} replay compared to wire");
+        let export = dir.path().join(format!("{engine}-output"));
+        let args = invoke("replay", &["--tape", tape.to_str().unwrap(), "--outputs", export.to_str().unwrap()]);
+        let (code, _, err) = process::tape_request(&args, dir.path());
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        let mut connections: Vec<_> = std::fs::read_dir(&export).unwrap().map(Result::unwrap)
+            .filter(|entry| entry.file_name().as_encoded_bytes().starts_with(b"socket-"))
+            .map(|entry| std::fs::read(entry.path()).unwrap()).collect();
+        connections.sort();
+        let mut expected = vec![wire[..fast_reply_len].to_vec(), wire[fast_reply_len..].to_vec()];
+        expected.sort();
+        assert_eq!(connections, expected);
         assert_eq!(std::fs::read(&tape).unwrap(), sealed);
         profile_fixture_replay(&common, dir.path(), &tape);
 
@@ -1599,7 +1478,8 @@ fn cli_tls_replay(with_secret: bool) {
         std::fs::remove_file(&file).unwrap();
     }
     std::fs::remove_file(&roots).unwrap();
-    let replay = invoke("replay", &["--tape", tape_path])
+    let outputs = dir.path().join("tls-outputs");
+    let replay = invoke("replay", &["--tape", tape_path, "--outputs", outputs.to_str().unwrap()])
         .env("SSL_CERT_FILE", &roots)
         .env_remove("SSL_CERT_DIR")
         .env_remove("HIRSEL_TL10_TOKEN")
@@ -1613,6 +1493,15 @@ fn cli_tls_replay(with_secret: bool) {
     assert_eq!(replay_log, format!("{recorded}inner calls: 0\n"));
     assert_eq!(std::fs::read(&tape).unwrap(), sealed);
 
+    let captured = std::fs::read(outputs.join("stdout")).unwrap();
+    assert_eq!(captured, recorded.as_bytes());
+    for entry in std::fs::read_dir(outputs).unwrap() {
+        let entry = entry.unwrap();
+        assert!(!entry.file_name().as_encoded_bytes().starts_with(b"socket-"));
+        if with_secret {
+            assert_secrets_absent(&[&std::fs::read(entry.path()).unwrap()]);
+        }
+    }
     let show = ["tape".into(), "show".into(), tape_path.into()];
     let (code, export, error) = process::tape_request(&show, dir.path());
     assert_ne!(code, Some(0));

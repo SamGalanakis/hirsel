@@ -769,6 +769,7 @@ struct Replay {
     tape: PathBuf,
     diagnose: bool,
     unit: Option<String>,
+    outputs: Option<PathBuf>,
 }
 
 impl Replay {
@@ -779,12 +780,14 @@ impl Replay {
             );
         }
         let (mut state, mut tape, mut diagnose, mut unit) = (None, None, false, None);
+        let mut outputs = None;
         use CompilerOption as O;
         for option in invocation.options {
             match option {
                 O::HostState(value) => state = Some(PathBuf::from(value)),
                 O::Tape(value) => tape = Some(PathBuf::from(value)),
                 O::Diagnose => diagnose = true,
+                O::ReplayOutputs(value) => outputs = Some(PathBuf::from(value)),
                 O::ReplayUnit(value) => unit = Some(value),
                 _ => return Err("unexpected option for host recording replay".into()),
             }
@@ -794,6 +797,7 @@ impl Replay {
             tape: tape.ok_or("replay requires --tape TAPE")?,
             diagnose,
             unit,
+            outputs,
         })
     }
 }
@@ -806,6 +810,7 @@ pub(crate) fn replay(invocation: Request<CompilerOption>) -> Result<i32, Error> 
         tape,
         diagnose,
         unit,
+        outputs,
     } = Replay::read(invocation)?;
     let tape = tape.canonicalize()?;
     let state = state.ok_or("replay requires --state DIR")?;
@@ -833,12 +838,13 @@ pub(crate) fn replay(invocation: Request<CompilerOption>) -> Result<i32, Error> 
         Err(error) => return Err(error.into()),
     };
     // Keep the verified file open across exec, even if collection removes its name.
-    let status = Command::new(crate::host::fd_path(&image)?)
+    let mut command = Command::new(crate::host::fd_path(&image)?);
+    command
         .arg("--hirsel-replay-recording")
         .arg(if diagnose { "diagnose" } else { "same" })
         .arg(tape)
-        .args(unit)
-        .status()?;
+        .args(unit);
+    let status = crate::tape_cli::outputs::execute(&mut command, outputs.as_deref())?;
     if status.success() {
         println!("Sealed");
     }

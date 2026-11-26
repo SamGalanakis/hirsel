@@ -47,6 +47,7 @@ flags! {
     RequestId ["--request-id"] "HEX" => "Resend this request instead of starting a new one; for decide, the request to decide.";
     RequestStatus ["--status"] "HEX" => "Print where a request stands.";
     Tape ["--tape"] "TAPE" => "Replay this tape without host grants.";
+    ReplayOutputs ["--outputs"] "DIR" => "Export committed standard streams and plaintext socket sends after a sealed replay.";
     ReplayUnit ["--unit"] "NAME" => "Replay this unit's stream alone (root) and read no other stream.";
     Replay ["--replay"] => "Run each selected test in the recording build with recording on, then replay it and require Sealed.";
     ExpectVerdict ["--expect-verdict"] "VERDICT" => "With --replay, require each selected test's replay to end with VERDICT.";

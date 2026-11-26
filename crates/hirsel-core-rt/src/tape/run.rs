@@ -422,8 +422,9 @@ unsafe extern "C" fn invoke(
                 }
                 super::helper_replay::start(context, streams, &shared, abort);
                 let failed = super::units::verdicts::conclude(run.stderr, None);
-                crate::coverage::exiting(i32::from(failed));
-                libc::_exit(i32::from(failed));
+                let status = i32::from(super::replay_delivery::outputs::finish(u8::from(failed)));
+                crate::coverage::exiting(status);
+                libc::_exit(status);
             }
             helpers = Some((streams, shared));
             Tape::open_with_startup(run.revision, TapeInput::Replay(replay), &expect)
@@ -864,6 +865,7 @@ unsafe fn run_taped(
 ) -> u8 {
     // SAFETY: every pointer is a borrowed generated startup operand.
     unsafe {
+        super::replay_delivery::outputs::start(mode);
         let input = &*input;
         let sink = match (
             entry::duplicate_stream(input.stderr_fd, libc::STDERR_FILENO),
@@ -984,7 +986,7 @@ unsafe fn run_taped(
         if let Some((at, err)) = run.record_truncated {
             super::writer::cut(Vec::new(), at, super::writer::Cut::Io(err));
         }
-        run.stop.unwrap_or(status)
+        super::replay_delivery::outputs::finish(run.stop.unwrap_or(status))
     }
 }
 

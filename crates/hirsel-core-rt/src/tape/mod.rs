@@ -1269,7 +1269,7 @@ fn finish(
         live.conclude_sealed();
     }
     if !helper && deadlock.is_some() && result.is_ok() && live.replay_abort.is_some() {
-        // Recorded deadlock matched and sealed on replay: exit 0.
+        replay_delivery::outputs::finish(0);
         crate::coverage::exiting(0);
         // SAFETY: launcher replay sealed cleanly.
         unsafe { libc::_exit(0) };

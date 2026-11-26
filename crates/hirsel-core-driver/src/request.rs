@@ -2,9 +2,7 @@
 //! the `hirsel` executable's whole behaviour after process setup. It lives in
 //! the library so that a test process can run a request exactly as the
 //! executable does (request_sequences.rs compares their outputs).
-use crate::cli::{
-    CompilerOption as Opt, ExplainOption, FmtOption, Invocation, NewOption, Request, TapeOption,
-};
+use crate::cli::{CompilerOption as Opt, ExplainOption, FmtOption, Invocation, NewOption, Request};
 use crate::code_store::CodeStore;
 use crate::native::recipe_build::Publication;
 use crate::product::ProductLibraries;
@@ -91,14 +89,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             conclude(Outcome::Exit(0))
         }
         Invocation::Tape(request) => {
-            let path = request
-                .positional
-                .as_deref()
-                .ok_or("tape show requires a tape file")?;
-            if !request.options.contains(&TapeOption::IncludeCredentials) {
-                return Err("tape show requires --include-credentials".into());
-            }
-            crate::tape_cli::show(Path::new(path))?;
+            crate::tape_cli::show(request)?;
             conclude(Outcome::Exit(0))
         }
         Invocation::Simple(request) if request.command.name == "manifest" => {
@@ -299,6 +290,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         recording_build,
         mut additional_runtimes,
         mut record_path,
+        replay_outputs,
         replay_tape,
         test_replay,
         mut test_laws,
@@ -1074,6 +1066,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 &runner,
                 run_args,
                 record_path.as_deref(),
+                replay_outputs.as_deref(),
                 profile.as_ref(),
                 temporary_output,
                 &mut meter,
@@ -1297,6 +1290,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                             &runner,
                             run_args,
                             record_path.as_deref(),
+                            replay_outputs.as_deref(),
                             profile.as_ref(),
                             temporary_output,
                             &mut meter,
@@ -1431,6 +1425,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         &runner,
         run_args,
         record_path.as_deref(),
+        replay_outputs.as_deref(),
         profile.as_ref(),
         temporary_output,
         &mut meter,
@@ -1450,6 +1445,7 @@ fn answer_hit(
     runner: &crate::Runner,
     run_args: Vec<String>,
     record_path: Option<&str>,
+    replay_outputs: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
     run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
@@ -1509,6 +1505,7 @@ fn answer_hit(
         runner,
         run_args,
         record_path,
+        replay_outputs,
         profile,
         run_output,
         meter,

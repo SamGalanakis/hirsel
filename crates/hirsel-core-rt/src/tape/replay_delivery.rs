@@ -1,3 +1,5 @@
+#[path = "outputs.rs"]
+pub(super) mod outputs;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -528,6 +530,21 @@ pub(super) unsafe fn replay_out(
         if out.value > (r.buffer.len as u64).saturating_add(tail.len as u64) {
             return Err(Fault::Corrupt);
         }
+    }
+    let count = match op {
+        STDOUT | STDERR => {
+            let n = usize::try_from(out.written).map_err(|_| Fault::Corrupt)?;
+            if n > r.buffer.len || (ok && n != r.buffer.len) {
+                return Err(Fault::Corrupt);
+            }
+            n
+        }
+        SEND_PAIR if ok => usize::try_from(out.value).map_err(|_| Fault::Corrupt)?,
+        _ => 0,
+    };
+    if count != 0 {
+        // SAFETY: the adapter pins the carriers through delivery; bounds were checked above.
+        unsafe { outputs::delivered(live, r, object, count) };
     }
     super::units::crossing::delivered(live, r, before, created, o.error.tag);
     Ok(o)

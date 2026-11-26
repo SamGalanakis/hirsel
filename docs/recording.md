@@ -301,6 +301,22 @@ numbers. Other argument bytes and outcome payloads are redacted. With `--diagnos
 line also includes the source position when one is available. Replay then exits 1. A
 `Sealed` replay exits 0.
 
+### Export replayed output
+
+`hirsel replay PACKAGE --tape TAPE --outputs DIR` writes the bytes the
+program recomputed and committed. The operator can also request this on
+`replay --state STATE`, including with `--unit`, if the pinned image supports
+output export. DIR must be new. Hirsel publishes it with owner-only access
+after all selected streams seal. A divergence, unsupported image, or export
+failure leaves the destination absent. A pre-existing destination is preserved.
+
+Root files are named `stdout`, `stderr`, and `socket-N`, where N is a
+plaintext TCP or Unix stream socket's local object ordinal. Helper files have
+a `stream-ID-` prefix. Each file starts at the first committed byte. A partial
+send contributes its committed prefix once. TLS, Secret sends, pipes and
+datagrams are outside this export. An export may contain application credentials.
+The export limit is 64 MiB across 256 files.
+
 ## Credentials
 
 A recording holds what servers sent to the run, exactly as received, so a recording of a
@@ -310,7 +326,14 @@ treated as **credential-bearing**:
 
 - its file is created readable only by its owner, at a path that does not exist yet;
 - `hirsel tape show PATH --include-credentials` writes its header and stored frames to
-  standard output, and nothing exports a recording without that flag;
+  standard output. Add `--json` to read a JSON array in spawn-path order, with physical
+  frames in order within each stream. Its schema-1 `HEADER` is followed by
+  `STREAM` records and their entries and frames. Frame positions start at one in each stream. A
+  `REPEAT` occupies the positions of its expanded choices. Binary fields
+  ending in `_hex` are hexadecimal strings. Use a JSON reader that preserves
+  64-bit integers for exact clock values and counters. A `TRUNCATED` record marks an
+  incomplete stream. Check the command's exit status before consuming the
+  document. Every export of a recording requires `--include-credentials`;
 - it is never redacted in place, since a replay needs its bytes exactly.
 
 Where cleartext can be in a recording:

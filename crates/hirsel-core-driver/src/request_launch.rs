@@ -8,6 +8,7 @@ use std::io::{self, Write};
 pub struct Launch {
     pub argv: Vec<std::ffi::OsString>,
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    pub(crate) mode: crate::tape_cli::outputs::Mode,
     pub(crate) keep: Option<crate::store::Scratch>,
 }
 impl Launch {
@@ -17,11 +18,25 @@ impl Launch {
         argv: &[std::ffi::OsString],
         env: &[(std::ffi::OsString, std::ffi::OsString)],
     ) -> Result<i32, Box<dyn std::error::Error>> {
-        let status = std::process::Command::new(&argv[0])
+        Self::execute_mode(argv, env, &crate::tape_cli::outputs::Mode::Run)
+    }
+
+    pub(crate) fn execute_mode(
+        argv: &[std::ffi::OsString],
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+        mode: &crate::tape_cli::outputs::Mode,
+    ) -> Result<i32, Box<dyn std::error::Error>> {
+        let mut command = std::process::Command::new(&argv[0]);
+        command
             .args(&argv[1..])
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .status()
-            .map_err(|e| format!("run execution {:?}: {e}", argv[0]))?;
+            .envs(env.iter().map(|(name, value)| (name, value)));
+        let status = match mode {
+            crate::tape_cli::outputs::Mode::Run => command.status(),
+            crate::tape_cli::outputs::Mode::Replay(dir) => {
+                crate::tape_cli::outputs::execute(&mut command, dir.as_deref())
+            }
+        }
+        .map_err(|e| format!("run execution {:?}: {e}", argv[0]))?;
         if !status.success() {
             eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
         }
@@ -89,7 +104,7 @@ pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::
         Outcome::Exit(code) => std::process::exit(code),
         Outcome::Test(session) => std::process::exit(session.conclude()),
         Outcome::Launch(launch) => {
-            let code = Launch::execute(&launch.argv, &launch.env)?;
+            let code = Launch::execute_mode(&launch.argv, &launch.env, &launch.mode)?;
             drop(launch);
             std::process::exit(code)
         }
@@ -107,6 +122,7 @@ pub(super) fn finish(
     runner: &crate::Runner,
     run_args: Vec<String>,
     record_path: Option<&str>,
+    replay_outputs: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
     mut run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
@@ -176,9 +192,15 @@ pub(super) fn finish(
                     .map(|record| ("HIRSEL_RECORD".into(), record.into()))
                     .into_iter()
                     .collect();
+                let mode = if command == "replay" {
+                    crate::tape_cli::outputs::Mode::Replay(replay_outputs.map(PathBuf::from))
+                } else {
+                    crate::tape_cli::outputs::Mode::Run
+                };
                 launch = Some(Launch {
                     argv,
                     env,
+                    mode,
                     keep: run_output.take(),
                 });
                 None

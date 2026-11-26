@@ -52,6 +52,7 @@ pub(super) struct CompilerFlags {
     pub(super) recording_build: bool,
     pub(super) additional_runtimes: BTreeMap<Flavour, PathBuf>,
     pub(super) record_path: Option<String>,
+    pub(super) replay_outputs: Option<String>,
     pub(super) replay_tape: Option<String>,
     pub(super) test_replay: bool,
     pub(super) test_laws: bool,
@@ -122,6 +123,7 @@ impl CompilerFlags {
                         .insert(Flavour::OBSERVED_RECORDING, PathBuf::from(value));
                 }
                 Opt::Record(value) => flags.record_path = Some(value),
+                Opt::ReplayOutputs(value) => flags.replay_outputs = Some(value),
                 Opt::Tape(value) => flags.replay_tape = Some(value),
                 Opt::ReplayUnit(_) => {
                     return Err("replay --unit needs --state DIR with --tape".into());

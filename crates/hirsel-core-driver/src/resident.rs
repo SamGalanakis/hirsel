@@ -162,6 +162,8 @@ struct Request {
 enum Answer {
     Exit(i32),
     Launch {
+        #[serde(default)]
+        mode: crate::tape_cli::outputs::Mode,
         argv: Vec<Vec<u8>>,
         env: Vec<(Vec<u8>, Vec<u8>)>,
     },
@@ -406,13 +408,13 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
         }
         return match answer {
             Answer::Exit(code) => Ok(Some(code)),
-            Answer::Launch { argv, env } => {
+            Answer::Launch { argv, env, mode } => {
                 let argv: Vec<OsString> = argv.into_iter().map(OsString::from_vec).collect();
                 let env: Vec<(OsString, OsString)> = env
                     .into_iter()
                     .map(|(n, v)| (OsString::from_vec(n), OsString::from_vec(v)))
                     .collect();
-                let code = crate::request::Launch::execute(&argv, &env)
+                let code = crate::request::Launch::execute_mode(&argv, &env, &mode)
                     .map_err(|error| io::Error::other(error.to_string()));
                 drop(stream);
                 code.map(Some)
@@ -567,6 +569,7 @@ pub(crate) fn answer(outcome: &Outcome) {
         Outcome::Exit(code) => Answer::Exit(*code),
         Outcome::Test(_) => unreachable!("a session answers as its client steps it"),
         Outcome::Launch(launch) => Answer::Launch {
+            mode: launch.mode.clone(),
             argv: launch.argv.iter().map(|a| a.as_bytes().to_vec()).collect(),
             env: launch
                 .env

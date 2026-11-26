@@ -225,6 +225,8 @@ def run_case(hirsel, quinn, certs, case):
     end = time.monotonic() + (TRANSFER_DEADLINE if size else DEADLINE)
     extra = ['transfer', size] if size else []
     ours_extra = [size] if size else []
+    if case.get('retry'):
+        ours_extra = [size, 'retry']
     started = time.monotonic()
     children = []
     try:
@@ -306,6 +308,10 @@ CASES = [
      'suite': 'TLS13_AES_256_GCM_SHA384', 'group': 'X25519'},
     {'name': 'quinn server / hirsel client, ChaCha20-Poly1305, P-256 (HelloRetryRequest)', 'quinn': 'server',
      'suite': 'TLS13_CHACHA20_POLY1305_SHA256', 'group': 'secp256r1'},
+    # Q7 against quinn: every first Initial gets a Retry; quinn checks the tag and the
+    # original_destination and retry_source transport parameters (RFC 9000 §7.3).
+    {'name': 'quinn client / hirsel server with Retry, AES-128-GCM, X25519', 'quinn': 'client',
+     'suite': 'TLS13_AES_128_GCM_SHA256', 'group': 'X25519', 'retry': True},
     # Q16 client pins against quinn's client certificate.
     {'name': 'quinn client with a pinned certificate / hirsel server with client_pins', 'quinn': 'client',
      'suite': 'TLS13_AES_128_GCM_SHA256', 'group': 'X25519', 'client_cert': True, 'client_pins': 'client'},

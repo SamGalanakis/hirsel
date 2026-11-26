@@ -95,7 +95,8 @@ type Space {
     acked: List[Range],
     probes: u64,
     largest_at: u64,
-    ecn_in: codec.EcnCounts
+    ecn_in: codec.EcnCounts,
+    token: Bytes
 }
 
 /// What an ack-eliciting packet carried that a loss or probe sends again.
@@ -132,7 +133,9 @@ pub opaque type Connection {
     side: schedule.Side,
     peer: Addr,
     local_id: Bytes,
+    initial_id: Bytes,
     original_id: Bytes,
+    retry_source: Option[Bytes],
     peer_id: Bytes,
     authenticated: bool,
     initial: Space,
@@ -182,9 +185,9 @@ fn protocols(t: TransportConfig) -> List[Bytes] {
     take out
 }
 
-fn new_connection(handle: ConnectionHandle, side: schedule.Side, peer: Addr, take local_id: Bytes, take original_id: Bytes, take peer_id: Bytes, take transport: TransportConfig, take server_id: Option[handshake.Identity], now: u64) -> Result[Connection, QuicError] {
+fn new_connection(handle: ConnectionHandle, side: schedule.Side, peer: Addr, take local_id: Bytes, take initial_id: Bytes, take original_id: Bytes, take peer_id: Bytes, take transport: TransportConfig, take server_id: Option[handshake.Identity], now: u64) -> Result[Connection, QuicError] {
     let mut initial = new_space()
-    let Ok(take initial_schedule) = schedule.quic_initial(side, original_id) else {
+    let Ok(take initial_schedule) = schedule.quic_initial(side, initial_id) else {
         return Error(Config)
     }
     let mut keys = take initial_schedule
@@ -199,7 +202,7 @@ fn new_connection(handle: ConnectionHandle, side: schedule.Side, peer: Addr, tak
         Server => true,
         Client => false,
     }
-    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, original_id: take original_id, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, done_acked: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None, streams: no_streams(), reset: b"", peer_reset: None, validated: !server, path_received: 0, path_sent: 0)
+    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, initial_id: take initial_id, original_id: take original_id, retry_source: None, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, done_acked: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None, streams: no_streams(), reset: b"", peer_reset: None, validated: !server, path_received: 0, path_sent: 0)
     refresh_idle(mut c, now)
     Ok(take c)
 }

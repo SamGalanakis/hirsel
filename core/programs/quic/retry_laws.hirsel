@@ -1,0 +1,269 @@
+const OTHER_IP: Addr = Addr(ip: V4(0x7f000002u32), port: 24101)
+
+const OTHER_PORT: Addr = Addr(ip: V4(0x7f000001u32), port: 24103)
+
+/// 10 s in nanoseconds: QUIC-4's Retry token lifetime.
+const TEN_S: u64 = 10000000000
+
+fn retry_server(seed: u64, member: u16, members: u16) -> quic.Endpoint {
+    let mut config = endpoint_config()
+    config.retry = Always
+    config.member = member
+    config.members = members
+    result.unwrap(quic.endpoint(provide.random(seed), take config, Some((p256_identity(false), transport_config(None)))))
+}
+
+fn seeded_client(seed: u64) -> quic.Endpoint {
+    result.unwrap(quic.endpoint(provide.random(seed), endpoint_config(), None))
+}
+
+/// A long header's DCID and SCID, read by hand from RFC 9000 §17.2: first octet,
+/// version (4), DCID length and DCID, SCID length and SCID.
+fn dcid_of(d: Bytes) -> Bytes {
+    let n: u64 = int.widen(d[5])
+    clone(list.slice(d, 6, 6 + n))
+}
+
+fn scid_of(d: Bytes) -> Bytes {
+    let n: u64 = int.widen(d[5])
+    let m: u64 = int.widen(d[6 + n])
+    clone(list.slice(d, 7 + n, 7 + n + m))
+}
+
+/// RFC 9001 §5.8 and §A.4, with the key and nonce the RFC publishes: the tag is the
+/// AES-128-GCM tag of an empty plaintext over ODCID length ‖ ODCID ‖ the Retry without
+/// its last 16 bytes.
+fn tag_verifies(retry: Bytes, odcid: Bytes) -> bool {
+    let key_bytes = option.unwrap(std.hex.decode(b"be0c690b9f66575a1d766b54e368c84e"))
+    let key = result.unwrap(secret.seal(take key_bytes, "aead(aes128-gcm)"))
+    let nonce = option.unwrap(std.hex.decode(b"461599d35d632bf2239825bb"))
+    let n = list.len(retry)
+    let mut aad: Bytes = list.with_capacity(1 + list.len(odcid) + n)
+    list.push(mut aad, int.narrow(list.len(odcid)))
+    list.append(mut aad, odcid)
+    list.append(mut aad, list.slice(retry, 0, n - 16))
+    let mut empty: Bytes = list.new()
+    match secret.aead_open(key, Aes128Gcm, nonce, aad, list.slice(retry, n - 16, n), mut empty) {
+        Ok(0) => true,
+        _ => false,
+    }
+}
+
+/// A client that sent its first Initial, got the server's one Retry and is ready to
+/// send its second Initial.
+type Retried {
+    client: quic.Endpoint,
+    handle: quic.ConnectionHandle,
+    first: Bytes,
+    retry: Bytes
+}
+
+fn get_retry(mut server: quic.Endpoint, seed: u64) -> Retried {
+    let mut client = seeded_client(seed)
+    let handle = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let sent = drain(mut client, 1)
+    if list.len(sent) != 1 || list.len(sent[0]) < 1200 {
+        fail("the client's first flight is one padded Initial")
+    }
+    let first: Bytes = clone(sent[0])
+    let mut events: List[quic.Event] = list.new()
+    let live = quic.live_connections(server)
+    deliver(mut server, 1, CLIENT_ADDR, first, mut events)
+    let replies = drain(mut server, 1)
+    // §8.1.2: one Retry, and the server keeps nothing for the Initial it answered.
+    if list.len(replies) != 1 || quic.live_connections(server) != live || list.len(events) != 0 {
+        fail("an Initial without a token gets one Retry and leaves no state")
+    }
+    let retry: Bytes = clone(replies[0])
+    // §17.2.5: long header, type 3, version 1; the DCID is the client's SCID; the SCID
+    // is new; the token is not empty; the tag verifies over the client's first DCID.
+    let n = list.len(retry)
+    let header = 7 + list.len(dcid_of(retry)) + list.len(scid_of(retry))
+    if retry[0] & 0xf0 != 0xf0 || retry[1] != 0 || retry[2] != 0 || retry[3] != 0 || retry[4] != 1 || n <= header + 16 {
+        fail("a Retry is a version 1 long header of type 3 with a token and a tag")
+    }
+    if dcid_of(retry) != scid_of(first) || scid_of(retry) == dcid_of(first) || !tag_verifies(retry, dcid_of(first)) {
+        fail("the Retry answers the client's SCID with a new SCID and a valid tag")
+    }
+    let mut at_client: List[quic.Event] = list.new()
+    deliver(mut client, 2, SERVER_ADDR, retry, mut at_client)
+    if list.len(at_client) != 0 || quic.initial_token(client, handle) != clone(list.slice(retry, header, n - 16)) {
+        fail("the client keeps the Retry's token")
+    }
+    Retried(client: take client, handle: handle, first: take first, retry: take retry)
+}
+
+/// The client's second Initial: to the Retry's SCID, carrying its token (§17.2.5.2).
+fn second_initial(mut r: Retried, now: u64) -> Bytes {
+    let sent = drain(mut r.client, now)
+    if list.len(sent) != 1 || dcid_of(sent[0]) != scid_of(r.retry) {
+        fail("after a Retry the client's Initial goes to the Retry's SCID")
+    }
+    clone(sent[0])
+}
+
+/// The server's answer to `d` from `from` is one INVALID_TOKEN close the client reads.
+fn refused_invalid_token(mut server: quic.Endpoint, mut r: Retried, d: Bytes, from: Addr, now: u64) {
+    let live = quic.live_connections(server)
+    let mut events: List[quic.Event] = list.new()
+    deliver(mut server, now, from, d, mut events)
+    let replies = drain(mut server, now)
+    if list.len(replies) != 1 || quic.live_connections(server) != live || list.len(events) != 0 {
+        fail("a refused token gets one reply and no connection")
+    }
+    let mut at_client: List[quic.Event] = list.new()
+    deliver(mut r.client, now, SERVER_ADDR, replies[0], mut at_client)
+    if list.len(at_client) != 1 {
+        fail("the client reads the refusal")
+    }
+    // RFC 9000 §20.1: INVALID_TOKEN is 0x0b.
+    if let Closed(_, Transport(code: 0x0b, ..)) = at_client[0] {} else {
+        fail("the refusal is INVALID_TOKEN")
+    }
+}
+
+/// Run both ends until both report Connected.
+fn handshake_completes(mut server: quic.Endpoint, mut client: quic.Endpoint, start: u64) {
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    for now in start .. start + 16 {
+        for d in drain(mut client, now) {
+            deliver(mut server, now, CLIENT_ADDR, d, mut at_server)
+        }
+        for d in drain(mut server, now) {
+            deliver(mut client, now, SERVER_ADDR, d, mut at_client)
+        }
+    }
+    if !connected(at_server) || !connected(at_client) {
+        fail("the retried handshake completes at both ends")
+    }
+}
+
+fn retried_client_connects() {
+    let mut server = retry_server(17, 0, 1)
+    let mut r = get_retry(mut server, 41)
+    // The client's own transport-parameter check (§7.3) requires the server's
+    // original_destination_connection_id to be its first DCID and its
+    // retry_source_connection_id to be the Retry's SCID.
+    handshake_completes(mut server, mut r.client, 3)
+    if quic.live_connections(server) != 1 {
+        fail("the retried client holds one connection")
+    }
+}
+
+fn spoofed_initials_keep_nothing() {
+    let mut server = retry_server(17, 0, 1)
+    for seed in 50u64 .. 58 {
+        let _ = get_retry(mut server, seed)
+    }
+    if quic.live_connections(server) != 0 {
+        fail("Initials that never return a token leave no connection")
+    }
+}
+
+fn replayed_tokens_refused() {
+    // From another IP and from another port: the token binds both (QUIC-4).
+    let mut server = retry_server(17, 0, 1)
+    let mut r = get_retry(mut server, 41)
+    let d = second_initial(mut r, 3)
+    refused_invalid_token(mut server, mut r, d, OTHER_IP, 3)
+    let mut p = get_retry(mut server, 42)
+    let d2 = second_initial(mut p, 3)
+    refused_invalid_token(mut server, mut p, d2, OTHER_PORT, 3)
+    // After 10 s: the Retry was issued at 1, so 1 + 10 s is the last instant it opens.
+    let mut late = get_retry(mut server, 43)
+    let d3 = second_initial(mut late, 3)
+    refused_invalid_token(mut server, mut late, d3, CLIENT_ADDR, 1 + TEN_S + 1)
+    let mut edge = get_retry(mut server, 44)
+    let d4 = second_initial(mut edge, 3)
+    let mut events: List[quic.Event] = list.new()
+    deliver(mut server, 1 + TEN_S, CLIENT_ADDR, d4, mut events)
+    if quic.live_connections(server) != 1 {
+        fail("a Retry token is accepted up to 10 s after it was issued")
+    }
+}
+
+fn foreign_tokens_refused() {
+    let mut server = retry_server(17, 0, 1)
+    // A token minted for connection A, presented on connection B: B's DCID is B's own
+    // Retry SCID, and A's original DCID and Retry SCID are bound in A's token.
+    let a = get_retry(mut server, 45)
+    let mut b = get_retry(mut server, 46)
+    quic.set_initial_token(mut b.client, b.handle, quic.initial_token(a.client, a.handle))
+    let d = second_initial(mut b, 3)
+    refused_invalid_token(mut server, mut b, d, CLIENT_ADDR, 3)
+    // A NEW_TOKEN token relabeled as a Retry token.
+    let mut c = get_retry(mut server, 47)
+    let mut address = quic.mint_address_token(server, CLIENT_ADDR, 1)
+    address[0] = 0x01
+    quic.set_initial_token(mut c.client, c.handle, take address)
+    let d2 = second_initial(mut c, 3)
+    refused_invalid_token(mut server, mut c, d2, CLIENT_ADDR, 3)
+    // A Retry token relabeled as a NEW_TOKEN token, on a first Initial: it is ignored
+    // (§8.1.3), so the server answers as if no token was sent, with a Retry.
+    let mut relabeled = quic.initial_token(a.client, a.handle)
+    relabeled[0] = 0x02
+    let mut fresh = seeded_client(48)
+    let h = result.unwrap(quic.connect(mut fresh, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    quic.set_initial_token(mut fresh, h, take relabeled)
+    let mut events: List[quic.Event] = list.new()
+    for d3 in drain(mut fresh, 1) {
+        deliver(mut server, 2, CLIENT_ADDR, d3, mut events)
+    }
+    let replies = drain(mut server, 2)
+    if list.len(replies) != 1 || replies[0][0] & 0xf0 != 0xf0 || quic.live_connections(server) != 0 {
+        fail("a token that is not a valid NEW_TOKEN token is ignored and Retry follows")
+    }
+}
+
+fn address_tokens_validate() {
+    // A valid NEW_TOKEN token from the IP it was issued to skips the Retry (§8.1.3);
+    // from another IP it is ignored and the server sends a Retry.
+    let mut server = retry_server(17, 0, 1)
+    let token = quic.mint_address_token(server, CLIENT_ADDR, 1)
+    let mut client = seeded_client(49)
+    let h = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    quic.set_initial_token(mut client, h, clone(token))
+    let first = drain(mut client, 1)
+    let mut events: List[quic.Event] = list.new()
+    deliver(mut server, 2, OTHER_IP, first[0], mut events)
+    let replies = drain(mut server, 2)
+    if list.len(replies) != 1 || replies[0][0] & 0xf0 != 0xf0 || quic.live_connections(server) != 0 {
+        fail("a NEW_TOKEN token from another IP is ignored")
+    }
+    deliver(mut server, 2, CLIENT_ADDR, first[0], mut events)
+    if quic.live_connections(server) != 1 {
+        fail("a NEW_TOKEN token from its IP admits the connection without a Retry")
+    }
+}
+
+fn group_members_share_tokens() {
+    // QUIC-4: every member holds the same token_key, so a Retry from member 0 of 4 is
+    // honoured by member 1, which another datagram may reach.
+    let mut zero = retry_server(17, 0, 4)
+    let mut one = retry_server(23, 1, 4)
+    let mut r = get_retry(mut zero, 41)
+    handshake_completes(mut one, mut r.client, 3)
+    if quic.live_connections(zero) != 0 || quic.live_connections(one) != 1 {
+        fail("the member that sent the Retry keeps nothing; the other holds the connection")
+    }
+}
+
+/// bug: a Retry keeps per-Initial state, carries a bad tag or the wrong DCID, or the
+/// client's later transport-parameter check fails on it; a Retry token is accepted from
+/// another address or port, on another connection, after its lifetime or relabeled from
+/// a NEW_TOKEN token; a bad NEW_TOKEN token is refused instead of ignored; a member of a
+/// group cannot open another member's token.
+/// oracle: RFC 9000 §8.1.2, §8.1.3, §17.2.5 and §20.1 (INVALID_TOKEN = 0x0b), RFC 9001
+/// §5.8 with its published key and nonce, and QUIC-4's 10 s lifetime, all by hand; the
+/// Retry is parsed and its tag checked here, not by the endpoint.
+@test
+fn retry_validates_address() -> Result[(), ()] {
+    retried_client_connects()
+    spoofed_initials_keep_nothing()
+    replayed_tokens_refused()
+    foreign_tokens_refused()
+    address_tokens_validate()
+    group_members_share_tokens()
+    Ok(())
+}

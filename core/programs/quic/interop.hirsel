@@ -1,8 +1,9 @@
 // The Hirsel QUIC endpoint interop.py runs against quinn on loopback UDP (law Q4's
 // handshake and transfer halves, and Q16's client pins).
-// Usage: interop server CLIENT_PIN_HEX|none [N]
+// Usage: interop server CLIENT_PIN_HEX|none [N [retry]]
 //        interop client SERVER_PORT SERVER_PIN_HEX [N]
-// With N, a transfer: the client opens one bidirectional stream and sends N bytes of
+// With `retry`, the server answers every Initial without a token with a Retry.
+// With N > 0, a transfer: the client opens one bidirectional stream and sends N bytes of
 // pattern() with FIN; the server reads them all, then sends N bytes back with FIN; the
 // client reads them all and closes with application code 0. Each side prints
 // `received <count> <sha256 of the bytes>` once its peer's FIN arrives.
@@ -174,12 +175,16 @@ fn step_transfer(mut e: quic.Endpoint, mut t: Transfer, client: bool, mut buf: B
     false
 }
 
-fn endpoint_config(r: Random) -> quic.EndpointConfig {
+fn endpoint_config(r: Random, retry: bool) -> quic.EndpointConfig {
     let mut reset: Bytes = list.with_capacity(32)
     host.random(r, mut reset)
     let mut token: Bytes = list.with_capacity(32)
     host.random(r, mut token)
-    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: MTU, retry: Never, reset_key: result.unwrap(secret.seal(take reset, "mac")), token_key: result.unwrap(secret.seal(take token, "kdf")), limits: quic.EndpointLimits(connections: 4, unvalidated: 4, datagram_bytes: 0))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: MTU, retry: if retry {
+        Always
+    } else {
+        Never
+    }, reset_key: result.unwrap(secret.seal(take reset, "mac")), token_key: result.unwrap(secret.seal(take token, "kdf")), limits: quic.EndpointLimits(connections: 4, unvalidated: 4, datagram_bytes: 0))
 }
 
 fn refusal_name(r: quic.Refusal) -> String {
@@ -285,7 +290,7 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
     let mut tr = Transfer(size: size, data: pattern(size), conn: None, stream: None, hash: std.sha256.start(), count: 0, received: false, sending: client, sent: 0, done: false)
     let mut e = if client {
         let port: u16 = result.unwrap(int.parse(argument(a, 1)))
-        let mut e = result.unwrap(quic.endpoint(r, endpoint_config(r), None))
+        let mut e = result.unwrap(quic.endpoint(r, endpoint_config(r, false), None))
         let c = result.unwrap(quic.connect(mut e, host.mono_ns(clock), Addr(ip: V4(LOOPBACK), port), "localhost", pins(argument(a, 2)), None, transport(None, transfer)))
         if transfer {
             tr.conn = Some(c)
@@ -300,7 +305,8 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         }
         let (id, der) = identity(r)
         say(out, "certificate", digest_bytes(std.sha256.hash(der)))
-        result.unwrap(quic.endpoint(r, endpoint_config(r), Some((take id, transport(take client_pins, transfer)))))
+        let retry = argument(a, 3) == "retry"
+        result.unwrap(quic.endpoint(r, endpoint_config(r, retry), Some((take id, transport(take client_pins, transfer)))))
     }
     let mut data: Bytes = list.with_capacity(16 * 2048)
     let mut packets: List[UdpPacket] = list.with_capacity(16)

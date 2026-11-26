@@ -30,9 +30,10 @@ pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshak
     if c.limits.unvalidated > c.limits.connections {
         return Error(Config)
     }
-    match c.retry {
-        Never => (),
-        _ => return Error(Config),
+    if let Above(n) = c.retry {
+        if n >= c.limits.unvalidated {
+            return Error(Config)
+        }
     }
     Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.new(), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new()))
 }
@@ -86,7 +87,7 @@ fn add_connection(mut e: Endpoint, take c: Connection) {
         slot += 1
     }
     if let Server = c.side {
-        map.insert(mut e.initial_cids, (c.peer, clone(c.original_id)), slot)
+        map.insert(mut e.initial_cids, (c.peer, clone(c.initial_id)), slot)
         if let None = c.params {
             e.unconfirmed += 1
         }
@@ -104,7 +105,7 @@ fn add_connection(mut e: Endpoint, take c: Connection) {
 pub fn connect(mut e: Endpoint, now: u64, to: Addr, take name: String, take pins: List[handshake.Pin], take identity: Option[handshake.Identity], take t: TransportConfig) -> Result[ConnectionHandle, QuicError] {
     let handle = reserve_handle(e)?
     let original = random_id(e.random, 8)
-    let mut c = new_connection(handle, Client, to, draw_local_id(e), clone(original), take original, take t, None, now)?
+    let mut c = new_connection(handle, Client, to, draw_local_id(e), clone(original), clone(original), take original, take t, None, now)?
     start_client(mut c, e.random, e.config.max_mtu, take name, take pins, take identity)?
     add_connection(mut e, take c)
     Ok(handle)
@@ -183,7 +184,7 @@ pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Byte
 fn release_connection(mut e: Endpoint, take c: Connection) {
     let _ = map.remove(mut e.cids, c.local_id)
     if let Server = c.side {
-        let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.original_id)))
+        let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.initial_id)))
         if let None = c.params {
             e.unconfirmed -= 1
         }

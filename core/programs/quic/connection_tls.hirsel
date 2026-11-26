@@ -31,6 +31,7 @@ fn accept_tls(mut c: Connection, random: Random, mtu: u16, ids: handshake.PeerCo
     }
     let mut p = parameters(c.transport, clone(c.local_id), mtu)
     p.original_destination = Some(clone(c.original_id))
+    p.retry_source = clone(c.retry_source)
     if list.len(c.reset) == 16 {
         p.stateless_reset_token = Some(clone(c.reset))
     }
@@ -46,11 +47,11 @@ fn accept_tls(mut c: Connection, random: Random, mtu: u16, ids: handshake.PeerCo
 }
 
 fn advance_tls(mut c: Connection, now: u64, random: Random, mtu: u16, level: packet.Space, wire: Bytes, mut events: List[Event]) -> Result[(), handshake.Error] {
-    let original: Option[Bytes] = match c.side {
-        Client => Some(clone(c.original_id)),
-        Server => None,
+    let (original, retry): (Option[Bytes], Option[Bytes]) = match c.side {
+        Client => (Some(clone(c.original_id)), clone(c.retry_source)),
+        Server => (None, None),
     }
-    let ids = handshake.PeerConnectionIds(initial_source: clone(c.peer_id), original_destination: take original, retry_source: None)
+    let ids = handshake.PeerConnectionIds(initial_source: clone(c.peer_id), original_destination: take original, retry_source: take retry)
     let Some(take state) = replace(mut c.tls, None) else {
         return accept_tls(mut c, random, mtu, ids, wire)
     }

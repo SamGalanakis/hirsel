@@ -26,7 +26,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
     } else {
         0u64
     }
-    let header_bound = 14 + list.len(dest) + list.len(source)
+    let header_bound = 14 + list.len(dest) + list.len(source) + list.len(s.token) + 8
     if limit < padding || limit <= header_bound + 16 {
         return None
     }

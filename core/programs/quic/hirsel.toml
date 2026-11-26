@@ -32,6 +32,7 @@ std = { major = 1 }
 "stream_tx.hirsel" = "quic"
 "endpoint_streams.hirsel" = "quic"
 "reset.hirsel" = "quic"
+"token.hirsel" = "quic"
 
 [tests]
 limit = 67108864
@@ -48,3 +49,4 @@ grants = ["Tasks"]
 "stream_laws.hirsel" = "laws"
 "reset_laws.hirsel" = "laws"
 "amplification_laws.hirsel" = "laws"
+"retry_laws.hirsel" = "laws"

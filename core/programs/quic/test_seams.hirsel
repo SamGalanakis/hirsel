@@ -12,3 +12,35 @@ pub fn send_frames(mut e: Endpoint, c: ConnectionHandle, frames: Bytes) -> Resul
     }
     Error(UnknownConnection)
 }
+
+/// Q7 seam: the connections an endpoint holds, so a law can see a Retry kept no state.
+pub fn live_connections(e: Endpoint) -> u64 {
+    e.live
+}
+
+/// Q7 seam: the token a client's Initials carry (a Retry's, once one is accepted).
+pub fn initial_token(e: Endpoint, c: ConnectionHandle) -> Bytes {
+    let Some(i) = slot_at(e, c) else {
+        return b""
+    }
+    if let Some(conn) = e.connections[i] {
+        return clone(conn.initial.token)
+    }
+    b""
+}
+
+/// Q7 seam: replace the token a client's next Initials carry, to present a token that
+/// was minted for another connection or relabeled to the other type.
+pub fn set_initial_token(mut e: Endpoint, c: ConnectionHandle, take token: Bytes) {
+    let Some(i) = slot_at(e, c) else {
+        return
+    }
+    if let Some(mut conn) = e.connections[i] {
+        conn.initial.token = take token
+    }
+}
+
+/// Q7 seam: the NEW_TOKEN token this server would issue to `peer` at `now`.
+pub fn mint_address_token(e: Endpoint, peer: Addr, now: u64) -> Bytes {
+    seal_token(e.random, e.config.token_key, TOKEN_ADDRESS, peer, b"", b"", now)
+}

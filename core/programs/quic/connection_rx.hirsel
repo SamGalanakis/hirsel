@@ -100,6 +100,14 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
         },
         TransportClose(code: code, frame_type: frame, ..) => Ok(PeerClose(Transport(code: code, frame: frame))),
         ApplicationClose(code: code, ..) => Ok(PeerClose(Application(code: code))),
+        NewToken(_) => {
+            // RFC 9000 §19.7: only a server sends NEW_TOKEN. A client has no way yet to
+            // present a kept token on a later connection, so it acknowledges and drops it.
+            if let Server = c.side {
+                return Error(Wire(0x0a, 0x07))
+            }
+            Ok(ElicitsAck)
+        },
         HandshakeDone => {
             if let Server = c.side {
                 return Error(Wire(0x0a, 0x1e))

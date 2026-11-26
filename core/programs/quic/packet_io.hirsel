@@ -51,12 +51,12 @@ fn open_packet(s: Space, h: codec.Header, mut buf: Bytes, mut plain: Bytes) -> R
     Ok(OpenedPacket(number: number, first: first))
 }
 
-fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, number: u64, payload_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
+fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, number: u64, payload_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
     let n = codec.Number(truncated: number & 0xffffffff, size: 4)
     if kind == OneRtt {
         codec.write_short_header(dest, false, false, n, mut out)?
     } else {
-        codec.write_long_header(kind, dest, source, b"", n, payload_len + 16, mut out)?
+        codec.write_long_header(kind, dest, source, token, n, payload_len + 16, mut out)?
     }
     Ok(list.len(out))
 }
@@ -68,7 +68,7 @@ fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes,
     if let Some(mut keys) = s.send {
         let start = list.len(out)
         let number = s.next
-        let Ok(body0) = begin_packet(kind, dest, source, number, list.len(payload), mut out) else {
+        let Ok(body0) = begin_packet(kind, dest, source, s.token, number, list.len(payload), mut out) else {
             return None
         }
         let mut body = body0
@@ -77,7 +77,7 @@ fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes,
             // Rewriting Length can add one byte when a short payload is padded to 1200.
             zeros = min_size - (body - start + list.len(payload) + 16)
             list.truncate(mut out, start)
-            let Ok(at) = begin_packet(kind, dest, source, number, list.len(payload) + zeros, mut out) else {
+            let Ok(at) = begin_packet(kind, dest, source, s.token, number, list.len(payload) + zeros, mut out) else {
                 return None
             }
             let growth = at - body
@@ -85,7 +85,7 @@ fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes,
             if growth != 0 {
                 zeros -= growth
                 list.truncate(mut out, start)
-                let Ok(rewritten) = begin_packet(kind, dest, source, number, list.len(payload) + zeros, mut out) else {
+                let Ok(rewritten) = begin_packet(kind, dest, source, s.token, number, list.len(payload) + zeros, mut out) else {
                     return None
                 }
                 body = rewritten

@@ -91,7 +91,7 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
         let finished = awaiting && established(c)
         if finished {
             e.unconfirmed -= 1
-            let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.original_id)))
+            let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.initial_id)))
         }
         if !before && established(c) {
             if let Some(_) = c.peer_reset {
@@ -115,12 +115,14 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
     }
 }
 
-fn refuse_limit(mut e: Endpoint, mut c: Connection) {
+/// A stateless Initial CONNECTION_CLOSE: CONNECTION_REFUSED (0x02) at a limit,
+/// INVALID_TOKEN (0x0b) for a Retry token that fails (RFC 9000 §8.1.2).
+fn refuse_initial(mut e: Endpoint, mut c: Connection, code: u64) {
     if !can_queue_reply(e) {
         return
     }
     let mut wire: Bytes = list.with_capacity(1200)
-    if let Some(_) = tx_space(mut c.initial, mut c.streams, false, Initial, c.peer_id, c.local_id, false, Some(transport_close(0x02, 0)), 1200, 0, false, mut wire) {
+    if let Some(_) = tx_space(mut c.initial, mut c.streams, false, Initial, c.peer_id, c.local_id, false, Some(transport_close(code, 0)), 1200, 0, false, mut wire) {
         list.push(mut e.stateless, Stateless(peer: c.peer, wire: take wire))
     }
 }
@@ -133,11 +135,32 @@ fn admit(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wi
             return
         },
     }
-    if h.destination.len < 8 || h.token.len != 0 {
+    let dcid = span(wire, h.destination)
+    let verdict = check_token(e, now, from, span(wire, h.token), dcid)
+    let invalid = match verdict {
+        Invalid => true,
+        _ => false,
+    }
+    let no_token = match verdict {
+        NoToken => true,
+        _ => false,
+    }
+    let (original, retried, validated) = match take verdict {
+        Retried(take odcid) => (take odcid, true, true),
+        Address => (clone(dcid), false, true),
+        _ => (clone(dcid), false, false),
+    }
+    if !retried && h.destination.len < 8 {
         dropped(mut e.drops, MalformedHeader)
         return
     }
-    let mut c = match new_connection(ConnectionHandle(0), Server, from, draw_local_id(e), span(wire, h.destination), span(wire, h.source), take t, Some(take id), now) {
+    if no_token {
+        if retry_due(e) {
+            send_retry(mut e, now, from, h, wire)
+            return
+        }
+    }
+    let mut c = match new_connection(ConnectionHandle(0), Server, from, draw_local_id(e), clone(dcid), take original, span(wire, h.source), take t, Some(take id), now) {
         Ok(take c) => take c,
         Error(_) => return,
     }
@@ -145,15 +168,23 @@ fn admit(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wi
     match open_for_connection(c, h, mut wire, mut e.plain) {
         Error(reason) => dropped(mut e.drops, reason),
         Ok(opened) => {
+            if invalid {
+                refuse_initial(mut e, mut c, 0x0b)
+                return
+            }
             let Ok(handle) = reserve_handle(e) else {
-                refuse_limit(mut e, mut c)
+                refuse_initial(mut e, mut c, 0x02)
                 return
             }
             if e.unconfirmed >= int.widen(e.config.limits.unvalidated) {
-                refuse_limit(mut e, mut c)
+                refuse_initial(mut e, mut c, 0x02)
                 return
             }
             c.handle = handle
+            if retried {
+                c.retry_source = Some(clone(dcid))
+            }
+            c.validated = validated
             c.path_received = h.packet.len
             let _ = accept_packet(mut c, now, h, opened, wire, e.plain, e.random, e.config.max_mtu, ecn, mut events)
             add_connection(mut e, take c)
@@ -183,6 +214,8 @@ fn dispatch(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut
         } else {
             dropped(mut e.drops, UnknownConnection)
         }
+    } else if h.kind == Retry && !server_side(e) {
+        client_retry(mut e, now, from, h, wire)
     } else if h.kind == Negotiation || h.kind == OtherVersion {
         negotiation(mut e, now, from, h, wire, mut events)
     } else {

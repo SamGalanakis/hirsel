@@ -1,0 +1,240 @@
+/// QUIC-4 token types: the type octet is the first byte of every token.
+const TOKEN_RETRY: u8 = 0x01
+
+const TOKEN_ADDRESS: u8 = 0x02
+
+/// QUIC-4 lifetimes, in nanoseconds: 10 s for a Retry token, 24 h for a NEW_TOKEN token.
+const RETRY_LIFETIME: u64 = 10000000000
+
+const ADDRESS_LIFETIME: u64 = 86400000000000
+
+/// type ‖ salt(16) ‖ sealed(original DCID up to 20 ‖ issued 8 ‖ tag 16). Anything longer
+/// is refused before a key is derived, so a hostile token costs no HKDF.
+const TOKEN_MAX: u64 = 61
+
+/// What a client's Initial token says about its address.
+type TokenVerdict = NoToken | Address | Retried(Bytes) | Invalid
+
+/// The address a token binds: the IP, and for a Retry token the port as well.
+fn put_address(a: Addr, port: bool, mut out: Bytes) {
+    match a.ip {
+        V4(x) => {
+            list.push(mut out, 4u8)
+            list.put_word_be(mut out, x)
+        },
+        V6(hi, lo) => {
+            list.push(mut out, 6u8)
+            list.put_word_be(mut out, hi)
+            list.put_word_be(mut out, lo)
+        },
+    }
+    if port {
+        list.put_word_be(mut out, a.port)
+    }
+}
+
+/// The AAD: type ‖ salt ‖ address ‖ the Retry's SCID (empty for NEW_TOKEN). The address
+/// and SCID are recomputed from the datagram that brings the token back, so a token
+/// replayed from another address, or with another DCID, fails to open.
+fn token_aad(kind: u8, salt: Bytes, from: Addr, scid: Bytes) -> Bytes {
+    let mut aad: Bytes = list.with_capacity(1 + 16 + 19 + list.len(scid))
+    list.push(mut aad, kind)
+    list.append(mut aad, salt)
+    put_address(from, kind == TOKEN_RETRY, mut aad)
+    list.append(mut aad, scid)
+    take aad
+}
+
+/// HKDF-SHA256(token_key, salt, "hirsel quic token" ‖ type) as a ChaCha20-Poly1305 key:
+/// each key seals one token, so the zero nonce is never reused.
+fn token_key(key: Secret, kind: u8, salt: Bytes) -> Option[Secret] {
+    let mut info: Bytes = list.with_capacity(18)
+    list.append(mut info, b"hirsel quic token")
+    list.push(mut info, kind)
+    match secret.derive_hkdf_sha256(key, salt, info, 32, "aead(chacha20-poly1305)") {
+        Ok(take k) => Some(take k),
+        Error(_) => None,
+    }
+}
+
+const ZERO_NONCE: FrozenBytes = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+/// Seal a token of `kind` for `from`. The plaintext is `inner` and the issue time.
+fn seal_token(r: Random, key: Secret, kind: u8, from: Addr, scid: Bytes, inner: Bytes, now: u64) -> Bytes {
+    let salt = random_id(r, 16)
+    let Some(k) = token_key(key, kind, salt) else {
+        return b""
+    }
+    let mut plain: Bytes = list.with_capacity(list.len(inner) + 8)
+    list.append(mut plain, inner)
+    list.put_word_be(mut plain, now)
+    let mut sealed: Bytes = list.with_capacity(list.len(plain) + 16)
+    let Ok(_) = secret.aead_seal(k, ChaCha20Poly1305, bytebuf.as_bytes(ZERO_NONCE), token_aad(kind, salt, from, scid), plain, mut sealed) else {
+        return b""
+    }
+    let mut out: Bytes = list.with_capacity(17 + list.len(sealed))
+    list.push(mut out, kind)
+    list.append(mut out, salt)
+    list.append(mut out, sealed)
+    take out
+}
+
+/// The plaintext before the issue time, when `token` is a `kind` token for `from` and
+/// `scid` that has not outlived `lifetime`.
+fn open_token(key: Secret, kind: u8, token: Bytes, from: Addr, scid: Bytes, lifetime: u64, now: u64) -> Option[Bytes] {
+    let n = list.len(token)
+    if n < 17 + 8 + 16 || n > TOKEN_MAX || token[0] != kind {
+        return None
+    }
+    let salt: Bytes = clone(list.slice(token, 1, 17))
+    let Some(k) = token_key(key, kind, salt) else {
+        return None
+    }
+    let mut plain: Bytes = list.with_capacity(n)
+    let Ok(_) = secret.aead_open(k, ChaCha20Poly1305, bytebuf.as_bytes(ZERO_NONCE), token_aad(kind, salt, from, scid), list.slice(token, 17, n), mut plain) else {
+        return None
+    }
+    let p = list.len(plain)
+    if p < 8 {
+        return None
+    }
+    let issued: u64 = list.word_be(plain, p - 8)
+    if now < issued || now - issued > lifetime {
+        return None
+    }
+    Some(clone(list.slice(plain, 0, p - 8)))
+}
+
+/// QUIC-4: a Retry token's failure is INVALID_TOKEN; a NEW_TOKEN token's failure is
+/// ignored (RFC 9000 §8.1.2 and §8.1.3). Any other type octet is not ours: no token.
+fn check_token(e: Endpoint, now: u64, from: Addr, token: Bytes, dcid: Bytes) -> TokenVerdict {
+    if list.len(token) == 0 {
+        return NoToken
+    }
+    if token[0] == TOKEN_RETRY {
+        return match open_token(e.config.token_key, TOKEN_RETRY, token, from, dcid, RETRY_LIFETIME, now) {
+            Some(take odcid) if list.len(odcid) >= 8 && list.len(odcid) <= 20 => Retried(take odcid),
+            _ => Invalid,
+        }
+    }
+    if token[0] == TOKEN_ADDRESS {
+        if let Some(_) = open_token(e.config.token_key, TOKEN_ADDRESS, token, from, b"", ADDRESS_LIFETIME, now) {
+            return Address
+        }
+    }
+    NoToken
+}
+
+fn retry_due(e: Endpoint) -> bool {
+    match e.config.retry {
+        Never => false,
+        Always => true,
+        Above(n) => e.unconfirmed >= int.widen(n),
+    }
+}
+
+/// RFC 9001 §5.8: AES-128-GCM under the published key and nonce, empty plaintext, over
+/// the pseudo-packet ODCID length ‖ ODCID ‖ the Retry packet without its tag.
+fn retry_aad(odcid: Bytes, packet: Bytes) -> Bytes {
+    let mut aad: Bytes = list.with_capacity(1 + list.len(odcid) + list.len(packet))
+    list.push(mut aad, int.narrow(list.len(odcid)))
+    list.append(mut aad, odcid)
+    list.append(mut aad, packet)
+    take aad
+}
+
+fn retry_key() -> Option[Secret] {
+    match secret.seal(b"\xbe\x0c\x69\x0b\x9f\x66\x57\x5a\x1d\x76\x6b\x54\xe3\x68\xc8\x4e", "aead(aes128-gcm)") {
+        Ok(take k) => Some(take k),
+        Error(_) => None,
+    }
+}
+
+const RETRY_NONCE: FrozenBytes = b"\x46\x15\x99\xd3\x5d\x63\x2b\xf2\x23\x98\x25\xbb"
+
+/// RFC 9000 §8.1.2: answer an Initial with a Retry and keep no state. Its SCID is the
+/// DCID the client uses next; the token binds the client's address and port, the
+/// original DCID and that SCID.
+fn send_retry(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Bytes) {
+    if !can_queue_reply(e) || h.destination.len < 8 {
+        dropped(mut e.drops, MalformedHeader)
+        return
+    }
+    let odcid = span(wire, h.destination)
+    let scid = draw_local_id(e)
+    let token = seal_token(e.random, e.config.token_key, TOKEN_RETRY, from, scid, odcid, now)
+    let Some(key) = retry_key() else {
+        return
+    }
+    let mut out: Bytes = list.with_capacity(7 + 40 + list.len(token) + 16)
+    if let Error(_) = codec.write_retry_prefix(span(wire, h.source), scid, token, mut out) {
+        return
+    }
+    let mut tag: Bytes = list.with_capacity(16)
+    let Ok(_) = secret.aead_seal(key, Aes128Gcm, bytebuf.as_bytes(RETRY_NONCE), retry_aad(odcid, out), b"", mut tag) else {
+        return
+    }
+    list.append(mut out, tag)
+    list.push(mut e.stateless, Stateless(peer: from, wire: take out))
+}
+
+/// RFC 9000 §17.2.5.2: a client accepts one Retry, before any packet from the server,
+/// whose SCID differs from the DCID it sent and whose tag verifies over that DCID. It
+/// then sends its Initials to the new SCID, with the token, under keys derived from it,
+/// and goes on numbering packets where it was.
+fn client_retry(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Bytes) {
+    let Some(i) = route(e, h, from, wire) else {
+        dropped(mut e.drops, UnknownConnection)
+        return
+    }
+    let Some(key) = retry_key() else {
+        return
+    }
+    if let Some(mut c) = e.connections[i] {
+        let client = match c.side {
+            Client => true,
+            Server => false,
+        }
+        let scid = span(wire, h.source)
+        let fresh = match c.retry_source {
+            None => true,
+            Some(_) => false,
+        }
+        if !client || c.peer != from || c.authenticated || !fresh || !open_life(c) || scid == c.peer_id {
+            dropped(mut e.drops, UnknownConnection)
+            return
+        }
+        let packet = list.slice(wire, h.packet.at, h.body.at)
+        let tag = list.slice(wire, h.body.at, h.body.at + h.body.len)
+        let mut empty: Bytes = list.new()
+        if let Error(_) = secret.aead_open(key, Aes128Gcm, bytebuf.as_bytes(RETRY_NONCE), retry_aad(c.original_id, packet), tag, mut empty) {
+            dropped(mut e.drops, PacketProtection)
+            return
+        }
+        let Ok(take keys) = schedule.quic_initial(Client, scid) else {
+            return
+        }
+        let mut initial_keys = take keys
+        if !install_keys(mut c.initial, mut initial_keys, Initial) {
+            return
+        }
+        // The Initials sent so far are gone: their CRYPTO data is sent again from the
+        // start and they no longer count in flight (RFC 9002 §6.3).
+        c.initial.token = span(wire, h.token)
+        c.initial.crypto_committed = 0
+        list.clear(mut c.initial.flights)
+        list.clear(mut c.initial.resend)
+        c.initial.probes = 0
+        recovery.discard(mut c.recovery, now, recovery.INITIAL)
+        c.peer_id = clone(scid)
+        c.initial_id = clone(scid)
+        c.retry_source = Some(take scid)
+    }
+}
+
+fn server_side(e: Endpoint) -> bool {
+    match e.server {
+        Some(_) => true,
+        None => false,
+    }
+}

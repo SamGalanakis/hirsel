@@ -7,6 +7,8 @@ use hirsel_core_ids::ContentHash;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 use std::path::{Path, PathBuf};
 
+mod batch;
+
 /// `_first` loads `_table[2]` through a PAGE21/PAGEOFF12 pair with addend
 /// 16 (frameless); `_second` keeps a frame, calls `_first`, addresses a
 /// local C string and calls `_odd`, so the link's dead strip keeps it;

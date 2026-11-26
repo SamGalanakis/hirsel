@@ -130,9 +130,15 @@ impl Target {
 
     /// LLVM features for all functions, before per-version SIMD attributes.
     pub fn llvm_features(self) -> String {
-        match self.arch() {
-            Arch::X86_64 => crate::isa::X86_64_BASE.llvm_features(),
-            Arch::Aarch64 => String::new(),
+        match self {
+            Self::X86_64Linux => crate::isa::X86_64_BASE.llvm_features(),
+            Self::Aarch64Linux => String::new(),
+            // LLVM 23's AArch64CodeLayoutOpt enables pair alignment in a
+            // process-wide option when the first subtarget opts in. Even a
+            // whole image must opt out, or later split parts can align to 64.
+            Self::Aarch64Darwin | Self::Aarch64Ios | Self::Aarch64IosSim => {
+                "-align-cmp-csel-pairs".into()
+            }
         }
     }
 }

@@ -91,7 +91,7 @@ sys.exit(index.read_text() != 'current')
         rustfmt.chmod(0o755)
         self.preflights = dict(check_file_lengths=lambda root: True, check_boundaries=lambda root: True,
                                check_target=lambda root: True, check_runners=lambda root: True,
-                               darwin_check=SimpleNamespace(rust_changed=lambda: True, check=lambda: 0))
+                               apple_check=SimpleNamespace(rust_changed=lambda: True, check=lambda: 0))
         for active in [patch.multiple(fmt, **self.preflights),
                        patch.multiple(fmt, ROOT=self.root, BUCK2=buck, RUSTFMT=rustfmt)]:
             active.start()

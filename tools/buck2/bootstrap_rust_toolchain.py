@@ -31,6 +31,8 @@ REQUIRED = (
     "lib/rustlib/x86_64-unknown-linux-gnu/lib",
     "lib/rustlib/aarch64-unknown-linux-gnu/lib",
     "lib/rustlib/aarch64-apple-darwin/lib",
+    "lib/rustlib/aarch64-apple-ios/lib",
+    "lib/rustlib/aarch64-apple-ios-sim/lib",
     "lib/rustlib/src/rust/library/std/src/lib.rs",
 )
 

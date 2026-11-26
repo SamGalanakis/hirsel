@@ -2,8 +2,12 @@
 // expect: on x86_64-unknown-linux-gnu run code() = 101
 // expect: on aarch64-unknown-linux-gnu run code() = 102
 // expect: on aarch64-apple-darwin run code() = 202
+// expect: on aarch64-apple-ios run code() = 302
+// expect: on aarch64-apple-ios-sim run code() = 302
 // expect: on x86_64-unknown-linux-gnu run via_local() = 1
 // expect: on aarch64-apple-darwin run via_local() = 2
+// expect: on aarch64-apple-ios run via_local() = 3
+// expect: on aarch64-apple-ios-sim run via_local() = 3
 // expect: on x86_64-unknown-linux-gnu run gated() = 3
 // expect: on aarch64-apple-darwin run gated() = 7
 // expect: on aarch64-unknown-linux-gnu run read() = 20
@@ -15,7 +19,8 @@ const MAC: bool = target.os == (Macos : target.Os)
 fn os_code() -> u64 {
     match target.os {
         Linux => 100,
-        Macos => 200
+        Macos => 200,
+        Ios => 300
     }
 }
 
@@ -35,7 +40,8 @@ fn via_local() -> u64 {
     let o = target.os
     match o {
         Linux => 1,
-        Macos => 2
+        Macos => 2,
+        Ios => 3
     }
 }
 

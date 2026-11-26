@@ -651,11 +651,11 @@ fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool)
             .args(["-Xlinker", "-rpath", "-Xlinker"])
             .arg(&runtime);
     }
-    let libraries: &[&str] = match NATIVE {
-        hirsel_core_layout::Target::X86_64Linux | hirsel_core_layout::Target::Aarch64Linux =>
-            &["-lm", "-ldl", "-lpthread", "-lrt", "-lutil"],
-        hirsel_core_layout::Target::Aarch64Darwin =>
-            &["-framework", "Security", "-framework", "CoreFoundation"],
+    let libraries: &[&str] = match NATIVE.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => &["-lm", "-ldl", "-lpthread", "-lrt", "-lutil"],
+        hirsel_core_layout::ObjectFormat::MachO => {
+            &["-framework", "Security", "-framework", "CoreFoundation"]
+        }
     };
     let link = compiler
         .current_dir(scratch.path())

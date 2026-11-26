@@ -2,13 +2,15 @@
 //! one of these facts; matches on them are exhaustive, so a new target is a
 //! compile error at each decision site.
 
-/// The supported targets. They share FORM's little-endian, 64-bit layout
+/// The named targets. They share FORM's little-endian, 64-bit layout
 /// recipes; calling conventions, object format and OS facts derive from them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum Target {
     X86_64Linux,
     Aarch64Linux,
     Aarch64Darwin,
+    Aarch64Ios,
+    Aarch64IosSim,
 }
 
 /// The instruction set a target runs.
@@ -23,6 +25,7 @@ pub enum Arch {
 pub enum Os {
     Linux,
     Macos,
+    Ios,
 }
 
 /// The container a target's objects and images use.
@@ -33,18 +36,34 @@ pub enum ObjectFormat {
 }
 
 impl Target {
-    pub const ALL: [Self; 3] = [Self::X86_64Linux, Self::Aarch64Linux, Self::Aarch64Darwin];
+    pub const ALL: [Self; 5] = [
+        Self::X86_64Linux,
+        Self::Aarch64Linux,
+        Self::Aarch64Darwin,
+        Self::Aarch64Ios,
+        Self::Aarch64IosSim,
+    ];
 
     /// The target's position in [`Self::ALL`], as a targeted selection numbers it (PROG-6).
     pub const fn index(self) -> usize {
         self as usize
     }
 
-    /// Select a supported target from its compiler triple.
+    /// Select a named target from its compiler triple.
     pub fn from_triple(triple: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|target| target.triple() == triple)
+    }
+
+    /// Whether a compiler request can build for this target.
+    pub fn admitted(self) -> Result<(), &'static str> {
+        match self {
+            Self::X86_64Linux | Self::Aarch64Linux | Self::Aarch64Darwin => Ok(()),
+            Self::Aarch64Ios | Self::Aarch64IosSim => Err(
+                "iOS targets build only --emit staticlib, which is not built yet (docs/spec/embed.md)",
+            ),
+        }
     }
 
     pub const fn triple(self) -> &'static str {
@@ -52,13 +71,17 @@ impl Target {
             Self::X86_64Linux => "x86_64-unknown-linux-gnu",
             Self::Aarch64Linux => "aarch64-unknown-linux-gnu",
             Self::Aarch64Darwin => "aarch64-apple-darwin",
+            Self::Aarch64Ios => "aarch64-apple-ios",
+            Self::Aarch64IosSim => "aarch64-apple-ios-sim",
         }
     }
 
     pub const fn arch(self) -> Arch {
         match self {
             Self::X86_64Linux => Arch::X86_64,
-            Self::Aarch64Linux | Self::Aarch64Darwin => Arch::Aarch64,
+            Self::Aarch64Linux | Self::Aarch64Darwin | Self::Aarch64Ios | Self::Aarch64IosSim => {
+                Arch::Aarch64
+            }
         }
     }
 
@@ -66,13 +89,14 @@ impl Target {
         match self {
             Self::X86_64Linux | Self::Aarch64Linux => Os::Linux,
             Self::Aarch64Darwin => Os::Macos,
+            Self::Aarch64Ios | Self::Aarch64IosSim => Os::Ios,
         }
     }
 
     pub const fn object_format(self) -> ObjectFormat {
         match self.os() {
             Os::Linux => ObjectFormat::Elf,
-            Os::Macos => ObjectFormat::MachO,
+            Os::Macos | Os::Ios => ObjectFormat::MachO,
         }
     }
 
@@ -88,7 +112,7 @@ impl Target {
     pub const fn page_log2(self) -> u8 {
         match self {
             Self::X86_64Linux | Self::Aarch64Linux => 12,
-            Self::Aarch64Darwin => 14,
+            Self::Aarch64Darwin | Self::Aarch64Ios | Self::Aarch64IosSim => 14,
         }
     }
 
@@ -100,6 +124,7 @@ impl Target {
             Self::X86_64Linux => "x86-64",
             Self::Aarch64Linux => "generic",
             Self::Aarch64Darwin => "apple-m1",
+            Self::Aarch64Ios | Self::Aarch64IosSim => "apple-a12",
         }
     }
 
@@ -140,7 +165,7 @@ impl Target {
         match self {
             Self::X86_64Linux => CAbi::SysV64,
             Self::Aarch64Linux => CAbi::Aapcs64,
-            Self::Aarch64Darwin => CAbi::DarwinPcs,
+            Self::Aarch64Darwin | Self::Aarch64Ios | Self::Aarch64IosSim => CAbi::DarwinPcs,
         }
     }
 }

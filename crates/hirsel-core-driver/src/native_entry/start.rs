@@ -64,7 +64,7 @@ pub(super) fn emit(
             // libSystem names its stderr stream `__stderrp`.
             match target.os() {
                 hirsel_core_layout::Os::Linux => "stderr",
-                hirsel_core_layout::Os::Macos => "__stderrp",
+                hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => "__stderrp",
             },
             Linkage::Import,
             true,

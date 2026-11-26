@@ -5,6 +5,7 @@
 fn pick() -> u64 {
     match target.os {
         Linux => 1,
-        Macos => true
+        Macos => true,
+        Ios => 2
     }
 }

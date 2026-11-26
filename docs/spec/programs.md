@@ -726,7 +726,7 @@ which the toolchain supplies (LANG-20). These rules hold:
   and no local. Retention and types read manifest constant expressions only; a computed
   constant that depends on `target` is evaluated for every target.<!-- doc-ref: planned -->
   So `match target.os { ... }` keeps one
-  arm, and `let o = target.os` followed by `match o { ... }` keeps both, on every engine. A
+  arm, and `let o = target.os` followed by `match o { ... }` keeps every arm, on every engine. A
   branch on a computed constant is an ordinary branch: every arm is retained, and an engine
   may still fold it.
   How much an engine folds never decides what is retained. The rule holds for every
@@ -750,13 +750,14 @@ fn submit(n: u64) -> u64 {
     match target.os {
         Linux => batched(n),
         Macos => target.unsupported("batched submit needs io_uring"),
+        Ios => target.unsupported("batched submit needs io_uring"),
     }
 }
 ```
 
 Built for `x86_64-unknown-linux-gnu`, `submit` retains the `Linux` arm only. Built for
 `aarch64-apple-darwin`, a program whose entry reaches `submit` is refused with the PROG-6
-line above, naming the chain. Both arms are typed for both targets: an arm that fails to type
+line above, naming the chain. Every arm is typed for every target. An arm that fails to type
 is refused on every target, with the build's target playing no part.
 
 ```hirsel
@@ -765,6 +766,7 @@ fn pick() -> u64 {
     match o {
         Linux => 1,
         Macos => target.unsupported("needs Linux"),          // reached on every target
+        Ios => 1,
     }
 }
 ```

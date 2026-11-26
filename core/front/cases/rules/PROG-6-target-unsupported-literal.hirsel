@@ -3,6 +3,7 @@
 fn gate(why: String) -> u64 {
     match target.os {
         Linux => target.unsupported(why),
-        Macos => 2
+        Macos => 2,
+        Ios => 3
     }
 }

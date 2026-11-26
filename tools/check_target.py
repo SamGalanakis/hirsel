@@ -62,8 +62,8 @@ HOST_FILES = {
     'crates/hirsel-intern/src/instructions.rs': 'macos-s12-driver-2828',
 }
 
-TARGET_VARIANT = (r'(?:\bTarget::(?:X86_64Linux|Aarch64Linux|Aarch64Darwin)'
-                  r'|\bArch::(?:X86_64|Aarch64)\b|\bOs::(?:Linux|Macos)\b'
+TARGET_VARIANT = (r'(?:\bTarget::(?:X86_64Linux|Aarch64Linux|Aarch64Darwin|Aarch64Ios|Aarch64IosSim)\b'
+                  r'|\bArch::(?:X86_64|Aarch64)\b|\bOs::(?:Linux|Macos|Ios)\b'
                   r'|\bObjectFormat::(?:Elf|MachO)\b|\bCAbi::(?:SysV64|Aapcs64|DarwinPcs)\b'
                   r'|"(?:x86_64|aarch64)-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?")')
 VARIANT = re.compile(TARGET_VARIANT)

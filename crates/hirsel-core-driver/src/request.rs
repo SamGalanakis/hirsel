@@ -506,7 +506,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             .ok_or("--recipe requires --code-store DIR")?;
         let publication =
             Publication::open(&CodeStore::new(path), root, &local_admission_limits())?;
-        target.clone_from(&publication.recipe().launch.target);
+        target = flags::admit_target(publication.recipe().launch.target.clone())?;
         Some(publication)
     } else {
         None

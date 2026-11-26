@@ -2,6 +2,8 @@
 // expect: run start() = 2
 // expect: on aarch64-unknown-linux-gnu run start() = 2
 // expect: on aarch64-apple-darwin refuses PROG-6: main.start reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-darwin, through main.run → main.submit
+// expect: on aarch64-apple-ios refuses PROG-6: main.start reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-ios, through main.run → main.submit
+// expect: on aarch64-apple-ios-sim refuses PROG-6: main.start reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-ios-sim, through main.run → main.submit
 // PROG-6: a build whose retained code reaches `target.unsupported` is refused for its target,
 // naming the reason, the target and the chain from the entry; the Linux builds keep only the
 // `Linux` arm and run.
@@ -13,7 +15,8 @@ fn submit[T](take t: T, n: u64) -> u64 {
     let _ = t
     match target.os {
         Linux => batched(n),
-        Macos => target.unsupported("batched submit needs io_uring")
+        Macos => target.unsupported("batched submit needs io_uring"),
+        Ios => target.unsupported("batched submit needs io_uring")
     }
 }
 

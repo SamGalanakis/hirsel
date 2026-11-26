@@ -47,6 +47,9 @@ fn c_probe(target: Target, llvm_prefix: &std::path::Path) -> std::result::Result
         Target::Aarch64Darwin => {
             Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
         }
+        Target::Aarch64Ios | Target::Aarch64IosSim => {
+            return Err(format!("no native C probe for {}", target.triple()));
+        }
     })
 }
 
@@ -57,6 +60,9 @@ fn run_probe(target: Target, binary: PathBuf) -> std::result::Result<(), String>
             .arg("-L")
             .arg(native_input("HIRSEL_AARCH64_SYSROOT")?)
             .arg(binary)),
+        Target::Aarch64Ios | Target::Aarch64IosSim => {
+            return Err(format!("no native C probe for {}", target.triple()));
+        }
     }
     Ok(())
 }

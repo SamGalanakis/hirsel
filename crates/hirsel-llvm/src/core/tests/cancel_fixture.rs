@@ -42,7 +42,7 @@ b3:
             emit_object_for_target(&module, target, Optimization::None, false, &module.sites())
                 .unwrap()
         }
-        Target::Aarch64Darwin => {
+        Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => {
             // Mach-O has no link-time --wrap. Redirect this fixture's generated
             // call to the same C wrapper, which calls the actual runtime.
             let ir = emit_ir_for_target(&module, target, false, &module.sites()).unwrap();
@@ -57,7 +57,7 @@ b3:
     let body = symbol(&module, FuncId(2));
     let real_spawn = match target {
         Target::X86_64Linux | Target::Aarch64Linux => "__real_hirsel_core_spawn",
-        Target::Aarch64Darwin => "hirsel_core_spawn",
+        Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => "hirsel_core_spawn",
     };
     let c = format!(
         r#"
@@ -100,7 +100,7 @@ int main(void) {{
         Target::X86_64Linux | Target::Aarch64Linux => {
             compiler.arg("-Wl,--wrap=hirsel_core_spawn");
         }
-        Target::Aarch64Darwin => {}
+        Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => {}
     }
     output(
         link_runtime(

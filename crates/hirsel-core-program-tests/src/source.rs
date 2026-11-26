@@ -336,9 +336,9 @@ fn combine(objects: &[Vec<u8>], target: Target) -> Vec<u8> {
             .into_os_string(),
         ),
         Target::Aarch64Linux => std::env::var_os("HIRSEL_AARCH64_CC"),
-        Target::Aarch64Darwin => None,
+        Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => None,
     }
-    .expect("declared native compiler");
+    .unwrap_or_else(|| panic!("no declared native compiler for {}", target.triple()));
     let mut link = Command::new(compiler);
     link.args(["-r", "-nostdlib"]);
     for (i, bytes) in objects.iter().enumerate() {

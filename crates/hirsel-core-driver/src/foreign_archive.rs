@@ -2,7 +2,7 @@
 use crate::code_admission::AdmissionError;
 use crate::code_store::ObjectKind;
 use hirsel_core_ids::{ContentHash, DefPath};
-use hirsel_core_ir::decode::{Debit, DecodeResult};
+use hirsel_core_ir::decode::{Debit, DecodeError, DecodeResult};
 use hirsel_core_ir::release_recipe::{ForeignCode, ForeignLeaf, ForeignTarget, ObjectRef};
 use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
 use object::read::archive::{ArchiveFile, ArchiveKind};
@@ -801,6 +801,16 @@ fn parse_member(
         ),
         Some(hirsel_core_layout::Target::Aarch64Darwin) => {
             return macho::parse_member(bytes, name, budget);
+        }
+        Some(hirsel_core_layout::Target::Aarch64Ios) => {
+            return Err(DecodeError::Unsupported(
+                "no archive admission for aarch64-apple-ios",
+            ));
+        }
+        Some(hirsel_core_layout::Target::Aarch64IosSim) => {
+            return Err(DecodeError::Unsupported(
+                "no archive admission for aarch64-apple-ios-sim",
+            ));
         }
         None => return Ok(None),
     };

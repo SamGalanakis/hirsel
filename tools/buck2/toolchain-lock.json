@@ -40,6 +40,18 @@
       "url": "https://github.com/hermeticbuild/rust-redist/releases/download/1.99.0/rust-std-1.99.0-aarch64-apple-darwin.tar.zst"
     },
     {
+      "archive_prefix": "rust-std-1.99.0-aarch64-apple-ios/rust-std-aarch64-apple-ios",
+      "name": "rust-std-ios",
+      "sha256": "76a9a42eb92853e10f1a0a65d103f6d2a44f16e9132a2dffea75f0e2e096d2ed",
+      "url": "https://github.com/hermeticbuild/rust-redist/releases/download/1.99.0/rust-std-1.99.0-aarch64-apple-ios.tar.zst"
+    },
+    {
+      "archive_prefix": "rust-std-1.99.0-aarch64-apple-ios-sim/rust-std-aarch64-apple-ios-sim",
+      "name": "rust-std-ios-sim",
+      "sha256": "28c23e41bed5334f68bc9bf34ff46b08ef7db1b3defee14fa2b894ffd6a3b590",
+      "url": "https://github.com/hermeticbuild/rust-redist/releases/download/1.99.0/rust-std-1.99.0-aarch64-apple-ios-sim.tar.zst"
+    },
+    {
       "archive_prefix": "rust-src-1.99.0/rust-src",
       "name": "rust-src",
       "sha256": "9128e68f0cac5c7666a72209cbca8c3f0a6e2e17725350b92ddbdbb9b31ae797",

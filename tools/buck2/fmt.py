@@ -10,7 +10,7 @@ each lock package a change since origin/main can move (core/tools/law_board.py).
 Changed source files must fit
 their line limits, production sources must keep test code out, and platform decisions
 must be exhaustive on the target with host `cfg`s only in host seams. A Rust change
-must type-check for aarch64-apple-darwin (tools/darwin_check.py). The editor
+must pass the Apple target checks (tools/apple_check.py). The editor
 parser checks the core and spec corpus. Explicit
 expectation comments exclude refusal/gap fixtures to preserve diagnostic coordinates.
 """
@@ -30,7 +30,7 @@ from check_boundaries import check as check_boundaries
 from check_file_lengths import check_changed as check_file_lengths
 from check_target import check as check_target
 from check_test_runners import check as check_runners
-import darwin_check
+import apple_check
 
 BUCK2 = ROOT / '.buck2/bin/buck2'
 RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
@@ -142,7 +142,7 @@ def check_cases(paths):
 def main():
     if not check_file_lengths(ROOT) or not check_boundaries(ROOT) or not check_target(ROOT):
         return 1
-    if darwin_check.rust_changed() and darwin_check.check():
+    if apple_check.rust_changed() and apple_check.check():
         return 1
     rustfmt_flags = sys.argv[1:]
     query = 'kind("^rust_(library|binary)$", root//:)'

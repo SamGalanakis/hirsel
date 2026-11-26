@@ -167,10 +167,15 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
             }
         }
         hirsel_core_layout::Target::Aarch64Linux => {}
-        // Every Apple Silicon Mac is at least an M1 (cpu `apple-m1`): LSE,
-        // FP16 and DotProd, no I8MM, and arm64 rather than arm64e (no PAuth).
+        // The M1 baseline has LSE, FP16 and DotProd.
         hirsel_core_layout::Target::Aarch64Darwin => {
             for feature in ["has_lse", "has_fp16", "has_dotprod"] {
+                isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
+            }
+        }
+        // The A12 baseline has LSE and FP16.
+        hirsel_core_layout::Target::Aarch64Ios | hirsel_core_layout::Target::Aarch64IosSim => {
+            for feature in ["has_lse", "has_fp16"] {
                 isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
             }
         }

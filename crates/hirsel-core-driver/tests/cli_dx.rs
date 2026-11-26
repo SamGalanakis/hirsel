@@ -28,6 +28,21 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
+fn hirsel_build_refuses_ios_before_reading_source() {
+    let dir = tempfile::tempdir().unwrap();
+    for target in ["aarch64-apple-ios", "aarch64-apple-ios-sim"] {
+        let output = run_in(dir.path(), &["build", "--target", target]);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "hirsel: {target}: iOS targets build only --emit staticlib, which is not built yet (docs/spec/embed.md)\n"
+            )
+        );
+    }
+}
+
+#[test]
 fn hirsel_new_dot_in_existing_git_dir_creates_agents_gitignore_and_refuses_reinit() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();

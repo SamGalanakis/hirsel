@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-fn main() {
+fn main() -> Result<(), String> {
     println!("cargo:rustc-cfg=hirsel_lazy_core");
     println!("cargo:rustc-check-cfg=cfg(hirsel_lazy_core)");
     let prefix = PathBuf::from(env::var_os("LLVM_SYS_231_PREFIX").expect("prepare pinned LLVM"));
@@ -33,7 +33,7 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={}", source.display());
     }
-    // A metadata-only check of another target (tools/darwin_check.py) builds no
+    // A metadata-only check of another target (tools/apple_check.py) builds no
     // engine: it needs the target's SDK and engine, which this host lacks. The
     // library it would link names nothing, so a skipped build never links.
     println!("cargo:rerun-if-env-changed=HIRSEL_METADATA_CHECK");
@@ -44,7 +44,7 @@ fn main() {
             "static COMPONENT: &[u8] = &[];\nconst CARGO_ENGINE: Option<(&str, &str)> = None;\nconst LLVM_BUILD_ID: &str = \"\";\nconst LLVM_LIBRARY: &str = \"\";\nconst BUCK_ENGINE: Option<&str> = None;\n",
         )
         .unwrap();
-        return;
+        return Ok(());
     }
     let product_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/toolchain-dist/product.toml");
@@ -54,6 +54,9 @@ fn main() {
         .parse()
         .unwrap();
     let target = env::var("TARGET").unwrap();
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
+        return Err(format!("no LLVM engine build for {target}"));
+    }
     let host = Host::of(&prefix, &product["hosts"][&target]);
     let buck_engine = match host.os {
         Os::Linux => Some(
@@ -153,6 +156,7 @@ fn main() {
         "static COMPONENT: &[u8] = include_bytes!({:?});\nconst CARGO_ENGINE: Option<(&str, &str)> = Some(({:?}, {:?}));\nconst LLVM_BUILD_ID: &str = {build_id:?};\nconst LLVM_LIBRARY: &str = {:?};\nconst BUCK_ENGINE: Option<&str> = {buck_engine:?};\n",
         host.component, profile.to_str().unwrap(), engine.to_str().unwrap(), host.library.file_name().unwrap(),
     )).unwrap();
+    Ok(())
 }
 
 /// How this host builds the engine component. The driver is a host binary, so the

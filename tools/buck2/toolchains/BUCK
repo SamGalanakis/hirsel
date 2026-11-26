@@ -15,6 +15,9 @@ LLVM_SONAME = LLVM_LIBRARY.split("/")[-1]
 RUST_FILES = {p.removeprefix("rust-files/"): p for p in glob(["rust-files/**"], exclude = [
     "rust-files/lib/rustlib/src/**",
     "rust-files/lib/rustlib/aarch64-apple-darwin/**",
+    # Slice 0 provisions these sysroots for Cargo metadata checks only.
+    "rust-files/lib/rustlib/aarch64-apple-ios/**",
+    "rust-files/lib/rustlib/aarch64-apple-ios-sim/**",
 ])}
 RUST_TARGET = select({
     "prelude//os:macos": "aarch64-apple-darwin",

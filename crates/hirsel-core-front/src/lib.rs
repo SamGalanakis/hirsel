@@ -39,6 +39,7 @@ pub use decls::*;
 pub use types::*;
 
 use hirsel_core_ids::DefPath;
+use hirsel_core_layout::Target as BuildTarget;
 use hirsel_core_resolve::{
     DefinitionId, ModuleId, NameIndex, Refusal, Resolution, ResolutionScratch, ResolvedUse, Site,
     Target,
@@ -124,7 +125,7 @@ pub struct Program<'a> {
     pub(crate) constant_ids: Rows<Option<u32>>,
     /// Each `match` scrutinee and `if` condition that is a constant expression, by its
     /// item and node: its value on each target (PROG-6).
-    pub(crate) constant_branches: HashMap<(ItemRef, NodeId), [ConstValue; 3]>,
+    pub(crate) constant_branches: HashMap<(ItemRef, NodeId), [ConstValue; BuildTarget::ALL.len()]>,
     /// Each constant an `Inline` length may name, by definition, evaluated when a
     /// header first names it (SEM-9); `None` while its evaluation is under way.
     pub(crate) length_constants:

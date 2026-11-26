@@ -1,0 +1,8 @@
+// expect: refuse LANG-17 at 4:5
+// expect: missing-pattern 4:5 Ios
+fn pick() -> u64 {
+    match target.os {
+        Linux => 1,
+        Macos => 2
+    }
+}

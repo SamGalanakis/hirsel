@@ -5,7 +5,7 @@
 use crate::native::Link;
 use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
-use hirsel_core_layout::{ObjectFormat, Os, Target};
+use hirsel_core_layout::{Arch, ObjectFormat, Os, Target};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::io;
@@ -261,15 +261,15 @@ const INSTALLED_RECIPE_SCHEMA: u32 = 2;
 /// The link editor's place in an installation.
 pub(crate) const INSTALLED_LINKER: &str = "bin/ld.lld";
 
-/// The arguments an installed link starts with: an ELF link's interpreter, or
-/// the flavour ld.lld must be told first to link Mach-O. The second names the
-/// recipe in its identity.
+/// An ELF link's interpreter or the flavour ld.lld needs to link Mach-O.
+/// The second argument names the recipe in its identity.
 fn installed_prefix(target: &str) -> io::Result<[&'static str; 2]> {
-    match Target::from_triple(target) {
-        Some(Target::X86_64Linux) => Ok(["-dynamic-linker", "/lib64/ld-linux-x86-64.so.2"]),
-        Some(Target::Aarch64Linux) => Ok(["-dynamic-linker", "/lib/ld-linux-aarch64.so.1"]),
-        Some(Target::Aarch64Darwin) => Ok(["-flavor", "darwin"]),
-        None => Err(io::Error::other("no installed link target")),
+    let refuse = || io::Error::other(format!("no installed link target for {target}"));
+    match Target::from_triple(target).ok_or_else(refuse)? {
+        Target::X86_64Linux => Ok(["-dynamic-linker", "/lib64/ld-linux-x86-64.so.2"]),
+        Target::Aarch64Linux => Ok(["-dynamic-linker", "/lib/ld-linux-aarch64.so.1"]),
+        Target::Aarch64Darwin => Ok(["-flavor", "darwin"]),
+        Target::Aarch64Ios | Target::Aarch64IosSim => Err(refuse()),
     }
 }
 
@@ -340,9 +340,9 @@ pub(crate) fn install_recipe(
             ]
             .map(str::to_owned)
             .to_vec();
-            match target_kind {
-                Target::Aarch64Linux => args.push("--fix-cortex-a53-843419".into()),
-                Target::X86_64Linux | Target::Aarch64Darwin => {}
+            match target_kind.arch() {
+                Arch::Aarch64 => args.push("--fix-cortex-a53-843419".into()),
+                Arch::X86_64 => {}
             }
             for path in &inputs.start {
                 args.push(copy(path)?);
@@ -360,8 +360,7 @@ pub(crate) fn install_recipe(
             }
             args
         }
-        // The image's minimum and SDK versions are both the floor; ld64
-        // signs an arm64 image ad hoc, which macOS requires to run it.
+        // Both versions are the floor. macOS requires ad hoc signing.
         Os::Macos => {
             let inputs = &serde_json::from_value::<DarwinTarget>(row).map_err(io::Error::other)?;
             let mut args = ["-arch", "arm64", "-platform_version", "macos"]
@@ -375,6 +374,7 @@ pub(crate) fn install_recipe(
             }
             args
         }
+        Os::Ios => return Err(io::Error::other(format!("no link kit row for {target}"))),
     };
     crate::installation::install_file(linker, &root.join(INSTALLED_LINKER), 0o755)?;
     let relative = Path::new("link").join(format!("{target}.json"));

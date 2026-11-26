@@ -6,7 +6,7 @@ Core module `target` names the target a build is for, so a program can branch on
 compile time:
 
 ```
-pub type Os: key = Linux | Macos
+pub type Os: key = Linux | Macos | Ios
 pub type Arch: key = X86_64 | Aarch64
 pub const os: Os        // supplied by the toolchain
 pub const arch: Arch    // supplied by the toolchain
@@ -24,9 +24,12 @@ module names maps to one pair, whether or not Hirsel supports that target yet:
 | `x86_64-unknown-linux-gnu` | `Linux` | `X86_64` |
 | `aarch64-unknown-linux-gnu` | `Linux` | `Aarch64` |
 | `aarch64-apple-darwin` | `Macos` | `Aarch64` |
+| `aarch64-apple-ios` | `Ios` | `Aarch64` |
+| `aarch64-apple-ios-sim` | `Ios` | `Aarch64` |
 
-`Macos` in the type is not a support claim. macOS is listed in
-[reserved](../../../docs/spec/reserved.md) until its native gate is green.
+`Macos` and `Ios` name target values. The
+[reserved list](../../../docs/spec/reserved.md) tracks macOS until its native gate
+passes and iOS until its device gate passes.
 
 **Branching.** A `match` on `target.os` or `target.arch`, or an `if` on a constant
 expression built from them, keeps only its taken arm in retained code, and every arm is

@@ -72,8 +72,12 @@ impl Runner {
         let interpreter = match hirsel_core_layout::Target::from_triple(target) {
             Some(hirsel_core_layout::Target::Aarch64Linux) => "lib/ld-linux-aarch64.so.1",
             Some(hirsel_core_layout::Target::X86_64Linux) => "lib64/ld-linux-x86-64.so.2",
-            // Darwin images run only on a Mac, never under an emulator.
-            Some(hirsel_core_layout::Target::Aarch64Darwin) | None => {
+            Some(
+                hirsel_core_layout::Target::Aarch64Darwin
+                | hirsel_core_layout::Target::Aarch64Ios
+                | hirsel_core_layout::Target::Aarch64IosSim,
+            )
+            | None => {
                 return Err(io::Error::other(format!(
                     "no emulated execution for target {target}"
                 )));

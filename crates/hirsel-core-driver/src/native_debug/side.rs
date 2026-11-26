@@ -325,6 +325,11 @@ pub(crate) fn bind<'a>(
                 "a {target} image cannot embed DWARF; its detached debug file (a .dSYM for a release link) holds the rows"
             ));
         }
+        Some(
+            hirsel_core_layout::Target::Aarch64Ios | hirsel_core_layout::Target::Aarch64IosSim,
+        ) => {
+            return Err(format!("debug image rows are not built for {target}"));
+        }
         None => return Err(format!("no native debug target {target}")),
     };
     let mut object = debug_object(architecture);

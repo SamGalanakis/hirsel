@@ -117,6 +117,12 @@ pub(crate) fn compile_bytes(
     match target {
         Target::X86_64Linux | Target::Aarch64Linux => {}
         Target::Aarch64Darwin => return Err(not_built()),
+        Target::Aarch64Ios | Target::Aarch64IosSim => {
+            return Err(AdmissionError::Refused(format!(
+                "FFI-10: no contained foreign code for {}",
+                target.triple()
+            )));
+        }
     }
     let key = cache.map(|cache| (cache, cache.key(pin, target)));
     if let Some((cache, key)) = key

@@ -313,7 +313,10 @@ fn mismatches(hirsel: &BTreeMap<String, Decl>, clang: &BTreeMap<String, Decl>) -
 #[test]
 fn runtime_declarations_match_clang() {
     let mut failures = Vec::new();
-    for target in Target::ALL {
+    for target in Target::ALL
+        .into_iter()
+        .filter(|target| target.admitted().is_ok())
+    {
         let triple = target.triple();
         for m in mismatches(&hirsel_declarations(target), &clang_declarations(triple)) {
             failures.push(format!("{triple}: {m}"));

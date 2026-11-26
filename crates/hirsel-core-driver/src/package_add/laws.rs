@@ -443,7 +443,7 @@ fn s6_add_interrupted_child() {
 fn peak_kib(usage: &libc::rusage) -> i64 {
     match crate::host::HOST_TARGET.os() {
         hirsel_core_layout::Os::Linux => usage.ru_maxrss,
-        hirsel_core_layout::Os::Macos => usage.ru_maxrss >> 10,
+        hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => usage.ru_maxrss >> 10,
     }
 }
 

@@ -37,7 +37,7 @@ const RAW: Bytes = raw()
 fn raw() -> Bytes { list.new() }
 
 fn zero() -> u8 { 0 }
-fn per_os() -> u8 { if target.os == (Macos : target.Os) { 1u8 / zero() } else { 1u8 } }
+fn per_os() -> u8 { match target.os { Linux => 1u8, Macos => 1u8 / zero(), Ios => 1u8 } }
 const PER_OS: u8 = per_os()
 
 fn deep(n: u64) -> u64 { if n == 0 { 0 } else { deep(n - 1) + 1 } }

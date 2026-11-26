@@ -57,19 +57,19 @@ jobs:
         run: .buck2/bin/buck2 test -j4 //tools/buck2/native-toolchain:proof
 
   metadata:
-    name: Darwin metadata check
+    name: Apple metadata check
     runs-on: ubuntu-24.04
     timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Check the workspace for aarch64-apple-darwin
+      - name: Check Rust for the macOS and iOS targets
         run: |
           rust=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           rustup toolchain install "$rust" --profile minimal --no-self-update
           python3 tools/buck2/bootstrap_rust_toolchain.py
-          python3 tools/darwin_check.py
+          python3 tools/apple_check.py
 
   corpus-toolchain:
     name: Build the Darwin corpus toolchain
@@ -201,7 +201,7 @@ jobs:
             fi
           fi
           if [[ "$METADATA_RESULT" == failure ]]; then
-            report darwin-check 'The Darwin metadata check job failed on Linux.'
+            report darwin-check 'The Apple metadata check job failed on Linux.'
           fi
           if [[ "$CORPUS_TOOLCHAIN_RESULT" == failure ]]; then
             report darwin-corpus-toolchain 'Building the toolchain for the Darwin corpus failed on Linux.'

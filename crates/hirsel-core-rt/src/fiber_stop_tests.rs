@@ -68,7 +68,10 @@ fn host_stops_have_exact_names_and_skip_cleanup() {
         hirsel_core_layout::Target::X86_64Linux => {
             modes.push(("refused growth", b"run stop: HostMemory\n".as_slice()));
         }
-        hirsel_core_layout::Target::Aarch64Linux | hirsel_core_layout::Target::Aarch64Darwin => {}
+        hirsel_core_layout::Target::Aarch64Linux
+        | hirsel_core_layout::Target::Aarch64Darwin
+        | hirsel_core_layout::Target::Aarch64Ios
+        | hirsel_core_layout::Target::Aarch64IosSim => {}
     }
     for (mode, expected) in modes {
         let output = crate::test_process::command()

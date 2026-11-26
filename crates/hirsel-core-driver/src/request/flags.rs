@@ -3,6 +3,7 @@ use crate::Backend;
 use crate::cli::CompilerOption as Opt;
 use crate::installation::Flavour;
 use hirsel_core_ids::{ContentHash, DefPath};
+use hirsel_core_layout::Target;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -278,6 +279,16 @@ impl CompilerFlags {
                 }
             }
         }
+        flags.target = admit_target(flags.target)?;
         Ok(flags)
     }
+}
+
+pub(super) fn admit_target(target: String) -> Result<String, String> {
+    if let Some(build_target) = Target::from_triple(&target) {
+        build_target
+            .admitted()
+            .map_err(|reason| format!("{target}: {reason}"))?;
+    }
+    Ok(target)
 }

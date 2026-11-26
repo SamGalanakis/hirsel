@@ -400,10 +400,12 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         let image = std::fs::read(dir.join("test")).unwrap();
         let file = object::File::parse(image.as_slice()).unwrap();
         match target {
-            Target::Aarch64Darwin => assert!(matches!(
-                file.flags(),
-                FileFlags::MachO { flags } if flags & object::macho::MH_PIE == object::macho::MH_PIE
-            )),
+            Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => {
+                assert!(matches!(
+                    file.flags(),
+                    FileFlags::MachO { flags } if flags & object::macho::MH_PIE == object::macho::MH_PIE
+                ))
+            }
             Target::X86_64Linux | Target::Aarch64Linux => {
                 assert_eq!(file.kind(), object::ObjectKind::Dynamic)
             }
@@ -420,7 +422,9 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
                 Target::X86_64Linux | Target::Aarch64Linux => assert!(
                     matches!(symbol.flags(), object::SymbolFlags::Elf { st_other, .. } if st_other.0 & 3 == object::elf::STV_HIDDEN.0)
                 ),
-                Target::Aarch64Darwin => assert_ne!(symbol.scope(), object::SymbolScope::Dynamic),
+                Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => {
+                    assert_ne!(symbol.scope(), object::SymbolScope::Dynamic)
+                }
             }
         }
     }
@@ -891,12 +895,20 @@ fn c_linker(target: Target, memcheck: bool) -> Command {
             command
         }
         Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
-        Target::Aarch64Darwin => Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into())),
+        Target::Aarch64Darwin => {
+            Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+        }
+        Target::Aarch64Ios | Target::Aarch64IosSim => {
+            panic!("no native fixture compiler for {}", target.triple())
+        }
     };
     let memcheck_loader = memcheck
         && match target {
             Target::X86_64Linux => true,
-            Target::Aarch64Linux | Target::Aarch64Darwin => false,
+            Target::Aarch64Linux
+            | Target::Aarch64Darwin
+            | Target::Aarch64Ios
+            | Target::Aarch64IosSim => false,
         };
     if memcheck_loader {
         // The pool's system loader is stripped; use the declared symbol-bearing
@@ -910,11 +922,12 @@ fn c_linker(target: Target, memcheck: bool) -> Command {
             .args(["-Xlinker", "-rpath", "-Xlinker"])
             .arg(&runtime);
     }
-    compiler
-        .args(["-std=c11", "-O0", "-fPIC", "-pie"]);
+    compiler.args(["-std=c11", "-O0", "-fPIC", "-pie"]);
     match target {
-        Target::X86_64Linux | Target::Aarch64Linux => { compiler.arg("-Wl,-z,text"); }
-        Target::Aarch64Darwin => {}
+        Target::X86_64Linux | Target::Aarch64Linux => {
+            compiler.arg("-Wl,-z,text");
+        }
+        Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => {}
     }
     compiler.arg("-I")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"));
@@ -933,7 +946,12 @@ fn link_runtime(compiler: &mut Command, target: Target) -> &mut Command {
         Target::X86_64Linux | Target::Aarch64Linux => {
             compiler.args(["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"])
         }
-        Target::Aarch64Darwin => compiler.args(["-framework", "Security", "-framework", "CoreFoundation"]),
+        Target::Aarch64Darwin => {
+            compiler.args(["-framework", "Security", "-framework", "CoreFoundation"])
+        }
+        Target::Aarch64Ios | Target::Aarch64IosSim => {
+            panic!("no native fixture runtime link for {}", target.triple())
+        }
     }
 }
 /// The command that runs `binary` on `target`.
@@ -953,6 +971,9 @@ fn c_executable(target: Target, memcheck: bool, binary: &std::path::Path) -> Com
             command
         }
         Target::X86_64Linux | Target::Aarch64Darwin => Command::new(binary),
+        Target::Aarch64Ios | Target::Aarch64IosSim => {
+            panic!("no native fixture execution for {}", target.triple())
+        }
         Target::Aarch64Linux => {
             let mut command = Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap());
             command

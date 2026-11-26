@@ -1,6 +1,7 @@
 //! Published plain constants lowered in declaration order.
 use super::patterns::{Head, Subject};
 use super::*;
+use crate::BuildTarget;
 use hirsel_core_ir::{LayoutQuery, SwitchArm};
 
 impl Cx<'_, '_, '_> {
@@ -238,7 +239,7 @@ impl Cx<'_, '_, '_> {
         }
         let mut values = match (c.targets, c.value) {
             (Some(values), _) => values,
-            (None, Some(value)) => [value; 3],
+            (None, Some(value)) => [value; BuildTarget::ALL.len()],
             (None, None) => {
                 self.halt();
                 return (ERROR, None);
@@ -278,19 +279,19 @@ impl Cx<'_, '_, '_> {
         // A value that differs by target: one block per target, joined.
         let join = self.new_result_join();
         if self.live() {
-            let blocks = [(); 3].map(|_| self.new_block(&[]));
+            let blocks = BuildTarget::ALL.map(|_| self.new_block(&[]));
             let sel = self.layout_word(LayoutQuery::Target, n);
-            let edges = [0, 1].map(|t| SwitchArm {
-                value: t as u64,
-                edge: self.edge(blocks[t], &[]),
+            let edges = BuildTarget::ALL.map(|target| SwitchArm {
+                value: target.index() as u64,
+                edge: self.edge(blocks[target.index()], &[]),
             });
-            let otherwise = self.edge(blocks[2], &[]);
-            let arms = PoolRange::push(&mut self.b.pools.arms, edges);
+            let (last, matching) = edges.split_last().unwrap();
+            let arms = PoolRange::push(&mut self.b.pools.arms, matching.iter().copied());
             self.end(
                 Terminator::Switch {
                     value: sel,
                     arms,
-                    otherwise,
+                    otherwise: last.edge,
                 },
                 Some(n),
             );
@@ -304,19 +305,32 @@ impl Cx<'_, '_, '_> {
     }
 
     /// The scrutinee or condition at `n` as a constant expression, on each target.
-    fn constant_branch(&self, n: NodeId) -> Option<[crate::ConstValue; 3]> {
+    fn constant_branch(&self, n: NodeId) -> Option<[crate::ConstValue; BuildTarget::ALL.len()]> {
         self.p.constant_branches.get(&(self.at, n)).copied()
     }
 
     /// Leave for `yes` on each target `taken` names and for `no` on the others. The
     /// otherwise edge, which no target takes, keeps both blocks in checked code.
-    fn targeted_switch(&mut self, taken: [bool; 3], yes: BlockId, no: BlockId, n: NodeId) {
+    fn targeted_switch(
+        &mut self,
+        taken: [bool; BuildTarget::ALL.len()],
+        yes: BlockId,
+        no: BlockId,
+        n: NodeId,
+    ) {
         let sel = self.layout_word(LayoutQuery::Target, n);
-        let edges = [0, 1, 2].map(|t| SwitchArm {
-            value: t as u64,
-            edge: self.edge(if taken[t] { yes } else { no }, &[]),
+        let edges = BuildTarget::ALL.map(|target| SwitchArm {
+            value: target.index() as u64,
+            edge: self.edge(if taken[target.index()] { yes } else { no }, &[]),
         });
-        let otherwise = self.edge(if taken == [true; 3] { no } else { yes }, &[]);
+        let otherwise = self.edge(
+            if taken.iter().all(|&take| take) {
+                no
+            } else {
+                yes
+            },
+            &[],
+        );
         let arms = PoolRange::push(&mut self.b.pools.arms, edges);
         self.end(
             Terminator::Switch {
@@ -361,7 +375,7 @@ impl Cx<'_, '_, '_> {
             .constant_branch(scrutinee)
             .filter(|values| values[0].ty == subject.ty)
             .and_then(|values| {
-                let mut taken = [false; 3];
+                let mut taken = [false; BuildTarget::ALL.len()];
                 for (t, value) in values.into_iter().enumerate() {
                     taken[t] = self.const_admits(id, value)?;
                 }

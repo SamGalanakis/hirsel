@@ -109,7 +109,7 @@ class HotFiles(unittest.TestCase):
                         check_compiler_metadata=lambda: 0,
                         check_runners=lambda root: True,
                         changed_cases=lambda: []), \
-                patch.object(fmt.__globals__['darwin_check'], 'rust_changed', return_value=False), \
+                patch.object(fmt.__globals__['apple_check'], 'rust_changed', return_value=False), \
                 patch.object(sys, 'argv', ['fmt.py']), \
                 patch('subprocess.run', side_effect=finished) as run:
             self.assertEqual(fmt(), 0)

@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""Publish the nightly board status and alert on missed complete runs."""
+"""Publish nightly board status, alert when it goes stale, and prune old runs."""
 import argparse
+from contextlib import closing
 from datetime import datetime, timezone
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
 
 MAX_AGE = 26 * 3600
 NIGHTLY_DIR = Path(os.environ.get("HIRSEL_BRIEFS", "/workspace/code/hirsel-briefs")) / "vopr/nightly"
+KEEP_RUNS = 3
+RUN_NAME = r"[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}"
+RUN_REFERENCE = re.compile(rf"(?<![\w.-])runs/({RUN_NAME})(?![\w.-])")
 
 
 def read_report(path):
@@ -110,6 +118,68 @@ def latest_attempt(base):
                 "step": failures or ("board comparison" if status in (2, 3) else "board"),
             }, report
     return None, {}
+
+
+def metadata_pins(base):
+    pins = set()
+
+    def scan(text):
+        pins.update(RUN_REFERENCE.findall(text))
+
+    def inspect(path, *, contents=True):
+        if path.is_symlink():
+            scan(str(path.parent / path.readlink()))
+            scan(str(path.resolve()))
+        if contents and path.is_file():
+            scan(path.read_text(errors="surrogateescape"))
+
+    def walk_error(error):
+        raise error
+
+    for name in ("last-complete.json", "last-complete.v2.json", "last-screen-inputs"):
+        inspect(base / name)
+    for name in ("baselines", "weekly-main"):
+        root = base / name
+        inspect(root, contents=False)
+        if root.is_dir():
+            for directory, dirs, files in os.walk(root, onerror=walk_error):
+                if name == "weekly-main" and ".git" in dirs:
+                    dirs.remove(".git")
+                for entry in (*dirs, *files):
+                    inspect(Path(directory) / entry, contents=name == "baselines")
+
+    history = base / "history.sqlite"
+    inspect(history, contents=False)
+    if history.exists():
+        # Run names are SQLite keys. Only paths in a stored contract can point to files.
+        with closing(sqlite3.connect(f"{history.as_uri()}?mode=ro", uri=True)) as db:
+            for (contract,) in db.execute("SELECT DISTINCT contract FROM samples WHERE contract IS NOT NULL"):
+                scan(contract)
+    return pins
+
+
+def prune_candidates(base, current=None):
+    base = base.resolve()
+    pins = metadata_pins(base)
+    if current is not None:
+        pins.add(current.name)
+    for accepted_only in (False, True):
+        if complete := last_complete(base, accepted_only=accepted_only):
+            markdown = complete[2]
+            pins.update(RUN_REFERENCE.findall(f"{markdown}\n{markdown.resolve()}"))
+    runs = [path for path in (base / "runs").glob("*") if re.fullmatch(RUN_NAME, path.name)
+            and not path.is_symlink() and path.is_dir()]
+    newest_first = sorted(runs, key=lambda path: (attempt_order(path), path.name), reverse=True)
+    return [path for path in newest_first[KEEP_RUNS:] if path.name not in pins]
+
+
+def remove_run(run):
+    # Buck seals cached toolchain directories. Leave linked files and directories alone.
+    for _, _, _, descriptor in os.fwalk(run):
+        mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        if not mode & stat.S_IWUSR:
+            os.fchmod(descriptor, mode | stat.S_IWUSR)
+    shutil.rmtree(run)
 
 
 def verdict(value):
@@ -213,6 +283,7 @@ def main():
                         help="record the failing systemd invocation")
     parser.add_argument("--service-failure-tier", choices=("nightly", "weekly"))
     parser.add_argument("--last-complete-commit", action="store_true")
+    parser.add_argument("--prune", type=Path, metavar="CURRENT_RUN", help=argparse.SUPPRESS)
     parser.add_argument("--record", type=Path, help="attempt run directory")
     parser.add_argument("--started", type=int)
     parser.add_argument("--commit")
@@ -228,6 +299,12 @@ def main():
     args.base.mkdir(parents=True, exist_ok=True)
     with (args.base / "freshness.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.prune is not None:
+            # The nightly wrapper already holds nightly.lock and baseline.lock.
+            for run in prune_candidates(args.base, args.prune):
+                remove_run(run)
+                print(f"Pruned board run {run}")
+            return
         if args.service_failure:
             service_failure(args.base, args.service_failure, args.service_failure_tier or "nightly")
             return

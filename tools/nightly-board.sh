@@ -36,16 +36,25 @@ finish() {
   if (( status != 0 )); then
     printf 'Nightly board failed at %s (exit %s). See %s\n' "$step" "$status" "$run" >&2
   fi
+  local recorded=0
   record --status "$status" || {
     if (( status == 0 )); then
       exit 1
     fi
+    recorded=1
   }
-  python3 "$tools/board-history.py" append --base "$base" "$run" >>"$run/run.log" 2>&1 ||
-    printf 'Board history append failed. See %s/run.log.\n' "$run" >&2
   if [[ -f "$run/bisect/alert.txt" ]]; then
     { mkdir -p "$base/alerts" && cat "$run/bisect/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
       printf 'Board bisect alert could not be copied from %s/bisect/alert.txt.\n' "$run" >&2
+  fi
+  if python3 "$tools/board-history.py" append --base "$base" "$run" >>"$run/run.log" 2>&1; then
+    if (( recorded == 0 )); then
+      flock --close "$base/baseline.lock" python3 "$tools/board-freshness.py" \
+        --base "$base" --prune "$run" >>"$run/run.log" 2>&1 ||
+        printf 'Board run pruning failed. See %s/run.log.\n' "$run" >&2
+    fi
+  else
+    printf 'Board history append failed. See %s/run.log.\n' "$run" >&2
   fi
 }
 trap finish EXIT

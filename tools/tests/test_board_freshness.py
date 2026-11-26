@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,53 @@ TOOLS = Path(__file__).resolve().parents[1]
 
 
 class BoardFreshnessTest(unittest.TestCase):
+    def test_pruning_keeps_referenced_and_in_progress_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            tags = ("expired", "current", "promoted", "legacy", "profile", "screen", "weekly",
+                    "history", "accepted", "refused", "recent1", "recent2", "recent3")
+            runs = {tag: base / "runs" / f"202611{day:02d}T000000Z-Ab1234"
+                    for day, tag in enumerate(tags, start=1)}
+            for run in runs.values():
+                run.mkdir(parents=True)
+            toolchain = runs["expired"] / "toolchain"
+            toolchain.mkdir()
+            (toolchain / "artifact").touch()
+            toolchain.chmod(0o555)
+
+            def complete(tag, status, mtime):
+                report = runs[tag] / "board" / "board.json"
+                report.parent.mkdir()
+                report.write_text(json.dumps({"complete": True, "commit": tag, "exit_status": status}))
+                report.with_suffix(".md").touch()
+                os.utime(report, (mtime, mtime))
+                return report
+
+            promoted = complete("promoted", 0, 1)
+            legacy = complete("legacy", 0, 2)
+            complete("accepted", 3, 3)
+            complete("refused", 2, 4)
+            (base / "last-complete.json").symlink_to(promoted.relative_to(base))
+            (base / "last-complete.v2.json").symlink_to(legacy)
+            (base / "last-screen-inputs").symlink_to(runs["screen"])
+            (base / "baselines").mkdir()
+            (base / "baselines/profile.json").write_text(json.dumps({"cwd": str(runs["profile"] / "images")}))
+            (base / "weekly-main").mkdir()
+            (base / "weekly-main/nightly-input").symlink_to(runs["weekly"])
+            subprocess.run([sys.executable, TOOLS / "board-history.py", "append", "--base", base], check=True)
+            with sqlite3.connect(base / "history.sqlite") as history:
+                history.execute("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+                    runs["history"].name, "goal", "row", "side", "metric",
+                    json.dumps([str(runs["history"] / "data")]), 1, None,
+                ))
+
+            subprocess.run([sys.executable, TOOLS / "board-freshness.py", "--base", base,
+                            "--prune", runs["current"]], capture_output=True, check=True)
+            self.assertEqual(set((base / "runs").iterdir()), {runs[tag] for tag in (
+                "current", "promoted", "legacy", "profile", "screen", "weekly", "history", "accepted",
+                "refused", "recent1", "recent2", "recent3",
+            )})
+
     def test_only_a_complete_nightly_sweep_counts_towards_the_26_hour_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

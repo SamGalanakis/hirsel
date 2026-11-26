@@ -1,0 +1,356 @@
+// The Standard Webhooks "Signature scheme" example supplies the first delivery.
+// The two other ids have independently computed HMAC-SHA256 tags over the same body.
+const WEBHOOK_TIME: u64 = 1614265330000
+
+const WEBHOOK_SIGNATURE: String = "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+
+type WebhookMintMode: shareable + send {
+    refuse: bool
+}
+
+type WebhookLawEvent: key + send = CalledWire | ClaimHeaders(u64) | FreshnessRead(u64) | VerifiedGithub
+
+type WebhookLawGrant: send {
+    secret: Secret,
+    github: Secret,
+    clock: Clock,
+    seen: Sender[WebhookLawEvent],
+    mode: Latest[WebhookMintMode]
+}
+
+fn webhook_law_mint(seed: WebhookLawGrant, _handles: (), _input: ()) -> Result[WebhookLawGrant, Capacity] {
+    if latest.read(seed.mode).refuse {
+        return Error(Capacity(requested: 8192, available: 0))
+    }
+    Ok(WebhookLawGrant(secret: secret.share(seed.secret), github: secret.share(seed.github), clock: seed.clock, seen: channel.sender(seed.seen), mode: latest.handle(seed.mode)))
+}
+
+fn webhook_law_claim(grant: WebhookLawGrant, request: ClaimRequest) -> Result[Claimed, ()] {
+    let fields = view request.headers
+    let _ = channel.try_send(grant.seen, ClaimHeaders(list.len(fields)))
+    if list.len(fields) != 3 || fields[0].0 != "webhook-timestamp" || fields[1].0 != "webhook-id" || fields[2].0 != "webhook-signature" {
+        return Error(())
+    }
+    let time = view fields[0].1
+    let id = view fields[1].1
+    let sig = view fields[2].1
+    let Some(timestamp) = http_law_decimal(time) else {
+        return Error(())
+    }
+    let mut data = std.http.copy_bytes(id)
+    list.push(mut data, b'.')
+    list.append(mut data, time)
+    list.push(mut data, b'.')
+    list.append(mut data, request.body)
+    if list.len(time) > 19 || !webhook_law_signature(grant.secret, data, sig) {
+        return Error(())
+    }
+    let now = host.wall_ms(grant.clock)
+    let _ = channel.try_send(grant.seen, FreshnessRead(now))
+    let seconds = now / 1000
+    if std.order.max(seconds, timestamp) - std.order.min(seconds, timestamp) > 300 {
+        return Error(())
+    }
+    Ok(Claimed(caller: store.Caller(issuer: 9u8, subject: b"hook"), key: std.http.copy_bytes(id)))
+}
+
+fn webhook_law_signature(key: Secret, data: Bytes, signatures: Bytes) -> bool {
+    let width = list.len(signatures)
+    let mut offset = 0u64
+    while offset < width {
+        let end = match list.find_byte(signatures, offset, width, b' ') {
+            Some(separator) => separator,
+            None => width,
+        }
+        let entry = list.slice(signatures, offset, end)
+        if list.starts_with_at(entry, 0, b"v1,") {
+            if let Some(tag) = std.base64.decode(list.slice(entry, 3, list.len(entry))) {
+                match secret.verify_hmac_sha256(key, data, tag) {
+                    Ok(true) => return true,
+                    Ok(false) => (),
+                    Error(_) => return false,
+                }
+            }
+        }
+        offset = end + 1
+    }
+    false
+}
+
+fn webhook_law_wire(grant: WebhookLawGrant, _credential: Bytes) -> Result[BoundCaller, BindRefusal] {
+    let _ = channel.try_send(grant.seen, CalledWire)
+    Error(Rejected)
+}
+
+fn github_law_claim(grant: WebhookLawGrant, request: ClaimRequest) -> Result[Claimed, ()] {
+    let fields = view request.headers
+    if list.len(fields) != 2 || fields[0].0 != "x-github-delivery" || fields[1].0 != "x-hub-signature-256" {
+        return Error(())
+    }
+    let signature = view fields[1].1
+    if list.len(signature) != 71 || !list.starts_with_at(signature, 0, b"sha256=") {
+        return Error(())
+    }
+    let hex = list.slice(signature, 7, 71)
+    for byte in hex {
+        if !int.is_ascii_digit(byte) && (byte < b'a' || byte > b'f') {
+            return Error(())
+        }
+    }
+    let tag = option.unwrap(std.hex.decode(hex))
+    match secret.verify_hmac_sha256(grant.github, request.body, tag) {
+        Ok(true) => {
+            let _ = channel.try_send(grant.seen, VerifiedGithub)
+            Ok(Claimed(caller: store.Caller(issuer: 9u8, subject: b"github"), key: std.http.copy_bytes(fields[0].1)))
+        },
+        _ => Error(()),
+    }
+}
+
+type WebhookLawInput: codec {
+    test: u32
+}
+
+fn webhook_law_entry(mut tx: store.Tx, handles: HttpLawHandles, _caller: Caller, take input: WebhookLawInput) -> Result[u64, ()] {
+    if input.test != 2432232314u32 {
+        return Error(())
+    }
+    http_op_increment(mut tx, handles, _caller, HttpOpInput(name: "saved"))
+}
+
+fn webhook_law_place(mut r: Registry[WebhookLawGrant, HttpLawHandles]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(webhook_law_entry), 65536, DEFAULT_STEPS)?
+    let mut fields: List[FieldSource] = list.new()
+    list.push(mut fields, FieldSource(field: "test", source: Body))
+    for op in["hook", "tiny", "github"] {
+        let mut route = string.from("/")
+        string.push(mut route, op)
+        let binding = HttpBinding(op: string.from(op), method: Post, path: take route, entry: http_law_key(r.t.exported[0u64]), fields: clone(fields), mode: Keyed, ok_status: 201u16, error_status: 422u16, body_max: 1024, arg_max: 65536, deadline_ms: 1000, steps: DEFAULT_STEPS)
+        let rule = if op == "github" {
+            github_law_rule()
+        } else if op == "tiny" {
+            webhook_law_rule(1)
+        } else {
+            webhook_law_rule(8192)
+        }
+        bind_keyed(mut r, take binding, take rule)?
+    }
+    Ok(())
+}
+
+fn webhook_law_rule(claim_bytes: u64) -> KeyedRule[WebhookLawGrant] {
+    let mut headers: List[String] = list.new()
+    list.push(mut headers, "webhook-id")
+    list.push(mut headers, "webhook-timestamp")
+    list.push(mut headers, "webhook-signature")
+    let claim = Claim(f: code.describe(webhook_law_claim), headers: take headers, claim_bytes, claim_steps: DEFAULT_STEPS)
+    KeyedRule(claim: take claim, retention_ms: 2000, keys_max: 1, principal_keys_max: 1)
+}
+
+fn github_law_rule() -> KeyedRule[WebhookLawGrant] {
+    let mut headers: List[String] = list.new()
+    list.push(mut headers, "x-hub-signature-256")
+    list.push(mut headers, "x-github-delivery")
+    let claim = Claim(f: code.describe(github_law_claim), headers: take headers, claim_bytes: 8192, claim_steps: DEFAULT_STEPS)
+    KeyedRule(claim: take claim, retention_ms: 2000, keys_max: 2, principal_keys_max: 2)
+}
+
+type WebhookLawServer: send {
+    listener: Listener,
+    relay: Relay,
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    seed: WebhookLawGrant,
+    stop: Receiver[u64]
+}
+
+fn webhook_law_serve(take job: WebhookLawServer) waits {
+    let WebhookLawServer(listener: take listener, relay: take relay, clock, random, tasks, seed: take seed, stop: take stop) = take job
+    let bind_seed = result.unwrap(webhook_law_mint(seed, (), ()))
+    let claim = Mint(seed: take seed, mint: webhook_law_mint, mint_bytes: 8192, mint_steps: DEFAULT_STEPS)
+    let bind_mint = Mint(seed: take bind_seed, mint: webhook_law_mint, mint_bytes: 8192, mint_steps: DEFAULT_STEPS)
+    let cfg: Grants[WebhookLawGrant, (), WebhookLawGrant] = Grants(attempt: None, call: None, claim: Some(take claim), bind: Some(take bind_mint))
+    let grants = grant_task(tasks, (), take cfg)
+    let place = code.describe(webhook_law_place)
+    let reg = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
+    let (take routes, take plan) = result.unwrap(http_router(reg, None, std.router.builder()))
+    let bind_plan = wire(code.describe(webhook_law_wire), 8192, DEFAULT_STEPS)
+    let make: scoped[view] fn() -> HttpConnection[WebhookLawGrant, HttpLawHandles] = fn() -> HttpConnection[WebhookLawGrant, HttpLawHandles] {
+        webhook_law_connection(grants, bind_plan, plan, relay, random, clock, tasks)
+    }
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    result.unwrap(http_serve_connections(take listeners, clock, tasks, http_law_config(), take routes, 2097152, make, Some(take stop)))
+    stop_grants(Some(take grants))
+}
+
+fn webhook_law_connection(grants: PlaceGrants[WebhookLawGrant], binding: Wire[WebhookLawGrant], plan: Arc[HttpRoutes], relay: Relay, random: Random, time: Clock, tasks: Tasks) -> HttpConnection[WebhookLawGrant, HttpLawHandles] {
+    let reg = result.unwrap(placed(code.describe(webhook_law_place), HTTP_LAW_PLACE_BYTES))
+    let wired = grant_binds_of(grants, binding)
+    let mut connection = http_connection(take reg, arc.share(plan), take wired, relay_endpoint(relay), random, time, tasks, 65536)
+    if let Some(take claims) = grant_claims_of(grants) {
+        http_grant_claims(mut connection, take claims)
+    }
+    take connection
+}
+
+fn webhook_law_post(n: Net, clock: Clock, address: Addr, path: Bytes, id: Bytes, signature: Bytes) -> HttpLawReply waits {
+    let mut headers = std.http.copy_bytes(b"Webhook-Timestamp: 1614265330\r\nWebhook-ID: ")
+    list.append(mut headers, id)
+    list.append(mut headers, b"\r\nWebhook-Signature: ")
+    list.append(mut headers, signature)
+    list.append(mut headers, b"\r\n")
+    webhook_law_request(n, clock, address, path, headers, b"{\"test\": 2432232314}")
+}
+
+fn github_law_post(n: Net, clock: Clock, address: Addr, delivery: Bytes, signature: Bytes, data: Bytes) -> HttpLawReply waits {
+    let mut headers = std.http.copy_bytes(b"X-GitHub-Delivery: ")
+    list.append(mut headers, delivery)
+    list.append(mut headers, b"\r\nX-Hub-Signature-256: sha256=")
+    list.append(mut headers, signature)
+    list.append(mut headers, b"\r\n")
+    webhook_law_request(n, clock, address, b"/github", headers, data)
+}
+
+fn webhook_law_request(n: Net, clock: Clock, address: Addr, path: Bytes, headers: Bytes, data: Bytes) -> HttpLawReply waits {
+    let mut raw = std.http.copy_bytes(b"POST ")
+    list.append(mut raw, path)
+    list.append(mut raw, b" HTTP/1.1\r\nHost: a\r\nConnection: close\r\n")
+    list.append(mut raw, headers)
+    let mut length = string.from("Unlisted: ignored\r\nContent-Type: application/json\r\nContent-Length: ")
+    string.push_u64(mut length, list.len(data))
+    list.append(mut raw, string.as_bytes(length))
+    list.append(mut raw, b"\r\n\r\n")
+    list.append(mut raw, data)
+    http_law_exchange(n, clock, address, raw)
+}
+
+type WebhookLawHistory: send {
+    head: Sender[HeadInput],
+    publisher: Sender[PubIn],
+    wall: ClockHand,
+    random: Random,
+    tasks: Tasks,
+    net: Net
+}
+
+fn webhook_law_history(take job: WebhookLawHistory) waits {
+    let WebhookLawHistory(head: take head, publisher: take pub_to, wall: take clock_hand, random, tasks, net) = take job
+    let mut wall = take clock_hand
+    let (time, take response_time) = provide.clock(0u64, WEBHOOK_TIME)
+    let place = code.describe(webhook_law_place)
+    let reg = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
+    let (take relay, take relaying) = result.unwrap(start_relay(reg, head, pub_to, time, tasks, RelayConfig(http_max: 2, sends_max: 2, positions_max: 2, arg_max: 1024)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let (stop, stopping): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (trace, observed): (Sender[WebhookLawEvent], Receiver[WebhookLawEvent]) = channel.new(32)
+    let (claim_clock, take freshness_hand) = provide.clock(0u64, WEBHOOK_TIME)
+    let mut freshness = take freshness_hand
+    let raw = option.unwrap(std.base64.decode(b"MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"))
+    let key = result.unwrap(secret.seal(take raw, "verify"))
+    let github_key = result.unwrap(secret.seal(b"It's a Secret to Everybody", "verify"))
+    let mode = latest.new(arc.new(WebhookMintMode(refuse: false)))
+    let server = task.spawn(tasks, bytes 4194304, WebhookLawServer(listener: take listener, relay: take relay, clock: time, random, tasks, seed: WebhookLawGrant(secret: take key, github: take github_key, clock: claim_clock, seen: take trace, mode: latest.handle(mode)), stop: take stopping), webhook_law_serve)
+    let first_key = b"msg_p5jXN8AQM9LWM0D4loKWxJek"
+    let second_key = b"another-message"
+    let second_tag = b"v1,Hx1eMVodqGXc2drKIqQR+KlF+YFFqZcyt4G0VtNx/7o="
+    let first = webhook_law_post(net, time, address, b"/hook", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    keyed_http_expect(first, 201u16, false, b"\"1\"", Some(b"1614265332000"), "first signed delivery")
+    let full = webhook_law_post(net, time, address, b"/hook", second_key, second_tag)
+    keyed_http_expect(full, 503u16, false, full.body, None, "live claim fills the only quota slot")
+    clock.set_wall(mut freshness, 1614265630999)
+    clock.set_wall(mut wall, 1614265331999)
+    let before = webhook_law_post(net, time, address, b"/.hirsel/op/hook", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    keyed_http_expect(before, 201u16, true, b"\"1\"", Some(b"1614265332000"), "duplicate one ms before expiry")
+    clock.set_wall(mut freshness, 1614265631000)
+    let late = webhook_law_post(net, time, address, b"/hook", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    keyed_http_expect(late, 401u16, false, b"", None, "signed delivery outside tolerance")
+    clock.set_wall(mut freshness, WEBHOOK_TIME)
+    let changed_id = webhook_law_post(net, time, address, b"/hook", second_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    keyed_http_expect(changed_id, 401u16, false, b"", None, "HMAC refuses a changed message id")
+    clock.set_wall(mut wall, 1614265332000)
+    let at = webhook_law_post(net, time, address, b"/hook", second_key, second_tag)
+    keyed_http_expect(at, 201u16, false, b"\"2\"", Some(b"1614265334000"), "quota reclaimed at expiry")
+    clock.set_wall(mut wall, 1614265332001)
+    let after = webhook_law_post(net, time, address, b"/hook", second_key, second_tag)
+    keyed_http_expect(after, 201u16, true, b"\"2\"", Some(b"1614265334000"), "duplicate one ms after reclaim")
+    clock.set_wall(mut wall, 100)
+    let rollback = webhook_law_post(net, time, address, b"/hook", second_key, second_tag)
+    keyed_http_expect(rollback, 201u16, true, b"\"2\"", Some(b"1614265334000"), "wall rollback preserved the reply")
+    clock.set_wall(mut wall, 18446744073709551615u64)
+    let never = webhook_law_post(net, time, address, b"/hook", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    keyed_http_expect(never, 201u16, false, b"\"3\"", Some(b"never"), "reply at max time does not wrap")
+    let duplicate = webhook_law_post(net, time, address, b"/hook", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    keyed_http_expect(duplicate, 201u16, true, b"\"3\"", Some(b"never"), "never expires at max time")
+    let empty = webhook_law_post(net, time, address, b"/hook", b"", b"v1,BbrBopkxy1IaPTmLxhGOIjtynRWNh3UqphKDPFaJ1cU=")
+    keyed_http_expect(empty, 400u16, false, b"", None, "a signed empty key still gives 400")
+    let spaced = webhook_law_post(net, time, address, b"/hook", b"bad key", b"v1,GNSyYghsMgvPCsONYPWCJmU4TTva8LswgIu6UqARG7o=")
+    keyed_http_expect(spaced, 400u16, false, b"", None, "a signed key containing space still gives 400")
+    let repeated = webhook_law_request(net, time, address, b"/hook", b"Webhook-Timestamp: 1614265330\r\nWebhook-ID: first\r\nWEBHOOK-id: second\r\nWebhook-Signature: v1,AAAA\r\n", b"{")
+    keyed_http_expect(repeated, 401u16, false, b"", None, "claim sees repeated headers before malformed JSON is decoded")
+    // GitHub's documented signed body passes the claim and then fails this
+    // application's JSON schema. The JSON example signs the same body twice.
+    let example = github_law_post(net, time, address, b"example", b"757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17", b"Hello, World!")
+    keyed_http_expect(example, 400u16, false, example.body, None, "GitHub's signed raw example reaches JSON preparation")
+    let github_data = b"{\"test\": 2432232314}"
+    let github_sig = b"e6416d07bfe8709e7df1eac7ac9684b962b42f921b04f5ee467d3cb77d53713a"
+    let delivery = github_law_post(net, time, address, b"delivery-1", github_sig, github_data)
+    keyed_http_expect(delivery, 201u16, false, b"\"4\"", Some(b"never"), "GitHub delivery id identifies the first claim")
+    let resent = github_law_post(net, time, address, b"delivery-2", github_sig, github_data)
+    keyed_http_expect(resent, 201u16, false, b"\"5\"", Some(b"never"), "GitHub does not sign the delivery id")
+    let limited = webhook_law_post(net, time, address, b"/tiny", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    if limited.status != 401u16 || limited.committed {
+        fail("a request that exceeds the claim allowance should give 401")
+    }
+    latest.publish(mode, arc.new(WebhookMintMode(refuse: true)))
+    let mint_failed = webhook_law_post(net, time, address, b"/tiny", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
+    if mint_failed.status != 503u16 || mint_failed.retry_after != Some(5u64) || mint_failed.committed {
+        fail("a failed claim mint must take precedence over the claim-input bound")
+    }
+    let reads: Inline[WebhookLawEvent, 27] =[ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(1614265630999), ClaimHeaders(3), FreshnessRead(1614265631000), ClaimHeaders(3), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(4), VerifiedGithub, VerifiedGithub, VerifiedGithub]
+    for i in 0u64 .. 27 {
+        match channel.try_receive(observed) {
+            Ok(value) if value == reads[i] => (),
+            _ => fail("claim start or freshness read differs from the delivery script"),
+        }
+    }
+    if let Ok(_) = channel.try_receive(observed) {
+        fail("claim or Wire.bind ran an extra time")
+    }
+    result.unwrap(channel.send(stop, host.mono_ns(time)))
+    result.unwrap(task.join(take server))
+    let _ = std.task.cancel_join(take relaying)
+    let _ = take head
+    let _ = take freshness
+    let _ = take response_time
+    let _ = take wall
+}
+
+// Run this law with hirsel test --replay on each native engine. It checks
+// the signed request and the stored outcomes under the same assertions on replay.
+@test
+fn keyed_http_webhook_history(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (clock, take wall) = provide.clock(0u64, WEBHOOK_TIME)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let place = code.describe(webhook_law_place)
+    let placing = placing_at(place, HTTP_LAW_PLACE_BYTES)
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16)
+    let mail = result.unwrap(mailbox(16))
+    let history = task.spawn(tasks, bytes 16777216, WebhookLawHistory(head: take head, publisher: post(mail), wall: take wall, random, tasks, net), webhook_law_history)
+    let started = run_head(take db, take reg, take identity, take handles, placing_at(place, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576, None, None)
+    if let Error(take problem) = started {
+        fail(start_text(Open(take problem)))
+    }
+    match task.join(take history) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}

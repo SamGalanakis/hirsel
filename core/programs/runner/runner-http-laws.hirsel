@@ -309,10 +309,6 @@ fn http_law_post_with_caller(n: Net, clock: Clock, addr: Addr, path: String, cre
 }
 
 fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: store.StreamId, p: u64, data: Bytes, deadline_ms: u32, expected: Option[String]) -> HttpLawReply waits {
-    let until = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64))
-    let (take read_half, take write_half) = net.split(result.unwrap(host.connect(n, addr, until)))
-    let mut input = take read_half
-    let mut output = take write_half
     let mut head = string.from(method)
     string.push(mut head, " ")
     string.push(mut head, path)
@@ -334,6 +330,14 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
     }
     list.append(mut request, b"\r\nContent-Type: application/json\r\n\r\n")
     list.append(mut request, data)
+    http_law_exchange(n, clock, addr, request)
+}
+
+fn http_law_exchange(n: Net, clock: Clock, addr: Addr, request: Bytes) -> HttpLawReply waits {
+    let until = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64))
+    let (take read_half, take write_half) = net.split(result.unwrap(host.connect(n, addr, until)))
+    let mut input = take read_half
+    let mut output = take write_half
     http_law_write(mut output, request, until)
     let mut received: Bytes = list.with_capacity(8192u64)
     loop {

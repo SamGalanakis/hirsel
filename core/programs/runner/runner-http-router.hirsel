@@ -469,6 +469,7 @@ fn claim_job_reply[G: send](take work: (ClaimJob[G], ClaimCompletionSignal)) wai
 
 // Error is the claim mint's failure, which is not an authentication failure.
 fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, mint: Sender[MintRequest[(), G]], claim: Claim[G], tasks: Tasks, clock: Clock, deadline: u64) -> Result[Option[Claimed], Fault] waits {
+    let seed = ask_mint(mint, ())?
     let copied = bound bytes claim.claim_bytes {
         isolate(scoped fn() -> ClaimRequest {
             let mut headers: List[(String, Bytes)] = list.new()
@@ -488,7 +489,6 @@ fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, mint: Sender[M
     let Ok(Ok(Ok(take request))) = take copied else {
         return Ok(None)
     }
-    let seed = ask_mint(mint, ())?
     let job = ClaimJob(seed: take seed, derive: claim.f, request: take request, steps: claim.claim_steps)
     let (to, from): (Sender[Option[Claimed]], Receiver[Option[Claimed]]) = channel.new(1u64)
     let Ok(take completion) = ClaimCompletionSignal(to: channel.sender(to), sent: false) else {

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Run Runner L15 and L17 with a native body trace, and L15 again in a fresh process at reopen."""
+"""Run Runner's HTTP delivery laws or the keyed record-and-replay laws."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -61,11 +62,53 @@ def fixture(work, compiler, cc):
         print(f"L15 {phase} | {expected} body runs")
 
 
+KEYED_REPLAY_CASES = {
+    "runner": (
+        "keyed_http_webhook_history",
+        "keyed_http_horizon_at_deciding_admission",
+        "keyed_http_claim_route_and_alias",
+        "quiet_reopen_recovers_bound_claims_once",
+    ),
+    "store": (
+        "claim_expires_from_its_reply",
+        "dropped_claim_time_survives_reopen_before_sweep",
+    ),
+}
+
+
+def keyed_replay(compiler, runtime, engine):
+    for package, cases in KEYED_REPLAY_CASES.items():
+        command = [compiler, "test", RUNNER.parent / package, "--libraries", ROOT / "core",
+                   "--backend", engine, "--replay", "--rerun", "-j", "1", "--json"]
+        if runtime is not None:
+            command.extend(["--runtime", runtime])
+        names = {f"{package}@1/{package}/{name}" for name in cases}
+        for name in sorted(names):
+            command.extend(["--exact", name])
+        verdict = run(command, json_output=True)
+        passed = {test["definition"] for test in verdict["tests"] if test["passed"]}
+        if not verdict["passed"] or passed != names:
+            raise RuntimeError(f"{engine} keyed replay missing laws: {names - passed}")
+        print(f"{engine} {package} | {len(passed)} keyed replay laws")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", required=True, type=Path)
+    parser.add_argument("--keyed-replay", action="store_true")
+    parser.add_argument("--record-runtime", type=Path)
     args = parser.parse_args()
     compiler = args.compiler.resolve()
+    if args.keyed_replay:
+        runtime = args.record_runtime.resolve() if args.record_runtime else None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [pool.submit(keyed_replay, compiler, runtime, engine)
+                    for engine in ("cranelift", "llvm")]
+            for job in jobs:
+                job.result()
+        return
+    if args.record_runtime:
+        parser.error("--record-runtime requires --keyed-replay")
     with tempfile.TemporaryDirectory(prefix="hirsel-http-l15-") as temp:
         work = Path(temp)
         obj = work / "trace.o"
@@ -100,4 +143,4 @@ if __name__ == "__main__":
     try:
         main()
     except subprocess.CalledProcessError as error:
-        raise SystemExit(f"L15 exit {error.returncode}\n{error.stdout}\n{error.stderr}") from error
+        raise SystemExit(f"HTTP law exit {error.returncode}\n{error.stdout}\n{error.stderr}") from error

@@ -19,3 +19,4 @@ grants = ["Tasks"]
 [tests.sources]
 "register_model.hirsel" = "register_model"
 "laws.hirsel" = "laws"
+"sim_laws.hirsel" = "laws"

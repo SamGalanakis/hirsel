@@ -4,3 +4,7 @@ fleet@1/laws/barrier_freeze_codec_keys_and_k13_outcomes src=a2a9ec67df8eb774 sig
 fleet@1/laws/move_kernel_closes_three_stale_races_and_lost_h src=fc70245c7232bbdd sig=83e09e2f8fb89668 run=c2c0c6612d4cbb79 bug=6b0679117cf1e660 oracle=10ef25ab43d64531 rows=pending
 fleet@1/laws/origin_wire_49_bytes_and_o3_o4 src=2e268373cc6d1ee3 sig=9dc2478c5984d6cf run=c2c0c6612d4cbb79 bug=e470365b53736031 oracle=682b692ae1f95af1 rows=pending
 fleet@1/laws/register_model_bfs_and_kernel_conforms src=cc48f1666553a25c sig=41f2e2b8ae09f871 run=c2c0c6612d4cbb79 bug=437f0eef619520c3 oracle=39ab6b876450f5b2 rows=pending
+fleet@1/laws/sim_acto_desired_state_edits_and_conformance src=327be28711e307cd sig=a064fc78676cafbf run=c2c0c6612d4cbb79 bug=1f3cac38dff3d8a1 oracle=dd7554272bdaebb6 rows=pending
+fleet@1/laws/sim_lost_head_write_before_claim_settles_readonly src=45e6ebd9852167b5 sig=e621a888280ada62 run=c7b2a52baff70a63 bug=106b3735f4b720b2 oracle=cadfa3430e4244cb rows=pending
+fleet@1/laws/sim_sieve_stale_controller_and_scoped_barrier src=6310b3a16ea8393d sig=74da9c94018e5482 run=c7b2a52baff70a63 bug=8d6d415facd53ec1 oracle=c4d3051b3b030e54 rows=pending
+fleet@1/laws/sim_three_stale_open_races_with_message_hold src=3ee151ac517f3f3d sig=664ee0c54a763e8b run=c7b2a52baff70a63 bug=a4cdfb4659042089 oracle=0538449336f9c901 rows=pending

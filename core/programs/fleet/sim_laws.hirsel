@@ -1,0 +1,431 @@
+// 3-host `hirsel fleet sim` law suite (docs/spec/fleet.md FLT-2, FLT-3, FLT-4, FLT-8).
+// Uses std.sim.message (hold_until/fire/repro) and std.sim.world (drifting/pause_at/drive).
+// Covers:
+//   - Three stale-open races from blueprint §2.1 (delayed A->B after C wins epoch 9,
+//     deposed local retry duel, attached-stream janitor claiming back moved Place).
+//   - Lost head write (H) reply before CLAIM (settled read-only via HeadView + ORIGIN).
+//   - Sieve stale-controller laws and scoped takeover barrier under clock pause.
+//   - Acto desired-state edit laws (mid-move edits, rollbacks, stale edits, freeze, crash/restart).
+type SimClockDriver: send {
+    clocks: std.sim.world.Clocks,
+    tasks: Tasks
+}
+
+fn run_sim_clocks(take input: SimClockDriver) waits {
+    let SimClockDriver(clocks: take clocks, tasks) = take input
+    std.sim.world.drive(take clocks, tasks)
+}
+
+type WirePayload = WireClaim(move_kernel.ClaimAuth) | WireContinue(move_kernel.ClaimAuth) | WireJanitor(move_kernel.ClaimAuth) | WireReply(move_kernel.Id16, move_kernel.SinkOutcome) | WireProbe(u64, u64)
+
+type HostState {
+    node_id: u64,
+    incarnation: u64,
+    recorded_pair: Option[move_kernel.HeadPair],
+    parked_deposed: bool,
+    retry_attempts: u64
+}
+
+fn make_host(node_id: u64, pair: Option[move_kernel.HeadPair]) -> HostState {
+    HostState(node_id: node_id, incarnation: 1, recorded_pair: pair, parked_deposed: false, retry_attempts: 0)
+}
+
+// Execute a single objects@1 writer open on the simulated shared bucket register.
+// Enforces ClaimAuth precondition before any write, fresh holder per open, and ORIGIN O1/O3.
+fn sim_open_writer(mut reg: MockRegister, mut host: HostState, auth: move_kernel.ClaimAuth) -> move_kernel.SinkOutcome {
+    match mock_cas(mut reg, auth) {
+        Ok(new_head) => {
+            host.recorded_pair = Some(new_head.pair)
+            host.parked_deposed = false
+            ClaimWon(new_head)
+        },
+        Error(actual) => {
+            host.parked_deposed = true
+            ClaimDeposed(actual)
+        },
+    }
+}
+
+/// bug: Let a delayed A->B move steal epoch 9 from C, let deposed A local retries duel, or let an in-flight janitor claim back a moved Place.
+/// oracle: docs/spec/fleet.md FLT-2 three stale-open races under std.sim.message holds and clock pauses.
+@test
+fn sim_three_stale_open_races_with_message_hold(tasks: Tasks) -> Result[(), ()] waits {
+    let (take w, clk_ctrl) = std.sim.world.new(3045, 1000, 0)
+    let mut world = take w
+    let mut clocks = std.sim.world.clocks(mut world)
+    let (idx_a, clk_a) = std.sim.world.drifting(mut clocks, 1000, 0, 50)
+    let (_, clk_b) = std.sim.world.drifting(mut clocks, 1000, 0, -50)
+    let (_, clk_c) = std.sim.world.drifting(mut clocks, 1000, 0, 25)
+    // Freeze host A's clock during takeover window [100, 500) to simulate a paused incumbent.
+    std.sim.world.pause_at(mut clocks, idx_a, 100, 500)
+    let mut reg = mock_register_genesis()
+    // Advance Place to epoch 8 on host A (node 1) via local Continue restarts.
+    for k in 2u64 .. 9u64 {
+        let cont = move_kernel.ClaimAuth(expect: Some(reg.head.pair), attempt: move_kernel.id16_from_u64(900 + k), class: Continue)
+        let _ = result.unwrap(mock_cas(mut reg, cont))
+    }
+    if reg.head.pair.epoch != 8 {
+        fail("setup must start at epoch 8")
+    }
+    let epoch8_pair = reg.head.pair
+    let mut host_a = make_host(1, Some(epoch8_pair))
+    let mut host_b = make_host(2, None)
+    let mut host_c = make_host(3, None)
+    let mut st = move_kernel.init_state(1, 1, 1, 1, reg.head)
+    // Hold B's A->B move_claim and A's in-flight janitor until C has won epoch 9.
+    let mut q: std.sim.message.Queue[WirePayload] = std.sim.message.new()
+    std.sim.message.hold_until(mut q, 0, 2, "move_claim", "c_won_epoch_9")
+    std.sim.message.hold_until(mut q, 1, 1, "janitor_claim", "c_won_epoch_9")
+    let repro_line = std.sim.message.repro(q, clocks)
+    // Controller authorizes A -> B expecting (8, h8), then recovery contender C expecting (8, h8).
+    let (st1, acts1) = move_kernel.step(take st, RequestMove(2, 1, 1, 1))
+    st = take st1
+    let Some(auth_b) = find_issued_claim(acts1) else {
+        fail(take repro_line)
+    }
+    std.sim.message.send(mut q, std.sim.message.Message(from: 0, to: 2, name: "move_claim", value: WireClaim(auth_b)))
+    // B's move_claim MUST be held right now.
+    if let Some(_) = std.sim.message.receive(mut q, 2) {
+        fail("move_claim to B was not held by std.sim.message")
+    }
+    // A's janitor starts in-flight while head was still epoch 8, held until after C wins.
+    let janitor_auth = move_kernel.ClaimAuth(expect: Some(epoch8_pair), attempt: move_kernel.id16_from_u64(5001), class: Continue)
+    std.sim.message.send(mut q, std.sim.message.Message(from: 1, to: 1, name: "janitor_claim", value: WireJanitor(janitor_auth)))
+    // Recovery contender C receives its claim immediately and wins epoch 9!
+    let (st2, acts2) = move_kernel.step(take st, RequestRecovery(3, 1, 1, 1))
+    st = take st2
+    let Some(auth_c) = find_issued_claim(acts2) else {
+        fail(take repro_line)
+    }
+    std.sim.message.send(mut q, std.sim.message.Message(from: 0, to: 3, name: "move_claim", value: WireClaim(auth_c)))
+    let Some(msg_c) = std.sim.message.receive(mut q, 3) else {
+        fail(take repro_line)
+    }
+    let WireClaim(c_cmd) = msg_c.value else {
+        fail(take repro_line)
+    }
+    let out_c = sim_open_writer(mut reg, mut host_c, c_cmd)
+    let ClaimWon(head9) = out_c else {
+        fail("C should have won epoch 9")
+    }
+    if head9.pair.epoch != 9 {
+        fail("C must install epoch 9")
+    }
+    let (st3, _) = move_kernel.step(take st, ClaimOutcome(auth_c.attempt, ClaimWon(head9)))
+    st = take st3
+    if st.incumbent_node != 3 || list.len(st.open_permits) != 0 {
+        fail("kernel did not settle C as epoch 9 incumbent")
+    }
+    // Release held messages now that C owns epoch 9.
+    std.sim.message.fire(mut q, "c_won_epoch_9")
+    // Race 1: Delayed A -> B move arrives; MUST be refused Superseded((9, h9)).
+    let Some(msg_b) = std.sim.message.receive(mut q, 2) else {
+        fail("held B move_claim did not release after fire")
+    }
+    let WireClaim(b_cmd) = msg_b.value else {
+        fail(take repro_line)
+    }
+    let out_b = sim_open_writer(mut reg, mut host_b, b_cmd)
+    if let ClaimDeposed(actual_b) = out_b {
+        if actual_b != head9.pair {
+            fail("delayed B did not observe C's epoch 9 pair")
+        }
+    } else {
+        fail("delayed A->B move stole epoch 9 from C")
+    }
+    // Race 2: Drive clocks across A's pause; A wakes with stale pair (8, h8) and tries local retries -> refused + parked.
+    let driver = task.spawn(tasks, bytes 65536, SimClockDriver(clocks: take clocks, tasks), run_sim_clocks)
+    host.sleep_until(clk_ctrl, 1250)
+    let a_during_pause = host.mono_ns(clk_a)
+    host.sleep_until(clk_ctrl, 1600)
+    let a_after_pause = host.mono_ns(clk_a)
+    let _ = host.mono_ns(clk_b)
+    let _ = host.mono_ns(clk_c)
+    result.unwrap(task.join(take driver))
+    if a_during_pause >= a_after_pause {
+        fail("A's clock did not resume after pause_at")
+    }
+    for r in 0u64 .. 3u64 {
+        if !host_a.parked_deposed {
+            let Some(stale_pair) = host_a.recorded_pair else {
+                fail("A lost recorded pair")
+            }
+            let retry_auth = move_kernel.ClaimAuth(expect: Some(stale_pair), attempt: move_kernel.id16_from_u64(6000 + r), class: Continue)
+            host_a.retry_attempts += 1
+            let out_a = sim_open_writer(mut reg, mut host_a, retry_auth)
+            if let ClaimDeposed(actual_a) = out_a {
+                if actual_a != head9.pair {
+                    fail("deposed A saw wrong head pair")
+                }
+            } else {
+                fail("deposed A local retry succeeded and started a retry duel")
+            }
+        }
+    }
+    if !host_a.parked_deposed || host_a.retry_attempts != 1 {
+        fail("Deposed end cause did not stop A's retry duel on first refusal")
+    }
+    // Race 3: Held janitor on A fires after C won epoch 9 -> MUST be refused Superseded.
+    let Some(msg_j) = std.sim.message.receive(mut q, 1) else {
+        fail("held janitor_claim did not release")
+    }
+    let WireJanitor(j_cmd) = msg_j.value else {
+        fail(take repro_line)
+    }
+    if let Error(actual_j) = mock_cas(mut reg, j_cmd) {
+        if actual_j != head9.pair {
+            fail("janitor observed wrong head pair")
+        }
+    } else {
+        fail("attached-stream janitor claimed back moved Place")
+    }
+    // Final register head must still be epoch 9 owned by C.
+    if reg.head.pair != head9.pair {
+        fail("stale race mutated epoch 9 head")
+    }
+    Ok(())
+}
+
+/// bug: Lose or mis-settle a move whose head replace H applied before CLAIM or whose reply was lost.
+/// oracle: docs/spec/fleet.md FLT-2 read-only HeadView + ORIGIN settlement across both orders (H wins + B Continue, and A janitor wins before H).
+@test
+fn sim_lost_head_write_before_claim_settles_readonly(tasks: Tasks) -> Result[(), ()] waits {
+    let (take w, clk0) = std.sim.world.new(3046, 0, 0)
+    let mut world = take w
+    let mut clocks = std.sim.world.clocks(mut world)
+    let (_, clk_b) = std.sim.world.drifting(mut clocks, 0, 0, 0)
+    let mut q: std.sim.message.Queue[WirePayload] = std.sim.message.new()
+    // Hold B's reply to controller until after read-only HeadView settlement completes.
+    std.sim.message.hold_until(mut q, 2, 0, "claim_reply", "settled_readonly")
+    // Case A: B's H applies, reply & CLAIM are lost, B even does a local Continue restart (epoch 3),
+    // and one read-only HeadRead still settles X as Won(2)!
+    let mut reg = mock_register_genesis()
+    let mut host_b = make_host(2, None)
+    let mut st = move_kernel.init_state(2, 1, 1, 1, reg.head)
+    let (st1, acts1) = move_kernel.step(take st, RequestMove(2, 1, 1, 1))
+    st = take st1
+    let Some(auth_b) = find_issued_claim(acts1) else {
+        fail("expected ClaimAuth for B")
+    }
+    let out_b = sim_open_writer(mut reg, mut host_b, auth_b)
+    // B's reply is held (lost in flight before CLAIM).
+    std.sim.message.send(mut q, std.sim.message.Message(from: 2, to: 0, name: "claim_reply", value: WireReply(auth_b.attempt, out_b)))
+    if let Some(_) = std.sim.message.receive(mut q, 0) {
+        fail("claim_reply should be held")
+    }
+    // Controller receives ClaimUndecided (timeout/lost reply); permit stays open and emits ReadHead.
+    let (st2, _) = move_kernel.step(take st, ClaimOutcome(auth_b.attempt, ClaimUndecided))
+    st = take st2
+    if list.len(st.open_permits) != 1 {
+        fail("ClaimUndecided must keep permit open")
+    }
+    // Before controller reads head, B locally restarts (Continue -> epoch 3), copying permit_attempt (O3).
+    let b_cont = move_kernel.ClaimAuth(expect: Some(reg.head.pair), attempt: move_kernel.id16_from_u64(1001), class: Continue)
+    let h3 = result.unwrap(mock_cas(mut reg, b_cont))
+    if h3.pair.epoch != 3 {
+        fail("expected epoch 3 after B Continue")
+    }
+    // Single read-only HeadRead settles X as Won at permit_epoch=2 even though HEAD.epoch=3!
+    let (st3, acts3) = move_kernel.step(take st, HeadRead(reg.head))
+    st = take st3
+    let mut saw_won_at_2 = false
+    for a in acts3 {
+        if let Observe(ObsSettledWon(att, pe, _)) = a {
+            if att == auth_b.attempt && pe == 2 {
+                saw_won_at_2 = true
+            }
+        }
+    }
+    if !saw_won_at_2 || st.incumbent_node != 2 || list.len(st.open_permits) != 0 {
+        fail("read-only HeadRead failed to settle lost-H + Continue as Won(2)")
+    }
+    std.sim.message.fire(mut q, "settled_readonly")
+    // Late duplicate reply arrives after settlement -> safely ignored (K13).
+    let Some(late_reply) = std.sim.message.receive(mut q, 0) else {
+        fail("late reply did not release")
+    }
+    let WireReply(late_att, late_out) = late_reply.value else {
+        fail("unexpected wire payload")
+    }
+    let (st4, acts4) = move_kernel.step(take st, ClaimOutcome(late_att, late_out))
+    if list.len(acts4) != 1 || st4.incumbent_node != 2 {
+        fail("late reply after settlement should be ignored cleanly")
+    }
+    // Case B: Opposite order — A's janitor wins epoch 2 before B's held H arrives; HeadRead settles X Dead.
+    let mut reg2 = mock_register_genesis()
+    let mut st_b = move_kernel.init_state(3, 1, 1, 1, reg2.head)
+    let (st_b1, acts_b1) = move_kernel.step(take st_b, RequestMove(2, 1, 1, 1))
+    st_b = take st_b1
+    let Some(auth_x) = find_issued_claim(acts_b1) else {
+        fail("expected ClaimAuth X")
+    }
+    let a_jan = move_kernel.ClaimAuth(expect: Some(reg2.head.pair), attempt: move_kernel.id16_from_u64(2001), class: Continue)
+    let _ = result.unwrap(mock_cas(mut reg2, a_jan))
+    if let Error(_) = mock_cas(mut reg2, auth_x) {} else {
+        fail("X must fail after A janitor won epoch 2")
+    }
+    let (st_b2, acts_b2) = move_kernel.step(take st_b, HeadRead(reg2.head))
+    let mut saw_dead = false
+    for a in acts_b2 {
+        if let Observe(ObsSettledDead(att, _)) = a {
+            if att == auth_x.attempt {
+                saw_dead = true
+            }
+        }
+    }
+    if !saw_dead || st_b2.incumbent_node != 1 || list.len(st_b2.open_permits) != 0 {
+        fail("HeadRead failed to settle janitor-preempted X as Dead")
+    }
+    let driver = task.spawn(tasks, bytes 65536, SimClockDriver(clocks: take clocks, tasks), run_sim_clocks)
+    host.sleep_until(clk0, 10)
+    let _ = host.mono_ns(clk_b)
+    result.unwrap(task.join(take driver))
+    Ok(())
+}
+
+/// bug: Let a stale controller bypass takeover fencing or let one slow incumbent stall unrelated Places across a scoped barrier.
+/// oracle: Sieve stale-controller laws and docs/spec/fleet.md FLT-3/FLT-4 scoped takeover barrier.
+@test
+fn sim_sieve_stale_controller_and_scoped_barrier(tasks: Tasks) -> Result[(), ()] waits {
+    let (take w, clk_c2) = std.sim.world.new(3047, 0, 0)
+    let mut world = take w
+    let mut clocks = std.sim.world.clocks(mut world)
+    let (idx_c1, clk_c1) = std.sim.world.drifting(mut clocks, 0, 0, 0)
+    // Pause old Controller 1 during [50, 7000) while Controller 2 takes over and runs a 6000ns barrier window.
+    std.sim.world.pause_at(mut clocks, idx_c1, 50, 7000)
+    let mut reg_p1 = mock_register_genesis()
+    let mut reg_p2 = mock_register_genesis()
+    // Place 1 sits on slow/unreported host A (1); Place 2 sits on healthy host B (2).
+    let mut p1 = move_kernel.init_state(101, 1, 1, 1, reg_p1.head)
+    let mut p2 = move_kernel.init_state(102, 1, 2, 1, reg_p2.head)
+    // Controller 2 (epoch 2) takes over both Places.
+    let (p1a, _) = move_kernel.step(take p1, ControllerTakeover(2, 1, reg_p1.head))
+    p1 = take p1a
+    let (p2a, _) = move_kernel.step(take p2, ControllerTakeover(2, 2, reg_p2.head))
+    p2 = take p2a
+    // Host B responds promptly to Controller 2's probe; host A is silent.
+    let (p2b, _) = move_kernel.step(take p2, IncumbentProbeOk(2, 1, reg_p2.head, 2))
+    p2 = take p2b
+    // Scoped barrier law: Place 2 on healthy host B can move IMMEDIATELY while Place 1 on silent host A stays blocked!
+    let (p1_try, p1_acts) = move_kernel.step(take p1, RequestMove(3, 1, 1, 1))
+    p1 = take p1_try
+    if find_issued_claim(p1_acts) != None || list.len(p1.open_permits) != 0 {
+        fail("Sieve violation: Place 1 moved while its scoped takeover barrier was still pending")
+    }
+    let (p2_move, p2_acts) = move_kernel.step(take p2, RequestMove(3, 1, 1, 1))
+    p2 = take p2_move
+    let Some(p2_auth) = find_issued_claim(p2_acts) else {
+        fail("scoped barrier stalled unrelated Place 2 on healthy host B")
+    }
+    let p2_h2 = result.unwrap(mock_cas(mut reg_p2, p2_auth))
+    let (p2_done, _) = move_kernel.step(take p2, HeadRead(p2_h2))
+    p2 = take p2_done
+    if p2.incumbent_node != 3 {
+        fail("Place 2 failed to move while Place 1 was in barrier")
+    }
+    // Drive clocks past Controller 2's barrier window (6000) and then past Controller 1's pause (7000).
+    let driver = task.spawn(tasks, bytes 65536, SimClockDriver(clocks: take clocks, tasks), run_sim_clocks)
+    host.sleep_until(clk_c2, 6100)
+    let c1_still_paused = host.mono_ns(clk_c1)
+    host.sleep_until(clk_c2, 7500)
+    let c1_resumed = host.mono_ns(clk_c1)
+    result.unwrap(task.join(take driver))
+    if c1_still_paused != 50 || c1_resumed <= 50 {
+        fail("pause_at did not freeze and resume stale Controller 1")
+    }
+    // Stale Controller 1 wakes up and attempts stale takeover (epoch 1) and stale probe (epoch 1) -> MUST be ignored.
+    let (p1_stale1, _) = move_kernel.step(take p1, ControllerTakeover(1, 1, reg_p1.head))
+    let (p1_stale2, _) = move_kernel.step(take p1_stale1, IncumbentProbeOk(1, 1, reg_p1.head, 1))
+    p1 = take p1_stale2
+    if p1.controller_epoch != 2 || p1.barrier == BarrierClear {
+        fail("Sieve violation: stale Controller 1 altered epoch 2 controller or cleared barrier")
+    }
+    // BarrierWindow(2) timeout fires on Controller 2 -> clears barrier -> budgeted repair moves Place 1 to C (3).
+    let (p1_clear, _) = move_kernel.step(take p1, Timeout(BarrierWindow(2)))
+    let (p1_mv, p1_mv_acts) = move_kernel.step(take p1_clear, RequestMove(3, 1, 1, 1))
+    let Some(p1_auth) = find_issued_claim(p1_mv_acts) else {
+        fail("Place 1 failed to authorize repair after barrier window expired")
+    }
+    let p1_h2 = result.unwrap(mock_cas(mut reg_p1, p1_auth))
+    let (p1_settled, _) = move_kernel.step(take p1_mv, HeadRead(p1_h2))
+    if p1_settled.incumbent_node != 3 || list.len(p1_settled.open_permits) != 0 {
+        fail("Place 1 repair did not settle on C")
+    }
+    Ok(())
+}
+
+/// bug: Let mid-move desired-state edits, rollbacks, stale edits, freezes or crashes violate Rule F1 or diverge from the independent register oracle.
+/// oracle: Acto desired-state edit laws plus std.model.conforms_check against register_model.
+@test
+fn sim_acto_desired_state_edits_and_conformance() -> Result[(), ()] {
+    let mut reg = mock_register_genesis()
+    let mut st = move_kernel.init_state(200, 1, 1, 1, reg.head)
+    let mut trace: List[std.model.Seen[register_model.RegLabel, register_model.RegObs]] = list.new()
+    // Edit 1: desired_node = 2 (gen 1), authorize move 1 -> 2.
+    let (s1, _) = move_kernel.step(take st, DesiredEdit(2, 1))
+    let (s2, acts2) = move_kernel.step(take s1, RequestMove(2, 1, 1, 1))
+    st = take s2
+    let Some(auth1) = find_issued_claim(acts2) else {
+        fail("Acto edit 1 did not authorize move")
+    }
+    list.push(mut trace, std.model.Seen(hint: LAuth, seen: register_model.RegObs(epoch: 1, attempt: auth1.attempt.lo, permit_attempt: 0, class: register_model.CLASS_PERMIT)))
+    // Acto mid-move desired edit: operator changes desired_node -> 3 (gen 2) while move 1->2 is STILL OPEN!
+    // Must update desired_node/gen WITHOUT dropping open permit 1 or authorizing a conflicting expect.
+    let (s3, _) = move_kernel.step(take st, DesiredEdit(3, 2))
+    let (s4, acts4) = move_kernel.step(take s3, RequestMove(3, 1, 2, 1))
+    st = take s4
+    if st.desired_node != 3 || st.desired_generation != 2 || list.len(st.open_permits) != 1 || find_issued_claim(acts4) != None {
+        fail("Acto mid-move edit broke Rule F1 or dropped open permit")
+    }
+    // Stale out-of-order edit (gen 1) and duplicate edit (gen 2) must not regress desired state.
+    let (s5, _) = move_kernel.step(take st, DesiredEdit(1, 1))
+    let (s6, _) = move_kernel.step(take s5, DesiredEdit(1, 2))
+    st = take s6
+    if st.desired_node != 3 || st.desired_generation != 2 {
+        fail("Acto stale/duplicate edit regressed desired state")
+    }
+    // Crash + Restart mid-move replays durable outbox for permit 1; permit 1 executes CAS and settles Won.
+    let (s7, _) = move_kernel.step(take st, Crash)
+    let (s8, replay_acts) = move_kernel.step(take s7, Restart)
+    st = take s8
+    if find_issued_claim(replay_acts) != Some(auth1) {
+        fail("K11 Crash+Restart did not replay open permit 1")
+    }
+    let h2 = result.unwrap(mock_cas(mut reg, auth1))
+    list.push(mut trace, std.model.Seen(hint: LCasWon, seen: register_model.RegObs(epoch: h2.pair.epoch, attempt: auth1.attempt.lo, permit_attempt: auth1.attempt.lo, class: register_model.CLASS_PERMIT)))
+    let (s9, _) = move_kernel.step(take st, HeadRead(h2))
+    st = take s9
+    list.push(mut trace, std.model.Seen(hint: LSettleWon, seen: register_model.RegObs(epoch: h2.pair.epoch, attempt: auth1.attempt.lo, permit_attempt: auth1.attempt.lo, class: register_model.CLASS_PERMIT)))
+    // Now that permit 1 is settled, reconcile toward desired_node = 3 (gen 2) -> succeeds cleanly.
+    let target_node = st.desired_node
+    let target_gen = st.desired_generation
+    let (s10, acts10) = move_kernel.step(take st, RequestMove(target_node, 1, target_gen, 1))
+    st = take s10
+    let Some(auth2) = find_issued_claim(acts10) else {
+        fail("Acto reconcile to desired node 3 failed after settlement")
+    }
+    list.push(mut trace, std.model.Seen(hint: LAuth, seen: register_model.RegObs(epoch: 2, attempt: auth2.attempt.lo, permit_attempt: auth1.attempt.lo, class: register_model.CLASS_PERMIT)))
+    let h3 = result.unwrap(mock_cas(mut reg, auth2))
+    list.push(mut trace, std.model.Seen(hint: LCasWon, seen: register_model.RegObs(epoch: h3.pair.epoch, attempt: auth2.attempt.lo, permit_attempt: auth2.attempt.lo, class: register_model.CLASS_PERMIT)))
+    let (s11, _) = move_kernel.step(take st, HeadRead(h3))
+    st = take s11
+    list.push(mut trace, std.model.Seen(hint: LSettleWon, seen: register_model.RegObs(epoch: h3.pair.epoch, attempt: auth2.attempt.lo, permit_attempt: auth2.attempt.lo, class: register_model.CLASS_PERMIT)))
+    // Rollback edit (desired_node = 1, gen 3) converges back to node 1 cleanly.
+    let (s12, _) = move_kernel.step(take st, DesiredEdit(1, 3))
+    let (s13, acts13) = move_kernel.step(take s12, RequestMove(1, 1, 3, 1))
+    st = take s13
+    let Some(auth3) = find_issued_claim(acts13) else {
+        fail("Acto rollback edit failed to authorize")
+    }
+    list.push(mut trace, std.model.Seen(hint: LAuth, seen: register_model.RegObs(epoch: 3, attempt: auth3.attempt.lo, permit_attempt: auth2.attempt.lo, class: register_model.CLASS_PERMIT)))
+    let h4 = result.unwrap(mock_cas(mut reg, auth3))
+    list.push(mut trace, std.model.Seen(hint: LCasWon, seen: register_model.RegObs(epoch: h4.pair.epoch, attempt: auth3.attempt.lo, permit_attempt: auth3.attempt.lo, class: register_model.CLASS_PERMIT)))
+    let (s14, _) = move_kernel.step(take st, HeadRead(h4))
+    list.push(mut trace, std.model.Seen(hint: LSettleWon, seen: register_model.RegObs(epoch: h4.pair.epoch, attempt: auth3.attempt.lo, permit_attempt: auth3.attempt.lo, class: register_model.CLASS_PERMIT)))
+    if s14.incumbent_node != 1 || s14.desired_node != 1 || list.len(s14.open_permits) != 0 {
+        fail("Acto rollback did not converge to node 1")
+    }
+    // Check full Acto trace against the independent concurrent register model.
+    result.unwrap(register_model.check_trace_conforms(4, 3, trace))
+    Ok(())
+}

@@ -97,7 +97,9 @@ type Space {
     largest_at: u64,
     ecn_in: codec.EcnCounts,
     token: Bytes,
-    key_phase: bool
+    key_phase: bool,
+    path_out: Bytes,
+    hold_data: bool
 }
 
 /// What an ack-eliciting packet carried that a loss or probe sends again.
@@ -160,7 +162,10 @@ pub opaque type Connection {
     validated: bool,
     path_received: u64,
     path_sent: u64,
-    keys: KeyUpdate
+    keys: KeyUpdate,
+    probe: Option[PathProbe],
+    probing_only: bool,
+    stream_packets: u64
 }
 
 fn parameters(t: TransportConfig, take local_id: Bytes, mtu: u16) -> handshake.TransportParameters {
@@ -204,7 +209,7 @@ fn new_connection(handle: ConnectionHandle, side: schedule.Side, peer: Addr, tak
         Server => true,
         Client => false,
     }
-    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, initial_id: take initial_id, original_id: take original_id, retry_source: None, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, done_acked: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None, streams: no_streams(), reset: b"", peer_reset: None, validated: !server, path_received: 0, path_sent: 0, keys: no_key_update())
+    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, initial_id: take initial_id, original_id: take original_id, retry_source: None, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, done_acked: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None, streams: no_streams(), reset: b"", peer_reset: None, validated: !server, path_received: 0, path_sent: 0, keys: no_key_update(), probe: None, probing_only: false, stream_packets: 0)
     refresh_idle(mut c, now)
     Ok(take c)
 }

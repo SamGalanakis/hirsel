@@ -1,0 +1,121 @@
+/// RFC 9000 §8.2 and §9.3: the server moved to a peer's new address and waits for the
+/// PATH_RESPONSE that echoes `challenge`. `prior` is the last validated address.
+type PathProbe {
+    challenge: Bytes,
+    prior: Addr,
+    resend_at: u64,
+    deadline: u64
+}
+
+/// §8.2.4: validation is abandoned after the larger of three PTOs and 6 × kInitialRtt
+/// (RFC 9002's 333 ms).
+const SIX_INITIAL_RTT: u64 = 1998000000
+
+fn push_path_frame(mut out: Bytes, kind: u8, data: Bytes) {
+    list.push(mut out, kind)
+    list.append(mut out, data)
+}
+
+/// Only PATH_CHALLENGE, PATH_RESPONSE, NEW_CONNECTION_ID and PADDING probe (§9.1).
+fn probing_frame(f: codec.Frame) -> bool {
+    match f {
+        Padding(_) => true,
+        PathChallenge(_) => true,
+        PathResponse(_) => true,
+        NewConnectionId(..) => true,
+        _ => false,
+    }
+}
+
+/// A server moves only once the handshake is confirmed, and only on 1-RTT packets; a
+/// client keeps its path (QUIC-1's migration row), so anything else from another address
+/// is dropped.
+fn may_migrate(c: Connection, kind: codec.PacketKind) -> bool {
+    let server = match c.side {
+        Server => true,
+        Client => false,
+    }
+    server && kind == OneRtt && confirmed(c)
+}
+
+/// §9.3: the peer's highest-numbered non-probing packet came from `from`. Send to it from
+/// now on, under the anti-amplification limit (§9.3.1) and with no stream data until it
+/// answers a PATH_CHALLENGE (QUIC-4). The congestion controller and RTT estimate start
+/// over unless only the port changed (§9.4).
+fn migrate(mut c: Connection, now: u64, from: Addr, arrived: u64, random: Random) {
+    let prior = match c.probe {
+        Some(p) => p.prior,
+        None => c.peer,
+    }
+    if from == prior {
+        c.peer = from
+        settle_path(mut c)
+        return
+    }
+    if from.ip != c.peer.ip {
+        recovery.new_path(mut c.recovery)
+    }
+    c.peer = from
+    c.validated = false
+    c.path_received = arrived
+    c.path_sent = 0
+    let challenge = random_id(random, 8)
+    push_path_frame(mut c.application.path_out, 0x1a, challenge)
+    c.application.hold_data = true
+    let pto = recovery.pto(c.recovery)
+    c.probe = Some(PathProbe(challenge: take challenge, prior: prior, resend_at: deadline_after(now, pto), deadline: deadline_after(now, order.max(int.saturating_mul(3, pto), SIX_INITIAL_RTT))))
+}
+
+/// The current address is validated: stream data flows again.
+fn settle_path(mut c: Connection) {
+    c.probe = None
+    c.validated = true
+    c.application.hold_data = false
+}
+
+/// §8.2.3: a PATH_RESPONSE echoing the outstanding challenge validates the path, on
+/// whichever path it arrives. Any other is ignored.
+fn path_response(mut c: Connection, data: Bytes) {
+    let matched = match c.probe {
+        Some(p) => p.challenge == data,
+        None => false,
+    }
+    if matched {
+        settle_path(mut c)
+    }
+}
+
+/// §8.2.2: answer each PATH_CHALLENGE once with a PATH_RESPONSE carrying its data. A
+/// burst past a few owed answers is dropped, so a peer cannot grow the queue.
+fn path_challenge(mut c: Connection, data: Bytes) {
+    if list.len(c.application.path_out) < 4 * 9 {
+        push_path_frame(mut c.application.path_out, 0x1b, data)
+    }
+}
+
+/// Before packets are staged: send the challenge again each PTO while it is unanswered,
+/// and at the deadline go back to the last validated address (§9.3.2).
+fn path_maintenance(mut c: Connection, now: u64) {
+    let pto = recovery.pto(c.recovery)
+    let mut give_up: Option[Addr] = None
+    if let Some(mut p) = c.probe {
+        if now >= p.deadline {
+            give_up = Some(p.prior)
+        } else if now >= p.resend_at && list.len(c.application.path_out) == 0 {
+            push_path_frame(mut c.application.path_out, 0x1a, p.challenge)
+            p.resend_at = deadline_after(now, pto)
+        }
+    }
+    if let Some(prior) = give_up {
+        c.peer = prior
+        list.clear(mut c.application.path_out)
+        settle_path(mut c)
+    }
+}
+
+fn path_wake(c: Connection) -> Option[u64] {
+    match c.probe {
+        Some(p) => Some(order.min(p.resend_at, p.deadline)),
+        None => None,
+    }
+}

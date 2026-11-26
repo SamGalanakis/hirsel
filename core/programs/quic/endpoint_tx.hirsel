@@ -1,5 +1,6 @@
 fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
     key_maintenance(mut c, now)
+    path_maintenance(mut c, now)
     let mut limit = order.min(mtu, MSS)
     if let Some(p) = c.params {
         limit = order.min(limit, p.max_udp_payload)
@@ -107,6 +108,7 @@ fn next_deadline(e: Endpoint) -> Option[u64] {
             if open_life(c) && !amplification_blocked(c) {
                 first = earliest(first, recovery.timer(c.recovery))
                 first = earliest(first, c.wake)
+                first = earliest(first, path_wake(c))
             }
         }
     }
@@ -164,6 +166,7 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
             commit_space(mut c.application, p)
             c.keys.sealed = int.saturating_add(c.keys.sealed, 1)
             if list.len(p.frames) > 0 {
+                c.stream_packets += 1
                 list.push(mut c.streams.inflight, SentPacket(number: p.number, frames: clone(p.frames)))
             }
         },

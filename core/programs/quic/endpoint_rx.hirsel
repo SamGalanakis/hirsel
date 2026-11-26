@@ -62,10 +62,11 @@ fn negotiation(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Byt
 }
 
 fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut wire: Bytes, mut plain: Bytes, random: Random, mtu: u16, ecn: u8, mut events: List[Event]) -> Result[(), DropReason] {
-    if from != c.peer {
+    let moved = from != c.peer
+    if moved && !may_migrate(c, h.kind) {
         return Error(WrongPath)
     }
-    if !c.validated {
+    if !c.validated && !moved {
         c.path_received = int.saturating_add(c.path_received, h.packet.len)
     }
     if let Draining = c.life {
@@ -78,11 +79,21 @@ fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut w
         c.keys.previous = None
     }
     refresh_next(mut c.keys)
+    let largest = c.application.largest
     let opened = open_for_connection(c, h, mut wire, mut plain)?
     if let Next = opened.phase {
         commit_receive_update(mut c, now, opened.number)
     }
-    accept_packet(mut c, now, h, opened, wire, plain, random, mtu, ecn, mut events)
+    let number = opened.number
+    accept_packet(mut c, now, h, opened, wire, plain, random, mtu, ecn, mut events)?
+    let newest = match largest {
+        Some(l) => number > l,
+        None => true,
+    }
+    if moved && newest && !c.probing_only && open_life(c) {
+        migrate(mut c, now, from, h.packet.len, random)
+    }
+    Ok(())
 }
 
 fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {

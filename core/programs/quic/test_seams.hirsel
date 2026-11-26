@@ -68,3 +68,15 @@ pub fn key_updates(e: Endpoint, c: ConnectionHandle) -> (u64, u64) {
     }
     (0, 0)
 }
+
+/// Q12 seam: where a server sends, whether that address is validated, the 1-RTT packets
+/// it has sent with stream-layer frames, and its congestion window and smoothed RTT.
+pub fn path_state(e: Endpoint, c: ConnectionHandle) -> Option[(Addr, bool, u64, u64, u64)] {
+    let Some(i) = slot_at(e, c) else {
+        return None
+    }
+    if let Some(conn) = e.connections[i] {
+        return Some((conn.peer, conn.validated, conn.stream_packets, recovery.window(conn.recovery), recovery.smoothed_rtt(conn.recovery)))
+    }
+    None
+}

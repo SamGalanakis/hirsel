@@ -1,0 +1,365 @@
+// QS6 law Q12: path validation and NAT rebinding (RFC 9000 §8.2, §9.3 and §9.4).
+// sim.udp's rebind moves the client's outside port on the same IP. It has no knob that
+// moves the IP, so the address change is driven by hand, as in the stream laws.
+/// RFC 9002 §7.2: min(10 × 1200, max(14720, 2 × 1200)) = 12000 bytes; §6.2.2: 333 ms.
+const FRESH_WINDOW: u64 = 12000
+
+const FRESH_RTT: u64 = 333 * MS
+
+const MOVED_CLIENT: Addr = Addr(ip: V4(0x7f000009u32), port: 24101)
+
+/// Every datagram one end sends at `now`, with the address it goes to.
+fn capture_to(mut sender: quic.Endpoint, now: u64) -> List[(Addr, Bytes)] {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let _ = quic.poll(mut sender, now, mut wire, mut packets)
+    let mut out: List[(Addr, Bytes)] = list.new()
+    for output in packets {
+        if let Transmit(to: to, at: at, len: len, ..) = output {
+            list.push(mut out, (to, clone(list.slice(wire, at, at + len))))
+        }
+    }
+    quic.committed(mut sender, now, list.len(out))
+    take out
+}
+
+fn server_path(e: quic.Endpoint, s: quic.ConnectionHandle) -> (Addr, bool, u64, u64, u64) {
+    match quic.path_state(e, s) {
+        Some(state) => state,
+        None => fail("the server lost the connection"),
+    }
+}
+
+/// The client's address changes (a new IP) mid-transfer. Right after the first packet
+/// from it the server sends there with the initial window and RTT (RFC 9002 §9.4); until
+/// the PATH_RESPONSE it sends no stream-layer frame there and at most three times what
+/// arrived from it (§9.3.1); after it the transfer completes.
+fn address_change() {
+    let (client0, server0, c, s) = key_pair()
+    let mut client = client0
+    let mut server = server0
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let id = result.unwrap(quic.open(mut client, c, true))
+    // The client's bytes open the stream at the server; the server's grow its window.
+    let mut t = carry(mut client, mut server, c, s, id, true, 1, 2 * MS, mut at_server, mut at_client) + MS
+    t = carry(mut client, mut server, c, s, id, false, 2, t, mut at_server, mut at_client) + MS
+    let (_, _, _, window, rtt) = server_path(server, s)
+    if window <= FRESH_WINDOW || rtt >= FRESH_RTT {
+        fail("the first transfer did not move the window and RTT off their initial values")
+    }
+    let data = pattern(ROUND, 7)
+    if result.unwrap(quic.write(mut client, c, id, data, false)) != ROUND {
+        fail("a write within credit came back short")
+    }
+    let mut into: Bytes = list.with_capacity(ROUND)
+    let mut moved = false
+    let mut validated = false
+    let mut arrived = 0u64
+    let mut sent_unvalidated = 0u64
+    for _ in 0u64 .. 2000 {
+        quic.timeout(mut client, t, mut at_client)
+        quic.timeout(mut server, t, mut at_server)
+        for (_, d) in capture_to(mut client, t) {
+            arrived += list.len(d)
+            hand(mut server, t, MOVED_CLIENT, d, mut at_server)
+            let (peer, ok, _, w, r) = server_path(server, s)
+            if !moved && peer == MOVED_CLIENT {
+                moved = true
+                if ok || w != FRESH_WINDOW || r != FRESH_RTT {
+                    fail("a new client address did not start unvalidated with a fresh controller")
+                }
+            }
+        }
+        let (peer, ok, packets, _, _) = server_path(server, s)
+        for (to, d) in capture_to(mut server, t) {
+            if to == MOVED_CLIENT && !ok {
+                sent_unvalidated += list.len(d)
+            }
+            hand(mut client, t, SERVER_ADDR, d, mut at_client)
+        }
+        let (_, _, packets_after, _, _) = server_path(server, s)
+        if peer == MOVED_CLIENT && !ok && packets_after != packets {
+            fail("stream data went to the new address before its PATH_RESPONSE")
+        }
+        if peer == MOVED_CLIENT && ok {
+            validated = true
+        }
+        let _ = result.unwrap(quic.read(mut server, s, id, mut into))
+        if list.len(into) == ROUND {
+            break
+        }
+        t += MS
+    }
+    if !moved || !validated || into != data {
+        fail("the transfer did not complete on the validated new address")
+    }
+    if sent_unvalidated > 3 * arrived {
+        fail("the server sent past three times what arrived from the unvalidated address")
+    }
+}
+
+const REBIND_BYTES: u64 = 256 * KIB
+
+pub type RebindEnd: send {
+    clock: Clock,
+    socket: UdpSocket
+}
+
+pub type RebindClient: send {
+    sent: Inline[u8, 32],
+    echoed: Inline[u8, 32],
+    done: bool
+}
+
+/// The server's path before and after one round of polls; nothing arrives in between.
+pub type PathSample: send {
+    peer: Addr,
+    validated: bool,
+    packets: u64,
+    packets_after: u64,
+    rtt: u64
+}
+
+pub type RebindServer: send {
+    samples: List[PathSample],
+    closed: bool
+}
+
+fn rebind_transport() -> quic.TransportConfig {
+    let mut t = key_transport()
+    t.max_idle_ms = 30000
+    take t
+}
+
+/// Send everything `e` has at `now`; returns its next deadline.
+fn sim_flush(mut e: quic.Endpoint, mut socket: UdpSocket, now: u64) -> u64 waits {
+    let mut wake = SIM_END
+    for _ in 0u64 .. 64 {
+        let mut out: Bytes = list.with_capacity(16 * 1500)
+        let mut outputs: List[quic.Output] = list.with_capacity(16)
+        wake = match quic.poll(mut e, now, mut out, mut outputs) {
+            Some(t) => order.min(t, SIM_END),
+            None => SIM_END,
+        }
+        let mut tx: List[UdpTx] = list.with_capacity(16)
+        for o in outputs {
+            if let Transmit(to: to, at: at, len: len, ecn: ecn, ..) = o {
+                list.push(mut tx, UdpTx(to, at: at, len: len, ecn: ecn))
+            }
+        }
+        if list.len(tx) == 0 {
+            quic.committed(mut e, now, 0)
+            break
+        }
+        let k = result.unwrap(host.udp_send(mut socket, out, tx, Never))
+        quic.committed(mut e, now, k)
+    }
+    wake
+}
+
+/// Wait for datagrams until `wake` and hand them to `e`.
+fn sim_receive(mut e: quic.Endpoint, mut socket: UdpSocket, clock: Clock, now: u64, wake: u64, mut events: List[quic.Event]) waits {
+    let mut data: Bytes = list.with_capacity(64 * 1536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    match host.udp_recv(mut socket, mut data, mut packets, At(clock, order.max(wake, now + 1))) {
+        Ok(_) => (),
+        Error(TimedOut) => (),
+        Error(_) => fail("sim.udp receive failed"),
+    }
+    let at = host.mono_ns(clock)
+    for p in packets {
+        let UdpPacket(peer, at: start, len, truncated, ecn) = p
+        if !truncated {
+            quic.receive_datagram(mut e, at, peer, ecn, mut data, start, len, mut events)
+        }
+    }
+}
+
+/// The client uploads REBIND_BYTES on one stream and reads the server's echo.
+fn rebind_client(take plan: RebindEnd) -> RebindClient waits {
+    let RebindEnd(clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    let _ = result.unwrap(quic.connect(mut e, 0, SIM_SERVER, "server", cert_pin(old_digest()), None, rebind_transport()))
+    let data = pattern(REBIND_BYTES, 11)
+    let mut stream: Option[(quic.ConnectionHandle, quic.StreamId)] = None
+    let mut written = 0u64
+    let mut fin_sent = false
+    let mut echo: Bytes = list.with_capacity(REBIND_BYTES)
+    let mut done = false
+    let mut events: List[quic.Event] = list.new()
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= SIM_END {
+            break
+        }
+        quic.timeout(mut e, now, mut events)
+        if let Some((c, id)) = stream {
+            if written < REBIND_BYTES {
+                written += result.unwrap(quic.write(mut e, c, id, list.slice(data, written, REBIND_BYTES), false))
+            } else if !fin_sent {
+                let _ = result.unwrap(quic.write(mut e, c, id, b"", true))
+                fin_sent = true
+            }
+            let (_, fin) = result.unwrap(quic.read(mut e, c, id, mut echo))
+            if fin && !done {
+                done = true
+                quic.close(mut e, c, 0, b"")
+            }
+        }
+        let wake = sim_flush(mut e, mut socket, now)
+        if done {
+            break
+        }
+        for event in events {
+            if let Connected(c: h, ..) = event {
+                stream = Some((h, result.unwrap(quic.open(mut e, h, true))))
+            }
+        }
+        list.clear(mut events)
+        sim_receive(mut e, mut socket, clock, now, wake, mut events)
+    }
+    RebindClient(sent: std.sha256.hash(data), echoed: std.sha256.hash(echo), done: done)
+}
+
+/// The server echoes the stream back and samples its path around each round of polls.
+fn rebind_server(take plan: RebindEnd) -> RebindServer waits {
+    let RebindEnd(clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), rebind_transport()))))
+    let mut conn: Option[quic.ConnectionHandle] = None
+    let mut stream: Option[quic.StreamId] = None
+    let mut pending: Bytes = list.new()
+    let mut got_fin = false
+    let mut fin_sent = false
+    let mut trace = RebindServer(samples: list.new(), closed: false)
+    let mut events: List[quic.Event] = list.new()
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= SIM_END || trace.closed {
+            break
+        }
+        quic.timeout(mut e, now, mut events)
+        if closes(events) {
+            break
+        }
+        if let (Some(c), Some(id)) = (conn, stream) {
+            let mut buf: Bytes = list.with_capacity(64 * KIB)
+            let (_, fin) = result.unwrap(quic.read(mut e, c, id, mut buf))
+            list.append(mut pending, buf)
+            got_fin = got_fin || fin
+            if list.len(pending) > 0 {
+                let n = result.unwrap(quic.write(mut e, c, id, pending, false))
+                pending = clone(list.slice(pending, n, list.len(pending)))
+            }
+            if got_fin && list.len(pending) == 0 && !fin_sent {
+                let _ = result.unwrap(quic.write(mut e, c, id, b"", true))
+                fin_sent = true
+            }
+        }
+        let before = match conn {
+            Some(c) => quic.path_state(e, c),
+            None => None,
+        }
+        let wake = sim_flush(mut e, mut socket, now)
+        if let (Some(c), Some((peer, validated, packets, _, _))) = (conn, before) {
+            if let Some((_, _, packets_after, _, rtt)) = quic.path_state(e, c) {
+                list.push(mut trace.samples, PathSample(peer: peer, validated: validated, packets: packets, packets_after: packets_after, rtt: rtt))
+            }
+        }
+        sim_receive(mut e, mut socket, clock, now, wake, mut events)
+        for event in events {
+            match event {
+                Connected(c: h, ..) => {
+                    conn = Some(h)
+                },
+                Opened(_, id) => {
+                    stream = Some(id)
+                },
+                Closed(..) => {
+                    trace.closed = true
+                },
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+    }
+    take trace
+}
+
+/// The client's NAT moves its outside port once, at its 41st datagram (each datagram
+/// from the opened client socket draws one rebind word; 0 rebinds, the largest keeps).
+fn port_rebind(tasks: Tasks) waits {
+    let mut words: List[u64] = list.with_capacity(20001)
+    for _ in 0u64 .. 40 {
+        list.push(mut words, 0xffffffffffffffff)
+    }
+    list.push(mut words, 0)
+    for _ in 0u64 .. 20000 {
+        list.push(mut words, 0xffffffffffffffff)
+    }
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take words)
+    let script = std.sim.world.Script(tail_seed: 1, streams: take streams)
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 10 * MS
+    config.rebind = 500000
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(1, 0, 0)
+    let sim = std.sim.udp.Server(config, plan: std.sim.world.plan_from(script, 0), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim, std.sim.udp.serve)
+    let client_socket = result.unwrap(host.udp_open(vnet, false, SIM_SOCKET))
+    let (take server_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_SERVER, SIM_SOCKET))
+    let client_task = task.spawn(tasks, bytes 16777216, RebindEnd(clock, socket: take client_socket), rebind_client)
+    let server_task = task.spawn(tasks, bytes 16777216, RebindEnd(clock, socket: take server_socket), rebind_server)
+    let c = result.unwrap(task.join(take client_task))
+    let s = result.unwrap(task.join(take server_task))
+    result.unwrap(task.join(take served))
+    if !c.done || c.echoed != c.sent {
+        fail("the echo across a port rebind did not complete with the same hash")
+    }
+    if list.len(s.samples) == 0 {
+        fail("the server never sampled its path")
+    }
+    let first = s.samples[0].peer
+    let mut moved: Option[Addr] = None
+    let mut moved_packets = 0u64
+    let mut validated = false
+    let mut settled = false
+    for sample in s.samples {
+        if sample.peer != first {
+            if let None = moved {
+                moved = Some(sample.peer)
+                moved_packets = sample.packets
+            }
+            if !sample.validated && sample.packets_after != sample.packets {
+                fail("stream data went to the rebound port before its PATH_RESPONSE")
+            }
+            validated = validated || sample.validated
+        }
+        // The path's RTT is 20 ms; a reset would put the estimate back to 333 ms.
+        if settled && sample.rtt >= FRESH_RTT {
+            fail("a port-only rebind reset the congestion controller")
+        }
+        settled = settled || sample.rtt < FRESH_RTT
+    }
+    let Some(rebound) = moved else {
+        fail("the server never moved to the rebound port")
+    }
+    let last = s.samples[list.len(s.samples) - 1]
+    if rebound.ip != first.ip || moved_packets == 0 || !validated || last.packets_after <= moved_packets {
+        fail("the rebind was not a mid-transfer port change the server validated and sent on")
+    }
+}
+
+/// bug: a server that sends stream data to a new client address before validating it,
+/// ignores the anti-amplification limit there, drops the connection on a NAT rebind, or
+/// resets (or keeps) its congestion state on the wrong kind of change.
+/// oracle: RFC 9000 §8.2, §9.3 and §9.4, RFC 9002 §6.2.2 and §7.2.
+@test
+fn rebind_validates_new_path(tasks: Tasks) -> Result[(), ()] waits {
+    address_change()
+    port_rebind(tasks)
+    Ok(())
+}

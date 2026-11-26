@@ -111,6 +111,14 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
             }
             Ok(ElicitsAck)
         },
+        PathChallenge(data) => {
+            path_challenge(mut c, list.slice(input, data.at, data.at + data.len))
+            Ok(ElicitsAck)
+        },
+        PathResponse(data) => {
+            path_response(mut c, list.slice(input, data.at, data.at + data.len))
+            Ok(ElicitsAck)
+        },
         HandshakeDone => {
             if let Server = c.side {
                 return Error(Wire(0x0a, 0x1e))
@@ -142,12 +150,14 @@ fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Byte
     }
     let mut r = take frame_reader
     let mut ack = false
+    c.probing_only = true
     while true {
         let f = match codec.next_frame(input, mut r) {
             Ok(Some(f)) => f,
             Ok(None) => break,
             Error(e) => return Error(codec_failure(e)),
         }
+        c.probing_only = c.probing_only && probing_frame(f)
         match apply_frame(mut c, now, kind, f, input, mut events)? {
             Quiet => (),
             ElicitsAck => {

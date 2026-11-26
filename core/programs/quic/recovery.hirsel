@@ -127,6 +127,25 @@ pub fn new(algorithm: Algorithm, mss: u64, server: bool) -> Recovery {
     Recovery(algorithm: algorithm, mss: mss, server: server, latest_rtt: 0, smoothed_rtt: INITIAL_RTT, rttvar: INITIAL_RTT / 2, min_rtt: 0, first_sample: None, max_ack_delay: 0, confirmed: false, handshake_keys: false, handshake_acked: false, pto_count: 0, timer: None, tracks: take tracks, window: initial, ssthresh: None, recovery_start: None, in_flight: 0, app_limited: false, cubic: Cubic(w_max: 0, k_ms: 0, epoch: None, cwnd_epoch: 0, w_est: 0, prior: 0), hystart: Hystart(phase: SlowStart, window_end: None, last_min: None, current_min: None, samples: 0), ecn: Testing, next_seq: 0, tokens: BURST_PACKETS * mss, refilled: None)
 }
 
+/// RFC 9002 §9.4 for RFC 9000 §9.4: a peer at a new address (more than a new port)
+/// starts again from the initial window and RTT. Packets in flight stay tracked.
+pub fn new_path(mut r: Recovery) {
+    r.latest_rtt = 0
+    r.smoothed_rtt = INITIAL_RTT
+    r.rttvar = INITIAL_RTT / 2
+    r.min_rtt = 0
+    r.first_sample = None
+    r.pto_count = 0
+    r.window = order.min(10 * r.mss, order.max(14720u64, 2 * r.mss))
+    r.ssthresh = None
+    r.recovery_start = None
+    r.cubic = Cubic(w_max: 0, k_ms: 0, epoch: None, cwnd_epoch: 0, w_est: 0, prior: 0)
+    r.hystart = Hystart(phase: SlowStart, window_end: None, last_min: None, current_min: None, samples: 0)
+    r.ecn = Testing
+    r.tokens = BURST_PACKETS * r.mss
+    r.refilled = None
+}
+
 pub fn set_max_ack_delay(mut r: Recovery, now: u64, ns: u64) {
     r.max_ack_delay = ns
     set_timer(mut r, now)

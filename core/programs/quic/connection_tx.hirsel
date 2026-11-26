@@ -8,6 +8,7 @@ type StagedPacket {
     done: bool,
     close: bool,
     eliciting: bool,
+    path: bool,
     frames: List[SentFrame]
 }
 
@@ -21,7 +22,10 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
         return None
     }
     let start = list.len(out)
-    let padding = if kind == Initial {
+    // RFC 9000 §8.2.1: a datagram with PATH_CHALLENGE or PATH_RESPONSE is expanded to
+    // 1200 bytes when the anti-amplification limit allows.
+    let path_frames = kind == OneRtt && list.len(s.path_out) > 0
+    let padding = if kind == Initial || (path_frames && limit >= 1200) {
         1200u64
     } else {
         0u64
@@ -39,6 +43,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
     let mut done_sent = false
     let mut closed = false
     let mut eliciting = false
+    let mut path = false
     let mut frames: List[SentFrame] = list.new()
     if let Some(f) = closing {
         let len = order.min(list.len(f.reason), cap - order.min(cap, 27))
@@ -81,6 +86,11 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
                 count -= 1
             }
         }
+        if path_frames && list.len(payload) + list.len(s.path_out) <= cap {
+            list.append(mut payload, s.path_out)
+            path = true
+            eliciting = true
+        }
         let probe = s.probes > 0
         if send || probe {
             if done && list.len(payload) < cap {
@@ -108,7 +118,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
                     eliciting = true
                 }
             }
-            if fill && kind == OneRtt {
+            if fill && kind == OneRtt && !s.hold_data {
                 fill_streams(mut st, cap, mut payload, mut frames)
                 eliciting = eliciting || list.len(frames) > 0
             }
@@ -126,7 +136,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
         requeue(mut st, frames)
         return None
     }
-    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, frames: take frames))
+    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, path: path, frames: take frames))
 }
 
 fn commit_space(mut s: Space, p: StagedPacket) {
@@ -137,6 +147,9 @@ fn commit_space(mut s: Space, p: StagedPacket) {
         s.crypto_committed = p.crypto_end
     }
     s.ack_pending = s.ack_pending && !p.ack
+    if p.path {
+        list.clear(mut s.path_out)
+    }
     if p.eliciting {
         list.push(mut s.flights, Flight(number: p.number, crypto_at: p.crypto_at, crypto_end: p.crypto_end, done: p.done))
         if s.probes > 0 {

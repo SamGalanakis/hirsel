@@ -472,7 +472,7 @@ fn idle_websocket_readers_return_their_stacks() {
         file: root.join("core/std/tests/websocket_upgrade.hirsel"),
         modules: vec!["tests".into(), "websocket_upgrade".into()],
         signatures: false,
-        foreign: false,
+        foreign: None,
         captured: None,
     });
     request.entry = Some(entry.clone());

@@ -197,7 +197,7 @@ mod tests {
             package: package("lib"),
             dependencies: vec![package("core"), package("std")],
             sources: vec![ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file,
                 modules: vec!["lib".into()],

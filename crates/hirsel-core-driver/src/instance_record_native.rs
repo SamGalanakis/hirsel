@@ -318,7 +318,7 @@ fn library_request(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -
                     namespace: None,
         package: package("lib"),
         sources: vec![hirsel_core_resolve::ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: None,
             file,
             modules: vec!["api".into()],

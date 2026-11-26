@@ -47,7 +47,7 @@ fn sources(dir: &Path, prefix: &[&str], signatures: bool) -> Vec<ModuleSource> {
             let mut modules: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
             modules.push(stem.to_string());
             ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file,
                 modules,

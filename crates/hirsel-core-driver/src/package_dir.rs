@@ -6,7 +6,7 @@ use crate::NativeOptions;
 use crate::package_content::{Content, Id, PackageArchive, Root, Source};
 use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_net::{EnvPatterns, GrantRule, NetGrant, RULE_SYNTAX, SecretGrant};
-use hirsel_core_resolve::{ModuleSource, PackageManifest};
+use hirsel_core_resolve::{ForeignModuleCapture, ModuleSource, PackageManifest};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::io;
@@ -602,7 +602,10 @@ impl PackageDir {
                     format!("{}/{file}", content.id)
                 };
                 ModuleSource {
-                    foreign: content.foreign.contains_key(&source.module),
+                    foreign: content
+                        .foreign
+                        .get(&source.module)
+                        .map(ForeignModuleCapture::containment),
                     file: PathBuf::from(&logical),
                     modules: source.module.clone(),
                     signatures: false,

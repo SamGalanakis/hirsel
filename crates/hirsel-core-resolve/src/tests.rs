@@ -49,7 +49,7 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
             .find(|p| p.package.name == pkg)
             .unwrap();
         manifest.sources.push(ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: m.into(),
             modules: vec![m.into()],
@@ -451,7 +451,7 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
             namespace: None,
             package: package("core"),
             sources: vec![ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: "string.hirsel".into(),
                 modules: vec!["string".into()],
@@ -464,7 +464,7 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
             namespace: None,
             package: package("app"),
             sources: vec![ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: "main.hirsel".into(),
                 modules: vec!["main".into()],
@@ -764,7 +764,7 @@ fn clean_measurement_preserves_module_ids_after_removing_a_whole_file() {
     ] {
         let file = std::path::PathBuf::from(format!("{name}.hirsel"));
         let source = ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: file.clone(),
             modules: vec![name.into()],
@@ -1132,7 +1132,7 @@ fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
                     namespace: None,
                     package: package("app"),
                     sources: vec![ModuleSource {
-                        foreign: false,
+                        foreign: None,
                         captured: None,
                         file: "positions.hirsel".into(),
                         modules: vec!["m".into()],

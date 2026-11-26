@@ -258,7 +258,7 @@ fn check_fences<'a>(fences: &[&'a Fence]) -> Vec<(Option<&'a Fence>, String)> {
         let file = files.path().join(format!("{sample}.hirsel"));
         fs::write(&file, &fence.source).unwrap();
         let source = ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file,
             modules: vec![sample.clone()],

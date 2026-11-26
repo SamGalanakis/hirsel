@@ -92,7 +92,7 @@ fn product(dir: &Path) -> Arc<CheckProduct> {
             namespace: None,
             package: package("p"),
             sources: vec![hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file,
                 modules: vec!["p".into()],

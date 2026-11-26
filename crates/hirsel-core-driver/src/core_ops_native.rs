@@ -788,7 +788,7 @@ fn bodied_core_operations(backend: Backend) {
     request.inputs.packages[1]
         .sources
         .push(hirsel_core_resolve::ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: None,
             file,
             modules: vec!["args".into()],

@@ -165,6 +165,7 @@ pub(crate) fn is_core_prelude(path: &DefPath, names: &[&str]) -> bool {
 
 mod roles;
 pub use roles::Role;
+use roles::nominal_bounds;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Generic {
@@ -218,6 +219,8 @@ pub struct Summary {
     pub recipe: Option<Recipe>,
     /// Part of an invalid recursive definition, already refused (OWN-2 or LANG-12).
     pub cycle: bool,
+    /// A handle kind of a contained module: its `foreign.Ptr` is not send (FFI-12).
+    pub contained: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -2927,113 +2930,48 @@ fn bounds_inner<const ENCODING: bool>(
             0
         }
     };
-    plain_extra
-        | match row {
-            TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED | CODEC,
-            TyKind::Never | TyKind::Unit => all | CODEC,
-            TyKind::Scalar(Scalar::F32 | Scalar::F64) => {
-                PLAIN | SHAREABLE | SEND | CROSS | FLOAT | ENCODED | CODEC
-            }
-            TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => {
-                all | INTEGER | ENCODED | CODEC
-            }
-            TyKind::Scalar(Scalar::Bool | Scalar::Char) => all | ENCODED | CODEC,
-            TyKind::Scalar(_) => all | ENCODED,
-            TyKind::Fn(_, _, _, callable) => match callable {
-                Callable::Plain => PLAIN | SHAREABLE | SEND | CROSS,
-                Callable::OwnSend => SEND,
-                Callable::Own | Callable::Scoped | Callable::ScopedView => 0,
-            },
-            TyKind::Tuple(xs) => meet(xs) | encoded(),
-            TyKind::Region(_) => 0,
-            TyKind::Anchored(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params),
-            TyKind::Array(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params) & all,
-            TyKind::Vector(_) => PLAIN | SHAREABLE | SEND | CROSS,
-            TyKind::View(x) => bounds_inner::<ENCODING>(decls, t, *x, params) & (KEY | ORDERED),
-            TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
-            TyKind::Adt(d, args) => {
-                let decl = &decls[d.index()];
-                let mut available = nominal_bounds(
-                    decl,
-                    || meet(args),
-                    |i| bounds_inner::<ENCODING>(decls, t, args[i], params),
-                );
-                // Wire parameters and the parameters held by the value can differ with via.
-                if available & CODEC != 0
-                    && decl.codec().is_some()
-                    && !holds_nothing(decls, t, ty, params)
-                {
-                    available &= !CODEC;
+    crate::foreign::contained_mask(decls, t, row)
+        & (plain_extra
+            | match row {
+                TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED | CODEC,
+                TyKind::Never | TyKind::Unit => all | CODEC,
+                TyKind::Scalar(Scalar::F32 | Scalar::F64) => {
+                    PLAIN | SHAREABLE | SEND | CROSS | FLOAT | ENCODED | CODEC
                 }
-                available | encoded()
-            }
-        }
-}
-
-fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) -> u16) -> u16 {
-    let declared = match decl.role {
-        // L2 (mc-units-lang): an owner crosses as a flat copy of its content,
-        // so only a list of plain elements and a string are `cross`.
-        Some(Role::List) => {
-            let elems = meet();
-            elems & (KEY | ORDERED | SHAREABLE | SEND | CODEC)
-                | if elems & (PLAIN | CROSS) == PLAIN | CROSS {
-                    CROSS
-                } else {
-                    0
+                TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => {
+                    all | INTEGER | ENCODED | CODEC
                 }
-        }
-        Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CROSS | CODEC,
-        Some(Role::FrozenBytes) => SHAREABLE | SEND,
-        Some(Role::Text) => KEY | ORDERED,
-        Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => meet() & (KEY | ORDERED),
-        Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
-        Some(Role::Args) => PLAIN | SHAREABLE | SEND | CROSS,
-        Some(Role::Causes) => SEND,
-        Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
-        Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
-        Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
-        // CONC-15: a holder crosses as its pointer; the payload stays put.
-        Some(Role::Shared) => SHAREABLE | SEND | CROSS | (meet() & (KEY | ORDERED)),
-        Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
-        Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
-        Some(Role::Client | Role::Secret | Role::Media) => SEND | CROSS,
-        Some(Role::Socket) => match decl.path.0.name.as_str() {
-            "Socket" | "Listener" | "UdpSocket" => SEND | CROSS,
-            _ => SEND,
-        },
-        Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
-        // MEM-24: a Columns sends and shares as its rows do. It does not cross a unit
-        // boundary (CONC-15), which copies one contiguous run per sequence.
-        Some(Role::Columns) => meet() & (SHAREABLE | SEND),
-        Some(Role::Capability) => PLAIN | SHAREABLE | SEND | CROSS,
-        Some(Role::ForeignHandle) => PLAIN | SEND,
-        Some(_) => 0,
-        None if decl.structural => meet(),
-        None => {
-            // CONC-2: a record or variant type is `cross` when it declares the bound
-            // and each field of each case is `cross`, which `check_declared_bounds` checks.
-            let mut bounds = decl.declared & !PLAIN;
-            for &i in &decl.summary.bound_params {
-                bounds &= at(i as usize);
-            }
-            if let Some(codec) = decl.codec() {
-                let mut codec_bound = decl.declared & CODEC;
-                for &i in &codec.params {
-                    codec_bound &= at(i as usize);
+                TyKind::Scalar(Scalar::Bool | Scalar::Char) => all | ENCODED | CODEC,
+                TyKind::Scalar(_) => all | ENCODED,
+                TyKind::Fn(_, _, _, callable) => match callable {
+                    Callable::Plain => PLAIN | SHAREABLE | SEND | CROSS,
+                    Callable::OwnSend => SEND,
+                    Callable::Own | Callable::Scoped | Callable::ScopedView => 0,
+                },
+                TyKind::Tuple(xs) => meet(xs) | encoded(),
+                TyKind::Region(_) => 0,
+                TyKind::Anchored(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params),
+                TyKind::Array(x, _) => bounds_inner::<ENCODING>(decls, t, *x, params) & all,
+                TyKind::Vector(_) => PLAIN | SHAREABLE | SEND | CROSS,
+                TyKind::View(x) => bounds_inner::<ENCODING>(decls, t, *x, params) & (KEY | ORDERED),
+                TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
+                TyKind::Adt(d, args) => {
+                    let decl = &decls[d.index()];
+                    let mut available = nominal_bounds(
+                        decl,
+                        || meet(args),
+                        |i| bounds_inner::<ENCODING>(decls, t, args[i], params),
+                    );
+                    // Wire parameters and the parameters held by the value can differ with via.
+                    if available & CODEC != 0
+                        && decl.codec().is_some()
+                        && !holds_nothing(decls, t, ty, params)
+                    {
+                        available &= !CODEC;
+                    }
+                    available | encoded()
                 }
-                bounds = bounds & !CODEC | codec_bound;
-            }
-            bounds
-        }
-    };
-    match decl.repr {
-        Repr::Region => declared & !(SEND | CROSS | SHAREABLE | CODEC),
-        Repr::Scoped => declared & !(SEND | CROSS | SHAREABLE | KEY | ORDERED | CODEC),
-        // SEM-7: a resource is never compared, whatever it declares.
-        Repr::Resource => declared & !(KEY | ORDERED | CODEC),
-        Repr::Own => declared,
-    }
+            })
 }
 
 /// Whether a declaration permits send when all its type arguments are plain

@@ -1365,7 +1365,9 @@ returns `NULL`, and the wrapper maps that to its own error. This is not a hidden
 is the program's own `bound bytes` or root limit, the refusal is a refused admission, which is
 already a CONC-10 event, and the guest sees an explicit failure. The other answer, `Err`, is a
 trap that Wasmtime's docs call "not necessarily compliant with the WebAssembly specification",
-and it is not taken. A charge outlives the bound scope that made it, as any surviving charge
+and it is not taken. Growth past the memory's or table's own declared maximum fails the same
+way, but before any admission: nothing is charged and there is no CONC-10 event, since no
+limit refused it. A charge outlives the bound scope that made it, as any surviving charge
 does, and is handed over to the parent on the scope's exit (MEM-20). It is refunded when the
 instance is discarded or dropped. Memory never shrinks while the instance lives. A host that
 refuses the pages a granted grow needs stops the run with `HostMemory` (FAIL-15), as it does

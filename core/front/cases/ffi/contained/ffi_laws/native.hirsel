@@ -1,0 +1,8 @@
+pub fn make(f: Foreign[laws.Box]) -> Option[foreign.Ptr[laws.Cell]]
+pub fn free(f: Foreign[laws.Box], take p: foreign.Ptr[laws.Cell]) -> i32
+pub fn slow(f: Foreign[laws.Box]) -> i32 waits
+pub fn listing(f: Foreign[laws.Box], d: Dir) -> i32
+// expect: refuse FFI-12 at 3:8
+// expect: message FFI-12 at 3:8 | a contained function is never waits
+// expect: refuse FFI-12 at 4:38
+// expect: message FFI-12 at 4:38 | a contained function takes no Dir

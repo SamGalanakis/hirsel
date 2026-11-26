@@ -22,7 +22,7 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
                 namespace: None,
                 package: package("app"),
                 sources: vec![hirsel_core_resolve::ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: None,
                     file: source_file,
                     modules: vec!["main".into()],
@@ -82,7 +82,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
             .unwrap()
             .iter()
             .map(|(file, module)| hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: directory.join(file),
                 modules: vec![module.as_str().unwrap().into()],
@@ -107,7 +107,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
         source.captured = None;
     }
     runner.sources.push(hirsel_core_resolve::ModuleSource {
-        foreign: false,
+        foreign: None,
         captured: None,
         file: root.join("crates/hirsel-core-driver/src/testdata/runner_launch.hirsel"),
         modules: vec!["runner_launch".into()],
@@ -493,7 +493,7 @@ fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     req.inputs.packages[0]
         .sources
         .push(hirsel_core_resolve::ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: bad,
             modules: vec!["broken".into()],
@@ -730,7 +730,7 @@ fn prog1_prog6_transitive_type_reads_and_discovery_order_have_stable_results() {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: other.clone(),
                 modules: vec!["other".into()],
@@ -1336,7 +1336,7 @@ fn session_id_changes_reuse_and_rebind_cached_refusals() {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: earlier.clone(),
                 modules: vec!["aaa".into()],
@@ -1543,7 +1543,7 @@ fn reachable_census_retains_a_named_function_without_a_native_body() {
         namespace: None,
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: library,
             modules: vec!["core".into()],
@@ -1791,7 +1791,7 @@ fn lowered_runtime_operation_needs_no_outside_body() {
         namespace: None,
         package: package("core"),
         sources: vec![hirsel_core_resolve::ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: core,
             modules: vec!["task".into()],
@@ -1902,7 +1902,7 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
             package: package(name),
             dependencies: deps,
             sources: vec![hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file,
                 modules: vec![module.into()],
@@ -2236,7 +2236,7 @@ fn program_request(kind: &str, dir: &Path, store: &Path) -> CheckRequest {
         req.inputs.packages[0]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file,
                 modules: vec![name.into()],
@@ -2702,7 +2702,7 @@ fn m2b_requests(root: &Path, dir: &Path) -> Vec<(String, CheckRequest)> {
         sources: corpus_files(&root.join("core").join(name), false)
             .into_iter()
             .map(|s| hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 signatures: true,
                 ..s
@@ -2807,7 +2807,7 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
         req.inputs.packages[at]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file,
                 modules: vec![module.to_string()],
@@ -3327,7 +3327,7 @@ fn corpus_files(dir: &Path, tests: bool) -> Vec<hirsel_core_resolve::ModuleSourc
             let rel = p.strip_prefix(dir).unwrap().with_extension("");
             let modules: Vec<String> = rel.iter().map(|m| m.to_string_lossy().into()).collect();
             (tests || modules[0] != "tests").then_some(hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: p,
                 modules,

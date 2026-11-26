@@ -85,15 +85,7 @@ pub(super) fn emit(
         let parsed = Abi::parse(function.header).ok_or("invalid checked foreign header")?;
         let route = match function.contained {
             None => Route::Native(thunk(object, unwind, &function.c_symbol, index, &parsed)?),
-            Some(module) => {
-                if parsed.waits {
-                    return Err("FFI-12: a contained function is never waits".into());
-                }
-                if parsed.arguments().any(|a| matches!(a, Argument::Dir)) {
-                    return Err("FFI-12: a contained function takes no Dir".into());
-                }
-                Route::Contained(modules[module])
-            }
+            Some(module) => Route::Contained(modules[module]),
         };
         let mut release = false;
         for argument in parsed.arguments() {

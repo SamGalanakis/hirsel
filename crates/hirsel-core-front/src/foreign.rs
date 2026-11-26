@@ -8,7 +8,7 @@ use hirsel_core_ids::DefPath;
 use hirsel_core_layout::Scalar;
 use hirsel_core_resolve::{ModuleId, Refusal, Site, Target};
 use hirsel_core_syntax::{NodeId, NodeKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub enum AbiParameter {
     Scalar(Scalar),
@@ -76,6 +76,8 @@ impl Marker {
 pub(crate) struct Names {
     interfaces: BTreeMap<DeclId, Site>,
     kinds: BTreeMap<DeclId, Site>,
+    /// Handle kinds of contained modules, whose `foreign.Ptr` is not send (FFI-12).
+    contained: BTreeSet<DeclId>,
 }
 
 #[derive(Default)]
@@ -319,6 +321,15 @@ impl Program<'_> {
                 _ => {}
             }
 
+            let contained = self.index.module_containment(module)
+                == Some(hirsel_core_resolve::Containment::Wasm);
+            if contained && fd.waits {
+                refusals.push(refusal(
+                    "FFI-12",
+                    fd.site,
+                    "a contained function is never waits",
+                ));
+            }
             let params = &fd.params[1..];
             let release = params.iter().any(|p| p.mode == Mode::Take);
             // Check the callable result with its roots. Lowering and the C
@@ -354,11 +365,19 @@ impl Program<'_> {
                         if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
                             let site = handle_site(p.site);
                             note_kind(names, &mut uses, kind, site, false, release, &mut refusals);
+                            if contained {
+                                names.contained.insert(kind);
+                            }
                             if release {
                                 releases.insert(raw_kind, function);
                             }
                         }
                     }
+                    (AbiType::Dir, Mode::View, false) if contained => refusals.push(refusal(
+                        "FFI-12",
+                        p.site,
+                        "a contained function takes no Dir",
+                    )),
                     (AbiType::Bytes { .. }, Mode::View | Mode::Mut, false)
                     | (AbiType::Dir, Mode::View, false) => {}
                     (AbiType::Scalar(_), Mode::View, false) if abi.scalar_or_unit() => {}
@@ -374,6 +393,9 @@ impl Program<'_> {
                 if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
                     let site = handle_site(fd.result_site);
                     note_kind(names, &mut uses, kind, site, true, false, &mut refusals);
+                    if contained {
+                        names.contained.insert(kind);
+                    }
                 }
             } else if result != ERROR && !result_shape.scalar_or_unit() {
                 refusals.push(refusal(
@@ -473,7 +495,20 @@ impl Program<'_> {
         header
     }
 
+    /// A contained module's handle kinds are marked so that `foreign.Ptr` of one is not
+    /// send: its address names a place in one task's instance (FFI-12, FFI-13).
+    fn mark_contained_kinds(&mut self) {
+        let base = self.decls.base_len();
+        let kinds: Vec<_> = self.foreign_names().contained.iter().copied().collect();
+        for kind in kinds {
+            if kind.index() >= base {
+                self.decls[kind.index()].summary.contained = true;
+            }
+        }
+    }
+
     pub(crate) fn mark_raw_handle_summaries(&mut self) {
+        self.mark_contained_kinds();
         let base = self.decls.base_len();
         let mut work = Vec::new();
         for d in base..self.decls.len() {
@@ -716,4 +751,24 @@ fn note_kind(
     };
     kind_use.made |= made;
     kind_use.releases += u32::from(release);
+}
+
+/// The bounds mask of a type: `foreign.Ptr[K]` of a contained module's kind K is an address
+/// in one task's instance, so it is not send (FFI-12). As a raw handle it is already neither
+/// shareable nor cross.
+pub(crate) fn contained_mask(decls: &Rows<TypeDecl>, t: &impl TyRead, row: &TyKind) -> u16 {
+    match row {
+        TyKind::Adt(d, args) if decls[d.index()].role == Some(Role::ForeignHandle) => {
+            match args.as_slice() {
+                [kind]
+                    if matches!(t.kind(*kind),
+                    TyKind::Adt(k, _) if decls[k.index()].summary.contained) =>
+                {
+                    !crate::decls::SEND
+                }
+                _ => u16::MAX,
+            }
+        }
+        _ => u16::MAX,
+    }
 }

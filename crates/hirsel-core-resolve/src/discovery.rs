@@ -8,8 +8,9 @@ pub struct ModuleSource {
     pub file: PathBuf,
     pub modules: Vec<String>,
     pub signatures: bool,
+    /// A foreign interface module (FFI-1) and how its code runs.
     #[serde(default)]
-    pub foreign: bool,
+    pub foreign: Option<Containment>,
     #[serde(skip)]
     pub captured: Option<CapturedSource>,
 }
@@ -23,7 +24,7 @@ pub struct CapturedSource {
 
 impl ModuleSource {
     pub fn mode(&self) -> ParseMode {
-        if self.foreign {
+        if self.foreign.is_some() {
             ParseMode::Foreign
         } else if self.signatures {
             ParseMode::Signatures
@@ -90,6 +91,16 @@ pub enum ForeignCode {
     Wasm(ForeignArchiveCapture),
 }
 
+/// How a foreign module's code runs: linked into the program (FFI-2), or as a
+/// contained WebAssembly instance (FFI-10).
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum Containment {
+    Native,
+    Wasm,
+}
+
 #[derive(Clone, Debug)]
 pub struct ForeignModuleCapture {
     pub symbols: String,
@@ -97,6 +108,13 @@ pub struct ForeignModuleCapture {
 }
 
 impl ForeignModuleCapture {
+    pub fn containment(&self) -> Containment {
+        match self.code {
+            ForeignCode::Native(_) => Containment::Native,
+            ForeignCode::Wasm(_) => Containment::Wasm,
+        }
+    }
+
     /// The archive rows of a native module; a contained module has none.
     pub fn archives(&self) -> Option<&std::collections::BTreeMap<String, ForeignArchiveCapture>> {
         match &self.code {
@@ -204,7 +222,7 @@ impl PackageManifest {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     out.push(ModuleSource {
-                        foreign: false,
+                        foreign: None,
                         captured: None,
                         file: path,
                         modules,
@@ -304,8 +322,8 @@ impl NameIndex {
                 path.clear();
                 path.extend(s.modules.iter().map(|n| self.symbols.find(n).unwrap()));
                 let module = self.add_module(p, &path);
-                if s.foreign {
-                    self.mark_foreign_module(module);
+                if let Some(containment) = s.foreign {
+                    self.mark_foreign_module(module, containment);
                 }
                 modules.push(module);
             }

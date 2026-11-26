@@ -22,7 +22,7 @@ fn source(file: PathBuf, module: &str) -> ModuleSource {
     ModuleSource {
         file,
         modules: module.split('.').map(str::to_owned).collect(),
-        foreign: false,
+        foreign: None,
         signatures: false,
         captured: None,
     }

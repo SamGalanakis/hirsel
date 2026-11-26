@@ -1851,7 +1851,7 @@ pub(crate) mod tests {
             namespace: None,
             package: package("core"),
             sources: vec![hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: core,
                 modules: vec!["core".into()],

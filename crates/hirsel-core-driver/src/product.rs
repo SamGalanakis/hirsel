@@ -38,7 +38,7 @@ impl PackageProduct {
             sources: sources
                 .iter()
                 .map(|(module, text)| ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: Some(hirsel_core_resolve::CapturedSource {
                         bytes: text.as_bytes().into(),
                         name: None,
@@ -336,7 +336,7 @@ fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &
     let mut selected = Vec::with_capacity(input.sources.len());
     let mut bytes = Vec::new();
     for source in &input.sources {
-        if !source.signatures || source.foreign {
+        if !source.signatures || source.foreign.is_some() {
             return None;
         }
         let name = source.modules.join("/");
@@ -386,7 +386,7 @@ fn matches_bundle(
         .zip(sources)
         .all(|((_, source), (module, text))| {
             source.signatures
-                && !source.foreign
+                && source.foreign.is_none()
                 && source
                     .modules
                     .iter()
@@ -451,7 +451,7 @@ mod tests {
             package: package("std"),
             dependencies: vec![package("core")],
             sources: vec![ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: file.clone(),
                 modules: vec![name.into()],
@@ -474,7 +474,7 @@ mod tests {
                 package: package("core"),
                 dependencies: vec![],
                 sources: vec![ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: None,
                     file,
                     modules: vec!["core".into()],
@@ -501,7 +501,7 @@ mod tests {
                 let file = dir.path().join(format!("{i}.hirsel"));
                 std::fs::write(&file, text).unwrap();
                 core.sources.push(ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: None,
                     file,
                     modules: vec!["ordering".into()],
@@ -831,7 +831,7 @@ mod tests {
             package: package("std"),
             dependencies: vec![package("core")],
             sources: vec![ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: std_file,
                 modules: vec!["std_only".into()],
@@ -977,7 +977,7 @@ mod agreement {
                         package: package("app"),
                         dependencies: vec![package("core")],
                         sources: vec![ModuleSource {
-                            foreign: false,
+                            foreign: None,
                             captured: None,
                             file: file.clone(),
                             modules: vec!["case".into()],
@@ -1079,7 +1079,7 @@ mod indexed_tests {
                     package: package("core"),
                     dependencies: vec![],
                     sources: vec![hirsel_core_resolve::ModuleSource {
-                        foreign: false,
+                        foreign: None,
                         captured: None,
                         file,
                         modules: vec!["core".into()],

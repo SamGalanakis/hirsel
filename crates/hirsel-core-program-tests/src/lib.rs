@@ -40,7 +40,7 @@ fn library_manifest(name: &str) -> PackageManifest {
         .unwrap()
         .iter()
         .map(|(file, module)| ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: root.join(file),
             modules: module
@@ -87,7 +87,7 @@ pub(crate) fn source_manifest(
         package: package("app"),
         dependencies,
         sources: vec![ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: path,
             modules: vec![module.into()],
@@ -211,7 +211,7 @@ pub(crate) fn checked_inputs(
                 toolchain: false,
             });
         package.sources.push(ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file,
             modules: path.modules,

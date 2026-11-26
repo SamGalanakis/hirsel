@@ -750,7 +750,7 @@ fn revision_cross_module_and_recursive_bindings() {
         std::fs::write(&file, format!("pub fn value() -> u64 {{ {leaf_value} }}\n")).unwrap();
         let mut request = revision_request(source, None, dir.path());
         request.inputs.packages[0].sources.push(hirsel_core_resolve::ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: None,
             file, modules: vec!["leaf".into()], signatures: false,
         });

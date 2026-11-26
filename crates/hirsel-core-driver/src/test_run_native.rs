@@ -2142,7 +2142,7 @@ archives = []
     for (package, expected_name) in [
         (&member.package, "c.hirsel"), (&consumer.dependencies[0], "shim@1/c.hirsel"),
     ] {
-        let names: Vec<_> = package.sources.iter().filter(|source| source.foreign)
+        let names: Vec<_> = package.sources.iter().filter(|source| source.foreign.is_some())
             .map(|source| source.captured.as_ref().unwrap().name.as_deref().unwrap()).collect();
         assert_eq!(names, [expected_name]);
     }

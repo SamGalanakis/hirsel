@@ -1349,7 +1349,7 @@ fn recovered_header_cases() -> Vec<String> {
             .unwrap();
             let mut store = request.inputs.packages.pop().unwrap();
             store.sources.push(ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: path,
                 modules: vec!["ice_places_358_store".into()],
@@ -1363,7 +1363,7 @@ fn recovered_header_cases() -> Vec<String> {
                 package: package("app"),
                 dependencies: vec![package("core"), package("std")],
                 sources: vec![ModuleSource {
-                    foreign: false,
+                    foreign: None,
                     captured: None,
                     file: path,
                     modules: vec!["main".into()],
@@ -1440,7 +1440,7 @@ fn flow_transform_rejects() {
         package: package("dep"),
         dependencies: vec![package("core")],
         sources: vec![ModuleSource {
-            foreign: false,
+            foreign: None,
             captured: None,
             file: dep.clone(),
             modules: vec!["api".into()],
@@ -1513,7 +1513,7 @@ pub fn worker() -> u64 { 0 }
             let file = files.path().join(format!("{module}.hirsel"));
             std::fs::write(&file, source).unwrap();
             ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file,
                 modules: vec![module.into()],
@@ -1657,7 +1657,7 @@ fn callable_value() { let _ = bad_callback }
     std::fs::write(&file, source).unwrap();
     let mut std = crate::std_manifest();
     std.sources.push(ModuleSource {
-        foreign: false,
+        foreign: None,
         captured: None,
         file,
         modules: vec!["signatures".into()],
@@ -1726,7 +1726,7 @@ fn callable_value() { let _ = bad_callback }
 
 #[test]
 fn foreign_frontend_cases() {
-    for name in ["headers", "types"] {
+    for name in ["contained", "types", "headers"] {
         foreign_case(name);
     }
     foreign_declaration_restore();
@@ -1758,7 +1758,7 @@ pub fn release(f: Foreign[main.Law], take p: foreign.Ptr[main.Obj]) -> i32 waits
         .unwrap()
         .sources
         .push(ModuleSource {
-            foreign: true,
+            foreign: Some(hirsel_core_resolve::Containment::Native),
             captured: None,
             file: native,
             modules: vec!["native".into()],

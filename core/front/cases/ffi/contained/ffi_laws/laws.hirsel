@@ -1,0 +1,10 @@
+pub opaque type Box {}
+pub opaque type Cell {}
+pub opaque resource type CellBox: send { f: Foreign[Box], p: foreign.Ptr[Cell] } drop(o) {
+    let _ = native.free(o.f, o.p)
+}
+pub opaque resource type Held { f: Foreign[Box], p: foreign.Ptr[Cell] } drop(o) {
+    let _ = native.free(o.f, o.p)
+}
+// A contained module's handle names a place in one task's instance (FFI-12).
+// expect: refuse CONC-2 at 3:59

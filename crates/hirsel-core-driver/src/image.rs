@@ -478,7 +478,7 @@ fn source_package_image_uses_the_captured_text_and_name() {
                     file: file.clone(),
                     modules: vec!["core".into()],
                     signatures: true,
-                    foreign: false,
+                    foreign: None,
                     captured: Some(CapturedSource {
                         bytes: format!("pub fn answer() -> u64 {{ {value} }}")
                             .into_bytes()

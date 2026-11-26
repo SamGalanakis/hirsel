@@ -1,0 +1,3 @@
+fn count(f: Foreign[ffi_laws.laws.Box]) -> i32 {
+    0
+}

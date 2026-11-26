@@ -1180,7 +1180,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .inputs
             .packages
             .iter()
-            .any(|package| package.sources.iter().any(|source| source.foreign));
+            .any(|package| package.sources.iter().any(|s| s.foreign.is_some()));
     if let Some(replay) = &replay_plan
         && !foreign_replay
     {

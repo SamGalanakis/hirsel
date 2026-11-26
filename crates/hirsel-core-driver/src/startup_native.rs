@@ -427,7 +427,7 @@ fn a_user_package_named_runner_is_not_a_place() {
             namespace: None,
             package: package("runner"),
             sources: vec![hirsel_core_resolve::ModuleSource {
-                foreign: false,
+                foreign: None,
                 captured: None,
                 file: runner.clone(),
                 modules: vec!["runner".into()],

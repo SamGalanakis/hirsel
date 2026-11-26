@@ -183,3 +183,73 @@ impl Role {
         })
     }
 }
+
+pub(super) fn nominal_bounds(
+    decl: &TypeDecl,
+    meet: impl Fn() -> u16,
+    at: impl Fn(usize) -> u16,
+) -> u16 {
+    let declared = match decl.role {
+        // L2 (mc-units-lang): an owner crosses as a flat copy of its content,
+        // so only a list of plain elements and a string are `cross`.
+        Some(Role::List) => {
+            let elems = meet();
+            elems & (KEY | ORDERED | SHAREABLE | SEND | CODEC)
+                | if elems & (PLAIN | CROSS) == PLAIN | CROSS {
+                    CROSS
+                } else {
+                    0
+                }
+        }
+        Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CROSS | CODEC,
+        Some(Role::FrozenBytes) => SHAREABLE | SEND,
+        Some(Role::Text) => KEY | ORDERED,
+        Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => meet() & (KEY | ORDERED),
+        Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
+        Some(Role::Args) => PLAIN | SHAREABLE | SEND | CROSS,
+        Some(Role::Causes) => SEND,
+        Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
+        Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
+        Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
+        // CONC-15: a holder crosses as its pointer; the payload stays put.
+        Some(Role::Shared) => SHAREABLE | SEND | CROSS | (meet() & (KEY | ORDERED)),
+        Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
+        Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
+        Some(Role::Client | Role::Secret | Role::Media) => SEND | CROSS,
+        Some(Role::Socket) => match decl.path.0.name.as_str() {
+            "Socket" | "Listener" | "UdpSocket" => SEND | CROSS,
+            _ => SEND,
+        },
+        Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
+        // MEM-24: a Columns sends and shares as its rows do. It does not cross a unit
+        // boundary (CONC-15), which copies one contiguous run per sequence.
+        Some(Role::Columns) => meet() & (SHAREABLE | SEND),
+        Some(Role::Capability) => PLAIN | SHAREABLE | SEND | CROSS,
+        Some(Role::ForeignHandle) => PLAIN | SEND,
+        Some(_) => 0,
+        None if decl.structural => meet(),
+        None => {
+            // CONC-2: a record or variant type is `cross` when it declares the bound
+            // and each field of each case is `cross`, which `check_declared_bounds` checks.
+            let mut bounds = decl.declared & !PLAIN;
+            for &i in &decl.summary.bound_params {
+                bounds &= at(i as usize);
+            }
+            if let Some(codec) = decl.codec() {
+                let mut codec_bound = decl.declared & CODEC;
+                for &i in &codec.params {
+                    codec_bound &= at(i as usize);
+                }
+                bounds = bounds & !CODEC | codec_bound;
+            }
+            bounds
+        }
+    };
+    match decl.repr {
+        Repr::Region => declared & !(SEND | CROSS | SHAREABLE | CODEC),
+        Repr::Scoped => declared & !(SEND | CROSS | SHAREABLE | KEY | ORDERED | CODEC),
+        // SEM-7: a resource is never compared, whatever it declares.
+        Repr::Resource => declared & !(KEY | ORDERED | CODEC),
+        Repr::Own => declared,
+    }
+}

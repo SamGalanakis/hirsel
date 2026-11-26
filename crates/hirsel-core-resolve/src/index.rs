@@ -295,7 +295,7 @@ pub struct NameIndex {
     prelude: Map<Symbol, DefinitionId>,
     pub core: Option<PackageKey>,
     // Module ordinals beyond the last foreign module are ordinary modules.
-    foreign_modules: Vec<bool>,
+    foreign_modules: Vec<Option<crate::Containment>>,
     pub diagnostics: Vec<Refusal>,
 }
 impl NameIndex {
@@ -506,21 +506,21 @@ impl NameIndex {
     }
     #[inline]
     pub fn module_is_foreign(&self, module: ModuleId) -> bool {
-        self.foreign_modules
-            .get(module.0 as usize)
-            .copied()
-            .unwrap_or(false)
+        self.module_containment(module).is_some()
+    }
+    pub fn module_containment(&self, module: ModuleId) -> Option<crate::Containment> {
+        *self.foreign_modules.get(module.0 as usize)?
     }
     #[inline]
     pub fn definition_is_foreign(&self, id: DefinitionId) -> bool {
         self.has_foreign_modules() && self.module_is_foreign(self.get(id).site.module)
     }
-    pub(crate) fn mark_foreign_module(&mut self, module: ModuleId) {
+    pub(crate) fn mark_foreign_module(&mut self, module: ModuleId, how: crate::Containment) {
         let id = module.0 as usize;
         if id >= self.foreign_modules.len() {
-            self.foreign_modules.resize(id + 1, false);
+            self.foreign_modules.resize(id + 1, None);
         }
-        self.foreign_modules[id] = true;
+        self.foreign_modules[id] = Some(how);
     }
     pub fn module_package(&self, module: ModuleId) -> PackageKey {
         self.modules[module.0 as usize].package

@@ -160,14 +160,18 @@ impl Closes {
                 return Err(Fault::Corrupt);
             }
             let blocks = replay.index.take(self.stream).ok_or(Fault::Corrupt)?;
-            self.scan = Scan::Reading(FrameReader::new(replay.source, blocks), 0);
+            let mut reader = FrameReader::open(replay.source, blocks)?;
+            if self.stream != 0 {
+                reader.entry()?;
+            }
+            self.scan = Scan::Reading(reader, 0);
         }
         let Scan::Reading(reader, at) = &mut self.scan else {
             return Ok(None);
         };
         let frame = reader.next(*at + 1)?;
         *at += 1;
-        if matches!(frame, Frame::End { .. }) {
+        if matches!(frame, Frame::End { .. } | Frame::HelperEnd { .. }) {
             self.scan = Scan::Ended;
             Ok(None)
         } else {

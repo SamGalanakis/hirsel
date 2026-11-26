@@ -40,6 +40,18 @@ pub(crate) struct Helper {
 }
 
 impl Helper {
+    /// A helper replaying its own stream on `group`'s cell: the entry's
+    /// capabilities are already designated there, by words of the run.
+    pub(super) fn replaying(group: Group, stream: u32) -> Self {
+        Self {
+            group: Some(group),
+            stream,
+            spawn_args: None,
+            grants: vec![],
+            sources: vec![],
+        }
+    }
+
     pub(crate) fn group(&self) -> Option<Group> {
         self.group
     }
@@ -168,6 +180,36 @@ impl Helper {
         let Some(live) = state.live.as_mut() else {
             return body.map(|(kind, body, _)| take(kind, body));
         };
+        if live.mode == Mode::Replay {
+            // The helper's replay ends at its `END`: the outcome it reached is
+            // the recorded one, and its stream holds nothing after it.
+            let out = match body {
+                Ok((kind, body, ending)) => {
+                    let gap = live.schedule.events - live.schedule.last;
+                    let frame = Frame::HelperEnd { gap, ending };
+                    let rep = live.replayer.as_mut().unwrap();
+                    match super::helper_replay::ended(rep, &frame) {
+                        Ok(()) => Ok(take(kind, body)),
+                        Err(fault) => {
+                            live.fault = Some(refuse(fault));
+                            live.abort_replay(fault, 0);
+                            Err(DIVERGED)
+                        }
+                    }
+                }
+                Err(why) => {
+                    live.refuse_replay(why);
+                    Err(why)
+                }
+            };
+            let (unit, launcher) = (live.unit().to_owned(), live.replay_abort.is_some());
+            drop(state);
+            let _ = finish(group.cell, group.generation, Seal::Unsealed);
+            if launcher && out.is_ok() {
+                units::verdicts::ended(&unit, None);
+            }
+            return out;
+        }
         let rec = live.recorder.as_mut().unwrap();
         let out = match body {
             Ok((kind, body, ending)) => {
@@ -188,6 +230,7 @@ impl Helper {
 }
 
 const NO_CAUSE: &str = "the helper failed without a cause its END can carry";
+const DIVERGED: &str = "the helper's replay diverged at its END";
 
 /// A helper's outcome as its owner's end `TAKE` holds it: the outcome kind
 /// and body, a result's handles in the order written, each with ordinal 0
@@ -417,12 +460,36 @@ pub(crate) unsafe fn replay_args(
     input: *const u8,
     spawned: &SpawnEntry,
 ) -> Result<Vec<u8>, &'static str> {
-    const ENTRY_HANDLE: &str = "a helper entry holding a handle";
+    const ENTRY_HANDLE: &str = "a helper entry holding a handle other than a capability";
+    let x = &spawned.x;
+    let held = Cross {
+        owners: x.owners()[1.min(x.owners().len())..].as_ptr(),
+        count: x.count.saturating_sub(1),
+        ..*x
+    };
+    // SAFETY: the input is initialized as `x` describes it.
+    let words = unsafe { capability_words(input, &held, None) };
+    // SAFETY: the spawner's context and its host files are live.
+    let files = unsafe { (*context).host_files };
+    let granted = if words.is_empty() || files.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: as above; no cell is locked here.
+        unsafe { units::item_grants::resolve(context, &(*files).registry, &words) }
+    };
     // SAFETY: forwarded.
     let body = unsafe {
-        entry(context, n, steps, input, spawned, &mut |_, _| {
-            Err(ENTRY_HANDLE)
-        })
+        entry(
+            context,
+            n,
+            steps,
+            input,
+            spawned,
+            &mut |kind, word| match kind {
+                CAPABILITY => units::item_grants::sent(&granted, kind, word),
+                _ => Err(ENTRY_HANDLE),
+            },
+        )
     }?;
     Ok(unit_spawn_args(
         &Entry::decode(0, 0, body).expect("a well-formed entry"),

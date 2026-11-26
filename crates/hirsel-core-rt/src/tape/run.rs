@@ -133,10 +133,6 @@ fn refused(run: &mut Run, error: OpenError) -> u8 {
         OpenError::Refused(Refusal::Limit) => "limit".to_owned(),
         OpenError::Refused(Refusal::Damaged(block)) => format!("damaged block {block}"),
         OpenError::Refused(Refusal::HeaderTooLarge) => "header too large".to_owned(),
-        OpenError::Refused(Refusal::HelperUnit) => {
-            "--unit replays only root in this build: a helper's replay from its stream's entry is not built"
-                .to_owned()
-        }
         OpenError::Refused(Refusal::NoUnit) => "--unit names no stream of the tape".to_owned(),
         OpenError::Unreadable(Fault::Truncated(at)) => format!("truncated at {at}"),
         OpenError::Unreadable(Fault::Damaged(block)) => format!("damaged block {block}"),
@@ -407,9 +403,31 @@ unsafe extern "C" fn invoke(
             arg: None,
             across: run.mode == 2,
         };
+        let abort = ReplayAbort {
+            stderr: run.stderr,
+            sources: run.sources,
+            diagnose: run.mode == 2,
+        };
         let mut launch_revision = run.revision;
-        let opened = if let Some(replay) = run.replay.take() {
+        let mut helpers = None;
+        let opened = if let Some(mut replay) = run.replay.take() {
             launch_revision = replay.stored.revision;
+            let streams = match replay.helper_streams() {
+                Ok(streams) => streams,
+                Err(e) => return refused(run, e),
+            };
+            let shared = super::helper_replay::Run::of(&replay);
+            if replay.chosen().is_ok_and(|(stream, _)| stream != 0) {
+                // `--unit` names a helper: it replays alone, without the root.
+                if let Err(e) = replay.admit(run.revision, &expect) {
+                    return refused(run, e);
+                }
+                super::helper_replay::start(context, streams, &shared, abort);
+                let failed = super::units::verdicts::conclude(run.stderr, None);
+                crate::coverage::exiting(i32::from(failed));
+                libc::_exit(i32::from(failed));
+            }
+            helpers = Some((streams, shared));
             Tape::open_with_startup(run.revision, TapeInput::Replay(replay), &expect)
         } else {
             let (dir, name) = match tape_directory(&mut run.sink, &run.path) {
@@ -447,11 +465,12 @@ unsafe extern "C" fn invoke(
             Err(e) => return refused(run, e),
         };
         if run.mode != 0 {
-            tape.set_replay_abort(ReplayAbort {
-                stderr: run.stderr,
-                sources: run.sources,
-                diagnose: run.mode == 2,
-            });
+            tape.set_replay_abort(abort);
+        }
+        // Every helper stream replays as its own unit from its entry, beside
+        // the root and not at its spawn.
+        if let Some((streams, shared)) = helpers {
+            super::helper_replay::start(context, streams, &shared, abort);
         }
         let (launch, managed) = if run.mode == 0 {
             ((*(*config).launch).clone(), !run.host.is_null())

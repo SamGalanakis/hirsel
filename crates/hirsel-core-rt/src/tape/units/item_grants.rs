@@ -147,7 +147,7 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
     };
     let inner = live.objects[o - 1].inner;
     let stored = match kind {
-        0 | 2..=6 | 8 | 13 => stored,
+        0 | 2..=6 | 8 | 9 | 13 => stored,
         kind if kind & HOMED != 0 => stored,
         // A Net's rules, granted or narrowed, are its source's handle.
         1 => net_rules(inner.ok_or(NET_RULES)?.handle)?,

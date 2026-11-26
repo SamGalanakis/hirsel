@@ -237,7 +237,7 @@ fn profile(c: &mut Cursor<'_>) -> Result<u8, Corrupt> {
 
 fn grant(c: &mut Cursor<'_>) -> Result<u8, Corrupt> {
     let kind = c.u8()?;
-    matches!(kind, 0..=8 | 13 | 14)
+    matches!(kind, 0..=9 | 13 | 14)
         .then_some(kind)
         .ok_or(Corrupt)
 }

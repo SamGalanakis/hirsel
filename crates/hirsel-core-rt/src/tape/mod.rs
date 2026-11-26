@@ -33,9 +33,12 @@ mod secret;
 mod tls;
 mod typed;
 pub(crate) use typed::{socket_parts, typed_socket};
+pub(crate) mod helper_replay;
+mod reader;
 pub(crate) mod units;
 mod unix;
 mod verdict;
+use reader::FrameReader;
 pub(crate) use verdict::format_verdict;
 use verdict::{FrameEvidence, IssueEvidence};
 pub(crate) mod writer;
@@ -176,14 +179,6 @@ unsafe impl Send for ReplayAbort {}
 // SAFETY: `sources` is immutable and pinned for the replay process's lifetime.
 unsafe impl Sync for ReplayAbort {}
 
-struct FrameReader {
-    source: ProviderFile,
-    blocks: StreamBlocks,
-    retained_block: Option<Retained<'static>>,
-    decoder: Decoder,
-    frames: std::vec::IntoIter<Frame>,
-}
-
 struct Replayer {
     reader: FrameReader,
     closes: Closes,
@@ -203,8 +198,6 @@ struct Replayer {
     alone: bool,
     /// The `UNIT_SPAWN`s replayed so far, numbering the next one's index.
     spawns: u64,
-    /// A replayed spawn delivered a stream that this replay leaves unread.
-    unreplayed: bool,
 }
 
 struct Live {
@@ -385,11 +378,9 @@ impl ReplayInput {
             .streams
             .iter()
             .find(|(_, name)| name.as_bytes() == unit.as_slice());
-        match found {
-            Some((0, name)) => Ok((0, name.clone())),
-            Some(_) => Err(OpenError::Refused(Refusal::HelperUnit)),
-            None => Err(OpenError::Refused(Refusal::NoUnit)),
-        }
+        found
+            .map(|(&stream, name)| (stream, name.clone()))
+            .ok_or(OpenError::Refused(Refusal::NoUnit))
     }
 }
 
@@ -459,9 +450,12 @@ impl Live {
         self.replayer.as_ref().map_or("root", |r| r.unit.as_str())
     }
 
-    /// If this is a launcher replay, write `replay: VERDICT at N` (plus the source
-    /// position under `--diagnose`) and exit 1 immediately so no program code,
-    /// cleanup or finalizer runs after the divergence or fault.
+    /// If this is a launcher replay, end this unit's replay at its verdict
+    /// `replay: VERDICT at N in UNIT` (plus the source position under
+    /// `--diagnose`) so no program code, cleanup or finalizer of the unit runs
+    /// after the divergence or fault. A helper's thread stops there; the
+    /// root's waits for every other started stream's verdict, writes the lines
+    /// and exits 1.
     pub(super) fn abort_replay(&self, fault: Fault, site: u64) {
         let Some(abort) = self.replay_abort else {
             return;
@@ -490,62 +484,13 @@ impl Live {
             );
             line.push(']');
         }
-        line.push('\n');
-        // SAFETY: `abort.stderr` is the launcher's stderr fd.
-        unsafe {
-            crate::os::diagnostic(abort.stderr, line.as_ptr(), line.len());
-            libc::_exit(1);
+        if self.replayer.as_ref().is_some_and(|r| r.stream != 0) {
+            units::verdicts::ended(self.unit(), Some(line));
+            units::verdicts::park();
         }
-    }
-}
-
-impl FrameReader {
-    fn new(source: ProviderFile, blocks: StreamBlocks) -> Self {
-        let mut reader = Self {
-            source,
-            blocks,
-            retained_block: None,
-            decoder: Decoder::default(),
-            frames: Default::default(),
-        };
-        reader.keep_block_storage();
-        reader
-    }
-
-    fn keep_block_storage(&mut self) {
-        self.retained_block = RETENTION.retain(self.blocks.buffer_capacity());
-        if self.retained_block.is_none() {
-            self.blocks.discard_buffer();
-        }
-    }
-
-    fn next(&mut self, at: u64) -> Result<Frame, Fault> {
-        loop {
-            if let Some(frame) = self.frames.next() {
-                if self.frames.as_slice().is_empty() {
-                    self.frames = Default::default();
-                }
-                return Ok(frame);
-            }
-            self.retained_block = None;
-            let decoded = match self
-                .blocks
-                .next(|offset, bytes| self.source.read_at(offset, bytes))
-            {
-                Err(ReadError::Format(s)) => Err(Fault::stopped(s, at)),
-                Err(ReadError::Source(e)) => Err(Fault::Io(e)),
-                Ok(None) => Err(Fault::Diverged(Divergence {
-                    at,
-                    kind: Mismatch::Extra,
-                })),
-                Ok(Some((flags, payload))) => self
-                    .decoder
-                    .block(payload, flags & END != 0)
-                    .map_err(Fault::from),
-            };
-            self.keep_block_storage();
-            self.frames = decoded?.into_iter();
-        }
+        units::verdicts::conclude(abort.stderr, Some(line));
+        // SAFETY: the replay ends here.
+        unsafe { libc::_exit(1) };
     }
 }
 
@@ -927,7 +872,10 @@ impl Tape {
                 )
             }
             TapeInput::Replay(replay) => {
-                let (stream, unit) = replay.chosen()?;
+                // `--unit` naming a helper replays that helper alone, and
+                // the root's stream is not opened (`run::invoke`).
+                let (stream, unit) = (0, String::from("root"));
+                replay.admit(revision, expect)?;
                 let ReplayInput {
                     source,
                     mut index,
@@ -937,18 +885,6 @@ impl Tape {
                     unit: alone,
                 } = replay;
                 let blocks = index.take(stream).expect("an indexed stream");
-                if stored.identity != expect.identity {
-                    return Err(OpenError::Refused(Refusal::Code));
-                }
-                if stored.revision != revision && !expect.across {
-                    return Err(OpenError::Refused(Refusal::Revision));
-                }
-                if expect.arg.is_some_and(|a| a != stored.arg) {
-                    return Err(OpenError::Refused(Refusal::Arg));
-                }
-                if stored.limit != expect.limit || stored.charge_policy != expect.charge_policy {
-                    return Err(OpenError::Refused(Refusal::Limit));
-                }
                 differs = stored.revision != revision;
                 let live = Live {
                     tape_id: stored.tape_id,
@@ -969,7 +905,7 @@ impl Tape {
                     sockets: BTreeMap::new(),
                     recorder: None,
                     replayer: Some(Replayer {
-                        reader: FrameReader::new(source, blocks),
+                        reader: FrameReader::open(source, blocks).map_err(OpenError::Unreadable)?,
                         closes: Closes::new(origin, stored.tape_id, stream),
                         lookahead: None,
                         taken: 0,
@@ -980,7 +916,6 @@ impl Tape {
                         streams,
                         alone: alone.is_some(),
                         spawns: 0,
-                        unreplayed: false,
                     }),
                 };
                 (
@@ -1158,10 +1093,10 @@ impl Tape {
             inner,
             open_resource: false,
         });
-        if live.mode == Mode::Record {
-            live.grants
-                .insert(live.objects.len(), (kind, stored.clone()));
-        }
+        // A value that carries the grant to another unit snapshots it, on
+        // replay as when recorded.
+        live.grants
+            .insert(live.objects.len(), (kind, stored.clone()));
         let h = handle(generation, live.objects.len());
         Ok((self.cell.provider, h, stored))
     }
@@ -1259,7 +1194,15 @@ fn finish(
         }
         truncated = rec.failed;
     }
-    if let (Some(ending), Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
+    let helper = live.replayer.as_ref().is_some_and(|rep| rep.stream != 0);
+    if let (Some(_), Ok(()), Some(rep), true) = (&deadlock, result, live.replayer.as_mut(), helper)
+    {
+        // A helper's stream ends with its own END: kind 3 for a deadlock.
+        let gap = live.schedule.events - live.schedule.last;
+        result = helper_replay::ended(rep, &helper::deadlock(gap, live.schedule.events));
+    }
+    if let (Some(ending), Ok(()), Some(rep), false) = (end, result, live.replayer.as_mut(), helper)
+    {
         result = match rep.next() {
             Ok(ref frame @ Frame::End { gap, .. }) if !live.schedule.at(gap) => Err(rep.compared(
                 Mismatch::Schedule,
@@ -1320,10 +1263,12 @@ fn finish(
     }
     if let Err(f) = result {
         live.abort_replay(f, 0);
-    } else {
-        live.refuse_unreplayed();
+    } else if helper && deadlock.is_some() {
+        units::verdicts::ended(live.unit(), None);
+    } else if !helper && end.is_some() {
+        live.conclude_sealed();
     }
-    if deadlock.is_some() && result.is_ok() && live.replay_abort.is_some() {
+    if !helper && deadlock.is_some() && result.is_ok() && live.replay_abort.is_some() {
         // Recorded deadlock matched and sealed on replay: exit 0.
         crate::coverage::exiting(0);
         // SAFETY: launcher replay sealed cleanly.

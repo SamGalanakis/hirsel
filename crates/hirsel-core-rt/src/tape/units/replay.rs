@@ -19,8 +19,8 @@ impl Live {
     }
 
     /// End the replay at what this build does not replay: `replay: refused:
-    /// WHY`, exit 2, as a refusal at open.
-    fn refuse_replay(&mut self, why: &str) {
+    /// WHY`, exit 2, as a refusal at open. It ends every unit's replay.
+    pub(in super::super) fn refuse_replay(&mut self, why: &str) {
         self.fault = Some(refuse(Fault::Corrupt));
         if let Some(abort) = self.replay_abort {
             let line = format!("replay: refused: {why}\n");
@@ -29,17 +29,6 @@ impl Live {
                 crate::os::diagnostic(abort.stderr, line.as_ptr(), line.len());
                 libc::_exit(2);
             }
-        }
-    }
-
-    /// The end of a full replay that left a started helper's stream unread:
-    /// refused, since this build replays no helper stream.
-    pub(in super::super) fn refuse_unreplayed(&mut self) {
-        if self.replayer.as_ref().is_some_and(|r| r.unreplayed) {
-            self.refuse_replay(
-                "a helper's stream is not replayed in this build: replay the root alone with \
-                 --unit root",
-            );
         }
     }
 }
@@ -52,8 +41,9 @@ pub(super) fn replaying<R>(group: Option<Group>, f: impl FnOnce(&mut Live) -> R)
 
 /// A replayed `UNIT_SPAWN` with its arguments, or why this build does not
 /// replay it: checked as a provider issue is. The helper's handle takes its
-/// ordinal, and the helper starts nothing. A delivered stream the tape does
-/// not hold is that child's `Truncated at 0`, unless the unit replays alone.
+/// ordinal, and the helper starts nothing: its stream replays as its own
+/// unit. A delivered stream the tape does not hold is that child's verdict
+/// `Truncated at 0`, unless the unit replays alone; the spawner goes on.
 pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'static str>) {
     replaying(group, |live| {
         let args = match args {
@@ -118,21 +108,13 @@ pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'st
             return;
         }
         let held = u32::try_from(out.value).is_ok_and(|s| rep.streams.contains_key(&s));
-        if held {
-            rep.unreplayed = true;
+        if held || live.replay_abort.is_none() {
             return;
         }
         // The missing stream's verdict names the child, at its position 0.
         let child = format!("{}.{index}", rep.unit);
-        live.fault = Some(refuse(Fault::Truncated(0)));
-        if let Some(abort) = live.replay_abort {
-            let line = format!("{}\n", format_verdict(Fault::Truncated(0), 0, &child));
-            // SAFETY: `abort.stderr` is the launcher's stderr fd.
-            unsafe {
-                crate::os::diagnostic(abort.stderr, line.as_ptr(), line.len());
-                libc::_exit(1);
-            }
-        }
+        let line = format_verdict(Fault::Truncated(0), 0, &child);
+        super::verdicts::unstarted(&child, line);
     });
 }
 
@@ -212,7 +194,12 @@ pub(crate) fn due(
         let packed = key
             .and_then(&layout)
             .ok_or(Unpacked::Layout)
-            .and_then(|(bytes, owners)| packed(&value, bytes, &owners));
+            .and_then(|(bytes, owners)| {
+                let held =
+                    &mut |_: u64, _: &mut format::Cursor<'_>| Err(Unpacked::Unsupported(HELD));
+                let bytes = bytes as usize;
+                packed(&value, vec![0; bytes], (0, bytes), &owners, held)
+            });
         match (key, packed) {
             (Some(key), Ok(packed)) => {
                 live.takes.helpers.remove(&key);
@@ -258,23 +245,39 @@ fn unsupported(arrival: &Arrival<'_>) -> &'static str {
     }
 }
 
-enum Unpacked {
+pub(in crate::tape) enum Unpacked {
     /// The value does not have the receiving type's layout.
     Layout,
     Unsupported(&'static str),
 }
 
-/// A value's wire form (`helper::value`) packed as a crossing packs it for
-/// the type of `bytes` flat bytes with `owners`: the flat bytes with each
-/// list's length, then each list's elements in owner-row order.
-fn packed(value: &[u8], bytes: u64, owners: &[[u64; 4]]) -> Result<Vec<u8>, Unpacked> {
+impl From<format::Corrupt> for Unpacked {
+    fn from(_: format::Corrupt) -> Self {
+        Unpacked::Layout
+    }
+}
+
+/// A value's wire form (`helper::value`) packed into `flat` as a crossing
+/// packs it: its `len` plain bytes at `at`, each owner row of `owners` (offsets in
+/// `flat`) filled, then each list's elements in owner-row order. A list's
+/// length is written in its row; every other owner word is what `word` reads
+/// from its part, given the row's kind.
+pub(in crate::tape) fn packed(
+    value: &[u8],
+    mut flat: Vec<u8>,
+    (at, len): (usize, usize),
+    owners: &[[u64; 4]],
+    word: &mut dyn FnMut(u64, &mut format::Cursor<'_>) -> Result<u64, Unpacked>,
+) -> Result<Vec<u8>, Unpacked> {
     let mut c = format::Cursor::new(value);
-    let plain = c.bytes().map_err(|_| Unpacked::Layout)?;
-    if plain.len() as u64 != bytes {
+    let plain = c.bytes()?;
+    if plain.len() != len {
         return Err(Unpacked::Layout);
     }
-    let mut flat = plain.to_vec();
-    let parts = c.varint().map_err(|_| Unpacked::Layout)?;
+    flat.get_mut(at..at + len)
+        .ok_or(Unpacked::Layout)?
+        .copy_from_slice(plain);
+    let parts = c.varint()?;
     let rows = live(owners, &|at, width| {
         let mut word = [0u8; 8];
         let at = at as usize;
@@ -299,7 +302,12 @@ fn packed(value: &[u8], bytes: u64, owners: &[[u64; 4]]) -> Result<Vec<u8>, Unpa
     let mut lists = BTreeMap::new();
     for ([at, kind, element, _], inner) in held {
         if kind != SEQ {
-            return Err(Unpacked::Unsupported(HELD));
+            let w = word(kind, &mut c)?;
+            let at = at as usize;
+            flat.get_mut(at..at + 8)
+                .ok_or(Unpacked::Layout)?
+                .copy_from_slice(&w.to_le_bytes());
+            continue;
         }
         // Only padding and case guards within the elements: no owner words.
         let owner = |r: &[u64; 4]| r[1] & !ELEMENT != PADDING && r[1] & CASE == 0;

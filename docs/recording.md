@@ -338,10 +338,11 @@ recorded outcome.
 
 ## Unit recordings
 
-Unit recording is being rolled out incrementally: per-helper streams, entries, host frames,
-`END` frames, takes, and unit operations are implemented, while per-stream helper replay
-remains in progress (see [units](spec/tasks.md#conc-15-units) for the current unbuilt list).
-The rest of this section describes the full unit-recording design.
+Per-helper streams, entries, host frames, `END` frames, takes and unit operations are
+recorded, and each helper stream replays as its own unit from its entry. Some takes and
+handles do not replay yet: [What this build replays](#replay-of-a-run-with-helpers) lists
+them, and [units](spec/tasks.md#conc-15-units) lists what is unbuilt. The rest of this
+section describes the full unit-recording design.
 
 A program that calls `task.spawn_unit` runs as several units, and each unit has its own
 order of events with no order across units ([event order](spec/tasks.md#conc-10-event-order)).
@@ -518,9 +519,9 @@ crosses to another unit, in an item, an entry or a helper's result. The rules, a
   older tape is read under the new rules.
 
 A `UdpSocket` crosses under recording too, and a value holding one is cut (`HANDLE`) rather
-than written. A helper's stream is not replayed yet ([Replay of a run with helpers](#replay-of-a-run-with-helpers)),
-so the receiving unit's reads are checked from its stream: the arrival's snapshot, and the
-deliveries on its new ordinal.
+than written. The receiving unit's reads are checked from its own stream
+([Replay of a run with helpers](#replay-of-a-run-with-helpers)): the arrival's snapshot,
+and the deliveries on its new ordinal.
 
 **Takes.** A unit **takes** an arrival when it applies it: when the arrival leaves the
 unit's queue of arrivals that have reached it and changes the unit's state. That happens in
@@ -673,9 +674,9 @@ wait for the parent to reach the spawn, and it may start streams in any order or
 batches, since none depends on another. A helper whose entry's code descriptor does not
 resolve in the replaying build, which only `--diagnose` across revisions can meet, ends
 `Diverged(Op)` at position 0 of its stream. A full replay requires a stream for every stream
-number a replayed `UNIT_SPAWN` delivery names. For one the index does not hold, it writes
-`replay: Truncated at 0 in UNIT`, naming it from the spawner's name and spawn index, and
-exits 1. A stream whose parent stream is absent is named `?.<stream number>` and sorts
+number a replayed `UNIT_SPAWN` delivery names. For one the index does not hold, that unit's
+verdict is `replay: Truncated at 0 in UNIT`, named from the spawner's name and spawn index,
+and the spawner replays on. A stream whose parent stream is absent is named `?.<stream number>` and sorts
 last. `--unit` skips the missing-stream check. Each unit replays against its own stream alone:
 
 - every take comes from its `TAKE` frames, at their positions. Arrivals that other replaying
@@ -691,18 +692,21 @@ them. A replay at any worker count of a recording made at any other worker count
 same observations in every unit. `hirsel replay app --tape PATH --unit NAME` replays one
 unit's stream alone and leaves the other streams unread.
 
-**What this build replays.** The root's stream replays as above when the root's helper ends
-return a value of plain bytes and lists of plain bytes. A helper end's `TAKE` that names
+**What this build replays.** Every stream replays as above, each helper on a thread of its
+own from its stream's entry, when its entry's value holds plain bytes, lists of plain bytes,
+functions and capabilities, and its helper ends return a value of plain bytes and lists of
+plain bytes. A helper's entry capability becomes an object of the helper's stream, by the
+ordinal the entry gives it. When every started stream has its verdict, the replay writes the
+lines that are not `Sealed`, as below, and exits 1 if it wrote any, else 0. A helper end's `TAKE` that names
 no helper the unit spawned, or carries a value of another layout than the handle's result
 type, ends the replay `Diverged(Take)` at the `TAKE`. A kind 0 take applies at the unit's
 next take point; a kind 1 take applies at the scheduler's pump, which pumps instead of
 waiting while that `TAKE` is the unit's next frame, since the unit's waits for its helpers
 are then not outside waits. What this build does not replay yet stops the replay with
-`replay: refused: WHY` and exit 2, as a refusal at open does: a helper stream (`--unit`
-naming a helper; a full replay whose helper streams are present, at the root's end, so the
-missing-stream verdict above still wins); a helper end that failed, was cancelled or hands
-its owner survivors; a result holding a handle or a function; a helper entry holding a
-handle; and every other take kind. `UNIT_CANCEL`, connections and the drops of clients and
+`replay: refused: WHY` and exit 2 for the whole replay, as a refusal at open does: a helper
+end that failed, was cancelled or hands its owner survivors; a result holding a handle or a
+function; a helper entry holding a handle other than a capability (a `Secret`, a key object,
+a connection, a socket); and every other take kind. `UNIT_CANCEL`, connections and the drops of clients and
 inboxes reach replay as frames it does not expect and end it `Diverged`. A package replay
 (`hirsel replay PACKAGE`) refuses `--unit`: only the operator replay of a pinned image
 replays one unit. These limits close as the helper streams' replay lands.
@@ -847,7 +851,7 @@ receiving stream as a `varint`, then:
 | 2 `Socket` | direction `u8` (0 made by `CONNECT`, 1 by `ACCEPT`); peer address, 19 bytes as a `LISTEN` delivery writes one; TLS `u8` 0, or 1 followed by the `TLS_CONNECT` success payload as `bytes`; state `u8`, bit 0 end of stream received and bit 1 reset received, as the sending unit's stream showed them (sockets that cross, above), other bits `Corrupt`; peer address for `CONNECT` the address it named |
 | 3 `Listener` | direction `u8`, always 0, any other value is `Corrupt`; bound address, 19 bytes |
 | 4 `UdpSocket` | direction `u8`, always 0, any other value is `Corrupt`; bound address, 19 bytes; peer `u8` 0, or 1 followed by the connected address, 19 bytes |
-| 5 capability | grant kind `u8` in `GrantKind`'s numbering (`Dir` 0, `Net` 1, `Clock` 2, `Random` 3, `Stdout` 4, `Stderr` 5, `Stdin` 6, `Env` 7, `Process` 8, `Exec` 13, `Cred` 14; a `random_tape` cell is `Random`), as its `GRANT` frame writes it; then `bytes`: for `Net` its rule count `varint` and rules as the header's grant snapshot writes them after the `Net` kind byte; for `Env` its record as the header writes it after the `Env` kind byte; for `Cred` its record after its kind byte; for `Exec` the profile snapshot; for `Stdin`, `Stdout` and `Stderr` the terminal byte; for every other kind nothing |
+| 5 capability | grant kind `u8` in `GrantKind`'s numbering (`Dir` 0, `Net` 1, `Clock` 2, `Random` 3, `Stdout` 4, `Stderr` 5, `Stdin` 6, `Env` 7, `Process` 8, `Tasks` 9, `Exec` 13, `Cred` 14; a `random_tape` cell is `Random`), as its `GRANT` frame writes it; then `bytes`: for `Net` its rule count `varint` and rules as the header's grant snapshot writes them after the `Net` kind byte; for `Env` its record as the header writes it after the `Env` kind byte; for `Cred` its record after its kind byte; for `Exec` the profile snapshot; for `Stdin`, `Stdout` and `Stderr` the terminal byte; for every other kind nothing |
 | 6 virtual capability | grant kind `u8`, as for tag 5; home stream `u32` |
 | 7 `Secret` | designation: origin kind `u8`, stream `u32`, ordinal `varint`; canonical policy text `bytes` |
 | 8 `KeyShare` | media origin (below); group `u8` (`X25519` 0, `P256` 1) |

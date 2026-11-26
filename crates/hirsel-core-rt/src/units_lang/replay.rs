@@ -93,3 +93,69 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
         hctx.end_helper(Some(ret), false);
     }
 }
+
+/// Start a helper stream's replay as its own unit, on a thread of its own,
+/// as a spawn starts a helper that runs: its context, its input unpacked
+/// from the entry, its code and its tape. No unit owns it: its end is
+/// published to an owner that never takes it, since its parent's replay
+/// takes the end from its own stream.
+/// # Safety
+/// `context` is the root's, live for the run.
+pub(crate) unsafe fn start_helper(
+    context: *const Context,
+    ready: crate::tape::helper_replay::Ready,
+) {
+    let owner = Box::leak(Box::new(UnitCtx::unfunded()));
+    let (_, hctx) = owner.spawn_unit();
+    let crate::tape::helper_replay::Ready {
+        helper,
+        entry,
+        data,
+        n,
+        steps,
+    } = ready;
+    // SAFETY: by the contract.
+    let (run, foreign, map_keys, registry) = unsafe {
+        (
+            (*context).run,
+            (*context).foreign,
+            (*context).map_keys(),
+            (*context)
+                .host_files
+                .as_ref()
+                .map_or_else(crate::host_file::Registry::default, |files| {
+                    files.registry.for_unit()
+                }),
+        )
+    };
+    let job = SendPtr((
+        hctx, data, entry, run, foreign, map_keys, registry, n, steps, helper,
+    ));
+    let start = move || {
+        let job = job;
+        let (hctx, data, entry, run, foreign, map_keys, registry, n, steps, helper) = job.0;
+        helper_main(
+            hctx,
+            data,
+            None,
+            entry.x.bytes,
+            entry.x.owned(),
+            entry.r.bytes,
+            entry.r.owned(),
+            run,
+            foreign,
+            map_keys,
+            registry,
+            entry.bridge,
+            entry.layout,
+            n,
+            steps,
+            Arc::new(HelperShared {}),
+            Some(helper),
+        );
+    };
+    std::thread::Builder::new()
+        .name("hirsel-unit".into())
+        .spawn(start)
+        .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
+}

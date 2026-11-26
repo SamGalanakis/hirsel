@@ -106,6 +106,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl7_helpers_record_their_own_streams",
         "native::tests::spawn_entries_start_each_helper_as_its_spawn_does",
         "native::tests::u4_root_replays_its_helper_takes",
+        "native::tests::u4d_helper_streams_replay_as_units",
         "native::tests::rl9_sent_items_match_their_takes",
         "native::tests::rl8_take_positions_natively",
         "native::tests::rl9_shared_crosses_into_a_helper",

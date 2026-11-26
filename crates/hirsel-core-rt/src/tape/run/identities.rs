@@ -90,6 +90,24 @@ pub(crate) fn identity_of(code: u64) -> Option<&'static [u8]> {
     }
 }
 
+/// The code word of the function whose identity is `identity_bytes`, or
+/// `None` when no descriptor of the link has it: a helper stream's entry
+/// names its function by identity, and a replay starts it at this word.
+pub(crate) fn code_of(identity_bytes: &[u8]) -> Option<u64> {
+    let index = INDEX.load(Ordering::Acquire);
+    if index.is_null() {
+        return None;
+    }
+    // SAFETY: install's contract: a pinned static index of descriptors.
+    unsafe {
+        let count = index.read() as usize;
+        let rows = std::slice::from_raw_parts(index.add(1).cast::<*const u64>(), count);
+        rows.iter()
+            .find(|&&d| identity(d) == identity_bytes)
+            .map(|&d| d.read())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

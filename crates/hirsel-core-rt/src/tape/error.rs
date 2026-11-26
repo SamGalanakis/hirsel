@@ -71,9 +71,6 @@ pub enum Refusal {
     Limit,
     Damaged(u64),
     HeaderTooLarge,
-    /// `--unit` names a helper: replaying a helper from its stream's entry
-    /// needs the link's spawn-entry table, which this build does not have.
-    HelperUnit,
     /// `--unit` names no stream the tape holds.
     NoUnit,
 }

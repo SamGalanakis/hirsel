@@ -47,7 +47,7 @@ use crossing::{TapeHelper, tape_group};
 use ending::end_take;
 pub(crate) mod packing;
 #[cfg(feature = "record")]
-mod replay;
+pub(crate) mod replay;
 mod sockets;
 use sockets::{attach_sockets, detach_sockets, socket_offsets, take_sockets};
 pub(crate) mod takes;

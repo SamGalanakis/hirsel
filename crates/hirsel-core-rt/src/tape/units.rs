@@ -13,6 +13,7 @@ use std::collections::HashMap;
 pub(crate) mod crossing;
 pub(crate) mod item_grants;
 pub(crate) mod replay;
+pub(crate) mod verdicts;
 
 /// One unit's take-point count and the ordinals of its unit objects.
 #[derive(Default)]

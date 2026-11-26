@@ -10,7 +10,7 @@ compiled program can reach. A kept reference to a name off every allowlist is an
 undefined symbol and fails the link; one the program can never reach is
 stripped, as it is in a shipped program.
 
-    darwin_import_law.py KIT LLVM ARCHIVE...
+    darwin_import_law.py KIT LLVM TARGET ARCHIVE...
 
 KIT is the link kit tree (manifest.json, ld.lld, aarch64-apple-darwin/*.tbd).
 The pinned LLVM's llvm-nm reads the roots and the linked imports.
@@ -21,9 +21,6 @@ import json
 import subprocess
 import sys
 import tempfile
-
-DARWIN = 'aarch64-apple-darwin'
-
 
 def nm(llvm, *args):
     run = subprocess.run(
@@ -47,15 +44,16 @@ def roots(llvm, archive):
 
 
 def main():
-    if len(sys.argv) < 4:
-        raise SystemExit('usage: darwin_import_law.py KIT LLVM ARCHIVE...')
+    if len(sys.argv) < 5:
+        raise SystemExit('usage: darwin_import_law.py KIT LLVM TARGET ARCHIVE...')
     kit = Path(sys.argv[1]).resolve()
     llvm = Path(sys.argv[2]).resolve()
-    target = json.loads((kit / 'manifest.json').read_text())['targets'][DARWIN]
+    triple = sys.argv[3]
+    target = json.loads((kit / 'manifest.json').read_text())['targets'][triple]
     floor = target['floor']
-    stubs = [str(kit / DARWIN / library) for library in target['libraries']]
+    stubs = [str(kit / triple / library) for library in target['libraries']]
     failed = False
-    for archive in (Path(arg).resolve() for arg in sys.argv[3:]):
+    for archive in (Path(arg).resolve() for arg in sys.argv[4:]):
         if not archive.is_file() or archive.stat().st_size == 0:
             raise SystemExit(f'darwin import law: no archive at {archive}')
         names = roots(llvm, archive)
@@ -66,7 +64,7 @@ def main():
             image = temporary / 'image.dylib'
             link = subprocess.run(
                 [str(kit / 'ld.lld'), '-flavor', 'darwin', '-arch', 'arm64',
-                 '-platform_version', 'macos', floor, floor, '-dylib', '-dead_strip',
+                 '-platform_version', target['platform_version_name'], floor, floor, '-dylib', '-dead_strip',
                  '-dead_strip_dylibs', '-exported_symbols_list', str(exported),
                  *[arg for name in names for arg in ('-u', name)],
                  str(archive), *stubs, '-o', str(image)],

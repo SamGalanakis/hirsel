@@ -3,6 +3,7 @@
 use super::{Member, Symbol, c_name};
 use crate::code_admission::AdmissionError;
 use hirsel_core_ir::decode::{Debit, DecodeResult};
+use hirsel_core_layout::Target;
 
 // Mach-O, as LLVM's `BinaryFormat/MachO.h` names it.
 pub(super) const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -12,9 +13,6 @@ const CPU_SUBTYPE_ARM64_ALL: u32 = 0;
 const LC_SEGMENT_64: u32 = 0x19;
 const LC_SYMTAB: u32 = 0x2;
 const LC_BUILD_VERSION: u32 = 0x32;
-const PLATFORM_MACOS: u32 = 1;
-/// The target's floor, macOS 26.0 (macOS decision D2), as `xxxx.yy.zz` nibbles.
-const MACOS_FLOOR: u32 = 26 << 16;
 const SECTION_TYPE: u32 = 0xff;
 const S_REGULAR: u32 = 0x0;
 const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
@@ -305,7 +303,8 @@ pub(super) fn parse_member(
         .map(|(_, command)| (u32_at(command, 8), u32_at(command, 12)));
     let build = match (builds.next(), builds.next()) {
         (Some((Some(platform), Some(minos))), None) => {
-            platform == PLATFORM_MACOS && minos <= MACOS_FLOOR
+            let apple = Target::Aarch64Darwin.apple().unwrap();
+            platform == apple.macho_platform && minos <= apple.macho_minos
         }
         _ => false,
     };
@@ -511,12 +510,16 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
                 .and_then(|archive| archive.check_headers(object, &leaf, target, None))
                 .map_err(|error| error.to_string())
         };
-        let arm64 = "arm64-apple-macos26.0";
+        let apple = hirsel_core_layout::Target::Aarch64Darwin.apple().unwrap();
+        let arm64 = apple.llvm_triple;
+        let arm64e = arm64.replacen("arm64", "arm64e", 1);
+        let x86 = arm64.replacen("arm64", "x86_64", 1);
+        let later = format!("{arm64}.1");
         admit(build(arm64, "")).unwrap();
         for (triple, extra, feature) in [
-            ("arm64e-apple-macos26.0", "", None),
-            ("arm64-apple-macos26.1", "", None),
-            ("x86_64-apple-macos26.0", "", None),
+            (arm64e.as_str(), "", None),
+            (later.as_str(), "", None),
+            (x86.as_str(), "", None),
             (
                 arm64,
                 "__asm__(\".linker_option \\\"-lz\\\"\");\n",
@@ -577,12 +580,15 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
 
         // Imports: the recipe's text stub is the only system library.
         let stub = fixture.path().join("libSystem.tbd");
+        let tbd_target = format!("arm64-{}", apple.platform_version_name);
         std::fs::write(
             &stub,
-            "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\n\
+            format!(
+                "--- !tapi-tbd\ntbd-version: 4\ntargets: [ {tbd_target} ]\n\
              install-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1\nexports:\n  \
-             - targets: [ arm64-macos ]\n    symbols: [ '_fcntl' ]\n\
-             undefineds:\n  - targets: [ arm64-macos ]\n    symbols: [ '_fsync' ]\n...\n",
+             - targets: [ {tbd_target} ]\n    symbols: [ '_fcntl' ]\n\
+             undefineds:\n  - targets: [ {tbd_target} ]\n    symbols: [ '_fsync' ]\n...\n"
+            ),
         )
         .unwrap();
         let runtime = fixture.path().join("runtime.o");

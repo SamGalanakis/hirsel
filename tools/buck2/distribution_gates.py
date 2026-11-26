@@ -51,7 +51,7 @@ def distribution_gates(out, call, Raw, reads, slots):
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="check-installer", script="//tools/toolchain-dist:check-installer",
                             data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py",
-                                  "//tools/toolchain-dist:product.toml"]))
+                                  "//tools/toolchain-dist:product.toml", "tools/native-toolchain/apple-targets.json"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present(reads)],
                             data=["tools/tests/distribution_notices.py", "//tools/toolchain-dist:build",

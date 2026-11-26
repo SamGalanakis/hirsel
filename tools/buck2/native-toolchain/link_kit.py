@@ -76,11 +76,6 @@ TARGETS = {
 # stopped exporting `__libc_memalign` from the loader.
 REMOVED = {("ld", "__libc_memalign")}
 
-# aarch64-apple-darwin: the macOS floor (docs/spec/reserved.md R5) and the names the
-# allowlist may never carry, because plain fsync does not flush the drive cache on
-# Darwin (STORE-SPEC §3.3c: F_FULLFSYNC).
-DARWIN = "aarch64-apple-darwin"
-DARWIN_FLOOR = "26.0"
 # Each Darwin library the kit stubs and its install name. A program links all of them
 # with -dead_strip_dylibs, so a framework it never reaches leaves no load command.
 DARWIN_LIBRARIES = {
@@ -244,12 +239,12 @@ def cross_check(abilists, zig, index, ours, name):
         raise SystemExit("\n".join(problems))
 
 
-def tbd_exports(text, arches=("arm64", "arm64e")):
-    """Every symbol a TBD v4 file (all its documents) exports for macOS on `arches`."""
+def tbd_exports(text, platform):
+    """Every symbol a TBD v4 file exports for the arm64 or arm64e platform."""
     found = set()
     item = re.compile(r"-\s*targets:\s*\[([^\]]*)\]((?:\s*[a-z-]+:\s*\[[^\]]*\])*)")
     for targets, lists in item.findall(text):
-        if not {t.strip() for t in targets.split(",")} & {f"{arch}-macos" for arch in arches}:
+        if not {t.strip() for t in targets.split(",")} & {f"arm64-{platform}", f"arm64e-{platform}"}:
             continue
         for kind, names in re.findall(r"([a-z-]+):\s*\[([^\]]*)\]", lists):
             if kind in ("symbols", "weak-symbols", "thread-local-symbols"):
@@ -257,7 +252,7 @@ def tbd_exports(text, arches=("arm64", "arm64e")):
     return found
 
 
-def darwin_library(library, allowlist, zig_tbd):
+def darwin_library(library, allowlist, zig_tbd, platform):
     """The kit's `<library>.tbd` text from its allowlist, refusing a banned name, an
     unsorted list and, for libSystem, a name Zig's libSystem.tbd does not export for
     arm64 macOS."""
@@ -266,35 +261,39 @@ def darwin_library(library, allowlist, zig_tbd):
     if names != sorted(set(names)):
         problems.append(f"{library}.symbols is not sorted and unique")
     if library == "libSystem":
-        exported = tbd_exports(zig_tbd)
+        exported = tbd_exports(zig_tbd, platform)
         problems += [f"{name}: not exported by libSystem for arm64 macOS (Zig's libSystem.tbd)"
                      for name in names if name not in exported]
     if problems:
         raise SystemExit("\n".join(problems))
     listed = ", ".join(f"'{name}'" for name in names)
-    return ("--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\n"
+    return (f"--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-{platform} ]\n"
             f"install-name: '{DARWIN_LIBRARIES[library]}'\ncurrent-version: 1\nexports:\n"
-            f"  - targets: [ arm64-macos ]\n    symbols: [ {listed} ]\n...\n"), len(names)
+            f"  - targets: [ arm64-{platform} ]\n    symbols: [ {listed} ]\n...\n"), len(names)
 
 
-def darwin_kit(output, allowlists, zig_tbd):
+def darwin_kit(output, allowlists, zig_tbd, apple):
     """Write the aarch64-apple-darwin row's text stubs under `output` and return
     its manifest row. Both the Linux kit and a Mac host's own kit
     (tools/toolchain-dist/darwin_host.py) are made here."""
     if set(allowlists) != set(DARWIN_LIBRARIES):
         raise SystemExit(f"--darwin-symbols must name exactly {sorted(DARWIN_LIBRARIES)}")
-    (output / DARWIN).mkdir()
+    target = output / apple["triple"]
+    target.mkdir()
+    platform = apple["platform_version_name"]
     files = {}
     for library in DARWIN_LIBRARIES:
-        tbd, count = darwin_library(library, Path(allowlists[library]).read_text(), zig_tbd)
-        (output / DARWIN / f"{library}.tbd").write_text(tbd)
+        tbd, count = darwin_library(library, Path(allowlists[library]).read_text(), zig_tbd, platform)
+        (target / f"{library}.tbd").write_text(tbd)
         files[f"{library}.tbd"] = {
-            "sha256": sha256(output / DARWIN / f"{library}.tbd"), "symbols": count,
+            "sha256": sha256(target / f"{library}.tbd"), "symbols": count,
             "source": f"tools/native-toolchain/darwin/{library}.symbols",
             "checked": ("exported for arm64 macOS by Zig's libSystem.tbd; no fsync or fdatasync"
                         if library == "libSystem" else "no Zig stub; checked on the Mac day")}
     return {
-        "floor": DARWIN_FLOOR,
+        "floor": apple["floor"],
+        "llvm_triple": apple["llvm_triple"],
+        "platform_version_name": platform,
         "libraries": [f"{library}.tbd" for library in DARWIN_LIBRARIES],
         "files": files,
     }
@@ -316,6 +315,7 @@ def main():
     parser.add_argument("--darwin-symbols", action="append", required=True,
                         help="<library>=<allowlist>, once for each of DARWIN_LIBRARIES")
     parser.add_argument("--zig-libsystem", type=Path, required=True, help="Zig's libSystem.tbd")
+    parser.add_argument("--apple-target", type=Path, required=True)
     parser.add_argument("--deb", action="append", default=[], help="<role>:<arch>=<deb>")
     parser.add_argument("--pins", type=Path, required=True, help="the lock naming each input's URL")
     parser.add_argument("--output", type=Path, required=True)
@@ -485,7 +485,8 @@ def main():
     # aarch64-apple-darwin: one generated text stub; S5's recipe links it with
     # `ld.lld -flavor darwin -platform_version macos <floor> <floor>`.
     allowlists = dict(spec.split("=", 1) for spec in args.darwin_symbols)
-    manifest["targets"][DARWIN] = darwin_kit(output, allowlists, args.zig_libsystem.read_text())
+    apple = json.loads(args.apple_target.read_text())
+    manifest["targets"][apple["triple"]] = darwin_kit(output, allowlists, args.zig_libsystem.read_text(), apple)
     write_manifest(output, manifest)
 
 

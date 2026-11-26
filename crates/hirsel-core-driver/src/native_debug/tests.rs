@@ -908,9 +908,15 @@ fn link_macho(
         schema: 0,
         target: Target::Aarch64Darwin.triple().into(),
         linker: linker.to_owned(),
-        args: ["-flavor", "darwin", "-arch", "arm64", "-platform_version"]
+        args: ["-flavor", "darwin", "-arch", "arm64"]
             .into_iter()
-            .chain(["macos", "26.0", "26.0", "-adhoc_codesign", "-e"])
+            .chain(
+                Target::Aarch64Darwin
+                    .apple()
+                    .unwrap()
+                    .platform_version_args(),
+            )
+            .chain(["-adhoc_codesign", "-e"])
             .chain([entry, crate::tool_inputs::INPUT_MARKER])
             .map(str::to_owned)
             .collect(),

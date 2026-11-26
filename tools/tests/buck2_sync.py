@@ -26,6 +26,9 @@ class ExecutorConfiguration(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.local = self.root / '.buckconfig.local'
+        source = self.root / sync.apple_records.SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_bytes((sync.ROOT / sync.apple_records.SOURCE).read_bytes())
 
     def test_missing_execution_configuration_is_not_created(self):
         self.assertFalse(sync.prepare.configure_test_executor(self.root))
@@ -51,6 +54,62 @@ class ExecutorConfiguration(unittest.TestCase):
              patch.object(sys, 'argv', ['sync.py', '--if-stale']):
             self.assertEqual(sync.main(), 0)
         self.assertIn(f'v2_test_executor = {self.root}/tools/buck2/test_executor.py', self.local.read_text())
+
+
+class AppleTargetRecords(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / sync.apple_records.SOURCE
+        self.source.parent.mkdir(parents=True)
+        self.source.write_bytes((sync.ROOT / sync.apple_records.SOURCE).read_bytes())
+
+    def run_sync(self, *flags):
+        reindeer = self.root / 'reindeer'
+        reindeer.touch()
+        with patch.object(sync, 'ROOT', self.root), patch.object(sync, 'REINDEER', reindeer), \
+             patch.object(sync.generated, 'stale', return_value=[]), \
+             patch.object(sys, 'argv', ['sync.py', *flags]):
+            self.assertEqual(sync.main(), 0)
+
+    def test_missing_cpu_row(self):
+        source = json.loads(self.source.read_text())
+        source['targets']['ios-simulator']['floor'] = '99.0'
+        self.source.write_text(json.dumps(source))
+        with self.assertRaisesRegex(SystemExit, r'ios-simulator: no cpu_by_floor row for \(ios, 99\.0\)'):
+            self.run_sync('--if-stale')
+        self.assertFalse((self.root / sync.apple_records.RUST).exists())
+        self.assertFalse((self.root / sync.apple_records.STARLARK).exists())
+
+    def test_generated_values(self):
+        self.run_sync('--if-stale')
+        rust = self.root / sync.apple_records.RUST
+        starlark = self.root / sync.apple_records.STARLARK
+        rows = json.loads(starlark.read_text().split('APPLE_TARGETS = ', 1)[1])
+        expected = {
+            'macos': ('MACOS', '26.0', 1, 'apple-m1', 'arm64-apple-macos26.0'),
+            'ios': ('IOS', '26.0', 2, 'apple-a12', 'arm64-apple-ios26.0'),
+            'ios-simulator': ('IOS_SIMULATOR', '26.0', 7, 'apple-a12', 'arm64-apple-ios26.0-simulator'),
+        }
+        rust_rows = rust.read_text()
+        fields = ('floor', 'macho_platform', 'cpu', 'llvm_triple')
+        self.assertEqual(set(rows), set(expected))
+        for name, (constant, *values) in expected.items():
+            with self.subTest(target=name):
+                self.assertEqual([rows[name][field] for field in fields], values)
+                row = rust_rows.split(f'const {constant}: AppleRecord = AppleRecord {{\n', 1)[1].split('};', 1)[0]
+                for field, value in zip(fields, values, strict=True):
+                    self.assertIn(f'    {field}: {json.dumps(value)},', row.splitlines())
+        self.run_sync('--check')
+        for output in (rust, starlark):
+            with self.subTest(stale=output.name):
+                content = output.read_text()
+                output.write_text(content + '\n')
+                with self.assertRaisesRegex(SystemExit, f'stale Apple target records: .*{output.name}'):
+                    self.run_sync('--check')
+                self.assertEqual(output.read_text(), content + '\n')
+                output.write_text(content)
 
 
 class ProductionFeatures(unittest.TestCase):

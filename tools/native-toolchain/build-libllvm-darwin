@@ -16,7 +16,7 @@
 # installation, so the linker's one search path is @loader_path/../lib and the dylib
 # has none. Configuration: Release without assertions, targets X86 and AArch64,
 # zlib on (the SDK's libz), zstd, libxml2, libedit, ffi, z3 and libpfm off, no
-# profile, LTO or BOLT; minos is the link kit's DARWIN_FLOOR and build paths are
+# profile, LTO or BOLT; minos comes from the macOS target record and build paths are
 # mapped out of the binaries. The result loads only libSystem, libc++ and libz.
 #
 # Run once per pin change on an Apple Silicon Mac at or above the floor, with the
@@ -44,10 +44,10 @@ dir="$(cd "$1" && pwd)"
 jobs=${JOBS:-4}
 version="$(lock_value llvm_version)"
 major=${version%%.*}
-library_path="$(python3 "$here/../toolchain-dist/product.py" llvm-path aarch64-apple-darwin)"
+apple=$(python3 "$here/../buck2/apple_records.py" macos triple floor)
+read -r triple floor <<< "$apple"
+library_path="$(python3 "$here/../toolchain-dist/product.py" llvm-path "$triple")"
 library="${library_path##*/}"
-floor="$(sed -n 's/^DARWIN_FLOOR = "\(.*\)"$/\1/p' "$here/../buck2/native-toolchain/link_kit.py")"
-[[ -n "$floor" ]] || fail "link_kit.py has no DARWIN_FLOOR"
 build="$dir/build"
 tools="llvm-config llvm-ar llvm-objdump"
 stage="$dir/stage"
@@ -68,7 +68,7 @@ if (( $# == 1 )); then
     -DCMAKE_C_COMPILER="$(xcrun --find clang)" -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
     -DCMAKE_OSX_SYSROOT="$sdk" -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$floor" \
     -DCMAKE_C_FLAGS="$flags" -DCMAKE_CXX_FLAGS="$flags" \
-    -DLLVM_HOST_TRIPLE=aarch64-apple-darwin -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-apple-darwin \
+    -DLLVM_HOST_TRIPLE="$triple" -DLLVM_DEFAULT_TARGET_TRIPLE="$triple" \
     -DLLVM_TARGETS_TO_BUILD='X86;AArch64' -DLLVM_ENABLE_PROJECTS=lld \
     -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON \
     -DLLVM_ENABLE_ZLIB=FORCE_ON -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_LIBEDIT=OFF \

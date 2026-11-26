@@ -4,41 +4,40 @@ load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
+load(":apple.bzl", "APPLE_TARGETS")
 load(":llvm.bzl", "llvm_cxx_tools", "llvm_tree", "source_files")
 load(":rust.bzl", "rust_toolchain", "trace_std")
 
 LLVM_HOST = HOSTS["x86_64-unknown-linux-gnu"]
 LLVM_LIBRARY = LLVM_HOST["llvm_library"]
 LLVM_SONAME = LLVM_LIBRARY.split("/")[-1]
+MACOS = APPLE_TARGETS["macos"]
+MACOS_TRIPLE = MACOS["triple"]
+MACOS_DEPLOYMENT = {MACOS["deployment_env"]: MACOS["floor"]}
 
 # Both trees are ignored local state that tools/buck2/bootstrap.py installs.
 RUST_FILES = {p.removeprefix("rust-files/"): p for p in glob(["rust-files/**"], exclude = [
     "rust-files/lib/rustlib/src/**",
-    "rust-files/lib/rustlib/aarch64-apple-darwin/**",
-    # Slice 0 provisions these sysroots for Cargo metadata checks only.
-    "rust-files/lib/rustlib/aarch64-apple-ios/**",
-    "rust-files/lib/rustlib/aarch64-apple-ios-sim/**",
-])}
+] + ["rust-files/lib/rustlib/{}/**".format(row["triple"]) for row in APPLE_TARGETS.values()])}
 RUST_TARGET = select({
-    "prelude//os:macos": "aarch64-apple-darwin",
+    "prelude//os:macos": MACOS_TRIPLE,
     "DEFAULT": select({
         "prelude//cpu:arm64": "aarch64-unknown-linux-gnu",
         "DEFAULT": "x86_64-unknown-linux-gnu",
     }),
 })
 
-# aarch64-apple-darwin is cross-built for the runtime archives only
-# (root//tools/buck2:runtime-darwin). Its floor is the link kit's DARWIN_FLOOR
-# (tools/buck2/native-toolchain/link_kit.py): rustc stamps it into every object
-# through MACOSX_DEPLOYMENT_TARGET, clang through its --target.
-DARWIN_FLOOR = "26.0"
+RUST_DEPLOYMENT = select({
+    "prelude//os:macos": MACOS_DEPLOYMENT,
+    "DEFAULT": {},
+})
 
 # The Darwin target's std (toolchain-lock.json rust-std-darwin) joins only the
 # Darwin sysroot. Every Darwin build is a runtime build, whose std is
 # :trace-std, so the prebuilt libstd is left out and only its dependencies remain.
 DARWIN_STD = {p.removeprefix("rust-files/"): p for p in glob(
-    ["rust-files/lib/rustlib/aarch64-apple-darwin/lib/*"],
-    exclude = ["rust-files/lib/rustlib/aarch64-apple-darwin/lib/libstd-*"],
+    ["rust-files/lib/rustlib/{}/lib/*".format(MACOS_TRIPLE)],
+    exclude = ["rust-files/lib/rustlib/{}/lib/libstd-*".format(MACOS_TRIPLE)],
 )}
 
 TARGET_STD = select({
@@ -51,6 +50,7 @@ trace_std(
     srcs = RUST_FILES,
     std_sources = "rust-files/lib/rustlib/src/rust/library",
     target_triple = RUST_TARGET,
+    deployment_env = RUST_DEPLOYMENT,
     target_std = TARGET_STD,
     script = "raw_backtrace_std.py",
     panic_image = select({
@@ -65,10 +65,7 @@ rust_toolchain(
     srcs = RUST_FILES,
     target_triple = RUST_TARGET,
     target_std = TARGET_STD,
-    deployment_target = select({
-        "prelude//os:macos": DARWIN_FLOOR,
-        "DEFAULT": None,
-    }),
+    deployment_env = RUST_DEPLOYMENT,
     runtime_std = select({
         "root//tools/buck2:profile_runtime": ":trace-std",
         "DEFAULT": None,
@@ -133,7 +130,7 @@ llvm_cxx_tools(
     name = "cxx_tools_darwin",
     tree = ":clang",
     fixed_build_date = "fixed-build-date",
-    darwin_target = "arm64-apple-macos" + DARWIN_FLOOR,
+    darwin_target = MACOS["llvm_triple"],
     darwin_include = "darwin-include",
 )
 

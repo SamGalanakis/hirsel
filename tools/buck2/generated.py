@@ -123,6 +123,23 @@ def load(root: Path) -> dict:
     return stamp.get('parts', {}) if isinstance(stamp, dict) else {}
 
 
+def write(path: Path, content: bytes | str) -> None:
+    """Replace a generated file only when its bytes change, so an unchanged
+    output wakes no file watcher."""
+    data = content.encode() if isinstance(content, str) else content
+    if path.is_file() and path.read_bytes() == data:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f'.{path.name}.', delete=False) as output:
+        pending = Path(output.name)
+        try:
+            output.write(data)
+            output.close()
+            pending.replace(path)
+        finally:
+            pending.unlink(missing_ok=True)
+
+
 def record(root: Path, part: str, reads: Reads) -> None:
     """Note that a part's outputs, as they are now, were generated from `reads`."""
     stamp = root / STAMP

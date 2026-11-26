@@ -8,13 +8,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-const TARGET: &str = "aarch64-apple-darwin";
+use hirsel_core_layout::Target;
+
+const TARGET: &str = Target::Aarch64Darwin.triple();
 
 fn assemble(dir: &Path, name: &str, source: &str) -> Vec<u8> {
     let (input, output) = (dir.join(format!("{name}.s")), dir.join(format!("{name}.o")));
     std::fs::write(&input, source).unwrap();
     let status = Command::new(bin().join("clang"))
-        .args(["--target=arm64-apple-macos26.0", "-c"])
+        .arg(format!("--target={}", Target::Aarch64Darwin.llvm_triple()))
+        .arg("-c")
         .arg(&input)
         .arg("-o")
         .arg(&output)
@@ -45,9 +48,15 @@ fn lld(dir: &Path, objects: &[&[u8]]) -> Vec<u8> {
         schema: 0,
         target: TARGET.into(),
         linker: bin().join("ld.lld"),
-        args: ["-flavor", "darwin", "-arch", "arm64", "-platform_version"]
+        args: ["-flavor", "darwin", "-arch", "arm64"]
             .into_iter()
-            .chain(["macos", "26.0", "26.0", "-adhoc_codesign", "-e", "_main"])
+            .chain(
+                Target::Aarch64Darwin
+                    .apple()
+                    .unwrap()
+                    .platform_version_args(),
+            )
+            .chain(["-adhoc_codesign", "-e", "_main"])
             .chain([crate::tool_inputs::INPUT_MARKER])
             .map(str::to_owned)
             .collect(),

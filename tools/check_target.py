@@ -13,13 +13,9 @@ Three rules over every first-party Rust source under crates/:
   (`Arch`, `Os`, `ObjectFormat`, `CAbi`), or on a target triple string, is an
   exhaustive `match`. Comparing with `==`/`!=`, `matches!`, `if let`/`let else` on a
   variant, and a `match` with a `_` arm all let a new target fall through silently.
-
-A third rule keeps the Darwin deployment floor's copies tied to
-link_kit.DARWIN_FLOOR, its one source.
 """
 
 import argparse
-import ast
 from bisect import bisect_right
 from pathlib import Path
 import re
@@ -233,124 +229,6 @@ def sources(root, staged):
     return snapshot(root, None, paths)
 
 
-LINK_KIT = 'tools/buck2/native-toolchain/link_kit.py'
-TOOLCHAIN_BUCK = 'tools/buck2/toolchains/BUCK'
-DRIVER_MACHO = 'crates/hirsel-core-driver/src/foreign_archive/macho.rs'
-INSTALL_SH = 'tools/toolchain-dist/install.sh.in'
-DARWIN_FLOOR_FILES = (LINK_KIT, TOOLCHAIN_BUCK, DRIVER_MACHO, INSTALL_SH)
-DARWIN_FLOOR_ASSIGNMENT = re.compile(r'^DARWIN_FLOOR\s*=\s*"(\d+)\.(\d+)"\s*$', re.MULTILINE)
-MACOS_FLOOR_ASSIGNMENT = re.compile(r'^const\s+MACOS_FLOOR:\s*u32\s*=\s*([^;]+);', re.MULTILINE)
-INSTALLER_FLOOR_ASSIGNMENT = re.compile(r'^macos_floor\s*=\s*(\d+)\.(\d+)\s*$', re.MULTILINE)
-
-
-def line_at(text, offset):
-    return text.count('\n', 0, offset) + 1
-
-
-def rust_u32(expression):
-    """The value of a small integer bitwise expression, or None when it has
-    another form. This is not Rust parsing; it is the check's canonical spelling
-    for the one Mach-O floor constant it compares."""
-    try:
-        tree = ast.parse(expression, mode='eval')
-    except SyntaxError:
-        return None
-
-    def evaluate(node):
-        if isinstance(node, ast.Constant) and type(node.value) is int and node.value >= 0:
-            return node.value
-        if not isinstance(node, ast.BinOp):
-            return None
-        left = evaluate(node.left)
-        right = evaluate(node.right)
-        if left is None or right is None:
-            return None
-        if isinstance(node.op, ast.LShift):
-            return left << right if right < 32 else None
-        if isinstance(node.op, ast.BitOr):
-            return left | right
-        return None
-
-    value = evaluate(tree.body)
-    return value if value is not None and value <= 0xffff_ffff else None
-
-
-def floor_label(version):
-    return f'{version[0]}.{version[1]}'
-
-
-def encoded_floor(version):
-    return (version[0] << 16) | (version[1] << 8)
-
-
-def encoded_label(value):
-    major = value >> 16
-    minor = (value >> 8) & 0xff
-    patch = value & 0xff
-    return f'{major}.{minor}' + (f'.{patch}' if patch else '')
-
-
-def darwin_floor_errors(texts):
-    """Copying errors in the Darwin floor: link_kit.py is the source, the Buck
-    toolchain and installer carry the same major.minor, and the driver carries
-    the same version in Mach-O's xxxx.yy.zz encoding."""
-    errors = []
-    versions = {}
-    for path in (LINK_KIT, TOOLCHAIN_BUCK):
-        text = texts.get(path)
-        if text is None:
-            errors.append((path, 1, 'missing; the Darwin floor must be tied to link_kit.DARWIN_FLOOR'))
-            continue
-        matches = list(DARWIN_FLOOR_ASSIGNMENT.finditer(text))
-        if len(matches) != 1:
-            errors.append((path, 1, 'assign DARWIN_FLOOR = "<major>.<minor>" exactly once'))
-            continue
-        match = matches[0]
-        versions[path] = ((int(match[1]), int(match[2])), line_at(text, match.start()))
-
-    if LINK_KIT not in versions:
-        return errors
-    source, _ = versions[LINK_KIT]
-    if TOOLCHAIN_BUCK in versions and versions[TOOLCHAIN_BUCK][0] != source:
-        found, line = versions[TOOLCHAIN_BUCK]
-        errors.append((TOOLCHAIN_BUCK, line, f'DARWIN_FLOOR is {floor_label(found)}, but the link kit source is '
-                                             f'{floor_label(source)}'))
-
-    text = texts.get(INSTALL_SH)
-    if text is None:
-        errors.append((INSTALL_SH, 1, 'missing; the installer floor must be tied to link_kit.DARWIN_FLOOR'))
-    else:
-        matches = list(INSTALLER_FLOOR_ASSIGNMENT.finditer(text))
-        if len(matches) != 1:
-            errors.append((INSTALL_SH, 1, 'assign macos_floor=<major>.<minor> exactly once'))
-        else:
-            match = matches[0]
-            found = (int(match[1]), int(match[2]))
-            if found != source:
-                errors.append((INSTALL_SH, line_at(text, match.start()),
-                               f'macos_floor is {floor_label(found)}, but link_kit.DARWIN_FLOOR is '
-                               f'{floor_label(source)}'))
-
-    text = texts.get(DRIVER_MACHO)
-    if text is None:
-        errors.append((DRIVER_MACHO, 1, 'missing; the driver floor must be tied to link_kit.DARWIN_FLOOR'))
-        return errors
-    matches = list(MACOS_FLOOR_ASSIGNMENT.finditer(text))
-    if len(matches) != 1:
-        errors.append((DRIVER_MACHO, 1, 'define const MACOS_FLOOR: u32 exactly once'))
-        return errors
-    match = matches[0]
-    line = line_at(text, match.start())
-    encoded = rust_u32(match[1])
-    if encoded is None:
-        errors.append((DRIVER_MACHO, line, 'MACOS_FLOOR must be non-negative integer arithmetic using << and |, '
-                                           'so the check can compare it with link_kit.DARWIN_FLOOR'))
-    elif encoded != encoded_floor(source):
-        errors.append((DRIVER_MACHO, line, f'MACOS_FLOOR encodes macOS {encoded_label(encoded)}, but '
-                                           f'link_kit.DARWIN_FLOOR is {floor_label(source)}'))
-    return errors
-
-
 MESSAGES = {
     'host-cfg': 'host cfg outside a host seam; decide on the target (hirsel_core_layout::Target) '
                 'or move the code behind a host seam',
@@ -365,7 +243,6 @@ def check(root, staged=False):
     ok = True
     try:
         files = sources(root, staged)
-        floor_files = snapshot(root, ':0' if staged else None, DARWIN_FLOOR_FILES)
     except OSError as error:
         print(f'check_target: {error}', file=sys.stderr)
         return False
@@ -380,10 +257,6 @@ def check(root, staged=False):
     for path in sorted(set(HOST_FILES) - host):
         print(f'{path}: no longer reads the host. Remove it from HOST_FILES in '
               'tools/check_target.py.', file=sys.stderr)
-        ok = False
-    floor_texts = {path: data.decode('utf-8', 'surrogateescape') for path, data in floor_files.items()}
-    for path, line, message in darwin_floor_errors(floor_texts):
-        print(f'{path}:{line}: darwin-floor: {message}', file=sys.stderr)
         ok = False
     return ok
 

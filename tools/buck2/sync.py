@@ -31,7 +31,8 @@ Either part writes an output only when its bytes change.
 
 Without flags, sync.py regenerates both parts. `--if-stale` regenerates only
 the parts whose outputs are missing or edited or whose inputs read differently
-since they were generated. `--check` also regenerates stale parts.
+since they were generated. Both also update the committed Apple target records.
+`--check` refuses stale Apple records and regenerates stale gitignored parts.
 """
 
 from __future__ import annotations
@@ -49,8 +50,10 @@ import tempfile
 import tomllib
 
 from action_sizes_from_log import CALIBRATED_CPUS, CPU_CLASSES, MAX_CPUS, compile_cpus
+import apple_records
 import compiler_source
 import generated
+from generated import write
 import prepare
 import rust_environment
 import supply_chain
@@ -219,23 +222,6 @@ def write_third_party(meta: dict, out: pathlib.Path, resolution: Resolution,
         for name in THIRD_PARTY_OUTPUTS:
             write(out / name, (work / name).read_bytes())
     return reads
-
-
-def write(path: pathlib.Path, content: bytes | str) -> None:
-    """Replace a generated file only when its bytes change, so an unchanged
-    output wakes no file watcher."""
-    data = content.encode() if isinstance(content, str) else content
-    if path.is_file() and path.read_bytes() == data:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f'.{path.name}.', delete=False) as output:
-        pending = pathlib.Path(output.name)
-        try:
-            output.write(data)
-            output.close()
-            pending.replace(path)
-        finally:
-            pending.unlink(missing_ok=True)
 
 
 def optional(reads: generated.Reads, path: pathlib.Path) -> None:
@@ -447,12 +433,13 @@ def first_party(meta: dict) -> str:
 
     out.append("\n" + "\n".join(call("export_file", name=f"darwin-{library.lower()}-symbols", src=f"tools/native-toolchain/darwin/{library}.symbols", visibility=["PUBLIC"]) for library in ("libSystem", "CoreFoundation", "Security")) + "\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])')))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py",
-                           args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration"],
+                           args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration", "AppleTargetRecords"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:prepare.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py",
                                  "//tools/buck2:supply_chain.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:runner_gates.py",
                                  "//tools/buck2:test_inputs.py", "//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py", "//tools/buck2:python_gates.py",
-                                 "//tools/toolchain-dist:product.toml"]))
+                                 "//tools/toolchain-dist:product.toml", "//tools/buck2:apple_records.py",
+                                 "tools/native-toolchain/apple-targets.json"]))
     out.append("\n" + call("hirsel_script_test", name="test-filter", script="tools/tests/test_filter.py",
                            data=["tools/test-filter", "tools/consumers", "//tools/buck2:event_logs.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py",
@@ -869,6 +856,8 @@ def write_first_party(meta: dict, out_root: pathlib.Path, resolution: Resolution
     global READS
     READS = generated.Reads(ROOT)
     READS.text(out_root / "third-party/units.json")
+    for path in (apple_records.SOURCE, apple_records.RUST, apple_records.STARLARK):
+        READS.bytes(ROOT / path)
     cargo_reads(READS, meta, layout=True)
     workspace = {p["id"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
     packages = [{"name": p["name"], "dependencies": [
@@ -985,10 +974,11 @@ def main() -> int:
     parser.add_argument("--if-stale", action="store_true",
                         help="regenerate only the parts whose outputs or inputs changed since they were generated")
     parser.add_argument("--check", action="store_true",
-                        help="regenerate when stale")
+                        help="reject stale Apple target records and regenerate stale gitignored files")
     parser.add_argument("--strict-production-features", action="store_true",
                         help="fail on every production test feature, including the explicitly recorded baseline leaks")
     args = parser.parse_args()
+    apple_records.sync(ROOT, args.check)
     prepare.configure_test_executor(ROOT)
     if not REINDEER.is_file():
         raise SystemExit("run tools/buck2/bootstrap.py first (Reindeer is missing)")

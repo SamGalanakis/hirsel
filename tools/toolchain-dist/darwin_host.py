@@ -16,8 +16,8 @@ Linux, from the same pins and flags:
 - the core and std images, the toolchain packages and the helpers, installed by
   the bundle's own compiler (toolchain_programs.py).
 
-Every Mach-O is built for the macOS floor, MACOSX_DEPLOYMENT_TARGET taken from
-link_kit.DARWIN_FLOOR, and carries an ad-hoc signature. The check reads every
+Every Mach-O is built for the floor in the macOS target record and carries an
+ad-hoc signature. The check reads every
 shipped Mach-O's load commands by file class (macho_check), runs
 `codesign -v --strict` on it, then installs the bundle into an empty prefix and
 runs the fresh-machine sequence under `env -i`.
@@ -40,10 +40,13 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/buck2/native-toolchain'))
+sys.path.insert(0, str(ROOT / 'tools/buck2'))
+from apple_records import AppleRecords, SOURCE  # noqa: E402
 import link_kit  # noqa: E402
 
-TARGET = link_kit.DARWIN
-FLOOR = link_kit.DARWIN_FLOOR
+APPLE = AppleRecords((ROOT / SOURCE).read_text()).rows['macos']
+TARGET = APPLE['triple']
+FLOOR = APPLE['floor']
 PRODUCT = tomllib.loads(Path(__file__).with_name('product.toml').read_text())
 RUNTIMES = {slot: config['features'] for slot, config in PRODUCT['runtime_slots'].items()
             if 'buck_suffix' in config}
@@ -83,7 +86,6 @@ LC_SEGMENT_64, LC_UUID, LC_CODE_SIGNATURE = 0x19, 0x1b, 0x1d
 LC_ID_DYLIB, LC_BUILD_VERSION, LC_VERSION_MIN_MACOSX = 0xd, 0x32, 0x24
 LC_RPATH = 0x8000001c
 DYLIB_LOADS = {0xc: 'load', 0x80000018: 'weak', 0x8000001f: 'reexport', 0x20: 'lazy', 0x80000023: 'upward'}
-PLATFORM_MACOS = 1
 S_MOD_INIT_FUNC_POINTERS, S_INIT_FUNC_OFFSETS = 0x9, 0x16
 VM_PROT_WRITE, VM_PROT_EXECUTE = 2, 4
 
@@ -126,7 +128,7 @@ def load_commands(data):
             facts['rpaths'].append(string(struct.unpack_from('<I', data, at + 8)[0], at, size))
         elif command == LC_BUILD_VERSION:
             platform_id, minos = struct.unpack_from('<II', data, at + 8)
-            if platform_id == PLATFORM_MACOS:
+            if platform_id == APPLE['macho_platform']:
                 facts['minos'] = f'{minos >> 16}.{minos >> 8 & 0xff}'
                 if minos & 0xff:
                     facts['minos'] += f'.{minos & 0xff}'
@@ -255,8 +257,9 @@ def shipped_machos(prefix):
 # --- Build ------------------------------------------------------------------
 
 def cargo_env(work, llvm):
-    return dict(os.environ, MACOSX_DEPLOYMENT_TARGET=FLOOR, LLVM_SYS_231_PREFIX=str(llvm),
-                CARGO_TARGET_DIR=str(work / 'target'), SOURCE_DATE_EPOCH='0')
+    return {**os.environ, APPLE['deployment_env']: FLOOR,
+            'LLVM_SYS_231_PREFIX': str(llvm), 'CARGO_TARGET_DIR': str(work / 'target'),
+            'SOURCE_DATE_EPOCH': '0'}
 
 
 def trace_sysroot(work, env):
@@ -316,7 +319,8 @@ def link_kit_tree(work):
     kit.mkdir()
     allowlists = {library: ROOT / f'tools/native-toolchain/darwin/{library}.symbols'
                   for library in link_kit.DARWIN_LIBRARIES}
-    link_kit.write_manifest(kit, {'targets': {TARGET: link_kit.darwin_kit(kit, allowlists, zig_libsystem(work))}})
+    row = link_kit.darwin_kit(kit, allowlists, zig_libsystem(work), APPLE)
+    link_kit.write_manifest(kit, {'targets': {TARGET: row}})
     return kit
 
 

@@ -1,4 +1,5 @@
 //! Structure checks for a linked Hirsel Mach-O image.
+use hirsel_core_layout::Target;
 use object::LittleEndian as LE;
 use object::macho::*;
 use object::read::macho::{LoadCommandVariant, MachHeader as _, Section as _, Segment as _};
@@ -29,10 +30,14 @@ pub(super) fn executable_uuid(bytes: &[u8]) -> io::Result<[u8; 16]> {
     while let Some(command) = commands.next().map_err(malformed)? {
         match command.variant().map_err(malformed)? {
             LoadCommandVariant::BuildVersion(version, _) => {
-                if version.platform.get(LE) != PLATFORM_MACOS
-                    || version.minos.get(LE) != Version::new(26, 0, 0)
+                let apple = Target::Aarch64Darwin.apple().unwrap();
+                if version.platform.get(LE) != Platform(apple.macho_platform)
+                    || version.minos.get(LE) != Version(apple.macho_minos)
                 {
-                    return Err(invalid("LC_BUILD_VERSION must declare macOS 26.0".into()));
+                    return Err(invalid(format!(
+                        "LC_BUILD_VERSION must declare macOS {}",
+                        apple.floor
+                    )));
                 }
                 build = true;
             }

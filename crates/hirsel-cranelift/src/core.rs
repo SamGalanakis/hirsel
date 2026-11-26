@@ -158,25 +158,19 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
     ]) {
         flags.set(name, value).map_err(|e| refuse(e.to_string()))?;
     }
-    let mut isa = cranelift_codegen::isa::lookup_by_name(options.target)
+    let mut isa = cranelift_codegen::isa::lookup_by_name(target.cranelift_triple())
         .map_err(|e| refuse(e.to_string()))?;
-    match target {
-        hirsel_core_layout::Target::X86_64Linux => {
+    match target.arch() {
+        hirsel_core_layout::Arch::X86_64 => {
             for feature in hirsel_core_layout::isa::X86_64_BASE.cranelift_features() {
                 isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
             }
         }
-        hirsel_core_layout::Target::Aarch64Linux => {}
-        // The M1 baseline has LSE, FP16 and DotProd.
-        hirsel_core_layout::Target::Aarch64Darwin => {
-            for feature in ["has_lse", "has_fp16", "has_dotprod"] {
-                isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
-            }
-        }
-        // The A12 baseline has LSE and FP16.
-        hirsel_core_layout::Target::Aarch64Ios | hirsel_core_layout::Target::Aarch64IosSim => {
-            for feature in ["has_lse", "has_fp16"] {
-                isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
+        hirsel_core_layout::Arch::Aarch64 => {
+            if let Some(apple) = target.apple() {
+                for feature in apple.cranelift_features {
+                    isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
+                }
             }
         }
     }

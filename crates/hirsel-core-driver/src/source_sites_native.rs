@@ -207,7 +207,8 @@ fn failure_sites_chained_rebase() {
         std::fs::write(&input, source).unwrap();
         command(
             Command::new(&clang)
-                .args(["--target=arm64-apple-macos26.0", "-c"])
+                .arg(format!("--target={}", hirsel_core_layout::Target::Aarch64Darwin.llvm_triple()))
+                .arg("-c")
                 .arg(input)
                 .arg("-o")
                 .arg(&output),

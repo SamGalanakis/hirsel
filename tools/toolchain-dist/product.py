@@ -9,6 +9,7 @@ import shlex
 import tomllib
 
 PRODUCT = Path(__file__).with_suffix('.toml')
+APPLE_TARGETS = PRODUCT.parents[1] / 'native-toolchain/apple-targets.json'
 ASSET = 'hirsel-{tag}-{target}.tar.gz'
 
 
@@ -31,6 +32,7 @@ def host_target(hosts):
 
 def installer(hosts):
     template = PRODUCT.with_name('install.sh.in').read_text()
+    macos = json.loads(APPLE_TARGETS.read_text())['targets']['macos']
     cases = []
     for target, host in hosts.items():
         cases.append(f"    {shlex.quote(host['platform'])})\n"
@@ -38,6 +40,7 @@ def installer(hosts):
                      f"        llvm_library={shlex.quote(host['llvm_library'])}\n"
                      '        ;;')
     return (template.replace('@HOSTS@', '\n'.join(cases))
+            .replace('@MACOS_FLOOR@', shlex.quote(macos['floor']))
             .replace('@ARCHIVE@', ASSET.format(tag='v$version', target='$target')))
 
 

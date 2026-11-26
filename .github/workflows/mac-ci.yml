@@ -132,9 +132,11 @@ jobs:
         id: build
         if: ${{ !cancelled() && steps.platform.outcome == 'success' && steps.digests.outcome == 'success' }}
         env:
-          MACOSX_DEPLOYMENT_TARGET: '26.0'
           RUSTFLAGS: -C link-arg=-Wl,-rpath,${{ github.workspace }}/tools/buck2/toolchains/llvm-files/lib
         run: |
+          apple=$(python3 tools/buck2/apple_records.py macos deployment_env floor)
+          read -r deployment_env floor <<< "$apple"
+          export "$deployment_env=$floor"
           rustup toolchain install --no-self-update
           python3 tools/buck2/bootstrap_llvm.py
           sdk=$(xcrun --sdk macosx --show-sdk-path)

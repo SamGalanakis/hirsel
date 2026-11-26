@@ -2,6 +2,38 @@
 //! one of these facts; matches on them are exhaustive, so a new target is a
 //! compile error at each decision site.
 
+use crate::apple_records::{IOS, IOS_SIMULATOR, MACOS};
+
+/// EMB-2's deployment and toolchain values for one Apple target.
+pub struct AppleRecord {
+    pub family: &'static str,
+    pub triple: &'static str,
+    pub floor: &'static str,
+    pub macho_platform: u32,
+    pub platform_version_name: &'static str,
+    pub llvm_os: &'static str,
+    pub llvm_environment: &'static str,
+    pub deployment_env: &'static str,
+    pub swiftpm_platform: &'static str,
+    pub xcframework_slice: &'static str,
+    pub cpu: &'static str,
+    pub cranelift_features: &'static [&'static str],
+    pub llvm_triple: &'static str,
+    pub cranelift_triple: &'static str,
+    pub macho_minos: u32,
+}
+
+impl AppleRecord {
+    pub const fn platform_version_args(&self) -> [&'static str; 4] {
+        [
+            "-platform_version",
+            self.platform_version_name,
+            self.floor,
+            self.floor,
+        ]
+    }
+}
+
 /// The named targets. They share FORM's little-endian, 64-bit layout
 /// recipes; calling conventions, object format and OS facts derive from them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -70,9 +102,32 @@ impl Target {
         match self {
             Self::X86_64Linux => "x86_64-unknown-linux-gnu",
             Self::Aarch64Linux => "aarch64-unknown-linux-gnu",
-            Self::Aarch64Darwin => "aarch64-apple-darwin",
-            Self::Aarch64Ios => "aarch64-apple-ios",
-            Self::Aarch64IosSim => "aarch64-apple-ios-sim",
+            Self::Aarch64Darwin => MACOS.triple,
+            Self::Aarch64Ios => IOS.triple,
+            Self::Aarch64IosSim => IOS_SIMULATOR.triple,
+        }
+    }
+
+    pub const fn apple(self) -> Option<&'static AppleRecord> {
+        match self {
+            Self::X86_64Linux | Self::Aarch64Linux => None,
+            Self::Aarch64Darwin => Some(&MACOS),
+            Self::Aarch64Ios => Some(&IOS),
+            Self::Aarch64IosSim => Some(&IOS_SIMULATOR),
+        }
+    }
+
+    pub const fn llvm_triple(self) -> &'static str {
+        match self.apple() {
+            Some(apple) => apple.llvm_triple,
+            None => self.triple(),
+        }
+    }
+
+    pub const fn cranelift_triple(self) -> &'static str {
+        match self.apple() {
+            Some(apple) => apple.cranelift_triple,
+            None => self.triple(),
         }
     }
 
@@ -118,13 +173,14 @@ impl Target {
 
     /// Keep LLVM's generic tuning. The named x86-64-v2 model splits unaligned
     /// AVX2 accesses in v3 functions even though their features allow them.
-    /// Every Apple Silicon Mac is at least an M1, whose cpu implies its features.
+    /// The Apple CPU model implies the baseline LLVM features for the floor.
     pub const fn cpu(self) -> &'static str {
         match self {
             Self::X86_64Linux => "x86-64",
             Self::Aarch64Linux => "generic",
-            Self::Aarch64Darwin => "apple-m1",
-            Self::Aarch64Ios | Self::Aarch64IosSim => "apple-a12",
+            Self::Aarch64Darwin => MACOS.cpu,
+            Self::Aarch64Ios => IOS.cpu,
+            Self::Aarch64IosSim => IOS_SIMULATOR.cpu,
         }
     }
 

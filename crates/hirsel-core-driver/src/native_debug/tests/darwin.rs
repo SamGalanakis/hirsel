@@ -22,7 +22,8 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
 
     rejects_bad_macho_structure();
 
-    let target = Target::Aarch64Darwin.triple();
+    let apple = Target::Aarch64Darwin.apple().unwrap();
+    let target = apple.triple;
     let sqlite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../core/programs/sqlite/libhirsel_sqlite-aarch64-apple-darwin.a");
     let bytes = std::fs::read(&sqlite).unwrap();
@@ -58,7 +59,8 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
         std::fs::write(dir.path().join(format!("{name}.c")), source).unwrap();
         let output = Command::new(llvm.join("clang"))
             .current_dir(dir.path())
-            .args(["--target=arm64-apple-macos26.0", "-O2", "-c"])
+            .arg(format!("--target={}", apple.llvm_triple))
+            .args(["-O2", "-c"])
             .arg(format!("{name}.c"))
             .arg("-o")
             .arg(format!("{name}.o"))
@@ -91,16 +93,10 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
         schema: 0,
         target: target.into(),
         linker: linker.clone(),
-        args: ["-flavor", "darwin", "-arch", "arm64", "-platform_version"]
+        args: ["-flavor", "darwin", "-arch", "arm64"]
             .into_iter()
-            .chain([
-                "macos",
-                "26.0",
-                "26.0",
-                "-adhoc_codesign",
-                "-e",
-                "_hirsel_entry",
-            ])
+            .chain(apple.platform_version_args())
+            .chain(["-adhoc_codesign", "-e", "_hirsel_entry"])
             .chain([crate::tool_inputs::INPUT_MARKER, stub.to_str().unwrap()])
             .map(str::to_owned)
             .collect(),
@@ -160,7 +156,15 @@ fn rejects_bad_macho_structure() {
         segment[88..94].copy_from_slice(b"__TEXT");
         segment[112..120].copy_from_slice(&words(&[size, 0]));
         segment[136..140].copy_from_slice(&words(&[flags]));
-        let mut commands = words(&[0x32, 24, 1, 26 << 16, 26 << 16, 0]);
+        let apple = hirsel_core_layout::Target::Aarch64Darwin.apple().unwrap();
+        let mut commands = words(&[
+            0x32,
+            24,
+            apple.macho_platform,
+            apple.macho_minos,
+            apple.macho_minos,
+            0,
+        ]);
         commands.extend(words(&[0x1b, 24, 1, 2, 3, 4]));
         commands.extend(words(&[0x1d, 16, 0, 1]));
         commands.extend(segment);

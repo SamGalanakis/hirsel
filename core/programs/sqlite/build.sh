@@ -47,6 +47,10 @@ sysroot=${HIRSEL_AARCH64_SYSROOT:?set HIRSEL_AARCH64_SYSROOT to the pinned Arm s
 # The Darwin row reads the pinned Zig's Darwin headers: lib/libc/include/any-darwin-any
 # at Zig commit bff490a23889750de7096d9057c0a432efc929a8, the link kit's pin.
 darwin=${ZIG_DARWIN_INCLUDE:?set ZIG_DARWIN_INCLUDE to the pinned Zig Darwin headers}
+darwin_record=$(python3 ../../../tools/buck2/apple_records.py macos llvm_triple triple)
+read -r darwin_llvm_triple darwin_triple <<EOF
+$darwin_record
+EOF
 (
     cd "$stage"
     for file in sqlite3 hirsel_sqlite hirsel_sqlite_os; do
@@ -85,16 +89,16 @@ darwin=${ZIG_DARWIN_INCLUDE:?set ZIG_DARWIN_INCLUDE to the pinned Zig Darwin hea
 #include "hirsel_sqlite_os.c"
 #include "hirsel_sqlite.c"
 UNIT
-    "$llvm/bin/clang" --target=arm64-apple-macos26.0 -nostdlibinc -isystem "$darwin" \
+    "$llvm/bin/clang" "--target=$darwin_llvm_triple" -nostdlibinc -isystem "$darwin" \
         -std=c11 -O2 -fno-ident "-ffile-prefix-map=$PWD=." "-ffile-prefix-map=$darwin=darwin" \
         -D_FORTIFY_SOURCE=0 -DSQLITE_WITHOUT_ZONEMALLOC \
         -DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=1 -DSQLITE_TEMP_STORE=3 \
         -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DESERIALIZE -DSQLITE_OMIT_LOCALTIME \
         -DSQLITE_USE_URI=0 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
         -c hsq.c -o hsq-darwin.o
-    "$llvm/bin/llvm-ar" --format=darwin rcs libhirsel_sqlite-aarch64-apple-darwin.a hsq-darwin.o
+    "$llvm/bin/llvm-ar" --format=darwin rcs "libhirsel_sqlite-$darwin_triple.a" hsq-darwin.o
 )
 for row in libhirsel_sqlite.a libhirsel_sqlite-aarch64-unknown-linux-gnu.a \
-    libhirsel_sqlite-aarch64-apple-darwin.a; do
+    "libhirsel_sqlite-$darwin_triple.a"; do
     cp "$stage/$row" "$row"
 done

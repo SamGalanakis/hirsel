@@ -73,7 +73,11 @@ fn assemble(dir: &Path, name: &str, source: &str) -> Vec<u8> {
     let (assembly, object) = (dir.join(format!("{name}.s")), dir.join(format!("{name}.o")));
     std::fs::write(&assembly, source).unwrap();
     let status = std::process::Command::new(bin().join("clang"))
-        .args(["--target=arm64-apple-macos26.0", "-c"])
+        .arg(format!(
+            "--target={}",
+            hirsel_core_layout::Target::Aarch64Darwin.llvm_triple()
+        ))
+        .arg("-c")
         .arg(&assembly)
         .arg("-o")
         .arg(&object)

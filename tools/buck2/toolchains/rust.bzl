@@ -12,7 +12,7 @@ def _trace_std(ctx):
     ctx.actions.run(cmd_args(
         "python3", ctx.attrs.script, tree, ctx.attrs.std_sources,
         ctx.attrs.panic_image, ctx.attrs.target_triple, std.as_output(),
-    ), category = "rust_trace_only_std")
+    ), category = "rust_trace_only_std", env = ctx.attrs.deployment_env)
     return [DefaultInfo(default_output = std)]
 
 trace_std = rule(
@@ -21,6 +21,7 @@ trace_std = rule(
         "srcs": attrs.dict(attrs.string(), attrs.source()),
         "std_sources": attrs.source(allow_directory = True),
         "target_triple": attrs.string(),
+        "deployment_env": attrs.dict(attrs.string(), attrs.string(), default = {}),
         "target_std": attrs.dict(attrs.string(), attrs.source(), default = {}),
         "script": attrs.source(),
         "panic_image": attrs.source(),
@@ -39,8 +40,7 @@ def _rust(ctx):
         files[target_lib + "libstd-hirsel-trace.rlib"] = std
         sysroot = ctx.actions.copied_dir("runtime-rust", files)
     rustc_env = {"PATH": "/usr/bin:/bin"}
-    if ctx.attrs.deployment_target != None:
-        rustc_env["MACOSX_DEPLOYMENT_TARGET"] = ctx.attrs.deployment_target
+    rustc_env.update(ctx.attrs.deployment_env)
     return [
         DefaultInfo(),
         RustToolchainInfo(
@@ -79,7 +79,7 @@ rust_toolchain = rule(
         "runtime_std": attrs.option(attrs.dep(), default = None),
         "target_triple": attrs.string(),
         "target_std": attrs.dict(attrs.string(), attrs.source(), default = {}),
-        "deployment_target": attrs.option(attrs.string(), default = None),
+        "deployment_env": attrs.dict(attrs.string(), attrs.string(), default = {}),
     },
     is_toolchain_rule = True,
 )

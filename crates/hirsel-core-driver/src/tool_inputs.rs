@@ -304,11 +304,9 @@ pub(crate) fn install_recipe(
         nonshared: String,
         end: Vec<String>,
     }
-    /// A Mach-O row: the macOS floor and the text stubs of the system's
-    /// libraries; libSystem carries the C runtime and the unwinder.
+    /// The system stubs in a Mach-O link kit.
     #[derive(serde::Deserialize)]
     struct DarwinTarget {
-        floor: String,
         libraries: Vec<String>,
     }
     #[derive(serde::Deserialize)]
@@ -360,15 +358,15 @@ pub(crate) fn install_recipe(
             }
             args
         }
-        // Both versions are the floor. macOS requires ad hoc signing.
         Os::Macos => {
             let inputs = &serde_json::from_value::<DarwinTarget>(row).map_err(io::Error::other)?;
-            let mut args = ["-arch", "arm64", "-platform_version", "macos"]
+            let apple = target_kind.apple().unwrap();
+            let mut args = ["-arch", "arm64"]
+                .into_iter()
+                .chain(apple.platform_version_args())
+                .chain(["-adhoc_codesign", INPUT_MARKER])
                 .map(str::to_owned)
-                .to_vec();
-            args.extend([inputs.floor.clone(), inputs.floor.clone()]);
-            args.push("-adhoc_codesign".into());
-            args.push(INPUT_MARKER.into());
+                .collect::<Vec<_>>();
             for path in &inputs.libraries {
                 args.push(copy(path)?);
             }

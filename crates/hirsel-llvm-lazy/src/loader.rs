@@ -315,7 +315,7 @@ pub(crate) fn compile(
     speed: bool,
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
-    let triple = CString::new(target.triple()).unwrap();
+    let triple = CString::new(target.llvm_triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
     let features = CString::new(target.llvm_features()).unwrap();
     let backend = backend()?;
@@ -596,7 +596,7 @@ fn emit(
             }
         };
     let own = CString::new(namespace).unwrap();
-    let triple = CString::new(target.triple()).unwrap();
+    let triple = CString::new(target.llvm_triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
     let features = CString::new(target.llvm_features()).unwrap();
     let backend = backend()?;
@@ -734,7 +734,7 @@ pub(crate) fn generate(
     target: hirsel_core_layout::Target,
     jobs: u32,
 ) -> Result<Vec<Vec<u8>>, String> {
-    let triple = CString::new(target.triple()).unwrap();
+    let triple = CString::new(target.llvm_triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
     let features = CString::new(target.llvm_features()).unwrap();
     let backend = backend()?;

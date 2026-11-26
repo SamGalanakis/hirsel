@@ -15,6 +15,7 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+mod apple_records;
 pub mod charge;
 mod continuation;
 pub mod cross;
@@ -35,7 +36,7 @@ mod target;
 pub use continuation::{Frames, Point, frames, spare_words};
 pub use foreign::{foreign_cleanup, foreign_kind, next_foreign_handle};
 pub use pieces::{LEAF_PIECES, holed_pieces, leaf_pieces};
-pub use target::{Arch, CAbi, CExtension, ObjectFormat, Os, Target, c_extension};
+pub use target::{AppleRecord, Arch, CAbi, CExtension, ObjectFormat, Os, Target, c_extension};
 
 /// Reserve a shape before filling its references, using the caller's type identity.
 pub fn intern_shape<K: Eq + std::hash::Hash, S: std::hash::BuildHasher>(

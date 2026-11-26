@@ -142,7 +142,7 @@ request validation (EMB-8):
 ## EMB-2: Apple target records
 
 Every Apple fact that depends on the platform variant or its floor comes from one record per
-variant, in one file: `tools/native-toolchain/apple-targets.json` <!-- doc-ref: planned -->.
+variant, in one file: `tools/native-toolchain/apple-targets.json`.
 Nothing else in the repository spells an Apple floor, a platform number or an Apple LLVM
 triple.
 
@@ -181,9 +181,9 @@ and floor, it gives the oldest CPU that the floor admits:
 two generated copies:
 
 - the Rust table that the layout crate includes,
-  `crates/hirsel-core-layout/src/apple_records.rs` <!-- doc-ref: planned -->;
+  `crates/hirsel-core-layout/src/apple_records.rs`;
 - the Starlark constants that the toolchain rules load,
-  `tools/buck2/toolchains/apple.bzl` <!-- doc-ref: planned -->.
+  `tools/buck2/toolchains/apple.bzl`.
 
 Shell recipes take the values as arguments from those rules. The `--check`
 <!-- doc-ref: external --> mode rejects a stale generated file, as it does for `pins.bzl`.

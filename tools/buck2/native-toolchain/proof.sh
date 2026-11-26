@@ -6,6 +6,7 @@ arm=$(realpath "$2")
 qemu=$(realpath "$3")
 valgrind=$(realpath "$4")
 kit=$(realpath "$5")
+darwin=$6
 export LD_LIBRARY_PATH="$llvm/lib"
 export VALGRIND_LIB="$valgrind/libexec/valgrind"
 build=$(mktemp -d)
@@ -74,12 +75,16 @@ int main(void) { void *p = malloc(32); free(p); write(1, "darwin\n", 7);
 #endif
   return 0; }
 C
-floor=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["targets"]["aarch64-apple-darwin"]["floor"])' "$kit/manifest.json")
-mapfile -t darwin_libraries < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["targets"]["aarch64-apple-darwin"]["libraries"]))' "$kit/manifest.json")
+darwin_flags=$(python3 -c 'import json,sys
+row = json.load(open(sys.argv[1]))["targets"][sys.argv[2]]
+print(row["floor"], row["llvm_triple"], row["platform_version_name"])
+' "$kit/manifest.json" "$darwin")
+read -r floor llvm_triple darwin_platform <<< "$darwin_flags"
+mapfile -t darwin_libraries < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["targets"][sys.argv[2]]["libraries"]))' "$kit/manifest.json" "$darwin")
 link_darwin() {
-  "$llvm/bin/clang" --target="arm64-apple-macos$floor" -c "$build/darwin.c" -o "$build/darwin.o" "$@"
-  "$kit/ld.lld" -flavor darwin -arch arm64 -platform_version macos "$floor" "$floor" -dead_strip -dead_strip_dylibs \
-    -adhoc_codesign "$build/darwin.o" "${darwin_libraries[@]/#/$kit/aarch64-apple-darwin/}" -o "$build/darwin"
+  "$llvm/bin/clang" --target="$llvm_triple" -c "$build/darwin.c" -o "$build/darwin.o" "$@"
+  "$kit/ld.lld" -flavor darwin -arch arm64 -platform_version "$darwin_platform" "$floor" "$floor" -dead_strip -dead_strip_dylibs \
+    -adhoc_codesign "$build/darwin.o" "${darwin_libraries[@]/#/$kit/$darwin/}" -o "$build/darwin"
 }
 link_darwin
 headers=$("$llvm/bin/llvm-objdump" --macho --private-headers "$build/darwin")

@@ -1,0 +1,42 @@
+{
+  "cpu_by_floor": {
+    "macos": {"26.0": "apple-m1"},
+    "ios": {"26.0": "apple-a12"}
+  },
+  "targets": {
+    "macos": {
+      "family": "macos",
+      "triple": "aarch64-apple-darwin",
+      "floor": "26.0",
+      "macho_platform": 1,
+      "platform_version_name": "macos",
+      "llvm_os": "macos",
+      "deployment_env": "MACOSX_DEPLOYMENT_TARGET",
+      "swiftpm_platform": "macOS",
+      "xcframework_slice": "macos-arm64"
+    },
+    "ios": {
+      "family": "ios",
+      "triple": "aarch64-apple-ios",
+      "floor": "26.0",
+      "macho_platform": 2,
+      "platform_version_name": "ios",
+      "llvm_os": "ios",
+      "deployment_env": "IPHONEOS_DEPLOYMENT_TARGET",
+      "swiftpm_platform": "iOS",
+      "xcframework_slice": "ios-arm64"
+    },
+    "ios-simulator": {
+      "family": "ios",
+      "triple": "aarch64-apple-ios-sim",
+      "floor": "26.0",
+      "macho_platform": 7,
+      "platform_version_name": "ios-simulator",
+      "llvm_os": "ios",
+      "llvm_environment": "simulator",
+      "deployment_env": "IPHONEOS_DEPLOYMENT_TARGET",
+      "swiftpm_platform": "iOS",
+      "xcframework_slice": "ios-arm64-simulator"
+    }
+  }
+}

@@ -17,6 +17,7 @@ load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budg
 load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
+load("@toolchains//:apple.bzl", "APPLE_TARGETS")
 load("@prelude//rust:cargo_package.bzl", "get_reindeer_platforms")
 load("@prelude//utils:selects.bzl", "selects")
 load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "MergedLinkInfo", "ObjectsLinkable")
@@ -887,10 +888,11 @@ def hirsel_core_runtime_archives(name, library, archive_name, shipped = True):
                 exec_compatible_with = [budget_constraint(test_budget_name("darwin-import-law"))],
             )
 
-def _darwin_law(ctx, kit):
+def _darwin_law(ctx, kit, args = []):
     # A law over the Darwin archives: `<law> KIT LLVM ARCHIVE...`.
     command = cmd_args(
         "python3", ctx.attrs._law, kit, ctx.attrs._llvm[DefaultInfo].default_outputs[0],
+        args,
         [archive[DefaultInfo].default_outputs[0] for archive in ctx.attrs.archives],
     )
     return [DefaultInfo(), ExternalRunnerTestInfo(
@@ -920,7 +922,7 @@ _darwin_sync_ban = rule(
 # names on Hirsel's Darwin allowlists. It runs on Linux with the kit's Mach-O
 # ld.lld, so a Darwin import is checked before any Mac links one.
 _darwin_import_law = rule(
-    impl = lambda ctx: _darwin_law(ctx, ctx.attrs._kit[DefaultInfo].default_outputs[0]),
+    impl = lambda ctx: _darwin_law(ctx, ctx.attrs._kit[DefaultInfo].default_outputs[0], [APPLE_TARGETS["macos"]["triple"]]),
     attrs = {
         "archives": attrs.list(attrs.dep()),
         "request": attrs.list(attrs.string()),

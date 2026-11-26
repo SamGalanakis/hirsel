@@ -422,10 +422,9 @@ impl<'a> Plan<'a> {
 }
 
 fn object(target: &str) -> Result<ObjectModule> {
-    let page = hirsel_core_layout::Target::from_triple(target)
-        .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?
-        .page_log2()
-        .to_string();
+    let target = hirsel_core_layout::Target::from_triple(target)
+        .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?;
+    let page = target.page_log2().to_string();
     let mut flags = settings::builder();
     for (name, value) in [
         ("is_pic", "true"),
@@ -439,7 +438,7 @@ fn object(target: &str) -> Result<ObjectModule> {
         flags.set(name, value).map_err(error)?;
     }
     // The launcher must reach the CPU check even on a pre-v2 x86-64 host.
-    let isa = cranelift_codegen::isa::lookup_by_name(target)
+    let isa = cranelift_codegen::isa::lookup_by_name(target.cranelift_triple())
         .map_err(error)?
         .finish(settings::Flags::new(flags))
         .map_err(error)?;

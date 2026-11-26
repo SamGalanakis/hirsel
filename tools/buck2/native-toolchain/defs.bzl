@@ -9,6 +9,7 @@ only when the pool's CAS lacks it, and not at all on an action-cache hit
 (buck2 app/buck2_action_impl/src/actions/impls/download_file.rs `declare_http`,
 app/buck2_execute/src/re/uploader.rs `find_missing`)."""
 load("//tools/buck2:platforms.bzl", "budget_constraint", "test_budget_name", "test_executor", "test_request")
+load("@toolchains//:apple.bzl", "APPLE_TARGETS")
 
 def _unpack(ctx):
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
@@ -31,6 +32,7 @@ unpack_toolchain = rule(impl = _unpack, attrs = {
 def _link_kit(ctx):
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     pins = ctx.actions.write_json("pins.json", ctx.attrs.pins)
+    apple_target = ctx.actions.write_json("apple-target.json", APPLE_TARGETS["macos"])
     source = lambda name: ctx.attrs.sources[name][DefaultInfo].default_outputs[0]
     command = cmd_args(
         "python3", ctx.attrs._script,
@@ -40,6 +42,7 @@ def _link_kit(ctx):
         "--libunwind", source("libunwind"),
         "--compiler-rt", source("compiler-rt"),
         "--zig-libsystem", source("libSystem-tbd"),
+        "--apple-target", apple_target,
         [cmd_args("--darwin-symbols", cmd_args(library, "=", path, delimiter = "")) for library, path in sorted(ctx.attrs._darwin_symbols.items())],
         "--pins", pins,
         "--output", output.as_output(),
@@ -66,7 +69,7 @@ link_kit = rule(impl = _link_kit, attrs = {
 
 def _proof(ctx):
     trees = [dep[DefaultInfo].default_outputs[0] for dep in ctx.attrs.tools]
-    command = cmd_args(ctx.attrs.interpreter, ctx.attrs.script, trees)
+    command = cmd_args(ctx.attrs.interpreter, ctx.attrs.script, trees, APPLE_TARGETS["macos"]["triple"])
     return [DefaultInfo(), ExternalRunnerTestInfo(
         type = "custom", command = [command], env = {"HIRSEL_PLATFORM_CAPTURE": "cold"}, labels = ["gate"],
         run_from_project_root = True, use_project_relative_paths = True,

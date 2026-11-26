@@ -21,6 +21,10 @@ impl<T> Stock<T> {
         }
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.idle.is_empty()
+    }
+
     fn take(&mut self, mut fits: impl FnMut(&T) -> bool) -> Option<(T, usize)> {
         let Some(index) = self.idle.iter().rposition(|(item, _, _)| fits(item)) else {
             self.misses += 1;
@@ -87,10 +91,10 @@ impl Retention {
         &mut self,
         select: impl Fn(&mut Self) -> &mut Stock<T>,
         fits: impl FnMut(&T) -> bool,
-    ) -> Option<T> {
+    ) -> Option<(T, usize)> {
         let (item, bytes) = select(self).take(fits)?;
         self.used -= bytes;
-        Some(item)
+        Some((item, bytes))
     }
 
     pub(super) fn keep<T>(

@@ -172,6 +172,62 @@ impl Stack {
             }
         }
     }
+    pub(crate) fn new_batch_with_reserve(count: usize, reserve: usize) -> Vec<Self> {
+        if count <= 1 {
+            return (0..count)
+                .map(|_| Self::new_with_reserve(reserve))
+                .collect();
+        }
+        let page_bytes = page();
+        let commit = commit_for_page(page_bytes);
+        let len = page_bytes + reserve;
+        let Some(total) = len.checked_mul(count) else {
+            return (0..count)
+                .map(|_| Self::new_with_reserve(reserve))
+                .collect();
+        };
+        // SAFETY: one contiguous inaccessible mapping partitioned into `count`
+        // independent guarded stacks, each with its own guard page and top
+        // writable band, unmapped individually on Drop.
+        unsafe {
+            let raw = libc::mmap(
+                std::ptr::null_mut(),
+                total,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            );
+            if raw == libc::MAP_FAILED {
+                return (0..count)
+                    .map(|_| Self::new_with_reserve(reserve))
+                    .collect();
+            }
+            let mut out = Vec::with_capacity(count);
+            for i in 0..count {
+                let base = raw.cast::<u8>().add(i * len);
+                let top = base.addr() + len;
+                if libc::mprotect(
+                    base.add(len - commit).cast(),
+                    commit,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                ) != 0
+                {
+                    crate::process::stop(b"HostMemory");
+                }
+                low_word(top).write(top - commit);
+                out.push(Self {
+                    base: NonNull::new_unchecked(base),
+                    len,
+                    guard_end: base.addr() + page_bytes,
+                    #[cfg(any(test, feature = "memcheck"))]
+                    valgrind: hirsel_stack::stack_register(base.add(page_bytes), base.add(len)),
+                });
+            }
+            out
+        }
+    }
+
     pub(crate) fn bounds(&self) -> (usize, usize, usize) {
         (self.base.as_ptr().addr(), self.guard_end, self.top())
     }
@@ -280,7 +336,7 @@ impl Stack {
     }
     /// Return a stack that grew to its first `COMMIT` bytes. A stack that never
     /// left them costs one load and compare, inlined into recycling.
-    fn trim(&self) {
+    pub(crate) fn trim(&self) {
         let top = self.top();
         // SAFETY: the stack is idle and its top word is always writable.
         let committed = top - commit_for_page(self.guard_bytes());
@@ -399,6 +455,25 @@ impl Stock {
 
     pub(crate) fn recycle(&mut self, stack: Stack) {
         stack.trim();
+        self.recycle_trimmed(stack);
+    }
+
+    /// Recycle a finished task's stack. A root task returns its trimmed stack
+    /// to its owning unit so the unit can recycle the guarded pair together.
+    pub(crate) fn recycle_ended(&mut self, is_root: bool, stack: Stack) {
+        stack.trim();
+        let stack = if is_root {
+            match crate::units::return_root_stack(stack) {
+                Ok(()) => return,
+                Err(stack) => stack,
+            }
+        } else {
+            stack
+        };
+        self.recycle_trimmed(stack);
+    }
+
+    fn recycle_trimmed(&mut self, stack: Stack) {
         if let Some(memory) = crate::units::memory() {
             memory.put_task_stack(stack);
             return;

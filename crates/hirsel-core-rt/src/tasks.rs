@@ -3711,7 +3711,7 @@ pub(crate) unsafe fn run_root_with_unit(
         id: 0,
         #[cfg(feature = "record")]
         group: None,
-        stack: Some(run.stacks.take()),
+        stack: Some(crate::units::take_root_stack().unwrap_or_else(|| run.stacks.take())),
         sp: ptr::null_mut(),
         body,
         input: input_storage.as_ptr(),
@@ -3868,9 +3868,9 @@ impl RunPtr {
                 crate::limit::Funding::unbind();
                 CURRENT.set(previous);
                 match (*task).state {
-                    State::Ended => {
-                        (*self.0).stacks.recycle((*task).stack.take().unwrap());
-                    }
+                    State::Ended => (*self.0)
+                        .stacks
+                        .recycle_ended(task == root, (*task).stack.take().unwrap()),
                     State::Provider => {
                         if (*task).stackless {
                             (*self.0).stacks.recycle(unmount(task));

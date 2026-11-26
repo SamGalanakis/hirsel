@@ -46,6 +46,8 @@ pub(super) struct UntiedPlan {
     pub(super) host_idle_ms: u64,
     pub(super) reactor: ReactorPlan,
     pub(super) retained_bytes: usize,
+    pub(super) worker_pair_stock: usize,
+    pub(super) pair_refill_batch: usize,
     pub(super) reclaim_bytes: usize,
     pub(super) reclaim_slots: usize,
     pub(super) ready_scratch_bytes: usize,
@@ -199,6 +201,16 @@ impl UntiedPlan {
             .clamp(2 * MIB, worker_retention)
             .min(host_retention);
         let retained = retained / page * page;
+        let pair_retained = (unit_stack + page) + (commit + page);
+        let pair_va = unit_stack + task_reserve + 2 * page;
+        let va_stock_total = address_left.map_or(usize::MAX, |a| (a / 4) / pair_va);
+        let mem_stock_total = retained / pair_retained;
+        let worker_pair_stock = (mem_stock_total.min(va_stock_total) / w).min(8);
+        let pair_refill_batch = if worker_pair_stock == 0 {
+            0
+        } else {
+            (worker_pair_stock / 2).clamp(1, 4).min(worker_pair_stock)
+        };
         let reclaim = if retained == 0 {
             0
         } else {
@@ -228,6 +240,8 @@ impl UntiedPlan {
             host_idle_ms: 10_000,
             reactor,
             retained_bytes: retained,
+            worker_pair_stock,
+            pair_refill_batch,
             reclaim_bytes: reclaim,
             reclaim_slots,
             ready_scratch_bytes: 2

@@ -2,9 +2,10 @@
 //! these, so an executable that never enables the pool keeps none of it.
 use super::host_calls::{HostCall, run_off_slot};
 use super::{
-    SharedMemory, check_slot, park_unit, pool, pool_memory, reply, sync::AtomicBool,
+    SharedMemory, check_slot, cur, park_unit, pool, pool_memory, reply, sync::AtomicBool,
     wake_unit_by_id, worker_ix, yield_unit_if_needed,
 };
+use crate::fiber::Stack;
 use std::sync::{OnceLock, atomic::Ordering};
 
 pub(super) static UNTIED_ON: AtomicBool = AtomicBool::new(false);
@@ -15,6 +16,8 @@ pub(crate) fn untied() -> bool {
 
 pub(super) struct PoolHooks {
     pub(super) memory: fn() -> Option<&'static dyn SharedMemory>,
+    pub(super) take_root_stack: fn() -> Option<Stack>,
+    pub(super) return_root_stack: fn(Stack) -> Result<(), Stack>,
     pub(super) park: fn(Option<u64>),
     pub(super) maybe_yield: fn(),
     pub(super) wake: fn(u32),
@@ -29,6 +32,8 @@ static POOL_HOOKS: OnceLock<PoolHooks> = OnceLock::new();
 pub(super) fn enable_pool() {
     let _ = POOL_HOOKS.set(PoolHooks {
         memory: pool_memory,
+        take_root_stack: take_unit_root_stack,
+        return_root_stack: return_unit_root_stack,
         park: park_unit,
         maybe_yield: yield_unit_if_needed,
         wake: wake_unit_by_id,
@@ -50,5 +55,40 @@ fn take_running_slot() {
     let (p, ix) = (pool(), worker_ix());
     if ix < p.w {
         check_slot(p, ix);
+    }
+}
+
+pub(crate) fn take_root_stack() -> Option<Stack> {
+    untied().then(|| (pool_hooks().take_root_stack)()).flatten()
+}
+
+pub(crate) fn return_root_stack(stack: Stack) -> Result<(), Stack> {
+    if untied() {
+        (pool_hooks().return_root_stack)(stack)
+    } else {
+        Err(stack)
+    }
+}
+
+fn take_unit_root_stack() -> Option<Stack> {
+    let u = cur();
+    // SAFETY: called on the running unit's stack.
+    (!u.is_null())
+        .then(|| unsafe { (*(*u).stack.get()).root.take() })
+        .flatten()
+}
+
+fn return_unit_root_stack(stack: Stack) -> Result<(), Stack> {
+    let u = cur();
+    if u.is_null() {
+        return Err(stack);
+    }
+    // SAFETY: called on the running unit's stack; `root` is owned by `u`.
+    let slot = unsafe { &mut (*(*u).stack.get()).root };
+    if slot.is_none() {
+        *slot = Some(stack);
+        Ok(())
+    } else {
+        Err(stack)
     }
 }

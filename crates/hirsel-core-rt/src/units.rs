@@ -19,14 +19,16 @@ mod memory;
 #[cfg(feature = "testing")]
 #[path = "units_observe.rs"]
 pub(crate) mod observe;
-use memory::UnitStack;
+use memory::{AdmittedStacks, StackPair};
 pub(crate) use memory::{Memory, SharedMemory};
 #[cfg(test)]
 #[path = "units_check.rs"]
 mod check;
 #[path = "units_directory.rs"]
 mod directory;
-use directory::{UnitDirectory, create_unit};
+#[cfg(test)]
+use directory::create_unit;
+use directory::{UnitDirectory, create_initial_unit};
 pub(crate) use directory::{spawn_job, spawn_language_job};
 #[path = "units_env.rs"]
 mod env;
@@ -44,8 +46,8 @@ pub(crate) mod ledger;
 pub(crate) use launch::launch;
 #[path = "units_plan.rs"]
 mod plan;
-pub(crate) use hooks::untied;
 use hooks::{UNTIED_ON, enable_pool, pool_hooks};
+pub(crate) use hooks::{return_root_stack, take_root_stack, untied};
 use plan::UntiedPlan;
 #[path = "units_reply.rs"]
 mod reply;
@@ -254,7 +256,7 @@ pub(crate) struct Unit {
     sp: UnsafeCell<*mut u8>,
     /// The running worker's host stack slot.
     host: UnsafeCell<*mut *mut u8>,
-    stack: UnsafeCell<Option<UnitStack>>,
+    pub(super) stack: UnsafeCell<AdmittedStacks>,
     /// Only the running unit reads or changes this heap owner.
     heap: UnsafeCell<std::cell::OnceCell<Arc<crate::task_heap::Heap>>>,
     state: AtomicU8,
@@ -321,7 +323,7 @@ pub(crate) fn identity() -> usize {
 }
 
 #[derive(Clone, Copy)]
-struct UP(*const Unit);
+pub(super) struct UP(*const Unit);
 // SAFETY: unit records are leaked and shared by design.
 unsafe impl Send for UP {}
 
@@ -426,58 +428,32 @@ fn now() -> u64 {
     sync::monotonic_ns()
 }
 
-/// Give a unit about to run for the first time its stack and initial frame.
-/// Done by the worker that runs it, so a cache miss's round trip to the
-/// memory thread never holds the poll turn or the unit's creator.
+/// Admit a unit's guarded unit and root-task stack pair before dispatch.
 /// # Safety
-/// `u` is dequeued by this worker and has never run.
-unsafe fn start_stack(p: &'static Pool, u: &Unit) -> bool {
-    // The checker does not model the memory thread: a start maps in place,
-    // as a cache hit would.
+/// `u` is dequeued by worker `ix` and has never run.
+unsafe fn start_stack(p: &'static Pool, ix: usize, u: &Unit) -> bool {
+    // SAFETY: `u` was exclusively dequeued by this worker.
+    if let Some(unit_stack) = unsafe { (*u.stack.get()).unit.as_ref() } {
+        // SAFETY: `u` owns its admitted stack; preparing on the worker thread
+        // keeps the unit-stack page fault off the memory thread.
+        unsafe {
+            *u.sp.get() =
+                unit_stack.prepare_frame(unit_entry, (u as *const Unit).cast_mut().cast());
+        }
+        return true;
+    }
     #[cfg(test)]
     if check::modelled() {
+        let pair = StackPair::new(p.plan.unit_stack_bytes, p.plan.task_stack_reserve);
         // SAFETY: by the contract.
-        unsafe { first_frame(u, UnitStack::new(p.plan.unit_stack_bytes)) };
+        unsafe { p.memory.admit_pair_to_unit(u, pair, true) };
         return true;
     }
-    if let Some(stack) = p.memory.cached_unit_stack() {
-        // SAFETY: by the contract.
-        unsafe { first_frame(u, stack) };
-        return true;
-    }
-    // A cache miss maps on the memory thread. The unit stays queued but on
-    // no queue; the job gives it the stack and publishes it again, while
-    // this worker goes on to other work.
-    let up = UP(u);
-    p.memory.post(move || {
-        let up = up;
-        // SAFETY: nobody else holds the dequeued unit until it is published.
-        unsafe { first_frame(&*up.0, UnitStack::new(p.plan.unit_stack_bytes)) };
-        publish(p, &p.injector, up);
-    });
-    false
+    // SAFETY: by the contract.
+    unsafe { p.memory.admit_or_refill(p, ix, u) }
 }
 
-/// # Safety
-/// `u` has no stack and nobody else is touching it.
-unsafe fn first_frame(u: &Unit, stack: UnitStack) {
-    // SAFETY: the frame is written at the top of the unit's own stack, which
-    // this thread alone owns until the unit runs.
-    unsafe {
-        let top = stack.top();
-        let words = hirsel_stack::initial_frame(
-            unit_entry,
-            (u as *const Unit).cast_mut().cast(),
-            std::ptr::null_mut(),
-        );
-        let start = top.sub(16 + size_of_val(&words));
-        std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
-        *u.sp.get() = start;
-        *u.stack.get() = Some(stack);
-    }
-}
-
-unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
+pub(super) unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
     // SAFETY: the record outlives its stack; see create_unit.
     unsafe {
         let u = &*(a as *const Unit);
@@ -704,6 +680,15 @@ fn publish(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
     notify_worker(p, 0);
 }
 
+pub(super) fn publish_batch(p: &Pool, batch: Vec<UP>) {
+    let n = batch.len();
+    p.injector.lock().unwrap().extend(batch);
+    p.queued.fetch_add(n, Ordering::SeqCst);
+    for _ in 0..n.min(p.w) {
+        notify_worker(p, 0);
+    }
+}
+
 fn push_counted(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
     q.lock().unwrap().push_back(up);
     p.queued.fetch_add(1, Ordering::SeqCst);
@@ -912,8 +897,8 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
         let u = &*up.0;
         #[cfg(feature = "testing")]
         let entry_ns = if observe::enabled() { now() } else { 0 };
-        if (*u.sp.get()).is_null() && !start_stack(p, u) {
-            // The memory thread maps the stack and queues the unit.
+        if (*u.sp.get()).is_null() && !start_stack(p, ix, u) {
+            // The memory thread maps the stack pair and queues the unit.
             return;
         }
         // Acquire readiness published while this entry was already queued.
@@ -949,7 +934,7 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 u.state.store(DONE, Ordering::SeqCst);
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.
-                p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
+                p.memory.release_unit_stacks(ix, (*u.stack.get()).take());
                 *u.sp.get() = std::ptr::null_mut();
                 if p.units.retire(up) {
                     p.stop.store(true, Ordering::SeqCst);

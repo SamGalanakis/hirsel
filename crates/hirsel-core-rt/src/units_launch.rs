@@ -82,10 +82,11 @@ pub(super) fn launch_planned(
                 })
                 .map(drop)
         });
-        // Start no program work until every worker exists.
+        // Start no program work until every worker exists; admit each initial
+        // unit's guarded stack pair before workers dispatch it.
         if result.is_ok() {
             for i in 0..k {
-                create_unit(i as u32);
+                create_initial_unit(i as u32);
             }
         }
         *ready.lock().unwrap() = Some(result.is_ok());

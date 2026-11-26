@@ -200,8 +200,23 @@ pub(crate) fn spawn_language_job(job: Job) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn create_unit(id: u32) {
     publish_unit(new_unit(id));
+}
+
+/// Create an initial unit with its guarded stack pair already admitted before
+/// any worker dispatches it.
+pub(super) fn create_initial_unit(id: u32) {
+    let unit = Box::leak(new_unit(id));
+    let p = pool();
+    let pair = StackPair::new(p.plan.unit_stack_bytes, p.plan.task_stack_reserve);
+    // SAFETY: `unit` has not been published yet; nobody else holds it.
+    unsafe { p.memory.admit_pair_to_unit(unit, pair, true) };
+    p.units.install(unit);
+    bump(S_CREATED);
+    add_stat(S_CREATE_NS, now() - unit.created_ns);
+    enqueue(p, unit);
 }
 
 // A helper's job is set by its spawner before publication. Keeping the job
@@ -217,7 +232,7 @@ fn new_unit(id: u32) -> Box<Unit> {
         observed_queue_cpu: AtomicU32::new(u32::MAX),
         sp: UnsafeCell::new(std::ptr::null_mut()),
         host: UnsafeCell::new(std::ptr::null_mut()),
-        stack: UnsafeCell::new(None),
+        stack: UnsafeCell::new(AdmittedStacks::EMPTY),
         heap: UnsafeCell::new(std::cell::OnceCell::new()),
         state: AtomicU8::new(QUEUED),
         inside: AtomicBool::new(false),

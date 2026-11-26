@@ -10,11 +10,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> (TyId, Option<ValueId>) {
         let Some(item) = self.named_callee(argument) else {
-            self.refuse(
-                "PROG-9",
-                argument,
-                "code.describe requires the name of a top-level function",
-            );
+            if matches!(self.call_target(argument), Some(Target::Missing)) {
+                self.halt();
+            } else {
+                self.refuse(
+                    "PROG-9",
+                    argument,
+                    "code.describe requires the name of a top-level function",
+                );
+            }
             return (ERROR, None);
         };
         let Some(callable) = self.checked_function_item(item, argument) else {

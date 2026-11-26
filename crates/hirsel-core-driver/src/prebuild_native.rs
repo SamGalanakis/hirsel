@@ -94,6 +94,38 @@ fn plain_library_objects(product: &CheckProduct, entry: &Option<DefPath>, option
     (plain.len(), plain.iter().filter(|o| o.compiled).count())
 }
 
+/// Law: reinstalling the image's unchanged prebuild is a no-op: every
+/// development and recipe object is already stored, so nothing compiles.
+#[test]
+#[ignore = "explicit native integration target"]
+fn a_prebuilt_image_prebuilds_again_without_compiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let prebuilt = prebuild_std(&dir.path().join("prebuilt"));
+    let (empty, _) = prebuild_check(&prebuilt, &dir.path().join("prebuild"), vec![], None);
+    let host = native_options(Backend::Cranelift, &dir.path().join("prebuild"));
+    let first = empty
+        .prebuild(
+            host.target.clone(),
+            host.runtime.clone(),
+            host.link.clone(),
+            &dir.path().join("first"),
+        )
+        .unwrap();
+    assert!(first.compiled > 0, "{first:?}");
+    let second = empty
+        .prebuild(
+            host.target,
+            host.runtime,
+            host.link,
+            &dir.path().join("second"),
+        )
+        .unwrap();
+    assert_eq!(second.instances, first.instances);
+    assert_eq!(second.skipped, first.skipped);
+    assert_eq!(second.compiled, 0, "{second:?}");
+    assert_eq!(second.recipe_compiled, 0, "{second:?}");
+}
+
 /// Law: after a prebuild, the first development build of any program over
 /// that image compiles no plain library object, and links the
 /// executable a build over an image nothing was prebuilt into links; a build

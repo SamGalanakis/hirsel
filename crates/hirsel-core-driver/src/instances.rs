@@ -95,8 +95,8 @@ impl std::fmt::Display for InstanceStop {
 pub use crate::instance_walk::collect_instances;
 /// Per-build instances retain their materialized modules for native emission.
 /// Nongeneric bodies keep the already-published module by reference. A walk
-/// over instance records (`Records`) materialises only its misses: a hit keeps
-/// its record instead.
+/// over instance records (`Records`) materialises only its misses unless the
+/// set materialises hits: a hit keeps its record either way.
 #[derive(Default)]
 pub(crate) struct InstanceSet {
     addresses: std::sync::OnceLock<Option<BTreeMap<Identity, ContentHash>>>,
@@ -114,6 +114,9 @@ pub(crate) struct InstanceSet {
     pub fields: std::collections::BTreeMap<Identity, Fields>,
     summarize_foreign: bool,
     compact_recipe: bool,
+    /// Whether a record hit is materialised too. A prebuild takes the hit's
+    /// object and still needs the instance's module for its recipe object.
+    materialize_hits: bool,
     target: Option<hirsel_core_layout::Target>,
     /// A reached module reads the target or binds a computed constant's value.
     target_inputs: bool,
@@ -314,6 +317,12 @@ impl InstanceSet {
             compact_recipe,
             ..Self::default()
         }
+    }
+    /// Materialise a record hit as well as taking its object. A prebuild needs
+    /// the instance's module for its recipe object.
+    pub(crate) fn materialize_hits(mut self) -> Self {
+        self.materialize_hits = true;
+        self
     }
     /// Materialise each instance's retained code for `target` (PROG-10).
     pub(crate) fn for_target(mut self, target: Option<hirsel_core_layout::Target>) -> Self {
@@ -616,9 +625,10 @@ impl CheckProduct {
         self.instances_observed(roots, limit, instances, None, |_, _| {})
     }
     /// Collect instances over Cranelift development instance records: a hit
-    /// takes its children and closures from its record and materialises
-    /// nothing; a miss is materialised from its template and its arguments'
-    /// closures, which the walk's records and materialised modules supply.
+    /// takes its children and closures from its record and, unless the set
+    /// materialises hits, nothing else; a miss is materialised from its
+    /// template and its arguments' closures, which the walk's records and
+    /// materialised modules supply.
     pub(crate) fn instances_over_records(
         &self,
         roots: impl IntoIterator<Item = Identity>,
@@ -656,8 +666,9 @@ impl CheckProduct {
         }
         Ok(reached)
     }
-    /// Walk one instance: its record on a hit, else its materialised body,
-    /// into `instances`; the instances it reaches.
+    /// Walk one instance: its record on a hit, else its materialised body
+    /// (both when the set materialises hits), into `instances`; the instances
+    /// it reaches.
     pub(crate) fn instance_step(
         &self,
         key: &Identity,
@@ -777,7 +788,9 @@ impl CheckProduct {
                     resolver.add_closures(&record.closures);
                     let pending = record.children.clone();
                     instances.hits.insert(key.clone(), record);
-                    return Ok(pending);
+                    if !instances.materialize_hits {
+                        return Ok(pending);
+                    }
                 }
             }
             let arguments = resolver.arguments(key).map_err(|hash| {

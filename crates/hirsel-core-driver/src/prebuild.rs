@@ -52,9 +52,11 @@ impl CheckProduct {
         if let Some(records) = &mut inputs.records {
             records.library = Some(library.clone());
         }
-        let mut materialized = crate::instances::InstanceSet::default().for_target(Some(
-            crate::reachability::build_target(options).map_err(NativeStop::Input)?,
-        ));
+        let mut materialized = crate::instances::InstanceSet::default()
+            .materialize_hits()
+            .for_target(Some(
+                crate::reachability::build_target(options).map_err(NativeStop::Input)?,
+            ));
         let mut resolver = hirsel_core_materialize::Resolver::default();
         let mut prebuilt = Prebuilt::default();
         // No prior reach record: every instance walks its own record or body.

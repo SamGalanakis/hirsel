@@ -104,9 +104,13 @@ The [RTP and RTCP specification](rtp.md) defines the sans-IO `rtp` package: head
 extensions, RTCP, retransmission, congestion control, pacing and stream rewriting (built; `rtp@1`).
 The [HTTP specification](http.md) defines std `http` (built, Layer 1), the runner's HTTP bindings
 and keyed operations (Part B, design).
-The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (built; `webrtc_sfu@1`, RTC-1 to RTC-9):
+The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (built; `webrtc_sfu@1`, RTC-1 to RTC-9; RTC-10 pooled rooms specified, not built):
 JSEP SDP, the sans-IO PeerSession, the room router with dynacast, active speakers,
-the revocation fence, and `media_record`.
+the revocation fence, `media_record`, and one service serving many rooms from one unit pool.
+The [QUIC specification](quic.md) defines the sans-IO QUIC v1 endpoint written in Hirsel: RFC 9000, 9001, 9002 and 9221, a QUIC-only TLS 1.3 handshake with pinned peers, and NET-16 steered connection IDs (specified, not built).
+The [WebTransport specification](webtransport.md) defines WebTransport over HTTP/3 (draft-ietf-webtrans-http3-17) with static-only QPACK and browser certificate hashes (specified, not built).
+The [MoQ specification](moq.md) defines the Media over QUIC endpoint and relay on draft-ietf-moq-transport-23 (specified, not built).
+The [SFU cascade specification](sfu_cascade.md) defines rooms that span SFU nodes over QUIC links, with a cross-node revocation fence that fails closed under partition (specified, not built; needs a room directory).
 The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (built; `turn@1`).
 The [SFrame specification](sframe.md) defines the `sframe` package: RFC 9605 end-to-end media encryption with AES-128-GCM, the sender-key ratchet, a replay window, and a ranged framing that keeps codec headers clear and authenticated (built; `sframe@1`, v4; v5 TLS-8 schedule slice E1 planned).
 The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, local

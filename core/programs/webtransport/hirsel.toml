@@ -1,0 +1,20 @@
+[package]
+name = "webtransport"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+quic = { major = 1, path = "../quic" }
+
+[sources]
+"h3_wire.hirsel" = "h3_wire"
+"qpack_tables.hirsel" = "qpack"
+"qpack.hirsel" = "qpack"
+
+[tests]
+limit = 67108864
+grants = ["Tasks"]
+
+[tests.sources]
+"laws.hirsel" = "laws"

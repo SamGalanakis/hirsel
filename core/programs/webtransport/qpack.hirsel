@@ -1,0 +1,364 @@
+// WT-6: static-only QPACK (RFC 9204) with HPACK's Huffman code (RFC 7541 §5.2, Appendix B).
+// The encoder writes static references and literals and never inserts; the decoder
+// advertises a table capacity of 0, so any dynamic reference is an error.
+pub type Field: key {
+    name: Bytes,
+    value: Bytes
+}
+
+/// Decompression is QPACK_DECOMPRESSION_FAILED, EncoderStream QPACK_ENCODER_STREAM_ERROR and
+/// DecoderStream QPACK_DECODER_STREAM_ERROR (RFC 9204 §6). TooLarge is a field section past
+/// the advertised SETTINGS_MAX_FIELD_SECTION_SIZE, malformed under RFC 9114 §4.2.2.
+pub type QpackError: key = Decompression | EncoderStream | DecoderStream | TooLarge
+
+/// RFC 9114 §4.2.2: a field's size is its name and value lengths plus 32.
+pub const FIELD_OVERHEAD: u64 = 32
+
+const MAX_INTEGER: u64 = 0x3fffffffffffffff
+
+pub const STATIC_COUNT: u64 = 99
+
+fn static_bounds(i: u64) -> (u64, u64, u64, u64) {
+    let (name_at, name_len, value_at, value_len) = STATIC_ENTRIES[i]
+    let a: u64 = int.widen(name_at)
+    let b: u64 = int.widen(name_len)
+    let c: u64 = int.widen(value_at)
+    let d: u64 = int.widen(value_len)
+    (a, a + b, c, c + d)
+}
+
+/// Entry i's name, appended to out.
+pub fn push_static_name(i: u64, mut out: Bytes) {
+    let (a, b, _, _) = static_bounds(i)
+    list.append(mut out, list.slice(string.as_bytes(STATIC_TEXT), a, b))
+}
+
+/// Entry i's value, appended to out.
+pub fn push_static_value(i: u64, mut out: Bytes) {
+    let (_, _, c, d) = static_bounds(i)
+    list.append(mut out, list.slice(string.as_bytes(STATIC_TEXT), c, d))
+}
+
+// RFC 7541 §5.1 prefixed integers. Ok(None) means the input ends inside the integer.
+fn read_prefixed(input: Bytes, mut at: u64, end: u64, bits: u64) -> Result[Option[u64], QpackError] {
+    if at >= end {
+        return Ok(None)
+    }
+    let mask: u64 = (1u64 << bits) - 1
+    let first: u64 = int.widen(input[at])
+    let mut n = first & mask
+    let mut i = at + 1
+    if n == mask {
+        let mut shift = 0u64
+        loop {
+            if i >= end {
+                return Ok(None)
+            }
+            let b: u64 = int.widen(input[i])
+            i += 1
+            if shift > 56 {
+                return Error(Decompression)
+            }
+            let add = (b & 0x7f) << shift
+            if add > MAX_INTEGER - n {
+                return Error(Decompression)
+            }
+            n += add
+            shift += 7
+            if b & 0x80 == 0 {
+                break
+            }
+        }
+    }
+    at = i
+    Ok(Some(n))
+}
+
+fn need(r: Result[Option[u64], QpackError]) -> Result[u64, QpackError] {
+    match r {
+        Ok(Some(n)) => Ok(n),
+        Ok(None) => Error(Decompression),
+        Error(e) => Error(e),
+    }
+}
+
+/// flags are the bits above the prefix in the first byte.
+fn write_prefixed(n: u64, bits: u64, flags: u8, mut out: Bytes) {
+    let mask: u64 = (1u64 << bits) - 1
+    if n < mask {
+        let low: u8 = int.narrow(n)
+        list.push(mut out, flags | low)
+        return
+    }
+    let full: u8 = int.narrow(mask)
+    list.push(mut out, flags | full)
+    let mut rest = n - mask
+    while rest >= 128 {
+        list.push(mut out, int.narrow((rest & 0x7f) | 0x80))
+        rest = rest >> 7
+    }
+    list.push(mut out, int.narrow(rest))
+}
+
+/// The Huffman-coded length of s in bytes, padding included.
+pub fn huffman_len(s: Bytes) -> u64 {
+    let mut bits = 0u64
+    for b in s {
+        let i: u64 = int.widen(b)
+        let (_, n) = HUFFMAN_CODES[i]
+        let w: u64 = int.widen(n)
+        bits += w
+    }
+    (bits + 7) / 8
+}
+
+/// RFC 7541 §5.2: codes most significant bit first, padded with the high bits of EOS.
+pub fn huffman_encode(s: Bytes, mut out: Bytes) {
+    let mut acc = 0u64
+    let mut held = 0u64
+    for b in s {
+        let i: u64 = int.widen(b)
+        let (code, n) = HUFFMAN_CODES[i]
+        let c: u64 = int.widen(code)
+        let w: u64 = int.widen(n)
+        acc = (acc << w) | c
+        held += w
+        while held >= 8 {
+            held -= 8
+            list.push(mut out, int.narrow((acc >> held) & 0xff))
+        }
+        acc = acc & ((1u64 << held) - 1)
+    }
+    if held > 0 {
+        let pad = 8 - held
+        list.push(mut out, int.narrow(((acc << pad) | ((1u64 << pad) - 1)) & 0xff))
+    }
+}
+
+/// Decode input[at..end) onto out, refusing to grow out past limit bytes (TooLarge). EOS
+/// inside the string, padding longer than 7 bits, or padding that is not all ones is
+/// Decompression (RFC 7541 §5.2).
+pub fn huffman_decode(input: Bytes, at: u64, end: u64, limit: u64, mut out: Bytes) -> Result[(), QpackError] {
+    let mut code = 0u64
+    let mut len = 0u64
+    let mut written = 0u64
+    for i in at .. end {
+        let byte: u64 = int.widen(input[i])
+        for k in 0u64 .. 8 {
+            code = (code << 1) | ((byte >> (7 - k)) & 1)
+            len += 1
+            if len >= 5 {
+                let (first, index, count) = HUFFMAN_LENGTHS[len - 5]
+                let f: u64 = int.widen(first)
+                let c: u64 = int.widen(count)
+                if c > 0 && code >= f && code - f < c {
+                    let base: u64 = int.widen(index)
+                    let sym: u64 = int.widen(HUFFMAN_SYMBOLS[base + code - f])
+                    if sym == 256 {
+                        return Error(Decompression)
+                    }
+                    if written >= limit {
+                        return Error(TooLarge)
+                    }
+                    list.push(mut out, int.narrow(sym))
+                    written += 1
+                    code = 0
+                    len = 0
+                } else if len >= 30 {
+                    return Error(Decompression)
+                }
+            }
+        }
+    }
+    if len > 7 || code != (1u64 << len) - 1 {
+        return Error(Decompression)
+    }
+    Ok(())
+}
+
+/// A string literal (RFC 9204 §4.1.2) whose length prefix has bits bits and H flag h_bit.
+fn read_string(input: Bytes, mut at: u64, end: u64, bits: u64, h_bit: u8, limit: u64, mut out: Bytes) -> Result[(), QpackError] {
+    let huffman = input[at] & h_bit != 0
+    let mut i = at
+    let len = need(read_prefixed(input, mut i, end, bits))?
+    if len > end - i {
+        return Error(Decompression)
+    }
+    if huffman {
+        huffman_decode(input, i, i + len, limit, mut out)?
+    } else {
+        if len > limit {
+            return Error(TooLarge)
+        }
+        list.append(mut out, list.slice(input, i, i + len))
+    }
+    at = i + len
+    Ok(())
+}
+
+fn write_string(s: Bytes, bits: u64, flags: u8, h_bit: u8, mut out: Bytes) {
+    let h = huffman_len(s)
+    if h < list.len(s) {
+        write_prefixed(h, bits, flags | h_bit, mut out)
+        huffman_encode(s, mut out)
+    } else {
+        write_prefixed(list.len(s), bits, flags, mut out)
+        list.append(mut out, s)
+    }
+}
+
+fn find_static(name: Bytes, value: Bytes) -> (Option[u64], Option[u64]) {
+    let mut by_name: Option[u64] = None
+    for i in 0u64 .. STATIC_COUNT {
+        let (a, b, c, d) = static_bounds(i)
+        if list.slice(string.as_bytes(STATIC_TEXT), a, b) == name {
+            if list.slice(string.as_bytes(STATIC_TEXT), c, d) == value {
+                return (Some(i), Some(i))
+            }
+            if let None = by_name {
+                by_name = Some(i)
+            }
+        }
+    }
+    (None, by_name)
+}
+
+/// One encoded field section (RFC 9204 §4.5) with Required Insert Count 0 and Base 0: an
+/// exact static match is an indexed line, a static name match a literal with name
+/// reference, anything else a literal name; strings are Huffman-coded when shorter.
+pub fn encode_section(fields: List[Field], mut out: Bytes) {
+    list.push(mut out, 0)
+    list.push(mut out, 0)
+    for f in fields {
+        match find_static(f.name, f.value) {
+            (Some(i), _) => write_prefixed(i, 6, 0xc0, mut out),
+            (None, Some(i)) => {
+                write_prefixed(i, 4, 0x50, mut out)
+                write_string(f.value, 7, 0, 0x80, mut out)
+            },
+            (None, None) => {
+                write_string(f.name, 3, 0x20, 0x08, mut out)
+                write_string(f.value, 7, 0, 0x80, mut out)
+            },
+        }
+    }
+}
+
+fn charge(mut used: u64, add: u64, limit: u64) -> Result[(), QpackError] {
+    if add > limit || used > limit - add {
+        return Error(TooLarge)
+    }
+    used += add
+    Ok(())
+}
+
+fn push_static(i: u64, mut used: u64, limit: u64, mut fields: List[Field]) -> Result[(), QpackError] {
+    if i >= STATIC_COUNT {
+        return Error(Decompression)
+    }
+    let mut name: Bytes = list.new()
+    push_static_name(i, mut name)
+    let mut value: Bytes = list.new()
+    push_static_value(i, mut value)
+    charge(mut used, list.len(name) + list.len(value) + FIELD_OVERHEAD, limit)?
+    list.push(mut fields, Field(name: take name, value: take value))
+    Ok(())
+}
+
+fn left(used: u64, limit: u64) -> u64 {
+    if used + FIELD_OVERHEAD >= limit {
+        return 0
+    }
+    limit - used - FIELD_OVERHEAD
+}
+
+/// Decode one field section, input[at..end), onto fields. The decoded size (RFC 9114
+/// §4.2.2) is bounded by max_size as each string is decoded: past it is TooLarge and
+/// decoding stops there. A non-zero Required Insert Count or any dynamic or post-base
+/// reference is Decompression (RFC 9204 §4.5.1, §2.2.3, with a table capacity of 0).
+pub fn decode_section(input: Bytes, at: u64, end: u64, max_size: u64, mut fields: List[Field]) -> Result[(), QpackError] {
+    let mut i = at
+    if need(read_prefixed(input, mut i, end, 8))? != 0 {
+        return Error(Decompression)
+    }
+    let _ = need(read_prefixed(input, mut i, end, 7))?
+    let mut used = 0u64
+    while i < end {
+        let b = input[i]
+        if b & 0x80 != 0 {
+            // Indexed field line: 1 T index(6).
+            if b & 0x40 == 0 {
+                return Error(Decompression)
+            }
+            let index = need(read_prefixed(input, mut i, end, 6))?
+            push_static(index, mut used, max_size, mut fields)?
+        } else if b & 0x40 != 0 {
+            // Literal with name reference: 01 N T index(4).
+            if b & 0x10 == 0 {
+                return Error(Decompression)
+            }
+            let index = need(read_prefixed(input, mut i, end, 4))?
+            if index >= STATIC_COUNT {
+                return Error(Decompression)
+            }
+            let mut name: Bytes = list.new()
+            push_static_name(index, mut name)
+            charge(mut used, list.len(name), max_size)?
+            if i >= end {
+                return Error(Decompression)
+            }
+            let mut value: Bytes = list.new()
+            read_string(input, mut i, end, 7, 0x80, left(used, max_size), mut value)?
+            charge(mut used, list.len(value) + FIELD_OVERHEAD, max_size)?
+            list.push(mut fields, Field(name: take name, value: take value))
+        } else if b & 0x20 != 0 {
+            // Literal with literal name: 001 N H length(3).
+            let mut name: Bytes = list.new()
+            read_string(input, mut i, end, 3, 0x08, left(used, max_size), mut name)?
+            charge(mut used, list.len(name), max_size)?
+            if i >= end {
+                return Error(Decompression)
+            }
+            let mut value: Bytes = list.new()
+            read_string(input, mut i, end, 7, 0x80, left(used, max_size), mut value)?
+            charge(mut used, list.len(value) + FIELD_OVERHEAD, max_size)?
+            list.push(mut fields, Field(name: take name, value: take value))
+        } else {
+            // 0001 (post-base indexed) and 0000 (post-base name reference) need a dynamic table.
+            return Error(Decompression)
+        }
+    }
+    Ok(())
+}
+
+/// Consume the complete instructions of the peer's encoder stream in input[at..end); returns
+/// the bytes consumed. Only Set Dynamic Table Capacity 0 (0x20) is accepted: a larger
+/// capacity exceeds our limit of 0 and every other instruction needs a table
+/// (RFC 9204 §4.3.1, §3.2.2), so either is EncoderStream.
+pub fn read_encoder_stream(input: Bytes, at: u64, end: u64) -> Result[u64, QpackError] {
+    for i in at .. end {
+        if input[i] != 0x20 {
+            return Error(EncoderStream)
+        }
+    }
+    Ok(end - at)
+}
+
+/// Consume the complete instructions of the peer's decoder stream; returns the bytes consumed.
+/// Stream Cancellation is accepted. A Section Acknowledgment or Insert Count Increment refers
+/// to dynamic state we never create, so either is DecoderStream (RFC 9204 §4.4).
+pub fn read_decoder_stream(input: Bytes, at: u64, end: u64) -> Result[u64, QpackError] {
+    let mut i = at
+    while i < end {
+        if input[i] & 0xc0 != 0x40 {
+            return Error(DecoderStream)
+        }
+        let start = i
+        match read_prefixed(input, mut i, end, 6) {
+            Ok(Some(_)) => (),
+            Ok(None) => return Ok(start - at),
+            Error(_) => return Error(DecoderStream),
+        }
+    }
+    Ok(i - at)
+}

@@ -1,0 +1,302 @@
+// TS1 laws: T1 codepoints, T2 static QPACK, T3 Huffman.
+fn hex(s: Bytes) -> Bytes {
+    option.unwrap(std.hex.decode(s))
+}
+
+fn field(name: Bytes, value: Bytes) -> qpack.Field {
+    let mut n: Bytes = list.new()
+    list.append(mut n, name)
+    let mut v: Bytes = list.new()
+    list.append(mut v, value)
+    qpack.Field(name: take n, value: take v)
+}
+
+fn same(a: u64, b: u64, take what: String) {
+    if a != b {
+        fail(take what)
+    }
+}
+
+/// bug: A WT-1 codepoint, an RFC 9114/9204/9220/9297 registry value or the draft-17 §4.4
+/// application-code mapping is mistyped, so a peer reads our settings, capsules or errors
+/// as something else.
+/// oracle: draft-ietf-webtrans-http3-17 §4.2, §4.3, §4.4 (Figure 4) and §9; RFC 9114 §6.2,
+/// §7.2, §8.1, §11.2; RFC 9204 §4.2, §5, §6; RFC 9220 §3; RFC 9297 §2.1.1, §3.2, §5.
+/// Values copied by hand from the documents.
+@test
+fn codepoints_match_draft() -> Result[(), ()] {
+    // draft-17 §9.2 HTTP/3 settings.
+    same(h3_wire.SETTINGS_WT_ENABLED, 0x20b8933b, "SETTINGS_WT_ENABLED, draft-17 §9.2")
+    same(h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_UNI, 0x2b64, "SETTINGS_WT_INITIAL_MAX_STREAMS_UNI, §9.2")
+    same(h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI, 0x2b65, "SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI, §9.2")
+    same(h3_wire.SETTINGS_WT_INITIAL_MAX_DATA, 0x2b61, "SETTINGS_WT_INITIAL_MAX_DATA, §9.2")
+    // draft-17 §9.3 signal value and §9.4 stream type.
+    same(h3_wire.SIGNAL_WT_BIDI, 0x41, "WT_STREAM signal, draft-17 §4.3")
+    same(h3_wire.STREAM_WT, 0x54, "WT_STREAM uni type, draft-17 §4.2")
+    // draft-17 §9.5 error codes.
+    same(h3_wire.WT_BUFFERED_STREAM_REJECTED, 0x3994bd84, "WT_BUFFERED_STREAM_REJECTED, §9.5")
+    same(h3_wire.WT_SESSION_GONE, 0x170d7b68, "WT_SESSION_GONE, §9.5")
+    same(h3_wire.WT_FLOW_CONTROL_ERROR, 0x045d4487, "WT_FLOW_CONTROL_ERROR, §9.5")
+    same(h3_wire.WT_ALPN_ERROR, 0x0817b3dd, "WT_ALPN_ERROR, §9.5")
+    same(h3_wire.WT_REQUIREMENTS_NOT_MET, 0x212c0d48, "WT_REQUIREMENTS_NOT_MET, §9.5")
+    same(h3_wire.WT_APPLICATION_FIRST, 0x52e4a40fa8db, "WT_APPLICATION_ERROR first, §9.5")
+    same(h3_wire.WT_APPLICATION_LAST, 0x52e5ac983162, "WT_APPLICATION_ERROR last, §9.5")
+    // draft-17 §9.6 capsules.
+    same(h3_wire.CAPSULE_WT_CLOSE_SESSION, 0x2843, "WT_CLOSE_SESSION, §9.6")
+    same(h3_wire.CAPSULE_WT_DRAIN_SESSION, 0x78ae, "WT_DRAIN_SESSION, §9.6")
+    same(h3_wire.CAPSULE_WT_MAX_STREAMS_BIDI, 0x190B4D3F, "WT_MAX_STREAMS bidi, §9.6")
+    same(h3_wire.CAPSULE_WT_MAX_STREAMS_UNI, 0x190B4D40, "WT_MAX_STREAMS uni, §9.6")
+    same(h3_wire.CAPSULE_WT_STREAMS_BLOCKED_BIDI, 0x190B4D43, "WT_STREAMS_BLOCKED bidi, §9.6")
+    same(h3_wire.CAPSULE_WT_STREAMS_BLOCKED_UNI, 0x190B4D44, "WT_STREAMS_BLOCKED uni, §9.6")
+    same(h3_wire.CAPSULE_WT_MAX_DATA, 0x190B4D3D, "WT_MAX_DATA, §9.6")
+    same(h3_wire.CAPSULE_WT_DATA_BLOCKED, 0x190B4D41, "WT_DATA_BLOCKED, §9.6")
+    // RFC 9220 §3/§5, RFC 9297 §2.1.1/§5, RFC 9204 §5.
+    same(h3_wire.SETTINGS_ENABLE_CONNECT_PROTOCOL, 0x08, "SETTINGS_ENABLE_CONNECT_PROTOCOL, RFC 9220 §3")
+    same(h3_wire.SETTINGS_H3_DATAGRAM, 0x33, "SETTINGS_H3_DATAGRAM, RFC 9297 §5.1")
+    same(h3_wire.H3_DATAGRAM_ERROR, 0x33, "H3_DATAGRAM_ERROR, RFC 9297 §5.2")
+    same(h3_wire.CAPSULE_DATAGRAM, 0x00, "DATAGRAM capsule, RFC 9297 §5.4")
+    same(h3_wire.SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0x01, "SETTINGS_QPACK_MAX_TABLE_CAPACITY, RFC 9204 §5")
+    same(h3_wire.SETTINGS_QPACK_BLOCKED_STREAMS, 0x07, "SETTINGS_QPACK_BLOCKED_STREAMS, RFC 9204 §5")
+    same(h3_wire.SETTINGS_MAX_FIELD_SECTION_SIZE, 0x06, "SETTINGS_MAX_FIELD_SECTION_SIZE, RFC 9114 §7.2.4.1")
+    // RFC 9114 §11.2.1 frame types and §11.2.4 / RFC 9204 §4.2 stream types.
+    same(h3_wire.FRAME_DATA, 0x00, "DATA, RFC 9114 §11.2.1")
+    same(h3_wire.FRAME_HEADERS, 0x01, "HEADERS, §11.2.1")
+    same(h3_wire.FRAME_CANCEL_PUSH, 0x03, "CANCEL_PUSH, §11.2.1")
+    same(h3_wire.FRAME_SETTINGS, 0x04, "SETTINGS, §11.2.1")
+    same(h3_wire.FRAME_PUSH_PROMISE, 0x05, "PUSH_PROMISE, §11.2.1")
+    same(h3_wire.FRAME_GOAWAY, 0x07, "GOAWAY, §11.2.1")
+    same(h3_wire.FRAME_MAX_PUSH_ID, 0x0d, "MAX_PUSH_ID, §11.2.1")
+    same(h3_wire.STREAM_CONTROL, 0x00, "control stream, RFC 9114 §11.2.4")
+    same(h3_wire.STREAM_PUSH, 0x01, "push stream, §11.2.4")
+    same(h3_wire.STREAM_QPACK_ENCODER, 0x02, "QPACK encoder stream, RFC 9204 §8.2")
+    same(h3_wire.STREAM_QPACK_DECODER, 0x03, "QPACK decoder stream, RFC 9204 §8.2")
+    // RFC 9114 §8.1 and RFC 9204 §6 error codes.
+    same(h3_wire.H3_NO_ERROR, 0x0100, "H3_NO_ERROR, RFC 9114 §8.1")
+    same(h3_wire.H3_GENERAL_PROTOCOL_ERROR, 0x0101, "H3_GENERAL_PROTOCOL_ERROR")
+    same(h3_wire.H3_INTERNAL_ERROR, 0x0102, "H3_INTERNAL_ERROR")
+    same(h3_wire.H3_STREAM_CREATION_ERROR, 0x0103, "H3_STREAM_CREATION_ERROR")
+    same(h3_wire.H3_CLOSED_CRITICAL_STREAM, 0x0104, "H3_CLOSED_CRITICAL_STREAM")
+    same(h3_wire.H3_FRAME_UNEXPECTED, 0x0105, "H3_FRAME_UNEXPECTED")
+    same(h3_wire.H3_FRAME_ERROR, 0x0106, "H3_FRAME_ERROR")
+    same(h3_wire.H3_EXCESSIVE_LOAD, 0x0107, "H3_EXCESSIVE_LOAD")
+    same(h3_wire.H3_ID_ERROR, 0x0108, "H3_ID_ERROR")
+    same(h3_wire.H3_SETTINGS_ERROR, 0x0109, "H3_SETTINGS_ERROR")
+    same(h3_wire.H3_MISSING_SETTINGS, 0x010a, "H3_MISSING_SETTINGS")
+    same(h3_wire.H3_REQUEST_REJECTED, 0x010b, "H3_REQUEST_REJECTED")
+    same(h3_wire.H3_REQUEST_CANCELLED, 0x010c, "H3_REQUEST_CANCELLED")
+    same(h3_wire.H3_REQUEST_INCOMPLETE, 0x010d, "H3_REQUEST_INCOMPLETE")
+    same(h3_wire.H3_MESSAGE_ERROR, 0x010e, "H3_MESSAGE_ERROR")
+    same(h3_wire.QPACK_DECOMPRESSION_FAILED, 0x0200, "QPACK_DECOMPRESSION_FAILED, RFC 9204 §6")
+    same(h3_wire.QPACK_ENCODER_STREAM_ERROR, 0x0201, "QPACK_ENCODER_STREAM_ERROR")
+    same(h3_wire.QPACK_DECODER_STREAM_ERROR, 0x0202, "QPACK_DECODER_STREAM_ERROR")
+    // draft-17 §4.4: 0 and 0xffffffff map to the range's ends (stated in the text). The first
+    // reserved value inside the range is 0x1f * 0x2ad7fd3c62c + 0x21 = 0x52e4a40fa8f9, so 29
+    // and 30 map to its two neighbours, 0x52e4a40fa8f8 and 0x52e4a40fa8fa (worked by hand).
+    same(h3_wire.application_code(0), 0x52e4a40fa8db, "application code 0")
+    same(h3_wire.application_code(0xffffffffu32), 0x52e5ac983162, "application code 0xffffffff")
+    same(h3_wire.application_code(29), 0x52e4a40fa8f8, "application code 29")
+    same(h3_wire.application_code(30), 0x52e4a40fa8fa, "application code 30 skips 0x52e4a40fa8f9")
+    if let Some(_) = h3_wire.application_code_of(0x52e4a40fa8f9) {
+        fail("a reserved HTTP/3 code mapped to an application code")
+    }
+    if h3_wire.application_code_of(0x52e4a40fa8fa) != Some(30u32) || h3_wire.application_code_of(0x52e5ac983162) != Some(0xffffffffu32) {
+        fail("the inverse of draft-17 Figure 4")
+    }
+    Ok(())
+}
+
+fn decodes(wire: Bytes, max: u64, expected: List[qpack.Field]) {
+    let mut fields: List[qpack.Field] = list.new()
+    result.unwrap(qpack.decode_section(wire, 0, list.len(wire), max, mut fields))
+    if fields != expected {
+        fail("field section decoded to the wrong fields")
+    }
+}
+
+fn encodes(fields: List[qpack.Field], wire: Bytes) {
+    let mut out: Bytes = list.new()
+    qpack.encode_section(fields, mut out)
+    if out != wire {
+        fail("field section encoded to the wrong bytes")
+    }
+    decodes(wire, 65536, fields)
+}
+
+fn refused(wire: Bytes, max: u64, expected: qpack.QpackError) {
+    let mut fields: List[qpack.Field] = list.new()
+    match qpack.decode_section(wire, 0, list.len(wire), max, mut fields) {
+        Error(e) if e == expected => (),
+        _ => fail("a field section was not refused with its RFC 9204 error"),
+    }
+}
+
+fn static_row(i: u64, name: Bytes, value: Bytes) {
+    let mut n: Bytes = list.new()
+    qpack.push_static_name(i, mut n)
+    let mut v: Bytes = list.new()
+    qpack.push_static_value(i, mut v)
+    if n != name || v != value {
+        fail("RFC 9204 Appendix A row")
+    }
+}
+
+/// bug: The static table, an indexed or literal line, or the dynamic-table refusals of WT-6
+/// are wrong, so a browser's CONNECT decodes to other fields or a dynamic reference is
+/// silently misread.
+/// oracle: RFC 9204 Appendix A rows and Appendix B.1 (the only vector without a dynamic
+/// table), §4.3 and §4.5; encode vectors derived by hand from Appendix A and RFC 7541
+/// Appendix B and C.4.1.
+@test
+fn qpack_static_vectors() -> Result[(), ()] {
+    same(qpack.STATIC_COUNT, 99, "RFC 9204 Appendix A has 99 entries")
+    static_row(0, b":authority", b"")
+    static_row(1, b":path", b"/")
+    static_row(15, b":method", b"CONNECT")
+    static_row(23, b":scheme", b"https")
+    static_row(25, b":status", b"200")
+    static_row(31, b"accept-encoding", b"gzip, deflate, br")
+    static_row(58, b"strict-transport-security", b"max-age=31536000; includesubdomains; preload")
+    static_row(72, b"accept-language", b"")
+    static_row(85, b"content-security-policy", b"script-src 'none'; object-src 'none'; base-uri 'none'")
+    static_row(90, b"origin", b"")
+    static_row(98, b"x-frame-options", b"sameorigin")
+    // Appendix B.1 sends /index.html raw; our encoder Huffman-codes it (8 < 11 bytes), so
+    // B.1 is a decode vector and the encode vector is 51 88 then the RFC 7541 code.
+    let mut path: List[qpack.Field] = list.new()
+    list.push(mut path, field(b":path", b"/index.html"))
+    decodes(hex(b"0000510b2f696e6465782e68746d6c"), 65536, path)
+    encodes(path, hex(b"0000518860d5485f2bce9a68"))
+    // RFC 7541 C.4.1's Huffman string under static name :authority (index 0).
+    let mut authority: List[qpack.Field] = list.new()
+    list.push(mut authority, field(b":authority", b"www.example.com"))
+    encodes(authority, hex(b"0000508cf1e3c2e5f23a6ba0ab90f4ff"))
+    // A WebTransport CONNECT: cf is :method CONNECT (15); :protocol is not in the table,
+    // so a literal name, 2f 00 (Huffman, length 7 past the 3-bit prefix); d7 is :scheme
+    // https (23); 50/51 name :authority/:path; origin is index 90, 5f 4b past the 4-bit prefix.
+    let mut connect: List[qpack.Field] = list.new()
+    list.push(mut connect, field(b":method", b"CONNECT"))
+    list.push(mut connect, field(b":protocol", b"webtransport-h3"))
+    list.push(mut connect, field(b":scheme", b"https"))
+    list.push(mut connect, field(b":authority", b"example.com"))
+    list.push(mut connect, field(b":path", b"/moq"))
+    list.push(mut connect, field(b"origin", b"https://example.com"))
+    encodes(connect, hex(b"0000cf2f00b95d8749c87a3f8bf058d360ea4567b12b4ecfd750882f91d35d055c87a751836293f65f4b8e9d29ad171860be474d7415721e9f"))
+    // :status 200, 404 and 403 are indices 25, 27 and 68; 68 passes the 6-bit prefix: ff 05.
+    let mut statuses: List[qpack.Field] = list.new()
+    list.push(mut statuses, field(b":status", b"200"))
+    list.push(mut statuses, field(b":status", b"404"))
+    list.push(mut statuses, field(b":status", b"403"))
+    encodes(statuses, hex(b"0000d9dbff05"))
+    // A dynamic reference in each position is QPACK_DECOMPRESSION_FAILED.
+    refused(hex(b"0100"), 65536, Decompression)
+    refused(hex(b"000080"), 65536, Decompression)
+    refused(hex(b"000010"), 65536, Decompression)
+    refused(hex(b"00004000"), 65536, Decompression)
+    refused(hex(b"00000000"), 65536, Decompression)
+    refused(hex(b"0000ff24"), 65536, Decompression)
+    // :path /index.html is 5 + 11 + 32 = 48 bytes (RFC 9114 §4.2.2).
+    decodes(hex(b"0000510b2f696e6465782e68746d6c"), 48, path)
+    refused(hex(b"0000510b2f696e6465782e68746d6c"), 47, TooLarge)
+    refused(hex(b"0000518860d5485f2bce9a68"), 47, TooLarge)
+    // Encoder stream: only Set Dynamic Table Capacity 0 (0x20); capacity 1 (0x21) and an
+    // insert with static name reference (c0 00) are QPACK_ENCODER_STREAM_ERROR (§4.3).
+    same(result.unwrap(qpack.read_encoder_stream(hex(b"2020"), 0, 2)), 2, "capacity 0 accepted")
+    if let Error(EncoderStream) = qpack.read_encoder_stream(hex(b"21"), 0, 1) {} else {
+        fail("Set Dynamic Table Capacity 1 accepted")
+    }
+    if let Error(EncoderStream) = qpack.read_encoder_stream(hex(b"c000"), 0, 2) {} else {
+        fail("an insert on the encoder stream accepted")
+    }
+    // Decoder stream: Stream Cancellation (01, §4.4.2) is consumed; a Section
+    // Acknowledgment (1, §4.4.1) or Insert Count Increment (00, §4.4.3) is an error.
+    same(result.unwrap(qpack.read_decoder_stream(hex(b"44"), 0, 1)), 1, "stream cancellation")
+    same(result.unwrap(qpack.read_decoder_stream(hex(b"447f"), 0, 2)), 1, "partial cancellation waits")
+    if let Error(DecoderStream) = qpack.read_decoder_stream(hex(b"84"), 0, 1) {} else {
+        fail("a Section Acknowledgment accepted")
+    }
+    if let Error(DecoderStream) = qpack.read_decoder_stream(hex(b"01"), 0, 1) {} else {
+        fail("an Insert Count Increment accepted")
+    }
+    Ok(())
+}
+
+fn huffman_vector(plain: Bytes, coded: Bytes) {
+    let mut out: Bytes = list.new()
+    qpack.huffman_encode(plain, mut out)
+    if out != coded || qpack.huffman_len(plain) != list.len(coded) {
+        fail("RFC 7541 Huffman encode")
+    }
+    let mut back: Bytes = list.new()
+    result.unwrap(qpack.huffman_decode(coded, 0, list.len(coded), 1024, mut back))
+    if back != plain {
+        fail("RFC 7541 Huffman decode")
+    }
+}
+
+fn huffman_refused(coded: Bytes) {
+    let mut back: Bytes = list.new()
+    if let Error(Decompression) = qpack.huffman_decode(coded, 0, list.len(coded), 1024, mut back) {} else {
+        fail("a malformed Huffman string decoded")
+    }
+}
+
+fn round_trip(plain: Bytes, mut coded: Bytes, mut back: Bytes) {
+    list.clear(mut coded)
+    list.clear(mut back)
+    qpack.huffman_encode(plain, mut coded)
+    result.unwrap(qpack.huffman_decode(coded, 0, list.len(coded), 3, mut back))
+    if back != plain {
+        fail("a byte string did not survive a Huffman round trip")
+    }
+}
+
+/// bug: A Huffman code, the canonical decode tables, the EOS padding or the padding checks
+/// are wrong, so a browser's Huffman-coded header decodes to other bytes or a malformed
+/// string is accepted.
+/// oracle: RFC 7541 Appendix C.4 and C.6 Huffman strings, §5.2's padding and EOS rules.
+@test
+fn huffman_round_trip_and_vectors() -> Result[(), ()] {
+    huffman_vector(b"www.example.com", hex(b"f1e3c2e5f23a6ba0ab90f4ff"))
+    huffman_vector(b"no-cache", hex(b"a8eb10649cbf"))
+    huffman_vector(b"custom-key", hex(b"25a849e95ba97d7f"))
+    huffman_vector(b"custom-value", hex(b"25a849e95bb8e8b4bf"))
+    huffman_vector(b"302", hex(b"6402"))
+    huffman_vector(b"307", hex(b"640eff"))
+    huffman_vector(b"private", hex(b"aec3771a4b"))
+    huffman_vector(b"gzip", hex(b"9bd9ab"))
+    huffman_vector(b"Mon, 21 Oct 2013 20:13:21 GMT", hex(b"d07abe941054d444a8200595040b8166e082a62d1bff"))
+    huffman_vector(b"https://www.example.com", hex(b"9d29ad171863c78f0b97c8e9ae82ae43d3"))
+    huffman_vector(b"foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1", hex(b"94e7821dd7f2e6c7b335dfdfcd5b3960d5af27087f3672c1ab270fb5291f9587316065c003ed4ee5b1063d5007"))
+    // Every byte string of length 0 to 3.
+    let mut coded: Bytes = list.with_capacity(16)
+    let mut back: Bytes = list.with_capacity(4)
+    let mut plain: Bytes = list.with_capacity(3)
+    round_trip(plain, mut coded, mut back)
+    for a in 0u64 .. 256 {
+        list.clear(mut plain)
+        list.push(mut plain, int.narrow(a))
+        round_trip(plain, mut coded, mut back)
+        for b in 0u64 .. 256 {
+            list.truncate(mut plain, 1)
+            list.push(mut plain, int.narrow(b))
+            round_trip(plain, mut coded, mut back)
+            for c in 0u64 .. 256 {
+                list.truncate(mut plain, 2)
+                list.push(mut plain, int.narrow(c))
+                round_trip(plain, mut coded, mut back)
+            }
+        }
+    }
+    // EOS (30 ones) inside a string; 'a' (00011) then 11 bits of padding; 'a' padded with
+    // zeros instead of the EOS prefix.
+    huffman_refused(hex(b"ffffffff"))
+    huffman_refused(hex(b"1fff"))
+    huffman_refused(hex(b"18"))
+    // A decode that would pass its limit stops there.
+    let mut short: Bytes = list.new()
+    if let Error(TooLarge) = qpack.huffman_decode(hex(b"f1e3c2e5f23a6ba0ab90f4ff"), 0, 12, 14, mut short) {} else {
+        fail("a Huffman decode ran past its limit")
+    }
+    same(list.len(short), 14, "the decode stopped at its limit")
+    Ok(())
+}

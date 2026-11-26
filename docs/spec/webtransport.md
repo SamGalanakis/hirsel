@@ -1,11 +1,11 @@
 # WebTransport over HTTP/3
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 2 of 4); design
-review applied the same day (media-w2-spec-fix-2918). Not built. Rules WT-1 to WT-7, laws T1
-to T10, slices TS1 to TS5. The review's rulings are at the end.*
+review applied the same day (media-w2-spec-fix-2918). TS1 built (wt-ts1-ts3-2992); TS2 to TS5
+not built. Rules WT-1 to WT-7, laws T1 to T10, slices TS1 to TS5. The review's rulings are at the end.*
 
 `webtransport` is a sans-IO HTTP/3 server and client with only what WebTransport needs. It is
-written in Hirsel under `core/programs/webtransport` <!-- doc-ref: planned --> and runs over
+written in Hirsel under `core/programs/webtransport` and runs over
 [QUIC](quic.md). It carries [MoQ](moq.md) to browsers, and gives a browser client of
 the SFU a QUIC path beside WebRTC. It follows:
 
@@ -243,13 +243,15 @@ is 13 days old. A client pinned only to a certificate that has rotated out is re
 
 ## Laws
 
-Red first in `core/programs/webtransport/laws.hirsel` <!-- doc-ref: planned --> unless named.
+Red first in `core/programs/webtransport/laws.hirsel` unless named.
 
 - **T1 `codepoints_match_draft`.** Each row of WT-1 against draft-17's IANA section and
   RFC 9114, 9220 and 9297's registries, copied by hand into the law with section numbers.
   *Oracle:* the documents.
-- **T2 `qpack_static_vectors`.** RFC 9204 Appendix A's static table, and the field sections of
-  RFC 9204 Appendix B.1 that use no dynamic table, encoded and decoded byte for byte; a
+- **T2 `qpack_static_vectors`.** RFC 9204 Appendix A's static table, and the field section of
+  RFC 9204 Appendix B.1, the only one that uses no dynamic table, decoded byte for byte. B.1
+  sends `/index.html` raw, and WT-6's encoder Huffman-codes it (8 bytes against 11), so the
+  encode vectors are derived by hand from Appendix A and RFC 7541's code; a
   dynamic reference in any position is `QPACK_DECOMPRESSION_FAILED`, and a Set Dynamic Table
   Capacity of 1 or an insert on the encoder stream is `QPACK_ENCODER_STREAM_ERROR`.
   *Oracle:* the RFC.

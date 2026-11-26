@@ -1,0 +1,274 @@
+// HTTP/3 framing (RFC 9114 §7), stream types (§6.2), SETTINGS (§7.2.4), capsules
+// (RFC 9297 §3) and the WT-1 codepoints. Pure codec: no connection state.
+// RFC 9114 §7.2 and §11.2.1.
+pub const FRAME_DATA: u64 = 0x00
+
+pub const FRAME_HEADERS: u64 = 0x01
+
+pub const FRAME_CANCEL_PUSH: u64 = 0x03
+
+pub const FRAME_SETTINGS: u64 = 0x04
+
+pub const FRAME_PUSH_PROMISE: u64 = 0x05
+
+pub const FRAME_GOAWAY: u64 = 0x07
+
+pub const FRAME_MAX_PUSH_ID: u64 = 0x0d
+
+// RFC 9114 §6.2 and §11.2.4, RFC 9204 §4.2, draft-17 §4.2.
+pub const STREAM_CONTROL: u64 = 0x00
+
+pub const STREAM_PUSH: u64 = 0x01
+
+pub const STREAM_QPACK_ENCODER: u64 = 0x02
+
+pub const STREAM_QPACK_DECODER: u64 = 0x03
+
+pub const STREAM_WT: u64 = 0x54
+
+pub const SIGNAL_WT_BIDI: u64 = 0x41
+
+// RFC 9204 §5, RFC 9114 §7.2.4.1, RFC 9220 §3, RFC 9297 §2.1.1, draft-17 §9.2.
+pub const SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x01
+
+pub const SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x06
+
+pub const SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x07
+
+pub const SETTINGS_ENABLE_CONNECT_PROTOCOL: u64 = 0x08
+
+pub const SETTINGS_H3_DATAGRAM: u64 = 0x33
+
+pub const SETTINGS_WT_ENABLED: u64 = 0x20b8933b
+
+pub const SETTINGS_WT_INITIAL_MAX_STREAMS_UNI: u64 = 0x2b64
+
+pub const SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI: u64 = 0x2b65
+
+pub const SETTINGS_WT_INITIAL_MAX_DATA: u64 = 0x2b61
+
+// RFC 9297 §3.2 and draft-17 §9.6.
+pub const CAPSULE_DATAGRAM: u64 = 0x00
+
+pub const CAPSULE_WT_CLOSE_SESSION: u64 = 0x2843
+
+pub const CAPSULE_WT_DRAIN_SESSION: u64 = 0x78ae
+
+pub const CAPSULE_WT_MAX_DATA: u64 = 0x190B4D3D
+
+pub const CAPSULE_WT_MAX_STREAMS_BIDI: u64 = 0x190B4D3F
+
+pub const CAPSULE_WT_MAX_STREAMS_UNI: u64 = 0x190B4D40
+
+pub const CAPSULE_WT_DATA_BLOCKED: u64 = 0x190B4D41
+
+pub const CAPSULE_WT_STREAMS_BLOCKED_BIDI: u64 = 0x190B4D43
+
+pub const CAPSULE_WT_STREAMS_BLOCKED_UNI: u64 = 0x190B4D44
+
+// RFC 9114 §8.1, RFC 9204 §6, draft-17 §9.5.
+pub const H3_NO_ERROR: u64 = 0x0100
+
+pub const H3_GENERAL_PROTOCOL_ERROR: u64 = 0x0101
+
+pub const H3_INTERNAL_ERROR: u64 = 0x0102
+
+pub const H3_STREAM_CREATION_ERROR: u64 = 0x0103
+
+pub const H3_CLOSED_CRITICAL_STREAM: u64 = 0x0104
+
+pub const H3_FRAME_UNEXPECTED: u64 = 0x0105
+
+pub const H3_FRAME_ERROR: u64 = 0x0106
+
+pub const H3_EXCESSIVE_LOAD: u64 = 0x0107
+
+pub const H3_ID_ERROR: u64 = 0x0108
+
+pub const H3_SETTINGS_ERROR: u64 = 0x0109
+
+pub const H3_MISSING_SETTINGS: u64 = 0x010a
+
+pub const H3_REQUEST_REJECTED: u64 = 0x010b
+
+pub const H3_REQUEST_CANCELLED: u64 = 0x010c
+
+pub const H3_REQUEST_INCOMPLETE: u64 = 0x010d
+
+pub const H3_MESSAGE_ERROR: u64 = 0x010e
+
+pub const H3_DATAGRAM_ERROR: u64 = 0x33
+
+pub const QPACK_DECOMPRESSION_FAILED: u64 = 0x0200
+
+pub const QPACK_ENCODER_STREAM_ERROR: u64 = 0x0201
+
+pub const QPACK_DECODER_STREAM_ERROR: u64 = 0x0202
+
+pub const WT_BUFFERED_STREAM_REJECTED: u64 = 0x3994bd84
+
+pub const WT_SESSION_GONE: u64 = 0x170d7b68
+
+pub const WT_FLOW_CONTROL_ERROR: u64 = 0x045d4487
+
+pub const WT_ALPN_ERROR: u64 = 0x0817b3dd
+
+pub const WT_REQUIREMENTS_NOT_MET: u64 = 0x212c0d48
+
+pub const WT_APPLICATION_FIRST: u64 = 0x52e4a40fa8db
+
+pub const WT_APPLICATION_LAST: u64 = 0x52e5ac983162
+
+pub const MAX_VARINT: u64 = 0x3fffffffffffffff
+
+/// draft-17 §4.4 Figure 4: a 32-bit application code to its HTTP/3 code, skipping the
+/// reserved 0x1f * N + 0x21 values.
+pub fn application_code(n: u32) -> u64 {
+    let w: u64 = int.widen(n)
+    WT_APPLICATION_FIRST + w + w / 0x1e
+}
+
+/// The inverse of application_code; None for a code outside the range or a reserved value.
+pub fn application_code_of(h: u64) -> Option[u32] {
+    if h < WT_APPLICATION_FIRST || h > WT_APPLICATION_LAST || (h - 0x21) % 0x1f == 0 {
+        return None
+    }
+    let shifted = h - WT_APPLICATION_FIRST
+    int.try_narrow(shifted - shifted / 0x1f)
+}
+
+/// RFC 9114 §7.2.8 and §6.2.3: reserved types of the form 0x1f * N + 0x21 carry no meaning.
+pub fn is_grease(n: u64) -> bool {
+    n >= 0x21 && (n - 0x21) % 0x1f == 0
+}
+
+fn width(n: u64) -> u64 {
+    if n < 64 {
+        1
+    } else if n < 16384 {
+        2
+    } else if n < 1073741824 {
+        4
+    } else {
+        8
+    }
+}
+
+/// RFC 9000 §16 varint at input[at..end). Ok(None) when the input ends inside it.
+pub fn read_varint(input: Bytes, mut at: u64, end: u64) -> Option[u64] {
+    if at >= end {
+        return None
+    }
+    let first: u64 = int.widen(input[at])
+    let size = 1u64 << (first >> 6)
+    if size > end - at {
+        return None
+    }
+    let mut n = first & 0x3f
+    for i in at + 1 .. at + size {
+        let b: u64 = int.widen(input[i])
+        n = (n << 8) | b
+    }
+    at += size
+    Some(n)
+}
+
+/// RFC 9000 §16, minimal width. n must be below 2^62.
+pub fn write_varint(n: u64, mut out: Bytes) {
+    if n > MAX_VARINT {
+        fail("varint above 2^62 - 1")
+    }
+    let size = width(n)
+    let tagged = match size {
+        1 => n,
+        2 => n | 0x4000,
+        4 => n | 0x80000000,
+        _ => n | 0xc000000000000000,
+    }
+    let mut i = size
+    while i > 0 {
+        i -= 1
+        list.push(mut out, int.narrow((tagged >> (8 * i)) & 0xff))
+    }
+}
+
+pub fn varint_len(n: u64) -> u64 {
+    width(n)
+}
+
+/// A frame or capsule header: its type, payload length and the header's own length.
+pub type Head: key {
+    kind: u64,
+    len: u64,
+    head: u64
+}
+
+/// The type and length that begin a frame (RFC 9114 §7.1) or capsule (RFC 9297 §3.2);
+/// None when input[at..end) does not yet hold both.
+pub fn read_head(input: Bytes, at: u64, end: u64) -> Option[Head] {
+    let mut i = at
+    let kind = read_varint(input, mut i, end)?
+    let len = read_varint(input, mut i, end)?
+    Some(Head(kind: kind, len: len, head: i - at))
+}
+
+pub fn write_head(kind: u64, len: u64, mut out: Bytes) {
+    write_varint(kind, mut out)
+    write_varint(len, mut out)
+}
+
+/// RFC 9114 §7.2.8: the HTTP/2 frame types with no HTTP/3 meaning are H3_FRAME_UNEXPECTED.
+pub fn reserved_frame(kind: u64) -> bool {
+    kind == 0x02 || kind == 0x06 || kind == 0x08 || kind == 0x09
+}
+
+pub type Settings {
+    pairs: List[(u64, u64)]
+}
+
+/// RFC 9114 §7.2.4: a SETTINGS payload. A repeated identifier, or one of the HTTP/2
+/// identifiers that §7.2.4.1 reserves (0x00, 0x02 to 0x05), is H3_SETTINGS_ERROR; a payload
+/// that ends inside a pair is H3_FRAME_ERROR (§7.1).
+pub fn read_settings(input: Bytes, at: u64, end: u64) -> Result[Settings, u64] {
+    let mut pairs: List[(u64, u64)] = list.new()
+    let mut i = at
+    while i < end {
+        let Some(id) = read_varint(input, mut i, end) else {
+            return Error(H3_FRAME_ERROR)
+        }
+        let Some(value) = read_varint(input, mut i, end) else {
+            return Error(H3_FRAME_ERROR)
+        }
+        if id == 0x00 || (id >= 0x02 && id <= 0x05) {
+            return Error(H3_SETTINGS_ERROR)
+        }
+        for (seen, _) in pairs {
+            if seen == id {
+                return Error(H3_SETTINGS_ERROR)
+            }
+        }
+        list.push(mut pairs, (id, value))
+    }
+    Ok(Settings(pairs: take pairs))
+}
+
+pub fn setting(s: Settings, id: u64) -> Option[u64] {
+    for (k, v) in s.pairs {
+        if k == id {
+            return Some(v)
+        }
+    }
+    None
+}
+
+pub fn write_settings(pairs: List[(u64, u64)], mut out: Bytes) {
+    let mut len = 0u64
+    for (k, v) in pairs {
+        len += width(k) + width(v)
+    }
+    write_head(FRAME_SETTINGS, len, mut out)
+    for (k, v) in pairs {
+        write_varint(k, mut out)
+        write_varint(v, mut out)
+    }
+}

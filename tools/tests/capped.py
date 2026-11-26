@@ -126,8 +126,13 @@ class Capped(unittest.TestCase):
         self.assertIn('width 4 exceeds 2 granted CPUs', stderr.getvalue())
 
     def test_an_unavailable_python_executable_keeps_the_capped_scope(self):
-        copied = self.root / 'capped'
+        copied = self.root / 'tools/capped'
+        copied.parent.mkdir()
         copied.write_text(CAPPED.read_text())
+        shield = self.root / 'core/tools'
+        shield.mkdir(parents=True)
+        for module in ('timing_shield.py', 'bench_cpus.py'):
+            (shield / module).write_text((ROOT / 'core/tools' / module).read_text())
         with patch.dict(os.environ, self.env, clear=True), \
                 patch.object(capped, '__file__', str(copied)), \
                 patch.object(capped.sys, 'argv', [str(CAPPED), 'true']), \

@@ -96,12 +96,25 @@ class HotFiles(unittest.TestCase):
             self.registry.with_name(name + '.rs').write_text('#[test]\nfn passes() {}\n')
         fmt = runpy.run_path(str(ROOT / 'tools/buck2/fmt.py'))['main']
         query = {'example': {'crate_root': 'crates/example/tests/it/main.rs', 'edition': '2024'}}
-        with patch.dict(fmt.__globals__, ROOT=self.root, check_std_index=lambda: 0, changed_cases=lambda: []), \
+
+        def finished(command, *args, **kwargs):
+            if command[:1] == ['git']:
+                return SimpleNamespace(stdout=b'', returncode=0)
+            stdout = json.dumps(query) if 'uquery' in command else ''
+            return SimpleNamespace(stdout=stdout, returncode=0)
+
+        with patch.dict(fmt.__globals__, ROOT=self.root,
+                        check_boundaries=lambda root: True,
+                        check_target=lambda root: True,
+                        check_compiler_metadata=lambda: 0,
+                        check_runners=lambda root: True,
+                        changed_cases=lambda: []), \
+                patch.object(fmt.__globals__['darwin_check'], 'rust_changed', return_value=False), \
                 patch.object(sys, 'argv', ['fmt.py']), \
-                patch('subprocess.run', return_value=SimpleNamespace(stdout=json.dumps(query),
-                                                                    returncode=0)) as run:
+                patch('subprocess.run', side_effect=finished) as run:
             self.assertEqual(fmt(), 0)
-        command = run.call_args_list[1].args[0]
+        commands = [call.args[0] for call in run.call_args_list]
+        [command] = [command for command in commands if Path(command[0]).name == 'rustfmt']
         self.assertIn('crates/example/tests/it/zed.rs', command)
         self.assertIn('crates/example/tests/it/alpha.rs', command)
         self.assertNotIn('crates/example/tests/it/modules.rs', command)

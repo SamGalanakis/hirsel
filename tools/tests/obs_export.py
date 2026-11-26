@@ -2,6 +2,7 @@
 """Offline evidence/time contracts and a real OTLP/HTTP fixture collector."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess

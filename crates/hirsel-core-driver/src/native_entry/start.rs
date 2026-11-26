@@ -214,11 +214,25 @@ pub(super) fn emit(
         let path = f.string(replay.path.as_bytes())?;
         let identity = f.string(plan.identity.as_bytes())?;
         let mode = f.constant(if replay.diagnose { 2 } else { 1 });
+        let (descriptors, spawns) = match descriptors {
+            Some((descriptors, spawns)) => (f.address(descriptors), f.address(spawns)),
+            None => (f.constant(0), f.constant(0)),
+        };
         f.value_call(
             "hirsel_core_os_replay",
             I8,
             &[
-                config, names, sources, entry, path, mode, identity, revision, build,
+                config,
+                names,
+                sources,
+                entry,
+                path,
+                mode,
+                identity,
+                revision,
+                build,
+                descriptors,
+                spawns,
             ],
         )?
     } else if let Some(build) = build {

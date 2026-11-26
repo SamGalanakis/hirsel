@@ -154,6 +154,24 @@ fn u4_root_replays_its_helper_takes() {
         );
         let (code, out, err) = u4_replay(&program, &missing, Some("root"));
         assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "", ""), "{backend:?}");
+        // The package replay image (`hirsel replay PACKAGE`) checks both
+        // spawns by the link's spawn table as the recording did, so it too
+        // reaches the second spawn and finds root.1 missing.
+        let recording = options.clone();
+        options.grant_mask = 0;
+        options.replay = Some(crate::ReplayPlan {
+            path: missing.to_str().unwrap().into(),
+            diagnose: false,
+        });
+        options.output = dir.path().join(format!("u4-{backend:?}-replay"));
+        let replay = product.build(&entry, &options).unwrap().executable;
+        options = recording;
+        let (code, out, err) = tape_run(&replay, &[], None);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (Some(1), "", "replay: Truncated at 0 in root.1\n"),
+            "{backend:?}: package replay"
+        );
 
         // (b) The first root TAKE names ordinal 99: arrival tag 4, the
         // ordinal, Returned (0), then the u64 value's 8 plain bytes and no

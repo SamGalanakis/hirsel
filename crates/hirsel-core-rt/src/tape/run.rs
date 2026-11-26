@@ -794,6 +794,9 @@ fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64, Option<Vec<u8>>)> {
 /// # Safety
 /// The generated config, names, source tables, entry, 32-byte revision and
 /// 32-byte build digest stay pinned for the call. Path and identity are NUL-terminated native strings.
+/// `descriptors` and `spawns` are null, or, for a program that spawns units,
+/// the link's static descriptor index and spawn table, as the recording
+/// entry takes them: a replayed spawn names its helper by the same rows.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_replay(
@@ -806,11 +809,15 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
     identity: *const libc::c_char,
     revision: *const [u8; 32],
     build: *const [u8; 32],
+    descriptors: *const u64,
+    spawns: *const u64,
 ) -> u8 {
     #[cfg(feature = "prof")]
     let _profile = crate::prof::Run::start_replay();
     // SAFETY: every pointer is a borrowed generated startup operand.
     unsafe {
+        identities::install(descriptors);
+        identities::install_spawns(spawns);
         run_taped(
             input,
             names,

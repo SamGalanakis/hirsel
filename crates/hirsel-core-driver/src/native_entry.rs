@@ -144,10 +144,10 @@ pub(crate) fn policy(
     )
 }
 impl<'a> Plan<'a> {
-    /// A recording entry of a program that can spawn units: it hands the
-    /// runtime the link's descriptor index.
+    /// A recording or replay entry of a program that can spawn units: it
+    /// hands the runtime the link's descriptor index and spawn table.
     pub(crate) fn recording_units(&self, spawns_units: bool) -> bool {
-        self.recording && self.replay.is_none() && spawns_units
+        (self.recording || self.replay.is_some()) && spawns_units
     }
 
     /// The link's descriptor names and spawn table for

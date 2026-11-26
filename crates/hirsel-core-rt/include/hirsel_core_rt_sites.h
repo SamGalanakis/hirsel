@@ -33,5 +33,6 @@ uint8_t hirsel_core_os_run_recording(const HirselCoreOsConfig *, const HirselCor
     const uint8_t build[32]);
 uint8_t hirsel_core_os_replay(const HirselCoreOsConfig *, const HirselCoreView *,
     const HirselCoreSourceTable *, HirselCoreEntry, const char *path, uint64_t mode,
-    const char *identity, const uint8_t revision[32], const uint8_t build[32]);
+    const char *identity, const uint8_t revision[32], const uint8_t build[32],
+    const uint64_t *descriptors, const uint64_t *spawns);
 #endif

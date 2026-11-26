@@ -14,8 +14,8 @@ export type {Access, CallOptions, Change, Draft, Frozen, RowChange, Subscription
 
 import {canReconnect, credential, current, initialPhase, laneOwed, stableMs, step, type Action, type Event, type Phase} from './state.js';
 
-import type {Codec, Done, Entry, Fault, Frame, Group, Option, Outcome, Part, Refusal, Room, SlotRow, SubscriptionEnd, Want,
-  WireOutcome} from './wire.js';
+import {Inbox, type Codec, type Done, type Entry, type Fault, type Frame, type Group, type Option, type Outcome,
+  type Part, type Refusal, type Room, type SlotRow, type SubscriptionEnd, type Want, type WireOutcome} from './wire.js';
 export type {Codec, Done, Entry, Fault, Frame, Group, Option, Outcome, Part, Refusal, Room, SlotRow, SubscriptionEnd, Want} from './wire.js';
 export interface Transport {
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, options?: CallOptions): Promise<Outcome<R>>;
@@ -71,6 +71,7 @@ export class Client implements Transport {
   private nextLane = 0;
   private phase: Phase = initialPhase;
   private socket?: Socket;
+  private readonly inbox = new Inbox();
   private work: Promise<void> = Promise.resolve();
   private pumpQueued = false;
   private wants: Want[];
@@ -156,6 +157,7 @@ export class Client implements Transport {
 
   whenReady(): Promise<void> { return this.ready; }
   private enqueue(fn: () => Promise<void>): Promise<void> {
+    this.inbox.seal();
     const next = this.work.then(fn);
     this.work = next.catch(error => error instanceof ClientError ? undefined : this.unavailable(error));
     return next;
@@ -302,14 +304,12 @@ export class Client implements Transport {
     catch { void this.run({tag: 'Transient', epoch}); return; }
     this.socket = socket; socket.binaryType = 'arraybuffer';
     socket.onopen = () => this.post({tag: 'SocketOpen', epoch});
-    socket.onmessage = ({data}) => this.post({tag: 'Resume', epoch, run: async () => {
-      let frame: Frame;
-      try {
-        if (!(data instanceof ArrayBuffer) && !(data instanceof Uint8Array)) throw new Error('binary Frame required');
-        frame = this.options.frame.decode(data instanceof Uint8Array ? data : new Uint8Array(data));
-      } catch { await this.incompatible(1007, epoch); return; }
-      await this.run({tag: 'Frame', frame, epoch});
-    }});
+    socket.onmessage = this.inbox.receiver(epoch, this.options.frame, {
+      schedule: run => this.post({tag: 'Resume', epoch, run}),
+      frame: frame => this.run({tag: 'Frame', frame, epoch}),
+      invalid: () => this.incompatible(1007, epoch),
+      unobserved: () => this.phase.tag === 'Ready' && !this.options.onBatch && !this.subs.size && !this.overlays.size,
+    });
     socket.onclose = ({code}) => { void this.run({tag: 'SocketLost', epoch, code}); };
     socket.onerror = () => { void this.run({tag: 'SocketLost', epoch}); };
   }

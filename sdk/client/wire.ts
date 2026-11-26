@@ -37,3 +37,58 @@ export type Frame = {tag: 'Hello'; values: [Option<Uint8Array>, Want[]]}
   | {tag: 'Live'; value: Part[]};
 export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Array): Frame }
 export type SubscriptionEnd = Extract<Frame, {tag: 'Ended'}>['values'][1];
+
+type Incoming = {epoch: number; data: unknown[]};
+interface Receive {
+  schedule: (run: () => Promise<void>) => void;
+  frame: (frame: Frame) => Promise<void>;
+  invalid: () => Promise<void>;
+  unobserved: () => boolean;
+}
+
+// Neighboring socket messages can share a completion write while they wait for
+// the client queue. An intervening client job closes the group.
+export class Inbox {
+  private tail?: Incoming;
+
+  seal(): void { this.tail = undefined; }
+
+  receiver(epoch: number, codec: Codec, receive: Receive): ({data}: {data: unknown}) => void {
+    return ({data}) => {
+      if (this.tail?.epoch === epoch) { this.tail.data.push(data); return; }
+      const batch = {epoch, data: [data]};
+      receive.schedule(async () => {
+        if (this.tail === batch) this.seal();
+        await this.drain(batch.data, codec, receive);
+      });
+      this.tail = batch;
+    };
+  }
+
+  private async drain(messages: unknown[], codec: Codec, receive: Receive): Promise<void> {
+    let version: bigint | undefined, done: Done[] = [];
+    const flush = async () => {
+      if (version !== undefined) await receive.frame({tag: 'Batch', values: [version, [], [], done]});
+      version = undefined; done = [];
+    };
+    for (const message of messages) {
+      let frame: Frame;
+      try {
+        if (!(message instanceof ArrayBuffer) && !(message instanceof Uint8Array)) throw new Error('binary Frame required');
+        frame = codec.decode(message instanceof Uint8Array ? message : new Uint8Array(message));
+      } catch { await flush(); await receive.invalid(); return; }
+      // Preserve every boundary where an image, a refusal or a callback can
+      // observe the version between these calls.
+      if (frame.tag === 'Batch' && receive.unobserved() && frame.values[1].length === 0 &&
+          frame.values[2].length === 0 && frame.values[3].every(({outcome}) =>
+            outcome.tag === 'Returned' || outcome.tag === 'Failed')) {
+        version = frame.values[0];
+        for (const row of frame.values[3]) done.push(row);
+      } else {
+        await flush();
+        await receive.frame(frame);
+      }
+    }
+    await flush();
+  }
+}

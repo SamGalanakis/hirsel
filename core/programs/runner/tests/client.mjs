@@ -118,7 +118,7 @@ export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
   try {
     await writeFile(join(dir,'package.json'),'{"type":"module"}');
-    for(const name of ['client','delivery','image','lanes','persistence','browser','node','room','state']) {
+    for(const name of ['client','delivery','image','lanes','persistence','browser','node','room','state','wire']) {
       let text=await readFile(new URL(name+'.ts',source),'utf8');
       if(mutant)text=mutant(name,text);
       await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
@@ -331,6 +331,42 @@ export async function laws(codec, only, mutant, entries, http) {
     await h.client.close();
     assert.deepEqual([await a,await c],[{tag:'LocallyUnknown'},{tag:'LocallyUnknown'}]);
     await closed;h.server.check();
+  };
+  tests.adjacent_replies_share_a_durable_completion=async()=>{
+    for(const observe of [false,true]) {
+      const versions=[];
+      const h=await setup(new Memory(),observe ? {onBatch:version=>versions.push(version)} : {});
+      await ready(h);
+      const delivered=[];
+      const answers=[7,8,9].map(n=>h.client.call(want,bytes(n),x=>x).then(outcome=>{
+        delivered.push(outcome.value[0]);
+        return outcome;
+      }));
+      await settle();
+      assert.equal(h.server.calls.length,3);
+      const writes=[];
+      let commit;
+      const gate=new Promise(resolve=>{commit=resolve;});
+      h.storage.beforeWrite=async state=>{
+        writes.push(Object.values(state.streams).filter(record=>record.terminal).length);
+        await gate;
+      };
+      const socket=h.server.sockets[0];
+      for(const [i,{frame:{values:[stream,p]}}] of h.server.calls.entries())
+        h.server.emit(socket,batch(BigInt(i+1),[],[],[{stream,p,outcome:returned(i+7)}]));
+      await settle();
+      try {
+        assert.deepEqual(delivered,[]);
+        assert.deepEqual(versions,[]);
+        assert.deepEqual(writes,observe ? [1] : [3]);
+      } finally {commit();}
+      assert.deepEqual(await Promise.all(answers),[7,8,9].map(returned));
+      await settle();
+      assert.deepEqual(delivered,[7,8,9]);
+      assert.deepEqual(versions,observe ? [1n,2n,3n] : []);
+      assert.deepEqual(writes,observe ? [1,2,3] : [3]);
+      h.server.check();await h.client.close();
+    }
   };
   tests.deadline_and_cancel_end_one_call=async()=>{
     const h=await setup();await ready(h);

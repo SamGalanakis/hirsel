@@ -1194,6 +1194,35 @@ fn control(mut schedule: Schedule, mut port: Served[NetOp], take call: Call[NetO
     }
 }
 
+/// Resets a cut node's connections and drops its held requests unapplied.
+fn sever(config: Config, mut schedule: Schedule, mut bucket: Bucket, mut peers: Map[u64, Peer], mut port: Served[NetOp], take call: Call[NetOp], take change: Option[List[u64]], clock: Clock, mut withdrawn: u64) waits {
+    let Some(take ids) = take change else {
+        let _ = answer(mut port, take call, Failed(Denied))
+        return
+    }
+    for id in ids {
+        let mut i = 0u64
+        while i < list.len(schedule.pending) {
+            if schedule.pending[i].peer == id {
+                let _: Pending = list.remove(mut schedule.pending, i)
+            } else {
+                i += 1
+            }
+        }
+        if let Some(take found) = map.remove(mut peers, id) {
+            let mut peer = take found
+            complete(mut peer, Decision(response: None, reset: true, applied: false, head: false))
+            if let Some((op, take parked)) = replace(mut peer.waiting, None) {
+                if !operate(config, mut bucket, mut peer, clock, op, mut port, take parked) {
+                    withdrawn += 1
+                }
+            }
+            map.insert(mut peers, id, take peer)
+        }
+    }
+    let _ = answer(mut port, take call, Failed(Refused))
+}
+
 fn notify(mut schedule: Schedule, mut port: Served[NetOp]) {
     let mut i = 0u64
     while i < list.len(schedule.watches) {
@@ -1268,17 +1297,23 @@ pub fn serve(tasks: Tasks, network: Net, n: Config, mut plan: sim.world.Plan, cl
     let mut schedule = Schedule(counts: map.new(), pending: list.new(), watches: list.new(), timers: map.new())
     let mut dns_changed = false
     let mut withdrawn = 0u64
+    let mut nodes = sim.s3_node.nodes()
     while let Some(take call) = provide.next(mut port) {
         let op = provide.net_op(call)
         match op {
-            ConnectUnix(root, path) => control(mut schedule, mut port, take call, root, path),
+            ConnectUnix(root, path) => match sim.s3_node.command(mut nodes, call, root, path) {
+                Some(take change) => sever(n, mut schedule, mut bucket, mut peers, mut port, take call, take change, clock, mut withdrawn),
+                None => control(mut schedule, mut port, take call, root, path),
+            },
             Connect(addr: addr, ..) => {
                 list.push(mut connects, (addr, host.mono_ns(clock)))
                 let spare = match n.cut {
                     Some(cut) => addr == cut.spare,
                     None => false,
                 }
-                if !spare && addr != n.address {
+                if sim.s3_node.severed(nodes, addr) {
+                    let _ = answer(mut port, take call, Failed(Reset))
+                } else if !spare && addr != n.address && !sim.s3_node.joined(nodes, addr) {
                     let refusal: NetError = match (addr.ip, n.address.ip) {
                         (V4(_), V6(_, _)) => Unreachable,
                         (V6(_, _), V4(_)) => Unreachable,
@@ -1293,6 +1328,7 @@ pub fn serve(tasks: Tasks, network: Net, n: Config, mut plan: sim.world.Plan, cl
                     }
                     let stream = sim.world.plan(sim.world.pick(mut plan, 0xffffffffffffffff))
                     map.insert(mut peers, next, new_peer(next, fault, take stream, spare))
+                    sim.s3_node.admit(mut nodes, next, addr)
                     next += 1
                 }
             },

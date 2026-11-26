@@ -1,0 +1,158 @@
+/// The addresses through which nodes reach one sim.s3 service, which of
+/// them are cut, and the connection each one opened.
+pub opaque type Nodes: send {
+    joined: List[Addr],
+    cut: List[Addr],
+    owners: List[(u64, Addr)]
+}
+
+const NODE_PATH: String = "sim-s3-node"
+
+pub fn nodes() -> Nodes {
+    Nodes(joined: list.new(), cut: list.new(), owners: list.new())
+}
+
+/// Whether `address` is a node's own address for the service.
+pub fn joined(n: Nodes, address: Addr) -> bool {
+    list.contains(n.joined, address)
+}
+
+/// Whether connections through `address` are cut.
+pub fn severed(n: Nodes, address: Addr) -> bool {
+    list.contains(n.cut, address)
+}
+
+/// Records that connection `id` was opened through `address`.
+pub fn admit(mut n: Nodes, id: u64, address: Addr) {
+    list.push(mut n.owners, (id, address))
+}
+
+fn read_text(c: Call[NetOp], field: u64, size: u64) -> Option[String] {
+    let mut raw: Bytes = list.with_capacity(size)
+    provide.payload(c, field, mut raw)
+    match string.from_utf8(take raw) {
+        Ok(take text) => Some(take text),
+        Error(_) => None,
+    }
+}
+
+fn numbers(text: String) -> Option[List[u64]] {
+    let mut out: List[u64] = list.new()
+    let mut at = 0u64
+    while let Some((word, next)) = string.next_split(text, at, " ") {
+        match int.parse_uint(word, 10) {
+            Ok(value) => list.push(mut out, value),
+            Error(_) => return None,
+        }
+        at = next
+    }
+    Some(out)
+}
+
+fn parse(text: String) -> Option[(u64, Addr)] {
+    let words = numbers(text)?
+    if list.len(words) != 5 || words[4] > 0xffff {
+        return None
+    }
+    let ip = if words[1] == 4 && words[2] <= 0xffffffff && words[3] == 0 {
+        V4(int.truncate(words[2]))
+    } else if words[1] == 6 {
+        V6(words[2], words[3])
+    } else {
+        return None
+    }
+    Some((words[0], Addr(ip, port: int.truncate(words[4]))))
+}
+
+/// None for a control call on another path. Otherwise applies a valid node
+/// change and returns Some(Some(ids)) with the connections it severs, or
+/// Some(None) for an invalid one.
+pub fn command(mut n: Nodes, c: Call[NetOp], root: u64, path: u64) -> Option[Option[List[u64]]] {
+    if read_text(c, 1, path) != Some(string.from(NODE_PATH)) {
+        return None
+    }
+    let Some(text) = read_text(c, 0, root) else {
+        return Some(None)
+    }
+    let Some((verb, address)) = parse(text) else {
+        return Some(None)
+    }
+    let mut severs: List[u64] = list.new()
+    match verb {
+        0 => {
+            if !list.contains(n.joined, address) {
+                list.push(mut n.joined, address)
+            }
+        },
+        1 => {
+            if !list.contains(n.cut, address) {
+                list.push(mut n.cut, address)
+            }
+            let mut others: List[(u64, Addr)] = list.new()
+            for (id, owner) in n.owners {
+                if owner == address {
+                    list.push(mut severs, id)
+                } else {
+                    list.push(mut others, (id, owner))
+                }
+            }
+            n.owners = take others
+        },
+        2 => {
+            let mut kept: List[Addr] = list.new()
+            for a in n.cut {
+                if a != address {
+                    list.push(mut kept, a)
+                }
+            }
+            n.cut = take kept
+        },
+        _ => return Some(None),
+    }
+    Some(Some(take severs))
+}
+
+fn send(n: Net, verb: String, address: Addr) -> Result[(), NetError] waits {
+    let mut text: String = clone(verb)
+    match address.ip {
+        V4(bits) => {
+            string.push(mut text, " 4 ")
+            string.push_u64(mut text, int.widen(bits))
+            string.push(mut text, " 0 ")
+        },
+        V6(hi, lo) => {
+            string.push(mut text, " 6 ")
+            string.push_u64(mut text, hi)
+            string.push(mut text, " ")
+            string.push_u64(mut text, lo)
+            string.push(mut text, " ")
+        },
+    }
+    string.push_u64(mut text, int.widen(address.port))
+    match host.connect_unix(n, text, NODE_PATH, Never) {
+        Error(Refused) => Ok(()),
+        Error(e) => Error(e),
+        Ok(take socket) => {
+            let _ = take socket
+            Error(Denied)
+        },
+    }
+}
+
+/// Makes `address` a node's own way to the service on `n`, as good as the
+/// configured address.
+pub fn join(n: Net, address: Addr) -> Result[(), NetError] waits {
+    send(n, "0", address)
+}
+
+/// Cuts the node at `address` from the service: its new connections are
+/// reset, its open connections reset, and its requests the service holds
+/// are dropped unapplied.
+pub fn cut(n: Net, address: Addr) -> Result[(), NetError] waits {
+    send(n, "1", address)
+}
+
+/// Lets the node at `address` connect again.
+pub fn restore(n: Net, address: Addr) -> Result[(), NetError] waits {
+    send(n, "2", address)
+}

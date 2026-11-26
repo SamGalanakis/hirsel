@@ -81,9 +81,9 @@
     "reason": "std-micro-prims-2019"
   },
   "core/std/sim/s3.hirsel": {
-    "lines": 1416,
-    "raise_revision": 8,
-    "reason": "object-range-stream-2690"
+    "lines": 1452,
+    "raise_revision": 9,
+    "reason": "sim-multinode-c1c3-2974"
   },
   "core/std/tests/codec.hirsel": {
     "lines": 2680,

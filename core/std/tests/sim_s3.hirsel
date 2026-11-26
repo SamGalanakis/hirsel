@@ -875,3 +875,54 @@ fn object_register_reads_on_worker(tasks: Tasks) -> bool waits {
     result.unwrap(task.join(take driver))
     passed && observed.writes == 2 && has_saved(observed, "head", "next")
 }
+
+fn node_wire(wire: Wire, port: u16) -> Wire {
+    Wire(network: wire.network, time: wire.time, key: secret.share(wire.key), address: Addr(ip: V4(2130706433), port: port))
+}
+
+// expect: run node_cut_from_bucket(tasks) = true
+fn node_cut_from_bucket(tasks: Tasks) -> bool waits {
+    let (take wire, _, take server, take driver) = wire_fixture(tasks, 41, sequence("00000000"), 412, list.new())
+    let a = node_wire(wire, 8081)
+    let b = node_wire(wire, 8082)
+    result.unwrap(sim.s3_node.join(a.network, a.address))
+    result.unwrap(sim.s3_node.join(b.network, b.address))
+    let before = s3_call(a, "PUT", "/a")
+    result.unwrap(sim.s3_node.cut(a.network, a.address))
+    let written = s3_call(b, "PUT", "/b")
+    let seen = s3_call(b, "GET", "/b")
+    let refused = s3_call(a, "GET", "/a")
+    let elsewhere = s3_call(b, "GET", "/a")
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    before == Some(200) && written == Some(200) && seen == Some(200) && refused == None && elsewhere == Some(200) && has_saved(observed, "b", "payload")
+}
+
+fn put_on_node(take w: HeldWire) waits {
+    let _ = put_held(take w)
+}
+
+// expect: run crash_drops_in_flight_put(tasks) = true
+fn crash_drops_in_flight_put(tasks: Tasks) -> bool waits {
+    let mut holds: List[sim.s3.Hold] = list.new()
+    list.push(mut holds, sim.s3.Hold(method: "PUT", key: "a", from: 1, count: 1, until: Requested("PUT", "b", 1), then: Apply))
+    let (take wire, endpoint, take server, take driver) = wire_fixture(tasks, 43, sequence("00000000"), 412, take holds)
+    let a = node_wire(wire, 8081)
+    let b = node_wire(wire, 8082)
+    result.unwrap(sim.s3_node.join(a.network, a.address))
+    result.unwrap(sim.s3_node.join(b.network, b.address))
+    let mut node = sim.node.node()
+    sim.node.reaches_s3(mut node, a.network, a.address)
+    sim.node.runs(mut node, task.spawn(tasks, bytes 1048576, HeldWire(wire: node_wire(a, 8081), path: string.from("/a")), put_on_node))
+    result.unwrap(sim.s3.requested(endpoint, "PUT", "a", 1))
+    let crashed = match sim.node.crash(take node) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+    let written = s3_call(b, "PUT", "/b")
+    let missing = s3_call(b, "GET", "/a")
+    let seen = s3_call(b, "GET", "/b")
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    crashed && written == Some(200) && missing == Some(404) && seen == Some(200) && !map.contains(observed.objects, "a") && has_saved(observed, "b", "payload")
+}

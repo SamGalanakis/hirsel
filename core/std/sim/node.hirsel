@@ -1,0 +1,68 @@
+/// One simulated node: the provider links it reaches peers through, and the
+/// tasks it runs. `crash` stops it while its peers keep running.
+pub opaque type Node {
+    links: List[Way],
+    tasks: List[Task[()]]
+}
+
+type Way = Bucket(Net, Addr) | Datagrams(Net, Ip, Ip) | Stream(Net, Ip, Ip)
+
+pub fn node() -> Node {
+    Node(links: list.new(), tasks: list.new())
+}
+
+/// The node reaches the sim.s3 service served on `n` through `address`,
+/// which must be its own address there (see `sim.s3_node.join`).
+pub fn reaches_s3(mut machine: Node, n: Net, address: Addr) {
+    list.push(mut machine.links, Bucket(n, address))
+}
+
+/// The node sends and receives sim.udp datagrams on `n` as `own` to `peer`.
+pub fn sends_udp(mut machine: Node, n: Net, own: Ip, peer: Ip) {
+    list.push(mut machine.links, Datagrams(n, own, peer))
+}
+
+/// The node's sim.net connections on `n` run between `own` and `peer`.
+pub fn connects_tcp(mut machine: Node, n: Net, own: Ip, peer: Ip) {
+    list.push(mut machine.links, Stream(n, own, peer))
+}
+
+/// The node runs `task`; a crash cancels it.
+pub fn runs(mut machine: Node, take task: Task[()]) {
+    list.push(mut machine.tasks, take task)
+}
+
+/// Crashes the node. First every link is cut in both directions, in the
+/// order they were added, so no request still in flight on the node is
+/// applied and no cleanup reaches a peer. Then every task is cancelled and
+/// joined, which drops the node's volatile state. Returns the first error a
+/// provider gave for a cut; the tasks are stopped either way.
+pub fn crash(take machine: Node) -> Result[(), NetError] waits {
+    let Node(links: take ways, tasks: take running) = take machine
+    let mut outcome: Result[(), NetError] = Ok(())
+    for way in ways {
+        let done = match way {
+            Bucket(n, address) => sim.s3_node.cut(n, address),
+            Datagrams(n, own, peer) => match sim.udp.link(n, own, peer, Cut) {
+                Ok(()) => sim.udp.link(n, peer, own, Cut),
+                Error(e) => Error(e),
+            },
+            Stream(n, own, peer) => match sim.net.cut(n, own, peer, Break) {
+                Ok(()) => sim.net.cut(n, peer, own, Break),
+                Error(e) => Error(e),
+            },
+        }
+        if let (Ok(()), Error(e)) = (outcome, done) {
+            outcome = Error(e)
+        }
+    }
+    let mut handles = take running
+    for i in 0u64 .. list.len(handles) {
+        task.cancel(mut handles[i])
+    }
+    while list.len(handles) > 0 {
+        let h: Task[()] = list.remove(mut handles, 0)
+        let _ = task.join(take h)
+    }
+    outcome
+}

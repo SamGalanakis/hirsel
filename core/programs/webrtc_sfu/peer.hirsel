@@ -29,8 +29,11 @@ pub type PeerLimits {
     pacer_packets: u32,
     // RTC-6: the estimate a session starts from before any feedback, in bit/s
     // (libwebrtc's and LiveKit's default is 300,000).
-    start_bps: u64
+    start_bps: u64,
+    dtls_transport: dtls.Transport
 }
+
+pub const DTLS_DEFAULT: dtls.Transport = dtls.DEFAULT_TRANSPORT
 
 pub type PeerError = Sdp(sdp.SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(dtls.DtlsError) | Srtp(srtp.SrtpError) | Rtp(rtp.header.WriteError) | Capacity(Capacity)
 
@@ -543,6 +546,17 @@ pub fn session_heap(limits: PeerLimits) -> u64 {
     sum + seq_of(bytes[Track], tracks) + seq_of(bytes[u16], tracks) + tracks * track_heap()
 }
 
+/// The receive-side share of one session's DTLS handshake.
+pub fn dtls_heap(limits: PeerLimits) -> u64 {
+    dtls.receive_heap(limits.dtls_transport, SLOT)
+}
+
+/// Whether the DTLS profile fits the SFU's datagram envelope.
+pub fn dtls_transport_fits(transport: dtls.Transport) -> bool {
+    let mtu: u64 = int.widen(transport.mtu)
+    mtu >= 256 && mtu <= SLOT && transport.start_rto_ns != 0 && transport.start_rto_ns <= transport.max_rto_ns && transport.handshake_ns != 0 && transport.max_message >= 2048 && transport.max_message <= 0x00ffffff
+}
+
 // The SSRCs a session draws while it holds a full set of down-tracks: its control SSRC,
 // and each down-track's own, RTX and FlexFEC SSRCs.
 fn ssrcs(limits: PeerLimits) -> u64 {
@@ -564,6 +578,9 @@ fn seq_of(element: u64, capacity: u64) -> u64 {
 /// Open the session for one participant on its home unit's socket `base`.
 /// `cert` is the unit's DTLS identity (`dtls.share_identity`), `r` its randomness.
 pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base: Addr, limits: PeerLimits, agreed: sdp.Negotiated, participant: Participant) -> Result[PeerSession, PeerError] {
+    if !dtls_transport_fits(limits.dtls_transport) {
+        return Error(Dtls(Config))
+    }
     let sections = build_sections(agreed, limits)?
     let credentials = stun_ice.credentials(copied(local.ice_ufrag), copied(local.ice_pwd)) ?=> |take e| Ice(e)
     let mut bases: List[stun_ice.Local] = list.with_capacity(1)
@@ -827,7 +844,7 @@ fn select(mut p: PeerSession, peer: Addr) -> Result[(), PeerError] {
     let Some(take id) = replace(mut p.identity, None) else {
         return Ok(())
     }
-    let mut e = dtls.server(take id, dtls.defaults(), peer, Verified) ?=> |take x| Dtls(x)
+    let mut e = dtls.server(take id, dtls.config_for(p.limits.dtls_transport), peer, Verified) ?=> |take x| Dtls(x)
     let mut digest: Bytes = list.with_capacity(32)
     for b in p.agreed.remote_fingerprint {
         list.push(mut digest, b)
@@ -843,6 +860,10 @@ fn select(mut p: PeerSession, peer: Addr) -> Result[(), PeerError] {
 fn dtls_in(mut p: PeerSession, now: u64, slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
     if list.len(slot) < 13 {
         p.drops.short_dtls += 1
+        return Ok(Nothing)
+    }
+    if list.len(slot) > SLOT {
+        p.drops.malformed += 1
         return Ok(Nothing)
     }
     let before = list.len(out.pkts)

@@ -242,7 +242,7 @@ fn relay_only_over(stream: bool, seed: u64) {
     for i in 0u64 .. 32 {
         n.remote_fingerprint[i] = d[i]
     }
-    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000)
+    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT)
     let who = peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7))
     let mut p = result.unwrap(peer.open(sfu_local(creds), take server_id, provide.random(seed + 2), SFU_MEDIA, limits, n, who))
     let mut out = result.unwrap(peer.outbox(65536, 64))

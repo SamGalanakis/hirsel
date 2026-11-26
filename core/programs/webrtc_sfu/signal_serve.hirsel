@@ -367,6 +367,9 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     if n == 0 || n > router.UNITS_MAX || list.len(binds) != int.widen(n) {
         return Error(Units)
     }
+    if !peer.dtls_transport_fits(session.dtls_transport) {
+        return Error(Router(Peer(Dtls(Config))))
+    }
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
     let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
     let bounds = router.pool_bounds(int.widen(n), int.widen(limits.rooms), int.widen(limits.sessions), session)
@@ -592,7 +595,8 @@ pub type RoomCost {
 /// the room's entry and message channels (sized by the application's message type),
 /// and SDP and ICE text (`peer.session_heap`).
 pub fn room_cost(limits: router.RoomLimits, session: peer.PeerLimits) -> RoomCost {
-    let per_session = int.saturating_add(router.member_bytes(limits, session), peer.session_heap(session))
+    let session_bytes = int.saturating_add(peer.session_heap(session), peer.dtls_heap(session))
+    let per_session = int.saturating_add(router.member_bytes(limits, session), session_bytes)
     RoomCost(replicated: router.room_replicated(limits), per_session: per_session, per_remote: router.remote_bytes(session), control: control_bytes(limits), bridge: 0, cascade: 0)
 }
 

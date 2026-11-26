@@ -1704,10 +1704,11 @@ two exact numbers from the same sizes the router allocates with:
 `room_cost` is computed from the same constants the allocations use, never from a table of
 estimates, and law W34 checks it against the charges the units actually record. As built
 in P1, `signal.room_cost` prices each term from the router's, the session's and the
-adapter's allocation bounds (each `rtp` constructor has a `*_heap` price beside it), and
-leaves out what is sized by input rather than by a bound: a session's agreed SDP, mids,
-ICE credentials and DTLS and SRTP state, and the caller's room-client, Dial, Embed and
-WebSocket buffers. `bridge` and `cascade` are 0: no bridge or cascade attaches to a
+adapter's allocation bounds (each `rtp` constructor has a `*_heap` price beside it).
+The session's DTLS transport sets its MTU, timers, message width and ahead window.
+The room ledger reserves its receive-side handshake budget as part of `per_session`.
+The service checks the configured MTU and message width against the media unit's grant
+before binding. `bridge` and `cascade` are 0: no bridge or cascade attaches to a
 pooled room in this build (CAS-6 and MOQ-8 add them), so W34 has nothing of theirs to
 measure yet. Each unit keeps a **ledger**: `unit_bytes` minus the fixed per-unit cost
 (`units.fixed_bytes` plus `signal.serve_bytes`), minus every open room's `replicated`,
@@ -1734,7 +1735,7 @@ exceeds `unit_bytes`. `control` includes the room client task's grant
 (`ROOM_CLIENT_BYTES`).
 
 **Left out of `room_cost` (as built in P3), each sized by input or by the application:**
-a session's agreed SDP and section mids, ICE credentials, DTLS and SRTP state, and the
+a session's agreed SDP and section mids, ICE credentials, outgoing DTLS flights, SRTP state, and the
 offer text a re-offer keeps until it is answered; the room client's Dial, Embed and
 membership, and its entry and message channels (sized by the message type `M`); the
 adapter's per-seat `sends` and `subs`, and its `jobs`, `answers`, `former` and `revokes`

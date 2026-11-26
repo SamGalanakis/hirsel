@@ -11,6 +11,19 @@ pub type Config {
     max_ahead: u16
 }
 
+/// Transport parameters independent of the cipher, group and SRTP choices.
+pub type Transport: key {
+    mtu: u16,
+    start_rto_ns: u64,
+    max_rto_ns: u64,
+    retries: u8,
+    handshake_ns: u64,
+    max_message: u32,
+    max_ahead: u16
+}
+
+pub const DEFAULT_TRANSPORT: Transport = Transport(mtu: 1200, start_rto_ns: 1000000000, max_rto_ns: 60000000000, retries: 7, handshake_ns: 60000000000, max_message: 16384, max_ahead: 32)
+
 pub type State = Handshaking | Connected | Closed(Close)
 
 pub type Poll = Send(u64) | WakeAt(u64) | Idle
@@ -84,6 +97,11 @@ pub opaque type Endpoint {
 }
 
 pub fn defaults() -> Config {
+    config_for(DEFAULT_TRANSPORT)
+}
+
+/// Default algorithms, with the transport parameters supplied by the caller.
+pub fn config_for(transport: Transport) -> Config {
     let mut suites: List[schedule.Suite12] = list.with_capacity(3)
     list.push(mut suites, Aes128GcmSha256)
     list.push(mut suites, Aes256GcmSha384)
@@ -95,7 +113,23 @@ pub fn defaults() -> Config {
     list.push(mut srtp, AeadAes128Gcm)
     list.push(mut srtp, AeadAes256Gcm)
     list.push(mut srtp, Aes128CmHmacSha1_80)
-    Config(suites: take suites, groups: take groups, srtp: take srtp, mtu: 1200, start_rto_ns: 1000000000, max_rto_ns: 60000000000, retries: 7, handshake_ns: 60000000000, max_message: 16384, max_ahead: 32)
+    Config(suites: take suites, groups: take groups, srtp: take srtp, mtu: transport.mtu, start_rto_ns: transport.start_rto_ns, max_rto_ns: transport.max_rto_ns, retries: transport.retries, handshake_ns: transport.handshake_ns, max_message: transport.max_message, max_ahead: transport.max_ahead)
+}
+
+/// The receive-side handshake budget for a bounded datagram envelope. Two messages
+/// can be current and next, and each admitted ahead fragment can start another
+/// message. A partial holds both body and bitmap. The transcript can hold three
+/// messages. Its growth and a message being processed can coexist with reassembly.
+pub fn receive_heap(transport: Transport, datagram: u64) -> u64 {
+    let ahead_count: u64 = int.widen(transport.max_ahead)
+    let pending = ahead_count + 2u64
+    let message: u64 = int.widen(transport.max_message)
+    let body = option.unwrap(charge.seq(1, message))
+    let partials = option.unwrap(charge.seq(bytes[PartialMessage], 3u64 * pending))
+    let log_bytes = option.unwrap(charge.seq(1, 9u64 * message))
+    let record_bytes = int.saturating_add(datagram, bytes[Bytes])
+    let queued_bytes = int.saturating_mul(3u64 * ahead_count, record_bytes)
+    int.saturating_add((2u64 * pending + 2u64) * body + partials + log_bytes, queued_bytes)
 }
 
 fn distinct(codes: List[u16]) -> bool {

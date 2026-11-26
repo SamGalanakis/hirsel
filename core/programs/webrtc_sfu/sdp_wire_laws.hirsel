@@ -300,7 +300,7 @@ fn established_with(seed: u64, offer_bytes: Bytes, who: peer.Participant, client
 
 /// The same, with the server's ICE ufrag `ufrag`, which names the session (RTC-3).
 fn established_as(seed: u64, offer_bytes: Bytes, who: peer.Participant, client: Addr, pacer_packets: u32, ufrag: Bytes) -> Rig {
-    established_limits(seed, offer_bytes, who, client, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: pacer_packets, start_bps: 300000), ufrag)
+    established_limits(seed, offer_bytes, who, client, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: pacer_packets, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT), ufrag)
 }
 
 /// The same, with the session's `limits`.
@@ -348,6 +348,12 @@ fn established_limits(seed: u64, offer_bytes: Bytes, who: peer.Participant, clie
             }
         }
         let _ = peer.poll(mut p, 0, mut out)
+        for tx in out.pkts {
+            let UdpTx(to: _, at: _, len, ecn: _) = tx
+            if len > int.widen(limits.dtls_transport.mtu) {
+                fail("server DTLS datagram exceeded the configured MTU")
+            }
+        }
         to_client(mut c, rc, 0, out)
         peer.clear_outbox(mut out)
     }
@@ -358,6 +364,19 @@ fn established_limits(seed: u64, offer_bytes: Bytes, who: peer.Participant, clie
     let keys = result.unwrap(dtls.take_srtp(mut c))
     let cs = result.unwrap(srtp.session(take keys, profile, srtp.Limits(send_streams: 32, receive_streams: 32, ended_streams: 32)))
     Rig(p: take p, c: take c, cs: take cs, out: take out)
+}
+
+/// bug: the SFU opens DTLS with a fixed MTU and ignores the session's path budget.
+/// oracle: each server flight datagram fits 256 bytes and the pinned session connects.
+@test
+fn sfu_dtls_fragments_to_the_session_mtu() -> Result[(), ()] {
+    let mut transport = peer.DTLS_DEFAULT
+    transport.mtu = 256
+    transport.max_message = 65536
+    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: transport)
+    let who = peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7))
+    let _ = established_limits(44, session_offer(), who, client_addr(), limits, b"server")
+    Ok(())
 }
 
 // The USERNAME of a browser's check of the server's ufrag `ufrag` (RFC 8445 section 7.2.2).

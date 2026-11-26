@@ -28,7 +28,7 @@ fn refused_why(reports: List[signal.PoolReport], name: signal.RoomName) -> Optio
 }
 
 fn ledger_run(net: Net, clock: Clock) waits {
-    let session = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000)
+    let session = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT)
     let limits = revoke_limits()
     let cost = signal.room_cost(limits, session)
     // Unit 0 holds each room's replicated state, adapter and client; unit 1 its

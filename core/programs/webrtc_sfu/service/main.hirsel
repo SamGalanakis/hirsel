@@ -71,6 +71,8 @@ type Settings {
     participants: u16,
     unit_bytes: u64,
     down_tracks: u16,
+    dtls_mtu: u16,
+    dtls_message_bytes: u32,
     audio_forward: u8,
     seconds: u64
 }
@@ -89,7 +91,8 @@ fn address(value: String) -> Option[Addr] {
 }
 
 fn settings(a: Args) -> Option[Settings] {
-    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), rooms: 0u32, participants: 0u16, unit_bytes: 0u64, down_tracks: 0u16, audio_forward: 0u8, seconds: 0u64)
+    let dtls_defaults = webrtc_sfu.peer.DTLS_DEFAULT
+    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), rooms: 0u32, participants: 0u16, unit_bytes: 0u64, down_tracks: 0u16, dtls_mtu: dtls_defaults.mtu, dtls_message_bytes: dtls_defaults.max_message, audio_forward: 0u8, seconds: 0u64)
     let mut i = 0u64
     while i < args.len(a) {
         let name = option.unwrap(args.get(a, i))
@@ -120,6 +123,16 @@ fn settings(a: Args) -> Option[Settings] {
                 return None
             }
             s.down_tracks = n
+        } else if name == "--dtls-mtu" {
+            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
+                return None
+            }
+            s.dtls_mtu = n
+        } else if name == "--dtls-message-bytes" {
+            let Ok(n) = (int.parse(value) : Result[u32, ParseError]) else {
+                return None
+            }
+            s.dtls_message_bytes = n
         } else if name == "--units" {
             let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
                 return None
@@ -458,7 +471,10 @@ fn media_plan(s: Settings) -> (webrtc_sfu.router.RoomLimits, webrtc_sfu.peer.Pee
     let tracks: u32 = int.widen(s.down_tracks)
     let ids = int.saturating_mul(s.participants, 4u16)
     let limits = webrtc_sfu.router.RoomLimits(participants: s.participants, ids: ids, publications: 8, down_tracks: tracks, audio_forward: s.audio_forward, pause_delay_ms: 1000, pause: false)
-    let session = webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: s.down_tracks, rtx_bytes: 1048576, pacer_packets: 256, start_bps: 300000)
+    let mut transport = webrtc_sfu.peer.DTLS_DEFAULT
+    transport.mtu = s.dtls_mtu
+    transport.max_message = s.dtls_message_bytes
+    let session = webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: s.down_tracks, rtx_bytes: 1048576, pacer_packets: 256, start_bps: 300000, dtls_transport: transport)
     let units: u32 = int.widen(s.units)
     let participants: u32 = int.widen(s.participants)
     let sessions = (s.rooms * participants + units - 1) / units
@@ -508,7 +524,7 @@ pub fn main(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Task
 
 fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let Some(s) = settings(a) else {
-        say(out, "usage: service --rooms N --participants N --unit-bytes N --down-tracks N [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--audio-forward N] [--seconds N]")
+        say(out, "usage: service --rooms N --participants N --unit-bytes N --down-tracks N [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--dtls-mtu N] [--dtls-message-bytes N] [--audio-forward N] [--seconds N]")
         return Error(Exit(status: 2u8))
     }
     // Each room has one SFU connection. Leave a second transport slot per browser
@@ -529,6 +545,10 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         return Error(Exit(status: 2u8))
     }
     let (limits, session, pool_limits) = media_plan(s)
+    if !webrtc_sfu.peer.dtls_transport_fits(session.dtls_transport) {
+        say(out, "invalid --dtls-mtu or --dtls-message-bytes")
+        return Error(Exit(status: 2u8))
+    }
     if !media_fits(s, limits, session, pool_limits, out) {
         return Error(Exit(status: 2u8))
     }

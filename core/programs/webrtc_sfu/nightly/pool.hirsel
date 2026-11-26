@@ -14,7 +14,7 @@ const N3_VIDEO_SSRC: u32 = 0x71000001
 
 const N3_AUDIO_SSRC: u32 = 0x71000002
 
-const N3_SESSION: peer.PeerLimits = peer.PeerLimits(sections: 2, down_tracks: 2, rtx_bytes: 1500, pacer_packets: 16, start_bps: 2000000)
+const N3_SESSION: peer.PeerLimits = peer.PeerLimits(sections: 2, down_tracks: 2, rtx_bytes: 1500, pacer_packets: 16, start_bps: 2000000, dtls_transport: peer.DTLS_DEFAULT)
 
 const N3_ROOM: router.RoomLimits = router.RoomLimits(participants: 4, ids: 5, publications: 2, down_tracks: 2, audio_forward: 0, pause_delay_ms: 5000, pause: false)
 

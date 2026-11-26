@@ -63,7 +63,7 @@ fn admit(mut r: router.Router, seed: u64, offer: Bytes, id: u64) -> Client {
 }
 
 fn admit_with(mut r: router.Router, seed: u64, offer: Bytes, id: u64, pacer_packets: u32) -> Client {
-    admit_limits(mut r, seed, offer, id, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: pacer_packets, start_bps: 300000))
+    admit_limits(mut r, seed, offer, id, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: pacer_packets, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT))
 }
 
 fn admit_limits(mut r: router.Router, seed: u64, offer: Bytes, id: u64, limits: peer.PeerLimits) -> Client {

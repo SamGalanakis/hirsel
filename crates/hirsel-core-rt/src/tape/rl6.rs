@@ -355,10 +355,10 @@ fn take_cases() {
         survivors
             .iter()
             .map(|entry| (
-                entry.kind,
-                entry.origin_kind,
-                entry.stream,
-                entry.ordinal,
+                entry.name.kind.tag(),
+                entry.name.kind.origin(),
+                entry.name.stream,
+                entry.name.ordinal,
                 entry.amount
             ))
             .collect::<Vec<_>>(),

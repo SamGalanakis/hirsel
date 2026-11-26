@@ -111,13 +111,8 @@ impl Helper {
     ) -> Result<EndTake, &'static str> {
         let mut handles = Vec::new();
         let mut grants = Vec::new();
-        let body = if failed {
-            let kind = if causes.first().is_some_and(|c| c.kind() == CANCELLED) {
-                2
-            } else {
-                1
-            };
-            Ok((kind, encode_causes(causes)))
+        let written = if failed {
+            Ok(None)
         } else {
             let r = Cross {
                 bytes,
@@ -148,48 +143,59 @@ impl Helper {
                 }
             };
             // SAFETY: forwarded.
-            unsafe { value(result, &r, None, &mut handle) }.map(|v| (0, v))
+            unsafe { value(result, &r, None, &mut handle) }.map(Some)
         };
-        // The END holds the result in canonical form.
-        let body = body.and_then(|(kind, body)| {
-            let canonical = if kind == 0 {
-                format::Value::decode(&body)
-                    .map_err(|_| NO_CAUSE)?
-                    .canonical()
-            } else {
-                body.clone()
+        // The END holds the result in canonical form, or the causes.
+        let body = written.and_then(|written| {
+            let canonical;
+            let outcome = match &written {
+                Some(w) => {
+                    canonical = format::Value::decode(w).map_err(|_| NO_CAUSE)?.canonical();
+                    let value = format::CanonicalValue::decode(&canonical).map_err(|_| NO_CAUSE)?;
+                    HelperOutcome::Returned(value)
+                }
+                None if causes.is_empty() => return Err(NO_CAUSE),
+                None => {
+                    let wire = causes.iter().map(|c| wire_cause(c)).collect();
+                    if causes[0].kind() == CANCELLED {
+                        HelperOutcome::Cancelled(wire)
+                    } else {
+                        HelperOutcome::Failed(wire)
+                    }
+                }
             };
-            HelperEnding::decode(kind, canonical)
-                .map(|ending| (kind, body, ending))
-                .map_err(|_| NO_CAUSE)
+            Ok((HelperEnding::encode(&outcome), written))
         });
-        let take = |kind, body| EndTake {
-            kind,
-            body,
+        let take = |ending, written| EndTake {
+            ending,
+            written,
             handles,
             grants,
             sockets: sockets.cloned(),
         };
         let Some(group) = self.group else {
-            return body.map(|(kind, body, _)| take(kind, body));
+            return body.map(|(ending, written)| take(ending, written));
         };
         let mut state = group.cell.state.lock().unwrap();
         if state.generation != group.generation {
-            return body.map(|(kind, body, _)| take(kind, body));
+            return body.map(|(ending, written)| take(ending, written));
         }
         let Some(live) = state.live.as_mut() else {
-            return body.map(|(kind, body, _)| take(kind, body));
+            return body.map(|(ending, written)| take(ending, written));
         };
         if live.mode == Mode::Replay {
             // The helper's replay ends at its `END`: the outcome it reached is
             // the recorded one, and its stream holds nothing after it.
             let out = match body {
-                Ok((kind, body, ending)) => {
+                Ok((ending, written)) => {
                     let gap = live.schedule.events - live.schedule.last;
-                    let frame = Frame::HelperEnd { gap, ending };
+                    let frame = Frame::HelperEnd {
+                        gap,
+                        ending: ending.clone(),
+                    };
                     let rep = live.replayer.as_mut().unwrap();
                     match super::helper_replay::ended(rep, &frame) {
-                        Ok(()) => Ok(take(kind, body)),
+                        Ok(()) => Ok(take(ending, written)),
                         Err(fault) => {
                             live.fault = Some(refuse(fault));
                             live.abort_replay(fault, 0);
@@ -212,11 +218,14 @@ impl Helper {
         }
         let rec = live.recorder.as_mut().unwrap();
         let out = match body {
-            Ok((kind, body, ending)) => {
+            Ok((ending, written)) => {
                 let gap = live.schedule.events - live.schedule.last;
                 live.schedule.last = live.schedule.events;
-                let _ = rec.frame(&Frame::HelperEnd { gap, ending });
-                Ok(take(kind, body))
+                let _ = rec.frame(&Frame::HelperEnd {
+                    gap,
+                    ending: ending.clone(),
+                });
+                Ok(take(ending, written))
             }
             Err(why) => {
                 rec.cut(why);
@@ -232,12 +241,13 @@ impl Helper {
 const NO_CAUSE: &str = "the helper failed without a cause its END can carry";
 const DIVERGED: &str = "the helper's replay diverged at its END";
 
-/// A helper's outcome as its owner's end `TAKE` holds it: the outcome kind
-/// and body, a result's handles in the order written, each with ordinal 0
-/// until the take gives it the owner's, and its capabilities' grants.
+/// A helper's outcome as its owner's end `TAKE` holds it: its `END`, a
+/// result as written, with its handles in the order written, each with
+/// ordinal 0 until the take gives it the owner's, and its capabilities'
+/// grants.
 pub(crate) struct EndTake {
-    pub(super) kind: u8,
-    pub(super) body: Vec<u8>,
+    pub(super) ending: HelperEnding,
+    pub(super) written: Option<Vec<u8>>,
     pub(super) handles: Vec<(u64, u64)>,
     pub(super) grants: Vec<units::item_grants::Granted>,
     /// The result's sockets in transit, which the owner's take names.
@@ -246,11 +256,9 @@ pub(crate) struct EndTake {
 
 /// The `END` a helper's stream ends with when its unit deadlocks.
 pub(super) fn deadlock(gap: u64, events: u64) -> Frame {
-    let mut body = Vec::new();
-    put_varint(&mut body, events);
     Frame::HelperEnd {
         gap,
-        ending: HelperEnding::decode(3, body).expect("a well-formed Deadlock END"),
+        ending: HelperEnding::encode(&HelperOutcome::Deadlock(events)),
     }
 }
 
@@ -785,33 +793,29 @@ fn word_part(
     Ok(())
 }
 
-/// Causes as a helper `END` writes them: each one's kind, site and detail.
-fn encode_causes(causes: &[&Cause]) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_varint(&mut out, causes.len() as u64);
-    for cause in causes {
-        out.push(cause.kind());
-        out.extend_from_slice(&cause.site.to_le_bytes());
-        match cause.kind() {
-            FAIL => {
-                let m = &cause.message;
-                let text = if m.len == 0 {
-                    &[][..]
-                } else {
-                    // SAFETY: a live Fail cause owns its message bytes.
-                    unsafe { std::slice::from_raw_parts(m.data, m.len as usize) }
-                };
-                put_varint(&mut out, text.len() as u64);
-                out.extend_from_slice(text);
-                // Its String capacity, 0 for static text: the join charges it.
-                put_varint(&mut out, m.capacity);
-            }
-            CAPACITY => {
-                out.extend_from_slice(&(cause.message.data as u64).to_le_bytes());
-                out.extend_from_slice(&cause.message.len.to_le_bytes());
-            }
-            _ => {}
-        }
+/// A cause as a helper `END` writes it: its kind, site and detail.
+fn wire_cause(cause: &Cause) -> format::Cause<'_> {
+    let m = &cause.message;
+    let detail = match cause.kind() {
+        FAIL => format::CauseDetail::Fail {
+            message: if m.len == 0 {
+                &[]
+            } else {
+                // SAFETY: a live Fail cause owns its message bytes.
+                unsafe { std::slice::from_raw_parts(m.data, m.len as usize) }
+            },
+            // Its String capacity, 0 for static text: the join charges it.
+            capacity: m.capacity,
+        },
+        CAPACITY => format::CauseDetail::Capacity {
+            requested: m.data as u64,
+            available: m.len,
+        },
+        _ => format::CauseDetail::None,
+    };
+    format::Cause {
+        kind: cause.kind(),
+        site: cause.site,
+        detail,
     }
-    out
 }

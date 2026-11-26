@@ -174,10 +174,11 @@ fn rl9_helper_key_object_survives_by_name() {
             })
             .collect();
         let share = Survivor {
-            kind: 3,
-            origin_kind: None,
-            stream: 1,
-            ordinal: 0,
+            name: hirsel_tape_format::SurvivorName {
+                kind: hirsel_tape_format::SurvivorKind::KeyObject,
+                stream: 1,
+                ordinal: 0,
+            },
             amount: 64,
         };
         assert_eq!(
@@ -390,22 +391,24 @@ fn rl9_key_objects_cross_as_snapshots() {
         expected.extend([0, 0, 0]); // no delivery, kind 3 charge ordinal 0, X25519
         assert_eq!(value.bytes(), expected, "{backend:?}: virtual key");
         let survivor = |kind, ordinal, amount| Survivor {
-            kind,
-            origin_kind: None,
-            stream,
-            ordinal,
+            name: hirsel_tape_format::SurvivorName {
+                kind,
+                stream,
+                ordinal,
+            },
             amount,
         };
+        use hirsel_tape_format::SurvivorKind::{Agreement, KeyObject};
         assert_eq!(
             survivors,
             [
-                survivor(3, 0, 64),
-                survivor(3, 2, 512),
-                survivor(3, 3, 16),
-                survivor(3, 4, 1024),
-                survivor(3, 5, 1024),
-                survivor(3, 6, 512),
-                survivor(4, 1, 48),
+                survivor(KeyObject, 0, 64),
+                survivor(KeyObject, 2, 512),
+                survivor(KeyObject, 3, 16),
+                survivor(KeyObject, 4, 1024),
+                survivor(KeyObject, 5, 1024),
+                survivor(KeyObject, 6, 512),
+                survivor(Agreement, 1, 48),
             ],
             "{backend:?}: survivor names and amounts"
         );

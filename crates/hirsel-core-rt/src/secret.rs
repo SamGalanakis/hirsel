@@ -231,10 +231,10 @@ pub(crate) struct ChargeCell {
     retirement: Mutex<Option<crate::tape::Retirement>>,
     #[cfg(feature = "record")]
     retired: std::sync::atomic::AtomicBool,
-    /// A key object's or registry entry's survivor name: kind, stream and
-    /// its number among the charges that unit tracked.
+    /// A key object's or registry entry's survivor name: its stream and its
+    /// number among the charges that unit tracked.
     #[cfg(feature = "record")]
-    pub(crate) made: Option<(u8, u32, u64)>,
+    pub(crate) made: Option<hirsel_tape_format::SurvivorName>,
 }
 
 // SAFETY: an outstanding charge pins its payer slot, and a refund settles from
@@ -258,13 +258,22 @@ impl ChargeCell {
 
     /// A media charge's cell, named as its helper-end survivor.
     #[cfg_attr(not(feature = "record"), allow(unused_variables))]
-    pub(crate) fn made(charge: Charge, kind: u8) -> Arc<Self> {
+    pub(crate) fn made(charge: Charge, kind: crate::media::Tracked) -> Arc<Self> {
         #[cfg_attr(not(feature = "record"), allow(unused_mut))]
         let mut cell = Self::new(charge);
         #[cfg(feature = "record")]
         {
+            use hirsel_tape_format::{SurvivorKind, SurvivorName};
+            let kind = match kind {
+                crate::media::Tracked::KeyObject => SurvivorKind::KeyObject,
+                crate::media::Tracked::RegistryEntry => SurvivorKind::Agreement,
+            };
             Arc::get_mut(&mut cell).unwrap().made =
-                crate::tape::units::next_made().map(|(stream, ordinal)| (kind, stream, ordinal));
+                crate::tape::units::next_made().map(|(stream, ordinal)| SurvivorName {
+                    kind,
+                    stream,
+                    ordinal,
+                });
         }
         cell
     }
@@ -345,9 +354,9 @@ pub(crate) type HandedOver = Vec<HandedCharge>;
 pub(crate) struct HandedCharge {
     weak: Weak<ChargeCell>,
     bytes: u64,
-    /// Its survivor name: kind, origin kind for a designation, stream, ordinal.
+    /// Its survivor name, if the recording gave it one.
     #[cfg(feature = "record")]
-    pub(crate) name: Option<(u8, Option<u8>, u32, u64)>,
+    pub(crate) name: Option<hirsel_tape_format::SurvivorName>,
     // A pool can physically retire between the hand-over and the end take.
     // Keep its pending tape identity until the new payer can receive the input.
     #[cfg(feature = "record")]
@@ -355,19 +364,31 @@ pub(crate) struct HandedCharge {
 }
 
 impl HandedCharge {
+    /// A pool's or tracked charge's hand-over, named as its cell names it:
+    /// by its `RETIRED` if it has one, else as the charge it was made.
     pub(crate) fn new(cell: &Arc<ChargeCell>, bytes: u64) -> Self {
         #[cfg(feature = "record")]
         let retirement = *cell.retirement.lock().unwrap();
+        #[cfg(feature = "record")]
+        let name = retirement.map(|r| r.survivor()).or(cell.made);
         Self {
             weak: Arc::downgrade(cell),
             bytes,
             #[cfg(feature = "record")]
-            name: retirement
-                .map(|r| r.survivor())
-                .or(cell.made)
-                .map(|(kind, stream, ordinal)| (kind, None, stream, ordinal)),
+            name,
             #[cfg(feature = "record")]
             retiring: retirement.is_some().then(|| cell.clone()),
+        }
+    }
+
+    /// A designation's or sealed bytes' hand-over, which no pool retires.
+    #[cfg(feature = "record")]
+    fn named(cell: &Arc<ChargeCell>, bytes: u64, name: hirsel_tape_format::SurvivorName) -> Self {
+        Self {
+            weak: Arc::downgrade(cell),
+            bytes,
+            name: Some(name),
+            retiring: None,
         }
     }
 }
@@ -499,19 +520,36 @@ impl Secrets {
         let mut handed = Vec::new();
         let mut refunds = Vec::new();
         for entry in self.entries.iter().flatten() {
-            for (_kind, cell) in [(2, &entry.charge), (7, &entry.secret.seal)] {
+            for (sealed, cell) in [(false, &entry.charge), (true, &entry.secret.seal)] {
                 let Some(cell) = cell else { continue };
                 if let Some(c) = cell.take_charge(payer) {
-                    #[cfg_attr(not(feature = "record"), allow(unused_mut))]
-                    let mut charge = HandedCharge::new(cell, c.1);
                     // Every designation of sealed bytes shares their origin,
                     // so the seal's name is the same from any of them.
                     #[cfg(feature = "record")]
-                    {
+                    let charge = {
+                        use hirsel_tape_format::{SurvivorKind, SurvivorName};
                         let (origin, ordinal) = entry.secret.origin.wire();
-                        charge.name =
-                            Some((_kind, Some(origin), entry.secret.origin.stream, ordinal));
-                    }
+                        let kind = if sealed {
+                            SurvivorKind::Sealed { origin }
+                        } else {
+                            SurvivorKind::Designation { origin }
+                        };
+                        let stream = entry.secret.origin.stream;
+                        HandedCharge::named(
+                            cell,
+                            c.1,
+                            SurvivorName {
+                                kind,
+                                stream,
+                                ordinal,
+                            },
+                        )
+                    };
+                    #[cfg(not(feature = "record"))]
+                    let charge = {
+                        let _ = sealed;
+                        HandedCharge::new(cell, c.1)
+                    };
                     handed.push(charge);
                     refunds.push(c);
                 }

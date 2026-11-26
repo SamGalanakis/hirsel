@@ -52,17 +52,93 @@ pub struct Credit {
     pub amount: u64,
 }
 
-/// Every survivor kind the format admits, in tag order.
-pub(crate) const SURVIVOR_KINDS: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7];
+/// What a helper-end survivor is. A `Secret` designation and sealed bytes
+/// carry their designation's origin kind; no other kind has one. The order
+/// is the wire's: by kind tag, then origin kind.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SurvivorKind {
+    Connection,
+    Shared,
+    Designation { origin: u8 },
+    KeyObject,
+    Agreement,
+    UdpPool,
+    GroupQueue,
+    Sealed { origin: u8 },
+}
 
-#[derive(Debug, Eq, PartialEq)]
-pub struct Survivor {
-    pub kind: u8,
-    pub origin_kind: Option<u8>,
-    /// The stream that made it or is its home; its ordinal is that stream's.
+impl SurvivorKind {
+    pub fn tag(self) -> u8 {
+        match self {
+            Self::Connection => 0,
+            Self::Shared => 1,
+            Self::Designation { .. } => 2,
+            Self::KeyObject => 3,
+            Self::Agreement => 4,
+            Self::UdpPool => 5,
+            Self::GroupQueue => 6,
+            Self::Sealed { .. } => 7,
+        }
+    }
+
+    pub fn origin(self) -> Option<u8> {
+        match self {
+            Self::Designation { origin } | Self::Sealed { origin } => Some(origin),
+            _ => None,
+        }
+    }
+
+    fn read(c: &mut Cursor<'_>) -> Result<Self, Corrupt> {
+        Ok(match c.u8()? {
+            0 => Self::Connection,
+            1 => Self::Shared,
+            2 => Self::Designation { origin: tag(c, 6)? },
+            3 => Self::KeyObject,
+            4 => Self::Agreement,
+            5 => Self::UdpPool,
+            6 => Self::GroupQueue,
+            7 => Self::Sealed { origin: tag(c, 6)? },
+            _ => return Err(Corrupt),
+        })
+    }
+}
+
+/// A survivor's name: what it is, the stream that made it or is its home,
+/// and its ordinal in that stream.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SurvivorName {
+    pub kind: SurvivorKind,
     pub stream: u32,
     pub ordinal: u64,
+}
+
+/// A charge the owner keeps at a helper's end. The derived order is the
+/// wire's: (kind, origin kind, stream, ordinal, amount).
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Survivor {
+    pub name: SurvivorName,
     pub amount: u64,
+}
+
+impl Survivor {
+    fn read(c: &mut Cursor<'_>) -> Result<Self, Corrupt> {
+        Ok(Self {
+            name: SurvivorName {
+                kind: SurvivorKind::read(c)?,
+                stream: c.u32()?,
+                ordinal: c.varint()?,
+            },
+            amount: c.u64()?,
+        })
+    }
+
+    fn put(&self, out: &mut Vec<u8>) {
+        out.push(self.name.kind.tag());
+        out.extend(self.name.kind.origin());
+        out.extend_from_slice(&self.name.stream.to_le_bytes());
+        put_varint(out, self.name.ordinal);
+        out.extend_from_slice(&self.amount.to_le_bytes());
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -70,6 +146,28 @@ pub struct Cause<'a> {
     pub kind: u8,
     pub site: u64,
     pub detail: CauseDetail<'a>,
+}
+
+impl Cause<'_> {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.push(self.kind);
+        out.extend_from_slice(&self.site.to_le_bytes());
+        match self.detail {
+            CauseDetail::None => {}
+            CauseDetail::Fail { message, capacity } => {
+                put_varint(out, message.len() as u64);
+                out.extend_from_slice(message);
+                put_varint(out, capacity);
+            }
+            CauseDetail::Capacity {
+                requested,
+                available,
+            } => {
+                out.extend_from_slice(&requested.to_le_bytes());
+                out.extend_from_slice(&available.to_le_bytes());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -93,6 +191,41 @@ pub enum HelperOutcome<'a, ResultValue = Value<'a>> {
     Failed(Vec<Cause<'a>>),
     Cancelled(Vec<Cause<'a>>),
     Deadlock(u64),
+}
+
+impl<'a, V> HelperOutcome<'a, V> {
+    pub fn kind(&self) -> u8 {
+        match self {
+            Self::Returned(_) => 0,
+            Self::Failed(_) => 1,
+            Self::Cancelled(_) => 2,
+            Self::Deadlock(_) => 3,
+        }
+    }
+
+    /// The same outcome with its result, if any, as `f` gives it.
+    pub fn map<W>(self, f: impl FnOnce(V) -> W) -> HelperOutcome<'a, W> {
+        match self {
+            Self::Returned(v) => HelperOutcome::Returned(f(v)),
+            Self::Failed(c) => HelperOutcome::Failed(c),
+            Self::Cancelled(c) => HelperOutcome::Cancelled(c),
+            Self::Deadlock(n) => HelperOutcome::Deadlock(n),
+        }
+    }
+
+    /// The outcome's body after its kind; `value` writes a result.
+    fn put(&self, out: &mut Vec<u8>, value: impl FnOnce(&V) -> &[u8]) {
+        match self {
+            Self::Returned(v) => out.extend_from_slice(value(v)),
+            Self::Failed(causes) | Self::Cancelled(causes) => {
+                put_varint(out, causes.len() as u64);
+                for cause in causes {
+                    cause.put(out);
+                }
+            }
+            Self::Deadlock(events) => put_varint(out, *events),
+        }
+    }
 }
 
 /// A value's checked wire bytes. Part order and the layout of plain bytes
@@ -151,6 +284,10 @@ impl<'a> Value<'a> {
 pub struct CanonicalValue<'a>(&'a [u8]);
 
 impl<'a> CanonicalValue<'a> {
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, Corrupt> {
+        decode(bytes, read_canonical_value)
+    }
+
     pub fn bytes(&self) -> &'a [u8] {
         self.0
     }
@@ -410,20 +547,7 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
             let kind = tag(c, 2)?;
             let outcome = outcome(c, kind, read_value)?;
             let survivors = (0..c.varint()?)
-                .map(|_| {
-                    let kind = c.u8()?;
-                    if !SURVIVOR_KINDS.contains(&kind) {
-                        return Err(Corrupt);
-                    }
-                    let origin_kind = matches!(kind, 2 | 7).then(|| tag(c, 6)).transpose()?;
-                    Ok(Survivor {
-                        kind,
-                        origin_kind,
-                        stream: c.u32()?,
-                        ordinal: c.varint()?,
-                        amount: c.u64()?,
-                    })
-                })
+                .map(|_| Survivor::read(c))
                 .collect::<Result<_, Corrupt>>()?;
             Arrival::HelperEnd(ordinal, outcome, survivors)
         }
@@ -451,6 +575,70 @@ fn decode<'a, T>(
 pub struct TakeBody(Vec<u8>);
 
 impl TakeBody {
+    /// The body of a `TAKE` of `arrival`. A helper end's survivors are
+    /// written in their wire order, whatever order they come in.
+    pub fn encode(arrival: &Arrival<'_>) -> Self {
+        let mut out = Vec::new();
+        match arrival {
+            Arrival::Item(ordinal, value) => {
+                out.push(0);
+                put_varint(&mut out, *ordinal);
+                out.extend_from_slice(value.bytes());
+            }
+            Arrival::Close(ordinal) | Arrival::SealAnswer(ordinal) => {
+                out.push(if matches!(arrival, Arrival::Close(_)) {
+                    1
+                } else {
+                    2
+                });
+                put_varint(&mut out, *ordinal);
+            }
+            Arrival::Settlement(position, settlement) => {
+                out.push(3);
+                put_varint(&mut out, *position);
+                match settlement {
+                    Settlement::Accepted => out.push(0),
+                    Settlement::Closed(value) => {
+                        out.push(1);
+                        out.extend_from_slice(value.bytes());
+                    }
+                    Settlement::Withdrawn => out.push(2),
+                }
+            }
+            Arrival::HelperEnd(ordinal, outcome, survivors) => {
+                out.push(4);
+                put_varint(&mut out, *ordinal);
+                out.push(outcome.kind());
+                outcome.put(&mut out, |v| v.bytes());
+                let mut survivors = survivors.clone();
+                survivors.sort_unstable();
+                put_varint(&mut out, survivors.len() as u64);
+                for survivor in &survivors {
+                    survivor.put(&mut out);
+                }
+            }
+            Arrival::LastRelease(stream, ordinal, header, unused) => {
+                out.push(6);
+                out.extend_from_slice(&stream.to_le_bytes());
+                put_varint(&mut out, *ordinal);
+                out.extend_from_slice(&header.to_le_bytes());
+                out.extend_from_slice(&unused.to_le_bytes());
+            }
+            Arrival::SharedRelease(stream, ordinal) => {
+                out.push(7);
+                out.extend_from_slice(&stream.to_le_bytes());
+                put_varint(&mut out, *ordinal);
+            }
+            Arrival::Cancel => out.push(8),
+            Arrival::Refund(credit) => {
+                out.push(9);
+                put_varint(&mut out, credit.limit);
+                out.extend_from_slice(&credit.amount.to_le_bytes());
+            }
+        }
+        Self(out)
+    }
+
     pub fn arrival(&self) -> Arrival<'_> {
         decode(&self.0, read_arrival).ok().expect("a checked TAKE")
     }
@@ -477,6 +665,16 @@ pub struct HelperEnding {
 }
 
 impl HelperEnding {
+    /// The `END` of a helper whose outcome is `outcome`.
+    pub fn encode(outcome: &HelperOutcome<'_, CanonicalValue<'_>>) -> Self {
+        let mut body = Vec::new();
+        outcome.put(&mut body, |v| v.bytes());
+        Self {
+            kind: outcome.kind(),
+            body,
+        }
+    }
+
     pub fn decode(kind: u8, body: Vec<u8>) -> Result<Self, Corrupt> {
         decode(&body, |c| outcome(c, kind, read_canonical_value))?;
         Ok(Self { kind, body })

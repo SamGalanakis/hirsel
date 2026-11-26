@@ -125,7 +125,7 @@ pub(super) fn track(context: &Context, charge: Charge) -> Paid {
     track_as(context, charge, media::KEY_OBJECT)
 }
 
-pub(super) fn track_as(context: &Context, charge: Charge, kind: u8) -> Paid {
+pub(super) fn track_as(context: &Context, charge: Charge, kind: media::Tracked) -> Paid {
     // SAFETY: the caller entered with a running context.
     unsafe {
         super::run_state((*context.host_files).registry.run_grants())

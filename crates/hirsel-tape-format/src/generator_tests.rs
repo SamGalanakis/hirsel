@@ -1,4 +1,3 @@
-use super::units::SURVIVOR_KINDS;
 use super::*;
 use std::convert::Infallible;
 
@@ -276,9 +275,12 @@ fn helper_end_body(survivors: &[(u8, Option<u8>, u32, u64, u64)]) -> Vec<u8> {
     body
 }
 
+/// The survivor kinds recording.md names: connection 0 to sealed bytes 7.
+const SURVIVOR_KINDS: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+
 fn generated_survivors(random: &mut SplitMix64) -> Vec<(u8, Option<u8>, u32, u64, u64)> {
     let mut out = Vec::new();
-    for &kind in SURVIVOR_KINDS {
+    for kind in SURVIVOR_KINDS {
         for edge in 0..EDGES.len() {
             let pick = |random: &mut SplitMix64| EDGES[random.next() as usize % EDGES.len()];
             let origin = matches!(kind, 2 | 7).then(|| (random.next() % 6) as u8);
@@ -305,18 +307,33 @@ fn generated_survivors_name_their_spec_fields() {
         };
         let found = survivors
             .iter()
-            .map(|s| (s.kind, s.origin_kind, s.ordinal, s.amount))
+            .map(|s| {
+                (
+                    s.name.kind.tag(),
+                    s.name.kind.origin(),
+                    s.name.ordinal,
+                    s.amount,
+                )
+            })
             .collect::<Vec<_>>();
         let want = expected
             .iter()
             .map(|&(kind, origin, _, ordinal, amount)| (kind, origin, ordinal, amount))
             .collect::<Vec<_>>();
         assert_eq!(found, want, "seed {seed}");
-        let streams = survivors.iter().map(|s| s.stream).collect::<Vec<_>>();
+        let streams = survivors.iter().map(|s| s.name.stream).collect::<Vec<_>>();
         let want = expected.iter().map(|s| s.2).collect::<Vec<_>>();
         assert_eq!(streams, want, "seed {seed}");
+        // The encoder writes them in the wire's ascending order.
+        let mut sorted = expected.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            TakeBody::encode(&body.arrival()).bytes(),
+            helper_end_body(&sorted),
+            "seed {seed}"
+        );
         // The kind after the last one the format names is Corrupt.
-        let past = SURVIVOR_KINDS.iter().max().unwrap() + 1;
+        let past = SURVIVOR_KINDS[7] + 1;
         let mut bad = helper_end_body(&expected[..1]);
         bad[6] = past;
         assert_eq!(

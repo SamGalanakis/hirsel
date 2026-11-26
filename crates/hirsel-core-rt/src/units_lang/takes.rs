@@ -315,9 +315,10 @@ pub(super) unsafe fn end_take(
     for &index in taken {
         let handed = &ended.charges[index];
         match handed.name {
-            Some((kind, origin, stream, ordinal)) => {
-                charges.push((kind, origin, stream, ordinal, handed.bytes()));
-            }
+            Some(name) => charges.push(hirsel_tape_format::Survivor {
+                name,
+                amount: handed.bytes(),
+            }),
             None => unnamed = Some(UNNAMED_CHARGE),
         }
     }

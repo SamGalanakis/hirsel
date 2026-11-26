@@ -143,8 +143,10 @@ fn u5_clients_cross_and_drop_in_another_unit() {
         // frame after it.
         let send = [165, 1, 10, 8, 7];
         one_line("close", 1, &send, &[3, 2, 0, 0, 0], 1, "replay: Diverged(Object) at 3 in root.0 ");
-        // The root's close take: tag 1, connection 3.
-        one_line("take", 0, &[], &[1, 3], 1, "replay: Diverged(Take) at 12 in root ");
+        // The root's close take of connection 3 (tag 1), after its item take
+        // (tag 0) of 5 on that connection.
+        let five = [0, 3, 8, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+        one_line("take", 0, &five, &[1, 3], 1, "replay: Diverged(Take) at 12 in root ");
 
         // A build of another revision: the same units with another exit
         // status on the failure path.

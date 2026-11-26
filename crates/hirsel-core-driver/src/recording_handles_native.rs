@@ -893,15 +893,20 @@ fn rl9_helper_secret_charges_survive_by_designation() {
             })
             .collect();
         let survivor = |kind, amount| Survivor {
-            kind,
-            origin_kind: Some(1),
-            stream: 1,
-            ordinal: 0,
+            name: hirsel_tape_format::SurvivorName {
+                kind,
+                stream: 1,
+                ordinal: 0,
+            },
             amount,
         };
+        use hirsel_tape_format::SurvivorKind::{Designation, Sealed};
         assert_eq!(
             ends,
-            [vec![survivor(2, 32), survivor(7, 40)]],
+            [vec![
+                survivor(Designation { origin: 1 }, 32),
+                survivor(Sealed { origin: 1 }, 40)
+            ]],
             "{backend:?}: the helper end's survivors"
         );
     }

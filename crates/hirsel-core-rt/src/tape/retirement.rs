@@ -8,8 +8,8 @@ use std::sync::Arc;
 #[derive(Clone, Copy)]
 pub(crate) struct Retirement {
     group: Group,
-    /// Survivor kind: 5 a socket's pool, 6 a group member's queue.
-    kind: u8,
+    /// A socket's pool (a group's intake included) or a group member's queue.
+    kind: hirsel_tape_format::SurvivorKind,
     /// The pool's home stream, whose object ordinal it is.
     stream: u32,
     pool: u64,
@@ -22,7 +22,11 @@ impl Retirement {
         let group = Group::root(cell_of(provider.state), generation_of(handle));
         Self {
             group,
-            kind: if queue && !intake { 6 } else { 5 },
+            kind: if queue && !intake {
+                hirsel_tape_format::SurvivorKind::GroupQueue
+            } else {
+                hirsel_tape_format::SurvivorKind::UdpPool
+            },
             stream: group.with(|live| units::stream(live)).unwrap_or(0),
             pool: pool_id(handle, intake),
         }
@@ -42,9 +46,13 @@ impl Retirement {
         }
     }
 
-    /// Its name in a helper end's survivor list: kind, stream, ordinal.
-    pub(crate) fn survivor(self) -> (u8, u32, u64) {
-        (self.kind, self.stream, self.pool >> 1)
+    /// Its name in a helper end's survivor list.
+    pub(crate) fn survivor(self) -> hirsel_tape_format::SurvivorName {
+        hirsel_tape_format::SurvivorName {
+            kind: self.kind,
+            stream: self.stream,
+            ordinal: self.pool >> 1,
+        }
     }
 }
 
@@ -114,7 +122,12 @@ pub(crate) fn served_udp_pools(
                 return Some(ServedPoolSet { owner, first });
             }
             let stream = units::stream(live);
-            let kind = if intake.is_some() { 6 } else { 5 };
+            use hirsel_tape_format::SurvivorKind::{GroupQueue, UdpPool};
+            let kind = if intake.is_some() {
+                GroupQueue
+            } else {
+                UdpPool
+            };
             for (index, member) in members.iter().enumerate() {
                 member.record_retirement(Retirement {
                     group: owner,
@@ -126,7 +139,7 @@ pub(crate) fn served_udp_pools(
             if let Some(intake) = intake {
                 intake.record_retirement(Retirement {
                     group: owner,
-                    kind: 5,
+                    kind: UdpPool,
                     stream,
                     pool: pool_id(first, true),
                 });

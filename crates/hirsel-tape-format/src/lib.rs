@@ -30,7 +30,7 @@ pub use index::{Index, StreamBlocks};
 pub use payload::{carries_payload, tls_accept_payload, tls_connect_payload, tls_hello_payload};
 pub use units::{
     Arrival, CanonicalValue, Cause, CauseDetail, Credit, Entry, EntryBody, HelperEnding,
-    HelperOutcome, Settlement, Survivor, TakeBody, TakePoint, Value,
+    HelperOutcome, Settlement, Survivor, SurvivorKind, SurvivorName, TakeBody, TakePoint, Value,
 };
 
 use std::hash::Hasher;

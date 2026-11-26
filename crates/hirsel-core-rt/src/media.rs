@@ -59,13 +59,19 @@ pub(crate) struct Payment {
     cell: Arc<ChargeCell>,
 }
 
-/// A key object's survivor kind, and an agreement or send-key registry entry's.
-pub(crate) const KEY_OBJECT: u8 = 3;
-pub(crate) const REGISTRY_ENTRY: u8 = 4;
+/// What a tracked charge is as a helper-end survivor: a key object, or an
+/// agreement or send-key registry entry.
+#[derive(Clone, Copy)]
+pub(crate) enum Tracked {
+    KeyObject,
+    RegistryEntry,
+}
+pub(crate) const KEY_OBJECT: Tracked = Tracked::KeyObject;
+pub(crate) const REGISTRY_ENTRY: Tracked = Tracked::RegistryEntry;
 
 impl Charges {
     /// Track `charge`, naming it as a survivor of `kind`.
-    pub(crate) fn track(self: &Arc<Self>, charge: Charge, kind: u8) -> Payment {
+    pub(crate) fn track(self: &Arc<Self>, charge: Charge, kind: Tracked) -> Payment {
         let cell = ChargeCell::made(charge, kind);
         self.0
             .lock()
@@ -163,7 +169,7 @@ impl Origin {
             let birth = payment
                 .cell
                 .made
-                .map(|(_, stream, admission)| (stream, delivery, admission));
+                .map(|name| (name.stream, delivery, name.ordinal));
             Self {
                 birth,
                 operand: Operand::Delivery(if opaque { delivery } else { 0 }),

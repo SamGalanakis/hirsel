@@ -152,23 +152,18 @@ impl Live {
         self.objects.len() as u64
     }
 
-    fn take(&mut self, point: TakePoint, body: Vec<u8>) {
+    fn take(&mut self, point: TakePoint, body: TakeBody) {
         self.fresh_takes();
         let gap = self.schedule.events - self.schedule.last;
         self.schedule.last = self.schedule.events;
         let count = self.takes.count;
         let rec = self.recorder.as_mut().unwrap();
-        match TakeBody::decode(body) {
-            Ok(body) => {
-                let _ = rec.frame(&Frame::Take {
-                    gap,
-                    point,
-                    count,
-                    body,
-                });
-            }
-            Err(_) => rec.cut("a take whose body does not decode"),
-        }
+        let _ = rec.frame(&Frame::Take {
+            gap,
+            point,
+            count,
+            body,
+        });
         self.takes.position = rec.encoder.position();
     }
 
@@ -302,9 +297,11 @@ pub(crate) fn refund(from: usize, ordinal: u64, bytes: u64) {
         return;
     }
     recording(group, |live| {
-        let mut body = vec![9];
-        put_varint(&mut body, ordinal);
-        body.extend_from_slice(&bytes.to_le_bytes());
+        let credit = format::Credit {
+            limit: ordinal,
+            amount: bytes,
+        };
+        let body = TakeBody::encode(&format::Arrival::Refund(credit));
         live.take(point(BINDING.get()), body);
     });
 }
@@ -683,9 +680,9 @@ pub(crate) enum Arrival<'a> {
         registry: *mut crate::host_file::Registry,
         /// Kept connections and `Shared` nodes by address, with their amounts.
         survivors: &'a [(usize, u64)],
-        /// Kept `Secret` designations, sealed bytes and UDP pools by name:
-        /// kind, origin kind, stream, ordinal, amount.
-        charges: &'a [(u8, Option<u8>, u32, u64, u64)],
+        /// Kept `Secret` designations, sealed bytes, key objects, registry
+        /// entries and UDP pools, by name.
+        charges: &'a [format::Survivor],
         /// Why other survivors cannot be named, if there are any.
         unnamed: Option<&'static str>,
     },
@@ -716,8 +713,8 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                     .map(|e| e.ordinal)
             })
         };
-        let mut body = Vec::new();
-        match arrival {
+        let mut value = Vec::new();
+        let body = match arrival {
             Arrival::Item {
                 conn,
                 flat,
@@ -729,7 +726,7 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 let generation = group.map_or(0, |g| g.generation);
                 let at = cell_at(group);
                 let mut designations = Vec::new();
-                let value = ordinal(conn).zip(layout(conn)).map(|(ordinal, layout)| {
+                let written = ordinal(conn).zip(layout(conn)).map(|(ordinal, layout)| {
                     let mut handle = |kind, word: u64| {
                         arrive(
                             live,
@@ -747,42 +744,48 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                         item_value(&layout, flat, Some(content), &mut handle)
                     })
                 });
-                match value {
-                    Some((ordinal, Ok(value))) => {
-                        body.push(0);
-                        put_varint(&mut body, ordinal);
-                        body.extend(value);
-                        if let Some(group) = group.filter(|_| !designations.is_empty()) {
-                            // SAFETY: the receiving unit's own registry, which
-                            // only its thread reaches (the arrival's contract).
-                            item_grants::designate(group, unsafe { &mut *registry }, &designations);
-                        }
+                let ordinal = match written {
+                    Some((ordinal, Ok(written))) => {
+                        value = written;
+                        ordinal
                     }
                     Some((_, Err(why))) => return live.cut(why),
                     None => return live.cut(UNNAMED_INBOX),
+                };
+                if let Some(group) = group.filter(|_| !designations.is_empty()) {
+                    // SAFETY: the receiving unit's own registry, which only
+                    // its thread reaches (the arrival's contract).
+                    item_grants::designate(group, unsafe { &mut *registry }, &designations);
                 }
+                let Ok(value) = format::Value::decode(&value) else {
+                    return live.cut(UNDECODED);
+                };
+                TakeBody::encode(&format::Arrival::Item(ordinal, value))
             }
             Arrival::Close(conn) | Arrival::SealAnswer(conn) => {
                 let Some(ordinal) = ordinal(conn) else {
                     return live.cut(UNNAMED_INBOX);
                 };
-                body.push(if matches!(arrival, Arrival::Close(_)) {
-                    1
+                TakeBody::encode(&if matches!(arrival, Arrival::Close(_)) {
+                    format::Arrival::Close(ordinal)
                 } else {
-                    2
-                });
-                put_varint(&mut body, ordinal);
+                    format::Arrival::SealAnswer(ordinal)
+                })
             }
             Arrival::Settlement(id, outcome) => {
-                let Some((position, value)) = live.takes.sends.remove(&id) else {
+                let Some((position, closed)) = live.takes.sends.remove(&id) else {
                     return;
                 };
-                body.push(3);
-                put_varint(&mut body, position);
-                body.push(outcome);
-                if outcome == 1 {
-                    body.extend(value);
-                }
+                value = closed;
+                let settlement = match outcome {
+                    0 => format::Settlement::Accepted,
+                    1 => match format::Value::decode(&value) {
+                        Ok(value) => format::Settlement::Closed(value),
+                        Err(_) => return live.cut(UNDECODED),
+                    },
+                    _ => format::Settlement::Withdrawn,
+                };
+                TakeBody::encode(&format::Arrival::Settlement(position, settlement))
             }
             Arrival::HelperEnd {
                 key,
@@ -802,14 +805,9 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                     Ok(end) => end,
                     Err(why) => return live.cut(why),
                 };
-                body.push(4);
-                put_varint(&mut body, ordinal);
-                body.push(end.kind);
-                if end.handles.is_empty() {
-                    body.extend_from_slice(&end.body);
-                } else {
-                    // Each handle in the result takes its ordinal here, in the
-                    // order the helper wrote them, each 0 in its END.
+                if let Some(written) = &end.written {
+                    // Each handle in the result takes its ordinal here, in
+                    // the order the helper wrote them, each 0 in its END.
                     let generation = group.map_or(0, |g| g.generation);
                     let mut designations = Vec::new();
                     let mut ordinals = Vec::with_capacity(end.handles.len());
@@ -829,8 +827,8 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                         }
                         ordinals.push(live.objects.len() as u64);
                     }
-                    let value = format::Value::decode(&end.body).expect("a written result");
-                    body.extend(value.with_ordinals(&ordinals));
+                    let written = format::Value::decode(written).expect("a written result");
+                    value = written.with_ordinals(&ordinals);
                     if let Some(group) =
                         group.filter(|_| !designations.is_empty() && !registry.is_null())
                     {
@@ -838,29 +836,39 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                         item_grants::designate(group, unsafe { &mut *registry }, &designations);
                     }
                 }
-                // Each survivor by its address: a `Shared` node (kind 1),
-                // whose entry ends at its release, else a connection (kind
-                // 0); then the named charges. Written in (kind, origin kind,
-                // stream, ordinal, amount) order, which no address decides.
+                // Each survivor by its address: a `Shared` node, whose entry
+                // ends at its release, else a connection; then the named
+                // charges.
                 let mut named = Vec::with_capacity(survivors.len() + charges.len());
                 for &(key, amount) in survivors {
-                    let node = nodes(|n| n.get(&key).map(|e| (1u8, e.stream, e.ordinal)));
-                    let conn = || conns(|c| c.get(&key).map(|e| (0u8, e.stream, e.ordinal)));
-                    let Some((kind, stream, ordinal)) = node.or_else(conn) else {
+                    let name = |kind, stream, ordinal| format::SurvivorName {
+                        kind,
+                        stream,
+                        ordinal,
+                    };
+                    let node = nodes(|n| {
+                        n.get(&key)
+                            .map(|e| name(format::SurvivorKind::Shared, e.stream, e.ordinal))
+                    });
+                    let conn = || {
+                        conns(|c| {
+                            c.get(&key).map(|e| {
+                                name(format::SurvivorKind::Connection, e.stream, e.ordinal)
+                            })
+                        })
+                    };
+                    let Some(name) = node.or_else(conn) else {
                         return live.cut(UNNAMED_SURVIVOR);
                     };
-                    named.push((kind, None, stream, ordinal, amount));
+                    named.push(format::Survivor { name, amount });
                 }
                 named.extend_from_slice(charges);
-                named.sort_unstable();
-                put_varint(&mut body, named.len() as u64);
-                for (kind, origin, stream, ordinal, amount) in named {
-                    body.push(kind);
-                    body.extend(origin);
-                    body.extend_from_slice(&stream.to_le_bytes());
-                    put_varint(&mut body, ordinal);
-                    body.extend_from_slice(&amount.to_le_bytes());
-                }
+                let result = format::Value::decode(&value);
+                let outcome = end
+                    .ending
+                    .outcome()
+                    .map(|_| result.expect("a written result"));
+                TakeBody::encode(&format::Arrival::HelperEnd(ordinal, outcome, named))
             }
             Arrival::LastRelease(conn) => {
                 let Some((stream, ordinal, header, retained)) = conns(|c| {
@@ -869,11 +877,10 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 }) else {
                     return live.cut(UNNAMED_INBOX);
                 };
-                body.push(6);
-                body.extend_from_slice(&stream.to_le_bytes());
-                put_varint(&mut body, ordinal);
-                body.extend_from_slice(&header.to_le_bytes());
-                body.extend_from_slice(&retained.saturating_sub(header).to_le_bytes());
+                let unused = retained.saturating_sub(header);
+                TakeBody::encode(&format::Arrival::LastRelease(
+                    stream, ordinal, header, unused,
+                ))
             }
             Arrival::SharedRelease(node) => {
                 // The release ends the node: nothing names it after.
@@ -883,17 +890,16 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                     return live.cut(UNNAMED_NODE);
                 };
                 live.takes.nodes.remove(&node);
-                body.push(7);
-                body.extend_from_slice(&stream.to_le_bytes());
-                put_varint(&mut body, ordinal);
+                TakeBody::encode(&format::Arrival::SharedRelease(stream, ordinal))
             }
-            Arrival::Cancel => body.push(8),
+            Arrival::Cancel => TakeBody::encode(&format::Arrival::Cancel),
             Arrival::Unrecorded(why) => return live.cut(why),
-        }
+        };
         live.take(point(pump), body);
     });
 }
 
 const UNNAMED_INBOX: &str = "a take for a connection the recording did not name";
+const UNDECODED: &str = "a take whose value does not decode";
 const UNNAMED_SURVIVOR: &str =
     "a helper end keeps a connection or Shared node the recording did not name";

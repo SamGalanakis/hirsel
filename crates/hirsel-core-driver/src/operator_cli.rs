@@ -3,33 +3,34 @@
 //! `hirsel deploy` drive one exchange each on `STATE/operator.sock`, and `hirsel replay
 //! --state` resolves a recording's pin through the host or, with no host, the offline pin
 //! reader.
-use crate::cli::{Invocation, OptionId as Opt};
+use crate::cli::{
+    CompilerOption, DeployOption, HostOption, LauncherOption, RegisterOption, Request,
+};
 use crate::code_store::CodeStore;
 use crate::launcher::session::{Attempt, Grants, Group};
 use crate::native::recipe_build::{foreign_grant_refusal, parse_root};
 use crate::operator::{
-    self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Needed, Pause, Phase, Record,
-    Registration, Report, Verdict,
+    self, Answer, Ask, Class, Fates, Forward, Front, Pause, Phase, Record, Registration, Report,
 };
 use crate::reachability::foreign_recording_refusal;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::hex;
 use hirsel_core_ir::release_recipe::Recipe;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod conversation;
 #[cfg(test)]
 mod laws;
 mod preview;
 mod pump;
 mod source;
 
-use preview::decide;
+use conversation::Conversation;
+pub(crate) use preview::decide;
 use preview::{approve_grant, decision_json, held_fate, preview_json};
 use pump::Pump;
 use source::{Source, submission};
@@ -40,8 +41,6 @@ type Error = Box<dyn std::error::Error>;
 const UNAVAILABLE: i32 = 75;
 /// How long replay waits for a running host's pin answer.
 const PIN_WAIT: Duration = Duration::from_secs(5);
-/// How long a deploy keeps resending a request the host answers `Busy`.
-const BUSY_WAIT: Duration = Duration::from_secs(60);
 /// The admission bytes per `Data` frame.
 const CHUNK: usize = 256 << 10;
 
@@ -54,7 +53,7 @@ pub(crate) fn installed(name: &str) -> Result<PathBuf, Error> {
 
 /// Run the launcher in the foreground with this installation's platform host
 /// (launch.md "Starting the host").
-pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, Error> {
+pub(crate) fn host(invocation: Request<HostOption>) -> Result<std::convert::Infallible, Error> {
     if invocation.positional.is_some() || !invocation.arguments.is_empty() {
         return Err(
             "host takes no recipe or arguments; register groups with hirsel register".into(),
@@ -64,38 +63,37 @@ pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, E
     let mut max_places = false;
     let mut lifecycle = None;
     let mut options = Vec::new();
-    for (option, value) in invocation.options {
-        match option {
-            Opt::HostState => state = value.map(PathBuf::from),
-            Opt::MaxPlaces => {
+    for option in invocation.options {
+        let forwarded = match option {
+            HostOption::HostState(value) => {
+                state = Some(PathBuf::from(value));
+                continue;
+            }
+            HostOption::MaxPlaces(value) => {
                 max_places = true;
-                options.push((option, value));
+                LauncherOption::MaxPlaces(value)
             }
-            Opt::Lifecycle => {
-                lifecycle = Some(crate::launcher::parse_lifecycle(
-                    value.as_deref().unwrap_or_default(),
-                )?);
-                options.push((option, value));
+            HostOption::Lifecycle(value) => {
+                lifecycle = Some(crate::launcher::parse_lifecycle(&value)?);
+                LauncherOption::Lifecycle(value)
             }
-            Opt::IdleMs | Opt::Admission => options.push((option, value)),
-            _ => return Err("unexpected host option".into()),
-        }
+            HostOption::IdleMs(value) => LauncherOption::IdleMs(value),
+            HostOption::Admission(value) => LauncherOption::Admission(value),
+        };
+        options.push(forwarded);
     }
     let state = state.ok_or("host requires --state DIR")?;
     if !max_places {
         return Err("host requires --max-places N".into());
     }
     crate::launcher::resolve_lifecycle(lifecycle)?;
-    let path = |name: &str| Some(state.join(name).to_string_lossy().into_owned());
+    let path = |name: &str| state.join(name).to_string_lossy().into_owned();
     options.extend([
-        (Opt::HostState, Some(state.to_string_lossy().into_owned())),
-        (Opt::Control, path(crate::product::bundled::LAUNCHER_SOCKET)),
-        (
-            Opt::OperatorListen,
-            path(crate::product::bundled::OPERATOR_SOCKET),
-        ),
+        LauncherOption::HostState(state.to_string_lossy().into_owned()),
+        LauncherOption::Control(path(crate::product::bundled::LAUNCHER_SOCKET)),
+        LauncherOption::OperatorListen(path(crate::product::bundled::OPERATOR_SOCKET)),
     ]);
-    crate::launcher::run(Invocation {
+    crate::launcher::run(Request {
         command: invocation.command,
         options,
         positional: None,
@@ -185,80 +183,155 @@ fn request_id(text: Option<String>) -> Result<Vec<u8>, Error> {
 
 /// `hirsel register R --state S --group NAME --listen ADDR --store DIR --code-store DIR
 /// [options] [-- arguments]`: add a group and deploy its first release.
-pub(crate) fn register(invocation: Invocation) -> Result<i32, Error> {
+pub(crate) fn register(invocation: Request<RegisterOption>) -> Result<i32, Error> {
     or_unavailable("register", register_on(invocation))
 }
 
-fn register_on(invocation: Invocation) -> Result<i32, Error> {
-    let (mut state, mut store_dir, mut code, mut name, mut listen) = (None, None, None, None, None);
-    let mut tenant = String::from("operator");
-    let mut workdir = std::env::current_dir()?;
-    let mut trusted = false;
-    let mut memory = None;
-    let (mut record, mut front) = (None, None);
-    let mut retention_days = 30u64;
-    let (mut lines, mut source_dir, mut packages) = (Vec::new(), None, Vec::new());
-    let mut d = None;
-    for (option, value) in invocation.options {
-        let text = value.unwrap_or_default();
-        match option {
-            Opt::HostState => state = Some(PathBuf::from(text)),
-            Opt::GroupName => name = Some(text),
-            Opt::Tenant => tenant = text,
-            Opt::Listen => listen = Some(text),
-            Opt::FrontHttp | Opt::FrontStream => {
-                let forward = if option == Opt::FrontHttp {
-                    Forward::Http
-                } else {
-                    Forward::Stream
-                };
-                let front = front.get_or_insert_with(|| Front {
-                    names: Vec::new(),
-                    forward,
-                });
-                if front.forward != forward {
-                    return Err("a group cannot use both --front-http and --front-stream".into());
+struct Register {
+    state: Option<PathBuf>,
+    inputs: Submission,
+    name: Option<String>,
+    listen: Option<String>,
+    tenant: String,
+    trusted: bool,
+    memory: Option<u64>,
+    record: Option<PathBuf>,
+    front: Option<Front>,
+    retention_days: u64,
+    packages: Vec<[u8; 32]>,
+    request_id: Option<String>,
+    arguments: Vec<String>,
+}
+
+enum RegisterPath {
+    Store(PathBuf),
+    Workdir(PathBuf),
+}
+
+impl Register {
+    fn read(
+        invocation: Request<RegisterOption>,
+        paths: &mut Vec<RegisterPath>,
+    ) -> Result<Self, Error> {
+        let mut request = Self {
+            state: None,
+            inputs: Submission {
+                positional: invocation.positional,
+                ..Submission::default()
+            },
+            name: None,
+            listen: None,
+            tenant: "operator".into(),
+            trusted: false,
+            memory: None,
+            record: None,
+            front: None,
+            retention_days: 30,
+            packages: Vec::new(),
+            request_id: None,
+            arguments: invocation.arguments,
+        };
+        use RegisterOption as O;
+        for option in invocation.options {
+            match option {
+                O::HostState(text) => request.state = Some(PathBuf::from(text)),
+                O::GroupName(text) => request.name = Some(text),
+                O::Tenant(text) => request.tenant = text,
+                O::Listen(text) => request.listen = Some(text),
+                O::FrontHttp(ref text) | O::FrontStream(ref text) => {
+                    let forward = if matches!(option, O::FrontHttp(_)) {
+                        Forward::Http
+                    } else {
+                        Forward::Stream
+                    };
+                    let front = request.front.get_or_insert_with(|| Front {
+                        names: Vec::new(),
+                        forward,
+                    });
+                    if front.forward != forward {
+                        return Err(
+                            "a group cannot use both --front-http and --front-stream".into()
+                        );
+                    }
+                    front.names.push(text.clone());
                 }
-                front.names.push(text);
+                O::GroupStore(text) => paths.push(RegisterPath::Store(text.into())),
+                O::CodeStore(text) => request.inputs.code = Some(PathBuf::from(text)),
+                O::Workdir(text) => paths.push(RegisterPath::Workdir(text.into())),
+                O::Trusted => request.trusted = true,
+                O::HostMemory(text) => request.memory = Some(text.parse()?),
+                O::Record(text) => request.record = Some(PathBuf::from(text)),
+                O::TapeRetention(text) => {
+                    request.retention_days = text
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|&n| n != 0)
+                        .ok_or("invalid tape retention")?
+                }
+                O::Grant(text) => request.inputs.grants.push(text),
+                O::RequestId(text) => request.request_id = Some(text),
+                O::SourceDir(text) => request.inputs.source = Some(PathBuf::from(text)),
+                O::PackageRoot(text) => request.packages.push(
+                    crate::package_content::Root::parse(&text)
+                        .ok_or("--package-root takes sha256:HEX")?
+                        .0,
+                ),
             }
-            Opt::GroupStore => store_dir = Some(std::path::absolute(text)?),
-            Opt::CodeStore => code = Some(PathBuf::from(text)),
-            Opt::Workdir => workdir = PathBuf::from(text).canonicalize()?,
-            Opt::Trusted => trusted = true,
-            Opt::HostMemory => memory = Some(text.parse()?),
-            Opt::Record => record = Some(PathBuf::from(text)),
-            Opt::TapeRetention => {
-                retention_days = text
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|&n| n != 0)
-                    .ok_or("invalid tape retention")?
-            }
-            Opt::Grant => lines.push(text),
-            Opt::RequestId => d = Some(text),
-            Opt::SourceDir => source_dir = Some(PathBuf::from(text)),
-            Opt::PackageRoot => packages.push(
-                crate::package_content::Root::parse(&text)
-                    .ok_or("--package-root takes sha256:HEX")?
-                    .0,
-            ),
-            _ => return Err("unexpected register option".into()),
+        }
+        Ok(request)
+    }
+
+    fn registration(
+        self,
+        workdir: PathBuf,
+        store: Option<PathBuf>,
+        record: Option<PathBuf>,
+    ) -> Result<Registration, Error> {
+        Ok(Registration {
+            name: self.name.ok_or("register requires --group NAME")?,
+            tenant: self.tenant,
+            workdir: workdir.to_string_lossy().into_owned(),
+            trusted: self.trusted,
+            listen: self.listen.ok_or("register requires --listen ADDR")?,
+            store: store
+                .ok_or("register requires --store DIR")?
+                .to_string_lossy()
+                .into_owned(),
+            memory: self.memory,
+            args: self.arguments,
+            record: record.map(|dir| Record {
+                dir: dir.to_string_lossy().into_owned(),
+                retention_s: self.retention_days.saturating_mul(86400),
+            }),
+            front: self.front,
+            packages: self.packages,
+        })
+    }
+}
+
+fn register_on(invocation: Request<RegisterOption>) -> Result<i32, Error> {
+    let mut workdir = std::env::current_dir()?;
+    let mut paths = Vec::new();
+    let request = Register::read(invocation, &mut paths);
+    let mut store = None;
+    for step in paths {
+        match step {
+            RegisterPath::Store(path) => store = Some(std::path::absolute(path)?),
+            RegisterPath::Workdir(path) => workdir = path.canonicalize()?,
         }
     }
-    let state = state.ok_or("register requires --state DIR")?;
-    let (input, upload, source, approvals) = submission(
-        source_dir,
-        invocation.positional.as_deref(),
-        code,
-        lines,
-        &state,
-    )?;
+    let mut request = request?;
+    let state = request
+        .state
+        .take()
+        .ok_or("register requires --state DIR")?;
+    let (input, upload, source, approvals) = std::mem::take(&mut request.inputs).open(&state)?;
     if let Some(upload) = &upload {
         if let Some(reason) = approvals.check(&upload.recipe) {
             eprintln!("register: refused: {reason}");
             return Ok(2);
         }
-        if record.is_some()
+        if request.record.is_some()
             && let Some(reason) = foreign_recording_refusal(&upload.recipe)
         {
             eprintln!("register: refused: {reason}");
@@ -266,27 +339,14 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
         }
     }
     // The recordings directory is made only for a registration the CLI does not refuse.
-    let record = record.map(crate::launcher::private_dir).transpose()?;
-    let registration = Registration {
-        name: name.ok_or("register requires --group NAME")?,
-        tenant,
-        workdir: workdir.to_string_lossy().into_owned(),
-        trusted,
-        listen: listen.ok_or("register requires --listen ADDR")?,
-        store: store_dir
-            .ok_or("register requires --store DIR")?
-            .to_string_lossy()
-            .into_owned(),
-        memory,
-        args: invocation.arguments,
-        record: record.map(|dir| Record {
-            dir: dir.to_string_lossy().into_owned(),
-            retention_s: retention_days.saturating_mul(86400),
-        }),
-        front,
-        packages,
-    };
-    let d = request_id(d)?;
+    let record = request
+        .record
+        .take()
+        .map(crate::launcher::private_dir)
+        .transpose()?;
+    let id = request.request_id.take();
+    let registration = request.registration(workdir, store, record)?;
+    let d = request_id(id)?;
     eprintln!("request {}", hex::encode(&d));
     let ask = Ask::Register(
         d.clone(),
@@ -295,76 +355,131 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
         approvals.foreign.clone(),
         approvals.exec.clone(),
     );
-    let mut exchange = Exchange::new(&state, d, "register", upload, approvals);
+    let mut exchange = Conversation::new(&state, d, "register", upload, approvals);
     exchange.source = source;
     exchange.run(ask)
-}
-
-/// `hirsel deploy` or `hirsel decide`.
-pub(crate) fn run(command: &str, invocation: Invocation) -> Result<crate::request::Outcome, Error> {
-    let code = if command == "decide" {
-        decide(invocation)?
-    } else {
-        deploy(invocation)?
-    };
-    Ok(crate::request::Outcome::Exit(code))
 }
 
 /// `hirsel deploy R --state S --group NAME --code-store DIR [--request-id HEX]
 /// [--approve-grant +LINE|-LINE ...] [--grant ...]` or `hirsel deploy --state S --status HEX`.
 /// A request that awaits any other decision is decided with `hirsel decide`.
-pub(crate) fn deploy(invocation: Invocation) -> Result<i32, Error> {
+pub(crate) fn deploy(invocation: Request<DeployOption>) -> Result<i32, Error> {
     or_unavailable("deploy", deploy_on(invocation))
 }
 
-fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
-    let (mut state, mut code, mut name, mut d, mut status) = (None, None, None, None, None);
-    let mut decision = Grants::default();
-    let (mut lines, mut source_dir) = (Vec::new(), None);
-    let mut held = Fates::default();
-    let mut held_given = false;
-    for (option, value) in invocation.options {
-        let text = value.unwrap_or_default();
-        match option {
-            Opt::HostState => state = Some(PathBuf::from(text)),
-            Opt::CodeStore => code = Some(PathBuf::from(text)),
-            Opt::GroupName => name = Some(text),
-            Opt::RequestId => d = Some(text),
-            Opt::RequestStatus => status = Some(text),
-            Opt::ApproveGrant => approve_grant(&mut decision, &text)?,
-            Opt::Grant => lines.push(text),
-            Opt::SourceDir => source_dir = Some(PathBuf::from(text)),
-            Opt::HeldAll | Opt::HeldEntry => {
-                held_fate(&mut held, option == Opt::HeldAll, &text)?;
-                held_given = true;
+#[derive(Default)]
+struct Submission {
+    positional: Option<String>,
+    code: Option<PathBuf>,
+    source: Option<PathBuf>,
+    grants: Vec<String>,
+}
+
+impl Submission {
+    fn open(
+        self,
+        state: &Path,
+    ) -> Result<(operator::Input, Option<Upload>, Option<Source>, Approvals), Error> {
+        submission(
+            self.source,
+            self.positional.as_deref(),
+            self.code,
+            self.grants,
+            state,
+        )
+    }
+}
+
+enum Deploy {
+    Status(Vec<u8>),
+    Submit {
+        inputs: Submission,
+        name: Option<String>,
+        request_id: Option<String>,
+        decision: Grants,
+        held: Fates,
+    },
+}
+
+impl Deploy {
+    fn read(invocation: Request<DeployOption>) -> Result<(PathBuf, Self), Error> {
+        let (mut state, mut code, mut name, mut d, mut status) = (None, None, None, None, None);
+        let mut decision = Grants::default();
+        let (mut lines, mut source_dir) = (Vec::new(), None);
+        let mut held = Fates::default();
+        let mut held_given = false;
+        use DeployOption as O;
+        for option in invocation.options {
+            match option {
+                O::HostState(text) => state = Some(PathBuf::from(text)),
+                O::CodeStore(text) => code = Some(PathBuf::from(text)),
+                O::GroupName(text) => name = Some(text),
+                O::RequestId(text) => d = Some(text),
+                O::RequestStatus(text) => status = Some(text),
+                O::ApproveGrant(text) => approve_grant(&mut decision, &text)?,
+                O::Grant(text) => lines.push(text),
+                O::SourceDir(text) => source_dir = Some(PathBuf::from(text)),
+                O::HeldAll(ref text) | O::HeldEntry(ref text) => {
+                    held_fate(&mut held, matches!(option, O::HeldAll(_)), text)?;
+                    held_given = true;
+                }
             }
-            _ => return Err("unexpected deploy option".into()),
         }
-    }
-    let state = state.ok_or("deploy requires --state DIR")?;
-    if !invocation.arguments.is_empty() {
-        return Err("deploy takes no program arguments; a group's arguments are registered".into());
-    }
-    let has_decision = decision != Grants::default();
-    let submission_options =
-        code.is_some() || name.is_some() || !lines.is_empty() || source_dir.is_some() || held_given;
-    if let Some(text) = status {
-        if invocation.positional.is_some() || d.is_some() || submission_options || has_decision {
-            return Err("deploy --status takes only --state".into());
+        let state = state.ok_or("deploy requires --state DIR")?;
+        if !invocation.arguments.is_empty() {
+            return Err(
+                "deploy takes no program arguments; a group's arguments are registered".into(),
+            );
         }
-        let d = hex::decode(&text)
-            .filter(|d| d.len() == 16)
-            .ok_or("--status takes 32 hex digits")?;
-        return status_of(&state, &d);
+        let has_decision = decision != Grants::default();
+        let submission_options = code.is_some()
+            || name.is_some()
+            || !lines.is_empty()
+            || source_dir.is_some()
+            || held_given;
+        if let Some(text) = status {
+            if invocation.positional.is_some() || d.is_some() || submission_options || has_decision
+            {
+                return Err("deploy --status takes only --state".into());
+            }
+            let d = hex::decode(&text)
+                .filter(|d| d.len() == 16)
+                .ok_or("--status takes 32 hex digits")?;
+            return Ok((state, Self::Status(d)));
+        }
+        sort_grants(&mut decision);
+        let inputs = Submission {
+            positional: invocation.positional,
+            code,
+            source: source_dir,
+            grants: lines,
+        };
+        Ok((
+            state,
+            Self::Submit {
+                inputs,
+                name,
+                request_id: d,
+                decision,
+                held,
+            },
+        ))
     }
-    sort_grants(&mut decision);
-    let (input, upload, source, approvals) = submission(
-        source_dir,
-        invocation.positional.as_deref(),
-        code,
-        lines,
-        &state,
-    )?;
+}
+
+fn deploy_on(invocation: Request<DeployOption>) -> Result<i32, Error> {
+    let (state, request) = Deploy::read(invocation)?;
+    let (inputs, name, d, decision, held) = match request {
+        Deploy::Status(d) => return status_of(&state, &d),
+        Deploy::Submit {
+            inputs,
+            name,
+            request_id,
+            decision,
+            held,
+        } => (inputs, name, request_id, decision, held),
+    };
+    let (input, upload, source, approvals) = inputs.open(&state)?;
     if let Some(upload) = &upload
         && let Some(reason) = approvals.check(&upload.recipe)
     {
@@ -406,7 +521,7 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         approvals.exec.clone(),
         held,
     );
-    let mut exchange = Exchange::new(&state, d, "deploy", upload, approvals);
+    let mut exchange = Conversation::new(&state, d, "deploy", upload, approvals);
     exchange.decision = Some(decision);
     exchange.source = source;
     exchange.run(ask)
@@ -563,250 +678,6 @@ fn state_json(d: &[u8], group: &Group, phase: &Phase) -> serde_json::Value {
     out
 }
 
-/// A Foreign or Exec policy refusal, which exits 2 like a refusal the CLI finds itself.
-fn policy_refusal(detail: &str) -> bool {
-    detail.starts_with("FFI-8: ")
-        || detail.starts_with("Exec[")
-        || detail.starts_with("Exec grants")
-}
-
-/// One deploy or registration: its request, the upload, the display and the outcome.
-struct Exchange<'a> {
-    state: &'a Path,
-    d: Vec<u8>,
-    command: &'static str,
-    upload: Option<Upload>,
-    approvals: Approvals,
-    /// The grant diff the operator approves, sent as a Decide when the request awaits an
-    /// Admission-stage decision on exactly it.
-    decision: Option<Grants>,
-    /// The source tree whose blobs the host's `Need` asks for, when the input is a manifest.
-    source: Option<Source>,
-}
-
-impl<'a> Exchange<'a> {
-    fn new(
-        state: &'a Path,
-        d: Vec<u8>,
-        command: &'static str,
-        upload: Option<Upload>,
-        approvals: Approvals,
-    ) -> Self {
-        Self {
-            state,
-            d,
-            command,
-            upload,
-            approvals,
-            decision: None,
-            source: None,
-        }
-    }
-
-    fn run(self, ask: Ask) -> Result<i32, Error> {
-        let started = std::time::Instant::now();
-        loop {
-            match self.attach(&ask)? {
-                Some(code) => return Ok(code),
-                None if started.elapsed() < BUSY_WAIT => {
-                    std::thread::sleep(Duration::from_millis(250))
-                }
-                None => {
-                    eprintln!(
-                        "{}: the host stayed busy; resend request {}",
-                        self.command,
-                        hex::encode(&self.d)
-                    );
-                    return Ok(UNAVAILABLE);
-                }
-            }
-        }
-    }
-
-    /// One attachment to the request: its exit status, or None when the host is busy and
-    /// the same request should be sent again.
-    fn attach(&self, ask: &Ask) -> Result<Option<i32>, Error> {
-        let mut reader = connect(self.state)?;
-        let out = Arc::new(Mutex::new(reader.try_clone()?));
-        out.lock().unwrap().send(ask)?;
-        let mut pump: Option<Pump> = None;
-        let mut decided = matches!(ask, Ask::Decide(..));
-        // The blob digests the host's `Need` parts named so far, for a source input.
-        let mut blobs: Vec<[u8; 32]> = Vec::new();
-        let lost = |command: &str, d: &[u8]| {
-            eprintln!("{command}: outcome unknown: request {}", hex::encode(d));
-            Ok(Some(UNAVAILABLE))
-        };
-        let result = loop {
-            let answer = match reader.recv() {
-                Ok(Some(answer)) => answer,
-                Ok(None) | Err(_) => break lost(self.command, &self.d),
-            };
-            match answer {
-                // A source's blobs follow the host's Need, not its AwaitInput.
-                Answer::State(_, _, _, Phase::AwaitInput(_)) if self.source.is_some() => {}
-                Answer::State(_, _, _, Phase::AwaitInput(a)) if pump.is_none() => {
-                    let Some(upload) = &self.upload else {
-                        break Err(format!(
-                            "request {} uploads its input; resend it with `hirsel deploy R --request-id HEX`",
-                            hex::encode(&self.d)
-                        )
-                        .into());
-                    };
-                    pump = Some(Pump::start(upload, &self.d, a, out.clone())?);
-                }
-                Answer::Need(_, a, keys, last) if self.source.is_some() => {
-                    let mut objects = false;
-                    for key in keys {
-                        match key {
-                            Needed::Blob(digest) => blobs.push(digest),
-                            Needed::Object(_) => objects = true,
-                        }
-                    }
-                    if objects {
-                        break Err("the host asked a source upload for code objects".into());
-                    }
-                    if !last {
-                        continue;
-                    }
-                    // A Need's parts end with its last; a repeated admission asks afresh.
-                    let wanted = std::mem::take(&mut blobs);
-                    let stream = match self.source.as_ref().unwrap().stream(&wanted) {
-                        Ok(stream) => stream,
-                        Err(why) => break Err(why),
-                    };
-                    // Nothing needed: the host admits from the blobs it holds.
-                    if stream.is_empty() {
-                        continue;
-                    }
-                    let mut connection = out.lock().unwrap();
-                    let sent = stream
-                        .chunks(CHUNK)
-                        .try_for_each(|chunk| {
-                            connection.send(&Ask::Data(self.d.clone(), a, chunk.to_vec()))
-                        })
-                        .and_then(|()| connection.send(&Ask::End(self.d.clone(), a)));
-                    if sent.is_err() {
-                        drop(connection);
-                        break lost(self.command, &self.d);
-                    }
-                }
-                Answer::Need(_, _, keys, last) => {
-                    let objects = keys
-                        .into_iter()
-                        .map(|key| match key {
-                            Needed::Object(key) => Ok(key),
-                            Needed::Blob(_) => Err(()),
-                        })
-                        .collect::<Result<Vec<_>, ()>>();
-                    let Ok(objects) = objects else {
-                        break Err("the host asked a recipe upload for source blobs".into());
-                    };
-                    if let Some(p) = &mut pump
-                        && p.need(objects, last).is_err()
-                    {
-                        break Err("the local upload ended before the host's Need".into());
-                    }
-                }
-                Answer::Display(_, a, root, text) => {
-                    if let Err(why) = self.check_display(&root, &text) {
-                        break Err(why);
-                    }
-                    let mut stdout = io::stdout().lock();
-                    stdout.write_all(text.as_bytes())?;
-                    stdout.flush()?;
-                    let hash = Sha256::digest(text.as_bytes()).to_vec();
-                    if out
-                        .lock()
-                        .unwrap()
-                        .send(&Ask::Confirm(self.d.clone(), a, hash))
-                        .is_err()
-                    {
-                        break lost(self.command, &self.d);
-                    }
-                }
-                Answer::State(d, group, _, phase) => match &phase {
-                    Phase::AwaitDecision(held) => {
-                        let grant_only = held.stage == DecisionStage::Admission
-                            && !held.shows_held()
-                            && self.decision.as_ref() == Some(&held.grants);
-                        if grant_only && !decided {
-                            decided = true;
-                            let ask = Ask::Decide(
-                                self.d.clone(),
-                                held.clone(),
-                                Verdict::Approve(Fates::default()),
-                            );
-                            if out.lock().unwrap().send(&ask).is_err() {
-                                break lost(self.command, &self.d);
-                            }
-                            continue;
-                        }
-                        eprintln!(
-                            "{}: request {} awaits the operator's decision; decide it with `hirsel decide --state DIR --request-id {}`",
-                            self.command,
-                            hex::encode(&self.d),
-                            hex::encode(&self.d)
-                        );
-                        println!("{}", state_json(&d, &group, &phase));
-                        break Ok(Some(2));
-                    }
-                    Phase::Undecided(..) => {
-                        println!("{}", state_json(&d, &group, &phase));
-                        break Ok(Some(UNAVAILABLE));
-                    }
-                    Phase::Installed(_, _, report) => {
-                        println!("{}", state_json(&d, &group, &phase));
-                        break Ok(Some(match report.pause {
-                            Pause::StartFailed(_) => 1,
-                            _ => 0,
-                        }));
-                    }
-                    Phase::Failed(class, detail, _) => {
-                        eprintln!("{}: {}: {detail}", self.command, class_name(*class));
-                        println!("{}", state_json(&d, &group, &phase));
-                        let refused = *class == Class::Denied && policy_refusal(detail);
-                        break Ok(Some(if refused { 2 } else { 1 }));
-                    }
-                    _ => (),
-                },
-                Answer::Error(Class::Busy, _) => break Ok(None),
-                Answer::Error(class, detail) => {
-                    eprintln!("{}: {}: {detail}", self.command, class_name(class));
-                    break Ok(Some(1));
-                }
-                other => break Err(format!("unexpected reply {other:?}").into()),
-            }
-        };
-        reader.shutdown();
-        if let Some(p) = pump {
-            let _ = p.stop();
-        }
-        result
-    }
-
-    /// The display must name exactly the submitted recipe's Foreign bindings, and Exec
-    /// lines only when the operator approved Exec requests.
-    /// A source's H is compiled by the host, which the CLI cannot recompute, so a source's
-    /// display is shown unchecked; the host still admits only the approvals sent.
-    fn check_display(&self, root: &[u8], text: &str) -> Result<(), Error> {
-        let Some(upload) = &self.upload else {
-            return Ok(());
-        };
-        if root != upload.root.0 {
-            return Err("the host displayed approvals for another recipe".into());
-        }
-        let foreign = crate::launcher::deploy_foreign_lines(&upload.recipe, upload.root);
-        let exec = text
-            .strip_prefix(&foreign)
-            .ok_or("the host reported different Foreign bindings")?;
-        if !exec.is_empty() && self.approvals.exec.is_empty() {
-            return Err("the host displayed Exec approvals the operator did not request".into());
-        }
-        Ok(())
-    }
-}
-
 /// Where a recording's pin stands.
 enum Pin {
     Found(ContentHash),
@@ -893,23 +764,50 @@ fn resolve_pin(state: &Path, id: [u8; 16]) -> Result<Pin, Error> {
     }
 }
 
+struct Replay {
+    state: Option<PathBuf>,
+    tape: PathBuf,
+    diagnose: bool,
+    unit: Option<String>,
+}
+
+impl Replay {
+    fn read(invocation: Request<CompilerOption>) -> Result<Self, Error> {
+        if invocation.positional.is_some() || !invocation.arguments.is_empty() {
+            return Err(
+                "host recording replay takes its program and arguments from the pin".into(),
+            );
+        }
+        let (mut state, mut tape, mut diagnose, mut unit) = (None, None, false, None);
+        use CompilerOption as O;
+        for option in invocation.options {
+            match option {
+                O::HostState(value) => state = Some(PathBuf::from(value)),
+                O::Tape(value) => tape = Some(PathBuf::from(value)),
+                O::Diagnose => diagnose = true,
+                O::ReplayUnit(value) => unit = Some(value),
+                _ => return Err("unexpected option for host recording replay".into()),
+            }
+        }
+        Ok(Self {
+            state,
+            tape: tape.ok_or("replay requires --tape TAPE")?,
+            diagnose,
+            unit,
+        })
+    }
+}
+
 /// `hirsel replay --state S --tape TAPE [--diagnose] [--unit NAME]`: run a
 /// recording's retained image, or replay one unit's stream alone.
-pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
-    if invocation.positional.is_some() || !invocation.arguments.is_empty() {
-        return Err("host recording replay takes its program and arguments from the pin".into());
-    }
-    let (mut state, mut tape, mut diagnose, mut unit) = (None, None, false, None);
-    for (option, value) in invocation.options {
-        match option {
-            Opt::HostState => state = value.map(PathBuf::from),
-            Opt::Tape => tape = value.map(PathBuf::from),
-            Opt::Diagnose => diagnose = true,
-            Opt::ReplayUnit => unit = value,
-            _ => return Err("unexpected option for host recording replay".into()),
-        }
-    }
-    let tape = tape.ok_or("replay requires --tape TAPE")?.canonicalize()?;
+pub(crate) fn replay(invocation: Request<CompilerOption>) -> Result<i32, Error> {
+    let Replay {
+        state,
+        tape,
+        diagnose,
+        unit,
+    } = Replay::read(invocation)?;
+    let tape = tape.canonicalize()?;
     let state = state.ok_or("replay requires --state DIR")?;
     let (tape_id, launch) = crate::tape_cli::run_route(&tape)?;
     let assembly = match resolve_pin(&state, tape_id)? {
@@ -924,25 +822,7 @@ pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
         }
     };
     let objects = crate::launcher::objects::Records::read_only(&state.join("objects"))?;
-    let image = (|| -> io::Result<_> {
-        let assembly = objects.assembly(assembly)?;
-        let recipe = crate::launcher::read_recipe(
-            &CodeStore::new(state.join("code")),
-            assembly.recipe,
-            None,
-        )?;
-        if let Some(reason) = foreign_recording_refusal(&recipe) {
-            eprintln!("replay: refused: {reason}");
-            return Ok(None);
-        }
-        if launch_digest(&launch) != Some(assembly.digest) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "recording image differs from its pin",
-            ));
-        }
-        objects.open_image(assembly.digest).map(Some)
-    })();
+    let image = pinned_image(&state, &objects, assembly, &launch);
     let image = match image {
         Ok(Some(file)) => file,
         Ok(None) => return Ok(2),
@@ -963,6 +843,34 @@ pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
         println!("Sealed");
     }
     Ok(status.code().unwrap_or(1))
+}
+
+fn pinned_image(
+    state: &Path,
+    objects: &crate::launcher::objects::Records,
+    pinned: ContentHash,
+    launch: &[u8],
+) -> io::Result<Option<std::fs::File>> {
+    let assembly = objects.assembly(pinned)?;
+    let recipe =
+        crate::launcher::read_recipe(&CodeStore::new(state.join("code")), assembly.recipe, None)?;
+    if let Some(reason) = foreign_recording_refusal(&recipe) {
+        eprintln!("replay: refused: {reason}");
+        return Ok(None);
+    }
+    check_pin_digest(launch_digest(launch), assembly.digest)?;
+    objects.open_image(assembly.digest).map(Some)
+}
+
+fn check_pin_digest(recorded: Option<ContentHash>, pinned: ContentHash) -> io::Result<()> {
+    if recorded == Some(pinned) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recording image differs from its pin",
+        ))
+    }
 }
 
 fn launch_digest(snapshot: &[u8]) -> Option<ContentHash> {

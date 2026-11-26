@@ -1,4 +1,4 @@
-use super::{COMMANDS, CommandSpec, OptionId, OptionSpec, options};
+use super::{COMMANDS, CommandSpec, HELP};
 
 pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
     COMMANDS
@@ -8,48 +8,9 @@ pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
 }
 
 pub(super) fn is_help(name: &str) -> bool {
-    options().any(|option| option.id == OptionId::Help && option.names.contains(&name))
+    HELP.names.contains(&name)
 }
 
-pub(super) fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
-    (command.name == "dev"
-        && matches!(
-            option.id,
-            OptionId::Listen
-                | OptionId::Limit
-                | OptionId::Grant
-                | OptionId::Dir
-                | OptionId::Backend
-                | OptionId::Runtime
-                | OptionId::Libraries
-                | OptionId::SourceCore
-                | OptionId::SourceStd
-        ))
-        || option.commands.is_empty()
-        || option.commands.contains(&command.name)
-        || (command.name.starts_with("sdk ")
-            && option.commands.contains(&"sdk")
-            && (command.name == "sdk ts" || option.id != OptionId::Output))
-        || (option.id == OptionId::Json
-            && command.name.starts_with("prof ")
-            && !matches!(
-                command.name,
-                "prof run" | "prof replay" | "prof attach" | "prof export"
-            ))
-        || (command.name == "prof replay"
-            && option.commands.contains(&"replay")
-            && !matches!(
-                option.id,
-                OptionId::HostState
-                    | OptionId::Diagnose
-                    | OptionId::Emulator
-                    | OptionId::Sysroot
-                    | OptionId::Json
-            ))
-        || (command.name == "prof run"
-            && option.id != OptionId::Output
-            && option.commands.contains(&"run"))
-}
 pub fn help(command: Option<&CommandSpec>) -> String {
     if let Some(command) = command {
         let mut result = format!(
@@ -66,14 +27,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             }
             return result;
         }
-        for option in options().filter(|o| applies(o, command)) {
-            let label = format!(
-                "{}{}",
-                option.names.join(", "),
-                option.value.map_or(String::new(), |v| format!(" {v}"))
-            );
-            result.push_str(&format!("  {label:<34} {}\n", option.description));
-        }
+        command.schema.write_help(&mut result);
         result
     } else {
         let mut result =

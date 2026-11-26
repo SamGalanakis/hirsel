@@ -34,7 +34,7 @@ mod probe;
 mod stmt;
 mod syntax;
 
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{LeanOption as Opt, Request};
 use bindings::{BUILTINS, PRELUDE_CTORS, PRELUDE_FNS, PreludeFn};
 use checks::{audit, check_body, type_audit};
 use syntax::*;
@@ -887,28 +887,28 @@ fn emit_fn(fx: &mut Fx, out: &mut String) -> R<()> {
 
 // ---------------------------------------------------------------------------------------------
 
-pub(crate) fn run(invocation: Invocation) -> R<()> {
+pub(crate) fn run(invocation: Request<Opt>) -> R<()> {
     let mut inputs = None;
     let mut store = None;
     let mut output = None;
     let mut target = None;
     let mut coreir = false;
-    for (option, value) in invocation.options {
-        let slot = match option {
-            OptionId::Inputs => &mut inputs,
-            OptionId::Store => &mut store,
-            OptionId::Output => &mut output,
-            OptionId::Target => &mut target,
-            OptionId::CoreIr if !coreir => {
+    for option in invocation.options {
+        let (slot, value, label) = match option {
+            Opt::Inputs(value) => (&mut inputs, value, "Inputs"),
+            Opt::Store(value) => (&mut store, value, "Store"),
+            Opt::Output(value) => (&mut output, value, "Output"),
+            Opt::Target(value) => (&mut target, value, "Target"),
+            Opt::CoreIr if !coreir => {
                 coreir = true;
                 continue;
             }
             _ => bail!("invalid option for {}", invocation.command.name),
         };
         if slot.is_some() {
-            bail!("option {option:?} must be given only once");
+            bail!("option {label} must be given only once");
         }
-        *slot = value;
+        *slot = Some(value);
     }
     let inputs = inputs.as_deref().ok_or("--inputs is required")?;
     let store = store.as_deref().ok_or("--store is required")?;

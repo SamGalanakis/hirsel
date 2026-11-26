@@ -5,7 +5,7 @@ use super::{
     Profile, Refusal, SiteMap, Targets,
     report::{Diff, Others},
 };
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{CoverageOption as Opt, Request};
 use crate::request::Outcome;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -15,22 +15,20 @@ type Error = Box<dyn std::error::Error>;
 
 /// Run `coverage merge` or `coverage diff`. A usage error is an `Err` (exit
 /// 2); an input the tool refuses prints the refusal and exits 1.
-pub(crate) fn run(invocation: Invocation) -> Result<Outcome, Error> {
+pub(crate) fn run(invocation: Request<Opt>) -> Result<Outcome, Error> {
     let command = invocation.command.name;
     let mut inputs: Vec<String> = invocation.positional.iter().cloned().collect();
     inputs.extend(invocation.arguments.iter().cloned());
     let (mut maps, mut base, mut targets, mut json, mut output, mut test) =
         (Vec::new(), None, None, false, None, None);
-    for (id, given) in invocation.options {
-        let value = || PathBuf::from(given.clone().expect("coverage option takes a value"));
-        match id {
-            OptionId::Json => json = true,
-            OptionId::CoverageMap => maps.push(value()),
-            OptionId::CoverageBase => base = Some(value()),
-            OptionId::CoverageTargets => targets = Some(value()),
-            OptionId::Output => output = Some(value()),
-            OptionId::TestExact => test = given.clone(),
-            _ => return Err(format!("{command} does not take that option").into()),
+    for option in invocation.options {
+        match option {
+            Opt::Json => json = true,
+            Opt::CoverageMap(value) => maps.push(PathBuf::from(value)),
+            Opt::MergeBase(value) => base = Some(PathBuf::from(value)),
+            Opt::MergeTargets(value) => targets = Some(PathBuf::from(value)),
+            Opt::Output(value) => output = Some(PathBuf::from(value)),
+            Opt::CoverageTest(value) => test = Some(value),
         }
     }
     let done = match command {

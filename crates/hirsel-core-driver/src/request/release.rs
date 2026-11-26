@@ -1,9 +1,10 @@
 //! A published release recipe can assemble without its checked source product.
-use super::{Duration, Meter, NativeOptions, Output, Path, Publication, ReachableOutput};
+use super::{Meter, NativeOptions, Output, Path, Publication, ReachableOutput};
 use crate::reach::ReachCounters;
 use crate::request_record::{self, Answer, Value};
 use crate::{CheckProduct, GapStop, NativeStop, Reachable};
 use hirsel_core_ids::ContentHash;
+use std::time::Duration;
 
 /// Local loading still parses disk input under CA4's decoder. Size limits
 /// follow the process allowance. Bound recursive decoder stack use explicitly.

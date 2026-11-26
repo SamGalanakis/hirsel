@@ -15,9 +15,9 @@ fn contradictory_deploy_actions_refuse_before_io() {
         let crate::cli::Action::Invoke(invocation) = crate::cli::parse(arguments).unwrap() else {
             panic!("expected an operator invocation");
         };
-        match command {
-            "deploy" => deploy(invocation),
-            "decide" => decide(invocation),
+        match invocation {
+            crate::cli::Invocation::Deploy(request) => deploy(request),
+            crate::cli::Invocation::Decide(request) => decide(request),
             _ => unreachable!(),
         }
     };
@@ -127,7 +127,9 @@ fn source_walk_manifest_approvals_and_refusals() {
         .into_iter()
         .chain(extra.iter().copied())
         .map(str::to_owned);
-        let crate::cli::Action::Invoke(invocation) = crate::cli::parse(arguments).unwrap() else {
+        let crate::cli::Action::Invoke(crate::cli::Invocation::Deploy(invocation)) =
+            crate::cli::parse(arguments).unwrap()
+        else {
             panic!("expected a deploy invocation");
         };
         deploy(invocation)

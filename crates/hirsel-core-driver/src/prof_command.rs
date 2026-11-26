@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use hirsel_prof::{CaptureOptions, Launch, MemMode, ObservationOptions, SymbolSource};
 
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{AttachOption, CompilerOption, ProfileExportOption, ProfileQueryOption, Request};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -30,17 +30,6 @@ impl Default for Sampling {
 }
 
 impl Sampling {
-    fn apply(&mut self, id: OptionId, value: String) -> Result<()> {
-        match id {
-            OptionId::ProfOut => self.out = value.into(),
-            OptionId::ProfFrequency => self.freq = value.parse()?,
-            OptionId::ProfPmu => self.pmu = Some(value),
-            OptionId::ProfStackBytes => self.stack_bytes = Some(value.parse()?),
-            _ => unreachable!(),
-        }
-        Ok(())
-    }
-
     fn options(&self) -> CaptureOptions<'_> {
         CaptureOptions {
             out: &self.out,
@@ -61,7 +50,7 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    pub(crate) fn read(invocation: &mut Invocation) -> Result<Self> {
+    pub(crate) fn read(invocation: &mut Request<CompilerOption>) -> Result<Self> {
         let mut run = Self {
             sampling: Sampling::default(),
             source_root: invocation.positional.as_deref().unwrap_or(".").into(),
@@ -70,29 +59,26 @@ impl Run {
             replay: invocation.command.name == "prof replay",
             replay_executable: Cell::new(None),
         };
-        for (id, value) in invocation.options.extract_if(.., |(option, _)| {
+        use CompilerOption::*;
+        for option in invocation.options.extract_if(.., |option| {
             matches!(
                 option,
-                OptionId::ProfTasks
-                    | OptionId::ProfMem
-                    | OptionId::ProfOut
-                    | OptionId::ProfFrequency
-                    | OptionId::ProfPmu
-                    | OptionId::ProfStackBytes
+                ProfTasks
+                    | ProfMem(_)
+                    | ProfOut(_)
+                    | ProfFrequency(_)
+                    | ProfPmu(_)
+                    | ProfStackBytes(_)
             )
         }) {
-            match id {
-                OptionId::ProfTasks => run.tasks = true,
-                OptionId::ProfMem => {
-                    run.mem = Some(match value.as_deref() {
-                        Some("exact") => MemMode::Exact,
-                        Some("sampled") => MemMode::Sampled,
-                        _ => return Err("--mem requires exact or sampled".into()),
-                    });
-                }
-                _ => run
-                    .sampling
-                    .apply(id, value.expect("profile option takes a value"))?,
+            match option {
+                ProfTasks => run.tasks = true,
+                ProfMem(mode) => run.mem = Some(mode),
+                ProfOut(value) => run.sampling.out = value.into(),
+                ProfFrequency(value) => run.sampling.freq = value.parse()?,
+                ProfPmu(value) => run.sampling.pmu = Some(value),
+                ProfStackBytes(value) => run.sampling.stack_bytes = Some(value.parse()?),
+                _ => unreachable!("only profiling options are extracted"),
             }
         }
         if run.replay {
@@ -100,16 +86,14 @@ impl Run {
             if !invocation
                 .options
                 .iter()
-                .any(|(id, _)| *id == OptionId::Output)
+                .any(|option| matches!(option, Output(_)))
             {
                 let scratch = tempfile::tempdir()?;
                 let executable = scratch.path().join("program");
                 let executable = executable
                     .to_str()
                     .ok_or("temporary executable path is not UTF-8")?;
-                invocation
-                    .options
-                    .push((OptionId::Output, Some(executable.to_owned())));
+                invocation.options.push(Output(executable.to_owned()));
                 run.replay_executable.set(Some(scratch));
             }
             invocation.command = crate::cli::named("replay")?;
@@ -160,7 +144,7 @@ impl Run {
     }
 }
 
-pub(crate) fn attach(invocation: Invocation) -> Result<()> {
+pub(crate) fn attach(invocation: Request<AttachOption>) -> Result<()> {
     let pid = invocation
         .positional
         .as_deref()
@@ -169,18 +153,19 @@ pub(crate) fn attach(invocation: Invocation) -> Result<()> {
     let mut sampling = Sampling::default();
     let mut debug: Option<PathBuf> = None;
     let mut duration = None;
-    for (id, value) in invocation.options {
-        let value = value.expect("attach option takes a value");
-        match id {
-            OptionId::ProfDuration => {
+    for option in invocation.options {
+        match option {
+            AttachOption::ProfDuration(value) => {
                 let parsed = Duration::try_from_secs_f64(value.parse()?)?;
                 if parsed.is_zero() {
                     return Err("--duration must be positive".into());
                 }
                 duration = Some(parsed);
             }
-            OptionId::ProfDebug => debug = Some(value.into()),
-            _ => sampling.apply(id, value)?,
+            AttachOption::ProfDebug(value) => debug = Some(value.into()),
+            AttachOption::ProfOut(value) => sampling.out = value.into(),
+            AttachOption::ProfFrequency(value) => sampling.freq = value.parse()?,
+            AttachOption::ProfPmu(value) => sampling.pmu = Some(value),
         }
     }
     hirsel_prof::attach(pid, duration, &sampling.options(), |path, image| {
@@ -205,7 +190,7 @@ pub(crate) fn symbol_source(
     })
 }
 
-pub(crate) fn query(invocation: Invocation) -> Result<()> {
+pub(crate) fn query(invocation: Request<ProfileQueryOption>) -> Result<()> {
     use hirsel_prof::{By, Group, Query};
 
     let command = invocation.command.name;
@@ -229,31 +214,31 @@ pub(crate) fn query(invocation: Invocation) -> Result<()> {
     let mut min_delta_pct = 1.0;
     let mut timeout = Duration::from_millis(5000);
     let mut json = false;
-    for (id, value) in invocation.options {
-        let arg = || value.as_deref().expect("profile option takes a value");
-        match id {
-            OptionId::Json => json = true,
-            OptionId::ProfBy => {
-                by = match arg() {
+    for option in invocation.options {
+        match option {
+            ProfileQueryOption::Json => json = true,
+            ProfileQueryOption::ProfBy(value) => {
+                by = match value.as_str() {
                     "self" => By::SelfCost,
                     "inclusive" => By::Inclusive,
                     _ => return Err("--by requires self or inclusive".into()),
                 }
             }
-            OptionId::ProfGroup => {
-                group = match arg() {
+            ProfileQueryOption::ProfGroup(value) => {
+                group = match value.as_str() {
                     "def_path" => Group::DefPath,
                     "instance" => Group::Instance,
                     _ => return Err("--group requires def_path or instance".into()),
                 }
             }
-            OptionId::ProfEvent => event = value,
-            OptionId::ProfFilter => filter = value,
-            OptionId::ProfRows => limit = arg().parse()?,
-            OptionId::ProfDepth => depth = arg().parse()?,
-            OptionId::ProfMinDeltaPct => min_delta_pct = arg().parse()?,
-            OptionId::ProfTimeout => timeout = Duration::from_millis(arg().parse()?),
-            _ => unreachable!(),
+            ProfileQueryOption::ProfEvent(value) => event = Some(value),
+            ProfileQueryOption::ProfFilter(value) => filter = Some(value),
+            ProfileQueryOption::ProfRows(value) => limit = value.as_str().parse()?,
+            ProfileQueryOption::ProfDepth(value) => depth = value.as_str().parse()?,
+            ProfileQueryOption::ProfMinDeltaPct(value) => min_delta_pct = value.as_str().parse()?,
+            ProfileQueryOption::ProfTimeout(value) => {
+                timeout = Duration::from_millis(value.as_str().parse()?)
+            }
         }
     }
     let request = match command {
@@ -304,18 +289,17 @@ pub(crate) fn query(invocation: Invocation) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn export(invocation: Invocation) -> Result<()> {
+pub(crate) fn export(invocation: Request<ProfileExportOption>) -> Result<()> {
     let input = invocation
         .positional
         .as_deref()
         .ok_or("prof export requires a .hprof file")?;
     let mut format = None;
     let mut out = None;
-    for (id, value) in invocation.options {
-        match id {
-            OptionId::ProfFormat => format = value,
-            OptionId::ProfOut => out = value,
-            _ => unreachable!("profile export option"),
+    for option in invocation.options {
+        match option {
+            ProfileExportOption::ProfFormat(value) => format = Some(value),
+            ProfileExportOption::ProfOut(value) => out = Some(value),
         }
     }
     if format.as_deref() != Some("pprof") {

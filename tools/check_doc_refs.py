@@ -43,12 +43,17 @@ def cli_names(root):
         elif match := re.match(r'[\w-]+ ([a-z][\w-]*)\b', usage):
             children.add(match[1])
 
-    flags = set()
-    for name in ('cli_options.rs', 'cli_package_options.rs', 'cli_operator_options.rs', 'cli_coverage_options.rs'):
-        module = driver.with_name(name).read_text(encoding='utf-8')
-        options = module.split('static OPTIONS:', 1)[1].split('\n];', 1)[0]
-        for names in re.findall(r'option!\(\s*\w+,\s*\[([^\]]+)\]', options):
-            flags.update(FLAG.findall(names))
+    flag_source = driver.with_name('cli_flags.rs').read_text(encoding='utf-8')
+    options = flag_source.split('\nflags! {', 1)[1].split('\n}', 1)[0]
+    flags = {
+        flag
+        for names in re.findall(r'^\s*\w+ \[([^\]]+)\]', options, re.M)
+        for flag in FLAG.findall(names)
+    }
+    if not flags:
+        raise ValueError('empty flag declarations')
+    help_flag = source.split('\nconst HELP: Flag = Flag {', 1)[1].split('\n};', 1)[0]
+    flags.update(FLAG.findall(help_flag))
     # Top-level switches such as --version are handled directly by parse().
     parser = driver.with_name('cli_parse.rs').read_text(encoding='utf-8')
     flags.update(re.findall(r'\bif name == "(--[\w-]+)"', parser))

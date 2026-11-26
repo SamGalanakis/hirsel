@@ -103,7 +103,9 @@ pub type Attributed { value: u64 }
 #[test]
 fn inspect_option_validation_handles_module_and_filter() {
     let parse_inspect = |args: &[&str]| {
-        let Action::Invoke(mut inv) = parse(args.iter().map(|s| (*s).to_owned())).unwrap() else {
+        let Action::Invoke(crate::cli::Invocation::Compiler(mut inv)) =
+            parse(args.iter().map(|s| (*s).to_owned())).unwrap()
+        else {
             panic!("expected Invoke");
         };
         Inspection::read(&mut inv)
@@ -146,5 +148,64 @@ fn version_and_spec_url_resolution_handles_release_tags_and_prereleases() {
     assert_eq!(
         spec_url_for(Some("0.2.0"), "docs/spec/programs.md", "prog-2"),
         "https://github.com/SamGalanakis/hirsel/blob/v0.2.0/docs/spec/programs.md#prog-2"
+    );
+}
+
+#[test]
+fn command_schemas_keep_documented_flag_ownership_and_defaults() {
+    use crate::cli::{CompilerOption, Invocation, ServeOption};
+    use hirsel_prof::MemMode;
+
+    let parse = |args: &[&str]| parse(args.iter().map(|arg| (*arg).to_owned()));
+    let Action::Invoke(Invocation::Serve(serve)) = parse(&["serve", "--stop"]).unwrap() else {
+        panic!("expected the serve request");
+    };
+    assert_eq!(serve.options, [ServeOption::Stop]);
+
+    let Action::Invoke(Invocation::Compiler(build)) =
+        parse(&["build", "--resident", "example"]).unwrap()
+    else {
+        panic!("expected the build request");
+    };
+    assert_eq!(build.options, [CompilerOption::Resident]);
+    assert_eq!(build.positional.as_deref(), Some("example"));
+
+    for (args, expected) in [
+        (
+            &["build", "--stop"][..],
+            "unknown option `--stop` for build; use help build",
+        ),
+        (
+            &["serve", "--resident"][..],
+            "unknown option `--resident` for serve; use help serve",
+        ),
+        (&["replay", "--tape"][..], "--tape requires TAPE"),
+    ] {
+        let error = match parse(args) {
+            Err(error) => error,
+            Ok(_) => panic!("accepted {args:?}"),
+        };
+        assert_eq!(error, expected);
+    }
+
+    let Action::Invoke(Invocation::Compiler(profile)) =
+        parse(&["prof", "run", "--mem", "--", "sampled"]).unwrap()
+    else {
+        panic!("expected the profile request");
+    };
+    assert_eq!(profile.arguments, ["sampled"]);
+    assert_eq!(profile.options, [CompilerOption::ProfMem(MemMode::Sampled)]);
+
+    let Action::Invoke(Invocation::Compiler(profile)) =
+        parse(&["prof", "replay", "--tape", "recording.htape", "--mem=exact"]).unwrap()
+    else {
+        panic!("expected the profile replay request");
+    };
+    assert_eq!(
+        profile.options,
+        [
+            CompilerOption::Tape("recording.htape".into()),
+            CompilerOption::ProfMem(MemMode::Exact),
+        ]
     );
 }

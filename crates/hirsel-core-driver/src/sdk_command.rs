@@ -1,5 +1,5 @@
 //! Build a server, then generate bindings from its bounded describe launch.
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{Request, SdkOption as Opt};
 use crate::sdk::{Describe, manifest_json, write_with_frame};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ pub struct Options {
     pub build: Vec<String>,
 }
 impl Options {
-    pub fn read(invocation: Invocation) -> Result<Self, Error> {
+    pub fn read(invocation: Request<Opt>) -> Result<Self, Error> {
         let program = invocation
             .positional
             .ok_or_else(|| {
@@ -30,11 +30,10 @@ impl Options {
         let mut timeout = Duration::from_secs(10);
         let mut n_place = 16 * 1024 * 1024;
         let mut build = Vec::new();
-        for (id, value) in invocation.options {
-            let text = value.as_deref().unwrap_or_default();
-            match id {
-                OptionId::Output => out = Some(PathBuf::from(text)),
-                OptionId::PlaceTimeout => {
+        for option in invocation.options {
+            match option {
+                Opt::Output(text) => out = Some(PathBuf::from(text)),
+                Opt::PlaceTimeout(text) => {
                     let seconds: f64 = text.parse()?;
                     timeout = Duration::try_from_secs_f64(seconds)
                         .map_err(|_| "--place-timeout must be finite and positive")?;
@@ -42,26 +41,26 @@ impl Options {
                         return Err("--place-timeout must be positive".into());
                     }
                 }
-                OptionId::NPlace => n_place = text.parse()?,
+                Opt::NPlace(text) => n_place = text.parse()?,
                 _ => {
-                    let name = match id {
-                        OptionId::Runtime => "--runtime",
-                        OptionId::Backend => "--backend",
-                        OptionId::Cc => "--cc",
-                        OptionId::Target => "--target",
-                        OptionId::Inputs => "--inputs",
-                        OptionId::PackageStore => "--package-store",
-                        OptionId::Locked => "--locked",
-                        OptionId::Frozen => "--frozen",
-                        OptionId::Libraries => "--libraries",
-                        OptionId::Entry => "--entry",
-                        OptionId::Store => "--store",
-                        OptionId::CoreProduct => "--core-product",
-                        OptionId::Limit => "--limit",
-                        OptionId::SourceCore => "--source-core",
-                        OptionId::SourceStd => "--source-std",
-                        OptionId::Release => "--release",
-                        OptionId::DebugLines => "--debug-lines",
+                    let (name, value) = match option {
+                        Opt::Runtime(value) => ("--runtime", Some(value)),
+                        Opt::Backend(value) => ("--backend", Some(value)),
+                        Opt::Cc(value) => ("--cc", Some(value)),
+                        Opt::Target(value) => ("--target", Some(value)),
+                        Opt::Inputs(value) => ("--inputs", Some(value)),
+                        Opt::PackageStore(value) => ("--package-store", Some(value)),
+                        Opt::Locked => ("--locked", None),
+                        Opt::Frozen => ("--frozen", None),
+                        Opt::Libraries(value) => ("--libraries", Some(value)),
+                        Opt::Entry(value) => ("--entry", Some(value)),
+                        Opt::Store(value) => ("--store", Some(value)),
+                        Opt::CoreProduct(value) => ("--core-product", Some(value)),
+                        Opt::Limit(value) => ("--limit", Some(value)),
+                        Opt::SourceCore => ("--source-core", None),
+                        Opt::SourceStd => ("--source-std", None),
+                        Opt::Release => ("--release", None),
+                        Opt::DebugLines(value) => ("--debug-lines", Some(value)),
                         _ => return Err("unsupported sdk build option".into()),
                     };
                     build.push(name.into());
@@ -147,7 +146,9 @@ mod tests {
     use super::*;
     fn parse(args: &[&str]) -> Result<Options, Error> {
         match crate::cli::parse(args.iter().map(|s| (*s).to_owned()))? {
-            crate::cli::Action::Invoke(invocation) => Options::read(invocation),
+            crate::cli::Action::Invoke(crate::cli::Invocation::Sdk(invocation)) => {
+                Options::read(invocation)
+            }
             _ => Err("expected invocation".into()),
         }
     }

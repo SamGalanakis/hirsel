@@ -1,5 +1,8 @@
-use super::help_text::{applies, is_help, named};
-use super::{CommandSpec, Invocation, OptionId, help, options};
+use super::help_text::{is_help, named};
+use super::{
+    Argument, CommandSchema, CommandSpec, Invocation, Kind, Positionals, Request, Schema, help,
+};
+use std::fmt::Write;
 
 pub enum Action {
     Help(String),
@@ -7,108 +10,104 @@ pub enum Action {
     Invoke(Invocation),
 }
 
-pub(super) fn invocation(
-    command: &'static CommandSpec,
-    mut arguments: std::iter::Peekable<impl Iterator<Item = String>>,
-) -> Result<Action, String> {
-    let name = command.name;
-    let mut invocation = Invocation {
-        command,
-        options: Vec::new(),
-        positional: None,
-        arguments: Vec::new(),
-    };
-    while let Some(argument) = arguments.next() {
-        if name == "prof attach" && (argument == "--mem" || argument.starts_with("--mem=")) {
-            return Err(
-                "attach cannot see earlier allocations; use 'hirsel prof run --mem'".into(),
-            );
-        }
-        if matches!(name, "prof run" | "prof replay")
-            && (argument == "--mem" || argument.starts_with("--mem="))
-        {
-            let value = if let Some((_, value)) = argument.split_once('=') {
-                value.to_owned()
-            } else if arguments
-                .peek()
-                .is_some_and(|v| matches!(v.as_str(), "exact" | "sampled"))
-            {
-                arguments.next().unwrap()
-            } else {
-                "sampled".to_owned()
-            };
-            if !matches!(value.as_str(), "exact" | "sampled") {
-                return Err("--mem requires exact or sampled".into());
+impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
+    fn parse(
+        &self,
+        command: &'static CommandSpec,
+        arguments: &mut dyn Iterator<Item = String>,
+    ) -> Result<Action, String> {
+        let name = command.name;
+        let mut request = Request {
+            command,
+            options: Vec::new(),
+            positional: None,
+            arguments: Vec::new(),
+        };
+        let mut arguments = arguments.peekable();
+        while let Some(argument) = arguments.next() {
+            if argument == "--" && matches!(self.positionals, Positionals::Tail) {
+                request.arguments.extend(arguments);
+                break;
             }
-            invocation.options.push((OptionId::ProfMem, Some(value)));
-            continue;
-        }
-        if argument == "--"
-            && matches!(
-                name,
-                "run"
-                    | "prof run"
-                    | "call"
-                    | "register"
-                    | "dry-run"
-                    | "dev"
-                    | "lean extract"
-                    | "lean status"
-            )
-        {
-            invocation.arguments.extend(arguments);
-            break;
-        }
-        if argument.starts_with('-')
-            && !(name == "prof sql"
+            let sql_comment = matches!(self.positionals, Positionals::Sql)
                 && argument.starts_with("--")
                 && argument.chars().any(char::is_whitespace)
-                && invocation.positional.is_some()
-                && invocation.arguments.is_empty())
-        {
-            let option = options()
-                .find(|o| o.names.contains(&argument.as_str()) && applies(o, command))
-                .ok_or_else(|| {
-                    format!("unknown option `{argument}` for {name}; use help {name}")
-                })?;
-            if option.id == OptionId::Help {
-                return Ok(Action::Help(help(Some(command))));
+                && request.positional.is_some()
+                && request.arguments.is_empty();
+            if argument.starts_with('-') && !sql_comment {
+                let option = self
+                    .options
+                    .iter()
+                    .find(|option| {
+                        option.flag.names.contains(&argument.as_str())
+                            || matches!(option.kind, Kind::OptionalMem(..) | Kind::RefuseMem)
+                                && argument
+                                    .split_once('=')
+                                    .is_some_and(|(name, _)| option.flag.names.contains(&name))
+                    })
+                    .ok_or_else(|| {
+                        format!("unknown option `{argument}` for {name}; use help {name}")
+                    })?;
+                let value = match &option.kind {
+                    Kind::Switch(value) => value.clone(),
+                    Kind::Value(metavar, parse) => parse(
+                        arguments
+                            .next()
+                            .ok_or_else(|| format!("{argument} requires {metavar}"))?,
+                    ),
+                    Kind::Help => return Ok(Action::Help(help(Some(command)))),
+                    Kind::RefuseMem => {
+                        return Err(
+                            "attach cannot see earlier allocations; use 'hirsel prof run --mem'"
+                                .into(),
+                        );
+                    }
+                    Kind::OptionalMem(_, parse) => {
+                        let value = if let Some((_, value)) = argument.split_once('=') {
+                            value.to_owned()
+                        } else if arguments
+                            .peek()
+                            .is_some_and(|v| matches!(v.as_str(), "exact" | "sampled"))
+                        {
+                            arguments.next().unwrap()
+                        } else {
+                            "sampled".to_owned()
+                        };
+                        parse(match value.as_str() {
+                            "exact" => hirsel_prof::MemMode::Exact,
+                            "sampled" => hirsel_prof::MemMode::Sampled,
+                            _ => return Err("--mem requires exact or sampled".into()),
+                        })
+                    }
+                };
+                request.options.push(value);
+            } else if request.positional.is_none() && !matches!(self.positionals, Positionals::None)
+            {
+                request.positional = Some(argument);
+            } else if matches!(self.positionals, Positionals::Many)
+                || request.arguments.is_empty()
+                    && matches!(self.positionals, Positionals::Pair | Positionals::Sql)
+            {
+                request.arguments.push(argument);
+            } else {
+                return Err(format!("unexpected argument `{argument}` for {name}"));
             }
-            let value = option
-                .value
-                .map(|value| {
-                    arguments
-                        .next()
-                        .ok_or_else(|| format!("{argument} requires {value}"))
-                })
-                .transpose()?;
-            invocation.options.push((option.id, value));
-        } else if invocation.positional.is_none()
-            && !matches!(name, "core-product" | "std-product" | "env")
-        {
-            invocation.positional = Some(argument);
-        } else if name == "coverage merge"
-            || invocation.arguments.is_empty()
-                && matches!(
-                    name,
-                    "coverage diff"
-                        | "prof annotate"
-                        | "prof callers"
-                        | "prof callees"
-                        | "prof diff"
-                        | "prof sql"
-                        | "store backup"
-                        | "store restore"
-                )
-        {
-            invocation.arguments.push(argument);
-        } else {
-            return Err(format!("unexpected argument `{argument}` for {name}"));
+        }
+        Ok(Action::Invoke((self.wrap)(request)))
+    }
+
+    fn write_help(&self, out: &mut String) {
+        for Argument { flag, kind } in self.options {
+            let metavar = match kind {
+                Kind::RefuseMem => continue,
+                Kind::Value(metavar, _) | Kind::OptionalMem(metavar, _) => format!(" {metavar}"),
+                Kind::Switch(_) | Kind::Help => String::new(),
+            };
+            let label = format!("{}{metavar}", flag.names.join(", "));
+            writeln!(out, "  {label:<34} {}", flag.description).unwrap();
         }
     }
-    Ok(Action::Invoke(invocation))
 }
-
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut arguments = arguments.into_iter().peekable();
     let Some(mut name) = arguments.next() else {
@@ -167,5 +166,5 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             _ => return Err(format!("expected: hirsel {}", command.usage)),
         }
     }
-    invocation(command, arguments)
+    command.schema.parse(command, &mut arguments)
 }

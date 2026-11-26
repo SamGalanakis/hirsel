@@ -2,6 +2,9 @@
 //! the `hirsel` executable's whole behaviour after process setup. It lives in
 //! the library so that a test process can run a request exactly as the
 //! executable does (request_sequences.rs compares their outputs).
+use crate::cli::{
+    CompilerOption as Opt, ExplainOption, FmtOption, Invocation, NewOption, Request, TapeOption,
+};
 use crate::code_store::CodeStore;
 use crate::native::recipe_build::Publication;
 use crate::product::ProductLibraries;
@@ -9,13 +12,13 @@ use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
     NativeOptions, operator_cli,
 };
-use hirsel_core_ids::DefPath;
 use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+mod flags;
 mod lean;
 mod release;
+use flags::CompilerFlags;
 pub(crate) use release::local_admission_limits;
 #[derive(Serialize)]
 struct Output<'a> {
@@ -42,7 +45,7 @@ struct ReachableOutput<'a> {
 }
 
 fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let mut invocation = match crate::cli::parse(args.into_iter())? {
+    let invocation = match crate::cli::parse(args.into_iter())? {
         crate::cli::Action::Help(help) => {
             print!("{help}");
             return conclude(Outcome::Exit(0));
@@ -53,103 +56,145 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         }
         crate::cli::Action::Invoke(invocation) => invocation,
     };
-    match invocation.command.name {
-        "prof attach" => {
-            return conclude(crate::prof_command::attach(invocation).map(|()| Outcome::Exit(0))?);
+    match invocation {
+        Invocation::Attach(request) => {
+            conclude(crate::prof_command::attach(request).map(|()| Outcome::Exit(0))?)
         }
-        "prof export" => {
-            return conclude(crate::prof_command::export(invocation).map(|()| Outcome::Exit(0))?);
+        Invocation::ProfileExport(request) => {
+            conclude(crate::prof_command::export(request).map(|()| Outcome::Exit(0))?)
         }
-        name if name.starts_with("prof ") && !matches!(name, "prof run" | "prof replay") => {
-            return conclude(crate::prof_command::query(invocation).map(|()| Outcome::Exit(0))?);
+        Invocation::ProfileQuery(request) => {
+            conclude(crate::prof_command::query(request).map(|()| Outcome::Exit(0))?)
         }
-        name if name.starts_with("coverage") => {
-            return conclude(crate::coverage::cli::run(invocation)?);
+        Invocation::Coverage(request) => conclude(crate::coverage::cli::run(request)?),
+        Invocation::Lean(request) => conclude(lean::run(request).map(|()| Outcome::Exit(0))?),
+        Invocation::Add(request) => conclude(Outcome::Exit(crate::package_add::run(request)?)),
+        Invocation::Launcher(request) => match crate::launcher::run(request)? {},
+        Invocation::Serve(request) => {
+            if crate::resident::serving() {
+                return Err("a resident compiler serves build and run requests only".into());
+            }
+            let serve = crate::resident::Serve::read(request)?;
+            conclude(Outcome::Exit(crate::resident::run(serve)?))
         }
-        name if name.starts_with("lean ") => {
-            return conclude(lean::run(invocation).map(|()| Outcome::Exit(0))?);
+        Invocation::Host(request) => match operator_cli::host(request)? {},
+        Invocation::Register(request) => conclude(Outcome::Exit(operator_cli::register(request)?)),
+        Invocation::Deploy(request) => conclude(Outcome::Exit(operator_cli::deploy(request)?)),
+        Invocation::Decide(request) => conclude(Outcome::Exit(operator_cli::decide(request)?)),
+        Invocation::Call(request) => conclude(Outcome::Exit(crate::call::run(
+            crate::call::Options::read(request)?,
+        )?)),
+        Invocation::Dev(request) => conclude(Outcome::Exit(launch::dev::run(request)?)),
+        Invocation::Store(request) => launch::store_tool(request),
+        Invocation::Sdk(request) => {
+            crate::sdk_command::run(crate::sdk_command::Options::read(request)?)?;
+            conclude(Outcome::Exit(0))
         }
-        _ => {}
+        Invocation::Tape(request) => {
+            let path = request
+                .positional
+                .as_deref()
+                .ok_or("tape show requires a tape file")?;
+            if !request.options.contains(&TapeOption::IncludeCredentials) {
+                return Err("tape show requires --include-credentials".into());
+            }
+            crate::tape_cli::show(Path::new(path))?;
+            conclude(Outcome::Exit(0))
+        }
+        Invocation::Simple(request) if request.command.name == "manifest" => {
+            crate::release_manifest::show(Path::new(
+                request
+                    .positional
+                    .as_deref()
+                    .ok_or("manifest show requires a path")?,
+            ))?;
+            conclude(Outcome::Exit(0))
+        }
+        Invocation::Simple(request) => {
+            crate::store::remote::begin()?;
+            if request.positional.is_some() {
+                return Err("primer takes no arguments".into());
+            }
+            print!("{}", crate::cli_tools::PRIMER);
+            conclude(Outcome::Exit(0))
+        }
+        Invocation::New(request) => {
+            crate::store::remote::begin()?;
+            let directory = request
+                .positional
+                .as_deref()
+                .ok_or("new requires a package directory")?;
+            let library = request.options.contains(&NewOption::Lib);
+            crate::cli::scaffold(Path::new(directory), library)?;
+            crate::fs::atomic_write(
+                &Path::new(directory).join("hirsel.lock"),
+                crate::package_lock::scaffold().as_bytes(),
+            )?;
+            crate::cli_tools::print_scaffold_summary(directory, library);
+            conclude(Outcome::Exit(0))
+        }
+        Invocation::Fmt(request) => {
+            use hirsel_core_syntax::{FormatAction, ParseMode};
+            crate::store::remote::begin()?;
+            let action = if request.options.contains(&FmtOption::FmtCheck) {
+                FormatAction::Check
+            } else {
+                FormatAction::Write
+            };
+            let mode = if request.options.contains(&FmtOption::Signatures) {
+                ParseMode::Signatures
+            } else {
+                ParseMode::Source
+            };
+            let stdin = request.options.contains(&FmtOption::FmtStdin);
+            let status = match (stdin, request.positional.as_deref()) {
+                (true, None) => crate::cli_tools::format_stdin(action, mode)?,
+                (false, Some(path)) => crate::cli_tools::format(Path::new(path), action, mode)?,
+                _ => return Err("fmt requires one of FILE, DIR, or --stdin".into()),
+            };
+            conclude(Outcome::Exit(status))
+        }
+        Invocation::Explain(request) => {
+            crate::store::remote::begin()?;
+            crate::cli_tools::explain(
+                request.positional.as_deref(),
+                request.options.contains(&ExplainOption::ListRules),
+                request.options.contains(&ExplainOption::Json),
+            )?;
+            conclude(Outcome::Exit(0))
+        }
+        Invocation::Compiler(request) => run_compiler(request),
     }
+}
+
+fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let profile = matches!(invocation.command.name, "prof run" | "prof replay")
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
     let command = launch::fleet_cli::prepare(&mut invocation)?;
-    match command {
-        "add" => return conclude(Outcome::Exit(crate::package_add::run(invocation)?)),
-        "launcher" => match crate::launcher::run(invocation)? {},
-        "serve" => {
-            if crate::resident::serving() {
-                return Err("a resident compiler serves build and run requests only".into());
-            }
-            let serve = crate::resident::Serve::read(invocation)?;
-            return conclude(Outcome::Exit(crate::resident::run(serve)?));
-        }
-        "host" => match operator_cli::host(invocation)? {},
-        "register" => return conclude(Outcome::Exit(operator_cli::register(invocation)?)),
-        "deploy" | "decide" => return conclude(operator_cli::run(command, invocation)?),
-        "call" => {
-            return conclude(Outcome::Exit(crate::call::run(
-                crate::call::Options::read(invocation)?,
-            )?));
-        }
-        "dev" => return conclude(Outcome::Exit(launch::dev::run(invocation)?)),
-        store if matches!(store, "dry-run" | "tapes check") || store.starts_with("store ") => {
-            return launch::store_tool(invocation);
-        }
-        _ => {}
-    }
     if command == "replay"
         && invocation
             .options
             .iter()
-            .any(|(option, _)| *option == Opt::HostState)
+            .any(|option| matches!(option, Opt::HostState(_)))
     {
         return conclude(Outcome::Exit(operator_cli::replay(invocation)?));
-    }
-    if matches!(command, "sdk ts" | "sdk json") {
-        crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
-        return conclude(Outcome::Exit(0));
-    }
-    if command == "tape" {
-        let path = invocation
-            .positional
-            .as_deref()
-            .ok_or("tape show requires a tape file")?;
-        if !invocation
-            .options
-            .iter()
-            .any(|(option, _)| *option == crate::cli::OptionId::IncludeCredentials)
-        {
-            return Err("tape show requires --include-credentials".into());
-        }
-        crate::tape_cli::show(Path::new(path))?;
-        return conclude(Outcome::Exit(0));
-    }
-    if command == "manifest" {
-        crate::release_manifest::show(Path::new(
-            invocation
-                .positional
-                .as_deref()
-                .ok_or("manifest show requires a path")?,
-        ))?;
-        return conclude(Outcome::Exit(0));
     }
     crate::store::remote::begin()?;
     let mut package_mode = crate::package_lock::Mode::default();
     let mut package_store = None;
     let mut pack_out = None;
-    for (option, value) in invocation.options.extract_if(.., |(option, _)| {
-        matches!(option, Opt::Locked | Opt::Frozen | Opt::PackageStore)
-            || (command == "pack" && *option == Opt::Output)
+    for option in invocation.options.extract_if(.., |option| {
+        matches!(option, Opt::Locked | Opt::Frozen | Opt::PackageStore(_))
+            || (command == "pack" && matches!(option, Opt::Output(_)))
     }) {
         match option {
             Opt::Locked if package_mode != crate::package_lock::Mode::Frozen => {
                 package_mode = crate::package_lock::Mode::Locked
             }
             Opt::Frozen => package_mode = crate::package_lock::Mode::Frozen,
-            Opt::PackageStore => package_store = value.map(PathBuf::from),
-            Opt::Output => pack_out = value.map(PathBuf::from),
+            Opt::PackageStore(value) => package_store = Some(PathBuf::from(value)),
+            Opt::Output(value) => pack_out = Some(PathBuf::from(value)),
             _ => {}
         }
     }
@@ -190,59 +235,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         return conclude(Outcome::Exit(0));
     }
     let replay_command = command == "replay";
-    if command == "new" {
-        let directory = invocation
-            .positional
-            .as_deref()
-            .ok_or("new requires a package directory")?;
-        let library = invocation
-            .options
-            .iter()
-            .any(|(id, _)| *id == crate::cli::OptionId::Lib);
-        crate::cli::scaffold(Path::new(directory), library)?;
-        crate::fs::atomic_write(
-            &Path::new(directory).join("hirsel.lock"),
-            crate::package_lock::scaffold().as_bytes(),
-        )?;
-        crate::cli_tools::print_scaffold_summary(directory, library);
-        return conclude(Outcome::Exit(0));
-    }
-    if command == "primer" {
-        if invocation.positional.is_some() {
-            return Err("primer takes no arguments".into());
-        }
-        print!("{}", crate::cli_tools::PRIMER);
-        return conclude(Outcome::Exit(0));
-    }
-    if command == "fmt" || command == "explain" {
-        use crate::cli::OptionId;
-        let has = |option| invocation.options.iter().any(|(id, _)| *id == option);
-        if command == "fmt" {
-            use hirsel_core_syntax::{FormatAction, ParseMode};
-            let action = if has(OptionId::FmtCheck) {
-                FormatAction::Check
-            } else {
-                FormatAction::Write
-            };
-            let mode = if has(OptionId::Signatures) {
-                ParseMode::Signatures
-            } else {
-                ParseMode::Source
-            };
-            let status = match (has(OptionId::FmtStdin), invocation.positional.as_deref()) {
-                (true, None) => crate::cli_tools::format_stdin(action, mode)?,
-                (false, Some(path)) => crate::cli_tools::format(Path::new(path), action, mode)?,
-                _ => return Err("fmt requires one of FILE, DIR, or --stdin".into()),
-            };
-            return conclude(Outcome::Exit(status));
-        }
-        crate::cli_tools::explain(
-            invocation.positional.as_deref(),
-            has(OptionId::ListRules),
-            has(OptionId::Json),
-        )?;
-        return conclude(Outcome::Exit(0));
-    }
     let inspection = (command == "inspect")
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
@@ -255,309 +247,77 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         .positional
         .map(PathBuf::from)
         .or_else(|| inspect_foreign.map(|_| PathBuf::from(".")));
-    let mut libraries = None;
-    let mut store = None;
-    let mut manifest = None;
-    let mut metrics = None;
-    let mut profile_front = false;
-    let mut image_path = None;
-    let mut install_root = None;
-    let mut link_kit = None;
-    let mut core_product = None;
-    let mut source_core = inspect_library.is_some();
-    let mut source_std = false;
-    let mut product_name = None;
-    let mut entry = None;
     let test_command = command == "test";
     let static_laws = matches!(command, "laws check" | "laws write");
     let recipe_command = matches!(command, "build" | "publish");
     let native_command = recipe_command || command == "run" || replay_command || test_command;
-    let mut recipe_root = None;
-    let mut code_store = None;
-    let mut release_manifest = None;
-    let mut n_place = None;
-    let mut place_timeout = Duration::from_secs(10);
-    let mut test_filter = None;
-    let mut test_exact = Vec::new();
-    let mut test_jobs = None;
-    let mut test_timeout = None;
-    let mut test_sim = false;
-    let mut corpus_path = None;
-    let mut test_seeds = None;
-    let mut test_seed = None;
-    let mut backend = None;
-    let mut release = false;
-    let mut debug_lines = None;
-    let mut runtime = None;
-    let mut explicit_runtime = false;
-    let mut explicit_target = false;
-    let mut logical_charge_report = None;
-    let mut output_path = None;
-    let mut root_limit = None;
-    let mut emulator = None;
-    let mut sysroot = None;
-    let mut target = crate::host::HOST_TARGET.triple().to_owned();
+    let mut run_args = invocation.arguments;
     // Link with --cc, the installed recipe, or the pinned LLVM clang.
     // Never use a cc found on PATH.
-    let mut cc = None;
     let pinned =
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
-    let mut run_args = invocation.arguments;
-    let mut recording_build = false;
-    let mut additional_runtimes = std::collections::BTreeMap::new();
-    let mut record_path = None;
-    let mut replay_tape = None;
-    let mut test_replay = false;
-    let mut test_laws = false;
-    let mut test_write_laws = false;
-    let mut law_baseline = None;
-    let (mut test_rerun, mut test_cache) = (false, crate::TestCache::default_root());
-    let mut coverage = crate::test_run::Flags::default();
-    let mut seed_base = None;
-    let mut expect_verdict = None;
-    let mut diagnose = false;
-    let mut grants = crate::package_dir::Grants::default();
-    let mut json = false;
-    use crate::cli::OptionId as Opt;
+    let CompilerFlags {
+        libraries,
+        store,
+        manifest,
+        metrics,
+        profile_front,
+        image_path,
+        install_root,
+        link_kit,
+        mut core_product,
+        mut source_core,
+        source_std,
+        product_name,
+        entry,
+        recipe_root,
+        code_store,
+        release_manifest,
+        n_place,
+        place_timeout,
+        test_filter,
+        test_exact,
+        test_jobs,
+        test_timeout,
+        mut test_sim,
+        corpus_path,
+        test_seeds,
+        test_seed,
+        backend,
+        release,
+        debug_lines,
+        mut runtime,
+        explicit_runtime,
+        explicit_target,
+        mut logical_charge_report,
+        output_path,
+        mut root_limit,
+        emulator,
+        sysroot,
+        mut target,
+        cc,
+        recording_build,
+        mut additional_runtimes,
+        mut record_path,
+        replay_tape,
+        test_replay,
+        mut test_laws,
+        test_write_laws,
+        law_baseline,
+        test_rerun,
+        test_cache,
+        coverage,
+        seed_base,
+        expect_verdict,
+        diagnose,
+        mut grants,
+        json,
+    } = CompilerFlags::read(
+        invocation.options,
+        inspect_library.is_some(),
+        crate::TestCache::default_root(),
+    )?;
     use crate::installation::{Flavour, Observation};
-    for (option, value) in invocation.options {
-        let value = value.unwrap_or_default();
-        match option {
-            Opt::Json => json = true,
-            Opt::Recipe => recipe_root = Some(crate::native::recipe_build::parse_root(&value)?),
-            Opt::CodeStore => code_store = Some(PathBuf::from(value)),
-            Opt::ReleaseManifest => release_manifest = Some(PathBuf::from(value)),
-            Opt::NPlace => n_place = Some(value.parse::<u64>()?),
-            Opt::PlaceTimeout => {
-                place_timeout = Duration::from_secs(value.parse::<u64>()?);
-                if place_timeout.is_zero() {
-                    return Err("--place-timeout must be positive".into());
-                }
-            }
-            Opt::Recording => recording_build = true,
-            Opt::RecordingRuntime => {
-                additional_runtimes.insert(Flavour::RECORDING, PathBuf::from(value));
-            }
-            Opt::ProfRuntime => {
-                additional_runtimes.insert(Flavour::PROF, PathBuf::from(value));
-            }
-            Opt::ProfRecordingRuntime => {
-                additional_runtimes.insert(Flavour::PROF_RECORDING, PathBuf::from(value));
-            }
-            Opt::ObservedRuntime => {
-                additional_runtimes.insert(Flavour::OBSERVED, PathBuf::from(value));
-            }
-            Opt::ObservedRecordingRuntime => {
-                additional_runtimes.insert(Flavour::OBSERVED_RECORDING, PathBuf::from(value));
-            }
-            Opt::Record => record_path = Some(value),
-            Opt::Tape => replay_tape = Some(value),
-            Opt::ReplayUnit => return Err("replay --unit needs --state DIR with --tape".into()),
-            Opt::Replay => test_replay = true,
-            Opt::Laws => test_laws = true,
-            Opt::WriteLaws => test_write_laws = true,
-            Opt::LawsBaseline => law_baseline = Some(PathBuf::from(value)),
-            Opt::Rerun => test_rerun = true,
-            Opt::LinkOnly => {}
-            Opt::TestCache => test_cache = PathBuf::from(value),
-            Opt::Coverage => coverage.on = true,
-            Opt::CoverageOut => coverage.out = Some(PathBuf::from(value)),
-            Opt::CoverageBase => coverage.base = Some(PathBuf::from(value)),
-            Opt::CoverageTargets => coverage.targets = Some(PathBuf::from(value)),
-            Opt::CoverageRuns => coverage.runs = true,
-            Opt::SeedBase => {
-                seed_base = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| "--seed-base expects a u64")?,
-                );
-            }
-            Opt::Sim => test_sim = true,
-            Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
-            Opt::SimSeeds => {
-                test_seeds = Some(
-                    value
-                        .parse::<std::num::NonZeroU64>()
-                        .map_err(|_| "--seeds expects a positive count")?
-                        .get(),
-                );
-            }
-            Opt::SimSeed => {
-                test_seed = Some(value.parse::<u64>().map_err(|_| "--seed expects a u64")?);
-            }
-            Opt::ExpectVerdict => expect_verdict = Some(value),
-            Opt::Diagnose => diagnose = true,
-            Opt::Install => install_root = Some(PathBuf::from(value)),
-            Opt::LinkKit => link_kit = Some(PathBuf::from(value)),
-            Opt::SourceCore => source_core = true,
-            Opt::SourceStd => source_std = true,
-            Opt::Name => {
-                product_name =
-                    Some(DefPath::from_full(&value).ok_or("invalid --name definition path")?)
-            }
-            Opt::CoreProduct => core_product = Some(PathBuf::from(value)),
-            Opt::Dir => grants
-                .directories
-                .push(hirsel_core_ids::launch::dir_slot(&value)?),
-            Opt::Grant => grants.grant(&value)?,
-            Opt::Filter => test_filter = Some(value),
-            Opt::TestExact => test_exact
-                .push(DefPath::from_full(&value).ok_or("--exact expects a full definition path")?),
-            Opt::TestJobs => {
-                test_jobs = Some(
-                    value
-                        .parse()
-                        .map_err(|_| "-j expects a positive job count")?,
-                );
-            }
-            Opt::TestTimeout => {
-                let seconds: u64 = value.parse()?;
-                if seconds == 0 {
-                    return Err("test timeout must be positive".into());
-                }
-                test_timeout = Some(std::time::Duration::from_secs(seconds));
-            }
-            Opt::Release => release = true,
-            Opt::DebugLines => {
-                debug_lines = Some(match value.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    _ => return Err("--debug-lines expects on or off".into()),
-                })
-            }
-            Opt::Backend => backend = Some(value.parse::<Backend>()?),
-            Opt::Runtime => {
-                explicit_runtime = true;
-                runtime = Some(PathBuf::from(value));
-            }
-            Opt::LogicalChargeReport => {
-                logical_charge_report = Some(PathBuf::from(value));
-            }
-            Opt::Cc => cc = Some(PathBuf::from(value)),
-            Opt::Target => {
-                explicit_target = true;
-                target = value;
-            }
-            Opt::Emulator => emulator = Some(PathBuf::from(value)),
-            Opt::Sysroot => sysroot = Some(PathBuf::from(value)),
-            Opt::Limit => root_limit = Some(value.parse()?),
-            Opt::Output => output_path = Some(PathBuf::from(value)),
-            Opt::Entry => entry = Some(DefPath::from_full(&value).ok_or("invalid entry path")?),
-            Opt::Libraries => libraries = Some(PathBuf::from(value)),
-            Opt::Store => store = Some(PathBuf::from(value)),
-            Opt::Inputs => manifest = Some(PathBuf::from(value)),
-            Opt::Metrics => metrics = Some(PathBuf::from(value)),
-            Opt::ProfileFront => profile_front = true,
-            // Routed before the request runs (`resident::submit`).
-            Opt::Resident => {}
-            Opt::Image => image_path = Some(PathBuf::from(value)),
-            Opt::Help
-            | Opt::Interface
-            | Opt::ForeignHeader
-            | Opt::ForeignAbi
-            | Opt::Dependents
-            | Opt::Transitive
-            | Opt::AffectedTests
-            | Opt::Unused
-            | Opt::InspectLibrary
-            | Opt::InspectStd
-            | Opt::InspectCore
-            | Opt::InspectModule
-            | Opt::InspectFilter
-            | Opt::CoreIr
-            | Opt::IncludeCredentials
-            | Opt::Lib
-            | Opt::FmtCheck
-            | Opt::FmtStdin
-            | Opt::Signatures
-            | Opt::ListRules
-            | Opt::PackageStore
-            | Opt::Locked
-            | Opt::Frozen
-            | Opt::AddRoot
-            | Opt::AddUpdate
-            | Opt::AddDryRun
-            | Opt::AddWorkspace
-            | Opt::Url
-            | Opt::Control
-            | Opt::Admission
-            | Opt::HostState
-            | Opt::OperatorListen
-            | Opt::PlatformHost
-            | Opt::MaxPlaces
-            | Opt::IdleMs
-            | Opt::Lifecycle
-            | Opt::Workdir
-            | Opt::Listen
-            | Opt::Fresh
-            | Opt::FrontHttp
-            | Opt::FrontStream
-            | Opt::ApproveGrant
-            | Opt::Refuse
-            | Opt::HeldAll
-            | Opt::HeldEntry
-            | Opt::HostMemory
-            | Opt::TapeRetention
-            | Opt::SourceDir
-            | Opt::PackageRoot
-            | Opt::GroupName
-            | Opt::Tenant
-            | Opt::GroupStore
-            | Opt::DryRunExe
-            | Opt::StoreRelease
-            | Opt::RecordedExecutable
-            | Opt::Trusted
-            | Opt::RequestId
-            | Opt::RequestStatus
-            | Opt::MaxMemory
-            | Opt::Stop
-            | Opt::CallTimeout
-            | Opt::CallStream
-            | Opt::ProfOut
-            | Opt::ProfTasks
-            | Opt::ProfMem
-            | Opt::ProfFrequency
-            | Opt::ProfPmu
-            | Opt::ProfStackBytes
-            | Opt::ProfDuration
-            | Opt::ProfDebug
-            | Opt::ProfBy
-            | Opt::ProfEvent
-            | Opt::ProfGroup
-            | Opt::ProfFilter
-            | Opt::ProfRows
-            | Opt::ProfDepth
-            | Opt::ProfMinDeltaPct
-            | Opt::ProfTimeout
-            | Opt::ProfFormat
-            | Opt::CoverageMap
-            | Opt::FleetHosts
-            | Opt::FleetRounds
-            | Opt::FleetPlaces
-            | Opt::FleetPartitions
-            | Opt::FleetPlacement => unreachable!("CLI early command option"),
-        }
-    }
-    if test_filter.is_some() && !test_exact.is_empty() {
-        return Err("test: --filter and --exact cannot be combined".into());
-    }
-    if law_baseline.is_some() {
-        for (narrowed, option) in [
-            (test_filter.is_some(), "--filter"),
-            (!test_exact.is_empty(), "--exact"),
-            (test_seed.is_some(), "--seed"),
-            (test_sim, "--sim"),
-            (test_seeds.is_some(), "--seeds"),
-            (corpus_path.is_some(), "--property-corpus"),
-            (test_replay, "--replay"),
-        ] {
-            if narrowed {
-                return Err(
-                    format!("test: --laws-baseline compares a full run; drop {option}").into(),
-                );
-            }
-        }
-    }
     let law_baseline = law_baseline
         .as_deref()
         .map(crate::law_lock::Baseline::read)

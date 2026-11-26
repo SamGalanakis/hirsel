@@ -40,7 +40,7 @@ fn invoke(law: &PackageLaw, dir: &str, args: &[&str]) -> (Option<i32>, String, S
     result(add(law, dir, args).output().unwrap())
 }
 
-fn direct(law: &PackageLaw, source: &str) -> crate::cli::Invocation {
+fn direct(law: &PackageLaw, source: &str) -> crate::cli::Request<crate::cli::AddOption> {
     let args = [
         "add",
         source,
@@ -48,7 +48,8 @@ fn direct(law: &PackageLaw, source: &str) -> crate::cli::Invocation {
         law.path("packages").to_str().unwrap(),
     ]
     .map(str::to_owned);
-    let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.into_iter()).unwrap()
+    let crate::cli::Action::Invoke(crate::cli::Invocation::Add(invocation)) =
+        crate::cli::parse(args.into_iter()).unwrap()
     else {
         panic!("expected an add invocation")
     };
@@ -424,7 +425,8 @@ fn s6_add_interrupted_child() {
     };
     let cwd = std::env::current_dir().unwrap();
     let args = ["add", &source, "--package-store", "../packages"].map(str::to_owned);
-    let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.into_iter()).unwrap()
+    let crate::cli::Action::Invoke(crate::cli::Invocation::Add(invocation)) =
+        crate::cli::parse(args.into_iter()).unwrap()
     else {
         panic!("expected an add invocation")
     };
@@ -459,7 +461,8 @@ fn s6_add_memory_child() {
         "--dry-run",
     ]
     .map(str::to_owned);
-    let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.into_iter()).unwrap()
+    let crate::cli::Action::Invoke(crate::cli::Invocation::Add(invocation)) =
+        crate::cli::parse(args.into_iter()).unwrap()
     else {
         panic!("expected an add invocation")
     };
@@ -672,7 +675,10 @@ fn forms_that_fetch_nothing() {
         "[workspace]\nmembers = [\"apps/ui\", \"libs/a\"]\n",
     );
     law.library("work/libs/a", "a", 1, "pub fn one() -> u64 { 1u64 }\n", "");
-    law.write("work/vendor/hirsel.toml", "[package]\nname = \"v\"\nmajor = 1\n");
+    law.write(
+        "work/vendor/hirsel.toml",
+        "[package]\nname = \"v\"\nmajor = 1\n",
+    );
     law.app("work/apps/ui", "[dependencies]\n");
     law.write(
         "work/apps/ui/main.hirsel",
@@ -726,7 +732,9 @@ fn s6_lock_survives_a_power_cut_after_it_returns() {
     let law = PackageLaw::new();
     law.app("app", "");
     law.write("durable_view.c", include_str!("../testdata/durable_view.c"));
-    let super::Link::Driver(cc) = super::native_options(super::Backend::Cranelift, law.dir.path()).link else {
+    let super::Link::Driver(cc) =
+        super::native_options(super::Backend::Cranelift, law.dir.path()).link
+    else {
         unreachable!()
     };
     let built = Command::new(cc)
@@ -736,7 +744,11 @@ fn s6_lock_survives_a_power_cut_after_it_returns() {
         .arg("-ldl")
         .output()
         .unwrap();
-    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
     let log = law.path("durable.log");
     let mut lock = law.command(&["lock", "app"], "packages");
     lock.env("LD_PRELOAD", law.path("durable_view.so"))
@@ -744,7 +756,8 @@ fn s6_lock_survives_a_power_cut_after_it_returns() {
         .env("DURABLE_DIR", law.path("app"))
         .env("DURABLE_NAME", "hirsel.lock");
     PackageLaw::pass(PackageLaw::output(lock));
-    let written = std::os::unix::fs::MetadataExt::ino(&fs::metadata(law.path("app/hirsel.lock")).unwrap());
+    let written =
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(law.path("app/hirsel.lock")).unwrap());
     let records = fs::read_to_string(&log).unwrap_or_default();
     let mut entry = 0;
     let mut synced = vec![];
@@ -756,8 +769,14 @@ fn s6_lock_survives_a_power_cut_after_it_returns() {
             _ => synced.push(inode),
         }
     }
-    assert_eq!(entry, written, "the lock's rename is not durable: {records}");
-    assert!(synced.contains(&written), "the lock's bytes are not durable: {records}");
+    assert_eq!(
+        entry, written,
+        "the lock's rename is not durable: {records}"
+    );
+    assert!(
+        synced.contains(&written),
+        "the lock's bytes are not durable: {records}"
+    );
 }
 
 #[test]

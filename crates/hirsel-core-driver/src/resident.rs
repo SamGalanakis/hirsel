@@ -279,8 +279,9 @@ struct Route {
 
 /// Route a request to the resident compiler of its toolchain.
 fn route(args: &[String]) -> Option<Route> {
-    use crate::cli::OptionId as Opt;
-    let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.iter().cloned()).ok()?
+    use crate::cli::CompilerOption as Opt;
+    let crate::cli::Action::Invoke(crate::cli::Invocation::Compiler(invocation)) =
+        crate::cli::parse(args.iter().cloned()).ok()?
     else {
         return None;
     };
@@ -293,19 +294,18 @@ fn route(args: &[String]) -> Option<Route> {
     let mut manifest = None;
     let mut recipe = None;
     let mut entry = None;
-    for (option, value) in &invocation.options {
+    for option in &invocation.options {
         match option {
             Opt::Resident => resident = true,
-            Opt::Inputs => manifest = value.as_deref().map(PathBuf::from),
-            Opt::Recipe => recipe = value.clone(),
-            Opt::Entry => entry = value.clone(),
+            Opt::Inputs(value) => manifest = Some(PathBuf::from(value)),
+            Opt::Recipe(value) => recipe = Some(value.clone()),
+            Opt::Entry(value) => entry = Some(value.clone()),
             // Ordinary compiler stores publish by content. A durable code
             // store also refreshes publication times. A custom linker can
             // have its own effects. Never repeat either after a lost reply.
-            Opt::CodeStore | Opt::Cc => retryable = false,
-            Opt::Grant
-                if invocation.command.name == "run"
-                    && value.as_deref().is_some_and(|v| v.starts_with("Foreign=")) =>
+            Opt::CodeStore(_) | Opt::Cc(_) => retryable = false,
+            Opt::Grant(value)
+                if invocation.command.name == "run" && value.starts_with("Foreign=") =>
             {
                 retryable = false;
             }
@@ -586,26 +586,24 @@ pub(crate) struct Serve {
 }
 impl Serve {
     pub(crate) fn read(
-        invocation: crate::cli::Invocation,
+        invocation: crate::cli::Request<crate::cli::ServeOption>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        use crate::cli::OptionId as Opt;
+        use crate::cli::ServeOption as Opt;
         if invocation.positional.is_some() {
             return Err("serve takes no package: one server serves every directory".into());
         }
         let mut max_memory = None;
         let mut stop = false;
-        for (option, value) in invocation.options {
+        for option in invocation.options {
             match option {
-                Opt::MaxMemory => {
+                Opt::MaxMemory(value) => {
                     max_memory = Some(
                         value
-                            .unwrap_or_default()
                             .parse()
                             .map_err(|_| "--max-memory expects a byte count")?,
                     )
                 }
                 Opt::Stop => stop = true,
-                _ => unreachable!("serve takes --max-memory and --stop"),
             }
         }
         Ok(Self { max_memory, stop })

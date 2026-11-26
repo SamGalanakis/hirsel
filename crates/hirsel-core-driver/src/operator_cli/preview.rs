@@ -2,10 +2,10 @@
 //! operator's decision on a held request (`hirsel decide`), and the preview's JSON.
 
 use super::{
-    Approvals, Error, Exchange, class_name, one, or_unavailable, sort_grants, state_json,
+    Approvals, Conversation, Error, class_name, one, or_unavailable, sort_grants, state_json,
     unexpected,
 };
-use crate::cli::{Invocation, OptionId as Opt};
+use crate::cli::{DecideOption, Request};
 use crate::launcher::session::Grants;
 use crate::operator::{
     Answer, Ask, Decision, DecisionStage, EntryChange, Fates, HeldBy, HeldFate, Migration, Phase,
@@ -69,41 +69,81 @@ pub(super) fn approve_grant(diff: &mut Grants, value: &str) -> Result<(), Error>
 /// line of its grant diff, and give fates exactly when it shows a held group or an unmatched
 /// path. The Decide carries the shown decision back, so a host that moved on refuses it; an
 /// approval follows the repeated admission to its outcome.
-pub(crate) fn decide(invocation: Invocation) -> Result<i32, Error> {
+pub(crate) fn decide(invocation: Request<DecideOption>) -> Result<i32, Error> {
     or_unavailable("decide", decide_on(invocation))
 }
 
-fn decide_on(invocation: Invocation) -> Result<i32, Error> {
-    let (mut state, mut d) = (None, None);
-    let mut approved = Grants::default();
-    let mut refuse = false;
-    let mut fates = Fates::default();
-    let mut fated = false;
-    for (option, value) in invocation.options {
-        let text = value.unwrap_or_default();
-        match option {
-            Opt::HostState => state = Some(PathBuf::from(text)),
-            Opt::RequestId => d = Some(text),
-            Opt::ApproveGrant => approve_grant(&mut approved, &text)?,
-            Opt::Refuse => refuse = true,
-            Opt::HeldAll | Opt::HeldEntry => {
-                held_fate(&mut fates, option == Opt::HeldAll, &text)?;
-                fated = true;
+enum DecisionRequest {
+    Refuse,
+    Approve {
+        grants: Grants,
+        fates: Option<Fates>,
+    },
+}
+
+impl DecisionRequest {
+    fn read(invocation: Request<DecideOption>) -> Result<(PathBuf, Vec<u8>, Self), Error> {
+        let (mut state, mut d) = (None, None);
+        let mut approved = Grants::default();
+        let mut refuse = false;
+        let mut fates = Fates::default();
+        let mut fated = false;
+        use DecideOption as O;
+        for option in invocation.options {
+            match option {
+                O::HostState(text) => state = Some(PathBuf::from(text)),
+                O::RequestId(text) => d = Some(text),
+                O::ApproveGrant(text) => approve_grant(&mut approved, &text)?,
+                O::Refuse => refuse = true,
+                O::HeldAll(ref text) | O::HeldEntry(ref text) => {
+                    held_fate(&mut fates, matches!(option, O::HeldAll(_)), text)?;
+                    fated = true;
+                }
             }
-            _ => return Err("unexpected decide option".into()),
+        }
+        if invocation.positional.is_some() || !invocation.arguments.is_empty() {
+            return Err("decide takes no recipe and no program arguments".into());
+        }
+        let state = state.ok_or("decide requires --state DIR")?;
+        let d = hex::decode(&d.ok_or("decide requires --request-id HEX")?)
+            .filter(|d| d.len() == 16)
+            .ok_or("--request-id takes 32 hex digits")?;
+        sort_grants(&mut approved);
+        let decision = if refuse {
+            if fated || approved != Grants::default() {
+                return Err("--refuse takes no --approve-grant, --held or --held-entry".into());
+            }
+            Self::Refuse
+        } else {
+            Self::Approve {
+                grants: approved,
+                fates: fated.then_some(fates),
+            }
+        };
+        Ok((state, d, decision))
+    }
+
+    fn verdict(self, held: &Decision) -> Result<Verdict, &'static str> {
+        let Self::Approve { grants, fates } = self else {
+            return Ok(Verdict::Refuse);
+        };
+        if grants != held.grants {
+            return Err("the --approve-grant lines are not the grant diff the request awaits");
+        }
+        match (held.shows_held(), fates) {
+            (true, None) => {
+                Err("the decision shows held runs; give their fates with --held or --held-entry")
+            }
+            (false, Some(_)) => {
+                Err("the decision shows no held run, so it takes no --held or --held-entry")
+            }
+            (_, fates) => Ok(Verdict::Approve(fates.unwrap_or_default())),
         }
     }
-    if invocation.positional.is_some() || !invocation.arguments.is_empty() {
-        return Err("decide takes no recipe and no program arguments".into());
-    }
-    let state = state.ok_or("decide requires --state DIR")?;
-    let d = hex::decode(&d.ok_or("decide requires --request-id HEX")?)
-        .filter(|d| d.len() == 16)
-        .ok_or("--request-id takes 32 hex digits")?;
-    sort_grants(&mut approved);
-    if refuse && (fated || approved != Grants::default()) {
-        return Err("--refuse takes no --approve-grant, --held or --held-entry".into());
-    }
+}
+
+fn decide_on(invocation: Request<DecideOption>) -> Result<i32, Error> {
+    let (state, d, request) = DecisionRequest::read(invocation)?;
     let held = match one(&state, &Ask::Status(d.clone()))? {
         Some(Answer::State(_, _, _, Phase::AwaitDecision(held))) => held,
         Some(Answer::State(d, group, _, phase)) => {
@@ -117,30 +157,20 @@ fn decide_on(invocation: Invocation) -> Result<i32, Error> {
         }
         other => return Ok(unexpected("decide", &d, other)),
     };
+    let verdict = match request.verdict(&held) {
+        Ok(verdict) => verdict,
+        Err(why) => {
+            eprintln!("decide: refused: {why}");
+            println!("{}", decision_json(&held));
+            return Ok(2);
+        }
+    };
     let none = Approvals {
         foreign: Vec::new(),
         exec: Vec::new(),
     };
-    if refuse {
-        let ask = Ask::Decide(d.clone(), held, Verdict::Refuse);
-        return Exchange::new(&state, d, "decide", None, none).run(ask);
-    }
-    let refusal = if approved != held.grants {
-        Some("the --approve-grant lines are not the grant diff the request awaits")
-    } else if held.shows_held() && !fated {
-        Some("the decision shows held runs; give their fates with --held or --held-entry")
-    } else if !held.shows_held() && fated {
-        Some("the decision shows no held run, so it takes no --held or --held-entry")
-    } else {
-        None
-    };
-    if let Some(why) = refusal {
-        eprintln!("decide: refused: {why}");
-        println!("{}", decision_json(&held));
-        return Ok(2);
-    }
-    let ask = Ask::Decide(d.clone(), held, Verdict::Approve(fates));
-    Exchange::new(&state, d, "decide", None, none).run(ask)
+    let ask = Ask::Decide(d.clone(), held, verdict);
+    Conversation::new(&state, d, "decide", None, none).run(ask)
 }
 
 /// The decision a held request awaits, as `hirsel decide` and State print it.

@@ -2,7 +2,7 @@
 //! `hirsel store verify --release` on an isolated image of the store,
 //! `hirsel store repair --release` on the store itself (STORE-SPEC §15.6).
 
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{Request, StoreOption as Opt};
 use crate::native_entry::launch_config;
 use crate::package_content::Sha256Writer;
 use std::{
@@ -19,7 +19,7 @@ type Error = Box<dyn std::error::Error>;
 const HELD: i32 = 75;
 const NOT_A_PLACE: i32 = 104;
 
-pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
+pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
     let name = invocation.command.name;
     let (flag, header, usage): (&str, &[u8], &str) = match name {
         "dry-run" => (
@@ -48,17 +48,17 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     if name == "dry-run" && store.is_some() {
         return Err("dry-run takes the candidate through --exe".into());
     }
-    for (id, value) in invocation.options {
-        let destination = match id {
-            OptionId::DryRunExe | OptionId::StoreRelease => &mut executable,
-            OptionId::RecordedExecutable if name == "tapes check" => &mut recorded,
-            OptionId::Store if name == "dry-run" => &mut store,
+    for option in invocation.options {
+        let (destination, value) = match option {
+            Opt::DryRunExe(value) | Opt::StoreRelease(value) => (&mut executable, value),
+            Opt::RecordedExecutable(value) if name == "tapes check" => (&mut recorded, value),
+            Opt::Store(value) if name == "dry-run" => (&mut store, value),
             _ => return Err(format!("usage: hirsel {usage}").into()),
         };
         if destination.is_some() {
             return Err(format!("usage: hirsel {usage}").into());
         }
-        *destination = value.map(PathBuf::from);
+        *destination = Some(PathBuf::from(value));
     }
     let (Some(executable), Some(store)) = (executable, store) else {
         return Err(format!("usage: hirsel {usage}").into());

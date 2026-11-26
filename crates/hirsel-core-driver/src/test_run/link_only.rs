@@ -1,51 +1,46 @@
 //! Build the selected test executables without launching them.
 use super::{Runner, TestLaunch, session::configure};
-use crate::cli::{Invocation, OptionId as Opt};
+use crate::cli::{CompilerOption as Opt, Request};
 use crate::package_dir::TestRuns;
 use crate::{CheckProduct, NativeOptions, NativeStop};
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::Target;
 use std::io;
 
-pub(crate) fn requested(invocation: &Invocation) -> io::Result<bool> {
-    if !invocation
-        .options
-        .iter()
-        .any(|(id, _)| *id == Opt::LinkOnly)
-    {
+pub(crate) fn requested(invocation: &Request<Opt>) -> io::Result<bool> {
+    if !invocation.options.iter().any(|id| *id == Opt::LinkOnly) {
         return Ok(false);
     }
-    for (option, _) in &invocation.options {
-        if matches!(
-            option,
-            Opt::Laws
-                | Opt::WriteLaws
-                | Opt::LawsBaseline
-                | Opt::Coverage
-                | Opt::CoverageOut
-                | Opt::CoverageBase
-                | Opt::CoverageTargets
-                | Opt::CoverageRuns
-                | Opt::Sim
-                | Opt::SimSeed
-                | Opt::SimSeeds
-                | Opt::SeedBase
-                | Opt::PropertyCorpus
-                | Opt::Replay
-                | Opt::TestJobs
-                | Opt::TestTimeout
-                | Opt::TestCache
-                | Opt::Rerun
-                | Opt::Emulator
-                | Opt::Sysroot
-                | Opt::LogicalChargeReport
-                | Opt::Metrics
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("test --link-only cannot be combined with {option:?}"),
-            ));
-        }
+    for option in &invocation.options {
+        let conflict = match option {
+            Opt::Laws => "Laws",
+            Opt::WriteLaws => "WriteLaws",
+            Opt::LawsBaseline(_) => "LawsBaseline",
+            Opt::Coverage => "Coverage",
+            Opt::CoverageOut(_) => "CoverageOut",
+            Opt::CoverageBase(_) => "CoverageBase",
+            Opt::CoverageTargets(_) => "CoverageTargets",
+            Opt::CoverageRuns => "CoverageRuns",
+            Opt::Sim => "Sim",
+            Opt::SimSeed(_) => "SimSeed",
+            Opt::SimSeeds(_) => "SimSeeds",
+            Opt::SeedBase(_) => "SeedBase",
+            Opt::PropertyCorpus(_) => "PropertyCorpus",
+            Opt::Replay => "Replay",
+            Opt::TestJobs(_) => "TestJobs",
+            Opt::TestTimeout(_) => "TestTimeout",
+            Opt::TestCache(_) => "TestCache",
+            Opt::Rerun => "Rerun",
+            Opt::Emulator(_) => "Emulator",
+            Opt::Sysroot(_) => "Sysroot",
+            Opt::LogicalChargeReport(_) => "LogicalChargeReport",
+            Opt::Metrics(_) => "Metrics",
+            _ => continue,
+        };
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("test --link-only cannot be combined with {conflict}"),
+        ));
     }
     Ok(true)
 }

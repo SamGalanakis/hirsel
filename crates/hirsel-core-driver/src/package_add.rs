@@ -1,4 +1,4 @@
-use crate::cli::Invocation;
+use crate::cli::{AddOption, Request};
 use crate::package_content::{ARCHIVE_LIMIT, Library, PackageArchive, Root, toolchain_major};
 use crate::package_dir::MANIFEST;
 use crate::package_files::{Captured, open_directory, walk};
@@ -516,12 +516,12 @@ fn spelling(id: &crate::package_content::Id, edge: &Edge) -> String {
     }
 }
 
-pub(crate) fn run(invocation: Invocation) -> Result<i32, Failure> {
+pub(crate) fn run(invocation: Request<AddOption>) -> Result<i32, Failure> {
     run_at(invocation, &std::env::current_dir()?, |_| {})
 }
 
 pub(crate) fn run_at(
-    invocation: Invocation,
+    invocation: Request<AddOption>,
     cwd: &Path,
     mut checkpoint: impl FnMut(Checkpoint),
 ) -> Result<i32, Failure> {

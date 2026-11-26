@@ -59,13 +59,13 @@ pub(crate) fn report_request_error(error: &(dyn std::error::Error + 'static)) ->
 /// `hirsel dry-run` and `hirsel store backup|restore`: the commands that run a tool on a
 /// store directory and exit with its status.
 pub(super) fn store_tool(
-    invocation: crate::cli::Invocation,
+    invocation: crate::cli::Request<crate::cli::StoreOption>,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
     let releases = matches!(invocation.command.name, "store verify" | "store repair")
         && invocation
             .options
             .iter()
-            .any(|(id, _)| *id == crate::cli::OptionId::StoreRelease);
+            .any(|option| matches!(option, crate::cli::StoreOption::StoreRelease(_)));
     conclude(Outcome::Exit(
         if matches!(invocation.command.name, "dry-run" | "tapes check") || releases {
             dry_run::run(invocation)?

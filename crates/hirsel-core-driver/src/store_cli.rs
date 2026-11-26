@@ -7,7 +7,7 @@
 //! image into `TARGET` with `EXPORT` last.
 
 use super::dry_run::copy_store;
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{Request, StoreOption as Opt};
 use crate::launcher::session::Group;
 use crate::operator::{self, Answer, Ask, Class};
 use hirsel_core_ids::hex;
@@ -163,7 +163,7 @@ fn online_backup(state: &Path, group_name: &str, to: &Path) -> Result<i32, Error
     }
 }
 
-pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
+pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
     let (verb, usage) = match invocation.command.name {
         "store backup" => (
             "backup",
@@ -178,10 +178,10 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     if verb == "backup" && !invocation.options.is_empty() {
         let mut state: Option<PathBuf> = None;
         let mut group: Option<String> = None;
-        for (id, value) in invocation.options {
-            match id {
-                OptionId::HostState => state = value.map(PathBuf::from),
-                OptionId::GroupName => group = value,
+        for option in invocation.options {
+            match option {
+                Opt::HostState(value) => state = Some(PathBuf::from(value)),
+                Opt::GroupName(value) => group = Some(value),
                 _ => return Err(format!("usage: hirsel {usage}").into()),
             }
         }
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn store_backup_parses_online_and_offline_forms() {
-        let Action::Invoke(online) = parse([
+        let Action::Invoke(crate::cli::Invocation::Store(online)) = parse([
             "store".into(),
             "backup".into(),
             "--state".into(),
@@ -279,7 +279,7 @@ mod tests {
         assert!(online.arguments.is_empty());
         assert_eq!(online.options.len(), 2);
 
-        let Action::Invoke(offline) = parse([
+        let Action::Invoke(crate::cli::Invocation::Store(offline)) = parse([
             "store".into(),
             "backup".into(),
             "/var/store".into(),

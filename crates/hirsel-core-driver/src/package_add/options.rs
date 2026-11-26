@@ -1,7 +1,7 @@
 // `hirsel add`'s command line: the SOURCE forms and the options (packages.md section 11).
 
 use super::{Failure, git};
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{AddOption as Opt, Request};
 use crate::package_content::{Id, Root};
 use crate::package_store::PackageStore;
 use std::path::PathBuf;
@@ -63,17 +63,17 @@ pub(super) struct Options {
 }
 
 impl Options {
-    pub(super) fn read(invocation: Invocation) -> Result<Self, Failure> {
+    pub(super) fn read(invocation: Request<Opt>) -> Result<Self, Failure> {
         let mut expected = None;
         let mut store = None;
         let mut update = false;
         let mut workspace = false;
         let mut dry_run = false;
         let mut json = false;
-        for (id, value) in invocation.options {
-            match id {
-                OptionId::Locked | OptionId::Frozen => {
-                    let flag = if id == OptionId::Locked {
+        for option in invocation.options {
+            match option {
+                Opt::Locked | Opt::Frozen => {
+                    let flag = if option == Opt::Locked {
                         "--locked"
                     } else {
                         "--frozen"
@@ -82,18 +82,17 @@ impl Options {
                         format!("hirsel.toml needs to be updated but {flag} was passed").into(),
                     );
                 }
-                OptionId::AddRoot => {
-                    expected =
-                        Some(value.as_deref().and_then(Root::parse).ok_or(
-                            "--root requires sha256: followed by 64 lowercase hex digits",
-                        )?);
+                Opt::AddRoot(value) => {
+                    expected = Some(
+                        Root::parse(&value)
+                            .ok_or("--root requires sha256: followed by 64 lowercase hex digits")?,
+                    );
                 }
-                OptionId::AddUpdate => update = true,
-                OptionId::AddWorkspace => workspace = true,
-                OptionId::AddDryRun => dry_run = true,
-                OptionId::Json => json = true,
-                OptionId::PackageStore => store = value.map(PathBuf::from),
-                _ => unreachable!(),
+                Opt::AddUpdate => update = true,
+                Opt::AddWorkspace => workspace = true,
+                Opt::AddDryRun => dry_run = true,
+                Opt::Json => json = true,
+                Opt::PackageStore(value) => store = Some(PathBuf::from(value)),
             }
         }
         let source = Source::parse(invocation.positional.ok_or("add requires SOURCE")?)?;

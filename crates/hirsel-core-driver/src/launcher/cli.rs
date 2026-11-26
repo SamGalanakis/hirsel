@@ -35,25 +35,22 @@ pub(crate) fn resolve_lifecycle(
 /// Lock `state`, recover any child cgroups in managed mode, then serve the control
 /// session on `SOCKET`.
 pub(crate) fn run(
-    invocation: crate::cli::Invocation,
+    invocation: crate::cli::Request<crate::cli::LauncherOption>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
-    use crate::cli::OptionId as Opt;
+    use crate::cli::LauncherOption as Opt;
     let (mut control, mut state, mut admission_file) = (None, None, None);
     let (mut operator, mut platform_host) = (None, None);
     let (mut max_places, mut idle_ms, mut lifecycle) = (None, None, None);
-    for (option, value) in invocation.options {
-        let text = value.unwrap_or_default();
-        let value = PathBuf::from(&text);
+    for option in invocation.options {
         match option {
-            Opt::Control => control = Some(value),
-            Opt::Admission => admission_file = Some(value),
-            Opt::HostState => state = Some(value),
-            Opt::OperatorListen => operator = Some(value),
-            Opt::PlatformHost => platform_host = Some(value),
-            Opt::MaxPlaces => max_places = Some(positive(&text, "--max-places")?),
-            Opt::IdleMs => idle_ms = Some(positive(&text, "--idle-ms")?),
-            Opt::Lifecycle => lifecycle = Some(parse_lifecycle(&text)?),
-            _ => return Err("unexpected launcher option".into()),
+            Opt::Control(value) => control = Some(PathBuf::from(value)),
+            Opt::Admission(value) => admission_file = Some(PathBuf::from(value)),
+            Opt::HostState(value) => state = Some(PathBuf::from(value)),
+            Opt::OperatorListen(value) => operator = Some(PathBuf::from(value)),
+            Opt::PlatformHost(value) => platform_host = Some(PathBuf::from(value)),
+            Opt::MaxPlaces(text) => max_places = Some(positive(&text, "--max-places")?),
+            Opt::IdleMs(text) => idle_ms = Some(positive(&text, "--idle-ms")?),
+            Opt::Lifecycle(text) => lifecycle = Some(parse_lifecycle(&text)?),
         }
     }
     let state_arg = state.ok_or("--state DIR is required")?;

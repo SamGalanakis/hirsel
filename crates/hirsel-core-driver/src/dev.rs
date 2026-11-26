@@ -1,5 +1,5 @@
 use crate::{
-    cli::{Invocation, OptionId},
+    cli::{DevOption as Opt, Request},
     launcher::{
         dev::{self as launcher, DevChild, Open, StoreId},
         session::{HostReply, InstallRefusal, PlaceReady},
@@ -110,7 +110,7 @@ struct Options {
 }
 
 impl Options {
-    fn read(invocation: Invocation) -> Result<Self, Error> {
+    fn read(invocation: Request<Opt>) -> Result<Self, Error> {
         let mut options = Self {
             server: fs::canonicalize(invocation.positional.as_deref().unwrap_or("."))?,
             listen: ([127, 0, 0, 1], 7700).into(),
@@ -123,44 +123,41 @@ impl Options {
             fresh: false,
             n_place: hirsel_core_ids::launch::DEFAULT_N_PLACE,
         };
-        for (id, value) in invocation.options {
-            let flag = match id {
-                OptionId::Listen => {
-                    options.listen = value.ok_or("missing listen address")?.parse()?;
+        for option in invocation.options {
+            let (flag, value) = match option {
+                Opt::Listen(value) => {
+                    options.listen = value.parse()?;
                     continue;
                 }
-                OptionId::Store => {
-                    options.store = value.map(PathBuf::from);
+                Opt::Store(value) => {
+                    options.store = Some(PathBuf::from(value));
                     continue;
                 }
-                OptionId::Fresh => {
+                Opt::Fresh => {
                     options.fresh = true;
                     continue;
                 }
-                OptionId::NPlace => {
-                    options.n_place = value.ok_or("missing n_place")?.parse()?;
+                Opt::NPlace(value) => {
+                    options.n_place = value.parse()?;
                     if options.n_place == 0 {
                         return Err("--n-place must be positive".into());
                     }
                     continue;
                 }
-                OptionId::Limit => {
+                Opt::Limit(value) => {
                     options.limit = true;
-                    "--limit"
+                    ("--limit", Some(value))
                 }
-                OptionId::Grant => {
-                    options.net |= value
-                        .as_deref()
-                        .is_some_and(|grant| grant.starts_with("Net"));
-                    "--grant"
+                Opt::Grant(value) => {
+                    options.net |= value.starts_with("Net");
+                    ("--grant", Some(value))
                 }
-                OptionId::Dir => "--dir",
-                OptionId::Backend => "--backend",
-                OptionId::Libraries => "--libraries",
-                OptionId::Runtime => "--runtime",
-                OptionId::SourceCore => "--source-core",
-                OptionId::SourceStd => "--source-std",
-                _ => return Err("unsupported dev option".into()),
+                Opt::Dir(value) => ("--dir", Some(value)),
+                Opt::Backend(value) => ("--backend", Some(value)),
+                Opt::Libraries(value) => ("--libraries", Some(value)),
+                Opt::Runtime(value) => ("--runtime", Some(value)),
+                Opt::SourceCore => ("--source-core", None),
+                Opt::SourceStd => ("--source-std", None),
             };
             options.build.push(flag.into());
             options.build.extend(value.map(OsString::from));
@@ -770,7 +767,7 @@ impl Proxy {
     }
 }
 
-pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
+pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
     let options = Options::read(invocation)?;
     if crate::resident::serving() {
         return Err("dev must run in the terminal process".into());

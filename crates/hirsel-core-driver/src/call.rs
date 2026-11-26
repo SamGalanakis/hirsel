@@ -5,7 +5,7 @@
 //! generated codec the TypeScript SDK uses. Arguments are typed before any
 //! connection is made. The specification is docs/spec/sdk.md, "Calling an
 //! entry from the terminal".
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{CallOption as Opt, Request};
 use crate::sdk::{Describe, Exported, Schema, stub_paths};
 use hirsel_core_ids::hex;
 use serde_json::{Map, Number, Value, json};
@@ -44,7 +44,7 @@ fn seconds(option: &str, text: &str) -> Result<Duration, Error> {
 }
 
 impl Options {
-    pub fn read(invocation: Invocation) -> Result<Self, Error> {
+    pub fn read(invocation: Request<Opt>) -> Result<Self, Error> {
         let server = invocation
             .positional
             .ok_or("call requires the server executable; use help call")?
@@ -58,20 +58,19 @@ impl Options {
             stream: None,
             call: invocation.arguments,
         };
-        for (id, value) in invocation.options {
-            let text = value.clone().unwrap_or_default();
-            match id {
-                OptionId::Url => options.url = Some(text),
-                OptionId::NPlace => {
+        for option in invocation.options {
+            match option {
+                Opt::Url(text) => options.url = Some(text),
+                Opt::NPlace(text) => {
                     options.n_place = text
                         .parse()
                         .map_err(|_| format!("--n-place expects BYTES, got `{text}`"))?
                 }
-                OptionId::PlaceTimeout => {
+                Opt::PlaceTimeout(text) => {
                     options.place_timeout = seconds("--place-timeout", &text)?
                 }
-                OptionId::CallTimeout => options.timeout = seconds("--timeout", &text)?,
-                OptionId::CallStream => {
+                Opt::CallTimeout(text) => options.timeout = seconds("--timeout", &text)?,
+                Opt::CallStream(text) => {
                     let bytes: [u8; 16] = hex::decode(&text)
                         .and_then(|bytes| bytes.try_into().ok())
                         .ok_or("--stream expects exactly 32 hexadecimal digits")?;
@@ -81,7 +80,6 @@ impl Options {
                         u64::from_be_bytes(n.try_into()?),
                     ));
                 }
-                _ => return Err("unsupported call option".into()),
             }
         }
         Ok(options)

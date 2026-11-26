@@ -1,5 +1,5 @@
 //! Package inspection over the check product and the native reach walk.
-use crate::cli::{Invocation, OptionId};
+use crate::cli::{CompilerOption as Opt, Request};
 use crate::{CheckProduct, reuse};
 use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_resolve::{DefinitionId, DefinitionKind};
@@ -26,46 +26,45 @@ pub(crate) struct Inspection {
 }
 
 impl Inspection {
-    pub(crate) fn read(invocation: &mut Invocation) -> Result<Self, String> {
-        use OptionId::*;
+    pub(crate) fn read(invocation: &mut Request<Opt>) -> Result<Self, String> {
+        use Opt::*;
         let mut queries = Vec::new();
         let mut transitive = false;
         let mut library = false;
         let mut module = None;
         let mut filter = None;
         let mut source_library = None;
-        for (option, value) in invocation.options.extract_if(.., |(option, _)| {
+        for option in invocation.options.extract_if(.., |option| {
             matches!(
                 option,
                 Interface
-                    | ForeignHeader
-                    | ForeignAbi
-                    | Dependents
-                    | AffectedTests
+                    | ForeignHeader(..)
+                    | ForeignAbi(..)
+                    | Dependents(..)
+                    | AffectedTests(..)
                     | Unused
                     | Transitive
                     | InspectLibrary
                     | InspectStd
                     | InspectCore
-                    | InspectModule
-                    | InspectFilter
+                    | InspectModule(..)
+                    | InspectFilter(..)
             )
         }) {
             match option {
                 Interface => queries.push(Query::Interface),
-                ForeignHeader | ForeignAbi => {
-                    let value = value.unwrap();
-                    let path = DefPath::from_full(&value)
+                ForeignHeader(ref value) | ForeignAbi(ref value) => {
+                    let path = DefPath::from_full(value)
                         .ok_or_else(|| format!("invalid foreign module path {value:?}"))?;
-                    let print = if option == ForeignAbi {
+                    let print = if matches!(option, ForeignAbi(_)) {
                         crate::foreign_header::Print::Abi
                     } else {
                         crate::foreign_header::Print::Header
                     };
                     queries.push(Query::Foreign(path, print));
                 }
-                Dependents => queries.push(Query::Dependents(value.unwrap())),
-                AffectedTests => queries.push(Query::AffectedTests(value.unwrap())),
+                Dependents(value) => queries.push(Query::Dependents(value)),
+                AffectedTests(value) => queries.push(Query::AffectedTests(value)),
                 Unused => queries.push(Query::Unused),
                 Transitive => transitive = true,
                 InspectLibrary => library = true,
@@ -75,13 +74,13 @@ impl Inspection {
                         return Err("inspect takes one library selector: --core or --std".into());
                     }
                 }
-                InspectModule => {
-                    if module.replace(value.unwrap()).is_some() {
+                InspectModule(value) => {
+                    if module.replace(value).is_some() {
                         return Err("inspect takes at most one --module".into());
                     }
                 }
-                InspectFilter => {
-                    if filter.replace(value.unwrap()).is_some() {
+                InspectFilter(value) => {
+                    if filter.replace(value).is_some() {
                         return Err("inspect takes at most one --filter".into());
                     }
                 }
@@ -93,7 +92,7 @@ impl Inspection {
             1 => queries.pop().unwrap(),
             _ => return Err("inspect takes at most one of --interface, --foreign-header, --foreign-abi, --dependents, --affected-tests or --unused".into()),
         };
-        let json = invocation.options.iter().any(|(id, _)| *id == Json);
+        let json = invocation.options.iter().any(|id| *id == Json);
         if json && !matches!(query, Query::Interface) {
             return Err("inspect --json requires --interface".into());
         }

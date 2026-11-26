@@ -3,8 +3,8 @@ fn text(law: &PackageLaw, path: &str) -> String {
     fs::read_to_string(law.path(path)).unwrap()
 }
 
-fn invocation(args: &[&str]) -> crate::cli::Invocation {
-    let crate::cli::Action::Invoke(invocation) =
+fn invocation(args: &[&str]) -> crate::cli::Request<crate::cli::AddOption> {
+    let crate::cli::Action::Invoke(crate::cli::Invocation::Add(invocation)) =
         crate::cli::parse(args.iter().map(|arg| (*arg).to_owned())).unwrap()
     else {
         panic!("expected an add invocation")
@@ -80,7 +80,10 @@ fn members_share_one_binding() {
         serde_json::json!(["hirsel.toml", "hirsel.lock", "apps/ui/hirsel.toml"])
     );
     assert_eq!(json["pending"], serde_json::json!([]));
-    assert_eq!(text(&law, "work/hirsel.toml"), declared(PACKAGE_X, "vendor/pkg.hpkg"));
+    assert_eq!(
+        text(&law, "work/hirsel.toml"),
+        declared(PACKAGE_X, "vendor/pkg.hpkg")
+    );
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
 
     let json = PackageLaw::pass(invoke(
@@ -94,7 +97,10 @@ fn members_share_one_binding() {
         json["committed"],
         serde_json::json!(["apps/api/hirsel.toml", "hirsel.lock"])
     );
-    assert_eq!(text(&law, "work/hirsel.toml"), declared(PACKAGE_X, "vendor/pkg.hpkg"));
+    assert_eq!(
+        text(&law, "work/hirsel.toml"),
+        declared(PACKAGE_X, "vendor/pkg.hpkg")
+    );
     assert_eq!(text(&law, "work/apps/api/hirsel.toml"), inherits(&api));
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
     PackageLaw::pass(law.with_store(&["fetch", "work/apps/ui", "--locked"], "cold-store"));
@@ -114,21 +120,34 @@ fn members_share_one_binding() {
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
     let (status, _, stderr) = invoke(&law, "work/apps/ui", &["../../vendor/jy.hpkg"]);
     assert_eq!(status, Some(2), "{stderr}");
-    assert!(stderr.contains("dependencies.json inherits the workspace binding"), "{stderr}");
+    assert!(
+        stderr.contains("dependencies.json inherits the workspace binding"),
+        "{stderr}"
+    );
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
 
     // Changing the shared declaration a sibling consumes needs --update.
     PackageLaw::refuse(
-        invoke(&law, "work/apps/ui", &["../../vendor/jy.hpkg", "--workspace"]),
+        invoke(
+            &law,
+            "work/apps/ui",
+            &["../../vendor/jy.hpkg", "--workspace"],
+        ),
         "the workspace binds json@1 for api@1; pass --update to change it",
     );
-    assert_eq!(text(&law, "work/hirsel.toml"), declared(PACKAGE_X, "vendor/pkg.hpkg"));
+    assert_eq!(
+        text(&law, "work/hirsel.toml"),
+        declared(PACKAGE_X, "vendor/pkg.hpkg")
+    );
     PackageLaw::pass(invoke(
         &law,
         "work/apps/ui",
         &["../../vendor/jy.hpkg", "--workspace", "--update"],
     ));
-    assert_eq!(text(&law, "work/hirsel.toml"), declared(PACKAGE_Y, "vendor/jy.hpkg"));
+    assert_eq!(
+        text(&law, "work/hirsel.toml"),
+        declared(PACKAGE_Y, "vendor/jy.hpkg")
+    );
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
     assert_eq!(text(&law, "work/apps/api/hirsel.toml"), inherits(&api));
     PackageLaw::pass(law.run(&["lock", "work/apps/api", "--locked"]));
@@ -149,7 +168,10 @@ fn members_share_one_binding() {
         "{stderr}"
     );
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), local);
-    assert_eq!(text(&law, "work/hirsel.toml"), "[workspace]\nmembers = [\"apps/ui\", \"apps/api\"]\n");
+    assert_eq!(
+        text(&law, "work/hirsel.toml"),
+        "[workspace]\nmembers = [\"apps/ui\", \"apps/api\"]\n"
+    );
     PackageLaw::pass(invoke(
         &law,
         "work/apps/ui",
@@ -171,7 +193,8 @@ fn virtual_root_declares_only() {
     let (status, _, stderr) = invoke(&law, "v", &["vendor/pkg.hpkg"]);
     assert_eq!(status, Some(2), "{stderr}");
     assert!(
-        stderr.contains("no package manifest here; pass --workspace to declare it for the workspace"),
+        stderr
+            .contains("no package manifest here; pass --workspace to declare it for the workspace"),
         "{stderr}"
     );
     PackageLaw::pass(invoke(&law, "v", &["vendor/pkg.hpkg", "--workspace"]));
@@ -220,7 +243,10 @@ fn partial_completion() {
     })
     .unwrap();
     assert_eq!(status, 1);
-    assert_eq!(text(&law, "work/hirsel.toml"), declared(PACKAGE_X, "vendor/pkg.hpkg"));
+    assert_eq!(
+        text(&law, "work/hirsel.toml"),
+        declared(PACKAGE_X, "vendor/pkg.hpkg")
+    );
     assert_eq!(text(&law, "work/apps/api/hirsel.toml"), edited);
     PackageLaw::pass(law.run(&["lock", "work/apps/api", "--locked"]));
     let json = PackageLaw::pass(invoke(
@@ -253,7 +279,10 @@ fn partial_completion() {
         .output()
         .unwrap();
     assert_eq!(crash.status.code(), Some(44), "{crash:?}");
-    assert_eq!(text(&law, "work/hirsel.toml"), declared(PACKAGE_X, "vendor/pkg.hpkg"));
+    assert_eq!(
+        text(&law, "work/hirsel.toml"),
+        declared(PACKAGE_X, "vendor/pkg.hpkg")
+    );
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), ui);
     PackageLaw::pass(law.run(&["lock", "work/apps/ui"]));
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
@@ -277,15 +306,23 @@ fn partial_completion() {
     two_members(&law);
     PackageLaw::pass(invoke(&law, "work/apps/api", &["../../vendor/pkg.hpkg"]));
     PackageLaw::pass(law.run(&["lock", "work/apps/api", "--locked"]));
-    let files = ["work/hirsel.toml", "work/apps/ui/hirsel.toml", "work/apps/api/hirsel.toml", "work/hirsel.lock"]
-        .map(|path| (path, text(&law, path)));
+    let files = [
+        "work/hirsel.toml",
+        "work/apps/ui/hirsel.toml",
+        "work/apps/api/hirsel.toml",
+        "work/hirsel.lock",
+    ]
+    .map(|path| (path, text(&law, path)));
     let (status, _, stderr) = invoke(
         &law,
         "work/apps/ui",
         &["../../vendor/jy.hpkg", "--workspace"],
     );
     assert_eq!(status, Some(2), "{stderr}");
-    assert!(stderr.contains("json@1 is bound to more than one root"), "{stderr}");
+    assert!(
+        stderr.contains("json@1 is bound to more than one root"),
+        "{stderr}"
+    );
     for (path, bytes) in files {
         assert_eq!(text(&law, path), bytes, "{path}");
     }

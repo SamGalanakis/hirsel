@@ -162,14 +162,20 @@ const PEER_ALERT: u64 = 4
 
 const OTHER_CLOSE: u64 = 5
 
+fn vopr_close_class(c: dtls.Close) -> (u64, u8) {
+    match c {
+        Timeout => (TIMEOUT, 0),
+        SentAlert(code) => (SENT_ALERT, code),
+        PeerAlert(code) => (PEER_ALERT, code),
+        _ => (OTHER_CLOSE, 0),
+    }
+}
+
 fn vopr_class(e: dtls.Endpoint) -> (u64, u8) {
     match dtls.state(e) {
         Handshaking => (OPEN, 0),
         Connected => (CONNECTED, 0),
-        Closed(Timeout) => (TIMEOUT, 0),
-        Closed(SentAlert(code)) => (SENT_ALERT, code),
-        Closed(PeerAlert(code)) => (PEER_ALERT, code),
-        Closed(_) => (OTHER_CLOSE, 0),
+        Closed(c) => vopr_close_class(c),
     }
 }
 
@@ -309,18 +315,33 @@ fn vopr_inject(mut end: End, now: u64, d: Bytes) {
     end.e = Some(take e)
 }
 
+fn vopr_same_discards(a: dtls.Discards, b: dtls.Discards) -> bool {
+    a.malformed == b.malformed && a.replayed == b.replayed && a.tampered == b.tampered && a.stale_epoch == b.stale_epoch && a.overflow == b.overflow && a.early_alert == b.early_alert
+}
+
 fn vopr_inject_endpoint(mut e: dtls.Endpoint, mut end: End, now: u64, d: Bytes) {
     let strict = end.strict
     let before = vopr_class(e)
+    let discards_before = dtls.discards(e)
     let mut data: Bytes = list.new()
     let got = dtls.receive(mut e, now, end.r, d, mut data)
     if !strict {
         return
     }
     end.out.strict_injections += 1
-    match got {
-        Ok(0) => (),
-        _ => vopr_violate(mut end, "an injected datagram past ChangeCipherSpec was not a quiet discard"),
+    // Past the peer's ChangeCipherSpec an open endpoint discards every injected
+    // datagram quietly (DTLS-4 Replay, DTLS-5 Final flights, DTLS-6). In the early
+    // arm an honest authenticated peer alert or handshake deadline may already have
+    // closed this endpoint before the injection; per DTLS-3 every later call must
+    // then keep answering Closed(c) with the same cause, no data and no discards.
+    let already_closed = before.0 != OPEN && before.0 != CONNECTED
+    let quiet = match got {
+        Ok(0) => !already_closed && list.len(data) == 0,
+        Error(Closed(c)) => already_closed && vopr_close_class(c) == before && list.len(data) == 0 && vopr_same_discards(discards_before, dtls.discards(e)),
+        _ => false,
+    }
+    if !quiet {
+        vopr_violate(mut end, "an injected datagram past ChangeCipherSpec was not a quiet discard")
     }
     if vopr_class(e) != before {
         vopr_violate(mut end, "an injected datagram past ChangeCipherSpec changed the state")
@@ -833,6 +854,43 @@ fn vopr_case(take given: std.sim.world.ScriptRun) -> (bool, std.sim.world.Feedba
     (string.byte_len(why) == 0, take trace)
 }
 
+// Seeds replayed on every default run of `vopr_attacker_never_interferes`
+// (regression corpus from nightly VOPR campaigns).
+const VOPR_ATTACK_REPLAY_SEEDS: Inline[u64, 1] =[129823]
+
+fn vopr_replay_seed(tasks: Tasks, seed: u64) -> Result[(), ()] waits {
+    let script = vopr_script(seed * VOPR_STRIDE)
+    let late = vopr_late_verdict(tasks, clone(script))
+    if string.byte_len(late) != 0 {
+        fail(clone(late))
+    }
+    let (early, _) = vopr_attack_verdict(tasks, script)
+    if string.byte_len(early) != 0 {
+        fail(clone(early))
+    }
+    Ok(())
+}
+
+fn vopr_attacker_seed(tasks: Tasks, seed: u64) -> Result[(), ()] waits {
+    let late = vopr_late_verdict(tasks, vopr_script(seed * VOPR_STRIDE))
+    if string.byte_len(late) != 0 {
+        fail(clone(late))
+    }
+    let cfg = std.sim.world.CampaignConfig(seed: seed * VOPR_STRIDE, cases: VOPR_CASES, providers: VOPR_NET, max_draws: VOPR_DRAWS, max_features: 4096, case_steps: 1099511627776, case_bytes: 46137344)
+    let result = std.sim.world.campaign(tasks, cfg, vopr_script, vopr_case)
+    let std.sim.world.CampaignResult(failure: take failure, ..) = take result
+    let Some(take hit) = take failure else {
+        return Ok(())
+    }
+    let (why, _) = vopr_attack_verdict(tasks, hit.script)
+    let mut message: String = clone(why)
+    string.push(mut message, " at campaign case ")
+    string.push_u64(mut message, hit.index)
+    string.push(mut message, ": ")
+    std.sim.world.show_script(hit.script, mut message)
+    fail(take message)
+}
+
 /// bug: an injected copy of an observed datagram with one field mutated faults an end or
 /// changes the honest end: a cookie ClientHello with message_seq 0xFFFF admitted and
 /// flight 4's numbering overflowing u16 (attack 2434 F1); an epoch-0 handshake record acted
@@ -856,22 +914,14 @@ fn vopr_case(take given: std.sim.world.ScriptRun) -> (bool, std.sim.world.Feedba
 /// for that injection kind and datagram type (steering rounds, dtls-campaign-steer-2532).
 @test
 fn vopr_attacker_never_interferes(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {
-    let seed = vopr_seed(seed_grant, 4)
-    let late = vopr_late_verdict(tasks, vopr_script(seed * VOPR_STRIDE))
-    if string.byte_len(late) != 0 {
-        fail(clone(late))
+    match std.sim.world.test_seed(seed_grant) {
+        Some(active) => vopr_attacker_seed(tasks, active),
+        None => {
+            vopr_attacker_seed(tasks, 4)?
+            for seed in VOPR_ATTACK_REPLAY_SEEDS {
+                vopr_replay_seed(tasks, seed)?
+            }
+            Ok(())
+        },
     }
-    let cfg = std.sim.world.CampaignConfig(seed: seed * VOPR_STRIDE, cases: VOPR_CASES, providers: VOPR_NET, max_draws: VOPR_DRAWS, max_features: 4096, case_steps: 1099511627776, case_bytes: 46137344)
-    let result = std.sim.world.campaign(tasks, cfg, vopr_script, vopr_case)
-    let std.sim.world.CampaignResult(failure: take failure, ..) = take result
-    let Some(take hit) = take failure else {
-        return Ok(())
-    }
-    let (why, _) = vopr_attack_verdict(tasks, hit.script)
-    let mut message: String = clone(why)
-    string.push(mut message, " at campaign case ")
-    string.push_u64(mut message, hit.index)
-    string.push(mut message, ": ")
-    std.sim.world.show_script(hit.script, mut message)
-    fail(take message)
 }

@@ -63,6 +63,13 @@ fn lld(dir: &Path, objects: &[&[u8]]) -> Vec<u8> {
 
 /// On macOS: the image's signature verifies and it exits with `status`.
 fn runs(dir: &Path, name: &str, image: &[u8], status: i32) {
+    if let Some(output) = std::env::var_os("HIRSEL_EXPORT_DARWIN_IMAGES") {
+        let case = std::thread::current();
+        let case = case.name().unwrap().rsplit("::").next().unwrap();
+        let output = PathBuf::from(output).join(case);
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join(format!("{name}.{status}.macho")), image).unwrap();
+    }
     if !crate::host::RUNS_DARWIN_IMAGES {
         return;
     }
@@ -297,7 +304,7 @@ fn an_edited_weak_copy_under_a_strong_definition_falls_back() {
                 "{name}: patched a weak copy lld did not keep"
             );
             linker.remember(frame, &objects, &want).unwrap();
-            runs(dir, name, &want, 1);
+            runs(dir, &format!("{name}-{n}"), &want, 1);
         }
     }
 }

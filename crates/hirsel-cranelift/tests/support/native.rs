@@ -641,7 +641,7 @@ fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool)
         fs::write(scratch.path().join(name), text).unwrap();
     }
     let mut compiler = Command::new(c_compiler());
-    if memcheck && !EMULATED {
+    if memcheck && MEMCHECK_SUPPORTED {
         // The declared Memcheck tree carries its matching loader symbols.
         let runtime = PathBuf::from(
             std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"),
@@ -652,24 +652,18 @@ fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool)
             .args(["-Xlinker", "-rpath", "-Xlinker"])
             .arg(&runtime);
     }
+    let libraries: &[&str] = match NATIVE {
+        hirsel_core_layout::Target::X86_64Linux | hirsel_core_layout::Target::Aarch64Linux =>
+            &["-lm", "-ldl", "-lpthread", "-lrt", "-lutil"],
+        hirsel_core_layout::Target::Aarch64Darwin =>
+            &["-framework", "Security", "-framework", "CoreFoundation"],
+    };
     let link = compiler
         .current_dir(scratch.path())
-        .args(["-fPIC", "caller.c", "input.o", "-I"])
-        .arg(scratch.path())
-        .arg(archive)
-        .args([
-            "-lm",
-            "-ldl",
-            "-lpthread",
-            "-lrt",
-            "-lutil",
-            "-pie",
-            "-o",
-            "run",
-        ])
+        .args(["-fPIC", "caller.c", "input.o", "-I"]).arg(scratch.path())
+        .arg(archive).args(libraries).args(["-pie", "-o", "run"])
         .args(c_boundary_poison::wraps(source).iter().map(|symbol| format!("-Wl,--wrap={symbol}")))
-        .output()
-        .unwrap();
+        .output().unwrap();
     assert!(
         link.status.success(),
         "{}",
@@ -678,11 +672,11 @@ fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool)
     let run = scratch.path().join("run");
     let image = fs::read(&run).unwrap();
     let image = cranelift_object::object::File::parse(&*image).unwrap();
-    assert_eq!(
-        image.kind(),
-        cranelift_object::object::ObjectKind::Dynamic,
-        "site oracle must execute PIE"
-    );
+    assert!(match image.flags() {
+        cranelift_object::object::FileFlags::MachO { flags } =>
+            flags & cranelift_object::object::macho::MH_PIE == cranelift_object::object::macho::MH_PIE,
+        _ => image.kind() == cranelift_object::object::ObjectKind::Dynamic,
+    }, "site oracle must execute PIE");
     run
 }
 
@@ -706,7 +700,7 @@ fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> 
     actual
 }
 fn native_command(binary: &std::path::Path, memcheck: bool) -> Command {
-    if memcheck && !EMULATED {
+    if memcheck && MEMCHECK_SUPPORTED {
         let mut command =
             Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
         command
@@ -718,6 +712,8 @@ fn native_command(binary: &std::path::Path, memcheck: bool) -> Command {
             ])
             .arg(binary);
         command
+    } else if RUNS_MACHO {
+        Command::new(binary)
     } else {
         // Native fixtures must turn a stuck runtime/child into an ordinary
         // red test.  Without a bound, Buck retries a signal-terminated test
@@ -849,15 +845,7 @@ fn input_path(variable: &str) -> PathBuf {
     };
     fs::canonicalize(path).unwrap()
 }
-/// AArch64 Linux images run under qemu and its sysroot; x86-64 ones natively, Memcheck included.
-const EMULATED: bool = match NATIVE { hirsel_core_layout::Target::X86_64Linux => false, hirsel_core_layout::Target::Aarch64Linux => true, hirsel_core_layout::Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac") };
-fn c_compiler() -> PathBuf {
-    if EMULATED {
-        std::env::var_os("HIRSEL_AARCH64_CC").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_ARM").join("bin/aarch64-none-linux-gnu-gcc"))
-    } else {
-        PathBuf::from("cc")
-    }
-}
+include!("native_host.rs");
 
 fn check_c_struct_calls() {
     let source = r#"core v1

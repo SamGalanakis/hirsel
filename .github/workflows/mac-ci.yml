@@ -1,0 +1,241 @@
+name: Mac CI
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      control:
+        description: Manual negative control
+        type: choice
+        default: none
+        options: [none, linux-platform, unexplained-skip]
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan Mac CI
+    runs-on: ubuntu-24.04
+    outputs:
+      control: ${{ steps.plan.outputs.control }}
+      cross_reason: ${{ steps.plan.outputs.cross_reason }}
+      mac_reason: ${{ steps.plan.outputs.mac_reason }}
+      nightly_cross_reason: ${{ steps.plan.outputs.nightly_reason }}
+      nightly_native_reason: ${{ steps.plan.outputs.nightly_reason }}
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ github.event_name == 'schedule' }}
+        with:
+          persist-credentials: false
+      - name: Record planned exclusions
+        id: plan
+        env:
+          CONTROL: ${{ inputs.control || 'none' }}
+        run: |
+          {
+            echo "control=$CONTROL"
+            case "$CONTROL" in
+              linux-platform)
+                echo 'cross_reason=The platform negative control needs no image artifacts.'
+                ;;
+              unexplained-skip)
+                echo 'mac_reason=The aggregator negative control skips the Linux image build.'
+                ;;
+            esac
+            if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+              echo 'cross_reason=Per-push checks are scheduled on pushes to main.'
+              echo 'mac_reason=Per-push checks are scheduled on pushes to main.'
+              dist_help=$(tools/toolchain-dist/build --help)
+              if ! grep -Eq -- '(^|[[:space:]])--host([=[:space:]]|$)' <<< "$dist_help"; then
+                echo 'nightly_reason=Waiting for R4: toolchain-dist/build --host aarch64-apple-darwin.'
+              fi
+            else
+              echo 'nightly_reason=Cross/native comparison runs only on the nightly schedule.'
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+  cross:
+    name: Cross-build Linux artifacts
+    needs: plan
+    if: ${{ needs.plan.outputs.cross_reason == '' && needs.plan.outputs.control != 'unexplained-skip' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned build tools
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
+          python3 tools/buck2/prepare.py --local
+      - name: Cross-build the Mach-O law images
+        run: python3 tools/ci/mac_images.py export "$RUNNER_TEMP/mac-artifacts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-mac-images
+          path: ${{ runner.temp }}/mac-artifacts
+          if-no-files-found: error
+          retention-days: 3
+
+  mac:
+    name: Run Mac laws
+    needs: [plan, cross]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mac_reason == '' }}
+    runs-on: ${{ needs.plan.outputs.control == 'linux-platform' && 'ubuntu-24.04' || 'macos-26' }}
+    timeout-minutes: 30
+    outputs:
+      platform: ${{ steps.platform.outcome }}
+      download: ${{ steps.download.outcome }}
+      digests: ${{ steps.digests.outcome }}
+      keychain: ${{ steps.keychain.outcome }}
+      images: ${{ steps.images.outcome }}
+      images_failures: ${{ steps.images.outputs.failures }}
+      build: ${{ steps.build.outcome }}
+      laws: ${{ steps.laws.outcome }}
+      laws_failures: ${{ steps.laws.outputs.failures }}
+      hygiene: ${{ steps.hygiene.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Assert arm64 macOS 26
+        id: platform
+        run: tools/ci/mac_assert.sh
+      - uses: actions/download-artifact@v4
+        id: download
+        if: ${{ needs.cross.result == 'success' }}
+        with:
+          name: linux-mac-images
+          path: ${{ runner.temp }}/mac-artifacts
+      - name: Verify Linux-image digests
+        id: digests
+        if: ${{ needs.cross.result == 'success' }}
+        run: tools/ci/mac_scrub.sh python3 tools/ci/mac_images.py verify "$RUNNER_TEMP/mac-artifacts"
+      - name: Bootstrap a throwaway keychain
+        id: keychain
+        run: tools/ci/mac_keychain.sh
+      - name: Run the Linux-built Mach-O laws with the SDK environment scrubbed
+        id: images
+        if: ${{ needs.cross.result == 'success' }}
+        run: tools/ci/mac_scrub.sh python3 tools/ci/mac_images.py run "$RUNNER_TEMP/mac-artifacts"
+      - name: Build the host test binaries and independent C compiler fixture
+        id: build
+        if: ${{ !cancelled() && steps.platform.outcome == 'success' && steps.digests.outcome == 'success' }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '26.0'
+          RUSTFLAGS: -C link-arg=-Wl,-rpath,${{ github.workspace }}/tools/buck2/toolchains/llvm-files/lib
+        run: |
+          rustup toolchain install --no-self-update
+          python3 tools/buck2/bootstrap_llvm.py
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          clang=$(xcrun --sdk macosx --find clang)
+          printf '#!/bin/bash\nexec %q -isysroot %q "$@"\n' "$clang" "$sdk" > "$RUNNER_TEMP/fixture-cc"
+          chmod +x "$RUNNER_TEMP/fixture-cc"
+          python3 tools/ci/mac_native.py build "$RUNNER_TEMP/native-tests.json"
+      - name: Run the native Darwin backend laws
+        id: laws
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          CC: ${{ runner.temp }}/fixture-cc
+          LLVM_SYS_231_PREFIX: ${{ github.workspace }}/tools/buck2/toolchains/llvm-files
+          HIRSEL_CORE_RT_ARCHIVE: ${{ runner.temp }}/mac-artifacts/libcore_cranelift_fixture.a
+          HIRSEL_CORE_RUNTIME_ARCHIVE: ${{ runner.temp }}/mac-artifacts/libcore_cranelift_fixture.a
+        run: tools/ci/mac_scrub.sh python3 tools/ci/mac_native.py run "$RUNNER_TEMP/native-tests.json"
+      - name: Remove temporary credentials and check tracked files
+        id: hygiene
+        if: ${{ always() && steps.platform.outcome == 'success' }}
+        run: |
+          keychain="$RUNNER_TEMP/hirsel-ci.keychain-db"
+          if [[ -f "$keychain" ]]; then security delete-keychain "$keychain"; fi
+          git diff --exit-code
+
+  nightly_cross:
+    name: Build the nightly corpus on Linux
+    needs: plan
+    if: ${{ github.event_name == 'schedule' && needs.plan.outputs.nightly_cross_reason == '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the Linux toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
+          tools/toolchain-dist/build --local --num-threads 4 --output "$RUNNER_TEMP/prefix"
+      - name: Build the Linux-to-Darwin corpus
+        run: tools/ci/side.sh "$RUNNER_TEMP/prefix/hirsel" "$RUNNER_TEMP/linux-corpus"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-nightly-corpus
+          path: ${{ runner.temp }}/linux-corpus
+          if-no-files-found: error
+          retention-days: 3
+
+  nightly_native:
+    name: Compare the nightly Mac corpus with Linux
+    needs: [plan, nightly_cross]
+    if: ${{ github.event_name == 'schedule' && needs.plan.outputs.nightly_native_reason == '' }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Assert arm64 macOS 26
+        run: tools/ci/mac_assert.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-nightly-corpus
+          path: ${{ runner.temp }}/linux-corpus
+      - name: Build the native toolchain
+        run: tools/toolchain-dist/build --host aarch64-apple-darwin --output "$RUNNER_TEMP/prefix"
+      - name: Compare cross-built and native Mach-O files
+        run: |
+          tools/ci/mac_scrub.sh tools/ci/side.sh "$RUNNER_TEMP/prefix/hirsel" "$RUNNER_TEMP/mac-corpus"
+          python3 tools/ci/compare.py "$RUNNER_TEMP/linux-corpus" "$RUNNER_TEMP/mac-corpus"
+
+  aggregate:
+    name: Strict Mac CI result
+    needs: [plan, cross, mac, nightly_cross, nightly_native]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    concurrency:
+      group: hirsel-issue-reporter
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require a result or a planned exclusion for every job
+        id: aggregate
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 tools/ci/mac_aggregate.py "$RUNNER_TEMP/mac-reds.json"
+      - name: File or update failure issues
+        if: ${{ failure() && steps.aggregate.outcome == 'failure' && (github.event_name != 'workflow_dispatch' || inputs.control == 'none') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - "$RUNNER_TEMP/mac-reds.json" <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          failures = json.loads(Path(sys.argv[1]).read_text())
+          status = 0
+          for key, detail in failures.items():
+              result = subprocess.run([sys.executable, "tools/ci/report_failure.py", key, detail])
+              status |= result.returncode
+          raise SystemExit(status)
+          PY

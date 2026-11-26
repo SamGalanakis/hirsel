@@ -32,11 +32,37 @@ fn run(command: &mut Command) {
     assert!(output.status.success(), "{command:?}: {output:?}");
 }
 
+fn executable_targets() -> &'static [Target] {
+    if std::env::consts::OS == "macos" {
+        &[Target::Aarch64Darwin]
+    } else {
+        &[Target::X86_64Linux, Target::Aarch64Linux]
+    }
+}
+
+fn c_probe(target: Target, llvm_prefix: &std::path::Path) -> std::result::Result<Command, String> {
+    Ok(match target {
+        Target::X86_64Linux => Command::new(llvm_prefix.join("bin/clang")),
+        Target::Aarch64Linux => Command::new(native_input("HIRSEL_AARCH64_CC")?),
+        Target::Aarch64Darwin => {
+            Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+        }
+    })
+}
+
+fn run_probe(target: Target, binary: PathBuf) -> std::result::Result<(), String> {
+    match target {
+        Target::X86_64Linux | Target::Aarch64Darwin => run(&mut Command::new(binary)),
+        Target::Aarch64Linux => run(Command::new(native_input("HIRSEL_QEMU_AARCH64")?)
+            .arg("-L")
+            .arg(native_input("HIRSEL_AARCH64_SYSROOT")?)
+            .arg(binary)),
+    }
+    Ok(())
+}
+
 #[test]
 fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::Result<(), String> {
-    let arm_cc = native_input("HIRSEL_AARCH64_CC")?;
-    let qemu = native_input("HIRSEL_QEMU_AARCH64")?;
-    let sysroot = native_input("HIRSEL_AARCH64_SYSROOT")?;
     let llvm_prefix = native_input("LLVM_SYS_231_PREFIX")?;
     use Scalar::*;
     let shapes: &[&[Scalar]] = &[
@@ -70,7 +96,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
     let failures = failure::Failures::new(&module);
     let scratch = tempfile::tempdir().unwrap();
     let dir = scratch.path();
-    for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+    for &target in executable_targets() {
         let mut text = sink::TextSink::default();
         let mut items = Items::new(&module);
         let mut c =
@@ -227,24 +253,12 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
             }
             for object in objects {
                 std::fs::write(dir.join("probe.o"), object).unwrap();
-                let compiler = match target {
-                    Target::X86_64Linux => llvm_prefix.join("bin/clang"),
-                    Target::Aarch64Linux => arm_cc.clone(),
-                    Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
-                };
-                run(Command::new(compiler)
+                run(c_probe(target, &llvm_prefix)?
                     .arg(dir.join("probe.c"))
                     .arg(dir.join("probe.o"))
                     .arg("-o")
                     .arg(dir.join("probe")));
-                match target {
-                    Target::X86_64Linux => run(&mut Command::new(dir.join("probe"))),
-                    Target::Aarch64Linux => run(Command::new(&qemu)
-                        .arg("-L")
-                        .arg(&sysroot)
-                        .arg(dir.join("probe"))),
-                    Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
-                }
+                run_probe(target, dir.join("probe"))?;
             }
         }
     }
@@ -254,9 +268,6 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
 #[test]
 fn checked_arithmetic_preserves_status_context_and_cause_copies() -> std::result::Result<(), String>
 {
-    let arm_cc = native_input("HIRSEL_AARCH64_CC")?;
-    let qemu = native_input("HIRSEL_QEMU_AARCH64")?;
-    let sysroot = native_input("HIRSEL_AARCH64_SYSROOT")?;
     let llvm_prefix = native_input("LLVM_SYS_231_PREFIX")?;
     let module =
         hirsel_core_ir::text::parse(include_str!("../../../hirsel-core-ir/samples/arith.core"))
@@ -299,9 +310,8 @@ int main(void) {{
     let scratch = tempfile::tempdir().unwrap();
     let dir = scratch.path();
     std::fs::write(dir.join("probe.c"), c).unwrap();
-    let prefix = llvm_prefix;
     let include = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include");
-    for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+    for &target in executable_targets() {
         for speed in [false, true] {
             for facts in [false, true] {
                 let ir = emit_ir_target_with_facts(
@@ -320,12 +330,7 @@ int main(void) {{
                 .unwrap();
                 let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
                 std::fs::write(dir.join("probe.o"), object).unwrap();
-                let compiler = match target {
-                    Target::X86_64Linux => prefix.join("bin/clang"),
-                    Target::Aarch64Linux => arm_cc.clone(),
-                    Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
-                };
-                run(Command::new(compiler)
+                run(c_probe(target, &llvm_prefix)?
                     .arg("-O0")
                     .arg("-I")
                     .arg(&include)
@@ -334,14 +339,7 @@ int main(void) {{
                     .arg("-lm")
                     .arg("-o")
                     .arg(dir.join("probe")));
-                match target {
-                    Target::X86_64Linux => run(&mut Command::new(dir.join("probe"))),
-                    Target::Aarch64Linux => run(Command::new(&qemu)
-                        .arg("-L")
-                        .arg(&sysroot)
-                        .arg(dir.join("probe"))),
-                    Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
-                }
+                run_probe(target, dir.join("probe"))?;
             }
         }
     }

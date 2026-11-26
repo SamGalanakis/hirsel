@@ -1,5 +1,5 @@
 //! CoreIR native conformance through an independently compiled C caller.
-const NATIVE: hirsel_core_layout::Target = hirsel_core_layout::Target::X86_64Linux;
+include!("support/native_host_target.rs");
 hirsel_guard::install!();
 include!("support/native.rs");
 include!("support/poison.rs");

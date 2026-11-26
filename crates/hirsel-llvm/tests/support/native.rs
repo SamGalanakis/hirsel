@@ -133,7 +133,11 @@ fn execute_object(
         configuration,
         optimization,
         object,
-        Target::X86_64Linux,
+        if std::env::consts::OS == "macos" {
+            Target::Aarch64Darwin
+        } else {
+            Target::X86_64Linux
+        },
     )
 }
 
@@ -387,23 +391,37 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         compiler.arg(format!("-Wl,--wrap={symbol}"));
     }
     output(
-        link_runtime(compiler.arg(dir.join("test.c")).arg(dir.join("core.o")))
+        link_runtime(compiler.arg(dir.join("test.c")).arg(dir.join("core.o")), target)
             .arg("-o")
             .arg(dir.join("test")),
     );
     {
-        use object::{Object as _, ObjectSymbol as _};
+        use object::{FileFlags, Object as _, ObjectSymbol as _};
         let image = std::fs::read(dir.join("test")).unwrap();
         let file = object::File::parse(image.as_slice()).unwrap();
-        assert_eq!(file.kind(), object::ObjectKind::Dynamic);
+        match target {
+            Target::Aarch64Darwin => assert!(matches!(
+                file.flags(),
+                FileFlags::MachO { flags } if flags & object::macho::MH_PIE == object::macho::MH_PIE
+            )),
+            Target::X86_64Linux | Target::Aarch64Linux => {
+                assert_eq!(file.kind(), object::ObjectKind::Dynamic)
+            }
+        }
         for symbol in file
             .symbols()
-            .filter(|s| s.name().is_ok_and(|n| n.starts_with("hirsel_core_site_")))
+            .filter(|s| s.name().is_ok_and(|n| {
+                n.strip_prefix(target.symbol_prefix())
+                    .is_some_and(|name| name.starts_with("hirsel_core_site_"))
+            }))
         {
             assert_eq!(symbol.section(), object::SymbolSection::Absolute);
-            assert!(
-                matches!(symbol.flags(), object::SymbolFlags::Elf { st_other, .. } if st_other.0 & 3 == object::elf::STV_HIDDEN.0)
-            );
+            match target {
+                Target::X86_64Linux | Target::Aarch64Linux => assert!(
+                    matches!(symbol.flags(), object::SymbolFlags::Elf { st_other, .. } if st_other.0 & 3 == object::elf::STV_HIDDEN.0)
+                ),
+                Target::Aarch64Darwin => assert_ne!(symbol.scope(), object::SymbolScope::Dynamic),
+            }
         }
     }
     let mut executable = c_executable(target, memcheck, &dir.join("test"));
@@ -873,13 +891,12 @@ fn c_linker(target: Target, memcheck: bool) -> Command {
             command
         }
         Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
-        Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
+        Target::Aarch64Darwin => Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into())),
     };
     let memcheck_loader = memcheck
         && match target {
             Target::X86_64Linux => true,
-            Target::Aarch64Linux => false,
-            Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
+            Target::Aarch64Linux | Target::Aarch64Darwin => false,
         };
     if memcheck_loader {
         // The pool's system loader is stripped; use the declared symbol-bearing
@@ -894,21 +911,30 @@ fn c_linker(target: Target, memcheck: bool) -> Command {
             .arg(&runtime);
     }
     compiler
-        .args(["-std=c11", "-O0", "-fPIC", "-pie", "-Wl,-z,text", "-I"])
+        .args(["-std=c11", "-O0", "-fPIC", "-pie"]);
+    match target {
+        Target::X86_64Linux | Target::Aarch64Linux => { compiler.arg("-Wl,-z,text"); }
+        Target::Aarch64Darwin => {}
+    }
+    compiler.arg("-I")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"));
     compiler
 }
 /// Ends a link line: the core runtime archive and the system libraries, after
 /// the objects that reference them.
-fn link_runtime(compiler: &mut Command) -> &mut Command {
+fn link_runtime(compiler: &mut Command, target: Target) -> &mut Command {
     let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(
             std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("CoreIR native runtime test input"),
         );
-    compiler
-        .arg(runtime)
-        .args(["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"])
+    compiler.arg(runtime);
+    match target {
+        Target::X86_64Linux | Target::Aarch64Linux => {
+            compiler.args(["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"])
+        }
+        Target::Aarch64Darwin => compiler.args(["-framework", "Security", "-framework", "CoreFoundation"]),
+    }
 }
 /// The command that runs `binary` on `target`.
 fn c_executable(target: Target, memcheck: bool, binary: &std::path::Path) -> Command {
@@ -926,7 +952,7 @@ fn c_executable(target: Target, memcheck: bool, binary: &std::path::Path) -> Com
                 .arg(binary);
             command
         }
-        Target::X86_64Linux => Command::new(binary),
+        Target::X86_64Linux | Target::Aarch64Darwin => Command::new(binary),
         Target::Aarch64Linux => {
             let mut command = Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap());
             command
@@ -935,7 +961,6 @@ fn c_executable(target: Target, memcheck: bool, binary: &std::path::Path) -> Com
                 .arg(binary);
             command
         }
-        Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
     }
 }
 

@@ -218,9 +218,12 @@ fn check_c_boundary_poison(target: Target, seed: u64) {
             compiler.arg(format!("-Wl,--wrap={symbol}"));
         }
         output(
-            link_runtime(compiler.arg(dir.join("test.c")).arg(dir.join("core.o")))
-                .arg("-o")
-                .arg(dir.join("test")),
+            link_runtime(
+                compiler.arg(dir.join("test.c")).arg(dir.join("core.o")),
+                target,
+            )
+            .arg("-o")
+            .arg(dir.join("test")),
         );
         let run = c_executable(target, false, &dir.join("test"))
             .output()

@@ -163,7 +163,7 @@ unsafe fn derive(
         if steps != 0 && !crate::steps::take_many(context, steps, site) {
             return crate::provider::CANCELLED;
         }
-        let child_size = SecretGrant::logical_size(&child.send, len).unwrap();
+        let child_size = SecretGrant::logical_size(child.send(), len).unwrap();
         let payer = (*context).payer();
         let mut charge = match admit_size(payer, child_size.checked_add(working)) {
             Ok(charge) => charge,

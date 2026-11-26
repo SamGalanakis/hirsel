@@ -626,7 +626,7 @@ pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
 /// current limit; a refusal answers error tag 2 (`provide.secret`).
 pub(crate) unsafe fn designate(context: *mut Context, secret: Secret) -> Outcome {
     unsafe {
-        let charge = match admit((*context).payer(), &secret.policy.send, 0) {
+        let charge = match admit((*context).payer(), secret.policy.send(), 0) {
             Ok(charge) => charge,
             Err(error) => return error,
         };
@@ -724,7 +724,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
             return INVALID;
         };
         let bytes = crate::tls::bytes(&*source);
-        let charge = match admit((*context).payer(), &policy.send, bytes.len() as u64) {
+        let charge = match admit((*context).payer(), policy.send(), bytes.len() as u64) {
             Ok(charge) => charge,
             Err(error) => return error,
         };
@@ -754,7 +754,7 @@ pub unsafe extern "C" fn hirsel_core_secret_narrow(
         let Some(policy) = secret.policy.intersect(&requested) else {
             return INVALID;
         };
-        let charge = match admit((*context).payer(), &policy.send, 0) {
+        let charge = match admit((*context).payer(), policy.send(), 0) {
             Ok(charge) => charge,
             Err(error) => return error,
         };

@@ -3165,7 +3165,7 @@ impl Machine<'_> {
                 else {
                     return Some(Err(Stop::Cause("Fail")));
                 };
-                let size = SecretGrant::logical_size(&secret.policy.send, 0);
+                let size = SecretGrant::logical_size(secret.policy.send(), 0);
                 let charge = size.unwrap_or(u64::MAX);
                 let payer = t.limits.last().unwrap();
                 if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
@@ -4237,7 +4237,7 @@ impl Machine<'_> {
             };
             if !secret
                 .policy
-                .send
+                .send()
                 .iter()
                 .any(|pattern| pattern.covers(name))
             {

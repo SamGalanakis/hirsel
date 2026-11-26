@@ -158,11 +158,14 @@ fn sframe_import_policy_grammar() {
         ("sframe_import", None),
     ] {
         let parsed = SecretPolicy::parse(text);
-        assert_eq!(parsed.as_ref().and_then(|p| p.sframe), want, "{text}");
+        assert_eq!(
+            parsed.as_ref().and_then(SecretPolicy::import),
+            want.map(ImportUse::Sframe),
+            "{text}"
+        );
         assert_eq!(parsed.is_some(), want.is_some(), "{text}");
         if let Some(policy) = parsed {
             assert_eq!(policy.text(), text);
-            assert_eq!(policy.import(), Some(ImportUse::Sframe(want.unwrap())));
             assert_eq!(policy.intersect(&policy).as_ref(), Some(&policy));
             assert!(policy.within(&policy));
             assert!(SecretGrant::new("key", "env:K", text).is_some());

@@ -995,7 +995,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             if !resolved.iter().all(|secret| {
                 secret
                     .policy
-                    .send
+                    .send()
                     .iter()
                     .any(|pattern| pattern.covers(name))
             }) {
@@ -1055,7 +1055,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             },
             designations: resolved
                 .iter()
-                .map(|secret| (secret.origin, secret.policy.send.clone()))
+                .map(|secret| (secret.origin, secret.policy.shared_send()))
                 .collect(),
             committed: 0,
             narrowed,

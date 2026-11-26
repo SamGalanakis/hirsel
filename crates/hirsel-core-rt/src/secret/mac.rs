@@ -116,7 +116,7 @@ unsafe fn mac(
         } else {
             SecretUse::MAC
         };
-        if !secret.policy.uses.permits(needed) {
+        if !secret.policy.uses().permits(needed) {
             return crate::net::DENIED;
         }
         let data = crate::tls::bytes(&*data);

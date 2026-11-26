@@ -11,7 +11,7 @@ impl Machine<'_> {
         let secret = self.secret(args[1]).unwrap();
         if !secret
             .policy
-            .send
+            .send()
             .iter()
             .any(|pattern| pattern.covers(name))
         {

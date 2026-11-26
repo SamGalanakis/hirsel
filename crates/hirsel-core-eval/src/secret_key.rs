@@ -12,7 +12,7 @@ impl Machine<'_> {
         else {
             return Ok(vec![0, 9, 1, 0]);
         };
-        let size = SecretGrant::logical_size(&policy.send, 1024);
+        let size = SecretGrant::logical_size(policy.send(), 1024);
         let charge = size.unwrap_or(u64::MAX);
         let payer = t.limits.last().unwrap().clone();
         if let Err(available) = self.admit_charge(&payer, charge, size.is_none()) {
@@ -41,7 +41,7 @@ impl Machine<'_> {
             };
             (intersection, 0)
         };
-        let size = SecretGrant::logical_size(&policy.send, len);
+        let size = SecretGrant::logical_size(policy.send(), len);
         let charge = size.unwrap_or(u64::MAX);
         let payer = t.limits.last().unwrap();
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
@@ -203,13 +203,13 @@ impl Machine<'_> {
             HostOp::SecretSign => SignAlg::from_case(a[1]).expect("a SignAlg case").needed(),
             _ => SecretUse::WRAP,
         };
-        if !key.policy.uses.permits(needed) {
+        if !key.policy.uses().permits(needed) {
             return fail(KeyFailure::Denied);
         }
         let (produced, out) = match op {
             HostOp::SecretWrap => {
                 let s = self.secret(a[1]).unwrap();
-                if s.policy.uses.imports() || (s.opaque && !key.opaque) {
+                if s.policy.import().is_some() || (s.opaque && !key.opaque) {
                     return fail(KeyFailure::Denied);
                 }
                 let blob = key_wrap::wrap_with_salt(
@@ -239,13 +239,13 @@ impl Machine<'_> {
                 let Some(requested) = std::str::from_utf8(self.carrier_bytes(a[2]))
                     .ok()
                     .and_then(SecretPolicy::parse)
-                    .filter(|policy| !policy.uses.imports())
+                    .filter(|policy| policy.import().is_none())
                 else {
                     return fail(KeyFailure::Invalid);
                 };
                 let blob = self.carrier_bytes(a[1]).to_vec();
                 let len = key_wrap::unwrapped_len(&blob).unwrap_or(0) as u64;
-                let size = SecretGrant::logical_size(&requested.send, len);
+                let size = SecretGrant::logical_size(requested.send(), len);
                 let charge = size.unwrap_or(u64::MAX);
                 let payer = t.limits.last().unwrap().clone();
                 if let Err(available) = self.admit_charge(&payer, charge, size.is_none()) {
@@ -306,7 +306,7 @@ impl Machine<'_> {
         let len = self.load(out + 8, 8);
         let spare = self.load(out + 16, 8) - len;
         let size = match secret_aead::output_len(
-            key.policy.uses,
+            key.policy.uses(),
             alg,
             mode,
             self.load(a[2] + 8, 8) as usize,
@@ -367,7 +367,7 @@ impl Machine<'_> {
         } else {
             SecretUse::VERIFY
         };
-        if !secret.policy.uses.permits(needed) {
+        if !secret.policy.uses().permits(needed) {
             return Ok(vec![0, 1, 0, 0]);
         }
         self.take_steps(t, self.load(a[1] + 8, 8))?;

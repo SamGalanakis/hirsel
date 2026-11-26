@@ -206,7 +206,7 @@ impl Machine<'_> {
         };
         if !self
             .secret(a[2])
-            .is_some_and(|key| key.policy.uses.permits(SecretUse::TLS_SERVE))
+            .is_some_and(|key| key.policy.uses().permits(SecretUse::TLS_SERVE))
         {
             return failed(self, 1, 0);
         }

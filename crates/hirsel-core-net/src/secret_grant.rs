@@ -6,7 +6,7 @@ use std::sync::Arc;
 mod import_spend;
 pub use import_spend::{ImportKind, ImportRefusal, ImportSpend, Spending};
 
-/// The uses of a Secret other than `tls_send` (TLS-5), as a set. `mac`
+/// Non-import uses of a Secret other than `tls_send` (TLS-5), as a set. `mac`
 /// permits verification too, so its set holds `VERIFY` as well, and an
 /// intersection is the bitwise and.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -20,6 +20,28 @@ pub enum ImportUse {
     TrafficSend,
     TrafficReceive,
     Sframe(SframeDirection),
+}
+
+impl ImportUse {
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "srtp_import(send)" => Self::SrtpSend,
+            "srtp_import(receive)" => Self::SrtpReceive,
+            "traffic_import(send)" => Self::TrafficSend,
+            "traffic_import(receive)" => Self::TrafficReceive,
+            _ => Self::Sframe(SframeDirection::parse(text)?),
+        })
+    }
+
+    fn text(self) -> String {
+        match self {
+            Self::SrtpSend => "srtp_import(send)".to_owned(),
+            Self::SrtpReceive => "srtp_import(receive)".to_owned(),
+            Self::TrafficSend => "traffic_import(send)".to_owned(),
+            Self::TrafficReceive => "traffic_import(receive)".to_owned(),
+            Self::Sframe(direction) => direction.text(),
+        }
+    }
 }
 
 /// The KID directions of an `sframe_import` use (TLS-8, SFrame schedules).
@@ -86,33 +108,6 @@ impl SecretUse {
     pub const DIGEST: Self = Self(1 << 18);
     /// `tls.accept` with the secret as the server's private key (TLS-9).
     pub const TLS_SERVE: Self = Self(1 << 19);
-    const SRTP_SEND: Self = Self(1 << 14);
-    const SRTP_RECEIVE: Self = Self(1 << 15);
-    const TRAFFIC_SEND: Self = Self(1 << 16);
-    const TRAFFIC_RECEIVE: Self = Self(1 << 17);
-    /// Set exactly when the policy holds an `sframe_import` use, whose
-    /// directions are the policy's `sframe` field.
-    const SFRAME: Self = Self(1 << 20);
-    const IMPORTS: u32 = Self::SRTP_SEND.0
-        | Self::SRTP_RECEIVE.0
-        | Self::TRAFFIC_SEND.0
-        | Self::TRAFFIC_RECEIVE.0
-        | Self::SFRAME.0;
-
-    /// Whether the set holds any import use, which excludes every other use.
-    pub fn imports(self) -> bool {
-        self.0 & Self::IMPORTS != 0
-    }
-
-    fn import(self) -> Option<ImportUse> {
-        Some(match self {
-            Self::SRTP_SEND => ImportUse::SrtpSend,
-            Self::SRTP_RECEIVE => ImportUse::SrtpReceive,
-            Self::TRAFFIC_SEND => ImportUse::TrafficSend,
-            Self::TRAFFIC_RECEIVE => ImportUse::TrafficReceive,
-            _ => return None,
-        })
-    }
 
     pub const fn aead(alg: AeadAlg, mode: AeadMode) -> Self {
         let open = 1 << (8 + 2 * alg as u32);
@@ -123,7 +118,7 @@ impl SecretUse {
     }
 
     /// Each use word in canonical order, with a use ahead of any it implies.
-    const WORDS: [(&str, Self); 21] = [
+    const WORDS: [(&str, Self); 16] = [
         ("tls_serve", Self::TLS_SERVE),
         ("mac", Self::MAC),
         ("verify", Self::VERIFY),
@@ -157,12 +152,6 @@ impl SecretUse {
             Self::aead(AeadAlg::Aes256Gcm, AeadMode::Open),
         ),
         ("wrap", Self::WRAP),
-        ("srtp_import(send)", Self::SRTP_SEND),
-        ("srtp_import(receive)", Self::SRTP_RECEIVE),
-        ("traffic_import(send)", Self::TRAFFIC_SEND),
-        ("traffic_import(receive)", Self::TRAFFIC_RECEIVE),
-        // Written from the policy's `sframe` field; never parsed as a word.
-        ("sframe_import", Self::SFRAME),
         ("mtls_client_id", Self::MTLS_CLIENT_ID),
     ];
 
@@ -177,38 +166,39 @@ impl SecretUse {
     fn word(word: &str) -> Option<Self> {
         Self::WORDS
             .iter()
-            .find(|(w, u)| *w == word && *u != Self::SFRAME)
+            .find(|(w, _)| *w == word)
             .map(|&(_, u)| u)
     }
 }
 
-/// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `tls_serve`, `mac`,
-/// `verify`, `kdf`, `digest`, `sign(<alg>)`, `aead(<alg>)`, `open(<alg>)`, `wrap`,
-/// the import uses and `mtls_client_id`, written in that order, separated by single
-/// spaces. A DNS name appears only inside `tls_send(...)`, so no name can be read as a use.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SecretPolicy {
-    /// The `tls_send` patterns (TLS-3 syntax); empty without `tls_send`.
-    pub send: Arc<[Pattern]>,
-    pub uses: SecretUse,
-    /// The directions of an `sframe_import` use, present exactly when `uses`
-    /// holds its bit.
-    pub sframe: Option<SframeDirection>,
+/// A Secret's authority (TLS-5, TLS-8): an exclusive packet-key import or a set of uses.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SecretPolicy {
+    Import(ImportUse),
+    Uses {
+        send: Arc<[Pattern]>,
+        uses: SecretUse,
+    },
+}
+
+impl Default for SecretPolicy {
+    fn default() -> Self {
+        Self::Uses {
+            send: Arc::from([]),
+            uses: SecretUse::default(),
+        }
+    }
 }
 
 impl SecretPolicy {
     pub fn parse(text: &str) -> Option<Self> {
+        if let Some(import) = ImportUse::parse(text) {
+            return Some(Self::Import(import));
+        }
         let mut send: Option<Box<[Pattern]>> = None;
         let mut uses = SecretUse::default();
-        let mut sframe = None;
         for token in text.split(' ') {
-            if token.starts_with("sframe_import(") {
-                if sframe.is_some() {
-                    return None;
-                }
-                sframe = Some(SframeDirection::parse(token)?);
-                uses.0 |= SecretUse::SFRAME.0;
-            } else if let Some(patterns) = token
+            if let Some(patterns) = token
                 .strip_prefix("tls_send(")
                 .and_then(|t| t.strip_suffix(')'))
             {
@@ -231,22 +221,36 @@ impl SecretPolicy {
             }
         }
         let send: Arc<[Pattern]> = send.map_or_else(|| Arc::from([]), Into::into);
-        if send.is_empty() && uses.is_empty() {
-            return None;
-        }
-        let policy = Self { send, uses, sframe };
-        if uses.imports() && (policy.import().is_none() || !policy.send.is_empty()) {
-            return None;
-        }
-        Some(policy)
+        (!send.is_empty() || !uses.is_empty()).then_some(Self::Uses { send, uses })
     }
 
     /// The import this policy authorises: its one import use, alone.
     pub fn import(&self) -> Option<ImportUse> {
-        match self.sframe {
-            Some(direction) if self.uses == SecretUse::SFRAME => Some(ImportUse::Sframe(direction)),
-            Some(_) => None,
-            None => self.uses.import(),
+        match self {
+            Self::Import(import) => Some(*import),
+            Self::Uses { .. } => None,
+        }
+    }
+
+    /// The `tls_send` patterns (TLS-3 syntax).
+    pub fn send(&self) -> &[Pattern] {
+        match self {
+            Self::Import(_) => &[],
+            Self::Uses { send, .. } => send,
+        }
+    }
+
+    pub fn shared_send(&self) -> Arc<[Pattern]> {
+        match self {
+            Self::Import(_) => Arc::from([]),
+            Self::Uses { send, .. } => Arc::clone(send),
+        }
+    }
+
+    pub fn uses(&self) -> SecretUse {
+        match self {
+            Self::Import(_) => SecretUse::default(),
+            Self::Uses { uses, .. } => *uses,
         }
     }
 
@@ -254,21 +258,23 @@ impl SecretPolicy {
     /// whose policy covers a stream's verified name, narrowed to it (TLS-5,
     /// virtual streams).
     pub fn exactly(name: &Name) -> Self {
-        Self {
+        Self::Uses {
             send: Arc::from([Pattern::Exact(name.clone())]),
             uses: SecretUse::default(),
-            sframe: None,
         }
     }
 
     /// The requested policy of a derived key, given the parent use for the sink.
     pub fn derived(&self, needed: SecretUse, requested: &str) -> Option<Self> {
-        if !self.uses.permits(needed) {
+        if !self.uses().permits(needed) {
             return None;
         }
         let child = Self::parse(requested)?;
+        let Self::Uses { send, uses } = &child else {
+            return None;
+        };
         if needed == SecretUse::DIGEST
-            && (child.uses.permits(SecretUse::DIGEST) || child.uses.permits(SecretUse::KDF))
+            && (uses.permits(SecretUse::DIGEST) || uses.permits(SecretUse::KDF))
         {
             return None;
         }
@@ -280,7 +286,7 @@ impl SecretPolicy {
                 | SecretUse::aead(AeadAlg::Aes128Gcm, AeadMode::Seal).0
                 | SecretUse::aead(AeadAlg::Aes256Gcm, AeadMode::Seal).0,
         );
-        (child.send.is_empty() && allowed.permits(child.uses)).then_some(child)
+        (send.is_empty() && allowed.permits(*uses)).then_some(child)
     }
 
     /// `secret.p256_key`'s policy (TLS-8): its uses are exactly
@@ -288,55 +294,60 @@ impl SecretPolicy {
     pub fn p256_generation(text: &[u8]) -> Option<Self> {
         let policy = Self::parse(std::str::from_utf8(text).ok()?)?;
         let serving = SecretUse(SecretUse::SIGN_P256.0 | SecretUse::TLS_SERVE.0);
-        (policy.send.is_empty() && (policy.uses == SecretUse::SIGN_P256 || policy.uses == serving))
+        (policy.send().is_empty()
+            && (policy.uses() == SecretUse::SIGN_P256 || policy.uses() == serving))
             .then_some(policy)
     }
 
     pub fn intersect(&self, requested: &Self) -> Option<Self> {
-        let send = Pattern::intersection(&self.send, &requested.send);
-        let uses = SecretUse(self.uses.0 & requested.uses.0);
-        // Two different `sframe_import` uses share no use (TLS-8, directions).
-        let sframe = match (self.sframe, requested.sframe) {
-            (Some(a), Some(b)) if a == b => Some(a),
-            (Some(_), Some(_)) => return None,
+        match (self, requested) {
+            (Self::Import(a), Self::Import(b)) if a == b => Some(Self::Import(*a)),
+            (
+                Self::Uses { send, uses },
+                Self::Uses {
+                    send: other,
+                    uses: requested,
+                },
+            ) => {
+                let send = Pattern::intersection(send, other);
+                let uses = SecretUse(uses.0 & requested.0);
+                (!send.is_empty() || !uses.is_empty()).then(|| Self::Uses {
+                    send: send.into(),
+                    uses,
+                })
+            }
             _ => None,
-        };
-        if send.is_empty() && uses.is_empty() {
-            return None;
         }
-        Some(Self {
-            send: send.into(),
-            uses,
-            sframe,
-        })
     }
 
     /// Whether every name and use this policy permits, `bound` permits too.
     pub fn within(&self, bound: &Self) -> bool {
-        bound.uses.permits(self.uses)
-            && (self.sframe.is_none() || self.sframe == bound.sframe)
-            && self
-                .send
-                .iter()
-                .all(|p| bound.send.iter().any(|q| p.is_subset_of(q)))
+        match self {
+            Self::Import(import) => bound.import() == Some(*import),
+            Self::Uses { send, uses } => {
+                bound.uses().permits(*uses)
+                    && send
+                        .iter()
+                        .all(|p| bound.send().iter().any(|q| p.is_subset_of(q)))
+            }
+        }
     }
 
     pub fn text(&self) -> String {
+        let (patterns, uses) = match self {
+            Self::Import(import) => return import.text(),
+            Self::Uses { send, uses } => (send, uses),
+        };
         let mut words = Vec::new();
         let send;
-        if !self.send.is_empty() {
-            send = format!("tls_send({})", Pattern::list_text(&self.send));
+        if !patterns.is_empty() {
+            send = format!("tls_send({})", Pattern::list_text(patterns));
             words.push(send.as_str());
         }
-        let mut left = self.uses.0;
-        let sframe = self.sframe.map(SframeDirection::text);
+        let mut left = uses.0;
         for (word, u) in SecretUse::WORDS {
             if left & u.0 == u.0 {
-                words.push(if u == SecretUse::SFRAME {
-                    sframe.as_deref().unwrap()
-                } else {
-                    word
-                });
+                words.push(word);
                 left &= !u.0;
             }
         }

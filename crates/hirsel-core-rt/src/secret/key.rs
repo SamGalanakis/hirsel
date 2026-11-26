@@ -211,8 +211,8 @@ pub unsafe extern "C" fn hirsel_core_secret_wrap(
         let secret = resolve(context, s);
         // A program that holds the KEK's bytes could open the blob itself,
         // so it never wraps bytes it does not hold under that KEK.
-        if !kek.policy.uses.permits(SecretUse::WRAP)
-            || secret.policy.uses.imports()
+        if !kek.policy.uses().permits(SecretUse::WRAP)
+            || secret.policy.import().is_some()
             || (secret.origin.opaque() && !kek.origin.opaque())
         {
             return key_error(KEY_DENIED);
@@ -240,15 +240,15 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
     unsafe {
         crate::process::deny_describe_capability(context);
         let kek = resolve(context, kek);
-        if !kek.policy.uses.permits(SecretUse::WRAP) {
+        if !kek.policy.uses().permits(SecretUse::WRAP) {
             return key_error(KEY_DENIED);
         }
-        let Some(requested) = policy(uses).filter(|policy| !policy.uses.imports()) else {
+        let Some(requested) = policy(uses).filter(|policy| policy.import().is_none()) else {
             return key_error(KEY_INVALID);
         };
         let blob = crate::tls::bytes(&*blob);
         let len = hirsel_core_net::key_wrap::unwrapped_len(blob).unwrap_or(0);
-        let charge = match admit((*context).payer(), &requested.send, len as u64) {
+        let charge = match admit((*context).payer(), requested.send(), len as u64) {
             Ok(charge) => charge,
             Err(mut error) => {
                 error.error.tag = KEY_CAPACITY;
@@ -321,7 +321,7 @@ pub unsafe extern "C" fn hirsel_core_secret_sign(
         let Some(alg) = SignAlg::from_case(alg) else {
             crate::process::stop(b"SignAlg")
         };
-        if !key.policy.uses.permits(alg.needed()) {
+        if !key.policy.uses().permits(alg.needed()) {
             return key_error(KEY_DENIED);
         }
         let provider = crate::entry::hirsel_core_capability_provider(context, random);
@@ -365,7 +365,7 @@ unsafe fn secret_aead(
         let [nonce, aad, bytes] = inputs;
         let spare = (*out).capacity - (*out).len;
         let len = match secret_aead::output_len(
-            key.policy.uses,
+            key.policy.uses(),
             alg,
             mode,
             (*nonce).len,

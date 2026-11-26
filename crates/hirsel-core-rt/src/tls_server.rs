@@ -333,7 +333,7 @@ unsafe fn accept(
             return DENIED;
         };
         let key_secret = crate::secret::resolve(context, secret);
-        if !key_secret.policy.uses.permits(SecretUse::TLS_SERVE) {
+        if !key_secret.policy.uses().permits(SecretUse::TLS_SERVE) {
             return refuse(context, key, DENIED);
         }
         let entries = chain_entries(view_bytes(&chain)).unwrap_or_default();

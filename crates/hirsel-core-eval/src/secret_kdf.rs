@@ -35,7 +35,7 @@ impl Machine<'_> {
         if steps != 0 {
             self.take_steps(t, steps)?;
         }
-        let child = SecretGrant::logical_size(&policy.send, len).unwrap();
+        let child = SecretGrant::logical_size(policy.send(), len).unwrap();
         let charge = child + working;
         let payer = t.limits.last().unwrap().clone();
         if let Err(available) = self.admit(&payer, charge) {

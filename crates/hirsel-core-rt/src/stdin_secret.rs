@@ -261,7 +261,8 @@ pub unsafe extern "C" fn hirsel_core_stdin_read_secret(
                 ..Outcome::default()
             };
         };
-        let charge = match crate::secret::admit((*context).payer(), &policy.send, LINE_MAX as u64) {
+        let charge = match crate::secret::admit((*context).payer(), policy.send(), LINE_MAX as u64)
+        {
             Ok(charge) => charge,
             Err(refused) => {
                 return Outcome {

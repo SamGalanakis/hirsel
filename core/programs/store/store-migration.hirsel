@@ -201,8 +201,9 @@ fn catalog_descriptions(catalog: PageTree) -> Result[List[DeclaredCollection], E
     let mut descriptions: List[DeclaredCollection] = list.new()
     while let Some((key, raw)) = next_page_range(mut rows)? {
         let stored = decode_catalog(raw)?
-        let name = catalog_collection_name(key, stored.kind)?
-        list.push(mut descriptions, DeclaredCollection(name: take name, id: stored.id, owner: stored.owner, kind: stored.kind))
+        let kind = descriptor_kind_byte(catalog_kind(stored.record))
+        let name = catalog_collection_name(key, kind)?
+        list.push(mut descriptions, DeclaredCollection(name: take name, id: stored.id, owner: stored.owner, kind))
     }
     Ok(take descriptions)
 }

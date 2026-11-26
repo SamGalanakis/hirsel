@@ -36,28 +36,26 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
     let mut records = byte_cursor(s.roots.catalog, Included(table_key("")?), end_key)?
     while let Some((take key, raw)) = next_bytes(mut records)? {
         let record = decode_catalog(raw)?
-        let (name, owner_name, form) = if record.kind == 2 {
+        let (name, owner_name, form, state) = if let CatalogIndex(index_meta) = view record.record {
             let index_name = declaration_index_name(key)?
             let table_name = match map.get(names, record.owner) {
                 Some(found) => string.from(found),
                 None => return Error(malformed(0)),
             }
-            let form = match record.shape {
+            let form = match index_meta.shape {
                 Entries(kind) => IndexForm(kind),
                 Sums => AggregateForm,
             }
-            (take index_name, take table_name, form)
+            (take index_name, take table_name, form, copied_state(index_meta.state)?)
         } else {
-            let own = catalog_collection_name(key, record.kind)?
+            let own = catalog_collection_name(key, descriptor_kind_byte(catalog_kind(record.record)))?
             map.insert(mut names, record.id, string.from(own))
-            let form = if record.kind == 3 {
-                CellForm
-            } else if record.kind == 4 {
-                LogForm
-            } else {
-                TableForm
+            let form: EntryForm = match record.record {
+                CatalogCell => CellForm,
+                CatalogLog => LogForm,
+                _ => TableForm,
             }
-            (string.from(own), take own, form)
+            (string.from(own), take own, form, Public)
         }
         let (rows, charge, tiered) = match std.page.collection_entry(s.roots.collections.root, prefix(record.id)?) {
             Some((_, map_value)) => {
@@ -67,7 +65,7 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
             None => (0u64, 0u64, false),
         }
         capacity(list.try_reserve(mut out, 1))?
-        list.push(mut out, CatalogEntry(name: take name, table: take owner_name, id: record.id, form: form, state: copied_state(record.state)?, revision: copied(record.revision)?, rows: rows, charge: charge, tiered: tiered))
+        list.push(mut out, CatalogEntry(name: take name, table: take owner_name, id: record.id, form: form, state: take state, revision: copied(record.revision)?, rows: rows, charge: charge, tiered: tiered))
     }
     Ok(take out)
 }

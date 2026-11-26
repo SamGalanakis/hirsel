@@ -31,7 +31,7 @@ type LogRetention: shareable + send {
 
 pub fn declare_log[V](mut d: Declare, name: String, take value: std.codec.Codec[V], retain: Retain) -> Result[Log[V], Error] {
     let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
-    let collection = declare_value_collection(mut d, name, 4, schema, take value)?
+    let collection = declare_value_collection(mut d, name, CatalogLog, schema, take value)?
     let keep: Option[u64] = match retain {
         Forever => None,
         Keep(n) => Some(n),

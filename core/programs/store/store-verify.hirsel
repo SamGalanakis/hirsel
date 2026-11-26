@@ -136,7 +136,7 @@ pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkRe
     }
     let name = declaration_index_name(key)?
     let mut findings: List[WalkFinding] = list.new()
-    if let Sums = record.shape {
+    if let Sums = catalog_index(record)?.shape {
         walk_sums(db, mut walk, record, name, limit, mut findings)?
     } else if walk.entries {
         walk_entries(db, mut walk, record, name, limit, mut findings)?
@@ -361,7 +361,7 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limi
             walk_past(mut walk)?
             break
         }
-        let primary = if let Entries(Unique) = record.shape {
+        let primary = if let Entries(Unique) = catalog_index(record)?.shape {
             list.slice(raw, 4, unique_owner_end(raw)?)
         } else {
             list.slice(entry_key, (extractor.key_end)(entry_key)?, list.len(entry_key))

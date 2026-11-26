@@ -78,7 +78,7 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     let mut next_stamp = first
     let mut duplicate: Option[(Bytes, Bytes)] = None
     let mut cursor: Option[Bytes] = None
-    if let Sums = record.shape {
+    if let Sums = catalog_index(record)?.shape {
         add_chunk_totals(mut roots.collections, mut live_bytes, plan.retained, plan.ceiling, first, mut next_stamp, extractor, rows)?
         if let Some((logical, _)) = list.last(rows) {
             cursor = Some(copied(list.slice(logical, 4, list.len(logical)))?)
@@ -92,7 +92,7 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
                     return Error(Limit(Key))
                 }
                 if let Some(prior) = get_page_row(roots.collections, row) {
-                    if let Entries(Unique) = record.shape {
+                    if let Entries(Unique) = catalog_index(record)?.shape {
                         let owner = list.slice(prior, 4, unique_owner_end(prior)?)
                         if owner != primary {
                             if let None = duplicate {
@@ -118,9 +118,9 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     canonical_tree(mut roots.collections)?
     plan.next_node = next_stamp - 1
     if done {
-        record.state = Public
+        set_index_state(mut record, Public)?
     } else if let Some(take final_key) = take cursor {
-        record.state = Backfilling(Some(take final_key))
+        set_index_state(mut record, Backfilling(Some(take final_key)))?
     }
     let raw = encode_catalog(record)?
     live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.retained)
@@ -141,10 +141,10 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
 // and grew faster than the rows (store-child-build-2660). An aggregate keeps
 // the chunked builder: its group rows add up parts, which a sort does not.
 fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extractor: RegisteredIndex, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
-    if let Sums = record.shape {
+    if let Sums = catalog_index(record)?.shape {
         return chunked_declared_index(mut plan, key, record, extractor, preview)
     }
-    let unique = if let Entries(Unique) = record.shape {
+    let unique = if let Entries(Unique) = catalog_index(record)?.shape {
         true
     } else {
         false
@@ -215,7 +215,7 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
     over_ceiling(live_bytes, plan.ceiling)?
     let written = list.len(kept)
     bulk_store_collection(mut roots.collections, current.id, 2, take kept, mut plan.next_node)?
-    current.state = Public
+    set_index_state(mut current, Public)?
     let raw = encode_catalog(current)?
     live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.retained)
     roots = catalog_insert(mut plan.next_node, roots, key, raw)?
@@ -230,7 +230,7 @@ fn chunked_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, ext
     let mut read = 0u64
     let mut duplicate: Option[(Bytes, Bytes)] = None
     loop {
-        let cursor = match current.state {
+        let cursor = match catalog_index(current)?.state {
             Backfilling(Some(final_key)) => Some(copied(final_key)?),
             _ => None,
         }
@@ -246,7 +246,7 @@ fn chunked_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, ext
             }
         }
         current = catalog_entry_in(plan.roots.catalog, key)?
-        if let Public = current.state {
+        if let Public = catalog_index(current)?.state {
             break
         }
     }
@@ -278,7 +278,12 @@ fn building_index(db: Db) -> Result[Option[(Bytes, Catalog)], Error] {
             continue
         }
         let record = decode_catalog(raw)?
-        if let Backfilling(_) = record.state {
+        let building = if let Backfilling(_) = catalog_index(record)?.state {
+            true
+        } else {
+            false
+        }
+        if building {
             if let Some(_) = bound_extractor(db.indexes, record) {
                 return Ok(Some((take key, take record)))
             }
@@ -326,7 +331,7 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
         return Ok(None)
     }
     let name = declaration_index_name(key)?
-    let cursor = match record.state {
+    let cursor = match catalog_index(record)?.state {
         Backfilling(Some(final_key)) => Some(copied(final_key)?),
         _ => None,
     }
@@ -340,7 +345,7 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
     }
     if let Some((take first, take second)) = take found {
         let mut failed = copied_record(record)?
-        failed.state = Failed(take first, take second)
+        set_index_state(mut failed, Failed(take first, take second))?
         put_index_record(mut plan, key, failed)?
     }
     let _ = publish_schema_plan(mut db, take plan)?
@@ -361,7 +366,7 @@ fn put_index_record(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result
 // Answers whether the record changed.
 fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[bool, Error] {
     let mut record = catalog_entry_in(plan.roots.catalog, key)?
-    if let Backfilling(None) = record.state {
+    if let Backfilling(None) = catalog_index(record)?.state {
         return Ok(false)
     }
     let mut roots = share_roots(plan.roots)
@@ -374,7 +379,7 @@ fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[bool, Error] {
     live_bytes = int.saturating_add(live_bytes, 126)
     let next_table = plan.next_table
     keep_schema(mut plan, take roots, live_bytes, next_table)?
-    record.state = Backfilling(None)
+    set_index_state(mut record, Backfilling(None))?
     put_index_record(mut plan, key, record)?
     Ok(true)
 }
@@ -436,7 +441,7 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         let Some(next_table) = int.checked_add(proposed.id, 1u32) else {
             return Error(Limit(Ids))
         }
-        proposed.state = Backfilling(None)
+        set_index_state(mut proposed, Backfilling(None))?
         let raw = encode_catalog(proposed)?
         let mut live_bytes = int.saturating_add(126, catalog_recharge(plan.live, plan.roots, key, raw, plan.retained))
         meta.epoch += 1
@@ -448,7 +453,7 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         roots = catalog_insert(mut plan.next_node, roots, key, raw)?
         roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
         keep_schema(mut plan, take roots, live_bytes, next_table)?
-    } else if let Failed(_, _) = proposed.state {
+    } else if let Failed(_, _) = catalog_index(proposed)?.state {
         let _ = demote_index(mut plan, key)?
     }
     let current = catalog_entry_in(plan.roots.catalog, key)?

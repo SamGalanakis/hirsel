@@ -22,12 +22,12 @@ pub fn cell_schemas[V](c: Cell[V]) -> Arc[RowSchemas] {
 }
 
 pub fn declare_cell[V](mut d: Declare, name: String, take value: std.codec.Codec[V]) -> Result[Cell[V], Error] {
-    let cell_binding = declare_value_collection(mut d, name, 3, list.new(), take value)?
+    let cell_binding = declare_value_collection(mut d, name, CatalogCell, list.new(), take value)?
     let key = arc.new(prefix(cell_binding.id)?)
     Ok(Cell(binding: take cell_binding, key: take key))
 }
 
-fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schema: Bytes, take value: std.codec.Codec[V]) -> Result[ValueCollection[V], Error] {
+fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogRecord, key_schema: Bytes, take value: std.codec.Codec[V]) -> Result[ValueCollection[V], Error] {
     if d.failed {
         return Error(MigrationFault)
     }
@@ -39,7 +39,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schem
     let (take record, created) = match get_page_row(d.plan.roots.catalog, key) {
         Some(raw) => {
             let existing = decode_catalog(raw)?
-            if existing.kind != kind {
+            if catalog_kind(existing.record) != catalog_kind(form) {
                 if let Migrate = d.mode {
                     return Error(Exists(named(name)?))
                 }
@@ -54,7 +54,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schem
             let Migrate = d.mode else {
                 return Error(Missing(named(name)?))
             }
-            let initial = Catalog(kind: kind, id: d.plan.next_table, owner: 0, epoch: 1, key: copied(key_schema)?, schemas: list.new(), next: 0, by: list.new(), revision: list.new(), shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Public)
+            let initial = Catalog(record: take form, id: d.plan.next_table, owner: 0, epoch: 1, key: copied(key_schema)?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
             (take initial, true)
         },
     }
@@ -94,7 +94,7 @@ fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, catalog: Catalog, cr
         if next_id == 4294967295 {
             return Error(Limit(Ids))
         }
-        define_store_collection(mut roots.collections, catalog.id, catalog.kind, mut plan.next_node)?
+        define_store_collection(mut roots.collections, catalog.id, descriptor_kind_byte(catalog_kind(catalog.record)), mut plan.next_node)?
         live_bytes = int.saturating_add(live_bytes, 126)
         next_id += 1
     }

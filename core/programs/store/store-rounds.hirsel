@@ -149,7 +149,7 @@ fn shipped_ranges(ranges: List[RangeChange]) -> Result[List[KeptRange], Error] {
     let mut out: List[KeptRange] = list.with_capacity(list.len(ranges))
     for shipped_range in ranges {
         let kind = match shipped_range.catalog {
-            Some(raw) => decode_catalog(raw)?.kind,
+            Some(raw) => descriptor_kind_byte(catalog_kind(decode_catalog(raw)?.record)),
             None => 0u8,
         }
         list.push(mut out, KeptRange(id: shipped_range.id, kind: kind))

@@ -166,7 +166,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
         let stored = transaction_row(tx, key)?
         if unchanged {
             old += 1
-        } else if let Entries(Unique) = record.shape {
+        } else if let Entries(Unique) = catalog_index(record)?.shape {
             list.push(mut edits.probes, (record.id, copied(key)?))
         }
         if let Some(prior) = stored {
@@ -240,7 +240,7 @@ type ValueSchema: shareable + send {
 }
 
 type Catalog {
-    kind: u8,
+    record: CatalogRecord,
     id: u32,
     owner: u32,
     epoch: u64,
@@ -248,12 +248,40 @@ type Catalog {
     schemas: List[ValueSchema],
     next: u16,
     by: Bytes,
-    revision: Bytes,
+    revision: Bytes
+}
+
+type CatalogRecord = CatalogTable | CatalogCell | CatalogLog | CatalogIndex(IndexRecord)
+
+type IndexRecord {
     shape: IndexShape,
     payload_schemas: List[Bytes],
     projection: Option[(Bytes, Bytes)],
-    // An index record's build state (§1.2); table, cell and log records keep Public.
     state: IndexState
+}
+
+fn catalog_kind(record: CatalogRecord) -> std.page_descriptor.CollectionKind {
+    match record {
+        CatalogTable => TableCollection,
+        CatalogIndex(_) => IndexCollection,
+        CatalogCell => CellCollection,
+        CatalogLog => LogCollection,
+    }
+}
+
+fn catalog_index(catalog: Catalog) -> Result[View[IndexRecord], Error] in catalog {
+    let CatalogIndex(index_record) = view catalog.record else {
+        return Error(malformed(0))
+    }
+    Ok(view index_record)
+}
+
+fn set_index_state(mut catalog: Catalog, take state: IndexState) -> Result[(), Error] {
+    if let CatalogIndex(mut index_record) = catalog.record {
+        index_record.state = take state
+        return Ok(())
+    }
+    Error(malformed(0))
 }
 
 // What an index record's collection holds (§1.2): the entries of a Many or
@@ -363,67 +391,76 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     let next_number: u16 = int.truncate(take_le(raw, mut at, 2)?)
     let by = take_blob(raw, mut at)?
     let revision = take_blob(raw, mut at)?
-    let mut shape: IndexShape = Entries(Many)
-    let mut payload_schemas: List[Bytes] = list.new()
-    let mut projection_record: Option[(Bytes, Bytes)] = None
-    let mut state: IndexState = Public
-    if kind == 2 {
-        shape = match take_le(raw, mut at, 1)? {
-            0 => Entries(Many),
-            1 => Entries(Unique),
-            2 => Sums,
-            _ => return Error(malformed(at - 1)),
-        }
-        let payload_count = take_le(raw, mut at, 2)?
-        for _ in 0u64 .. payload_count {
-            list.push(mut payload_schemas, take_blob(raw, mut at)?)
-        }
-        let project_id = take_blob(raw, mut at)?
-        let project_revision = take_blob(raw, mut at)?
-        if list.len(project_id) > 0 {
-            projection_record = Some((take project_id, take project_revision))
-        } else if list.len(project_revision) > 0 {
-            return Error(malformed(at))
-        }
-        // An aggregate's rows carry totals, never a payload.
-        if let Sums = shape {
-            let projected = if let Some(_) = projection_record {
-                true
-            } else {
-                false
-            }
-            if payload_count != 0 || projected {
-                return Error(malformed(at))
-            }
-        }
-        if at >= list.len(raw) {
-            return Error(malformed(at))
-        }
-        let tag_at = list.len(raw) - 1
-        state = match raw[tag_at] {
-            0 => Public,
-            1 => Backfilling(None),
-            2 => Backfilling(Some(take_blob(raw, mut at)?)),
-            3 => {
-                let first = take_blob(raw, mut at)?
-                Failed(take first, take_blob(raw, mut at)?)
-            },
-            _ => return Error(malformed(tag_at)),
-        }
-        if at != tag_at {
-            return Error(malformed(at))
-        }
-        at += 1
+    let record: CatalogRecord = match kind {
+        1 => CatalogTable,
+        2 => CatalogIndex(decode_index_record(raw, mut at)?),
+        3 => CatalogCell,
+        4 => CatalogLog,
+        _ => return Error(malformed(0)),
     }
     if at != list.len(raw) {
         return Error(malformed(at))
     }
-    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision, shape: take shape, payload_schemas: take payload_schemas, projection: take projection_record, state: take state))
+    Ok(Catalog(record: take record, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision))
+}
+
+fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
+    let shape: IndexShape = match take_le(raw, mut at, 1)? {
+        0 => Entries(Many),
+        1 => Entries(Unique),
+        2 => Sums,
+        _ => return Error(malformed(at - 1)),
+    }
+    let mut payload_schemas: List[Bytes] = list.new()
+    let payload_count = take_le(raw, mut at, 2)?
+    for _ in 0u64 .. payload_count {
+        list.push(mut payload_schemas, take_blob(raw, mut at)?)
+    }
+    let project_id = take_blob(raw, mut at)?
+    let project_revision = take_blob(raw, mut at)?
+    let projection_record = if list.len(project_id) > 0 {
+        Some((take project_id, take project_revision))
+    } else {
+        if list.len(project_revision) > 0 {
+            return Error(malformed(at))
+        }
+        None
+    }
+    // An aggregate's rows carry totals, never a payload.
+    if let Sums = shape {
+        let projected = if let Some(_) = projection_record {
+            true
+        } else {
+            false
+        }
+        if payload_count != 0 || projected {
+            return Error(malformed(at))
+        }
+    }
+    if at >= list.len(raw) {
+        return Error(malformed(at))
+    }
+    let tag_at = list.len(raw) - 1
+    let state: IndexState = match raw[tag_at] {
+        0 => Public,
+        1 => Backfilling(None),
+        2 => Backfilling(Some(take_blob(raw, mut at)?)),
+        3 => {
+            let first = take_blob(raw, mut at)?
+            Failed(take first, take_blob(raw, mut at)?)
+        },
+        _ => return Error(malformed(tag_at)),
+    }
+    if at != tag_at {
+        return Error(malformed(at))
+    }
+    at += 1
+    Ok(IndexRecord(shape, payload_schemas: take payload_schemas, projection: take projection_record, state: take state))
 }
 
 fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
     let mut raw: Bytes = list.new()
-    capacity(le(mut raw, int.widen(c.kind), 1))?
+    capacity(le(mut raw, int.widen(descriptor_kind_byte(catalog_kind(c.record))), 1))?
     capacity(le(mut raw, int.widen(c.id), 4))?
     capacity(le(mut raw, int.widen(c.owner), 4))?
     capacity(le(mut raw, c.epoch, 8))?
@@ -437,20 +474,20 @@ fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
     capacity(le(mut raw, int.widen(c.next), 2))?
     capacity(blob(mut raw, c.by))?
     capacity(blob(mut raw, c.revision))?
-    if c.kind == 2 {
-        capacity(le(mut raw, shape_byte(c.shape), 1))?
-        capacity(le(mut raw, list.len(c.payload_schemas), 2))?
-        for schema in c.payload_schemas {
+    if let CatalogIndex(index_meta) = view c.record {
+        capacity(le(mut raw, shape_byte(index_meta.shape), 1))?
+        capacity(le(mut raw, list.len(index_meta.payload_schemas), 2))?
+        for schema in index_meta.payload_schemas {
             capacity(blob(mut raw, schema))?
         }
-        match c.projection {
+        match index_meta.projection {
             Some((project_id, revision)) => {
                 capacity(blob(mut raw, project_id))?
                 capacity(blob(mut raw, revision))?
             },
             None => capacity(le(mut raw, 0, 8))?,
         }
-        match c.state {
+        match index_meta.state {
             Public => capacity(le(mut raw, 0, 1))?,
             Backfilling(None) => capacity(le(mut raw, 1, 1))?,
             Backfilling(Some(cursor)) => {
@@ -497,7 +534,7 @@ fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, primary: 
         push_index_edit(mut edits, RemoveRow(take key, refund))
         return Ok(())
     }
-    if index_claims(record.state, primary) {
+    if index_claims(catalog_index(record)?.state, primary) {
         stage_index_drift(mut edits, record)
     }
     Ok(())
@@ -583,7 +620,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
                 if list.len(incoming.payload) > tx.limits.value {
                     return Error(Limit(Value))
                 }
-                if let Sums = ix.shape {
+                if let Sums = catalog_index(ix)?.shape {
                     let old = match previous {
                         Some(value) => Some((bound_index.extract)(value, primary)?),
                         None => None,
@@ -675,7 +712,7 @@ fn delete_impl(mut tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catal
         for (_, ix) in indexes {
             let bound_index = registered_index(tx, table_id, schema, ix)?
             let removed = (bound_index.extract)(old, key)?
-            if let Sums = ix.shape {
+            if let Sums = catalog_index(ix)?.shape {
                 plan_aggregate_edit(tx, mut pending, mut frame, ix, key, Some(take removed), None)?
                 continue
             }

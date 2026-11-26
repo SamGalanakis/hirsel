@@ -105,7 +105,7 @@ fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
     let mut records = byte_cursor(db.heads[0].roots.catalog, Included(take first_key), end_key)?
     while let Some((take key, raw)) = next_bytes(mut records)? {
         let record = decode_catalog(raw)?
-        let state = copied_state(record.state)?
+        let state = copied_state(catalog_index(record)?.state)?
         capacity(list.try_reserve(mut out, 1))?
         list.push(mut out, IndexReport(table: record.owner, id: record.id, index: declaration_index_name(key)?, state: take state))
     }

@@ -87,7 +87,7 @@ pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, 
     declaration_name(name)?
     let lookup_key = catalog_index_key(t.handle.id, name)?
     let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?
-    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, shape: Sums, payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Sums, payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision)
     let existing = existing_index_record(d, lookup_key, name)?
     let rebuilt_for = settle_index_record(mut d, lookup_key, name, take existing, mut proposed, ends)?
     let schema_binding = aggregate_binding(t.handle, proposed, by, key)
@@ -188,7 +188,7 @@ fn totals_bytes(members: u64, sum: u64) -> Result[Bytes, Error] {
 // edits are planned against the transaction's rows before any is applied;
 // a claimed row whose old part is not in its group's totals is drift.
 fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes, take old: Option[IndexValue], take new: Option[IndexValue]) -> Result[(), Error] {
-    if !index_claims(record.state, primary) {
+    if !index_claims(catalog_index(record)?.state, primary) {
         return Ok(())
     }
     let (take old_keys, take old_sums) = match take old {

@@ -343,8 +343,10 @@ fn note_cause(mut out: String, what: String) {
 // A stored revision of another length was written before the composite
 // revision (v2.112), so its parts cannot be told apart.
 fn rebuild_cause(old: Catalog, proposed: Catalog, ends: List[u64]) -> Result[String, Error] {
+    let old_index = catalog_index(old)?
+    let proposed_index = catalog_index(proposed)?
     let mut out = string.new()
-    if shape_byte(old.shape) != shape_byte(proposed.shape) {
+    if shape_byte(old_index.shape) != shape_byte(proposed_index.shape) {
         note_cause(mut out, "shape")
     }
     if old.by != proposed.by {
@@ -353,10 +355,10 @@ fn rebuild_cause(old: Catalog, proposed: Catalog, ends: List[u64]) -> Result[Str
     if old.key != proposed.key {
         note_cause(mut out, "index key schema")
     }
-    if old.payload_schemas != proposed.payload_schemas {
+    if old_index.payload_schemas != proposed_index.payload_schemas {
         note_cause(mut out, "payload schema")
     }
-    if old.projection != proposed.projection {
+    if old_index.projection != proposed_index.projection {
         note_cause(mut out, "projection")
     }
     if old.revision != proposed.revision {
@@ -402,33 +404,37 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
     declaration_name(name)?
     let lookup_key = catalog_index_key(t.handle.id, name)?
     let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, codec)?
-    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, shape: Entries(kind), payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let mut planned_index = IndexRecord(shape: Entries(kind), payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let key_schema = std.codec.key_schema(key) ?=> |_| Schema(0)
+    let extractor_identity = copied(code.identity(by))?
     let existing = existing_index_record(d, lookup_key, name)?
     let mut extractor_project: Option[IndexProjection[K, V, P]] = None
     let mut payload_readers = take row_readers
     if cover_row {
         let source = catalog_entry_in(d.plan.roots.catalog, t.handle.catalog_key)?
         for schema in source.schemas {
-            list.push(mut proposed.payload_schemas, copied(schema.schema)?)
+            list.push(mut planned_index.payload_schemas, copied(schema.schema)?)
         }
     } else if let Some(projection_record) = project {
-        proposed.projection = Some((copied(code.identity(projection_record))?, declaration_revision(d.versioned, projection_record)?))
+        planned_index.projection = Some((copied(code.identity(projection_record))?, declaration_revision(d.versioned, projection_record)?))
         let description = std.codec.schema(codec) ?=> |_| Schema(0)
         let unit = std.codec.schema(std.codec.of_unit()) ?=> |_| Schema(0)
         let number: Option[u16] = if description == unit {
             None
         } else {
             if let Some(old) = existing {
-                if let Some(_) = old.projection {
-                    proposed.payload_schemas = clone(old.payload_schemas)
+                let old_index = catalog_index(old)?
+                if let Some(_) = old_index.projection {
+                    planned_index.payload_schemas = clone(old_index.payload_schemas)
                 }
             }
-            let at = index_payload_number(mut proposed.payload_schemas, description)?
-            payload_readers = Some(index_payload_readers(codec, proposed, at, description)?)
+            let at = index_payload_number(mut planned_index.payload_schemas, description)?
+            payload_readers = Some(index_payload_readers(codec, key_schema, planned_index.payload_schemas, at, description)?)
             Some(at)
         }
         extractor_project = Some(IndexProjection(by: projection_record, codec: codec, number: number))
     }
+    let mut proposed = Catalog(record: CatalogIndex(take planned_index), id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: take key_schema, schemas: list.new(), next: 0, by: take extractor_identity, revision: take revision)
     let rebuilt_for = settle_index_record(mut d, lookup_key, name, take existing, mut proposed, ends)?
     let schema_binding = declare_binding(t.handle, proposed, kind, by, key, take extractor_project, cover_row)
     build_declared_record(mut d, t.handle, lookup_key, name, proposed, schema_binding.index, take rebuilt_for)?
@@ -468,8 +474,13 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
             }
         },
         Some(take old) => {
-            let schemas_changed = old.key != proposed.key || old.payload_schemas != proposed.payload_schemas
-            let code_changed = shape_byte(old.shape) != shape_byte(proposed.shape) || old.by != proposed.by || old.revision != proposed.revision || old.projection != proposed.projection
+            let old_index = catalog_index(old)?
+            let (schemas_changed, code_changed) = {
+                let proposed_index = catalog_index(proposed)?
+                let schemas = old.key != proposed.key || old_index.payload_schemas != proposed_index.payload_schemas
+                let code = shape_byte(old_index.shape) != shape_byte(proposed_index.shape) || old.by != proposed.by || old.revision != proposed.revision || old_index.projection != proposed_index.projection
+                (schemas, code)
+            }
             if schemas_changed || code_changed {
                 if let Migrate = d.mode {
                     let cause = rebuild_cause(old, proposed, ends)?
@@ -481,14 +492,14 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
                     capacity(list.try_reserve(mut changed, 1))?
                     list.push(mut changed, named(name)?)
                     proposed.id = old.id
-                    proposed.state = copied_state(old.state)?
+                    set_index_state(mut proposed, copied_state(old_index.state)?)?
                     Ok(None)
                 } else {
                     Error(Changed(named(name)?))
                 }
             } else {
                 proposed.id = old.id
-                proposed.state = copied_state(old.state)?
+                set_index_state(mut proposed, copied_state(old_index.state)?)?
                 Ok(None)
             }
         },
@@ -509,7 +520,7 @@ fn build_declared_record[K, V](mut d: Declare, t: Table[K, V], lookup_key: Bytes
     } else {
         false
     }
-    let resume = match proposed.state {
+    let resume = match catalog_index(proposed)?.state {
         Public => false,
         _ => !needs_rebuild && migrating,
     }
@@ -544,13 +555,13 @@ fn index_payload_number(mut schemas: List[Bytes], description: Bytes) -> Result[
     Ok(int.truncate(next_number))
 }
 
-fn index_payload_readers[P](codec: std.codec.Codec[P], record: Catalog, current: u16, description: Bytes) -> Result[Arc[Readers[P]], Error] {
+fn index_payload_readers[P](codec: std.codec.Codec[P], key_schema: Bytes, payload_schemas: List[Bytes], current: u16, description: Bytes) -> Result[Arc[Readers[P]], Error] {
     let mut older: List[Option[std.codec.Reader[P]]] = list.new()
-    for i in 0u64 .. list.len(record.payload_schemas) {
+    for i in 0u64 .. list.len(payload_schemas) {
         if i == int.widen(current) {
             list.push(mut older, None)
         } else {
-            let resolved_payload = match std.codec.resolve(codec, record.payload_schemas[i]) {
+            let resolved_payload = match std.codec.resolve(codec, payload_schemas[i]) {
                 Error(Schema(at)) => return Error(Schema(at)),
                 Error(problem) => return Error(Decode(problem)),
                 Ok(take resolved) => take resolved,
@@ -558,7 +569,7 @@ fn index_payload_readers[P](codec: std.codec.Codec[P], record: Catalog, current:
             list.push(mut older, Some(take resolved_payload))
         }
     }
-    let schemas = arc.new(RowSchemas(key: copied(record.key)?, value: copied(description)?))
+    let schemas = arc.new(RowSchemas(key: copied(key_schema)?, value: copied(description)?))
     Ok(arc.new(Readers(codec: codec, current: current, older: take older, schemas: take schemas)))
 }
 

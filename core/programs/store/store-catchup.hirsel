@@ -124,20 +124,23 @@ fn catch_up_indexes(plan: SchemaPlan, ranges: List[KeptRange]) -> Result[List[Ca
         if !shipped {
             continue
         }
-        if record.kind != 2u8 {
-            let id_key = deploy_result(prefix(record.id))?
-            if let Some(root) = std.page.collection_child(plan.roots.collections.root, id_key) {
-                let (rows, _) = std.page.totals(root)
-                if rows != 0 {
-                    return Error(Drift)
+        let kind = {
+            let CatalogIndex(index_meta) = view record.record else {
+                let id_key = deploy_result(prefix(record.id))?
+                if let Some(root) = std.page.collection_child(plan.roots.collections.root, id_key) {
+                    let (rows, _) = std.page.totals(root)
+                    if rows != 0 {
+                        return Error(Drift)
+                    }
                 }
+                continue
             }
-            continue
-        }
-        // An aggregate's group totals are not entries a row owns; a full
-        // preparation rebuilds them.
-        let Entries(kind) = record.shape else {
-            return Error(Drift)
+            // An aggregate's group totals are not entries a row owns; a full
+            // preparation rebuilds them.
+            let Entries(kind) = index_meta.shape else {
+                return Error(Drift)
+            }
+            kind
         }
         let index_name = deploy_result(declaration_index_name(key))?
         let mut found_at: Option[u64] = None

@@ -391,7 +391,11 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
             record.revision = take prior_revision
         },
         DriftProjection => {
-            record.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision))
+            if let CatalogIndex(mut index_meta) = record.record {
+                index_meta.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision))
+            } else {
+                return Error(malformed(0))
+            }
         },
         _ => (),
     }

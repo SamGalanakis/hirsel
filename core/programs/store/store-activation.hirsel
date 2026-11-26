@@ -66,7 +66,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
             return Error(Foreign)
         }
         let record = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
-        if record.kind != 1 || record.id != t.id {
+        if catalog_kind(record.record) != TableCollection || record.id != t.id {
             return Error(Stale(t.id))
         }
         let current = record.schemas[list.len(record.schemas) - 1]
@@ -424,7 +424,7 @@ pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Res
     let mut old = 0u32
     if let Some(raw) = get_page_row(db.heads[0].roots.catalog, key) {
         let record = deploy_result(decode_catalog(raw))?
-        if record.kind == 1 {
+        if catalog_kind(record.record) == TableCollection {
             old = record.id
         }
     }

@@ -149,12 +149,12 @@ fn export_step(step: LeaseStep) -> Result[ExportStep, DeployError] {
 fn state_move(before: Bytes, after: Bytes) -> Result[Option[u32], Error] {
     let mut was = decode_catalog(before)?
     let mut now = decode_catalog(after)?
-    if was.kind != 2u8 || now.kind != 2u8 {
+    if catalog_kind(was.record) != IndexCollection || catalog_kind(now.record) != IndexCollection {
         return Ok(None)
     }
     let id = now.id
-    was.state = Public
-    now.state = Public
+    set_index_state(mut was, Public)?
+    set_index_state(mut now, Public)?
     if encode_catalog(was)? != encode_catalog(now)? {
         return Ok(None)
     }

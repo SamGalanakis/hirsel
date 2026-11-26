@@ -76,7 +76,7 @@ fn agg_stored(db: Db, id: u32) -> Result[List[(Bytes, Bytes)], Error] {
 // k <= c, and an empty model before the first chunk.
 fn agg_claimed(db: Db, a: Aggregate[u64]) -> Result[Option[Option[u64]], Error] {
     let record = catalog_entry_in(db.heads[0].roots.catalog, a.catalog_key)?
-    match record.state {
+    match catalog_index(record)?.state {
         Public => Ok(None),
         Backfilling(Some(cursor)) => {
             let cursor_key: u64 = list.word_be(cursor, 0)

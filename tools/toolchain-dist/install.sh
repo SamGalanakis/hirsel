@@ -3,9 +3,10 @@ set -u
 
 # tools/toolchain-dist/build reads this assignment for the release gate.
 glibc_floor=2.28
+# TODO(darwin-floor-source-2900): derive this from the shared Darwin floor.
+macos_floor=26.0
 release_url=https://github.com/SamGalanakis/hirsel/releases
 release_api=https://api.github.com/repos/SamGalanakis/hirsel/releases
-target=x86_64-unknown-linux-gnu
 modify_path=true
 uninstall=false
 download_dir=
@@ -102,23 +103,42 @@ if "$uninstall"; then
     exit 0
 fi
 
-[ "$(uname -s)" = Linux ] || fail 'Hirsel requires Linux'
-case "$(uname -m)" in
-    x86_64) ;;
-    *) fail 'Hirsel requires an x86_64 host' ;;
-esac
-libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=
-case "$libc" in
-    'glibc '*) glibc=${libc#glibc } ;;
-    *) fail "Hirsel requires glibc $glibc_floor or later (musl is unsupported)" ;;
-esac
-if ! awk -v host="$glibc" -v floor="$glibc_floor" 'BEGIN {
-    if (host !~ /^[0-9]+\.[0-9]+(\.[0-9]+)?$/) exit 1
-    split(host, a, "."); split(floor, b, ".")
-    exit !(a[1]+0 > b[1]+0 || (a[1]+0 == b[1]+0 && a[2]+0 >= b[2]+0))
-}'; then
-    fail "Hirsel requires glibc $glibc_floor or later (found $glibc)"
+version_at_least() {
+    awk -v host="$1" -v floor="$2" 'BEGIN {
+        if (host !~ /^[0-9]+\.[0-9]+(\.[0-9]+)?$/) exit 1
+        split(host, a, "."); split(floor, b, ".")
+        exit !(a[1]+0 > b[1]+0 || (a[1]+0 == b[1]+0 && a[2]+0 >= b[2]+0))
+    }'
+}
+
+platform=$(uname -s)-$(uname -m)
+# A translated shell reports x86_64 on Apple silicon.
+if [ "$platform" = Darwin-x86_64 ] &&
+    [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
+    platform=Darwin-arm64
 fi
+case "$platform" in
+    Linux-x86_64)
+        target=x86_64-unknown-linux-gnu
+        llvm_library=libLLVM.so.23.1
+        libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=
+        case "$libc" in
+            'glibc '*) glibc=${libc#glibc } ;;
+            *) fail "Hirsel requires glibc $glibc_floor or later (musl is unsupported)" ;;
+        esac
+        version_at_least "$glibc" "$glibc_floor" ||
+            fail "Hirsel requires glibc $glibc_floor or later (found $glibc)"
+        ;;
+    Darwin-arm64)
+        target=aarch64-apple-darwin
+        llvm_library=libLLVM.23.1.dylib
+        macos=$(sw_vers -productVersion 2>/dev/null) || fail 'cannot determine macOS version'
+        version_at_least "$macos" "$macos_floor" ||
+            fail "Hirsel requires macOS $macos_floor or later (found $macos)"
+        ;;
+    Linux-*) fail 'Hirsel requires an x86_64 host' ;;
+    *) fail 'Hirsel requires x86_64 Linux or an Apple silicon Mac' ;;
+esac
 
 fetch() {
     case "$1" in
@@ -235,11 +255,20 @@ archive=hirsel-v$version-$target.tar.gz
 fetch "${base%/}/SHA256SUMS" "$download_dir/SHA256SUMS" || fail 'cannot download SHA256SUMS'
 expected=$(LC_ALL=C awk -v asset="$archive" '
     $2 == asset || $2 == "*" asset {
-        if (NF != 2 || $1 !~ /^[0-9a-fA-F]+$/ || length($1) != 64) exit 1
+        if (NF != 2 || $1 !~ /^[0-9a-fA-F]+$/ || length($1) != 64) { invalid = 1; exit }
         digest = tolower($1); n++
     }
-    END { if (n != 1) exit 1; print digest }
-' "$download_dir/SHA256SUMS") || fail "SHA256SUMS must list exactly one valid digest for $archive"
+    END {
+        if (invalid || n > 1) exit 1
+        if (n == 0) exit 3
+        print digest
+    }
+' "$download_dir/SHA256SUMS") || {
+    if [ "$?" -eq 3 ] && [ "$target" = aarch64-apple-darwin ]; then
+        fail "v$version has no aarch64-apple-darwin build in this release"
+    fi
+    fail "SHA256SUMS must list exactly one valid digest for $archive"
+}
 
 if command -v sha256sum >/dev/null 2>&1; then
     hash_command() { sha256sum < "$1"; }
@@ -257,7 +286,7 @@ actual=$(hash_command "$download_dir/$archive") || fail 'cannot compute SHA-256'
 has_bundle() {
     [ -x "$1/hirsel" ] && [ -x "$1/bin/ld.lld" ] &&
         [ -d "$1/link/kit" ] &&
-        [ -f "$1/lib/libLLVM.so.23.1" ] && [ -f "$1/hirsel-core-toolchain.json" ]
+        [ -f "$1/lib/$llvm_library" ] && [ -f "$1/hirsel-core-toolchain.json" ]
 }
 
 if [ -L "$prefix/versions" ] || [ -L "$prefix/bin" ]; then

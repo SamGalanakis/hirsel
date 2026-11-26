@@ -205,6 +205,7 @@ export_file(name = "runtime_parts.py", src = "runtime_parts.py", visibility = ["
 export_file(name = "runner_gates.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "test_inputs.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "core_gates.py", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "distribution_gates.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "sync.py", src = "sync.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "prepare.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "cargo_units.py", mode = "reference", visibility = ["PUBLIC"])

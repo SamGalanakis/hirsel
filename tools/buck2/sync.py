@@ -55,6 +55,7 @@ import prepare
 import rust_environment
 import supply_chain
 from cargo_units import Resolution, configured, relocate
+from distribution_gates import distribution_gates
 from runner_gates import runner_gates
 from test_inputs import RUNTIME_DATA, TEST_DATA
 from core_gates import core_gates
@@ -457,24 +458,6 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                 library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
 
 
-def adapted_citations_present() -> list[str]:
-    """The files third-party/NOTICES.md cites that exist in the tree: the gate
-    is red on a cited file missing from them (tools/toolchain-dist/notices.py)."""
-    import importlib.util
-    path = ROOT / "tools/toolchain-dist/notices.py"
-    READS.bytes(path)
-    spec = importlib.util.spec_from_file_location("notices", path)
-    notices = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(notices)
-    cited = {cited for _, paths in notices.citations(READS.text(ROOT / notices.ADAPTED)) for cited in paths}
-    return sorted(path for path in cited if READS.is_file(ROOT / path))
-
-
-def distribution_license_paths() -> list[str]:
-    sources = json.loads(READS.text(ROOT / "tools/toolchain-dist/notice-sources.json"))
-    return sorted({path for runtime in sources["host_runtimes"].values() for path in runtime["texts"]})
-
-
 def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -499,14 +482,14 @@ def first_party(meta: dict) -> str:
                            data=["//tools/buck2:sync.py", "//tools/buck2:prepare.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py",
                                  "//tools/buck2:supply_chain.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:runner_gates.py",
-                                 "//tools/buck2:test_inputs.py", "//tools/buck2:core_gates.py"]))
+                                 "//tools/buck2:test_inputs.py", "//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-filter", script="tools/tests/test_filter.py",
                            data=["tools/test-filter", "tools/consumers", "//tools/buck2:event_logs.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py",
                            args=["-v"],
                            data=Raw('["tools/consumers", "tools/capped", '
                                     '"//tools/buck2:sync.py", "//tools/buck2:runner_gates.py", "//tools/buck2:test_inputs.py", '
-                                    '"//tools/buck2:core_gates.py", '
+                                    '"//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py", '
                                     '"//tools/buck2:generated.py", "//tools/buck2:action_sizes_from_log.py", '
                                     '"//tools/buck2:test_sizes_from_usage.py", "//tools/buck2:test_requirements.bzl"]')))
 
@@ -724,14 +707,7 @@ def first_party(meta: dict) -> str:
                             toolchain_packages="//:toolchain-packages",
                             platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
                             visibility=["PUBLIC"]))
-    out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
-                            args=["--present", *adapted_citations_present()],
-                            data=["tools/tests/distribution_notices.py", "//tools/toolchain-dist:build", "//tools/toolchain-dist:install.sh", "NOTICES.md", "Cargo.lock",
-                                  *("tools/tests/fixtures/glibc-gate/" + name for name in ("strong-glibc239", "weak-dynsym", "weak-symtab")),
-                                  "//third-party:NOTICES.md", "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
-                                  *("//tools/toolchain-dist:" + path.removeprefix("tools/toolchain-dist/") for path in distribution_license_paths())],
-                            files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py",
-                                       "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
+    distribution_gates(out, call, READS)
     out.append("\n" + call("hirsel_script_test", name="core-evaluator", script="core/tools/gate_evaluator.py",
                             production=True, native_tools=True,
                             bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",

@@ -128,6 +128,47 @@ Linux root with just the loader and runtime libraries. From that root it runs
 executes `./program` and checks the package. The installation's link kit provides
 the CRT and link-time libraries.
 
+## The macOS bundle
+
+Buck2 does not run on macOS. On an Apple Silicon Mac with rustup, from a checkout
+of the commit:
+
+```sh
+tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/hirsel-darwin --work /tmp/hirsel-darwin-work
+```
+
+`darwin_host.py` builds with Cargo what Buck2 builds on Linux, from the same pins:
+the compiler in Cargo's `dist` profile against the pinned LLVM tree, the six runtime
+archives (fat-LTO staticlibs of `hirsel-core-rt` against the trace-only std, with
+`tools/buck2/profile.bzl`'s runtime flags), and the Darwin link kit's text stubs. The
+bundle ships `hirsel`, `bin/ld.lld` and `lib/libLLVM.23.1.dylib` from the pinned
+tree, the runtimes and link kit for `aarch64-apple-darwin` only, the core and std
+images, the toolchain packages and the helpers in `libexec/hirsel/`. The last two
+come from `toolchain-programs.sh`, which Buck2's bundle runs too. Every Mach-O is
+built with `MACOSX_DEPLOYMENT_TARGET` from `link_kit.DARWIN_FLOOR` and carries an
+ad-hoc signature. The bundle has no notices directory and no `hirsel-build.json` yet.
+
+The build then checks the bundle, as
+`tools/toolchain-dist/build --host aarch64-apple-darwin --check-fresh PREFIX` does
+for any unpacked bundle. Each Mach-O's load commands must match its file class:
+
+| File | Loads exactly | LC_RPATH | Other |
+|---|---|---|---|
+| `hirsel` | libSystem, CoreFoundation, Security, libiconv | none | |
+| `bin/ld.lld` | libSystem, libc++, libz, `@rpath/libLLVM.23.1.dylib` | `@loader_path/../lib` | same bytes as the pinned tree |
+| `lib/libLLVM.23.1.dylib` | libSystem, libc++, libz | none | id `@rpath/libLLVM.23.1.dylib`, same bytes as the pinned tree |
+| `libexec/hirsel/*` and the programs the check builds | a subset of the link kit's libraries | none | no initializer entries |
+| `<program>.dSYM/.../DWARF/<program>` beside those | nothing | none | MH_DSYM with its program's UUID, unsigned |
+| `core-packages/<std>/native/o/**` | nothing | none | MH_OBJECT, unsigned; the final link sets its platform version |
+
+Every image (the first four rows) is a thin arm64 file with LC_UUID, minos at the
+floor, no segment whose maximum protection is both writable and executable, and a
+signature that passes `codesign -v --strict`; a Mach-O of no class fails.
+Without `MACOSX_DEPLOYMENT_TARGET`, rustc 1.99 stamps minos 11.0. The check then packs the bundle,
+unpacks it into an empty read-only prefix and runs the fresh-machine sequence above
+under `env -i` (PATH holding only the prefix, `/usr/bin` and `/bin`), then builds
+the relocation program on both backends and checks every program it built.
+
 On Rust toolchain or LLVM bumps, run
 `tools/toolchain-dist/check-repro --output /tmp/hirsel-repro` from the commit
 to qualify. It builds that commit without PGO (or with `--pgo` and `--bolt`,

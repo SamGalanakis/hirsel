@@ -277,6 +277,35 @@ def darwin_library(library, allowlist, zig_tbd):
             f"  - targets: [ arm64-macos ]\n    symbols: [ {listed} ]\n...\n"), len(names)
 
 
+def darwin_kit(output, allowlists, zig_tbd):
+    """Write the aarch64-apple-darwin row's text stubs under `output` and return
+    its manifest row. Both the Linux kit and a Mac host's own kit
+    (tools/toolchain-dist/darwin_host.py) are made here."""
+    if set(allowlists) != set(DARWIN_LIBRARIES):
+        raise SystemExit(f"--darwin-symbols must name exactly {sorted(DARWIN_LIBRARIES)}")
+    (output / DARWIN).mkdir()
+    files = {}
+    for library in DARWIN_LIBRARIES:
+        tbd, count = darwin_library(library, Path(allowlists[library]).read_text(), zig_tbd)
+        (output / DARWIN / f"{library}.tbd").write_text(tbd)
+        files[f"{library}.tbd"] = {
+            "sha256": sha256(output / DARWIN / f"{library}.tbd"), "symbols": count,
+            "source": f"tools/native-toolchain/darwin/{library}.symbols",
+            "checked": ("exported for arm64 macOS by Zig's libSystem.tbd; no fsync or fdatasync"
+                        if library == "libSystem" else "no Zig stub; checked on the Mac day")}
+    return {
+        "floor": DARWIN_FLOOR,
+        "libraries": [f"{library}.tbd" for library in DARWIN_LIBRARIES],
+        "files": files,
+    }
+
+
+def write_manifest(output, manifest):
+    text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    (output / "manifest.json").write_text(text)
+    (output / "digest").write_text(hashlib.sha256(text.encode()).hexdigest() + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--llvm", type=Path, required=True)
@@ -456,26 +485,8 @@ def main():
     # aarch64-apple-darwin: one generated text stub; S5's recipe links it with
     # `ld.lld -flavor darwin -platform_version macos <floor> <floor>`.
     allowlists = dict(spec.split("=", 1) for spec in args.darwin_symbols)
-    if set(allowlists) != set(DARWIN_LIBRARIES):
-        raise SystemExit(f"--darwin-symbols must name exactly {sorted(DARWIN_LIBRARIES)}")
-    (output / DARWIN).mkdir()
-    files = {}
-    for library in DARWIN_LIBRARIES:
-        tbd, count = darwin_library(library, Path(allowlists[library]).read_text(), args.zig_libsystem.read_text())
-        (output / DARWIN / f"{library}.tbd").write_text(tbd)
-        files[f"{library}.tbd"] = {
-            "sha256": sha256(output / DARWIN / f"{library}.tbd"), "symbols": count,
-            "source": f"tools/native-toolchain/darwin/{library}.symbols",
-            "checked": ("exported for arm64 macOS by Zig's libSystem.tbd; no fsync or fdatasync"
-                        if library == "libSystem" else "no Zig stub; checked on the Mac day")}
-    manifest["targets"][DARWIN] = {
-        "floor": DARWIN_FLOOR,
-        "libraries": [f"{library}.tbd" for library in DARWIN_LIBRARIES],
-        "files": files,
-    }
-    text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    (output / "manifest.json").write_text(text)
-    (output / "digest").write_text(hashlib.sha256(text.encode()).hexdigest() + "\n")
+    manifest["targets"][DARWIN] = darwin_kit(output, allowlists, args.zig_libsystem.read_text())
+    write_manifest(output, manifest)
 
 
 if __name__ == "__main__":

@@ -3,12 +3,15 @@
 
     tools/toolchain-dist/build --train-profile DIR [--llvm-profdata /path/to/llvm-profdata]
     tools/toolchain-dist/build --output /tmp/dist [--pgo DIR/<sha256>.profdata [--bolt DIR/<sha256>.fdata]]
+    tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/dist [--work DIR]
 
 Training counts differ from run to run, so a release never trains: it takes a
 PGO profile and a BOLT profile, each trained once and named by its SHA-256, and
 refuses one whose bytes do not match its name. `--train-profile` writes both;
 the BOLT profile is trained on the PGO-use compiler built from the PGO profile
-beside it, the only binary it is valid for. Uses Buck2's remote pool. Training
+beside it, the only binary it is valid for. Uses Buck2's remote pool, except
+`--host aarch64-apple-darwin`, which builds on an Apple Silicon Mac with Cargo
+(darwin_host.py). Training
 uses one tools/capped command at a time. Keep output and work outside the
 repository; profiles are never committed.
 """
@@ -135,6 +138,38 @@ def sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+RELOCATION_PROGRAM = r'''pub fn main(out: Stdout) -> Result[(), Exit] waits {
+    let value = result.unwrap(std.int.parse_uint("2a", 16))
+    let mut line = string.new()
+    string.push_u64(mut line, value)
+    string.push_char(mut line, '\n')
+    result.unwrap(stdout.write(out, line))
+    Ok(())
+}
+'''
+
+
+def relocation_witness(compiler, work, env):
+    """Build a program on each backend with `compiler` and run it; return the executables."""
+    project = work / 'app'
+    subprocess.run([compiler, 'new', project], cwd=work, env=env, check=True)
+    (project / 'main.hirsel').write_text(RELOCATION_PROGRAM)
+    # Hexadecimal 2a is 2 * 16 + 10 = 42. The program writes it in decimal with a newline.
+    expected = b'42\n'
+    executables = []
+    for backend in ('cranelift', 'llvm'):
+        executable = work / backend
+        subprocess.run([compiler, 'build', project, '--backend', backend,
+                        '--grant', 'Stdout', '-o', executable],
+                       cwd=work, env=env, check=True)
+        actual = subprocess.check_output([executable], cwd=work, env=env)
+        if actual != expected:
+            raise ValueError(f'{backend} relocation witness wrote {actual!r}, expected {expected!r}')
+        print(f'dist: {backend} relocation witness passed', flush=True)
+        executables.append(executable)
+    return executables
+
+
 def witness(output):
     try:
         with (tempfile.TemporaryDirectory(prefix='hirsel-prefix-', dir=output.parent) as prefix,
@@ -146,30 +181,8 @@ def witness(output):
             shipped = work / 'core-packages'
             packages.rename(shipped)
             shutil.copytree(shipped, packages)
-            compiler = moved / 'hirsel'
-            project = work / 'app'
             env = dict(PATH=os.defpath, HOME=scratch, TMPDIR=scratch, HIRSEL_JOBS='1')
-            subprocess.run([compiler, 'new', project], cwd=work, env=env, check=True)
-            (project / 'main.hirsel').write_text(r'''pub fn main(out: Stdout) -> Result[(), Exit] waits {
-    let value = result.unwrap(std.int.parse_uint("2a", 16))
-    let mut line = string.new()
-    string.push_u64(mut line, value)
-    string.push_char(mut line, '\n')
-    result.unwrap(stdout.write(out, line))
-    Ok(())
-}
-''')
-            # Hexadecimal 2a is 2 * 16 + 10 = 42. The program writes it in decimal with a newline.
-            expected = b'42\n'
-            for backend in ('cranelift', 'llvm'):
-                executable = work / backend
-                subprocess.run([compiler, 'build', project, '--backend', backend,
-                                '--grant', 'Stdout', '-o', executable],
-                               cwd=work, env=env, check=True)
-                actual = subprocess.check_output([executable], cwd=work, env=env)
-                if actual != expected:
-                    raise ValueError(f'{backend} relocation witness wrote {actual!r}, expected {expected!r}')
-                print(f'dist: {backend} relocation witness passed', flush=True)
+            relocation_witness(moved / 'hirsel', work, env)
             shutil.rmtree(packages)
             shipped.rename(packages)
             moved.rename(output)
@@ -186,23 +199,6 @@ def fresh_witness(prefix):
     if table is None:
         raise ValueError('could not read RUNTIME_TARGETS from tools/buck2/defs.bzl')
     targets = set(ast.literal_eval(table[1]))
-    registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())
-    observation_labels = {'none': '', 'prof': 'profiling ', 'observed': 'charge observation '}
-    labels = {
-        (observation, record): f"{prefix}{'recording ' if record else ''}runtime"
-        for observation, prefix in observation_labels.items()
-        for record in (False, True)
-    }
-    rows = registration['runtimes']
-    expected = {(target, observation, record) for target in targets for observation, record in labels}
-    registered = {(row['target'], row['observation'], row['record']) for row in rows}
-    if registered != expected:
-        raise ValueError(f'runtime target/flavour mismatch: missing {sorted(expected - registered)}, '
-                         f'extra {sorted(registered - expected)}')
-    runtimes = {
-        f"{labels[row['observation'], row['record']]} {row['target']} {Path(row['path']).parent.name}"
-        for row in rows
-    }
 
     relocated = '/opt/relocated-hirsel'
     sandbox = ['bwrap', '--unshare-all', '--die-with-parent',
@@ -221,7 +217,6 @@ def fresh_witness(prefix):
             if match and not Path(match[1]).is_relative_to(prefix):
                 libraries.add(match[1])
     loader_files = [arg for path in sorted(libraries) for arg in ('--ro-bind', path, path)]
-    sequence = 'hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build'
     cross_main = '''pub fn main() -> Result[(), Exit] {
     if result.unwrap(std.int.parse_uint("2a", 16)) == 42 {
         Ok(())
@@ -232,19 +227,48 @@ def fresh_witness(prefix):
 '''
     with tempfile.TemporaryDirectory(prefix='hirsel-cross-') as output:
         passed = subprocess.run([*sandbox, *loader_files, '--bind', output, '/out', '--', '/bin/sh', '-c',
-                                 f'hirsel --version && hirsel inspect --std --interface && '
-                                 f'{sequence} && ./program && hirsel check && '
+                                 f'{FRESH_SEQUENCE} && '
                                  f"printf '%s' {shlex.quote(cross_main)} > main.hirsel && "
                                  'hirsel build --target aarch64-apple-darwin -o /out/program-darwin'],
                                 capture_output=True, text=True, env={})
-        if passed.returncode or passed.stderr or 'pass executed app@1/tests/test_twice' not in passed.stdout:
-            raise ValueError(f'fresh root acceptance failed ({passed.returncode})\n'
-                             f'{passed.stdout}{passed.stderr}')
+        accept_fresh(passed, prefix, targets)
         with (Path(output) / 'program-darwin').open('rb') as image:
             # mach_header_64: MH_MAGIC_64, CPU_TYPE_ARM64, cpusubtype, MH_EXECUTE.
             header = image.read(16)
         if len(header) != 16 or struct.unpack('<II4xI', header) != (0xfeedfacf, 0x0100000c, 2):
             raise ValueError('fresh root Darwin build did not produce an arm64 Mach-O executable')
+    print('dist: fresh-root arm64 Mach-O build passed', flush=True)
+
+
+# The fresh-machine sequence, run in an empty root on each host.
+FRESH_SEQUENCE = ('hirsel --version && hirsel inspect --std --interface && '
+                  'hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build && '
+                  './program && hirsel check')
+
+
+def accept_fresh(passed, prefix, targets):
+    """Check a fresh-machine run of FRESH_SEQUENCE against the bundle's registration,
+    which must hold every runtime flavour for exactly `targets`."""
+    if passed.returncode or passed.stderr or 'pass executed app@1/tests/test_twice' not in passed.stdout:
+        raise ValueError(f'fresh root acceptance failed ({passed.returncode})\n'
+                         f'{passed.stdout}{passed.stderr}')
+    registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())
+    observation_labels = {'none': '', 'prof': 'profiling ', 'observed': 'charge observation '}
+    labels = {
+        (observation, record): f"{prefix}{'recording ' if record else ''}runtime"
+        for observation, prefix in observation_labels.items()
+        for record in (False, True)
+    }
+    rows = registration['runtimes']
+    expected = {(target, observation, record) for target in targets for observation, record in labels}
+    registered = {(row['target'], row['observation'], row['record']) for row in rows}
+    if registered != expected:
+        raise ValueError(f'runtime target/flavour mismatch: missing {sorted(expected - registered)}, '
+                         f'extra {sorted(registered - expected)}')
+    runtimes = {
+        f"{labels[row['observation'], row['record']]} {row['target']} {Path(row['path']).parent.name}"
+        for row in rows
+    }
     lines = passed.stdout.splitlines()
     if not any(line.startswith('std@1/sim/fs/serve\t') for line in lines):
         raise ValueError('fresh root std interface omitted the public sim.fs.serve declaration')
@@ -255,7 +279,6 @@ def fresh_witness(prefix):
             or reported != runtimes):
         raise ValueError(f'fresh root reported unexpected version identities\n{passed.stdout}')
     print(passed.stdout + passed.stderr, end='', flush=True)
-    print('dist: fresh-root arm64 Mach-O build passed', flush=True)
     print('dist: fresh-root acceptance passed', flush=True)
 
 
@@ -339,6 +362,7 @@ def profile_lock():
 
 
 def main():
+    import darwin_host
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--output', type=Path)
@@ -348,6 +372,8 @@ def main():
                         help='check the glibc floor and fresh-machine behavior (requires readelf and bwrap)')
     action.add_argument('--check-glibc', type=Path, metavar='PREFIX',
                         help='check the glibc floor on an existing bundle (requires readelf)')
+    parser.add_argument('--host', choices=[darwin_host.TARGET],
+                        help='build or check natively on this host instead of with Buck2 on Linux')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', type=Path, metavar='PROFILE',
                         help='use this pinned profile, named <sha256>.profdata (from --train-profile)')
@@ -365,6 +391,21 @@ def main():
         parser.error('--bolt requires --pgo: a BOLT profile is trained on the PGO-use compiler')
     if args.llvm_profdata and args.train_profile is None:
         parser.error('--llvm-profdata requires --train-profile')
+    if args.host is not None:
+        if args.pgo or args.bolt or args.local or args.num_threads or args.train_profile or args.check_glibc:
+            parser.error('--host takes only --output or --check-fresh, and --work')
+        def accept(passed, prefix):
+            accept_fresh(passed, prefix, {darwin_host.TARGET})
+        if args.check_fresh is not None:
+            darwin_host.check(args.check_fresh.resolve(), FRESH_SEQUENCE, accept, relocation_witness)
+            return
+        output = args.output.resolve()
+        if output.exists() or output.is_relative_to(ROOT):
+            parser.error('output must be a fresh directory outside the checkout')
+        work = args.work.resolve() if args.work else output.with_name(output.name + '-work')
+        darwin_host.build(output, work)
+        darwin_host.check(output, FRESH_SEQUENCE, accept, relocation_witness)
+        return
     if args.check_glibc is not None:
         check_glibc(args.check_glibc.resolve())
         return

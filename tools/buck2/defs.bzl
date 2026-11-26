@@ -505,10 +505,6 @@ def hirsel_script_test(name, script, data, args = [], bin_exes = {}, front_obser
 
 PRODUCT_MEMORY_LIMIT = "2G"
 
-# The platform host's root limit: its catalog store, the launcher session and each operator
-# connection's reader and writer.
-PLATFORM_HOST_LIMIT = 1073741824
-
 def _core_image_impl(ctx):
     sources = ctx.actions.symlinked_dir("sources", {f.short_path: f for f in ctx.attrs.srcs})
     image = ctx.actions.declare_output("core-image", dir = True)
@@ -537,11 +533,6 @@ def hirsel_core_image(name, **kwargs):
                 exec_compatible_with = [budget_constraint(pool_budget_name(*PRECHECK_REQUEST))],
                 visibility = ["PUBLIC"], **kwargs)
 
-# A toolchain package's manifest binds the other toolchain packages it uses from the
-# toolchain, as an installed package does, in place of the workspace's path bindings.
-# Every package a toolchain package binds is itself a toolchain package.
-TOOLCHAIN_BINDINGS = "sed -E 's/^([a-z_]+) = \\{ major = ([0-9]+), path = \"[^\"]*\" \\}$/\\1 = { major = \\2 }/'"
-
 def _program_sources(ctx, name, sources):
     # Each package keeps its own directory: core/programs/<package>/<file>.
     return ctx.actions.symlinked_dir(name, {
@@ -552,26 +543,12 @@ def _program_sources(ctx, name, sources):
 def _toolchain_packages_impl(ctx):
     # The toolchain packages other than std (package_content::TOOLCHAIN in the driver), each
     # packed alone from core/programs/<name> as <name>-<major>.hpkg with its dependencies bound
-    # from the toolchain.
+    # from the toolchain, by tools/toolchain-dist/toolchain-programs.sh.
     sources = _program_sources(ctx, "package-sources", ctx.attrs.sources)
     packages = ctx.actions.declare_output("packages", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
-    script = ctx.actions.write("pack.sh", [
-        "set -eu",
-        'compiler="$1"; sources="$2"; out="$3"; work="$4"; shift 4',
-        'mkdir -p "$out" "$work"',
-        'for name in "$@"; do',
-        '  mkdir -p "$work/$name"; cp -RL "$sources/$name"/. "$work/$name/"',
-        # The copies keep the inputs' read-only mode under remote execution: replace the
-        # manifest rather than write through it.
-        '  rm -f "$work/$name/hirsel.toml"',
-        '  ' + TOOLCHAIN_BINDINGS + ' "$sources/$name/hirsel.toml" > "$work/$name/hirsel.toml"',
-        '  major="$(sed -nE \'s/^major = ([0-9]+)$/\\1/p\' "$work/$name/hirsel.toml" | head -n 1)"',
-        '  "$compiler" pack "$work/$name" --package-store "$work/packages" --output "$out/$name-$major.hpkg" > /dev/null',
-        'done',
-    ])
     ctx.actions.run(
-        cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
+        cmd_args("/bin/sh", ctx.attrs._programs, "pack", ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
                  sources, packages.as_output(), scratch.as_output(), ctx.attrs.packages,
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
@@ -586,6 +563,7 @@ _toolchain_packages = rule(
         "packages": attrs.list(attrs.string()),
         "sources": attrs.list(attrs.source()),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
+        "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain-programs.sh"),
     },
 )
 
@@ -672,11 +650,9 @@ def _toolchain_bundle_impl(ctx):
     # loads, ld.lld and the link kit, the runtime archive for each target, and the core and std
     # images, recorded in hirsel-core-toolchain.json, and the toolchain package archives. The compiler copies
     # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
-    # builds the platform host as libexec/hirsel/platform_main (docs/spec/launch.md "Starting
-    # the host") and its offline pin reader as libexec/hirsel/pin_reader. The launcher
-    # starts the host in the state directory, and the driver starts the reader there.
-    # libexec/hirsel/store_tool runs `hirsel store
-    # backup|restore` (STORE-SPEC §15.4) on the two directories the driver passes as fds 3 and 4.
+    # builds the helpers in libexec/hirsel (tools/toolchain-dist/toolchain-programs.sh helpers).
+    # The launcher starts the platform host in the state directory, and the driver starts the
+    # pin reader there.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     runtimes = ctx.attrs.runtimes[DefaultInfo].sub_targets
@@ -690,8 +666,6 @@ def _toolchain_bundle_impl(ctx):
         # Keep the build-tree RPATH valid. Install products with the final
         # compiler because BOLT changes its GNU build ID.
         compiler = ctx.actions.copy_file("hirsel", ctx.attrs._bolt_compiler, executable_bit_override = True)
-    cwd = "." if ctx.attrs._darwin else "/proc/self/cwd"
-    fd_dir = "/dev/fd" if ctx.attrs._darwin else "/proc/self/fd"
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
@@ -700,15 +674,7 @@ def _toolchain_bundle_impl(ctx):
         '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --observed-runtime "${16}" --observed-recording-runtime "${18}" --target aarch64-unknown-linux-gnu --link-kit "$8" > /dev/null',
         '"$1" std-product --install "$root" --runtime "${19}" --recording-runtime "${20}" --prof-runtime "${21}" --prof-recording-runtime "${22}" --observed-runtime "${23}" --observed-recording-runtime "${24}" --target aarch64-apple-darwin --link-kit "$8" > /dev/null',
         'cp "${13}"/*.hpkg "$root/core-packages/"',
-        'mkdir -p "$TMPDIR/platform" "$root/libexec/hirsel"; cp -L "${14}"/platform/* "$TMPDIR/platform/"; rm -f "$TMPDIR/platform/hirsel.toml"',
-        TOOLCHAIN_BINDINGS + ' "${14}/platform/hirsel.toml" > "$TMPDIR/platform/hirsel.toml"',
-        '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/main --grant Clock --grant Random --grant Tasks'
-        + ' --grant "Net=UnixRoot ctl {};UnixConnect ctl launcher.sock;UnixListen ctl operator.sock"'.format(cwd)
-        + ' --dir {}/catalog --limit {} -o "$root/libexec/hirsel/platform_main" > /dev/null'.format(cwd, PLATFORM_HOST_LIMIT),
-        '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/read_pin --grant Clock --grant Stdout'
-        + ' --dir {}/catalog --limit {} -o "$root/libexec/hirsel/pin_reader" > /dev/null'.format(cwd, PLATFORM_HOST_LIMIT),
-        '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/store_tool/main --grant Clock --grant Random --grant Tasks --grant Stdout --grant Stderr'
-        + ' --dir {}/3 --dir {}/4 --limit {} -o "$root/libexec/hirsel/store_tool" > /dev/null'.format(fd_dir, fd_dir, PLATFORM_HOST_LIMIT),
+        '/bin/sh "${25}" helpers "$root" "${14}/platform" "$TMPDIR"',
     ])
     platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
     ctx.actions.run(
@@ -735,6 +701,7 @@ def _toolchain_bundle_impl(ctx):
                  prof_recording_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
                  observed_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
                  observed_recording_runtimes["aarch64-apple-darwin"][DefaultInfo].default_outputs[0],
+                 ctx.attrs._programs,
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
@@ -756,9 +723,9 @@ hirsel_toolchain_bundle = rule(
         "observed_recording_runtimes": attrs.dep(),
         "toolchain_packages": attrs.dep(),
         "platform_sources": attrs.list(attrs.source()),
-        "_darwin": attrs.bool(default = select({"prelude//os:macos": True, "DEFAULT": False})),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
+        "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain-programs.sh"),
     } | ({"_bolt_compiler": attrs.source(default = "root//tools/toolchain-dist:hirsel-bolt")} if DIST_BOLT == "use" else {}),
 )
 

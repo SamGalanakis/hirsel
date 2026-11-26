@@ -13,8 +13,12 @@ use std::{
     time::Duration,
 };
 
-// 2027-01-01 UTC, inside alpha.pem's 2026-11-20..2046-11-15 validity.
-const INSIDE: u64 = 1_798_761_600;
+const APPLE_CA: &[u8] = include_bytes!("../../../testdata/tls/platform-ca.pem");
+const APPLE_LEAF: &[u8] = include_bytes!("../../../testdata/tls/platform-leaf.pem");
+const APPLE_PIN: &str = "60977253ffc26bd2e60734788b6deb20c53f89cae7fca0287c336356d0381eeb";
+const UNRELATED_PIN: &str = "649f529cdaed70d49948fbff4d06ea60d5483ac1450e42dfb171abea7d5fbe07";
+// 2021-01-01 UTC, inside the platform leaf's Dec 2020 to Feb 2021 lifetime.
+const INSIDE: u64 = 1_609_459_200;
 const DAY: u64 = 86_400;
 
 fn time(seconds: u64) -> UnixTime {
@@ -23,7 +27,7 @@ fn time(seconds: u64) -> UnixTime {
 
 fn anchored() -> TestTrust {
     TestTrust {
-        anchors: Some(CertificateDer::from_pem_slice(CA).unwrap()),
+        anchors: Some(CertificateDer::from_pem_slice(APPLE_CA).unwrap()),
         now: Some(time(INSIDE)),
         ..TestTrust::default()
     }
@@ -42,7 +46,7 @@ fn with_trust(config: TestTrust, check: impl FnOnce()) {
 }
 
 fn leaf_cases() {
-    let leaf = CertificateDer::from_pem_slice(ALPHA).unwrap();
+    let leaf = CertificateDer::from_pem_slice(APPLE_LEAF).unwrap();
     let check = |leaf, name, seconds, detail| {
         let answer = trust::evaluate(&Input {
             chain: vec![leaf],
@@ -55,22 +59,44 @@ fn leaf_cases() {
     };
     check(leaf.clone(), "wrong.test", INSIDE, 1);
     check(leaf.clone(), "127.0.0.1", INSIDE, 1);
-    check(leaf.clone(), "alpha.test", INSIDE + 21 * 365 * DAY, 2);
+    check(leaf.clone(), "alpha.test", INSIDE + 60 * DAY, 2);
     check(leaf, "alpha.test", INSIDE - 60 * DAY, 3);
     check(CertificateDer::from(vec![1, 2, 3]), "alpha.test", INSIDE, 4);
+
+    let policy = trust::evaluate(&Input {
+        chain: vec![CertificateDer::from_pem_slice(ALPHA).unwrap()],
+        name: ServerName::try_from("alpha.test").unwrap(),
+        now: time(1_798_761_600),
+        test: Some(Arc::new(TestTrust {
+            anchors: Some(CertificateDer::from_pem_slice(CA).unwrap()),
+            ..TestTrust::default()
+        })),
+    })
+    .unwrap_err();
+    // errSecCertificateValidityPeriodTooLong is a policy failure.
+    assert_eq!(
+        (policy.status, policy.error, policy.value as i64),
+        (0, tls_failure(0, 4).error, -67901),
+    );
 }
 
 fn exchange(
     run: &mut Run,
-    roots: Option<&[u8]>,
+    roots: Option<(&[u8], &str)>,
     version: &'static SupportedProtocolVersion,
 ) -> Outcome {
-    let config = certificate_for_versions(ALPHA, ALPHA_KEY, &[], &[version]);
+    let config = certificate_for_versions(APPLE_LEAF, ALPHA_KEY, &[], &[version]);
     let (port, peer) = serve(listener(), config, |mut server| {
         server_handshake(&mut server).is_ok()
     });
     let key = run.connect(port);
+    let net = run.net;
+    let roots = roots.map(|(bundle, pin)| {
+        run.net = run.grant(&format!("Tls alpha.test 0-65535 Roots=sha256:{pin}"));
+        bundle
+    });
     let outcome = run.upgrade(key, b"alpha.test", roots, &[]).outcome;
+    run.net = net;
     let accepted = outcome.error == IoError::OK;
     if accepted {
         run.release_halves(outcome.value);
@@ -88,13 +114,19 @@ fn issuer_clock_and_roots() {
         },
         || {
             let out = exchange(&mut run, None, &rustls::version::TLS13);
-            assert_error(out, tls_failure(0, 0));
-            assert!(matches!(out.value as i64, -25318 | -67843));
+            assert_eq!(
+                (out.status, out.error),
+                (0, tls_failure(0, 0).error),
+                "Apple code {}",
+                out.value as i64
+            );
+            assert!(matches!(out.value as i64, -25318 | -67843), "{out:?}");
         },
     );
     with_trust(anchored(), || {
         for version in rustls::DEFAULT_VERSIONS {
-            assert_eq!(exchange(&mut run, None, version).error, IoError::OK);
+            let out = exchange(&mut run, None, version);
+            assert_eq!(out.error, IoError::OK, "Apple code {}", out.value as i64);
         }
     });
     with_trust(
@@ -119,22 +151,22 @@ fn issuer_clock_and_roots() {
         },
         || {
             assert_eq!(
-                exchange(&mut run, Some(CA), &rustls::version::TLS13).error,
+                exchange(
+                    &mut run,
+                    Some((APPLE_CA, APPLE_PIN)),
+                    &rustls::version::TLS13
+                )
+                .error,
                 IoError::OK
             );
-            let root = "649f529cdaed70d49948fbff4d06ea60d5483ac1450e42dfb171abea7d5fbe07";
-            let grant = run.grant(&format!("Tls alpha.test 0-65535 Roots=sha256:{root}"));
-            let (port, peer) = serve(listener(), certificate_config(&[]), |mut server| {
-                server_handshake(&mut server).is_ok()
-            });
-            let key = run.connect(port);
-            run.net = grant;
             assert_error(
-                run.upgrade(key, b"alpha.test", Some(UNRELATED), &[])
-                    .outcome,
+                exchange(
+                    &mut run,
+                    Some((UNRELATED, UNRELATED_PIN)),
+                    &rustls::version::TLS13,
+                ),
                 tls_failure(0, 0),
             );
-            assert!(!peer.join().unwrap());
             assert_eq!(calls.load(Ordering::Relaxed), 0);
         },
     );
@@ -156,9 +188,11 @@ fn held_evaluation(reason: u8, expected: u8) {
         ..anchored()
     };
     let mut run = Run::new();
-    let (port, peer) = serve(listener(), certificate_config(&[]), |mut server| {
-        server_handshake(&mut server).is_ok()
-    });
+    let (port, peer) = serve(
+        listener(),
+        certificate_for(APPLE_LEAF, ALPHA_KEY, &[]),
+        |mut server| server_handshake(&mut server).is_ok(),
+    );
     let socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
     socket.set_nonblocking(true).unwrap();
     let fd = duplicate_high(&socket, 128);
@@ -259,10 +293,10 @@ fn held_evaluation(reason: u8, expected: u8) {
     release.send(()).unwrap();
     assert!(!wait_for_completion.recv().unwrap());
     assert_ne!(unsafe { libc::fcntl(guard.as_raw_fd(), libc::F_GETFD) }, -1);
-    assert_eq!(
-        exchange(&mut next, Some(CA), &rustls::version::TLS13).error,
-        IoError::OK
-    );
+    with_trust(anchored(), || {
+        let out = exchange(&mut next, None, &rustls::version::TLS13);
+        assert_eq!(out.error, IoError::OK, "Apple code {}", out.value as i64);
+    });
 }
 
 fn duplicate_high(source: &impl AsRawFd, minimum: i32) -> OwnedFd {

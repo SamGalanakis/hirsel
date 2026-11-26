@@ -118,6 +118,10 @@ impl Cache {
                 .map_err(protocol_error)?
                 .with_root_certificates(roots.clone())
                 .with_no_client_auth();
+        #[cfg(all(test, target_vendor = "apple"))]
+        if let Some(now) = platform::test_trust().and_then(|test| test.now) {
+            config.time_provider = Arc::new(platform::ProviderClock { now: Some(now) });
+        }
         config.resumption = if cacheable {
             Resumption::in_memory_sessions(TICKETS_PER_CONFIG)
                 .tls12_resumption(Tls12Resumption::Disabled)

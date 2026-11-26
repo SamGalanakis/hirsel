@@ -114,7 +114,7 @@ impl<'order, 'm, 'b> Write<'order, 'm, 'b> {
 }
 
 pub(crate) struct Read<'a, 'b> {
-    pub(super) budget: &'b Debit<'b>,
+    pub(crate) budget: &'b Debit<'b>,
     depth: usize,
     bytes: &'a [u8],
     pub(super) pools: Pools,

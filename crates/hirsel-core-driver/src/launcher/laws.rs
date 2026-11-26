@@ -287,6 +287,7 @@ int main(int argc, char **argv) {
         foreign_modules: vec![],
         foreign_archives: vec![],
         toolchain: vec![],
+        values: vec![],
         launch: release_recipe::Launch {
             backend: release_recipe::Backend::Cranelift,
             target: options.target,
@@ -1149,6 +1150,7 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
         foreign_modules: vec![],
         foreign_archives: vec![],
         toolchain: vec![],
+        values: vec![],
         launch: Launch {
             backend: Backend::Cranelift,
             target: "x86_64-unknown-linux-gnu".into(),

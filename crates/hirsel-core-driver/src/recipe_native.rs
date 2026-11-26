@@ -260,6 +260,26 @@ impl CheckProduct {
         coded.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         let mut bodies = coded.into_iter().map(|(_, code)| code).collect::<Vec<_>>();
         bodies.sort_unstable_by_key(|body| body.body.hash);
+        // Each computed constant a unit's constant slots bind travels as a
+        // value object, so a host assembling from the recipe binds it too.
+        let mut values = BTreeMap::new();
+        for identity in units.keys().chain(memos.keys()) {
+            let instance = reached.materialized.get(identity);
+            let bound = instance.values.as_deref().unwrap_or_default();
+            for ((_, value), &hash) in bound.iter().zip(&instance.signatures.values) {
+                values.entry(hash).or_insert(value);
+            }
+        }
+        let mut values = values
+            .into_iter()
+            .map(|(hash, value)| {
+                store.put(
+                    ObjectKind::Value,
+                    &hirsel_core_ir::static_data::encode_value_object(hash, value),
+                )
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        values.sort_unstable_by_key(|value| value.hash);
         let ungranted = super::recipe_grants::ungranted(&foreign.grants, &decl.parameters);
         let launch = Launch {
             backend: match options.backend {
@@ -277,6 +297,7 @@ impl CheckProduct {
             entry,
             groups,
             bodies,
+            values,
             foreign_modules: foreign.modules,
             foreign_archives: foreign.archives,
             toolchain: addresses

@@ -38,6 +38,8 @@ pub enum ObjectKind {
     Group,
     Recipe,
     ForeignArchive,
+    /// A computed constant's value (PROG-10).
+    Value,
 }
 
 impl ObjectKind {
@@ -48,6 +50,7 @@ impl ObjectKind {
             Self::Group => "groups",
             Self::Recipe => "recipes",
             Self::ForeignArchive => "archives",
+            Self::Value => "values",
         }
     }
 
@@ -59,6 +62,7 @@ impl ObjectKind {
             Self::Group => 2,
             Self::Recipe => 3,
             Self::ForeignArchive => 4,
+            Self::Value => 5,
         }
     }
 
@@ -68,6 +72,7 @@ impl ObjectKind {
             Self::Annex => hirsel_core_ir::normal::ANNEX_HASH_DOMAIN,
             Self::Group => hirsel_core_ir::address::GROUP_HASH_DOMAIN,
             Self::Recipe => hirsel_core_ir::release_recipe::HASH_DOMAIN,
+            Self::Value => hirsel_core_ir::static_data::VALUE_OBJECT_DOMAIN,
             Self::ForeignArchive => return None,
         })
     }
@@ -294,6 +299,7 @@ impl CodeStore {
             ObjectKind::Body,
             ObjectKind::Annex,
             ObjectKind::ForeignArchive,
+            ObjectKind::Value,
         ] {
             let directory = self.root.join(kind.directory());
             let rows = match fs::read_dir(&directory) {

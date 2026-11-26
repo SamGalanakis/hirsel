@@ -445,6 +445,14 @@ fn verify_release(
         check_foreign_archive_inventory(&recipe, &budget.scratch())?;
     }
     closure::check(&recipe, &groups, &bodies, semantics, &budget.scratch())?;
+    let values = decode_rows(&recipe.values, budget, |object, budget| {
+        let raw = load(ObjectKind::Value, object, budget)?;
+        Ok(hirsel_core_ir::static_data::decode_value_object(
+            &raw, budget,
+        )?)
+    })?;
+    let mut bodies = bodies;
+    bind_constant_slots(&recipe, &groups, &mut bodies, values, budget)?;
     let mut link_archives = crate::foreign_archive::LinkArchives::default();
     if recipe.has_foreign() {
         charge_rows::<crate::foreign_archive::ArchiveOrigin<'_>>(
@@ -478,6 +486,84 @@ fn verify_release(
         bodies,
         link_archives,
     })
+}
+
+/// Bind every constant slot of the closure to its value (PROG-10), so no
+/// verified body holds an unbound computed constant: a member's group binds
+/// each slot `Value(h)`, and the value object whose claim is `h` must have the
+/// slot's type and hash to `h` under it. A value no slot binds is `Extra`, a
+/// slot whose value is not listed `Missing`.
+fn bind_constant_slots(
+    recipe: &Recipe,
+    groups: &[Group],
+    bodies: &mut [Body],
+    values: Vec<(ContentHash, hirsel_core_ir::StaticValue)>,
+    budget: &Debit<'_>,
+) -> Result<(), AdmissionError> {
+    use hirsel_core_ir::static_data::{fits, value_closure, value_hash};
+    use hirsel_core_ir::{Static, StaticValue};
+    use std::collections::BTreeMap;
+    let mut by_hash: BTreeMap<ContentHash, (StaticValue, bool)> = BTreeMap::new();
+    for (hash, value) in values {
+        if by_hash.insert(hash, (value, false)).is_some() {
+            return Err(AdmissionError::Malformed(
+                "two value objects claim one value",
+            ));
+        }
+    }
+    for member in groups.iter().flat_map(|group| &group.members) {
+        budget.check()?;
+        let at = recipe
+            .bodies
+            .binary_search_by_key(&member.body, |row| row.body.hash)
+            .map_err(|_| AdmissionError::Missing(member.body))?;
+        let decoded = &mut bodies[at].decoded;
+        if decoded.constant_slots.is_empty() {
+            continue;
+        }
+        let function_slots = decoded.slots.len();
+        let module = &mut decoded.module;
+        let recipes = hirsel_core_layout::compute(&module.types)
+            .map_err(|_| AdmissionError::Malformed("a constant slot's type has no layout"))?;
+        for (path, binding) in decoded
+            .constant_slots
+            .iter()
+            .zip(member.slots.get(function_slots..).unwrap_or_default())
+        {
+            let hirsel_core_ir::address::Binding::Value(hash) = *binding else {
+                return Err(AdmissionError::Binding(
+                    "a value binds exactly the constant slots",
+                ));
+            };
+            let (value, used) = by_hash
+                .get_mut(&hash)
+                .ok_or(AdmissionError::Missing(hash))?;
+            *used = true;
+            for row in 0..module.statics.len() {
+                let Static::Computed { ty, constant } = &module.statics[row] else {
+                    continue;
+                };
+                if constant != path {
+                    continue;
+                }
+                let closure = value_closure(module, ty).ok_or(AdmissionError::Malformed(
+                    "a constant slot's type holds no value",
+                ))?;
+                if !fits(ty, value, &module.types, &recipes)
+                    || value_hash(closure, ty, value, &module.types, &recipes) != hash
+                {
+                    return Err(AdmissionError::Binding(
+                        "a value object differs from the value its slot binds",
+                    ));
+                }
+                module.statics[row] = hirsel_core_ir::static_data::bound_static(ty, value.clone());
+            }
+        }
+    }
+    if let Some((&hash, _)) = by_hash.iter().find(|(_, (_, used))| !used) {
+        return Err(AdmissionError::Extra(hash));
+    }
+    Ok(())
 }
 
 fn check_foreign_archive_inventory(
@@ -553,6 +639,7 @@ fn listed_objects(
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(recipe.groups.len()))
+        .and_then(|n| n.checked_add(recipe.values.len()))
         .and_then(|n| n.checked_add(recipe.foreign_archives.len()))
         .filter(|&n| n <= limits.closure_objects)
         .ok_or(AdmissionError::Limit(Limit::ClosureObjects))?;
@@ -572,6 +659,12 @@ fn listed_objects(
                 (ObjectKind::Annex, &row.annex),
             ]
         }))
+        .chain(
+            recipe
+                .values
+                .iter()
+                .map(|object| (ObjectKind::Value, object)),
+        )
         .chain(
             recipe
                 .foreign_archives

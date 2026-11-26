@@ -215,6 +215,7 @@ impl Reservation<'_> {
                 ObjectKind::Body => "body",
                 ObjectKind::Annex => "annex",
                 ObjectKind::ForeignArchive => "archive",
+                ObjectKind::Value => "value",
                 ObjectKind::Recipe => unreachable!("recipes are in the request header"),
             };
             staging

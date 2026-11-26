@@ -355,7 +355,7 @@ steps are the only build path. `hirsel publish` runs the first step alone and pr
 DIR.
 
 **Objects.** A code store holds immutable objects, each named by the hash of its own bytes:
-bodies, groups and annexes (PROG-10), and recipes. A **recipe** has a version, the normal-form
+bodies, groups, annexes and values (PROG-10), and recipes. A **recipe** has a version, the normal-form
 version and these parts:
 
 - the entry, the program's `main`, as its identity encoding (PROG-10) and its address;
@@ -363,6 +363,9 @@ version and these parts:
   of hash;
 - every body in that closure, as its hash and byte length with its annex's hash and byte
   length, in strictly ascending order of body hash;
+- every **value** a body of that closure binds to a computed constant (PROG-10), as its value
+  hash and byte length, in strictly ascending order of hash. A value object holds the value
+  hash and the value itself, so a host binds the constant without running the program;
 - the **foreign modules** ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)):
   one foreign leaf per reached foreign module, with its identity, symbol prefix, whole archive
   table and reached functions, in strictly ascending order of module identity;
@@ -391,8 +394,8 @@ So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.
 
-Its root is `R = H("hirsel.release-recipe.v3", recipe)`; the version is 3, and versions 1 (no
-foreign parts) and 2 (no toolchain part) are never read or written. A place's `place`, `migrate`, handle
+Its root is `R = H("hirsel.release-recipe.v4", recipe)`; the version is 4, and versions 1 (no
+foreign parts), 2 (no toolchain part) and 3 (no values) are never read or written. A place's `place`, `migrate`, handle
 and launch code is reached from `main`, so the closure covers it. The annexes hold the site
 maps failures report, so a comment that moves lines changes R but no address. The optimized
 native link stores coordinates for the site words its retained sections reference. Each
@@ -454,7 +457,7 @@ objects it lacks.
    included. An object the host did not ask for, or one already received, is
    `Unsolicited(h)` and is not kept. An object whose bytes do not hash to its listed hash is
    `Hash(h)`.
-5. Every group, body and annex of the closure decodes within the limits under PROG-10's
+5. Every group, body, annex and value of the closure decodes within the limits under PROG-10's
    encoding rules, each annex against its own body, before any of it is put into a map.
    A body in a different normal-form version is `Unsupported`. Republish from source.
    Invalid frames are `Malformed`.
@@ -468,7 +471,11 @@ objects it lacks.
    leaf, or a function of one, that no slot reaches is `Extra`. Each leaf's table has a row
    for the recipe's target (`Missing` otherwise), and the foreign archives part is exactly the
    set of the pins and lengths selected by those rows and by the `Foreign` bindings
-   (`Missing`, `Extra`).
+   (`Missing`, `Extra`). Each body's computed constant slots name, through its member's
+   `Value(h)` bindings, exactly the listed values: a value no slot binds is `Extra(h)`, a slot
+   whose value is not listed is `Missing(h)`. Each value fits its constant's type and hashes,
+   with that type's closure hash, to `h` (`Binding`). Admission binds each constant to its value
+   here, so every body that leaves admission is lowered with its constants bound.
 7. Every slot's identity equals the bound member's or builtin's identity, every `Internal`
    index is in range, each group's members form one strongly connected component, the entry's
    identity matches, and the closure has one address per identity with every slot's signature

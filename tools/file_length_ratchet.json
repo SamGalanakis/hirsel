@@ -152,9 +152,9 @@
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/code_admission/code_store.rs": {
-    "lines": 1063,
-    "raise_revision": 1,
-    "reason": "runner-place-provenance-2819"
+    "lines": 1066,
+    "raise_revision": 3,
+    "reason": "fixfwd-place-comptime-unbound-2845"
   },
   "crates/hirsel-core-driver/src/core_ops_native.rs": {
     "lines": 2474,
@@ -162,9 +162,9 @@
     "reason": "coverage-c1-2551"
   },
   "crates/hirsel-core-driver/src/launcher/laws.rs": {
-    "lines": 1249,
-    "raise_revision": 1,
-    "reason": "runner-place-provenance-2819"
+    "lines": 1244,
+    "raise_revision": 2,
+    "reason": "fixfwd-place-comptime-unbound-2845"
   },
   "crates/hirsel-core-driver/src/launcher/mod.rs": {
     "lines": 1866,
@@ -196,9 +196,9 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 1834,
-    "raise_revision": 7,
-    "reason": "runner-place-provenance-2819"
+    "lines": 1805,
+    "raise_revision": 9,
+    "reason": "fixfwd-place-comptime-unbound-2845"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 4070,
@@ -342,9 +342,9 @@
     "reason": "macos-s9-target-consts-2508"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
-    "lines": 1319,
-    "raise_revision": 4,
-    "reason": "cli-s1a-launch-2709"
+    "lines": 1171,
+    "raise_revision": 6,
+    "reason": "fixfwd-place-comptime-unbound-2845"
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
     "lines": 2450,

@@ -375,6 +375,7 @@ impl Worker {
                         2 => ObjectKind::Body,
                         3 => ObjectKind::Annex,
                         4 => ObjectKind::ForeignArchive,
+                        5 => ObjectKind::Value,
                         _ => {
                             need.done = true;
                             break;
@@ -830,6 +831,7 @@ mod tests {
             address: ContentHash::default(),
             groups: vec![],
             bodies: vec![],
+            values: vec![],
             foreign_modules: vec![],
             foreign_archives: vec![],
             toolchain: vec![],

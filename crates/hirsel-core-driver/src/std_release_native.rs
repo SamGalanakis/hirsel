@@ -908,3 +908,44 @@ fn a_program_over_a_separate_std_does_what_it_does_whole() {
 fn a_program_over_a_separate_std_records_what_it_records_whole() {
     assert!(std_differential(&["recorded"]) > 0, "a recorded run wrote a tape");
 }
+
+/// A published release carries the values of its computed constants (PROG-10),
+/// and admission binds them before the bodies lower: a program whose std reach
+/// holds base64's alphabet table and the float printer's power tables, opened
+/// from its recipe alone, decodes and prints what RFC 4648 and the shortest
+/// round-trip spelling say. Red before 2845, where `Publication::open` stopped
+/// on "computed constant std@1/base64/VALUES reached emission unbound".
+#[test]
+#[ignore = "explicit native integration target"]
+fn a_published_release_binds_its_computed_constants() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"pub fn main(out: Stdout) -> Result[(), Exit] {
+    let decoded = match std.base64.decode(string.as_bytes("aGVsbG8sIEhpcnNlbA==")) {
+        Some(take decoded) => take decoded,
+        None => return Error(Exit(status: 2u8)),
+    }
+    let mut line = match string.from_utf8(take decoded) {
+        Ok(take line) => take line,
+        Error(_) => return Error(Exit(status: 3u8)),
+    }
+    string.push(mut line, " ")
+    std.float.push_f64(mut line, 0.1)
+    string.push(mut line, " ")
+    std.float.push_f64(mut line, 1000000000000000000000.0)
+    result.unwrap(stdout.write(out, line));
+    Ok(())
+}
+"#;
+    let product = std_checked(dir.path(), "constants", source, "cache");
+    let mut options = native_options(Backend::Cranelift, &dir.path().join("constants"));
+    options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
+    options.grant_mask = 1 << 4;
+    let (status, stdout, stderr, _, _) =
+        std_run(&product, &options, StdBuild::Dev, &dir.path().join("constants"));
+    assert_eq!(
+        (status, String::from_utf8_lossy(&stdout).into_owned()),
+        (Some(0), "hello, Hirsel 0.1 1000000000000000000000".to_owned()),
+        "{}",
+        String::from_utf8_lossy(&stderr)
+    );
+}

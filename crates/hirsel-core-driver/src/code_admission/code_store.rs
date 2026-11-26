@@ -115,6 +115,7 @@ impl Fixture {
                 foreign_modules: vec![],
                 foreign_archives: vec![],
                 toolchain: vec![],
+                values: vec![],
                 launch: Launch {
                     backend: Backend::Cranelift,
                     target: TARGET.into(),
@@ -266,6 +267,7 @@ fn read_need(peer: &mut UnixStream) -> Option<Vec<ObjectKey>> {
                     2 => ObjectKind::Body,
                     3 => ObjectKind::Annex,
                     4 => ObjectKind::ForeignArchive,
+                    5 => ObjectKind::Value,
                     tag => panic!("unexpected Need tag {tag}"),
                 },
                 hash: ContentHash(read(peer)),
@@ -280,6 +282,7 @@ fn object_header(key: ObjectKey) -> Vec<u8> {
         ObjectKind::Body => 2,
         ObjectKind::Annex => 3,
         ObjectKind::ForeignArchive => 4,
+        ObjectKind::Value => 5,
         ObjectKind::Recipe => panic!("recipe object frame"),
     }];
     bytes.extend_from_slice(&key.hash.0);

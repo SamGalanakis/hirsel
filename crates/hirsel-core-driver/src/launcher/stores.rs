@@ -84,6 +84,7 @@ impl Images for Stores {
                 code.insert(key(ObjectKind::Body, pair.body.hash));
                 code.insert(key(ObjectKind::Annex, pair.annex.hash));
             }
+            code.extend(recipe.values.iter().map(|v| key(ObjectKind::Value, v.hash)));
             code.extend(
                 recipe
                     .foreign_archives

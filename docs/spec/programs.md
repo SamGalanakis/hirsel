@@ -572,6 +572,14 @@ as tags, and a change in the meaning of one gets a new tag, under the same rule.
 - **The values table.** A library image stores the value of each computed constant it
   evaluated, by its initialiser's address, and a program that imports the library reads it
   there and runs nothing.
+- **A value object carries a value to a host.** A release recipe lists, for every `Value(h)`
+  its closure binds, a **value object**: the magic `HIRVALUE\0`, version 1, then `h` and the
+  value as a tree (tag 0, the bits as a 64-bit little-endian word; tag 1, the case as an
+  optional 32-bit word then a ULEB128 count of fields and each field; tag 2, a ULEB128 count
+  then the bytes). Its object hash is `H("hirsel.code-value-object.v1", bytes)`. A host that
+  admits the recipe checks that the value fits its constant's type and hashes to `h`, then
+  binds the constant to it ([launch](launch.md#release-recipe-and-host-assembly), admission
+  step 6), so a host lowers no body with an unbound constant and evaluates nothing.
 - **A static value enters the image as its bytes.** A static computed constant's slot is
   bound to one read-only static holding its value bytes, as above; every reader in a build
   shares it. The reader takes the length and the data from that static at run time and

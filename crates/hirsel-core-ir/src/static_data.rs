@@ -1,4 +1,5 @@
 use crate::Static;
+use hirsel_core_ids::ContentHash;
 use hirsel_core_layout::{FieldTy, Layout, RecipeRow, Row, TypeRef, case_word, field_size};
 use std::borrow::Cow;
 
@@ -246,4 +247,147 @@ fn write(
         }
         _ => unreachable!("a checked constant has its type's shape"),
     }
+}
+
+/// The value hash domain (PROG-10).
+pub const VALUE_HASH_DOMAIN: &str = "hirsel.code-value.v1";
+/// The closure hash domain of a constant type that reaches no row: a scalar or `()`.
+pub const SCALAR_CLOSURE_DOMAIN: &str = "hirsel.core-closure.v1";
+/// The hash domain of a value object, the code-store object that carries a
+/// computed constant's value to a host assembling from a release recipe.
+pub const VALUE_OBJECT_DOMAIN: &str = "hirsel.code-value-object.v1";
+const VALUE_MAGIC: &[u8] = b"HIRVALUE\0\x01\x00";
+
+/// The closure hash `c` of a computed constant held in a slot of type `ty`
+/// in `module` (PROG-10): its row's closure hash, or a scalar's name hash.
+/// None for a type no constant slot holds.
+pub fn value_closure(module: &crate::Module, ty: &FieldTy) -> Option<ContentHash> {
+    match ty {
+        FieldTy::Inline(t) if t.index() < module.types.len() => {
+            Some(module.closure(crate::TypeId(t.0)).hash)
+        }
+        FieldTy::Scalar(s) => Some(ContentHash::of_parts(
+            SCALAR_CLOSURE_DOMAIN,
+            [s.name().as_bytes()],
+        )),
+        _ => None,
+    }
+}
+
+/// A value's PROG-10 value hash `H("hirsel.code-value.v1", c ‖ v)`, with `c`
+/// its type's closure hash and `v` its value bytes.
+pub fn value_hash(
+    closure: ContentHash,
+    ty: &FieldTy,
+    value: &StaticValue,
+    shapes: &[Row],
+    recipes: &[RecipeRow],
+) -> ContentHash {
+    let mut bytes = Vec::new();
+    value_bytes(ty, value, shapes, recipes, &mut bytes);
+    ContentHash::of_parts(VALUE_HASH_DOMAIN, [closure.0.as_slice(), &bytes])
+}
+
+/// Whether `value` has the shape a slot of type `ty` binds, so that
+/// [`value_bytes`] and [`bound_static`] read it: a scalar's bits, a fixed
+/// row's fields of one of its cases, an array's elements, or a static
+/// constant's bytes in a row.
+pub fn fits(ty: &FieldTy, value: &StaticValue, shapes: &[Row], recipes: &[RecipeRow]) -> bool {
+    match (ty, value) {
+        (FieldTy::Scalar(_), StaticValue::Bits(_)) => true,
+        (FieldTy::Inline(t), _) if t.index() >= shapes.len() || t.index() >= recipes.len() => false,
+        (FieldTy::Inline(_), StaticValue::Bytes(_)) => true,
+        (FieldTy::Inline(t), _) => {
+            let shape = &shapes[t.index()];
+            if let Some(array @ FieldTy::Array(..)) = &shape.held {
+                return fits(array, value, shapes, recipes);
+            }
+            let (Layout::Fixed(layout), StaticValue::Fields { case, fields }) =
+                (&recipes[t.index()].layout, value)
+            else {
+                return false;
+            };
+            let Some(declared) = shape.fields(*case) else {
+                return false;
+            };
+            layout.offsets.len() > case.unwrap_or(0) as usize
+                && declared.len() == fields.len()
+                && declared
+                    .iter()
+                    .zip(fields)
+                    .all(|(field, value)| fits(&field.ty, value, shapes, recipes))
+        }
+        (FieldTy::Array(item, n), StaticValue::Fields { case: None, fields }) => {
+            fields.len() as u64 == *n && fields.iter().all(|v| fits(item, v, shapes, recipes))
+        }
+        _ => false,
+    }
+}
+
+/// A value object's bytes: the value hash its readers' groups bind, then the
+/// value as a tree (`0` bits as a 64-bit little-endian word; `1` an optional
+/// case index and the fields; `2` the bytes, counted).
+pub fn encode_value_object(hash: ContentHash, value: &StaticValue) -> Vec<u8> {
+    fn tree(value: &StaticValue, out: &mut Vec<u8>) {
+        match value {
+            StaticValue::Bits(bits) => {
+                out.push(0);
+                out.extend_from_slice(&bits.to_le_bytes());
+            }
+            StaticValue::Fields { case, fields } => {
+                out.push(1);
+                match case {
+                    None => out.push(0),
+                    Some(case) => {
+                        out.push(1);
+                        out.extend_from_slice(&case.to_le_bytes());
+                    }
+                }
+                crate::normal::uleb(out, fields.len() as u64);
+                for field in fields {
+                    tree(field, out);
+                }
+            }
+            StaticValue::Bytes(bytes) => {
+                out.push(2);
+                crate::normal::uleb(out, bytes.len() as u64);
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    let mut bytes = VALUE_MAGIC.to_vec();
+    bytes.extend_from_slice(&hash.0);
+    tree(value, &mut bytes);
+    bytes
+}
+
+/// Decode a value object completely: the value hash it claims and its value.
+/// The claim is checked where a slot binds it, against the slot's type.
+pub fn decode_value_object(
+    bytes: &[u8],
+    budget: &crate::decode::Debit<'_>,
+) -> crate::decode::DecodeResult<(ContentHash, StaticValue)> {
+    use crate::normal::wire::{Read, Wire, invalid};
+    fn tree(input: &mut Read<'_, '_>) -> crate::decode::DecodeResult<StaticValue> {
+        match u8::read(input)? {
+            0 => Ok(StaticValue::Bits(u64::read(input)?)),
+            1 => {
+                let case = Option::<u32>::read(input)?;
+                let count = input.count()?;
+                let fields = input.read_vec(count, tree)?;
+                Ok(StaticValue::Fields { case, fields })
+            }
+            2 => {
+                let count = input.count()?;
+                input.budget.allocation::<u8>(count)?;
+                Ok(StaticValue::Bytes(input.take(count)?.to_vec()))
+            }
+            _ => Err(invalid("unknown value tag")),
+        }
+    }
+    let mut input = Read::new(bytes, VALUE_MAGIC, budget)?;
+    let hash = ContentHash::read(&mut input)?;
+    let value = input.nested(tree)?;
+    input.end()?;
+    Ok((hash, value))
 }

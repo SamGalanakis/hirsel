@@ -604,6 +604,7 @@ impl Pump {
                 ObjectKind::Body => 2,
                 ObjectKind::Annex => 3,
                 ObjectKind::ForeignArchive => 4,
+                ObjectKind::Value => 5,
                 ObjectKind::Recipe => return Err(io::ErrorKind::InvalidData.into()),
             });
             frame.extend_from_slice(&key.hash.0);

@@ -127,7 +127,7 @@ pub type Approvals: codec + send {
 }
 
 // One object the launcher needs, by kind and 32-byte hash.
-pub type Wanted: codec + send = GroupKey(Bytes) | BodyKey(Bytes) | AnnexKey(Bytes) | ArchiveKey(Bytes)
+pub type Wanted: codec + send = GroupKey(Bytes) | BodyKey(Bytes) | AnnexKey(Bytes) | ArchiveKey(Bytes) | ValueKey(Bytes)
 
 // A grant diff (launch.md "Publish and assemble"): the sorted grant lines a new recipe
 // holds that the old one lacks, and the sorted lines of the old one it drops. A line is one

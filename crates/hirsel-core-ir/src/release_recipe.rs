@@ -8,9 +8,9 @@ use crate::normal::{
 };
 use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 
-const MAGIC: &[u8] = b"HIRRECIP\0\x03\x00";
+const MAGIC: &[u8] = b"HIRRECIP\0\x04\x00";
 const NORMAL_FORM: u16 = crate::normal::VERSION;
-pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v3";
+pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v4";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRef {
@@ -126,6 +126,9 @@ pub struct Recipe {
     pub groups: Vec<ObjectRef>,
     /// In strictly increasing body hash order.
     pub bodies: Vec<BodyRef>,
+    /// The value objects of the computed constants the closure's constant
+    /// slots bind (PROG-10), in strictly increasing object hash order.
+    pub values: Vec<ObjectRef>,
     /// In strictly increasing order of the module identity encoding.
     pub foreign_modules: Vec<ForeignLeaf>,
     /// In strictly increasing order of raw SHA-256.
@@ -284,6 +287,10 @@ impl Recipe {
             row.body.encode(&mut bytes);
             row.annex.encode(&mut bytes);
         }
+        uleb(&mut bytes, self.values.len() as u64);
+        for value in &self.values {
+            value.encode(&mut bytes);
+        }
         uleb(&mut bytes, self.foreign_modules.len() as u64);
         for leaf in &self.foreign_modules {
             leaf.encode(&mut bytes);
@@ -367,6 +374,13 @@ impl Recipe {
             ordered(&mut prev, body.hash, "unordered body references")?;
             let annex = ObjectRef::decode(input)?;
             Ok(BodyRef { body, annex })
+        })?;
+        let mut prev = None;
+        let count = input.count()?;
+        let values = input.read_vec(count, |input| {
+            let object = ObjectRef::decode(input)?;
+            ordered(&mut prev, object.hash, "unordered value references")?;
+            Ok(object)
         })?;
         let mut prev = None;
         let count = input.count()?;
@@ -459,6 +473,7 @@ impl Recipe {
             address,
             groups,
             bodies,
+            values,
             foreign_modules,
             foreign_archives,
             toolchain,
@@ -511,6 +526,10 @@ mod tests {
                     },
                 },
             ],
+            values: vec![ObjectRef {
+                hash: ContentHash([9; 32]),
+                len: 13,
+            }],
             foreign_modules: vec![ForeignLeaf {
                 module: DefPath::from_full("lib@1/native").unwrap(),
                 symbols: "hfl_".into(),
@@ -574,7 +593,7 @@ mod tests {
             },
         };
         // Independent frame, including two-byte ULEB for the group's length.
-        let mut bytes = b"HIRRECIP\0\x03\0\x05\0\x0fapp@1/main/main\0\0".to_vec();
+        let mut bytes = b"HIRRECIP\0\x04\0\x05\0\x0fapp@1/main/main\0\0".to_vec();
         bytes.extend_from_slice(&[1; 32]);
         bytes.push(1);
         bytes.extend_from_slice(&[2; 32]);
@@ -584,6 +603,9 @@ mod tests {
             bytes.extend_from_slice(&[hash; 32]);
             bytes.push(size);
         }
+        bytes.push(1);
+        bytes.extend_from_slice(&[9; 32]);
+        bytes.push(13);
         bytes.extend_from_slice(b"\x01\x0clib@1/native\x04hfl_\x01\x06target");
         bytes.extend_from_slice(&[7; 32]);
         bytes.extend_from_slice(b"\x0b\x01\x11lib@1/native/open\0\0\x04fn()");
@@ -603,10 +625,10 @@ mod tests {
         assert_eq!(recipe.encode(), bytes);
         assert_eq!(decode(&bytes), Ok(recipe.clone()));
 
-        let mut version_one = bytes.clone();
-        version_one[9] = 2;
+        let mut version_three = bytes.clone();
+        version_three[9] = 3;
         assert_eq!(
-            decode(&version_one),
+            decode(&version_three),
             Err(DecodeError::Unsupported("code frame version"))
         );
         let mut extra_archive = recipe.clone();

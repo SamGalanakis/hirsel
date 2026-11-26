@@ -14,6 +14,7 @@ pub(crate) fn put_wanted(w: &mut Writer, keys: &[ObjectKey]) {
             ObjectKind::Body => 1,
             ObjectKind::Annex => 2,
             ObjectKind::ForeignArchive => 3,
+            ObjectKind::Value => 4,
             ObjectKind::Recipe => unreachable!("a recipe is never needed"),
         });
         w.bytes(&key.hash.0);
@@ -29,6 +30,7 @@ pub(crate) fn get_wanted(r: &mut Reader<'_>) -> io::Result<Vec<ObjectKey>> {
                 1 => ObjectKind::Body,
                 2 => ObjectKind::Annex,
                 3 => ObjectKind::ForeignArchive,
+                4 => ObjectKind::Value,
                 _ => return Err(malformed("needed object tag")),
             };
             let hash =

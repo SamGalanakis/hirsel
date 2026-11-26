@@ -836,7 +836,8 @@ fn function_annex(
 pub struct DecodedBody {
     pub module: Module,
     pub slots: Vec<Slot>,
-    pub constant_slots: usize,
+    /// The computed constant each constant slot names, in slot order.
+    pub constant_slots: Vec<DefPath>,
     closures: Vec<Vec<ContentHash>>,
     abi_closures: Vec<Option<ContentHash>>,
     signatures: Vec<Option<ContentHash>>,
@@ -1023,10 +1024,14 @@ pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<DecodedBody> {
             canonical,
             plan.live_functions,
             plan.slots,
-            plan.constant_slots.len(),
+            plan.constant_slots
+                .into_iter()
+                .cloned()
+                .collect::<Vec<DefPath>>(),
         )
     };
     let (_live, kept_slots) = meter.finish()?;
+    budget.charge_slots(constant_slots.len())?;
     if !canonical {
         return Err(malformed());
     }

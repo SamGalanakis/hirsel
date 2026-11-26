@@ -59,9 +59,6 @@ thread_local! {
     static ACTIVE: RefCell<Vec<(DefPath, Target)>> = const { RefCell::new(Vec::new()) };
 }
 
-const VALUE_DOMAIN: &str = "hirsel.code-value.v1";
-const CLOSURE_DOMAIN: &str = "hirsel.core-closure.v1";
-
 impl CheckProduct {
     /// Constant `path`'s value on `target`, or why it is refused.
     pub(crate) fn computed(&self, path: &DefPath, target: Target) -> Evaluation {
@@ -217,24 +214,25 @@ fn run(units: &Units, root: &Identity) -> Result<Arc<Value>, Arc<str>> {
                     fields: vec![],
                 },
             };
-            let closure = match &ty {
-                Some(FieldTy::Inline(t)) => module.closure(hirsel_core_ir::TypeId(t.0)).hash,
-                Some(FieldTy::Scalar(s)) => {
-                    ContentHash::of_parts(CLOSURE_DOMAIN, [s.name().as_bytes()])
+            use hirsel_core_ir::static_data as data;
+            let hash = match ty
+                .as_ref()
+                .and_then(|ty| Some((ty, data::value_closure(&module, ty)?)))
+            {
+                Some((ty, closure)) => {
+                    data::value_hash(closure, ty, &value, &module.types, &recipes)
                 }
-                _ => ContentHash::of_parts(CLOSURE_DOMAIN, [b"()".as_slice()]),
+                // `()` reaches no row and has no value bytes.
+                None => ContentHash::of_parts(
+                    data::VALUE_HASH_DOMAIN,
+                    [
+                        ContentHash::of_parts(data::SCALAR_CLOSURE_DOMAIN, [b"()".as_slice()])
+                            .0
+                            .as_slice(),
+                        &[],
+                    ],
+                ),
             };
-            let mut bytes = Vec::new();
-            if let Some(ty) = &ty {
-                hirsel_core_ir::static_data::value_bytes(
-                    ty,
-                    &value,
-                    &module.types,
-                    &recipes,
-                    &mut bytes,
-                );
-            }
-            let hash = ContentHash::of_parts(VALUE_DOMAIN, [closure.0.as_slice(), &bytes]);
             return Ok(Arc::new(Value { value, hash }));
         }
         hirsel_core_eval::Outcome::Failed(chain) => {

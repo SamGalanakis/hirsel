@@ -169,7 +169,7 @@ pub(super) fn check(
                 budget,
             )?;
             // PROG-10: the function slots, then one `Value` per constant slot.
-            if row.slots.len() != decoded.slots.len() + decoded.decoded.constant_slots {
+            if row.slots.len() != decoded.slots.len() + decoded.decoded.constant_slots.len() {
                 binding.get_or_insert("group binding count differs from the body slots");
             }
 

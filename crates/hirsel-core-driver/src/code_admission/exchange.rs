@@ -140,6 +140,7 @@ impl<'a> Exchange<'a> {
             2 => ObjectKind::Body,
             3 => ObjectKind::Annex,
             4 => ObjectKind::ForeignArchive,
+            5 => ObjectKind::Value,
             _ => return Err(AdmissionError::Malformed("object frame tag")),
         };
         Ok(Some(ObjectKey {
@@ -349,6 +350,7 @@ fn tag(kind: ObjectKind) -> u8 {
         ObjectKind::Body => 2,
         ObjectKind::Annex => 3,
         ObjectKind::ForeignArchive => 4,
+        ObjectKind::Value => 5,
         ObjectKind::Recipe => unreachable!("recipes are in the request header"),
     }
 }

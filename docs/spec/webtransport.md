@@ -297,7 +297,9 @@ P-256 and valid for at most 14 days (W3C WebTransport,
 That hash is exactly `quic.Pin.Cert` (QUIC-3).
 
 `browser_identity` rejects validity intervals outside (0, 14 days] before minting with
-`std.x509_build.self_signed_p256` and a key from `secret.p256_key`.
+a key from `secret.p256_key`. It signs a P-256 server leaf with its own key and
+puts the DNS name or IP address in subjectAltName. Chromium requires the
+X.509 extensions field when validating certificate hashes.
 `browser_server` starts QUIC with the *current* identity and keeps the *next* one.
 `certificate_hashes(w)` is `[Cert(current), Cert(next)]`, and whatever page or signaling
 serves the client publishes it, so a client fetched at any time holds a list that contains
@@ -342,7 +344,8 @@ Red first in `core/programs/webtransport/laws.hirsel` unless named.
   reason `"bye"`, which the server reports as `Closed(_, 7, "bye")`. Nightly on Boat.
   *Oracle:* the browser's `WebTransportCloseInfo` and the hashes. Run T5 and T10 with
   `python3 core/programs/webtransport/browser/run.py --compiler HIRSEL --runtime PIC_ARCHIVE --linker LD_LLD --work DIR`.
-  Boat mints the echo identities in the VM.
+  Boat mints the echo identities in the VM. Chromium 153 and Firefox 155
+  require older WebTransport SETTINGS and leave T5 red until they support draft-17.
 - **T6 `buffered_streams_bounded`.** Under `sim.udp`, a client whose CONNECT is delayed
   opens `buffered` + 5 streams: the first `buffered` are delivered once the session is
   accepted, the rest are reset with `WT_BUFFERED_STREAM_REJECTED`, and a refused session's
@@ -371,7 +374,7 @@ Red first in `core/programs/webtransport/laws.hirsel` unless named.
   rotation (`[old, new]`) connects both before and after `rotate`; a client pinned to `[old]`
   only connects before and is refused with `Refused(Pin)` after; a connection made before
   the rotation stays up across it. A certificate valid for 15 days is refused by
-  `self_signed_p256`'s caller check before it can be served. *Oracle:* the W3C rule, and
+  `browser_identity` before it can be served. *Oracle:* the W3C rule, and
   QUIC-3's any-pin rule.
 
 ## Build slices

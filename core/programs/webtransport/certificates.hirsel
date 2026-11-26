@@ -18,7 +18,8 @@ type BrowserRotation {
 }
 
 /// Mint a browser identity. W3C WebTransport §6.4 permits P-256 and a validity
-/// period of at most two weeks for serverCertificateHashes.
+/// period of at most two weeks for serverCertificateHashes. name is a DNS name
+/// or IP address and appears in subjectAltName.
 pub fn browser_identity(r: Random, serial: u64, name: String, not_before: std.time.Timestamp, not_after: std.time.Timestamp) -> Result[BrowserIdentity, CertificateError] {
     let first_second = std.time.unix_secs(not_before)
     let end = std.time.unix_secs(not_after)
@@ -30,14 +31,23 @@ pub fn browser_identity(r: Random, serial: u64, name: String, not_before: std.ti
         Ok(take key) => take key,
         Error(err) => return Error(Key(err)),
     }
-    let der = match std.x509_build.self_signed_p256(key, r, public, serial, name, not_before, not_after) {
+    let mut names: List[std.x509_build.San] = list.with_capacity(1)
+    match std.net.parse_ip(string.as_bytes(name)) {
+        Ok(ip) => list.push(mut names, Address(ip)),
+        Error(_) => list.push(mut names, Dns(string.from(name))),
+    }
+    // QUICHE's fingerprint verifier requires X.509 extensions. Build a server
+    // leaf with a subjectAltName and sign it with its own key.
+    let issuer = std.x509_build.Issuer(key: take key, public: clone(public), common_name: string.from(name))
+    let der = match std.x509_build.leaf_p256(issuer, r, public, serial, name, names, not_before, not_after) {
         Ok(take der) => take der,
         Error(err) => return Error(Certificate(err)),
     }
+    let std.x509_build.Issuer(key: take identity_key, ..) = take issuer
     let digest = std.sha256.hash(der)
     let mut chain: List[Bytes] = list.with_capacity(1)
     list.push(mut chain, take der)
-    let identity: quic.handshake.Identity = Identity(chain: take chain, key: take key, alg: P256)
+    let identity: quic.handshake.Identity = Identity(chain: take chain, key: take identity_key, alg: P256)
     Ok(BrowserIdentity(identity: take identity, digest: digest, rotate_at: order.min(first_second + ROTATE_SECONDS, end)))
 }
 

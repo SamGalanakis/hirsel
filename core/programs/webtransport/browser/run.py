@@ -48,19 +48,21 @@ def main():
     parser.add_argument("--compiler", required=True, type=Path)
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--linker", required=True, type=Path)
+    parser.add_argument("--law", choices=("t5", "t10"), help="select one law; default runs both")
     parser.add_argument("--work", required=True, type=Path)
     args = parser.parse_args()
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=True)
     bundle = stage(work, args.compiler, args.runtime, args.linker)
     tools = bundle / "toolchain"
-    subprocess.run([
-        tools / "hirsel", "build", "core/programs/webtransport/browser", "--libraries", "core",
-        "--cc", "/usr/bin/gcc", "--runtime", tools / "runtime.a", "--entry", ENTRY,
-        "--store", work / "build-store", "--limit", "268435456", "--grant", "Random", "--grant", "Clock", "--grant", "Stdout",
-        "--grant", "Net=UdpBind 127.0.0.1/32 0-65535;UdpSend 127.0.0.1/32 1-65535",
-        "-o", "echo",
-    ], cwd=bundle, env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}"), check=True)
+    if args.law != "t10":
+        subprocess.run([
+            tools / "hirsel", "build", "core/programs/webtransport/browser", "--libraries", "core",
+            "--cc", "/usr/bin/gcc", "--runtime", tools / "runtime.a", "--entry", ENTRY,
+            "--store", work / "build-store", "--limit", "268435456", "--grant", "Random", "--grant", "Clock", "--grant", "Stdout",
+            "--grant", "Net=UdpBind 127.0.0.1/32 0-65535;UdpSend 127.0.0.1/32 1-65535",
+            "-o", "echo",
+        ], cwd=bundle, env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}"), check=True)
     common = '--libraries core --cc /usr/bin/gcc --runtime "$PWD/toolchain/runtime.a"'
     package = "core/programs/webtransport"
     rotation = (
@@ -78,6 +80,8 @@ node {package}/browser/browser_echo.mjs "$PWD/echo"
         {"lane": "webtransport-t10", "bundle": "bundle", "command": rotation, "seconds": 180},
         {"lane": "webtransport-t5", "bundle": "bundle", "command": echo, "seconds": 600},
     ]
+    if args.law:
+        jobs = [job for job in jobs if job["lane"] == f"webtransport-{args.law}"]
     manifest = work / "jobs.json"
     manifest.write_text(json.dumps(jobs) + "\n")
     return subprocess.call([DISPATCH, "--manifest", manifest, "--batch-seconds", "700"], cwd=work)

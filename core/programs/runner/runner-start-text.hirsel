@@ -111,6 +111,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Missed => string.push(mut line, "a read is waiting for a store frame"),
         Remote(_) => string.push(mut line, "a bucket operation failed"),
         Tiered(reason) => string.push(mut line, store.tiered_refusal_text(reason)),
+        Attached(_) => string.push(mut line, "the bucket store's head is attached to a host stream; open it through the stream's service"),
     }
 }
 

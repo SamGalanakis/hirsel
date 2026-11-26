@@ -172,7 +172,17 @@ fn history_frame_pair(raw: Bytes, field: DiskFrame) -> HistoryPair {
     HistoryPair(epoch: read_le(raw, at, 8), holder: StoreId(hi: read_le(raw, at + 8, 8), lo: read_le(raw, at + 16, 8)))
 }
 
+// A head carrying ATTACH is refused here: only the stream's openers read it
+// (§12.11.2, "A non-streamed opener refuses an attached head").
 fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
+    let (take capture, take attach) = history_decode_head_attach(raw)?
+    if let Some(a) = attach {
+        return Error(Attached(stream_attached_sid(a)))
+    }
+    Ok(take capture)
+}
+
+fn history_decode_head_attach(raw: Bytes) -> Result[(HistoryCapture, Option[Attach]), Error] {
     let (context, field) = history_head_frame(raw)?
     let head = list.slice(raw, field.payload, field.end)
     let pair = history_frame_pair(raw, field)
@@ -191,12 +201,21 @@ fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
         schema_binding[i] = head[104 + i]
     }
     let config = history_frame("head", context, raw, field.end, 0x00D0)?
-    if config.end != list.len(raw) || config.end - config.payload > AUTHORITY_LIMIT {
+    if config.end - config.payload > AUTHORITY_LIMIT {
         return Error(disk_fault("head", field.end, Malformed))
     }
     let meta = history_config(list.slice(raw, config.payload, config.end), field.end, raw[29])?
+    let attach: Option[Attach] = if config.end == list.len(raw) {
+        None
+    } else {
+        let frame = history_frame("head", context, raw, config.end, 0x0100)?
+        if frame.end != list.len(raw) {
+            return Error(disk_fault("head", frame.end, Malformed))
+        }
+        Some(stream_attach_decode(raw, frame, newest.seq)?)
+    }
     let captured = HistoryHead(authority_kind: raw[29], store: context.store, pair, activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding: schema_binding)
-    Ok(HistoryCapture(head: captured, config: take meta))
+    Ok((HistoryCapture(head: captured, config: take meta), take attach))
 }
 
 fn history_next_id(n: u64) -> Result[u64, Error] {

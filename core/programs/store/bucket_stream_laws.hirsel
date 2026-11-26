@@ -1,0 +1,204 @@
+// L90 laws for the Bucket host stream (STORE-SPEC §12.11.15). Each oracle is
+// the spec's rule or a value chosen here, never the encoder's own output.
+
+fn stream_law_head(at_seq: u64) -> HistoryHead {
+    let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
+    let newest = HistoryRef(seq: at_seq, epoch: 1, len: 189, digest: 0x2702)
+    HistoryHead(authority_kind: 1, store: StoreId(hi: 9, lo: 10), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: newest, checkpoint: base, floor: 1, binding:[0; 32])
+}
+
+fn stream_law_authority() -> Result[Bytes, Error] {
+    let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "p", style: Path), "bucket")
+    history_config_bytes(config)
+}
+
+fn stream_law_bytes(first: u8, n: u64, step: u8) -> Bytes {
+    let mut out: Bytes = list.with_capacity(n)
+    let mut b = first
+    for _ in 0u64 .. n {
+        list.push(mut out, b)
+        b += step
+    }
+    take out
+}
+
+fn stream_law_sid() -> StoreId {
+    StoreId(hi: 0x0807060504030201, lo: 0x100F0E0D0C0B0A09)
+}
+
+fn stream_law_tail(inc: u64, from_seq: u64, cutoff: u64, at: u64) -> SealedTail {
+    SealedTail(tail: StreamRef(sid: StoreId(hi: 21, lo: 22), inc, from_seq, from_frame: 0), cutoff, at)
+}
+
+fn stream_law_attached(head: HistoryHead, a: Attach) -> Result[Bytes, Error] {
+    let authority = stream_law_authority()?
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    history_encode_head(mut raw, head, authority)?
+    stream_attach_append(mut raw, DiskContext(store: head.store, role: 7, seq: head.entry.seq), a)?
+    Ok(take raw)
+}
+
+fn stream_law_expect_malformed(head: HistoryHead, a: Attach, take description: String) -> Result[(), Error] {
+    let raw = stream_law_attached(head, a)?
+    match history_decode_head_attach(raw) {
+        Error(Corrupt(Fault(file: f, why: Malformed, ..))) if f == "head" => Ok(()),
+        _ => fail(take description),
+    }
+}
+
+// L90 (§12.11.2): a non-streamed opener refuses an attached head with the
+// live sid, and ATTACH's rules hold. Red before ATTACH was read: such a head
+// was a standalone head plus trailing bytes, and a reader that skipped them
+// would drop the Place's stream tail.
+@test
+fn bucket_stream_attached_head_refused() -> Result[(), Error] {
+    let head = stream_law_head(5)
+    let mut sealed: List[SealedTail] = list.new()
+    list.push(mut sealed, stream_law_tail(1, 3, 4, 2))
+    list.push(mut sealed, stream_law_tail(2, 7, 9, 5))
+    let tail_ref = StreamRef(sid: stream_law_sid(), inc: 3, from_seq: 40, from_frame: 2)
+    let raw = stream_law_attached(head, Attach(settles: 6, live: Some(tail_ref), sealed: take sealed))?
+    // 4,999 bytes is the head bound with a full ATTACH; this one holds two sealed tails.
+    if list.len(raw) > 4999 {
+        fail("an attached head passed its bound")
+    }
+    let expected_sid = stream_law_bytes(1, 16, 1)
+    match history_decode_head(raw) {
+        Error(Attached(sid)) if sid == expected_sid => (),
+        _ => fail("a non-streamed reader accepted an attached head"),
+    }
+    let (_, take attach) = history_decode_head_attach(raw)?
+    let Some(a) = attach else {
+        fail("the attached reader lost ATTACH")
+    }
+    let Some(r) = a.live else {
+        fail("the attached reader lost the live tail")
+    }
+    if a.settles != 6 || r.inc != 3 || r.from_seq != 40 || r.from_frame != 2 || list.len(a.sealed) != 2 || a.sealed[1].cutoff != 9 || a.sealed[1].at != 5 {
+        fail("ATTACH did not read back as written")
+    }
+    let direct = stream_law_attached(head, Attach(settles: 0, live: None, sealed: list.new()))?
+    match history_decode_head(direct) {
+        Error(Attached(sid)) if sid == stream_law_bytes(0, 16, 0) => (),
+        _ => fail("direct service did not report 16 zero bytes"),
+    }
+    let mut falling: List[SealedTail] = list.new()
+    list.push(mut falling, stream_law_tail(1, 3, 4, 4))
+    list.push(mut falling, stream_law_tail(2, 7, 9, 3))
+    stream_law_expect_malformed(head, Attach(settles: 0, live: None, sealed: take falling), "a sealed `at` fell")?
+    let mut ahead: List[SealedTail] = list.new()
+    list.push(mut ahead, stream_law_tail(1, 3, 4, 6))
+    stream_law_expect_malformed(head, Attach(settles: 0, live: None, sealed: take ahead), "a sealed `at` passed the head position")?
+    let mut backwards: List[SealedTail] = list.new()
+    list.push(mut backwards, stream_law_tail(1, 8, 7, 2))
+    stream_law_expect_malformed(head, Attach(settles: 0, live: None, sealed: take backwards), "a sealed cutoff below its start")?
+    let mut nine: List[SealedTail] = list.new()
+    for _ in 0u64 .. 9 {
+        list.push(mut nine, stream_law_tail(1, 1, 1, 1))
+    }
+    match stream_law_attached(head, Attach(settles: 0, live: None, sealed: take nine)) {
+        Ok(over) => match history_decode_head_attach(over) {
+            Error(Corrupt(_)) => (),
+            _ => fail("nine sealed tails were accepted"),
+        },
+        Error(_) => (),
+    }
+    Ok(())
+}
+
+fn stream_law_register(rev: u64, low_seq: u64, k: u64) -> StreamRegister {
+    let mut rows: List[RegRow] = list.new()
+    list.push(mut rows, RegRow(store: StoreId(hi: 1, lo: 2), epoch: 4, token: StoreId(hi: 5, lo: 6), rev_hold: rev, abandoned: false))
+    list.push(mut rows, RegRow(store: StoreId(hi: 1, lo: 3), epoch: 2, token: StoreId(hi: 7, lo: 8), rev_hold: rev - 1, abandoned: true))
+    StreamRegister(rev, sid: stream_law_sid(), inc: 2, holder: StoreId(hi: 30, lo: 31), collecting: false, low_inc: 2, low_seq, index: Some(RegIndex(k, len: 100, digest: 0x77, covers_inc: 2, covers_seq: 40)), rows: take rows)
+}
+
+// L90 (§12.11.2, §12.11.3 rule 1): a register body is 110 + 49 per row, a body
+// with a lower rev than one seen is `Regressed`, and a write may not lower
+// `low` or `index.k`. Red without the rev guard: an old body seen again would
+// show a removed row or an old incarnation and reauthorize nothing it should.
+@test
+fn bucket_stream_register_rules() -> Result[(), Error] {
+    let reg = stream_law_register(5, 10, 3)
+    let mut raw: Bytes = list.with_capacity(REG_LIMIT + 128)
+    stream_register_encode(mut raw, reg, 1)?
+    if list.len(raw) != 72 + 16 + 110 + 2 * 49 {
+        fail("the register body is not 110 + 49 per row")
+    }
+    let read = stream_register_decode(raw, stream_law_sid(), 5)?
+    if read.rev != 5 || list.len(read.rows) != 2 || !read.rows[1].abandoned || read.rows[0].rev_hold != 5 || read.low_seq != 10 {
+        fail("the register did not read back")
+    }
+    match stream_register_decode(raw, stream_law_sid(), 6) {
+        Error(Corrupt(Fault(file: f, why: Regressed, ..))) if f == "reg" => (),
+        _ => fail("a register body with a lower rev was accepted"),
+    }
+    match stream_register_decode(raw, StoreId(hi: 1, lo: 1), 0) {
+        Error(Corrupt(_)) => (),
+        _ => fail("another stream's register was accepted"),
+    }
+    if !stream_register_follows(stream_law_register(5, 10, 3), stream_law_register(6, 10, 3)) {
+        fail("a valid successor was refused")
+    }
+    if stream_register_follows(stream_law_register(5, 10, 3), stream_law_register(7, 10, 3)) || stream_register_follows(stream_law_register(5, 10, 3), stream_law_register(6, 9, 3)) || stream_register_follows(stream_law_register(5, 10, 3), stream_law_register(6, 10, 2)) {
+        fail("a register write that skipped a rev or lowered low or index.k was accepted")
+    }
+    // The register's limit holds 10,698 slots' 2 × rows: 110 + 49 × 21,396 = 1,048,514.
+    if stream_register_bytes(2 * STREAM_MAX_SLOTS) > REG_LIMIT || stream_register_bytes(2 * STREAM_MAX_SLOTS + 2) <= REG_LIMIT {
+        fail("max_slots 10,698 is not the register's bound")
+    }
+    Ok(())
+}
+
+fn stream_law_slice(hi: u64, take octets: Bytes) -> BatchSlice {
+    BatchSlice(store: StoreId(hi, lo: 0), epoch: 3, frames: 1, octets)
+}
+
+// L90 (§12.11.2): a batch's INDEX locates each Place's slice, its row digest
+// and FOOTER catch a changed byte, INDEX's limit is the constant 727,480 and
+// a reader's first 4 KiB holds 58 rows; a TERM at a batch key reads as TERM.
+@test
+fn bucket_stream_batch_objects() -> Result[(), Error] {
+    let mut slices: List[BatchSlice] = list.new()
+    list.push(mut slices, stream_law_slice(1, stream_law_bytes(1, 3, 1)))
+    list.push(mut slices, stream_law_slice(4, stream_law_bytes(9, 5, 0)))
+    let mut raw: Bytes = list.with_capacity(4096)
+    stream_batch_encode(mut raw, stream_law_sid(), 2, 17, 1, 44, slices)?
+    let found = stream_batch_check("b", raw, stream_law_sid(), 2, 17)?
+    // HEADER 72, INDEX 16 + 16 + 2 × 68, slices 3 + 5, FOOTER 16 + 32.
+    if found.byte_len != 240 || list.len(raw) != 240 + 8 + 48 || found.seen_rev != 44 {
+        fail("the batch layout differs from §12.11.2")
+    }
+    let second = found.rows[1]
+    if second.offset != 243 || second.len != 5 || list.slice(raw, second.offset, second.offset + second.len) != stream_law_bytes(9, 5, 0) {
+        fail("INDEX does not locate the second slice")
+    }
+    stream_slice_check("b", second, list.slice(raw, 243, 248))?
+    let mut changed: Bytes = clone(raw)
+    let _ = list.set(mut changed, 244, 8u8)
+    match stream_slice_check("b", second, list.slice(changed, 243, 248)) {
+        Error(Corrupt(Fault(why: Checksum, ..))) => (),
+        _ => fail("a changed slice byte passed its digest"),
+    }
+    match stream_batch_check("b", changed, stream_law_sid(), 2, 17) {
+        Error(Corrupt(Fault(why: Checksum, ..))) => (),
+        _ => fail("a changed slice byte passed FOOTER"),
+    }
+    match stream_batch_check("b", raw, stream_law_sid(), 2, 18) {
+        Error(Corrupt(_)) => (),
+        _ => fail("a batch read at another key was accepted"),
+    }
+    if STREAM_INDEX_PREFIX + 58 * STREAM_INDEX_ROW_BYTES > STREAM_INDEX_PROBE || STREAM_INDEX_PREFIX + 59 * STREAM_INDEX_ROW_BYTES <= STREAM_INDEX_PROBE {
+        fail("the first 4 KiB does not hold exactly 58 rows")
+    }
+    if 16 + 68 * 10698 != STREAM_INDEX_LIMIT || disk_kind_limit(0x0101) != Some(727480) {
+        fail("INDEX's limit is not the constant 727,480")
+    }
+    let mut term: Bytes = list.with_capacity(256)
+    stream_term_encode(mut term, stream_law_sid(), 2, 18, 1)?
+    match stream_batch_head("b", term, stream_law_sid(), 2, 18)? {
+        Term(2, 18) => (),
+        _ => fail("a TERM did not read as the terminal fence"),
+    }
+    Ok(())
+}

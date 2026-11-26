@@ -13,7 +13,7 @@ pub type Caller: codec + key + shareable + cross {
 
 pub type Limit: shareable + cross = Key | Value | Transaction | Name | Ids | Manifest | Triggers
 
-pub type Why: shareable + cross = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed
+pub type Why: shareable + cross = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed | Regressed
 
 pub type Fault: shareable + cross {
     file: String,
@@ -23,7 +23,7 @@ pub type Fault: shareable + cross {
 
 pub type StoreCapacity: shareable + cross = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity)
 
-pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String) | LimitsDiffer(StoreLimits)
+pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String) | LimitsDiffer(StoreLimits) | Attached(Bytes)
 
 type Roots = PageRoots
 
@@ -2766,7 +2766,7 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0087 => Some(16715784),
         0x0088 => Some(1048832),
         0x0089 => Some(16715784),
-        _ => None
+        _ => stream_kind_limit(kind)
     }
 }
 
@@ -2816,7 +2816,7 @@ fn disk_check_frame_kind(file: String, ctx: DiskContext, kind: u16, flags: u16, 
     if kind == 0x0001 && at != 0 {
         return Error(disk_fault(file, at, Header))
     }
-    if ((kind == 0x0011 || kind == 0x0013) && ctx.role != 2) || (kind == 0x0012 && ctx.role != 4) || ((kind >= 0x0021 && kind <= 0x0023) && ctx.role != 3) || (kind == 0x0031 && ctx.role != 1) {
+    if (kind >= 0x0100 && kind <= 0x0105) || ((kind == 0x0011 || kind == 0x0013) && ctx.role != 2) || (kind == 0x0012 && ctx.role != 4) || ((kind >= 0x0021 && kind <= 0x0023) && ctx.role != 3) || (kind == 0x0031 && ctx.role != 1) {
         return Error(disk_fault(file, at, Kind(int.widen(kind))))
     }
     if (kind == 0x0013 || kind == 0x0023) && flags != 1 {

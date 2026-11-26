@@ -410,3 +410,198 @@ fn journal_test_info_commits_and_clock_monotonic(d: Dir, r: Random, tasks: Tasks
     }
     close(take reopened)
 }
+
+fn cadence_frame(send: Sender[JournalMsg], ctx: DiskContext, number: u64) waits {
+    let raw = journal_empty_commit(ctx, 72 + (number - 1) * 42, number)
+    result.unwrap(channel.send(send, Frame(take raw, number)))
+}
+
+fn cadence_ack(acks: Receiver[Ack], synced: Receiver[()], number: u64) waits {
+    result.unwrap(channel.receive(synced))
+    match channel.try_receive(acks) {
+        Ok(Journaled(last_number, written)) if last_number == number && written == number * 42 => (),
+        _ => fail("L94: the notice did not follow the cumulative group ack"),
+    }
+    if let Error(Empty) = channel.try_receive(acks) {
+        return
+    }
+    fail("L94: extra group ack")
+}
+
+fn cadence_wait(mut hand: ClockHand, due: Option[u64]) waits {
+    if clock.idle(mut hand) != due {
+        fail("L94: wrong pending deadline")
+    }
+}
+
+@test
+fn journal_coalesce_and_end_cadence(tasks: Tasks) -> Result[(), Error] waits {
+    let (c, hand0) = provide.clock(0, 0)
+    let mut hand = take hand0
+    // A distant deadline keeps the simulated filesystem open when the worker
+    // has no deadline. Otherwise quiescence ends the server's provide.next.
+    let sentinel_at = 1000000000u64
+    let mut sentinel = task.spawn(tasks, bytes 0, (c, sentinel_at), fn(take wait_for: (Clock, u64)) waits {
+        host.sleep_until(wait_for.0, wait_for.1)
+    })
+    let (d, mount) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1), 1048576)
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let mut creation = disk_creation_block()?
+    let (take segment, take end_file, take header) = disk_new_segment(d, c, id, 7, 0, mut creation)?
+    let JournalChannels(frames: take send, queued: take receive, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take notices, written_receive: take written, synced_send: take synced_send, synced_receive: take synced) = journal_channels(4)
+    cadence_frame(send, ctx, 1)
+    cadence_frame(send, ctx, 2)
+    let cadence_spec = JournalCadence(group_delay_us: 50, end_groups: 3, end_interval_ms: 10)
+    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: 4, group_bytes: 65536, clock: c, cadence: cadence_spec, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take notices, synced: take synced_send)
+    let worker = task.spawn(tasks, bytes journal_group_room(65536) + JOURNAL_WORKER_SLACK, take input, journal_worker)
+    capacity(result.unwrap(channel.receive(waiting)))?
+    cadence_ack(received, synced, 2)
+    cadence_wait(mut hand, Some(10000000u64))
+    cadence_frame(send, ctx, 3)
+    cadence_wait(mut hand, Some(50000u64))
+    for number in 4u64 .. 7 {
+        clock.advance_to(mut hand, (number - 3) * 10000)
+        cadence_frame(send, ctx, number)
+        if number < 6 {
+            cadence_wait(mut hand, Some(50000u64))
+            if let Ok(_) = channel.try_receive(synced) {
+                fail("L94: a partial gathering group sent a notice")
+            }
+        }
+    }
+    cadence_ack(received, synced, 6)
+    result.unwrap(channel.send(send, Flush))
+    cadence_wait(mut hand, Some(10000000u64))
+    if let Ok(_) = channel.try_receive(synced) {
+        fail("L94: an empty Flush sent a notice")
+    }
+    if let Ok(_) = channel.try_receive(written) {
+        fail("L94: an empty Flush answered a Barrier")
+    }
+    if disk_end(d, id, 7)? != Some(72u64) {
+        fail("L94: END advanced before the time or count threshold")
+    }
+    clock.advance_to(mut hand, 10000000)
+    cadence_wait(mut hand, Some(sentinel_at))
+    if disk_end(d, id, 7)? != Some(324u64) {
+        fail("L94: END did not use the first group's deadline")
+    }
+    cadence_frame(send, ctx, 7)
+    cadence_wait(mut hand, Some(10050000u64))
+    result.unwrap(channel.send(send, Flush))
+    cadence_ack(received, synced, 7)
+    cadence_frame(send, ctx, 8)
+    cadence_wait(mut hand, Some(10050000u64))
+    clock.advance_to(mut hand, 10050000)
+    // Whether the timeout or arrival is observed first, 9 belongs to the
+    // next group. Its own deadline starts at 10.05 ms.
+    cadence_frame(send, ctx, 9)
+    cadence_ack(received, synced, 8)
+    cadence_wait(mut hand, Some(10100000u64))
+    clock.advance_to(mut hand, 10100000)
+    cadence_ack(received, synced, 9)
+    cadence_wait(mut hand, Some(sentinel_at))
+    if disk_end(d, id, 7)? != Some(450u64) {
+        fail("L94: END did not advance on the group count")
+    }
+    cadence_frame(send, ctx, 10)
+    cadence_wait(mut hand, Some(20100000u64))
+    cadence_ack(received, synced, 10)
+    drop(take send)
+    result.unwrap(task.join(take worker))?
+    cadence_wait(mut hand, Some(sentinel_at))
+    if disk_end(d, id, 7)? != Some(492u64) {
+        fail("L94: close did not write the final END with the clock held")
+    }
+    let reopened = journal_recover(d, id, 7, c, journal_initial())?
+    if reopened.end != 492 || reopened.replay.state.tips[0].head != 10 {
+        fail("L94: recovered journal lost or reordered a frame")
+    }
+    task.cancel(mut sentinel)
+    let _ = task.join(take sentinel)
+    let _ = sim_disk_unmount(take d, take mount)
+    Ok(())
+}
+
+fn cadence_failed_write(tasks: Tasks, c: Clock, fail_end: bool) -> Result[(), Error] waits {
+    let mut plan = std.sim.world.plan(1)
+    // Segment creation consumes six calls before the first COMMIT and END.
+    let fail_site = if fail_end {
+        7u64
+    } else {
+        6u64
+    }
+    std.sim.world.script(mut plan, fail_site, Eio)
+    let (d, mount) = sim_disk_mount(tasks, c, std.sim.fs.new(), take plan, 1048576)
+    let id = StoreId(hi: 1, lo: 2)
+    let mut creation = disk_creation_block()?
+    let (take segment, take end_file, take header) = disk_new_segment(d, c, id, 7, 0, mut creation)?
+    let JournalChannels(frames: take send, queued: take receive, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take notices, written_receive: take written, synced_send: take synced_send, synced_receive: take synced) = journal_channels(1)
+    let cadence_spec = JournalCadence(group_delay_us: 50, end_groups: 1, end_interval_ms: 10)
+    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: 1, group_bytes: 65536, clock: c, cadence: cadence_spec, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take notices, synced: take synced_send)
+    cadence_frame(send, DiskContext(store: id, role: 2, seq: 7), 1)
+    let worker = task.spawn(tasks, bytes journal_group_room(65536) + JOURNAL_WORKER_SLACK, take input, journal_worker)
+    capacity(result.unwrap(channel.receive(waiting)))?
+    if fail_end {
+        match result.unwrap(channel.receive(received)) {
+            Journaled(1, 42) => (),
+            _ => fail("L94: END failure lost the durable COMMIT ack"),
+        }
+    }
+    match result.unwrap(channel.receive(received)) {
+        Broken(Other(5)) => (),
+        _ => fail("L94: the failed write did not report Broken"),
+    }
+    match channel.try_receive(written) {
+        Ok(WriteFailed(Other(5))) => (),
+        _ => fail("L94: Broken preceded the write failure notice"),
+    }
+    result.unwrap(channel.receive(synced))
+    match result.unwrap(task.join(take worker)) {
+        Error(Io(Other(5))) => (),
+        _ => fail("L94: the worker did not return its write failure"),
+    }
+    drop(take send)
+    let mut segment_check = disk_io(host.open(d, journal_path(7, "")?, Read))?
+    if !disk_io(host.try_lock_shared(mut segment_check))? {
+        fail("L94: a failed write kept the segment fence")
+    }
+    disk_io(host.close(take segment_check))?
+    if disk_end(d, id, 7)? != Some(72u64) {
+        fail("L94: a failed write advanced END")
+    }
+    let recovered = journal_recover(d, id, 7, c, journal_initial())?
+    let expected = if fail_end {
+        1u64
+    } else {
+        0u64
+    }
+    if recovered.end != 72 + expected * 42 || recovered.replay.state.tips[0].head != expected {
+        fail("L94: recovery disagreed with COMMIT durability after a failed write")
+    }
+    let _ = sim_disk_unmount(take d, take mount)
+    Ok(())
+}
+
+fn journal_crash_cadence(scenario: View[String]) -> (String, JournalCadence) {
+    if scenario == "journal-group-cadence" {
+        ("journal-group", DIRECTORY_JOURNAL_CADENCE)
+    } else if scenario == "journal-rotate-cadence" {
+        ("journal-rotate", DIRECTORY_JOURNAL_CADENCE)
+    } else {
+        (clone(scenario), JOURNAL_IMMEDIATE_CADENCE)
+    }
+}
+
+@test
+fn journal_cadence_failed_writes(tasks: Tasks) -> Result[(), Error] waits {
+    let (c, hand) = provide.clock(0, 0)
+    cadence_failed_write(tasks, c, false)?
+    cadence_failed_write(tasks, c, true)?
+    if host.mono_ns(c) != 0 {
+        fail("L94: failure cleanup advanced the clock")
+    }
+    drop(take hand)
+    Ok(())
+}

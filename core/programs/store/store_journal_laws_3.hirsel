@@ -679,7 +679,7 @@ type JournalCancelInput: send {
 }
 
 fn journal_cancel_owner(take input: JournalCancelInput) -> Result[(), Error] waits {
-    journal_crash_write(input.d, input.c, input.r, input.tasks, input.out, "journal-cancel")
+    journal_crash_write(input.d, input.c, input.r, input.tasks, input.out, "journal-cancel", JOURNAL_IMMEDIATE_CADENCE)
 }
 
 // L4/X1: a queued frame is acked before a successor can bind its end.

@@ -1,6 +1,16 @@
-type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile, Bytes) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), Error]], u64) | ObjectSkipFence(Sender[Result[(), Error]]) | ObjectExportRead(ObjectExportFetch) | StreamAnswer(SlotAck) | ObjectClose(Sender[Result[(), Error]])
+type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile, Bytes) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), Error]], u64) | ObjectSkipFence(Sender[Result[(), Error]]) | ObjectExportRead(ObjectExportFetch) | StreamAnswer(SlotAck) | ObjectClose(Sender[Result[(), Error]]) | Flush
 
 type WriteNotice: send = Written | WriteFailed(IoError)
+
+type JournalWake = NoJournalWake | GatherFlush | ObjectIdleTimer(Task[()])
+
+type JournalCadence: cross {
+    group_delay_us: u32,
+    end_groups: u32,
+    end_interval_ms: u64
+}
+
+const DIRECTORY_JOURNAL_CADENCE: JournalCadence = JournalCadence(group_delay_us: 50, end_groups: 64, end_interval_ms: 10)
 
 type JournalIdleTimer: send {
     clock: Clock,
@@ -26,6 +36,8 @@ type JournalWorker: send {
     header: Bytes,
     group_commits: u32,
     group_bytes: u32,
+    clock: Clock,
+    cadence: JournalCadence,
     zero_extension: bool,
     receive: Receiver[JournalMsg],
     send: Sender[Ack],
@@ -144,7 +156,7 @@ fn journal_write_oversized(mut segment: HostFile, block_at: u64, frame: Bytes, m
 }
 
 fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), Error] waits {
-    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, header: take first_header, group_commits: max_frames, group_bytes: max_bytes, zero_extension: zero_extension, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced) = take input
+    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, header: take first_header, group_commits: max_frames, group_bytes: max_bytes, clock: clock, cadence: cadence_spec, zero_extension: zero_extension, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced) = take input
     let mut segment_file = take segment
     let mut end_handle = take end_file
     let mut seq = initial_seq
@@ -154,6 +166,12 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
     let mut end_named = 72u64
     let mut written = 0u64
     let mut groups = 0u64
+    let delay_us: u64 = int.widen(cadence_spec.group_delay_us)
+    let delay_ns = delay_us * 1000
+    let interval_ns = int.saturating_mul(cadence_spec.end_interval_ms, 1000000u64)
+    let mut end_due: Option[u64] = None
+    let mut armed = false
+    let mut solos = 0u8
     let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
     let mut buffer = take reserved
     list.append(mut buffer, first_header)
@@ -173,10 +191,22 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
     let mut deferred: Option[JournalMsg] = None
     loop {
         let mut next_message = replace(mut deferred, None)
+        let mut closing = false
         if let None = next_message {
             if groups != 0 {
-                // A cap or Barrier can end a group without probing the queue.
-                match channel.try_receive(receive) {
+                // P2 services an already due END even when control messages
+                // keep the queue readable without producing another group.
+                let pending: Result[JournalMsg, ReceiveError] = if let Some(due) = end_due {
+                    if host.mono_ns(clock) >= due {
+                        Error(Empty)
+                    } else {
+                        channel.receive_until(receive, At(clock, due))
+                    }
+                } else {
+                    // In immediate mode a cap or Barrier still probes first.
+                    channel.try_receive(receive)
+                }
+                match take pending {
                     Ok(take msg) => {
                         next_message = Some(take msg)
                     },
@@ -186,12 +216,15 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                             end_named = end
                         }
                         groups = 0
+                        end_due = None
                     },
-                    Error(Closed) => {}
+                    Error(Closed) => {
+                        closing = interval_ns != 0
+                    },
                 }
             }
             if let None = next_message {
-                let target = if small_groups >= 64 {
+                let target = if end == end_named && small_groups >= 64 {
                     journal_window_target(end, window_limit)
                 } else {
                     0u64
@@ -212,14 +245,17 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                 }
             }
             if let None = next_message {
-                if end != end_named {
-                    journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
-                    end_named = end
-                    groups = 0
-                }
-                next_message = match channel.receive(receive) {
-                    Ok(take msg) => Some(take msg),
-                    Error(_) => None
+                if !closing {
+                    if end != end_named {
+                        journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
+                        end_named = end
+                        groups = 0
+                        end_due = None
+                    }
+                    next_message = match channel.receive(receive) {
+                        Ok(take msg) => Some(take msg),
+                        Error(_) => None
+                    }
                 }
             }
         }
@@ -228,8 +264,9 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
         let mut frames = 0u64
         let mut group_bytes = 0u64
         let mut last_frame = 0u64
+        let mut gather_until: Option[u64] = None
         let mut idle = false
-        let mut closing = false
+        let mut expired = false
         let mut rotating: Option[(HostFile, HostFile, Bytes)] = None
         let mut answering = false
         loop {
@@ -241,9 +278,15 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                 },
                 Some(Frame(take raw, number)) => {
                     let length = list.len(raw)
-                    if frames != 0 && group_bytes + length > group_limit {
+                    if let Some(until) = gather_until {
+                        expired = group_bytes >= JOURNAL_BULK_GROUP || host.mono_ns(clock) >= until
+                    }
+                    if expired || (frames != 0 && group_bytes + length > group_limit) {
                         deferred = Some(Frame(take raw, number))
                         break
+                    }
+                    if frames == 0 && armed && length < JOURNAL_BULK_GROUP {
+                        gather_until = Some(int.saturating_add(host.mono_ns(clock), delay_ns))
                     }
                     if length > group_limit {
                         oversized = Some(take raw)
@@ -265,6 +308,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                     answering = true;
                     break
                 },
+                Some(Flush) => break,
                 Some(ObjectPause(..)) => fail("log journal received an object cut"),
                 Some(ObjectFresh(..)) => fail("log journal received an object head probe"),
                 Some(ObjectSkipFence(..)) => fail("log journal received an object head probe"),
@@ -273,12 +317,27 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                 Some(StreamAnswer(..)) => fail("log journal received a stream answer"),
                 Some(ObjectClose(..)) => fail("log journal received an object close"),
             }
-            match channel.try_receive(receive) {
+            if let Some(until) = gather_until {
+                if group_bytes >= JOURNAL_BULK_GROUP || host.mono_ns(clock) >= until {
+                    expired = true
+                    break
+                }
+            }
+            let pending = match channel.try_receive(receive) {
+                Error(Empty) => if let Some(until) = gather_until {
+                    channel.receive_until(receive, At(clock, until))
+                } else {
+                    Error(Empty)
+                },
+                other => take other,
+            }
+            match take pending {
                 Ok(take msg) => {
                     next_message = Some(take msg)
                 },
                 Error(Empty) => {
-                    idle = true;
+                    idle = gather_until == None
+                    expired = !idle
                     break
                 },
                 Error(Closed) => {
@@ -310,9 +369,22 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             if let Error(_) = channel.send(send, Journaled(last_frame, written)) {
                 return Ok(())
             }
+            if interval_ns != 0 && end_due == None {
+                end_due = Some(int.saturating_add(host.mono_ns(clock), interval_ns))
+            }
             // After the ack, so a writer woken by this notice finds it.
             let _ = channel.try_send(synced, ())
             groups += 1
+            if delay_ns != 0 && frames >= 2 {
+                armed = true
+                solos = 0
+            } else if expired && frames == 1 {
+                solos += 1
+                if solos == 2 {
+                    armed = false
+                    solos = 0
+                }
+            }
             small_groups = if group_bytes >= JOURNAL_BULK_GROUP {
                 0u64
             } else {
@@ -324,11 +396,16 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             None => false
         }
         // An END that would repeat the d already named writes nothing.
-        let load_end = groups == 64
-        if (idle || closing || rotate_now || load_end) && end != end_named {
+        let load_end = groups >= int.widen(cadence_spec.end_groups)
+        let time_end = match end_due {
+            Some(due) => frames != 0 && host.mono_ns(clock) >= due,
+            None => interval_ns == 0 && idle,
+        }
+        if (time_end || closing || rotate_now || load_end) && end != end_named {
             journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
             end_named = end
             groups = 0
+            end_due = None
             let target = journal_window_target(end, window_limit)
             if load_end && small_groups >= 64 && window - end < target / 2 {
                 let width = order.min(JOURNAL_WINDOW_STEP, journal_align_up(end + target) - window)

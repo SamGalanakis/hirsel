@@ -116,37 +116,6 @@ impl Bridge {
     fn exists(&self, name: &str) -> bool {
         self.fs.inode(name).is_some()
     }
-    fn apply(&mut self, op: Op<'_>) -> bool {
-        assert!(
-            self.read_only.is_none()
-                || matches!(op, Op::Sync(name) if is_segment(name))
-                || matches!(op, Op::SyncDir),
-            "read-only open issued {op:?}"
-        );
-        if !self.reach(&op) {
-            return false;
-        }
-        if self.phase == 1 && self.trace_cuts {
-            // BL2: where a Direct write first changes the durable image. A
-            // group over a tail block starts past a block boundary (72 for a
-            // fresh segment's first group, behind its creation HEADER).
-            if let Op::Write(name, bytes) = &op
-                && self.fs.is_direct(name)
-                && let Some(inode) = self.fs.inode(name)
-            {
-                let durable = self.fs.durable_inode(inode);
-                let first = (0..bytes.len()).find(|&at| durable.get(at) != Some(&bytes[at]));
-                if let Some(first) = first {
-                    eprintln!("w2-direct {} {name} {first}", self.events + 1);
-                }
-            }
-        }
-        self.fs.issue(&op);
-        if self.phase == 1 {
-            self.events += 1;
-        }
-        true
-    }
     fn error(tag: u8) -> Outcome {
         Outcome {
             error: Error {
@@ -471,19 +440,20 @@ impl Bridge {
                 if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
                     self.split_at = start;
                 }
-                let append = op == 2 && mode == 2
-                    || cursor != 0
-                        && self
-                            .fs
-                            .read(&name)
-                            .is_some_and(|bytes| cursor == bytes.len());
+                let append = self.fs.inode(&name) == Some(inode)
+                    && (op == 2 && mode == 2
+                        || cursor != 0
+                            && self
+                                .fs
+                                .read_inode(inode)
+                                .is_some_and(|bytes| cursor == bytes.len()));
                 let applied = if append {
                     self.apply(Op::Append(&name, &data[..written]))
                 } else {
-                    let mut bytes = self.fs.read(&name).unwrap_or(&[]).to_vec();
+                    let mut bytes = self.fs.read_inode(inode).unwrap_or(&[]).to_vec();
                     bytes.resize(bytes.len().max(cursor + written), 0);
                     bytes[cursor..cursor + written].copy_from_slice(&data[..written]);
-                    self.apply(Op::Write(&name, &bytes))
+                    self.apply_open_file(inode, &name, Some(&bytes))
                 };
                 if !applied {
                     return Self::error(5);

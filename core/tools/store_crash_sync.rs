@@ -93,16 +93,11 @@ impl Bridge {
             assert_eq!(self.failed_syncs, 1, "store retried a failed sync");
             return Self::error(5);
         }
-        if !self.exists(&name) {
-            // journal-ack holds a sync across other tasks' turns, so a
-            // cut may remove the segment's end file first. A sync of an
-            // unlinked file reaches no live name. A restart that revives
-            // the name sees its last synced bytes, which a crash just
-            // before this sync gives anyway, so this hides no state.
-            return if self.crashed {
-                Self::error(5)
-            } else {
+        if self.fs.inode(&name) != Some(inode) {
+            return if self.apply_open_file(inode, &name, None) {
                 Outcome::default()
+            } else {
+                Self::error(5)
             };
         }
         let first_crash = self.orphan_end

@@ -37,6 +37,7 @@ FORK_IMAGES = ('journal-fork-ack-cut', 'journal-fork-complete', 'journal-fork-to
                'journal-fork-child-unwritten')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut',
             'orphan-end-recovery-sync', 'journal-place-short')
+CADENCE_CUTS = ('journal-group-cadence', 'journal-rotate-cadence')
 
 
 def provider_checks(executable, engine, env):
@@ -143,7 +144,8 @@ def main():
                 # the immutable binary once at every W2 mutation cut.
                 cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
                                    manifest, work, engine, entry='store@1/store/journal_crash_main',
-                                   scenarios=(*SCENARIOS, 'journal-keyed'), environment=env, count_only=('orphan-end', *FORK_IMAGES))
+                                   scenarios=(*SCENARIOS, 'journal-keyed', *CADENCE_CUTS), environment=env,
+                                   count_only=('orphan-end', *FORK_IMAGES))
                 rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 late = late_writes(work / (engine + '-crash') / 'store', engine, env)
                 rows.append(dict(engine=engine, passed=True, late_writes=late))

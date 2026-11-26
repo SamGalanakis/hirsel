@@ -544,6 +544,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 }
             },
             Rotate(..) => fail("object journal received a segment rotation"),
+            Flush => fail("object journal received a Directory flush"),
         }
     }
 }

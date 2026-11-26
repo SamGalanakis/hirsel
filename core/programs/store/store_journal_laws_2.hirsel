@@ -363,7 +363,7 @@ fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, t: Table[u64, u64], out:
 pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut options = journal_crash_options()
     options.group_commits = 1
-    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let mut db = result.unwrap(journal_legacy_open(tasks, d, c, r, options))
     let commit_ticket = result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(durable(mut db, commit_ticket))
     let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
@@ -493,7 +493,7 @@ fn journal_sync_count(take db: Db, t: Table[u64, u64], out: Stdout) -> Result[()
     close(take owned)
 }
 
-fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String) -> Result[(), Error] waits {
+fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String, cadence_spec: JournalCadence) -> Result[(), Error] waits {
     let mut options = journal_crash_options()
     if scenario == "journal-place-idle" {
         options.group_commits = 1
@@ -501,7 +501,7 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
     if scenario == "journal-place-split" || scenario == "journal-place-short" {
         options.group_bytes = 100
     }
-    let mut db = open(tasks, d, c, r, options)?
+    let mut db = open_directory(tasks, d, c, r, options, cadence_spec)?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if let Some(fork_case) = journal_fork_case(scenario) {
         return journal_crash_fork_write(take db, t, out, fork_case)
@@ -838,7 +838,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
 // independent prefix oracle whose minimum comes only from returned durable.
 pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
-    let scenario = option.unwrap(args.get(argv, 1))
+    let (scenario, cadence_spec) = journal_crash_cadence(option.unwrap(args.get(argv, 1)))
     if scenario == "journal-keyed" {
         let text = option.unwrap(args.get(argv, 3))
         let mut floor = 0u64
@@ -918,7 +918,7 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
                 _ => Error(Exit(status: 32))
             }
         }
-        match journal_crash_write(d, c, r, tasks, out, scenario) {
+        match journal_crash_write(d, c, r, tasks, out, scenario, cadence_spec) {
             Ok(()) => {
                 let _ = stdout.write(out, "DONE");
                 Ok(())

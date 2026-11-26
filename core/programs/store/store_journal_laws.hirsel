@@ -231,6 +231,12 @@ fn journal_test_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
 }
 
+const JOURNAL_IMMEDIATE_CADENCE: JournalCadence = JournalCadence(group_delay_us: 0, end_groups: 64, end_interval_ms: 0)
+
+fn journal_legacy_open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
+    open_directory(tasks, d, c, r, options, JOURNAL_IMMEDIATE_CADENCE)
+}
+
 fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let mut creation = result.unwrap(disk_creation_block())
@@ -277,7 +283,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
     } else {
         100u32
     }
-    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: max_frames, group_bytes: max_bytes, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send)
+    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: max_frames, group_bytes: max_bytes, clock: c, cadence: JOURNAL_IMMEDIATE_CADENCE, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send)
     let reserve = journal_group_room(int.widen(max_bytes))
     let worker = if mode == 0 || mode == 2 {
         task.spawn(tasks, bytes reserve + 65536, take input, journal_worker_zero)

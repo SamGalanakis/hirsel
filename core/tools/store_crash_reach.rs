@@ -2,7 +2,7 @@
 //! operation it names. A cut records its intercepted step, logical file role
 //! and completed prefix; an eligible host-call ordinal, counted before
 //! effects, selects an EIO beside the mutation ordinal.
-use super::{Bridge, Error, Op, Outcome, ZERO_AT};
+use super::{Bridge, Error, Op, Outcome, ZERO_AT, is_segment};
 use std::{ffi::c_void, slice};
 
 /// An EIO injected at one eligible host call, named by phase, ordinal,
@@ -30,6 +30,56 @@ fn fnv(mut hash: u64, text: &str) -> u64 {
 }
 
 impl Bridge {
+    pub(super) fn apply(&mut self, op: Op<'_>) -> bool {
+        self.apply_to(op, None)
+    }
+
+    pub(super) fn apply_open_file(&mut self, inode: u64, name: &str, bytes: Option<&[u8]>) -> bool {
+        let op = match bytes {
+            Some(data) => Op::Write(name, data),
+            None => Op::Sync(name),
+        };
+        // Retirement can unlink the name before the worker closes the file.
+        let orphaned = (self.fs.inode(name) != Some(inode)).then_some(inode);
+        self.apply_to(op, orphaned)
+    }
+
+    fn apply_to(&mut self, op: Op<'_>, inode: Option<u64>) -> bool {
+        assert!(
+            self.read_only.is_none()
+                || matches!(op, Op::Sync(name) if is_segment(name))
+                || matches!(op, Op::SyncDir),
+            "read-only open issued {op:?}"
+        );
+        if !self.reach(&op) {
+            return false;
+        }
+        if self.phase == 1 && self.trace_cuts {
+            // BL2: where a Direct write first changes the durable image. A
+            // group over a tail block starts past a block boundary (72 for a
+            // fresh segment's first group, behind its creation HEADER).
+            if let Op::Write(name, bytes) = &op
+                && self.fs.is_direct(name)
+                && let Some(inode) = self.fs.inode(name)
+            {
+                let durable = self.fs.durable_inode(inode);
+                let first = (0..bytes.len()).find(|&at| durable.get(at) != Some(&bytes[at]));
+                if let Some(first) = first {
+                    eprintln!("w2-direct {} {name} {first}", self.events + 1);
+                }
+            }
+        }
+        match (inode, &op) {
+            (Some(inode), Op::Write(_, bytes)) => self.fs.write_inode(inode, bytes.to_vec()),
+            (Some(inode), Op::Sync(_)) => self.fs.sync_inode(inode),
+            _ => self.fs.issue(&op),
+        }
+        if self.phase == 1 {
+            self.events += 1;
+        }
+        true
+    }
+
     /// A write-phase step's kind and logical role, as its cut names it.
     fn step(&self, op: &Op<'_>) -> String {
         let kind = match op {

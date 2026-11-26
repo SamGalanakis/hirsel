@@ -1323,17 +1323,6 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
     Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, order: take order, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, skipped: skipped, frame: take frame, info: ci, reads: take seen))
 }
 
-fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
-    if let Some(raw) = frame {
-        let size = list.len(raw)
-        while disk_state(db).inflight > db.limits.frame - size {
-            let acknowledged = journal_receive(db)
-            journal_ack(mut db, take acknowledged)?
-        }
-    }
-    Ok(())
-}
-
 pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
     let _ = durable_groups(mut db, t)?
     Ok(())
@@ -1385,41 +1374,6 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
         Error(Closed) => journal_ack(mut db, Broken(Closed))?,
     }
     Ok(covered(db, t.mark))
-}
-
-// The worker sends one Journaled ack after each successful group sync.
-fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
-    if !same(db.store, t.store) || t.open != open_number(db) {
-        return Error(Foreign)
-    }
-    if object_writer_open(db) && covered(db, t.mark) {
-        return Ok(0)
-    }
-    if let Some(e) = journal_poison(db) {
-        return Error(Poisoned(e))
-    }
-    if let Cut(generation) = t.mark {
-        if is_disk(db) {
-            disk_wait_cut(db, generation)?
-            return Ok(0)
-        }
-    }
-    let drained = journal_poll_groups(mut db)
-    if object_writer_open(db) && covered(db, t.mark) {
-        return Ok(match drained {
-            Ok(groups) => groups,
-            Error(_) => 0u64
-        })
-    }
-    let mut groups = drained ?=> durable_latch_error
-    if is_disk(db) {
-        while !covered(db, t.mark) {
-            let ack = journal_receive(db)
-            journal_ack(mut db, take ack) ?=> durable_latch_error
-            groups += 1
-        }
-    }
-    Ok(groups)
 }
 
 fn covered(db: Db, mark: Mark) -> bool {
@@ -3670,7 +3624,7 @@ type DiskState {
     journal: Sender[JournalMsg],
     pending: Option[Bytes],
     journal_task: Task[Result[(), Error]],
-    journal_idle_task: Option[Task[()]],
+    journal_wake: JournalWake,
     creation: Bytes,
     // The pager of a store with a Tiered collection (§13.8), started from `tasks`; `restamp` and
     // `unload` name the collection a `set_residency` cut moves to Tiered or to Memory on main.
@@ -3762,12 +3716,7 @@ fn journal_channels(group_count: u64) -> JournalChannels {
 // S3 makes the disk opener public with its journal and final durability path.
 /// Opens a Directory store. An object store opens with `open_authority`.
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
-    if let Bucket(_) = options.authority {
-        return Error(Unsupported(1))
-    }
-    open_checks(options)?
-    let session = disk_session(d, c, r, options)?
-    open_started(tasks, d, c, options, take session)
+    open_directory(tasks, d, c, r, options, DIRECTORY_JOURNAL_CADENCE)
 }
 
 /// Captures an existing Directory store. The clock drives the terminal
@@ -3840,7 +3789,7 @@ fn open_checks(options: Options) -> Result[(), Error] {
     Ok(())
 }
 
-fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: DiskSession) -> Result[Db, Error] waits {
+fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: JournalCadence, take session: DiskSession) -> Result[Db, Error] waits {
     let DiskSession(lock: take lock, startup: take startup) = take session
     let zero_extension = disk_io(host.zero_extension(d))?
     let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: limits) = take startup
@@ -3872,13 +3821,18 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     })?
     let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive) = take channels
     let reserve = journal_group_room(int.widen(options.group_bytes))
-    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, header: take header, group_commits: options.group_commits, group_bytes: options.group_bytes, zero_extension: zero_extension, receive: take queued, send: take journal_acks, ready: take ready, written: channel.sender(written_send), synced: take synced_send)
+    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, header: take header, group_commits: options.group_commits, group_bytes: options.group_bytes, clock: c, cadence: cadence_spec, zero_extension: zero_extension, receive: take queued, send: take journal_acks, ready: take ready, written: channel.sender(written_send), synced: take synced_send)
     let writer = match task.try_spawn(tasks, bytes reserve + JOURNAL_WORKER_SLACK, take input, journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, steps: list.new(), scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: None, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
+    let journal_wake = if cadence_spec.group_delay_us == 0 {
+        NoJournalWake
+    } else {
+        GatherFlush
+    }
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, steps: list.new(), scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_wake: take journal_wake, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
     Ok(take db)
 }
 

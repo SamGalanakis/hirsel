@@ -16,6 +16,66 @@ fn journal_receive(db: Db) -> Ack waits {
     }
 }
 
+fn journal_flush(db: Db) waits {
+    let state = disk_state(db)
+    if let GatherFlush = state.journal_wake {
+        // The ack channel preserves the worker's first failure if it has exited.
+        let _ = channel.send(state.journal, Flush)
+    }
+}
+
+fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
+    if let Some(raw) = frame {
+        let size = list.len(raw)
+        if disk_state(db).inflight > db.limits.frame - size {
+            journal_flush(db)
+        }
+        while disk_state(db).inflight > db.limits.frame - size {
+            let acknowledged = journal_receive(db)
+            journal_ack(mut db, take acknowledged)?
+        }
+    }
+    Ok(())
+}
+
+// The worker sends one Journaled ack after each successful group sync.
+fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
+    if !same(db.store, t.store) || t.open != open_number(db) {
+        return Error(Foreign)
+    }
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(0)
+    }
+    if let Some(e) = journal_poison(db) {
+        return Error(Poisoned(e))
+    }
+    if let Cut(generation) = t.mark {
+        if is_disk(db) {
+            disk_wait_cut(db, generation)?
+            return Ok(0)
+        }
+    }
+    let drained = journal_poll_groups(mut db)
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(match drained {
+            Ok(groups) => groups,
+            Error(_) => 0u64
+        })
+    }
+    let mut groups = drained ?=> durable_latch_error
+    if is_disk(db) {
+        if !covered(db, t.mark) {
+            journal_flush(db)
+        }
+        while !covered(db, t.mark) {
+            let ack = journal_receive(db)
+            journal_ack(mut db, take ack) ?=> durable_latch_error
+            groups += 1
+        }
+    }
+    Ok(groups)
+}
+
 fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
     write_disk(mut db.disk, take ack, scoped fn(mut state: DiskState, take incoming: Ack) -> Result[(), Error] {
         match take incoming {
@@ -66,6 +126,15 @@ fn journal_poll_groups(mut db: Db) -> Result[u64, Error] {
     Ok(groups)
 }
 
+fn open_directory(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, cadence_spec: JournalCadence) -> Result[Db, Error] waits {
+    if let Bucket(_) = options.authority {
+        return Error(Unsupported(1))
+    }
+    open_checks(options)?
+    let session = disk_session(d, c, r, options)?
+    open_started(tasks, d, c, options, cadence_spec, take session)
+}
+
 pub fn close(take db: Db) -> Result[(), Error] waits {
     let mut owned = take db
     if !is_disk(owned) {
@@ -100,7 +169,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     teardown_hook(owned)
     let connection = replace(mut owned.disk, None)
     list.clear(mut owned.heads)
-    let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task, lock: take lock, object: take object_writer, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
+    let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_wake: take wake, pager_task: take pager_task, lock: take lock, object: take object_writer, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
     // A Reader may still hold the pager's requests, so the pager is cancelled
     // rather than waited for once the store's sender is dropped.
     clear_parked(mut owned)
@@ -111,7 +180,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
         task.cancel(mut pager)
         let _ = task.join(take pager)
     }
-    if let Some(take running) = take timer {
+    if let ObjectIdleTimer(take running) = take wake {
         let mut t = take running
         task.cancel(mut t)
         let _ = task.join(take t)

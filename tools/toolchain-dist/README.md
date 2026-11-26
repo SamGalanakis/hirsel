@@ -114,6 +114,13 @@ alternative; a missing Cargo license expression is reported as a manifest gap.
 `required_texts` names the explicitly required mimalloc v3 and
 ring/BoringSSL/fiat/once_cell texts.
 
+For listed Wasmtime workspace crates that omit their license, packaging fetches
+the upstream root license at the exact Git revision recorded in the locked
+archive. It checks the crate's source path and declared license, then verifies
+the license bytes against the pinned SHA-256. Run
+`python3 tools/toolchain-dist/notices.py --check-crates` after Buck preparation
+to check both release link graphs without building the bundles.
+
 The manifest records the pinned archive provenance, license expressions,
 upstream text paths and hashes, source/build-input hashes, and every bundled
 file's hash. It has no timestamps, checkout paths or host identifiers. Notice

@@ -13,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('notices', Path(os.environ.get('HIRSEL_DISTRIBUTION_NOTICES', ROOT / 'tools/toolchain-dist/notices.py')))
@@ -215,31 +216,43 @@ class Notices(unittest.TestCase):
             notices.generate(self.bundle, self.graph, self.metadata, self.root, self.home, self.sources)
 
     def fallback_fixture(self):
-        data = b'actual same-revision upstream terms'
-        import hashlib
-        archive(self.crate, {'.cargo_vcs_info.json': b'{"git":{"sha1":"revision"}}'})
+        data = b'actual upstream terms at this revision'
+        self.revision = 'a' * 40
+        vcs = dict(git=dict(sha1=self.revision), path_in_vcs='crates/example')
+        archive(self.crate, {'.cargo_vcs_info.json': json.dumps(vcs).encode()})
         self.write_lock()
-        donor = self.crate.with_name('donor-2.0.crate')
-        archive(donor, {'.cargo_vcs_info.json': b'{"git":{"sha1":"revision"}}', 'LICENSE': data}, 'donor-2.0')
-        with (self.root / 'Cargo.lock').open('a') as lock:
-            lock.write('[[package]]\nname = "donor"\nversion = "2.0"\nsource = "registry+test"\n'
-                       f'checksum = "{notices.sha256(donor)}"\n')
-        fallback = dict(donor='donor-2.0', path='LICENSE', revision='revision',
-                        sha256=hashlib.sha256(data).hexdigest(), upstream='upstream source', reason='archive omission')
-        self.sources['archive_omissions'] = {'example-1.0': fallback}
+        fallback = dict(source='https://example.test/upstream', path='LICENSE',
+                        sha256=notices.hashlib.sha256(data).hexdigest(), license=self.package['license'],
+                        packages={'example': 'crates/example'})
+        self.sources['archive_omissions'] = {'upstream': fallback}
+        self.fetch_license = self.enterContext(patch.object(notices.urllib.request, 'urlopen',
+                                                            return_value=io.BytesIO(data)))
+        self.addCleanup(notices.upstream_license.cache_clear)
         return fallback
 
-    def test_verified_same_revision_fallback_records_omission(self):
+    def test_verified_upstream_fallback_records_exact_revision(self):
         self.fallback_fixture()
         record = self.generate()['components'][0]
-        self.assertEqual(record['archive_omission']['donor'], 'donor-2.0')
+        url = f'https://example.test/upstream/{self.revision}/LICENSE'
+        self.fetch_license.assert_called_once_with(url, timeout=30)
+        self.assertEqual(record['archive_omission']['upstream'], url)
+        self.assertEqual(record['archive_omission']['revision'], self.revision)
         self.assertEqual((self.bundle / 'notices/crates/example-1.0/LICENSE').read_bytes(),
-                         b'actual same-revision upstream terms')
+                         b'actual upstream terms at this revision')
 
-    def test_fallback_refuses_another_revision(self):
-        self.fallback_fixture()['revision'] = 'wrong revision'
-        with self.assertRaisesRegex(ValueError, 'revision mismatch'):
+    def test_fallback_refuses_invalid_revision(self):
+        self.fallback_fixture()
+        archive(self.crate, {'.cargo_vcs_info.json': b'{"git":{"sha1":"main"}}'})
+        self.write_lock()
+        with self.assertRaisesRegex(ValueError, 'invalid fallback revision'):
             self.generate()
+        self.fetch_license.assert_not_called()
+
+    def test_fallback_refuses_another_source_path(self):
+        self.fallback_fixture()['packages']['example'] = 'elsewhere'
+        with self.assertRaisesRegex(ValueError, 'source path or declared license mismatch'):
+            self.generate()
+        self.fetch_license.assert_not_called()
 
     def test_fallback_refuses_another_text(self):
         self.fallback_fixture()['sha256'] = 'wrong digest'

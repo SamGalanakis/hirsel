@@ -2,11 +2,13 @@
 """Collect release notices from the configured link graph, pinned crate archives and native pins.
 
     notices.py --write [--bundle DIR]   rewrite NOTICES.md
+    notices.py --check-crates           check Linux and Darwin crate texts
 
 No SPDX-to-text substitution: retain the actual upstream texts, including nested
 C/assembly notices. Paths in the result are relative and timestamps are absent.
 """
 import fnmatch
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -138,7 +140,7 @@ def crate_texts(archive, checksum, package, required=(), allow_empty=False):
         missing.add(declared)
     if missing or (not primary and not allow_empty):
         raise ValueError(f"{prefix}missing license text: {sorted(missing) or 'no upstream license files'}")
-    return texts
+    return texts, primary
 
 
 def pinned_archive(cargo_home, name, checksum):
@@ -151,20 +153,62 @@ def pinned_archive(cargo_home, name, checksum):
     raise ValueError(f'{name}: pinned crate archive unavailable in Cargo cache')
 
 
-def omitted_text(archive, package, fallback, cargo_home, locked):
-    """Explicit, reviewed per-version upstream omission; never an SPDX fallback."""
-    donor = fallback['donor']
-    donor_archive = pinned_archive(cargo_home, donor, locked[donor]['checksum'])
-    for path, prefix in ((archive, package), (donor_archive, donor)):
-        with tarfile.open(path) as source:
-            vcs = json.load(source.extractfile(prefix + '/.cargo_vcs_info.json'))
-        if vcs['git']['sha1'] != fallback['revision']:
-            raise ValueError(f'{package}: fallback revision mismatch')
-    with tarfile.open(donor_archive) as source:
-        data = source.extractfile(donor + '/' + fallback['path']).read()
-    if hashlib.sha256(data).hexdigest() != fallback['sha256']:
-        raise ValueError(f'{package}: fallback license checksum mismatch')
-    return {fallback['path']: data}
+@lru_cache
+def upstream_license(url, checksum):
+    with urllib.request.urlopen(url, timeout=30) as response:
+        data = response.read()
+    if hashlib.sha256(data).hexdigest() != checksum:
+        raise ValueError(f'{url}: fallback license checksum mismatch')
+    return data
+
+
+def omitted_text(archive, name, package, fallback):
+    """The archive checksum binds the crate to the immutable upstream revision."""
+    with tarfile.open(archive) as source:
+        vcs = json.load(source.extractfile(name + '/.cargo_vcs_info.json'))
+    git = vcs['git']
+    revision = git['sha1']
+    path = fallback['path']
+    if git.get('dirty') or not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise ValueError(f'{name}: invalid fallback revision')
+    if vcs['path_in_vcs'] != fallback['packages'][package['name']] or package['license'] != fallback['license']:
+        raise ValueError(f'{name}: fallback source path or declared license mismatch')
+    url = f"{fallback['source']}/{revision}/{path}"
+    data = upstream_license(url, fallback['sha256'])
+    return data, dict(upstream=url, revision=revision, path=path, sha256=fallback['sha256'])
+
+
+def crate_notices(linked, metadata, sources, root=ROOT, cargo_home=None):
+    cargo_home = cargo_home or Path(os.environ.get('CARGO_HOME', Path.home() / '.cargo'))
+    packages = {p['name'] + '-' + p['version']: p for p in metadata['packages'] if p['source']}
+    lock = tomllib.loads((root / 'Cargo.lock').read_text())
+    locked = {p['name'] + '-' + p['version']: p for p in lock['package'] if 'source' in p}
+    fallbacks = {name: fallback for fallback in sources.get('archive_omissions', {}).values()
+                 for name in fallback['packages']}
+    shipped = {}
+    for crates in linked.values():
+        for name, targets in crates.items():
+            shipped.setdefault(name, set()).update(targets)
+    for name, targets in sorted(shipped.items()):
+        package, pin = packages[name], locked[name]
+        if package['source'] != pin['source'] or not pin['source'].startswith('registry+'):
+            raise ValueError(f'{name}: unsupported or mismatched package source')
+        archive = pinned_archive(cargo_home, name, pin['checksum'])
+        fallback = fallbacks.get(package['name'])
+        texts, primary = crate_texts(archive, pin['checksum'], package,
+                                     sources['required_texts'].get(name, []), allow_empty=bool(fallback))
+        record = dict(name=package['name'], version=package['version'],
+                      source=pin['source'], archive_sha256=pin['checksum'],
+                      url=f"https://static.crates.io/crates/{package['name']}/{package['version']}/download",
+                      declared_license=package['license'], targets=sorted(targets),
+                      selection='All upstream license/notice files and full text files with embedded copyright/SPDX notices retained; no alternative license elected.')
+        if not primary:
+            data, provenance = omitted_text(archive, name, package, fallback)
+            texts[provenance['path']] = data
+            record['archive_omission'] = provenance
+        if not package['license']:
+            record['gap'] = 'No Cargo license expression; inspect upstream license files.'
+        yield name, record, texts
 
 
 def file_inventory(bundle):
@@ -424,10 +468,6 @@ def check_bundle(bundle, sources, inventory, llvm_tree=None):
 def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None, archive=None, *, llvm_tree=None):
     """Only add notices; refuse missing inputs without leaving a partial directory."""
     sources = sources or notice_sources()[0]
-    cargo_home = cargo_home or Path(os.environ.get('CARGO_HOME', Path.home() / '.cargo'))
-    packages = {p['name'] + '-' + p['version']: p for p in metadata['packages'] if p['source']}
-    lock = tomllib.loads((root / 'Cargo.lock').read_text())
-    locked = {p['name'] + '-' + p['version']: p for p in lock['package'] if 'source' in p}
     if llvm_tree is None:
         linked = {pattern: linked_crates(graph, entry['crates'])
                   for pattern, entry in sources['files'].items() if 'crates' in entry}
@@ -465,33 +505,9 @@ def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None, 
             path.write_bytes(data)
             return dict(path=name, sha256=hashlib.sha256(data).hexdigest())
 
-        shipped = {}
-        for pattern, crates in linked.items():
-            for name, targets in crates.items():
-                shipped.setdefault(name, set()).update(targets)
-        for name, targets in sorted(shipped.items()):
-            targets = sorted(targets)
-            package, pin = packages[name], locked[name]
-            if package['source'] != pin['source'] or not pin['source'].startswith('registry+'):
-                raise ValueError(f'{name}: unsupported or mismatched package source')
-            archive_path = pinned_archive(cargo_home, name, pin['checksum'])
-            fallback = sources.get('archive_omissions', {}).get(name)
-            texts = crate_texts(archive_path, pin['checksum'], package,
-                                sources['required_texts'].get(name, []), allow_empty=bool(fallback))
-            used_fallback = bool(fallback) and not any(LICENSE_NAME.fullmatch(PurePosixPath(path).name) for path in texts)
-            if used_fallback:
-                texts.update(omitted_text(archive_path, name, fallback, cargo_home, locked))
-            record = dict(name=package['name'], version=package['version'],
-                          source=pin['source'], archive_sha256=pin['checksum'],
-                          url=f"https://static.crates.io/crates/{package['name']}/{package['version']}/download",
-                          declared_license=package['license'], targets=targets,
-                          selection='All upstream license/notice files and full text files with embedded copyright/SPDX notices retained; no alternative license elected.',
-                          texts=[dict(upstream=path, **retain(f'crates/{name}/{path}', data))
-                                 for path, data in sorted(texts.items())])
-            if used_fallback:
-                record['archive_omission'] = dict(fallback, donor_archive_sha256=locked[fallback['donor']]['checksum'])
-            if not package['license']:
-                record['gap'] = 'No Cargo license expression; inspect upstream license files.'
+        for name, record, texts in crate_notices(linked, metadata, sources, root, cargo_home):
+            record['texts'] = [dict(upstream=path, **retain(f'crates/{name}/{path}', data))
+                               for path, data in sorted(texts.items())]
             manifest['components'].append(record)
 
         for row in current['native']:
@@ -565,8 +581,18 @@ def collect(bundle, mode):
     return generate(bundle, *facts(mode))
 
 
-def collect_darwin(bundle, llvm_tree):
+def darwin_metadata():
     from darwin_host import RUNTIMES, TARGET
+
+    features = sorted({feature for runtime in RUNTIMES.values() for feature in runtime})
+    return json.loads(subprocess.check_output([
+        os.environ.get('CARGO', 'cargo'), 'metadata', '--locked', '--format-version', '1',
+        '--filter-platform', TARGET, '--features', ','.join('hirsel-core-rt/' + feature for feature in features)],
+        cwd=ROOT))
+
+
+def collect_darwin(bundle, llvm_tree):
+    from darwin_host import TARGET
 
     sources, llvm = notice_sources(TARGET)
     files = sources['files']
@@ -581,12 +607,20 @@ def collect_darwin(bundle, llvm_tree):
         host_runtimes={},
         external=[dict(component='macOS libSystem, CoreFoundation, Security, libiconv, libc++ and libz',
                        status='System dependencies. The bundle supplies Hirsel-generated link stubs for programs.')])
-    features = sorted({feature for runtime in RUNTIMES.values() for feature in runtime})
-    metadata = json.loads(subprocess.check_output([
-        os.environ.get('CARGO', 'cargo'), 'metadata', '--locked', '--format-version', '1',
-        '--filter-platform', TARGET, '--features', ','.join('hirsel-core-rt/' + feature for feature in features)],
-        cwd=ROOT))
-    return generate(bundle, None, metadata, sources=sources, llvm_tree=llvm_tree)
+    return generate(bundle, None, darwin_metadata(), sources=sources, llvm_tree=llvm_tree)
+
+
+def check_crates():
+    """Run the packaging crate scan for both hosts without building a bundle."""
+    sources, _ = notice_sources()
+    entries = {pattern: entry for pattern, entry in sources['files'].items() if 'crates' in entry}
+    graph, metadata = facts()
+    linux = {pattern: linked_crates(graph, entry['crates']) for pattern, entry in entries.items()}
+    mac_metadata = darwin_metadata()
+    darwin = {pattern: cargo_linked_crates(mac_metadata, entry['package']) for pattern, entry in entries.items()}
+    for host, links, meta in [('Linux', linux, metadata), ('Darwin', darwin, mac_metadata)]:
+        counts = [bool(record.get('archive_omission')) for _, record, _ in crate_notices(links, meta, sources)]
+        print(f'{host}: verified {len(counts)} crate archives, {sum(counts)} upstream license fallbacks')
 
 
 def write(bundle):
@@ -603,12 +637,19 @@ def write(bundle):
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Rewrite NOTICES.md.')
-    parser.add_argument('--write', action='store_true', required=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument('--write', action='store_true')
+    action.add_argument('--check-crates', action='store_true')
     parser.add_argument('--bundle', type=Path, help='an installation (default: build //:hirsel-toolchain)')
     args = parser.parse_args()
-    if args.bundle is None:
-        built = subprocess.check_output([str(ROOT / '.buck2/bin/buck2'), 'build', '//:hirsel-toolchain',
-                                         '--show-full-simple-output'], cwd=ROOT, text=True)
-        args.bundle = Path(built.strip())
-    write(args.bundle)
+    if args.check_crates:
+        if args.bundle is not None:
+            parser.error('--bundle requires --write')
+        check_crates()
+    else:
+        if args.bundle is None:
+            built = subprocess.check_output([str(ROOT / '.buck2/bin/buck2'), 'build', '//:hirsel-toolchain',
+                                             '--show-full-simple-output'], cwd=ROOT, text=True)
+            args.bundle = Path(built.strip())
+        write(args.bundle)

@@ -185,29 +185,27 @@
     }
   ],
   "archive_omissions": {
-    "cranelift-assembler-x64-0.136.3": {
-      "donor": "cranelift-codegen-0.136.3",
+    "wasmtime": {
+      "source": "https://raw.githubusercontent.com/bytecodealliance/wasmtime",
       "path": "LICENSE",
-      "revision": "f96eabaa11a06086e4fb779ed1c1688481067ab9",
       "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5",
-      "upstream": "https://github.com/bytecodealliance/wasmtime/blob/f96eabaa11a06086e4fb779ed1c1688481067ab9/LICENSE",
-      "reason": "Published archive omits license text; upstream root license is identical to the same-revision locked donor archive text."
-    },
-    "cranelift-bitset-0.136.3": {
-      "donor": "cranelift-codegen-0.136.3",
-      "path": "LICENSE",
-      "revision": "f96eabaa11a06086e4fb779ed1c1688481067ab9",
-      "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5",
-      "upstream": "https://github.com/bytecodealliance/wasmtime/blob/f96eabaa11a06086e4fb779ed1c1688481067ab9/LICENSE",
-      "reason": "Published archive omits license text; upstream root license is identical to the same-revision locked donor archive text."
-    },
-    "wasmtime-internal-core-49.0.3": {
-      "donor": "cranelift-codegen-0.136.3",
-      "path": "LICENSE",
-      "revision": "f96eabaa11a06086e4fb779ed1c1688481067ab9",
-      "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5",
-      "upstream": "https://github.com/bytecodealliance/wasmtime/blob/f96eabaa11a06086e4fb779ed1c1688481067ab9/LICENSE",
-      "reason": "Published archive omits license text; upstream root license is identical to the same-revision locked donor archive text."
+      "license": "Apache-2.0 WITH LLVM-exception",
+      "packages": {
+        "cranelift-assembler-x64": "cranelift/assembler-x64",
+        "cranelift-assembler-x64-meta": "cranelift/assembler-x64/meta",
+        "cranelift-bitset": "cranelift/bitset",
+        "cranelift-isle": "cranelift/isle/isle",
+        "cranelift-srcgen": "cranelift/srcgen",
+        "pulley-interpreter": "pulley",
+        "pulley-macros": "pulley/macros",
+        "wasmtime-internal-component-macro": "crates/component-macro",
+        "wasmtime-internal-component-util": "crates/component-util",
+        "wasmtime-internal-core": "crates/core",
+        "wasmtime-internal-jit-debug": "crates/jit-debug",
+        "wasmtime-internal-jit-icache-coherence": "crates/jit-icache-coherence",
+        "wasmtime-internal-versioned-export-macros": "crates/versioned-export-macros",
+        "wasmtime-internal-wit-bindgen": "crates/wit-bindgen"
+      }
     }
   }
 }

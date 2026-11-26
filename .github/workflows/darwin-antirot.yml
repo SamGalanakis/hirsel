@@ -34,6 +34,8 @@ jobs:
           rustup toolchain install "$rust" --profile minimal --no-self-update
           cargo fetch --locked
           python3 tools/buck2/prepare.py --local
+      - name: Check Linux and Darwin release crate notices
+        run: python3 tools/toolchain-dist/notices.py --check-crates
       - name: Darwin laws
         id: laws
         run: |

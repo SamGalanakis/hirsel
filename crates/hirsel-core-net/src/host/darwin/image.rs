@@ -7,6 +7,7 @@
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::darwin::fs::MetadataExt;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::sync::{Arc, OnceLock};
@@ -74,12 +75,20 @@ fn private_copy(source: &mut File) -> io::Result<File> {
 pub(crate) fn pin(source: &mut File) -> Result<File, String> {
     let step = |step, error| format!("{step}: {error}");
     let image = private_copy(source).map_err(|e| step("clone image", e))?;
+    // A clone keeps its source's flags, and a compressed file has its bytes only while
+    // UF_COMPRESSED is set: without it the file reads as empty. So the immutable flag
+    // joins the flags the copy has.
+    let flags = image
+        .metadata()
+        .map_err(|e| step("read image flags", e))?
+        .st_flags()
+        | libc::UF_IMMUTABLE;
     // SAFETY: the private copy's mode and flags belong to this launch.
     unsafe {
         if libc::fchmod(image.as_raw_fd(), 0o500) < 0 {
             return Err(step("set image mode", io::Error::last_os_error()));
         }
-        if libc::fchflags(image.as_raw_fd(), libc::UF_IMMUTABLE) < 0 {
+        if libc::fchflags(image.as_raw_fd(), flags) < 0 {
             return Err(step("make image immutable", io::Error::last_os_error()));
         }
     }

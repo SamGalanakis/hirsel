@@ -12,7 +12,8 @@ fn exec_provider_runs_the_sealed_image_and_uses_directional_pipes() {
     }
     let fixture = tempfile::tempdir().unwrap();
     let source = fixture.path().join("digest.c");
-    let image = fixture.path().join("digest");
+    std::fs::create_dir(fixture.path().join("plain")).unwrap();
+    let image = fixture.path().join("plain/digest");
     std::fs::write(
         &source,
         r#"
@@ -72,22 +73,49 @@ int main(void) {
         String::from_utf8_lossy(&compilation.stderr)
     );
 
-    let check = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "provider_tests::exec_provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
-            "--nocapture",
-        ])
-        .env(PROBE, image)
-        .output()
-        .unwrap();
-    assert!(
-        check.status.success(),
-        "Exec provider child {:?}\n{}\n{}",
-        check.status,
-        String::from_utf8_lossy(&check.stdout),
-        String::from_utf8_lossy(&check.stderr)
-    );
+    // A compressed file (most of what macOS installs) has its bytes only while its
+    // compression flag is set, so a pin that drops the flag runs an empty file.
+    #[cfg(target_os = "macos")]
+    let forms = {
+        use std::os::darwin::fs::MetadataExt;
+        std::fs::create_dir(fixture.path().join("compressed")).unwrap();
+        let compressed = fixture.path().join("compressed/digest");
+        let copy = Command::new("ditto")
+            .arg("--hfsCompression")
+            .args([&image, &compressed])
+            .output()
+            .unwrap();
+        assert!(
+            copy.status.success(),
+            "{}",
+            String::from_utf8_lossy(&copy.stderr)
+        );
+        let flags = std::fs::metadata(&compressed).unwrap().st_flags();
+        assert_ne!(flags & libc::UF_COMPRESSED, 0, "ditto left the image plain");
+        vec![compressed]
+    };
+    #[cfg(target_os = "linux")]
+    let forms = Vec::new();
+    // Each image is pinned from its own directory, which the law writes in.
+    for image in std::iter::once(image).chain(forms) {
+        let check = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "provider_tests::exec_provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
+                "--nocapture",
+            ])
+            .env(PROBE, &image)
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "Exec provider child for {} {:?}\n{}\n{}",
+            image.display(),
+            check.status,
+            String::from_utf8_lossy(&check.stdout),
+            String::from_utf8_lossy(&check.stderr)
+        );
+    }
 }
 
 fn exec_provider_law(image: &std::path::Path) {

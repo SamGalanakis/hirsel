@@ -308,8 +308,7 @@ pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[
     let codec = std.codec.key_u64()
     let low = lower_bytes(id, typed_bound(codec, lo)?, false)?
     let high = lower_bytes(id, typed_bound(codec, hi)?, true)?
-    let capture: Snapshot = clone(s)
-    Ok(Rows(capture: take capture, source: id, catalog_key: arc.share(l.binding.catalog_key), catalog_page: arc.share(l.binding.catalog_page), low: take low, high: take high, last: None, reverse: false, done: false, decoder: log_decoder(l)))
+    open_snapshot_rows(s, id, take low, take high, false, log_decoder(l))
 }
 
 type LogRangeTail {
@@ -349,17 +348,16 @@ pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result
     let committed_high = log_key(id, order.min(upper, head.next))?
     // Staged appends are read through the tail, so a Tiered cursor stages none.
     let tiered = tx_tiered_rows(tx, id, committed_low, committed_high, false)?
-    let cursor = if let Some(_) = tiered {
-        byte_cursor(tx.roots.collections, Included(copied(committed_high)?), committed_high)?
+    let cursor: Option[CollectionCursor] = if let Some(_) = tiered {
+        None
     } else {
-        byte_cursor(tx.roots.collections, Included(take committed_low), committed_high)?
+        collection_cursor(tx.roots.collections, id, committed_low, committed_high, false)?
     }
     let tail = LogRangeTail(id: id, seq: order.max(head.next, lower), end: upper)
     let codec = std.codec.key_u64()
     let low = lower_bytes(id, typed_bound(codec, lo)?, false)?
     let high = lower_bytes(id, typed_bound(codec, hi)?, true)?
-    let rows = PageRows(cursor: take cursor, data: share_page_tree(tx.roots.collections), decoder: log_decoder(l))
-    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: false, log_tail: Some(tail), tiered: take tiered))
+    Ok(TxRows(cursor: take cursor, decoder: log_decoder(l), owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: false, log_tail: Some(tail), tiered: take tiered))
 }
 
 fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, Arc[Bytes])], Error] {

@@ -2487,64 +2487,6 @@ pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] wa
     snapshot_changes(r, a, b)
 }
 
-pub opaque scoped type TxRows[K, V] {
-    rows: PageRows[K, V],
-    owner: CallId,
-    depth: u64,
-    reads: View[core.Log[Read]],
-    low: Bytes,
-    high: Bytes,
-    reverse: bool,
-    log_tail: Option[LogRangeTail],
-    tiered: Option[TxTieredRows]
-}
-
-// Before decoding an attempted row, record it and the gap traversed to find it.
-// Exhaustion records the remainder once. An unused cursor observes no keys.
-pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Error] {
-    if !same(tx.store, r.owner.store) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
-        return Error(Foreign)
-    }
-    let mut found = match r.tiered {
-        Some(mut tiered) => next_tiered_in(tx, mut tiered, r.reverse)?,
-        None => next_bytes(mut r.rows.cursor)?,
-    }
-    if let None = found {
-        if let Some(mut tail) = r.log_tail {
-            found = next_log_range_tail(tx, mut tail)?
-        }
-    }
-    match take found {
-        Some((take key, take raw)) => {
-            if r.reverse {
-                let new_high = copied(key)?
-                let high = replace(mut r.high, take new_high)
-                log.append(r.reads, Span(copied(key)?, take high))
-            } else {
-                let mut end = copied(key)?
-                list.push(mut end, 0u8)
-                let low = replace(mut r.low, copied(end)?)
-                log.append(r.reads, Span(take low, take end))
-            }
-            let row = advance_rows(r.rows.decoder, r.rows.data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] {
-                Ok(())
-            })?
-            match take row {
-                Some((take value, _)) => Ok(Some(take value)),
-                None => Ok(None)
-            }
-        },
-        None => {
-            if r.low < r.high {
-                let low = replace(mut r.low, list.new())
-                let high = replace(mut r.high, list.new())
-                log.append(r.reads, Span(take low, take high))
-            }
-            Ok(None)
-        },
-    }
-}
-
 fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
     let old_charge = if retained {
         0u64

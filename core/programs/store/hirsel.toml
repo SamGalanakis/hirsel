@@ -169,6 +169,7 @@ dirs = ["."]
 "store_fork_laws.hirsel" = "store"
 "store_read_laws.hirsel" = "store"
 "store_tx_range_laws.hirsel" = "store"
+"store_cursor_laws.hirsel" = "store"
 "store_disk_laws.hirsel" = "store"
 "store_disk_laws_2.hirsel" = "store"
 "store_crash_laws.hirsel" = "store"

@@ -1,0 +1,151 @@
+fn cursor_law_rows(mut db: Db, t: Table[u64, u64], row_count: u64) -> Result[(), Error] {
+    let mut rows: List[std.page.Row] = list.with_capacity(row_count)
+    for i in 0u64 .. row_count {
+        let key = key_word(2 * i)
+        let mut raw: Bytes = list.with_capacity(10)
+        list.put_word_le(mut raw, t.readers.current)
+        list.put_word_le(mut raw, 2 * i + 1)
+        let charge = entry(key, raw)
+        list.push(mut rows, std.page.Row(key: take key, value: take raw, charge: charge))
+    }
+    let first = db.next_node + 1
+    let mut ids = first
+    bulk_collection(mut db.heads[0u64].roots.collections, t.id, 1, rows, first, mut ids)?
+    db.next_node = ids - 1
+    Ok(())
+}
+
+fn scan_cursor_budget(s: Snapshot, t: Table[u64, u64], row_count: u64) -> Result[(), Error] waits {
+    let read_handle = law_reader(s)
+    let start = 20000u64
+    let opened = scan(read_handle, s, t, Included(start), Unbounded)?
+    let observed = bound steps(150 * row_count - 1) {
+        let mut rows = take opened
+        let mut matches = true
+        for i in 0u64 .. row_count {
+            let key = start + 2 * i
+            match next(read_handle, mut rows) {
+                Ok(Some(row)) if row == (key, key + 1) => {},
+                _ => {
+                    matches = false
+                },
+            }
+        }
+        matches
+    }
+    if let Ok(true) = observed {
+        return Ok(())
+    }
+    fail("a scan must return the model's rows in fewer than 150 steps per row")
+}
+
+fn scan_no_per_row_reseek(mut db: Db, t: Table[u64, u64]) -> Result[(), Error] waits {
+    cursor_law_rows(mut db, t, 50000)?
+    let s = snapshot(db)
+    scan_cursor_budget(s, t, 10)?
+    scan_cursor_budget(s, t, 1000)
+}
+
+fn cursor_tx_model(tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+    let mut forward = range(tx, t, Excluded(18), Included(1000))?
+    let mut backward = range_reverse(tx, t, Excluded(18), Included(1000))?
+    for i in 0u64 .. 491 {
+        let up = 20 + 2 * i
+        let down = 1000 - 2 * i
+        if next_in(tx, mut forward)? != Some((up, up + 1)) || next_in(tx, mut backward)? != Some((down, down + 1)) {
+            fail("transaction cursors must match the model in both directions")
+        }
+    }
+    if next_in(tx, mut forward)? != None || next_in(tx, mut backward)? != None {
+        fail("transaction cursors must stop at their bounds")
+    }
+    Ok(())
+}
+
+fn cursor_pages_model(s: Snapshot, t: Table[u64, u64]) -> Result[(), Error] waits {
+    let r = law_reader(s)
+    let limits = Limits(rows: 37, byte_limit: 65536)
+    let mut page = scan_page(r, s, t, Excluded(18), Included(1000), limits)?
+    let mut key = 20u64
+    loop {
+        for row in page.rows {
+            if row != (key, key + 1) || key > 1000 {
+                fail("paged rows must match the model")
+            }
+            key += 2
+        }
+        let Page(rows: _, byte_count: _, next: take token) = take page
+        let Some(take resume) = take token else {
+            break
+        }
+        let Paged(take following) = scan_next(r, s, t, take resume, limits)? else {
+            fail("resume must stay on the original capture")
+        }
+        page = take following
+    }
+    if key != 1002 {
+        fail("paged scan must reach the inclusive upper bound")
+    }
+    Ok(())
+}
+
+fn cursor_tiered_model(db: Db, t: Table[u64, u32]) -> Result[(), Error] waits {
+    l62_snapshot_scan_reads(db, t)?
+    l62_snapshot_page_reads(db, t)
+}
+
+@test
+fn test_scan_cursor_parity(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let _ = law_table(mut db, "cursor", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "cursor", std.codec.key_u64(), std.codec.of_u64())?
+    for row_count in[0u64, 1u64, 512u64] {
+        cursor_law_rows(mut db, t, row_count)?
+        let s = snapshot(db)
+        for reverse in[false, true] {
+            if !scan_matches_rows(s, t, 0, 2 * row_count, Unbounded, reverse) {
+                fail("snapshot cursors must match the same model on empty, single-leaf and split trees")
+            }
+        }
+    }
+    let s = snapshot(db)
+    let Seen(Seen(value: Ok(()), ..)) = look(law_reader(s), s, None, copy_env(t), cursor_tx_model)? else {
+        fail("transaction model must finish successfully")
+    }
+    cursor_pages_model(s, t)?
+    l62_tiered_scan_fixture(d, c, tasks, false, cursor_tiered_model)?
+    scan_no_per_row_reseek(mut db, t)
+}
+
+@test
+fn test_cursor_carries_in_collection_bound(c: Clock) -> Result[(), Error] {
+    let db = test_db(c, 1073741824)
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let first = db.next_node + 1
+    let mut ids = first
+    let id = 255u32
+    define_collection(mut tree, id, 1, first, mut ids)?
+    let key = logical_key(id, b"\xff")?
+    put_page_row(mut tree, key, b"row", first, mut ids)?
+    let low = prefix(id)?
+    let carried = prefix_after(key)?
+    if list.len(carried) != 3 {
+        fail("fixture must carry across the collection id's low byte")
+    }
+    for reverse in[false, true] {
+        let Some(take opened) = collection_cursor(tree, id, low, carried, reverse)? else {
+            fail("the shortened upper bound includes this collection")
+        }
+        let mut rows = take opened
+        let item = std.page.cursor_read(mut rows.walk, scoped fn(suffix: Bytes, raw: Bytes) -> bool {
+            suffix == b"\xff" && raw == b"row"
+        })
+        if item != Some(true) {
+            fail("the shortened upper bound must keep the collection's last key")
+        }
+    }
+    if let Some(_) = collection_cursor(tree, id, carried, prefix(id + 1)?, false)? {
+        fail("the shortened lower bound must exclude the entire collection")
+    }
+    Ok(())
+}

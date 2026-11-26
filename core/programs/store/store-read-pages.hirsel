@@ -91,30 +91,52 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                 }
                 return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Page[K, V], Error] {
                     let mut walk = ()
-                    read_snapshot_page(s, source, copied(high)?, limits, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-                        if tiered_rows {
+                    read_snapshot_page(s, source, copied(high)?, limits, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
+                        let found = if tiered_rows {
                             if let Some(last_key) = previous {
                                 let after = scan_page_after(last_key)?
-                                return tiered_scan_row(attempt, visible, edge, source, edits, after, high, false)
+                                tiered_scan_row(attempt, visible, edge, source, edits, after, high, false)?
+                            } else {
+                                tiered_scan_row(attempt, visible, edge, source, edits, start, high, false)?
                             }
-                            return tiered_scan_row(attempt, visible, edge, source, edits, start, high, false)
+                        } else {
+                            let mut cursor = resume_data(data, start, high, previous, false)?
+                            next_bytes(mut cursor)?
                         }
-                        let mut cursor = resume_data(data, start, high, previous, false)?
-                        next_bytes(mut cursor)
-                    }, scoped fn(mut _walk: (), key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
-                        tiered_snapshot_row(attempt, visible, data, decoder, key, raw, remaining)
+                        let Some((take key, raw)) = take found else {
+                            return Ok(PageEnd)
+                        }
+                        if full {
+                            return Ok(PageLimit)
+                        }
+                        let row = tiered_snapshot_row(attempt, visible, data, decoder, key, raw, remaining)?
+                        Ok(snapshot_page_step(take key, take row))
                     })
                 })
             }
         }
     }
-    let mut cursor = byte_cursor(data, take low, high)?
-    read_snapshot_page(s, source, take high, limits, mut cursor, scoped fn(mut current: PageRange, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-        next_bytes(mut current)
-    }, scoped fn(mut current: PageRange, key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
-        advance_rows(decoder, data, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] {
-            Ok(())
+    let start = scan_page_start(low, prefix(source)?)?
+    let Some(take opened) = collection_cursor(data, source, start, high, false)? else {
+        return Ok(Page(rows: list.new(), byte_count: 0, next: None))
+    }
+    let mut cursor = take opened
+    let leading = prefix(source)?
+    read_snapshot_page(s, source, take high, limits, mut cursor, scoped fn(mut current: CollectionCursor, previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
+        let stepped = std.page.cursor_read(mut current.walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[SnapshotPageStep[K, V], Error] {
+            if full {
+                return Ok(PageLimit)
+            }
+            let key = collection_row_key(leading, suffix)
+            let row = advance_rows(decoder, data, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] {
+                Ok(())
+            })?
+            Ok(snapshot_page_step(take key, take row))
         })
+        match take stepped {
+            Some(take step) => take step,
+            None => Ok(PageEnd),
+        }
     })
 }
 
@@ -132,32 +154,34 @@ fn scan_page_after(key: Bytes) -> Result[Bytes, Error] {
     Ok(take after)
 }
 
-fn read_snapshot_page[K, V, W](s: Snapshot, source: u32, take high: Bytes, limits: Limits, mut walk: W, advance: scoped[view] fn(mut W, Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error], decode_row: scoped[view] fn(mut W, Bytes, Bytes, Option[u64]) -> Result[Option[((K, V), u64)], Error]) -> Result[Page[K, V], Error] {
+type SnapshotPageStep[K, V] = PageEnd | PageLimit | PageValue(Bytes, (K, V), u64)
+
+fn snapshot_page_step[K, V](take key: Bytes, take row: Option[((K, V), u64)]) -> SnapshotPageStep[K, V] {
+    match take row {
+        Some((take value, size)) => PageValue(take key, take value, size),
+        None => PageLimit,
+    }
+}
+
+fn read_snapshot_page[K, V, W](s: Snapshot, source: u32, take high: Bytes, limits: Limits, mut walk: W, advance: scoped[view] fn(mut W, Option[Bytes], bool, Option[u64]) -> Result[SnapshotPageStep[K, V], Error]) -> Result[Page[K, V], Error] {
     let mut page: List[(K, V)] = list.new()
     let mut byte_count = 0u64
     let mut final_item: Option[Bytes] = None
     while true {
-        let found = advance(mut walk, final_item)?
-        let (take key, take raw) = match take found {
-            Some(take pair) => take pair,
-            None => return Ok(Page(rows: take page, byte_count: byte_count, next: None))
-        }
-        if list.len(page) == limits.rows {
-            break
-        }
+        let full = list.len(page) == limits.rows
         let remaining: Option[u64] = if list.len(page) == 0 {
             None
         } else {
             Some(int.saturating_sub(limits.byte_limit, byte_count))
         }
-        let row = decode_row(mut walk, key, raw, remaining)?
-        match take row {
-            Some((take value, size)) => {
+        match advance(mut walk, final_item, full, remaining)? {
+            PageEnd => return Ok(Page(rows: take page, byte_count: byte_count, next: None)),
+            PageLimit => break,
+            PageValue(take key, take value, size) => {
                 list.push(mut page, take value)
                 byte_count += size
                 final_item = Some(take key)
             },
-            None => break
         }
     }
     let resume = match take final_item {

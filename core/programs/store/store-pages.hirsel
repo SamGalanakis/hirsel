@@ -578,6 +578,46 @@ fn drop_collection(mut tree: PageTree, id: u32, private_from: u64, mut ids: u64)
     page_result(std.page.remove(mut tree.root, prefix(id)?, private_from, mut ids))
 }
 
+type CollectionCursor: send {
+    walk: std.page.Cursor,
+    leading: Bytes
+}
+
+fn collection_cursor(tree: PageTree, id: u32, low: Bytes, high: Bytes, reverse: bool) -> Result[Option[CollectionCursor], Error] {
+    let leading = prefix(id)?
+    let low_prefix = list.slice(low, 0, order.min(4, list.len(low)))
+    let high_prefix = list.slice(high, 0, order.min(4, list.len(high)))
+    if high <= low || high_prefix < leading || low_prefix > leading {
+        return Ok(None)
+    }
+    let Some(root) = std.page.collection_child(tree.root, leading) else {
+        return Ok(None)
+    }
+    let start = if low_prefix == leading {
+        Some(copied(list.slice(low, 4, list.len(low)))?)
+    } else {
+        None
+    }
+    let stop = if high_prefix == leading {
+        Some(copied(list.slice(high, 4, list.len(high)))?)
+    } else {
+        None
+    }
+    let walk = if reverse {
+        std.page.cursor_open_bounded(root, stop, false, true, take start)
+    } else {
+        std.page.cursor_open_bounded(root, start, true, false, take stop)
+    }
+    Ok(Some(CollectionCursor(walk: take walk, leading: take leading)))
+}
+
+fn collection_row_key(leading: Bytes, suffix: Bytes) -> Bytes {
+    let mut key: Bytes = list.with_capacity(list.len(leading) + list.len(suffix))
+    list.append(mut key, leading)
+    list.append(mut key, suffix)
+    take key
+}
+
 type PageRange: send {
     listed: std.page.Cursor,
     nested: bool,

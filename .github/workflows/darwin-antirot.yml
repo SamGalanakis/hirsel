@@ -63,9 +63,91 @@ jobs:
           python3 tools/buck2/bootstrap_rust_toolchain.py
           python3 tools/darwin_check.py
 
+  corpus-toolchain:
+    name: Build the Darwin corpus toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build and install the compiler and Darwin runtime
+        run: |
+          rust=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$rust" --profile minimal --no-self-update
+          cargo fetch --locked
+          python3 tools/buck2/prepare.py --local
+
+          driver=//:hirsel-core-driver-bin-hirsel
+          runtime='//:hirsel-core-rt-archives[aarch64-apple-darwin]'
+          kit=//tools/buck2/native-toolchain:kit
+          outputs=$(.buck2/bin/buck2 build -j4 --show-json-output "$driver" "$runtime" "$kit")
+          path_for() { jq -er --arg target "root$1" '.[$target]' <<< "$outputs"; }
+          compiler=$(path_for "$driver")
+          archive=$(path_for "$runtime")
+          link_kit=$(path_for "$kit")
+          prefix="$RUNNER_TEMP/darwin-corpus"
+          "$compiler" core-product --install "$prefix" --runtime "$archive" \
+            --target aarch64-apple-darwin --link-kit "$link_kit"
+          tar -czf "$RUNNER_TEMP/darwin-corpus.tar.gz" -C "$prefix" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-corpus-toolchain
+          path: ${{ runner.temp }}/darwin-corpus.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  corpus:
+    name: Darwin corpus (${{ matrix.backend }}, ${{ matrix.packages }})
+    needs: corpus-toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {backend: cranelift, packages: all}
+          - {backend: llvm, packages: platform}
+          - {backend: llvm, packages: runner}
+          - {backend: llvm, packages: store}
+          - {backend: llvm, packages: remaining}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-corpus-toolchain
+          path: ${{ runner.temp }}
+      - name: Cross-link and check Mach-O structure
+        shell: bash
+        env:
+          BACKEND: ${{ matrix.backend }}
+          HARVEST_GROUP: ${{ matrix.packages }}
+        run: |
+          prefix="$RUNNER_TEMP/darwin-corpus"
+          mkdir "$prefix"
+          tar -xzf "$RUNNER_TEMP/darwin-corpus.tar.gz" -C "$prefix"
+          runtime=$("$prefix/hirsel" env --target aarch64-apple-darwin --json | jq -er '.runtime')
+          only=()
+          case "$HARVEST_GROUP" in
+            all) ;;
+            remaining)
+              packages=$(PYTHONPATH=core/tools python3 -c '
+          from m1 import DARWIN_HARVEST
+          print(*[package for package in DARWIN_HARVEST if package not in {"platform", "runner", "store"}])')
+              read -r -a only <<< "$packages"
+              only=(--only "${only[@]}")
+              ;;
+            *) only=(--only "$HARVEST_GROUP") ;;
+          esac
+          python3 core/tools/m1.py --target aarch64-apple-darwin --backend "$BACKEND" \
+            --compiler "$prefix/hirsel" --runtime "$runtime" "${only[@]}"
+
   report:
     name: File or update failure issues
-    needs: [native, metadata]
+    needs: [native, metadata, corpus-toolchain, corpus]
     if: ${{ failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
@@ -88,6 +170,8 @@ jobs:
           FAILED_LAWS: ${{ needs.native.outputs.failed-laws }}
           PROOF: ${{ needs.native.outputs.proof }}
           METADATA_RESULT: ${{ needs.metadata.result }}
+          CORPUS_TOOLCHAIN_RESULT: ${{ needs.corpus-toolchain.result }}
+          CORPUS_RESULT: ${{ needs.corpus.result }}
         run: |
           status=0
           report() {
@@ -110,5 +194,11 @@ jobs:
           fi
           if [[ "$METADATA_RESULT" == failure ]]; then
             report darwin-check 'The Darwin metadata check job failed on Linux.'
+          fi
+          if [[ "$CORPUS_TOOLCHAIN_RESULT" == failure ]]; then
+            report darwin-corpus-toolchain 'Building the toolchain for the Darwin corpus failed on Linux.'
+          fi
+          if [[ "$CORPUS_RESULT" == failure ]]; then
+            report darwin-corpus-cross-link 'Cross-linking the Darwin corpus failed on Linux.'
           fi
           exit "$status"

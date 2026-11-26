@@ -50,6 +50,16 @@ require or extract a constant argument.
   Replacement, rename or deletion of the file after launch leaves the digest
   stable. Both native backends use the same runtime launch boundary. A closed
   executable with no digest reader may omit capture on a run that is not recorded.
+- Darwin has no name for the running image itself, only the path it was started
+  from. A program started directly opens that path once (`_NSGetExecutablePath`)
+  and hashes the file at once, before its first statement, and keeps neither the
+  descriptor nor a mapping. Replacement, rename or deletion of the file after
+  that leaves the digest stable. The hash is not deferred: macOS lets the file
+  of a running image be written and truncated, so a later read could hash other
+  bytes and a mapping could fault. A file put at that path between the exec and
+  the open is hashed in place of the running image; a child of the platform
+  launcher is not exposed to this, because it takes the digest the launcher
+  verified (below, "macOS").
 - An evaluator launching a built artifact hashes the artifact it loaded, and
   retains that artifact's target. It never hashes the evaluator executable.
   Source-only evaluation has no executable image and is unavailable.

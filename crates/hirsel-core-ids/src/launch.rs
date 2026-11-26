@@ -171,7 +171,7 @@ pub struct Metadata {
 
 impl Metadata {
     pub fn native(target: &str, n_place: u64, describe: bool) -> Self {
-        let file = File::open("/proc/self/exe");
+        let file = running_image();
         #[cfg(target_os = "linux")]
         if let Ok(file) = &file
             && let Some(image) = MappedImage::new(file)
@@ -390,6 +390,17 @@ impl Metadata {
             _ => 0,
         }
     }
+}
+
+/// Open the file this process runs. Linux names the running image itself,
+/// whatever became of its path. Darwin has only the path the image was started
+/// from, so the launcher opens that path and hashes the file at once.
+fn running_image() -> io::Result<File> {
+    #[cfg(target_os = "linux")]
+    let image = File::open("/proc/self/exe");
+    #[cfg(target_os = "macos")]
+    let image = std::env::current_exe().and_then(File::open);
+    image
 }
 
 #[cold]

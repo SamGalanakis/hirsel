@@ -15,6 +15,7 @@ store@1/store/bucket_stream_set_prefix_listing src=67c9d8c2b23da32f sig=a6edd165
 store@1/store/bucket_stream_slot_refusals src=8e2666c91e606382 sig=25b345f7de09a5a8 run=3df318621522d07b bug=- oracle=- rows=pending
 store@1/store/bucket_stream_streamed_genesis src=b534a6ae68d0b320 sig=9048e66c4e4c1cbb run=3df318621522d07b bug=- oracle=- rows=pending
 store@1/store/bucket_stream_zero_cost src=812a57fab9302f87 sig=64ec4da93f3f8fad run=dbf6722727633166 bug=- oracle=- rows=pending
+store@1/store/bucket_test_backup_restore_full_scan src=c9fc358186c69a4b sig=711f5c880ca269f0 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/bucket_test_claim_cut src=629896efc4c22ce6 sig=d79277c209d90b50 run=57538e9471c5f788 bug=- oracle=- rows=pending
 store@1/store/bucket_test_fence src=374f1b70d4991209 sig=42a62487d1f155a5 run=6677ce756ba8a915 bug=- oracle=- rows=pending
 store@1/store/bucket_test_ignored_conditions_refuse_genesis src=7480b5dc02cfdaaa sig=7cfd7689c95cf761 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
@@ -121,7 +122,7 @@ store@1/store/journal_frame_oversize src=b30798267bb46832 sig=461e9ff6e0026bca r
 store@1/store/journal_frame_size_boundary src=b2ab03e39041356a sig=9f0bb221864ab3f7 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/journal_test_ack_channel src=b2a042d02926e76b sig=c0ad1dab080d31db run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_apply src=f9c7c6ccfd97a380 sig=32c0500e62abe2fd run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/journal_test_backup_restore src=7c289969da4edbfd sig=003d04be58c1c5e8 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/journal_test_backup_restore src=c5a561e651c1d79f sig=0f8be7a54b12a7a3 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_bootstrap src=231a97ac777ab42e sig=4386956fe1a87de2 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_call_vector src=26227feb393c78e1 sig=a12791ae89b487ab run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/journal_test_cap_arithmetic src=877fc3f5b1cafeb7 sig=20722d93cdbb4742 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

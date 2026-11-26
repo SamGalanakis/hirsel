@@ -1,5 +1,4 @@
-// Store 1.5 backup and restore laws (STORE-SPEC §15.5).
-
+// Store 1.5 backup and restore laws (STORE-SPEC §15.5, CLOUD #4).
 fn backup_law_delete(mut db: Db, t: Table[u64, u64], k: u64) -> bool waits {
     let out = run(mut db, None, (copy_env(k), copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
         let _ = delete(mut tx, call_env.1, call_env.0)?
@@ -32,7 +31,72 @@ fn backup_law_same_rows(left: Db, at_left: Snapshot, right: Db, at_right: Snapsh
     }
 }
 
-fn backup_law_schema(mut schema: Declare) -> Result[(Table[u64, u64], Index[u64, u64, u64, ()], Table[u64, u64]), Error] {
+// Full-scan both-ways check over every index entry in key order.
+fn backup_law_same_index(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, ix: Index[u64, u64, u64, ()]) -> Result[u64, DeployError] waits {
+    let mut expected = deploy_result(find(result.unwrap(reader(left, 0u64)), at_left, ix, Unbounded, Unbounded))?
+    let mut actual = deploy_result(find(result.unwrap(reader(right, 0u64)), at_right, ix, Unbounded, Unbounded))?
+    let mut matched = 0u64
+    loop {
+        let want = deploy_result(next(law_reader(expected.capture), mut expected))?
+        let got = deploy_result(next(law_reader(actual.capture), mut actual))?
+        if want != got {
+            return Error(ExportMismatch)
+        }
+        if want == None {
+            return Ok(matched)
+        }
+        matched = matched + 1
+    }
+}
+
+// Full-scan both-ways check over every retained log entry in sequence order.
+fn backup_law_same_log(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, l: Log[u64]) -> Result[u64, DeployError] waits {
+    let left_reader = result.unwrap(reader(left, 0u64))
+    let right_reader = result.unwrap(reader(right, 0u64))
+    let mut expected = deploy_result(log_scan(left_reader, at_left, l, Unbounded, Unbounded))?
+    let mut actual = deploy_result(log_scan(right_reader, at_right, l, Unbounded, Unbounded))?
+    let mut matched = 0u64
+    loop {
+        let want = deploy_result(next(left_reader, mut expected))?
+        let got = deploy_result(next(right_reader, mut actual))?
+        if want != got {
+            return Error(ExportMismatch)
+        }
+        if want == None {
+            return Ok(matched)
+        }
+        matched = matched + 1
+    }
+}
+
+fn backup_law_cell_set(mut db: Db, cell_handle: Cell[u64], v: u64) -> bool waits {
+    let out = run(mut db, None, (copy_env(cell_handle), copy_env(v)), fn(mut tx, call_env) -> Result[(), Error] {
+        cell_set(mut tx, call_env.0, call_env.1)
+    })
+    match take out {
+        Ok(Committed(_)) => true,
+        _ => false
+    }
+}
+
+fn backup_law_log_edit(mut db: Db, l: Log[u64], first: u64, n_items: u64, trim: Option[u64]) -> bool waits {
+    let log_handle: Log[u64] = clone(l)
+    let out = run(mut db, None, (take log_handle, first, n_items, trim), fn(mut tx, call_env) -> Result[(), Error] {
+        for i in 0u64 .. call_env.2 {
+            let _ = append(mut tx, call_env.0, call_env.1 + i)?
+        }
+        if let Some(before) = call_env.3 {
+            trim_before(mut tx, call_env.0, before)?
+        }
+        Ok(())
+    })
+    match take out {
+        Ok(Committed(_)) => true,
+        _ => false
+    }
+}
+
+fn backup_law_schema(mut schema: Declare) -> Result[(Table[u64, u64], Index[u64, u64, u64, ()], Table[u64, u64], Cell[u64], Log[u64]), Error] {
     let key = std.codec.key_u64()
     let value = std.codec.of_u64()
     let mut declared_items = declare_table(mut schema, "items", key, value)?
@@ -40,13 +104,36 @@ fn backup_law_schema(mut schema: Declare) -> Result[(Table[u64, u64], Index[u64,
     let items = finish(mut schema, take declared_items)?
     let declared_other = declare_table(mut schema, "other", key, value)?
     let other = finish(mut schema, take declared_other)?
-    Ok((items, ix, other))
+    let meta = declare_cell(mut schema, "meta", value)?
+    let events = declare_log(mut schema, "events", value, Forever)?
+    Ok((items, ix, other, meta, events))
+}
+
+fn backup_law_check_logical(source: Db, leased: Snapshot, twin: Db, now: Snapshot, items: Table[u64, u64], ix: Index[u64, u64, u64, ()], other: Table[u64, u64], meta: Cell[u64], events: Log[u64], expect_items: u64, expect_other: u64, expect_log: u64) -> Result[(), DeployError] waits {
+    if version(now) != version(leased) || twin.store.hi != source.store.hi || twin.store.lo != source.store.lo {
+        return Error(ExportMismatch)
+    }
+    if backup_law_same_rows(source, leased, twin, now, items)? != expect_items || backup_law_same_rows(source, leased, twin, now, other)? != expect_other {
+        return Error(ExportMismatch)
+    }
+    if backup_law_same_index(source, leased, twin, now, ix)? != expect_items {
+        return Error(ExportMismatch)
+    }
+    let want_meta = deploy_result(cell_get(result.unwrap(reader(source, 0u64)), leased, meta))?
+    let got_meta = deploy_result(cell_get(result.unwrap(reader(twin, 0u64)), now, meta))?
+    if want_meta != got_meta {
+        return Error(ExportMismatch)
+    }
+    if backup_law_same_log(source, leased, twin, now, events)? != expect_log {
+        return Error(ExportMismatch)
+    }
+    Ok(())
 }
 
 fn backup_law_seed(tasks: Tasks, source: Dir, c: Clock, r: Random, options: Options) -> Result[(), DeployError] waits {
     let mut db = deploy_result(open(tasks, source, c, r, options))?
     let mut schema = deploy_result(declare(db, Migrate))?
-    let (items, _, other) = deploy_result(backup_law_schema(mut schema))?
+    let (items, _, other, meta, events) = deploy_result(backup_law_schema(mut schema))?
     let _ = deploy_result(seal(mut db, take schema))?
     for k in 0u64 .. 40 {
         if !typed_put(mut db, items, k, k * 3) || !typed_put(mut db, other, k * 7, k) {
@@ -56,15 +143,15 @@ fn backup_law_seed(tasks: Tasks, source: Dir, c: Clock, r: Random, options: Opti
             let _ = deploy_result(checkpoint(mut db))?
         }
     }
-    if !backup_law_delete(mut db, items, 5) || !typed_put(mut db, items, 6, 1000) {
+    if !backup_law_delete(mut db, items, 5) || !typed_put(mut db, items, 6, 1000) || !backup_law_cell_set(mut db, meta, 77u64) || !backup_law_log_edit(mut db, events, 100u64, 5u64, Some(2u64)) {
         return Error(ExportMismatch)
     }
     deploy_result(close(take db))
 }
 
-// L89 (§15.5). A restored backup opens as an ordinary store and equals its
-// source at the leased head, row by row, whatever the source wrote, deleted
-// or checkpointed after the lease.
+// L89 (§15.5, CLOUD #4). A restored backup opens as an ordinary store and equals its
+// source at the leased head across every table, index, cell and log, whatever the source
+// wrote, deleted or checkpointed after the lease.
 @test
 fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
     let source = disk_test_directory(d)
@@ -78,9 +165,9 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     backup_law_seed(tasks, source, c, r, options)?
     let mut db = deploy_result(open(tasks, source, c, r, options))?
     let mut schema = deploy_result(declare(db, Open))?
-    let (items, ix, other) = deploy_result(backup_law_schema(mut schema))?
+    let (items, ix, other, meta, events) = deploy_result(backup_law_schema(mut schema))?
     let _ = deploy_result(seal(mut db, take schema))?
-    if !typed_put(mut db, other, 1000, 1) || !typed_put(mut db, items, 7, 2000) {
+    if !typed_put(mut db, other, 1000, 1) || !typed_put(mut db, items, 7, 2000) || !backup_law_log_edit(mut db, events, 200u64, 2u64, None) {
         return Error(ExportMismatch)
     }
     let leased = snapshot(db)
@@ -98,7 +185,7 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
             return Error(ExportMismatch)
         }
     }
-    if !backup_law_delete(mut db, other, 0) {
+    if !backup_law_delete(mut db, other, 0) || !backup_law_cell_set(mut db, meta, 999u64) || !backup_law_log_edit(mut db, events, 300u64, 3u64, Some(4u64)) {
         return Error(ExportMismatch)
     }
     let _ = deploy_result(checkpoint(mut db))?
@@ -131,25 +218,13 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     if stamp.head != version(leased) {
         return Error(ExportMismatch)
     }
-    let twin = deploy_result(open(tasks, restored, c, r, options))?
+    let mut twin = deploy_result(open(tasks, restored, c, r, options))?
+    let mut twin_schema = deploy_result(declare(twin, Open))?
+    let (twin_items, twin_ix, twin_other, twin_meta, twin_events) = deploy_result(backup_law_schema(mut twin_schema))?
+    let _ = deploy_result(seal(mut twin, take twin_schema))?
     let now = snapshot(twin)
-    if version(now) != version(leased) || twin.store.hi != db.store.hi || twin.store.lo != db.store.lo {
-        return Error(ExportMismatch)
-    }
-    if backup_law_same_rows(db, leased, twin, now, items)? != 39 || backup_law_same_rows(db, leased, twin, now, other)? != 41 {
-        return Error(ExportMismatch)
-    }
-    let mut found = deploy_result(find(result.unwrap(reader(twin, 0u64)), now, ix, Included(2), Included(2)))?
-    let mut expected = deploy_result(find(result.unwrap(reader(db, 0u64)), leased, ix, Included(2), Included(2)))?
-    loop {
-        let got = deploy_result(next(law_reader(found.capture), mut found))?
-        if got != deploy_result(next(law_reader(expected.capture), mut expected))? {
-            return Error(ExportMismatch)
-        }
-        if got == None {
-            break
-        }
-    }
+    let _ = (twin_items, twin_ix, twin_other, twin_meta, twin_events)
+    backup_law_check_logical(db, leased, twin, now, items, ix, other, meta, events, 39u64, 41u64, 5u64)?
     let gone = disk_test_directory(d)
     disk_io_deploy(host.remove(target, "EXPORT"))?
     match restore(target, gone, c, options) {
@@ -158,6 +233,66 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     }
     deploy_result(close(take twin))?
     deploy_result(close(take db))
+}
+
+fn bucket_backup_restore_body(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), DeployError] waits {
+    let target = disk_test_directory(d)
+    let restored = disk_test_directory(d)
+    let mut bucket_options = bucket_law_options(true)
+    bucket_options.group_bytes = 65536
+    bucket_options.head_poll_ms = 10000
+    let authority = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 1))?
+    let mut db = open_authority(tasks, take authority, c, r, bucket_options) ?=> |Refusal(error: take problem, ..)| Store(take problem)
+    let mut schema = deploy_result(declare(db, Migrate))?
+    let (items, ix, other, meta, events) = deploy_result(backup_law_schema(mut schema))?
+    let _ = deploy_result(seal(mut db, take schema))?
+    for k in 0u64 .. 24 {
+        if !typed_put(mut db, items, k, k * 5) || !typed_put(mut db, other, k * 3, k + 10) {
+            return Error(ExportMismatch)
+        }
+        if k == 11 {
+            let _ = deploy_result(checkpoint(mut db))?
+        }
+    }
+    if !backup_law_delete(mut db, items, 4) || !typed_put(mut db, items, 6, 4242) || !backup_law_cell_set(mut db, meta, 55u64) || !backup_law_log_edit(mut db, events, 10u64, 4u64, Some(1u64)) {
+        return Error(ExportMismatch)
+    }
+    let leased = snapshot(db)
+    let mut attempt: Bytes = list.with_capacity(16)
+    list.fill(mut attempt, 16, 9u8)
+    let job = begin_backup(mut db, target, result.unwrap(copied(attempt)))?
+    // Post-lease mutations and checkpoint on the live Bucket writer must not appear in the restore.
+    if !typed_put(mut db, items, 99, 99) || !backup_law_delete(mut db, other, 0) || !backup_law_cell_set(mut db, meta, 888u64) || !backup_law_log_edit(mut db, events, 50u64, 2u64, Some(2u64)) {
+        return Error(ExportMismatch)
+    }
+    let _ = deploy_result(checkpoint(mut db))?
+    let copied_backup = export_copy(take job)?
+    release_export(mut db, attempt)
+    if copied_backup.stamp.head != version(leased) {
+        return Error(ExportMismatch)
+    }
+    let dir_options = result.unwrap(sized(Directory, 2147483648u64))
+    let stamp = restore(target, restored, c, dir_options)?
+    if stamp.head != version(leased) {
+        return Error(ExportMismatch)
+    }
+    let mut twin = deploy_result(open(tasks, restored, c, r, dir_options))?
+    let mut twin_schema = deploy_result(declare(twin, Open))?
+    let _ = deploy_result(backup_law_schema(mut twin_schema))?
+    let _ = deploy_result(seal(mut twin, take twin_schema))?
+    let now = snapshot(twin)
+    backup_law_check_logical(db, leased, twin, now, items, ix, other, meta, events, 23u64, 24u64, 3u64)?
+    deploy_result(close(take twin))?
+    deploy_result(close(take db))
+}
+
+// CLOUD #4: full-scan restore verification for a Bucket backup restored into a Directory store.
+@test
+fn bucket_test_backup_restore_full_scan(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let sim = bucket_law_sim(tasks, c, 20263, None, list.new())
+    let outcome = bucket_backup_restore_body(d, c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
 }
 
 fn disk_io_deploy(take r: Result[(), IoError]) -> Result[(), DeployError] {

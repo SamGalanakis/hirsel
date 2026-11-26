@@ -1,7 +1,12 @@
 const ROOM_RING_BYTES: u64 = 65536u64
+
 const ROOM_RING_HEADER: u64 = 24u64
 
-type RoomRing: send { data: Bytes, head: u64, used: u64 }
+type RoomRing: send {
+    data: Bytes,
+    head: u64,
+    used: u64
+}
 
 type RingMessage {
     len: u32,
@@ -19,7 +24,9 @@ fn room_ring() -> RoomRing {
     RoomRing(data: take data, head: 0u64, used: 0u64)
 }
 
-fn room_ring_at(ring: RoomRing, at: u64) -> u64 { (ring.head + at) % ROOM_RING_BYTES }
+fn room_ring_at(ring: RoomRing, at: u64) -> u64 {
+    (ring.head + at) % ROOM_RING_BYTES
+}
 
 fn room_ring_put(mut ring: RoomRing, at: u64, value: u64, width: u64) {
     for i in 0u64 .. width {
@@ -40,14 +47,20 @@ fn room_ring_word(ring: RoomRing, at: u64, width: u64) -> u64 {
 fn room_ring_append(mut ring: RoomRing, from_peer: u32, recv_adm: u64, from_slot: u16, room_slot: u8, direct: bool, payload: Bytes) -> bool {
     let len = list.len(payload)
     let width = ROOM_RING_HEADER + len
-    if width > ROOM_RING_BYTES - ring.used { return false }
+    if width > ROOM_RING_BYTES - ring.used {
+        return false
+    }
     let at = ring.used
     room_ring_put(mut ring, at, len, 4u64)
     room_ring_put(mut ring, at + 4u64, int.widen(from_peer), 4u64)
     room_ring_put(mut ring, at + 8u64, recv_adm, 8u64)
     room_ring_put(mut ring, at + 16u64, int.widen(from_slot), 2u64)
     room_ring_put(mut ring, at + 18u64, int.widen(room_slot), 1u64)
-    room_ring_put(mut ring, at + 19u64, if direct { 1u64 } else { 0u64 }, 1u64)
+    room_ring_put(mut ring, at + 19u64, if direct {
+        1u64
+    } else {
+        0u64
+    }, 1u64)
     for i in 0u64 .. len {
         let offset = room_ring_at(ring, at + ROOM_RING_HEADER + i)
         ring.data[offset] = payload[i]
@@ -58,17 +71,16 @@ fn room_ring_append(mut ring: RoomRing, from_peer: u32, recv_adm: u64, from_slot
 
 fn room_ring_message(ring: RoomRing, at: u64) -> RingMessage {
     let flags = ring.data[room_ring_at(ring, at + 19u64)]
-    RingMessage(len: int.truncate(room_ring_word(ring, at, 4u64)),
-        from_peer: int.truncate(room_ring_word(ring, at + 4u64, 4u64)),
-        recv_adm: room_ring_word(ring, at + 8u64, 8u64),
-        from_slot: int.truncate(room_ring_word(ring, at + 16u64, 2u64)),
-        room_slot: ring.data[room_ring_at(ring, at + 18u64)],
-        direct: flags & 1u8 != 0u8, consumed: flags & 2u8 != 0u8)
+    RingMessage(len: int.truncate(room_ring_word(ring, at, 4u64)), from_peer: int.truncate(room_ring_word(ring, at + 4u64, 4u64)), recv_adm: room_ring_word(ring, at + 8u64, 8u64), from_slot: int.truncate(room_ring_word(ring, at + 16u64, 2u64)), room_slot: ring.data[room_ring_at(ring, at + 18u64)], direct: flags & 1u8 != 0u8, consumed: flags & 2u8 != 0u8)
 }
 
 fn room_ring_emit(ring: RoomRing, at: u64, message: RingMessage, mut out: Bytes) {
     std.codec.put_u32(message.from_peer, mut out)
-    list.push(mut out, if message.direct { 1u8 } else { 0u8 })
+    list.push(mut out, if message.direct {
+        1u8
+    } else {
+        0u8
+    })
     std.codec.put_u32(message.len, mut out)
     let len: u64 = int.widen(message.len)
     for i in 0u64 .. len {
@@ -84,7 +96,9 @@ fn room_ring_consume(mut ring: RoomRing, at: u64) {
 fn room_ring_reclaim(mut ring: RoomRing) {
     while ring.used > 0u64 {
         let message = room_ring_message(ring, 0u64)
-        if !message.consumed { return }
+        if !message.consumed {
+            return
+        }
         let len: u64 = int.widen(message.len)
         let width = ROOM_RING_HEADER + len
         ring.head = room_ring_at(ring, width)

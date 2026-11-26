@@ -22,39 +22,58 @@ fn shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
     let (refund, _returned): (Sender[u64], Receiver[u64]) = channel.new(8u64)
     let mut registered = result.unwrap(placed(code.describe(shared_law_place), 1048576u64))
     result.unwrap(bind_query_slots(mut registered, h))
-    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)),
-        reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let first = at_base_generation(mut b, 1u64, 10u32, 1u64, shared_input(key, 136u64, 1u8, refund))
     let joined = at_base_generation(mut b, 2u64, 20u32, 1u64, shared_input(key, 65536u64, 2u8, refund))
     if list.len(first.complete) != 1u64 || list.len(joined.complete) != 1u64 {
         return Error("joining a plain view did not complete")
     }
-    if map.len(b.subs.indexed) != 1u64 { return Error("the joined view has more than one interval index entry") }
-    if !mark_due(mut b.subs, 1u64, 10u32) || !mark_due(mut b.subs, 2u64, 20u32) { return Error("views did not become due") }
+    if map.len(b.subs.indexed) != 1u64 {
+        return Error("the joined view has more than one interval index entry")
+    }
+    if !mark_due(mut b.subs, 1u64, 10u32) || !mark_due(mut b.subs, 2u64, 20u32) {
+        return Error("views did not become due")
+    }
     set(mut db, h.t, 0u64, 1u64)
     b.newest = Some(store.snapshot(db))
     let mut fences = Fenced(sessions: map.new())
     let changes = round(mut b, mut fences)
-    if map.len(fences.sessions) != 2u64 { return Error("the due view skipped its shared refresh") }
+    if map.len(fences.sessions) != 2u64 {
+        return Error("the due view skipped its shared refresh")
+    }
     {
         let tight = option.unwrap(sub_at(b.subs, 1u64, 10u32))
         let roomy = option.unwrap(sub_at(b.subs, 2u64, 20u32))
-        if tight.live { return Error("the tight subscriber kept an uncharged image") }
-        if !roomy.live { return Error("the tight subscriber ended another subscriber") }
-        if list.len(option.unwrap(map.get(b.subs.indexed, tight.routes)).routes) != 1u64 { return Error("ended subscriber lost its old dependency") }
+        if tight.live {
+            return Error("the tight subscriber kept an uncharged image")
+        }
+        if !roomy.live {
+            return Error("the tight subscriber ended another subscriber")
+        }
+        if list.len(option.unwrap(map.get(b.subs.indexed, tight.routes)).routes) != 1u64 {
+            return Error("ended subscriber lost its old dependency")
+        }
     }
     let mut rejected = false
     for owed in changes {
-        if list.len(owed.rows) != 0u64 { return Error("due subscriber received a delta") }
+        if list.len(owed.rows) != 0u64 {
+            return Error("due subscriber received a delta")
+        }
         for ended in owed.ended {
             if owed.session == 1u64 && ended.sub == 10u32 {
-                if let Refused(Budget(_)) = ended.outcome { rejected = true }
+                if let Refused(Budget(_)) = ended.outcome {
+                    rejected = true
+                }
             }
         }
     }
-    if !rejected { return Error("a larger read image did not charge the subscriber") }
+    if !rejected {
+        return Error("a larger read image did not charge the subscriber")
+    }
     let current = at_base_generation(mut b, 3u64, 30u32, 1u64, shared_input(key, 65536u64, 3u8, refund))
-    if list.len(current.complete) != 1u64 || list.len(current.rows) != 1u64 { return Error("join did not get the refreshed image") }
+    if list.len(current.complete) != 1u64 || list.len(current.rows) != 1u64 {
+        return Error("join did not get the refreshed image")
+    }
     Ok(())
 }
 

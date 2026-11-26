@@ -5,8 +5,7 @@ type HttpArgument {
 
 type HttpAssemblyError = RequestBody(std.http.BodyError) | MediaType | BadArgument(u32) | ArgumentCapacity
 
-fn http_assemble(req: std.http.Request, mut resp: std.http.Responder, plan: std.json.JsonPlan,
-    binding: HttpBinding, alias: bool) -> Result[Bytes, HttpAssemblyError] waits {
+fn http_assemble(req: std.http.Request, mut resp: std.http.Responder, plan: std.json.JsonPlan, binding: HttpBinding, alias: bool) -> Result[Bytes, HttpAssemblyError] waits {
     let (take arguments, has_body) = http_argument_sources(plan, binding, alias)
     let body = http_request_body(req, mut resp, has_body)?
     http_assemble_fields(req, plan, binding, take arguments, body, has_body)
@@ -22,17 +21,20 @@ fn http_argument_sources(plan: std.json.JsonPlan, binding: HttpBinding, alias: b
                 Ok(s) => http_argument_source(s, alias),
                 Error(_) => fail("invalid finalized HTTP field mapping"),
             }
-            if source == Body { has_body = true }
+            if source == Body {
+                has_body = true
+            }
             map.insert(mut arguments, string.from(field.name), HttpArgument(source: source, shape: field.shape))
         }
     }
     (take arguments, has_body)
 }
 
-fn http_assemble_fields(req: std.http.Request, plan: std.json.JsonPlan, binding: HttpBinding,
-    take arguments: Map[String, HttpArgument], body: String, has_body: bool) -> Result[Bytes, HttpAssemblyError] {
+fn http_assemble_fields(req: std.http.Request, plan: std.json.JsonPlan, binding: HttpBinding, take arguments: Map[String, HttpArgument], body: String, has_body: bool) -> Result[Bytes, HttpAssemblyError] {
     let assembled = bound bytes binding.arg_max {
-        let assembled_field = bound steps binding.steps { http_argument_bytes(req, plan, arguments, body, has_body) }
+        let assembled_field = bound steps binding.steps {
+            http_argument_bytes(req, plan, arguments, body, has_body)
+        }
         match take assembled_field {
             Ok(take answer) => take answer,
             Error(_) => Error(ArgumentCapacity),
@@ -45,26 +47,42 @@ fn http_assemble_fields(req: std.http.Request, plan: std.json.JsonPlan, binding:
 }
 
 fn http_argument_source(source: Source, alias: bool) -> Source {
-    if alias && source == Path { Query } else { source }
+    if alias && source == Path {
+        Query
+    } else {
+        source
+    }
 }
 
 fn http_request_body(req: std.http.Request, mut resp: std.http.Responder, has_body: bool) -> Result[String, HttpAssemblyError] waits {
-    if has_body && !http_json_content_type(req) { return Error(MediaType) }
+    if has_body && !http_json_content_type(req) {
+        return Error(MediaType)
+    }
     let body = http_request_body_bytes(req, mut resp, has_body)?
     Ok(string.from_utf8(take body) ?=> |_| BadArgument(2u32))
 }
 
 fn http_request_body_bytes(req: std.http.Request, mut resp: std.http.Responder, allow_body: bool) -> Result[Bytes, HttpAssemblyError] waits {
     if let Some(inline) = std.http.inline_body(req) {
-        if !allow_body && list.len(inline) != 0u64 { return Error(BadArgument(1u32)) }
+        if !allow_body && list.len(inline) != 0u64 {
+            return Error(BadArgument(1u32))
+        }
         return Ok(std.http.copy_bytes(inline))
     }
-    let mut chunk: Bytes = list.with_capacity(if allow_body { 4096u64 } else { 1u64 })
+    let mut chunk: Bytes = list.with_capacity(if allow_body {
+        4096u64
+    } else {
+        1u64
+    })
     let mut body: Bytes = list.new()
     loop {
         let n = std.http.read(mut resp, mut chunk) ?=> RequestBody
-        if n == 0u64 { break }
-        if !allow_body { return Error(BadArgument(1u32)) }
+        if n == 0u64 {
+            break
+        }
+        if !allow_body {
+            return Error(BadArgument(1u32))
+        }
         list.append(mut body, chunk)
         list.clear(mut chunk)
     }
@@ -72,12 +90,17 @@ fn http_request_body_bytes(req: std.http.Request, mut resp: std.http.Responder, 
 }
 
 fn http_json_content_type(req: std.http.Request) -> bool {
-    if let Some(_) = std.http.field_at(req, b"content-type", 1u64) { return false }
-    let Some(raw) = std.http.field(req, b"content-type") else { return false }
-    let Ok(media) = string.from_utf8(std.http.copy_bytes(raw)) else { return false }
+    if let Some(_) = std.http.field_at(req, b"content-type", 1u64) {
+        return false
+    }
+    let Some(raw) = std.http.field(req, b"content-type") else {
+        return false
+    }
+    let Ok(media) = string.from_utf8(std.http.copy_bytes(raw)) else {
+        return false
+    }
     if let Some((kind, attr)) = string.split_once(media, ";") {
-        return http_ascii_eq(string.trim_ascii(kind), b"application/json") &&
-            http_utf8_charset(string.trim_ascii(attr))
+        return http_ascii_eq(string.trim_ascii(kind), b"application/json") && http_utf8_charset(string.trim_ascii(attr))
     }
     http_ascii_eq(string.trim_ascii(media), b"application/json")
 }
@@ -87,19 +110,26 @@ fn http_ascii_eq(text: String, expected: Bytes) -> bool {
 }
 
 fn http_utf8_charset(attr: String) -> bool {
-    let Some((name, value)) = string.split_once(attr, "=") else { return false }
+    let Some((name, value)) = string.split_once(attr, "=") else {
+        return false
+    }
     let text = string.trim_ascii(value)
-    http_ascii_eq(string.trim_ascii(name), b"charset") &&
-        (http_ascii_eq(text, b"utf-8") || http_ascii_eq(text, b"\"utf-8\""))
+    http_ascii_eq(string.trim_ascii(name), b"charset") && (http_ascii_eq(text, b"utf-8") || http_ascii_eq(text, b"\"utf-8\""))
 }
 
 fn http_argument_bytes(req: std.http.Request, plan: std.json.JsonPlan, args: Map[String, HttpArgument], body: String, has_body: bool) -> Result[Bytes, HttpAssemblyError] {
     let parameters = http_query_fields(req, args)?
-    let mut fields = if has_body { http_body_fields(body, args)? } else { map.new() }
+    let mut fields = if has_body {
+        http_body_fields(body, args)?
+    } else {
+        map.new()
+    }
     for (name, argument) in args {
         match argument.source {
             Path => {
-                let Some(value) = std.http.capture(req, name) else { return Error(BadArgument(1u32)) }
+                let Some(value) = std.http.capture(req, name) else {
+                    return Error(BadArgument(1u32))
+                }
                 let assembled_field = http_scalar_text(plan, argument.shape, value)?
                 map.insert(mut fields, string.from(name), take assembled_field)
             },
@@ -109,11 +139,17 @@ fn http_argument_bytes(req: std.http.Request, plan: std.json.JsonPlan, args: Map
             Body => (),
         }
     }
-    let mut object = string.from(if let Atom(0u8) = plan.shapes[plan.facts[plan.root].form] { "null" } else { "{" })
+    let mut object = string.from(if let Atom(0u8) = plan.shapes[plan.facts[plan.root].form] {
+        "null"
+    } else {
+        "{"
+    })
     if object == "{" {
         let mut first = true
         for (name, raw) in fields {
-            if !first { string.push(mut object, ",") }
+            if !first {
+                string.push(mut object, ",")
+            }
             first = false
             std.json.write(mut object, false, scoped fn(w: std.json.Writer) {
                 std.json.write_string_value(w, name)
@@ -129,15 +165,24 @@ fn http_argument_bytes(req: std.http.Request, plan: std.json.JsonPlan, args: Map
 fn http_body_fields(body: String, args: Map[String, HttpArgument]) -> Result[Map[String, String], HttpAssemblyError] {
     let parsed = std.json.decode(body, scoped fn(document: String, mut root_cursor: std.json.Cursor) -> Result[Map[String, String], std.json.Error] {
         std.json.record_of(document, mut root_cursor, map.new(), scoped fn(name: String, text: String, mut cursor: std.json.Cursor, mut fields: Map[String, String]) -> Result[(), std.json.Error] {
-            let Some(field) = map.get(args, name) else { return Error(WrongKind(0u64)) }
-            if field.source != Body { return Error(WrongKind(0u64)) }
-            if map.contains(fields, name) { return Error(IntegerRange(0u64)) }
+            let Some(field) = map.get(args, name) else {
+                return Error(WrongKind(0u64))
+            }
+            if field.source != Body {
+                return Error(WrongKind(0u64))
+            }
+            if map.contains(fields, name) {
+                return Error(IntegerRange(0u64))
+            }
             let raw = std.json.read_raw(text, mut cursor)?
             map.insert(mut fields, string.from(name), string.from(raw))
             Ok(())
         })
     })
-    Ok(parsed ?=> |e| match e { IntegerRange(_) => BadArgument(3u32), _ => BadArgument(1u32) })
+    Ok(parsed ?=> |e| match e {
+        IntegerRange(_) => BadArgument(3u32),
+        _ => BadArgument(1u32)
+    })
 }
 
 fn http_query_fields(req: std.http.Request, args: Map[String, HttpArgument]) -> Result[Map[String, List[String]], HttpAssemblyError] {
@@ -147,8 +192,12 @@ fn http_query_fields(req: std.http.Request, args: Map[String, HttpArgument]) -> 
     while let Some((key, value, next)) = std.uri.next_pair(raw, at) {
         let mut name = string.new()
         std.uri.decode_text(raw, key, mut name) ?=> |_| BadArgument(1u32)
-        let Some(field) = map.get(args, name) else { return Error(BadArgument(1u32)) }
-        if field.source != Query { return Error(BadArgument(1u32)) }
+        let Some(field) = map.get(args, name) else {
+            return Error(BadArgument(1u32))
+        }
+        if field.source != Query {
+            return Error(BadArgument(1u32))
+        }
         let mut member = string.new()
         std.uri.decode_text(raw, value, mut member) ?=> |_| BadArgument(1u32)
         let mut values = match map.remove(mut found, name) {
@@ -169,7 +218,9 @@ fn http_query_text(plan: std.json.JsonPlan, shape: u64, input: Option[View[List[
             if let Some(values) = input {
                 let mut first = true
                 for raw in values {
-                    if !first { string.push(mut text, ",") }
+                    if !first {
+                        string.push(mut text, ",")
+                    }
                     first = false
                     let assembled_field = http_scalar_text(plan, item, raw)?
                     string.push(mut text, assembled_field)
@@ -190,13 +241,17 @@ fn http_query_text(plan: std.json.JsonPlan, shape: u64, input: Option[View[List[
 }
 
 fn http_query_scalar(plan: std.json.JsonPlan, shape: u64, values: List[String]) -> Result[Option[String], HttpAssemblyError] {
-    if list.len(values) != 1u64 { return Error(BadArgument(1u32)) }
+    if list.len(values) != 1u64 {
+        return Error(BadArgument(1u32))
+    }
     let assembled_field = http_scalar_text(plan, shape, values[0])?
     Ok(Some(take assembled_field))
 }
 
 fn http_scalar_text(plan: std.json.JsonPlan, shape: u64, value: String) -> Result[String, HttpAssemblyError] {
-    let Atom(op) = plan.shapes[plan.facts[shape].form] else { fail("HTTP scalar field has a scalar schema") }
+    let Atom(op) = plan.shapes[plan.facts[shape].form] else {
+        fail("HTTP scalar field has a scalar schema")
+    }
     if op == 2u8 || op == 6u8 || op == 10u8 || op == 13u8 {
         let mut text = string.new()
         std.json.write(mut text, false, scoped fn(w: std.json.Writer) {
@@ -205,15 +260,25 @@ fn http_scalar_text(plan: std.json.JsonPlan, shape: u64, value: String) -> Resul
         return Ok(take text)
     }
     if op == 1u8 {
-        if value == "true" || value == "false" { return Ok(string.from(value)) }
+        if value == "true" || value == "false" {
+            return Ok(string.from(value))
+        }
         return Error(BadArgument(1u32))
     }
     // The typed reader checks canonical spelling and the destination width.
     let b = string.as_bytes(value)
-    let digits_at = if list.len(b) > 0u64 && b[0] == b'-' { 1u64 } else { 0u64 }
-    if digits_at == list.len(b) { return Error(BadArgument(1u32)) }
+    let digits_at = if list.len(b) > 0u64 && b[0] == b'-' {
+        1u64
+    } else {
+        0u64
+    }
+    if digits_at == list.len(b) {
+        return Error(BadArgument(1u32))
+    }
     for byte in list.slice(b, digits_at, list.len(b)) {
-        if !int.is_ascii_digit(byte) { return Error(BadArgument(1u32)) }
+        if !int.is_ascii_digit(byte) {
+            return Error(BadArgument(1u32))
+        }
     }
     Ok(string.from(value))
 }

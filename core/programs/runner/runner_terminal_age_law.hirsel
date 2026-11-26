@@ -19,14 +19,14 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
     let _ = channel.try_send(to, wire_event(FromRunner(update(6u64, None, list.new()))))
-    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take to, closed: None, ended: list.new(),
-        reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false,
-        progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut active = subscriptions()
     let mut waiting: List[Replies] = list.new()
     settle(mut active, mut joined, mut waiting, terminal_age_owe(1u64, 7u64, 1u32), 7u64)
     settle(mut active, mut joined, mut waiting, terminal_age_owe(1u64, 9u64, 2u32), 9u64)
-    if replaced { unend(mut joined[0u64].ended, 1u32) }
+    if replaced {
+        unend(mut joined[0u64].ended, 1u32)
+    }
     let _ = result.unwrap(channel.try_receive(inbox))
     let mut fresh: List[Owe] = list.new()
     let fresh_index = owe(mut fresh, 1u64, 9u64)
@@ -35,15 +35,20 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     list.push(mut fresh[fresh_index].groups, fixture_owed_group(3u32, list.new()))
     settle(mut active, mut joined, mut waiting, take fresh, 9u64)
     let event = result.unwrap(channel.try_receive(inbox))
-    let Notice(e: Updated(take pending)) = publisher_notice(take event) else { return Error("missing owner update") }
-
+    let Notice(e: Updated(take pending)) = publisher_notice(take event) else {
+        return Error("missing owner update")
+    }
     let (head, _requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), head, clock, tasks, wire_defaults(1048576u64), string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
     let mut work = wire_work()
     owner.joined = Some(1u64)
-    list.push(mut owner.subs, (1u32, if replaced { 2u64 } else { 1u64 }))
+    list.push(mut owner.subs, (1u32, if replaced {
+        2u64
+    } else {
+        1u64
+    }))
     list.push(mut owner.subs, (2u32, 1u64))
     list.push(mut owner.subs, (3u32, 1u64))
     result.unwrap(wire_update(mut owner, mut work, take pending))
@@ -59,17 +64,23 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
                 batch_seen = true
             },
             Ended(2u32, _) => {
-                if item.check != Some(9u64) { return Error("an older Ended changed a separate Ended release check") }
+                if item.check != Some(9u64) {
+                    return Error("an older Ended changed a separate Ended release check")
+                }
                 fresh_end_seen = true
             },
             Ended(1u32, _) => {
-                if item.check != Some(7u64) { return Error("an owed Ended lost its original release check") }
+                if item.check != Some(7u64) {
+                    return Error("an owed Ended lost its original release check")
+                }
                 old_end_seen = true
             },
             _ => return Error("unexpected frame or Reset"),
         }
     }
-    if !batch_seen || !fresh_end_seen || old_end_seen == replaced { return Error("incorrect frames after Ended retry") }
+    if !batch_seen || !fresh_end_seen || old_end_seen == replaced {
+        return Error("incorrect frames after Ended retry")
+    }
     Ok(())
 }
 

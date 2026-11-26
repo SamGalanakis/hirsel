@@ -16,7 +16,11 @@ fn row(chunk: u32) -> runner.Row {
     let mut value: Bytes = list.new()
     let mut payload: Bytes = list.new()
     for i in 0u64 .. 64u64 {
-        let x: u8 = if chunk == 1953u32 && i >= 8u64 { 0u8 } else { int.narrow(i) }
+        let x: u8 = if chunk == 1953u32 && i >= 8u64 {
+            0u8
+        } else {
+            int.narrow(i)
+        }
         list.push(mut payload, x)
     }
     let c: std.codec.Codec[Bytes] = std.codec.of()

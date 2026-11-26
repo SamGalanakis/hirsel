@@ -1,13 +1,12 @@
 pub type StreamId = store.StreamId
 
-pub type Done: codec + send { stream: StreamId, p: u64, outcome: Outcome }
+pub type Done: codec + send {
+    stream: StreamId,
+    p: u64,
+    outcome: Outcome
+}
 
-pub type Frame: codec + send =
-    Hello(Option[Bytes], List[Want]) | Call(StreamId, u64, u32, u32, Bytes)
-    | Subscribe(u32, u32, Bytes, Option[Bytes]) | Unsubscribe(u32)
-    | Welcome(Caller, u32, u64, Bytes, String, u64, u64, u64) | Placed(Entry)
-    | Batch(u64, List[u32], List[Group], List[Done]) | Ended(u32, Outcome) | Reset(u64, List[Done])
-    | Set(u32, Option[Bytes]) | Send(u32, Option[u32], Bytes) | Live(List[Part])
+pub type Frame: codec + send = Hello(Option[Bytes], List[Want]) | Call(StreamId, u64, u32, u32, Bytes) | Subscribe(u32, u32, Bytes, Option[Bytes]) | Unsubscribe(u32) | Welcome(Caller, u32, u64, Bytes, String, u64, u64, u64) | Placed(Entry) | Batch(u64, List[u32], List[Group], List[Done]) | Ended(u32, Outcome) | Reset(u64, List[Done]) | Set(u32, Option[Bytes]) | Send(u32, Option[u32], Bytes) | Live(List[Part])
 
 pub type Part: codec + send {
     sub: u32,
@@ -50,21 +49,34 @@ fn wire_done_size(o: Outcome) -> u64 {
 }
 
 fn wire_optional_bytes(b: Option[Bytes]) -> u64 {
-    match b { Some(value) => 4u64 + list.len(value), None => 0u64 }
+    match b {
+        Some(value) => 4u64 + list.len(value),
+        None => 0u64
+    }
 }
 
 fn wire_done_bytes(done: List[Done]) -> u64 {
     let mut size = 0u64
-    for d in done { size += wire_done_size(d.outcome) }
+    for d in done {
+        size += wire_done_size(d.outcome)
+    }
     size
 }
 
 fn wire_part_size(p: Part) -> u64 {
     let mut size = ROOM_PART_FIXED + 4u64 * list.len(p.left)
-    if let Some(_) = p.you { size += 4u64 }
-    for (_, caller) in p.joined { size += 9u64 + list.len(caller.subject) }
-    for (_, state) in p.states { size += 8u64 + wire_optional_bytes(state) }
-    for (_, _, message) in p.msgs { size += 9u64 + list.len(message) }
+    if let Some(_) = p.you {
+        size += 4u64
+    }
+    for (_, caller) in p.joined {
+        size += 9u64 + list.len(caller.subject)
+    }
+    for (_, state) in p.states {
+        size += 8u64 + wire_optional_bytes(state)
+    }
+    for (_, _, message) in p.msgs {
+        size += 9u64 + list.len(message)
+    }
     size
 }
 
@@ -72,7 +84,9 @@ fn wire_output_size(f: Frame) -> u64 {
     match f {
         Hello(token, wanted) => {
             let mut size = 12u64 + wire_optional_bytes(token)
-            for entry in wanted { size += 20u64 + list.len(entry.identity) }
+            for entry in wanted {
+                size += 20u64 + list.len(entry.identity)
+            }
             size
         },
         Call(_, _, _, _, arg) => 40u64 + list.len(arg),
@@ -86,10 +100,16 @@ fn wire_output_size(f: Frame) -> u64 {
         Reset(_, done) => 16u64 + wire_done_bytes(done),
         Ended(_, o) => 8u64 + wire_done_size(o) - 24u64,
         Set(_, state) => 12u64 + wire_optional_bytes(state),
-        Send(_, destination, message) => 16u64 + (if let Some(_) = destination { 4u64 } else { 0u64 }) + list.len(message),
+        Send(_, destination, message) => 16u64 + (if let Some(_) = destination {
+            4u64
+        } else {
+            0u64
+        }) + list.len(message),
         Live(parts) => {
             let mut size = 8u64
-            for p in parts { size += wire_part_size(p) }
+            for p in parts {
+                size += wire_part_size(p)
+            }
             size
         },
     }
@@ -141,7 +161,9 @@ fn retained_groups_charge(groups: List[Group]) -> u64 {
         room_needed += wire_round(list.capacity(group.value)) + wire_round(58u64 * list.capacity(group.rows))
         for row in group.rows {
             room_needed += wire_round(list.capacity(row.key))
-            if let Some(value) = row.value { room_needed += wire_round(list.capacity(value)) }
+            if let Some(value) = row.value {
+                room_needed += wire_round(list.capacity(value))
+            }
         }
     }
     std.order.max(room_needed, wire_groups_size(groups))
@@ -149,27 +171,41 @@ fn retained_groups_charge(groups: List[Group]) -> u64 {
 
 fn cached_groups_size(packed: List[OwedGroup]) -> u64 {
     let mut total = 0u64
-    for group in packed { total += 4u64 + list.len(group.payload) }
+    for group in packed {
+        total += 4u64 + list.len(group.payload)
+    }
     total
 }
 
 fn cached_charge(packed: List[OwedGroup]) -> u64 {
     let mut room_needed = wire_round(12u64 * list.capacity(packed))
-    for group in packed { room_needed += wire_round(list.capacity(group.payload)) + 32u64 }
+    for group in packed {
+        room_needed += wire_round(list.capacity(group.payload)) + 32u64
+    }
     room_needed
 }
 
 fn materialize_frame(take frame: Frame, tapes: List[OwedGroup]) -> Frame {
-    if list.len(tapes) == 0u64 { return take frame }
-    let Batch(version, take complete, _, take done) = take frame else { fail("runner: group tapes outside Batch") }
+    if list.len(tapes) == 0u64 {
+        return take frame
+    }
+    let Batch(version, take complete, _, take done) = take frame else {
+        fail("runner: group tapes outside Batch")
+    }
     let mut groups: List[Group] = list.with_capacity(list.len(tapes))
-    for group in tapes { list.push(mut groups, unpack_group(group)) }
+    for group in tapes {
+        list.push(mut groups, unpack_group(group))
+    }
     Batch(version, take complete, take groups, take done)
 }
 
 fn encode_published_frame(out: std.wsock.Outbound, frame: Frame, tapes: List[OwedGroup]) -> Result[Bytes, std.wsock.Error] {
-    if list.len(tapes) == 0u64 { return wire_encode(out, frame) }
-    let Batch(version, complete, _, done) = view frame else { fail("runner: group tapes outside Batch") }
+    if list.len(tapes) == 0u64 {
+        return wire_encode(out, frame)
+    }
+    let Batch(version, complete, _, done) = view frame else {
+        fail("runner: group tapes outside Batch")
+    }
     let size = wire_output_size(frame) + cached_groups_size(tapes)
     std.wsock.try_encode_parts(out, size, scoped fn(mut bytes_out: Bytes) -> Result[(), u16] {
         std.codec.put_u32(6u32, mut bytes_out)
@@ -189,71 +225,127 @@ fn encode_published_frame(out: std.wsock.Outbound, frame: Frame, tapes: List[Owe
 
 fn filter_output_groups(take output: WireOutput, stamps: List[(u32, u64)], present: bool) -> Option[WireOutput] {
     let WireOutput(frame: take frame, tapes: take packed, marks: take marks, generations: take generations, external: external, check: check) = take output
-    let Batch(version, take ids, take groups, take done) = take frame else { return None }
+    let Batch(version, take ids, take groups, take done) = take frame else {
+        return None
+    }
     let mut complete = take ids
-    filter_content(mut complete, stamps, present, fn(sub: u32) -> u32 { sub })
+    filter_content(mut complete, stamps, present, fn(sub: u32) -> u32 {
+        sub
+    })
     let mut held = take groups
-    filter_content(mut held, stamps, present, fn(group: Group) -> u32 { group.sub })
+    filter_content(mut held, stamps, present, fn(group: Group) -> u32 {
+        group.sub
+    })
     let mut tapes = take packed
-    filter_content(mut tapes, stamps, present, fn(group: OwedGroup) -> u32 { group.sub })
+    filter_content(mut tapes, stamps, present, fn(group: OwedGroup) -> u32 {
+        group.sub
+    })
     let content = list.len(complete) != 0u64 || list.len(held) != 0u64 || list.len(tapes) != 0u64
-    if !content && list.len(done) == 0u64 { return None }
-    Some(WireOutput(frame: Batch(version, take complete, take held, take done), tapes: take tapes,
-        marks: take marks, generations: take generations, external: external, check: if content { check } else { None }))
+    if !content && list.len(done) == 0u64 {
+        return None
+    }
+    Some(WireOutput(frame: Batch(version, take complete, take held, take done), tapes: take tapes, marks: take marks, generations: take generations, external: external, check: if content {
+        check
+    } else {
+        None
+    }))
 }
 
 fn filter_content[T](mut items: List[T], stamps: List[(u32, u64)], present: bool, sub_of: fn(T) -> u32) {
     let mut kept = 0u64
     for index in 0u64 .. list.len(items) {
-        let listed = match sub_generation(stamps, sub_of(items[index])) { Some(_) => true, None => false }
+        let listed = match sub_generation(stamps, sub_of(items[index])) {
+            Some(_) => true,
+            None => false
+        }
         if listed == present {
             list.swap(mut items, kept, index)
             kept += 1u64
         }
     }
-    while list.len(items) > kept { let _ = list.pop(mut items) }
+    while list.len(items) > kept {
+        let _ = list.pop(mut items)
+    }
 }
 
-fn wire_configuration(c: WireConfig) -> bool { none(wire_problem(c, launch_target_bytes().size)) }
+fn wire_configuration(c: WireConfig) -> bool {
+    none(wire_problem(c, launch_target_bytes().size))
+}
 
 fn exceeds(name: String, value: u64, limit: u64) -> Option[StartError] {
     Some(Exceeds(Bound(name: clone(name), value: value, limit: limit)))
 }
 
 fn session_problem(c: WireConfig, max_sessions: u64, target_size: u64) -> Option[StartError] {
-    if max_sessions == 0u64 { return Some(Missing("max_sessions")) }
-    if max_sessions > WIRE_OWNER_LIMIT { return exceeds("max_sessions", max_sessions, WIRE_OWNER_LIMIT) }
+    if max_sessions == 0u64 {
+        return Some(Missing("max_sessions"))
+    }
+    if max_sessions > WIRE_OWNER_LIMIT {
+        return exceeds("max_sessions", max_sessions, WIRE_OWNER_LIMIT)
+    }
     wire_problem(c, target_size)
 }
 
 // The first WireConfig setting a session cannot run with. The place's one Registry is
 // the serving task's (serving_bytes), not a session's.
 fn wire_problem(c: WireConfig, target_size: u64) -> Option[StartError] {
-    if c.q > 4u64 { return exceeds("q", c.q, 4u64) }
-    if c.socket.max_frame > 262144u64 { return exceeds("socket.max_frame", c.socket.max_frame, 262144u64) }
-    if c.socket.pending_max > 1024u64 { return exceeds("socket.pending_max", c.socket.pending_max, 1024u64) }
-    if c.budget > 1048576u64 { return exceeds("budget", c.budget, 1048576u64) }
-    if c.max_subs == 0u64 { return Some(Missing("max_subs")) }
-    if c.n_pool == 0u64 { return Some(Missing("n_pool")) }
-    if c.n_pool > WIRE_POOL_BYTES { return exceeds("n_pool", c.n_pool, WIRE_POOL_BYTES) }
-    if c.n_service > WIRE_SESSION_CEILING { return exceeds("n_service", c.n_service, WIRE_SESSION_CEILING) }
-    if c.n_granted > WIRE_SESSION_CEILING { return exceeds("n_granted", c.n_granted, WIRE_SESSION_CEILING) }
+    if c.q > 4u64 {
+        return exceeds("q", c.q, 4u64)
+    }
+    if c.socket.max_frame > 262144u64 {
+        return exceeds("socket.max_frame", c.socket.max_frame, 262144u64)
+    }
+    if c.socket.pending_max > 1024u64 {
+        return exceeds("socket.pending_max", c.socket.pending_max, 1024u64)
+    }
+    if c.budget > 1048576u64 {
+        return exceeds("budget", c.budget, 1048576u64)
+    }
+    if c.max_subs == 0u64 {
+        return Some(Missing("max_subs"))
+    }
+    if c.n_pool == 0u64 {
+        return Some(Missing("n_pool"))
+    }
+    if c.n_pool > WIRE_POOL_BYTES {
+        return exceeds("n_pool", c.n_pool, WIRE_POOL_BYTES)
+    }
+    if c.n_service > WIRE_SESSION_CEILING {
+        return exceeds("n_service", c.n_service, WIRE_SESSION_CEILING)
+    }
+    if c.n_granted > WIRE_SESSION_CEILING {
+        return exceeds("n_granted", c.n_granted, WIRE_SESSION_CEILING)
+    }
     let peak = wire_variable_peak(c) + c.n_granted
-    if peak > WIRE_SESSION_CEILING { return exceeds("session peak", peak, WIRE_SESSION_CEILING) }
+    if peak > WIRE_SESSION_CEILING {
+        return exceeds("session peak", peak, WIRE_SESSION_CEILING)
+    }
     // Welcome carries one issuer byte, at most SUBJECT_MAX subject bytes and a 32-byte digest.
     // The launch target belongs to this run, so its size is known at serve.
     let welcome = 85u64 + SUBJECT_MAX + target_size
-    let mandatory = if welcome > 125u64 { welcome } else { 125u64 }
+    let mandatory = if welcome > 125u64 {
+        welcome
+    } else {
+        125u64
+    }
     let floor = std.order.max(mandatory, wire_outcome_reserve(c) + 28u64)
-    if c.socket.max_frame < floor { return Some(Missing("socket.max_frame (below the Welcome and outcome frames)")) }
-    if c.budget < wire_round(mandatory + 14u64) { return Some(Missing("budget (below one Welcome frame)")) }
+    if c.socket.max_frame < floor {
+        return Some(Missing("socket.max_frame (below the Welcome and outcome frames)"))
+    }
+    if c.budget < wire_round(mandatory + 14u64) {
+        return Some(Missing("budget (below one Welcome frame)"))
+    }
     None
 }
 
 fn wire_decode(b: Bytes) -> Result[Frame, u16] {
-    if list.len(b) < 4u64 { return Error(1007u16) }
+    if list.len(b) < 4u64 {
+        return Error(1007u16)
+    }
     let tag: u32 = list.word_le(b, 0u64)
-    if tag > 3u32 && tag != 9u32 && tag != 10u32 { return Error(1007u16) }
+    if tag > 3u32 && tag != 9u32 && tag != 10u32 {
+        return Error(1007u16)
+    }
     let codec: std.codec.Codec[Frame] = std.codec.of()
     Ok(std.codec.decode(codec, b) ?=> |_| 1007u16)
 }

@@ -123,7 +123,9 @@ fn sweep_head_streams(mut db: store.Db, busy: Map[Bytes, Worker], waiting: List[
 // answered commitless (V3), Refused(HistoryUnavailable) or Refused(RequestMismatch), and
 // neither marks the stream.
 fn begin[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request) -> Result[(), store.Error] waits {
-    if !none(q.claim) { return begin_keyed_request(mut hd, take q) }
+    if !none(q.claim) {
+        return begin_keyed_request(mut hd, take q)
+    }
     let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
     let a = match admit_head_stream(mut hd.db, hd.busy, hd.waiting, name, q.p, q.digest) {
         Ok(take x) => take x,
@@ -173,8 +175,7 @@ fn publish_commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
     publish_reply_with_expiry(mut hd, take q, take o, replayed, None)
 }
 
-fn publish_reply_with_expiry[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome,
-    replayed: bool, expires: Option[u64]) -> Result[(), store.Error] waits {
+fn publish_reply_with_expiry[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, replayed: bool, expires: Option[u64]) -> Result[(), store.Error] waits {
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
     let mut answers: List[CallAnswer] = list.new()

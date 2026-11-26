@@ -28,20 +28,23 @@ type S3ReadTrial {
 type OpenS3ReadTrial = scoped fn(std.sim.s3.Endpoint, S3ReadCase) -> Result[S3ReadTrial, store.Error] waits
 
 fn observe_s3_read_failure(take trial: S3ReadTrial, fault: S3ReadCase) -> bool waits {
-    let S3ReadTrial(board: take board, rounds: take reserved, joined: take sessions, owner: take owner,
-        other: take other, release: take committed, answers: take answers, subscription: take input) = take trial
+    let S3ReadTrial(board: take board, rounds: take reserved, joined: take sessions, owner: take owner, other: take other, release: take committed, answers: take answers, subscription: take input) = take trial
     let mut b = take board
     let mut rounds = take reserved
     let mut joined = take sessions
     let register = latest.handle(rounds.round)
     let a = store.version(b.base)
-    if !release_load(register, owner.fence, a) { return false }
+    if !release_load(register, owner.fence, a) {
+        return false
+    }
     let mut owes: List[Owe] = list.new()
     let mut waiting: List[Replies] = list.new()
     keep_answers(mut waiting, take answers)
     let at = if fault.phase == SubscribeRead {
         publish_wire_subscription(mut b, mut joined, mut owes, 1u64, 1u32, 2u64, take input)
-        if latest.read(register).at != a || release_load(register, owner.fence, a) { return false }
+        if latest.read(register).at != a || release_load(register, owner.fence, a) {
+            return false
+        }
         a
     } else {
         let version = store.version(committed)
@@ -53,25 +56,34 @@ fn observe_s3_read_failure(take trial: S3ReadTrial, fault: S3ReadCase) -> bool w
                 fail("L56 cold read: R advanced before the affected fence")
             }
         })
-        if latest.read(register).at != version || release_load(register, owner.fence, a) { return false }
+        if latest.read(register).at != version || release_load(register, owner.fence, a) {
+            return false
+        }
         version
     }
-    if !release_load(register, other.fence, a) { return false }
+    if !release_load(register, other.fence, a) {
+        return false
+    }
     settle(mut b.subs, mut joined, mut waiting, take owes, at)
-    if !failed_read_reset(owner, at) { return false }
+    if !failed_read_reset(owner, at) {
+        return false
+    }
     settle(mut b.subs, mut joined, mut waiting, list.new(), at)
-    if let Error(Empty) = channel.try_receive(owner.from) {} else { return false }
-
+    if let Error(Empty) = channel.try_receive(owner.from) {} else {
+        return false
+    }
     // The failed cold read is one-shot. The next subscription uses the last
     // Released snapshot and must complete as one whole image at that base.
     let restarted = at_base_generation(mut b, 1u64, 1u32, 3u64, failed_read_sub())
-    let rows = if fault.phase == SubscribeRead { 2u64 } else { 0u64 }
-    restarted.version == at && list.len(restarted.complete) == 1u64 &&
-        restarted.complete[0u64] == 1u32 && list.len(restarted.rows) == rows
+    let rows = if fault.phase == SubscribeRead {
+        2u64
+    } else {
+        0u64
+    }
+    restarted.version == at && list.len(restarted.complete) == 1u64 && restarted.complete[0u64] == 1u32 && list.len(restarted.rows) == rows
 }
 
-fn s3_l56_case(tasks: Tasks, clock: Clock, take config: std.sim.s3.Config,
-    take plan: std.sim.world.Plan, fault: S3ReadCase, open_trial: OpenS3ReadTrial) -> bool waits {
+fn s3_l56_case(tasks: Tasks, clock: Clock, take config: std.sim.s3.Config, take plan: std.sim.world.Plan, fault: S3ReadCase, open_trial: OpenS3ReadTrial) -> bool waits {
     let (endpoint, take running) = std.sim.s3.start_service(tasks, take config, take plan, clock, 1048576u64, 33554432u64)
     let mut server = take running
     let passed = match open_trial(endpoint, fault) {

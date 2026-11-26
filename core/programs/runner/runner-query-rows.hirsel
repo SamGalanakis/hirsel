@@ -24,13 +24,24 @@ fn wire_rows(take projected: List[Row], sub: u32) -> List[SubRow] {
     take rows
 }
 
-type CoverRow { slot: u16, change: store.Change }
-type CoverCursor { next_span: u64, first: bool, active: Option[store.SpanRows] }
+type CoverRow {
+    slot: u16,
+    change: store.Change
+}
+
+type CoverCursor {
+    next_span: u64,
+    first: bool,
+    active: Option[store.SpanRows]
+}
+
 type ProjectionIssue = ProjectionStopped(Outcome) | ProjectionRead(store.Error)
 
 fn projection_cause(cs: Causes) -> Outcome {
     for cause in cs {
-        if let Capacity(problem) = cause.kind { return Failed(OutOfBytes(capacity_room(problem))) }
+        if let Capacity(problem) = cause.kind {
+            return Failed(OutOfBytes(capacity_room(problem)))
+        }
         break
     }
     Failed(Raised(raised(cs)))
@@ -61,7 +72,9 @@ fn stop_projection(take problem: ProjectionIssue) -> Queried {
 
 fn has_tail(spans: List[Cover]) -> bool {
     for span in spans {
-        if let Some(_) = span.tail { return true }
+        if let Some(_) = span.tail {
+            return true
+        }
     }
     false
 }
@@ -73,30 +86,34 @@ fn image_spans(reader: store.Reader, at: store.Snapshot, spans: List[Cover], bin
     for span in spans {
         if let Some(length) = span.tail {
             let binding = view bindings[int.widen(span.slot)]
-            let Some(resolve) = view binding.tail_window else { fail("runner: a tail cover needs a Log binding") }
+            let Some(resolve) = view binding.tail_window else {
+                fail("runner: a tail cover needs a Log binding")
+            }
             let window = resolve(reader, at, length) ?=> |problem| ProjectionRead(take problem)
             let id = binding.collection.1
             if window.first < window.next {
                 let bounds = projection_result(isolate(scoped fn() -> Result[Cover, store.Error] {
-                    Ok(Cover(slot: span.slot, low: cover_log_key(id, window.first),
-                        high: cover_log_key(id, window.next), tail: None))
+                    Ok(Cover(slot: span.slot, low: cover_log_key(id, window.first), high: cover_log_key(id, window.next), tail: None))
                 }))?
                 list.push(mut resolved, take bounds)
             }
         } else {
-            let copied = projection_result(isolate(scoped fn() -> Result[Cover, store.Error] { Ok(clone(span)) }))?
+            let copied = projection_result(isolate(scoped fn() -> Result[Cover, store.Error] {
+                Ok(clone(span))
+            }))?
             list.push(mut resolved, take copied)
         }
     }
-    projection_result(isolate(scoped fn() -> Result[List[Cover], store.Error] { Ok(merge_covers(clone(resolved))) }))
+    projection_result(isolate(scoped fn() -> Result[List[Cover], store.Error] {
+        Ok(merge_covers(clone(resolved)))
+    }))
 }
 
 fn cover_cursor() -> CoverCursor {
     CoverCursor(next_span: 0u64, first: false, active: None)
 }
 
-fn next_cover_row(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot,
-    spans: List[Cover], mut cursor: CoverCursor) -> Result[Option[CoverRow], store.Error] waits {
+fn next_cover_row(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot, spans: List[Cover], mut cursor: CoverCursor) -> Result[Option[CoverRow], store.Error] waits {
     loop {
         if let Some(mut active) = cursor.active {
             let changed = (access.span)(read_handle, mut active, cursor.first)?
@@ -105,7 +122,9 @@ fn next_cover_row(access: PublisherReads, read_handle: store.Reader, at: store.S
                 return Ok(Some(CoverRow(slot: spans[cursor.next_span - 1u64].slot, change: take row)))
             }
         }
-        if cursor.next_span == list.len(spans) { return Ok(None) }
+        if cursor.next_span == list.len(spans) {
+            return Ok(None)
+        }
         let span = view spans[cursor.next_span]
         cursor.active = Some(store.open_span_changes(read_handle, at, span.low, span.high)?)
         cursor.next_span += 1u64
@@ -119,14 +138,17 @@ fn published_slot(row: CoverRow, bindings: List[BoundSlot]) -> Result[Option[Byt
 
 fn convert_cover_row(out: Log[Row], bindings: List[BoundSlot], row: CoverRow, include_value: bool) -> Result[(), ProjectionIssue] {
     projection_result(isolate(scoped fn() -> Result[(), store.Error] {
-        let value = if include_value { published_slot(row, bindings)? } else { None }
+        let value = if include_value {
+            published_slot(row, bindings)?
+        } else {
+            None
+        }
         log.append(out, Row(slot: row.slot, key: clone(row.change.tree_key), value: take value))
         Ok(())
     }))
 }
 
-fn cover_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
+fn cover_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot, spans: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
     if has_tail(spans) {
         let image = image_spans(read_handle, at, spans, bindings)?
         return complete_rows(access, read_handle, at, image, bindings, out)
@@ -134,8 +156,7 @@ fn cover_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snaps
     complete_rows(access, read_handle, at, spans, bindings, out)
 }
 
-fn complete_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
+fn complete_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot, spans: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
     let mut cursor = cover_cursor()
     while let Some(take changed) = next_cover_row(access, read_handle, at, spans, mut cursor) ?=> |problem| ProjectionRead(take problem) {
         convert_cover_row(out, bindings, changed, true)?
@@ -144,13 +165,16 @@ fn complete_rows(access: PublisherReads, read_handle: store.Reader, at: store.Sn
 }
 
 fn compare_projected(a: CoverRow, b: CoverRow) -> Order {
-    if a.slot < b.slot { return Less }
-    if a.slot > b.slot { return Greater }
+    if a.slot < b.slot {
+        return Less
+    }
+    if a.slot > b.slot {
+        return Greater
+    }
     list.compare_bytes(a.change.tree_key, b.change.tree_key)
 }
 
-fn rerun_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, old: List[Cover],
-    b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
+fn rerun_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, old: List[Cover], b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
     if has_tail(old) || has_tail(new) {
         let old_image = image_spans(read_handle, a, old, bindings)?
         let new_image = image_spans(read_handle, b, new, bindings)?
@@ -159,8 +183,7 @@ fn rerun_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapsh
     diff_image_rows(access, read_handle, a, old, b, new, bindings, out)
 }
 
-fn diff_image_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, old: List[Cover],
-    b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
+fn diff_image_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, old: List[Cover], b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), ProjectionIssue] waits {
     let mut before = cover_cursor()
     let mut after = cover_cursor()
     let mut previous = next_cover_row(access, read_handle, a, old, mut before) ?=> |problem| ProjectionRead(take problem)
@@ -206,13 +229,16 @@ fn cover_projection(take projected: Result[Result[Result[(), store.Error], Cause
     Ok(projection_result(take projected) ?=> stop_projection)
 }
 
-fn cover_delta_span(access: PublisherReads, reader: store.Reader, at: store.Snapshot, position: u16,
-    lo: Bytes, hi: Bytes, inserting: bool, binding: BoundSlot, out: Log[Row]) -> Result[(), Queried] waits {
+fn cover_delta_span(access: PublisherReads, reader: store.Reader, at: store.Snapshot, position: u16, lo: Bytes, hi: Bytes, inserting: bool, binding: BoundSlot, out: Log[Row]) -> Result[(), Queried] waits {
     let mut source = store.open_span_changes(reader, at, lo, hi) ?=> |e| projection_error(take e, list.new())
     let mut first = true
     while let Some(take item) = (access.span)(reader, mut source, first) ?=> |e| projection_error(take e, list.new()) {
         let projected = isolate(scoped fn() -> Result[(), store.Error] {
-            let value = if inserting { (binding.publish_value)(item)? } else { None }
+            let value = if inserting {
+                (binding.publish_value)(item)?
+            } else {
+                None
+            }
             log.append(out, Row(slot: position, key: clone(item.tree_key), value: take value))
             Ok(())
         })
@@ -222,26 +248,35 @@ fn cover_delta_span(access: PublisherReads, reader: store.Reader, at: store.Snap
     Ok(())
 }
 
-fn covered_pages(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, b: store.Snapshot,
-    span: Cover, bindings: BoundSlot, rows: Log[Row]) -> Result[(), Queried] waits {
+fn covered_pages(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, b: store.Snapshot, span: Cover, bindings: BoundSlot, rows: Log[Row]) -> Result[(), Queried] waits {
     let base: Option[store.Snapshot] = Some(clone(a))
-    let mut low = projection_result(isolate(scoped fn() -> Result[Bytes, store.Error] { Ok(clone(span.low)) })) ?=> stop_projection
+    let mut low = projection_result(isolate(scoped fn() -> Result[Bytes, store.Error] {
+        Ok(clone(span.low))
+    })) ?=> stop_projection
     loop {
         let page = (access.changes)(read_handle, base, b, low, span.high, publication_page_limits()) ?=> |e| projection_error(take e, list.new())
         for trim in page.trimmed {
             cover_delta_span(access, read_handle, a, span.slot, trim.lo, trim.hi, false, bindings, rows)?
         }
-        let projected = isolate(scoped fn() -> Result[(), store.Error] { covered_rows(page.changes, span, bindings, rows) })
+        let projected = isolate(scoped fn() -> Result[(), store.Error] {
+            covered_rows(page.changes, span, bindings, rows)
+        })
         cover_projection(take projected)?
         let store.ChangePage(next: take resume, ..) = take page
         match take resume {
-            Some(take continuation) => { low = take continuation },
+            Some(take continuation) => {
+                low = take continuation
+            },
             None => return Ok(()),
         }
     }
 }
 
-type CoverEdge { slot: u16, key: Bytes, before: bool }
+type CoverEdge {
+    slot: u16,
+    key: Bytes,
+    before: bool
+}
 
 fn add_cover_edges(mut edges: List[CoverEdge], spans: List[Cover], before: bool) {
     for span in spans {
@@ -250,8 +285,7 @@ fn add_cover_edges(mut edges: List[CoverEdge], spans: List[Cover], before: bool)
     }
 }
 
-fn covered_window_pages(access: PublisherReads, reader: store.Reader, a: store.Snapshot, b: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], rows: Log[Row]) -> Result[(), Queried] waits {
+fn covered_window_pages(access: PublisherReads, reader: store.Reader, a: store.Snapshot, b: store.Snapshot, spans: List[Cover], bindings: List[BoundSlot], rows: Log[Row]) -> Result[(), Queried] waits {
     let before = image_spans(reader, a, spans, bindings) ?=> stop_projection
     let after = image_spans(reader, b, spans, bindings) ?=> stop_projection
     let edges = projection_result(isolate(scoped fn() -> Result[List[CoverEdge], store.Error] {
@@ -259,19 +293,30 @@ fn covered_window_pages(access: PublisherReads, reader: store.Reader, a: store.S
         add_cover_edges(mut ordered, before, true)
         add_cover_edges(mut ordered, after, false)
         list.sort(mut ordered, scoped fn(x: CoverEdge, y: CoverEdge) -> Order {
-            if x.slot < y.slot { Less } else if x.slot > y.slot { Greater } else { list.compare_bytes(x.key, y.key) }
+            if x.slot < y.slot {
+                Less
+            } else if x.slot > y.slot {
+                Greater
+            } else {
+                list.compare_bytes(x.key, y.key)
+            }
         })
         Ok(take ordered)
     })) ?=> stop_projection
-
     // Only window edges can change membership. Shared ranges page through changes and trims.
     let mut was = false
     let mut now = false
     for i in 0u64 .. int.saturating_sub(list.len(edges), 1u64) {
         let edge = view edges[i]
-        if edge.before { was = !was } else { now = !now }
+        if edge.before {
+            was = !was
+        } else {
+            now = !now
+        }
         let next = view edges[i + 1u64]
-        if edge.slot != next.slot || edge.key == next.key || !(was || now) { continue }
+        if edge.slot != next.slot || edge.key == next.key || !(was || now) {
+            continue
+        }
         let binding = view bindings[int.widen(edge.slot)]
         if was && now {
             let span = projection_result(isolate(scoped fn() -> Result[Cover, store.Error] {
@@ -279,15 +324,18 @@ fn covered_window_pages(access: PublisherReads, reader: store.Reader, a: store.S
             })) ?=> stop_projection
             covered_pages(access, reader, a, b, span, binding, rows)?
         } else {
-            let at: store.Snapshot = if now { clone(b) } else { clone(a) }
+            let at: store.Snapshot = if now {
+                clone(b)
+            } else {
+                clone(a)
+            }
             cover_delta_span(access, reader, at, edge.slot, edge.key, next.key, now, binding, rows)?
         }
     }
     Ok(())
 }
 
-fn covered_all_pages(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, b: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], rows: Log[Row]) -> Result[(), Queried] waits {
+fn covered_all_pages(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, b: store.Snapshot, spans: List[Cover], bindings: List[BoundSlot], rows: Log[Row]) -> Result[(), Queried] waits {
     if has_tail(spans) {
         return covered_window_pages(access, read_handle, a, b, spans, bindings, rows)
     }

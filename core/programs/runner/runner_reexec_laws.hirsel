@@ -1,8 +1,11 @@
 type ReplayMembers = store.Table[Bytes, u64]
+
 type ReplayRegistry = Registry[(), ReplayMembers]
 
 const REPLAY_BYTES: u64 = 131072u64
+
 const REPLAY_STEPS: u64 = 65536u64
+
 const REPLAY_PLACE_BYTES: u64 = 1048576u64
 
 fn replay_tables(mut d: store.Declare) -> Result[(ReplayMembers, ReplayMembers), store.Error] {
@@ -31,7 +34,9 @@ fn replay_member(mut tx: store.Tx, h: ReplayMembers, caller: Caller, take arg: u
         return Error(13u64)
     }
     result.unwrap(store.put(mut tx, h, caller.subject, arg))
-    if arg == 4u64 { fail("replay member fault") }
+    if arg == 4u64 {
+        fail("replay member fault")
+    }
     Ok(arg)
 }
 
@@ -43,7 +48,9 @@ fn replay_seed(mut db: store.Db, h: ReplayMembers, value: u64) -> () waits {
     let seed = result.unwrap(store.run(mut db, None, (store.copy_env(h), store.copy_env(value)), fn(mut tx, call_env) -> Result[(), store.Error] {
         store.put(mut tx, call_env.0, string.as_bytes("alice"), call_env.1)
     }))
-    let Committed(receipt) = take seed else { fail("replay seed commit") }
+    let Committed(receipt) = take seed else {
+        fail("replay seed commit")
+    }
     result.unwrap(store.durable(mut db, receipt.ticket))
 }
 
@@ -60,7 +67,9 @@ fn replay_record(mut db: store.Db, registered: ReplayRegistry, h: ReplayMembers,
     }
     let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
     let admission = result.unwrap(store.admit(mut db, name, q.p, q.digest))
-    let Admitted(take complete) = take admission else { fail("replay expected admission") }
+    let Admitted(take complete) = take admission else {
+        fail("replay expected admission")
+    }
     result.unwrap(store.durable(mut db, store.ticket(complete)))
     let tried = result.unwrap(run_effect(mut db, identity, registered, h, q, take complete))
     let receipt = match take tried {
@@ -69,7 +78,9 @@ fn replay_record(mut db: store.Db, registered: ReplayRegistry, h: ReplayMembers,
         Served(Ok(Failed(take pending, Raised(5u32)))) if arg == 4u64 => {
             let reply = result.unwrap(encode_runner_reply(Failed(Raised(5u32))))
             let settled = result.unwrap(store.conclude(mut db, take pending, take reply, Resident))
-            let Committed(take receipt) = take settled else { fail("replay expected settled fault") }
+            let Committed(take receipt) = take settled else {
+                fail("replay expected settled fault")
+            }
             take receipt
         },
         _ => fail("replay recorded unexpected outcome"),
@@ -79,7 +90,9 @@ fn replay_record(mut db: store.Db, registered: ReplayRegistry, h: ReplayMembers,
 }
 
 fn replay_expect(ok: bool, take message: String) -> () {
-    if !ok { fail(take message) }
+    if !ok {
+        fail(take message)
+    }
 }
 
 fn is_replay_verdict(actual: store.Verdict, expected: store.Verdict) -> bool {
@@ -94,8 +107,7 @@ fn is_replay_verdict(actual: store.Verdict, expected: store.Verdict) -> bool {
 }
 
 fn replay_check(db: store.Db, v: u64, mode: ReplayMode, handles: StaticFn[fn(mut store.Declare) -> Result[ReplayMembers, store.Error]]) -> store.Verdict waits {
-    result.unwrap(reexecute(db, store.main_branch(db), v, mode,
-        code.describe(replay_place), REPLAY_PLACE_BYTES, None, handles))
+    result.unwrap(reexecute(db, store.main_branch(db), v, mode, code.describe(replay_place), REPLAY_PLACE_BYTES, None, handles))
 }
 
 // L30 and §7's Committed, Kept and concluded-fault verdicts, through the runner.
@@ -124,7 +136,6 @@ fn test_replay_caller(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -
     let bounds = replay_record(mut db, shorter, h, identity, 15u32, "alice", 2u64)
     replay_seed(mut db, other, 1u64)
     let other_commit = replay_record(mut db, registered, other, other_identity, 16u32, "alice", 2u64)
-
     let selected = code.describe(replay_schema)
     replay_expect(is_replay_verdict(replay_check(db, committed, RecordedCode, selected), Same), "replay must use the recorded Caller and base")
     replay_expect(is_replay_verdict(replay_check(db, kept, RecordedCode, selected), Same), "replay must keep the typed error reply")

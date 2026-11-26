@@ -1,4 +1,6 @@
-pub opaque type ParkId: codec + key + send { number: u64 }
+pub opaque type ParkId: codec + key + send {
+    number: u64
+}
 
 pub type Wake[S: send]: send = Due(S) | Completed(S, Bytes)
 
@@ -18,7 +20,9 @@ pub opaque type Tables[S]: shareable + send {
     triggers: triggers.Tables
 }
 
-fn put_id(id: ParkId, mut raw: Bytes) { std.codec.put_key_u64(id.number, mut raw) }
+fn put_id(id: ParkId, mut raw: Bytes) {
+    std.codec.put_key_u64(id.number, mut raw)
+}
 
 fn read_id(raw: Bytes, mut at: u64) -> Result[ParkId, std.codec.DecodeError] {
     Ok(ParkId(number: std.codec.take_key_u64(raw, mut at)?))
@@ -29,7 +33,9 @@ fn id_schema(mut schema: std.codec.Schema) -> Result[(), std.codec.EncodeError] 
     Ok(())
 }
 
-pub fn key() -> std.codec.Key[ParkId] { std.codec.key_make(code.describe(put_id), code.describe(read_id), code.describe(id_schema)) }
+pub fn key() -> std.codec.Key[ParkId] {
+    std.codec.key_make(code.describe(put_id), code.describe(read_id), code.describe(id_schema))
+}
 
 fn named(prefix: String, suffix: String) -> String {
     let mut name: String = clone(prefix)
@@ -50,12 +56,19 @@ pub fn declare_tables[S: codec](mut d: store.Declare, name: String, take pending
 }
 
 /// Gives a migration the typed state table independently of pending wake arguments.
-pub fn state_table[S](tables: Tables[S]) -> store.Table[ParkId, S] { clone(tables.states) }
+pub fn state_table[S](tables: Tables[S]) -> store.Table[ParkId, S] {
+    clone(tables.states)
+}
 
 fn allocate[S](mut tx: store.Tx, tables: Tables[S]) -> Result[ParkId, Error] {
     let saved = store.fetch(tx, tables.next, 0u64) ?=> Store
-    let prior = match saved { Some(n) => n, None => 0u64 }
-    let Some(next) = int.checked_add(prior, 1u64) else { return Error(IdLimit) }
+    let prior = match saved {
+        Some(n) => n,
+        None => 0u64
+    }
+    let Some(next) = int.checked_add(prior, 1u64) else {
+        return Error(IdLimit)
+    }
     store.put(mut tx, tables.next, 0u64, next) ?=> Store
     Ok(ParkId(number: next))
 }
@@ -67,7 +80,11 @@ fn defer[S](mut tx: store.Tx, tables: Tables[S], entries: triggers.Entries, wake
         None => None,
     }
     store.put(mut tx, tables.states, id, state) ?=> Store
-    let completion = if completable { Some(triggers.destination(wake)) } else { None }
+    let completion = if completable {
+        Some(triggers.destination(wake))
+    } else {
+        None
+    }
     store.put(mut tx, tables.signals, id, Signal(due: deadline, trigger: trigger, payload: None, completion: take completion)) ?=> Store
     Ok(id)
 }
@@ -84,26 +101,41 @@ fn drop_signal[S](mut tx: store.Tx, tables: Tables[S], id: ParkId) -> Result[(),
 
 /// Claims the state inside the wake transaction. A duplicate or early wake changes nothing.
 pub fn take_wake[S: send](mut tx: store.Tx, tables: Tables[S], id: ParkId) -> Result[Option[Wake[S]], store.Error] {
-    let Some(take signal) = store.fetch(tx, tables.signals, id)? else { return Ok(None) }
+    let Some(take signal) = store.fetch(tx, tables.signals, id)? else {
+        return Ok(None)
+    }
     if let Some(at) = signal.due {
-        if store.info(mut tx).at < at { return Ok(None) }
-    } else if let None = signal.payload { return Ok(None) }
-    let Some(take state) = store.fetch(tx, tables.states, id)? else { return Ok(None) }
+        if store.info(mut tx).at < at {
+            return Ok(None)
+        }
+    } else if let None = signal.payload {
+        return Ok(None)
+    }
+    let Some(take state) = store.fetch(tx, tables.states, id)? else {
+        return Ok(None)
+    }
     drop_signal(mut tx, tables, id)?
     let Signal(payload: take payload, ..) = take signal
-    Ok(Some(match take payload { Some(take body) => Completed(take state, take body), None => Due(take state) }))
+    Ok(Some(match take payload {
+        Some(take body) => Completed(take state, take body),
+        None => Due(take state)
+    }))
 }
 
 /// Suppresses a wake and discards its state. Returns whether the park was open.
 pub fn cancel[S](mut tx: store.Tx, tables: Tables[S], id: ParkId) -> Result[bool, Error] {
-    let Some(signal) = store.fetch(tx, tables.signals, id) ?=> Store else { return Ok(false) }
+    let Some(signal) = store.fetch(tx, tables.signals, id) ?=> Store else {
+        return Ok(false)
+    }
     stop(mut tx, tables.triggers, signal.trigger)?
     drop_signal(mut tx, tables, id) ?=> Store
     Ok(true)
 }
 
 fn stop(mut tx: store.Tx, tables: triggers.Tables, trigger: Option[triggers.Id]) -> Result[(), Error] {
-    let Some(id) = trigger else { return Ok(()) }
+    let Some(id) = trigger else {
+        return Ok(())
+    }
     match triggers.request_cancel(mut tx, tables, id) {
         Ok(()) => Ok(()),
         Error(StaleAttempt) => Ok(()),
@@ -112,6 +144,8 @@ fn stop(mut tx: store.Tx, tables: triggers.Tables, trigger: Option[triggers.Id])
 }
 
 pub fn pending_trigger[S](reader: store.Reader, snapshot: store.Snapshot, tables: Tables[S], id: ParkId) -> Result[Option[triggers.Id], store.Error] waits {
-    let Some(signal) = store.get(reader, snapshot, tables.signals, id)? else { return Ok(None) }
+    let Some(signal) = store.get(reader, snapshot, tables.signals, id)? else {
+        return Ok(None)
+    }
     Ok(signal.trigger)
 }

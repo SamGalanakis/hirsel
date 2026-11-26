@@ -11,7 +11,10 @@ fn drive_deadline_hung(take d: Drive, steps: u64) -> () waits {
     match computed.outcome {
         Returned(b) => {
             let c: std.codec.Codec[u64] = std.codec.of()
-            match std.codec.decode(c, b) { Ok(19) => {}, _ => fail("hung: compute did not answer") }
+            match std.codec.decode(c, b) {
+                Ok(19) => {},
+                _ => fail("hung: compute did not answer")
+            }
         },
         _ => fail("hung: compute faulted"),
     }
@@ -43,13 +46,16 @@ fn drive_hung_extra(take d: Drive) -> () waits {
 
 pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut token: Bytes = list.new()
-    served(c, r, tasks, n, drive_hung_base) &&
-        served_on_with_place(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut token, 0u64, drive_hung_extra, code.describe(place_hung_extra))
+    served(c, r, tasks, n, drive_hung_base) && served_on_with_place(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut token, 0u64, drive_hung_extra, code.describe(place_hung_extra))
 }
 
 @test
 fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    if law_calls_deadline_hung(c, r, tasks, n) { Ok(()) } else { Error(()) }
+    if law_calls_deadline_hung(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 fn drain_id(label: String, birth: u64) -> store.StreamId {
@@ -60,7 +66,9 @@ fn drain_id(label: String, birth: u64) -> store.StreamId {
     store.StreamId(t: birth, n: list.word_le(raw, 0u64))
 }
 
-fn drain_caller() -> store.Caller { store.Caller(issuer: 1u8, subject: list.new()) }
+fn drain_caller() -> store.Caller {
+    store.Caller(issuer: 1u8, subject: list.new())
+}
 
 fn drain_stream(label: String, birth: u64) -> store.StreamKey {
     store.StreamKey(caller: drain_caller(), id: drain_id(label, birth))
@@ -74,10 +82,15 @@ fn drain_send(to: Sender[runner.HeadInput], stream: String, birth: u64, position
 }
 
 fn drain_answer(from: Receiver[runner.WireEvent], stream: String, birth: u64, position: u64) -> runner.Outcome {
-    let event = match channel.try_receive(from) { Ok(take event) => take event, Error(_) => fail("drain: send got no answer") }
+    let event = match channel.try_receive(from) {
+        Ok(take event) => take event,
+        Error(_) => fail("drain: send got no answer")
+    }
     let received = option.unwrap(runner.head_outcome(take event))
     want(received.stream == result.unwrap(store.stream_key_bytes(drain_stream(stream, birth))) && received.p == position, "drain: answer to wrong send")
-    if let Ok(_) = channel.try_receive(from) { fail("drain: send answered twice") }
+    if let Ok(_) = channel.try_receive(from) {
+        fail("drain: send answered twice")
+    }
     let runner.KeyedDone(outcome: take outcome, ..) = take received
     take outcome
 }

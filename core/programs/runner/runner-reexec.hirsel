@@ -10,10 +10,7 @@ fn code_bytes(n: u64, s: u64, replay_identity: Bytes) -> Result[Bytes, Capacity]
 }
 
 // Re-execute a recorded transact against its original base without publishing writes.
-pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: store.Branch, version: u64, mode: ReplayMode,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
-    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
-    schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
+pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: store.Branch, version: u64, mode: ReplayMode, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
     let loaded = store.prepare_reexecute(db, branch, version) ?=> Store
     let source = match take loaded {
         Ok(take prepared) => take prepared,
@@ -23,8 +20,7 @@ pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: sto
     let recorded_code = view recorded_entry.record.code
     if let RecordedCode = mode {
         let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
-        if list.len(identity) == 0u64 || list.len(recorded_code) != 16u64 + list.len(identity) ||
-            !list.starts_with_at(recorded_code, 16u64, identity) {
+        if list.len(identity) == 0u64 || list.len(recorded_code) != 16u64 + list.len(identity) || !list.starts_with_at(recorded_code, 16u64, identity) {
             return Ok(Unknown(RevisionUnknown))
         }
     }
@@ -35,11 +31,15 @@ pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: sto
     if let RecordedCode = mode {
         let identity = list.slice(recorded_code, 16u64, list.len(recorded_code))
         let expected = code_bytes(n, s, identity) ?=> |problem| Store(Full(Allocation(problem)))
-        if expected != recorded_code { return Ok(Unknown(RevisionUnknown)) }
+        if expected != recorded_code {
+            return Ok(Unknown(RevisionUnknown))
+        }
     }
     // The current CALL format has only stream records. HTTP Part B adds claim keys.
     let caller = view recorded_entry.record.stream.caller
-    if let Some(Malformed(_)) = check(recorded_entry.record.args) { return Ok(Unknown(ArgsUnresolved)) }
+    if let Some(Malformed(_)) = check(recorded_entry.record.args) {
+        return Ok(Unknown(ArgsUnresolved))
+    }
     let mut declaration = store.declare_replay(db, source) ?=> Store
     let h = (code.callable(schema))(mut declaration) ?=> Store
     let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)

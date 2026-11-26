@@ -34,10 +34,13 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     })
     let started = done(take started_run)
     result.unwrap(store.durable(mut before, started.ticket))
-    let Body(a1) = started.value else { return false }
-    if number(a1) != 1u64 { return false }
+    let Body(a1) = started.value else {
+        return false
+    }
+    if number(a1) != 1u64 {
+        return false
+    }
     result.unwrap(store.close(take before))
-
     let mut db = result.unwrap(store.open(tasks, dir, c, r, law_options()))
     let t = result.unwrap(store.bind_declaration(mut db, Open, declare_tables))
     let p = option.unwrap(first(db, t))
@@ -46,16 +49,22 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     })
     let decision = done(take decision_run)
     result.unwrap(store.durable(mut db, decision.ticket))
-    if let Held = decision.value { } else { return false }
-    if let Some(_) = first(db, t) { return false }
+    if let Held = decision.value {} else {
+        return false
+    }
+    if let Some(_) = first(db, t) {
+        return false
+    }
     let refused = store.run(mut db, None, (store.copy_env(a1), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
         let _ = fence(tx, call_env.1, call_env.0)?
         Ok(())
     })
-    match refused { Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (), _ => return false }
-
+    match refused {
+        Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (),
+        _ => return false
+    }
     let released_run = store.run(mut db, None, (store.copy_env(r2), store.copy_env(queued), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
-        release(mut tx, call_env.2, call_env.1.value, Some(copy_bytes(call_env.0)?))
+        release(mut tx, call_env.2, call_env.1 .value, Some(copy_bytes(call_env.0)?))
     })
     let released = done(take released_run)
     result.unwrap(store.durable(mut db, released.ticket))
@@ -65,19 +74,28 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     })
     let restarted = done(take restarted_run)
     result.unwrap(store.durable(mut db, restarted.ticket))
-    let Body(a2) = restarted.value else { return false }
+    let Body(a2) = restarted.value else {
+        return false
+    }
     let same = run_id(a2) == queued.value
     let old = store.run(mut db, None, (store.copy_env(a1), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
         finish(mut tx, call_env.1, call_env.0, Returned(list.new()))
     })
-    match old { Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (), _ => return false }
+    match old {
+        Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (),
+        _ => return false
+    }
     result.unwrap(store.close(take db))
     same && number(a2) == 2u64
 }
 
 @test
 fn journal_test_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_trigger_revision(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_trigger_revision(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 // The `due` index of a store written before this release: its keys run in reverse due order.

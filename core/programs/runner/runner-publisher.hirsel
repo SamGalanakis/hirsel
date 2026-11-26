@@ -44,7 +44,9 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                 continue
             },
             Halt => {
-                for i in 0u64 .. list.len(joined) { revoke_room_grants(mut joined[i]) }
+                for i in 0u64 .. list.len(joined) {
+                    revoke_room_grants(mut joined[i])
+                }
                 round_disarm(take rounds)
                 return
             },
@@ -91,8 +93,12 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                     wake_room_grants(mut joined)
                 }
             },
-            RelayJoined(take pending) => { relay = take pending },
-            RoomRounds(to) => { let _ = channel.try_send(to, latest.handle(rounds.round)) },
+            RelayJoined(take pending) => {
+                relay = take pending
+            },
+            RoomRounds(to) => {
+                let _ = channel.try_send(to, latest.handle(rounds.round))
+            },
             Joined(take j) => {
                 let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence, progress: take progress, taken: take taken, first: take first, http_credit: take http_credit) = take j
                 let wake: Option[Sender[WireEvent]] = match closed {

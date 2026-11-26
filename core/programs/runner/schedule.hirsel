@@ -1,6 +1,12 @@
-pub type Tick: codec + send { name: String, anchor: u64 }
+pub type Tick: codec + send {
+    name: String,
+    anchor: u64
+}
 
-pub opaque type Alarm: codec + send { tick: Tick, id: triggers.Id }
+pub opaque type Alarm: codec + send {
+    tick: Tick,
+    id: triggers.Id
+}
 
 pub type DispatchFailure: codec + send = MissingEntry | IndexLimit | Storage
 
@@ -15,9 +21,11 @@ pub type Status: send {
 }
 
 pub type Error: send = InvalidInterval | InvalidCron | NoNext | Store(store.Error) | Trigger(triggers.Error)
+
 pub type TickError: codec + send = NoNext | Storage | RearmRefused
 
 type Cadence: codec + send = Every(u64) | Cron(CronFields)
+
 type Row: codec + send {
     cadence: Cadence,
     target: triggers.Destination,
@@ -81,26 +89,38 @@ fn upsert(mut tx: store.Tx, t: Tables, w: Wiring, name: String, cadence: Cadence
 
 /// Creates or replaces a named interval. The first anchor is one period after this commit.
 pub fn every(mut tx: store.Tx, t: Tables, w: Wiring, name: String, period_ms: u64, target: triggers.Entry[Tick]) -> Result[triggers.Id, Error] {
-    if period_ms == 0u64 { return Error(InvalidInterval) }
-    let Some(next) = int.checked_add(store.info(mut tx).at, period_ms) else { return Error(NoNext) }
+    if period_ms == 0u64 {
+        return Error(InvalidInterval)
+    }
+    let Some(next) = int.checked_add(store.info(mut tx).at, period_ms) else {
+        return Error(NoNext)
+    }
     upsert(mut tx, t, w, name, Every(period_ms), target, next)
 }
 
 /// Creates or replaces a named five-field cron schedule. The offset is minutes east of UTC.
 pub fn cron(mut tx: store.Tx, t: Tables, w: Wiring, name: String, expression: String, utc_offset: i32, target: triggers.Entry[Tick]) -> Result[triggers.Id, Error] {
-    let Some(fields) = parse_cron(expression, utc_offset) else { return Error(InvalidCron) }
-    let Some(next) = next_cron(fields, store.info(mut tx).at) else { return Error(NoNext) }
+    let Some(fields) = parse_cron(expression, utc_offset) else {
+        return Error(InvalidCron)
+    }
+    let Some(next) = next_cron(fields, store.info(mut tx).at) else {
+        return Error(NoNext)
+    }
     upsert(mut tx, t, w, name, Cron(fields), target, next)
 }
 
 pub fn remove(mut tx: store.Tx, t: Tables, name: String) -> Result[bool, Error] {
-    let Some(saved) = store.fetch(tx, t.rows, name) ?=> Store else { return Ok(false) }
+    let Some(saved) = store.fetch(tx, t.rows, name) ?=> Store else {
+        return Ok(false)
+    }
     cancel(mut tx, t, saved.tick) ?=> Trigger
     Ok(store.delete(mut tx, t.rows, name) ?=> Store)
 }
 
 pub fn status(tx: store.Tx, t: Tables, name: String) -> Result[Option[Status], store.Error] {
-    let Some(take row) = store.fetch(tx, t.rows, name)? else { return Ok(None) }
+    let Some(take row) = store.fetch(tx, t.rows, name)? else {
+        return Ok(None)
+    }
     let Row(next: next, tick: alarm_id, last_run: last_run, history: take history, ..) = take row
     let outcome = triggers.fetch_outcome(tx, t.triggers, alarm_id)?
     Ok(Some(Status(next: next, tick: alarm_id, tick_outcome: take outcome, last_run: last_run, history: take history)))
@@ -117,13 +137,22 @@ fn following(cadence: Cadence, anchor: u64, at: u64) -> Option[u64] {
 }
 
 fn overlap(tx: store.Tx, t: Tables, previous: Option[triggers.Id]) -> Result[bool, store.Error] {
-    let Some(id) = previous else { return Ok(false) }
+    let Some(id) = previous else {
+        return Ok(false)
+    }
     // Trigger outcomes are durable rows retained after the pending trigger is consumed.
-    match triggers.fetch_outcome(tx, t.triggers, id)? { Some(_) => Ok(false), None => Ok(true) }
+    match triggers.fetch_outcome(tx, t.triggers, id)? {
+        Some(_) => Ok(false),
+        None => Ok(true)
+    }
 }
 
 fn dispatch_failure(e: triggers.Error) -> DispatchFailure {
-    match e { MissingEntry => MissingEntry, IndexLimit => IndexLimit, _ => Storage }
+    match e {
+        MissingEntry => MissingEntry,
+        IndexLimit => IndexLimit,
+        _ => Storage
+    }
 }
 
 /// Rearms the schedule and dispatches the user run in the tick transaction.
@@ -131,10 +160,16 @@ fn dispatch_failure(e: triggers.Error) -> DispatchFailure {
 pub fn tick(mut tx: store.Tx, t: Tables, w: Wiring, take alarm: Alarm) -> Result[(), TickError] {
     let Alarm(tick: take requested, id: id) = take alarm
     let at = store.info(mut tx).at
-    let Some(take saved) = store.fetch(tx, t.rows, requested.name) ?=> |_| Storage else { return Ok(()) }
-    if saved.tick != id || at < saved.next { return Ok(()) }
+    let Some(take saved) = store.fetch(tx, t.rows, requested.name) ?=> |_| Storage else {
+        return Ok(())
+    }
+    if saved.tick != id || at < saved.next {
+        return Ok(())
+    }
     let mut row = take saved
-    let Some(next) = following(row.cadence, row.next, at) else { return Error(NoNext) }
+    let Some(next) = following(row.cadence, row.next, at) else {
+        return Error(NoNext)
+    }
     row.tick = arm(mut tx, t, w, requested.name, next) ?=> |_| RearmRefused
     row.next = next
     let anchor = requested.anchor
@@ -145,11 +180,16 @@ pub fn tick(mut tx: store.Tx, t: Tables, w: Wiring, take alarm: Alarm) -> Result
             triggers.write_saved(mut draft, t.triggers, w.entries, row.target, requested, AfterCommit)
         })
         match take dispatched {
-            Ok(run) => { row.last_run = Some(run); Ran(anchor, run) },
+            Ok(run) => {
+                row.last_run = Some(run);
+                Ran(anchor, run)
+            },
             Error(take problem) => Failed(anchor, dispatch_failure(problem)),
         }
     }
-    if list.len(row.history) == HISTORY { let _ = list.remove(mut row.history, 0u64) }
+    if list.len(row.history) == HISTORY {
+        let _ = list.remove(mut row.history, 0u64)
+    }
     list.push(mut row.history, event)
     store.put(mut tx, t.rows, requested.name, row) ?=> |_| Storage
     Ok(())

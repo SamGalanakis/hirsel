@@ -13,7 +13,10 @@ type LawDb {
 
 type LawError: codec + send = Declined | Broken
 
-type LawHandles: shareable + send { app: signup.Tables, table: store.Table[u64, u64] }
+type LawHandles: shareable + send {
+    app: signup.Tables,
+    table: store.Table[u64, u64]
+}
 
 fn law_schema(mut d: store.Declare) -> Result[LawHandles, store.Error] {
     let app = signup.schema(mut d)?
@@ -21,15 +24,24 @@ fn law_schema(mut d: store.Declare) -> Result[LawHandles, store.Error] {
     Ok(LawHandles(app: take app, table: store.finish(mut d, take declared)?))
 }
 
-fn law_steps(h: LawHandles) -> Tables { signup.step_tables(h.app) }
+fn law_steps(h: LawHandles) -> Tables {
+    signup.step_tables(h.app)
+}
 
-fn signup_tables(h: LawHandles) -> signup.Tables { clone(h.app) }
+fn signup_tables(h: LawHandles) -> signup.Tables {
+    clone(h.app)
+}
 
-fn same_law_handles(h: LawHandles) -> LawHandles { clone(h) }
+fn same_law_handles(h: LawHandles) -> LawHandles {
+    clone(h)
+}
 
 fn law_bump(mut tx: store.Tx, h: LawHandles, add: u64) -> Result[u64, LawError] {
     let t = view h.table
-    let current = match result.unwrap(store.fetch(tx, t, 0u64)) { Some(n) => n, None => 0u64 }
+    let current = match result.unwrap(store.fetch(tx, t, 0u64)) {
+        Some(n) => n,
+        None => 0u64
+    }
     let next = current + add
     result.unwrap(store.put(mut tx, t, 0u64, next))
     Ok(next)
@@ -37,7 +49,11 @@ fn law_bump(mut tx: store.Tx, h: LawHandles, add: u64) -> Result[u64, LawError] 
 
 fn law_decline(mut tx: store.Tx, h: LawHandles, add: u64) -> Result[u64, LawError] {
     let now = law_bump(mut tx, h, add)?
-    if now == add { Error(Declined) } else { Ok(now) }
+    if now == add {
+        Error(Declined)
+    } else {
+        Ok(now)
+    }
 }
 
 fn law_target(clock: Clock, caller: runner.Caller, take n: u64) -> Result[u64, Capacity] waits {
@@ -64,7 +80,11 @@ fn law_open(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> LawDb waits {
 
 fn law_open_at(dir: Dir, c: Clock, r: Random, tasks: Tasks, fresh: bool) -> LawDb waits {
     let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    let handles = result.unwrap(store.bind_declaration(mut db, if fresh { Migrate } else { Open }, law_schema))
+    let handles = result.unwrap(store.bind_declaration(mut db, if fresh {
+        Migrate
+    } else {
+        Open
+    }, law_schema))
     let ts = signup.trigger_tables(handles.app)
     let mut registry: runner.Registry[(), LawHandles] = runner.registry()
     result.unwrap(register(mut registry, law_steps, 131072u64, runner.DEFAULT_STEPS))
@@ -110,7 +130,9 @@ fn law_signup(mut law: LawDb) -> triggers.Id waits {
 
 fn law_start(mut law: LawDb, id: triggers.Id, revision: Bytes) -> triggers.Started waits {
     let trigger_tables = view law.triggers
-    let pending = result.unwrap(triggers.next_pending(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), trigger_tables, scoped fn(other: triggers.Id) -> bool { other != id }))
+    let pending = result.unwrap(triggers.next_pending(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), trigger_tables, scoped fn(other: triggers.Id) -> bool {
+        other != id
+    }))
     let row = option.unwrap(take pending)
     let started = store.run(mut law.db, None, (store.copy_env(revision), store.copy_env(trigger_tables), store.copy_env(row)), fn(mut tx, call_env) -> Result[triggers.Started, triggers.Error] {
         triggers.start(mut tx, call_env.1, call_env.2, call_env.0)
@@ -119,7 +141,9 @@ fn law_start(mut law: LawDb, id: triggers.Id, revision: Bytes) -> triggers.Start
 }
 
 fn law_attempt(mut law: LawDb, id: triggers.Id, revision: Bytes) -> triggers.Attempt waits {
-    let Body(attempt) = law_start(mut law, id, revision) else { fail("step law: expected an attempt") }
+    let Body(attempt) = law_start(mut law, id, revision) else {
+        fail("step law: expected an attempt")
+    }
     attempt
 }
 
@@ -133,7 +157,9 @@ fn law_attempt_call[F, A: codec](mut law: LawDb, a: triggers.Attempt, f: StaticF
 
 fn law_answer(mut law: LawDb, take call: Result[store.Outcome[runner.Outcome, runner.FencedRefusal], store.Error]) -> Reply waits {
     let observed = law_commit(mut law.db, take call)
-    let Returned(raw) = view observed else { fail("step law: expected a reply") }
+    let Returned(raw) = view observed else {
+        fail("step law: expected a reply")
+    }
     result.unwrap(decode(raw))
 }
 
@@ -154,19 +180,26 @@ fn law_outside(clock: Clock, take n: u64) -> Result[u64, LawError] waits {
     Ok(n)
 }
 
-fn law_other_outside(clock: Clock, take n: u64) -> Result[u64, LawError] waits { Ok(law_outside(clock, n)? + 1u64) }
+fn law_other_outside(clock: Clock, take n: u64) -> Result[u64, LawError] waits {
+    Ok(law_outside(clock, n)? + 1u64)
+}
 
 fn law_receipt[A: codec](take request: Begin, value: A) -> Command {
     Finalize(Finish(step: take request, raw: result.unwrap(encode(value))))
 }
 
 fn law_replay[A: codec](reply: Reply) -> A {
-    let Replay(raw) = view reply else { fail("step law: expected replay") }
+    let Replay(raw) = view reply else {
+        fail("step law: expected replay")
+    }
     result.unwrap(decode(raw))
 }
 
 fn law_stale(take call: Result[store.Outcome[runner.Outcome, runner.FencedRefusal], store.Error]) -> bool {
-    match take call { Ok(Aborted(store.Undone(value: Refusal(StaleAttempt), ticket: None))) => true, _ => false }
+    match take call {
+        Ok(Aborted(store.Undone(value: Refusal(StaleAttempt), ticket: None))) => true,
+        _ => false
+    }
 }
 
 fn law_finish(mut law: LawDb, a: triggers.Attempt, terminal: triggers.Terminal) -> () waits {
@@ -186,10 +219,14 @@ pub fn journal_law_steps_reexecution(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let mail: signup.Port = Welcome(channel.sender(services.mail))
     let (take unwrapped_services, take unwrapped_mail, take unwrapped_pay) = signup.scripted_services(tasks)
     let raw_mail: signup.Port = Welcome(channel.sender(unwrapped_services.mail))
-    if let Ok(1u64) = signup.send_welcome(raw_mail, "ada@example.test") {} else { return false }
+    if let Ok(1u64) = signup.send_welcome(raw_mail, "ada@example.test") {} else {
+        return false
+    }
     let send = code.describe(signup.send_welcome)
     let sent = outside_request(0u64, "ada@example.test", send, First)
-    if let Ready = law_control(mut law, first, Enter(clone(sent))) {} else { return false }
+    if let Ready = law_control(mut law, first, Enter(clone(sent))) {} else {
+        return false
+    }
     let receipt = signup.send_welcome(mail, "ada@example.test")
     let _ = law_control(mut law, first, law_receipt(take sent, receipt))
     let mut reopened = law_reopen(take law)
@@ -198,27 +235,41 @@ pub fn journal_law_steps_reexecution(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let got: Result[u64, signup.WriteError] = law_replay(observed)
     // The next scripted send gets receipt 2. An unwrapped repeat would already
     // have used that receipt and this probe would get 3.
-    let no_repeat = match signup.send_welcome(mail, "probe@example.test") { Ok(n) => n == 2u64, _ => false }
-    let repeated = match signup.send_welcome(raw_mail, "ada@example.test") { Ok(2u64) => true, _ => false }
+    let no_repeat = match signup.send_welcome(mail, "probe@example.test") {
+        Ok(n) => n == 2u64,
+        _ => false
+    }
+    let repeated = match signup.send_welcome(raw_mail, "ada@example.test") {
+        Ok(2u64) => true,
+        _ => false
+    }
     let _ = take unwrapped_mail
     let _ = take unwrapped_pay
     let _ = take mailing
     let _ = take billing
-    match got { Ok(1u64) => no_repeat && repeated && triggers.number(second) == 2u64, _ => false }
+    match got {
+        Ok(1u64) => no_repeat && repeated && triggers.number(second) == 2u64,
+        _ => false
+    }
 }
 
 fn law_history_call(mut db: store.Db, stream: store.StreamKey, position: u64) -> u64 waits {
     let entry = string.as_bytes("history-control")
     let request: Bytes = list.new()
     let admitted = result.unwrap(store.admit(mut db, stream, position, store.request_digest(entry, request)))
-    let Admitted(take token) = take admitted else { fail("step law: history setup") }
+    let Admitted(take token) = take admitted else {
+        fail("step law: history setup")
+    }
     let mut code_bytes: Bytes = list.new()
     list.fill(mut code_bytes, 16u64, 0u8)
-    let record = store.CallRecord(key: clone(entry), args: take request,
-        stream: clone(stream), revision: None, code: take code_bytes)
+    let record = store.CallRecord(key: clone(entry), args: take request, stream: clone(stream), revision: None, code: take code_bytes)
     let plan = store.Plan(n_e: 65536u64, s_e: 65536u64, reply_max: 16u64)
-    let served = store.serve(mut db, take token, plan, Some(take record), (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {Ok(list.new()) })
-    let Ok(Committed(receipt)) = served else { fail("step law: history reply") }
+    let served = store.serve(mut db, take token, plan, Some(take record), (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
+        Ok(list.new())
+    })
+    let Ok(Committed(receipt)) = served else {
+        fail("step law: history reply")
+    }
     result.unwrap(store.durable(mut db, receipt.ticket))
     store.version(store.snapshot(db))
 }
@@ -234,21 +285,30 @@ pub fn journal_law_steps_own_rows(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let before = law_history_call(mut law.db, stream, 0u64)
     let _ = law_history_call(mut law.db, stream, 1u64)
     let before_cut = result.unwrap(store.recorded(law.db, store.main_branch(law.db), before))
-    if let None = before_cut { return false }
+    if let None = before_cut {
+        return false
+    }
     let cut = result.unwrap(store.checkpoint(mut law.db))
     result.unwrap(store.durable(mut law.db, cut))
     let mut reopened = law_reopen(take law)
     let history = result.unwrap(store.recorded(reopened.db, store.main_branch(reopened.db), before))
-    if let Some(_) = history { return false }
+    if let Some(_) = history {
+        return false
+    }
     let request = store.request_digest(string.as_bytes("history-control"), list.new())
-    if let Ok(HistoryUnavailable) = store.admit(mut reopened.db, stream, 0u64, request) {} else { return false }
+    if let Ok(HistoryUnavailable) = store.admit(mut reopened.db, stream, 0u64, request) {} else {
+        return false
+    }
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
     let replay = law_transaction(mut reopened, second, 0u64, code.describe(law_bump), 7u64)
     let live: Result[u64, LawError] = law_replay(effect)
     let saved: Result[u64, LawError] = law_replay(replay)
     let table: store.Table[u64, u64] = clone(reopened.handles.table)
     let counter = result.unwrap(store.get(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), table, 0u64))
-    match (live, saved, counter) { (Ok(7u64), Ok(7u64), Some(7u64)) => true, _ => false }
+    match (live, saved, counter) {
+        (Ok(7u64), Ok(7u64), Some(7u64)) => true,
+        _ => false
+    }
 }
 
 // Law 3's typed error replays without the aborted user writes.
@@ -260,18 +320,29 @@ pub fn journal_law_steps_typed_error(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let mut reopened = law_reopen(take law)
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
     let table: store.Table[u64, u64] = clone(reopened.handles.table)
-    if let None = result.unwrap(store.get(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), table, 0u64)) {} else { return false }
+    if let None = result.unwrap(store.get(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), table, 0u64)) {} else {
+        return false
+    }
     let old: Result[Option[Result[u64, LawError]], store.Error] = recorded(reopened.db, law_steps(reopened.handles), StepId(run: id, index: 0u64))
-    if let Ok(Some(Error(Declined))) = old {} else { return false }
+    if let Ok(Some(Error(Declined))) = old {} else {
+        return false
+    }
     // The same callback would succeed against this new value. Replay must
     // take the recorded error branch and leave the new value alone.
-    let seeded = store.run(mut reopened.db, None, store.copy_env(reopened.handles), fn(mut tx, h) -> Result[u64, LawError] { law_bump(mut tx, h, 77u64) })
-    if law_commit(mut reopened.db, take seeded) != 77u64 { return false }
+    let seeded = store.run(mut reopened.db, None, store.copy_env(reopened.handles), fn(mut tx, h) -> Result[u64, LawError] {
+        law_bump(mut tx, h, 77u64)
+    })
+    if law_commit(mut reopened.db, take seeded) != 77u64 {
+        return false
+    }
     let replay = law_transaction(mut reopened, second, 0u64, code.describe(law_decline), 3u64)
     let live: Result[u64, LawError] = law_replay(failed)
     let saved: Result[u64, LawError] = law_replay(replay)
     let row = result.unwrap(store.get(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), table, 0u64))
-    match (live, saved, row) { (Error(Declined), Error(Declined), Some(77u64)) => true, _ => false }
+    match (live, saved, row) {
+        (Error(Declined), Error(Declined), Some(77u64)) => true,
+        _ => false
+    }
 }
 
 fn law_release(mut law: LawDb, id: triggers.Id, revision: Bytes) -> () waits {
@@ -287,8 +358,12 @@ fn law_release(mut law: LawDb, id: triggers.Id, revision: Bytes) -> () waits {
 fn law_request_hold(law: LawDb, id: triggers.Id, expected: Fingerprint, actual: Fingerprint) -> bool waits {
     let snapshot = store.snapshot(law.db)
     let mark = result.unwrap(triggers.hold_mark(result.unwrap(store.reader(law.db, 0u64)), snapshot, law.triggers, id))
-    let None = result.unwrap(triggers.outcome(result.unwrap(store.reader(law.db, 0u64)), snapshot, law.triggers, id)) else { return false }
-    let Some(Request(2u64, 0u64, old, new)) = mark else { return false }
+    let None = result.unwrap(triggers.outcome(result.unwrap(store.reader(law.db, 0u64)), snapshot, law.triggers, id)) else {
+        return false
+    }
+    let Some(Request(2u64, 0u64, old, new)) = mark else {
+        return false
+    }
     old != new && old == expected.contract && new == actual.contract
 }
 
@@ -299,10 +374,14 @@ fn law_fingerprint_arg(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits 
     let f = code.describe(law_bump)
     let _ = law_transaction(mut law, first, 0u64, f, 10u64)
     let mut reopened = law_reopen(take law)
-    if let Held = law_start(mut reopened, id, string.as_bytes("r2")) {} else { return false }
+    if let Held = law_start(mut reopened, id, string.as_bytes("r2")) {} else {
+        return false
+    }
     law_release(mut reopened, id, string.as_bytes("r2"))
     let second = law_attempt(mut reopened, id, string.as_bytes("r2"))
-    if let Held = law_transaction(mut reopened, second, 0u64, f, 20u64) {} else { return false }
+    if let Held = law_transaction(mut reopened, second, 0u64, f, 20u64) {} else {
+        return false
+    }
     let n = std.codec.of_u64()
     let e: std.codec.Codec[LawError] = std.codec.of()
     let expected = result.unwrap(fingerprint(TRANSACTION, code.identity(f), n, n, e, result.unwrap(encode(10u64))))
@@ -313,7 +392,9 @@ fn law_fingerprint_arg(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits 
 fn law_save_outside(mut law: LawDb, take request: Begin) -> triggers.Id waits {
     let id = law_enroll(mut law, 1u64)
     let first = law_attempt(mut law, id, string.as_bytes("r1"))
-    let Ready = law_control(mut law, first, Enter(clone(request))) else { fail("step law: expected a started row") }
+    let Ready = law_control(mut law, first, Enter(clone(request))) else {
+        fail("step law: expected a started row")
+    }
     let saved: Result[u64, LawError] = Ok(23u64)
     let _ = law_control(mut law, first, law_receipt(take request, saved))
     id
@@ -322,14 +403,18 @@ fn law_save_outside(mut law: LawDb, take request: Begin) -> triggers.Id waits {
 fn law_fingerprint_hold(mut law: LawDb, saved: Fingerprint, now: Fingerprint) -> bool waits {
     let id = law_save_outside(mut law, Begin(index: 0u64, fingerprint: clone(saved), mode: First))
     let second = law_attempt(mut law, id, string.as_bytes("r1"))
-    let Held = law_control(mut law, second, Enter(Begin(index: 0u64, fingerprint: clone(now), mode: First))) else { return false }
+    let Held = law_control(mut law, second, Enter(Begin(index: 0u64, fingerprint: clone(now), mode: First))) else {
+        return false
+    }
     law_request_hold(law, id, saved, now)
 }
 
 // Law 4. Each schema change preserves the callback identity and argument bytes,
 // as a change to a named type's definition across revisions can do.
 pub fn journal_law_steps_fingerprint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    if !law_fingerprint_arg(d, c, r, tasks) { return false }
+    if !law_fingerprint_arg(d, c, r, tasks) {
+        return false
+    }
     let mut law = law_open(d, c, r, tasks)
     let n = std.codec.of_u64()
     let changed = std.codec.of_u32()
@@ -337,15 +422,22 @@ pub fn journal_law_steps_fingerprint(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let raw = result.unwrap(encode(6u64))
     let same = outside_request(0u64, 6u64, code.describe(law_outside), First)
     let other = outside_request(0u64, 6u64, code.describe(law_other_outside), First)
-    if !law_fingerprint_hold(mut law, same.fingerprint, other.fingerprint) { return false }
+    if !law_fingerprint_hold(mut law, same.fingerprint, other.fingerprint) {
+        return false
+    }
     let identity = code.identity(code.describe(law_outside))
     let changed_arg = result.unwrap(fingerprint(OUTSIDE, identity, changed, n, e, raw))
     let changed_result = result.unwrap(fingerprint(OUTSIDE, identity, n, changed, e, raw))
     let changed_error = result.unwrap(fingerprint(OUTSIDE, identity, n, n, changed, raw))
-    if !law_fingerprint_hold(mut law, same.fingerprint, changed_arg) { return false }
-    if !law_fingerprint_hold(mut law, same.fingerprint, changed_result) { return false }
-    if !law_fingerprint_hold(mut law, same.fingerprint, changed_error) { return false }
-
+    if !law_fingerprint_hold(mut law, same.fingerprint, changed_arg) {
+        return false
+    }
+    if !law_fingerprint_hold(mut law, same.fingerprint, changed_result) {
+        return false
+    }
+    if !law_fingerprint_hold(mut law, same.fingerprint, changed_error) {
+        return false
+    }
     // A compact `fn law_outside(clock:Clock,take n:u64)->Result[u64,LawError] waits`
     // has these identity bytes by PROG-9. Replay against the commented source above.
     let mut prior_identity: Bytes = list.new()
@@ -358,15 +450,21 @@ pub fn journal_law_steps_fingerprint(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let switched = law_save_outside(mut law, Begin(index: 0u64, fingerprint: clone(prior_outside), mode: First))
     let mut reopened = law_reopen(take law)
     let second = law_attempt(mut reopened, switched, string.as_bytes("r1"))
-    if let Held = law_transaction(mut reopened, second, 0u64, f, 6u64) {} else { return false }
+    if let Held = law_transaction(mut reopened, second, 0u64, f, 6u64) {} else {
+        return false
+    }
     let tx = result.unwrap(fingerprint(TRANSACTION, code.identity(f), n, n, e, raw))
-    if !law_request_hold(reopened, switched, prior_outside, tx) { return false }
-
+    if !law_request_hold(reopened, switched, prior_outside, tx) {
+        return false
+    }
     let formatted_attempt = law_attempt(mut reopened, formatted, string.as_bytes("r1"))
     let reply = law_control(mut reopened, formatted_attempt, Enter(take same))
     let saved: Result[u64, LawError] = law_replay(reply)
     let mark = result.unwrap(triggers.hold_mark(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), reopened.triggers, formatted))
-    match (saved, mark) { (Ok(23u64), None) => true, _ => false }
+    match (saved, mark) {
+        (Ok(23u64), None) => true,
+        _ => false
+    }
 }
 
 // Law 5. Keep the script alive across the cut, make no result commit on
@@ -380,19 +478,28 @@ pub fn journal_law_steps_in_doubt(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let charge = "scripted-card"
     let key = result.unwrap(outside_key(StepId(run: id, index: 1u64)))
     let send = code.describe(signup.send_charge)
-    if let Ready = law_control(mut law, first, Enter(keyed_request(1u64, charge, send, First))) {} else { return false }
+    if let Ready = law_control(mut law, first, Enter(keyed_request(1u64, charge, send, First))) {} else {
+        return false
+    }
     let original = signup.send_charge(payment, key, clone(charge))
     let mut reopened = law_reopen(take law)
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    if let Doubt = law_control(mut reopened, second, Enter(keyed_request(1u64, charge, send, First))) {} else { return false }
+    if let Doubt = law_control(mut reopened, second, Enter(keyed_request(1u64, charge, send, First))) {} else {
+        return false
+    }
     let lookup = keyed_request(1u64, charge, send, Lookup)
-    if let Ready = law_control(mut reopened, second, Enter(clone(lookup))) {} else { return false }
+    if let Ready = law_control(mut reopened, second, Enter(clone(lookup))) {} else {
+        return false
+    }
     let found = signup.find_charge(payment, key, take charge)
     let answer = law_control(mut reopened, second, law_receipt(take lookup, found))
     let receipt: Result[u64, signup.WriteError] = law_replay(answer)
     let _ = take mailing
     let _ = take billing
-    match (original, receipt) { (Ok(1u64), Ok(1u64)) => true, _ => false }
+    match (original, receipt) {
+        (Ok(1u64), Ok(1u64)) => true,
+        _ => false
+    }
 }
 
 fn law_pending_step(mut law: LawDb, a: triggers.Attempt, index: u64) -> () waits {
@@ -401,8 +508,16 @@ fn law_pending_step(mut law: LawDb, a: triggers.Attempt, index: u64) -> () waits
     }
 }
 
-type WaitingReply: send { attempt: triggers.Attempt, index: u64, until: Receiver[()] }
-type LateReply: send { attempt: triggers.Attempt, command: Command }
+type WaitingReply: send {
+    attempt: triggers.Attempt,
+    index: u64,
+    until: Receiver[()]
+}
+
+type LateReply: send {
+    attempt: triggers.Attempt,
+    command: Command
+}
 
 fn law_reply_after_cut(take waiting: WaitingReply) -> LateReply waits {
     result.unwrap(channel.receive(waiting.until))
@@ -435,13 +550,20 @@ pub fn journal_law_steps_sealed(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let (release, delayed) = law_hold_reply(tasks, old, 0u64)
     let mut reopened = law_reopen(take law)
     let current = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    if let Doubt = law_control(mut reopened, current, Enter(outside_request(0u64, 6u64, code.describe(law_outside), First))) {} else { return false }
+    if let Doubt = law_control(mut reopened, current, Enter(outside_request(0u64, 6u64, code.describe(law_outside), First))) {} else {
+        return false
+    }
     let final_bytes = result.unwrap(encode(42u64))
     law_finish(mut reopened, current, Returned(clone(final_bytes)))
-    if !law_late(mut reopened, release, take delayed) { return false }
+    if !law_late(mut reopened, release, take delayed) {
+        return false
+    }
     let saved = result.unwrap(triggers.outcome(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), reopened.triggers, id))
     let effect: Result[Option[Result[u64, LawError]], store.Error] = recorded(reopened.db, law_steps(reopened.handles), StepId(run: id, index: 0u64))
-    match (saved, effect) { (Some(Returned(raw)), Ok(None)) => raw == final_bytes, _ => false }
+    match (saved, effect) {
+        (Some(Returned(raw)), Ok(None)) => raw == final_bytes,
+        _ => false
+    }
 }
 
 // Law 7. Explicit re-send owns the new started row, and the old reply is
@@ -455,14 +577,22 @@ pub fn journal_law_steps_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let (release, delayed) = law_hold_reply(tasks, old, 1u64)
     let mut reopened = law_reopen(take law)
     let current = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    if let Doubt = law_control(mut reopened, current, Enter(outside_request(1u64, 6u64, code.describe(law_outside), First))) {} else { return false }
+    if let Doubt = law_control(mut reopened, current, Enter(outside_request(1u64, 6u64, code.describe(law_outside), First))) {} else {
+        return false
+    }
     let retry = outside_request(1u64, 6u64, code.describe(law_outside), Resend)
-    if let Ready = law_control(mut reopened, current, Enter(clone(retry))) {} else { return false }
-    if !law_late(mut reopened, release, take delayed) { return false }
+    if let Ready = law_control(mut reopened, current, Enter(clone(retry))) {} else {
+        return false
+    }
+    if !law_late(mut reopened, release, take delayed) {
+        return false
+    }
     let answer: Result[u64, LawError] = Ok(22u64)
     let _ = law_control(mut reopened, current, law_receipt(take retry, answer))
     let saved: Result[Option[Result[u64, LawError]], store.Error] = recorded(reopened.db, law_steps(reopened.handles), StepId(run: id, index: 1u64))
-    if let Ok(Some(Ok(22u64))) = saved {} else { return false }
+    if let Ok(Some(Ok(22u64))) = saved {} else {
+        return false
+    }
     let cancelled = {
         let trigger_tables = view reopened.triggers
         store.run(mut reopened.db, None, (store.copy_env(id), store.copy_env(trigger_tables)), fn(mut tx, call_env) -> Result[(), triggers.Error] {
@@ -473,10 +603,19 @@ pub fn journal_law_steps_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let at = store.version(store.snapshot(reopened.db))
     let request = Enter(outside_request(2u64, 9u64, code.describe(law_outside), First))
     let refused = law_attempt_call(mut reopened, current, code.describe(control), request)
-    match take refused { Ok(Aborted(store.Undone(value: Refusal(Cancelled), ticket: None))) => (), _ => return false }
-    if store.version(store.snapshot(reopened.db)) != at { return false }
+    match take refused {
+        Ok(Aborted(store.Undone(value: Refusal(Cancelled), ticket: None))) => (),
+        _ => return false
+    }
+    if store.version(store.snapshot(reopened.db)) != at {
+        return false
+    }
     law_finish(mut reopened, current, Returned(list.new()))
-    if let Some(Cancelled) = result.unwrap(triggers.outcome(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), reopened.triggers, id)) { true } else { false }
+    if let Some(Cancelled) = result.unwrap(triggers.outcome(result.unwrap(store.reader(reopened.db, 0u64)), store.snapshot(reopened.db), reopened.triggers, id)) {
+        true
+    } else {
+        false
+    }
 }
 
 // Law 9. A duplicate request at the insertion index would replay under
@@ -489,7 +628,9 @@ pub fn journal_law_steps_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         let _ = law_transaction(mut law, first, index, code.describe(law_bump), 1u64)
     }
     let mut reopened = law_reopen(take law)
-    if let Held = law_start(mut reopened, id, string.as_bytes("r2")) {} else { return false }
+    if let Held = law_start(mut reopened, id, string.as_bytes("r2")) {} else {
+        return false
+    }
     let snapshot = store.snapshot(reopened.db)
     match result.unwrap(triggers.hold_mark(result.unwrap(store.reader(reopened.db, 0u64)), snapshot, reopened.triggers, id)) {
         Some(Revision(r1, r2)) => r1 == string.as_bytes("r1") && r2 == string.as_bytes("r2"),
@@ -501,8 +642,12 @@ pub fn journal_law_steps_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
 // the transaction. Each invocation must make one commit.
 pub fn journal_law_steps_transaction_pair(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut law = law_open(d, c, r, tasks)
-    let seeded = store.run(mut law.db, None, store.copy_env(law.handles), fn(mut tx, h) -> Result[u64, LawError] { law_bump(mut tx, h, 5u64) })
-    if law_commit(mut law.db, take seeded) != 5u64 { return false }
+    let seeded = store.run(mut law.db, None, store.copy_env(law.handles), fn(mut tx, h) -> Result[u64, LawError] {
+        law_bump(mut tx, h, 5u64)
+    })
+    if law_commit(mut law.db, take seeded) != 5u64 {
+        return false
+    }
     let left = law_enroll(mut law, 1u64)
     let right = law_enroll(mut law, 1u64)
     let a = law_attempt(mut law, left, string.as_bytes("r1"))
@@ -513,7 +658,10 @@ pub fn journal_law_steps_transaction_pair(d: Dir, c: Clock, r: Random, tasks: Ta
     let snapshot = store.snapshot(law.db)
     let table: store.Table[u64, u64] = clone(law.handles.table)
     let count = result.unwrap(store.get(result.unwrap(store.reader(law.db, 0u64)), snapshot, table, 0u64))
-    match (first, second, count) { (Ok(6u64), Ok(7u64), Some(7u64)) => store.version(snapshot) == before + 2u64, _ => false }
+    match (first, second, count) {
+        (Ok(6u64), Ok(7u64), Some(7u64)) => store.version(snapshot) == before + 2u64,
+        _ => false
+    }
 }
 
 // Law 10's child cut. Reopen after the commit and replay the parent's step.
@@ -529,66 +677,119 @@ pub fn journal_law_steps_transaction_child(d: Dir, c: Clock, r: Random, tasks: T
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
     let reply = law_transaction(mut reopened, second, 0u64, code.describe(law_park), 0u64)
     let replayed: Result[triggers.Id, LawError] = law_replay(reply)
-    if result.unwrap(replayed) != child { return false }
+    if result.unwrap(replayed) != child {
+        return false
+    }
     let snapshot = store.snapshot(reopened.db)
-    let additional = result.unwrap(triggers.next_pending(result.unwrap(store.reader(reopened.db, 0u64)), snapshot, reopened.triggers, scoped fn(observed: triggers.Id) -> bool { observed == id || observed == child }))
-    if let Some(_) = additional { return false }
-    let present = result.unwrap(triggers.next_pending(result.unwrap(store.reader(reopened.db, 0u64)), snapshot, reopened.triggers, scoped fn(observed: triggers.Id) -> bool { observed != child }))
-    match present { Some(pending) => triggers.pending_id(pending) == child, None => false }
+    let additional = result.unwrap(triggers.next_pending(result.unwrap(store.reader(reopened.db, 0u64)), snapshot, reopened.triggers, scoped fn(observed: triggers.Id) -> bool {
+        observed == id || observed == child
+    }))
+    if let Some(_) = additional {
+        return false
+    }
+    let present = result.unwrap(triggers.next_pending(result.unwrap(store.reader(reopened.db, 0u64)), snapshot, reopened.triggers, scoped fn(observed: triggers.Id) -> bool {
+        observed != child
+    }))
+    match present {
+        Some(pending) => triggers.pending_id(pending) == child,
+        None => false
+    }
 }
 
 @test
 fn journal_test_steps_reexecution(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_reexecution(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_reexecution(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_own_rows(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_own_rows(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_own_rows(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_typed_error(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_typed_error(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_typed_error(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_fingerprint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_fingerprint(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_fingerprint(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_in_doubt(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_in_doubt(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_in_doubt(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_sealed(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_sealed(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_sealed(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_fence(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_fence(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_revision(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_revision(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_transaction_pair(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_transaction_pair(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_transaction_pair(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn journal_test_steps_transaction_child(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_steps_transaction_child(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if journal_law_steps_transaction_child(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 fn law_first(law: LawDb) -> triggers.Pending waits {
-    option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), law.triggers, fn(other: triggers.Id) -> bool { false })))
+    option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), law.triggers, fn(other: triggers.Id) -> bool {
+        false
+    })))
 }
 
 fn law_close(take law: LawDb) -> () waits {
@@ -624,12 +825,18 @@ fn law_barrier_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, phase: String, out
     }
     // The sign-up activation was visible in the volatile head, but its failed
     // sync kept it outside the durable prefix. The resumed step has to run.
-    if triggers.number(a) != 2u64 || result.unwrap(signup.active(law.db, law.handles.app, 1u64)) { return false }
+    if triggers.number(a) != 2u64 || result.unwrap(signup.active(law.db, law.handles.app, 1u64)) {
+        return false
+    }
     let absent: Result[Option[Result[(), signup.WriteError]], store.Error] = recorded(law.db, law_steps(law.handles), StepId(run: id, index: 0u64))
-    if let Ok(None) = absent {} else { return false }
+    if let Ok(None) = absent {} else {
+        return false
+    }
     let replay = law_transaction(mut law, a, 0u64, code.describe(signup.activate), 1u64)
     let stored: Result[(), signup.WriteError] = law_replay(replay)
-    if let Ok(()) = stored {} else { return false }
+    if let Ok(()) = stored {} else {
+        return false
+    }
     let live = result.unwrap(signup.active(law.db, law.handles.app, 1u64))
     law_close(take law)
     live
@@ -641,14 +848,20 @@ fn law_park_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, phase: String, out: S
         let capped_run = law_enroll(mut law, 1u64)
         let first = law_attempt(mut law, capped_run, string.as_bytes("r1"))
         let _ = law_transaction(mut law, first, 0u64, code.describe(law_bump), 1u64)
-        if let Capped = law_transaction(mut law, first, 1u64, code.describe(law_bump), 9u64) {} else { return false }
-        if let Some(Cap) = result.unwrap(triggers.outcome(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), law.triggers, capped_run)) {} else { return false }
+        if let Capped = law_transaction(mut law, first, 1u64, code.describe(law_bump), 9u64) {} else {
+            return false
+        }
+        if let Some(Cap) = result.unwrap(triggers.outcome(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), law.triggers, capped_run)) {} else {
+            return false
+        }
         let park = law_enroll(mut law, 1u64)
         let a = law_attempt(mut law, park, string.as_bytes("r1"))
         let wake = store.next_call_info(law.db).at + 86400000u64
         let reply = law_transaction(mut law, a, 0u64, code.describe(law_park), wake)
         let child: Result[triggers.Id, LawError] = law_replay(reply)
-        if result.unwrap(child) == park { return false }
+        if result.unwrap(child) == park {
+            return false
+        }
         law_finish(mut law, a, Returned(list.new()))
         law_close(take law)
         return true
@@ -658,24 +871,40 @@ fn law_park_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, phase: String, out: S
     let wake = triggers.due_time(pending)
     let snapshot = store.snapshot(law.db)
     let table: store.Table[u64, u64] = clone(law.handles.table)
-    if result.unwrap(store.get(result.unwrap(store.reader(law.db, 0u64)), snapshot, table, 0u64)) != Some(1u64) { return false }
-    if result.unwrap(store.get(result.unwrap(store.reader(law.db, 0u64)), snapshot, table, 1u64)) != Some(wake) { return false }
+    if result.unwrap(store.get(result.unwrap(store.reader(law.db, 0u64)), snapshot, table, 0u64)) != Some(1u64) {
+        return false
+    }
+    if result.unwrap(store.get(result.unwrap(store.reader(law.db, 0u64)), snapshot, table, 1u64)) != Some(wake) {
+        return false
+    }
     if phase == "write" {
         let early = store.next_call_info(law.db).at < wake
         let trigger_tables = view law.triggers
         let tried = store.run(mut law.db, None, (store.copy_env(pending), store.copy_env(trigger_tables)), fn(mut tx, call_env) -> Result[triggers.Started, triggers.Error] {
             triggers.start(mut tx, call_env.1, call_env.0, string.as_bytes("r1"))
         })
-        let refused = match tried { Ok(Aborted(store.Undone(value: NotDue, ticket: None))) => true, _ => false }
+        let refused = match tried {
+            Ok(Aborted(store.Undone(value: NotDue, ticket: None))) => true,
+            _ => false
+        }
         result.unwrap(stdout.write(out, "DONE"))
         return early && refused
     }
-    if store.next_call_info(law.db).at != wake { return false }
+    if store.next_call_info(law.db).at != wake {
+        return false
+    }
     let awoken = law_attempt(mut law, id, string.as_bytes("r1"))
-    if triggers.number(awoken) != 1u64 { return false }
+    if triggers.number(awoken) != 1u64 {
+        return false
+    }
     law_finish(mut law, awoken, Returned(list.new()))
-    let remaining = result.unwrap(triggers.next_pending(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), law.triggers, fn(other: triggers.Id) -> bool { false }))
-    let once = match remaining { None => true, _ => false }
+    let remaining = result.unwrap(triggers.next_pending(result.unwrap(store.reader(law.db, 0u64)), store.snapshot(law.db), law.triggers, fn(other: triggers.Id) -> bool {
+        false
+    }))
+    let once = match remaining {
+        None => true,
+        _ => false
+    }
     law_close(take law)
     once
 }
@@ -683,6 +912,14 @@ fn law_park_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, phase: String, out: S
 pub fn journal_steps_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
-    let passed = if scenario == "steps-park" { law_park_cut(d, c, r, tasks, phase, out) } else { law_barrier_cut(d, c, r, tasks, phase, out) }
-    if passed { Ok(()) } else { Error(Exit(status: 1u8)) }
+    let passed = if scenario == "steps-park" {
+        law_park_cut(d, c, r, tasks, phase, out)
+    } else {
+        law_barrier_cut(d, c, r, tasks, phase, out)
+    }
+    if passed {
+        Ok(())
+    } else {
+        Error(Exit(status: 1u8))
+    }
 }

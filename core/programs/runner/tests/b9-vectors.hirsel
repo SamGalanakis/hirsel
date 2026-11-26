@@ -1,9 +1,16 @@
 // Hand-derived wire bytes from HTTP B-9. The laws supply the fixture version.
 const B9_EMPTY: String = "retry: 1000\n\nevent: batch\ndata: {\"version\":\"@version@\",\"complete\":[0],\"groups\":[{\"sub\":0,\"value\":{},\"rows\":[]}],\"outcomes\":[]}\n\n"
+
 const B9_DELTA: String = "event: batch\ndata: {\"version\":\"@version@\",\"complete\":[],\"groups\":[{\"sub\":0,\"rows\":[]}],\"outcomes\":[]}\n\n"
+
 const B9_INSERTED: String = "event: batch\ndata: {\"version\":\"@version@\",\"complete\":[],\"groups\":[{\"sub\":0,\"rows\":[{\"slot\":\"unit\",\"table\":\"units\",\"key\":1,\"present\":true,\"value\":null},{\"slot\":\"option\",\"table\":\"options\",\"key\":2,\"present\":true,\"value\":null}]}],\"outcomes\":[]}\n\n"
+
 const B9_PRESENT: String = "retry: 1000\n\nevent: batch\ndata: {\"version\":\"@version@\",\"complete\":[0],\"groups\":[{\"sub\":0,\"value\":{},\"rows\":[{\"slot\":\"unit\",\"table\":\"units\",\"key\":1,\"present\":true,\"value\":null},{\"slot\":\"option\",\"table\":\"options\",\"key\":2,\"present\":true,\"value\":null}]}],\"outcomes\":[]}\n\n"
+
 const B9_REMOVED: String = "event: batch\ndata: {\"version\":\"@version@\",\"complete\":[],\"groups\":[{\"sub\":0,\"rows\":[{\"slot\":\"unit\",\"table\":\"units\",\"key\":1,\"present\":false},{\"slot\":\"option\",\"table\":\"options\",\"key\":2,\"present\":false}]}],\"outcomes\":[]}\n\n"
+
 const B9_RESET: String = "event: reset\ndata: {\"version\":\"@version@\",\"outcomes\":[]}\n\n"
+
 const B9_ENDED: String = "event: ended\ndata: {\"sub\":0,\"outcome\":{\"Refused\":\"Deadline\"}}\n\n"
+
 const B9_EXPIRED: String = "event: expired\ndata: {\"reason\":\"auth_expired\"}\n\n"

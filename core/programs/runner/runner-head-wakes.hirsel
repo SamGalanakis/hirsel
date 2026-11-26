@@ -1,17 +1,28 @@
-type SyncRelay: send { notices: Receiver[()], to: Sender[HeadInput] }
+type SyncRelay: send {
+    notices: Receiver[()],
+    to: Sender[HeadInput]
+}
 
 // One SyncWake per sync notice, and a last one when the journal worker ends, so a head
 // waiting on its inbox looks at its held groups again. A full inbox drops the wake: the
 // head then has input to take, and it polls the journal before it waits again.
 fn relay_syncs(take relay: SyncRelay) -> () waits {
     loop {
-        let more = match channel.receive(relay.notices) { Ok(()) => true, Error(_) => false }
+        let more = match channel.receive(relay.notices) {
+            Ok(()) => true,
+            Error(_) => false
+        }
         let _ = channel.try_send(relay.to, SyncWake)
-        if !more { return }
+        if !more {
+            return
+        }
     }
 }
 
-type ParkRelay: send { notices: Receiver[()], to: Sender[HeadInput] }
+type ParkRelay: send {
+    notices: Receiver[()],
+    to: Sender[HeadInput]
+}
 
 // One ParkWake per park notice; a full inbox drops it, since the head polls its parked
 // calls before it waits again.
@@ -21,14 +32,19 @@ fn relay_parks(take relay: ParkRelay) -> () waits {
     }
 }
 
-type Forward: send { from: Receiver[HeadInput], to: Sender[HeadInput] }
+type Forward: send {
+    from: Receiver[HeadInput],
+    to: Sender[HeadInput]
+}
 
 // A head the caller feeds through its own channel gets one inbox that also carries the
 // relay's wakes. The caller closing its channel arrives as InboxEnded.
 fn forward_requests(take forward: Forward) -> () waits {
     loop {
         match head_next(forward.from, true) {
-            Some(take message) => if let Error(_) = channel.send(forward.to, take message) { return },
+            Some(take message) => if let Error(_) = channel.send(forward.to, take message) {
+                return
+            },
             None => {
                 let _ = channel.send(forward.to, InboxEnded)
                 return
@@ -42,19 +58,32 @@ fn forward_requests(take forward: Forward) -> () waits {
 fn head_wakes[G: send, H: shareable + inert + send](mut hd: Head[G, H], take inbox: Receiver[HeadInput], drain: Option[HeadDrain], tasks: Tasks) -> (Receiver[HeadInput], List[Task[()]], Result[(), store.Error]) {
     let mut helpers: List[Task[()]] = list.new()
     let notices = store.sync_notices(mut hd.db)
-    let recovering_claims = match hd.recovery { Some(_) => true, None => false }
-    if none(notices) && !recovering_claims { return (take inbox, take helpers, Ok(())) }
+    let recovering_claims = match hd.recovery {
+        Some(_) => true,
+        None => false
+    }
+    if none(notices) && !recovering_claims {
+        return (take inbox, take helpers, Ok(()))
+    }
     let (to, woken): (Sender[HeadInput], Receiver[HeadInput]) = match drain {
         Some(control) => (channel.sender(control.head_to), take inbox),
         None => {
-            let inbox_room = if recovering_claims { 65u64 } else { 64u64 }
+            let inbox_room = if recovering_claims {
+                65u64
+            } else {
+                64u64
+            }
             let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(inbox_room)
             let forward = Forward(from: take inbox, to: channel.sender(to))
             match task.try_spawn(tasks, bytes 65536u64, take forward, forward_requests) {
                 Ok(take running) => list.push(mut helpers, take running),
                 Error((problem, take back)) => {
                     let Forward(from: take original, ..) = take back
-                    let admission: Result[(), store.Error] = if let Ok(_) = store.claim_of(hd.db) { Error(Full(Allocation(problem))) } else { Ok(()) }
+                    let admission: Result[(), store.Error] = if let Ok(_) = store.claim_of(hd.db) {
+                        Error(Full(Allocation(problem)))
+                    } else {
+                        Ok(())
+                    }
                     return (take original, take helpers, take admission)
                 },
             }

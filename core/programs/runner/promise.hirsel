@@ -1,6 +1,10 @@
-pub opaque type PromiseId: codec + send { park: ParkId }
+pub opaque type PromiseId: codec + send {
+    park: ParkId
+}
 
-pub fn park_id(id: PromiseId) -> ParkId { id.park }
+pub fn park_id(id: PromiseId) -> ParkId {
+    id.park
+}
 
 pub type Completion: codec + send = Recorded | AlreadyComplete
 
@@ -12,8 +16,12 @@ pub fn create[S](mut tx: store.Tx, tables: Tables[S], entries: triggers.Entries,
 /// Completes a promise once and schedules a fresh wake with its payload.
 pub fn complete[S](mut tx: store.Tx, tables: Tables[S], entries: triggers.Entries, promise: PromiseId, take payload: Bytes) -> Result[Completion, Error] {
     let id = promise.park
-    let Some(take saved) = store.fetch(tx, tables.signals, id) ?=> Store else { return Ok(AlreadyComplete) }
-    let Some(target) = view saved.completion else { return Ok(AlreadyComplete) }
+    let Some(take saved) = store.fetch(tx, tables.signals, id) ?=> Store else {
+        return Ok(AlreadyComplete)
+    }
+    let Some(target) = view saved.completion else {
+        return Ok(AlreadyComplete)
+    }
     let trigger = triggers.write_saved(mut tx, tables.triggers, entries, target, id, AfterCommit) ?=> Trigger
     stop(mut tx, tables.triggers, saved.trigger)?
     let signal = Signal(due: None, trigger: Some(trigger), payload: Some(take payload), completion: None)

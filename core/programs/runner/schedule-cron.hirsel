@@ -1,4 +1,7 @@
-type CronField: codec + send { selected: u64, wildcard: bool }
+type CronField: codec + send {
+    selected: u64,
+    wildcard: bool
+}
 
 type CronFields: codec + send {
     minute: CronField,
@@ -16,17 +19,25 @@ fn cron_number(raw: Bytes, mut at: u64) -> Option[u64] {
         value = int.checked_add(int.checked_mul(value, 10u64)?, int.widen(raw[at] - b'0'))?
         at += 1u64
     }
-    if start == at { None } else { Some(value) }
+    if start == at {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn cron_field(raw: Bytes, low: u64, high: u64) -> Option[CronField] {
     let n = list.len(raw)
-    if n == 0u64 { return None }
+    if n == 0u64 {
+        return None
+    }
     let wildcard = raw[0u64] == b'*'
     let mut at = 0u64
     let mut bits = 0u64
     loop {
-        if at == n { return None }
+        if at == n {
+            return None
+        }
         let (start, last) = if raw[at] == b'*' {
             at += 1u64
             (low, high)
@@ -44,33 +55,51 @@ fn cron_field(raw: Bytes, low: u64, high: u64) -> Option[CronField] {
         if at < n && raw[at] == b'/' {
             at += 1u64
             step = cron_number(raw, mut at)?
-            if start == end { end = high }
+            if start == end {
+                end = high
+            }
         }
-        if start < low || end > high || start > end || step == 0u64 { return None }
+        if start < low || end > high || start > end || step == 0u64 {
+            return None
+        }
         let mut value = start
         while value <= end {
             bits |= 1u64 << value
-            if step > end - value { break }
+            if step > end - value {
+                break
+            }
             value += step
         }
-        if at == n { return Some(CronField(selected: bits, wildcard: wildcard)) }
-        if raw[at] != b',' { return None }
+        if at == n {
+            return Some(CronField(selected: bits, wildcard: wildcard))
+        }
+        if raw[at] != b',' {
+            return None
+        }
         at += 1u64
     }
 }
 
-fn cron_space(c: u8) -> bool { c == b' ' || c == b'\t' }
+fn cron_space(c: u8) -> bool {
+    c == b' ' || c == b'\t'
+}
 
 fn cron_next_field(raw: Bytes, mut at: u64, low: u64, high: u64) -> Option[CronField] {
     let n = list.len(raw)
-    while at < n && cron_space(raw[at]) { at += 1u64 }
+    while at < n && cron_space(raw[at]) {
+        at += 1u64
+    }
     let start = at
-    while at < n && !cron_space(raw[at]) { at += 1u64 }
+    while at < n && !cron_space(raw[at]) {
+        at += 1u64
+    }
     cron_field(list.slice(raw, start, at), low, high)
 }
 
 fn parse_cron(expression: String, offset: i32) -> Option[CronFields] {
-    if offset < -1439 || offset > 1439 { return None }
+    if offset < -1439 || offset > 1439 {
+        return None
+    }
     let raw = string.as_bytes(expression)
     let mut at = 0u64
     let minute = cron_next_field(raw, mut at, 0u64, 59u64)?
@@ -78,15 +107,23 @@ fn parse_cron(expression: String, offset: i32) -> Option[CronFields] {
     let day = cron_next_field(raw, mut at, 1u64, 31u64)?
     let month = cron_next_field(raw, mut at, 1u64, 12u64)?
     let weekday = cron_next_field(raw, mut at, 0u64, 7u64)?
-    while at < list.len(raw) && cron_space(raw[at]) { at += 1u64 }
-    if at != list.len(raw) { return None }
+    while at < list.len(raw) && cron_space(raw[at]) {
+        at += 1u64
+    }
+    if at != list.len(raw) {
+        return None
+    }
     Some(CronFields(minute: minute, hour: hour, day: day, month: month, weekday: weekday, offset: offset))
 }
 
-fn selected(field: CronField, number: u64) -> bool { (field.selected & (1u64 << number)) != 0u64 }
+fn selected(field: CronField, number: u64) -> bool {
+    (field.selected & (1u64 << number)) != 0u64
+}
 
 fn cron_day(fields: CronFields, date: std.time.Date) -> bool {
-    if !selected(fields.month, int.widen(std.time.month(date))) { return false }
+    if !selected(fields.month, int.widen(std.time.month(date))) {
+        return false
+    }
     let day = selected(fields.day, int.widen(std.time.day(date)))
     let weekday = match std.time.weekday(date) {
         Sunday => selected(fields.weekday, 0u64) || selected(fields.weekday, 7u64),
@@ -97,7 +134,11 @@ fn cron_day(fields: CronFields, date: std.time.Date) -> bool {
         Friday => selected(fields.weekday, 5u64),
         Saturday => selected(fields.weekday, 6u64),
     }
-    if fields.day.wildcard || fields.weekday.wildcard { day && weekday } else { day || weekday }
+    if fields.day.wildcard || fields.weekday.wildcard {
+        day && weekday
+    } else {
+        day || weekday
+    }
 }
 
 fn next_cron(fields: CronFields, after: u64) -> Option[u64] {
@@ -113,7 +154,11 @@ fn next_cron(fields: CronFields, after: u64) -> Option[u64] {
         if cron_day(fields, date) {
             for h in from_hour .. 24u64 {
                 if selected(fields.hour, h) {
-                    let start = if h == from_hour { from_minute } else { 0u64 }
+                    let start = if h == from_hour {
+                        from_minute
+                    } else {
+                        0u64
+                    }
                     for m in start .. 60u64 {
                         if selected(fields.minute, m) {
                             let wall = std.time.at(date, int.narrow(h), int.narrow(m), 0u8, 0u32)?

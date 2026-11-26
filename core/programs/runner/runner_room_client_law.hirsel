@@ -4,7 +4,6 @@
 // its incarnation bytes, its revision and the peer number of every occupied slot). Between
 // the Parts of one split image the client's revision must be None. The second law runs the
 // client's session over a socket against a running place.
-
 // The relay's 16 incarnation bytes as the two little-endian words a Part carries.
 fn relay_words(raw: Inline[u8, 16]) -> (u64, u64) {
     let mut low = 0u64

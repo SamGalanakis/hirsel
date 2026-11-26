@@ -162,9 +162,7 @@ pub fn law_p09_describe() -> bool {
         (Compute, Compute, Granted) => true,
         _ => false,
     }
-    kinds && d0.identity == code.identity(code.describe(toggle)) && d1.identity == code.identity(code.describe(boom)) &&
-        d2.identity == code.identity(code.describe(stamp)) && d0.args == u32s && d0.result == bools &&
-        d1.args == u32s && d1.result == u32s && d2.args == u32s && d2.result == u64s
+    kinds && d0.identity == code.identity(code.describe(toggle)) && d1.identity == code.identity(code.describe(boom)) && d2.identity == code.identity(code.describe(stamp)) && d0.args == u32s && d0.result == bools && d1.args == u32s && d1.result == u32s && d2.args == u32s && d2.result == u64s
 }
 
 // p13: registering a key already present is refused with that key, and the registry
@@ -194,34 +192,88 @@ fn same_room(a: runner.Room, b: runner.Room) -> bool {
 
 fn same_fault(a: runner.Fault, b: runner.Fault) -> bool {
     match a {
-        Raised(x) => match b { Raised(y) => x == y, _ => false },
-        OutOfBytes(x) => match b { OutOfBytes(y) => same_room(x, y), _ => false },
-        OutOfTime(x) => match b { OutOfTime(y) => x == y, _ => false },
-        Gone => match b { Gone => true, _ => false },
-        Conflict(x) => match b { Conflict(y) => x == y, _ => false },
+        Raised(x) => match b {
+            Raised(y) => x == y,
+            _ => false
+        },
+        OutOfBytes(x) => match b {
+            OutOfBytes(y) => same_room(x, y),
+            _ => false
+        },
+        OutOfTime(x) => match b {
+            OutOfTime(y) => x == y,
+            _ => false
+        },
+        Gone => match b {
+            Gone => true,
+            _ => false
+        },
+        Conflict(x) => match b {
+            Conflict(y) => x == y,
+            _ => false
+        },
     }
 }
 
 fn same_refusal(a: runner.Refusal, b: runner.Refusal) -> bool {
     match a {
-        NoEntry => match b { NoEntry => true, _ => false },
-        Malformed(x) => match b { Malformed(y) => x.kind == y.kind && x.at == y.at, _ => false },
-        Overloaded => match b { Overloaded => true, _ => false },
-        Deadline => match b { Deadline => true, _ => false },
-        Budget(x) => match b { Budget(y) => same_room(x, y), _ => false },
-        NotAllowed => match b { NotAllowed => true, _ => false },
-        RequestMismatch => match b { RequestMismatch => true, _ => false },
-        HistoryUnavailable => match b { HistoryUnavailable => true, _ => false },
+        NoEntry => match b {
+            NoEntry => true,
+            _ => false
+        },
+        Malformed(x) => match b {
+            Malformed(y) => x.kind == y.kind && x.at == y.at,
+            _ => false
+        },
+        Overloaded => match b {
+            Overloaded => true,
+            _ => false
+        },
+        Deadline => match b {
+            Deadline => true,
+            _ => false
+        },
+        Budget(x) => match b {
+            Budget(y) => same_room(x, y),
+            _ => false
+        },
+        NotAllowed => match b {
+            NotAllowed => true,
+            _ => false
+        },
+        RequestMismatch => match b {
+            RequestMismatch => true,
+            _ => false
+        },
+        HistoryUnavailable => match b {
+            HistoryUnavailable => true,
+            _ => false
+        },
     }
 }
 
 fn same(a: runner.Outcome, b: runner.Outcome) -> bool {
     match a {
-        Returned(x) => match b { Returned(y) => x == y, _ => false },
-        Failed(x) => match b { Failed(y) => same_fault(x, y), _ => false },
-        Refused(x) => match b { Refused(y) => same_refusal(x, y), _ => false },
-        Abandoned => match b { Abandoned => true, _ => false },
-        InDoubt => match b { InDoubt => true, _ => false },
+        Returned(x) => match b {
+            Returned(y) => x == y,
+            _ => false
+        },
+        Failed(x) => match b {
+            Failed(y) => same_fault(x, y),
+            _ => false
+        },
+        Refused(x) => match b {
+            Refused(y) => same_refusal(x, y),
+            _ => false
+        },
+        Abandoned => match b {
+            Abandoned => true,
+            _ => false
+        },
+        InDoubt => match b {
+            InDoubt => true,
+            _ => false
+        },
     }
 }
 
@@ -403,32 +455,56 @@ pub fn law_l4_malformed_flood() -> bool {
 
 @test
 fn test_p01_call() -> Result[(), ()] {
-    if law_p01_call() { Ok(()) } else { Error(()) }
+    if law_p01_call() {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn test_p09_describe() -> Result[(), ()] {
-    if law_p09_describe() { Ok(()) } else { Error(()) }
+    if law_p09_describe() {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn test_p13_duplicate_refused() -> Result[(), ()] {
-    if law_p13_duplicate_refused() { Ok(()) } else { Error(()) }
+    if law_p13_duplicate_refused() {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn test_p15_types_roundtrip() -> Result[(), ()] {
-    if law_p15_types_roundtrip() { Ok(()) } else { Error(()) }
+    if law_p15_types_roundtrip() {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn test_p19_place_bound() -> Result[(), ()] {
-    if law_p19_place_bound() { Ok(()) } else { Error(()) }
+    if law_p19_place_bound() {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn test_l4_malformed_flood() -> Result[(), ()] {
-    if law_l4_malformed_flood() { Ok(()) } else { Error(()) }
+    if law_l4_malformed_flood() {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 // p02: a granted entry runs as a task under `bytes n` holding its grant (the Clock),
@@ -466,13 +542,23 @@ pub fn law_p02_start_finish(c: Clock, tasks: Tasks) -> bool waits {
 
 @test
 fn test_p02_start_finish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
-    if law_p02_start_finish(c, tasks) { Ok(()) } else { Error(()) }
+    if law_p02_start_finish(c, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
-fn return_child(take n: u64) -> u64 { n }
+fn return_child(take n: u64) -> u64 {
+    n
+}
+
 fn granted_spawn(tasks: Tasks, caller: runner.Caller, take n: u64) -> Result[u64, Capacity] waits {
     let h = task.spawn(tasks, bytes 0u64, n, return_child)
-    match task.join(take h) { Ok(v) => Ok(v), _ => fail("granted child failed") }
+    match task.join(take h) {
+        Ok(v) => Ok(v),
+        _ => fail("granted child failed")
+    }
 }
 
 pub fn law_granted_tasks_copy_steps(tasks: Tasks) -> bool waits {
@@ -485,29 +571,46 @@ pub fn law_granted_tasks_copy_steps(tasks: Tasks) -> bool waits {
     let ran = bound steps 1000000u64 {
         match runner.start(r, tasks, tasks, store.Caller(issuer: 0u8, subject: list.new()), key, take arg) {
             Ok(take h) => match runner.finish(take h) {
-                Returned(b) => list.len(b) == 8u64 && b[0u64] == 7u8 &&
-                    b[1u64] == 0u8 && b[2u64] == 0u8 && b[3u64] == 0u8 &&
-                    b[4u64] == 0u8 && b[5u64] == 0u8 && b[6u64] == 0u8 && b[7u64] == 0u8,
+                Returned(b) => list.len(b) == 8u64 && b[0u64] == 7u8 && b[1u64] == 0u8 && b[2u64] == 0u8 && b[3u64] == 0u8 && b[4u64] == 0u8 && b[5u64] == 0u8 && b[6u64] == 0u8 && b[7u64] == 0u8,
                 _ => false,
             },
             Error(_) => false,
         }
     }
-    match ran { Ok(v) => v, Error(_) => false }
+    match ran {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
 
 @test
 fn test_granted_tasks_copy_steps(tasks: Tasks) -> Result[(), ()] waits {
-    if law_granted_tasks_copy_steps(tasks) { Ok(()) } else { Error(()) }
+    if law_granted_tasks_copy_steps(tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
-resource type BusyGrant: send { clock: Clock } drop(g) { loop {} }
+resource type BusyGrant: send {
+    clock: Clock
+} drop(g) {
+    loop {}
+}
+
 fn grant_returns(g: BusyGrant, caller: runner.Caller, take x: u32) -> Result[u32, Capacity] waits {
     std.clock.sleep_ns(g.clock, 0u64)
     Ok(x)
 }
-fn forever(take x: u32) -> Result[u32, Capacity] { loop {} }
-fn granted_forever(c: Clock, caller: runner.Caller, take x: u32) -> Result[u32, Capacity] waits { std.clock.sleep_ns(c, 0u64); loop {} }
+
+fn forever(take x: u32) -> Result[u32, Capacity] {
+    loop {}
+}
+
+fn granted_forever(c: Clock, caller: runner.Caller, take x: u32) -> Result[u32, Capacity] waits {
+    std.clock.sleep_ns(c, 0u64);
+    loop {}
+}
 
 // Both forms return the registered allowance, including a stop in decode.
 pub fn law_step_bounds(c: Clock, tasks: Tasks) -> bool waits {
@@ -518,20 +621,24 @@ pub fn law_step_bounds(c: Clock, tasks: Tasks) -> bool waits {
     let cr: std.codec.Codec[u32] = std.codec.of()
     let k = key_of(code.identity(code.describe(forever)), ca, cr)
     match runner.call(r, k, u32_arg(7u32)) {
-        Failed(OutOfTime(65536)) => {}, _ => return false,
+        Failed(OutOfTime(65536)) => {},
+        _ => return false,
     }
     let kg = key_of(code.identity(code.describe(granted_forever)), ca, cr)
     let h = match runner.start(r, tasks, c, store.Caller(issuer: 0u8, subject: list.new()), kg, u32_arg(7u32)) {
-        Ok(take t) => take t, _ => return false,
+        Ok(take t) => take t,
+        _ => return false,
     }
     match runner.finish(take h) {
-        Failed(OutOfTime(65536)) => {}, _ => return false,
+        Failed(OutOfTime(65536)) => {},
+        _ => return false,
     }
     let mut zero: Reg = runner.registry()
     result.unwrap(runner.compute(mut zero, code.describe(toggle), 65536u64, 0u64))
     let kz = key_of(code.identity(code.describe(toggle)), ca, std.codec.of_bool())
     match runner.call(zero, kz, u32_arg(2u32)) {
-        Failed(OutOfTime(0)) => {}, _ => return false,
+        Failed(OutOfTime(0)) => {},
+        _ => return false,
     }
     // The granted task owns its grant. Its finalizer gets no unmetered tail.
     let mut owned: runner.Registry[BusyGrant, ()] = runner.registry()
@@ -539,12 +646,20 @@ pub fn law_step_bounds(c: Clock, tasks: Tasks) -> bool waits {
     let ko = key_of(code.identity(code.describe(grant_returns)), ca, cr)
     let g = result.unwrap(BusyGrant(clock: c))
     let finalizing = match runner.start(owned, tasks, take g, store.Caller(issuer: 0u8, subject: list.new()), ko, u32_arg(2u32)) {
-        Ok(take t) => take t, _ => return false,
+        Ok(take t) => take t,
+        _ => return false,
     }
-    match runner.finish(take finalizing) { Failed(OutOfTime(32)) => true, _ => false }
+    match runner.finish(take finalizing) {
+        Failed(OutOfTime(32)) => true,
+        _ => false
+    }
 }
 
 @test
 fn test_step_bounds(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
-    if law_step_bounds(c, tasks) { Ok(()) } else { Error(()) }
+    if law_step_bounds(c, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }

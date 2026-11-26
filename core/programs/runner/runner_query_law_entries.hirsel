@@ -1,4 +1,6 @@
-fn law_query_table(h: Qh) -> store.Table[u64, u64] { clone(h.t) }
+fn law_query_table(h: Qh) -> store.Table[u64, u64] {
+    clone(h.t)
+}
 
 fn law_query_slots() -> Result[Slots[Qh], RegisterError] {
     table_slot("data", code.describe(law_query_table))

@@ -3084,14 +3084,24 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     const TUPLE: &str = "fn pair() -> (u64, u64) { (1u64, 2u64) }\n";
     let libraries = tempfile::tempdir().unwrap();
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
-    // Copies of core and std whose std lacks one maker: `of_u64`, or `of_list`.
     let without = |maker: &str, next: char| {
         let copy = libraries.path().join(maker);
         copy_libraries(&shipped, &copy, &|text| {
-            text.replace(
+            let text = text.replace(
                 &format!("pub fn {maker}{next}"),
                 &format!("pub fn {maker}_renamed{next}"),
-            )
+            );
+            if maker == "of_list" {
+                // The simulation trace still needs its List[A] codec. Name
+                // the renamed maker directly so this fixture can isolate the
+                // automatic lookup used when lowering the test's List body.
+                text.replace(
+                    "codec.of() : codec.Codec[List[A]]",
+                    "codec.of_list_renamed() : codec.Codec[List[A]]",
+                )
+            } else {
+                text
+            }
         });
         copy
     };
@@ -3099,48 +3109,30 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     let no_list = without("of_list", '[');
     let no_schema = without("schema_of", '[');
     let cases = [
-        (
-            "std's u64 maker leaves",
-            (&shipped, &CODEC.to_owned()),
-            (&renamed, &CODEC.to_owned()),
-            false,
-        ),
-        (
-            "std's u64 maker returns",
-            (&renamed, &CODEC.to_owned()),
-            (&shipped, &CODEC.to_owned()),
-            true,
-        ),
-        (
-            "std's List maker leaves",
-            (&shipped, &LIST.to_owned()),
-            (&no_list, &LIST.to_owned()),
-            true,
-        ),
-        (
-            "std's List maker returns",
-            (&no_list, &LIST.to_owned()),
-            (&shipped, &LIST.to_owned()),
-            true,
-        ),
+        ("std's u64 maker leaves", CODEC, &shipped, &renamed, false),
+        ("std's u64 maker returns", CODEC, &renamed, &shipped, true),
+        ("std's List maker leaves", LIST, &shipped, &no_list, true),
+        ("std's List maker returns", LIST, &no_list, &shipped, true),
         (
             "a tuple's implicit schema protocol leaves",
-            (&shipped, &TUPLE.to_owned()),
-            (&no_schema, &TUPLE.to_owned()),
+            TUPLE,
+            &shipped,
+            &no_schema,
             true,
         ),
         (
             "a tuple's implicit schema protocol returns",
-            (&no_schema, &TUPLE.to_owned()),
-            (&shipped, &TUPLE.to_owned()),
+            TUPLE,
+            &no_schema,
+            &shipped,
             true,
         ),
     ];
-    for (case, base, edit, accepted) in cases {
+    for (case, source, base, edit, accepted) in cases {
         let dir = tempfile::tempdir().unwrap();
         let app = dir.path().join("app");
         std::fs::create_dir(&app).unwrap();
-        let check = |(root, source): (&PathBuf, &String), store: &str| {
+        let check = |root: &Path, store: &str| {
             std::fs::write(app.join("main.hirsel"), source).unwrap();
             let mut request = CheckRequest::program(&app, root, &dir.path().join(store)).unwrap();
             request.entry = None;

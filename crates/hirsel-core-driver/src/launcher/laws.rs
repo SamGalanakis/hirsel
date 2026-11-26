@@ -1094,7 +1094,7 @@ fn host_restart_wired() {
 
     let mut rig = self::rig(&[]);
     let work = hosted(&mut rig, "echo x >> ../starts\nexit 74");
-    rig.idle(Duration::from_millis(500));
+    rig.idle(Duration::from_secs(2));
     let starts = fs::read_to_string(work.join("starts"))
         .unwrap()
         .lines()

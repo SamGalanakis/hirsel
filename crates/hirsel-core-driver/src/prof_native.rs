@@ -391,7 +391,9 @@ fn profiler_times_provider_callbacks_separately_from_pending() {
         )
         .unwrap();
     assert_eq!((status, error), (0, 0));
-    assert!(wait > 0 && issue > 0 && deliver > 0);
+    // A callback can start and finish within one monotonic clock tick.
+    assert!(wait >= 0 && issue >= 0 && deliver >= 0);
+    assert!(callbacks > 0);
     assert_eq!(callbacks, wait + issue + deliver);
     assert!(pending > 0 && callbacks + pending <= span);
     let timer: i64 = db
@@ -721,23 +723,27 @@ pub fn main() -> Result[(), Exit] {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     // Charged: root startup (256 + 32) plus the full 160-byte scope.
-    // Retained at the region allocation: startup slot, cause cell, inputs,
-    // main result, root Task, Region header and one 4 KiB backing request.
-    // The root Task is one `tasks::Task`, repr(C) in declared order, as the record
-    // runtimes build it: release, so a FrameRecord is its base pointer alone.
+    // Record runtimes use the release layout (FrameRecord is one pointer).
     // Its owned Context, also repr(C): current, events, steps, run; the hash key,
     // fast salt and strong key; two flags padded to a word; cancel_shield,
     // finalizing, bound_depth, primary; causes; task_record; active_resource,
-    // host_files; the isolates and step_bounds Vecs; step_slice_tail, regions,
-    // heap, frame_lists, spare_isolate_cell, foreign, root_limit, root_refusal.
-    let context = 4 * 8 + (32 + 16 + 32) + 8 + 4 * 8 + 16 + 16 + 2 * 8 + 2 * 24 + 8 * 8;
-    // The Task: four flags and polls_left; context; the owned Context; run, ready;
-    // waiters; waiting_on and the two wait links; timer; operation and the all
-    // and warm links; warm and state padded; id; the record group; stack; sp,
-    // body; input and result; layout; failed padded; record; frame; stackless
-    // padded; moved; transfer; holder; cursor.
-    let task = 8 + 8 + context + 16 + 16 + 24 + 40 + 5 * 8 + 8 + 8 + 24 + 24 + 16 + 2 * 24
-        + 64 + 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8;
+    // host_files; isolates, step_bounds, step_slice_tail, regions, heap,
+    // frame_lists, spare_isolate_cell, foreign, contained, root_limit and
+    // root_refusal. Instances is a Vec on Linux and a unit struct on Apple.
+    let instances = match crate::host::HOST_TARGET.os() {
+        hirsel_core_layout::Os::Linux => 3 * 8,
+        hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => 0,
+    };
+    let context = 4 * 8 + (32 + 16 + 32) + 8 + 4 * 8 + 16 + 16 + 2 * 8 + 2 * 24 + 8 * 8 + instances;
+    // Four flags and polls_left; context pointer and owned Context; run and
+    // ready pointers; waiters, waiting_on and two wait links; timer; operation
+    // and four all/warm links; warm, channel tape and state padded; id.
+    let task_header = 8 + 8 + context + 16 + 16 + 24 + 40 + 5 * 8 + 8 + 8;
+    // Group; stack; sp and body; input and result pointers; storage Layout;
+    // TaskLayout. The root uses separate 16-byte input and 24-byte result stores.
+    let task_entry = 24 + 24 + 16 + 2 * 8 + 16 + 64;
+    let task_tail = 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8;
+    let task = task_header + task_entry + task_tail;
     let retained = 16 + 56 + 16 + 24 + task + 272 + 4096;
     // The Stamp takes one 24-byte native slot in the first chunk.
     let runtime_peaks = [

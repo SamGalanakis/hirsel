@@ -151,9 +151,9 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
-    "lines": 1474,
-    "raise_revision": 7,
-    "reason": "cli-s4-secret-2713"
+    "lines": 1475,
+    "raise_revision": 8,
+    "reason": "atomic-write-durability-2912"
   },
   "crates/hirsel-core-driver/src/native.rs": {
     "lines": 2768,

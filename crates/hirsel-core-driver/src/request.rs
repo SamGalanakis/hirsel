@@ -207,7 +207,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .iter()
             .any(|(id, _)| *id == crate::cli::OptionId::Lib);
         crate::cli::scaffold(Path::new(directory), library)?;
-        crate::package_store::atomic_write(
+        crate::fs::atomic_write(
             &Path::new(directory).join("hirsel.lock"),
             crate::package_lock::scaffold().as_bytes(),
         )?;

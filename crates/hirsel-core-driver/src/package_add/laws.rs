@@ -708,6 +708,50 @@ fn forms_that_fetch_nothing() {
     PackageLaw::pass(law.run(&["build", "work/apps/ui", "--frozen"]));
 }
 
+/// The view of `app/hirsel.lock` a power cut leaves right after `hirsel lock`
+/// returns, from the POSIX contract: an entry update is durable only once a
+/// fsync of its directory follows it, and a file's bytes only once a fsync of
+/// that file does. `testdata/durable_view.c` logs each sync; the durable entry
+/// is the inode the directory named at its last sync.
+#[test]
+fn s6_lock_survives_a_power_cut_after_it_returns() {
+    let law = PackageLaw::new();
+    law.app("app", "");
+    law.write("durable_view.c", include_str!("../testdata/durable_view.c"));
+    let super::Link::Driver(cc) = super::native_options(super::Backend::Cranelift, law.dir.path()).link else {
+        unreachable!()
+    };
+    let built = Command::new(cc)
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(law.path("durable_view.so"))
+        .arg(law.path("durable_view.c"))
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let log = law.path("durable.log");
+    let mut lock = law.command(&["lock", "app"], "packages");
+    lock.env("LD_PRELOAD", law.path("durable_view.so"))
+        .env("DURABLE_LOG", &log)
+        .env("DURABLE_DIR", law.path("app"))
+        .env("DURABLE_NAME", "hirsel.lock");
+    PackageLaw::pass(PackageLaw::output(lock));
+    let written = std::os::unix::fs::MetadataExt::ino(&fs::metadata(law.path("app/hirsel.lock")).unwrap());
+    let records = fs::read_to_string(&log).unwrap_or_default();
+    let mut entry = 0;
+    let mut synced = vec![];
+    for record in records.lines() {
+        let (kind, inode) = record.split_once(' ').unwrap();
+        let inode: u64 = inode.parse().unwrap();
+        match kind {
+            "dir" => entry = inode,
+            _ => synced.push(inode),
+        }
+    }
+    assert_eq!(entry, written, "the lock's rename is not durable: {records}");
+    assert!(synced.contains(&written), "the lock's bytes are not durable: {records}");
+}
+
 #[test]
 fn s9_add_forms_that_fetch_nothing() {
     forms_that_fetch_nothing();

@@ -1,7 +1,7 @@
+use crate::fs::atomic_write;
 use crate::package_content::{Id, Root};
 use crate::package_files::{Captured, FileId, WalkError, open_directory, walk};
 use crate::package_resolve::Resolution;
-use crate::package_store::atomic_write;
 use crate::package_workspace::Workspace;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};

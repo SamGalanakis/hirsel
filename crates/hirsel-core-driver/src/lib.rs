@@ -44,6 +44,7 @@ mod executable;
 mod host;
 pub use host::close_inherited_descriptors;
 mod flow;
+mod fs;
 mod instance_walk;
 mod instances;
 mod law_lock;

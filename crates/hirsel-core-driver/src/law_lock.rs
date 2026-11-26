@@ -401,7 +401,7 @@ pub(crate) fn update(directory: &Path, update: impl FnOnce(&mut Lock)) -> io::Re
     let path = directory.join(NAME);
     let mut lock = Lock::read(&path)?;
     update(&mut lock);
-    crate::package_store::atomic_write(&path, lock.text().as_bytes())
+    crate::fs::atomic_write(&path, lock.text().as_bytes())
 }
 
 fn site_key(test: &str, row: &LawRow) -> String {

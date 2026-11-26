@@ -80,18 +80,6 @@ fn id(file: &File) -> io::Result<(u64, u64)> {
     Ok((info.dev(), info.ino()))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path.parent().expect("internal file has a parent");
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(bytes)?;
-    file.as_file().sync_all()?;
-    // A libc rename, not tempfile's raw syscall, so the dev law faults can cut here.
-    let temp = file.into_temp_path();
-    fs::rename(&temp, path)?;
-    temp.keep()?;
-    open_dir(parent)?.sync_all()
-}
-
 fn decimal(text: &str) -> Option<u64> {
     let number: u64 = text.parse().ok()?;
     (number.to_string() == text && number != 0).then_some(number)
@@ -221,8 +209,8 @@ impl Directory {
         } else {
             let (number, path) = next_directory(&stores)?;
             let dir = open_dir(&path)?;
-            atomic_write(&path.join(MARKER), &marker(&dir)?)?;
-            atomic_write(&stores.join("current"), format!("{number}\n").as_bytes())?;
+            crate::fs::atomic_write(&path.join(MARKER), &marker(&dir)?)?;
+            crate::fs::atomic_write(&stores.join("current"), format!("{number}\n").as_bytes())?;
             (path, dir)
         };
         if let Some(sources) = sources {
@@ -339,7 +327,7 @@ impl Directory {
     }
 
     pub(super) fn save(&self, locator: &Locator) -> Result<(), Error> {
-        atomic_write(
+        crate::fs::atomic_write(
             &self.root.join("state.json"),
             &serde_json::to_vec(&(&self.store, id(&self.store_dir)?, locator))?,
         )?;

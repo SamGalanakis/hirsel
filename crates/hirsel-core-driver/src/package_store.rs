@@ -64,7 +64,7 @@ impl PackageStore {
     pub(crate) fn install(&self, archive: &PackageArchive) -> io::Result<()> {
         fs::create_dir_all(&self.path)?;
         for (root, library) in &archive.entries {
-            atomic_write(&self.path.join(root.hex()), &library.encoded)?;
+            crate::fs::atomic_write(&self.path.join(root.hex()), &library.encoded)?;
         }
         Ok(())
     }
@@ -87,7 +87,7 @@ impl PackageStore {
             }
         }
         let path = crate::host::fd_path(&directory)?.join(name);
-        atomic_write(&path, encoded)?;
+        crate::fs::atomic_write(&path, encoded)?;
         Ok(true)
     }
 
@@ -234,16 +234,4 @@ pub(crate) fn fetch_https(
         bytes.extend_from_slice(&chunk[..n]);
     }
     Ok(bytes)
-}
-
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path)?;
-    Ok(())
 }

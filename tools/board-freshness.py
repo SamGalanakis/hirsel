@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import fcntl
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -31,10 +32,11 @@ def last_complete(base, *, accepted_only=False):
     for finished, path in sorted(reports, reverse=True):
         report = read_report(path)
         status = report.get("exit_status")
+        markdown = path.with_suffix(".md")
         if (report.get("complete") is True and status in (0, 2, 3)
                 and (not accepted_only or status != 2 or path == promoted)
-                and path.with_name("board.md").is_file()):
-            return finished, report["commit"], path.with_name("board.md")
+                and markdown.is_file()):
+            return finished, report["commit"], markdown
     return None
 
 
@@ -151,11 +153,34 @@ def atomic_write(path, content):
         pending.replace(path)
 
 
+def service_failure(base, followups):
+    now = datetime.now(timezone.utc)
+    status = os.environ.get("MONITOR_EXIT_STATUS", "")
+    if os.environ.get("MONITOR_EXIT_CODE") == "exited" and status in ("1", "2", "3"):
+        outcome = {"1": "incomplete", "2": "refused", "3": "regressed"}[status]
+        detail = f"{outcome} (exit {status})"
+    else:
+        result = os.environ.get("MONITOR_SERVICE_RESULT", "unknown")
+        detail = f"failed ({result}{', status ' + status if status else ''})"
+    invocation = os.environ.get("MONITOR_INVOCATION_ID")
+    journal = (f"journalctl --user _SYSTEMD_INVOCATION_ID={invocation}" if invocation
+               else "journalctl --user -u hirsel-board.service")
+    line = f"{timestamp(now.timestamp())} Hirsel nightly board {detail}. See `{journal}`."
+    alerts = base / "alerts"
+    alerts.mkdir(exist_ok=True)
+    atomic_write(alerts / f"{now.date()}.txt", line + "\n")
+    with followups.open("a") as stream:
+        stream.write(f"\n- {line}\n")
+    print(line)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--current", type=Path)
     parser.add_argument("--alert", action="store_true")
+    parser.add_argument("--service-failure", type=Path, metavar="FOLLOWUPS",
+                        help="record the failing systemd invocation")
     parser.add_argument("--last-complete-commit", action="store_true")
     parser.add_argument("--record", type=Path, help="attempt run directory")
     parser.add_argument("--started", type=int)
@@ -169,6 +194,9 @@ def main():
     args.base.mkdir(parents=True, exist_ok=True)
     with (args.base / "freshness.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.service_failure:
+            service_failure(args.base, args.service_failure)
+            return
         if args.record:
             if args.started is None or not args.step:
                 parser.error("--record requires --started and --step")

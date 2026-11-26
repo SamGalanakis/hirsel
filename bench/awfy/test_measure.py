@@ -16,6 +16,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 import awfy_measure
+import board_baseline
 from board import EXPECTED, Board, measurement_slot, rebaseline, receipt
 from checkbox_gate import checkbox_value, session_rss_sample
 import bench_cpus
@@ -171,19 +172,27 @@ class BoardCompletion(unittest.TestCase):
 
                 path.write_text(json.dumps(report))
                 self.assertEqual(rebaseline(run), 0)
-                self.assertEqual(previous.readlink(), path)
+                snapshot = base / "baselines" / f"{report['commit']}.json"
+                self.assertEqual(previous.resolve(), snapshot)
+                self.assertFalse(snapshot.is_symlink())
+                self.assertEqual(snapshot.read_bytes(), path.read_bytes())
                 self.assertIn("measurement identity changed: affinity, argv, flags", output.getvalue())
 
-                report["instruction_comparison"] = {"status": "Within +2% on every row", "details": [
+                report["instruction_comparison"] = {"status": board_baseline.COMPARISON_PASSED, "details": [
                     "awfy/Json 1,000 -> 1,002 (+0.200%)",
                 ]}
                 report["size_comparison"] = ["REFUSED (size identity differs: strip_flags)"]
+                before = snapshot.read_bytes()
+                stat = snapshot.stat()
                 path.write_text(json.dumps(report))
+                self.assertEqual(snapshot.read_bytes(), before)
                 self.assertEqual(rebaseline(run), 0)
                 self.assertIn("measurement identity changed: strip_flags", output.getvalue())
+                with self.assertRaisesRegex(ValueError, "baseline changed"):
+                    rebaseline(run, base, snapshot, f"{stat.st_dev}:{stat.st_ino}")
 
     def board_fixture(self, out, omit_edit=False, sample_status="ok"):
-        board = Board(out, "abcd1234")
+        board = Board(out, "abcd1234" * 5)
         board.report["size_measurement"] = {
             "strip_version": "GNU strip 2.42", "strip_flags": ["--strip-all"],
             "verified_workloads": sorted(awfy_measure.EXPECTED["AWFY original"]),
@@ -226,7 +235,7 @@ class BoardCompletion(unittest.TestCase):
                 return ("toggles_per_second",), {"toggles_per_second": 450}
             return ("server_rss_bytes",), {"server_rss_bytes": 4096, "connections": 64}
         return ("instructions", "cycles"), {
-            "instructions": 123, "cycles": 99, "verified": True,
+            "instructions": 123, "cycles": 99, "verified": True, "max_rss_kib": "1000",
             "pmu_times_ns": {event: [[100, 100]] for event in ("instructions:u", "cycles:u")},
         }
 

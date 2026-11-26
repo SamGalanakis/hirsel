@@ -37,7 +37,7 @@ class InstructionGuard(unittest.TestCase):
             "image_sha256": "f" * 64,
             "marker": stdout,
             "stdout": stdout,
-            "sample": {"status": "ok", "verified": True, "instructions": 69_882_571,
+            "sample": {"status": "ok", "verified": True, "instructions": 69_882_571, "max_rss_kib": "1000",
                        "pmu_times_ns": {"instructions:u": [[1_000_000, 1_000_000]]}},
         }]
         with tempfile.TemporaryDirectory() as temp:
@@ -74,6 +74,30 @@ class InstructionGuard(unittest.TestCase):
             result = compare(injected, "--aa")
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("CLBG::Mandelbrot 69,882,571 -> 71,302,841 (+2.032%) FAIL", result.stdout)
+
+            compile_rows = [
+                deepcopy(baseline["rows"][0]) | {"key": f"compile/LangArena {mode}", "suite": "compile", "mode": mode}
+                for mode in ("cold", "edit")
+            ]
+            rss_baseline = deepcopy(baseline)
+            rss_baseline["rows"].extend(compile_rows)
+            rss_baseline["expected_rows"].extend(row["key"] for row in compile_rows)
+            base.write_text(json.dumps(rss_baseline))
+            for index, row in enumerate(rss_baseline["rows"]):
+                with self.subTest(rss_row=row["key"]):
+                    changed = deepcopy(rss_baseline)
+                    sample = changed["rows"][index]["sample"]
+                    sample["max_rss_kib"] = 1050
+                    self.assertEqual(compare(changed, "--aa").returncode, 0)
+                    sample["max_rss_kib"] = 1051
+                    result = compare(changed, "--aa")
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(f"{row['key']} peak RSS 1,000 -> 1,051 KiB (+5.100%) FAIL", result.stdout)
+                    del sample["max_rss_kib"]
+                    result = compare(changed, "--aa")
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("lacks a positive max_rss_kib sample", result.stderr)
+            base.write_text(json.dumps(baseline))
 
             for field, value in (("affinity", [11]), ("argv", ["./clbg-64", "one-iteration.json", "other"])):
                 with self.subTest(field=field):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample checked release rows and compare their user-instruction receipts."""
+"""Sample checked release rows and compare their instructions and peak RSS."""
 import argparse
 from contextlib import contextmanager, nullcontext
 from decimal import Decimal, InvalidOperation
@@ -28,6 +28,7 @@ from timing_shield import file_locks, hold, measurement_affinity
 VERSION = 6
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
+RSS_LIMIT = 5
 GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
@@ -326,6 +327,15 @@ def validate_row(key, row):
         raise ValueError("lacks a verified instruction sample")
 
 
+def peak_rss_kib(row):
+    value = row["sample"].get("max_rss_kib")
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        value = int(value)
+    if type(value) is not int or value <= 0:
+        raise ValueError("lacks a positive max_rss_kib sample")
+    return value
+
+
 def rows_from(path):
     rows, refusals = instruction_rows(path)
     if refusals:
@@ -368,18 +378,18 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
             if key not in before or key not in after:
                 raise ValueError("row sets differ")
             left, right = before[key], after[key]
+            rss = []
             for path, row in ((before_path, left), (after_path, right)):
                 try:
                     validate_row(key, row)
+                    rss.append(peak_rss_kib(row))
                 except INVALID_RECEIPT as error:
                     raise ValueError(f"{path}: {error}") from error
             candidate_pairs.add(match_rows(key, left, right))
+            matched.append((key, left["sample"]["instructions"], right["sample"]["instructions"], *rss))
         except INVALID_RECEIPT as error:
             refusals[key] = str(error)
             print(f"{key} REFUSED ({error})", file=sys.stderr)
-            continue
-
-        matched.append((key, left["sample"]["instructions"], right["sample"]["instructions"]))
 
     changed_pairs = sorted((left, right) for left, right in candidate_pairs if left != right)
     if aa and changed_pairs:
@@ -395,12 +405,17 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
 
     failed = False
     ratios = []
-    for key, baseline, candidate in matched:
+    for key, baseline, candidate, baseline_rss, candidate_rss in matched:
         percent = Decimal(100) * (candidate - baseline) / baseline
         breach = percent > threshold
         failed |= breach
         ratios.append(candidate / baseline)
         print(f"{key} {baseline:,} -> {candidate:,} ({percent:+.3f}%){' FAIL' if breach else ''}")
+        rss_percent = Decimal(100) * (candidate_rss - baseline_rss) / baseline_rss
+        rss_breach = rss_percent > RSS_LIMIT
+        failed |= rss_breach
+        print(f"{key} peak RSS {baseline_rss:,} -> {candidate_rss:,} KiB "
+              f"({rss_percent:+.3f}%){' FAIL' if rss_breach else ''}")
     for index, field in enumerate(CANDIDATE_HASHES):
         values = sorted({(left[index], right[index]) for left, right in changed_pairs})
         for left, right in values:
@@ -410,7 +425,8 @@ def compare(before_path, after_path, threshold, *, aa=False, expected=None, bloc
                 print(f"Variable {field} {left} -> {right}")
     if ratios:
         geomean = math.expm1(math.fsum(map(math.log, ratios)) / len(ratios)) * 100
-        print(f"{len(ratios)} rows compared, geomean {geomean:+.3f}%, threshold +{threshold}%")
+        print(f"{len(ratios)} rows compared, instruction geomean {geomean:+.3f}%, "
+              f"instruction limit +{threshold}%, peak RSS limit +{RSS_LIMIT}%")
     return REFUSED if refusals else int(failed)
 
 
@@ -914,7 +930,7 @@ def main():
     for suite in ("awfy", "pool", "arena"):
         sampling.add_argument(f"--candidate-{suite}-build", type=lambda path: Path(path).resolve())
     sampling.add_argument("--threshold", type=threshold, metavar="PERCENT")
-    comparison = commands.add_parser("compare", help="compare matched instruction receipts")
+    comparison = commands.add_parser("compare", help="compare instructions and peak RSS in matched receipts")
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")

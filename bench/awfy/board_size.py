@@ -1,4 +1,5 @@
 """Validate nightly size rows and diagnose archived ELF growth."""
+from pathlib import Path
 import re
 
 import awfy_measure
@@ -33,7 +34,12 @@ def size_changes(reference, candidate):
 
 
 def size_census(baseline, candidate, reference, report, side):
-    archives = [path.parent / "awfy" / f"{side}-harness" for path in (baseline, candidate)]
+    baseline_dir = baseline.parent
+    if baseline.name != "board.json":
+        # A promoted receipt is copied without its workload logs or binaries.
+        bounce = rows_by_label(reference)["AWFY original", "Bounce"]["samples"][side]
+        baseline_dir = Path(bounce["directory"]).parents[2]
+    archives = [path / "awfy" / f"{side}-harness" for path in (baseline_dir, candidate.parent)]
     result = elf_census.census(*archives)
     for name, board in (("baseline", reference), ("candidate", report)):
         sample = rows_by_label(board)["Size", SIZE_ROW]["samples"][side]

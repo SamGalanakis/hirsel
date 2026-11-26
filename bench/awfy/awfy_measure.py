@@ -20,6 +20,7 @@ from elf_census import STRIP_FLAGS, strip_image
 
 
 SIDES = ("hirsel", "rust", "goose")
+MATMUL_WORKERS = {"Matmul::T4": 4, "Matmul::T8": 8, "Matmul::T16": 16}
 SUITES = {"awfy": "AWFY original", "pool": "AWFY pool/index", "arena": "LangArena", "compile": "Compile"}
 EXPECTED = {
     "AWFY original": (
@@ -58,6 +59,18 @@ HELLO = rb"Hello, world!\n"
 CORE_MEASURE = importlib.util.spec_from_file_location("core_measure", ROOT / "core/tools/measure.py")
 core_measure = importlib.util.module_from_spec(CORE_MEASURE)
 CORE_MEASURE.loader.exec_module(core_measure)
+
+
+def row_label(name):
+    return f"{name} (single CPU)" if name in MATMUL_WORKERS else name
+
+
+def matmul_notes(name):
+    if width := MATMUL_WORKERS.get(name):
+        return (f"Hirsel submits {width} row blocks to one worker for the process run. "
+                f"Rust creates and drops a {width}-worker Rayon pool each iteration. "
+                f"Goose starts {width} workers at construction and joins them at checksum time. "
+                "All workers share the measurement CPU.")
 
 
 @contextmanager

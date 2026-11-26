@@ -1,0 +1,12 @@
+[Unit]
+Description=Measure the nightly Hirsel board
+OnFailure=hirsel-board-alert.service
+
+[Service]
+Type=oneshot
+CPUAffinity=8-11
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HIRSEL_BOARD_BASE=%h/.local/share/hirsel-board
+ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-board/main fetch --quiet origin main
+# Select the script from the fetched revision under the same lock as manual runs.
+ExecStart=/usr/bin/flock --close %h/.local/share/hirsel-board/nightly.lock /bin/bash -c 'cd "$$1" && { git switch --quiet --detach origin/main || { git status --porcelain >&2; exit 2; }; } && exec ./tools/nightly-board.sh --locked --fetched' _ %h/.local/share/hirsel-board/main

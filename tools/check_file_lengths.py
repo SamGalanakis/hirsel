@@ -16,7 +16,6 @@ EXCLUDED_TREES = (
     'third_party/',  # Vendored third-party dependencies.
     'third-party/',  # Vendored headers and generated dependency inputs.
     'vendor/',  # Vendored dependencies.
-    'bench/langarena/',  # Upstream LangArena reference code.
     'core/langarena/rust/',  # The upstream LangArena Rust suite and its dependencies.
     'editors/tree-sitter-hirsel/src/tree_sitter/',  # Tree-sitter's bundled headers.
 )

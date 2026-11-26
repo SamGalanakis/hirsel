@@ -44,11 +44,26 @@ trap finish EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 record
-taskset -c 8-11 git -C "$base/main" fetch -q origin main
+if [[ ${2:-} != --fetched ]]; then
+  taskset -c 8-11 git -C "$base/main" fetch -q origin main
+fi
 step="check out origin/main"
 cd "$base/main"
-commit=$(git rev-parse --verify origin/main)
-taskset -c 8-11 git switch -q --detach "$commit"
+if [[ ${2:-} == --fetched ]]; then
+  commit=$(git rev-parse --verify HEAD)
+else
+  commit=$(git rev-parse --verify origin/main)
+  if ! taskset -c 8-11 git switch -q --detach "$commit"; then
+    git status --porcelain | tee -a "$run/run.log" >&2
+    exit 2
+  fi
+fi
+step="check clean checkout"
+checkout_status=$(git status --porcelain)
+if [[ -n "$checkout_status" ]]; then
+  printf '%s\n' "$checkout_status" | tee -a "$run/run.log" >&2
+  exit 2
+fi
 checkout=$PWD
 boat_status=0
 step="Boat screen"
@@ -87,9 +102,13 @@ done
 baseline=()
 # Pass the pointer as a positional argument to the shell inside flock.
 # shellcheck disable=SC2016
-baseline_path=$(flock --close "$base/baseline.lock" bash -c '
-  if [[ -e "$1" || -L "$1" ]]; then realpath -m -- "$1"; fi
+baseline_state=$(flock --close "$base/baseline.lock" bash -c '
+  if [[ -e "$1" || -L "$1" ]]; then
+    realpath -m -- "$1" && stat -Lc "%d:%i" -- "$1"
+  fi
 ' _ "$base/last-complete.json")
+baseline_path=${baseline_state%%$'\n'*}
+baseline_inode=${baseline_state#*$'\n'}
 if [[ -n "$baseline_path" ]]; then
   baseline=(--baseline "$baseline_path")
 fi
@@ -109,16 +128,11 @@ taskset -c 8-11,16-19 python3 bench/awfy/board.py "$run/board" \
 if (( status == 0 )); then
   step="promote baseline"
   taskset -c 8-11 python3 bench/awfy/board.py rebaseline "$run" \
-    --base "$base" --expected-baseline "$baseline_path" >>"$run/run.log" 2>&1 || status=$?
+    --base "$base" --expected-baseline "$baseline_path" --expected-baseline-inode "$baseline_inode" \
+    >>"$run/run.log" 2>&1 || status=$?
 elif (( status == 2 )); then
   step="board comparison"
-  if [[ -n "$baseline_path" ]] && taskset -c 8-11 python3 bench/awfy/board.py rebaseline "$run" \
-      --base "$base" --expected-baseline "$baseline_path" >>"$run/run.log" 2>&1; then
-    step="rebaseline"
-    status=0
-  else
-    echo "Comparison refused. Baseline retained." >>"$run/run.log"
-  fi
+  echo "Comparison refused. Baseline retained." >>"$run/run.log"
 elif (( status == 3 )); then
   step="board comparison"
 fi

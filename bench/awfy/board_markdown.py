@@ -1,5 +1,6 @@
 """Render the human-readable nightly goal board."""
 
+import awfy_measure
 import board_host
 import board_size
 
@@ -17,7 +18,7 @@ def render(report, expected, density_goal):
             for side in ("rust", "goose"):
                 value = row["ratios"][side].get(metric)
                 cells.append(f"{value:.4f}×" if value is not None else "n/a")
-            lines.append("| " + " | ".join((row["goal"], row["row"], metric, *cells,
+            lines.append("| " + " | ".join((row["goal"], awfy_measure.row_label(row["row"]), metric, *cells,
                                               row["commit"][:8])) + " |")
     if density := report.get("place_density"):
         lines += ["", f"## Place density, {density['places']} live Places", "", density["note"], "",
@@ -39,7 +40,7 @@ def render(report, expected, density_goal):
         lines += ["", f"Board exit status {report['exit_status']}"]
     comparison = report.get("instruction_comparison")
     if comparison:
-        lines += ["", "## Nightly instruction comparison", "", comparison["status"], "",
+        lines += ["", "## Nightly instructions and peak RSS comparison", "", comparison["status"], "",
                   *comparison["details"]]
     for gate in ("size", "checkbox"):
         if comparison := report.get(f"{gate}_comparison"):

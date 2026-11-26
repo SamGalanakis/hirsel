@@ -184,6 +184,8 @@ environment setting to stay inside the board's existing resource limits.
 - The instruction gate flags a Hirsel increase greater than 2% on any row.
   Hirsel and peer CPU counters require equal enabled and running times.
   A refused row is reported alongside comparisons for the remaining rows.
+- The peak RSS gate flags a Hirsel increase greater than 5% on any matched
+  runtime or compile row. It uses the recorded `max_rss_kib` sample.
 - The size gate reports changes for each stripped original-14 harness and
   flags Hirsel growth of 2,048 bytes or more. The receipt includes the strip
   version and options and SHA-256 hashes of the stripped and original binaries.
@@ -207,8 +209,13 @@ python3 bench/awfy/board.py rebaseline "$out"
 ```
 
 The command validates the run and prints its commit and the reason it was
-promoted. It also accepts a clean wrapper run directory and updates
-`~/.local/share/hirsel-board/last-complete.json` atomically.
+promoted. It also accepts a wrapper run directory. It copies the promoted
+receipt to `~/.local/share/hirsel-board/baselines/<commit>.json` and updates
+`last-complete.json` atomically.
+
+The `hirsel-board.timer` user unit starts the board at 03:15 UTC. A failed
+service writes `~/.local/share/hirsel-board/alerts/<UTC-date>.txt` and appends
+the alert to `followups.md`.
 
 ## Screen two revisions on Boat
 

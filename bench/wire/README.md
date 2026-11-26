@@ -127,9 +127,8 @@ Goose `src/runtime/runtime_os.h:88-110,240-264` supplies the file/directory sync
 ordering precedent, but whole-file replacement is unsuitable for group commit.
 The fan-out adapts tokio-tungstenite `examples/server.rs:44-65`; its unbounded
 channels are replaced with Tokio bounded mpsc plus chunk coalescing. Tungstenite
-owns RFC framing and masking. No protocol implementation is copied. Open-loop scheduling adapts
-`bench/apps/tasks/rust/src/bin/load.rs:114-157`; its per-request spawning is
-replaced with bounded per-connection arrivals to preserve one in-flight Call
+owns RFC framing and masking. No protocol implementation is copied. Open-loop
+scheduling uses bounded per-connection arrivals to preserve one in-flight Call
 per stream. Echo measures the generator separately. Goose has no implemented
 network benchmark to adopt.
 

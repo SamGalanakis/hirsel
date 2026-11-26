@@ -1,10 +1,13 @@
 """Classify baseline refusals and publish validated boards."""
 from pathlib import Path
 import re
+from shutil import copy2
 import tempfile
 
 import receipt
 from receipt import measurement_slot
+
+COMPARISON_PASSED = "Instructions within +2%, peak RSS within +5%"
 
 
 def rows_by_label(report):
@@ -20,7 +23,7 @@ def rows_by_label(report):
 def refused_identity_fields(report, keys, size_identity):
     instruction = report["instruction_comparison"]
     size, checkbox = report["size_comparison"], report["checkbox_comparison"]
-    if (instruction["status"] not in ("Within +2% on every row", "Refused")
+    if (instruction["status"] not in (COMPARISON_PASSED, "Refused")
             or any(line.endswith(" FAIL") for line in (*instruction["details"], *size, *checkbox))
             or any("REFUSED" in line for line in checkbox)):
         return set()
@@ -55,16 +58,34 @@ def refused_identity_fields(report, keys, size_identity):
     return changed
 
 
-def promote(path, base, expected_baseline):
+def promote(path, base, expected_baseline=None, expected_inode=None):
+    commit = receipt.read(path)["commit"]
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("invalid baseline commit")
     base = base if base is not None else Path.home() / ".local/share/hirsel-board"
-    base.mkdir(parents=True, exist_ok=True)
+    baselines = base / "baselines"
+    baselines.mkdir(parents=True, exist_ok=True)
     baseline = base / "last-complete.json"
+    snapshot = baselines / f"{commit}.json"
     with measurement_slot(base / "baseline.lock"):
         if expected_baseline is not None:
             target = baseline.resolve() if baseline.exists() or baseline.is_symlink() else ""
             if target != expected_baseline:
                 raise ValueError("baseline changed since the nightly comparison")
+            if expected_inode and target:
+                stat = target.stat()
+                if f"{stat.st_dev}:{stat.st_ino}" != expected_inode:
+                    raise ValueError("baseline changed since the nightly comparison")
         with tempfile.TemporaryDirectory(dir=base) as scratch:
-            link = Path(scratch) / "baseline"
-            link.symlink_to(path)
+            scratch = Path(scratch)
+            copy2(path, scratch / "board.json")
+            markdown = path.with_suffix(".md")
+            if markdown.is_file():
+                copy2(markdown, scratch / "board.md")
+                (scratch / "board.md").replace(snapshot.with_suffix(".md"))
+            else:
+                snapshot.with_suffix(".md").unlink(missing_ok=True)
+            link = scratch / "baseline"
+            link.symlink_to(snapshot.relative_to(base))
+            (scratch / "board.json").replace(snapshot)
             link.replace(baseline)

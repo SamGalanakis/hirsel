@@ -68,7 +68,8 @@ NOTES = (
     "for byte, with upstream checksums. Each AWFY row verifies the reference result internally. "
     "The startup rows report a representative whole process with one iteration and no warmup. "
     "LangArena startup uses the one-iteration Rust oracle. The ports use different libraries and layouts.",
-    "The nightly instruction gate flags Hirsel increases above 2%. All CPU counters must be fully active. "
+    "The nightly gates flag Hirsel increases above 2% in instructions or above 5% in peak RSS. "
+    "All CPU counters must be fully active. "
     "The size row measures each original-14 harness after GNU strip, reports growth, and flags Hirsel "
     "increases of 2,048 bytes or more. The compile rows keep dependencies built and use one Cargo "
     "codegen unit with release incremental enabled. The warm edit rebuilds code and changes "
@@ -231,7 +232,7 @@ class Board:
         except receipt.INVALID_RECEIPT as error:
             instructions = receipt.REFUSED
             print(f"REFUSED ({error})", file=output)
-        status = ("Within +2% on every row", "Instruction regression", "Refused")[instructions]
+        status = (board_baseline.COMPARISON_PASSED, "Instruction or peak RSS regression", "Refused")[instructions]
         details = output.getvalue().splitlines()
         self.report["instruction_comparison"] = {"status": status, "details": details, **receipt_change}
 
@@ -357,16 +358,6 @@ def sample_runtime(row, commands, directory, samples_dir, env, siblings, index, 
     return samples
 
 
-def matmul_notes(name):
-    widths = {"Matmul::T4": 4, "Matmul::T8": 8, "Matmul::T16": 16}
-    if name in widths:
-        width = widths[name]
-        return (f"Hirsel submits {width} row blocks to one worker for the process run. "
-                f"Rust creates and drops a {width}-worker Rayon pool each iteration. "
-                f"Goose starts {width} workers at construction and joins them at checksum time. "
-                "All workers share the measurement CPU.")
-
-
 def runtime_rows(board, suite, directory, upstream, tools, *, config=None, startup=False, extended=False):
     goal = awfy_measure.SUITES[suite]
     rows = (awfy_measure.arena_rows(directory, config) if config is not None
@@ -395,7 +386,7 @@ def runtime_rows(board, suite, directory, upstream, tools, *, config=None, start
         if all(sample["verified"] for sample in samples.values()):
             verified.append(name)
         metrics = ("seconds",) if startup else ("seconds", "instructions") if suite == "arena" else ("instructions",)
-        board.row(title, label, samples, metrics, notes=matmul_notes(name))
+        board.row(title, label, samples, metrics, notes=awfy_measure.matmul_notes(name))
         if not extended and suite != "arena" and name == startup_name:
             board.row("Startup", startup_label,
                       {side: sample.copy() for side, sample in samples.items()}, ("seconds",))
@@ -1008,7 +999,9 @@ def required_peers(selected):
 
 
 def validate_sources(args, selected):
-    if git(ROOT, "status", "--porcelain"):
+    status = subprocess.check_output(["git", "-C", ROOT, "status", "--porcelain"], text=True)
+    if status:
+        print(status, file=sys.stderr, end="")
         raise ValueError("run the board from a clean Hirsel checkout")
     peers = required_peers(selected)
     for name, commit in PINS.items():
@@ -1327,11 +1320,14 @@ def comparison_measurement_hold(args, evidence):
 
 def validate_baseline(path, report):
     rows = rows_by_label(report)
+    instructions = receipt.rows_from(path)
     if (report["complete"] is not True
             or rows.keys() != {(goal, name) for goal, names in EXPECTED.items() for name in names}
             or any(row["status"] != "ok" for row in rows.values()) or inactive_counters(report)
-            or receipt.rows_from(path).keys() != set(instruction_keys())):
+            or instructions.keys() != set(instruction_keys())):
         raise ValueError(f"{path}: a baseline requires all current rows and fully active counters")
+    for row in instructions.values():
+        receipt.peak_rss_kib(row)
     if report["size_measurement"]["verified_workloads"] != sorted(EXPECTED["AWFY original"]):
         raise ValueError(f"{path}: size requires all original-14 workloads")
     board_size.size_changes(report, report)
@@ -1340,7 +1336,7 @@ def validate_baseline(path, report):
         list(checkbox_changes(row, row, metric))
 
 
-def rebaseline(run, base=None, expected_baseline=None):
+def rebaseline(run, base=None, expected_baseline=None, expected_inode=None):
     path = run / "board.json"
     if not path.is_file():
         path = run / "board/board.json"
@@ -1353,7 +1349,7 @@ def rebaseline(run, base=None, expected_baseline=None):
     if report["complete"] is not True or report["failures"] or (exit_status != 0 and not changed):
         raise ValueError(f"{path}: rebaseline requires a complete run with clean gates or identity-only refusals")
     validate_baseline(path, report)
-    board_baseline.promote(path, base, expected_baseline)
+    board_baseline.promote(path, base, expected_baseline, expected_inode)
     reason = f"measurement identity changed: {', '.join(sorted(changed))}" if changed else "it is a complete, clean board"
     print(f"Promoted {path} ({report['commit']}) because {reason}.")
     return 0
@@ -1386,9 +1382,10 @@ def main():
         parser.add_argument("--base", type=Path)
         parser.add_argument("--expected-baseline", type=lambda value: Path(value) if value else "",
                             help="compared board.json path, or an empty string for no previous baseline")
+        parser.add_argument("--expected-baseline-inode", help="device and inode of the compared board.json")
         args = parser.parse_args(sys.argv[2:])
         try:
-            return rebaseline(args.run, args.base, args.expected_baseline)
+            return rebaseline(args.run, args.base, args.expected_baseline, args.expected_baseline_inode)
         except (*receipt.INVALID_RECEIPT, ArithmeticError) as error:
             print(f"rebaseline refused: {error}", file=sys.stderr)
             return receipt.REFUSED

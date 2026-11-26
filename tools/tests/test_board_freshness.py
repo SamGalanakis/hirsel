@@ -73,12 +73,13 @@ esac
                                 "commit", "--allow-empty", "-qm", message], check=True)
             previous = subprocess.check_output(["git", "-C", main, "rev-parse", "HEAD^"], text=True).strip()
             subprocess.run(["git", "-C", main, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
-            previous_board = base / "previous-board"
+            previous_board = base / "baselines"
             previous_board.mkdir()
-            (previous_board / "board.json").write_text(
+            previous_snapshot = previous_board / f"{previous}.json"
+            previous_snapshot.write_text(
                 json.dumps({"complete": True, "commit": previous, "exit_status": 0}),
             )
-            (previous_board / "board.md").write_text("Previous complete board\n")
+            previous_snapshot.with_suffix(".md").write_text("Previous complete board\n")
             taskset = base / "taskset"
             taskset.write_text(r'''#!/bin/bash
 shift 2
@@ -90,19 +91,21 @@ case "$1 $2 $3" in
     python3 -c 'from pathlib import Path
 from board_baseline import promote
 import sys
-run, base, previous = sys.argv[1:]
-promote(Path(run) / "board/board.json", Path(base), Path(previous) if previous else "")' "$4" "$6" "$8" ;;
+run, base, previous, inode = sys.argv[1:]
+promote(Path(run) / "board/board.json", Path(base), Path(previous) if previous else "", inode)' "$4" "$6" "$8" "${10}" ;;
   'python3 bench/awfy/board.py '*)
     mkdir -p "$3"
-    printf '{"complete":true,"commit":"%s","exit_status":0}\n' "$(git rev-parse HEAD)" >"$3/board.json"
-    touch "$3/board.md" "${HIRSEL_BOARD_BASE}/board-completed" ;;
+    printf '{"complete":true,"commit":"%s","exit_status":%s}\n' \
+      "$(git rev-parse HEAD)" "$FIXTURE_BOARD_STATUS" >"$3/board.json"
+    touch "$3/board.md" "${HIRSEL_BOARD_BASE}/board-completed"
+    exit "$FIXTURE_BOARD_STATUS" ;;
   'python3 tools/buck2/prepare.py ') exit 0 ;;
   '.buck2/bin/buck2 build -j4') echo '{"root//:hirsel-toolchain":"prefix"}' ;;
   'python3 core/tools/law_board.py check')
-    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == --compiler && $# == 5 ]] || exit 90
+    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == --compiler && "$6" == --compiler-scratch ]] || exit 90
     exit 0 ;;
   'python3 core/tools/law_board.py nightly')
-    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$6" == --commit && "$7" == "$FIXTURE_PREVIOUS" ]] || exit 90
+    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$8" == --commit && "$9" == "$FIXTURE_PREVIOUS" ]] || exit 90
     echo "fixture: weaker property row"
     exit 1 ;;
   'python3 core/tools/sim_campaign.py --compiler') exit 0 ;;
@@ -114,39 +117,69 @@ promote(Path(run) / "board/board.json", Path(base), Path(previous) if previous e
 esac
 ''')
             taskset.chmod(0o755)
-            for campaign_status in (0, 1, 75):
-                with self.subTest(campaign_status=campaign_status):
+            for board_status, campaign_status in ((0, 0), (0, 1), (0, 75), (2, 0)):
+                with self.subTest(board_status=board_status, campaign_status=campaign_status):
                     (base / "board-completed").unlink(missing_ok=True)
                     (base / "last-screen-inputs").unlink(missing_ok=True)
                     if campaign_status != 0:
                         (base / "last-screen-inputs").symlink_to(previous_board)
                     (base / "last-complete.json").unlink(missing_ok=True)
-                    (base / "last-complete.json").symlink_to(previous_board / "board.json")
-                    os.utime(previous_board / "board.json")
+                    (base / "last-complete.json").symlink_to(previous_snapshot)
+                    os.utime(previous_snapshot)
+                    baseline_bytes = (base / "last-complete.json").read_bytes()
+                    commit = subprocess.check_output(["git", "-C", main, "rev-parse", "HEAD"], text=True).strip()
+                    snapshot = base / "baselines" / f"{commit}.json"
+                    snapshot.unlink(missing_ok=True)
                     result = subprocess.run(
                         [TOOLS / "nightly-board.sh"], capture_output=True, text=True,
                         env=os.environ | {"HIRSEL_BOARD_BASE": str(base),
                                           "HIRSEL_BOARD_CURRENT": str(base / "CURRENT-BOARD.md"),
                                           "HIRSEL_VOPR_LEDGER": str(base / "seeds.sqlite"),
+                                          "FIXTURE_BOARD_STATUS": str(board_status),
                                           "FIXTURE_VOPR_STATUS": str(campaign_status),
                                           "FIXTURE_PREVIOUS": previous,
                                           "PYTHONPATH": str(TOOLS.parent / "bench/awfy"),
                                           "PATH": f"{base}:{os.environ['PATH']}"},
                     )
-                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.returncode, board_status, result.stderr)
                     current = (base / "CURRENT-BOARD.md").read_text()
-                    self.assertIn("**Passed** · yes", current)
+                    self.assertIn(f"**Passed** · {'yes' if board_status == 0 else 'no'}", current)
                     boat_status = 0 if campaign_status == 0 else 7
                     self.assertIn(f"Boat exit {boat_status} · VOPR exit {campaign_status}", current)
                     self.assertIn("Laws exit 1", current)
                     run = Path(result.stdout.strip())
-                    self.assertEqual((base / "last-complete.json").resolve(), run / "board/board.json")
                     log = (run / "run.log").read_text()
+                    if board_status == 2:
+                        self.assertEqual((base / "last-complete.json").resolve(), previous_snapshot)
+                        self.assertEqual((base / "last-complete.json").read_bytes(), baseline_bytes)
+                        self.assertFalse(snapshot.exists())
+                        self.assertIn("Comparison refused. Baseline retained.", log)
+                    else:
+                        self.assertEqual((base / "last-complete.json").resolve(), snapshot)
+                        self.assertEqual(snapshot.read_bytes(), (run / "board/board.json").read_bytes())
                     self.assertIn("fixture: weaker property row", log)
                     if campaign_status == 1:
                         self.assertIn("VOPR campaign exited 1", log)
                     if campaign_status == 75:
                         self.assertIn("VOPR deferred", log)
+
+    def test_service_failure_writes_dated_alert_and_followup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            followups = base / "followups.md"
+            followups.write_text("Existing entry\n")
+            for status, outcome in ((1, "incomplete"), (2, "refused"), (3, "regressed")):
+                result = subprocess.check_output(
+                    [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups],
+                    env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": str(status),
+                                      "MONITOR_INVOCATION_ID": "a" * 32},
+                    text=True,
+                )
+                self.assertRegex(result, r"^\d{4}-\d{2}-\d{2} .* UTC Hirsel nightly board ")
+                self.assertIn(f"{outcome} (exit {status})", result)
+                self.assertEqual((base / "alerts" / f"{result[:10]}.txt").read_text(), result)
+                self.assertIn("- " + result, followups.read_text())
+            self.assertTrue(followups.read_text().startswith("Existing entry\n"))
 
     def test_failed_fetch_preserves_last_complete_and_alerts_when_stale(self):
         with tempfile.TemporaryDirectory() as directory:

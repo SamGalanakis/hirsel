@@ -229,7 +229,8 @@ def markdown(report):
             if coverage:
                 status += " (" + ", ".join(f"{arm} {matched}/{total}"
                                            for arm, (matched, total) in coverage.items()) + ")"
-            lines.append("| " + " | ".join((row["goal"], row["row"], metric, *values, *ratios, status)) + " |")
+            lines.append("| " + " | ".join((row["goal"], awfy_measure.row_label(row["row"]),
+                                             metric, *values, *ratios, status)) + " |")
     lines += ["", "## Qualification", ""]
     for row in report["rows"]:
         if row["issues"] and row["issues"].get("export") != report.get("units", {}).get("reason"):

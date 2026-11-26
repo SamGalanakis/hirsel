@@ -4,7 +4,7 @@ pub opaque type PromptInput {
     lines: std.io.Lines
 }
 
-pub type PromptError = PromptUnavailable | PromptRead(std.io.Error) | PromptWrite(WriteError)
+pub type PromptError = PromptUnavailable | PromptRead(std.io.Error) | PromptWrite(WriteError) | PromptSecret(stdin.SecretReadError)
 
 /// Prepare a reader to reuse for successive prompts. Buffered input stays in the reader.
 pub fn prompt_input(i: Stdin, max_bytes: u64) -> PromptInput {
@@ -36,6 +36,22 @@ pub fn prompt_line(mut reader: PromptInput, err: Stderr, message: String, no_inp
         Ok(true) => Ok(Some(take line)),
         Ok(false) => Ok(None),
         Error(e) => Error(PromptRead(e)),
+    }
+}
+
+/// Write a sanitized prompt on stderr and read one line from the terminal with echo off,
+/// as a Secret with policy `uses`. Returns None at EOF and PromptUnavailable when input
+/// is disabled or stdin is a pipe. The line goes to the host, never to program memory.
+pub fn prompt_secret(i: Stdin, err: Stderr, message: String, uses: String, no_input: bool) -> Result[Option[Secret], PromptError] waits {
+    if !can_prompt(i, no_input) {
+        return Error(PromptUnavailable)
+    }
+    prompt_text(err, message)?
+    match stdin.read_secret(i, uses, Never) {
+        Ok(take secret) => Ok(Some(take secret)),
+        Error(NotTerminal) => Error(PromptUnavailable),
+        Error(Eof) => Ok(None),
+        Error(e) => Error(PromptSecret(e)),
     }
 }
 

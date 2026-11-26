@@ -156,6 +156,12 @@ prompt. It retains any bytes buffered for later lines.
 `cli.prompt_line(mut reader, err, text, no_input)` writes a sanitized prompt to
 stderr and reads one UTF-8 line, stripping LF or CRLF. It returns `None` at EOF
 and `PromptUnavailable` if stdin is a pipe or `--no-input` is set.
+`cli.prompt_secret(i, err, text, uses, no_input)` writes the prompt the same way, then
+reads one line with echo off through `stdin.read_secret` and returns it as a `Secret`
+with policy `uses`. The program never holds the typed bytes. It returns `None` at EOF,
+`PromptUnavailable` as `prompt_line` does, and `PromptSecret(e)` for the read's other
+errors, such as `Empty`, `TooLong`, `Busy` or `Policy`. The terminal discards
+typed-ahead input when echo goes off, so a line buffered in a reader is not the secret.
 `cli.confirm(mut reader, err, question, assume_yes, no_input)` accepts `y` or
 `yes` after ASCII trimming and case folding. `--yes` accepts immediately.
 Otherwise, EOF, a different answer or unavailable input declines.

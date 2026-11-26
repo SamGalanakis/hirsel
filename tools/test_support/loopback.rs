@@ -116,25 +116,34 @@ pub fn owns_client(pid: u32, client: SocketAddr, server: SocketAddr) -> io::Resu
     }
     let mut pending = vec![pid as libc::c_int];
     while let Some(pid) = pending.pop() {
-        let mut fds = vec![
-            libc::proc_fdinfo {
+        // A full buffer may have cut the list short: another test can hold
+        // thousands of descriptors while this one accepts.
+        let mut fds = Vec::new();
+        let mut room = 4096;
+        loop {
+            let empty = libc::proc_fdinfo {
                 proc_fd: 0,
-                proc_fdtype: 0
+                proc_fdtype: 0,
             };
-            4096
-        ];
-        let bytes = (fds.len() * size_of::<libc::proc_fdinfo>()) as libc::c_int;
-        // SAFETY: the buffer is live and writable for `bytes`.
-        let got = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDLISTFDS,
-                0,
-                fds.as_mut_ptr().cast(),
-                bytes,
-            )
-        };
-        fds.truncate(got.max(0) as usize / size_of::<libc::proc_fdinfo>());
+            fds.resize(room, empty);
+            let bytes = (room * size_of::<libc::proc_fdinfo>()) as libc::c_int;
+            // SAFETY: the buffer is live and writable for `bytes`.
+            let got = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    fds.as_mut_ptr().cast(),
+                    bytes,
+                )
+            };
+            let held = got.max(0) as usize / size_of::<libc::proc_fdinfo>();
+            if held < room {
+                fds.truncate(held);
+                break;
+            }
+            room *= 2;
+        }
         for fd in fds {
             if fd.proc_fdtype != libc::PROX_FDTYPE_SOCKET as u32 {
                 continue;

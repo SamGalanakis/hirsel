@@ -661,9 +661,7 @@ fn child_mode_authority() {
     rig.launcher
         .listen(UnixListener::bind(work.join("control")).unwrap())
         .unwrap();
-    let control = {
-        crate::host::fd_report(rig.launcher.control.as_ref().unwrap().as_raw_fd())
-    };
+    let control = crate::host::fd_report(rig.launcher.control.as_ref().unwrap().as_raw_fd());
     let held = |name: &str| -> Vec<String> {
         fs::read_to_string(work.join(format!("fds-{name}")))
             .unwrap()

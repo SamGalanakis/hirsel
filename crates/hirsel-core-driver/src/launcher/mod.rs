@@ -8,10 +8,12 @@
 //! that a decision reads again: what it knows of its children is in memory and reaches a
 //! new host through the inventory that answers `Hello`.
 pub(crate) mod admit;
+mod admitting;
 mod bootstrap;
 mod cgroup;
 mod cli;
 mod control_session;
+mod cutovers;
 pub(crate) mod dev;
 mod embedded_host;
 mod grants;
@@ -35,7 +37,9 @@ pub(crate) use cgroup::Lifecycle;
 use cli::bind_control;
 pub(crate) use cli::{parse_lifecycle, resolve_lifecycle, run};
 
+use admitting::Admissions;
 use control_session::{Conn, ControlSession, PeerPolicy};
+use cutovers::{Cutovers, Route};
 #[cfg(test)]
 use hirsel_core_ids::hex;
 use lifecycle::ObjectLifecycle;
@@ -79,9 +83,6 @@ pub(crate) fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
     }
     path.canonicalize()
 }
-
-/// Concurrent admissions; a further `Admit` fails until one ends.
-const ADMISSIONS: usize = 4;
 
 /// The staging bound of the launcher's code store.
 pub(super) const STAGING_BYTES: u64 = 512 << 20;
@@ -129,31 +130,13 @@ pub(crate) fn wait_pid(pid: libc::pid_t) -> io::Result<ExitStatus> {
     }
 }
 
-/// A cutover forwarded to OLD, kept from first forward until the host's `CutoverAck`.
-struct Forwarded {
-    command: HostCommand,
-    reply: Option<HostReply>,
-}
-
-/// Admission state: the stores, the running workers, and the notes they send.
-struct Admitting {
-    admission: Arc<Admission>,
-    workers: BTreeMap<Attempt, admit::Worker>,
-    next: u64,
-    notes: mpsc::Receiver<admit::Note>,
-    sender: mpsc::Sender<admit::Note>,
-    wake: File,
-    waker: Arc<File>,
-    _watch: Watch,
-}
-
 pub(crate) struct Launcher<I> {
     poll: Readiness,
     supervisor: ChildSupervisor,
     pub(super) objects: ObjectLifecycle<I>,
     session: ControlSession,
-    admitting: Option<Admitting>,
-    cutovers: BTreeMap<(Child, Attempt), Forwarded>,
+    admitting: Option<Admissions>,
+    cutovers: Cutovers,
     /// The platform host, when this launcher starts it; then only its process may hold the
     /// control session.
     pub(super) bootstrap: Option<bootstrap::Bootstrap>,
@@ -256,7 +239,7 @@ impl<I: Images> Launcher<I> {
             objects: ObjectLifecycle::new(images),
             session: ControlSession::default(),
             admitting: None,
-            cutovers: BTreeMap::new(),
+            cutovers: Cutovers::default(),
             bootstrap: None,
             _lock: lock,
         })
@@ -269,20 +252,7 @@ impl<I: Images> Launcher<I> {
 
     /// Admit releases with `admission`'s stores; without it every `Admit` fails.
     pub(crate) fn admit_with(&mut self, admission: Admission) -> io::Result<()> {
-        let (wake, write) = pipe()?;
-        let mut watch = self.poll.watch(wake.as_raw_fd());
-        watch.set(READ)?;
-        let (sender, notes) = mpsc::channel();
-        self.admitting = Some(Admitting {
-            admission: Arc::new(admission),
-            workers: BTreeMap::new(),
-            next: 0,
-            notes,
-            sender,
-            wake,
-            waker: admit::waker(write)?,
-            _watch: watch,
-        });
+        self.admitting = Some(Admissions::new(&self.poll, admission)?);
         Ok(())
     }
 
@@ -375,21 +345,8 @@ impl<I: Images> Launcher<I> {
                 ChildNotice::Event(event) => self.session.emit(event),
                 ChildNotice::ClaimReleased(child) => self.objects.release_claim(&child),
                 ChildNotice::Reply(child, reply) => {
-                    // OLD's next answer after a forwarded cutover is that cutover's; a held-write
-                    // acknowledgement is a notice.
-                    if !matches!(
-                        reply,
-                        HostReply::Opened(_)
-                            | HostReply::WriteAck(_)
-                            | HostReply::StoreMismatch(..)
-                    ) && let Some(((c, a), forwarded)) = self
-                        .cutovers
-                        .iter_mut()
-                        .find(|((c, _), f)| *c == child && f.reply.is_none())
-                    {
-                        forwarded.reply = Some(reply.clone());
-                        self.session
-                            .emit(Event::CutoverResult(c.clone(), *a, reply));
+                    if let Some(result) = self.cutovers.answer(&child, &reply) {
+                        self.session.emit(result);
                     } else {
                         if matches!(
                             reply,
@@ -402,20 +359,7 @@ impl<I: Images> Launcher<I> {
                         self.session.emit(Event::Placed(child, reply));
                     }
                 }
-                ChildNotice::Exited(child) => {
-                    // OLD ended with a forwarded cutover unanswered: the launcher cannot tell
-                    // whether it installed, so its saved reply is Uncertain.
-                    for ((c, a), forwarded) in &mut self.cutovers {
-                        if *c == child && forwarded.reply.is_none() {
-                            forwarded.reply = Some(HostReply::Uncertain);
-                            self.session.emit(Event::CutoverResult(
-                                c.clone(),
-                                *a,
-                                HostReply::Uncertain,
-                            ));
-                        }
-                    }
-                }
+                ChildNotice::Exited(child) => self.session.extend(self.cutovers.exited(&child)),
             }
         }
     }
@@ -451,7 +395,7 @@ impl<I: Images> Launcher<I> {
             }
             Request::Release(attempt) => {
                 if let Some(admitting) = &mut self.admitting {
-                    admitting.workers.remove(&attempt);
+                    admitting.cancel(attempt);
                 }
                 self.objects.release(attempt);
             }
@@ -466,22 +410,12 @@ impl<I: Images> Launcher<I> {
             Request::AdmitData(attempt, bytes) => self.admit_data(attempt, &bytes),
             Request::AdmitEnd(attempt) => self.admit_end(attempt),
             Request::Assemble(attempt) => self.assemble(attempt),
-            Request::CutoverAck(child, attempt) => drop(self.cutovers.remove(&(child, attempt))),
+            Request::CutoverAck(child, attempt) => self.cutovers.ack(child, attempt),
             Request::CollectAbort => {
                 self.objects.unfence();
                 self.emit(Event::Collected(0));
             }
         }
-    }
-
-    fn admission_failed(&mut self, attempt: Attempt, why: impl Into<String>) {
-        if let Some(admitting) = &mut self.admitting {
-            admitting.workers.remove(&attempt);
-        }
-        self.emit(Event::AdmissionFailed(
-            attempt,
-            Failure::Invalid(why.into()),
-        ));
     }
 
     fn admit(
@@ -492,195 +426,70 @@ impl<I: Images> Launcher<I> {
         approvals: Approvals,
         deadline_ms: u64,
     ) {
-        let refusal = match (&self.admitting, self.supervisor.group_admit_state(&group)) {
-            (None, _) => Some("the launcher has no code store"),
-            (_, GroupAdmitState::Unknown) => Some("unknown group"),
-            (_, GroupAdmitState::Retiring) => Some("the group is retiring"),
-            (Some(a), _) if a.workers.contains_key(&attempt) => Some("the attempt is admitting"),
-            (Some(a), _) if a.workers.len() >= ADMISSIONS => {
-                Some("busy: every admission slot runs")
-            }
-            _ => None,
-        };
-        if let Some(why) = refusal {
-            return self.emit(Event::AdmissionFailed(
+        let failed = match &mut self.admitting {
+            None => Some(admitting::invalid(
                 attempt,
-                Failure::Invalid(why.into()),
-            ));
-        }
-        let deadline = admit::deadline_from_wall_ms(deadline_ms);
-        let Some(deadline) = deadline else {
-            return self.admission_failed(attempt, "the admission deadline passed before Admit");
-        };
-        let root = |r: &[u8]| {
-            <[u8; 32]>::try_from(r)
-                .ok()
-                .map(hirsel_core_ids::ContentHash)
-        };
-        let source = match input {
-            Input::Attested(r) => root(&r).map(admit::Source::Attested),
-            Input::Publication(r) => root(&r).map(admit::Source::Publication),
-            Input::Source(bytes, gated) => match admit::source(&bytes, gated) {
-                Ok(source) => Some(source),
-                Err(why) => return self.emit(Event::AdmissionFailed(attempt, why)),
-            },
-        };
-        let Some(source) = source else {
-            return self.emit(Event::AdmissionFailed(
+                "the launcher has no code store",
+            )),
+            Some(admitting) => admitting.admit(
+                &self.poll,
+                self.supervisor.group_admit_state(&group),
                 attempt,
-                Failure::Invalid("the recipe root is not 32 bytes".into()),
-            ));
+                input,
+                approvals,
+                deadline_ms,
+            ),
         };
-        let admitting = self.admitting.as_mut().expect("checked above");
-        let id = admitting.next;
-        admitting.next += 1;
-        let (sender, waker) = (admitting.sender.clone(), admitting.waker.clone());
-        let worker = admit::Worker::spawn(
-            admitting.admission.clone(),
-            &self.poll,
-            id,
-            attempt,
-            source,
-            approvals,
-            deadline,
-            move |note| {
-                let _ = sender.send(note);
-                admit::wake(&waker);
-            },
-        );
-        match worker {
-            Ok(worker) => drop(admitting.workers.insert(attempt, worker)),
-            Err(e) => self.admission_failed(attempt, format!("admission worker: {e}")),
-        }
+        self.session.extend(failed);
     }
 
     fn admit_data(&mut self, attempt: Attempt, bytes: &[u8]) {
-        let Some(admitting) = &mut self.admitting else {
-            return self.admission_failed(attempt, "the launcher has no code store");
+        let failed = match &mut self.admitting {
+            None => Some(admitting::invalid(
+                attempt,
+                "the launcher has no code store",
+            )),
+            Some(admitting) => admitting.data(attempt, bytes),
         };
-        let bound = admitting.admission.input_bound();
-        let why = match admitting.workers.get_mut(&attempt) {
-            None => "unknown attempt",
-            Some(worker) if worker.ending => "input after AdmitEnd",
-            Some(worker) => match &mut worker.conn {
-                None => "a publication takes no input",
-                Some(_) if worker.received.saturating_add(bytes.len() as u64) > bound => {
-                    "admission input exceeds its bound"
-                }
-                Some(conn) => {
-                    worker.received += bytes.len() as u64;
-                    conn.output.extend_from_slice(bytes);
-                    return;
-                }
-            },
-        };
-        self.admission_failed(attempt, why);
+        self.session.extend(failed);
     }
 
     fn admit_end(&mut self, attempt: Attempt) {
-        match self
-            .admitting
-            .as_mut()
-            .and_then(|a| a.workers.get_mut(&attempt))
-        {
-            Some(worker) => worker.ending = true,
-            None => self.admission_failed(attempt, "unknown attempt"),
-        }
+        let failed = match &mut self.admitting {
+            None => Some(admitting::invalid(attempt, "unknown attempt")),
+            Some(admitting) => admitting.end(attempt),
+        };
+        self.session.extend(failed);
     }
 
     fn assemble(&mut self, attempt: Attempt) {
-        match self
-            .admitting
-            .as_mut()
-            .and_then(|a| a.workers.get_mut(&attempt))
-        {
-            Some(worker) if worker.admitted => worker.assemble(),
-            _ => self.admission_failed(attempt, "the attempt is not admitted"),
-        }
+        let failed = match &mut self.admitting {
+            None => Some(admitting::invalid(attempt, "the attempt is not admitted")),
+            Some(admitting) => admitting.assemble(attempt),
+        };
+        self.session.extend(failed);
     }
 
-    /// Apply the workers' notes. A note of a cancelled worker is dropped: its assembly
-    /// record is then no reservation's and the next collection may remove it.
+    /// Apply the workers' notes; an assembled record is its attempt's reservation.
     fn notes(&mut self) {
         let Some(admitting) = &mut self.admitting else {
             return;
         };
-        let mut drained = [0; 64];
-        while matches!((&admitting.wake).read(&mut drained), Ok(n) if n > 0) {}
-        let mut events = Vec::new();
-        let mut reserved = Vec::new();
-        while let Ok(note) = admitting.notes.try_recv() {
-            let (id, attempt) = match &note {
-                admit::Note::Admitted { id, attempt, .. }
-                | admit::Note::Assembled { id, attempt, .. }
-                | admit::Note::Failed(id, attempt, _) => (*id, *attempt),
-            };
-            if admitting.workers.get(&attempt).is_none_or(|w| w.id != id) {
-                continue;
-            }
-            match note {
-                admit::Note::Admitted {
-                    root,
-                    summary,
-                    display,
-                    ..
-                } => {
-                    admitting.workers.get_mut(&attempt).unwrap().admitted = true;
-                    events.push(Event::Admitted(attempt, root, summary, display));
-                }
-                admit::Note::Assembled {
-                    key,
-                    digest,
-                    fetch,
-                    assembly,
-                    ..
-                } => {
-                    admitting.workers.remove(&attempt);
-                    reserved.push((attempt, key));
-                    events.push(Event::Assembled(
-                        attempt,
-                        key.to_vec(),
-                        digest,
-                        fetch,
-                        assembly,
-                    ));
-                }
-                admit::Note::Failed(_, _, why) => {
-                    admitting.workers.remove(&attempt);
-                    events.push(Event::AdmissionFailed(attempt, why));
-                }
-            }
-        }
+        let (events, reserved) = admitting.notes();
         for (attempt, key) in reserved {
-            self.reserve(attempt, BTreeSet::from([key]));
+            self.objects.reserve(attempt, BTreeSet::from([key]));
         }
         self.session.extend(events);
     }
 
-    /// Move each attested worker's input and Need.
     fn pump(&mut self) {
-        let Some(admitting) = &mut self.admitting else {
-            return;
-        };
-        let mut events = Vec::new();
-        for (&attempt, worker) in &mut admitting.workers {
-            for (keys, last) in worker.pump() {
-                events.push(Event::Need(attempt, keys, last));
-            }
+        if let Some(admitting) = &mut self.admitting {
+            self.session.extend(admitting.pump());
         }
-        self.session.extend(events);
     }
 
-    /// Whether some attested input waits on its worker past the window, so the session is
-    /// not read until the worker takes it.
     fn backlogged(&self) -> bool {
-        self.admitting.as_ref().is_some_and(|a| {
-            a.workers.values().any(|w| {
-                w.conn
-                    .as_ref()
-                    .is_some_and(|c| c.output.len() > session::MAX_FRAME)
-            })
-        })
+        self.admitting.as_ref().is_some_and(Admissions::backlogged)
     }
 
     fn hello(&mut self) {
@@ -690,10 +499,10 @@ impl<I: Images> Launcher<I> {
         // A new session ends every reservation and admission of the old one (§14.5).
         self.objects.new_session();
         if let Some(admitting) = &mut self.admitting {
-            admitting.workers.clear();
+            admitting.clear();
         }
         let (children, cold, replayed) = self.supervisor.inventory_for_hello();
-        let cutovers = self.cutovers.keys().cloned().collect();
+        let cutovers = self.cutovers.held();
         self.emit(Event::Inventory(children, cold, cutovers));
         for (child, reply) in replayed {
             self.session.emit(Event::Placed(child, reply));
@@ -726,40 +535,14 @@ impl<I: Images> Launcher<I> {
     }
 
     fn command(&mut self, child: Child, command: &HostCommand) {
-        // A cutover is kept by (OLD, attempt): an identical re-send is forwarded once and
-        // answered with OLD's saved reply.
-        let key = match command {
-            HostCommand::Cutover(a, ..) => <[u8; 16]>::try_from(a.as_slice()).ok().map(|a| {
-                let hi = u64::from_le_bytes(a[..8].try_into().unwrap());
-                let lo = u64::from_le_bytes(a[8..].try_into().unwrap());
-                (child.clone(), Attempt { hi, lo })
-            }),
-            _ => None,
+        let key = match self.cutovers.route(&child, command) {
+            Route::Held(answer) => return self.session.extend(answer),
+            Route::Forward(key) => key,
         };
-        if let Some(key) = &key
-            && let Some(held) = self.cutovers.get(key)
-        {
-            if held.command != *command {
-                return self.emit(Event::Placed(
-                    child,
-                    HostReply::Refused("a different cutover holds this attempt".into()),
-                ));
-            }
-            if let Some(reply) = held.reply.clone() {
-                self.emit(Event::CutoverResult(key.0.clone(), key.1, reply));
-            }
-            return;
-        }
         let accepting = *command == HostCommand::StoreAccepted;
         if self.supervisor.send_command(&child, command, accepting) {
             if let Some(key) = key {
-                self.cutovers.insert(
-                    key,
-                    Forwarded {
-                        command: command.clone(),
-                        reply: None,
-                    },
-                );
+                self.cutovers.forwarded(key, command);
             }
         } else if !accepting {
             self.emit(Event::Placed(
@@ -775,7 +558,7 @@ impl<I: Images> Launcher<I> {
         }
         // No worker writes a record while the roots are read and removed, and every
         // record already written has its note applied, so its reservation is held.
-        let admission = self.admitting.as_ref().map(|a| a.admission.clone());
+        let admission = self.admitting.as_ref().map(Admissions::admission);
         let _publishing = admission
             .as_ref()
             .map(|a| a.publish.lock().unwrap_or_else(|e| e.into_inner()));
@@ -789,11 +572,7 @@ impl<I: Images> Launcher<I> {
         let backlogged = self.backlogged();
         self.session.prepare_watch(backlogged)?;
         if let Some(admitting) = &mut self.admitting {
-            for worker in admitting.workers.values_mut() {
-                if let Some(conn) = &mut worker.conn {
-                    conn.watch()?;
-                }
-            }
+            admitting.watch()?;
         }
         let mut events = [ReadyEvent::EMPTY; 64];
         let timeout = match (timeout, self.bootstrap.as_ref().and_then(|b| b.timeout())) {

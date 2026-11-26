@@ -39,6 +39,12 @@ finish() {
       exit 1
     fi
   }
+  python3 "$tools/board-history.py" append --base "$base" "$run" >>"$run/run.log" 2>&1 ||
+    printf 'Board history append failed. See %s/run.log.\n' "$run" >&2
+  if [[ -f "$run/bisect/alert.txt" ]]; then
+    { mkdir -p "$base/alerts" && cat "$run/bisect/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
+      printf 'Board bisect alert could not be copied from %s/bisect/alert.txt.\n' "$run" >&2
+  fi
 }
 trap finish EXIT
 trap 'exit 143' TERM
@@ -225,6 +231,12 @@ if (( n1_status == 0 )); then
 fi
 if (( n1_status != 0 )); then
   printf 'N1 browser_room exited %s. See %s/n1.log.\n' "$n1_status" "$run" >>"$run/run.log"
+fi
+if (( status == 3 )) && [[ -n "$baseline_path" ]]; then
+  python3 "$checkout/bench/awfy/board_bisect.py" "$run/bisect" \
+    --baseline "$baseline_path" --board "$run/board/board.json" --alert "$run/bisect/alert.txt" \
+    --awfy "$base/peers/awfy" --langarena "$base/peers/langarena" >>"$run/run.log" 2>&1 ||
+    printf 'Board bisect unresolved. See %s/run.log.\n' "$run" >&2
 fi
 echo "$run"
 exit "$status"

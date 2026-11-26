@@ -168,7 +168,11 @@ esac
             base = Path(directory)
             followups = base / "followups.md"
             followups.write_text("Existing entry\n")
+            culprit = "Culprit fc72987650b1cd38f85493120edf157d2d8c2343 arena/Json::ParseMapping\n"
             for status, outcome in ((1, "incomplete"), (2, "refused"), (3, "regressed")):
+                if status == 3:
+                    with next((base / "alerts").glob("*.txt")).open("a") as alert:
+                        alert.write(culprit)
                 result = subprocess.check_output(
                     [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups],
                     env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": str(status),
@@ -177,7 +181,8 @@ esac
                 )
                 self.assertRegex(result, r"^\d{4}-\d{2}-\d{2} .* UTC Hirsel nightly board ")
                 self.assertIn(f"{outcome} (exit {status})", result)
-                self.assertEqual((base / "alerts" / f"{result[:10]}.txt").read_text(), result)
+                expected = result + (culprit if status == 3 else "")
+                self.assertEqual((base / "alerts" / f"{result[:10]}.txt").read_text(), expected)
                 self.assertIn("- " + result, followups.read_text())
             self.assertTrue(followups.read_text().startswith("Existing entry\n"))
 

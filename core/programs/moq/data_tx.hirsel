@@ -469,6 +469,15 @@ pub fn fence_track[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName,
 
 /// MOQ-8 revocation fence helper returning `(reset_streams, dropped_datagrams)`.
 pub fn fence_track_counts[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName, code: u64) -> (u64, u64) {
+    let counts = purge_track(mut s, mut io, track, code)
+    if let Some(pt) = pub_track_at(s, track) {
+        let _ = list.remove(mut s.pub_tracks, pt)
+    }
+    end_track(mut s, mut io, track, code)
+    counts
+}
+
+fn purge_track[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName, code: u64) -> (u64, u64) {
     if s.phase == Ended {
         return (0, 0)
     }
@@ -478,10 +487,18 @@ pub fn fence_track_counts[D](mut s: Session, mut io: LinkIo[D], track: codec.Tra
         if s.tx_subgroups[i].track == track {
             let st = s.tx_subgroups[i].stream
             let rel = s.tx_subgroups[i].header_len
-            tx_reset(s.link, mut io, st, code, rel)
+            let reset = io.ops.reset
+            let link = s.link
+            if let Ok(()) = reset(mut io.driver, link, st, code, rel) {
+                reset_streams += 1
+            } else if let Ok(()) = reset(mut io.driver, link, st, code, 0) {
+                reset_streams += 1
+            }
+            // QUIC at offset zero refuses only terminal or unknown streams.
+            // WT can also refuse a queued WT header. While that header is
+            // queued, WT has accepted no application bytes for the stream.
             drop_outgoing(mut s, st)
             let _ = list.remove(mut s.tx_subgroups, i)
-            reset_streams += 1
         } else {
             i += 1
         }
@@ -490,7 +507,6 @@ pub fn fence_track_counts[D](mut s: Session, mut io: LinkIo[D], track: codec.Tra
     if let Some(pt) = pub_track_at(s, clone(track)) {
         dropped_dgs = tx_drop_datagrams(s.link, mut io, s.pub_tracks[pt].tag)
     }
-    end_track(mut s, mut io, track, code)
     (reset_streams, dropped_dgs)
 }
 

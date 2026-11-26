@@ -18,7 +18,8 @@ program outside the repository binds it as `media_record = { major = 1 }`.
 ## 1. Use
 
 ```text
-let mut rec = record.recorder(random, record.Config(unit: k, window: 64, max_wait_us: 400000, pending: 64))?
+let observer = webrtc_sfu.router.new_observer(k)
+let mut rec = record.recorder(record.Config(window: 64, max_wait_us: 400000, pending: 64), take observer)
 // control inbox:  if let Some(ack) = record.control(mut rec, now, order) { send ack to the control unit }
 // media inbox:    record.carried(mut rec, now, carried)
 // every ~10 ms:   record.poll(mut rec, now)
@@ -34,17 +35,17 @@ is the caller's job.
 
 ## 2. A unit of the router
 
-The recorder is media unit `k` (`Config.unit`). It is one more member of
+The Observer gives the recorder its media unit index `k`. It is one more member of
 the unit set that the control unit orders (RTC-5). Its seats are admitted
 with home `k`. A seat subscribes like a participant (`Subscribe` with a
 `Layer` target), and the subscriptions decide what is recorded: one track
 and one file per down-track whose home is `k`.
 
-The recorder keeps the room state in an observer Router
-(`webrtc_sfu.router.observer`), which applies each `Order` like every other
-unit and owns no session. After an order it settles its tracks against
-`downs_on(k)`: a new down-track opens a file, and a removed one closes it.
-It then answers with `Ack(seq, k, answer)`.
+The recorder keeps the accepted room state in a `webrtc_sfu.router.Observer`.
+Starting with a current Observer opens files for its existing down-tracks.
+After each accepted `Order`, it reads the room's down-tracks. A new
+down-track opens a file, and a removed one closes it. The recorder then
+answers with `Ack(room, seq, k, answer)`.
 
 Each track posts `Wanted(mask)` for the encoding it targets to the
 publication's home unit, so dynacast keeps that layer flowing (RTC-6). A
@@ -56,8 +57,8 @@ track posts mask 0 when it closes.
   suspended room, is dropped when it is taken (step 4).
 - When a revoke removes a down-track, the track's buffered frames are
   dropped, not flushed. Its file is closed before the ack.
-- A suspension drops what the room's tracks buffer, and video waits for a
-  key frame.
+- The first suspension cause drops what the room's tracks buffer. The
+  recorder waits for all causes to clear and then for a video key frame.
 - `Unsubscribe` and `Leave` let buffered whole frames land, then close.
 
 So no frame of a fenced owner lands in a file after the revoke's ack.
@@ -68,8 +69,8 @@ So no frame of a fenced owner lands in a file after the revoke's ack.
 records. Frames come out in rtp_jitter's delivered form (rtp_jitter
 README §3).
 
-- A change of encoding, or a `reset` stream, finishes the old buffer and
-  starts a new one.
+- Retarget drops old buffered frames. A `reset` on the current encoding
+  finishes the old buffer and starts a new one.
 - On `NeedKeyframe`, a video track posts `Key(why: Loss)` to the home unit,
   which coalesces it into a PLI or FIR upstream. Until the next key frame,
   non-key frames are dropped.

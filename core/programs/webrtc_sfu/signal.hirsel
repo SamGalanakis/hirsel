@@ -108,7 +108,7 @@ type Pub {
 }
 
 // What to do with a control call's answer.
-type After = Quiet | Admitted(peer.Gen, u64, Bytes, List[u8]) | Discard | Opening | Ended | Fence(u32, peer.Gen) | Announced(peer.Gen, u8) | Subscribed(peer.Gen, u64, u8) | Unsubscribed(peer.Gen, u64) | Changed(peer.Gen)
+type After = BridgeSeated | BridgeLeft | BridgeSubscribed | Quiet | Admitted(peer.Gen, u64, Bytes, List[u8]) | Discard | Opening | Ended | Fence(u32, peer.Gen) | Announced(peer.Gen, u8) | Subscribed(peer.Gen, u64, u8) | Unsubscribed(peer.Gen, u64) | Changed(peer.Gen)
 
 type Job {
     change: router.Change,
@@ -157,6 +157,9 @@ pub opaque type Adapter[M] {
     seats: List[Seat],
     epoch: u64,
     pubs: List[Pub],
+    bridge: Option[RoomBridge],
+    bridge_serial: u64,
+    bridge_events: List[BridgeEvent],
     signaling: Signaling,
     // The control order: the call in flight and what waits, in order.
     calling: Option[After],
@@ -188,7 +191,7 @@ type Life: key = Serving | Closing | Gone
 pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M]) -> Adapter[M] {
     let mut jobs: List[Job] = list.new()
     list.push(mut jobs, Job(change: Open(room: room, limits: limits), after: Opening))
-    Adapter(room: room, limits: limits, embed: take embed, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), signaling: Live, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new(), relaying: None, unix_s: 0, revokes: list.new(), life: Serving, opening: None, refused: false)
+    Adapter(room: room, limits: limits, embed: take embed, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), bridge: None, bridge_serial: 0, bridge_events: list.new(), signaling: Live, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new(), relaying: None, unix_s: 0, revokes: list.new(), life: Serving, opening: None, refused: false)
 }
 
 /// Give the adapter a relay: from now on each admission is minted TURN credentials and
@@ -728,6 +731,7 @@ pub fn step[M: codec](mut a: Adapter[M], mut l: Ledger, mut u: units.Unit, now: 
             answered(mut a, mut l, take after, take answer, mut out)
         }
     }
+    drive_bridge(mut a, mut l, mut u)?
     let mut faulted: Option[router.RouterError] = None
     for take e in units.take_room_events(mut u, a.room) {
         match take e {
@@ -851,6 +855,13 @@ fn fenced[M](mut a: Adapter[M], mut l: Ledger, g: peer.Gen, mut out: List[runner
 
 fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer: Result[router.Answer, router.RouterError], mut out: List[runner.room_client.RoomOut[M]]) {
     match take after {
+        BridgeSeated => bridge_seated(mut a, mut l, take answer),
+        BridgeLeft => bridge_left(mut a, mut l, take answer),
+        BridgeSubscribed => {
+            if let Error(take e) = take answer {
+                list.push(mut a.bridge_events, Refused(Limits(take e)))
+            }
+        },
         Quiet => (),
         Discard => (),
         Ended => {
@@ -911,6 +922,7 @@ fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer:
                     }
                     list.push(mut a.pubs, Pub(id: id, owner: g, peer: p, media: media, encodings: shape.encodings))
                     to_room(a, Published(int.widen(p), id, kind_of(media), shape.encodings), mut out)
+                    bridge_subscribe(mut a, id)
                 },
                 Ok(Done) => (),
                 Error(e) => to_peer(a, p, Refused(code(e)), mut out),

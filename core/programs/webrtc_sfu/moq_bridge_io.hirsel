@@ -1,0 +1,394 @@
+// The sealed wire and descriptors are private to the socket send path.
+type SendBatch {
+    wire: Bytes,
+    tx: List[UdpTx],
+    outputs: List[quic.Output]
+}
+
+const SEND_BATCH: u64 = 64
+
+/// The bridge's own socket, identity, transport and memory limits.
+/// Native MoQ is always enabled. A WebTransport origin enables HTTP/3.
+pub type BridgeLink: cross {
+    bind: Addr,
+    config: BridgeConfig,
+    endpoint: quic.EndpointConfig,
+    certificate: Bytes,
+    key: Secret,
+    algorithm: SignAlg,
+    web_origin: Option[String],
+    moq: moq.Limits,
+    links: u16,
+    authority: String,
+    path: String,
+    transport_bytes: u64
+}
+
+pub type StartError: cross = Config | Bind(NetError) | Capacity(Capacity) | Quic(quic.QuicError) | Router(router.RouterError) | Spawn
+
+pub type Running {
+    doors: units.Doors,
+    roster: Client[units.Doors],
+    task: Task[()]
+}
+
+type Hello: cross {
+    doors: units.Doors,
+    roster: Client[units.Doors]
+}
+
+type Start: cross {
+    listener: BridgeLink,
+    hello: Client[Result[Hello, StartError]],
+    net: Net,
+    clock: Clock,
+    random: Random,
+    plane: units.Plane,
+    queue: units.MediaQueues,
+    timing: units.Timing,
+    total: u16,
+    until: u64
+}
+
+/// Price the bridge's fixed buffers and caller-funded transport state.
+pub fn listener_bytes(l: BridgeLink, plane: units.Plane, queues: units.MediaQueues, total: u16) -> u64 {
+    let depth = units.control_slots(l.config.unit, total, plane)
+    let controls = seq_price(bytes[units.ControlMessage], order.max(4, depth))
+    let width: u64 = int.widen(queues.datagram_bytes)
+    let Some(socket) = units.udp_options(queues.socket_slots, queues.datagram_bytes) else {
+        return 0xffffffffffffffff
+    }
+    let UdpOptions(slots: slots, slot_bytes: stride) = socket
+    let net_bytes: u64 = (int.widen(slots) : u64) * int.widen(stride)
+    let rings = units.virtual_inbox_bytes(l.config.unit, total, plane, queues)
+    let buffers = seq_price(1, 64 * width) + seq_price(bytes[UdpPacket], 64) + seq_price(1, SEND_BATCH * int.widen(l.endpoint.max_mtu)) + seq_price(bytes[UdpTx], SEND_BATCH) + seq_price(bytes[quic.Output], SEND_BATCH)
+    int.saturating_add(l.transport_bytes, rings + net_bytes + buffers + controls + 65536)
+}
+
+pub fn listener_valid(l: BridgeLink, index: u16, queues: units.MediaQueues) -> bool {
+    if let Some(_) = l.web_origin {
+        let window = order.max(l.moq.max_buffered, 65536)
+        let overhead: u64 = 4u64 * int.widen(l.moq.control_bytes) + 65536u64
+        let per: u64 = int.widen(order.max(l.links, 1))
+        if window > (0x3fffffffffffffffu64 - overhead) / per {
+            return false
+        }
+    }
+    l.config.unit == index && l.config.window > 0 && l.config.window <= 32768 && l.config.max_frame_bytes != 0 && l.config.max_frame_bytes <= l.moq.object_bytes && l.links != 0 && l.transport_bytes != 0 && l.endpoint.max_mtu <= queues.datagram_bytes
+}
+
+pub fn start(tasks: Tasks, net: Net, clock: Clock, random: Random, take listener: BridgeLink, plane: units.Plane, queues: units.MediaQueues, timing: units.Timing, total: u16, grant: u64, until: u64) -> Result[Running, StartError] waits {
+    let c: Result[(Client[Result[Hello, StartError]], Inbox[Result[Hello, StartError]]), Capacity] = conn.new(1, bytes 0)
+    let (hello, take inbox) = c ?=> |cap| Capacity(cap)
+    let args = Start(listener: take listener, hello: take hello, net: net, clock: clock, random: random, plane: plane, queue: queues, timing: timing, total: total, until: until)
+    let work = task.spawn_unit(tasks, bytes grant, take args, run) ?=> |_| Spawn
+    match conn.receive(inbox) {
+        Ok(Ok(take h)) => {
+            let Hello(doors: take d, roster: take r) = take h
+            Ok(Running(doors: take d, roster: take r, task: take work))
+        },
+        Ok(Error(take e)) => {
+            let _ = task.join(take work)
+            Error(take e)
+        },
+        Error(_) => {
+            let _ = task.join(take work)
+            Error(Spawn)
+        },
+    }
+}
+
+type Bound {
+    b: Bridge,
+    socket: UdpSocket,
+    control: Inbox[units.ControlMessage],
+    media: Inbox[router.Carried],
+    siblings: Inbox[units.Doors],
+    hello: Hello
+}
+
+fn bind(take l: BridgeLink, n: Net, r: Random, q: units.MediaQueues, plane: units.Plane, total: u16) -> Result[Bound, StartError] waits {
+    let BridgeLink(bind: at, config: cfg, endpoint: take ep, certificate: take leaf, key: take signing_key, algorithm: alg, web_origin: take web_origin, moq: limits, links: links, authority: take authority, path: take path, transport_bytes: _) = take l
+    let Some(options) = units.udp_options(q.socket_slots, q.datagram_bytes) else {
+        return Error(Config)
+    }
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, take leaf)
+    let identity: quic.handshake.Identity = Identity(chain: take chain, key: take signing_key, alg: alg)
+    let (take web, take transport) = match take web_origin {
+        Some(take origin) => {
+            let mut origins: List[String] = list.with_capacity(1)
+            list.push(mut origins, take origin)
+            let mut authorities: List[String] = list.with_capacity(1)
+            list.push(mut authorities, clone(authority))
+            let web_limits = webtransport.Limits(authorities: take authorities, origins: take origins, require_origin: true, sessions: links, sessions_per_connection: links, pending_connects: links, streams_bidi: int.widen(limits.requests), streams_uni: int.widen(limits.requests), data: limits.max_buffered, buffered: limits.max_early_streams, buffered_datagrams: limits.max_early_streams, header_bytes: limits.control_bytes)
+            let mut t = webtransport.transport(web_limits)
+            list.push(mut t.alpn, moq.ALPN)
+            (Some(webtransport.endpoint(take web_limits)), take t)
+        },
+        None => (None, moq.transport_config(limits)),
+    }
+    let mtu = ep.max_mtu
+    let server = quic.endpoint(r, take ep, Some((take identity, take transport))) ?=> |e| Quic(e)
+    let (take socket, local) = host.udp_bind(n, at, options) ?=> |e| Bind(e)
+    let (take doors, take control_in, take media) = units.inboxes_with(local, cfg.unit, total, plane, q) ?=> |e| Router(e)
+    let c: Result[(Client[units.Doors], Inbox[units.Doors]), Capacity] = conn.new(64, bytes 0)
+    let (roster, take siblings) = c ?=> |cap| Capacity(cap)
+    let b = bridge(cfg, take server, take web, mtu, limits, int.widen(links), take authority, take path)
+    Ok(Bound(b: take b, socket: take socket, control: take control_in, media: take media, siblings: take siblings, hello: Hello(doors: take doors, roster: roster)))
+}
+
+fn run(take s: Start) waits {
+    let Start(listener: take l, hello: take report, net: net, clock: clock, random: r, plane: plane, queue: queues, timing: timing, total: total, until: until) = take s
+    let result = bind(take l, net, r, queues, plane, total)
+    let opened = match take result {
+        Ok(take b) => take b,
+        Error(take e) => {
+            let _ = conn.send(report, Error(take e))
+            return
+        },
+    }
+    let Bound(b: take initial, socket: take bound_socket, control: take orders, media: take media, siblings: take siblings, hello: take out) = take opened
+    if let Error(_) = conn.send(report, Ok(take out)) {
+        return
+    }
+    let mut doors: List[units.Doors] = list.new()
+    for _ in 0u16 .. total {
+        let Ok(take d) = conn.receive(siblings) else {
+            return
+        }
+        list.push(mut doors, take d)
+    }
+    let mut socket = take bound_socket
+    let mut b = take initial
+    let width: u64 = int.widen(queues.datagram_bytes)
+    let mut rx: Bytes = list.with_capacity(64 * width)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    let mut acks: List[units.ControlMessage] = list.new()
+    let mut wake: Option[u64] = None
+    let mut rung = 0u64
+    while host.mono_ns(clock) < until {
+        let now_before = host.mono_ns(clock)
+        let cap = order.min(until, int.saturating_add(now_before, timing.idle_poll_ns))
+        let next = option.unwrap(earlier(Some(cap), wake))
+        list.clear(mut rx)
+        list.clear(mut packets)
+        let got = match host.udp_recv(mut socket, mut rx, mut packets, At(clock, next)) {
+            Ok(n) => n,
+            Error(_) => 0,
+        }
+        let now = host.mono_ns(clock)
+        while let Ok(take msg) = conn.try_receive(orders) {
+            let units.ControlMessage(step: take step, opus_fmtp: _) = take msg
+            if let Some(take answer) = control(mut b, now, take step) {
+                list.push(mut acks, units.ControlMessage(step: take answer, opus_fmtp: None))
+            }
+        }
+        while list.len(acks) != 0 {
+            let a = list.remove(mut acks, 0)
+            match conn.try_send(doors[0].control, take a) {
+                Ok(()) => {
+                    rung |= 1
+                },
+                Error(Full(take back)) => {
+                    list.insert(mut acks, 0, take back)
+                    break
+                },
+                Error(Closed(_)) => return,
+            }
+        }
+        for _ in 0u32 .. plane.media_take {
+            let Ok(take msg) = conn.try_receive(media) else {
+                break
+            }
+            carried(mut b, now, take msg)
+        }
+        for i in 0u64 .. got {
+            let UdpPacket(peer: from, at: at, len: len, truncated: truncated, ecn: ecn) = packets[i]
+            if !truncated && len != 0 {
+                receive(mut b, now, from, ecn, mut rx, at, len)
+            }
+        }
+        poll_jitter(mut b, now)
+        for take post in take_posts(mut b) {
+            let router.Post(to: to, carried: take packet) = take post
+            let k: u64 = int.widen(to)
+            if let Ok(()) = conn.try_send(doors[k].media, take packet) {
+                rung |= 1u64 << k
+            }
+        }
+        ring(mut socket, clock, timing.control_send_ns, doors, mut rung)
+        wake = stage(mut b, now)
+        let deadline = int.saturating_add(host.mono_ns(clock), timing.media_send_ns)
+        let _ = send(mut b, clock, mut socket, deadline, 0xffffffffffffffff)
+    }
+}
+
+fn ring(mut socket: UdpSocket, clock: Clock, timeout: u64, doors: List[units.Doors], mut rung: u64) waits {
+    if rung == 0 {
+        return
+    }
+    let mut tx: List[UdpTx] = list.new()
+    for i in 0u64 .. list.len(doors) {
+        if (rung >> i) & 1 != 0 {
+            list.push(mut tx, UdpTx(to: doors[i].addr, at: 0, len: 0, ecn: 0))
+        }
+    }
+    let deadline = int.saturating_add(host.mono_ns(clock), timeout)
+    if let Ok(n) = host.udp_send(mut socket, b"", tx, At(clock, deadline)) {
+        for _ in 0u64 .. n {
+            rung = rung & (rung - 1)
+        }
+    }
+}
+
+pub fn receive(mut b: Bridge, now: u64, from: Addr, ecn: u8, mut data: Bytes, at: u64, len: u64) {
+    let mut qev: List[quic.Event] = list.new()
+    quic.receive_datagram(mut b.io.driver.q, now, from, ecn, mut data, at, len, mut qev)
+    socket_events(mut b, now, qev)
+}
+
+fn socket_events(mut b: Bridge, now: u64, qev: List[quic.Event]) {
+    let mut h3: List[quic.Event] = list.new()
+    for ev in qev {
+        if let Connected(c: c, alpn: protocol) = ev {
+            if protocol == moq.ALPN {
+                if let Some(link) = moq.native_link(mut b.io.driver, c) {
+                    if moq.publisher_add(mut b.publisher, b.io, link) {
+                        continue
+                    }
+                    moq.retire_link(mut b.io.driver, link)
+                }
+                quic.close(mut b.io.driver.q, c, moq.ERR_INTERNAL_ERROR, b"bridge link limit")
+            } else if protocol == "h3" {
+                if let None = b.io.driver.w {
+                    quic.close(mut b.io.driver.q, c, moq.ERR_PROTOCOL_VIOLATION, b"WebTransport disabled")
+                    continue
+                }
+                list.push(mut h3, clone(ev))
+            }
+        } else {
+            // WT ignores connections whose HTTP/3 handshake it did not take.
+            list.push(mut h3, clone(ev))
+        }
+    }
+    let mut events: List[moq.AddressedEvent] = list.new()
+    moq.native_events(mut b.io.driver, qev, mut events)
+    moq.publisher_receive(mut b.publisher, mut b.io, now, events)
+    let mut web: List[webtransport.Event] = list.new()
+    if let Some(mut w) = b.io.driver.w {
+        webtransport.receive(mut w, mut b.io.driver.q, now, h3, mut web)
+    }
+    web_events(mut b, now, web)
+}
+
+fn web_events(mut b: Bridge, now: u64, events: List[webtransport.Event]) {
+    for ev in events {
+        match ev {
+            Requested(s, req) => {
+                let valid = req.authority == b.authority && req.path == b.path && list.any(req.protocols, fn(p: String) -> bool {
+                    p == moq.ALPN
+                })
+                let verdict: webtransport.Verdict = if valid {
+                    Accept(protocol: Some(moq.ALPN), headers: list.new())
+                } else {
+                    Refuse(status: 403)
+                }
+                if let Some(mut w) = b.io.driver.w {
+                    let _ = webtransport.answer(mut w, mut b.io.driver.q, s, take verdict)
+                }
+            },
+            Ready(s: s, ..) => {
+                if let Some(link) = moq.web_link(mut b.io.driver, s) {
+                    if moq.publisher_add(mut b.publisher, b.io, link) {
+                        continue
+                    }
+                    moq.retire_link(mut b.io.driver, link)
+                }
+                if let Some(mut w) = b.io.driver.w {
+                    webtransport.close(mut w, mut b.io.driver.q, s, 1, b"bridge link limit")
+                }
+            },
+            _ => (),
+        }
+    }
+    let mut addressed: List[moq.AddressedEvent] = list.new()
+    moq.web_events(mut b.io.driver, events, mut addressed)
+    moq.publisher_receive(mut b.publisher, mut b.io, now, addressed)
+}
+
+pub fn admit(mut b: Bridge, now: u64) {
+    let tracks = view (b.tracks)
+    let obs = view (b.r)
+    moq.publisher_admit(mut b.publisher, mut b.io, scoped fn(name: moq.codec.TrackName) -> bool {
+        list.any(tracks, scoped fn(t: BridgeTrack) -> bool {
+            t.moq_track == name && router.observer_routing_allowed(obs, t.seat.room, now / 1000000)
+        })
+    })
+}
+
+fn earlier(a: Option[u64], b: Option[u64]) -> Option[u64] {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(order.min(x, y)),
+        (None, _) => b,
+        _ => a,
+    }
+}
+
+pub fn stage(mut b: Bridge, now: u64) -> Option[u64] {
+    if list.len(b.send.tx) != 0 {
+        return Some(now)
+    }
+    let mut qev: List[quic.Event] = list.new()
+    quic.timeout(mut b.io.driver.q, now, mut qev)
+    socket_events(mut b, now, qev)
+    admit(mut b, now)
+    let mut web: List[webtransport.Event] = list.new()
+    let next = if let Some(mut w) = b.io.driver.w {
+        webtransport.poll(mut w, mut b.io.driver.q, now, mut web)
+    } else {
+        None
+    }
+    web_events(mut b, now, web)
+    let mq = moq.publisher_poll(mut b.publisher, mut b.io, now)
+    list.clear(mut b.send.outputs)
+    let q = quic.poll(mut b.io.driver.q, now, mut b.send.wire, mut b.send.outputs)
+    for o in b.send.outputs {
+        if let Transmit(to: to, at: at, len: len, ecn: ecn, send_at: _) = o {
+            list.push(mut b.send.tx, UdpTx(to: to, at: at, len: len, ecn: ecn))
+        }
+    }
+    list.clear(mut b.send.outputs)
+    earlier(earlier(next, mq), q)
+}
+
+pub fn staged_count(b: Bridge) -> u64 {
+    list.len(b.send.tx)
+}
+
+/// The socket owner reports only the prefix accepted by udp_send. QUIC abandons
+/// the rest. No caller can keep a retryable copy of the sealed suffix.
+pub fn send(mut b: Bridge, clock: Clock, mut socket: UdpSocket, deadline: u64, limit: u64) -> u64 waits {
+    let n = order.min(list.len(b.send.tx), limit)
+    if n == 0 {
+        return 0
+    }
+    let sent = match host.udp_send(mut socket, b.send.wire, list.slice(b.send.tx, 0, n), At(clock, deadline)) {
+        Ok(k) => k,
+        Error(_) => 0,
+    }
+    quic.committed(mut b.io.driver.q, host.mono_ns(clock), sent)
+    list.clear(mut b.send.wire)
+    list.clear(mut b.send.tx)
+    sent
+}
+
+fn discard_staged(mut b: Bridge, now: u64) {
+    let n = list.len(b.send.tx)
+    if n != 0 {
+        b.counts.discarded_staged += n
+        quic.committed(mut b.io.driver.q, now, 0)
+        list.clear(mut b.send.wire)
+        list.clear(mut b.send.tx)
+    }
+}

@@ -383,8 +383,8 @@ fn shape(codec: webrtc_sfu.sdp.Codec) -> Option[webrtc_sfu.router.Shape] {
 /// A room where the publisher (home 0) publishes `video` (and Opus when
 /// `audio`), and the recorder's seat (home 1) subscribes to both.
 fn setup(video: Option[webrtc_sfu.sdp.Codec], audio: bool) -> Rig {
-    let config = record.Config(unit: 1, window: 512, max_wait_us: 400000, pending: 64)
-    let rec = result.unwrap(record.recorder(provide.random(7), config))
+    let config = record.Config(window: 512, max_wait_us: 400000, pending: 64)
+    let rec = record.recorder(config, webrtc_sfu.router.new_observer(1))
     let mut r = Rig(rec: take rec, seq: 0, now: 1000000000, files: list.new(), posts: list.new())
     order(mut r, Open(room: ROOM, limits: limits()))
     order(mut r, Admit(who: webrtc_sfu.peer.Participant(gen: PUBLISHER, room: ROOM), home: 0))

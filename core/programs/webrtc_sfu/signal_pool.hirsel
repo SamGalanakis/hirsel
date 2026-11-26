@@ -37,9 +37,9 @@ pub fn room_name(b: Bytes) -> RoomName {
     RoomName(n)
 }
 
-pub type PoolOrder[M]: send = Open(name: RoomName, dial: runner.room_client.Dial, limits: router.RoomLimits, embed: Embed[M]) | Close(name: RoomName)
+pub type PoolOrder[M]: send = Open(name: RoomName, dial: runner.room_client.Dial, limits: router.RoomLimits, embed: Embed[M]) | Close(name: RoomName) | AttachBridge(name: RoomName, max_frame_bytes: u64) | DetachBridge(name: RoomName)
 
-pub type PoolReport: send = Opened(name: RoomName, room: peer.RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: peer.RoomId) | Empty(name: RoomName, room: peer.RoomId, idle_ns: u64) | Closed(name: RoomName, room: peer.RoomId, why: CloseWhy)
+pub type PoolReport: send = Opened(name: RoomName, room: peer.RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: peer.RoomId) | Empty(name: RoomName, room: peer.RoomId, idle_ns: u64) | Closed(name: RoomName, room: peer.RoomId, why: CloseWhy) | BridgeAttached(name: RoomName, room: peer.RoomId) | BridgeDetached(name: RoomName, room: peer.RoomId) | BridgeRefused(name: RoomName, why: PoolRefusal)
 
 pub type PoolRefusal: send = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(router.RouterError)
 
@@ -210,6 +210,15 @@ pub fn step_rooms[M: codec](mut p: Rooms[M], mut u: units.Unit, now: u64) {
             close(mut p.served[i].a)
         }
         bound_out(mut p.served[i])
+        let name = p.served[i].name
+        let room = room_of(p.served[i].a)
+        for take ev in replace(mut p.served[i].a.bridge_events, list.new()) {
+            match take ev {
+                Attached => list.push(mut p.reports, BridgeAttached(name: name, room: room)),
+                Detached => list.push(mut p.reports, BridgeDetached(name: name, room: room)),
+                Refused(take why) => list.push(mut p.reports, BridgeRefused(name: name, why: take why)),
+            }
+        }
     }
     let mut i = 0u64
     while i < list.len(p.served) {

@@ -28,6 +28,7 @@ sframe = { major = 1, path = "../sframe" }
 "datagram_tx.hirsel" = "moq"
 "cache.hirsel" = "moq"
 "relay.hirsel" = "moq"
+"publisher.hirsel" = "moq"
 "e2ee.hirsel" = "moq"
 
 [tests]

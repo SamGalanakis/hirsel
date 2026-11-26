@@ -131,6 +131,58 @@ fn ledger_run(net: Net, clock: Clock) waits {
     close_hall(take h)
 }
 
+fn virtual_ledger() {
+    let v = option.unwrap(units.virtual_unit(63))
+    if units.virtual_index(v) != 63 || units.virtual_unit(64) != None {
+        fail("virtual door did not respect the 64-door bound")
+    }
+    let limits = revoke_limits()
+    let session = peer.PeerLimits(sections: 4, down_tracks: 8, rtx_bytes: 65536, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
+    let cost = signal.room_cost(limits, session)
+    let control = cost.replicated + cost.control + cost.per_session
+    let mut budgets: List[u64] = list.new()
+    list.push(mut budgets, control)
+    for _ in 1u16 .. 63 {
+        list.push(mut budgets, cost.replicated + cost.per_session)
+    }
+    let mut ledger = signal.ledger(take budgets, 1, session)
+    let projection = router.observer_room_bytes(limits)
+    let bridge = signal.room_cost_bridge(limits, session, 8, 256).bridge
+    let available = projection + bridge
+    result.unwrap(signal.ledger_bridge(mut ledger, v, available))
+    let old: peer.RoomId = RoomId(201)
+    result.unwrap(signal.reserve_room(mut ledger, old, limits))
+    if signal.primary_of(ledger, old) != Some(0) || signal.ledger_free(ledger, 63) != bridge {
+        fail("virtual projection was charged as a WebRTC session home")
+    }
+    result.unwrap(signal.reserve_bridge(mut ledger, old, bridge))
+    if signal.ledger_free(ledger, 63) != 0 {
+        fail("bridge did not charge its own virtual unit exactly")
+    }
+    if let Error(Exists) = signal.reserve_bridge(mut ledger, old, bridge) {
+        ()
+    } else {
+        fail("a duplicate bridge attachment reserved a second hold")
+    }
+    signal.release_bridge(mut ledger, old)
+    signal.release_bridge(mut ledger, old)
+    if signal.ledger_free(ledger, 63) != bridge {
+        fail("bridge refund was applied more than once")
+    }
+    result.unwrap(signal.reserve_bridge(mut ledger, old, bridge))
+    signal.release_room(mut ledger, old)
+    if signal.ledger_free(ledger, 63) != available {
+        fail("close did not refund its bridge and projection")
+    }
+    let fresh: peer.RoomId = RoomId(202)
+    result.unwrap(signal.reserve_room(mut ledger, fresh, limits))
+    result.unwrap(signal.reserve_bridge(mut ledger, fresh, bridge))
+    signal.release_bridge(mut ledger, old)
+    if signal.ledger_free(ledger, 63) != 0 {
+        fail("an old room's refund hit the reopened room")
+    }
+}
+
 /// bug: the control unit admits a room or a join whose memory no unit has reserved, so
 /// two pending builds both pass a check only one fits; or a refusal reserves bytes; or a
 /// leave, an unsubscribe, a refused join or a close leaves bytes reserved, so the pool
@@ -146,6 +198,7 @@ fn ledger_run(net: Net, clock: Clock) waits {
 fn pool_ledger_reserves_what_fits(tasks: Tasks) -> Result[(), router.RouterError] waits {
     let (net, clock, take served) = sim_net(tasks, 34500)
     ledger_run(net, clock)
+    virtual_ledger()
     result.unwrap(task.join(take served))
     Ok(())
 }

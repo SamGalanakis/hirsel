@@ -1,0 +1,163 @@
+// A live publisher over addressed MoQ sessions. FETCH never has a source of
+// bytes here. It is refused before any grant or stream writer can be created.
+pub opaque type Publisher {
+    sessions: List[Session],
+    limits: Limits,
+    most: u64,
+    authority: Bytes,
+    path: Bytes
+}
+
+pub fn publisher(limits: Limits, most: u64, take authority: Bytes, take path: Bytes) -> Publisher {
+    Publisher(sessions: list.new(), limits: limits, most: most, authority: take authority, path: take path)
+}
+
+fn publisher_at(p: Publisher, link: LinkId) -> Option[u64] {
+    for i in 0u64 .. list.len(p.sessions) {
+        if p.sessions[i].link == link {
+            return Some(i)
+        }
+    }
+    None
+}
+
+pub fn publisher_add[D](mut p: Publisher, io: LinkIo[D], link: LinkId) -> bool {
+    if publisher_at(p, link) != None {
+        return true
+    }
+    if list.len(p.sessions) >= p.most {
+        return false
+    }
+    let Some(take s) = link_session(io, link, Server, Publisher, p.limits) else {
+        return false
+    }
+    list.push(mut p.sessions, take s)
+    true
+}
+
+pub fn publisher_receive[D](mut p: Publisher, mut io: LinkIo[D], now: u64, events: List[AddressedEvent]) {
+    let mut out: List[Event] = list.new()
+    for addressed in events {
+        let Some(i) = publisher_at(p, addressed.link) else {
+            continue
+        }
+        receive_link(mut p.sessions[i], mut io, now, addressed.event, mut out)
+        for ev in out {
+            match ev {
+                Setup(authority: a, path: path, token: _) => {
+                    let allowed = (list.len(a) == 0 || a == p.authority) && (list.len(path) == 0 || path == p.path)
+                    if allowed {
+                        accept_setup(mut p.sessions[i], mut io, Ok(default_scope(p.authority, p.path)))
+                    } else {
+                        accept_setup(mut p.sessions[i], mut io, Error(ERR_UNAUTHORIZED))
+                    }
+                },
+                Fetch(id: id, ..) => accept(mut p.sessions[i], mut io, id, Error(REQ_NOT_SUPPORTED)),
+                Publish(id: id, ..) => accept(mut p.sessions[i], mut io, id, Error(REQ_NOT_SUPPORTED)),
+                _ => (),
+            }
+        }
+        list.clear(mut out)
+        if is_closed(p.sessions[i]) {
+            let _ = list.remove(mut p.sessions, i)
+        }
+    }
+}
+
+/// Decide each outstanding SUBSCRIBE at the publisher's current control sequence.
+pub fn publisher_admit[D](mut p: Publisher, mut io: LinkIo[D], allowed: scoped fn(codec.TrackName) -> bool) {
+    for i in 0u64 .. list.len(p.sessions) {
+        admit_subscriptions(mut p.sessions[i], mut io, allowed)
+    }
+}
+
+fn admit_subscriptions[D](mut s: Session, mut io: LinkIo[D], allowed: scoped fn(codec.TrackName) -> bool) {
+    let mut i = 0u64
+    while i < list.len(s.requests) {
+        if s.requests[i].local || s.requests[i].kind != ReqSubscribe || s.requests[i].state != Pending {
+            i += 1
+            continue
+        }
+        let ok = match s.requests[i].track {
+            Some(t) => allowed(t),
+            None => false,
+        }
+        let id = RequestId(s.requests[i].id)
+        if ok {
+            accept(mut s, mut io, id, Ok(()))
+            i += 1
+        } else {
+            accept(mut s, mut io, id, Error(REQ_DOES_NOT_EXIST))
+        }
+    }
+}
+
+pub fn publisher_poll[D](mut p: Publisher, mut io: LinkIo[D], now: u64) -> Option[u64] {
+    let mut next: Option[u64] = None
+    for i in 0u64 .. list.len(p.sessions) {
+        if let Some(at) = poll(mut p.sessions[i], mut io, now) {
+            next = Some(match next {
+                Some(t) => order.min(at, t),
+                None => at,
+            })
+        }
+    }
+    next
+}
+
+pub fn publisher_send[D](mut p: Publisher, mut io: LinkIo[D], now: u64, o: Object) {
+    for i in 0u64 .. list.len(p.sessions) {
+        let _ = publish_at(mut p.sessions[i], mut io, now, now, o, false)
+    }
+}
+
+pub fn publisher_finish[D](mut p: Publisher, mut io: LinkIo[D], now: u64, track: codec.TrackName, group: u64) {
+    for i in 0u64 .. list.len(p.sessions) {
+        finish_subgroup(mut p.sessions[i], mut io, now, track, group, 0)
+    }
+}
+
+/// Remove both the outstanding requests and all send permission for a track.
+pub fn publisher_fence[D](mut p: Publisher, mut io: LinkIo[D], track: codec.TrackName) -> (u64, u64) {
+    let mut resets = 0u64
+    let mut datagrams = 0u64
+    for i in 0u64 .. list.len(p.sessions) {
+        refuse_pending_track(mut p.sessions[i], mut io, track)
+        let (rs, ds) = fence_track_counts(mut p.sessions[i], mut io, track, DONE_TRACK_ENDED)
+        resets += rs
+        datagrams += ds
+    }
+    (resets, datagrams)
+}
+
+fn refuse_pending_track[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName) {
+    let mut j = 0u64
+    while j < list.len(s.requests) {
+        if !s.requests[j].local && s.requests[j].state == Pending && s.requests[j].track == Some(clone(track)) {
+            let id = RequestId(s.requests[j].id)
+            accept(mut s, mut io, id, Error(REQ_DOES_NOT_EXIST))
+        } else {
+            j += 1
+        }
+    }
+}
+
+/// Suspend delivery without removing established subscriptions.
+pub fn publisher_pause[D](mut p: Publisher, mut io: LinkIo[D], track: codec.TrackName) {
+    for i in 0u64 .. list.len(p.sessions) {
+        refuse_pending_track(mut p.sessions[i], mut io, track)
+        let _ = purge_track(mut p.sessions[i], mut io, track, RESET_CANCELLED)
+    }
+}
+
+pub fn publisher_pending(p: Publisher) -> u64 {
+    let mut n = 0u64
+    for s in p.sessions {
+        for r in s.requests {
+            if !r.local && r.kind == ReqSubscribe && r.state == Pending {
+                n += 1
+            }
+        }
+    }
+    n
+}

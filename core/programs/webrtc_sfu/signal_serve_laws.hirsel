@@ -74,6 +74,50 @@ fn loopback(port: u16) -> Addr {
     Addr(ip: V4(0x7f000001u32), port: port)
 }
 
+type BridgeOrders: send {
+    clock: Clock,
+    until: u64,
+    orders: Sender[signal.PoolOrder[signal.Signal]],
+    reports: Receiver[signal.PoolReport]
+}
+
+fn bridge_order(take work: BridgeOrders) -> bool waits {
+    let BridgeOrders(clock: c, until: until, orders: take orders, reports: take reports) = take work
+    let name = signal.room_name(b"room")
+    let mut phase = 0u64
+    while host.mono_ns(c) < until {
+        match channel.try_receive(reports) {
+            Ok(Opened(name: n, room: _)) if n == name && phase == 0 => {
+                // The ledger fits, but the bridge's configured frame cap
+                // rejects installation. The next attach can use the refund.
+                let _ = channel.send(orders, AttachBridge(name: name, max_frame_bytes: 513))
+                phase = 1
+            },
+            Ok(BridgeRefused(name: n, why: Limits(Limit(_)))) if n == name && phase == 1 => {
+                let _ = channel.send(orders, AttachBridge(name: name, max_frame_bytes: 512))
+                phase = 2
+            },
+            Ok(BridgeAttached(name: n, room: _)) if n == name && phase == 2 => {
+                let _ = channel.send(orders, AttachBridge(name: name, max_frame_bytes: 512))
+                phase = 3
+            },
+            Ok(BridgeRefused(name: n, why: Exists)) if n == name && phase == 3 => {
+                let _ = channel.send(orders, DetachBridge(name: name))
+                phase = 4
+            },
+            Ok(BridgeDetached(name: n, room: _)) if n == name && phase == 4 => {
+                let _ = channel.send(orders, AttachBridge(name: name, max_frame_bytes: 512))
+                phase = 5
+            },
+            Ok(BridgeAttached(name: n, room: _)) if n == name && phase == 5 => return true,
+            Ok(BridgeRefused(..)) => return false,
+            Ok(_) => (),
+            Error(_) => host.sleep_until(c, host.mono_ns(c) + MS),
+        }
+    }
+    false
+}
+
 /// bug: the service never joins the room, drops the browser's offer, builds the session
 /// on no unit, or answers with an address or certificate that is not a unit's.
 /// oracle: RTC-8 and RTC-3 by hand: the browser's `Offer(1, sdp)` through the relay is
@@ -98,15 +142,22 @@ fn service_answers_over_the_room(c: Clock, random: Random, tasks: Tasks, net: Ne
     list.push(mut binds, loopback(0))
     list.push(mut binds, loopback(0))
     let (order_to, orders): (Sender[signal.PoolOrder[signal.Signal]], Receiver[signal.PoolOrder[signal.Signal]]) = channel.new(1u64)
-    let (reports, _reported): (Sender[signal.PoolReport], Receiver[signal.PoolReport]) = channel.new(16u64)
+    let (reports, reported): (Sender[signal.PoolReport], Receiver[signal.PoolReport]) = channel.new(16u64)
     let _ = channel.send(order_to, Open(name: signal.room_name(b"room"), dial: sfu_dial(tasks, net, c, random, address), limits: revoke_limits(), embed: take embed))
     let limits = signal.PoolLimits(units: 2, unit_bytes: 67108864, rooms: 1, sessions: 8, inflight: 1, media_take: 1024, room_pps: 100000, open_pps: None)
-    let pool = signal.Pool(tasks: tasks, net: net, clock: c, random: random, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR), limits: limits, timing: signal.DEFAULT_TIMING, queues: units.DEFAULT_MEDIA_QUEUES, orders: take orders, reports: take reports, until: until, relay: None)
+    let (take key, take certificate) = signal.unit_certificate(random, c) ?=> |_| 7u64
+    let bridge_link = bridge.BridgeLink(bind: loopback(0), config: bridge.BridgeConfig(unit: 2, window: 16, max_wait_us: 5000, max_frame_bytes: 512, mode: StreamsAndDatagrams), endpoint: m12_ep_cfg(), certificate: take certificate, key: take key, algorithm: P256, web_origin: None, moq: m12_moq_limits(), links: 4, authority: "sfu.bridge", path: "/room", transport_bytes: 8388608)
+    let bridge_orders = task.spawn(tasks, bytes 1048576, BridgeOrders(clock: c, until: until, orders: take order_to, reports: take reported), bridge_order)
+    let pool = signal.Pool(tasks: tasks, net: net, clock: c, random: random, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR), limits: limits, timing: signal.DEFAULT_TIMING, queues: units.DEFAULT_MEDIA_QUEUES, orders: take orders, reports: take reports, until: until, relay: None, bridge: Some(take bridge_link))
     let served = signal.serve_pool(take pool)
     let answer = result.unwrap(task.join(take browser))
+    let bridge_ok = result.unwrap(task.join(take bridge_orders))
     let _ = runner.fixture.end(take running, 5000u64)
     if let Error(_) = served {
         return Error(2u64)
+    }
+    if !bridge_ok {
+        return Error(8u64)
     }
     let Some(text) = answer else {
         return Error(3u64)

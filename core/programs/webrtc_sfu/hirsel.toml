@@ -15,6 +15,7 @@ runner = { major = 1, path = "../runner" }
 store = { major = 1, path = "../store" }
 quic = { major = 1, path = "../quic" }
 moq = { major = 1, path = "../moq" }
+webtransport = { major = 1, path = "../webtransport" }
 rtp_jitter = { major = 1, path = "../rtp_jitter" }
 
 [sources]
@@ -38,6 +39,7 @@ rtp_jitter = { major = 1, path = "../rtp_jitter" }
 "router_rate.hirsel" = "router"
 "units.hirsel" = "units"
 "units_io.hirsel" = "units"
+"units_virtual.hirsel" = "units"
 "signal.hirsel" = "signal"
 "signal_turn.hirsel" = "signal"
 "turn_runtime.hirsel" = "turn_runtime"
@@ -46,6 +48,7 @@ rtp_jitter = { major = 1, path = "../rtp_jitter" }
 "signal_pool.hirsel" = "signal"
 "signal_room.hirsel" = "signal"
 "signal_ledger.hirsel" = "signal"
+"signal_bridge.hirsel" = "signal"
 "cascade/directory.hirsel" = "cascade"
 "cascade/canon.hirsel" = "cascade"
 "cascade/wire.hirsel" = "cascade"
@@ -53,6 +56,7 @@ rtp_jitter = { major = 1, path = "../rtp_jitter" }
 "cascade/cost.hirsel" = "cascade"
 "cascade/forward.hirsel" = "cascade"
 "moq_bridge.hirsel" = "bridge"
+"moq_bridge_io.hirsel" = "bridge"
 "cascade/repair.hirsel" = "cascade"
 "cascade/fence.hirsel" = "cascade"
 

@@ -381,68 +381,63 @@ backing independently.
 
 ## MOQ-8: The SFU bridge
 
-The SFU publishes a room's media as MoQ so large audiences subscribe through MoQ relays
-instead of WebRTC. One track per published layer: namespace `(room, participant)`, where
-`participant` is the room's canonical participant id (CAS-2), and name `<kind>/<rid>`; group
-per keyframe interval (a group starts at each keyframe the SFU forwards), object per frame,
-reassembled by the existing depacketizers.
+The SFU publishes live room media as MoQ. The bridge is a virtual subscriber
+unit in the RTC-10 pool. It offers one MoQ track per bridged layer of an
+accepted down-track. The namespace is `(room, participant)` and the track
+name is `<kind>/<section>/<rid>`. The section distinguishes publications
+of the same media kind. A new epoch of the same participant can reuse the
+name, with a new subscription and fresh group IDs so older duplicate guards
+cannot mistake new frames for retransmissions.
 
-**A virtual subscriber unit.** The bridge is a media unit of the pool with no PeerSession,
-as RTC-9's recorder is: the control unit sends it every `Order`, and it answers each with an
-`Ack`; the home units of the room's publishers post it the plaintext `Media` of each layer it
-subscribes to (fan-out step 3) and it posts its `Wanted` masks and `Key` requests back
-(RTC-6). A room's publishers may live on many units; the bridge subscribes on each one's home
-unit, so it is one subscriber of the whole room, not a guest of one unit. It owns its own
-`quic.Endpoint` and the MoQ sessions it publishes on, to a relay or directly to
-subscribers.
+The bridge follows the accepted control order through `router.Observer`.
+It routes on the down-track's target and matches the publication's owner
+generation when it takes RTP. It posts wanted masks and key requests to the
+publisher's home. `Pool.bridge` configures a live publisher on native QUIC
+and can enable WebTransport on the same socket. A native SETUP that supplies
+an address must match the listener. A WebTransport CONNECT must match the
+listener's path and authority, pass the configured origin policy, and
+negotiate the MoQ protocol. SUBSCRIBE is admitted only while its track is
+installed and allowed to route. This publisher returns REQUEST_ERROR
+`NOT_SUPPORTED` for FETCH, during and after publication. Its session state
+has no local relay cache or FETCH writer. Downstream relays retain their own
+MOQ-6 cache policy.
 
-**Reassembly is budgeted.** A frame arrives as several RTP payloads, each a `Shared[Bytes]`
-the router shares, and a MoQ object is one contiguous payload, so the bridge copies each
-frame once into a per-track reassembly buffer and publishes that buffer as the object's
-`Shared[Bytes]` to every session. That is one copy per frame and none per subscriber. Each
-bridged layer's reassembly buffer is bounded by the layer's maximum frame size and charged in
-the room's `RoomCost` (RTC-10), so admitting a bridged room reserves it; a frame past the
-bound is dropped and counted, and the next keyframe starts a new group.
+The bridge bounds each layer's jitter window and drops a frame past its
+configured byte limit. If the next packet would extend the buffered window
+past its bound, the bridge polls for eligible frames and drops and counts the
+backed-up window if it still cannot fit. Video waits for a fresh keyframe after either
+drop. A keyframe begins a group. Each completed jitter `Frame` becomes an
+object. Opus needs no RTP marker. Video waiting for a preceding packet keeps
+its marker in the reorder window. The bridge moves the completed frame's
+owned bytes into a shared payload range. RTP extraction and depacketization
+still form the contiguous frame. Publisher SFrame ciphertext passes through
+depacketization and MoQ as payload bytes. The bridge holds no SFrame keys.
 
-**The revocation fence** (RTC-7, law M12). RTC-7 step 4 drops `Media` of a fenced generation
-when the bridge takes it, and step 3 removes the fenced participant's down-tracks. Before the
-bridge acknowledges, for each of the participant's tracks and each session it publishes on:
+**The socket fence** (RTC-7, law M12). The bridge applies the accepted
+`Revoke`, stops offering the covered down-tracks and drops their buffered
+RTP and pending subscription grants. The socket owner commits only the prefix
+accepted by UDP. It abandons any held sealed suffix, invalidates the wire and
+descriptors, and removes requeued track work before it can poll again.
+For each covered track and MoQ session it:
 
-1. `quic.reset(e, c, s, code, reliable = header_len)` on every open subgroup stream of the
-   track, which discards every queued, unacknowledged and retransmittable byte past the
-   stream header, including a polled but uncommitted suffix (QUIC-5);
-2. `quic.drop_datagrams(e, c, tag)` with the track's tag, which removes its queued
-   datagrams (QUIC-7);
-3. `end_track`, which sends PUBLISH_DONE for the track's subscriptions;
-4. drops the track's reassembly buffer.
+1. Resets open subgroup streams at the end of the subgroup header and drops
+   their application queues. If the reliable offset is unavailable it also
+   tries offset zero. A WT stream blocked on its transport header has
+   accepted no application payload. The bridge drops its pending application
+   bytes in this case too.
+2. Drops datagrams with the track's tag. WebTransport scopes that tag to its
+   CONNECT.
+3. Refuses pending subscriptions with `DOES_NOT_EXIST` and ends active ones
+   with PUBLISH_DONE.
+4. Acknowledges after all covered tracks and queues are settled.
 
-So once `revoke` returns, no byte of the fenced participant's objects leaves the bridge's
-QUIC endpoint, as a first send or a retransmission. M12's boundary is the bridge's send
-side: objects that left before the fence, and copies a downstream relay has cached, are
-outside it, as packets already delivered to a WebRTC subscriber are outside RTC-7.
-
-An end-to-end-encrypted room publishes SFrame ciphertext the bridge cannot read. The bridge
-is slice MS6.
-
-**End-state `Pool.bridge` and `VirtualUnit` seam (text only, not yet built —
-media-seams-design-3072).** In the wired end state, the bridge attaches to `webrtc_sfu`'s
-`Pool[M]` as an explicit `VirtualUnit` (`Pool.bridge`, RTC-10) sharing `router.Observer` with
-`media_record` and `cascade` (no embedded `router.Router` or dummy `peer.Outbox`):
-
-- Unit 0 reserves and releases `RoomCost.bridge` (`signal.reserve_bridge` / `release_bridge`) on
-  explicit `PoolOrder.AttachBridge` / `DetachBridge` and on `PoolOrder.Close`.
-- The bridge deletes its duplicated `sessions: List[moq.Session]` accept loop and manual
-  `staged_wire`/`staged_tx` staging, delegating publication to one `moq.Relay` over
-  `moq.MixedDriver` + `moq.mixed_ops()` (supporting both native QUIC relays and browser
-  WebTransport subscribers).
-- On RTP frame completion (`marker == true`), the bridge moves its owned reassembly buffer
-  directly into `quic.payload_whole(shared.new(take reassembly))` (eliminating the extra
-  `frame_buf` copy).
-- At the bridge unit's RTC-7 fence point, `Revoke` updates `router.Observer`, drops queued
-  `Carried.Media` and reassembly buffers, abandons any uncommitted UDP batch via
-  `quic.committed(..., 0)`, calls `moq.fence_track` (which invokes `LinkOps.reset` with
-  `reliable = header_len` and `LinkOps.drop_datagrams` on both native and WebTransport sessions),
-  and returns `Ack` only after all four hold (preserving M12 `bridge_ends_on_revoke`).
+No object bytes from the revoked generation leave the bridge socket after
+the acknowledgment, including retransmissions. Bytes already accepted by
+UDP and copies at downstream relays remain outside this boundary. The fence
+preserves other publications. Detach and room close apply the same send
+fence to every covered track. A suspension purges the room's pending payloads
+and holds delivery until every cause clears. Established subscriptions stay
+open across suspension.
 
 ## MOQ-9: What a session refuses
 

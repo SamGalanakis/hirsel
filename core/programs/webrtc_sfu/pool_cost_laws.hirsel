@@ -376,7 +376,7 @@ fn topology_room(participants: u16, sections: u8, tracks: u16) -> Result[router.
     let session = peer.PeerLimits(sections: sections, down_tracks: tracks, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
     let count: u64 = int.widen(participants)
     let rows = router.pool_bounds(2, 1, (count + 1) / 2, session)
-    let mut r = router.observer(provide.random(35000))
+    let mut r = router.on_unit(provide.random(35000), router.UNITS_MAX)
     let held = option.unwrap(router.pool_bytes(rows))
     let reserved = bound bytes held {
         router.reserve_pool(mut r, rows)

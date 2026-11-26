@@ -25,7 +25,8 @@ pub type Pool[M] {
     orders: Receiver[PoolOrder[M]],
     reports: Sender[PoolReport],
     until: u64,
-    relay: Option[RelayLink]
+    relay: Option[RelayLink],
+    bridge: Option[bridge.BridgeLink]
 }
 
 /// What signaling shares with the relay place (TURN-11): the master it mints with (it
@@ -36,7 +37,7 @@ pub type RelayLink {
     revokes: Sender[RelayRevoke]
 }
 
-pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers | Queues
+pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers | Queues | Bridge(bridge.StartError)
 
 /// The pool's unit deadlines, active polling interval, signaling retry policy, and
 /// how long a room stays continuously empty before `PoolReport.Empty` is raised.
@@ -378,7 +379,7 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
 /// order and hands each room client its messages without waiting. A one-room service is
 /// a pool with one `Open` queued.
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits {
-    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, timing: timing, queues: queues, orders: take orders, reports: take reports, until: until, relay: take linked) = take p
+    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, timing: timing, queues: queues, orders: take orders, reports: take reports, until: until, relay: take linked, bridge: take bridge_link) = take p
     let n = limits.units
     if n == 0 || n > router.UNITS_MAX || list.len(binds) != int.widen(n) {
         return Error(Units)
@@ -400,15 +401,39 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     }
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
     let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
-    let bounds = router.pool_bounds(int.widen(n), int.widen(limits.rooms), int.widen(limits.sessions), session)
+    let mut roster_limits = limits
+    let mut virtual_door: Option[units.VirtualUnit] = None
+    let mut bridge_fixed = 0u64
+    let mut bridge_window = 0u64
+    if let Some(l) = bridge_link {
+        let Some(v) = units.virtual_unit(n) else {
+            return Error(Units)
+        }
+        roster_limits.units += 1
+        if !bridge.listener_valid(l, n, queues) {
+            return Error(Bridge(Config))
+        }
+        bridge_fixed = bridge.listener_bytes(l, plane, queues, roster_limits.units)
+        if bridge_fixed == 0xffffffffffffffff || bridge_fixed > limits.unit_bytes {
+            return Error(Router(Capacity(Capacity(requested: bridge_fixed, available: limits.unit_bytes))))
+        }
+        bridge_window = l.config.window
+        virtual_door = Some(v)
+    }
+    let total = roster_limits.units
+    let bounds = router.pool_bounds(int.widen(total), int.widen(limits.rooms), int.widen(limits.sessions), session)
     for k in 0u16 .. n {
-        let fixed = pool_unit_bytes(k, limits, session, queues)
+        let fixed = pool_unit_bytes(k, roster_limits, session, queues)
         if fixed == 0xffffffffffffffff || fixed > limits.unit_bytes {
             return Error(Router(Capacity(Capacity(requested: fixed, available: limits.unit_bytes))))
         }
     }
     let (take socket, at) = host.udp_bind(net, binds[0], options) ?=> |e| Bind(e)
-    let (doors0, take control, take media) = units.inboxes_with(at, 0, n, plane, queues) ?=> |take e| Router(e)
+    let (doors0, take control, take media) = units.inboxes_with(at, 0, total, plane, queues) ?=> |take e| Router(e)
+    let bridge_run = match take bridge_link {
+        Some(take l) => Some(bridge.start(tasks, net, clock, random, take l, plane, queues, timing.udp, total, limits.unit_bytes, until) ?=> |take e| Bridge(e)),
+        None => None,
+    }
     let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes HELLO_BYTES)
     let (hello, take hellos) = hc ?=> |c| Router(Capacity(c))
     let dc: Result[(Client[Finished], Inbox[Finished]), Capacity] = conn.new(1024, bytes FINISHED_BYTES)
@@ -416,7 +441,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let mut running: List[Task[Result[(), ServeError]]] = list.new()
     for k in 1u16 .. n {
         let terms: sdp.Policy = clone(policy)
-        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, queues: queues, until: until)
+        let start = Start(index: k, units: total, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, queues: queues, until: until)
         match task.spawn_unit(tasks, bytes limits.unit_bytes, take start, unit_task) {
             Ok(take t) => list.push(mut running, take t),
             Error(_) => return Error(Spawn),
@@ -450,6 +475,17 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
         list.push(mut rosters, take r)
         list.push(mut builders, take b)
     }
+    let mut bridge_task: Option[Task[()]] = None
+    if let Some(take run) = take bridge_run {
+        let bridge.Running(doors: take d, roster: take roster, task: take worker) = take run
+        list.push(mut all, take d)
+        for door in all {
+            if let Error(_) = conn.send(roster, dup(door)) {
+                return Error(Units)
+            }
+        }
+        bridge_task = Some(take worker)
+    }
     for r in rosters {
         for k in 0u64 .. list.len(all) {
             if let Error(_) = conn.send(r, Sibling(index: int.narrow(k), doors: dup(all[k]), done: conn.client(done))) {
@@ -458,15 +494,22 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
         }
     }
     let mut u = units.unit_with(random, 0, all, take control, take media, queues, plane) ?=> |take e| Router(e)
+    if let Some(v) = virtual_door {
+        units.set_virtual(mut u, v) ?=> |take e| Router(e)
+    }
     units.reserve_pool(mut u, bounds)
     units.set_timing(mut u, timing.udp)
     units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
     let mut free: List[u64] = list.new()
     for k in 0u16 .. n {
-        list.push(mut free, limits.unit_bytes - pool_unit_bytes(k, limits, session, queues))
+        list.push(mut free, limits.unit_bytes - pool_unit_bytes(k, roster_limits, session, queues))
     }
-    let mut pool: Rooms[M] = rooms(limits.rooms, ledger(take free, limits.sessions, session))
+    let mut room_ledger = ledger(take free, limits.sessions, session)
+    if let Some(v) = virtual_door {
+        ledger_bridge(mut room_ledger, v, limits.unit_bytes - bridge_fixed) ?=> |_| Units
+    }
+    let mut pool: Rooms[M] = rooms(limits.rooms, take room_ledger)
     empty_idle(mut pool, timing.empty_idle_ns)
     let mut revokes_to: Option[Sender[RelayRevoke]] = None
     if let Some(take link) = take linked {
@@ -502,6 +545,8 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
                     list.push(mut clients, take c)
                 },
                 Close(name: name) => close_room(mut pool, name),
+                AttachBridge(name: name, max_frame_bytes: cap) => attach_bridge(mut pool, name, bridge_window, cap),
+                DetachBridge(name: name) => detach_bridge(mut pool, name),
             }
         }
         // The rooms marked ready, and only those.
@@ -600,6 +645,9 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     for take t in running {
         let _ = task.join(take t)
     }
+    if let Some(take worker) = take bridge_task {
+        let _ = task.join(take worker)
+    }
     Ok(())
 }
 
@@ -638,9 +686,9 @@ pub fn room_cost_cascade(limits: router.RoomLimits, session: peer.PeerLimits, li
 }
 
 /// Price a room including its MOQ-8 bridge reassembly buffer budget (RTC-10, MOQ-8).
-pub fn room_cost_bridge(limits: router.RoomLimits, session: peer.PeerLimits, max_frame_bytes: u64) -> RoomCost {
+pub fn room_cost_bridge(limits: router.RoomLimits, session: peer.PeerLimits, window: u64, max_frame_bytes: u64) -> RoomCost {
     let mut c = room_cost(limits, session)
-    c.bridge = bridge.bridge_room_cost(limits, max_frame_bytes)
+    c.bridge = bridge.bridge_room_cost(limits, window, max_frame_bytes)
     c
 }
 

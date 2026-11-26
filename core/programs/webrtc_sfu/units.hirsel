@@ -85,6 +85,8 @@ pub type Event = Fenced(peer.Participant) | Fault(room: peer.RoomId, error: rout
 pub opaque type Unit {
     r: router.Router,
     index: u16,
+    virtual: Option[VirtualUnit],
+    bridge_replies: List[BridgeReply],
     doors: List[Doors],
     control: Inbox[ControlMessage],
     media: Inbox[router.Carried],
@@ -182,7 +184,7 @@ pub fn fixed_bytes(index: u16, units: u16, plane: Plane, q: MediaQueues, pool: r
     let Some(socket) = udp_options(q.socket_slots, q.datagram_bytes) else {
         return 0xffffffffffffffff
     }
-    let boxes = connection_bytes(bytes[ControlMessage], control_slots(index, units, plane), 0) + connection_bytes(bytes[router.Carried], q.ingress_packets, q.ingress_bytes)
+    let boxes = virtual_inbox_bytes(index, units, plane, q)
     let packet_bytes = int.saturating_add(priced(bytes[UdpTx], q.egress_packets), priced(bytes[peer.Tag], q.egress_packets))
     let out = int.saturating_add(priced(1, q.egress_bytes), packet_bytes)
     let width: u64 = int.widen(q.datagram_bytes)
@@ -195,6 +197,10 @@ pub fn fixed_bytes(index: u16, units: u16, plane: Plane, q: MediaQueues, pool: r
     }
     let fixed = boxes + buffers + slots * int.widen(each)
     int.saturating_add(fixed, int.saturating_add(out, rows))
+}
+
+pub fn virtual_inbox_bytes(index: u16, units: u16, plane: Plane, q: MediaQueues) -> u64 {
+    connection_bytes(bytes[ControlMessage], control_slots(index, units, plane), 0) + connection_bytes(bytes[router.Carried], q.ingress_packets, q.ingress_bytes)
 }
 
 /// Reserve the unit's router row lists at `pool` before it serves any room (RTC-10
@@ -273,7 +279,7 @@ pub fn unit_with(r: Random, index: u16, doors: List[Doors], take control: Inbox[
     for d in doors {
         list.push(mut all, Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr))
     }
-    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, datagram_bytes: width, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, timing: DEFAULT_TIMING, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
+    Ok(Unit(r: router.on_unit(r, index), index: index, virtual: None, bridge_replies: list.new(), doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, datagram_bytes: width, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, timing: DEFAULT_TIMING, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
 }
 
 pub fn router_of(u: Unit) -> View[router.Router] in u {
@@ -478,7 +484,11 @@ fn start_call(mut u: Unit, now: u64, i: u64, c: router.Change, fence: bool) {
         Publish(room: room, who: who, section: section, id: _, shape: _) => Publish(room: room, who: who, section: section, id: router.next_publication(mut u.r), shape: None),
         other => other,
     }
-    let home = router.first(u.r, change)
+    let first = router.first(u.r, change)
+    let home = match u.virtual {
+        Some(v) if first == v.index => 0u16,
+        _ => first,
+    }
     u.calls[i].seq += 1
     let seq = u.calls[i].seq
     let room = u.calls[i].room
@@ -662,10 +672,22 @@ pub fn take_control(mut u: Unit, now: u64) {
             },
             Ok(ControlMessage(step: Ack(room: room, seq: seq, unit: k, answer: a), opus_fmtp: fmtp)) => answered(mut u, now, room, seq, k, a, fmtp),
             Ok(ControlMessage(step: Fault(room: room, unit: _, error: take e), opus_fmtp: _)) => list.push(mut u.events, Fault(room: room, error: take e)),
+            Ok(ControlMessage(step: BridgeAck(room: room, serial: serial, unit: from, answer: take a), opus_fmtp: _)) => {
+                if u.index == 0 && u.virtual == virtual_unit(from) && u.virtual != None && router.room_open(u.r, room) {
+                    list.push(mut u.bridge_replies, BridgeReply(room: room, serial: serial, answer: take a))
+                }
+            },
+            Ok(ControlMessage(step: BridgeOrder(..), opus_fmtp: _)) => (),
             Error(_) => break,
         }
     }
     if u.index == 0 {
+        {
+            let r = view (u.r)
+            list.retain(mut u.bridge_replies, scoped fn(a: BridgeReply) -> bool {
+                router.room_open(r, a.room)
+            })
+        }
         repost(mut u)
         admit(mut u, now)
     }

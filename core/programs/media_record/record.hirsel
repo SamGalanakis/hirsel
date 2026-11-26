@@ -6,8 +6,6 @@
 // packets into frames; each frame lands in its track's own file at the time the
 // publisher's sender reports give it.
 pub type Config {
-    // This recorder's index among the media units: the home of its seats.
-    unit: u16,
     // rtp_jitter's reorder window, in packets, and its wait for a hole.
     window: u64,
     max_wait_us: u64,
@@ -79,7 +77,7 @@ type Track {
 }
 
 pub opaque type Recorder {
-    r: webrtc_sfu.router.Router,
+    r: webrtc_sfu.router.Observer,
     config: Config,
     tracks: List[Track],
     posts: List[webrtc_sfu.router.Post],
@@ -89,7 +87,6 @@ pub opaque type Recorder {
     // of its first placed frame.
     origin: Option[i64],
     counts: Counts,
-    out: webrtc_sfu.peer.Outbox,
     events: List[rtp_jitter.jitter.Event],
     buffer: Bytes,
     empty: Shared[Bytes]
@@ -97,10 +94,14 @@ pub opaque type Recorder {
 
 const NS: i64 = 1000000000
 
-pub fn recorder(random: Random, config: Config) -> Result[Recorder, webrtc_sfu.router.RouterError] {
-    let out = webrtc_sfu.peer.outbox(1500, 1) ?=> |take e| Peer(e)
+pub fn recorder(config: Config, take observer: webrtc_sfu.router.Observer) -> Recorder {
     let empty: Bytes = list.new()
-    Ok(Recorder(r: webrtc_sfu.router.observer(random), config: config, tracks: list.new(), posts: list.new(), output: list.new(), next_file: 1, origin: None, counts: Counts(stale: 0, unwanted: 0, dropped: 0, early: 0, overflow: 0, keys: 0), out: take out, events: list.new(), buffer: list.new(), empty: shared.new(take empty)))
+    let mut rec = Recorder(r: take observer, config: config, tracks: list.new(), posts: list.new(), output: list.new(), next_file: 1, origin: None, counts: Counts(stale: 0, unwanted: 0, dropped: 0, early: 0, overflow: 0, keys: 0), events: list.new(), buffer: list.new(), empty: shared.new(take empty))
+    let rooms = webrtc_sfu.router.observer_rooms(rec.r)
+    for room in rooms {
+        settle(mut rec, room)
+    }
+    rec
 }
 
 pub fn counts(rec: Recorder) -> Counts {
@@ -124,27 +125,26 @@ pub fn take_output(mut rec: Recorder) -> List[Output] {
 pub fn control(mut rec: Recorder, now: u64, take c: webrtc_sfu.router.Control) -> Option[webrtc_sfu.router.Control] {
     match take c {
         Order(room: order_room, seq: seq, change: take change) => {
+            let allowed = webrtc_sfu.router.observer_routing_allowed(rec.r, order_room, now / 1000000)
             let paused = match change {
-                Suspend(room: room, cause: _, on: true) => Some(room),
+                Suspend(room: room, cause: _, on: true) if allowed => Some(room),
                 _ => None,
             }
-            let answer = webrtc_sfu.router.apply(mut rec.r, now, take change, mut rec.out)
-            let _ = webrtc_sfu.router.take_posts(mut rec.r)
-            let _ = webrtc_sfu.router.take_notices(mut rec.r)
-            let _ = webrtc_sfu.router.purge(rec.r, mut rec.out)
-            if let Some(room) = paused {
-                for i in 0u64 .. list.len(rec.tracks) {
-                    if rec.tracks[i].seat.room == room {
-                        restart(mut rec, i)
+            let answer = webrtc_sfu.router.observer_apply(mut rec.r, order_room, seq, change)
+            if let Ok(_) = answer {
+                if let Some(room) = paused {
+                    for i in 0u64 .. list.len(rec.tracks) {
+                        if rec.tracks[i].seat.room == room {
+                            restart(mut rec, i)
+                        }
                     }
                 }
+                settle(mut rec, order_room)
             }
-            settle(mut rec)
-            let unit = rec.config.unit
+            let unit = webrtc_sfu.router.observer_unit(rec.r)
             Some(Ack(room: order_room, seq: seq, unit: unit, answer: take answer))
         },
-        Ack(room: _, seq: _, unit: _, answer: _) => None,
-        Fault(room: _, unit: _, error: _) => None,
+        _ => None,
     }
 }
 
@@ -154,7 +154,7 @@ pub fn carried(mut rec: Recorder, now: u64, take msg: webrtc_sfu.router.Carried)
     let webrtc_sfu.router.Carried(carry: carry, packet: packet) = take msg
     match carry {
         Media(room: room, publication: p, src: src, m: m, handle: _, speaking: _, rate: _, dropped: _) => media(mut rec, now, room, p, src, m, packet),
-        Sender(room: room, publication: p, owner: owner, source: source, info: info) => sender(mut rec, room, p, owner, source, info),
+        Sender(room: room, publication: p, owner: owner, source: source, info: info) => sender(mut rec, now, room, p, owner, source, info),
         _ => {
             rec.counts.unwanted += 1
         },
@@ -164,6 +164,10 @@ pub fn carried(mut rec: Recorder, now: u64, take msg: webrtc_sfu.router.Carried)
 /// Release frames whose holes waited long enough (rtp_jitter `poll`).
 pub fn poll(mut rec: Recorder, now: u64) {
     for i in 0u64 .. list.len(rec.tracks) {
+        if !webrtc_sfu.router.observer_routing_allowed(rec.r, rec.tracks[i].seat.room, now / 1000000) {
+            restart(mut rec, i)
+            continue
+        }
         rtp_jitter.jitter.poll(mut rec.tracks[i].jitter, now / 1000, mut rec.events)
         deliver(mut rec, i)
     }
@@ -182,11 +186,15 @@ fn is_video(t: Track) -> bool {
 }
 
 // ---- Tracks follow this unit's down-tracks ----
-fn settle(mut rec: Recorder) {
-    let downs = webrtc_sfu.router.downs_on(rec.r, rec.config.unit)
+fn settle(mut rec: Recorder, room: webrtc_sfu.peer.RoomId) {
+    let downs = webrtc_sfu.router.observer_downs(rec.r, room)
     let mut i = 0u64
     while i < list.len(rec.tracks) {
         let t = rec.tracks[i].seat
+        if t.room != room {
+            i += 1
+            continue
+        }
         let kept = list.any(downs, scoped fn(d: webrtc_sfu.router.DownInfo) -> bool {
             d.room == t.room && d.publication == t.publication && d.sub == t.sub
         })
@@ -195,7 +203,7 @@ fn settle(mut rec: Recorder) {
         } else {
             // A fenced owner's buffered media is dropped, as RTC-7 drops it
             // from every queue; an unsubscribe or a leave lets it land.
-            let fenced = webrtc_sfu.router.fenced(rec.r, t.room, t.owner)
+            let fenced = webrtc_sfu.router.observer_fenced(rec.r, t.room, t.owner)
             close(mut rec, i, !fenced)
         }
     }
@@ -209,8 +217,12 @@ fn settle(mut rec: Recorder) {
         }
         match found {
             Some(k) => {
-                rec.tracks[k].target = d.target
-                want(mut rec, k)
+                if rec.tracks[k].target != d.target {
+                    restart(mut rec, k)
+                    rec.tracks[k].encoding = None
+                    rec.tracks[k].target = d.target
+                    want(mut rec, k)
+                }
             },
             None => open(mut rec, d),
         }
@@ -218,7 +230,7 @@ fn settle(mut rec: Recorder) {
 }
 
 fn open(mut rec: Recorder, d: webrtc_sfu.router.DownInfo) {
-    let Some(info) = webrtc_sfu.router.publication_info(rec.r, d.room, d.publication) else {
+    let Some(info) = webrtc_sfu.router.observer_publication(rec.r, d.room, d.publication) else {
         return
     }
     let Some(writer) = files.writer(info.shape.codec) else {
@@ -269,7 +281,7 @@ fn close(mut rec: Recorder, i: u64, flush: bool) {
     }
     list.push(mut rec.output, Closed(file: t.file))
     if t.mask != 0 {
-        let unit = rec.config.unit
+        let unit = webrtc_sfu.router.observer_unit(rec.r)
         post_bare(mut rec, t.seat.home, Wanted(room: t.seat.room, publication: t.seat.publication, src: t.seat.owner, unit: unit, mask: 0))
     }
 }
@@ -296,7 +308,7 @@ fn want(mut rec: Recorder, i: u64) {
     }
     rec.tracks[i].mask = mask
     let t = rec.tracks[i].seat
-    let unit = rec.config.unit
+    let unit = webrtc_sfu.router.observer_unit(rec.r)
     post_bare(mut rec, t.home, Wanted(room: t.room, publication: t.publication, src: t.owner, unit: unit, mask: mask))
 }
 
@@ -316,7 +328,7 @@ fn ask_key(mut rec: Recorder, i: u64) {
 
 // ---- Media ----
 fn media(mut rec: Recorder, now: u64, room: webrtc_sfu.peer.RoomId, p: webrtc_sfu.router.PublicationId, src: webrtc_sfu.peer.Gen, m: webrtc_sfu.peer.MediaIn, packet: Bytes) {
-    if webrtc_sfu.router.fenced(rec.r, room, src) || webrtc_sfu.router.suspended(rec.r, room) {
+    if webrtc_sfu.router.observer_fenced(rec.r, room, src) || !webrtc_sfu.router.observer_routing_allowed(rec.r, room, now / 1000000) {
         rec.counts.stale += 1
         return
     }
@@ -354,8 +366,8 @@ fn media(mut rec: Recorder, now: u64, room: webrtc_sfu.peer.RoomId, p: webrtc_sf
     }
 }
 
-fn sender(mut rec: Recorder, room: webrtc_sfu.peer.RoomId, p: webrtc_sfu.router.PublicationId, owner: webrtc_sfu.peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) {
-    if webrtc_sfu.router.fenced(rec.r, room, owner) || webrtc_sfu.router.suspended(rec.r, room) {
+fn sender(mut rec: Recorder, now: u64, room: webrtc_sfu.peer.RoomId, p: webrtc_sfu.router.PublicationId, owner: webrtc_sfu.peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) {
+    if webrtc_sfu.router.observer_fenced(rec.r, room, owner) || !webrtc_sfu.router.observer_routing_allowed(rec.r, room, now / 1000000) {
         rec.counts.stale += 1
         return
     }

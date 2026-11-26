@@ -684,9 +684,8 @@ fn remove_request[D](mut s: Session, mut io: LinkIo[D], idx: u64) {
         if s.tx_subgroups[i].req_id == req_id {
             let st = s.tx_subgroups[i].stream
             let rel = s.tx_subgroups[i].header_len
-            if !s.tx_subgroups[i].fin_sent {
-                tx_reset(s.link, mut io, st, RESET_CANCELLED, rel)
-            }
+            // A queued FIN does not settle the stream's retransmissions.
+            tx_reset(s.link, mut io, st, RESET_CANCELLED, rel)
             drop_outgoing(mut s, st)
             let _ = list.remove(mut s.tx_subgroups, i)
         } else {

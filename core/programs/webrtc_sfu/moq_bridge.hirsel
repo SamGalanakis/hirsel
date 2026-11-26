@@ -1,11 +1,4 @@
-// MOQ-8: SFU-to-MoQ bridge (slice MS6).
-// A virtual subscriber unit of the SFU pool with no PeerSession (like media_record):
-// applies every control `Order` to its observer Router, answers each with an `Ack`,
-// receives plaintext `Media` from publisher home units, reassembles frames in budgeted
-// per-layer buffers using rtp_jitter, publishes each frame once as Shared[Bytes] to
-// every MoQ session on its own quic.Endpoint, and enforces MOQ-8's revocation egress
-// fence (reset streams with reliable = header_len, drop datagrams, PUBLISH_DONE, drop
-// polled-but-uncommitted suffix and reassembly buffer) before returning Ack.
+// MOQ-8 applies RTC-7 control and socket fences to the MoQ publisher.
 pub type BridgeMode: key = StreamsOnly | DatagramsOnly | StreamsAndDatagrams
 
 pub type BridgeConfig: key {
@@ -20,6 +13,7 @@ pub type BridgeCounts: key {
     stale: u64,
     unwanted: u64,
     oversized: u64,
+    window_overflow: u64,
     published: u64,
     fenced_tracks: u64,
     fenced_streams: u64,
@@ -38,7 +32,6 @@ type BridgeSeat: key {
 
 type BridgeTrack {
     seat: BridgeSeat,
-    codec: sdp.Codec,
     depack_codec: rtp_jitter.depack.Codec,
     video: bool,
     target: router.Target,
@@ -46,8 +39,7 @@ type BridgeTrack {
     encoding: Option[u8],
     moq_track: moq.codec.TrackName,
     jitter: rtp_jitter.jitter.Jitter,
-    reassembly: Bytes,
-    reassembly_cap: u64,
+    max_frame_bytes: u64,
     needs_key: bool,
     started_group: bool,
     group: u64,
@@ -55,19 +47,25 @@ type BridgeTrack {
 }
 
 pub opaque type Bridge {
-    r: router.Router,
+    r: router.Observer,
+    rooms: List[Attached],
     config: BridgeConfig,
     tracks: List[BridgeTrack],
+    next_group: u64,
     posts: List[router.Post],
-    out: peer.Outbox,
     events: List[rtp_jitter.jitter.Event],
     empty: Shared[Bytes],
     io: moq.LinkIo[moq.MixedDriver],
-    sessions: List[moq.Session],
-    session_events: List[moq.Event],
-    staged_wire: Bytes,
-    staged_tx: List[quic.Output],
+    publisher: moq.Publisher,
+    authority: String,
+    path: String,
+    send: SendBatch,
     counts: BridgeCounts
+}
+
+type Attached: key {
+    room: peer.RoomId,
+    max_frame_bytes: u64
 }
 
 const BRIDGE_ENCODINGS_PER_PUB: u64 = 4
@@ -82,8 +80,8 @@ fn decimal_bytes(n: u64) -> Bytes {
 }
 
 /// MOQ-8 track name: namespace `(room, participant)` (CAS-2 canonical participant id),
-/// name `<kind>/<rid>`.
-pub fn track_name(room: peer.RoomId, owner: peer.Gen, codec: sdp.Codec, encoding: u8) -> moq.codec.TrackName {
+/// name `<kind>/<section>/<rid>`.
+pub fn track_name(room: peer.RoomId, owner: peer.Gen, codec: sdp.Codec, section: u8, encoding: u8) -> moq.codec.TrackName {
     let peer.RoomId(rn) = room
     let peer.Gen(id: pid, epoch: _) = owner
     let mut ns_fields: List[Bytes] = list.with_capacity(2)
@@ -97,8 +95,11 @@ pub fn track_name(room: peer.RoomId, owner: peer.Gen, codec: sdp.Codec, encoding
     }
     let enc_u64: u64 = int.widen(encoding)
     let rid = decimal_bytes(enc_u64)
-    let mut name: Bytes = list.with_capacity(list.len(kind) + 1 + list.len(rid))
+    let media_section = decimal_bytes(int.widen(section))
+    let mut name: Bytes = list.with_capacity(list.len(kind) + 2 + list.len(media_section) + list.len(rid))
     list.append(mut name, kind)
+    list.push(mut name, 0x2f)
+    list.append(mut name, media_section)
     list.push(mut name, 0x2f)
     list.append(mut name, rid)
     moq.codec.TrackName(ns: take ns, name: take name)
@@ -113,225 +114,148 @@ fn seq_price(element: u64, cap: u64) -> u64 {
 
 /// MOQ-8 budgeted reassembly cost charged in `RoomCost.bridge` (RTC-10).
 /// Bounds the per-layer reassembly buffers for every published layer of the room.
-pub fn bridge_room_cost(limits: router.RoomLimits, max_frame_bytes: u64) -> u64 {
-    let p: u64 = int.widen(limits.participants)
+pub fn bridge_room_cost(limits: router.RoomLimits, window: u64, max_frame_bytes: u64) -> u64 {
+    if window == 0 || window > 32768 {
+        return 0xffffffffffffffff
+    }
+    let participants: u64 = int.widen(limits.participants)
     let pubs: u64 = int.widen(limits.publications)
-    let layers = int.saturating_mul(int.saturating_mul(p, pubs), BRIDGE_ENCODINGS_PER_PUB)
-    let one_buf = seq_price(1, max_frame_bytes)
-    let bufs = int.saturating_mul(layers, one_buf)
-    let table = seq_price(bytes[BridgeTrack], order.max(layers, 4))
-    int.saturating_add(bufs, table)
+    let layers = participants * pubs * BRIDGE_ENCODINGS_PER_PUB
+    let packets = rtp_jitter.jitter.window_bytes(window, peer.SLOT)
+    let frame = seq_price(1, max_frame_bytes)
+    let retained = int.saturating_mul(layers, int.saturating_add(packets, frame))
+    let table = seq_price(bytes[BridgeTrack], order.max(4, 4 * layers))
+    // One depacketization can hold its owned parts and completed frames
+    // while draining the bounded window of one track.
+    let scratch = 4u64 * packets
+    int.saturating_add(int.saturating_add(retained, table), scratch)
 }
 
-pub fn bridge(random: Random, config: BridgeConfig, take q: quic.Endpoint) -> Result[Bridge, router.RouterError] {
-    let out = peer.outbox(1500, 1) ?=> |take e| Peer(e)
+/// Build a mixed-transport publisher. The configured authority and path identify
+/// this broadcast endpoint. Its room attachments determine which tracks it offers.
+pub fn bridge(config: BridgeConfig, take q: quic.Endpoint, take w: Option[webtransport.Endpoint], mtu: u16, limits: moq.Limits, most: u64, take authority: String, take path: String) -> Bridge {
     let empty: Bytes = list.new()
-    Ok(Bridge(
-        r: router.observer(random),
+    let p = moq.publisher(limits, most, clone(string.as_bytes(authority)), clone(string.as_bytes(path)))
+    Bridge(
+        r: router.new_observer(config.unit),
+        rooms: list.new(),
         config: config,
         tracks: list.new(),
+        next_group: 0,
         posts: list.new(),
-        out: take out,
         events: list.new(),
         empty: shared.new(take empty),
-        io: moq.mixed_driver(take q, None, 0x100000000),
-        sessions: list.new(),
-        session_events: list.new(),
-        staged_wire: list.with_capacity(64 * 1200),
-        staged_tx: list.with_capacity(65),
-        counts: BridgeCounts(stale: 0, unwanted: 0, oversized: 0, published: 0, fenced_tracks: 0, fenced_streams: 0, dropped_datagrams: 0, discarded_staged: 0, keys: 0),
-    ))
+        io: moq.mixed_driver(take q, take w, most),
+        publisher: take p,
+        authority: take authority,
+        path: take path,
+        send: SendBatch(wire: list.with_capacity(SEND_BATCH * int.widen(mtu)), tx: list.with_capacity(SEND_BATCH), outputs: list.with_capacity(SEND_BATCH)),
+        counts: BridgeCounts(stale: 0, unwanted: 0, oversized: 0, window_overflow: 0, published: 0, fenced_tracks: 0, fenced_streams: 0, dropped_datagrams: 0, discarded_staged: 0, keys: 0),
+    )
 }
 
 pub fn counts(b: Bridge) -> BridgeCounts {
     b.counts
 }
 
-pub fn router_of(b: Bridge) -> View[router.Router] in b {
-    view b.r
-}
-
 pub fn take_posts(mut b: Bridge) -> List[router.Post] {
     replace(mut b.posts, list.new())
 }
 
-pub fn take_session_events(mut b: Bridge) -> List[moq.Event] {
-    replace(mut b.session_events, list.new())
+pub fn pending_subscriptions(b: Bridge) -> u64 {
+    moq.publisher_pending(b.publisher)
 }
 
-/// Total bytes reserved across all active per-track reassembly buffers.
-pub fn reassembly_bytes(b: Bridge) -> u64 {
-    let mut total = 0u64
-    for t in b.tracks {
-        total += t.reassembly_cap
-    }
-    total
-}
-
-/// Active reassembly buffer bytes held for `owner` (0 once fenced/closed, M12).
-pub fn track_reassembly_bytes(b: Bridge, owner: peer.Gen) -> u64 {
-    let mut total = 0u64
+pub fn track_count(b: Bridge, owner: peer.Gen) -> u64 {
+    let mut n = 0u64
     for t in b.tracks {
         if t.seat.owner == owner {
-            total += t.reassembly_cap
-        }
-    }
-    total
-}
-
-/// Add an outbound MoQ publisher session to this bridge.
-pub fn add_session(mut b: Bridge, take s: moq.Session) -> u64 {
-    list.push(mut b.sessions, take s)
-    list.len(b.sessions) - 1
-}
-
-/// Feed one received UDP datagram into the bridge's QUIC endpoint and dispatch events
-/// to its MoQ sessions. Returns raw QUIC events (e.g. `Connected` for accepting new sessions).
-pub fn receive_quic(mut b: Bridge, now: u64, from: Addr, ecn: u8, mut data: Bytes, at: u64, len: u64) -> List[quic.Event] {
-    let mut qev: List[quic.Event] = list.new()
-    quic.receive_datagram(mut b.io.driver.q, now, from, ecn, mut data, at, len, mut qev)
-    if list.len(qev) > 0 {
-        let mut tevs: List[moq.AddressedEvent] = list.new()
-        moq.native_events(mut b.io.driver, qev, mut tevs)
-        for si in 0u64 .. list.len(b.sessions) {
-            moq.receive(mut b.sessions[si], mut b.io, now, tevs, mut b.session_events)
-        }
-    }
-    take qev
-}
-
-/// Accept a newly connected MoQ subscriber session on the bridge's QUIC endpoint.
-pub fn accept_moq_peer(mut b: Bridge, now: u64, conn: quic.ConnectionHandle, limits: moq.Limits, init_events: List[quic.Event]) -> u64 {
-    let link = option.unwrap(moq.native_link(mut b.io.driver, conn))
-    let mut s = option.unwrap(moq.link_session(b.io, link, Server, Publisher, limits))
-    let mut tevs: List[moq.AddressedEvent] = list.new()
-    moq.native_events(mut b.io.driver, init_events, mut tevs)
-    moq.receive(mut s, mut b.io, now, tevs, mut b.session_events)
-    add_session(mut b, take s)
-}
-
-/// Accept every pending MoQ `Setup` and `Subscribe` event received across the bridge's sessions.
-pub fn accept_pending(mut b: Bridge, take scope: moq.Scope) -> u64 {
-    let mut accepted = 0u64
-    let mut remaining: List[moq.Event] = list.new()
-    let evs = replace(mut b.session_events, list.new())
-    for take ev in evs {
-        match take ev {
-            Setup(..) => {
-                for si in 0u64 .. list.len(b.sessions) {
-                    moq.accept_setup(mut b.sessions[si], mut b.io, Ok(clone(scope)))
-                }
-            },
-            Subscribe(id: id, ..) => {
-                for si in 0u64 .. list.len(b.sessions) {
-                    moq.accept(mut b.sessions[si], mut b.io, id, Ok(()))
-                }
-                accepted += 1
-            },
-            other => list.push(mut remaining, take other),
-        }
-    }
-    b.session_events = take remaining
-    accepted
-}
-
-/// Poll MoQ sessions and stage QUIC packets into the bridge's uncommitted send batch
-/// WITHOUT committing them yet (enables testing a polled-but-uncommitted batch at revoke, M12).
-pub fn stage_tx(mut b: Bridge, now: u64) -> Option[u64] {
-    for si in 0u64 .. list.len(b.sessions) {
-        let _ = moq.poll(mut b.sessions[si], mut b.io, now)
-    }
-    list.clear(mut b.staged_wire)
-    list.clear(mut b.staged_tx)
-    quic.poll(mut b.io.driver.q, now, mut b.staged_wire, mut b.staged_tx)
-}
-
-/// Number of `Transmit` datagrams sitting in the bridge's polled-but-uncommitted batch.
-pub fn staged_count(b: Bridge) -> u64 {
-    let mut n = 0u64
-    for o in b.staged_tx {
-        if let Transmit(..) = o {
             n += 1
         }
     }
     n
 }
 
-/// Commit up to `limit` (all when 0) datagrams from the staged batch into `(wire_out, pkts_out)`.
-pub fn commit_tx(mut b: Bridge, now: u64, limit: u64, mut wire_out: Bytes, mut pkts_out: List[(Addr, u64, u64)]) -> u64 {
-    let avail = staged_count(b)
-    if avail == 0 {
-        return 0
-    }
-    let take_n = if limit == 0 || limit > avail {
-        avail
-    } else {
-        limit
-    }
-    let mut emitted = 0u64
-    for o in b.staged_tx {
-        if emitted >= take_n {
-            break
-        }
-        if let Transmit(to: to, at: at, len: len, ..) = o {
-            let dst_at = list.len(wire_out)
-            list.append(mut wire_out, list.slice(b.staged_wire, at, at + len))
-            list.push(mut pkts_out, (to, dst_at, len))
-            emitted += 1
+fn room_at(b: Bridge, room: peer.RoomId) -> Option[u64] {
+    for i in 0u64 .. list.len(b.rooms) {
+        if b.rooms[i].room == room {
+            return Some(i)
         }
     }
-    quic.committed(mut b.io.driver.q, now, emitted)
-    list.clear(mut b.staged_wire)
-    list.clear(mut b.staged_tx)
-    emitted
+    None
 }
 
-/// Abandon any polled-but-uncommitted QUIC send batch (MOQ-8 fence).
-fn discard_staged(mut b: Bridge, now: u64) {
-    let n = staged_count(b)
-    if list.len(b.staged_tx) > 0 {
-        b.counts.discarded_staged += n
-        quic.committed(mut b.io.driver.q, now, 0)
-        list.clear(mut b.staged_wire)
-        list.clear(mut b.staged_tx)
+/// Install at the latest accepted sequence. The projection is already current
+/// because this virtual door participates from pool startup.
+fn attach(mut b: Bridge, now: u64, room: peer.RoomId, max_frame_bytes: u64) -> Result[(), router.RouterError] {
+    if router.observer_sequence(b.r, room) == None {
+        return Error(NoRoom)
     }
+    if room_at(b, room) != None {
+        return Error(Exists)
+    }
+    if max_frame_bytes == 0 || max_frame_bytes > b.config.max_frame_bytes {
+        return Error(Limit(int.narrow(order.min(b.config.max_frame_bytes, 0xffffffff))))
+    }
+    list.try_reserve(mut b.rooms, 1) ?=> |cap| Capacity(cap)
+    list.push(mut b.rooms, Attached(room: room, max_frame_bytes: max_frame_bytes))
+    settle_tracks(mut b, now, room)
+    Ok(())
 }
 
-/// Apply one SFU control message (RTC-5, RTC-7, MOQ-8).
-/// Before returning `Ack`, enforces the MOQ-8 egress fence on every fenced/ended track:
-/// 1. abandons any polled-but-uncommitted QUIC batch;
-/// 2. `quic.reset(..., reliable = header_len)` on open subgroup streams;
-/// 3. `quic.drop_datagrams(..., tag)` on queued datagrams;
-/// 4. `moq.end_track` sending `PUBLISH_DONE`;
-/// 5. drops the track and its reassembly buffer.
+fn detach(mut b: Bridge, now: u64, room: peer.RoomId) -> Result[(), router.RouterError] {
+    let Some(k) = room_at(b, room) else {
+        return Error(NoRoom)
+    }
+    let _ = list.remove(mut b.rooms, k)
+    settle_tracks(mut b, now, room)
+    Ok(())
+}
+
+/// Apply the accepted RTC-5 order and settle the output before answering.
 pub fn control(mut b: Bridge, now: u64, take c: router.Control) -> Option[router.Control] {
     match take c {
-        Order(room: order_room, seq: seq, change: take change) => {
-            let is_fence = router.fencing(change)
-            let paused = match change {
-                Suspend(room: room, cause: _, on: true) => Some(room),
-                _ => None,
-            }
-            let answer = router.apply(mut b.r, now, take change, mut b.out)
-            let _ = router.take_posts(mut b.r)
-            let _ = router.take_notices(mut b.r)
-            let _ = router.purge(b.r, mut b.out)
-            if is_fence {
-                discard_staged(mut b, now)
-            }
-            if let Some(room) = paused {
-                for i in 0u64 .. list.len(b.tracks) {
-                    if b.tracks[i].seat.room == room {
-                        restart_track(mut b, i)
+        Order(room: room, seq: seq, change: change) => {
+            let was_allowed = router.observer_routing_allowed(b.r, room, now / 1000000)
+            let answer = router.observer_apply(mut b.r, room, seq, change)
+            if let Ok(_) = answer {
+                if let Close(..) = change {
+                    if let Some(k) = room_at(b, room) {
+                        let _ = list.remove(mut b.rooms, k)
                     }
                 }
+                if was_allowed && !router.observer_routing_allowed(b.r, room, now / 1000000) {
+                    if let Suspend(..) = change {
+                        pause_room(mut b, now, room)
+                    }
+                }
+                settle_tracks(mut b, now, room)
             }
-            settle_tracks(mut b, now)
             let unit = b.config.unit
-            Some(Ack(room: order_room, seq: seq, unit: unit, answer: take answer))
+            Some(Ack(room: room, seq: seq, unit: unit, answer: take answer))
         },
-        Ack(..) => None,
-        Fault(..) => None,
+        BridgeOrder(room: room, serial: serial, frame_bytes: cap) => {
+            let answer = match cap {
+                Some(max) => attach(mut b, now, room, max),
+                None => detach(mut b, now, room),
+            }
+            Some(BridgeAck(room: room, serial: serial, unit: b.config.unit, answer: take answer))
+        },
+        _ => None,
+    }
+}
+
+fn pause_room(mut b: Bridge, now: u64, room: peer.RoomId) {
+    discard_staged(mut b, now)
+    for i in 0u64 .. list.len(b.tracks) {
+        if b.tracks[i].seat.room != room {
+            continue
+        }
+        let name: moq.codec.TrackName = clone(b.tracks[i].moq_track)
+        moq.publisher_pause(mut b.publisher, mut b.io, name)
+        restart_track(mut b, i)
+        b.tracks[i].started_group = false
+        b.tracks[i].object_id = 0
     }
 }
 
@@ -349,46 +273,52 @@ pub fn carried(mut b: Bridge, now: u64, take msg: router.Carried) {
 /// Advance jitter buffers so completed frames whose holes timed out are emitted.
 pub fn poll_jitter(mut b: Bridge, now: u64) {
     for i in 0u64 .. list.len(b.tracks) {
+        if !router.observer_routing_allowed(b.r, b.tracks[i].seat.room, now / 1000000) {
+            continue
+        }
         rtp_jitter.jitter.poll(mut b.tracks[i].jitter, now / 1000, mut b.events)
         deliver_frames(mut b, i, now)
     }
 }
 
-fn settle_tracks(mut b: Bridge, now: u64) {
-    let downs = router.downs_on(b.r, b.config.unit)
+fn settle_tracks(mut b: Bridge, now: u64, room: peer.RoomId) {
+    let downs = router.observer_downs(b.r, room)
     let mut i = 0u64
     while i < list.len(b.tracks) {
         let t = b.tracks[i].seat
-        let kept = list.any(downs, scoped fn(d: router.DownInfo) -> bool {
-            d.room == t.room && d.publication == t.publication && d.sub == t.sub
+        if t.room != room {
+            i += 1
+            continue
+        }
+        let target = b.tracks[i].target
+        let kept = room_at(b, t.room) != None && list.any(downs, scoped fn(d: router.DownInfo) -> bool {
+            d.room == t.room && d.publication == t.publication && d.sub == t.sub && d.target == target
         })
-        if kept && !router.fenced(b.r, t.room, t.owner) {
+        if kept && !router.observer_fenced(b.r, t.room, t.owner) {
             i += 1
         } else {
-            let fenced = router.fenced(b.r, t.room, t.owner) || !router.room_open(b.r, t.room)
-            close_track(mut b, i, now, fenced)
+            close_track(mut b, i, now)
         }
     }
     for d in downs {
-        let mut found: Option[u64] = None
-        for k in 0u64 .. list.len(b.tracks) {
-            let t = b.tracks[k].seat
-            if t.room == d.room && t.publication == d.publication && t.sub == d.sub {
-                found = Some(k)
-            }
+        let Some(a) = room_at(b, d.room) else {
+            continue
         }
-        match found {
-            Some(k) => {
-                b.tracks[k].target = d.target
-                send_want(mut b, k)
-            },
-            None => open_track(mut b, d),
+        let found = list.any(b.tracks, scoped fn(t: BridgeTrack) -> bool {
+            t.seat.room == d.room && t.seat.publication == d.publication && t.seat.sub == d.sub
+        })
+        if !found {
+            let max_frame_bytes = b.rooms[a].max_frame_bytes
+            open_track(mut b, d, max_frame_bytes)
         }
     }
 }
 
-fn open_track(mut b: Bridge, d: router.DownInfo) {
-    let Some(info) = router.publication_info(b.r, d.room, d.publication) else {
+fn open_track(mut b: Bridge, d: router.DownInfo, max_frame_bytes: u64) {
+    let Layer(encoding: enc, ..) = d.target else {
+        return
+    }
+    let Some(info) = router.observer_publication(b.r, d.room, d.publication) else {
         return
     }
     let depack_codec: rtp_jitter.depack.Codec = match info.shape.codec {
@@ -396,20 +326,19 @@ fn open_track(mut b: Bridge, d: router.DownInfo) {
         Vp8 => Vp8,
         Vp9 => Vp9,
         Av1 => Av1,
-        _ => H264,
+        H264 => H264,
+        _ => return,
     }
     let video = info.shape.codec != Opus
-    let enc: u8 = match d.target {
-        Layer(encoding: e, ..) => e,
-        Off => 0,
+    let tr = track_name(d.room, info.owner, info.shape.codec, info.section, enc)
+    if list.any(b.tracks, scoped fn(t: BridgeTrack) -> bool {
+        t.moq_track == tr
+    }) {
+        return
     }
-    let tr = track_name(d.room, info.owner, info.shape.codec, enc)
-    let j = rtp_jitter.jitter.new(rtp_jitter.jitter.Config(codec: depack_codec, window: b.config.window, max_wait_us: b.config.max_wait_us))
-    let reasm: Bytes = list.with_capacity(b.config.max_frame_bytes)
-    let cap = b.config.max_frame_bytes
+    let j = new_jitter(b.config, depack_codec)
     list.push(mut b.tracks, BridgeTrack(
         seat: BridgeSeat(room: d.room, publication: d.publication, sub: d.sub, owner: info.owner, home: info.home),
-        codec: info.shape.codec,
         depack_codec: depack_codec,
         video: video,
         target: d.target,
@@ -417,8 +346,7 @@ fn open_track(mut b: Bridge, d: router.DownInfo) {
         encoding: None,
         moq_track: take tr,
         jitter: take j,
-        reassembly: take reasm,
-        reassembly_cap: cap,
+        max_frame_bytes: max_frame_bytes,
         needs_key: video,
         started_group: false,
         group: 0,
@@ -427,37 +355,26 @@ fn open_track(mut b: Bridge, d: router.DownInfo) {
     send_want(mut b, list.len(b.tracks) - 1)
 }
 
-fn close_track(mut b: Bridge, i: u64, now: u64, fenced: bool) {
-    if fenced {
-        discard_staged(mut b, now)
-    }
+fn close_track(mut b: Bridge, i: u64, now: u64) {
+    discard_staged(mut b, now)
     let t = list.remove(mut b.tracks, i)
-    let tr: moq.codec.TrackName = clone(t.moq_track)
-    // MOQ-8 steps 1-3: reset open subgroup streams (reliable = header_len), drop queued
-    // datagrams, and send PUBLISH_DONE across every MoQ session before Ack returns.
-    if fenced {
-        b.counts.fenced_tracks += 1
-        for si in 0u64 .. list.len(b.sessions) {
-            let (rs, dd) = moq.fence_track_counts(mut b.sessions[si], mut b.io, clone(tr), moq.DONE_TRACK_ENDED)
-            b.counts.fenced_streams += rs
-            b.counts.dropped_datagrams += dd
-        }
-    } else {
-        for si in 0u64 .. list.len(b.sessions) {
-            moq.end_track(mut b.sessions[si], mut b.io, clone(tr), moq.DONE_TRACK_ENDED)
-        }
-    }
-    // MOQ-8 step 4: `t` (including `t.reassembly` and `t.jitter`) is dropped here.
+    let (reset, dropped) = moq.publisher_fence(mut b.publisher, mut b.io, t.moq_track)
+    b.counts.fenced_tracks += 1
+    b.counts.fenced_streams += reset
+    b.counts.dropped_datagrams += dropped
     if t.mask != 0 {
         let unit = b.config.unit
         post_bare(mut b, t.seat.home, Wanted(room: t.seat.room, publication: t.seat.publication, src: t.seat.owner, unit: unit, mask: 0))
     }
 }
 
+fn new_jitter(c: BridgeConfig, codec: rtp_jitter.depack.Codec) -> rtp_jitter.jitter.Jitter {
+    rtp_jitter.jitter.new(rtp_jitter.jitter.Config(codec: codec, window: c.window, max_wait_us: c.max_wait_us))
+}
+
 fn restart_track(mut b: Bridge, i: u64) {
     let dc = b.tracks[i].depack_codec
-    b.tracks[i].jitter = rtp_jitter.jitter.new(rtp_jitter.jitter.Config(codec: dc, window: b.config.window, max_wait_us: b.config.max_wait_us))
-    list.clear(mut b.tracks[i].reassembly)
+    b.tracks[i].jitter = new_jitter(b.config, dc)
     b.tracks[i].needs_key = b.tracks[i].video
 }
 
@@ -491,7 +408,7 @@ fn ask_key(mut b: Bridge, i: u64) {
 
 fn on_media(mut b: Bridge, now: u64, room: peer.RoomId, p: router.PublicationId, src: peer.Gen, m: peer.MediaIn, packet: Bytes) {
     // RTC-7 step 4: drop media of any fenced generation or suspended room on arrival.
-    if router.fenced(b.r, room, src) || router.suspended(b.r, room) {
+    if router.observer_fenced(b.r, room, src) || !router.observer_routing_allowed(b.r, room, now / 1000000) {
         b.counts.stale += 1
         return
     }
@@ -507,18 +424,28 @@ fn on_media(mut b: Bridge, now: u64, room: peer.RoomId, p: router.PublicationId,
         let Layer(encoding: e, ..) = b.tracks[i].target else {
             continue
         }
-        if e != m.encoding || m.payload_at + m.payload_len > list.len(packet) {
+        if e != m.encoding || m.payload_at > list.len(packet) || m.payload_len > list.len(packet) - m.payload_at || m.payload_len > peer.SLOT {
             continue
         }
         taken = true
         if b.tracks[i].encoding != Some(e) || m.reset {
             restart_track(mut b, i)
             b.tracks[i].encoding = Some(e)
-            b.tracks[i].moq_track = track_name(room, src, b.tracks[i].codec, e)
+        }
+        let seq: u16 = int.truncate(m.index)
+        if !rtp_jitter.jitter.window_fits(b.tracks[i].jitter, seq) {
+            rtp_jitter.jitter.poll(mut b.tracks[i].jitter, now / 1000, mut b.events)
+            deliver_frames(mut b, i, now)
+            if !rtp_jitter.jitter.window_fits(b.tracks[i].jitter, seq) {
+                b.counts.window_overflow += 1
+                restart_track(mut b, i)
+                if b.tracks[i].video {
+                    ask_key(mut b, i)
+                }
+            }
         }
         let mut payload: Bytes = list.with_capacity(m.payload_len)
         list.append(mut payload, list.slice(packet, m.payload_at, m.payload_at + m.payload_len))
-        let seq: u16 = int.truncate(m.index)
         rtp_jitter.jitter.push(mut b.tracks[i].jitter, seq, m.ts, m.marker, take payload, now / 1000, mut b.events)
         deliver_frames(mut b, i, now)
     }
@@ -546,7 +473,7 @@ fn deliver_frames(mut b: Bridge, i: u64, now: u64) {
 fn publish_frame(mut b: Bridge, i: u64, now: u64, key: bool, take data: Bytes) {
     // MOQ-8: a frame past the layer's max_frame_bytes bound is dropped and counted,
     // and the next keyframe starts a new group.
-    if list.len(data) > b.config.max_frame_bytes {
+    if list.len(data) > b.tracks[i].max_frame_bytes {
         b.counts.oversized += 1
         if b.tracks[i].video {
             b.tracks[i].needs_key = true
@@ -557,34 +484,21 @@ fn publish_frame(mut b: Bridge, i: u64, now: u64, key: bool, take data: Bytes) {
     if b.tracks[i].needs_key && !key {
         return
     }
-    // MOQ-8: group per keyframe interval (a new group starts at each keyframe).
-    if key {
+    // Allocate fresh group IDs even when a new epoch reuses a track name.
+    // The subscriber may still retain duplicate guards for the old epoch.
+    if key || !b.tracks[i].started_group {
         if b.tracks[i].started_group {
-            let prev_g = b.tracks[i].group
-            let tr: moq.codec.TrackName = clone(b.tracks[i].moq_track)
-            for si in 0u64 .. list.len(b.sessions) {
-                moq.finish_subgroup(mut b.sessions[si], mut b.io, now, clone(tr), prev_g, 0)
-            }
-            b.tracks[i].group += 1
-            b.tracks[i].object_id = 0
-        } else {
-            b.tracks[i].started_group = true
-            b.tracks[i].group = 0
-            b.tracks[i].object_id = 0
+            let prev = b.tracks[i].group
+            let name: moq.codec.TrackName = clone(b.tracks[i].moq_track)
+            moq.publisher_finish(mut b.publisher, mut b.io, now, name, prev)
         }
-        b.tracks[i].needs_key = false
-    } else if !b.tracks[i].started_group {
         b.tracks[i].started_group = true
-        b.tracks[i].group = 0
+        b.tracks[i].group = b.next_group
+        b.next_group += 1
         b.tracks[i].object_id = 0
+        b.tracks[i].needs_key = false
     }
-    // MOQ-8: copy each frame once into the track's budgeted reassembly buffer and share
-    // one Shared[Bytes] payload across every MoQ session (1 copy per frame, 0 per subscriber).
-    list.clear(mut b.tracks[i].reassembly)
-    list.append(mut b.tracks[i].reassembly, data)
-    let mut frame_buf: Bytes = list.with_capacity(list.len(b.tracks[i].reassembly))
-    list.append(mut frame_buf, b.tracks[i].reassembly)
-    let shared_payload = shared.new(take frame_buf)
+    let shared_payload = shared.new(take data)
     let g = b.tracks[i].group
     let oid = b.tracks[i].object_id
     b.tracks[i].object_id += 1
@@ -598,9 +512,7 @@ fn publish_frame(mut b: Bridge, i: u64, now: u64, key: bool, take data: Bytes) {
     let send_dg = b.config.mode == DatagramsOnly || (b.config.mode == StreamsAndDatagrams && list.len(shared_payload) <= 900)
     if send_stream {
         let obj = moq.Object(track: clone(tr), group: g, subgroup: 0, id: oid, mode: Subgroup, publisher_priority: prio, status: Normal, properties: b"", payload: quic.payload_whole(shared.share(shared_payload)))
-        for si in 0u64 .. list.len(b.sessions) {
-            let _ = moq.publish_at(mut b.sessions[si], mut b.io, now, now, clone(obj), false)
-        }
+        moq.publisher_send(mut b.publisher, mut b.io, now, obj)
     }
     if send_dg {
         let dg_oid = if send_stream {
@@ -611,9 +523,7 @@ fn publish_frame(mut b: Bridge, i: u64, now: u64, key: bool, take data: Bytes) {
             oid
         }
         let obj = moq.Object(track: clone(tr), group: g, subgroup: 0, id: dg_oid, mode: Datagram, publisher_priority: prio, status: Normal, properties: b"", payload: quic.payload_whole(shared.share(shared_payload)))
-        for si in 0u64 .. list.len(b.sessions) {
-            let _ = moq.publish_at(mut b.sessions[si], mut b.io, now, now, clone(obj), false)
-        }
+        moq.publisher_send(mut b.publisher, mut b.io, now, obj)
     }
     b.counts.published += 1
 }

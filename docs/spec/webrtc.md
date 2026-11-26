@@ -1598,9 +1598,11 @@ records a room's publications to files. It is a virtual down-track: a media
 unit with no PeerSession. Its seats are participants admitted with the
 recorder's unit as home, and it records what they subscribe to.
 
-- **A unit like the others.** The control unit sends it every `Order`, as
-  it does every unit (RTC-5). The recorder applies each order to an
-  observer Router and answers with its `Ack`. Home units post it the
+- **A unit like the others.** The recorder applies the accepted control
+  order to a `router.Observer` and answers with its `Ack` (RTC-5). Starting
+  with a current Observer opens the files for its existing down-tracks.
+  Retarget discards the old target's buffered media. Unsubscribe finishes
+  and closes the file. Home units post it the
   plaintext `Media` of each publication it subscribes to (fan-out step 3),
   and the publishers' `Sender` reports. It posts each down-track's
   `Wanted` mask and its `Key` requests to the home unit (RTC-6). It holds
@@ -1610,7 +1612,8 @@ recorder's unit as home, and it records what they subscribe to.
   is taken. Step 3 removes the down-tracks. Before it acknowledges, the
   recorder drops what those tracks buffer and closes their files. So once
   `revoke` returns, no frame of the fenced participant lands in a file.
-  A suspension drops the room's buffered frames the same way.
+  The first suspension cause drops the room's buffered frames. Recording
+  stays paused until every cause clears.
 - **Frames and time.** Each recorded encoding has one `rtp_jitter` buffer.
   Frames are placed on one timeline from the sender reports (rtp_jitter
   `sync`), whose zero is the recording's first frame. Each file's times
@@ -1651,7 +1654,7 @@ isolation, so one room's load or failure leaves the others' service unchanged.
 
 ```hirsel unbuilt
 pub type PoolLimits {
-    units: u16,                // 1 to 64, one port and one unit task each
+    units: u16,                // session-eligible units, including Unit 0
     unit_bytes: u64,           // each unit task's memory (CONC-15), as Service.unit_bytes
     rooms: u32,                // live rooms at once, across the pool
     sessions: u32,             // live PeerSessions per unit
@@ -1660,13 +1663,13 @@ pub type PoolLimits {
     room_pps: u32,             // authenticated datagrams per second per publisher session
     open_pps: Option[u32]      // SRTP open attempts per second per unit, before authentication
 }
-pub type PoolOrder[M] = Open(name: RoomName, dial: runner.room_client.Dial, limits: RoomLimits, embed: Embed[M]) | Close(name: RoomName)
-pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: RoomId) | Empty(name: RoomName, room: RoomId, idle_ns: u64) | Closed(name: RoomName, room: RoomId, why: CloseWhy)
+pub type PoolOrder[M] = Open(name: RoomName, dial: runner.room_client.Dial, limits: RoomLimits, embed: Embed[M]) | Close(name: RoomName) | AttachBridge(name: RoomName, max_frame_bytes: u64) | DetachBridge(name: RoomName)
+pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: RoomId) | Empty(name: RoomName, room: RoomId, idle_ns: u64) | Closed(name: RoomName, room: RoomId, why: CloseWhy) | BridgeAttached(name: RoomName, room: RoomId) | BridgeDetached(name: RoomName, room: RoomId) | BridgeRefused(name: RoomName, why: PoolRefusal)
 pub type PoolRefusal = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(RouterError)
 pub type CloseWhy = Asked | Fault(RouterError)
 pub type RoomName = RoomName(Inline[u8, 32])
 pub type ServiceTiming: key { udp: units.Timing, active_tick_ns: u64, rejoin_initial_ns: u64, rejoin_max_ns: u64, empty_idle_ns: u64 }
-pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, queues: units.MediaQueues, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
+pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, queues: units.MediaQueues, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink], bridge: Option[bridge.BridgeLink] }
 
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits
 pub fn room_cost(limits: RoomLimits, session: peer.PeerLimits) -> RoomCost
@@ -1678,48 +1681,49 @@ pool of one room, and there is no second entry point to keep (`/wholehog`). The 
 sends `Open` and `Close` orders on `orders` and reads `PoolReport`s. `RoomName` is the
 application's name for the room, 32 bytes, opaque to the pool. The pool keeps one
 `Adapter[M]` and one `room_client` membership per open room on the control unit (unit 0). `relay` is the TURN relay link every room mints its credentials from (TURN-11).
-`Pool.cascade` is added with [SFU cascade](sfu_cascade.md) CAS-6, which is not yet built.
-Until then `RoomCost.bridge` and `RoomCost.cascade` are 0.
+`Pool.cascade` is planned in [SFU cascade](sfu_cascade.md) CAS-6.
 
-**Virtual units, `router.Observer`, and `Pool.bridge` / `Pool.cascade` (text only, not yet built
-— media-seams-design-3072).** `router.Router` is the single owner of rooms, publications (both
-`Origin.Local(unit)` and `Origin.Remote(node)`), down-tracks, wanted masks, keyframe throttling,
-fences, suspension causes (`Signaling | Lease | Term`), and lease deadlines across local,
-recorded, bridged, and cascaded rooms:
+**Accepted-state projection.** `router.Router` owns routing and admission policy.
+Unit 0 orders each room's changes by sequence. A virtual unit applies a change after its
+first unit accepts it, including the publication shape returned by the publisher's home.
+`router.Observer` retains the virtual unit's down-tracks with their subscriber generation
+and target, the publication's owner generation, home and shape, the room's fence table,
+suspension causes and lease. Revokes, leaves and closes remove all matching down-tracks.
+A late attachment reads the post-change projection at the latest sequence, then follows
+later orders. The projection rejects stale orders on a live room and fences absent rooms.
 
 ```hirsel unbuilt
 pub opaque type Observer
-
-pub type ObserverEvent =
-    RoomOpened(room: peer.RoomId)
-  | RoomClosed(room: peer.RoomId)
-  | Published(room: peer.RoomId, pub_id: u64, who: peer.Participant, codec: sdp.Codec, encodings: u8)
-  | Unpublished(room: peer.RoomId, pub_id: u64)
-  | Fenced(room: peer.RoomId, participant: u64, epoch: u64)
-  | Suspended(room: peer.RoomId, cause: u8)
-  | Resumed(room: peer.RoomId, cause: u8)
-
-pub fn new_observer(max_rooms: u32, max_ids: u32, max_pubs: u32) -> Observer
-pub fn observer_apply(mut obs: Observer, change: Change) -> Option[ObserverEvent]
-pub fn observer_fenced(obs: Observer, room: peer.RoomId, participant: u64, epoch: u64) -> bool
+pub fn new_observer(home: u16) -> Observer
+pub fn observer_sequence(obs: Observer, room: peer.RoomId) -> Option[u64]
+pub fn observer_apply(mut obs: Observer, room: peer.RoomId, seq: u64, change: Change) -> Result[Answer, RouterError]
+pub fn observer_downs(obs: Observer, room: peer.RoomId) -> List[DownInfo]
+pub fn observer_publication(obs: Observer, room: peer.RoomId, id: PublicationId) -> Option[PublicationInfo]
+pub fn observer_fenced(obs: Observer, room: peer.RoomId, who: peer.Gen) -> bool
 pub fn observer_routing_allowed(obs: Observer, room: peer.RoomId, now_ms: u64) -> bool
 ```
 
-- **Virtual units:** Non-WebRTC SFU attachments (`media_record`, `moq_bridge`, and `cascade`)
-  attach to `Pool[M]` as `VirtualUnit` endpoints registered alongside WebRTC units `1..n` in
-  `units.Doors`, receiving `ControlMessage` orders, returning `Ack` at their fence point,
-  consuming `router.Carried` media, and posting `Post.Wanted` / `Post.Key`. They hold
-  `router.Observer` rather than a full `router.Router` + dummy `peer.Outbox`.
-- **Bridge lifecycle on `Pool[M]`:** `Pool[M]` gains `bridge: Option[BridgeLink]` and
-  `cascade: Option[CascadeLink]` (symmetric with `relay: Option[RelayLink]`). `PoolOrder[M]`
-  adds `AttachBridge(name: RoomName, max_frame_bytes: u64)` and `DetachBridge(name: RoomName)`,
-  driving `signal.reserve_bridge` and `signal.release_bridge` on Unit 0's `Ledger` so
-  `RoomCost.bridge` is reserved and refunded in production.
-- **Remote publication ingress:** Cascade injects remote-origin publications into `router.Router`
-  homed on the cascade virtual unit (using the canonical PT/extmap table as their agreed shape),
-  so `router_route.spread` fans them out to local units with zero duplicate forwarding code.
-  Remote edge wanted masks enter `router_dynacast` through the cascade virtual unit's standard
-  `Post.Wanted` messages.
+**Virtual door.** A `VirtualUnit` has a control inbox, a media inbox and a doorbell.
+It follows the session-eligible units in `units.Doors`. The 64-door limit includes
+Unit 0 and the virtual door. A pool with a bridge supports 1 to 63 session-eligible
+units. The primary and fallback session-home searches use only session-eligible
+indices. Virtual subscriptions are validated on Unit 0 before they enter the
+accepted order. The virtual unit answers at its own fence point with an `Ack`.
+It receives `router.Carried` media and sends `Post.Wanted` and `Post.Key`.
+
+**Bridge lifecycle.** With `Pool.bridge`, the bridge task and its doors start
+with the pool. `AttachBridge` reserves the room's attachment bytes on the virtual
+unit and admits one virtual subscriber seat in that room. The seat counts against
+the room's participant and id limits. The pool installs the attachment at the
+live room's latest sequence and subscribes the seat to the base encodings of
+existing and later publications through the control order. The bridge offers
+only installed down-tracks. A duplicate attachment returns `Exists`. A frame
+limit above the bridge configuration returns `Limit` at installation. On
+installation failure the pool removes the seat and refunds the reservation.
+`DetachBridge` waits for the bridge's socket fence, removes the seat and refunds
+the same reservation. `Close` waits for the normal room fence and refunds both
+the attachment and projection. Replies carry the room incarnation and request
+serial.
 
 **Room occupancy and empty-room reclamation.** Unit 0 tracks each serving room's non-service
 seat count (`signal.room_peers`, excluding the service's own `you`/`former` peer numbers).
@@ -1774,8 +1778,9 @@ two exact numbers from the same sizes the router allocates with:
   down-track's headroom is the bound on references it may hold, not a share of the buffer;
 - `control`: what the room holds on unit 0: its `Adapter[M]`, its `room_client` membership
   and that task's channels, and its pending `Build`s, each up to the room's bounds;
-- `bridge`: the MoQ bridge's reassembly buffers when the room is bridged ([MoQ](moq.md)
-  MOQ-8), one per bridged layer at its maximum frame size, else 0;
+- `bridge`: the optional MoQ attachment's layer records, bounded RTP jitter windows,
+  frame budget and depacketization scratch ([MoQ](moq.md) MOQ-8). The unattached
+  room's projection has its own reservation on the virtual unit;
 - `cascade`: per cascade link the room is attached to, the link's room state
   ([SFU cascade](sfu_cascade.md) CAS-6), else 0.
 
@@ -1789,13 +1794,14 @@ The service checks the configured MTU and message width against the media unit's
 before binding. The peer's repair profile sizes the RTP history and TWCC logs from the
 packet rate and retention interval, and the codec counters from the feedback interval.
 The default retains one second at 1,024 packets per second and sends feedback every 50 ms.
-The service derives its ingress RTX ring from the same packet count. `bridge` and
-`cascade` are 0: no bridge or cascade attaches to a
-pooled room in this build (CAS-6 and MOQ-8 add them), so W34 has nothing of theirs to
-measure yet. Each unit keeps a **ledger**: `unit_bytes` minus the fixed per-unit cost
-(`units.fixed_bytes` plus `signal.serve_bytes`), minus every open room's `replicated`,
-minus every homed session's `per_session`, minus every remote down-track's `per_remote`.
-Unit 0's ledger also carries each room's `control`, `bridge` and `cascade`.
+The service derives its ingress RTX ring from the same packet count. Each session
+unit's ledger starts at `unit_bytes` minus the fixed unit cost (`units.fixed_bytes`
+plus `signal.serve_bytes`). Open reserves `replicated` on each of those units and
+`control` on Unit 0. Sessions and remote down-tracks reserve their own terms.
+The bridge's ledger starts at its grant less the socket, inbox, work buffers and
+configured transport budget. Open then reserves the room's Observer projection on
+that ledger. Attach reserves `RoomCost.bridge` there. `signal.room_cost` has zero
+optional attachment terms.
 
 **The fixed cost (as built in P3).** `units.fixed_bytes` is the unit's control and media
 inboxes at their byte budgets, its outbox, its receive, batch and slot buffers, the socket's

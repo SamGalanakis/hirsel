@@ -7,6 +7,7 @@
 /// what it paid for. So two pending `Build`s never both pass a check only one fits.
 pub opaque type Ledger {
     free: List[u64],
+    bridge: Option[units.VirtualUnit],
     live: List[u32],
     sessions: u32,
     session: peer.PeerLimits,
@@ -38,7 +39,26 @@ pub fn ledger(take free: List[u64], sessions: u32, session: peer.PeerLimits) -> 
     for _ in free {
         list.push(mut live, 0)
     }
-    Ledger(free: take free, live: take live, sessions: sessions, session: session, rooms: list.new(), held: list.new())
+    Ledger(free: take free, bridge: None, live: take live, sessions: sessions, session: session, rooms: list.new(), held: list.new())
+}
+
+/// Append the funded virtual door after every eligible session home.
+pub fn ledger_bridge(mut l: Ledger, unit: units.VirtualUnit, free: u64) -> Result[(), PoolRefusal] {
+    if l.bridge != None || list.len(l.free) != int.widen(units.virtual_index(unit)) {
+        return Error(Exists)
+    }
+    list.push(mut l.free, free)
+    list.push(mut l.live, 0)
+    l.bridge = Some(unit)
+    Ok(())
+}
+
+fn homes(l: Ledger) -> u64 {
+    list.len(l.free) - if l.bridge == None {
+        0u64
+    } else {
+        1u64
+    }
 }
 
 /// The bytes unit `unit` has left to reserve.
@@ -86,7 +106,10 @@ fn refund(mut l: Ledger, i: u64) {
 
 // What a room holds on unit `k` from its `Open` until its `Close` completes: its
 // replicated state everywhere, and on the control unit its adapter, bridge and cascade.
-fn room_share(cost: RoomCost, k: u64) -> u64 {
+fn room_share(l: Ledger, cost: RoomCost, limits: router.RoomLimits, k: u64) -> u64 {
+    if k == homes(l) {
+        return router.observer_room_bytes(limits)
+    }
     if k == 0 {
         int.saturating_add(int.saturating_add(cost.replicated, cost.control), int.saturating_add(cost.bridge, cost.cascade))
     } else {
@@ -104,10 +127,10 @@ pub fn reserve_room(mut l: Ledger, room: peer.RoomId, limits: router.RoomLimits)
     room_fits(l, limits)?
     let cost = room_cost(limits, l.session)
     for k in 0u64 .. list.len(l.free) {
-        hold(mut l, room, int.narrow(k), room_share(cost, k), Whole)
+        hold(mut l, room, int.narrow(k), room_share(l, cost, limits, k), Whole)
     }
     let mut primary = 0u64
-    for k in 1u64 .. list.len(l.free) {
+    for k in 1u64 .. homes(l) {
         if l.free[k] > l.free[primary] {
             primary = k
         }
@@ -128,7 +151,7 @@ pub fn reserve_session(mut l: Ledger, who: peer.Participant) -> Option[u16] {
     if fits(l, primary, need) {
         home = Some(primary)
     } else {
-        for k in 0u64 .. list.len(l.free) {
+        for k in 0u64 .. homes(l) {
             if !fits(l, k, need) {
                 continue
             }
@@ -150,7 +173,12 @@ pub fn reserve_session(mut l: Ledger, who: peer.Participant) -> Option[u16] {
 pub fn room_fits(l: Ledger, limits: router.RoomLimits) -> Result[(), PoolRefusal] {
     let cost = room_cost(limits, l.session)
     for k in 0u64 .. list.len(l.free) {
-        let need = int.saturating_add(room_share(cost, k), cost.per_session)
+        let own = room_share(l, cost, limits, k)
+        let need = if k < homes(l) {
+            int.saturating_add(own, cost.per_session)
+        } else {
+            own
+        }
         if l.free[k] < need {
             return Error(Bytes(unit: int.narrow(k), need: need, free: l.free[k]))
         }
@@ -255,17 +283,32 @@ pub fn release_cascade(mut l: Ledger, room: peer.RoomId, link: u64) {
     }
 }
 
-/// Reserve a room's MOQ-8 bridge reassembly buffer budget on unit 0 (MOQ-8, RTC-10).
+/// Reserve one attachment on its own virtual unit. The room must already have
+/// paid for its projection on that unit.
 pub fn reserve_bridge(mut l: Ledger, room: peer.RoomId, amount: u64) -> Result[(), PoolRefusal] {
-    let free = l.free[0]
-    if free < amount {
-        return Error(Bytes(unit: 0, need: amount, free: free))
+    let Some(v) = l.bridge else {
+        return Error(Limits(NoParticipant))
     }
-    hold(mut l, room, 0, amount, Bridge)
+    if priced_at(l, room) == None {
+        return Error(Limits(NoRoom))
+    }
+    for h in l.held {
+        if h.room == room {
+            if let Bridge = h.what {
+                return Error(Exists)
+            }
+        }
+    }
+    let unit = units.virtual_index(v)
+    let free = l.free[int.widen(unit)]
+    if amount > free || amount == 0xffffffffffffffff {
+        return Error(Bytes(unit: unit, need: amount, free: free))
+    }
+    hold(mut l, room, unit, amount, Bridge)
     Ok(())
 }
 
-/// Refund a room's MOQ-8 bridge reservation on unit 0 (MOQ-8, RTC-10).
+/// Refund the attachment after installation failed or its send fence completed.
 pub fn release_bridge(mut l: Ledger, room: peer.RoomId) {
     let mut i = 0u64
     while i < list.len(l.held) {

@@ -234,7 +234,7 @@ edges = []
 [[package]]
 id = "webrtc_sfu@1"
 source = "member:webrtc_sfu"
-edges = ["dtls@1", "media_bits@1", "moq@1", "quic@1", "rtp@1", "rtp_jitter@1", "runner@1", "srtp@1", "std@1", "store@1", "stun_ice@1", "turn@1"]
+edges = ["dtls@1", "media_bits@1", "moq@1", "quic@1", "rtp@1", "rtp_jitter@1", "runner@1", "srtp@1", "std@1", "store@1", "stun_ice@1", "turn@1", "webtransport@1"]
 
 [[package]]
 id = "webtransport@1"

@@ -1,0 +1,177 @@
+type BridgeStage = Seating | Installing(sent: bool) | Live | Detaching(sent: bool) | Leaving(Option[router.RouterError])
+
+type RoomBridge {
+    seat: peer.Gen,
+    max_frame_bytes: u64,
+    stage: BridgeStage
+}
+
+type BridgeEvent = Attached | Detached | Refused(PoolRefusal)
+
+fn attach_bridge[M](mut p: Rooms[M], name: RoomName, window: u64, max_frame_bytes: u64) {
+    let Some(i) = named_at(p, name) else {
+        list.push(mut p.reports, BridgeRefused(name: name, why: Limits(NoRoom)))
+        return
+    }
+    let result = request_bridge(mut p.served[i].a, mut p.l, window, max_frame_bytes)
+    if let Error(take why) = take result {
+        list.push(mut p.reports, BridgeRefused(name: name, why: take why))
+    }
+}
+
+fn request_bridge[M](mut a: Adapter[M], mut l: Ledger, window: u64, max_frame_bytes: u64) -> Result[(), PoolRefusal] {
+    if !serving(a) {
+        return Error(Limits(NoRoom))
+    }
+    let Some(v) = l.bridge else {
+        return Error(Limits(NoParticipant))
+    }
+    if let Some(_) = a.bridge {
+        return Error(Exists)
+    }
+    let cap = bridge.bridge_room_cost(a.limits, window, max_frame_bytes)
+    reserve_bridge(mut l, a.room, cap)?
+    a.bridge_serial += 1
+    // RTC-8 assigns real peers IDs below limits.ids. The virtual subscriber
+    // consumes an ordinary room seat and has no signaling identity.
+    let seat: peer.Gen = Gen(id: int.widen(a.limits.ids), epoch: a.bridge_serial)
+    let who = peer.Participant(gen: seat, room: a.room)
+    let home = units.virtual_index(v)
+    a.bridge = Some(RoomBridge(seat: seat, max_frame_bytes: max_frame_bytes, stage: Seating))
+    list.push(mut a.jobs, Job(change: Admit(who: who, home: home), after: BridgeSeated))
+    Ok(())
+}
+
+fn detach_bridge[M](mut p: Rooms[M], name: RoomName) {
+    let Some(i) = named_at(p, name) else {
+        list.push(mut p.reports, BridgeRefused(name: name, why: Limits(NoRoom)))
+        return
+    }
+    let b = match p.served[i].a.bridge {
+        Some(b) => b.stage,
+        None => {
+            list.push(mut p.reports, BridgeRefused(name: name, why: Limits(NoParticipant)))
+            return
+        },
+    }
+    if let Live = b {
+        p.served[i].a.bridge_serial += 1
+        if let Some(mut entry) = p.served[i].a.bridge {
+            entry.stage = Detaching(sent: false)
+        }
+    } else {
+        list.push(mut p.reports, BridgeRefused(name: name, why: Exists))
+    }
+}
+
+fn bridge_seated[M](mut a: Adapter[M], mut l: Ledger, take answer: Result[router.Answer, router.RouterError]) {
+    match take answer {
+        Ok(_) => {
+            if let Some(mut b) = a.bridge {
+                b.stage = Installing(sent: false)
+            }
+        },
+        Error(take e) => {
+            release_bridge(mut l, a.room)
+            a.bridge = None
+            list.push(mut a.bridge_events, Refused(Limits(take e)))
+        },
+    }
+}
+
+fn drive_bridge[M](mut a: Adapter[M], mut l: Ledger, mut u: units.Unit) -> Result[(), router.RouterError] {
+    if !serving(a) {
+        return Ok(())
+    }
+    let Some(b) = a.bridge else {
+        return Ok(())
+    }
+    let (sent, frames) = match b.stage {
+        Installing(sent: sent) => (sent, Some(b.max_frame_bytes)),
+        Detaching(sent: sent) => (sent, None),
+        _ => return Ok(()),
+    }
+    let room = a.room
+    let ticket = a.bridge_serial
+    if !sent {
+        match units.post_bridge(mut u, room, ticket, frames) {
+            Ok(true) => {
+                if let Some(mut entry) = a.bridge {
+                    entry.stage = if frames == None {
+                        Detaching(sent: true)
+                    } else {
+                        Installing(sent: true)
+                    }
+                }
+            },
+            Ok(false) => (),
+            Error(take e) => bridge_ack(mut a, mut l, frames != None, Error(take e))?,
+        }
+    } else if let Some(take answer) = units.bridge_answer(mut u, room, ticket) {
+        bridge_ack(mut a, mut l, frames != None, take answer)?
+    }
+    Ok(())
+}
+
+fn bridge_ack[M](mut a: Adapter[M], mut l: Ledger, install: bool, take answer: Result[(), router.RouterError]) -> Result[(), router.RouterError] {
+    if install {
+        match take answer {
+            Ok(()) => {
+                if let Some(mut b) = a.bridge {
+                    b.stage = Live
+                }
+                let mut pubs: List[u64] = list.new()
+                for p in a.pubs {
+                    list.push(mut pubs, p.id)
+                }
+                for id in pubs {
+                    bridge_subscribe(mut a, id)
+                }
+                list.push(mut a.bridge_events, Attached)
+            },
+            Error(take e) => bridge_leave(mut a, Some(take e)),
+        }
+    } else {
+        answer?
+        bridge_leave(mut a, None)
+    }
+    Ok(())
+}
+
+fn bridge_leave[M](mut a: Adapter[M], take error: Option[router.RouterError]) {
+    let seat = if let Some(mut b) = a.bridge {
+        b.stage = Leaving(take error)
+        b.seat
+    } else {
+        return
+    }
+    list.push(mut a.jobs, Job(change: Leave(room: a.room, who: seat), after: BridgeLeft))
+}
+
+fn bridge_left[M](mut a: Adapter[M], mut l: Ledger, take answer: Result[router.Answer, router.RouterError]) {
+    let Some(take b) = replace(mut a.bridge, None) else {
+        return
+    }
+    release_bridge(mut l, a.room)
+    if let Leaving(take why) = take b.stage {
+        if let Some(take e) = take why {
+            list.push(mut a.bridge_events, Refused(Limits(take e)))
+            return
+        }
+    }
+    match take answer {
+        Ok(_) => list.push(mut a.bridge_events, Detached),
+        Error(take e) => list.push(mut a.bridge_events, Refused(Limits(take e))),
+    }
+}
+
+fn bridge_subscribe[M](mut a: Adapter[M], id: u64) {
+    if let Some(b) = a.bridge {
+        if let Live = b.stage {
+            let seat = b.seat
+            let target: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+            let change: router.Change = Subscribe(room: a.room, who: seat, p: PublicationId(id), section: 0, target: target)
+            list.push(mut a.jobs, Job(change: change, after: BridgeSubscribed))
+        }
+    }
+}

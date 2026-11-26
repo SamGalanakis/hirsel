@@ -163,11 +163,49 @@ fn suspend_drops_buffered_media() -> Result[(), ()] {
     list.push(mut reports, 0u64)
     send(mut r, streams, 0, 32 * NS / 30, reports, drops)
     order(mut r, Suspend(room: ROOM, cause: Signaling, on: true))
+    order(mut r, Suspend(room: ROOM, cause: Lease, on: true))
     let none: List[(u64, u64)] = list.new()
     send(mut r, streams, 32 * NS / 30, 40 * NS / 30, reports, none)
     order(mut r, Suspend(room: ROOM, cause: Signaling, on: false))
-    send(mut r, streams, 40 * NS / 30, 3 * NS, reports, none)
+    send(mut r, streams, 40 * NS / 30, 45 * NS / 30, reports, none)
+    order(mut r, Suspend(room: ROOM, cause: Lease, on: false))
+    send(mut r, streams, 45 * NS / 30, 3 * NS, reports, none)
     finish(mut r)
     expect(r.files[file_of(r, VIDEO)], streams[0], range(0, 28), WALL0, "media buffered before the suspension landed after it")
+    Ok(())
+}
+
+/// bug: a recorder starting after Subscribe misses the track, or Retarget
+/// releases old-layer frames waiting for the first sender report.
+/// oracle: RTC-9. Only the second, newly targeted Opus frame can reach Ogg.
+@test
+fn late_recorder_discards_frames_from_the_previous_target() -> Result[(), ()] {
+    let mut obs = webrtc_sfu.router.new_observer(1)
+    result.unwrap(webrtc_sfu.router.observer_apply(mut obs, ROOM, 1, Open(room: ROOM, limits: limits())))
+    result.unwrap(webrtc_sfu.router.observer_apply(mut obs, ROOM, 2, Admit(who: webrtc_sfu.peer.Participant(gen: PUBLISHER, room: ROOM), home: 0)))
+    result.unwrap(webrtc_sfu.router.observer_apply(mut obs, ROOM, 3, Admit(who: webrtc_sfu.peer.Participant(gen: SEAT, room: ROOM), home: 1)))
+    result.unwrap(webrtc_sfu.router.observer_apply(mut obs, ROOM, 4, Publish(room: ROOM, who: PUBLISHER, section: 0, id: AUDIO, shape: shape(Opus))))
+    let play: webrtc_sfu.router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(webrtc_sfu.router.observer_apply(mut obs, ROOM, 5, Subscribe(room: ROOM, who: SEAT, p: AUDIO, section: 0, target: play)))
+    let cfg = record.Config(window: 512, max_wait_us: 400000, pending: 64)
+    let mut r = Rig(rec: record.recorder(cfg, take obs), seq: 5, now: 1000000000, files: list.new(), posts: list.new())
+    collect(mut r)
+    let file = file_of(r, AUDIO)
+    let a = stream(AUDIO, Opus, opus_frames(), 2400, 10, 0)
+    media(mut r, a, 0)
+    advance(mut r, 1000000000)
+    order(mut r, Retarget(room: ROOM, who: SEAT, p: AUDIO, target: Off))
+    report(mut r, a, 0)
+    order(mut r, Retarget(room: ROOM, who: SEAT, p: AUDIO, target: play))
+    media(mut r, a, 1)
+    advance(mut r, 1000000000)
+    order(mut r, Unsubscribe(room: ROOM, who: SEAT, p: AUDIO))
+    if !r.files[file].closed {
+        fail("unsubscribe did not close the late recorder's file")
+    }
+    let packets = read_back(r.files[file])
+    if list.len(packets) != 1 || packets[0].data != a.frames[1].data {
+        fail("retarget played an old frame or lost the new one")
+    }
     Ok(())
 }

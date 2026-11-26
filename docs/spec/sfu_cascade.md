@@ -201,7 +201,10 @@ Each link carries:
 **Distribution-adapter ownership and zero-copy media handoff (text only, not yet built —
 media-seams-design-3072).** Cascade does not own a second router, fence table, suspension
 bitmask, or PLI/FIR throttle. It runs as a `VirtualUnit` distribution adapter (`Pool.cascade`,
-RTC-10) over `webrtc_sfu.router`:
+RTC-10) over `webrtc_sfu.router`. The planned adapter uses RTC-10's
+accepted-order Observer and virtual-door limit. Its local down-track projection
+follows target changes and retains the publication's owner generation and home.
+The cascade attachment, remote publication ingress and link rules below are S5.
 
 - `router.Router` owns all rooms, local and remote-origin (`Origin.Remote`) publications, local
   down-tracks, wanted-mask unions (`pause_delay_ms`), `Keyframes` PLI/FIR throttling, `fenced`

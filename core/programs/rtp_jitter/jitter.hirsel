@@ -65,6 +65,37 @@ fn end(j: Jitter) -> u64 {
     j.floor + list.len(j.slots) - j.head
 }
 
+/// Whether a packet can enter without retaining more than the configured
+/// window of sequence positions. Callers that fund a bounded packet window
+/// may poll before trying again or abandon the old frame on overflow.
+pub fn window_fits(j: Jitter, seq: u16) -> bool {
+    if !j.started {
+        return true
+    }
+    let Index(i) = rtp.seq.estimate(j.highest, seq) else {
+        return true
+    }
+    if i < j.floor && (j.fixed || j.highest - i >= j.config.window) {
+        return true
+    }
+    let lo = order.min(i, j.floor)
+    let hi = order.max(i + 1, end(j))
+    hi - lo <= j.config.window
+}
+
+/// Packet and slot storage for a caller that enforces window_fits. The slot
+/// allowance includes consumed positions, list growth and compaction.
+pub fn window_bytes(window: u64, packet: u64) -> u64 {
+    let slots = int.saturating_mul(4, int.saturating_add(int.saturating_mul(2, window), 64))
+    let Some(slots_bytes) = charge.seq(bytes[Slot], slots) else {
+        return 0xffffffffffffffff
+    }
+    let Some(payload_bytes) = charge.seq(1, packet) else {
+        return 0xffffffffffffffff
+    }
+    int.saturating_add(slots_bytes, int.saturating_mul(window, payload_bytes))
+}
+
 pub fn push(mut j: Jitter, seq: u16, ts: u32, marker: bool, take payload: Bytes, now_us: u64, mut out: List[Event]) {
     if !j.started {
         j.started = true

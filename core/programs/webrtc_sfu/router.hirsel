@@ -224,7 +224,7 @@ pub type Answer: cross = Done | Shaped(id: PublicationId, shape: Shape)
 /// The control inboxes' messages: the control unit's changes, each room's in that
 /// room's order, and each unit's acknowledgement once it has applied one. `seq`
 /// counts per room (RTC-10, The control plane).
-pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | Ack(room: peer.RoomId, seq: u64, unit: u16, answer: Result[Answer, RouterError]) | Fault(room: peer.RoomId, unit: u16, error: RouterError)
+pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | Ack(room: peer.RoomId, seq: u64, unit: u16, answer: Result[Answer, RouterError]) | Fault(room: peer.RoomId, unit: u16, error: RouterError) | BridgeOrder(room: peer.RoomId, serial: u64, frame_bytes: Option[u64]) | BridgeAck(room: peer.RoomId, serial: u64, unit: u16, answer: Result[(), RouterError])
 
 /// The media inboxes' messages (RTC-5):
 ///

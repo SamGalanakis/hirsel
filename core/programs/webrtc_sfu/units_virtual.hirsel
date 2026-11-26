@@ -1,0 +1,59 @@
+/// The optional virtual door follows every session-eligible unit.
+pub opaque type VirtualUnit: key {
+    index: u16
+}
+
+pub fn virtual_unit(session_units: u16) -> Option[VirtualUnit] {
+    if session_units == 0 || session_units >= router.UNITS_MAX {
+        return None
+    }
+    Some(VirtualUnit(index: session_units))
+}
+
+pub fn virtual_index(v: VirtualUnit) -> u16 {
+    v.index
+}
+
+type BridgeReply {
+    room: peer.RoomId,
+    serial: u64,
+    answer: Result[(), router.RouterError]
+}
+
+pub fn set_virtual(mut u: Unit, v: VirtualUnit) -> Result[(), router.RouterError] {
+    if list.len(u.doors) != (int.widen(v.index) : u64) + 1 || u.index >= v.index {
+        return Error(Limit(int.widen(router.UNITS_MAX)))
+    }
+    u.virtual = Some(v)
+    Ok(())
+}
+
+/// Send a bridge lifecycle request to the virtual door. A full mailbox leaves
+/// it with the caller for a later turn.
+pub fn post_bridge(mut u: Unit, room: peer.RoomId, serial: u64, frame_bytes: Option[u64]) -> Result[bool, router.RouterError] {
+    let Some(v) = u.virtual else {
+        return Error(NoParticipant)
+    }
+    if u.index != 0 || !router.room_open(u.r, room) {
+        return Error(NoRoom)
+    }
+    let i: u64 = int.widen(v.index)
+    match conn.try_send(u.doors[i].control, ControlMessage(step: BridgeOrder(room: room, serial: serial, frame_bytes: frame_bytes), opus_fmtp: None)) {
+        Ok(()) => {
+            u.rung |= 1u64 << i
+            Ok(true)
+        },
+        Error(Full(_)) => Ok(false),
+        Error(Closed(_)) => Error(NoParticipant),
+    }
+}
+
+pub fn bridge_answer(mut u: Unit, room: peer.RoomId, serial: u64) -> Option[Result[(), router.RouterError]] {
+    for i in 0u64 .. list.len(u.bridge_replies) {
+        if u.bridge_replies[i].room == room && u.bridge_replies[i].serial == serial {
+            let BridgeReply(room: _, serial: _, answer: take a) = list.remove(mut u.bridge_replies, i)
+            return Some(take a)
+        }
+    }
+    None
+}

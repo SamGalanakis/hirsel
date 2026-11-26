@@ -7,6 +7,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::profile::Result;
+pub(crate) use crate::record::{CPU_CLOCK, Event, Kind, Mapping, RUNTIME, Record, Sample};
 
 const RECORD_ID: u64 = (1 << 1) | (1 << 2) | (1 << 7); // TID, TIME, CPU
 const SAMPLE_FIELDS: u64 = RECORD_ID | (1 << 0) // IP
@@ -45,29 +46,6 @@ struct PerfAttr {
     sample_stack_user: u32,
     clockid: i32,
 }
-
-#[derive(Clone, Copy)]
-pub(crate) struct Event {
-    pub(crate) name: &'static str,
-    pub(crate) unit: &'static str,
-    kind: u32,
-    config: u64,
-}
-
-// Runtime timing does not open a sampling event.
-pub(crate) const RUNTIME: Event = Event {
-    name: "runtime",
-    unit: "nanoseconds",
-    kind: 0,
-    config: 0,
-};
-
-pub(crate) const CPU_CLOCK: Event = Event {
-    name: "cpu-clock",
-    unit: "nanoseconds",
-    kind: 1,
-    config: 0,
-};
 
 // PERF_COUNT_SW_DUMMY does not sample. An enabled event still delivers mmap,
 // comm and task records, including while the sampling events are disabled.
@@ -124,7 +102,11 @@ pub(crate) fn monotonic_ns() -> io::Result<u64> {
     Ok(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64)
 }
 
-pub(crate) fn validate_settings(freq: u64, bytes: u32) -> Result<()> {
+/// The user stack bytes each sample copies when `--stack-bytes` is absent.
+pub(crate) const STACK_BYTES: u32 = 32768;
+
+pub(crate) fn validate_settings(freq: u64, bytes: Option<u32>) -> Result<()> {
+    let bytes = bytes.unwrap_or(STACK_BYTES);
     if freq == 0 {
         return Err("--freq must be positive".into());
     }
@@ -474,42 +456,6 @@ impl Drop for Ring {
     }
 }
 
-pub(crate) struct Record {
-    pub(crate) time: u64,
-    pub(crate) pid: u32,
-    pub(crate) tid: u32,
-    pub(crate) kind: Kind,
-}
-
-pub(crate) enum Kind {
-    Sample(Sample),
-    Mapping(Mapping),
-    Comm { name: String, exec: bool },
-    Fork { parent: u32 },
-    Exit,
-    Lost(u64),
-}
-
-#[derive(Clone)]
-pub(crate) struct Mapping {
-    pub(crate) start: u64,
-    pub(crate) end: u64,
-    pub(crate) offset: u64,
-    pub(crate) path: std::path::PathBuf,
-    pub(crate) dev: Option<(u32, u32)>,
-    pub(crate) inode: u64,
-}
-
-pub(crate) struct Sample {
-    pub(crate) pc: u64,
-    pub(crate) kernel: bool,
-    pub(crate) cpu: u32,
-    pub(crate) period: u64,
-    pub(crate) event: Event,
-    pub(crate) registers: Option<(u64, u64, u64)>,
-    pub(crate) stack: Vec<u8>,
-}
-
 #[derive(Default)]
 struct EventSorter {
     pending: Vec<Record>,
@@ -598,7 +544,7 @@ pub(super) fn decode(kind: u32, misc: u16, bytes: &[u8], event: Event) -> Result
             kind: Kind::Sample(Sample {
                 pc,
                 kernel: misc & PERF_RECORD_MISC_CPUMODE_MASK == PERF_RECORD_MISC_KERNEL,
-                cpu,
+                cpu: Some(cpu),
                 period,
                 event,
                 registers,
@@ -700,7 +646,7 @@ mod tests {
 
     #[test]
     fn perf_permission_errors_include_host_settings_for_a_blocked_syscall() {
-        const CASE: &str = "linux::perf::tests::perf_permission_errors_include_host_settings_for_a_blocked_syscall";
+        const CASE: &str = "host::linux::perf::tests::perf_permission_errors_include_host_settings_for_a_blocked_syscall";
         const CHILD: &str = "HIRSEL_PROF_TEST_PERF_DENIED";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())

@@ -1,13 +1,15 @@
 //! Portable CPU profiles for Hirsel.
 
-#[cfg(target_os = "linux")]
+mod image;
+mod import;
 mod memory;
-#[cfg(target_os = "linux")]
 mod observation;
 mod pprof;
 mod profile;
 mod query;
+mod record;
 mod tail;
+mod unwind;
 
 pub use pprof::export_pprof;
 pub use profile::{Profile, ProfileWriter, RunMeta};
@@ -20,19 +22,7 @@ pub const CODEGEN_REMARK_SECTION: &str = ".debug_hirsel_remarks";
 hirsel_guard::install!();
 
 mod capture;
-pub use capture::{CaptureOptions, Launch, MemMode, ObservationOptions, SymbolSource};
+pub use capture::{CaptureOptions, Launch, MemMode, ObservationOptions, SymbolSource, replay};
 
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-mod linux;
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub use linux::{attach, replay, run};
-#[cfg(target_os = "macos")]
-mod unsupported;
-#[cfg(target_os = "macos")]
-pub use unsupported::{attach, replay, run};
+mod host;
+pub use host::{attach, run};

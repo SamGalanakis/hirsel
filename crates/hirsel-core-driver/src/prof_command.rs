@@ -15,7 +15,7 @@ struct Sampling {
     out: PathBuf,
     freq: u64,
     pmu: Option<String>,
-    stack_bytes: u32,
+    stack_bytes: Option<u32>,
 }
 
 impl Default for Sampling {
@@ -24,7 +24,7 @@ impl Default for Sampling {
             out: "profile.hprof".into(),
             freq: 997,
             pmu: None,
-            stack_bytes: 32768,
+            stack_bytes: None,
         }
     }
 }
@@ -35,7 +35,7 @@ impl Sampling {
             OptionId::ProfOut => self.out = value.into(),
             OptionId::ProfFrequency => self.freq = value.parse()?,
             OptionId::ProfPmu => self.pmu = Some(value),
-            OptionId::ProfStackBytes => self.stack_bytes = value.parse()?,
+            OptionId::ProfStackBytes => self.stack_bytes = Some(value.parse()?),
             _ => unreachable!(),
         }
         Ok(())

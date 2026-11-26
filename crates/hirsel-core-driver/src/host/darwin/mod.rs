@@ -557,11 +557,11 @@ pub(crate) fn child_descriptors(pid: u32) -> Vec<String> {
     open
 }
 
-/// hirsel-prof samples with Linux perf events; a Darwin test that needs a
-/// child's code range has no profiler to compare it with.
+/// `hirsel prof attach` refuses on macOS (it needs `task_for_pid`), so a
+/// Darwin test that needs a child's code range has no capture to compare.
 #[cfg(test)]
 pub(crate) fn child_code_range(_pid: u32, _image: &Path) -> std::ops::Range<u64> {
-    panic!("hirsel-prof samples with Linux perf events; macOS has no capture to compare")
+    panic!("hirsel prof attach refuses on macOS; no attach capture to compare")
 }
 
 /// Reading another process's memory on macOS needs `task_for_pid`, which a

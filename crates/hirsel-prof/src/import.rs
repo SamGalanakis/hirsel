@@ -5,14 +5,14 @@ use std::rc::Rc;
 
 use rusqlite::Connection;
 
-use super::image::{self, Function, Image, Symbolized};
-use super::perf::{Kind, Mapping, Record, Sample};
-use super::procfs::{self, Identity, KernelSymbols};
-use super::unwind::{Registers, Stack, Step};
 use crate::MemMode;
+use crate::host::{self, KernelSymbols};
+use crate::image::{self, Function, Image, Symbolized};
 use crate::memory::MemoryImport;
 use crate::observation::{Observation, RecordKind};
 use crate::profile::{Result, Timestamp, Unsigned};
+use crate::record::{CPU_CLOCK, Identity, Kind, Mapping, Record, Sample, parse_mappings};
+use crate::unwind::{Registers, Stack, Step};
 
 struct ActiveMapping {
     id: i64,
@@ -42,7 +42,7 @@ pub(crate) struct Import<'a> {
     mapping: BTreeMap<u64, ActiveMapping>,
     images: HashMap<Identity, Rc<Image>>,
     vdso: Option<Rc<Image>>,
-    kernel_symbols: Option<KernelSymbols>,
+    pub(crate) kernel_symbols: Option<KernelSymbols>,
     threads: HashMap<u32, Thread>,
     functions: HashMap<Function, i64>,
     frames: HashMap<FrameKey, i64>,
@@ -135,7 +135,7 @@ impl<'a> Import<'a> {
                         matches!(next.kind, RecordKind::Mapping(_)) && next.ts == record.ts
                     }) {
                         self.close_mappings(record.ts)?;
-                        self.initialize(Vec::new(), procfs::parse_mappings(&maps)?, record.ts)?;
+                        self.initialize(Vec::new(), parse_mappings(&maps)?, record.ts)?;
                         maps.clear();
                     }
                 }
@@ -335,7 +335,7 @@ impl<'a> Import<'a> {
     fn load_image(&mut self, mapping: &Mapping) -> Option<Rc<Image>> {
         if mapping.path == Path::new("[vdso]") {
             if self.vdso.is_none() {
-                let bytes = procfs::vdso(self.pid, mapping).ok()?;
+                let bytes = host::vdso(self.pid, mapping).ok()?;
                 self.vdso = Some(Rc::new(
                     Image::parse(&bytes, image::local_symbols(&bytes), false).ok()?,
                 ));
@@ -345,7 +345,7 @@ impl<'a> Import<'a> {
         if Identity::mapping(mapping) == Some(self.main_identity) {
             return Some(self.main.clone());
         }
-        let mut fd = procfs::mapped_file(self.pid, mapping).ok()?;
+        let mut fd = host::mapped_file(self.pid, mapping).ok()?;
         let identity = Identity::read(&fd).ok()?;
         if identity == self.main_identity {
             return Some(self.main.clone());
@@ -366,7 +366,7 @@ impl<'a> Import<'a> {
     fn sample(&mut self, tid: u32, time: u64, sample: Sample) -> Result<()> {
         let thread = self.thread(tid, "", time)?;
         let (frames, root, status) = if sample.kernel
-            || (kernel_address(sample.pc)
+            || (host::kernel_address(sample.pc)
                 && Self::active_mapping(&self.mapping, sample.pc).is_none())
         {
             let label = self
@@ -400,6 +400,75 @@ impl<'a> Import<'a> {
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             (Timestamp(time), thread, sample.cpu, site, format!("{:#x}", sample.pc),
              sample.event.name, Unsigned(sample.period), root, status),
+        )?;
+        Ok(())
+    }
+
+    /// A stack the runtime walked by frame pointers: the interrupted PC,
+    /// then each return address. The walk needs no image, so a frame without
+    /// one stays unsymbolized and the frames above it still count.
+    pub(crate) fn walked(
+        &mut self,
+        tid: u32,
+        time: u64,
+        period: u64,
+        pcs: &[u64],
+        truncated: bool,
+    ) -> Result<()> {
+        let leaf = *pcs.first().ok_or("a walked stack must have a leaf")?;
+        let thread = self.thread(tid, "", time)?;
+        let mut frames = Vec::new();
+        let mut host = false;
+        let mut fiber = false;
+        for (depth, &raw) in pcs.iter().enumerate() {
+            // A return address names the instruction after its call.
+            let pc = if depth == 0 {
+                raw
+            } else {
+                raw.saturating_sub(1)
+            };
+            let active = Self::active_mapping(&self.mapping, pc);
+            let rel_pc = active.map(|active| pc - active.map.start);
+            let resolved = active.and_then(|active| {
+                let address = active.virtual_start?.checked_add(rel_pc?)?;
+                Some((active.image.as_ref()?, address))
+            });
+            let symbols = if let Some((image, address)) = resolved {
+                image.frames(address)?
+            } else {
+                vec![Symbolized::default()]
+            };
+            frames.extend(symbols.into_iter().map(|symbol| FrameKey {
+                mapping: active.map(|active| active.id),
+                rel_pc,
+                symbol,
+            }));
+            if let Some((image, address)) = resolved
+                && image.main
+                && let Some(name) = image.physical_name(address)
+            {
+                host |= image::host_fiber_invocation(name);
+                if !host && image::fiber_boundary(name) {
+                    fiber = true;
+                    break;
+                }
+            }
+        }
+        let (root, status) = if Self::active_mapping(&self.mapping, leaf).is_none() {
+            ("failed", "unknown_mapping")
+        } else if fiber {
+            ("fiber", "fiber_root")
+        } else if truncated {
+            ("truncated", "truncated_stack")
+        } else {
+            ("host", "ok")
+        };
+        let site = self.callsite(frames)?;
+        self.db.execute(
+            "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,event,period,stack_root,unwind_status)
+             VALUES (?1,?2,NULL,?3,?4,?5,?6,?7,?8)",
+            (Timestamp(time), thread, site, format!("{leaf:#x}"),
+             CPU_CLOCK.name, Unsigned(period), root, status),
         )?;
         Ok(())
     }
@@ -602,25 +671,10 @@ impl<'a> Import<'a> {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-fn kernel_address(pc: u64) -> bool {
-    // The upper canonical half with five-level paging, except the legacy
-    // userspace vsyscall page.
-    pc >= 0xff00_0000_0000_0000 && !(0xffff_ffff_ff60_0000..0xffff_ffff_ff60_1000).contains(&pc)
-}
-
-#[cfg(target_arch = "aarch64")]
-fn kernel_address(pc: u64) -> bool {
-    // A 52-bit TTBR1 range starts at the lowest kernel address.
-    pc >= 0xfff0_0000_0000_0000
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::perf::{CPU_CLOCK, decode};
     use super::*;
-    use crate::{By, Group, ProfileWriter, Query, RunMeta, query};
-    use serde_json::json;
+    use crate::ProfileWriter;
 
     #[test]
     fn runtime_observation_refuses_unassigned_kind() {
@@ -641,79 +695,6 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "unassigned runtime observation kind 24 in HIRSOBS2"
-        );
-    }
-
-    #[test]
-    fn kernel_samples_keep_periods_without_user_unwind_failures() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("kernel.hprof");
-        let profile = ProfileWriter::create(&path).unwrap();
-        let exe = std::env::current_exe().unwrap();
-        let identity = Identity::read(&std::fs::File::open(&exe).unwrap()).unwrap();
-        let bytes = std::fs::read(exe).unwrap();
-        let image = Rc::new(Image::parse(&bytes, image::SymbolSource::OffsetsOnly, true).unwrap());
-        let mut import = Import::new(profile.connection(), 1, dir.path().into(), image, identity);
-        import.kernel_symbols = Some(KernelSymbols::parse(
-            "0000000000000000 T hidden\nffffffff81000100 T page_fault\nffffffff81000200 D data\n",
-        ));
-        // Linux perf sample records with no user registers or stack bytes.
-        for (pc, mode, period) in [
-            (0xffff_ffff_8100_0110u64, 2, 11),
-            (0xffff_ffff_8100_0200, 2, 7),
-            (0x10, 1, 5),
-            (0x20, 2, 13),
-        ] {
-            let pid_tid = (1u64 << 32) | 1;
-            let payload: Vec<u8> = [pc, pid_tid, 1, 0, period, 0, 0]
-                .into_iter()
-                .flat_map(u64::to_ne_bytes)
-                .collect();
-            import
-                .record(decode(9, mode, &payload, CPU_CLOCK).unwrap().unwrap())
-                .unwrap();
-        }
-        drop(import);
-        profile
-            .finish(&RunMeta {
-                capture_mode: "attach",
-                target: "linux",
-                cmdline: "[]",
-                build_id: "",
-                image_digest: "",
-                symbol_tier: "offsets_only",
-                clock: "CLOCK_MONOTONIC",
-                primary_event: "cpu-clock",
-                primary_unit: "nanoseconds",
-                freq_hz: 997,
-                fallback_reason: "",
-                start_ns: 0,
-                duration_ns: 2,
-                samples_lost: 0,
-            })
-            .unwrap();
-        let top = query(
-            &path,
-            Query::Top {
-                by: By::SelfCost,
-                event: None,
-                group: Group::DefPath,
-                filter: None,
-            },
-            10,
-        )
-        .unwrap();
-        assert_eq!(top.quality["kernel_samples"], 3);
-        assert_eq!(top.quality["unwind_failed"], 1);
-        assert_eq!(top.quality["unknown_mapping"], 1);
-        assert_eq!(top.quality["unresolved_samples"], 1);
-        assert_eq!(top.quality["host_root_samples"], 0);
-        assert_eq!(
-            top.result["rows"],
-            json!([
-                {"function":"[kernel]", "self_total":12, "inclusive_total":12, "sample_count":2},
-                {"function":"[kernel] page_fault", "self_total":11, "inclusive_total":11, "sample_count":1},
-            ])
         );
     }
 }

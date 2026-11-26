@@ -7,10 +7,10 @@ use gimli::{AttributeValue, EndianArcSlice, LittleEndian, UnitOffset, UnitRef};
 use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 use sha2::{Digest, Sha256};
 
-use super::perf::Mapping;
-use super::unwind::UnwindInfo;
 pub(crate) use crate::capture::SymbolSource;
 use crate::profile::Result;
+use crate::record::Mapping;
+use crate::unwind::UnwindInfo;
 
 type Reader = EndianArcSlice<LittleEndian>;
 
@@ -30,9 +30,7 @@ pub(crate) fn local_symbols(image: &[u8]) -> SymbolSource {
     };
     if file.section_by_name(".debug_info").is_some() {
         SymbolSource::EmbeddedDwarf
-    } else if file.symbols().any(|s| useful_symbol(&s))
-        || file.dynamic_symbols().any(|s| useful_symbol(&s))
-    {
+    } else if !text_symbols(&file).is_empty() {
         SymbolSource::SymtabOnly
     } else {
         SymbolSource::OffsetsOnly
@@ -83,8 +81,54 @@ pub(crate) struct Symbolized {
     pub(crate) inlined: bool,
 }
 
-fn useful_symbol<'data>(s: &impl ObjectSymbol<'data>) -> bool {
-    s.is_definition() && s.kind() == object::SymbolKind::Text && s.size() != 0
+/// The image's defined code symbols by address. A Mach-O symbol carries no
+/// size and its name a leading `_`: it ends where the next symbol or its
+/// section does, and its name is the one the source gave.
+fn text_symbols(file: &object::File<'_>) -> Vec<Symbol> {
+    let macho = file.format() == object::BinaryFormat::MachO;
+    let mut symbols = Vec::new();
+    for symbol in file.symbols().chain(file.dynamic_symbols()) {
+        if !symbol.is_definition() || symbol.kind() != object::SymbolKind::Text {
+            continue;
+        }
+        let Ok(name) = symbol.name() else {
+            continue;
+        };
+        let end = if macho {
+            symbol
+                .section_index()
+                .and_then(|index| file.section_by_index(index).ok())
+                .and_then(|section| section.address().checked_add(section.size()))
+        } else {
+            symbol
+                .address()
+                .checked_add(symbol.size())
+                .filter(|_| symbol.size() != 0)
+        };
+        if let Some(end) = end {
+            symbols.push(Symbol {
+                name: if macho {
+                    name.strip_prefix('_').unwrap_or(name)
+                } else {
+                    name
+                }
+                .to_owned(),
+                start: symbol.address(),
+                end,
+            });
+        }
+    }
+    symbols.sort_by_key(|symbol| (symbol.start, symbol.end));
+    if macho {
+        for index in 1..symbols.len() {
+            let next = symbols[index].start;
+            let previous = &mut symbols[index - 1];
+            if next > previous.start {
+                previous.end = previous.end.min(next);
+            }
+        }
+    }
+    symbols
 }
 
 impl Image {
@@ -95,7 +139,7 @@ impl Image {
         #[cfg(target_arch = "aarch64")]
         let arch = object::Architecture::Aarch64;
         if file.architecture() != arch || !file.is_little_endian() {
-            return Err("profiling requires a native little-endian Linux ELF image".into());
+            return Err("profiling requires a native little-endian image".into());
         }
         let section = |name| {
             file.section_by_name(name)
@@ -140,29 +184,24 @@ impl Image {
                 Ok::<_, Box<dyn std::error::Error>>(addr2line::Context::from_dwarf(dwarf)?)
             })
             .transpose()?;
-        let mut symbols = Vec::new();
-        if !matches!(source, SymbolSource::OffsetsOnly) {
-            for symbol in file.symbols().chain(file.dynamic_symbols()) {
-                if useful_symbol(&symbol)
-                    && let Ok(name) = symbol.name()
-                    && let Some(end) = symbol.address().checked_add(symbol.size())
-                {
-                    symbols.push(Symbol {
-                        name: name.to_owned(),
-                        start: symbol.address(),
-                        end,
-                    });
-                }
-            }
-        }
-        symbols.sort_by_key(|symbol| (symbol.start, symbol.end));
+        let symbols = if matches!(source, SymbolSource::OffsetsOnly) {
+            Vec::new()
+        } else {
+            text_symbols(&file)
+        };
         let segments = file
             .segments()
             .filter_map(|segment| {
-                let object::SegmentFlags::Elf { p_flags, .. } = segment.flags() else {
-                    return None;
+                let executable = match segment.flags() {
+                    object::SegmentFlags::Elf { p_flags, .. } => {
+                        p_flags & object::elf::PF_X == object::elf::PF_X
+                    }
+                    object::SegmentFlags::MachO { initprot, .. } => {
+                        initprot.contains(object::macho::VM_PROT_EXECUTE)
+                    }
+                    _ => false,
                 };
-                if p_flags & object::elf::PF_X != object::elf::PF_X {
+                if !executable {
                     return None;
                 }
                 let (offset, len) = segment.file_range();

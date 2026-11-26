@@ -37,7 +37,7 @@ HOST_SEAMS = (
     'crates/hirsel-core-net/src/host/',
     'crates/hirsel-core-net/src/reactor/',
     'crates/hirsel-core-net/src/own_address/',
-    'crates/hirsel-prof/src/linux/',
+    'crates/hirsel-prof/src/host/',
     'crates/hirsel-llvm-lazy/src/host/',
     'crates/hirsel-core-program-tests/examples/linux/',
 )
@@ -59,8 +59,6 @@ HOST_FILES = {
     # compiler identity).
     'crates/hirsel-core-ids/src/launch.rs': 'macos-s12-driver-2828',
     'crates/hirsel-intern/src/instructions.rs': 'macos-s12-driver-2828',
-    # S13 is unlanded: hirsel-prof on Darwin.
-    'crates/hirsel-prof/src/lib.rs': 'S13',
 }
 
 TARGET_VARIANT = (r'(?:\bTarget::(?:X86_64Linux|Aarch64Linux|Aarch64Darwin)'

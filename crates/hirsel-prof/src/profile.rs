@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, ToSql};
 use tempfile::NamedTempFile;
 
 const APPLICATION_ID: i64 = 0x48505246;
-const HPROF_VERSION: i64 = 4;
+const HPROF_VERSION: i64 = 5;
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

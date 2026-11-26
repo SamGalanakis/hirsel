@@ -34,6 +34,9 @@ pub(crate) enum Kind {
     IoPending = 10,
     IoEnd = 11,
     Mapping = 12,
+    /// A sampled thread's stack: its thread id, the period in nanoseconds,
+    /// flags (bit 0: truncated), the interrupted PC and each return address.
+    CpuSample = 13,
     Alloc = 16,
     Peak = 17,
     BudgetScope = 18,
@@ -205,7 +208,7 @@ pub(crate) fn now_ns() -> u64 {
 pub(crate) fn append(kind: Kind, words: &[u64], bytes: &[u8]) {
     WRITER.with(|slot| {
         if let Some(writer) = slot.borrow_mut().as_mut()
-            && (writer.tasks || kind as u16 >= 16)
+            && (writer.tasks || matches!(kind, Kind::CpuSample) || kind as u16 >= 16)
         {
             writer.append(kind, words, bytes);
         }
@@ -268,6 +271,56 @@ impl Drop for Worker {
 pub(crate) struct Run {
     shared: Arc<Shared>,
     drain: Option<JoinHandle<io::Result<()>>>,
+    sampler: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+}
+
+/// One stack a host sampler walked: the interrupted PC, then each return
+/// address, in a buffer reused across samples so that no walk allocates.
+pub(crate) struct Stack {
+    pub(crate) tid: u64,
+    /// The chain was longer than [`Stack::DEPTH`].
+    pub(crate) truncated: bool,
+    pub(crate) len: usize,
+    pub(crate) pcs: [u64; Stack::DEPTH],
+}
+
+impl Stack {
+    pub(crate) const DEPTH: usize = 256;
+}
+
+/// Sample this process's running threads `hz` times a second as
+/// [`Kind::CpuSample`] records until `stop`.
+fn sample_cpu(hz: u64, stop: &AtomicBool) {
+    let mut sampler = match crate::host::prof_sampler::Sampler::new() {
+        Ok(sampler) => sampler,
+        Err(error) => {
+            eprintln!("hirsel: cannot sample CPU: {error}");
+            return;
+        }
+    };
+    let _worker = Worker::enter();
+    let interval = Duration::from_nanos(1_000_000_000 / hz);
+    let mut stack = Box::new(Stack {
+        tid: 0,
+        truncated: false,
+        len: 0,
+        pcs: [0; Stack::DEPTH],
+    });
+    let mut words = vec![0u64; 3 + Stack::DEPTH];
+    let mut last = now_ns();
+    while !stop.load(Ordering::Acquire) {
+        thread::sleep(interval);
+        let now = now_ns();
+        let period = now - last;
+        last = now;
+        sampler.round(&mut stack, &mut |stack| {
+            words[0] = stack.tid & u64::from(u32::MAX);
+            words[1] = period;
+            words[2] = u64::from(stack.truncated);
+            words[3..3 + stack.len].copy_from_slice(&stack.pcs[..stack.len]);
+            append(Kind::CpuSample, &words[..3 + stack.len], &[]);
+        });
+    }
 }
 
 impl Run {
@@ -293,12 +346,26 @@ impl Run {
             return None;
         }
         let tasks = std::env::var_os("HIRSEL_PROFILE_TASKS").is_none_or(|value| value != "0");
+        let hz = std::env::var_os("HIRSEL_PROFILE_CPU_HZ");
         // SAFETY: the generated executable calls this at process entry.
         unsafe {
             std::env::remove_var("HIRSEL_PROFILE");
             std::env::remove_var("HIRSEL_PROFILE_CHUNK_BYTES");
             std::env::remove_var("HIRSEL_PROFILE_TASKS");
+            std::env::remove_var("HIRSEL_PROFILE_CPU_HZ");
         }
+        let hz = match hz {
+            None => None,
+            Some(value) => match value.to_str().and_then(|text| text.parse::<u64>().ok()) {
+                Some(hz @ 1..=1_000_000) if !replay => Some(hz),
+                _ => {
+                    eprintln!(
+                        "hirsel: HIRSEL_PROFILE_CPU_HZ requires 1 to 1000000 samples a second"
+                    );
+                    return None;
+                }
+            },
+        };
         let live_memory = !replay && memory.is_some();
         let default_size = if live_memory {
             LIVE_MEMORY_CHUNK_BYTES
@@ -319,7 +386,18 @@ impl Run {
             return None;
         };
         match Self::open(path, size, tasks, live_memory) {
-            Ok(run) => {
+            Ok(mut run) => {
+                if let Some(hz) = hz {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let flag = stop.clone();
+                    match thread::Builder::new()
+                        .name("hirsel-sampler".into())
+                        .spawn(move || sample_cpu(hz, &flag))
+                    {
+                        Ok(handle) => run.sampler = Some((stop, handle)),
+                        Err(error) => eprintln!("hirsel: cannot sample CPU: {error}"),
+                    }
+                }
                 match memory {
                     Some(settings) if replay => crate::mem_prof::start(settings),
                     Some(settings) => crate::mem_prof::start_live(settings),
@@ -370,12 +448,17 @@ impl Run {
         Ok(Self {
             shared,
             drain: Some(drain),
+            sampler: None,
         })
     }
 }
 
 impl Drop for Run {
     fn drop(&mut self) {
+        if let Some((stop, sampler)) = self.sampler.take() {
+            stop.store(true, Ordering::Release);
+            let _ = sampler.join();
+        }
         // Every runtime worker has returned, so all registered chunks are sealed.
         if crate::mem_prof::enabled() {
             let _worker = Worker::enter();

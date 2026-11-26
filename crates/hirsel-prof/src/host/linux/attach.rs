@@ -6,10 +6,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use super::capture::{Capture, CaptureOptions, Provenance, finish, open_perf, open_rings};
-use super::image::SymbolSource;
-use super::import::Import;
 use super::perf::{self, Kind};
 use super::procfs;
+use crate::capture::SymbolSource;
+use crate::import::Import;
 use crate::profile::{ProfileWriter, Result};
 
 /// Profile a live process without stopping its threads.
@@ -249,9 +249,9 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
-    use super::super::image::local_symbols;
     use super::*;
     use crate::Profile;
+    use crate::image::local_symbols;
 
     #[test]
     fn attach_resolves_stripped_leaf_as_mapping_and_offset() {
@@ -304,7 +304,7 @@ int main(void) {
                 out: &profile,
                 freq: 997,
                 pmu: Some("cpu-clock"),
-                stack_bytes: 32768,
+                stack_bytes: None,
             },
             |_, bytes| Ok(local_symbols(bytes)),
         );

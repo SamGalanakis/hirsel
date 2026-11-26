@@ -14,6 +14,8 @@ use linux as provider;
 #[cfg(test)]
 pub(crate) use provider::HOST_TARGET;
 pub use provider::exec;
+#[cfg(feature = "prof")]
+pub(crate) use provider::prof_sampler;
 pub(crate) use provider::{clock, file, path, stat::stat, sync, sys, unix};
 
 /// A terminal's size as `cols | rows << 16` from `TIOCGWINSZ`, zero when the

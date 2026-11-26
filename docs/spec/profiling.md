@@ -73,8 +73,9 @@ the mapping and relative PC when neither source is available.
 ## Profile file
 
 A `.hprof` is a self-contained SQLite database with `application_id =
-0x48505246` and `user_version = 4`. Readers open the current version
-read-only and refuse other versions.
+0x48505246` and `user_version = 5`. Readers open the current version
+read-only and refuse other versions. A `cpu_sample` row's `cpu` is NULL when
+the host does not report which CPU ran the sampled thread.
 Source snippets and symbol names are recorded in the database so it can travel
 without the source tree, executable or debug files.
 

@@ -1,18 +1,17 @@
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 use std::process::ExitStatus;
-use std::rc::Rc;
 
-use super::image::Image;
-use super::import::Import;
 use super::launch::SuspendedLaunchedProcess;
 use super::perf::{self, Event, PerfGroup, PerfSettings};
-use super::procfs::Identity;
-use crate::capture::SymbolSource;
-pub(crate) use crate::capture::{CaptureOptions, Launch, MemMode, ObservationOptions};
-use crate::observation::{Observation, RecordKind};
-use crate::profile::{ProfileWriter, Result, RunMeta};
+pub(crate) use crate::capture::{
+    Capture, CaptureOptions, LIVE_EXACT, Launch, MemMode, ObservationOptions, Provenance,
+    SymbolSource, cmdline, finish, runtime_samples, seed_mappings,
+};
+use crate::import::Import;
+use crate::observation::Observation;
+use crate::profile::{ProfileWriter, Result};
 
 /// Profile a just-built executable, starting its counters at successful exec.
 pub fn run(
@@ -89,6 +88,7 @@ pub fn run(
         if group.is_none() {
             seed_mappings(&mut import, &observations)?;
         }
+        runtime_samples(&mut import, &observations)?;
         if let Some(mode) = mem {
             import.store_memory(&observations, mode, true)?;
         }
@@ -97,16 +97,11 @@ pub fn run(
     import.close(end)?;
     let samples_lost = import.samples_lost;
     drop(import);
-    let cmdline = serde_json::to_string(
-        &std::iter::once(path.to_string_lossy())
-            .chain(launch.arguments.iter().map(|arg| arg.as_str().into()))
-            .collect::<Vec<_>>(),
-    )?;
     finish(
         profile,
         Capture {
             mode: "run",
-            cmdline,
+            cmdline: cmdline(&path, launch.arguments)?,
             start,
             end,
             samples_lost,
@@ -117,164 +112,6 @@ pub fn run(
         },
     )?;
     Ok(status)
-}
-
-/// Launch the existing native tape-replay entry without CPU sampling.
-/// Its own verifier decides the exit status and no profile is published on refusal.
-pub fn replay(
-    launch: &Launch<'_>,
-    out: &Path,
-    resolve: impl FnOnce(&Path, &[u8]) -> io::Result<SymbolSource>,
-) -> Result<ExitStatus> {
-    let path = launch.executable.canonicalize()?;
-    let mut file = File::open(&path)?;
-    let provenance = Provenance::load(&path, &mut file, resolve)?;
-    let start = perf::monotonic_ns()?;
-    let mut command = std::process::Command::new(&path);
-    command.args(launch.arguments).env_remove("HIRSEL_RECORD");
-    for key in ObservationOptions::KEYS {
-        command.env_remove(key);
-    }
-    if let Some(options) = launch.observation {
-        command.envs(
-            options
-                .environment()
-                .into_iter()
-                .filter_map(|(key, value)| value.map(|value| (key, value))),
-        );
-    }
-    let mut child = command.spawn()?;
-    let pid = child.id();
-    let status = child.wait()?;
-    if !status.success() {
-        return Ok(status);
-    }
-    let end = perf::monotonic_ns()?;
-    let profile = ProfileWriter::create(out)?;
-    let mut import = Import::new(
-        profile.connection(),
-        pid,
-        launch.source_root.to_owned(),
-        provenance.main.clone(),
-        provenance.identity,
-    );
-    import.source_remarks()?;
-    if let Some(options) = launch.observation {
-        let observations = Observation::read(options.path)?;
-        if let Some(mode) = options.mem {
-            import.store_memory(&observations, mode, false)?;
-        } else {
-            seed_mappings(&mut import, &observations)?;
-        }
-        observations.store(profile.connection())?;
-    }
-    import.close(end)?;
-    drop(import);
-    let cmdline = serde_json::to_string(
-        &std::iter::once(path.to_string_lossy())
-            .chain(launch.arguments.iter().map(|arg| arg.as_str().into()))
-            .collect::<Vec<_>>(),
-    )?;
-    finish(
-        profile,
-        Capture {
-            mode: "replay",
-            cmdline,
-            start,
-            end,
-            samples_lost: 0,
-            freq: 0,
-            fallback: String::new(),
-            event: perf::RUNTIME,
-            provenance,
-        },
-    )?;
-    Ok(status)
-}
-
-pub(crate) const LIVE_EXACT: &str =
-    "a live memory profile is sampled; record a tape and use 'hirsel prof replay --mem=exact'";
-
-fn seed_mappings(import: &mut Import<'_>, observations: &Observation) -> Result<()> {
-    let mut maps = observations
-        .records
-        .iter()
-        .filter_map(|record| match &record.kind {
-            RecordKind::Mapping(line) => Some((record.ts, line)),
-            _ => None,
-        })
-        .peekable();
-    let Some(&(time, _)) = maps.peek() else {
-        return Ok(());
-    };
-    let bytes = maps
-        .flat_map(|(_, line)| line.iter().copied().chain([b'\n']))
-        .collect::<Vec<_>>();
-    import.initialize(Vec::new(), super::procfs::parse_mappings(&bytes)?, time)
-}
-
-pub(super) struct Provenance {
-    pub(super) main: Rc<Image>,
-    pub(super) identity: Identity,
-    tier: &'static str,
-}
-
-impl Provenance {
-    pub(super) fn load(
-        path: &Path,
-        file: &mut File,
-        resolve: impl FnOnce(&Path, &[u8]) -> io::Result<SymbolSource>,
-    ) -> Result<Self> {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let identity = Identity::read(file)?;
-        let symbols = resolve(path, &bytes)?;
-        let tier = symbols.tier();
-        let main = Rc::new(Image::parse(&bytes, symbols, true)?);
-        Ok(Self {
-            main,
-            identity,
-            tier,
-        })
-    }
-}
-
-pub(super) struct Capture {
-    pub(super) mode: &'static str,
-    pub(super) cmdline: String,
-    pub(super) start: u64,
-    pub(super) end: u64,
-    pub(super) samples_lost: u64,
-    pub(super) freq: u64,
-    pub(super) fallback: String,
-    pub(super) event: Event,
-    pub(super) provenance: Provenance,
-}
-
-pub(super) fn finish(profile: ProfileWriter, capture: Capture) -> Result<()> {
-    #[cfg(target_arch = "x86_64")]
-    let target = "x86_64-unknown-linux-gnu";
-    #[cfg(target_arch = "aarch64")]
-    let target = "aarch64-unknown-linux-gnu";
-    profile.finish(&RunMeta {
-        capture_mode: capture.mode,
-        target,
-        cmdline: &capture.cmdline,
-        build_id: capture.provenance.main.build_id.as_deref().unwrap_or(""),
-        image_digest: &capture.provenance.main.digest,
-        symbol_tier: capture.provenance.tier,
-        clock: "CLOCK_MONOTONIC",
-        primary_event: capture.event.name,
-        primary_unit: capture.event.unit,
-        freq_hz: capture.freq,
-        fallback_reason: &capture.fallback,
-        start_ns: capture.start,
-        duration_ns: capture
-            .end
-            .checked_sub(capture.start)
-            .ok_or("monotonic clock regressed")?,
-        samples_lost: capture.samples_lost,
-    })
 }
 
 pub(super) fn open_perf(
@@ -326,7 +163,7 @@ pub(super) fn open_rings(
                     event,
                     PerfSettings {
                         freq: options.freq,
-                        stack_bytes: options.stack_bytes,
+                        stack_bytes: options.stack_bytes.unwrap_or(perf::STACK_BYTES),
                         sideband: enable_on_exec && index == 0,
                         enable_on_exec,
                     },
@@ -342,9 +179,15 @@ mod tests {
     use std::fs;
     use std::process::Command;
 
-    use super::super::image::local_symbols;
+    use std::rc::Rc;
+
+    use super::super::perf::{CPU_CLOCK, decode};
+    use super::super::procfs::KernelSymbols;
     use super::*;
-    use crate::Profile;
+    use crate::image::{self, Image, local_symbols};
+    use crate::record::Identity;
+    use crate::{By, Group, Profile, ProfileWriter, Query, RunMeta, query};
+    use serde_json::json;
 
     #[test]
     fn launch_samples_dwarf_through_a_twenty_kib_frame() {
@@ -411,7 +254,7 @@ int main(void) {
                 out: &profile,
                 freq: 997,
                 pmu: Some("cpu-clock"),
-                stack_bytes: 32768,
+                stack_bytes: None,
             },
             |_, bytes| Ok(local_symbols(bytes)),
         )
@@ -456,5 +299,78 @@ int main(void) {
             [], |r| r.get(0),
         ).unwrap();
         assert!(retained > 0);
+    }
+
+    #[test]
+    fn kernel_samples_keep_periods_without_user_unwind_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.hprof");
+        let profile = ProfileWriter::create(&path).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let identity = Identity::read(&std::fs::File::open(&exe).unwrap()).unwrap();
+        let bytes = std::fs::read(exe).unwrap();
+        let image = Rc::new(Image::parse(&bytes, image::SymbolSource::OffsetsOnly, true).unwrap());
+        let mut import = Import::new(profile.connection(), 1, dir.path().into(), image, identity);
+        import.kernel_symbols = Some(KernelSymbols::parse(
+            "0000000000000000 T hidden\nffffffff81000100 T page_fault\nffffffff81000200 D data\n",
+        ));
+        // Linux perf sample records with no user registers or stack bytes.
+        for (pc, mode, period) in [
+            (0xffff_ffff_8100_0110u64, 2, 11),
+            (0xffff_ffff_8100_0200, 2, 7),
+            (0x10, 1, 5),
+            (0x20, 2, 13),
+        ] {
+            let pid_tid = (1u64 << 32) | 1;
+            let payload: Vec<u8> = [pc, pid_tid, 1, 0, period, 0, 0]
+                .into_iter()
+                .flat_map(u64::to_ne_bytes)
+                .collect();
+            import
+                .record(decode(9, mode, &payload, CPU_CLOCK).unwrap().unwrap())
+                .unwrap();
+        }
+        drop(import);
+        profile
+            .finish(&RunMeta {
+                capture_mode: "attach",
+                target: "linux",
+                cmdline: "[]",
+                build_id: "",
+                image_digest: "",
+                symbol_tier: "offsets_only",
+                clock: "CLOCK_MONOTONIC",
+                primary_event: "cpu-clock",
+                primary_unit: "nanoseconds",
+                freq_hz: 997,
+                fallback_reason: "",
+                start_ns: 0,
+                duration_ns: 2,
+                samples_lost: 0,
+            })
+            .unwrap();
+        let top = query(
+            &path,
+            Query::Top {
+                by: By::SelfCost,
+                event: None,
+                group: Group::DefPath,
+                filter: None,
+            },
+            10,
+        )
+        .unwrap();
+        assert_eq!(top.quality["kernel_samples"], 3);
+        assert_eq!(top.quality["unwind_failed"], 1);
+        assert_eq!(top.quality["unknown_mapping"], 1);
+        assert_eq!(top.quality["unresolved_samples"], 1);
+        assert_eq!(top.quality["host_root_samples"], 0);
+        assert_eq!(
+            top.result["rows"],
+            json!([
+                {"function":"[kernel]", "self_total":12, "inclusive_total":12, "sample_count":2},
+                {"function":"[kernel] page_fault", "self_total":11, "inclusive_total":11, "sample_count":1},
+            ])
+        );
     }
 }

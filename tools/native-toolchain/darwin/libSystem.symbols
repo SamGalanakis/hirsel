@@ -2,7 +2,6 @@
 # name per line, sorted. link_kit.py turns it into the kit's libSystem.tbd, so a name
 # left off is unlinkable. fsync and fdatasync never appear: Darwin durability is
 # fcntl(F_FULLFSYNC) (STORE-SPEC §3.3c). Each name must be in Zig's libSystem.tbd.
-
 _CCRandomGenerateBytes
 __NSGetArgc
 __NSGetArgv
@@ -103,6 +102,9 @@ _logf
 _longjmp
 _lseek
 _lstat
+_mach_port_deallocate
+_mach_task_self_
+_mach_vm_read_overwrite
 _malloc
 _memchr
 _memcmp
@@ -224,12 +226,18 @@ _strspn
 _sysconf
 _sysctlbyname
 _tanh
+_task_threads
 _tcgetattr
 _tcsetattr
+_thread_get_state
+_thread_info
+_thread_resume
+_thread_suspend
 _unlink
 _unlinkat
 _unsetenv
 _usleep
+_vm_deallocate
 _vsnprintf
 _waitpid
 _write

@@ -1,5 +1,5 @@
 PRAGMA application_id = 0x48505246;
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 
 CREATE TABLE run_meta (
     key TEXT PRIMARY KEY,
@@ -59,7 +59,7 @@ CREATE TABLE cpu_sample (
     thread_id INTEGER NOT NULL REFERENCES thread,
     task_id INTEGER REFERENCES task,
     host_stack_interval_id INTEGER REFERENCES host_stack_interval,
-    cpu INTEGER NOT NULL,
+    cpu INTEGER,
     callsite_id INTEGER NOT NULL REFERENCES callsite,
     raw_pc_hex TEXT NOT NULL,
     event TEXT NOT NULL CHECK (event <> ''),

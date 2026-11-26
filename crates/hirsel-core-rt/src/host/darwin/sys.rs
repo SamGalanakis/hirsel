@@ -604,9 +604,65 @@ pub(crate) fn resident_bytes() -> Option<u64> {
     (rc == 0).then(|| unsafe { usage.assume_init() }.ri_resident_size)
 }
 
-/// No mappings: hirsel-prof does not capture on macOS (its `unsupported`
-/// provider), so a profile records none.
+/// Each loaded image's executable `__TEXT` segment as a `/proc/self/maps`
+/// line (`start-end r-xp offset major:minor inode path`), so a profile
+/// symbolizes sampled PCs the way it does on Linux. An image from the shared
+/// cache has no file of its own and reports device and inode zero.
 #[cfg(feature = "prof")]
 pub(crate) fn mappings() -> Option<Vec<u8>> {
-    None
+    use std::io::Write as _;
+    use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const LC_SEGMENT_64: u32 = 0x19;
+    let mut out = Vec::new();
+    // SAFETY: dyld's image list; an index below the count names a loaded image.
+    for index in 0..unsafe { libc::_dyld_image_count() } {
+        // SAFETY: as above; dyld keeps the header and name while it is loaded.
+        let (header, slide, name) = unsafe {
+            (
+                libc::_dyld_get_image_header(index).cast::<u8>(),
+                libc::_dyld_get_image_vmaddr_slide(index),
+                libc::_dyld_get_image_name(index),
+            )
+        };
+        if header.is_null() || name.is_null() {
+            continue;
+        }
+        // SAFETY: dyld's NUL-terminated path of a loaded image.
+        let path = unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes();
+        let read32 = |at: usize| {
+            // SAFETY: `at` lies within the mapped header and load commands.
+            unsafe { header.add(at).cast::<u32>().read_unaligned() }
+        };
+        let read64 = |at: usize| {
+            // SAFETY: as above.
+            unsafe { header.add(at).cast::<u64>().read_unaligned() }
+        };
+        if read32(0) != MH_MAGIC_64 || path.contains(&b'\n') {
+            continue;
+        }
+        let (dev, inode) = std::fs::metadata(std::ffi::OsStr::from_bytes(path))
+            .map_or((0, 0), |meta| (meta.dev() as u32, meta.ino()));
+        let mut at = 32;
+        for _ in 0..read32(16) {
+            let (command, size) = (read32(at), read32(at + 4) as usize);
+            // SAFETY: segname is 16 bytes inside the load command.
+            let segment = unsafe { std::slice::from_raw_parts(header.add(at + 8), 16) };
+            if command == LC_SEGMENT_64 && segment.starts_with(b"__TEXT\0") {
+                let start = read64(at + 24).wrapping_add_signed(slide as i64);
+                let _ = write!(
+                    out,
+                    "{start:x}-{:x} r-xp {:x} {:x}:{:x} {inode} ",
+                    start + read64(at + 32),
+                    read64(at + 40),
+                    dev >> 24,
+                    dev & 0xff_ffff,
+                );
+                out.extend_from_slice(path);
+                out.push(b'\n');
+            }
+            at += size;
+        }
+    }
+    Some(out)
 }

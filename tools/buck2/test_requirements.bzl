@@ -5,6 +5,7 @@ HOST_TEST_BINARIES = ["hirsel-prof-unittest"]
 
 PERF_TEST_CASES = {
     "hirsel-core-driver-unittest": [
+        "native::tests::profiler_attributes_a_hot_and_a_cold_definition_on_both_backends",
         "native::tests::profiler_attach_uses_snapshot_before_sampling_existing_mappings",
         "native::tests::profiler_keeps_interleaved_fibers_and_source_lines_on_both_backends",
         "native::tests::profiler_labels_foreign_callback_as_host_stack",

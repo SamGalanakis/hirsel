@@ -3,6 +3,8 @@ pub(crate) mod clock;
 pub mod exec;
 pub(crate) mod file;
 pub(crate) mod path;
+#[cfg(feature = "prof")]
+pub(crate) mod prof_sampler;
 pub(crate) mod stat;
 pub(crate) mod sync;
 pub(crate) mod sys;

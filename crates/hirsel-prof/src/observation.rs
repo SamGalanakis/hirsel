@@ -71,6 +71,14 @@ pub(crate) enum RecordKind {
         status: u8,
     },
     Mapping(Vec<u8>),
+    /// A thread stack the runtime sampled itself: the interrupted PC, then
+    /// each return address.
+    CpuSample {
+        tid: u32,
+        period: u64,
+        truncated: bool,
+        pcs: Vec<u64>,
+    },
     Memory {
         event: MemoryEvent,
         stack: Vec<u8>,
@@ -162,6 +170,14 @@ impl RecordKind {
                 status: u8::try_from(status)?,
             },
             (12, [], _) => Self::Mapping(bytes),
+            (13, &[tid, period, flags @ 0..=1, ref pcs @ ..], true) if !pcs.is_empty() => {
+                Self::CpuSample {
+                    tid: u32::try_from(tid)?,
+                    period,
+                    truncated: flags == 1,
+                    pcs: pcs.to_vec(),
+                }
+            }
             (16..=21, _, _) | (22..=23, _, true) => Self::Memory {
                 event: MemoryEvent::decode(kind, words)?,
                 stack: bytes,
@@ -172,7 +188,7 @@ impl RecordKind {
                 memory_emitted,
             },
             (END | LOSS, _, _) => return Err("invalid runtime observation footer".into()),
-            (1..=12, _, _) => {
+            (1..=13, _, _) => {
                 return Err(format!("invalid runtime observation payload for kind {kind}").into());
             }
             _ => {
@@ -286,7 +302,12 @@ impl Observation {
                 "runtime_events",
                 self.records
                     .iter()
-                    .filter(|record| !matches!(record.kind, RecordKind::Mapping(_)))
+                    .filter(|record| {
+                        !matches!(
+                            record.kind,
+                            RecordKind::Mapping(_) | RecordKind::CpuSample { .. }
+                        )
+                    })
                     .count() as u64,
             ),
             ("runtime_events_lost", self.lost),
@@ -530,6 +551,7 @@ impl<'a> Import<'a> {
                 }
             }
             RecordKind::Mapping(_)
+            | RecordKind::CpuSample { .. }
             | RecordKind::Memory { .. }
             | RecordKind::End
             | RecordKind::Loss { .. } => {}

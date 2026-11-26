@@ -19,7 +19,7 @@ fn capture_native_profile(
             out,
             freq: 997,
             pmu: Some("cpu-clock"),
-            stack_bytes: 32768,
+            stack_bytes: None,
         },
         |path, bytes| crate::prof_command::symbol_source(path, bytes, None),
     )
@@ -86,7 +86,7 @@ int main(void) {
             out: &out,
             freq: 997,
             pmu: Some("cpu-clock"),
-            stack_bytes: 32768,
+            stack_bytes: None,
         },
         |path, bytes| {
             // Keep the target executing while attach resolves the image.
@@ -260,6 +260,71 @@ pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
             functions_with_source.len(),
             2,
             "{backend:?}: {functions_with_source:?}"
+        );
+    }
+}
+
+#[test]
+fn profiler_attributes_a_hot_and_a_cold_definition_on_both_backends() {
+    // hot runs nine times cold's iterations of the same loop shape, so about
+    // nine samples in ten land in hot. Each host samples its own way (perf on
+    // Linux, the runtime's own sampler on macOS) into the shared profile.
+    const SOURCE: &str = r#"fn hot(seed: u64) -> u64 {
+    let mut n = seed
+    for i in 0u64 .. 45000000u64 {
+        n = (n * 5u64 + i % 19u64) % 2147483647u64
+    }
+    n
+}
+
+fn cold(seed: u64) -> u64 {
+    let mut n = seed
+    for i in 0u64 .. 5000000u64 {
+        n = (n * 5u64 + i % 19u64) % 2147483647u64
+    }
+    n
+}
+
+pub fn main() -> Result[(), Exit] {
+    let x = hot(1u64)
+    let y = cold(x)
+    if x == y { Error(Exit(status: 1)) } else { Ok(()) }
+}
+"#;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = source_request(SOURCE, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(product.accepted(), "{backend:?}");
+        let mut options = native_options(backend, dir.path());
+        options.runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_ARCHIVE").unwrap());
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let built = product.build(&entry, &options).unwrap();
+        let profile = capture_native_profile(&built.executable, &dir.path().join("hot.hprof"), None);
+        let db = profile.connection();
+        let total: i64 = db
+            .query_row("SELECT count(*) FROM cpu_sample", [], |row| row.get(0))
+            .unwrap();
+        // Self samples: the leaf frame's definition.
+        let own = |definition: &str| -> i64 {
+            db.query_row(
+                "SELECT count(*) FROM cpu_sample s JOIN callsite c ON c.id=s.callsite_id
+                 JOIN frame fr ON fr.id=c.frame_id JOIN function f ON f.id=fr.function_id
+                 WHERE f.def_path=?1",
+                [definition],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let (hot, cold) = (own("app@1/main/hot"), own("app@1/main/cold"));
+        assert!(
+            cold > 0 && hot > 5 * cold && hot > total * 7 / 10,
+            "{backend:?}: hot {hot}, cold {cold} of {total}"
         );
     }
 }

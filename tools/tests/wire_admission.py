@@ -47,7 +47,7 @@ def crc64(data):
 # The query result schema contains the unit value and one named table slot.
 READ_RESULT_FP = crc64(
     blob(b'\x03\0\0\0\0\x00') + u32(1) + blob(b'data') + u32(0)
-    + blob(b'\x04\0\0\0\0\x06') + blob(b'\x03\0\0\0\0\x05')
+    + blob(b'\x04\0\0\0\0\x06') + blob(b'\x03\0\0\0\0\x06') + blob(b'\x03\0\0\0\0\x05')
 )
 
 # PROG-9 encodes the entire function signature, including the transaction's
@@ -56,7 +56,7 @@ ENTRIES = {
     'put': (b'\x01wire@1/admission/put(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[u64,u32]', fingerprint(5), fingerprint(17, 6, 5)),
     'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
     'big': (b'\x01wire@1/admission/big(take u32)->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]', fingerprint(5), fingerprint(14, 3)),
-    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Answer[core@1/core/()],core@1/core/Capacity]', fingerprint(5), READ_RESULT_FP),
+    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', fingerprint(5), READ_RESULT_FP),
     'gone': (b'retired', 0, 0),
     'unknown': (b'unknown', 0, 0),
 }

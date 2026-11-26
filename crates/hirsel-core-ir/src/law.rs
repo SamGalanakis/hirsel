@@ -4,6 +4,32 @@ use crate::{BlockId, Body, Callee, Function, Module, Param, PlaceTy, Terminator,
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy, Fixed, Layout, RecipeRow, law};
 
+pub const STORE_DB_TYPE: &str = "store@1/store/Db";
+pub const STORE_EMPTY_DB: &str = "store@1/store/empty_db";
+pub const STORE_VERIFY_TEARDOWN: &str = "store@1/store/verify_teardown";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreTeardownHook {
+    /// `store@1/store/teardown_hook(db: Db)`
+    CheckDb,
+    /// `store@1/store/allow_unverified_teardown(hi: u64, lo: u64)`
+    OptOut,
+    /// `store@1/store/teardown_opted_out(hi: u64, lo: u64) -> bool`
+    IsOptedOut,
+}
+
+pub fn store_teardown_hook(definition: &DefPath) -> Option<StoreTeardownHook> {
+    if !(definition.package_is("store", "1") && definition.0.modules == ["store"]) {
+        return None;
+    }
+    match definition.0.name.as_str() {
+        "teardown_hook" => Some(StoreTeardownHook::CheckDb),
+        "allow_unverified_teardown" => Some(StoreTeardownHook::OptOut),
+        "teardown_opted_out" => Some(StoreTeardownHook::IsOptedOut),
+        _ => None,
+    }
+}
+
 fn prop_name(definition: &DefPath) -> Option<&str> {
     (definition.package_is("std", "1") && definition.0.modules == ["prop"])
         .then_some(definition.0.name.as_str())

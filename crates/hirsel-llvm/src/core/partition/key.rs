@@ -55,6 +55,7 @@ impl Keys {
                     functions,
                     module.external_call_sites,
                     module.law_observation,
+                    module.store_teardown,
                 ),
                 (
                     &items.function_symbols,

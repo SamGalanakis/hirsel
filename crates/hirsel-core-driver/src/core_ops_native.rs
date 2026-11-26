@@ -127,6 +127,7 @@ fn core_operations(backend: Backend) {
             exec_grants: vec![],
             env_patterns: None,
             observed: None,
+            store_teardown: false,
         };
         let built = match product.build(&entry, &options) {
             Ok(built) => built,
@@ -222,6 +223,7 @@ fn counted_operations(backend: Backend) {
             exec_grants: vec![],
             env_patterns: None,
             observed: None,
+            store_teardown: false,
         };
         let built = match product.build(&entry, &options) {
             Ok(built) => built,
@@ -302,6 +304,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             exec_grants: vec![],
             env_patterns: None,
             observed: None,
+            store_teardown: false,
         };
         let built = product.build(&entry, &options).unwrap();
         let result = Command::new(built.executable).args(argv).output().unwrap();
@@ -390,6 +393,7 @@ fn stream_operations(backend: Backend) {
             exec_grants: vec![],
             env_patterns: None,
             observed: None,
+            store_teardown: false,
         };
         let built = product.build(&entry, &options).unwrap();
         let mut command = Command::new(built.executable);
@@ -473,6 +477,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         exec_grants: vec![],
         env_patterns: None,
         observed: None,
+        store_teardown: false,
     };
     let built = product.build(&entry, &options).unwrap();
     let output = Command::new(built.executable).output().unwrap();
@@ -570,6 +575,7 @@ fn host_operations(backend: Backend) {
             exec_grants: vec![],
             env_patterns: None,
             observed: None,
+            store_teardown: false,
         };
         let built = product.build(&entry, &options).unwrap();
         let output = Command::new(built.executable).output().unwrap();
@@ -656,33 +662,12 @@ pub fn proof_clone_run() -> u64 {
         .unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
-        recording: false,
-        coverage: None,
-        replay: None,
-        backend,
-        optimize: false,
-        debug_lines: false,
-        target: TARGET.into(),
-        runtime: root
-            .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
         link: crate::native::Link::Driver(
             PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
         ),
-        cas: dir.path().join("cas"),
-        output: dir.path().join("program"),
-        root_limit: 1_048_576,
+        target: TARGET.into(),
         instance_limit: 64,
-        directories: vec![],
-        grant_mask: 0,
-        logical_charge_report: None,
-        net_rules: vec![],
-            unix_roots: Default::default(),
-        secret_grants: vec![],
-            cred_grants: vec![],
-        foreign_grants: Default::default(),
-        exec_grants: vec![],
-        env_patterns: None,
-        observed: None,
+        ..crate::native::tests::native_options(backend, dir.path())
     };
     let built = product.build(&entry, &options).unwrap();
     let output = Command::new(built.executable).output().unwrap();

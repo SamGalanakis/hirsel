@@ -34,11 +34,27 @@ fn resident_rows_after(roots: Roots, table_id: u32, cursor: Option[Bytes], limit
     Ok((take out, done))
 }
 
+fn table_is_tiered(tree: PageTree, table_id: u32) -> Result[bool, Error] {
+    if let None = view tree.paging {
+        return Ok(false)
+    }
+    if let Some((_, descriptor)) = std.page.collection_slot(tree.root, prefix(table_id)?) {
+        return Ok(collection_descriptor(descriptor).residency != ResidentMemory)
+    }
+    Ok(false)
+}
+
 // The same rows on main's head when the table is Tiered: each is read
 // through the pager under a reader's pin extractor, as a snapshot scan reads.
 fn tiered_rows_after(db: Db, table_id: u32, cursor: Option[Bytes], limit: u64) -> Result[(List[(Bytes, Bytes)], bool), Error] waits {
+    tiered_rows_after_mode(db, table_id, cursor, limit, false)
+}
+
+fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u64, direct: bool) -> Result[(List[(Bytes, Bytes)], bool), Error] waits {
     let s = snapshot(db)
-    let r = reader(db, db.writer_pin_bytes)?
+    if !table_is_tiered(s.roots.collections, table_id)? {
+        return resident_rows_after(s.roots, table_id, cursor, limit)
+    }
     let Some(inventory) = view s.roots.collections.paging else {
         return resident_rows_after(s.roots, table_id, cursor, limit)
     }
@@ -52,7 +68,41 @@ fn tiered_rows_after(db: Db, table_id: u32, cursor: Option[Bytes], limit: u64) -
         },
         None => None,
     }
+    let direct_dir: Option[Dir] = if direct {
+        match view db.disk {
+            Some(state) => state.d,
+            None => None,
+        }
+    } else {
+        None
+    }
     let mut out: List[(Bytes, Bytes)] = list.new()
+    if let Some(d) = direct_dir {
+        while list.len(out) <= limit {
+            let Some((take key, value, take resume)) = snapshot_tiered_span_step_direct(d, db.store, db.writer_pin_bytes, s, inventory, low, high, previous)? else {
+                return Ok((take out, true))
+            }
+            if list.len(out) == limit {
+                return Ok((take out, false))
+            }
+            list.push(mut out, (take key, copied(value)?))
+            previous = Some(take resume)
+        }
+        return Ok((take out, false))
+    }
+    if direct {
+        let has_pager_task = match view db.disk {
+            Some(state) => match view state.pager_task {
+                Some(_) => true,
+                None => false,
+            },
+            None => false,
+        }
+        if !has_pager_task {
+            return Error(Io(Closed))
+        }
+    }
+    let r = reader(db, db.writer_pin_bytes)?
     while list.len(out) <= limit {
         let Some((take key, value, take resume)) = snapshot_tiered_span_step(r, s, inventory, low, high, previous)? else {
             return Ok((take out, true))

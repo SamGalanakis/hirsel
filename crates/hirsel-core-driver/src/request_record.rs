@@ -97,6 +97,7 @@ impl Request {
 fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
     let NativeOptions {
         recording,
+        store_teardown,
         coverage,
         replay,
         backend,
@@ -152,6 +153,9 @@ fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
     // Appended only when on, so a plain request's key is the key it had.
     if let Some(scope) = coverage {
         tuple.extend(encode(&(hirsel_core_ir::coverage::KEY_TAG, scope))?);
+    }
+    if *store_teardown {
+        tuple.extend(encode(&"hirsel.store-teardown.v1")?);
     }
     Ok(tuple)
 }

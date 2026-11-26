@@ -64,6 +64,8 @@ pub struct Snapshot {
     pub module: Module,
     pub external_call_sites: bool,
     pub law_observation: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub store_teardown: bool,
     /// A coverage build's scope (`docs/coverage.md`); absent otherwise, so a
     /// plain snapshot keeps its bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +155,7 @@ impl Snapshot {
             roots,
             external_call_sites: module.external_call_sites,
             law_observation: module.law_observation,
+            store_teardown: module.store_teardown,
             coverage: module.coverage.clone(),
             coverage_rebound: module.coverage_rebound.as_deref().cloned(),
             module,
@@ -173,6 +176,7 @@ impl Snapshot {
         let mut snapshot: Self = serde_json::from_reader(input)?;
         snapshot.module.external_call_sites = snapshot.external_call_sites;
         snapshot.module.law_observation = snapshot.law_observation;
+        snapshot.module.store_teardown = snapshot.store_teardown;
         snapshot.module.coverage = snapshot.coverage.clone();
         snapshot.module.coverage_rebound =
             snapshot.coverage_rebound.clone().map(std::sync::Arc::new);

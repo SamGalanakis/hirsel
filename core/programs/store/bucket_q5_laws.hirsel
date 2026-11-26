@@ -129,6 +129,7 @@ fn q5_clean_site(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation
     let tested = q5_actor(take trial)
     let Q5Observation(outcome: take outcome, ..) = take tested
     outcome?
+    deploy_result(trust_bucket_sim(tasks, sim, "s3.test"))?
     let report = bucket_law_finish(take sim)
     Ok(q5_locate_site(operation, report))
 }
@@ -306,7 +307,8 @@ fn q5_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation: Q5Op
     }
     let report = bucket_law_finish(take sim)
     q5_fault_check(report, site, fault)
-    q5_verify(operation, fault, observed, report)
+    q5_verify(operation, fault, observed, report)?
+    deploy_result(trust_bucket_report(report))
 }
 
 fn q5_applies(fault: Q5Fault) -> bool {
@@ -367,6 +369,7 @@ fn genesis_debris_case(d: Dir, real: Clock, tasks: Tasks, seed: u64, phase: Gene
             }
         },
     }
+    deploy_result(trust_bucket_sim(tasks, sim, "s3.test"))?
     let report = bucket_law_finish(take sim)
     if list.len(report.head_writes) != 2 || !q5_selects(GenesisWrite, report.head_writes[0].data) {
         fail("L54-G: the register did not record exactly one genesis and its claim")

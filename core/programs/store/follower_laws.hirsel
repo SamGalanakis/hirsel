@@ -219,14 +219,13 @@ fn follower_steps_log_floor(d: Dir, c: Clock, r: Random, tasks: Tasks, budget: u
 @test
 fn bucket_test_m2_follower_steps(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(true))
-    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 2) {
+    let outcome = bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 2) {
         let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 258), None, list.new())
-        let observed = object_follower_steps_law(r, tasks, sim, plan)
+        let observed = trust_bucket_then(tasks, sim, "s3.test", object_follower_steps_law(r, tasks, sim, plan))
         let _ = bucket_law_finish(take sim)
-        let steps = result.unwrap(take observed)
-        result.unwrap(follower_steps_log_floor(d, c, r, tasks, steps))
-        Ok(())
+        follower_steps_log_floor(d, c, r, tasks, observed?)
     }, "L85 follower_steps fixture")
+    trust_seed_gate("bucket_test_m2_follower_steps", take outcome)
 }
 
 fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -292,14 +291,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
 
 @test
 fn bucket_test_m2_follower_read_admission(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1010), None, list.new())
-    let verdict = follower_destination_admission(tasks, sim)
-    let trace = bucket_law_finish(take sim)
-    verdict?
-    if trace.writes != 2 || trace.attempts != 4 {
-        fail("L85: the two creates and two exactly funded reads were the only requests")
-    }
-    Ok(())
+    trust_seed_gate("bucket_test_m2_follower_read_admission", bucket_m2_follower_read_admission_run(c, tasks, seed_grant))
 }
 
 fn follower_overlap_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -389,11 +381,7 @@ fn log_follower_overlap_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
 
 @test
 fn bucket_test_m2_follower_overlap(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1101), None, list.new())
-    let verdict = follower_overlap_law(c, r, tasks, sim)
-    let _ = bucket_law_finish(take sim)
-    verdict?
-    log_follower_overlap_law(d, c, r, tasks)
+    trust_seed_gate("bucket_test_m2_follower_overlap", bucket_m2_follower_overlap_run(d, c, r, tasks, seed_grant))
 }
 
 @test
@@ -739,9 +727,9 @@ fn follower_refusal_retry(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(),
 @test
 fn bucket_test_m2_follower_retry(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1201), None, list.new())
-    let verdict = follower_refusal_retry(r, tasks, sim)
+    let checked = trust_bucket_then(tasks, sim, "s3.test", follower_refusal_retry(r, tasks, sim))
     let _ = bucket_law_finish(take sim)
-    verdict
+    trust_seed_gate("bucket_test_m2_follower_retry", take checked)
 }
 
 type FollowerCancelBind: send {

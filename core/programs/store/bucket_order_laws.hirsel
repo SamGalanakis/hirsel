@@ -131,8 +131,13 @@ fn bucket_order_fresh_case(tasks: Tasks, c: Clock, r: Random, seed: u64, orderin
         },
     }
     let tested = result.unwrap(task.join(take running))
+    let trusted = match view tested {
+        Ok(()) => trust_bucket_sim(tasks, sim, "s3.test"),
+        Error(_) => Ok(()),
+    }
     let report = bucket_law_finish(take sim)
     tested?
+    trusted?
     match ordering {
         Overtaken => {
             for write in report.head_writes {
@@ -456,7 +461,7 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
     let _ = take publisher
     let report = bucket_law_report(take sim)
     if lost_marker {
-        witness_ceiling_check(report, entry_key, 24, "")
+        witness_ceiling_check(report, entry_key, 24, "")?
     } else {
         // C has already read its checkpoint when its sweep removes C20.
         if list.len(report.head_writes) != 5 {
@@ -465,8 +470,9 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
         let body = view report.head_writes[3].data
         let reference = HistoryRef(seq: read_le(body, 120, 8), epoch: read_le(body, 128, 8), len: read_le(body, 136, 8), digest: read_le(body, 144, 8))
         let claimed_entry = history_key("e-", reference)
-        witness_ceiling_check(report, manifest_key, 22, claimed_entry)
+        witness_ceiling_check(report, manifest_key, 22, claimed_entry)?
     }
+    trust_bucket_report(report)
 }
 
 fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim, seed: u64) -> Result[(), Error] waits {
@@ -535,7 +541,7 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim, seed: u64) -> R
 fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 773)
     let sim = bucket_law_sim(tasks, c, seed, None, list.new())
-    let followed = bucket_m2_law_follow(tasks, r, sim, seed)
+    let checked = trust_bucket_then(tasks, sim, "s3.test", bucket_m2_law_follow(tasks, r, sim, seed))
     let _ = bucket_law_finish(take sim)
-    followed
+    trust_seed_gate("bucket_test_m2_follower", take checked)
 }

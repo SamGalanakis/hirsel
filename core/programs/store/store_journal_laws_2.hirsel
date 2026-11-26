@@ -45,6 +45,7 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
         return Error(Foreign)
     }
     let _ = take original
+    trust_opt_out("journal/poison", db)
     match close(take db) {
         Error(Poisoned(Closed)) => Ok(()),
         _ => Error(Foreign)

@@ -30,16 +30,443 @@ fn trust_store(mut db: Db) -> Result[(), Error] waits {
         if let Some(d) = state.d {
             trust_directory(d)?
         }
+        if let Some(_) = view state.object {
+            teardown_check_bucket(db)?
+        }
     }
     trust_indexes(mut db)
 }
 
-// The single registry of intentional damage at checked reopen points.
-fn trust_expected_reopen_fault(case: String, problem: Error) -> bool {
-    // The W2 read-only law publishes a MANIFEST with its last byte removed.
+// End-of-seed Bucket check over a live BucketSim before bucket_law_finish stops it.
+fn trust_bucket_sim(tasks: Tasks, sim: BucketSim, host_name: String) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(sim, tasks, host_name, 991, true)?
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    match history_fetch(mut client, "head", mut raw, deadline) {
+        Ok(_) => (),
+        Error(Remote(NotFound)) => return Ok(()),
+        Error(take problem) => return Error(take problem),
+    }
+    let captured = history_decode_head(raw)?
+    teardown_validate_bucket_checkpoint(mut client, captured.head, deadline)
+}
+
+fn trust_bucket_then[T](tasks: Tasks, sim: BucketSim, host_name: String, take observed: Result[T, Error]) -> Result[T, Error] waits {
+    let value = observed?
+    trust_bucket_sim(tasks, sim, host_name)?
+    Ok(take value)
+}
+
+// End-of-seed Bucket check over a finished BucketSim report when the law
+// asserts exact request/attempt counts or runs a scripted fault tape.
+fn trust_bucket_report(report: std.sim.s3.Report) -> Result[(), Error] {
+    let Some(stored_head) = map.get(report.objects, "head") else {
+        return Ok(())
+    }
+    let captured = history_decode_head(stored_head.data)?
+    let head = captured.head
+    if head.checkpoint.seq == 0 {
+        return Ok(())
+    }
+    let cp_key = history_key("e-", head.checkpoint)
+    let Some(stored_cp) = map.get(report.objects, cp_key) else {
+        return Error(Corrupt(Fault(file: cp_key, offset: 0, why: Absent)))
+    }
+    history_object_digest(cp_key, head.checkpoint, stored_cp.data)?
+    let mark = history_read_mark(cp_key, head.store, head.checkpoint, stored_cp.data)?
+    let manifest_key = history_key("m-", mark.manifest)
+    let Some(stored_manifest) = map.get(report.objects, manifest_key) else {
+        return Error(Corrupt(Fault(file: manifest_key, offset: 0, why: Absent)))
+    }
+    let _ = history_decode_manifest(manifest_key, head.store, mark, head.checkpoint.seq, clone(stored_manifest.data))?
+    if mark.depth == 0 {
+        let mut at = mark.locate_at
+        while at < mark.locate_end {
+            let item = HistoryRef(seq: read_le(stored_cp.data, at, 8), epoch: read_le(stored_cp.data, at + 8, 8), len: read_le(stored_cp.data, at + 16, 8), digest: read_le(stored_cp.data, at + 24, 8))
+            let pack_key = history_key("p-", item)
+            let Some(stored_pack) = map.get(report.objects, pack_key) else {
+                return Error(Corrupt(Fault(file: pack_key, offset: 0, why: Absent)))
+            }
+            history_object_digest(pack_key, item, stored_pack.data)?
+            at += 32
+        }
+    }
+    Ok(())
+}
+
+// The single allowlist of intentional damage across reopen checks, teardown
+// opt-outs, and seeded-law fault gating.
+fn trust_expected_fault(case: String, problem: Error) -> bool {
     match problem {
         Corrupt(Fault(file: file, why: Truncated, ..)) if case == "read-only/torn-manifest" => file == "MANIFEST",
-        Corrupt(_) => case == "L69/seeded-write",
+        Corrupt(Fault(why: Absent, ..)) => case == "bucket_test_m2_retention_witness",
+        Corrupt(_) => case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf",
+        Poisoned(_) => case == "journal/poison" || case == "follower-crash/enospc",
         _ => false,
     }
+}
+
+fn trust_expected_reopen_fault(case: String, problem: Error) -> bool {
+    trust_expected_fault(case, problem)
+}
+
+fn trust_allows_teardown_opt_out(case: String) -> bool {
+    case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf" || case == "journal/poison" || case == "follower-crash/enospc" || case == "teardown/opt-out-control"
+}
+
+fn trust_opt_out(case: String, db: Db) {
+    if !trust_allows_teardown_opt_out(case) {
+        fail("store trust: unlisted teardown opt-out")
+    }
+    allow_unverified_teardown(db.store.hi, db.store.lo)
+}
+
+fn trust_opt_out_world(case: String) {
+    if !trust_allows_teardown_opt_out(case) {
+        fail("store trust: unlisted teardown opt-out")
+    }
+    allow_unverified_teardown(0u64, 0u64)
+}
+
+// One shared fault gate for every seeded store law: unexpected Corrupt or
+// Poisoned fails loudly unless explicitly admitted by `trust_expected_fault`.
+fn trust_seed_gate(law: String, take outcome: Result[(), Error]) -> Result[(), Error] {
+    match take outcome {
+        Ok(()) => Ok(()),
+        Error(take problem) => {
+            let unexpected = match view problem {
+                Corrupt(_) => !trust_expected_fault(law, clone(problem)),
+                Poisoned(_) => !trust_expected_fault(law, clone(problem)),
+                _ => false,
+            }
+            if unexpected {
+                let mut msg = string.with_capacity(96)
+                string.push(mut msg, "store trust seed gate (")
+                string.push(mut msg, law)
+                string.push(mut msg, "): unexpected Corrupt or Poisoned")
+                fail(take msg)
+            }
+            Error(take problem)
+        },
+    }
+}
+
+fn trust_seed_deploy_gate(law: String, take outcome: Result[(), DeployError]) -> Result[(), DeployError] {
+    match take outcome {
+        Ok(()) => Ok(()),
+        Error(Store(take problem)) => match trust_seed_gate(law, Error(take problem)) {
+            Ok(()) => Ok(()),
+            Error(take kept) => Error(Store(take kept)),
+        },
+        Error(take other) => Error(take other),
+    }
+}
+
+fn trust_str_contains(haystack: String, needle: String) -> bool {
+    let h = string.as_bytes(haystack)
+    let n = string.as_bytes(needle)
+    let h_len = list.len(h)
+    let n_len = list.len(n)
+    if n_len == 0 {
+        return true
+    }
+    if n_len > h_len {
+        return false
+    }
+    for i in 0u64 .. h_len - n_len + 1 {
+        let mut ok = true
+        for j in 0u64 .. n_len {
+            if h[i + j] != n[j] {
+                ok = false
+                break
+            }
+        }
+        if ok {
+            return true
+        }
+    }
+    false
+}
+
+fn trust_causes_contain(causes: Causes, needle: String) -> bool {
+    for cause in causes {
+        if let Fail(msg) = view cause.kind {
+            if trust_str_contains(msg, needle) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn trust_bucket_indexed_fixture(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(Db, Table[u64, u64], Index[u64, u64, u64, ()]), Error] waits {
+    let authority = bucket_law_authority(sim, tasks, "s3.test", 41)?
+    let mut db = open_authority(tasks, take authority, sim.time, r, bucket_order_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    let mut d = declare(db, Migrate)?
+    let mut items = declare_table(mut d, "items", std.codec.key_u64(), std.codec.of_u64())?
+    let by_v = index(mut d, mut items, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let rows = finish(mut d, take items)?
+    let _ = seal(mut db, take d)?
+    for k in 1u64 .. 5 {
+        if !typed_put(mut db, rows, k, k * 10) {
+            return Error(Foreign)
+        }
+    }
+    let _ = checkpoint(mut db)?
+    Ok((take db, rows, by_v))
+}
+
+type TeardownMemCase: send {
+    c: Clock
+}
+
+type TeardownDirCase: send {
+    d: Dir,
+    c: Clock,
+    r: Random,
+    tasks: Tasks,
+    pack: String,
+    raw: Bytes
+}
+
+type TeardownBucketCase: send {
+    tasks: Tasks,
+    r: Random,
+    time: Clock,
+    endpoint: std.sim.s3.Endpoint
+}
+
+fn trust_teardown_mem_case(take job: TeardownMemCase) -> Result[(), Error] waits {
+    let mut mem_fx = walk_fixture(job.c)?
+    walk_edit(mut mem_fx.db, mem_fx.bucket.id, walk_entry(3, Some(3)), None)?
+    Ok(())
+}
+
+fn trust_teardown_dir_case(take job: TeardownDirCase) -> Result[(), Error] waits {
+    let dir_db = open(job.tasks, job.d, job.c, job.r, disk_crash_options("checkpoint"))?
+    disk_write_synced(job.d, job.pack, job.raw)?
+    let _ = dir_db
+    Ok(())
+}
+
+fn trust_teardown_bucket_case(take job: TeardownBucketCase) -> Result[(), Error] waits {
+    let client = bucket_endpoint_client(job.endpoint, std.sim.s3.endpoint_network(job.endpoint), job.time, job.tasks, "s3.test", 41, true, 0)?
+    let authority = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    let mut bad_bucket = open_authority(job.tasks, take authority, job.time, job.r, bucket_order_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    let mut decl = declare(bad_bucket, Migrate)?
+    let mut items = declare_table(mut decl, "items", std.codec.key_u64(), std.codec.of_u64())?
+    let by_v = index(mut decl, mut items, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let rows = finish(mut decl, take items)?
+    let _ = seal(mut bad_bucket, take decl)?
+    for k in 1u64 .. 5 {
+        if !typed_put(mut bad_bucket, rows, k, k * 10) {
+            return Error(Foreign)
+        }
+    }
+    let _ = checkpoint(mut bad_bucket)?
+    walk_edit(mut bad_bucket, by_v.id, walk_entry(20, Some(2)), None)?
+    Ok(())
+}
+
+// Red before universal teardown: a @test world leaves a corrupted index binding
+// or pack in a live Db (Memory, Directory, and Bucket) and returns normally.
+// With teardown verification active, drop/close fails with the walker's finding.
+@test
+fn test_teardown_catches_corrupt_live_db(c: Clock, d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // 1. Live Memory Db with a corrupted index binding left to drop unclosed.
+    let mem_task = task.spawn(tasks, bytes 16777216, TeardownMemCase(c), trust_teardown_mem_case)
+    match task.join(take mem_task) {
+        Error(Failed(causes)) if trust_causes_contain(causes, "index bucket fault Missing") => (),
+        _ => fail("store trust: teardown missed corrupted index binding in live Memory Db"),
+    }
+    // 2. Live Directory Db with a corrupted pack frame left at close/drop.
+    let child = disk_test_directory(d)
+    disk_crash_init(child, c, r, tasks, "checkpoint")?
+    let (_, take manifest) = read_page_manifest_file(child)?
+    let root = manifest.branches[0u64].roots.catalog
+    let pack = paged_pack_path(root.pack)?
+    let mut raw = disk_read_paged_file(child, pack, 67108864)?
+    raw[root.offset + 16] = raw[root.offset + 16] ^ 1u8
+    let dir_task = task.spawn(tasks, bytes 33554432, TeardownDirCase(d: child, c, r, tasks, pack: clone(pack), raw: take raw), trust_teardown_dir_case)
+    match task.join(take dir_task) {
+        Error(Failed(causes)) if trust_causes_contain(causes, "Corrupt") && trust_causes_contain(causes, pack) => (),
+        _ => fail("store trust: teardown missed corrupted pack in live Directory Db"),
+    }
+    // 3. Live Bucket Db: clean close passes; corrupted index binding goes red on drop.
+    let sim = bucket_law_sim(tasks, c, 701u64, None, list.new())
+    let (take clean_bucket, _, _) = trust_bucket_indexed_fixture(tasks, r, sim)?
+    close(take clean_bucket)?
+    let _ = bucket_law_finish(take sim)
+    let sim_bad = bucket_law_sim(tasks, c, 702u64, None, list.new())
+    let bucket_task = task.spawn(tasks, bytes 16777216, TeardownBucketCase(tasks, r, time: sim_bad.time, endpoint: sim_bad.endpoint), trust_teardown_bucket_case)
+    let caught_bucket = task.join(take bucket_task)
+    let _ = bucket_law_finish(take sim_bad)
+    match caught_bucket {
+        Error(Failed(causes)) if trust_causes_contain(causes, "index by_v fault Missing") => (),
+        _ => fail("store trust: teardown missed corrupted index binding in live Bucket Db"),
+    }
+    // 4. Opt-out path: an allowlisted case skips teardown on that Db, while an
+    // unlisted case is rejected.
+    let mut opted = walk_fixture(c)?
+    walk_edit(mut opted.db, opted.bucket.id, walk_entry(3, Some(3)), None)?
+    trust_opt_out("teardown/opt-out-control", opted.db)
+    drop(take opted)
+    let rejected_opt_out = result.unwrap(isolate(scoped fn() {
+        trust_opt_out_world("not-in-allowlist")
+    }))
+    match rejected_opt_out {
+        Error(causes) if trust_causes_contain(causes, "unlisted teardown opt-out") => (),
+        _ => fail("store trust: unlisted opt-out must fail"),
+    }
+    Ok(())
+}
+
+fn bucket_m2_register_fence_run(c: Clock, tasks: Tasks, seed_grant: Env, out: Stdout) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
+    let observed = trust_bucket_then(tasks, sim, "s3.test", bucket_m2_law_register(tasks, sim))
+    let report = bucket_law_finish(take sim)
+    let mut trace = string.from("trace ")
+    string.push_u64(mut trace, report.fragment_trace)
+    string.push(mut trace, "\n")
+    result.unwrap(stdout.write(out, trace))
+    let (committed, orphan) = observed?
+    let published = option.unwrap(map.get(report.objects, "head"))
+    let final_capture = history_decode_head(published.data)?
+    if final_capture.head.pair.epoch != 2 || final_capture.head.entry.seq != 4 || !history_ref_matches(final_capture.head.entry, committed) || !map.contains(report.objects, history_key("e-", orphan)) || report.writes != 11 {
+        fail("the fenced advance appeared in the register")
+    }
+    Ok(())
+}
+
+fn bucket_m2_link_recovery_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
+    let checked = trust_bucket_then(tasks, sim, "s3.test", bucket_m2_law_recover(tasks, sim))
+    let _ = bucket_law_finish(take sim)
+    checked?
+    let wire_limit = 152u64 + 164 + 16777216 + 88 + 20
+    let test_id = StoreId(hi: 9, lo: 10)
+    let mut raw: Bytes = list.with_capacity(1024)
+    let largest = HistoryRef(seq: 1, epoch: 1, len: wire_limit, digest: 3)
+    let fitted = history_genesis_packet(mut raw, test_id, 1, largest, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    let admitted = history_read_mark("max MANIFEST", test_id, fitted, raw)?
+    if admitted.manifest.len != wire_limit {
+        fail("the max legal MANIFEST wire length was refused")
+    }
+    let excess = HistoryRef(seq: 1, epoch: 1, len: wire_limit + 1, digest: 3)
+    let too_large = history_genesis_packet(mut raw, test_id, 1, excess, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    if let Error(Corrupt(Fault(why: Malformed, ..))) = history_read_mark("oversize MANIFEST", test_id, too_large, raw) {} else {
+        fail("one byte above the wire limit was admitted for GET")
+    }
+    Ok(())
+}
+
+fn bucket_m2_paged_recovery_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+    trust_directory(directory)?
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
+    let recovered = bucket_m2_read_packs(directory, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    recovered
+}
+
+fn bucket_m2_retry_budget_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
+    list.push(mut faults, SlowDown)
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 39), None, take faults)
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let mut body = string.into_bytes(string.from("proposed head"))
+    let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let start = host.mono_ns(sim.time)
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let outcome = history_write_head(mut client, Absent, mut body, mut witness, due)
+    let elapsed = host.mono_ns(sim.time) - start
+    let _ = take client
+    let report = bucket_law_finish(take sim)
+    if let HistoryUndecided = outcome {} else {
+        fail("a throttled register reached a terminal verdict without evidence")
+    }
+    if elapsed < 1500000000 || report.attempts > 5 || report.writes != 0 || body != string.as_bytes("proposed head") {
+        fail("conditional retries escaped the client's backoff or attempt budget")
+    }
+    Ok(())
+}
+
+fn bucket_m2_head_probe_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 17), None, list.new())
+    let checked = trust_bucket_then(tasks, sim, "s3.test", bucket_m2_law_probe(tasks, sim))
+    let report = bucket_law_finish(take sim)
+    checked?
+    if report.writes != 6 {
+        fail("head probes wrote to the register")
+    }
+    Ok(())
+}
+
+fn bucket_m2_admitted_claim_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+    trust_directory(directory)?
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 42), None, list.new())
+    let checked = trust_bucket_then(tasks, sim, "s3.test", bucket_m2_law_admit(directory, tasks, r, sim))
+    let report = bucket_law_finish(take sim)
+    checked?
+    let visible = option.unwrap(map.get(report.objects, "head"))
+    let selected = history_decode_head(visible.data)?
+    if selected.head.entry.seq != 3 || selected.head.pair.epoch != 2 {
+        fail("a refused claim or fenced advance changed the visible head")
+    }
+    Ok(())
+}
+
+fn bucket_m2_fresh_order_run(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 571)
+    bucket_order_fresh_case(tasks, c, r, seed, LostReply)?
+    bucket_order_fresh_case(tasks, c, r, seed, Overtaken)?
+    bucket_order_fresh_case(tasks, c, r, seed, FencedAfterRead)
+}
+
+fn bucket_m2_ack_history_run(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 581)
+    for (replaced, acks) in[(false, 8u64), (true, 4u64)] {
+        let sim = bucket_ack_fixture(tasks, c, seed)
+        let tested = bucket_ack_commits(tasks, r, sim, replaced)
+        let report = bucket_law_finish(take sim)
+        tested?
+        bucket_ack_history(report, acks)?
+        trust_bucket_report(report)?
+    }
+    Ok(())
+}
+
+fn bucket_m2_claim_witness_run(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 521)
+    witness_case(tasks, c, r, seed, false)?
+    witness_case(tasks, c, r, seed, true)
+}
+
+fn bucket_m2_genesis_debris_run(d: Dir, c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
+    let seed = bucket_law_seed(seed_grant, 542)
+    genesis_debris_case(d, c, tasks, seed, AfterManifest)?
+    genesis_debris_case(d, c, tasks, seed, AfterCheckpoint)?
+    genesis_debris_case(d, c, tasks, seed, ConcurrentList)
+}
+
+fn bucket_m2_follower_read_admission_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1010), None, list.new())
+    let verdict = follower_destination_admission(tasks, sim)
+    let trace = bucket_law_finish(take sim)
+    verdict?
+    if trace.writes != 2 || trace.attempts != 4 {
+        fail("L85: the two creates and two exactly funded reads were the only requests")
+    }
+    Ok(())
+}
+
+fn bucket_m2_follower_overlap_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1101), None, list.new())
+    let checked = trust_bucket_then(tasks, sim, "s3.test", follower_overlap_law(c, r, tasks, sim))
+    let _ = bucket_law_finish(take sim)
+    checked?
+    log_follower_overlap_law(d, c, r, tasks)
 }

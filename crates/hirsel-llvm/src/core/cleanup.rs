@@ -1141,10 +1141,9 @@ impl FunctionEmitter<'_> {
         self.br(Label::plain("resume"));
         Ok(())
     }
-    /// Row `t`'s finalizer, if it has one, on `base`, its failure ORed into the
-    /// byte at `status`. A resource's runs under its grant; a core slot
-    /// kernel's on an own row under the current limit (FORM v1c).
+    /// Row `t`'s finalizer on `base`, its failure ORed into `status` (FORM v1c).
     fn finalize(&mut self, t: usize, base: &Value, status: &Value) {
+        self.store_db_teardown(t, base, status);
         let Some(f) = self.module.types[t].finalizer else {
             return;
         };

@@ -501,20 +501,24 @@ fn bucket_test_m2_retention_witness(d: Dir, c: Clock, r: Random, tasks: Tasks, s
     let witness_plan = follower_law_plan(Bucket(bucket_law_lanes(1)), witness_options)
     let case_plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
     let fixture_bytes = order.max(bucket_law_fixture_bytes(witness_plan, 1), bucket_law_fixture_bytes(case_plan, 1))
-    bucket_law_admitted(bound bytes fixture_bytes {
+    let outcome = bucket_law_admitted(bound bytes fixture_bytes {
         let sim = bucket_law_sim(tasks, c, seed, None, list.new())
         let observed = object_retention_witness_law(r, tasks, sim, witness_options, witness_plan)
         let report = bucket_law_finish(take sim)
         observed?
         follower_heal_reads(report, "L59 evicted MANIFEST")
+        trust_bucket_report(report)?
         let directory = disk_test_directory(d)
         bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+        trust_directory(directory)?
         let cases: Inline[RetentionCase, 5] =[ReclaimedPack, RetainedPack, DeletedAfterCut, LostWitness, RetryCold]
         for case in cases {
             retention_case_run(directory, c, r, tasks, seed, case, case_plan)?
         }
-        Ok(())
+        let ok: Result[(), Error] = Ok(())
+        ok
     }, "L59 retention_witness fixture")
+    trust_seed_gate("bucket_test_m2_retention_witness", take outcome)
 }
 
 type RetentionCase: send = ReclaimedPack | RetainedPack | DeletedAfterCut | LostWitness | RetryCold
@@ -849,6 +853,7 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
     let report = bucket_law_finish(take sim)
     if let RetainedPack = case {} else {
         follower_heal_reads(report, retention_case_label(case))
+        trust_bucket_report(report)?
     }
     let target = if stages_pack {
         string.from(fixture.pack_name)

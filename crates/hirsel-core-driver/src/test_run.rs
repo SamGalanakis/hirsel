@@ -316,6 +316,7 @@ impl CheckProduct {
         // An unused launch grant could otherwise touch host state before the
         // test starts.
         let mut options = self.granted(test, options);
+        options.store_teardown = self.store_teardown_def().is_some();
         let slots = InheritedSlots::take(&mut options);
         let foreign_recipe =
             |options: &NativeOptions| !options.foreign_grants.is_empty() && !options.recording;
@@ -479,5 +480,82 @@ impl CheckProduct {
                 | "core@1/core/Tasks" => false,
                 _ => true,
             })
+    }
+
+    pub(crate) fn walk_instances_with_teardown(
+        &self,
+        entry: &DefPath,
+        limit: usize,
+        records: Option<(
+            &crate::instances::Records,
+            Option<(Option<&crate::reach::Reach>, &[bool], &[DefPath])>,
+            &std::collections::BTreeSet<hirsel_core_ir::Identity>,
+        )>,
+        compact_recipe: bool,
+        target: Option<hirsel_core_layout::Target>,
+        store_teardown: bool,
+    ) -> (
+        crate::instances::InstanceSet,
+        Result<Vec<hirsel_core_ir::Identity>, crate::instances::InstanceStop>,
+    ) {
+        let walk_roots = |roots: Vec<hirsel_core_ir::Identity>| {
+            let mut materialized =
+                crate::instances::InstanceSet::for_reach(compact_recipe).for_target(target);
+            let _phase = crate::meter::trace::span("instance walk");
+            let instances = match records {
+                Some((records, prior, damaged)) => self.instances_over_records(
+                    roots,
+                    limit,
+                    &mut materialized,
+                    records,
+                    crate::instances::Expand {
+                        prior: prior.and_then(|(p, _, _)| p),
+                        changed: prior.map_or(&[], |(_, c, _)| c),
+                        damaged,
+                    },
+                ),
+                None => self.instances_into(roots, limit, &mut materialized),
+            };
+            (materialized, instances)
+        };
+        let (mut materialized, mut instances) =
+            walk_roots(vec![hirsel_core_ir::Identity::plain(entry.clone())]);
+        if let Some(extra) = self.store_teardown_extra_root(store_teardown, &instances) {
+            (materialized, instances) =
+                walk_roots(vec![hirsel_core_ir::Identity::plain(entry.clone()), extra]);
+        }
+        (materialized, instances)
+    }
+
+    pub(crate) fn store_teardown_def(&self) -> Option<DefPath> {
+        let path = DefPath::from_full(hirsel_core_ir::law::STORE_VERIFY_TEARDOWN)?;
+        let defined = self.definitions.contains_key(&path)
+            || self
+                .image
+                .as_ref()
+                .and_then(|image| image.directory().ok())
+                .is_some_and(|dir| dir.definitions.contains_key(&path));
+        defined.then_some(path)
+    }
+
+    pub(crate) fn store_teardown_extra_root(
+        &self,
+        store_teardown: bool,
+        instances: &Result<Vec<hirsel_core_ir::Identity>, crate::instances::InstanceStop>,
+    ) -> Option<hirsel_core_ir::Identity> {
+        let reached = instances.as_ref().ok()?;
+        let needs = store_teardown
+            && reached
+                .iter()
+                .any(|i| i.definition.to_string() == hirsel_core_ir::law::STORE_EMPTY_DB)
+            && !reached
+                .iter()
+                .any(|i| i.definition.to_string() == hirsel_core_ir::law::STORE_VERIFY_TEARDOWN);
+        needs
+            .then(|| {
+                self.store_teardown_def()
+                    .map(hirsel_core_ir::Identity::plain)
+            })
+            .flatten()
     }
 }

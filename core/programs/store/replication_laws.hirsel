@@ -211,11 +211,15 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64, follow_plan: Followe
 fn bucket_test_m2_replication(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 711)
     let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(false))
-    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 3) {
+    let outcome = bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 3) {
         let sim = bucket_law_sim(tasks, c, seed, Some(bucket_law_wire_cut(0, false)), list.new())
         let checked = replication_run(tasks, sim, seed, plan)
+        let trusted = match take checked {
+            Ok(()) => trust_bucket_sim(tasks, sim, "spare.test"),
+            Error(take problem) => Error(take problem),
+        }
         let _ = bucket_law_finish(take sim)
-        result.unwrap(take checked)
-        Ok(())
+        trusted
     }, "replication fixture")
+    trust_seed_gate("bucket_test_m2_replication", take outcome)
 }

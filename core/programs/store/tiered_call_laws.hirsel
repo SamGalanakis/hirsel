@@ -793,17 +793,21 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
     Ok(())
 }
 
+fn l63_seeded_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[(), Error] waits {
+    let (_, _, take opened, take rows, take marks) = l63_directory_fixture(d, c, r, tasks)?
+    let mut db = take opened
+    l63_schedule(mut db, (take rows, take marks), seed)?
+    trust_store(mut db)?
+    close(take db)
+}
+
 @test
 fn test_l63_seeded_call_schedule(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = match std.sim.world.test_seed(seed_grant) {
         Some(active) => active,
         None => 1u64,
     }
-    let (_, _, take opened, take rows, take marks) = l63_directory_fixture(d, c, r, tasks)?
-    let mut db = take opened
-    l63_schedule(mut db, (take rows, take marks), seed)?
-    trust_store(mut db)?
-    close(take db)
+    trust_seed_gate("test_l63_seeded_call_schedule", l63_seeded_run(d, c, r, tasks, seed))
 }
 
 // The hand-derived diff of a large table: each `(key, row)` in key order,

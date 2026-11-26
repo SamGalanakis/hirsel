@@ -633,6 +633,11 @@ pub(super) fn module(module: Cow<'_, Module>, preserve_step_trees: bool) -> Cow<
                         && hirsel_core_ir::law::observes(
                             &module.instances[f.instance.index()].definition,
                         ))
+                    && !(module.store_teardown
+                        && hirsel_core_ir::law::store_teardown_hook(
+                            &module.instances[f.instance.index()].definition,
+                        )
+                        .is_some())
                     && price(b) <= 192
                     && b.blocks.len() <= 24
                     && b.insts.iter().all(supported)

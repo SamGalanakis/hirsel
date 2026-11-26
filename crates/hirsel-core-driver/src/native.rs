@@ -94,29 +94,23 @@ pub struct ReplayPlan {
 /// Runtime and linker inputs are explicit, independently produced artifacts.
 #[derive(Clone)]
 pub struct NativeOptions {
-    /// Link and enter the recording runtime (`hirsel build --recording`, `run --record`, `replay`, `test --replay`).
+    /// Recording runtime (`build --recording`, `run --record`, `replay`, `test --replay`).
     pub recording: bool,
-    /// Coverage build (`docs/coverage.md`): the packages whose bodies have
-    /// sites, or none for a build without the switch.
+    pub store_teardown: bool,
+    /// Coverage build (`docs/coverage.md`) scope, or none.
     pub coverage: Option<hirsel_core_ir::coverage::Scope>,
-    /// Launcher-only replay plan (`hirsel replay`, `test --replay` replay phase).
     pub replay: Option<ReplayPlan>,
     pub backend: Backend,
     pub optimize: bool,
-    /// Source-neutral native line rows; failure positions are always enabled.
     pub debug_lines: bool,
     pub target: String,
     pub runtime: PathBuf,
     pub link: Link,
-    /// The content store every build's objects and records live in (the
-    /// user's by default).
     pub cas: PathBuf,
     pub output: PathBuf,
     pub root_limit: u64,
     pub instance_limit: usize,
-    /// Paths are opened relative to the executable's working directory at startup.
     pub directories: Vec<String>,
-    /// Explicit host authority, using the runtime's grant-kind bit positions.
     pub grant_mask: u64,
     pub net_rules: Vec<hirsel_core_net::GrantRule>,
     pub unix_roots: std::collections::BTreeMap<String, String>,
@@ -167,6 +161,7 @@ impl NativeOptions {
             root_limit: 64 * 1024 * 1024,
             instance_limit: DEFAULT_INSTANCE_LIMIT,
             recording: false,
+            store_teardown: false,
             coverage: None,
             replay: None,
             directories: vec![],
@@ -311,6 +306,7 @@ fn emit_unit(
     // the unmerged IR; the compiler identity in every key names this step.
     let mut shared = module.clone();
     shared.law_observation = options.recording;
+    shared.store_teardown = options.store_teardown;
     shared.coverage = options.coverage.clone();
     shared.external_call_sites = !options.foreign_grants.is_empty();
     let Module {
@@ -380,10 +376,12 @@ pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::
         !options.foreign_grants.is_empty(),
         matches!(options.backend, Backend::Llvm) && !hirsel_llvm_lazy::core::facts_enabled(),
     ))?;
-    // A coverage build's objects depend on its scope. A build without the
-    // switch appends nothing, so its keys are the keys it had before coverage.
+    // Coverage and store-teardown switches append their tags only when set.
     if let Some(scope) = &options.coverage {
         environment.extend(encode(&(hirsel_core_ir::coverage::KEY_TAG, scope))?);
+    }
+    if options.store_teardown {
+        environment.extend(encode(&"hirsel.store-teardown.v1")?);
     }
     Ok(environment)
 }
@@ -1014,6 +1012,7 @@ impl CheckProduct {
             instances.iter().map(|i| &i.definition),
             |package| self.index.supplied_by_toolchain(package),
         ))
+        .with_store_teardown(options.store_teardown, instances.iter())
         .with_foreign(foreign_modules.values(), Some(&link_archives));
         link_objects(
             &entry_plan,
@@ -2019,6 +2018,7 @@ pub(crate) mod tests {
             root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive"));
         NativeOptions {
             recording: false,
+            store_teardown: false,
             coverage: None,
             replay: None,
             backend,

@@ -1,5 +1,4 @@
 //! Publish the checked program and assemble its recipe with a local toolchain.
-
 use super::recipe_grants::{GRANT_NAMES, grant_name, kind, net_rule};
 use super::std_release::{StdSide, std_side};
 use super::*;
@@ -28,7 +27,6 @@ use binding::{Bindings, bind_module, source_bindings};
 mod unit;
 pub(super) use unit::prepare_std_unit;
 use unit::{instance_builtins, prepare_unit};
-
 #[derive(Debug, Serialize)]
 pub struct AssemblyRecord {
     pub identity: ContentHash,
@@ -1617,12 +1615,12 @@ impl Publication {
             (objects, false, false)
         };
         let cleanup = if let Some(module) = cleanup {
-            let identity = cleanup_identity(&module);
-            let cleanup_key = key("hirsel.recipe-entry-cleanup.v1", &(emitter, root_body))?;
-            objects.push(object(&store, &options, cleanup_key, &identity, || {
+            let id = cleanup_identity(&module);
+            let k = key("hirsel.recipe-entry-cleanup.v1", &(emitter, root_body))?;
+            objects.push(object(&store, &options, k, &id, || {
                 Ok(Cow::Borrowed(&module))
             })?);
-            Some(identity.symbol())
+            Some(id.symbol())
         } else {
             None
         };
@@ -1638,6 +1636,7 @@ impl Publication {
             self.addresses.keys().map(|i| &i.definition),
             |package| self.recipe.toolchain.contains(package),
         ))
+        .with_store_teardown(options.store_teardown, self.addresses.keys())
         .with_release_sites(&release_sites, &release_debug_sites, &remarks)
         .with_foreign(&self.recipe.foreign_modules, Some(&self.link_archives));
         let result = link_objects(

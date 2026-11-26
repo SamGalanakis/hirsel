@@ -88,6 +88,7 @@ pub mod tasks;
 mod term_restore;
 #[cfg(feature = "testing")]
 pub mod test_provider;
+pub mod test_teardown;
 pub mod tls;
 pub mod tls_server;
 mod udp_net;

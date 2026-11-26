@@ -123,6 +123,21 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
 // schema commit; under an export lease catch-up ships that commit as a step
 // (§3.5a). A Report walk never commits.
 pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkReport, Error] waits {
+    let (take report, demote) = verify_step_read(db, mut walk, limit, false)?
+    if let Some((owner, id)) = demote {
+        let mut seen: List[(u32, u32)] = list.new()
+        list.push(mut seen, (owner, id))
+        trip_drift(mut db, 0, seen)?
+        if let Some((_, at_id)) = walk.at {
+            if at_id == id {
+                walk_past(mut walk)?
+            }
+        }
+    }
+    Ok(take report)
+}
+
+fn verify_step_read(db: Db, mut walk: IndexWalk, limit: u64, direct: bool) -> Result[(WalkReport, Option[(u32, u32)]), Error] waits {
     healthy(db)?
     if limit == 0 {
         return Error(Limit(Transaction))
@@ -132,33 +147,28 @@ pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkRe
         walk.entries = false
         walk.cursor = None
         walk.sums = None
-        return Ok(WalkReport(checked: walk.checked, done: true, findings: list.new()))
+        return Ok((WalkReport(checked: walk.checked, done: true, findings: list.new()), None))
     }
     let name = declaration_index_name(key)?
     let mut findings: List[WalkFinding] = list.new()
     if let Sums = catalog_index(record)?.shape {
-        walk_sums(db, mut walk, record, name, limit, mut findings)?
+        walk_sums(db, mut walk, record, name, limit, mut findings, direct)?
     } else if walk.entries {
-        walk_entries(db, mut walk, record, name, limit, mut findings)?
+        walk_entries(db, mut walk, record, name, limit, mut findings, direct)?
     } else {
-        walk_rows(db, mut walk, record, name, limit, mut findings)?
+        walk_rows(db, mut walk, record, name, limit, mut findings, direct)?
     }
     let repair = if let Repair = walk.mode {
         true
     } else {
         false
     }
-    if repair && list.len(findings) != 0 {
-        let mut seen: List[(u32, u32)] = list.new()
-        list.push(mut seen, (record.owner, record.id))
-        trip_drift(mut db, 0, seen)?
-        if let Some((_, id)) = walk.at {
-            if id == record.id {
-                walk_past(mut walk)?
-            }
-        }
+    let demote = if repair && list.len(findings) != 0 {
+        Some((record.owner, record.id))
+    } else {
+        None
     }
-    Ok(WalkReport(checked: walk.checked, done: false, findings: take findings))
+    Ok((WalkReport(checked: walk.checked, done: false, findings: take findings), demote))
 }
 
 // Moves the walk to the first index after the one it is on.
@@ -186,7 +196,7 @@ fn walk_finding(mut findings: List[WalkFinding], name: String, entry_key: Bytes,
 
 // The fold may span slices. Restart it if a commit changed the head,
 // so comparisons and repair never use totals from different versions.
-fn walk_sums(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] waits {
+fn walk_sums(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let head = db.heads[0].head
     match walk.sums {
         Some(fold) if fold.head == head => (),
@@ -202,7 +212,7 @@ fn walk_sums(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
     let Some(extractor) = bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
     }
-    let (take rows, done) = tiered_rows_after(db, record.owner, clone(walk.cursor), limit)?
+    let (take rows, done) = tiered_rows_after_mode(db, record.owner, clone(walk.cursor), limit, direct)?
     for (logical, raw) in rows {
         let primary = list.slice(logical, 4, list.len(logical))
         let values = (extractor.extract)(raw, primary)?
@@ -306,12 +316,12 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, 
 
 // Rows phase: up to `limit` rows after the cursor, each extracted with the
 // bound extractor and looked up in the index collection, which is resident.
-fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] waits {
+fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let cursor = match walk.cursor {
         Some(final_key) => Some(copied(final_key)?),
         None => None,
     }
-    let (take rows, done) = tiered_rows_after(db, record.owner, cursor, limit)?
+    let (take rows, done) = tiered_rows_after_mode(db, record.owner, cursor, limit, direct)?
     let collections = view db.heads[0].roots.collections
     let Some(extractor) = bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
@@ -340,7 +350,7 @@ fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
 // Entries phase: up to `limit` entries after the cursor. A Unique entry names
 // its row in its payload; a Many entry ends with it. The row is read as a
 // point read, through the pager when the table is Tiered.
-fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] waits {
+fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let low = match walk.cursor {
         Some(final_key) => {
             let mut k = prefix(record.id)?
@@ -350,7 +360,36 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limi
         None => Included(prefix(record.id)?),
     }
     let s = snapshot(db)
-    let r = reader(db, db.writer_pin_bytes)?
+    let is_tiered = table_is_tiered(s.roots.collections, record.owner)?
+    let direct_dir: Option[Dir] = if is_tiered && direct {
+        match view db.disk {
+            Some(state) => state.d,
+            None => None,
+        }
+    } else {
+        None
+    }
+    let opened_reader: Option[Reader] = if is_tiered {
+        if let Some(_) = direct_dir {
+            None
+        } else {
+            if direct {
+                let has_pager_task = match view db.disk {
+                    Some(state) => match view state.pager_task {
+                        Some(_) => true,
+                        None => false,
+                    },
+                    None => false,
+                }
+                if !has_pager_task {
+                    return Error(Io(Closed))
+                }
+            }
+            Some(reader(db, db.writer_pin_bytes)?)
+        }
+    } else {
+        None
+    }
     let mut indexed = byte_cursor(s.roots.collections, take low, prefix(record.id + 1)?)?
     let Some(extractor) = bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
@@ -368,22 +407,23 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limi
         }
         let mut logical = prefix(record.owner)?
         list.append(mut logical, primary)
-        let fault = snapshot_point(r, s, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
-            let Some(row) = stored else {
-                return Ok(Some(Extra))
+        let fault = if !is_tiered {
+            walk_check_entry_row(extractor, entry_key, raw, primary, get_page_row(s.roots.collections, logical))?
+        } else if let Some(d) = direct_dir {
+            let Some(inventory) = view s.roots.collections.paging else {
+                return Error(Io(Closed))
             }
-            let values = (extractor.extract)(row, primary)?
-            for produced in values.keys {
-                if produced == entry_key {
-                    return Ok(if same_bytes(values.payload, raw) {
-                        None
-                    } else {
-                        Some(Payload)
-                    })
-                }
+            read_tiered_point_direct(d, db.store, inventory, s.open, s.branch, db.writer_pin_bytes, s.roots.collections, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
+                walk_check_entry_row(extractor, entry_key, raw, primary, stored)
+            })?
+        } else {
+            let Some(r) = view opened_reader else {
+                return Error(Io(Closed))
             }
-            Ok(Some(Extra))
-        })?
+            snapshot_point(r, s, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
+                walk_check_entry_row(extractor, entry_key, raw, primary, stored)
+            })?
+        }
         if let Some(found) = fault {
             walk_finding(mut findings, name, entry_key, found)?
         }
@@ -392,4 +432,185 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limi
     }
     walk.checked = int.saturating_add(walk.checked, read)
     Ok(())
+}
+
+fn walk_check_entry_row(extractor: RegisteredIndex, entry_key: Bytes, raw: Bytes, primary: Bytes, stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
+    let Some(row) = stored else {
+        return Ok(Some(Extra))
+    }
+    let values = (extractor.extract)(row, primary)?
+    for produced in values.keys {
+        if produced == entry_key {
+            return Ok(if same_bytes(values.payload, raw) {
+                None
+            } else {
+                Some(Payload)
+            })
+        }
+    }
+    Ok(Some(Extra))
+}
+
+// Test-build hook points: inert in production builds; lowered by the compiler
+// in `@test` builds to `hirsel_core_test_db_*`.
+fn teardown_hook(db: Db) {
+    if list.len(db.heads) == 18446744073709551615u64 {
+        fail("store trust teardown")
+    }
+}
+
+pub fn allow_unverified_teardown(hi: u64, lo: u64) {
+    let _ = hi
+    let _ = lo
+}
+
+fn teardown_opted_out(hi: u64, lo: u64) -> bool {
+    let _ = hi
+    let _ = lo
+    false
+}
+
+fn teardown_fault_name(fault: WalkFault) -> String {
+    match fault {
+        Missing => "Missing",
+        Extra => "Extra",
+        Payload => "Payload",
+    }
+}
+
+fn teardown_fail_corrupt(scope: String, fault: Fault) -> Never {
+    let mut msg = string.with_capacity(96)
+    string.push(mut msg, "store trust teardown (")
+    string.push(mut msg, scope)
+    string.push(mut msg, "): Corrupt ")
+    string.push(mut msg, fault.file)
+    string.push(mut msg, " @")
+    string.push_u64(mut msg, fault.offset)
+    fail(take msg)
+}
+
+fn teardown_check_bucket(db: Db) -> Result[(), Error] waits {
+    let Some(state) = view db.disk else {
+        return Ok(())
+    }
+    let Some(ow) = view state.object else {
+        return Ok(())
+    }
+    if let Some(problem) = view ow.failed {
+        return match problem {
+            Corrupt(fault) => Error(Corrupt(clone(fault))),
+            Poisoned(e) => Error(Poisoned(e)),
+            _ => Ok(()),
+        }
+    }
+    match health_result(latest.read(ow.health)) {
+        Ok(()) => (),
+        Error(Corrupt(fault)) => return Error(Corrupt(fault)),
+        Error(Poisoned(e)) => return Error(Poisoned(e)),
+        Error(_) => return Ok(()),
+    }
+    if let Some(_) = ow.stream {
+        return Ok(())
+    }
+    if ow.recovered.seq == 0 {
+        return Ok(())
+    }
+    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    if let Error(_) = channel.try_send(state.journal, ObjectPause(take handover, take resuming)) {
+        return Ok(())
+    }
+    let Ok(take owned_io) = channel.receive(paused) else {
+        return Ok(())
+    }
+    let mut lane = object_journal_begin(take owned_io)
+    let head = lane.register.head
+    let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    let checked = teardown_validate_bucket_checkpoint(mut lane.client, head, deadline)
+    let _ = return_object_journal(take lane, resume)
+    match take checked {
+        Ok(()) => Ok(()),
+        Error(Corrupt(fault)) => Error(Corrupt(fault)),
+        Error(Poisoned(e)) => Error(Poisoned(e)),
+        // Ignore closed/fenced/remote transport errors if the sim stopped or faulted.
+        Error(_) => Ok(()),
+    }
+}
+
+fn teardown_validate_bucket_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline: u64) -> Result[(), Error] waits {
+    if head.checkpoint.seq == 0 {
+        return Ok(())
+    }
+    let (take mark, take checkpoint_data) = history_checkpoint(mut client, head, deadline)?
+    let manifest = history_read_manifest(mut client, head.store, mark, head.checkpoint.seq, deadline)?
+    let locator = history_locator(mut client, head, mark, checkpoint_data, deadline)?
+    let name = history_read_key("m-", mark.manifest)?
+    let _ = validate_bucket_graph(mut client, locator, deadline, head.store, name, take manifest, true)?
+    Ok(())
+}
+
+// Registered by the test launcher (`native_entry/start.rs`) only in `@test` builds.
+fn verify_teardown(db: Db) waits {
+    if list.len(db.heads) == 0 {
+        return
+    }
+    if teardown_opted_out(db.store.hi, db.store.lo) {
+        return
+    }
+    if let Some(state) = view db.disk {
+        if let Some(_) = state.poison {
+            fail("store trust teardown: database is Poisoned")
+        }
+        if let Some(d) = state.d {
+            match read_only_manifest(d) {
+                Ok((_, id, take manifest)) => match validate_directory_graph(d, id, take manifest, true) {
+                    Ok(_) => (),
+                    Error(Corrupt(fault)) => teardown_fail_corrupt("directory", fault),
+                    Error(Poisoned(_)) => fail("store trust teardown (directory): Poisoned"),
+                    Error(_) => (),
+                },
+                Error(Corrupt(fault)) => teardown_fail_corrupt("directory", fault),
+                Error(Poisoned(_)) => fail("store trust teardown (directory): Poisoned"),
+                Error(_) => (),
+            }
+        }
+        if let Some(ow) = view state.object {
+            if let Some(problem) = view ow.failed {
+                match problem {
+                    Corrupt(fault) => teardown_fail_corrupt("bucket", clone(fault)),
+                    Poisoned(_) => fail("store trust teardown (bucket): Poisoned"),
+                    _ => (),
+                }
+            }
+            match health_result(latest.read(ow.health)) {
+                Ok(()) => (),
+                Error(Corrupt(fault)) => teardown_fail_corrupt("bucket", fault),
+                Error(Poisoned(_)) => fail("store trust teardown (bucket): Poisoned"),
+                Error(_) => (),
+            }
+        }
+    }
+    let mut walk = begin_verify(Report)
+    loop {
+        match verify_step_read(db, mut walk, 128u64, true) {
+            Ok((report, _)) => {
+                if list.len(report.findings) != 0 {
+                    let found = view report.findings[0u64]
+                    let mut msg = string.with_capacity(96)
+                    string.push(mut msg, "store trust teardown: index ")
+                    string.push(mut msg, found.index)
+                    string.push(mut msg, " fault ")
+                    string.push(mut msg, teardown_fault_name(found.fault))
+                    fail(take msg)
+                }
+                if report.done {
+                    return
+                }
+            },
+            Error(Corrupt(fault)) => teardown_fail_corrupt("index walk", fault),
+            Error(Poisoned(_)) => fail("store trust teardown (index walk): Poisoned"),
+            // Fenced/Lost/Closed (e.g. a mock pager or fenced Bucket writer): stop cleanly.
+            Error(_) => return,
+        }
+    }
 }

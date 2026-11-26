@@ -93,6 +93,9 @@ pub(crate) struct Plan<'a> {
     /// plain plan's encoding, which keeps every other program's link key.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     place: bool,
+    /// `store@1/store/verify_teardown` symbol registered at `@test` startup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_teardown_fn: Option<String>,
     replay: Option<&'a crate::native::ReplayPlan>,
     foreign: Vec<foreign::Function<'a>>,
     /// The contained modules the foreign functions call into (FFI-15).
@@ -279,6 +282,7 @@ impl<'a> Plan<'a> {
             recording: options.recording,
             coverage: options.coverage.is_some(),
             place: false,
+            store_teardown_fn: None,
             replay: options.replay.as_ref(),
             foreign: vec![],
             contained: vec![],
@@ -302,6 +306,24 @@ impl<'a> Plan<'a> {
     /// Marks a program that reaches the toolchain's `runner` package.
     pub(crate) fn with_place(mut self, place: bool) -> Self {
         self.place = place;
+        self
+    }
+
+    /// Registers `store@1/store/verify_teardown` in `@test` builds when present.
+    pub(crate) fn with_store_teardown<'b>(
+        mut self,
+        enabled: bool,
+        defs: impl IntoIterator<Item = &'b hirsel_core_ir::Identity>,
+    ) -> Self {
+        self.store_teardown_fn = enabled
+            .then(|| {
+                defs.into_iter()
+                    .find(|i| {
+                        i.definition.to_string() == hirsel_core_ir::law::STORE_VERIFY_TEARDOWN
+                    })
+                    .map(|i| i.symbol())
+            })
+            .flatten();
         self
     }
 

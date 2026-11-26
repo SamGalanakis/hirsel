@@ -670,13 +670,13 @@ impl Glues {
     }
 }
 
-struct Glue<'a, 'b, 'c> {
+pub(super) struct Glue<'a, 'b, 'c> {
     b: FunctionBuilder<'a>,
     object: &'b mut ObjectModule,
-    tables: &'c Tables<'c>,
+    pub(super) tables: &'c Tables<'c>,
     glues: &'c Glues,
-    ctx: Value,
-    caller_site: Value,
+    pub(super) ctx: Value,
+    pub(super) caller_site: Value,
     failed: Value,
     calls: calls::Calls<'c>,
     /// In fixed resume glue, the cursor after each suspension point numbered
@@ -702,7 +702,7 @@ impl Glue<'_, '_, '_> {
             .ins()
             .load(types::I64, MemFlagsData::trusted(), base, off)
     }
-    fn merge(&mut self, status: Value) {
+    pub(super) fn merge(&mut self, status: Value) {
         if let Some(list) = self.list {
             let at = memory_layout::WORKLIST_FAILED as i32;
             let flags = MemFlagsData::trusted();
@@ -718,7 +718,7 @@ impl Glue<'_, '_, '_> {
         let call = self.b.ins().call(f, args);
         self.b.inst_results(call)[0]
     }
-    fn call(
+    pub(super) fn call(
         &mut self,
         name: &'static str,
         params: &[Ty],
@@ -736,10 +736,9 @@ impl Glue<'_, '_, '_> {
         let storage = self.icon(self.tables.layouts[index].logical_size.unwrap());
         (recipe, storage)
     }
-    /// Row `index`'s finalizer, if it has one, on `base`, its status merged. A
-    /// resource's runs under its grant, after the test trace hook; a core slot
-    /// kernel's on an own row under the current limit (FORM v1c).
+    /// Row `index`'s finalizer on `base`, its status merged (FORM v1c).
     fn finalize(&mut self, index: usize, base: Value) -> Result<()> {
+        self.store_db_teardown(index, base)?;
         let resource = self.tables.input.types[index].repr == Repr::Resource;
         if resource
             && self.tables.trace_drops

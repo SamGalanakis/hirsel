@@ -9,7 +9,21 @@ fn tiered_replayed_row(tree: PageTree, logical: Bytes) -> Option[View[ReplayRow]
     replay_overlay_at(overlay, logical)
 }
 
+type TieredPageBackend = PagerTask(Sender[TieredPagerMessage]) | PagerDirect(Dir, StoreId)
+
 fn read_tiered_point[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    read_tiered_point_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, tree, logical, decode_row)
+}
+
+fn read_tiered_point_direct[R](d: Dir, owner: StoreId, inventory: TieredReadInventory, opened: u64, branch_id: u32, pin_bytes: u64, tree: PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    let grant = disk_allocation(scoped fn() -> Result[Arc[TieredReaderGrant], Error] {
+        Ok(arc.new(TieredReaderGrant(store: owner, opened: opened, pin_bytes: pin_bytes)))
+    })?
+    let root = TieredPinRoot(domain: opened, branch: branch_id, generation: inventory.generation, root_stamp: tree_stamp(tree))
+    read_tiered_point_with(PagerDirect(d, owner), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, tree, logical, decode_row)
+}
+
+fn read_tiered_point_with[R](take backend: TieredPageBackend, packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
     if list.len(logical) < 4 {
         return decode_row(None)
     }
@@ -34,7 +48,7 @@ fn read_tiered_point[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
         return decode_row(stored)
     }
     let key = list.slice(logical, 4, list.len(logical))
-    retry_tiered_read(source, root_grant, root, key, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error] {
+    retry_tiered_read_with(take backend, packs, next_stamp, deadline, root_grant, root, key, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error] {
         tiered_reading(attempt, ValuesAt)
         let backing = TieredBorrowedRoot(edge: view edge, pins: view visible)
         let stored = tiered_point_bytes(attempt, backing, key)?
@@ -43,6 +57,10 @@ fn read_tiered_point[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
 }
 
 fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: TieredDirection, read: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    retry_tiered_read_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, key, upper, direction, read)
+}
+
+fn retry_tiered_read_with[R](take backend: TieredPageBackend, packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: TieredDirection, read: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
@@ -67,7 +85,7 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
                     SeekUpper => option.unwrap(upper),
                     SeekOperation => view key,
                 }
-                serve_tiered_miss(source, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending)?
+                serve_tiered_miss_with(backend, packs, next_stamp, deadline, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending)?
             },
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
@@ -84,8 +102,19 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
 // names it. A target whose delivery failed once fails the read or call when
 // an attempt demands it again.
 fn serve_tiered_miss(source: TieredPageSource, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
-    let demand = tiered_miss_demand(source, state, sought, direction, take grant, mut pending)?
-    let delivered = tiered_point_delivery(source.pager, take demand)?
+    serve_tiered_miss_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root, state, sought, direction, take grant, mut pins, mut pending)
+}
+
+fn serve_tiered_miss_with(backend: TieredPageBackend, packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+    let demand = tiered_miss_demand_raw(packs, next_stamp, deadline, state, sought, direction, take grant, mut pending)?
+    let delivered = match backend {
+        PagerTask(requests) => tiered_point_delivery(requests, take demand)?,
+        PagerDirect(d, owner) => {
+            let mut input = PagerLocal(d)
+            let mut local_cache = new_tiered_cache(0)
+            tiered_pager_point(mut input, mut local_cache, owner, demand)?
+        },
+    }
     let _ = tiered_install_delivery(take delivered, root, state.stamps, mut pins, mut pending)?
     Ok(())
 }
@@ -93,6 +122,10 @@ fn serve_tiered_miss(source: TieredPageSource, root: TieredPinRoot, state: Tiere
 // The demand for a latched miss, or the failure an earlier delivery of the
 // same target recorded.
 fn tiered_miss_demand(source: TieredPageSource, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pending: Option[(TieredTarget, Error)]) -> Result[TieredPointDemand, Error] {
+    tiered_miss_demand_raw(source.packs, source.next_stamp, source.deadline, state, sought, direction, take grant, mut pending)
+}
+
+fn tiered_miss_demand_raw(packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pending: Option[(TieredTarget, Error)]) -> Result[TieredPointDemand, Error] {
     let Some(AttemptMiss(target)) = view state.stopped else {
         fail("store: only a latched miss is delivered")
     }
@@ -104,7 +137,7 @@ fn tiered_miss_demand(source: TieredPageSource, state: TieredTouchSet, sought: B
         let (_, take problem) = option.unwrap(replace(mut pending, None))
         return Error(take problem)
     }
-    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, values: clone(state.values), room: int.saturating_sub(state.partition, state.touched_bytes), direction: direction, paths: clone(state.gather.paths), siblings: clone(state.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: take grant))
+    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, values: clone(state.values), room: int.saturating_sub(state.partition, state.touched_bytes), direction: direction, paths: clone(state.gather.paths), siblings: clone(state.siblings), packs: std.omap.snapshot(packs), next_stamp: next_stamp, deadline: deadline, grant: take grant))
 }
 
 // Installs a delivered batch in its order and records its failure. The

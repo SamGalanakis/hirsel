@@ -553,6 +553,9 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
     let (take rows, take marks) = take tables
     let options = view swarm.options
     let mut db = open(tasks, d, c, r, clone(options))?
+    if swarm.faults.corrupt != 0 || swarm.faults.misdirect != 0 || swarm.faults.lost_write != 0 {
+        trust_opt_out("L69/seeded-write", db)
+    }
     let mut g = std.rand.new(seed, 2397)
     let mut initial: Map[u64, u8] = map.new()
     for key in 0u64 .. RANDOM_ROWS {

@@ -25,9 +25,7 @@ fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     close(take db)
 }
 
-// L57. A receipt keeps its branch version across later journal rotations.
-@test
-fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+fn position_survives_three_cuts_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
     let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
@@ -65,6 +63,7 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
     if !same(saved.store, db.store) || saved.branch != 0 || saved.version != 2 {
         fail("the ticket lost its original branch version")
     }
+    trust_store(mut db)?
     close(take db)?
     let mut ids = followers()
     let follow_plan = follower_law_plan(Directory, result.unwrap(sized(Directory, 2147483648u64)))
@@ -91,6 +90,12 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
         fail("the follower missed the committed row")
     }
     Ok(())
+}
+
+// L57. A receipt keeps its branch version across later journal rotations.
+@test
+fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    trust_seed_gate("position_survives_three_cuts", position_survives_three_cuts_run(d, c, r, tasks, seed_grant))
 }
 
 @test
@@ -170,6 +175,7 @@ fn object_branch_position_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result
     if get(follower_reader(recovered, 0u64)?, found, rows, 7)? != Some(take value) {
         fail("L57: deletion changed the earlier follower snapshot")
     }
+    trust_store(mut writer)?
     close(take writer)
 }
 
@@ -177,8 +183,12 @@ fn object_branch_position_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result
 fn bucket_test_m2_branch_position(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 253), None, list.new())
     let observed = object_branch_position_law(r, tasks, sim)
+    let checked = match take observed {
+        Ok(()) => trust_bucket_sim(tasks, sim, "s3.test"),
+        Error(take problem) => Error(take problem),
+    }
     let _ = bucket_law_finish(take sim)
-    observed
+    trust_seed_gate("bucket_test_m2_branch_position", take checked)
 }
 
 fn sim_law_declared(first: String, other: Option[String]) -> SimLevels {
@@ -343,6 +353,7 @@ fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_las
     if apply_last {
         bucket_law_head_history(report)?
         follower_heal_reads(report, "L56-W watch")
+        trust_bucket_report(report)?
     } else {
         let invalid_head = view report.head_writes[list.len(report.head_writes) - 1]
         let latest_claim = view report.head_writes[list.len(report.head_writes) - 2]
@@ -439,6 +450,7 @@ fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_
     level_mark(mut marks, 3)?
     close(take writer)?
     sim_law_reopen_refusal(tasks, r, sim, mut world, sim_law_declared("b", Some("a")), "a")?
+    trust_bucket_sim(tasks, sim, "s3.test")?
     let events = level_log(take world)?
     let report = bucket_law_finish(take sim)
     if list.len(report.head_writes) != 3 {
@@ -501,12 +513,13 @@ fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_
 fn bucket_test_m2_sim_levels(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 553)
     let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
-    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
+    let outcome = bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
         sim_law_weak_ahead(tasks, c, r, seed, false, plan)?
         sim_law_weak_ahead(tasks, c, r, seed, true, plan)?
         sim_law_ordered_levels(tasks, c, r, seed, false)?
         sim_law_ordered_levels(tasks, c, r, seed, true)
     }, "L55 sim_levels fixture")
+    trust_seed_gate("bucket_test_m2_sim_levels", take outcome)
 }
 
 type ReplaySchemaStep = CreateRows | AddIndex | RenameRows | ConvertRows | DropIndex | DropRows
@@ -587,8 +600,7 @@ fn replay_schema_assert(db: Db, schema: ReplaySchema, step_number: u64, anchor_v
 // A Directory schema step is itself a covering cut. Immediately after
 // each step, append one data commit, then reopen against the unchanged
 // MANIFEST and check the journal suffix before the next schema step.
-@test
-fn test_schema_steps_journal_replay(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+fn schema_steps_journal_replay_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let mut options = disk_crash_options("schema")
     let mut db = open(tasks, directory, c, r, options)?
@@ -645,5 +657,11 @@ fn test_schema_steps_journal_replay(d: Dir, c: Clock, r: Random, tasks: Tasks, s
         replay_schema_assert(db, rebound, step_number, anchor_value, fixed, latest)?
         step_number += 1
     }
+    trust_store(mut db)?
     close(take db)
+}
+
+@test
+fn test_schema_steps_journal_replay(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    trust_seed_gate("test_schema_steps_journal_replay", schema_steps_journal_replay_run(d, c, r, tasks, seed_grant))
 }

@@ -191,6 +191,9 @@ pub struct Causes {
     tail: *mut Cell,
 }
 impl Causes {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.head.is_null()
+    }
     pub(crate) fn append(&mut self, cell: Box<Cell>) {
         let cell = Box::into_raw(cell);
         if self.tail.is_null() {

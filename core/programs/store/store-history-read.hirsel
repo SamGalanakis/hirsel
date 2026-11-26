@@ -68,8 +68,14 @@ fn history_length(link: HistoryLink, seq: u64) -> HistoryRef {
 }
 
 fn history_missing_object(path: String, reference: HistoryRef) -> Error {
-    let missing_seq = if string.starts_with(path, "e-") { Some(reference.seq) } else { None }
-    match (bound bytes round8(string.byte_len(path)) { string.from(path) }) {
+    let missing_seq = if string.starts_with(path, "e-") {
+        Some(reference.seq)
+    } else {
+        None
+    }
+    match (bound bytes round8(string.byte_len(path)) {
+        string.from(path)
+    }) {
         Ok(take name) => HistoryMissing(take name, missing_seq),
         Error(problem) => Full(Allocation(problem)),
     }
@@ -93,12 +99,16 @@ fn history_range(mut client: std.object.Client, path: String, reference: History
 
 fn history_read_key(lead: String, reference: HistoryRef) -> Result[String, Error] {
     // The longest object key has 60 bytes. The String rounds up to 64.
-    capacity(bound bytes 64 { history_key(lead, reference) })
+    capacity(bound bytes 64 {
+        history_key(lead, reference)
+    })
 }
 
 fn history_link_slots(rows: u64) -> Result[List[HistoryLink], Error] {
     let charge = size_or(int.checked_mul(rows, 24), 18446744073709551615u64)
-    let mut refs: List[HistoryLink] = capacity(bound bytes charge { list.with_capacity(rows) })?
+    let mut refs: List[HistoryLink] = capacity(bound bytes charge {
+        list.with_capacity(rows)
+    })?
     list.fill(mut refs, rows, HistoryLink(epoch: 0, len: 0, digest: 0))
     Ok(take refs)
 }
@@ -192,9 +202,8 @@ fn history_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline
     Ok((take mark, take raw))
 }
 
-fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: HistoryMark, checkpoint_seq: u64, deadline: u64) -> Result[PageManifest, Error] waits {
-    let name = history_read_key("m-", mark.manifest)?
-    let mut raw = history_read_object(mut client, name, mark.manifest, deadline)?
+fn history_decode_manifest(name: String, id: StoreId, mark: HistoryMark, checkpoint_seq: u64, take bytes_in: Bytes) -> Result[PageManifest, Error] {
+    let mut raw = take bytes_in
     let local = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         let ctx = history_object_context(name, id, 1, mark.manifest, raw)?
         history_object_digest(name, mark.manifest, raw)?
@@ -211,13 +220,17 @@ fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: Histo
             return Error(disk_fault(name, 72, Malformed))
         }
         let cursor = manifest.sweep
-        if cursor.position >= mark.floor ||
-            (cursor.position == 0 && (cursor.epoch != 0 || cursor.digest != 0)) ||
-            (cursor.position != 0 && cursor.epoch == 0) {
+        if cursor.position >= mark.floor || (cursor.position == 0 && (cursor.epoch != 0 || cursor.digest != 0)) || (cursor.position != 0 && cursor.epoch == 0) {
             return Error(disk_fault(name, 72, Malformed))
         }
         Ok(take manifest)
     })
+}
+
+fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: HistoryMark, checkpoint_seq: u64, deadline: u64) -> Result[PageManifest, Error] waits {
+    let name = history_read_key("m-", mark.manifest)?
+    let raw = history_read_object(mut client, name, mark.manifest, deadline)?
+    history_decode_manifest(name, id, mark, checkpoint_seq, take raw)
 }
 
 fn history_check_claim(path: String, reference: HistoryRef, raw: Bytes, frame: DiskFrame) -> Result[(), Error] {

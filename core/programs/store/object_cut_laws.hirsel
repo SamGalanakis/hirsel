@@ -807,8 +807,7 @@ fn object_conflict_budget_held(attempts: u64, writes: u64) -> bool {
     attempts == 15 && writes == 3
 }
 
-@test
-fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+fn bucket_m2_head_conflict_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 39)
     let clean: std.sim.s3.Fault = Clean
     let conflict: std.sim.s3.Fault = Conflict
@@ -829,6 +828,7 @@ fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     if object_conflict_single_advance(3, 9) || !object_conflict_single_advance(captured.head.entry.seq, raced.writes) || stored.data != expected || raced.attempts != 17 {
         fail("L54: the bucket did not record exactly one generation-3 advance")
     }
+    trust_bucket_report(raced)?
     // Genesis, five conflicts, then another five attempts with a 503 mixed
     // in. A clean sixth attempt in the mixed run would publish the candidate.
     let budget_tape =[clean, clean, clean, clean, clean, conflict, conflict, conflict, conflict, conflict, conflict, slow, conflict, conflict, conflict, clean, clean, clean]
@@ -841,7 +841,12 @@ fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     if object_conflict_budget_held(16, 3) || !object_conflict_budget_held(exhausted.attempts, exhausted.writes) || after.data != original {
         fail("Q5: mixed retries exceeded five attempts or changed the head")
     }
-    Ok(())
+    trust_bucket_report(exhausted)
+}
+
+@test
+fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    trust_seed_gate("bucket_test_m2_head_conflict", bucket_m2_head_conflict_run(c, tasks, seed_grant))
 }
 
 // The head's raw bytes through the uncut address: (pair epoch, entry seq, AUTHORITY tail).
@@ -913,8 +918,7 @@ fn bucket_test_claim_cut(c: Clock, r: Random, tasks: Tasks, e: Env, out: Stdout)
 
 // STORE §12.2: an endpoint that applies a PUT whose If-None-Match fails is
 // refused at genesis, before any head exists.
-@test
-fn bucket_test_ignored_conditions_refuse_genesis(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+fn bucket_ignored_conditions_run(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
     list.push(mut faults, IgnoreConditions)
     let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 2111), None, take faults)
@@ -931,4 +935,9 @@ fn bucket_test_ignored_conditions_refuse_genesis(c: Clock, r: Random, tasks: Tas
         fail("the refused genesis wrote a head")
     }
     Ok(())
+}
+
+@test
+fn bucket_test_ignored_conditions_refuse_genesis(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    trust_seed_gate("bucket_test_ignored_conditions_refuse_genesis", bucket_ignored_conditions_run(c, r, tasks, seed_grant))
 }

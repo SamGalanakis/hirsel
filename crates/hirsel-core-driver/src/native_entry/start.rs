@@ -38,6 +38,16 @@ pub(super) fn emit(
     if plan.coverage {
         coverage_open(&mut f)?;
     }
+    if let Some(symbol) = &plan.store_teardown_fn {
+        let sig = signature(f.object, &[I64, I64, I64], Some(I8));
+        let func = f
+            .object
+            .declare_function(symbol, Linkage::Import, &sig)
+            .map_err(error)?;
+        let func = f.object.declare_func_in_func(func, f.b.func);
+        let addr = f.b.ins().func_addr(I64, func);
+        f.void_call("hirsel_core_test_db_teardown_register", &[addr])?;
+    }
     let argc = f.b.ins().uextend(I64, parameters[0]);
     let n = f.b.ins().iadd_imm_s(argc, -1);
     let one = f.constant(1);

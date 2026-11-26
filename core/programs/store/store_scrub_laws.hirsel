@@ -135,6 +135,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     if get(result.unwrap(reader(db, 0u64)), snapshot(db), t, 1999)? != Some(1999u64) {
         return Error(MigrationFault)
     }
+    trust_opt_out("scrub/misdirected", db)
     close(take db)
 }
 
@@ -177,6 +178,7 @@ fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
         fail("the partial header must spend its seven bytes before the next pack")
     }
     drop(take tour)
+    trust_opt_out("scrub/damage-budget", db)
     close(take db)
 }
 

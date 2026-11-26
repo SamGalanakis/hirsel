@@ -143,12 +143,15 @@ fn swarm_case(take case: std.prop.Case[StoreSwarm]) -> Result[(), String] waits 
     let (disk, fault_server) = sim_disk_mount(tasks, c, take image, take faults, 33554432)
     let verdict = random_arm(disk, c, r, tasks, world_seed, take fixture, swarm)
     let final_image = sim_disk_unmount(take disk, take fault_server)
-    match verdict {
+    match take verdict {
         Ok(()) => Ok(()),
-        Error(problem) if std.sim.fs.has_write_damage(final_image) && trust_expected_reopen_fault("L69/seeded-write", problem) => {
+        Error(take problem) if std.sim.fs.has_write_damage(final_image) && trust_expected_reopen_fault("L69/seeded-write", clone(problem)) => {
             let _ = std.prop.sometimes("disk fault detected", true)
             Ok(())
         },
-        Error(_) => Error("L69 swarm: store returned an unexpected error"),
+        Error(take problem) => {
+            let _ = trust_seed_gate("test_l69_random_arm", Error(take problem))
+            Error("L69 swarm: store returned an unexpected error")
+        },
     }
 }

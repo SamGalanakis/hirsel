@@ -413,6 +413,10 @@ fn model_step(mut db: Db, wall: u64, kind: u64, k: u64) -> bool {
         Ok(Committed(_)) => kind < 3,
         Ok(Aborted(Undone(value: Foreign, ticket: None))) => kind == 3,
         Ok(Failed(_)) => kind == 4,
+        Error(take problem) => {
+            let _ = trust_seed_gate("test_model", Error(take problem))
+            false
+        },
         _ => false
     }
 }

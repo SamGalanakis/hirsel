@@ -525,20 +525,7 @@ fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, H
 // Head names only the new holder's chain.
 @test
 fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks, seed_grant: Env, out: Stdout) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
-    let observed = bucket_m2_law_register(tasks, sim)
-    let report = bucket_law_finish(take sim)
-    let mut trace = string.from("trace ")
-    string.push_u64(mut trace, report.fragment_trace)
-    string.push(mut trace, "\n")
-    result.unwrap(stdout.write(out, trace))
-    let (committed, orphan) = observed?
-    let published = option.unwrap(map.get(report.objects, "head"))
-    let final_capture = history_decode_head(published.data)?
-    if final_capture.head.pair.epoch != 2 || final_capture.head.entry.seq != 4 || !history_ref_matches(final_capture.head.entry, committed) || !map.contains(report.objects, history_key("e-", orphan)) || report.writes != 11 {
-        fail("the fenced advance appeared in the register")
-    }
-    Ok(())
+    trust_seed_gate("bucket_test_m2_register_fence", bucket_m2_register_fence_run(c, tasks, seed_grant, out))
 }
 
 fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -559,27 +546,7 @@ fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] wait
 
 @test
 fn bucket_test_m2_link_recovery(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
-    let recovered = bucket_m2_law_recover(tasks, sim)
-    let _ = bucket_law_finish(take sim)
-    recovered?
-    // Format 5 adds 164 fixed bytes to AP14's 152. Add 16 MiB of
-    // records, the 88-byte envelope and the optional 20-byte FENCE.
-    let wire_limit = 152u64 + 164 + 16777216 + 88 + 20
-    let test_id = StoreId(hi: 9, lo: 10)
-    let mut raw: Bytes = list.with_capacity(1024)
-    let largest = HistoryRef(seq: 1, epoch: 1, len: wire_limit, digest: 3)
-    let fitted = history_genesis_packet(mut raw, test_id, 1, largest, HistoryLocateRoot(depth: 0, rows: list.new()))?
-    let admitted = history_read_mark("max MANIFEST", test_id, fitted, raw)?
-    if admitted.manifest.len != wire_limit {
-        fail("the max legal MANIFEST wire length was refused")
-    }
-    let excess = HistoryRef(seq: 1, epoch: 1, len: wire_limit + 1, digest: 3)
-    let too_large = history_genesis_packet(mut raw, test_id, 1, excess, HistoryLocateRoot(depth: 0, rows: list.new()))?
-    if let Error(Corrupt(Fault(why: Malformed, ..))) = history_read_mark("oversize MANIFEST", test_id, too_large, raw) {} else {
-        fail("one byte above the wire limit was admitted for GET")
-    }
-    Ok(())
+    trust_seed_gate("bucket_test_m2_link_recovery", bucket_m2_link_recovery_run(c, tasks, seed_grant))
 }
 
 fn bucket_m2_law_retained() -> Result[(), Error] {
@@ -730,42 +697,19 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
         fail("the object checkpoint did not reconstruct its row")
     }
-    Ok(())
+    teardown_validate_bucket_checkpoint(mut source.client, head, source.deadline)
 }
 
 @test
 fn bucket_test_m2_paged_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let directory = disk_test_directory(d)
-    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
-    let recovered = bucket_m2_read_packs(directory, tasks, sim)
-    let _ = bucket_law_finish(take sim)
-    recovered
+    trust_seed_gate("bucket_test_m2_paged_recovery", bucket_m2_paged_recovery_run(d, c, r, tasks, seed_grant))
 }
 
 // Q5 shares one attempt budget and the client's backoff even when every
 // conditional response is SlowDown.
 @test
 fn bucket_test_m2_retry_budget(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
-    list.push(mut faults, SlowDown)
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 39), None, take faults)
-    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
-    let mut body = string.into_bytes(string.from("proposed head"))
-    let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    let start = host.mono_ns(sim.time)
-    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let outcome = history_write_head(mut client, Absent, mut body, mut witness, due)
-    let elapsed = host.mono_ns(sim.time) - start
-    let _ = take client
-    let report = bucket_law_finish(take sim)
-    if let HistoryUndecided = outcome {} else {
-        fail("a throttled register reached a terminal verdict without evidence")
-    }
-    if elapsed < 1500000000 || report.attempts > 5 || report.writes != 0 || body != string.as_bytes("proposed head") {
-        fail("conditional retries escaped the client's backoff or attempt budget")
-    }
-    Ok(())
+    trust_seed_gate("bucket_test_m2_retry_budget", bucket_m2_retry_budget_run(c, tasks, seed_grant))
 }
 
 fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -816,14 +760,7 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
 
 @test
 fn bucket_test_m2_head_probe(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 17), None, list.new())
-    let probed = bucket_m2_law_probe(tasks, sim)
-    let report = bucket_law_finish(take sim)
-    probed?
-    if report.writes != 6 {
-        fail("head probes wrote to the register")
-    }
-    Ok(())
+    trust_seed_gate("bucket_test_m2_head_probe", bucket_m2_head_probe_run(c, tasks, seed_grant))
 }
 
 fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
@@ -869,46 +806,22 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
 
 @test
 fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let directory = disk_test_directory(d)
-    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 42), None, list.new())
-    let admitted = bucket_m2_law_admit(directory, tasks, r, sim)
-    let report = bucket_law_finish(take sim)
-    admitted?
-    let visible = option.unwrap(map.get(report.objects, "head"))
-    let selected = history_decode_head(visible.data)?
-    if selected.head.entry.seq != 3 || selected.head.pair.epoch != 2 {
-        fail("a refused claim or fenced advance changed the visible head")
-    }
-    Ok(())
+    trust_seed_gate("bucket_test_m2_admitted_claim", bucket_m2_admitted_claim_run(d, c, r, tasks, seed_grant))
 }
 
 @test
 fn bucket_test_m2_fresh_order(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let seed = bucket_law_seed(seed_grant, 571)
-    bucket_order_fresh_case(tasks, c, r, seed, LostReply)?
-    bucket_order_fresh_case(tasks, c, r, seed, Overtaken)?
-    bucket_order_fresh_case(tasks, c, r, seed, FencedAfterRead)
+    trust_seed_gate("bucket_test_m2_fresh_order", bucket_m2_fresh_order_run(c, r, tasks, seed_grant))
 }
 
 @test
 fn bucket_test_m2_ack_history(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let seed = bucket_law_seed(seed_grant, 581)
-    for (replaced, acks) in[(false, 8u64), (true, 4u64)] {
-        let sim = bucket_ack_fixture(tasks, c, seed)
-        let tested = bucket_ack_commits(tasks, r, sim, replaced)
-        let report = bucket_law_finish(take sim)
-        tested?
-        bucket_ack_history(report, acks)?
-    }
-    Ok(())
+    trust_seed_gate("bucket_test_m2_ack_history", bucket_m2_ack_history_run(c, r, tasks, seed_grant))
 }
 
 @test
 fn bucket_test_m2_claim_witness(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let seed = bucket_law_seed(seed_grant, 521)
-    witness_case(tasks, c, r, seed, false)?
-    witness_case(tasks, c, r, seed, true)
+    trust_seed_gate("bucket_test_m2_claim_witness", bucket_m2_claim_witness_run(c, r, tasks, seed_grant))
 }
 
 @test
@@ -917,21 +830,20 @@ fn bucket_test_m2_q5_matrix(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_gran
     let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
     let writes: Inline[Q5Operation, 3] =[GenesisWrite, ClaimWrite, ActivationWrite]
     let schedules: Inline[Q5Fault, 6] =[AfterBody, BeforeBody, OvertakeDrop, OvertakeApply, Retry500, ExhaustBeforeBody]
-    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
+    let outcome: Result[(), DeployError] = bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
         for operation in writes {
             let site = result.unwrap(q5_clean_site(d, c, r, tasks, seed, operation))
             for fault in schedules {
-                result.unwrap(q5_case(d, c, r, tasks, seed, operation, site, fault, plan))
+                q5_case(d, c, r, tasks, seed, operation, site, fault, plan)?
             }
         }
-        Ok(())
+        let ok: Result[(), DeployError] = Ok(())
+        ok
     }, "L54-M Q5 matrix fixture")
+    trust_seed_deploy_gate("bucket_test_m2_q5_matrix", take outcome)
 }
 
 @test
 fn bucket_test_m2_genesis_debris(d: Dir, c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
-    let seed = bucket_law_seed(seed_grant, 542)
-    genesis_debris_case(d, c, tasks, seed, AfterManifest)?
-    genesis_debris_case(d, c, tasks, seed, AfterCheckpoint)?
-    genesis_debris_case(d, c, tasks, seed, ConcurrentList)
+    trust_seed_deploy_gate("bucket_test_m2_genesis_debris", bucket_m2_genesis_debris_run(d, c, tasks, seed_grant))
 }

@@ -1544,12 +1544,12 @@ pub struct Module {
     /// condition derived from the launch, outside the checked body encoding.
     #[serde(skip)]
     pub external_call_sites: bool,
-    /// Insert engine observations only while emitting a recording build.
+    /// Emission-only switches (recording observations, `@test` store `Db` teardown).
     #[serde(skip)]
     pub law_observation: bool,
-    /// Flag the sites of bodies from these packages while emitting a coverage
-    /// build ([`crate::coverage`]). Like `law_observation`, a condition of the
-    /// emission, outside the checked body encoding.
+    #[serde(skip)]
+    pub store_teardown: bool,
+    /// Flag body sites from these packages in a coverage build ([`crate::coverage`]).
     #[serde(skip)]
     pub coverage: Option<crate::coverage::Scope>,
     /// In a coverage build of units whose anchors name their unit's sites

@@ -315,7 +315,7 @@ impl Reached<'_> {
 impl CheckProduct {
     pub fn reachable(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.reachable_inner(entry, limit, None, None, false, None)
+            self.reachable_inner(entry, limit, None, None, false, None, false)
         })
     }
 
@@ -325,21 +325,25 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> io::Result<Reachable<'_>> {
         let _phase = crate::meter::trace::span("reach");
-        let limit = options.instance_limit;
-        let target = build_target(options)?;
+        let (limit, target, td) = (
+            options.instance_limit,
+            build_target(options)?,
+            options.store_teardown,
+        );
         if !crate::resident::serving() {
             return hirsel_core_ids::published::catch_io(|| {
-                self.reachable_inner(entry, limit, None, None, true, Some(target))
+                self.reachable_inner(entry, limit, None, None, true, Some(target), td)
             });
         }
         let key = crate::native::key(
             "hirsel.recipe-reach.v1",
             &(
                 self.environment,
-                self.image.as_ref().map(|image| image.identity),
+                self.image.as_ref().map(|i| i.identity),
                 entry,
                 limit,
                 target.triple(),
+                td,
             ),
         )?;
         let record = crate::resident::RECIPE_REACH
@@ -350,6 +354,7 @@ impl CheckProduct {
             options.llvm_release() || matches!(options.backend, crate::native::Backend::Cranelift),
             &mut record.lock().unwrap(),
             Some(target),
+            td,
         )
     }
 
@@ -360,9 +365,18 @@ impl CheckProduct {
         compact_recipe: bool,
         record: &mut Option<RecipeGraph>,
         target: Option<hirsel_core_layout::Target>,
+        store_teardown: bool,
     ) -> io::Result<Reachable<'_>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.reachable_inner(entry, limit, None, Some(record), compact_recipe, target)
+            self.reachable_inner(
+                entry,
+                limit,
+                None,
+                Some(record),
+                compact_recipe,
+                target,
+                store_teardown,
+            )
         })
     }
     /// The build's reachable set for `options`. A Cranelift development build
@@ -386,25 +400,20 @@ impl CheckProduct {
         let _phase = crate::meter::trace::span("reach");
         let inputs = crate::native::native_inputs(self, options)?;
         let target = Some(build_target(options)?);
+        let (lim, td) = (options.instance_limit, options.store_teardown);
         let mut reached = hirsel_core_ids::published::catch_io(|| {
             let Some(records) = inputs.records.as_ref() else {
-                return self.reachable_inner(
-                    entry,
-                    options.instance_limit,
-                    None,
-                    None,
-                    false,
-                    target,
-                );
+                return self.reachable_inner(entry, lim, None, None, false, target, td);
             };
             let Some(selection) = crate::reach::selection(self, records, entry, options)? else {
                 return self.reachable_inner(
                     entry,
-                    options.instance_limit,
+                    lim,
                     Some((records, None, damaged)),
                     None,
                     false,
                     target,
+                    td,
                 );
             };
             let loaded = crate::reach::load(&records.store, selection)?;
@@ -464,18 +473,13 @@ impl CheckProduct {
                     }),
                 });
             }
-            let mut reached = self.reachable_inner(
-                entry,
-                options.instance_limit,
-                Some((
-                    records,
-                    Some((prior.as_ref(), &changed, &constants)),
-                    damaged,
-                )),
-                None,
-                false,
-                target,
-            )?;
+            let prior_rec = Some((
+                records,
+                Some((prior.as_ref(), &changed[..], &constants[..])),
+                damaged,
+            ));
+            let mut reached =
+                self.reachable_inner(entry, lim, prior_rec, None, false, target, td)?;
             reached.counters.record_bytes = record_bytes as u64;
             let complete = reached.accepted() && reached.first_stops.is_empty();
             let draft = match (complete, reached.graph.take()) {
@@ -614,35 +618,25 @@ impl CheckProduct {
         mut recipe_record: Option<&mut Option<RecipeGraph>>,
         compact_recipe: bool,
         target: Option<hirsel_core_layout::Target>,
+        store_teardown: bool,
     ) -> io::Result<Reachable<'_>> {
-        let mut materialized =
-            crate::instances::InstanceSet::for_reach(compact_recipe).for_target(target);
-        let roots = [Identity::plain(entry.clone())];
-        let prior = records.and_then(|(_, p, _)| p);
-        let instances = {
-            let _phase = crate::meter::trace::span("instance walk");
-            match records {
-                Some((records, _, damaged)) => {
-                    let expand = crate::instances::Expand {
-                        prior: prior.and_then(|(p, _, _)| p),
-                        changed: prior.map_or(&[], |(_, c, _)| c),
-                        damaged,
-                    };
-                    self.instances_over_records(roots, limit, &mut materialized, records, expand)
-                }
-                None => self.instances_into(roots, limit, &mut materialized),
-            }
-        };
+        let (mut materialized, instances) = self.walk_instances_with_teardown(
+            entry,
+            limit,
+            records,
+            compact_recipe,
+            target,
+            store_teardown,
+        );
         let image_directory = self.image.as_ref().map(|i| i.directory()).transpose()?;
-        let constants = match prior {
+        let constants = match records.and_then(|(_, p, _)| p) {
             Some((_, _, constants)) => constants.to_vec(),
             None => self.own_constants()?,
         };
-        // The record's graph is this walk's when its roots are equal and each
-        // changed node reaches what it reached: the walk is a function of its
-        // roots and of each node's edges.
+        // The record's graph matches when its roots and changed edges match.
         let mut reuse = None;
-        if let (Some((Some(prior), changed, _)), Ok(reached)) = (prior, &instances)
+        if let (Some((Some(prior), changed, _)), Ok(reached)) =
+            (records.and_then(|(_, p, _)| p), &instances)
             && prior.constants() == constants
         {
             let definitions: BTreeSet<&DefPath> = reached

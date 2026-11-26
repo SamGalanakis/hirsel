@@ -536,6 +536,8 @@ impl FunctionEmitter<'_> {
         } else if let Some(record) = self.abi.record {
             let fields = self.load_record(record, &Local::DEST.into());
             self.return_values(&fields);
+        } else if let Some(value) = self.store_teardown_return() {
+            self.return_values(&[value]);
         } else {
             let values = values
                 .get(&self.body.pools.values)

@@ -27,7 +27,14 @@ thread_local! {
 }
 crate::units::moved_tls! { static GUARD: (usize, usize) = (0, 0); }
 crate::units::moved_tls! { static STOP_FD: i32 = 2; }
-static PREVIOUS: OnceLock<libc::sigaction> = OnceLock::new();
+/// The signals a touch of an inaccessible stack page raises: Darwin reports a
+/// protection fault on a mapped `PROT_NONE` page as SIGBUS, Linux as SIGSEGV.
+#[cfg(target_os = "linux")]
+const FAULTS: [libc::c_int; 1] = [libc::SIGSEGV];
+#[cfg(target_os = "macos")]
+const FAULTS: [libc::c_int; 2] = [libc::SIGSEGV, libc::SIGBUS];
+/// Each of `FAULTS`' handlers from before `arm`, in the same order.
+static PREVIOUS: OnceLock<[libc::sigaction; FAULTS.len()]> = OnceLock::new();
 #[cfg(test)]
 #[path = "fiber_stop_tests.rs"]
 mod stop_tests;
@@ -87,14 +94,16 @@ pub(crate) fn arm() {
         // SAFETY: initialized sigaction structures and a signal-compatible handler.
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
-            let mut previous: libc::sigaction = std::mem::zeroed();
             action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
             action.sa_sigaction = fault as *const () as usize;
             libc::sigemptyset(&mut action.sa_mask);
-            if libc::sigaction(libc::SIGSEGV, &action, &mut previous) != 0 {
-                crate::process::stop(b"SignalStack");
-            }
-            previous
+            FAULTS.map(|signal| {
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(signal, &action, &mut previous) != 0 {
+                    crate::process::stop(b"SignalStack");
+                }
+                previous
+            })
         }
     });
     ALTERNATE.with(|_| ());
@@ -513,6 +522,8 @@ unsafe extern "C" fn fault(signal: i32, info: *mut libc::siginfo_t, context: *mu
     unsafe {
         let previous = PREVIOUS
             .get()
+            .and_then(|saved| saved.iter().zip(FAULTS).find(|(_, armed)| *armed == signal))
+            .map(|(previous, _)| previous)
             .unwrap_or_else(|| crate::process::stop(b"Signal"));
         if previous.sa_sigaction == libc::SIG_DFL || previous.sa_sigaction == libc::SIG_IGN {
             libc::sigaction(signal, previous, std::ptr::null_mut());

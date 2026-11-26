@@ -296,23 +296,34 @@ fn partitions(module: &Module, bound: usize) -> Option<(usize, Vec<usize>)> {
     Some((count, module.link_symbols().iter().map(|s| of(s)).collect()))
 }
 
-/// Lower a release unit for x86-64 Linux, whole or, over `bound` Core
-/// instructions ([`partition_instructions`]), in [`partitions`]: each partition is a module
-/// of its own context that `each` takes as soon as it is built, so one
-/// partition's LLVM module is live at a time. Partitions keep every call
-/// between them: each defines its bodies hidden and declares the others' it
-/// calls. Returns the unit's release sites and debug sites, numbered over the
-/// partitions in order.
 #[cfg(hirsel_lazy_core)]
+mod key;
+
+#[cfg(hirsel_lazy_core)]
+pub(crate) type LowerPartition<'a> =
+    Box<dyn FnOnce() -> Result<(crate::construction::NativeModule, crate::ReleaseSites)> + 'a>;
+
+/// Prepare a release unit, then visit its partitions in link order. A
+/// partition's key is available before its LLVM context or module exists.
+#[cfg(hirsel_lazy_core)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_release_unit(
     module: Module,
     roles: &hirsel_core_ir::roles::Facts,
+    target: Target,
     observe_charge: bool,
+    number_sites: bool,
     neutral: &BTreeSet<hirsel_core_ids::ContentHash>,
     bound: usize,
-    each: &mut dyn FnMut(crate::construction::NativeModule) -> std::result::Result<(), String>,
-) -> Result<(Vec<source::ReleaseSite>, Vec<source::ReleaseSite>)> {
-    let versions = versions::program(&[&module]);
+    each: &mut dyn FnMut(
+        Option<hirsel_core_ids::ContentHash>,
+        LowerPartition<'_>,
+    ) -> std::result::Result<(), String>,
+) -> Result<()> {
+    let versions = match target.arch() {
+        hirsel_core_layout::Arch::X86_64 => Some(versions::program(&[&module])),
+        hirsel_core_layout::Arch::Aarch64 => None,
+    };
     let source = SourceEmission {
         batch_steps: true,
         test_hooks: cfg!(test),
@@ -324,46 +335,116 @@ pub(crate) fn emit_release_unit(
         roles: Some(roles),
         neutral: Some(neutral),
         prepay_step_trees: true,
-        release_sites: true,
-        versions: Some(&versions),
+        release_sites: number_sites,
+        versions: versions.as_ref(),
     };
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
-    let mut debug = sink::native::ReleaseDebug::new(module.items.clone());
+    let debug_items = number_sites.then(|| std::rc::Rc::<[_]>::from(module.items.clone()));
     let mut module = prepare(Cow::Owned(module), &recipes, source, provided);
     let plan = partitions(&module, bound);
-    let analyses = Analyses::new(&module, &recipes, source, provided, facts_enabled());
-    let mut sites = Some(ReleaseSites::default());
+    let facts = facts_enabled();
+    let analyses = Analyses::new(&module, &recipes, source, provided, facts);
+    let printed = std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE");
+    let keys = plan
+        .as_ref()
+        .filter(|_| printed.is_none())
+        .map(|_| key::Keys::new(&module, &analyses, roles, facts))
+        .transpose()
+        .map_err(|e| Error::Llvm(e.to_string()))?;
     for partition in 0..plan.as_ref().map_or(1, |(count, _)| *count) {
         let members = plan
             .as_ref()
             .map(|(_, of)| of.iter().map(|&p| p == partition).collect::<Vec<_>>());
-        let context = std::rc::Rc::new(
-            crate::construction::Context::with_anonymous_locals(true).map_err(Error::Llvm)?,
-        );
-        let mut native = sink::native::NativeSink::release(context, debug);
-        let foreign = emit_prepared(
-            &module,
-            &recipes,
-            &analyses,
-            Target::X86_64Linux,
-            observe_charge,
-            facts_enabled(),
-            source,
-            provided,
-            members.as_deref(),
-            &mut sites,
-            &mut native,
-        )?;
-        if members.is_some() {
-            close_partition(&module, &recipes, &foreign, &mut native)?;
-        }
-        debug = native.take_release_debug();
-        if let Some(members) = &members {
+        let namespace = members
+            .as_ref()
+            .map(|_| u32::try_from(partition).expect("Core function indices"));
+        let key = keys
+            .as_ref()
+            .zip(members.as_deref())
+            .map(|(keys, members)| keys.partition(&module, &analyses, members, namespace.unwrap()))
+            .transpose()
+            .map_err(|e| Error::Llvm(e.to_string()))?;
+        // Match the whole-unit emitter's context on the former composed
+        // paths, and the direct emitter's context on the x86 executable path.
+        let anonymous = number_sites;
+        let mut lowered = false;
+        each(
+            key,
+            Box::new(|| {
+                let context = std::rc::Rc::new(
+                    crate::construction::Context::with_anonymous_locals(anonymous)
+                        .map_err(Error::Llvm)?,
+                );
+                let debug = || {
+                    debug_items
+                        .as_ref()
+                        .map(|items| sites::ReleaseDebug::new(items.clone(), namespace))
+                };
+                let mut native = match debug() {
+                    Some(debug) => sink::native::NativeSink::release(context, debug),
+                    None => sink::native::NativeSink::new(context),
+                };
+                let produce = |sink: &mut dyn Sink| {
+                    let mut sites = number_sites.then(|| ReleaseSites {
+                        partition: namespace,
+                        ..ReleaseSites::default()
+                    });
+                    let foreign = emit_prepared(
+                        &module,
+                        &recipes,
+                        &analyses,
+                        target,
+                        observe_charge,
+                        facts,
+                        source,
+                        provided,
+                        members.as_deref(),
+                        &mut sites,
+                        sink,
+                    )?;
+                    Ok::<_, Error>((foreign, sites.map_or_else(Vec::new, |sites| sites.bindings)))
+                };
+                let (foreign, sites) = produce(&mut native)?;
+                let unresolved = members
+                    .as_ref()
+                    .map(|_| native.unresolved().map_err(Error::Llvm))
+                    .transpose()?;
+                if let Some(names) = &unresolved {
+                    close_partition(&module, &recipes, &foreign, names, &mut native);
+                }
+                if let Some(dir) = &printed {
+                    let text =
+                        debug().map_or_else(sink::TextSink::default, sink::TextSink::release);
+                    printed_oracle(
+                        std::path::Path::new(dir),
+                        &module,
+                        &native.print().map_err(Error::Llvm)?,
+                        anonymous,
+                        text,
+                        |text| {
+                            let (foreign, _) = produce(text)?;
+                            if let Some(names) = &unresolved {
+                                close_partition(&module, &recipes, &foreign, names, text);
+                            }
+                            Ok(())
+                        },
+                    )?;
+                }
+                let debug_sites = native.release_debug_sites();
+                let native = native.finish().map_err(Error::Llvm)?;
+                if let Some(members) = &members {
+                    release_bodies(module.to_mut(), members);
+                }
+                lowered = true;
+                Ok((native, crate::ReleaseSites { sites, debug_sites }))
+            }),
+        )
+        .map_err(Error::Llvm)?;
+        if !lowered && let Some(members) = &members {
             release_bodies(module.to_mut(), members);
         }
-        each(native.finish().map_err(Error::Llvm)?).map_err(Error::Llvm)?;
     }
-    Ok((sites.unwrap().bindings, debug.sites()))
+    Ok(())
 }
 
 /// Free the bodies of a lowered partition's `members` that no later partition
@@ -394,21 +475,21 @@ fn close_partition(
     module: &Module,
     recipes: &[hirsel_core_layout::RecipeRow],
     foreign: &Foreign,
-    sink: &mut sink::native::NativeSink,
-) -> Result<()> {
-    for name in sink.unresolved().map_err(Error::Llvm)? {
-        if !foreign.contains_key(&name)
+    unresolved: &[String],
+    sink: &mut dyn Sink,
+) {
+    for name in unresolved {
+        if !foreign.contains_key(name)
             && let Some(i) = name.strip_prefix('s').and_then(|i| i.parse::<usize>().ok())
             && i < module.statics.len()
         {
             define_static(module, recipes, i, sink);
         }
     }
-    for name in sink.unresolved().map_err(Error::Llvm)? {
-        if let Some((signature, attrs)) = foreign.get(&name) {
-            sink.declare(&name, signature, attrs);
+    for name in unresolved {
+        if let Some((signature, attrs)) = foreign.get(name) {
+            sink.declare(name, signature, attrs);
         }
     }
     sink.named_metadata("hirsel.partition", &[]);
-    Ok(())
 }

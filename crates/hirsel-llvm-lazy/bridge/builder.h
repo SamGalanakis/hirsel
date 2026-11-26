@@ -18,9 +18,8 @@ typedef struct {
     void (*unit_drop)(HirselLlvmBuilder *);
     LLVMModuleRef (*unit_take)(HirselLlvmBuilder *, HirselBuilderOutput *);
     void (*module_drop)(LLVMModuleRef);
-    void (*module_key)(LLVMModuleRef, HirselBuilderOutput *);
     void (*print)(HirselLlvmBuilder *, HirselBuilderOutput *);
-    void (*print_text)(const char *, size_t, HirselBuilderOutput *);
+    void (*print_text)(const char *, size_t, uint8_t, HirselBuilderOutput *);
     LLVMTypeRef (*integer_type)(HirselLlvmBuilder *, unsigned);
     LLVMTypeRef (*float_type)(HirselLlvmBuilder *, unsigned);
     LLVMTypeRef (*pointer_type)(HirselLlvmBuilder *);

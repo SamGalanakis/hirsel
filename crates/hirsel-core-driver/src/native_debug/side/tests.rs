@@ -98,7 +98,7 @@ pub(crate) fn binding_case() {
     let remark = CodegenRemark {
         definition: first.items[0].clone(),
         linkage: "hprivate1".into(),
-        owner: release_debug_owner(&first.items[0]),
+        owner: release_debug_owner(&first.items[0], None),
         start: 0,
         kind: RemarkKind::BoundsCheck,
     };
@@ -106,6 +106,7 @@ pub(crate) fn binding_case() {
         item: first.items[0].clone(),
         start: 12,
         ordinal: 0,
+        partition: None,
     }];
     let mut sources = SourceMap {
         points: Default::default(),

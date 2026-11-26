@@ -209,66 +209,59 @@ impl Held for Unheld {
     fn keep_tail(&mut self, _: &[u8], _: &[u8; 32], _: &[u8], _: &[u8]) {}
 }
 
-/// A release unit's sites, numbered over its partitions in order.
+/// A lowered partition's bindings for the program's source locations.
 pub struct ReleaseSites {
     pub sites: Vec<hirsel_core_ir::source::ReleaseSite>,
     pub debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
 
-/// Lower the joined release `module`, which lowering consumes: its transforms
-/// change it in place and it is dropped once lowered. A unit over `bound`
-/// Core instructions ([`core::partition_instructions`]) lowers in partitions
-/// that keep the calls between them; `each` takes each partition as soon as
-/// it is lowered, in order, and the next is lowered once it returns. A unit
-/// within the bound is one partition.
+/// Prepare the joined release `module`, then visit it in link order. A unit
+/// over `bound` Core instructions has independently cached partitions.
+/// Calling `ReleasePartition::lower` on a miss is the only LLVM lowering.
 pub fn lower_release(
     module: hirsel_core_ir::Module,
     facts: &hirsel_core_ir::roles::Facts,
+    target: hirsel_core_layout::Target,
     observe_charge: bool,
+    closed_executable: bool,
     bound: usize,
-    each: &mut dyn FnMut(ReleasePartition) -> Result<(), String>,
-) -> Result<ReleaseSites, String> {
+    each: &mut dyn FnMut(ReleasePartition<'_>) -> Result<(), String>,
+) -> Result<(), String> {
     let neutral = core::step_neutral_program(&[&module]);
-    let (sites, debug_sites) = core::emit_release_unit(
+    let number_sites = match target.arch() {
+        hirsel_core_layout::Arch::X86_64 => closed_executable,
+        hirsel_core_layout::Arch::Aarch64 => false,
+    };
+    core::emit_release_unit(
         module,
         facts,
+        target,
         observe_charge,
+        number_sites,
         &neutral,
         bound,
-        &mut |module| each(ReleasePartition { module }),
+        &mut |key, lower| each(ReleasePartition { key, lower, target }),
     )
-    .map_err(|error| error.to_string())?;
-    Ok(ReleaseSites { sites, debug_sites })
+    .map_err(|error| error.to_string())
 }
 
-/// One partition of a release unit, lowered and not yet optimised.
-pub struct ReleasePartition {
-    module: construction::NativeModule,
+/// A release partition prepared in CoreIR.
+pub struct ReleasePartition<'a> {
+    /// The lowering input's key, present when this unit was partitioned and
+    /// the printed oracle does not need to inspect fresh modules.
+    pub key: Option<hirsel_core_ids::ContentHash>,
+    lower: core::LowerPartition<'a>,
+    target: hirsel_core_layout::Target,
 }
 
-impl ReleasePartition {
-    /// What the partition's module records before optimisation.
-    pub fn ir_key(&self) -> hirsel_core_ids::ContentHash {
-        self.module.ir_key()
-    }
-
-    /// Optimise the partition and generate it in parts ([`emit_program_parts`]).
-    pub fn emit(
-        self,
-        exports: &[String],
-        jobs: u32,
-        held: &mut dyn Held,
-        lend: Lend<'_>,
-    ) -> Result<Program, String> {
-        loader::program(
-            vec![loader::ProgramUnit::Native(self.module)],
-            exports,
-            hirsel_core_layout::Target::X86_64Linux,
-            jobs,
-            held,
-            None,
-            lend,
-        )
+impl ReleasePartition<'_> {
+    pub fn lower(self) -> Result<(Lowered, ReleaseSites), String> {
+        let (module, sites) = (self.lower)().map_err(|error| error.to_string())?;
+        let lowered = Lowered {
+            units: vec![loader::ProgramUnit::Native(module)],
+            target: self.target,
+        };
+        Ok((lowered, sites))
     }
 }
 

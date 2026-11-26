@@ -39,9 +39,9 @@ mod partition;
 pub use optimized_ir::*;
 #[cfg(hirsel_lazy_core)]
 use oracle::printed_oracle;
-#[cfg(hirsel_lazy_core)]
-pub(crate) use partition::emit_release_unit;
 use partition::{Analyses, Foreign, ForeignBody, bodies, define_static, foreign_symbols, prepare};
+#[cfg(hirsel_lazy_core)]
+pub(crate) use partition::{LowerPartition, emit_release_unit};
 mod scalar;
 mod simd;
 mod sink;
@@ -287,6 +287,7 @@ struct Items {
 }
 #[derive(Default)]
 struct ReleaseSites {
+    partition: Option<u32>,
     names: std::collections::HashMap<(ItemId, u32), String>,
     /// The next ordinal of each owner's release sites.
     next: std::collections::HashMap<hirsel_core_ids::DefPath, u32>,
@@ -427,23 +428,13 @@ fn emit_module(
         &mut sites,
         sink,
     )?;
-    // A unit over the partition bound that a target lowers whole (only x86-64
-    // Linux lowers release units in partitions) keeps its call boundaries as
-    // a partition does (`hirsel_llvm_large_release`).
-    if bodies(&module, None)
-        .map(|(_, body)| body.insts.len())
-        .sum::<usize>()
-        > partition_instructions()
-    {
-        sink.named_metadata("hirsel.large-release", &[]);
-    }
     Ok(sites.map_or_else(Vec::new, |sites| sites.bindings))
 }
 
 /// Lower the prepared `module` into `sink`: every body, or with `members`
 /// only the members' (a release partition). A partition's bodies are hidden
 /// globals, and it returns how each other body is declared ([`Foreign`]).
-/// `release_sites` numbers release sites on from earlier partitions.
+/// `release_sites` provides this partition's site namespace and collects bindings.
 #[allow(clippy::too_many_arguments)]
 fn emit_prepared(
     module: &Module,
@@ -615,6 +606,10 @@ fn emit_prepared(
             failures,
             call_layouts,
             provided.release_sites,
+            items
+                .release_sites
+                .as_ref()
+                .and_then(|sites| sites.partition),
             members,
             &mut next_scope,
             sink,
@@ -1200,6 +1195,8 @@ fn native_module(
             std::path::Path::new(&dir),
             module,
             &native.print().map_err(Error::Llvm)?,
+            false,
+            sink::TextSink::default(),
             |text| {
                 emit_module(
                     Cow::Borrowed(module),

@@ -7,6 +7,7 @@ const RELEASE_SUM: &str = "type N: shareable + send {\n    value: u64,\n    tail
 /// `ping(1) + 3` = `pong(0) + 4` = `2 * width("ab") + 4` = 8.
 fn release_parts() -> String {
     RELEASE_SUM
+        .replace("fn scale(", "cold fn scale(")
         .replace(
             "pub fn main()",
             "fn width(s: String) -> u64 { string.byte_len(s) }\nfn ping(n: u64) -> u64 {\n    if n == 0u64 { width(\"ab\") } else { pong(n - 1u64) + 1u64 }\n}\nfn pong(n: u64) -> u64 {\n    if n == 0u64 { width(\"ab\") * 2u64 } else { ping(n - 1u64) + 2u64 }\n}\npub fn main()",
@@ -18,13 +19,15 @@ fn release_parts() -> String {
 /// (a bound of one Core instruction), exits as the unit does whole, and an
 /// edit's build, which reuses the partitions the edit leaves unchanged, is a
 /// cold build of the edited source into an empty store: the same executable
-/// bytes. Mutants caught: a partition's key that does not cover its lowered
-/// module reuses another partition's parts, and the edit fails to link; a
-/// partition that does not declare the bodies of others it calls leaves them
-/// undefined. The constant both partitions read is a content-named part of
+/// bytes. The second edit makes `scale` fallible. The caller's unchanged Core
+/// body must now call its status-returning symbol. A key of member bodies
+/// alone reuses a call to the removed infallible symbol and fails to link.
+/// The constant both partitions read is a content-named part of
 /// each, which the link takes once, so its linkage does not reach the
 /// executable. Exits hand-derived as in [`release_edit_is_the_cold_build`],
 /// plus `ping(3)` ([`release_parts`]): 24 + 8 = 32, then 30 + 8 = 38.
+/// With `scale(x) = x / x`, the sums are 6 and 2. Parsing the suffixes of
+/// "6 2" adds 1 + 1 + 2, so the last exit is 6 + 2 + 4 + 8 = 20.
 #[test]
 #[ignore = "explicit native integration target"]
 fn release_partitions_edit_is_the_cold_build() {
@@ -33,6 +36,10 @@ fn release_partitions_edit_is_the_cold_build() {
     let program = release_parts();
     assert!(program.contains("ping(3u64)"), "the program calls ping");
     let edited = program.replace("build(6u64)", "build(7u64)");
+    let fallible = edited.replace(
+        "fn scale(x: u64) -> u64 { x }",
+        "fn scale(x: u64) -> u64 { x / x }",
+    );
     let mut options = native_options(Backend::Llvm, dir.path());
     options.optimize = true;
     let apart = |name: &str| NativeOptions {
@@ -40,21 +47,57 @@ fn release_partitions_edit_is_the_cold_build() {
         output: dir.path().join(format!("{name}-program")),
         ..options.clone()
     };
-    let (_, _, status) = reach_build(&record_check(&program, &core, dir.path(), "whole"), &apart("whole"));
+    let (_, _, status) = reach_build(
+        &record_check(&program, &core, dir.path(), "whole"),
+        &apart("whole"),
+    );
     assert_eq!(status, Some(32), "whole");
     super::release::RELEASE_PARTITION.set(Some(1));
-    let (cold, _, cold_status) = reach_build(&record_check(&program, &core, dir.path(), "store"), &options);
-    let (edit, edit_bytes, edit_status) = reach_build(&record_check(&edited, &core, dir.path(), "store"), &options);
-    let (_, fresh_bytes, fresh_status) = reach_build(&record_check(&edited, &core, dir.path(), "fresh"), &apart("fresh"));
+    super::release::RELEASE_LOWERED.set(0);
+    let (cold, _, cold_status) = reach_build(
+        &record_check(&program, &core, dir.path(), "store"),
+        &options,
+    );
+    let cold_lowered = super::release::RELEASE_LOWERED.replace(0);
+    let (edit, edit_bytes, edit_status) =
+        reach_build(&record_check(&edited, &core, dir.path(), "store"), &options);
+    let edit_lowered = super::release::RELEASE_LOWERED.get();
+    let (_, fresh_bytes, fresh_status) = reach_build(
+        &record_check(&edited, &core, dir.path(), "fresh"),
+        &apart("fresh"),
+    );
+    let (_, abi_bytes, abi_status) = reach_build(
+        &record_check(&fallible, &core, dir.path(), "store"),
+        &options,
+    );
+    let (_, abi_fresh, abi_fresh_status) = reach_build(
+        &record_check(&fallible, &core, dir.path(), "abi-fresh"),
+        &apart("abi-fresh"),
+    );
     super::release::RELEASE_PARTITION.set(None);
-    assert_eq!((cold_status, edit_status, fresh_status), (Some(32), Some(38), Some(38)));
+    assert_eq!(
+        (cold_status, edit_status, fresh_status),
+        (Some(32), Some(38), Some(38))
+    );
     assert!(
         edit.compiled >= 1 && edit.compiled < cold.compiled,
         "the edit regenerates only its partitions: {} of {} parts",
         edit.compiled,
         cold.compiled
     );
-    assert!(edit_bytes == fresh_bytes, "the edited build is the cold build");
+    assert!(
+        edit_bytes == fresh_bytes,
+        "the edited build is the cold build"
+    );
+    assert!(
+        edit_lowered > 0 && edit_lowered < cold_lowered,
+        "the edit lowers {edit_lowered} of {cold_lowered} partitions"
+    );
+    assert_eq!((abi_status, abi_fresh_status), (Some(20), Some(20)));
+    assert!(
+        abi_bytes == abi_fresh,
+        "the edited ABI links like the cold build"
+    );
 }
 
 /// The release build's edits in one store and parts cache are a cold

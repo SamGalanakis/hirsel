@@ -261,6 +261,7 @@ pub struct ReleaseSite {
     pub item: DefPath,
     pub start: u32,
     pub ordinal: u32,
+    pub partition: Option<u32>,
 }
 
 /// The item whose release sites `item`'s are numbered among. A recipe unit
@@ -285,19 +286,23 @@ pub fn numbers_unit_sites(item: &DefPath) -> bool {
 
 /// Synthetic DWARF file identity for release-code locations numbered by
 /// the instructions that use them. The link binds those ordinals to sources.
-pub fn release_debug_owner(item: &DefPath) -> DefPath {
+pub fn release_debug_owner(item: &DefPath, partition: Option<u32>) -> DefPath {
     let mut owner = release_site_owner(item);
     owner.0.modules.insert(0, "$debug".into());
+    if let Some(partition) = partition {
+        owner.0.modules.insert(1, format!("p{partition}"));
+    }
     owner
 }
 
 /// The symbol of the site numbered `ordinal` among those of `item`'s owner
 /// ([`release_site_owner`]).
-pub fn release_site_symbol(item: &DefPath, ordinal: u32) -> String {
-    format!(
-        "{}_release_{ordinal}",
-        site_symbol(&release_site_owner(item))
-    )
+pub fn release_site_symbol(item: &DefPath, ordinal: u32, partition: Option<u32>) -> String {
+    let owner = site_symbol(&release_site_owner(item));
+    match partition {
+        Some(partition) => format!("{owner}_release_p{partition}_{ordinal}"),
+        None => format!("{owner}_release_{ordinal}"),
+    }
 }
 
 /// SITES.md 6(b): whether a function reads its caller's site. Only a core@1

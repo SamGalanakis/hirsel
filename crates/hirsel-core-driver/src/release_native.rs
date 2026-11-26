@@ -38,15 +38,8 @@ fn unit_key(
     inputs: &impl serde::Serialize,
     consumed: &[&[hirsel_core_ir::roles::BodyFacts]],
 ) -> io::Result<ContentHash> {
-    use std::io::Write as _;
-
     let fields = (hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs);
-    let length = encoding::fixed_size(&fields)?;
-    ContentHash::of_stream("hirsel.core-release-unit.v6", length, |digest| {
-        let mut buffered = io::BufWriter::new(digest);
-        encoding::write_fixed(&mut buffered, &fields)?;
-        buffered.flush()
-    })
+    encoding::hash_fixed("hirsel.core-release-unit.v7", &fields)
 }
 
 /// A part's key: the compiler, libLLVM and target
@@ -188,7 +181,7 @@ struct Parts {
     debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
     remarks: Vec<hirsel_core_ir::source::CodegenRemark>,
 }
-const PARTS_SCHEMA: u32 = 5;
+const PARTS_SCHEMA: u32 = 6;
 
 type Held = (
     ContentHash,
@@ -294,12 +287,16 @@ struct Joined {
     parts: Vec<ContentHash>,
     held: Vec<Held>,
     remarks: Vec<hirsel_core_ir::source::CodegenRemark>,
+    sites: Vec<hirsel_core_ir::source::ReleaseSite>,
+    debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
     seen: std::collections::HashSet<ContentHash>,
 }
 
 impl Joined {
     fn add(&mut self, record: Parts, held: Vec<Held>) {
         self.remarks.extend(record.remarks);
+        self.sites.extend(record.sites);
+        self.debug_sites.extend(record.debug_sites);
         for (key, held) in record.parts.into_iter().zip(held) {
             if self.seen.insert(key) {
                 self.parts.push(key);
@@ -312,19 +309,23 @@ impl Joined {
         let record = Parts {
             schema: PARTS_SCHEMA,
             parts: self.parts,
-            sites: Vec::new(),
-            debug_sites: Vec::new(),
+            sites: self.sites,
+            debug_sites: self.debug_sites,
             remarks: self.remarks,
         };
         (record, self.held)
     }
 }
 
-fn load_parts(store: &Store, key: ContentHash) -> io::Result<Option<(Parts, Vec<Held>)>> {
+fn load_parts(
+    store: &Store,
+    key: ContentHash,
+    partition: bool,
+) -> io::Result<Option<(Parts, Vec<Held>)>> {
     let Some(record) = store.get(key)?.and_then(|bytes| decode::<Parts>(&bytes)) else {
         return Ok(None);
     };
-    if record.schema != PARTS_SCHEMA || record.parts.is_empty() {
+    if record.schema != PARTS_SCHEMA || (!partition && record.parts.is_empty()) {
         return Ok(None);
     }
     let mut held = Vec::with_capacity(record.parts.len());
@@ -531,75 +532,74 @@ pub(super) fn emit_release_image(
         remote: remote.as_deref(),
     };
     let exports = [instance.symbol()];
-    let (record, held) = match load_parts(store, unit)? {
+    let printed = std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_some();
+    let cached = if printed {
+        None
+    } else {
+        load_parts(store, unit, false)?
+    };
+    let (record, held) = match cached {
         Some(hit) => hit,
         None => {
-            let (mut record, held) = if closed_executable
-                && direct_release(target)
-                && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_none()
-            {
-                let ([module], facts) = core.take().expect("the Core unit is not yet lowered");
-                // Each partition's parts are held by its lowered module's key:
-                // an edit regenerates the partitions whose modules it changes.
-                let mut joined = Joined::default();
-                let mut stop = None;
-                let lowered = hirsel_llvm_lazy::lower_release(
-                    module,
-                    &facts[0],
-                    options.logical_charge_report.is_some(),
-                    partition_bound(),
-                    &mut |partition| {
-                        let made = (|| {
-                            let key = crate::native::key(
-                                "hirsel.core-release-partition.v1",
-                                &(
-                                    &generator,
-                                    runtime,
-                                    instance,
-                                    std_key,
-                                    lent_key,
-                                    partition.ir_key(),
-                                ),
-                            )?;
-                            if let Some(hit) = load_parts(store, key)? {
-                                return Ok(hit);
-                            }
-                            let made = generation
-                                .parts(|held| partition.emit(&exports, jobs, held, lend), &emit)?;
-                            store.put_keyed(key, &encode(&made.0)?)?;
-                            Ok::<_, NativeStop>(made)
-                        })();
-                        match made {
-                            Ok((record, held)) => Ok(joined.add(record, held)),
-                            Err(error) => {
-                                stop = Some(error);
-                                Err("a release partition stopped".into())
-                            }
+            let ([module], facts) = core.take().expect("the Core unit is not yet lowered");
+            let mut joined = Joined::default();
+            let mut stop = None;
+            let lowered = hirsel_llvm_lazy::lower_release(
+                module,
+                &facts[0],
+                target,
+                options.logical_charge_report.is_some(),
+                closed_executable,
+                partition_bound(),
+                &mut |partition| {
+                    let made = (|| {
+                        let key = partition
+                            .key
+                            .map(|input| {
+                                crate::native::key(
+                                    "hirsel.core-release-partition.v2",
+                                    &(
+                                        &generator,
+                                        instance,
+                                        std_key,
+                                        lent_key,
+                                        closed_executable,
+                                        input,
+                                    ),
+                                )
+                            })
+                            .transpose()?;
+                        if let Some(key) = key
+                            && let Some(hit) = load_parts(store, key, true)?
+                        {
+                            return Ok(hit);
                         }
-                    },
-                );
-                if let Some(error) = stop {
-                    return Err(error);
-                }
-                let lowered = lowered.map_err(emit)?;
-                drop(facts);
-                let (mut record, held) = joined.finish();
-                record.sites = lowered.sites;
-                record.debug_sites = lowered.debug_sites;
-                (record, held)
-            } else {
-                let (modules, facts) = core.take().expect("the Core unit is not yet lowered");
-                let unit = hirsel_llvm_lazy::Unit::Core {
-                    module: &modules[0],
-                    facts: &facts[0],
-                    observe_charge: options.logical_charge_report.is_some(),
-                    debug_lines: true,
-                };
-                let lowered = hirsel_llvm_lazy::lower_program(&[unit], target).map_err(emit)?;
-                drop(facts);
-                drop(modules);
-                generation.parts(|held| lowered.emit(&exports, jobs, held, lend), &emit)?
-            };
+                        #[cfg(test)]
+                        RELEASE_LOWERED.set(RELEASE_LOWERED.get() + usize::from(key.is_some()));
+                        let (lowered, sites) = partition.lower().map_err(emit)?;
+                        let (mut record, held) = generation
+                            .parts(|held| lowered.emit(&exports, jobs, held, lend), &emit)?;
+                        record.sites = sites.sites;
+                        record.debug_sites = sites.debug_sites;
+                        if let Some(key) = key {
+                            store.put_keyed(key, &encode(&record)?)?;
+                        }
+                        Ok::<_, NativeStop>((record, held))
+                    })();
+                    match made {
+                        Ok((record, held)) => Ok(joined.add(record, held)),
+                        Err(error) => {
+                            stop = Some(error);
+                            Err("a release partition stopped".into())
+                        }
+                    }
+                },
+            );
+            if let Some(error) = stop {
+                return Err(error);
+            }
+            lowered.map_err(emit)?;
+            let (mut record, held) = joined.finish();
             record.remarks.sort_unstable();
             store.put_keyed(unit, &encode(&record)?)?;
             (record, held)
@@ -736,6 +736,7 @@ mod tests {
 
 #[cfg(test)]
 std::thread_local! {
+    pub(crate) static RELEASE_LOWERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The partition bound in place of [`partition_instructions`]: a test
     /// lowers a small unit in partitions.
     ///
@@ -751,16 +752,4 @@ fn partition_bound() -> usize {
         return bound;
     }
     hirsel_llvm_lazy::core::partition_instructions()
-}
-
-/// Whether the direct release unit ([`hirsel_llvm_lazy::lower_release`]) emits
-/// for `target`. It lowers for x86-64 Linux only; other targets take the
-/// printed-IR path.
-fn direct_release(target: hirsel_core_layout::Target) -> bool {
-    match target {
-        hirsel_core_layout::Target::X86_64Linux => true,
-        hirsel_core_layout::Target::Aarch64Linux | hirsel_core_layout::Target::Aarch64Darwin => {
-            false
-        }
-    }
 }

@@ -91,11 +91,16 @@ impl FunctionEmitter<'_> {
                     let next = sites.next.entry(owner).or_default();
                     let ordinal = *next;
                     *next += 1;
-                    let name = hirsel_core_ir::source::release_site_symbol(&item, ordinal);
+                    let name = hirsel_core_ir::source::release_site_symbol(
+                        &item,
+                        ordinal,
+                        sites.partition,
+                    );
                     sites.bindings.push(hirsel_core_ir::source::ReleaseSite {
                         item,
                         start: anchor.start,
                         ordinal,
+                        partition: sites.partition,
                     });
                     name
                 })
@@ -167,6 +172,7 @@ pub(super) fn debug_plan(
     failures: &failure::Failures,
     call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
     release: bool,
+    partition: Option<u32>,
     members: Option<&[bool]>,
     next: &mut usize,
     sink: &mut dyn Sink,
@@ -189,7 +195,7 @@ pub(super) fn debug_plan(
             files.entry(anchor.item.0).or_insert_with(|| {
                 let item = &module.items[anchor.item.index()];
                 if release {
-                    let owner = hirsel_core_ir::source::release_debug_owner(item);
+                    let owner = hirsel_core_ir::source::release_debug_owner(item, partition);
                     *owners.entry(owner.clone()).or_insert_with(|| {
                         node(Metadata::File {
                             filename: owner.to_string(),
@@ -336,4 +342,66 @@ pub(super) fn debug_plan(
     sink.named_metadata("llvm.dbg.cu", &[unit]);
     sink.named_metadata("llvm.module.flags", &[dwarf_flag, debug_flag]);
     plan
+}
+
+/// Debug positions are numbered on first use, independently in each
+/// partition. The native and printed sinks resolve the same deferred nodes.
+#[cfg(hirsel_lazy_core)]
+pub(crate) struct ReleaseDebug {
+    items: std::rc::Rc<[hirsel_core_ids::DefPath]>,
+    partition: Option<u32>,
+    pending: std::collections::HashMap<usize, (u32, u32, usize)>,
+    ordinals: std::collections::HashMap<(u32, u32), u32>,
+    next: std::collections::HashMap<hirsel_core_ids::DefPath, u32>,
+    sites: Vec<source::ReleaseSite>,
+}
+
+#[cfg(hirsel_lazy_core)]
+impl ReleaseDebug {
+    pub(super) fn new(
+        items: std::rc::Rc<[hirsel_core_ids::DefPath]>,
+        partition: Option<u32>,
+    ) -> Self {
+        Self {
+            items,
+            partition,
+            pending: Default::default(),
+            ordinals: Default::default(),
+            next: Default::default(),
+            sites: Vec::new(),
+        }
+    }
+
+    pub(super) fn defer(&mut self, id: usize, item: u32, start: u32, scope: usize) {
+        self.pending.insert(id, (item, start, scope));
+    }
+
+    pub(super) fn location(&mut self, id: usize) -> Option<Metadata> {
+        let (item, start, scope) = self.pending.remove(&id)?;
+        let ordinal = *self.ordinals.entry((item, start)).or_insert_with(|| {
+            let item = &self.items[item as usize];
+            let next = self
+                .next
+                .entry(source::release_site_owner(item))
+                .or_default();
+            let ordinal = *next;
+            *next += 1;
+            self.sites.push(source::ReleaseSite {
+                item: item.clone(),
+                start,
+                ordinal,
+                partition: self.partition,
+            });
+            ordinal
+        });
+        Some(Metadata::Location {
+            line: u64::from(ordinal) + 1,
+            column: 1,
+            scope,
+        })
+    }
+
+    pub(super) fn sites(self) -> Vec<source::ReleaseSite> {
+        self.sites
+    }
 }

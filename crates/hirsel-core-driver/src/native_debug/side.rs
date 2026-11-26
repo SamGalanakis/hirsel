@@ -91,7 +91,7 @@ impl<'a> Sources<'a> {
             let item = sources.map.items.get(&binding.item).copied();
             let rows = sources
                 .release
-                .entry(release_debug_owner(&binding.item))
+                .entry(release_debug_owner(&binding.item, binding.partition))
                 .or_default();
             debug_assert_eq!(rows.len(), binding.ordinal as usize);
             rows.push(item.map(|item| (item, binding.start)));

@@ -660,8 +660,18 @@ pub(super) struct TextSink {
     allocations: String,
     code: String,
     bound: std::collections::HashMap<String, String>,
+    #[cfg(hirsel_lazy_core)]
+    release_debug: Option<super::sites::ReleaseDebug>,
 }
 impl TextSink {
+    #[cfg(hirsel_lazy_core)]
+    pub(super) fn release(debug: super::sites::ReleaseDebug) -> Self {
+        Self {
+            release_debug: Some(debug),
+            ..Self::default()
+        }
+    }
+
     pub fn finish(mut self) -> String {
         self.text.push_str(&self.metadata);
         self.text
@@ -679,27 +689,6 @@ fn scopes(out: &mut String, scoped: &Option<Scoped>) {
         }
     }
 }
-fn parameter(out: &mut String, p: &Parameter) {
-    write!(out, "{}{}", p.ty, p.extension.text()).unwrap();
-    if p.noalias {
-        out.push_str(" noalias nofree");
-    }
-    if p.readonly {
-        out.push_str(" readonly");
-    }
-    if p.dereferenceable != 0 {
-        write!(out, " dereferenceable({})", p.dereferenceable).unwrap();
-    }
-    if let Some(ty) = &p.sret {
-        write!(out, " sret({ty})").unwrap();
-    }
-    if let Some(ty) = &p.byval {
-        write!(out, " byval({ty})").unwrap();
-    }
-    if p.align != 0 {
-        write!(out, " align {}", p.align).unwrap();
-    }
-}
 pub(super) fn result_type(out: &mut String, sig: &FnSig) {
     out.push_str(sig.extension.text().trim_start());
     if sig.extension != Extension::None {
@@ -709,34 +698,6 @@ pub(super) fn result_type(out: &mut String, sig: &FnSig) {
         out.push_str("nonnull ");
     }
     write!(out, "{}", sig.result).unwrap();
-}
-fn function_attrs(out: &mut String, attrs: &FnAttrs) {
-    match attrs.inline {
-        Inline::Default => {}
-        Inline::Always => out.push_str(" alwaysinline"),
-        Inline::Never => out.push_str(" noinline"),
-    }
-    if attrs.cold {
-        out.push_str(" cold");
-    }
-    if attrs.nounwind {
-        out.push_str(" nounwind");
-    }
-    if attrs.argmem_read {
-        out.push_str(" memory(argmem: read)");
-    }
-    if attrs.map_probe {
-        out.push_str(" \"hirsel-map-probe\"");
-    }
-    if !attrs.carriers.is_empty() {
-        write!(out, " \"hirsel-carriers\"=\"{}\"", attrs.carriers).unwrap();
-    }
-    if let Some(level) = attrs.level {
-        write!(out, " \"target-features\"=\"{}\"", level.llvm_features()).unwrap();
-    }
-    if let Some(scope) = attrs.subprogram {
-        write!(out, " !dbg !{scope}").unwrap();
-    }
 }
 fn md_string(out: &mut String, text: &str) {
     out.push('!');
@@ -795,6 +756,9 @@ fn rebind(code: &str, bound: &std::collections::HashMap<String, String>) -> Stri
     out
 }
 
+mod text_attrs;
+use text_attrs::{function_attrs, parameter};
+
 impl Sink for TextSink {
     fn global(&mut self, g: &Global) {
         let out = &mut self.text;
@@ -846,6 +810,7 @@ impl Sink for TextSink {
     fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs) {
         let out = &mut self.text;
         out.push_str("declare ");
+        out.push_str(attrs.linkage.text());
         result_type(out, sig);
         out.push(' ');
         write_global(out, name).unwrap();
@@ -861,6 +826,14 @@ impl Sink for TextSink {
         out.push('\n');
     }
     fn metadata(&mut self, id: usize, node: &Metadata) {
+        #[cfg(hirsel_lazy_core)]
+        if let Metadata::ReleaseLocation { item, start, scope } = node {
+            self.release_debug
+                .as_mut()
+                .unwrap()
+                .defer(id, *item, *start, *scope);
+            return;
+        }
         let out = &mut self.metadata;
         write!(out, "!{id} = ").unwrap();
         match node {
@@ -923,7 +896,7 @@ impl Sink for TextSink {
                     .unwrap()
                 }
             }
-            Metadata::ReleaseLocation { .. } => unreachable!("release sites use the native sink"),
+            Metadata::ReleaseLocation { .. } => unreachable!("release positions are deferred"),
             Metadata::LexicalBlockFile { scope, file } => write!(
                 out,
                 "!DILexicalBlockFile(scope: !{scope}, file: !{file}, discriminator: 0)"
@@ -989,6 +962,15 @@ impl Sink for TextSink {
         self.bound.insert(n, v);
     }
     fn instruction(&mut self, result: Option<Local>, op: Operation<'_>, location: Option<usize>) {
+        #[cfg(hirsel_lazy_core)]
+        if let Some(id) = location
+            && let Some(node) = self
+                .release_debug
+                .as_mut()
+                .and_then(|debug| debug.location(id))
+        {
+            self.metadata(id, &node);
+        }
         let out = &mut self.code;
         out.push_str("  ");
         if let Some(name) = result {

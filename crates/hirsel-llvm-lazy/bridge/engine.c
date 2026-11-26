@@ -31,9 +31,8 @@ typedef void (*HirselLlvmSourceRemark)(void *, unsigned, const char *, size_t, c
                                        const char *, size_t, unsigned);
 extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine,
     HirselLlvmSourceRemark source, void *receiver);
-extern LLVMBool hirsel_llvm_large_release(LLVMModuleRef module);
 extern LLVMBool hirsel_llvm_release_partition(LLVMModuleRef module);
-extern LLVMErrorRef hirsel_llvm_optimize_large_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
+extern LLVMErrorRef hirsel_llvm_optimize_release_partition(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
     LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
     const uint8_t *lent, size_t lent_len);
@@ -553,7 +552,6 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     // unit's are once internal, but its other partitions call them by name:
     // they stay global and hidden.
     int partition = hirsel_llvm_release_partition(module);
-    int large = hirsel_llvm_large_release(module);
     if (export_count) {
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
             // A partition declares the bodies it calls in the others hidden;
@@ -587,8 +585,8 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     LLVMErrorRef e = LLVMErrorSuccess;
     // A library (`lend`) is optimised whole however large: every program
     // runs its code and inlines its lent bodies, and it is lowered once.
-    if (speed && !lend && (partition || large)) {
-        e = hirsel_llvm_optimize_large_release(module, machine);
+    if (speed && !lend && partition) {
+        e = hirsel_llvm_optimize_release_partition(module, machine);
     } else if (speed) {
         unsigned hint = LLVMGetEnumAttributeKindForName("inlinehint", 10);
         unsigned never = LLVMGetEnumAttributeKindForName("noinline", 8);

@@ -33,6 +33,18 @@ pub fn fixed_size(value: &(impl Serialize + ?Sized)) -> io::Result<u64> {
     Ok(size.0)
 }
 
+/// Hash the fixed-width encoding without allocating the encoded record.
+pub fn hash_fixed(
+    domain: &str,
+    value: &(impl Serialize + ?Sized),
+) -> io::Result<crate::ContentHash> {
+    crate::ContentHash::of_stream(domain, fixed_size(value)?, |digest| {
+        let mut buffered = io::BufWriter::new(digest);
+        write_fixed(&mut buffered, value)?;
+        buffered.flush()
+    })
+}
+
 pub fn read_fixed<T: de::DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
     read::<false, T>(bytes)
 }

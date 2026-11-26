@@ -405,7 +405,11 @@ pub(super) fn define_release(
         if let Some(item) = sources.items.get(&binding.item) {
             absolute(
                 object,
-                hirsel_core_ir::source::release_site_symbol(&binding.item, binding.ordinal),
+                hirsel_core_ir::source::release_site_symbol(
+                    &binding.item,
+                    binding.ordinal,
+                    binding.partition,
+                ),
                 starts[item.file as usize] + u64::from(item.file_offset) + u64::from(binding.start),
             );
         }

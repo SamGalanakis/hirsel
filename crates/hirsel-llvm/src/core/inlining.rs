@@ -16,6 +16,11 @@ struct CallbackRole {
 pub(super) struct CallbackSites(Vec<CallbackRole>);
 
 impl CallbackSites {
+    #[cfg(hirsel_lazy_core)]
+    pub(super) fn roles(&self) -> impl Iterator<Item = (bool, bool)> + '_ {
+        self.0.iter().map(|role| (role.caller, role.output_loop))
+    }
+
     pub(super) fn new(module: &Module, step_variants: &BTreeMap<FuncId, FuncId>) -> Self {
         Self(
             module

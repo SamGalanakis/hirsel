@@ -12,13 +12,14 @@ pub(super) fn printed_oracle(
     dir: &std::path::Path,
     module: &Module,
     native: &str,
+    anonymous: bool,
+    mut text: sink::TextSink,
     produce: impl FnOnce(&mut sink::TextSink) -> Result<()>,
 ) -> Result<()> {
     use std::io::Write as _;
-    let mut text = sink::TextSink::default();
     produce(&mut text)?;
     let text = text.finish();
-    let parsed = crate::construction::print_text(&text).map_err(Error::Llvm)?;
+    let parsed = crate::construction::print_text(&text, anonymous).map_err(Error::Llvm)?;
     let identity = module
         .instances
         .first()

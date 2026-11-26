@@ -1,5 +1,4 @@
 #include "builder.h"
-#include "key.h"
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm-c/TargetMachine.h>
@@ -80,20 +79,24 @@ static void unit_forward(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
     for (StringRef name : names) { text += name; text += '\0'; }
     output(out, text);
 }
-// The module's key (key.h): what its bitcode records, with no bitcode written.
-static void module_key(LLVMModuleRef module, HirselBuilderOutput *out) {
-    hirsel_key::Digest key = hirsel_key::module_key(*unwrap(module));
-    output(out, StringRef(reinterpret_cast<const char *>(key.data()), key.size()));
-}
 static void print(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
     std::string text; raw_string_ostream stream(text); u->module->print(stream, nullptr); output(out, text);
 }
-static void print_text(const char *data, size_t len, HirselBuilderOutput *out) {
+static void print_text(const char *data, size_t len, uint8_t anonymous, HirselBuilderOutput *out) {
     LLVMContext context; SMDiagnostic diagnostic;
     auto buffer = MemoryBuffer::getMemBufferCopy(StringRef(data, len), "hirsel-core");
     auto module = parseAssembly(buffer->getMemBufferRef(), diagnostic, context);
     if (!module) { std::string text; raw_string_ostream stream(text); diagnostic.print("hirsel", stream); output(out, text, true); return; }
     module->setModuleIdentifier("hirsel-core");
+    if (anonymous) {
+        for (Function &function : *module) {
+            for (Argument &argument : function.args()) argument.setName("");
+            for (BasicBlock &block : function) {
+                block.setName("");
+                for (Instruction &inst : block) inst.setName("");
+            }
+        }
+    }
     std::string text; raw_string_ostream stream(text); module->print(stream, nullptr); output(out, text);
 }
 static LLVMTypeRef integer_type(HirselLlvmBuilder *u, unsigned bits) { return wrap(IntegerType::get(u->context, bits)); }
@@ -383,7 +386,7 @@ static LLVMMetadataRef di_lexical_block_file(HirselLlvmBuilder *u, LLVMMetadataR
 }
 extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
     static const HirselLlvmBuilderApi api = {
-        context_new, context_drop, unit_new, unit_drop, unit_take, module_drop, module_key, print, print_text,
+        context_new, context_drop, unit_new, unit_drop, unit_take, module_drop, print, print_text,
         integer_type, float_type, pointer_type, void_type, metadata_type, array_type, vector_type, struct_type,
         integer, poison, zero, constant_cast, constant_add, constant_sub, constant_struct, constant_bytes,
         global_ref, global, function, attribute, string_attribute, finish_declaration, subprogram,

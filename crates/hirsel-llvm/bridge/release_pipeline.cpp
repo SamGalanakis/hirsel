@@ -666,9 +666,6 @@ namespace {
 // (`core::emit_release_unit`): its bodies take the large pipeline, and the
 // bodies it shares with the unit's other partitions stay hidden globals.
 constexpr StringLiteral PartitionMark = "hirsel.partition";
-// A unit over the partition bound that its target lowers whole
-// (`core::emit_module`).
-constexpr StringLiteral LargeMark = "hirsel.large-release";
 // Preserve call boundaries. Even always-inline helpers can expand this much
 // IR past the memory budget. Std calls use the side's objects.
 constexpr StringLiteral LargeFunctionPasses =
@@ -682,17 +679,7 @@ extern "C" LLVMBool hirsel_llvm_release_partition(LLVMModuleRef module) {
     return unwrap(module)->getNamedMetadata(PartitionMark) != nullptr;
 }
 
-// Whether `module` is a unit over the partition bound lowered whole, which
-// takes the large pipeline as a partition does. The mark names no node and
-// is dropped here, so it never reaches the module's parts.
-extern "C" LLVMBool hirsel_llvm_large_release(LLVMModuleRef module) {
-    NamedMDNode *mark = unwrap(module)->getNamedMetadata(LargeMark);
-    if (!mark) return 0;
-    unwrap(module)->eraseNamedMetadata(mark);
-    return 1;
-}
-
-extern "C" LLVMErrorRef hirsel_llvm_optimize_large_release(LLVMModuleRef module, LLVMTargetMachineRef machine) {
+extern "C" LLVMErrorRef hirsel_llvm_optimize_release_partition(LLVMModuleRef module, LLVMTargetMachineRef machine) {
     return runPasses(module, machine, "release",
         ("globaldce,function<eager-inv>(" + LargeFunctionPasses + "),globaldce").str());
 }

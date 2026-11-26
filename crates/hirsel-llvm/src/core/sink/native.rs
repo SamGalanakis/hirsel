@@ -1,10 +1,10 @@
 //! The product sink: each item and instruction becomes the LLVM object the
 //! assembly parser would build for the text producer's line, in the same
 //! order. Forward locals are typed placeholders replaced at their definition.
+use super::super::sites::ReleaseDebug;
 use super::*;
 use crate::construction::{self as llvm, Api, Output, Raw};
-use hirsel_core_ids::DefPath;
-use hirsel_core_ir::source::{ReleaseSite, release_debug_owner};
+use hirsel_core_ir::source::ReleaseSite;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -37,45 +37,6 @@ enum TempSlot {
     Empty,
     Pending(Raw),
     Defined(Raw),
-}
-
-/// A release unit's debug lines: each source position's ordinal among its
-/// owner's, numbered in the order the unit's bodies first use them. A
-/// partitioned unit passes it from each partition's sink to the next.
-#[derive(Default)]
-pub(crate) struct ReleaseDebug {
-    items: Vec<DefPath>,
-    pending: HashMap<usize, (u32, u32, usize)>,
-    ordinals: HashMap<(u32, u32), u32>,
-    next: HashMap<DefPath, u32>,
-    sites: Vec<ReleaseSite>,
-}
-
-impl ReleaseDebug {
-    pub fn new(items: Vec<DefPath>) -> Self {
-        Self {
-            items,
-            ..Self::default()
-        }
-    }
-    pub fn sites(self) -> Vec<ReleaseSite> {
-        self.sites
-    }
-    fn line(&mut self, item: u32, start: u32) -> u64 {
-        let ordinal = self.ordinals.entry((item, start)).or_insert_with(|| {
-            let item = &self.items[item as usize];
-            let next = self.next.entry(release_debug_owner(item)).or_default();
-            let ordinal = *next;
-            *next += 1;
-            self.sites.push(ReleaseSite {
-                item: item.clone(),
-                start,
-                ordinal,
-            });
-            ordinal
-        });
-        u64::from(*ordinal) + 1
-    }
 }
 
 pub(crate) struct NativeSink {
@@ -126,12 +87,10 @@ impl NativeSink {
         sink
     }
 
-    /// The unit's debug lines so far; positions this sink's metadata held
-    /// unresolved belong to it alone.
-    pub fn take_release_debug(&mut self) -> ReleaseDebug {
-        let mut debug = self.release_debug.take().unwrap();
-        debug.pending.clear();
-        debug
+    pub fn release_debug_sites(&mut self) -> Vec<ReleaseSite> {
+        self.release_debug
+            .take()
+            .map_or_else(Vec::new, ReleaseDebug::sites)
     }
 
     /// Each global the unit references and has not yet defined or declared,
@@ -146,17 +105,9 @@ impl NativeSink {
 
     fn debug_location(&mut self, id: usize) -> Raw {
         if let Some(debug) = &mut self.release_debug
-            && let Some((item, start, scope)) = debug.pending.remove(&id)
+            && let Some(node) = debug.location(id)
         {
-            let line = debug.line(item, start);
-            self.metadata(
-                id,
-                &Metadata::Location {
-                    line,
-                    scope,
-                    column: 1,
-                },
-            );
+            self.metadata(id, &node);
         }
         self.md(id)
     }
@@ -585,8 +536,7 @@ impl Sink for NativeSink {
                     self.release_debug
                         .as_mut()
                         .unwrap()
-                        .pending
-                        .insert(id, (*item, *start, *scope));
+                        .defer(id, *item, *start, *scope);
                     return;
                 }
                 Metadata::LexicalBlockFile { scope, file } => {

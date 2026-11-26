@@ -30,9 +30,8 @@ pub(crate) struct Api {
     pub unit_drop: unsafe extern "C" fn(Raw),
     pub unit_take: unsafe extern "C" fn(Raw, *mut Output) -> Raw,
     pub module_drop: unsafe extern "C" fn(Raw),
-    pub module_key: unsafe extern "C" fn(Raw, *mut Output),
     pub print: unsafe extern "C" fn(Raw, *mut Output),
-    pub print_text: unsafe extern "C" fn(*const c_char, usize, *mut Output),
+    pub print_text: unsafe extern "C" fn(*const c_char, usize, u8, *mut Output),
     pub integer_type: unsafe extern "C" fn(Raw, u32) -> Raw,
     pub float_type: unsafe extern "C" fn(Raw, u32) -> Raw,
     pub pointer_type: unsafe extern "C" fn(Raw) -> Raw,
@@ -173,13 +172,6 @@ impl NativeModule {
     pub(crate) fn consume(&self) {
         self.consumed.set(true);
     }
-    /// What the module's bitcode records, read from the module in memory.
-    pub(crate) fn ir_key(&self) -> hirsel_core_ids::ContentHash {
-        let mut out = Output::default();
-        unsafe { (self.context.api.module_key)(self.raw, &mut out) };
-        let key = output_bytes(out).0;
-        hirsel_core_ids::ContentHash(key.try_into().expect("a module key is 32 bytes"))
-    }
 }
 impl Drop for NativeModule {
     fn drop(&mut self) {
@@ -191,11 +183,11 @@ impl Drop for NativeModule {
     }
 }
 /// The printed module of LLVM text parsed in its own fresh context.
-pub(crate) fn print_text(text: &str) -> Result<String, String> {
+pub(crate) fn print_text(text: &str, anonymous: bool) -> Result<String, String> {
     let api = crate::loader::construction_api()?;
     let mut out = Output::default();
     // SAFETY: text stays borrowed for the synchronous parser/printer call.
-    unsafe { (api.print_text)(text.as_ptr().cast(), text.len(), &mut out) };
+    unsafe { (api.print_text)(text.as_ptr().cast(), text.len(), anonymous.into(), &mut out) };
     output(out)
 }
 pub(crate) fn output_bytes(out: Output) -> (Vec<u8>, bool) {

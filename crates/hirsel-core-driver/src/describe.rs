@@ -224,17 +224,27 @@ mod tests {
     #[test]
     fn place_run_bounded_kills_and_reaps_after_stdout_closes() {
         let root = tempfile::tempdir().unwrap();
-        let child = script(
-            root.path(),
-            "echo $$ > \"$0.pid\"\nexec 1>&-\nexec python3 -c 'import time; time.sleep(2)'",
-        );
+        let pid = root.path().join("describe-child.pid");
+        let exec = [
+            "-c".into(),
+            "echo $$ > \"$1\"\nexec 1>&-\nexec python3 -c 'import time; time.sleep(2)'".into(),
+            "describe-child".into(),
+            pid.to_str().unwrap().into(),
+        ];
         let start = Instant::now();
         assert!(matches!(
-            describe_child(&child, 4096, Duration::from_millis(100)),
+            child(
+                Path::new("/bin/sh"),
+                4096,
+                Duration::from_millis(100),
+                None,
+                None,
+                &exec,
+            ),
             Err(DescribeError::PlaceTimedOut)
         ));
         assert!(start.elapsed() < Duration::from_secs(1));
-        let pid = std::fs::read_to_string(root.path().join("describe-child.pid")).unwrap();
+        let pid = std::fs::read_to_string(&pid).unwrap();
         assert!(
             crate::host::zombie(pid.trim().parse().unwrap()).is_none(),
             "child was not reaped"

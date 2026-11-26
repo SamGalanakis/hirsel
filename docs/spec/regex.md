@@ -12,7 +12,7 @@ This chapter specifies std `regex`: regular expressions over `String`. The API u
 
 std regex has four values, and every search operation takes a regex, a cache and a haystack.
 
-```hirsel unbuilt
+```hirsel signatures std/regex
 pub opaque type Regex: shareable + send
 pub opaque type Cache: send
 pub opaque type Groups: send
@@ -30,7 +30,7 @@ pub type Error = Syntax(SyntaxError) | TooBig(u64)
 
 Each `Regex` holds an identity from `unique.new()` ([MEM-18](memory.md#mem-18-pools-are-library-code)), made by `new`. `cache(re, ..)` and `groups(re)` record it, and `clone` of a regex, cache or groups keeps it. Two regexes compiled separately from equal patterns have different identities. **Passing a `Cache` or `Groups` made for another regex is a failure** with primary cause `Fail` (RE-7).
 
-```hirsel unbuilt
+```hirsel signatures std/regex
 pub fn new(pattern: String) -> Result[Regex, Error]
 pub fn size(re: Regex) -> u64
 pub fn cache(re: Regex, budget: u64) -> Cache

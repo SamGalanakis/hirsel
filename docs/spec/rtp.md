@@ -106,17 +106,17 @@ levels, SDES items other than CNAME, and libwebrtc's second-generation loss-base
 
 ## RTP-1: The fixed header
 
-```hirsel unbuilt
+```hirsel signatures rtp/header
 // module header
 pub type Error = Short | Version | Csrc | Extension | Padding | Buffer | Index
 pub type Block = NoBlock | OneByte(at: u64, len: u64) | TwoByte(at: u64, len: u64) | Opaque(profile: u16, at: u64, len: u64)
-pub type Header = Header(marker: bool, pt: u8, seq: u16, ts: u32, ssrc: u32, csrcs: u8, padded: bool, block: Block, end: u64, len: u64)
-pub type Fields = Fields(marker: bool, pt: u8, seq: u16, ts: u32, ssrc: u32)
+pub type Header { marker: bool, pt: u8, seq: u16, ts: u32, ssrc: u32, csrcs: u8, padded: bool, block: Block, end: u64, len: u64 }
+pub type Fields { marker: bool, pt: u8, seq: u16, ts: u32, ssrc: u32 }
 pub type WriteError = Capacity(Capacity) | Form
 
 pub fn parse(pkt: Bytes) -> Result[Header, Error]
-pub fn payload(h: header.Header, pkt: Bytes) -> Result[(u64, u64), Error]
-pub fn csrc(h: header.Header, pkt: Bytes, i: u8) -> Result[u32, Error]
+pub fn payload(h: Header, pkt: Bytes) -> Result[(u64, u64), Error]
+pub fn csrc(h: Header, pkt: Bytes, i: u8) -> Result[u32, Error]
 pub fn write(f: Fields, w: View[ext.ExtWriter], mut out: Bytes) -> Result[u64, WriteError]
 ```
 
@@ -170,7 +170,7 @@ extension values written.
 
 ## RTP-2: Extended sequence numbers
 
-```hirsel core
+```hirsel signatures rtp/seq
 // module seq
 pub type Index = Index(u64) | Before | Beyond
 pub fn nearest(highest: i64, wire: u64, bits: u8) -> i64
@@ -236,13 +236,13 @@ the only ordering any stateful operation uses.
 
 ## RTP-3: Header extensions
 
-```hirsel unbuilt
+```hirsel signatures rtp/ext
 // module ext
-pub type Kind = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq | DependencyDescriptor
+pub type Kind: key = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq | DependencyDescriptor
     | VideoLayersAllocation | PlayoutDelay | VideoOrientation | AbsCaptureTime
-pub type Form = OneOnly | TwoOnly | Mixed
+pub type Form: key = OneOnly | TwoOnly | Mixed
 pub type Error = Overrun | Value(Kind) | Buffer
-pub type Element = Element(id: u8, at: u64, len: u64)
+pub type Element { id: u8, at: u64, len: u64 }
 pub type MapError = BadId | IdTaken | KindTaken | Full | Value(Kind)
 pub opaque type ExtMap
 pub opaque type ExtWriter
@@ -391,15 +391,15 @@ element a receiver of that negotiation would misread.
 
 ## RTP-4: RTCP compound packets
 
-```hirsel core
+```hirsel signatures rtp/rtcp
 // module rtcp
-pub type Mode = Compound | Reduced
-pub type Error = Version | Length | Padding | NotCompound | Body(u8) | Buffer | Index
-pub type Item = Sr(SenderInfo, u8) | Rr(u32, u8) | Sdes(u8) | Bye(u8, Option[(u64, u64)])
+pub type Mode: key = Compound | Reduced
+pub type Error: key = Version | Length | Padding | NotCompound | Body(u8) | Buffer | Index
+pub type Item: key = Sr(SenderInfo, u8) | Rr(u32, u8) | Sdes(u8) | Bye(u8, Option[(u64, u64)])
     | Nack(u32, u32) | Twcc(u32, u32) | Pli(u32, u32) | Fir(u32) | Other(u8, u8)
-pub type Packet = Packet(item: Item, at: u64, body: u64, end: u64, len: u64)
-pub type SenderInfo = SenderInfo(ssrc: u32, ntp: u64, rtp: u32, packets: u32, octets: u32)
-pub type Block = Block(ssrc: u32, fraction: u8, lost: i32, highest: u32, jitter: u32, lsr: u32, dlsr: u32)
+pub type Packet { item: Item, at: u64, body: u64, end: u64, len: u64 }
+pub type SenderInfo: key { ssrc: u32, ntp: u64, rtp: u32, packets: u32, octets: u32 }
+pub type Block: key { ssrc: u32, fraction: u8, lost: i32, highest: u32, jitter: u32, lsr: u32, dlsr: u32 }
 pub type WriteError = Capacity(Capacity) | Unrepresentable
 
 pub fn is_rtcp(pkt: Bytes) -> bool
@@ -508,9 +508,9 @@ inputs, and a refusal appends nothing.
 
 ## RTP-5: Reception statistics, reports and round-trip time
 
-```hirsel unbuilt
+```hirsel signatures rtp/stats
 // module stats
-pub type Seen = Counted | Held | Restarted
+pub type Seen: key = Counted | Held | Restarted
 pub opaque type Received
 pub opaque type Sent
 
@@ -518,11 +518,11 @@ pub fn received(clock: u32, first: u64, first_ts: i64, at_ns: u64) -> Received
 pub fn on_packet(mut r: Received, index: u64, ts: i64, at_ns: u64) -> Seen
 pub fn on_sr(mut r: Received, info: rtcp.SenderInfo, at_ns: u64)
 pub fn report(mut r: Received, ssrc: u32, now_ns: u64) -> rtcp.Block
-pub fn rtt(b: Block, ntp_now: u64) -> Option[u64]
+pub fn rtt(b: rtcp.Block, ntp_now: u64) -> Option[u64]
 
 pub fn sent(clock: u32) -> Sent
 pub fn on_sent(mut s: Sent, payload: u64)
-pub fn sender_info(s: Sent, ssrc: u32, ntp_now: u64, rtp_now: u32) -> SenderInfo
+pub fn sender_info(s: Sent, ssrc: u32, ntp_now: u64, rtp_now: u32) -> rtcp.SenderInfo
 ```
 
 **Receiving.** A `Received` follows one incoming SSRC's packets on the wire, from its first
@@ -586,15 +586,15 @@ the bit, across reordering, duplicates, restarts and wraps. The round-trip time 
 
 ## RTP-6: Loss tracking, NACK and keyframe requests
 
-```hirsel core
+```hirsel signatures rtp/loss
 // module loss
-pub type NackConfig = NackConfig(window: u32, retry_ns: u64, tries: u8, max_age_ns: u64)
-pub type Gap = Tracked | Reset
-pub type Due = Done(Option[u64]) | More
+pub type NackConfig { window: u32, retry_ns: u64, tries: u8, max_age_ns: u64 }
+pub type Gap: key = Tracked | Reset
+pub type Due: key = Done(Option[u64]) | More
 pub opaque type Losses
 pub opaque type Keyframes
-pub type Why = Loss | Switch
-pub type Request = Pli | Fir(u8)
+pub type Why: key = Loss | Switch
+pub type Request: key = Pli | Fir(u8)
 
 pub fn losses(c: NackConfig, first: u64, at_ns: u64) -> Result[Losses, Capacity]
 pub fn on_packet(mut l: Losses, index: u64, at_ns: u64) -> Gap
@@ -669,7 +669,7 @@ FIR, and no two FIRs sent carry the same sequence number until it wraps.
 
 ## RTP-7: Retransmission history and RTX
 
-```hirsel unbuilt
+```hirsel signatures rtp/history
 // module history
 pub type Lookup = Found(u64) | Missing | Throttled | BeforeSwitch
 pub opaque type History[P]
@@ -677,15 +677,16 @@ pub opaque type History[P]
 pub fn history[P](slots: u32, max_age_ns: u64) -> Result[History[P], Capacity]
 pub fn put[P](mut h: History[P], index: u64, at_ns: u64, take p: P) -> Option[P]
 pub fn get[P](mut h: History[P], index: u64, now_ns: u64, min_resend_ns: u64) -> Lookup
-pub fn entry[P](h: History[P], index: u64) -> Option[View[P]]
+pub fn entry[P](h: History[P], index: u64) -> Option[View[P]] in h
 pub fn gate[P](mut h: History[P], index: u64)
 pub fn clear[P](mut h: History[P]) -> u64
+```
 
-// module rtx
+```hirsel signatures rtp/rtx
 pub type Rtx = Repair(u16, u64) | Probe
 pub fn unwrap(h: header.Header, pkt: Bytes) -> Result[Rtx, header.Error]
-pub fn write(f: Fields, w: View[ExtWriter], osn: u16, pre: Bytes, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, WriteError]
-pub fn write_probe(f: Fields, w: View[ExtWriter], pad: u8, mut out: Bytes) -> Result[u64, WriteError]
+pub fn write(f: header.Fields, w: View[ext.ExtWriter], osn: u16, pre: Bytes, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, header.WriteError]
+pub fn write_probe(f: header.Fields, w: View[ext.ExtWriter], pad: u8, mut out: Bytes) -> Result[u64, header.WriteError]
 ```
 
 **History.** A `History[P]` remembers what a stream sent, so a NACK can be answered. `P` is
@@ -780,9 +781,9 @@ repair.
 
 ## RTP-8: Transport-wide sequence numbers and feedback
 
-```hirsel unbuilt
+```hirsel signatures rtp/twcc
 // module twcc
-pub type Acked = Acked(index: u64, sent_ns: u64, size: u32, arrived_us: Option[i64])
+pub type Acked: key { index: u64, sent_ns: u64, size: u32, arrived_us: Option[i64] }
 pub type Error = Prefix | Chunk | Symbol | Deltas | Tail | Capacity(Capacity) | Buffer
 pub opaque type SendLog
 pub opaque type RecvLog
@@ -793,7 +794,7 @@ pub fn parse(pkt: Bytes, p: rtcp.Packet) -> Result[u32, Error]
 pub fn on_feedback(mut s: SendLog, pkt: Bytes, p: rtcp.Packet, max: u32, mut out: List[Acked]) -> Result[u64, Error]
 
 pub fn recv_log(slots: u32) -> Result[RecvLog, Capacity]
-pub fn on_packet(mut r: RecvLog, seq: u16, at_ns: u64)
+pub fn on_packet(mut r: RecvLog, number: u16, at_ns: u64)
 pub fn write(mut r: RecvLog, sender: u32, media: u32, max: u64, mut out: Bytes) -> Result[u64, Capacity]
 ```
 
@@ -886,16 +887,16 @@ receipt twice or turn it into a loss, and a refusal for room changes nothing.
 
 ## RTP-9: Bandwidth estimation
 
-```hirsel unbuilt
+```hirsel signatures rtp/bwe
 // module bwe
-pub type Usage = Normal | Overuse | Underuse
-pub type Config = Config(start_bps: u64, min_bps: u64, max_bps: u64)
+pub type Usage: key = Normal | Overuse | Underuse
+pub type Config { start_bps: u64, min_bps: u64, max_bps: u64 }
 pub opaque type Bwe
 
 pub fn bwe(c: Config) -> Bwe
 pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: Option[u64])
 pub fn target(b: Bwe) -> u64
-pub type Cluster = Cluster(id: u32, rate_bps: u64, packets: u32, min_ns: u64)
+pub type Cluster: key { id: u32, rate_bps: u64, packets: u32, min_ns: u64 }
 pub fn probe(mut b: Bwe, want_bps: u64, now_ns: u64) -> Option[Cluster]
 pub fn probe_sent(mut b: Bwe, id: u32, index: u64)
 ```
@@ -1126,9 +1127,9 @@ it stays at the offered rate. The arithmetic is the text above, to the bit.
 
 ## RTP-10: Pacer
 
-```hirsel unbuilt
+```hirsel signatures rtp/pacer
 // module pacer
-pub type Class = Audio | Retransmit | Video | Padding
+pub type Class: key = Audio | Retransmit | Video | Padding
 pub type Next[Q] = Send(Q) | Probe(u32, u8) | Pad(u8) | Wait(u64) | Idle
 pub opaque type Pacer[Q]
 
@@ -1203,9 +1204,9 @@ padding packet is representable. A full pacer refuses explicitly.
 
 ## RTP-11: Stream rewriting and layer switching
 
-```hirsel unbuilt
+```hirsel signatures rtp/rewrite
 // module rewrite
-pub type Unit = Unit(start: bool, end: bool, keyframe: bool, needs: u32, switches: u32, frame: u16)
+pub type Unit { start: bool, end: bool, keyframe: bool, needs: u32, switches: u32, frame: u16 }
 pub type Target = Off | Layer(source: u32, target: u8)
 pub type TargetError = Unrepresentable()
 pub type Out = Forward(u64, u32) | Late(u64, u32) | Drop | Wait
@@ -1221,8 +1222,9 @@ pub fn pending(r: Rewrite) -> Option[u32]
 pub fn paddable(r: Rewrite) -> bool
 pub fn pad(mut r: Rewrite) -> Option[(u64, u32)]
 pub fn close(mut r: Rewrite)
+```
 
-// module counter
+```hirsel signatures rtp/counter
 pub type Mode = Compact | Translate
 pub type CounterError = Absent | Width | Full
 pub opaque type Counter
@@ -1526,7 +1528,7 @@ ratio is quoted.
 
 ## RTP-13: Redundant audio (RED)
 
-```hirsel core
+```hirsel signatures rtp/red
 // module red
 pub type Error: key = Short | Overrun
 pub type Block { pt: u8, offset: u16, at: u64, len: u64 }
@@ -1606,7 +1608,7 @@ are not taken.
 
 ## RTP-14: FlexFEC-03
 
-```hirsel unbuilt
+```hirsel signatures rtp/fec
 // module fec
 pub const HEADER: u64 = 20
 pub const SPAN: u16 = 15
@@ -1617,7 +1619,7 @@ pub opaque type Group
 pub fn group() -> Result[Group, Capacity]
 pub fn count(g: Group) -> u8
 pub fn clear(mut g: Group)
-pub fn protect(mut g: Group, m: ext.ExtMap, pkt: Bytes, size: u8) -> Result[bool, Refusal]
+pub fn protect(mut g: Group, m: ext.ExtMap, pkt: Bytes, limit: u8) -> Result[bool, Refusal]
 pub fn payload_len(g: Group) -> u64
 pub fn timestamp(g: Group) -> u32
 pub fn write(mut g: Group, mut out: Bytes) -> Result[u64, Capacity]

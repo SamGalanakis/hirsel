@@ -2328,16 +2328,16 @@ the accepted socket for the bounded read, then rejoins it under NET-7.
 
 ### The header: required, checked, consumed exactly
 
-```hirsel unbuilt
+```hirsel signatures std/proxy
 // package std, module proxy
 pub type Header { source: Addr, destination: Addr }  // the client, and the address it dialed
 pub type Refusal = Untrusted | Missing | Malformed | Local | Family | TooLong | Silent | Ended | Failed(NetError)
 pub type Step = Need(u64) | Done(Header, u64)  // total bytes needed so far; or the header and its length
-pub type Config { trusted: List[ingress_policy.Prefix], header_max: u64, header_ms: u64 }
+pub type Config: shareable + send { trusted: List[ingress_policy.Prefix], header_max: u64, header_ms: u64 }
 
 pub fn config(trusted: List[ingress_policy.Prefix], header_max: u64, header_ms: u64) -> Result[Config, ()]
 pub fn step(b: Bytes, header_max: u64) -> Result[Step, Refusal]  // sans-IO; slice U6
-pub fn accept(take s: Socket, peer: Addr, c: Config, clock: Clock, accepted_ns: u64) -> Result[(Socket, Header), Refusal] waits
+pub fn accept(take s: Socket, peer: Addr, c: Config, time: Clock, accepted_ns: u64) -> Result[(Socket, Header), Refusal] waits
 ```
 
 `config` refuses an empty `trusted` list, since such a listener could accept nothing. It also

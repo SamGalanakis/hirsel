@@ -148,7 +148,7 @@ Not taken, with the reason:
 The package's public types and operations are the ones below. Modules are `sframe` (header,
 keys, seal and open, window, ratchet) and `ranges` (layouts, escaping, codec rules).
 
-```hirsel unbuilt
+```hirsel signatures sframe/sframe
 // module sframe
 pub type Suite = Aes128GcmSha256_128()
 pub fn suite_id(s: Suite) -> u16                     // 0x0004
@@ -173,7 +173,7 @@ pub type Sealed { kid: u64, ctr: u64, len: u64 }
 pub type Opened { kid: u64, ctr: u64, len: u64 }
 pub type Mark { ctr: u64, volume: u64 }
 
-pub type Sender
+pub opaque type Sender
 pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take keys: schedule.Schedule, at: u64, from: Mark, l: Limits) -> Result[Sender, (SframeError, schedule.Schedule)]
 pub fn current_kid(s: Sender) -> u64
 pub fn next_ctr(s: Sender) -> u64
@@ -182,20 +182,22 @@ pub fn ratchet(mut s: Sender) -> Result[(), SframeError]
 pub fn seal(mut s: Sender, metadata: Bytes, plain: Bytes, mut out: Bytes) -> Result[Sealed, SframeError]
 pub fn seal_ranged(mut s: Sender, layout: ranges.Layout, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Sealed, SframeError]
 
-pub type Receiver
+pub opaque type Receiver
 pub fn receiver(suite: Suite, framing: ranges.Framing, l: Limits) -> Result[Receiver, SframeError]
-pub fn install(mut r: Receiver, kid: u64, keys: schedule.Schedule, floor: u64) -> Result[(), SframeError]
-pub fn install_from(mut r: Receiver, kid: u64, s: Sender, floor: u64) -> Result[(), SframeError]
+pub fn install(mut r: Receiver, id: u64, keys: schedule.Schedule, floor: u64) -> Result[(), SframeError]
+pub fn install_from(mut r: Receiver, id: u64, s: Sender, floor: u64) -> Result[(), SframeError]
 pub fn install_ratcheted(mut r: Receiver, f: Follow, take keys: schedule.Schedule) -> Result[(), (SframeError, schedule.Schedule)]
 pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take keys: schedule.Schedule, at: u64, floor: u64) -> Result[(), (SframeError, schedule.Schedule)]
-pub fn remove(mut r: Receiver, kid: u64) -> bool
+pub fn remove(mut r: Receiver, id: u64) -> bool
 pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool
 pub fn open(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError]
 pub fn open_ranged(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError]
 
 pub fn ratchet_key(base: Bytes) -> Bytes                // RFC 9605 §5.1's next base key, for distribution only (SFRAME-14)
 
-// module ranges
+```
+
+```hirsel signatures sframe/ranges
 pub type Escape = Bare | AnnexB
 pub type Framing = Rfc | Ranged(Escape)
 pub type Range { at: u64, len: u64 }
@@ -945,12 +947,12 @@ reservations, its volume limit and its framing.
 
 - **Core surface** (TLS-8, SFrame schedules):
 
-  ```hirsel unbuilt
+  ```hirsel signatures core/schedule
   // module schedule
   pub type SframeSuite = Aes128GcmSha256_128()
   pub fn import_sframe(suite: SframeSuite, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
-  pub fn sframe_sealer(mut s: Schedule, steps: u64, kid: u64, floor: u64) -> Result[Sealer, ScheduleError]
-  pub fn sframe_opener(s: Schedule, ahead: u64, kid: u64) -> Result[Opener, ScheduleError]
+  pub fn sframe_sealer(mut s: Schedule, steps: u64, kid: u64, floor: u64) -> Result[packet.Sealer, ScheduleError]
+  pub fn sframe_opener(s: Schedule, ahead: u64, kid: u64) -> Result[packet.Opener, ScheduleError]
   pub fn sframe_ratchet(mut s: Schedule, steps: u64) -> Result[(), ScheduleError]
   ```
 
@@ -986,12 +988,12 @@ reservations, its volume limit and its framing.
   - `SframeError`'s `Secret(secret.SecretError)` becomes `Schedule(schedule.ScheduleError)`.
 - **New signatures.** The other signatures of SFRAME-2 are unchanged.
 
-  ```hirsel unbuilt
+  ```hirsel signatures sframe/sframe
   // module sframe, at E1
   pub type Follow { generation: u64, bits: u8, step: u64, at: u64, forward: u8, keep: u8, floor: u64 }
   pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take keys: schedule.Schedule, at: u64, from: Mark, l: Limits) -> Result[Sender, (SframeError, schedule.Schedule)]
-  pub fn install(mut r: Receiver, kid: u64, keys: schedule.Schedule, floor: u64) -> Result[(), SframeError]
-  pub fn install_from(mut r: Receiver, kid: u64, s: Sender, floor: u64) -> Result[(), SframeError]
+  pub fn install(mut r: Receiver, id: u64, keys: schedule.Schedule, floor: u64) -> Result[(), SframeError]
+  pub fn install_from(mut r: Receiver, id: u64, s: Sender, floor: u64) -> Result[(), SframeError]
   pub fn install_ratcheted(mut r: Receiver, f: Follow, take keys: schedule.Schedule) -> Result[(), (SframeError, schedule.Schedule)]
   pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take keys: schedule.Schedule, at: u64, floor: u64) -> Result[(), (SframeError, schedule.Schedule)]
   ```

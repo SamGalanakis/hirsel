@@ -163,22 +163,57 @@ not own its session.
 
 ## RTC-1: SDP descriptions
 
-```hirsel unbuilt
-pub type Media = Audio | Video | Application
-pub type Direction = SendRecv | SendOnly | RecvOnly | Inactive
-pub type Setup = Active | Passive | ActPass
-pub type Codec = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec | Flexfec
-pub type Ext = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor
-pub type Format = Format(pt: u8, codec: Codec, clock: u32, channels: u8, fmtp: Bytes, apt: Option[u8], nack: bool, pli: bool, fir: bool, twcc: bool)
-pub type Vad = VadOn | VadOff
-pub type Extmap = Extmap(id: u8, ext: Ext, dir: Option[Direction], vad: Option[Vad])
-pub type RidDir = RidSend | RidRecv
-pub type Rid = Rid(id: Inline[u8, 16], len: u8, dir: RidDir, pts: List[u8], depend: List[u8], restrictions: Bytes)
-pub type Stream = Stream(alternatives: List[u8], paused: List[bool])
-pub type Simulcast = Simulcast(send: List[Stream], recv: List[Stream])
-pub type Port = Rejected | BundleOnly | Port(u16)
-pub type Section = Section(media: Media, port: Port, mid: Inline[u8, 16], mid_len: u8, dir: Direction, formats: List[Format], extmaps: List[Extmap], rids: List[Rid], simulcast: Simulcast, ssrcs: List[u32], rtx_pairs: List[(u32, u32)], fec_pairs: List[(u32, u32)], msid: Bytes, rtcp_mux: bool)
-pub type Description = Description(origin_session: u64, origin_version: u64, bundle: List[u8], ice_ufrag: Bytes, ice_pwd: Bytes, ice_lite: bool, fingerprint: Inline[u8, 32], setup: Setup, tls_id: Bytes, sections: List[Section], candidates: List[Bytes])
+```hirsel signatures webrtc_sfu/sdp
+pub type Media: key = Audio | Video | Application
+pub type Direction: key = SendRecv | SendOnly | RecvOnly | Inactive
+pub type Setup: key = Active | Passive | ActPass
+pub type Codec: key = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec | Flexfec
+pub type Ext: key = Mid | RidExtension | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor | VideoLayersAllocation | PlayoutDelay | VideoOrientation | AbsCaptureTime
+pub type Format { pt: u8, codec: Codec, clock: u32, channels: u8, fmtp: Bytes, apt: Option[u8], nack: bool, pli: bool, fir: bool, twcc: bool }
+pub type Vad: key = VadOn | VadOff
+pub type Extmap { id: u8, ext: Ext, dir: Option[Direction], vad: Option[Vad] }
+pub type RidDir: key = RidSend | RidRecv
+pub type Rid { id: Inline[u8, 16], len: u8, dir: RidDir, pts: List[u8], depend: List[u8], unresolved: List[Id], restrictions: Bytes }
+pub type Stream { alternatives: List[u8], paused: List[bool] }
+pub type Simulcast { send: List[Stream], recv: List[Stream] }
+pub type Port: key = Rejected | BundleOnly | Port(u16)
+pub type Section {
+    media: Media,
+    protocol: Bytes,
+    fallback: Bytes,
+    connection: Bytes,
+    port: Port,
+    mid: Inline[u8, 16],
+    mid_len: u8,
+    dir: Direction,
+    formats: List[Format],
+    extmaps: List[Extmap],
+    mixed_extmaps: bool,
+    rids: List[Rid],
+    simulcast: Simulcast,
+    ssrcs: List[u32],
+    rtx_pairs: List[(u32, u32)],
+    fec_pairs: List[(u32, u32)],
+    msid: Bytes,
+    rtcp_mux: bool,
+    rtcp_rsize: bool
+}
+pub type Description {
+    origin_session: u64,
+    origin_version: u64,
+    bundle: List[u8],
+    ice_ufrag: Bytes,
+    ice_pwd: Bytes,
+    ice_lite: bool,
+    ice_options: Bytes,
+    mixed_extmaps: bool,
+    fingerprint: Inline[u8, 32],
+    setup: Setup,
+    tls_id: Bytes,
+    sections: List[Section],
+    candidates: List[Bytes],
+    end_of_candidates: bool
+}
 pub type SdpError = TooLarge | Malformed(u64) | NoBundle | NotBundled(u8) | NoRtcpMux(u8) | NoMid(u8) | NoFingerprint | WrongFingerprint | NoIceCredentials | ExtmapConflict(u8) | PayloadConflict(u8) | TooManySections | TooManyFormats(u8) | TooManyRids(u8) | BadRid(u8) | AnswerMismatch(u8) | AssociationChanged | Capacity(Capacity)
 
 pub fn parse(text: Bytes, mut out: Description) -> Result[(), SdpError]
@@ -290,15 +325,41 @@ the writer. It is not the oracle for what the writer must say (RTC-2).
 
 ## RTC-2: Offer and answer
 
-```hirsel unbuilt
-pub type Policy = Policy(audio: List[Codec], video: List[Codec], exts: List[Ext], max_sections: u8, simulcast: bool)
-pub type Negotiated = Negotiated(remote_ufrag: Bytes, remote_pwd: Bytes, remote_fingerprint: Inline[u8, 32], remote_setup: Setup, tls_id: Bytes, sections: List[Agreed])
-pub type Agreed = Agreed(index: u8, mid: Inline[u8, 16], mid_len: u8, media: Media, recv: bool, send: bool, formats: List[Format], extmaps: List[Extmap], rids: List[Rid], streams: List[Stream])
-pub type Signaling = Stable | HaveLocalOffer(u64) | HaveRemoteOffer(u64)
+```hirsel signatures webrtc_sfu/sdp
+pub type Policy: cross { audio: List[Codec], video: List[Codec], exts: List[Ext], max_sections: u8, simulcast: bool }
+pub type Negotiated {
+    remote_ufrag: Bytes,
+    remote_pwd: Bytes,
+    remote_fingerprint: Inline[u8, 32],
+    remote_setup: Setup,
+    tls_id: Bytes,
+    local: LocalEnd,
+    mixed_extmaps: bool,
+    sections: List[Agreed]
+}
+pub type Agreed {
+    index: u8,
+    mid: Inline[u8, 16],
+    mid_len: u8,
+    media: Media,
+    recv: bool,
+    send: bool,
+    formats: List[Format],
+    extmaps: List[Extmap],
+    ext_form: ExtForm,
+    rids: List[Rid],
+    streams: List[Stream],
+    rid_drops: RidDrops,
+    local: Section,
+    down_track: bool,
+    remote_ssrcs: List[u32],
+    remote_rtx: List[(u32, u32)]
+}
+pub type Signaling: key = Stable | HaveLocalOffer(u64) | HaveRemoteOffer(u64)
 
-pub fn answer(policy: Policy, current: Option[Negotiated], offer: Description, local: LocalEnd, mut out: Description, mut agreed: Negotiated) -> Result[(), SdpError]
+pub fn answer(policy: Policy, current: Option[Negotiated], remote: Description, local: LocalEnd, mut out: Description, mut agreed: Negotiated) -> Result[(), SdpError]
 pub fn offer(policy: Policy, current: Negotiated, local: LocalEnd, adds: List[SendSection], mut out: Description) -> Result[(), SdpError]
-pub fn accept_answer(current: Negotiated, sent: Description, answer: Description, mut agreed: Negotiated) -> Result[(), SdpError]
+pub fn accept_answer(current: Negotiated, sent: Description, remote: Description, mut agreed: Negotiated) -> Result[(), SdpError]
 ```
 
 `LocalEnd` is the server's half: its ICE ufrag and password (fresh per PeerSession,
@@ -446,23 +507,28 @@ through the writer is never the oracle.
 
 ## RTC-3: PeerSession
 
-```hirsel unbuilt
+```hirsel signatures webrtc_sfu/peer
 pub opaque type PeerSession
-pub type PeerLimits = PeerLimits(sections: u8, down_tracks: u16, rtx_bytes: u64, pacer_packets: u32, start_bps: u64)
-pub type PeerError = Sdp(SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(DtlsError) | Srtp(SrtpError) | Rtp(RtpError) | Capacity(Capacity)
-pub type Class = Stun | Dtls | Rtp | Rtcp | Drop
+pub type RoomId: key = RoomId(u64)
+pub type Participant {
+    gen: Gen,
+    room: RoomId
+}
+pub type PeerLimits { sections: u8, down_tracks: u16, rtx_bytes: u64, pacer_packets: u32, start_bps: u64 }
+pub type PeerError = Sdp(sdp.SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(dtls.DtlsError) | Srtp(srtp.SrtpError) | Rtp(rtp.header.WriteError) | Capacity(Capacity)
+pub type Class: key = Stun | Dtls | Rtp | Rtcp | Drop
 pub type Input = Nothing | Replied | Media(MediaIn) | Repair(MediaIn) | Control(ControlIn)
 pub type Poll = Transmit | WakeAt(u64) | Idle
-pub type Gen = Gen(id: u64, epoch: u64)
-pub type Tag = Tag(src: Option[Gen], dst: Gen, room: RoomId)
-pub type Outbox = Outbox(data: Bytes, pkts: List[UdpTx], tags: List[Tag])
+pub type Gen: key = Gen(id: u64, epoch: u64)
+pub type Tag { src: Option[Gen], dst: Gen, room: RoomId }
+pub type Outbox { data: Bytes, pkts: List[UdpTx], tags: List[Tag] }
 
 pub fn classify(prefix: Bytes) -> Class
-pub fn open(take local: LocalEnd, take cert: CertKey, limits: PeerLimits, agreed: Negotiated, participant: Participant) -> Result[PeerSession, PeerError]
+pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base: Addr, limits: PeerLimits, agreed: sdp.Negotiated, participant: Participant) -> Result[PeerSession, PeerError]
 pub fn receive(mut p: PeerSession, now: u64, from: Addr, mut slot: Bytes, mut out: Outbox) -> Result[Input, PeerError]
 pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll
-pub fn renegotiated(mut p: PeerSession, agreed: Negotiated) -> Result[(), PeerError]
-pub fn close(take p: PeerSession, mut out: Outbox)
+pub fn renegotiated(mut p: PeerSession, agreed: sdp.Negotiated) -> Result[(), PeerError]
+pub fn close(take p: PeerSession, notify: bool, mut out: Outbox)
 ```
 
 A PeerSession is a sans-IO state machine over `(now, datagram)`. It never calls the network
@@ -676,31 +742,37 @@ raises none either; the next re-offer names no SSRC for the ended track.
 
 ## RTC-5: Router, rooms and fan-out
 
-```hirsel unbuilt
+```hirsel signatures webrtc_sfu/router
 pub opaque type Router
-pub type RoomId = RoomId(u64)
-pub type Participant = Participant(room: RoomId, id: u64, epoch: u64)
-pub type PublicationId = PublicationId(u64)
-pub type Target = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
-pub type RoomLimits = RoomLimits(participants: u16, ids: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32, pause: bool)
-pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Unrepresentable | Peer(PeerError) | Capacity(Capacity)
-pub type Event = Answer(Participant, Bytes) | Offer(Participant, u64, Bytes) | Glare(Participant, u64) | Published(PublicationId, Participant, Media, u8) | Unpublished(PublicationId) | Layers(PublicationId, u8) | Speakers(RoomId, Inline[u64, 8], u8) | Fenced(Participant)
+pub type PublicationId: key = PublicationId(u64)
+pub type Target: key + codec = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
+pub type RoomLimits { participants: u16, ids: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32, pause: bool }
+pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Unrepresentable | Peer(peer.PeerError) | Capacity(Capacity)
 
-pub fn router(units: u16, unit: u16, mut inbox: Inbox[RouterIn], peers: List[Sender[RouterIn]]) -> Result[Router, RouterError]
-pub fn open_room(mut r: Router, room: RoomId, limits: RoomLimits) -> Result[(), RouterError] waits
-pub fn join(mut r: Router, who: Participant, publish: bool, offer: Bytes) -> Result[(), RouterError] waits
-pub fn signal(mut r: Router, who: Participant, kind: SignalIn) -> Result[(), RouterError] waits
-pub fn subscribe(mut r: Router, who: Participant, p: PublicationId, target: Target) -> Result[(), RouterError] waits
-pub fn set_target(mut r: Router, who: Participant, p: PublicationId, target: Target) -> Result[(), RouterError] waits
-pub fn set_playout(mut r: Router, who: Participant, p: PublicationId, delay: Option[Delay]) -> Result[(), RouterError] waits
-pub fn rebind(mut r: Router, who: Participant, from: PublicationId, to: PublicationId, target: Target) -> Result[(), RouterError] waits
-pub fn unsubscribe(mut r: Router, who: Participant, p: PublicationId) -> Result[(), RouterError] waits
-pub fn leave(mut r: Router, who: Participant) -> Result[(), RouterError] waits
-pub fn revoke(mut r: Router, room: RoomId, participant: u64, epoch: u64) -> Result[(), RouterError] waits
-pub fn suspend(mut r: Router, room: RoomId) -> Result[(), RouterError] waits
-pub fn resume(mut r: Router, room: RoomId) -> Result[(), RouterError] waits
-pub fn close_room(mut r: Router, room: RoomId) -> Result[(), RouterError] waits
-pub fn turn(mut r: Router, now: u64, mut sock: UdpSocket, mut rx: Bytes, mut batch: List[UdpPacket], mut out: Outbox, mut events: List[Event]) -> Result[u64, RouterError] waits
+pub fn router(r: Random) -> Router
+pub fn open_room(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), RouterError]
+pub fn join(mut r: Router, take session: peer.PeerSession) -> Result[(), RouterError]
+pub fn subscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn set_target(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn set_playout(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, delay: Option[peer.Delay]) -> Result[(), RouterError]
+pub fn rebind(mut r: Router, room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn unsubscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Result[(), RouterError]
+pub fn leave(mut r: Router, room: peer.RoomId, who: peer.Gen, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn revoke(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn suspend(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError]
+pub fn resume(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Result[(), RouterError]
+```
+
+```hirsel signatures webrtc_sfu/units
+pub opaque type Unit
+pub type Event = Fenced(peer.Participant) | Layers(publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Gen, version: u64, text: Bytes) | Shut(who: peer.Gen)
+pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError]
+pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64) -> Result[Unit, router.RouterError]
+pub fn begin(mut u: Unit, now: u64, take c: router.Change) -> Result[(), router.RouterError]
+pub fn finished(mut u: Unit) -> Option[Result[router.Answer, router.RouterError]]
+pub fn call(mut u: Unit, clock: Clock, mut sock: UdpSocket, take c: router.Change) -> Result[router.Answer, router.RouterError] waits
+pub fn turn(mut u: Unit, clock: Clock, mut sock: UdpSocket, until: u64) -> Result[Option[u64], router.RouterError] waits
+pub fn take_events(mut u: Unit) -> List[Event]
 ```
 
 **Identity.** A participant is `(room, id, epoch)`. `id` is the caller's, a number below
@@ -713,10 +785,11 @@ session's **generation** is its participant's `Gen(id, epoch)` (RTC-3), the tag 
 entry carries.
 
 **Units and the control order.** Every media unit runs one `Router` over its own socket. The
-unit that runs the signaling adapter (RTC-8) is the **control unit**. Every control call
-(`open_room` to `close_room`) is made on it. It applies the call to its own state, sends the
-change as one `RouterIn` message to every other unit, in one order, and returns when the units
-the change touches have applied it. So every unit sees one order of control changes.
+unit that runs the signaling adapter (RTC-8) is the **control unit**. It submits a
+`router.Change` through `units.call` or the `units.begin` and `units.finished` pair. The unit
+that owns the affected session applies the change first. After it acknowledges success,
+the control unit sends the change to the other units. The call completes when those units
+acknowledge it.
 
 **Waking a unit.** A unit waits in `udp_recv` (NET-16), which no inbox message interrupts.
 So whenever a unit posts one or more messages to another unit's inbox in a turn, it ends
@@ -738,9 +811,9 @@ ends with the send step: it drops every entry of `out` and of the uncommitted su
 tag names a fenced generation, or a suspended room with a `src`, then calls `udp_send`. A partial send (NET-16:
 `Ok(k)` with `k` below the count) keeps entries `k` onward as the **uncommitted suffix**,
 which the next turn's send step rechecks against the fences before it retries it. It
-appends signaling and dynacast output to `events`, which the adapter sends (RTC-8). It
-returns the earliest deadline. A unit's loop is `turn` and then `udp_recv`'s wait until that
-deadline or 50 ms, whichever comes first.
+queues signaling and dynacast events, which the adapter takes with `units.take_events`
+(RTC-8). It returns the earliest deadline, if any. The unit passes the earlier of that
+deadline and 50 ms from the current time as the next turn's `until`.
 
 **Fan-out.** For a `Media` packet of publication `P`, encoding `e`:
 
@@ -1281,21 +1354,24 @@ both to the generic `runner.room` (core/programs/runner/runner-room.hirsel): typ
 per peer plus addressed `Message M`. The room's types are the application's, so the adapter is
 generic over them:
 
-```hirsel unbuilt
-pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, Target) | Target(u64, Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
-pub type Incarnation = Incarnation(Inline[u8, 16])
+```hirsel signatures webrtc_sfu/signal
+pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
+pub type Embed[M] { wrap: own[send] fn(take Signal) -> M, unwrap: own[send] fn(take M) -> Option[Signal], publish: own[send] fn(u32) -> bool }
+pub type Build: cross { who: peer.Participant, home: u16, peer: u32, version: u64, offer: Bytes, publish: bool, ice_ufrag: Bytes, ice_pwd: Bytes }
+pub type Built: cross { answer: Bytes, recvs: List[u8], sends: List[(u8, sdp.Media)] }
+
+pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M], units: u16) -> Adapter[M]
+pub fn you[M](mut a: Adapter[M], peer: Option[u32])
+pub fn room_in[M: codec](mut a: Adapter[M], take input: runner.room_client.RoomIn[M], mut out: List[runner.room_client.RoomOut[M]])
+pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: List[runner.room_client.RoomOut[M]]) -> Result[(), router.RouterError]
+pub fn take_builds[M](mut a: Adapter[M]) -> List[Build]
+pub fn built[M](mut a: Adapter[M], who: peer.Participant, take result: Result[Built, router.RouterError], mut out: List[runner.room_client.RoomOut[M]])
+```
+
+```hirsel signatures runner/room_client
+pub type Incarnation: key + send = Incarnation(Inline[u8, 16])
 pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
 pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
-pub type Embed[M] { wrap: own[send] fn(take Signal) -> M, unwrap: own[send] fn(take M) -> Option[Signal], publish: own[send] fn(u32) -> bool }
-pub type Build { who: Participant, home: u16, peer: u32, version: u64, offer: Bytes, publish: bool }
-pub type Built { answer: Bytes, recvs: List[u8], sends: List[(u8, Media)] }
-
-pub fn adapter[M: codec](room: RoomId, limits: RoomLimits, take embed: Embed[M], units: u16) -> Adapter[M]
-pub fn you[M](mut a: Adapter[M], peer: Option[u32])
-pub fn room_in[M: codec](mut a: Adapter[M], take input: RoomIn[M], mut out: List[RoomOut[M]])
-pub fn step[M: codec](mut a: Adapter[M], mut u: Unit, now: u64, mut out: List[RoomOut[M]]) -> Result[(), RouterError]
-pub fn take_builds[M](mut a: Adapter[M]) -> List[Build]
-pub fn built[M](mut a: Adapter[M], who: Participant, take result: Result[Built, RouterError], mut out: List[RoomOut[M]])
 ```
 
 The service itself is one room peer, admitted by the application's room admission like any

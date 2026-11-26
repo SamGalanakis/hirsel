@@ -144,11 +144,11 @@ and it would need a server DTLS listener for no network class TLS does not reach
 
 ### TURN-3: Types
 
-```hirsel unbuilt
+```hirsel signatures turn/turn
 // package turn
-pub type Family = V4 | V6
-pub type Algorithm = Md5 | Sha256           // RFC 8489 §18.5.1
-pub type Transport = Datagram | Stream      // client-to-server leg; the relay leg is UDP
+pub type Family: key = V4 | V6
+pub type Algorithm: key = Md5 | Sha256      // RFC 8489 §18.5.1
+pub type Transport: key = Datagram | Stream  // client-to-server leg; the relay leg is UDP
 
 pub type Now { mono_ns: u64, unix_s: u64 }  // monotonic for timers, wall for credential expiry
 
@@ -181,7 +181,7 @@ There is no jitter anywhere. A `WakeAt` is exact, so a run under `std.sim.udp` o
 `Message` record and keys integrity with plaintext `Bytes`. TURN needs every method, its own
 attributes and `Secret` keys. Slice U0 generalizes it, in place, with no second codec:
 
-```hirsel unbuilt
+```hirsel signatures stun_ice/stun_ice
 // package stun_ice, added beside the Binding functions
 pub type Key = Short(Bytes) | Long(Secret)            // RFC 8489 §9.1 and §9.2
 pub type Attr { kind: u16, value: Range }
@@ -233,7 +233,7 @@ and every credential this text mints is printable ASCII, which OpaqueString leav
 **Two new TLS-5 sinks** (slice U1), so that no long-term key and no password the relay
 checks is ever plaintext in program memory:
 
-```hirsel unbuilt
+```hirsel signatures core/secret
 // package secret, beside the MAC and derivation sinks of TLS-5
 pub type DigestAlg = Md5 | Sha256
 pub type Inner = Raw | Base64
@@ -268,7 +268,7 @@ pub fn verify_hmac_sha1(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacE
   chosen by the minting application, with no `:`.
 - `password = base64(HMAC-SHA256(master, username))`, 44 ASCII bytes.
 
-```hirsel unbuilt
+```hirsel signatures turn/turn
 // package turn
 pub fn mint(master: Secret, expiry_unix_s: u64, subject: Bytes, mut username: Bytes, mut password: Bytes) -> Result[(), TurnError]
 pub fn relay_key(master: Secret, username: Bytes, realm: Bytes, alg: Algorithm) -> Result[Secret, TurnError]
@@ -395,7 +395,7 @@ an authenticated request must verify, or it is discarded and counted `tampered`.
 
 ### TURN-6: The client
 
-```hirsel unbuilt
+```hirsel signatures turn/turn
 pub type ClientConfig {
     transport: Transport,
     family: Family,
@@ -408,8 +408,8 @@ pub type ClientConfig {
 }
 pub type ClientState = Allocating | Allocated(Allocation) | Closed(Failure)
 pub type Allocation { relayed: Addr, mapped: Addr, expires_ns: u64 }
-pub type Received = Data(Addr, Range) | Control | Discarded
-pub type ClientDiscards { malformed: u64, stray: u64, tampered: u64, unauthenticated: u64, unbound_channel: u64 }
+pub type Received = Data(Addr, stun_ice.Range) | Control | Discarded
+pub type ClientDiscards { malformed: u64, stray: u64, tampered: u64, unauthenticated: u64, unbound_channel: u64, refused: u64 }
 
 pub opaque type Client
 
@@ -417,7 +417,7 @@ pub fn client_defaults() -> ClientConfig
 pub fn client(c: ClientConfig, server: Addr, take username: Bytes, take password: Secret) -> Result[Client, TurnError]
 pub fn permit(mut c: Client, peer: Addr, now: Now) -> Result[(), TurnError]
 pub fn bind(mut c: Client, peer: Addr, now: Now) -> Result[u16, TurnError]
-pub fn send_to(mut c: Client, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[Range, TurnError]
+pub fn send_to(mut c: Client, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[stun_ice.Range, TurnError]
 pub fn receive(mut c: Client, now: Now, r: Random, mut packet: Bytes) -> Result[Received, TurnError]
 pub fn poll(mut c: Client, now: Now, r: Random, mut out: Bytes) -> Result[Poll, TurnError]
 pub fn close(mut c: Client, now: Now)
@@ -462,7 +462,7 @@ judges its policy on IP and port (TURN-7), and the permission it installs covers
 
 ### TURN-7: The relay server
 
-```hirsel unbuilt
+```hirsel signatures turn/turn
 pub type Prefix { ip: Ip, bits: u8 }
 pub type Allow { prefix: Prefix, ports_lo: u16, ports_hi: u16 }
 pub type PeerPolicy { deny: List[Prefix], allow: List[Allow], local: List[Ip] }
@@ -484,9 +484,9 @@ pub type RelayConfig {
     derive_per_source_s: u16, // relay_key derivations per source prefix per second; default 10
     policy: PeerPolicy
 }
-pub type Ingress = Udp(Addr) | Stream(u64)          // the local UDP address, or a connection
-pub type Origin { ingress: Ingress, client: Addr }  // the client side of the 5-tuple
-pub type Out = ToClient(Origin, Range) | ToPeer(Addr, Addr, Range) | Reply(Origin, u64) | Nothing
+pub type Ingress: key = Udp(Addr) | Stream(u64)     // the local UDP address, or a connection
+pub type Origin: key { ingress: Ingress, client: Addr }  // the client side of the 5-tuple
+pub type Out = ToClient(Origin, stun_ice.Range) | ToPeer(Addr, Addr, stun_ice.Range) | Reply(Origin, u64) | Nothing
 pub type RelayDiscards { malformed: u64, no_allocation: u64, no_permission: u64, policy: u64,
                          unbound_channel: u64, reserved_channel: u64, throttled: u64,
                          challenged: u64, oversize: u64, unknown_stream: u64, idle_stream: u64 }
@@ -499,7 +499,7 @@ pub fn relay_defaults(realm: Bytes) -> RelayConfig
 pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError]
 pub fn from_client(mut r: Relay, now: Now, rnd: Random, o: Origin, mut packet: Bytes, mut out: Bytes) -> Result[Out, TurnError]
 pub fn from_peer(mut r: Relay, now: Now, relayed: Addr, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[Out, TurnError]
-pub fn connected(mut r: Relay, conn: u64, local: Addr, client: Addr, now: Now) -> Result[(), TurnError]
+pub fn connected(mut r: Relay, conn: u64, local: Addr, source: Addr, now: Now) -> Result[(), TurnError]
 pub fn disconnected(mut r: Relay, conn: u64)
 pub fn relay_poll(mut r: Relay, now: Now) -> Poll
 pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64, now: Now) -> Result[u64, TurnError]
@@ -526,7 +526,7 @@ full address (IP and source port) the policy denies is `Nothing`, counted `polic
 expires allocations, permissions, channels and channel quarantines at their exact times and
 answers the next `WakeAt`.
 
-**Stream connections.** The caller calls `connected(r, conn, local, client, now)` once per
+**Stream connections.** The caller calls `connected(r, conn, local, source, now)` once per
 accepted stream, before its first `from_client`: `local` is the address the client connected
 to and `client` the client's address (behind H1, the PROXY v2 header's destination and
 source). The client's address arrives again, as for UDP, in each `from_client`'s
@@ -805,9 +805,9 @@ addresses and their media ports in `allow`, so it relays to nothing else (slice 
 
 **Stream framing.** One sans-IO framer per accepted or connected stream, used by both ends:
 
-```hirsel unbuilt
+```hirsel signatures turn/turn
 pub opaque type Framer
-pub type Frame = Message(Range) | Pending
+pub type Frame = Message(stun_ice.Range) | Pending
 pub fn framer() -> Framer
 pub fn frame_next(mut f: Framer, buffer: Bytes) -> Result[Frame, TurnError]
 pub fn frame_consumed(mut f: Framer, mut buffer: Bytes)

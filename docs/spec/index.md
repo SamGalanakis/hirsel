@@ -85,12 +85,15 @@ headings but are non-normative performance targets
 introduced. A refusal comment `// refused: ID` names the rule a refusal cites. The
 [transition table](ownership.md#own-26-the-transition-table) is the single authority for
 what every operation does to ownership, charges and failures. Examples are informative.
-Every code block is a self-contained program fragment: it declares each type it uses that
+A plain Hirsel fence is a self-contained program fragment: it declares each type it uses that
 the core library does not, and a block whose comment says `refused` is refused only where
 the comment says. A block marked `` ```hirsel unbuilt `` belongs to its rule but shows what the
 built `hirsel` does not implement yet; the mark is removed when it does, and the spec
 test fails on a marked block that is already refused or accepted as its comments say.
-`` ```hirsel core `` uses the core declaration rules. A `` ```hirsel run `` block is a complete
+`` ```hirsel core `` uses the core declaration rules. A
+`` ```hirsel signatures package/module `` block lists public declarations from that package
+module. Each declaration must match the exported spelling, including the parameter names,
+parameter modes and types, and result type. A `` ```hirsel run `` block is a complete
 program. The next fence is `text` with its exact stdout, followed by an `Outcome:`
 line that states success or failure.
 

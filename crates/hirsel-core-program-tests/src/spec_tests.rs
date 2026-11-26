@@ -13,11 +13,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod signatures;
+
 struct Fence {
     path: PathBuf,
     line: usize,
     source: String,
     signatures: bool,
+    signature_module: Option<String>,
     /// A `hirsel unbuilt` fence claims what the built checker does not do yet.
     unbuilt: bool,
     uses_std: bool,
@@ -137,10 +140,12 @@ fn read_fences(
         };
         let location = format!("{}:{}", path.display(), at + 1);
         let source = body(&mut lines, &location);
+        let signature_module = info.strip_prefix("hirsel signatures ");
         let mode = match info {
             "hirsel" | "hirsel run" | "hirsel unbuilt" => ParseMode::Source,
             "hirsel core" => ParseMode::Signatures,
             "" | "ebnf" | "json" | "sh" | "text" | "toml" => continue,
+            _ if signature_module.is_some() => ParseMode::Signatures,
             _ => panic!("{location}: unknown fence info string {info:?}"),
         };
         let signatures = mode == ParseMode::Signatures;
@@ -217,7 +222,8 @@ fn read_fences(
             uses_std: std_by_default || names_library(&source, "std"),
             uses_store: names_library(&source, "store"),
             source,
-            signatures,
+            signatures: info == "hirsel core",
+            signature_module: signature_module.map(str::to_owned),
             unbuilt,
             entry,
             rules,
@@ -523,6 +529,9 @@ fn every_live_spec_fence_checks_its_claim() {
         })
         .collect::<Vec<_>>();
     let (unbuilt, live): (Vec<_>, Vec<_>) = fences.iter().partition(|fence| fence.unbuilt);
+    let (api, live): (Vec<_>, Vec<_>) = live
+        .into_iter()
+        .partition(|fence| fence.signature_module.is_some());
     let refused = live
         .iter()
         .filter(|fence| !fence.rules.is_empty() || fence.refused_any)
@@ -530,7 +539,8 @@ fn every_live_spec_fence_checks_its_claim() {
     let runs = live.iter().filter(|fence| fence.run.is_some()).count();
     let positive = live.len() - refused - runs;
     println!(
-        "spec fences: {refused} refused, {positive} positive, {runs} run, {} unbuilt",
+        "spec fences: {refused} refused, {positive} positive, {runs} run, {} API listings, {} unbuilt",
+        api.len(),
         unbuilt.len()
     );
     assert!(
@@ -538,6 +548,7 @@ fn every_live_spec_fence_checks_its_claim() {
         "spec corpus is incomplete"
     );
     failures.extend(check_all(&live).into_iter().map(|(_, failure)| failure));
+    failures.extend(signatures::check(&api));
     // A `hirsel unbuilt` fence that already checks as its comments say (refused for
     // each rule it cites, or accepted) shows a built feature: its mark is stale.
     let unbuilt_failures = check_all(&unbuilt);

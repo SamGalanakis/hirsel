@@ -164,6 +164,35 @@ Each link carries:
   stream so edge nodes rewrite timestamps the same way the home does (RTC-4), and
   subscribers on any node see one consistent clock per publication.
 
+**Distribution-adapter ownership and zero-copy media handoff (text only, not yet built —
+media-seams-design-3072).** Cascade does not own a second router, fence table, suspension
+bitmask, or PLI/FIR throttle. It runs as a `VirtualUnit` distribution adapter (`Pool.cascade`,
+RTC-10) over `webrtc_sfu.router`:
+
+- `router.Router` owns all rooms, local and remote-origin (`Origin.Remote`) publications, local
+  down-tracks, wanted-mask unions (`pause_delay_ms`), `Keyframes` PLI/FIR throttling, `fenced`
+  high-water marks, `causes` (`Signaling | Lease | Term`), and `lease_deadline_ms` /
+  `lease_guard_ms`.
+- `cascade` owns strictly inter-node distribution: `RoomDirectory` (CAS-1), `LinkHub` mTLS QUIC
+  links and room streams (CAS-2), canonical RTP PT/extmap rewrite (`canon.hirsel`), the cross-node
+  grant ledger and partition lease timers (`fence.hirsel`, emitting `router.Change.{Revoke,
+  Suspend, Resume, SetLease}` onto Unit 0 instead of mirroring fence/suspend state), strictly
+  edge-local 1-hop RTP-12 repair (`repair.hirsel`, no duplicate PLI throttle), per-link congestion
+  layer ceilings (`LinkCongestion`, capping only the congested link without mutating other links
+  or local allocations), and exact `attach_cost` (`cost.hirsel`).
+- **Outbound media:** The cascade virtual unit receives `router.Carried.Media` from the home
+  unit, verifies `observer_routing_allowed` and `!observer_fenced`, rewrites once via
+  `canon.to_canon` into a `quic.PayloadSlice`, records in edge-local repair history, and for each
+  subscribed edge whose `(edge.wanted_mask & link_ceiling)` includes the encoding, prepends the
+  8-byte `(room_num, layer_num)` header into a `quic.FramedSlice` (`quic.framed_prepend`, zero
+  payload copies per edge) and passes it to `quic.send_datagram`.
+- **Inbound media:** `link` strips the 8-byte `(room_num, layer_num)` header from
+  `quic.Event.Datagram` via `quic.payload_trim_front` (zero copies) and hands the resulting
+  `quic.PayloadSlice` to `router` for standard local fan-out (`router_route.spread`).
+- **Wanted masks:** Remote edge `Wanted` masks are unioned by the cascade adapter and posted via
+  `Post.Wanted` into `router_dynacast`'s single per-publication union; local `Post.Wanted` masks
+  for remote publications are unioned and sent upstream as one `Control.Wanted`.
+
 ## CAS-4: The cross-node fence
 
 `revoke(room, participant, epoch)` is called on the home. It returns `Ok(())` only when no

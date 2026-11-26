@@ -103,6 +103,67 @@ runs MOQ-6 over them: `relay_receive` consumes the transport events of all its s
 and every request a session receives becomes `RelayEvent.Authorize`, which the application
 answers with `relay_authorize`.
 
+**End-state transport capability seam and zero-copy handoff (text only, not yet built —
+media-seams-design-3072).** `Io`, `Transport`, and `TransportEvent` are replaced by one
+transport-agnostic capability interface implemented once for native QUIC and once for
+WebTransport (plus one `MixedDriver` dispatcher for mixed relays). `Session`, `Relay`, and all
+session/data modules never import `webtransport` or `quic.Endpoint` and cannot tell which
+transport a session runs on:
+
+```hirsel unbuilt
+pub type LinkId = LinkId(u32)
+pub type LinkStream = LinkStream(u64)
+pub type AddressMode = InUri | InSetup
+
+pub type LinkError =
+    Closed
+  | StreamUnknown
+  | Limit
+  | TooLarge(u64)
+  | Protocol
+
+pub type LinkEvent =
+    Ready(alpn: String, max_datagram: u64)
+  | Opened(stream: LinkStream, bidi: bool)
+  | Readable(stream: LinkStream)
+  | Writable(stream: LinkStream)
+  | Acked(stream: LinkStream)
+  | Reset(stream: LinkStream, code: u64, final_size: u64)
+  | Stopped(stream: LinkStream, code: u64)
+  | Datagram(data: quic.PayloadSlice)
+  | Closed(code: u64)
+
+pub type LinkOps[D] {
+    address_mode: fn(D, LinkId) -> AddressMode,
+    max_datagram: fn(D, LinkId) -> u64,
+    open: fn(mut D, LinkId, bool) -> Result[LinkStream, LinkError],
+    read: fn(mut D, LinkId, LinkStream, mut Bytes) -> Result[(u64, bool), LinkError],
+    write: fn(mut D, LinkId, LinkStream, Bytes, bool) -> Result[u64, LinkError],
+    write_slice: fn(mut D, LinkId, LinkStream, take quic.PayloadSlice, bool) -> Result[bool, LinkError],
+    reset: fn(mut D, LinkId, LinkStream, u64, u64) -> Result[(), LinkError],
+    stop: fn(mut D, LinkId, LinkStream, u64) -> Result[(), LinkError],
+    priority: fn(mut D, LinkId, LinkStream, quic.Priority) -> Result[(), LinkError],
+    send_datagram: fn(mut D, LinkId, take quic.FramedSlice, quic.Priority, u64) -> Result[(), LinkError],
+    drop_datagrams: fn(mut D, LinkId, u64) -> u64,
+    close: fn(mut D, LinkId, u64, Bytes)
+}
+
+pub fn native_ops() -> LinkOps[quic.Endpoint]
+pub fn web_ops() -> LinkOps[WebDriver]
+pub fn mixed_ops() -> LinkOps[MixedDriver]
+```
+
+- `address_mode` (`InSetup` for native QUIC, `InUri` for WebTransport) governs SETUP `PATH` and
+  `AUTHORITY` validation so session code never branches on transport kind.
+- `priority`, `reset` (reliable reset via `quic.reset` or `webtransport.reset_at`), and
+  `drop_datagrams` (session-scoped on WebTransport, WT-2) all route strictly through `LinkOps[D]`.
+- `Object.payload` becomes `quic.PayloadSlice`. Datagram publish writes the `OBJECT_DATAGRAM`
+  header into `quic.FramedSlice` (`framed_prepend`, zero payload copies; cold-path coalesce only
+  if properties exceed `FRAMED_PREFIX_MAX` headroom). Datagram receive strips the header via
+  `quic.payload_trim_front` (zero copies). `RelayLimits.cache_bytes` and `per_track_cache_bytes`
+  charge `quic.payload_retained_bytes(o.payload)` (full backing length) plus properties and
+  record overhead (MOQ-6, MOQ-7).
+
 ## MOQ-2: Control
 
 The control channel is a pair of unidirectional streams, one each way, which carry SETUP and
@@ -296,6 +357,26 @@ outside it, as packets already delivered to a WebRTC subscriber are outside RTC-
 
 An end-to-end-encrypted room publishes SFrame ciphertext the bridge cannot read. The bridge
 is slice MS6.
+
+**End-state `Pool.bridge` and `VirtualUnit` seam (text only, not yet built —
+media-seams-design-3072).** In the wired end state, the bridge attaches to `webrtc_sfu`'s
+`Pool[M]` as an explicit `VirtualUnit` (`Pool.bridge`, RTC-10) sharing `router.Observer` with
+`media_record` and `cascade` (no embedded `router.Router` or dummy `peer.Outbox`):
+
+- Unit 0 reserves and releases `RoomCost.bridge` (`signal.reserve_bridge` / `release_bridge`) on
+  explicit `PoolOrder.AttachBridge` / `DetachBridge` and on `PoolOrder.Close`.
+- The bridge deletes its duplicated `sessions: List[moq.Session]` accept loop and manual
+  `staged_wire`/`staged_tx` staging, delegating publication to one `moq.Relay` over
+  `moq.MixedDriver` + `moq.mixed_ops()` (supporting both native QUIC relays and browser
+  WebTransport subscribers).
+- On RTP frame completion (`marker == true`), the bridge moves its owned reassembly buffer
+  directly into `quic.payload_whole(shared.new(take reassembly))` (eliminating the extra
+  `frame_buf` copy).
+- At the bridge unit's RTC-7 fence point, `Revoke` updates `router.Observer`, drops queued
+  `Carried.Media` and reassembly buffers, abandons any uncommitted UDP batch via
+  `quic.committed(..., 0)`, calls `moq.fence_track` (which invokes `LinkOps.reset` with
+  `reliable = header_len` and `LinkOps.drop_datagrams` on both native and WebTransport sessions),
+  and returns `Ack` only after all four hold (preserving M12 `bridge_ends_on_revoke`).
 
 ## MOQ-9: What a session refuses
 

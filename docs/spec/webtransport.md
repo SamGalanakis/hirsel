@@ -150,6 +150,33 @@ DATAGRAM frame's payload is a single run of bytes (RFC 9221 §4); a client may o
 and send datagrams while its CONNECT awaits the response (draft-17 §4).
 `dropped_datagrams` counts the received datagrams dropped (WT-4).
 
+**Transport capability completion and zero-copy datagrams (text only, not yet built —
+media-seams-design-3072).** So upper protocols such as `moq` never bypass `webtransport` to call
+`quic` directly on a session's underlying connection, and never copy datagram payloads through
+this layer, WT-2's end-state wrapper surface adds three operations and adopts `quic.PayloadSlice`
+and `quic.FramedSlice` (QUIC-1):
+
+```hirsel unbuilt
+pub fn priority(w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, p: quic.Priority) -> Result[(), WtError]
+pub fn reset_at(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32, reliable: u64) -> Result[(), WtError]
+pub fn drop_datagrams(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, tag: u64) -> u64
+pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: quic.PayloadSlice, fin: bool) -> Result[bool, WtError]
+pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), WtError]
+```
+
+- `priority` validates that `stream` belongs to session `s` and forwards to `quic.priority`.
+- `reset_at` validates ownership, maps `code` via draft-17 §4.4, and calls
+  `quic.reset(..., h3_code, stream.header + reliable)` so both the WebTransport stream header and
+  the application's `reliable` prefix are delivered reliably before reset (`reset` is `reset_at`
+  with `reliable = 0`).
+- `send_datagram` and `drop_datagrams` namespace the caller's `tag` by session (`wt_tag(s, tag)`)
+  before calling `quic`, so two pooled WebTransport sessions sharing one QUIC connection never
+  drop each other's queued datagrams.
+- `send_datagram` prepends the quarter-stream-id varint directly into `FramedSlice.prefix`
+  (`quic.framed_prepend`, zero payload copies), and `receive` trims the incoming quarter-stream-id
+  varint from `quic.Event.Datagram` via `quic.payload_trim_front`, emitting
+  `Event.Datagram(s, quic.PayloadSlice)` with zero copies.
+
 `answer` is the application's verdict on a CONNECT: `Accept` sends `200` with the protocol
 it picked from the client's `WT-Available-Protocols` (draft-17 §3.3) in
 `WT-Protocol`, and `Refuse(n)` sends `n`. No session data flows before `Accept`.

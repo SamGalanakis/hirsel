@@ -1673,6 +1673,46 @@ application's name for the room, 32 bytes, opaque to the pool. The pool keeps on
 `Pool.cascade` is added with [SFU cascade](sfu_cascade.md) CAS-6, which is not yet built.
 Until then `RoomCost.bridge` and `RoomCost.cascade` are 0.
 
+**Virtual units, `router.Observer`, and `Pool.bridge` / `Pool.cascade` (text only, not yet built
+— media-seams-design-3072).** `router.Router` is the single owner of rooms, publications (both
+`Origin.Local(unit)` and `Origin.Remote(node)`), down-tracks, wanted masks, keyframe throttling,
+fences, suspension causes (`Signaling | Lease | Term`), and lease deadlines across local,
+recorded, bridged, and cascaded rooms:
+
+```hirsel unbuilt
+pub opaque type Observer
+
+pub type ObserverEvent =
+    RoomOpened(room: peer.RoomId)
+  | RoomClosed(room: peer.RoomId)
+  | Published(room: peer.RoomId, pub_id: u64, who: peer.Participant, codec: sdp.Codec, encodings: u8)
+  | Unpublished(room: peer.RoomId, pub_id: u64)
+  | Fenced(room: peer.RoomId, participant: u64, epoch: u64)
+  | Suspended(room: peer.RoomId, cause: u8)
+  | Resumed(room: peer.RoomId, cause: u8)
+
+pub fn new_observer(max_rooms: u32, max_ids: u32, max_pubs: u32) -> Observer
+pub fn observer_apply(mut obs: Observer, change: Change) -> Option[ObserverEvent]
+pub fn observer_fenced(obs: Observer, room: peer.RoomId, participant: u64, epoch: u64) -> bool
+pub fn observer_routing_allowed(obs: Observer, room: peer.RoomId, now_ms: u64) -> bool
+```
+
+- **Virtual units:** Non-WebRTC SFU attachments (`media_record`, `moq_bridge`, and `cascade`)
+  attach to `Pool[M]` as `VirtualUnit` endpoints registered alongside WebRTC units `1..n` in
+  `units.Doors`, receiving `ControlMessage` orders, returning `Ack` at their fence point,
+  consuming `router.Carried` media, and posting `Post.Wanted` / `Post.Key`. They hold
+  `router.Observer` rather than a full `router.Router` + dummy `peer.Outbox`.
+- **Bridge lifecycle on `Pool[M]`:** `Pool[M]` gains `bridge: Option[BridgeLink]` and
+  `cascade: Option[CascadeLink]` (symmetric with `relay: Option[RelayLink]`). `PoolOrder[M]`
+  adds `AttachBridge(name: RoomName, max_frame_bytes: u64)` and `DetachBridge(name: RoomName)`,
+  driving `signal.reserve_bridge` and `signal.release_bridge` on Unit 0's `Ledger` so
+  `RoomCost.bridge` is reserved and refunded in production.
+- **Remote publication ingress:** Cascade injects remote-origin publications into `router.Router`
+  homed on the cascade virtual unit (using the canonical PT/extmap table as their agreed shape),
+  so `router_route.spread` fans them out to local units with zero duplicate forwarding code.
+  Remote edge wanted masks enter `router_dynacast` through the cascade virtual unit's standard
+  `Post.Wanted` messages.
+
 **Room occupancy and empty-room reclamation.** Unit 0 tracks each serving room's non-service
 seat count (`signal.room_peers`, excluding the service's own `you`/`former` peer numbers).
 `ServiceTiming.empty_idle_ns` (30 s in `DEFAULT_TIMING`; configurable via `signal.empty_idle`

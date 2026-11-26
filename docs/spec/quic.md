@@ -170,6 +170,58 @@ cascade) holds one copy, and each connection copies only into its own sealed pac
 TLS-8 `seal_into` does in the cipher. A packet is assembled contiguously in `out` and sealed
 in place; there is no scatter-input seal.
 
+**Zero-copy payload-slice handoff (text only, not yet built — media-seams-design-3072).** To
+eliminate intermediate framing and demux copies across `quic`, `webtransport`, `moq`, and
+`webrtc_sfu/cascade` (Performancesmash #6), `quic` exports two owned slice types shared by all
+upper media packages:
+
+```hirsel unbuilt
+pub const FRAMED_PREFIX_MAX: u64 = 64
+
+pub type PayloadSlice: send {
+    backing: Shared[Bytes],
+    at: u64,
+    len: u64
+}
+
+pub type FramedSlice: send {
+    prefix: Inline[u8, 64],
+    prefix_start: u8,
+    payload: PayloadSlice
+}
+
+pub fn payload_whole(take backing: Shared[Bytes]) -> PayloadSlice
+pub fn payload_slice(take backing: Shared[Bytes], at: u64, len: u64) -> Option[PayloadSlice]
+pub fn payload_share(s: PayloadSlice) -> PayloadSlice
+pub fn payload_trim_front(take s: PayloadSlice, n: u64) -> Option[PayloadSlice]
+pub fn payload_trim_range(take s: PayloadSlice, offset: u64, len: u64) -> Option[PayloadSlice]
+pub fn payload_retained_bytes(s: PayloadSlice) -> u64
+
+pub fn framed_from(take payload: PayloadSlice) -> FramedSlice
+pub fn framed_prepend(mut f: FramedSlice, header: Bytes) -> bool
+pub fn framed_len(f: FramedSlice) -> u64
+pub fn framed_retained_bytes(f: FramedSlice) -> u64
+
+pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: PayloadSlice, fin: bool) -> Result[bool, QuicError]
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority, tag: u64) -> Result[(), QuicError]
+```
+
+- **Bounds:** `at + len <= list.len(backing)` and `prefix_start <= 64`, enforced at construction.
+- **Right-aligned inline prefix:** `FramedSlice` stores active TX framing headers in
+  `prefix[prefix_start .. 64]` (empty at `prefix_start = 64`). Each protocol layer (`cascade`,
+  `moq`, `webtransport`) prepends its header in O(header_len) with zero shifts and zero payload
+  copies. If an abnormally large header (e.g. long MoQ properties) exceeds `prefix_start`,
+  `framed_prepend` returns `false` and the caller explicitly coalesces into one `Shared[Bytes]`.
+- **Direct-to-slot TX assembly:** `poll` writes the 1-RTT short header, the `DATAGRAM` frame
+  header, `prefix[prefix_start .. 64]`, and `payload.backing[at .. at + len]` directly into `out`
+  and seals in place via `packet.seal`, removing both intermediate scratch staging (`tx_payload`)
+  and secondary packet copies.
+- **Tight packet-sized RX `PayloadSlice`:** `receive_datagram` opens 1-RTT packets in place and
+  copies each received `DATAGRAM` frame once into an exact-length `Shared[Bytes]` (`len ==
+  frame.len <= max_mtu`, never retaining the caller's `UDP_GRO` receive slab), emitting
+  `Event.Datagram(c, PayloadSlice)`. Upper layers strip their headers via `payload_trim_front`
+  with zero copies.
+
 `priority` sets a stream's `Priority`: its urgency (0 to 7), then its `order` within that
 urgency, then `then` within equal orders, each lower first; among equal priorities streams
 take turns, as [RFC 9218](https://www.rfc-editor.org/rfc/rfc9218)'s `u` and `i` do. A
@@ -471,6 +523,12 @@ datagrams by track so a revocation fence can purge them (MOQ-8).
 Received datagrams are delivered in arrival order as `Event.Datagram`, never reassembled and
 never acknowledged to the application, within `EndpointLimits.datagram_bytes` (QUIC-4); one
 that would pass it is dropped and counted as `DatagramBuffer`.
+
+**Retained-backing budget rule (text only, not yet built — media-seams-design-3072).** Under the
+`PayloadSlice` / `FramedSlice` contract (QUIC-1), wire MTU and `max_datagram_frame_size` checks
+use `framed_len(f)` / `s.len`, while memory caps (`send_bytes`, `datagram_bytes`) charge
+`framed_retained_bytes(f)` / `payload_retained_bytes(s)` — the full `list.len(backing)` plus
+queue record overhead — so a short slice can never hide an uncharged backing allocation.
 
 ## QUIC-8: Timers, closing and idling
 

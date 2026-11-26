@@ -616,7 +616,11 @@ fn nack_in(mut p: PeerSession, now: u64, pkt: Bytes, r: rtp.rtcp.Packet, media: 
             p.tracks[t].nacked += bits
         }
     }
-    if p.tracks[t].rtx_ssrc == 0 || p.tracks[t].highest == EMPTY {
+    let rtx_present = match p.tracks[t].rtx {
+        Some(_) => true,
+        None => false,
+    }
+    if !rtx_present || p.tracks[t].highest == EMPTY {
         p.drops.nack += 1
         return
     }

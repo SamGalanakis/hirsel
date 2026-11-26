@@ -205,12 +205,12 @@ type Dd {
 // payload as the leg sends it (an RTX repair's begins with its OSN), followed by its
 // `dd` bytes of dependency descriptor, and the header is written at send, when the
 // transport number is taken (RTP-8).
+type PacedStream = Media(guard: u8) | Rtx | Fec | Padding
+
 type Paced {
     slot: u32,
     track: u16,
-    media: bool,
-    // RTP-14: the FlexFEC group size of the packet's frame, 0 for none.
-    guard: u8,
+    stream: PacedStream,
     fields: rtp.header.Fields,
     level: Option[u8],
     voice: bool,
@@ -236,13 +236,29 @@ type Inbound {
     received: List[u64]
 }
 
+// A down-track's RFC 4588 repair stream: its SSRC and next sequence number.
+type RtxState {
+    ssrc: u32,
+    seq: u16
+}
+
+// A down-track's FlexFEC repair stream: its SSRC and next sequence number, whether
+// the frame being sent is a keyframe, the group being filled and the protection level
+// from the last report.
+type FecState {
+    ssrc: u32,
+    seq: u16,
+    key: bool,
+    group: rtp.fec.Group,
+    policy: rtp.fec.Policy
+}
+
 type Track {
     section: u8,
     video: bool,
     opus_fmtp: Option[Bytes],
     ssrc: u32,
-    rtx_ssrc: u32,
-    rtx_seq: u16,
+    rtx: Option[RtxState],
     highest: u64,
     sent: rtp.stats.Sent,
     history: rtp.history.History[Record],
@@ -271,14 +287,8 @@ type Track {
     last_pt: u8,
     // The subscription's static playout delay, written on every media packet (RTC-5).
     playout: Option[Delay],
-    // RTP-14: the FlexFEC-03 SSRC (0 for none) and its next sequence number, whether
-    // the frame being sent is a keyframe, the group being filled and the protection
-    // level from the last report.
-    fec_ssrc: u32,
-    fec_seq: u16,
-    fec_key: bool,
-    fec: rtp.fec.Group,
-    fec_policy: rtp.fec.Policy
+    // RTP-14: the FlexFEC-03 repair stream, when the section agreed one.
+    fec: Option[FecState]
 }
 
 type Section {
@@ -714,12 +724,16 @@ pub fn control_ssrc(p: PeerSession) -> u32 {
 }
 
 /// A down-track's media and RTX SSRCs, for `a=ssrc` and `a=ssrc-group:FID`.
-pub fn track_ssrcs(p: PeerSession, track: u16) -> Option[(u32, u32)] {
+pub fn track_ssrcs(p: PeerSession, track: u16) -> Option[(u32, Option[u32])] {
     let i: u64 = int.widen(track)
     if i >= list.len(p.tracks) {
         return None
     }
-    Some((p.tracks[i].ssrc, p.tracks[i].rtx_ssrc))
+    let rtx = match p.tracks[i].rtx {
+        Some(r) => Some(r.ssrc),
+        None => None,
+    }
+    Some((p.tracks[i].ssrc, rtx))
 }
 
 pub fn target_bps(p: PeerSession) -> u64 {

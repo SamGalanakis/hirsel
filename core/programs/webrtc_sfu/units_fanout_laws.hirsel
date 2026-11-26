@@ -116,7 +116,7 @@ fn fanout_run(net: Net, clock: Clock) waits {
         }
         let (m, x) = option.unwrap(tracks)
         legs[k].ssrc = m
-        legs[k].rtx = x
+        legs[k].rtx = option.unwrap(x)
     }
     // 20 packets, one each 20 ms.
     let media_before = units.counts(h.w.u1).media

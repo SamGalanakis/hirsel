@@ -971,7 +971,7 @@ fn remove_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId
 
 // ---- Readers ----
 /// The media and RTX SSRCs of `who`'s down-track of a publication, on its home unit.
-pub fn track_ssrcs(r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Option[(u32, u32)] {
+pub fn track_ssrcs(r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Option[(u32, Option[u32])] {
     let di = down_at(r, room, who, p)?
     let mi = member_at(r, room, who)?
     peer.track_ssrcs(r.members[mi].session, r.downs[di].track)

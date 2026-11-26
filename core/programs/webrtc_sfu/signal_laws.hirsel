@@ -347,7 +347,7 @@ fn router_on(h: Hall, k: u16) -> View[router.Router] in h {
 }
 
 // The down-track SSRCs subscriber `p` receives publisher `q` on.
-fn down_track(r: Sig, p: u32, q: u32) -> (u32, u32) {
+fn down_track(r: Sig, p: u32, q: u32) -> (u32, Option[u32]) {
     let m = seat_of_peer(r, p)
     option.unwrap(router.track_ssrcs(router_on(r.h, m.home), room_id(), m.gen, pub_for(r, q)))
 }
@@ -436,7 +436,8 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
     // 2's unit asks peer 1's, which answers, and the reply waits in peer 2's unit's
     // media inbox when the loss comes. Each peer's held window of source sequence
     // numbers is [from, to).
-    let (two_one, two_one_rtx) = down_track(r, 2, 1)
+    let (two_one, repair) = down_track(r, 2, 1)
+    let two_one_rtx = option.unwrap(repair)
     let mut held: List[(u32, u16, u16)] = list.new()
     for p in 1u32 .. 4u32 {
         let m = seat_of_peer(r, p)

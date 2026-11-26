@@ -95,13 +95,13 @@ pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Resul
             }
         }
         list.push(mut current.sections[si].local.ssrcs, t.ssrc)
-        if t.rtx_ssrc != 0 {
-            list.push(mut current.sections[si].local.rtx_pairs, (t.ssrc, t.rtx_ssrc))
-            list.push(mut current.sections[si].local.ssrcs, t.rtx_ssrc)
+        if let Some(rtx) = t.rtx {
+            list.push(mut current.sections[si].local.rtx_pairs, (t.ssrc, rtx.ssrc))
+            list.push(mut current.sections[si].local.ssrcs, rtx.ssrc)
         }
-        if t.fec_ssrc != 0 {
-            list.push(mut current.sections[si].local.fec_pairs, (t.ssrc, t.fec_ssrc))
-            list.push(mut current.sections[si].local.ssrcs, t.fec_ssrc)
+        if let Some(fec) = t.fec {
+            list.push(mut current.sections[si].local.fec_pairs, (t.ssrc, fec.ssrc))
+            list.push(mut current.sections[si].local.ssrcs, fec.ssrc)
         }
     }
     current.local.origin_version += 1
@@ -126,9 +126,15 @@ pub fn unannounced(p: PeerSession, track: u16) -> bool {
     let si: u64 = int.widen(p.tracks[t].section)
     let local = p.sections[si].agreed.local
     let ssrc = p.tracks[t].ssrc
-    let rtx = p.tracks[t].rtx_ssrc
-    let fec = p.tracks[t].fec_ssrc
-    (rtx != 0 && !paired(local.rtx_pairs, (ssrc, rtx))) || (fec != 0 && !paired(local.fec_pairs, (ssrc, fec)))
+    let rtx_missing = match p.tracks[t].rtx {
+        Some(rtx) => !paired(local.rtx_pairs, (ssrc, rtx.ssrc)),
+        None => false,
+    }
+    let fec_missing = match p.tracks[t].fec {
+        Some(fec) => !paired(local.fec_pairs, (ssrc, fec.ssrc)),
+        None => false,
+    }
+    rtx_missing || fec_missing
 }
 
 fn paired(pairs: List[(u32, u32)], pair: (u32, u32)) -> bool {

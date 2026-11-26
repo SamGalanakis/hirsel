@@ -195,7 +195,8 @@ fn rebind_run(cross: bool, seed: u64) {
     let pc = result.unwrap(router.publish(mut r, room, pubs[oc].who, 2))
     let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
     result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
-    let (m, x) = option.unwrap(router.track_ssrcs(r, room, s.who, pa))
+    let (m, repair) = option.unwrap(router.track_ssrcs(r, room, s.who, pa))
+    let x = option.unwrap(repair)
     // RTC-4: the subscribe's re-offer, at version 2, announces the pair; it is answered.
     let (v2, _) = w7_reoffered(mut r, s.who)
     result.unwrap(router.answer_reoffer(mut r, room, s.who, v2, w7_answer(seed + 10)))
@@ -291,7 +292,7 @@ fn rebind_run(cross: bool, seed: u64) {
     send(mut r, 34 * MS, mut pubs[oc], RC, b"c", 40001, TC + 3000, true, vp8_key(), mut out)
     on_leg(one(received(mut s, out), "C after its switch"), m, plus(o, 12), later(t, anchor_c + 3000), "C's numbering")
     peer.clear_outbox(mut out)
-    if router.track_ssrcs(r, room, s.who, pc) != Some((m, x)) {
+    if router.track_ssrcs(r, room, s.who, pc) != Some((m, Some(x))) {
         fail("the down-track's SSRCs changed before any collision")
     }
     // The subscriber's own authenticated packet on the leg's media SSRC (RFC 3550
@@ -305,7 +306,8 @@ fn rebind_run(cross: bool, seed: u64) {
     if asked(mut pubs[oc], out, RC).plis != 1 {
         fail("the collision did not ask C for a keyframe")
     }
-    let (m2, x2) = option.unwrap(router.track_ssrcs(r, room, s.who, pc))
+    let (m2, repair2) = option.unwrap(router.track_ssrcs(r, room, s.who, pc))
+    let x2 = option.unwrap(repair2)
     if m2 == m || m2 == x || x2 == m || x2 == x || m2 == 0 || x2 == 0 || m2 == x2 {
         fail("the collision did not draw fresh SSRCs")
     }

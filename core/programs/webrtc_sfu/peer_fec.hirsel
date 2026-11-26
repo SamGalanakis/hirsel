@@ -6,8 +6,7 @@
 // Whether track `t` sends FlexFEC: the section keeps `flexfec-03` and the agreement in
 // force pairs the track's media SSRC with its FlexFEC SSRC (RTC-4).
 fn fec_on(p: PeerSession, t: u64) -> bool {
-    let fec = p.tracks[t].fec_ssrc
-    if fec == 0 {
+    let Some(fec) = p.tracks[t].fec else {
         return false
     }
     let si: u64 = int.widen(p.tracks[t].section)
@@ -16,7 +15,7 @@ fn fec_on(p: PeerSession, t: u64) -> bool {
     }
     let ssrc = p.tracks[t].ssrc
     for pair in p.sections[si].agreed.local.fec_pairs {
-        if pair == (ssrc, fec) {
+        if pair == (ssrc, fec.ssrc) {
             return true
         }
     }
@@ -28,19 +27,24 @@ fn fec_on(p: PeerSession, t: u64) -> bool {
 // keyframe from its first packet on, though only that packet's descriptor says so.
 fn guard(mut p: PeerSession, t: u64, u: rtp.rewrite.Unit) -> u8 {
     if u.start {
-        p.tracks[t].fec_key = u.keyframe
+        if let Some(mut fec) = p.tracks[t].fec {
+            fec.key = u.keyframe
+        }
     }
     if !p.tracks[t].video || !fec_on(p, t) {
         return 0
     }
-    let class: rtp.fec.Class = if u.keyframe || p.tracks[t].fec_key {
+    let Some(fec) = p.tracks[t].fec else {
+        return 0
+    }
+    let class: rtp.fec.Class = if u.keyframe || fec.key {
         Key
     } else if (u.needs & 1) != 0 {
         Base
     } else {
         Upper
     }
-    rtp.fec.size(p.tracks[t].fec_policy, class)
+    rtp.fec.size(fec.policy, class)
 }
 
 // Put the media packet in `p.pkt`, before it is sealed, into track `t`'s group. A
@@ -51,17 +55,21 @@ fn fec_protect(mut p: PeerSession, t: u64, si: u64, limit: u8) -> bool {
         return false
     }
     let map = p.sections[si].map
-    match rtp.fec.protect(mut p.tracks[t].fec, map, p.pkt, limit) {
-        Ok(full) => full,
-        Error(Packet) => false,
-        Error(Long) => false,
-        Error(_) => {
-            rtp.fec.clear(mut p.tracks[t].fec)
-            match rtp.fec.protect(mut p.tracks[t].fec, map, p.pkt, limit) {
-                Ok(full) => full,
-                Error(_) => false,
-            }
-        },
+    if let Some(mut fec) = p.tracks[t].fec {
+        match rtp.fec.protect(mut fec.group, map, p.pkt, limit) {
+            Ok(full) => full,
+            Error(Packet) => false,
+            Error(Long) => false,
+            Error(_) => {
+                rtp.fec.clear(mut fec.group)
+                match rtp.fec.protect(mut fec.group, map, p.pkt, limit) {
+                    Ok(full) => full,
+                    Error(_) => false,
+                }
+            },
+        }
+    } else {
+        false
     }
 }
 
@@ -70,27 +78,38 @@ fn fec_protect(mut p: PeerSession, t: u64, si: u64, limit: u8) -> bool {
 fn fec_send(mut p: PeerSession, now: u64, t: u64, src: Gen, mut out: Outbox) -> Result[(), PeerError] {
     let si: u64 = int.widen(p.tracks[t].section)
     let Some(pt) = send_pt(p.sections[si].agreed, Flexfec) else {
-        rtp.fec.clear(mut p.tracks[t].fec)
+        if let Some(mut fec) = p.tracks[t].fec {
+            rtp.fec.clear(mut fec.group)
+        }
         return Ok(())
     }
-    let ts = rtp.fec.timestamp(p.tracks[t].fec)
     let mut buf = replace(mut p.repair, list.new())
     list.clear(mut buf)
-    let wrote = rtp.fec.write(mut p.tracks[t].fec, mut buf)
-    let staged = match wrote {
-        Ok(n) if n > 0 => {
-            let f = rtp.header.Fields(marker: false, pt: pt, seq: p.tracks[t].fec_seq, ts: ts, ssrc: p.tracks[t].fec_ssrc)
-            let q = Paced(slot: 0, track: int.narrow(t), media: false, guard: 0, fields: f, level: None, voice: false, src: src, dd: 0, cvo: None, capture: None)
+    let mut repair: Option[(u32, u16, u32, u64)] = None
+    if let Some(mut fec) = p.tracks[t].fec {
+        let ssrc = fec.ssrc
+        let seq = fec.seq
+        let ts = rtp.fec.timestamp(fec.group)
+        match rtp.fec.write(mut fec.group, mut buf) {
+            Ok(n) if n > 0 => {
+                repair = Some((ssrc, seq, ts, n))
+            },
+            _ => rtp.fec.clear(mut fec.group),
+        }
+    }
+    let staged = match repair {
+        Some((ssrc, seq, ts, n)) => {
+            let f = rtp.header.Fields(marker: false, pt: pt, seq: seq, ts: ts, ssrc: ssrc)
+            let q = Paced(slot: 0, track: int.narrow(t), stream: Fec, fields: f, level: None, voice: false, src: src, dd: 0, cvo: None, capture: None)
             stage(mut p, now, mut out, q, Video, None, buf, 0, n, None, None, None)
         },
-        _ => {
-            rtp.fec.clear(mut p.tracks[t].fec)
-            Ok(false)
-        },
+        None => Ok(false),
     }
     p.repair = take buf
     if staged? {
-        p.tracks[t].fec_seq = int.wrapping_add(p.tracks[t].fec_seq, 1u16)
+        if let Some(mut fec) = p.tracks[t].fec {
+            fec.seq = int.wrapping_add(fec.seq, 1u16)
+        }
     }
     Ok(())
 }
@@ -99,6 +118,8 @@ fn fec_send(mut p: PeerSession, now: u64, t: u64, src: Gen, mut out: Outbox) -> 
 // and the session's round trip.
 fn fec_report(mut p: PeerSession, t: u64, fraction: u8) {
     if p.tracks[t].video {
-        rtp.fec.on_report(mut p.tracks[t].fec_policy, fraction, p.rtt)
+        if let Some(mut fec) = p.tracks[t].fec {
+            rtp.fec.on_report(mut fec.policy, fraction, p.rtt)
+        }
     }
 }

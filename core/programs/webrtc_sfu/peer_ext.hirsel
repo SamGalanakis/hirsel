@@ -25,9 +25,11 @@ fn leg_ext(mut p: PeerSession, now: u64, si: u64, size: u32, q: Paced) -> Result
         let _ = rtp.ext.put_orientation(mut p.ext, map, b)
     }
     let t: u64 = int.widen(q.track)
-    if q.media && t < list.len(p.tracks) {
-        if let Some(d) = p.tracks[t].playout {
-            let _ = rtp.ext.put_playout_delay(mut p.ext, map, d.min, d.max)
+    if let Media(guard: _) = q.stream {
+        if t < list.len(p.tracks) {
+            if let Some(d) = p.tracks[t].playout {
+                let _ = rtp.ext.put_playout_delay(mut p.ext, map, d.min, d.max)
+            }
         }
     }
     if let Some(c) = q.capture {

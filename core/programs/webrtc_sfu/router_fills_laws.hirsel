@@ -407,7 +407,8 @@ fn av1_rtx_offer() -> Bytes {
 // with the OSN, then that packet's payload, with its timestamp and marker, and with
 // the descriptor the media packet carried (the leg's frame number, not the source's).
 fn expect_repair(mut r: router.Router, now: u64, pv: router.PublicationId, mut l: Watched, j: u64, packets: List[Bytes], mut out: peer.Outbox, take what: String) {
-    let (m, x) = option.unwrap(router.track_ssrcs(r, room_id(), l.c.who, pv))
+    let (m, repair) = option.unwrap(router.track_ssrcs(r, room_id(), l.c.who, pv))
+    let x = option.unwrap(repair)
     let h = l.t.heads[j]
     peer.clear_outbox(mut out)
     feed(mut r, now, l.c.who, l.c.at, nack(mut l.c.cs, m, h.seq), mut out)

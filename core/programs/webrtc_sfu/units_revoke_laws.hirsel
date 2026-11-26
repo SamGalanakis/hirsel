@@ -165,8 +165,10 @@ fn revoke_run(net: Net, clock: Clock, held: Held, arm: Arm) waits {
     }
     let (x_py, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, x, py))
     let (x_pz, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, x, pz))
-    let (y_pa, y_pa_rtx) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u2), room, gen_of(2), pa))
-    let (z_pa, z_pa_rtx) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, gen_of(3), pa))
+    let (y_pa, y_repair) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u2), room, gen_of(2), pa))
+    let y_pa_rtx = option.unwrap(y_repair)
+    let (z_pa, z_repair) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, gen_of(3), pa))
+    let z_pa_rtx = option.unwrap(z_repair)
     let (z_py, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, gen_of(3), py))
     let y_start = h.peers[BY].seq
     // Unit 1 takes one `Media` message per packet of Y's that reached unit 2.

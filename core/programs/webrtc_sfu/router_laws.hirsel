@@ -187,9 +187,11 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
     let (m1, x1) = option.unwrap(router.track_ssrcs(r, room, s1.who, pa))
     let (m2, x2) = option.unwrap(router.track_ssrcs(r, room, s2.who, pa))
     let (m3, x3) = option.unwrap(router.track_ssrcs(r, room, s3.who, pa))
-    if x3 != 0 || x1 == 0 || x2 == 0 {
+    if x3 != None || x1 == None || x2 == None {
         fail("RTX SSRCs follow the legs' RTX agreement")
     }
+    let r1 = option.unwrap(x1)
+    let r2 = option.unwrap(x2)
     peer.clear_outbox(mut out)
     // Source 10, 11, 13, 12, 14 on section a.
     let mut now = 10 * MS
@@ -223,8 +225,8 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
             t3 = g3.h.ts
         }
         if seq == 12 {
-            expect_rtx(g1, x1, 0, plus(n1, 2), later(t1, 6000), 97, "late 12 goes out on subscriber 1's RTX SSRC")
-            expect_rtx(g2, x2, 0, plus(n2, 2), later(t2, 6000), 101, "late 12 goes out on subscriber 2's RTX SSRC")
+            expect_rtx(g1, r1, 0, plus(n1, 2), later(t1, 6000), 97, "late 12 goes out on subscriber 1's RTX SSRC")
+            expect_rtx(g2, r2, 0, plus(n2, 2), later(t2, 6000), 101, "late 12 goes out on subscriber 2's RTX SSRC")
             if list.len(got3) != 0 {
                 fail("a leg without RTX sent the late packet")
             }
@@ -244,6 +246,7 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
     }
     // The same across the 16-bit wrap on section b: 65534, 65535, 1, 0, 2.
     let (mb, xb) = option.unwrap(router.track_ssrcs(r, room, s1.who, pb))
+    let rb = option.unwrap(xb)
     let mut nb = 0u16
     let mut tb = 0u32
     let mut wire_b: List[Bytes] = list.new()
@@ -263,7 +266,7 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
             tb = g.h.ts
         }
         if seq == 0 {
-            expect_rtx(g, xb, 0, plus(nb, 2), later(tb, 3000 * step), 97, "late 0 goes out as RTX across the wrap")
+            expect_rtx(g, rb, 0, plus(nb, 2), later(tb, 3000 * step), 97, "late 0 goes out as RTX across the wrap")
         } else {
             expect_media(g, mb, plus(nb, k), later(tb, 3000 * step), 96, "wrapped media number")
         }
@@ -278,7 +281,7 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
     let sent3 = nack(mut s1.cs, m1, plus(n1, 1))
     feed(mut r, now, s1.who, s1.at, sent3, mut out)
     let a1 = one(received(mut s1, out), "subscriber 1's NACK is answered once")
-    expect_rtx(a1, x1, 1, plus(n1, 1), later(t1, 3000), 97, "subscriber 1's NACK answer")
+    expect_rtx(a1, r1, 1, plus(n1, 1), later(t1, 3000), 97, "subscriber 1's NACK answer")
     if option.unwrap(ext_value(a1, 1, Mid)) != b"c1" || option.unwrap(ext_value(a1, 3, TransportSeq)) != b"\x00\x0a" {
         fail("subscriber 1's NACK answer MID or transport number")
     }
@@ -286,7 +289,7 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
     let sent4 = nack(mut s2.cs, m2, plus(n2, 1))
     feed(mut r, now, s2.who, s2.at, sent4, mut out)
     let a2 = one(received(mut s2, out), "subscriber 2's NACK is answered once")
-    expect_rtx(a2, x2, 1, plus(n2, 1), later(t2, 3000), 101, "subscriber 2's NACK answer")
+    expect_rtx(a2, r2, 1, plus(n2, 1), later(t2, 3000), 101, "subscriber 2's NACK answer")
     if option.unwrap(ext_value(a2, 9, Mid)) != b"v" || option.unwrap(ext_value(a2, 5, TransportSeq)) != b"\x00\x05" {
         fail("subscriber 2's NACK answer MID or transport number")
     }
@@ -476,9 +479,10 @@ fn rsize_nack_is_answered_with_rtx() -> Result[(), router.RouterError] {
     let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
     result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
     let (m, x) = option.unwrap(router.track_ssrcs(r, room, s.who, pa))
-    if x == 0 {
+    if x == None {
         fail("the subscriber's leg has no RTX SSRC")
     }
+    let repair = option.unwrap(x)
     peer.clear_outbox(mut out)
     let mut now = 10 * MS
     let mut n0 = 0u16
@@ -506,7 +510,7 @@ fn rsize_nack_is_answered_with_rtx() -> Result[(), router.RouterError] {
         peer.clear_outbox(mut out)
         let _ = router.poll(mut r, now + ms * MS, mut out)
         for g in received(mut s, out) {
-            if g.h.ssrc == x {
+            if g.h.ssrc == repair {
                 list.push(mut got, clone(g))
             }
         }
@@ -514,7 +518,7 @@ fn rsize_nack_is_answered_with_rtx() -> Result[(), router.RouterError] {
     for lost in[2u16, 5u16, 6u16] {
         let mut count = 0u64
         for g in got {
-            if g.h.ssrc != x {
+            if g.h.ssrc != repair {
                 continue
             }
             let body = payload_of(g)

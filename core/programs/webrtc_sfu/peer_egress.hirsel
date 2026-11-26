@@ -29,23 +29,27 @@ fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut out: Outbox) -> Result[(
         return Ok(())
     }
     for t in 0u64 .. list.len(p.tracks) {
-        let fec = p.tracks[t].fec_ssrc
-        if p.tracks[t].ssrc == ssrc || (p.tracks[t].rtx_ssrc != 0 && p.tracks[t].rtx_ssrc == ssrc) || (fec != 0 && fec == ssrc) {
+        let rtx = track_rtx_ssrc(p, t)
+        let fec = track_fec_ssrc(p, t)
+        if p.tracks[t].ssrc == ssrc || rtx == Some(ssrc) || fec == Some(ssrc) {
             let old = p.tracks[t].ssrc
-            let old_rtx = p.tracks[t].rtx_ssrc
             retire(mut p, old, mut out)?
             let fresh = draw(mut p)
             p.tracks[t].ssrc = fresh
-            if old_rtx != 0 {
+            if let Some(old_rtx) = rtx {
                 retire(mut p, old_rtx, mut out)?
                 let fresh_rtx = draw(mut p)
-                p.tracks[t].rtx_ssrc = fresh_rtx
+                if let Some(mut r) = p.tracks[t].rtx {
+                    r.ssrc = fresh_rtx
+                }
             }
-            if fec != 0 {
-                retire(mut p, fec, mut out)?
+            if let Some(old_fec) = fec {
+                retire(mut p, old_fec, mut out)?
                 let fresh_fec = draw(mut p)
-                p.tracks[t].fec_ssrc = fresh_fec
-                rtp.fec.clear(mut p.tracks[t].fec)
+                if let Some(mut f) = p.tracks[t].fec {
+                    f.ssrc = fresh_fec
+                    rtp.fec.clear(mut f.group)
+                }
             }
             p.tracks[t].highest = EMPTY
             p.tracks[t].sent = rtp.stats.sent(0)
@@ -73,6 +77,20 @@ fn has_rtx(a: sdp.Agreed) -> bool {
         }
     }
     false
+}
+
+fn track_rtx_ssrc(p: PeerSession, t: u64) -> Option[u32] {
+    match p.tracks[t].rtx {
+        Some(rtx) => Some(rtx.ssrc),
+        None => None,
+    }
+}
+
+fn track_fec_ssrc(p: PeerSession, t: u64) -> Option[u32] {
+    match p.tracks[t].fec {
+        Some(fec) => Some(fec.ssrc),
+        None => None,
+    }
 }
 
 fn section_clock(p: PeerSession, section: u8) -> u32 {
@@ -107,24 +125,23 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     let clock = section_clock(p, section)
     let ssrc = draw(mut p)
     let rtx = if video && has_rtx(p.sections[si].agreed) {
-        draw(mut p)
+        Some(RtxState(ssrc: draw(mut p), seq: 0))
     } else {
-        0
+        None
     }
     // RTP-14: a FlexFEC SSRC is drawn where the section agreed `flexfec-03`; it is
     // used once a re-offer's answer takes its `FEC-FR` pair.
-    let fec_ssrc = if video && send_pt(p.sections[si].agreed, Flexfec) != None {
-        draw(mut p)
-    } else {
-        0
+    let mut fec: Option[FecState] = None
+    if video && send_pt(p.sections[si].agreed, Flexfec) != None {
+        let group = rtp.fec.group() ?=> |c| Capacity(c)
+        fec = Some(FecState(ssrc: draw(mut p), seq: first_seq, key: false, group: take group, policy: rtp.fec.policy()))
     }
-    let fec = rtp.fec.group() ?=> |c| Capacity(c)
     let history: rtp.history.History[Record] = rtp.history.history(HISTORY_SLOTS, HISTORY_AGE_NS) ?=> |c| Capacity(c)
     let rewrite = rtp.rewrite.rewrite(clock, REWRITE_RANGES, REWRITE_FRAMES, int.widen(first_seq), first_ts) ?=> |c| Capacity(c)
     let pictures = rtp.counter.counter(15, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
-    let track = Track(section: section, video: video, opus_fmtp: None, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None, fec_ssrc: fec_ssrc, fec_seq: first_seq, fec_key: false, fec: take fec, fec_policy: rtp.fec.policy())
+    let track = Track(section: section, video: video, opus_fmtp: None, ssrc: ssrc, rtx: rtx, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None, fec: take fec)
     for t in 0u64 .. list.len(p.tracks) {
         if p.tracks[t].ended {
             p.tracks[t] = take track
@@ -332,14 +349,16 @@ fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Rec
     let Some(rpt) = rtx_pt(p.sections[si].agreed, rec.pt) else {
         return Ok(false)
     }
-    if p.tracks[t].rtx_ssrc == 0 {
+    let Some(rtx) = p.tracks[t].rtx else {
         return Ok(false)
     }
-    let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
+    let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: rtx.seq, ts: ts, ssrc: rtx.ssrc)
     let osn: u16 = int.truncate(index)
-    let q = Paced(slot: 0, track: int.narrow(t), media: false, guard: 0, fields: f, level: None, voice: false, src: rec.src, dd: 0, cvo: rec.cvo, capture: rec.capture)
+    let q = Paced(slot: 0, track: int.narrow(t), stream: Rtx, fields: f, level: None, voice: false, src: rec.src, dd: 0, cvo: rec.cvo, capture: rec.capture)
     if stage(mut p, now, mut out, q, Retransmit, Some(osn), payload, rec.from, rec.len, rec.picture, rec.tl0, rec.dd)? {
-        p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
+        if let Some(mut current) = p.tracks[t].rtx {
+            current.seq = int.wrapping_add(current.seq, 1u16)
+        }
     }
     let _ = drain(mut p, now, mut out)
     Ok(true)
@@ -378,9 +397,12 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
             list.clear(mut p.pkt)
             return Error(take e)
         }
-        let full = fec_protect(mut p, t, si, q.guard)
+        let full = match q.stream {
+            Media(guard: group) => fec_protect(mut p, t, si, group),
+            _ => false,
+        }
         seal_out(mut p, q.src, mut out)?
-        if q.media {
+        if let Media(guard: _) = q.stream {
             rtp.stats.on_sent(mut p.tracks[t].sent, len)
         }
         if full {
@@ -418,7 +440,7 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
         list.push(mut p.free, slot)
         return Error(take e)
     }
-    let entry = Paced(slot: slot, track: q.track, media: q.media, guard: q.guard, fields: q.fields, level: q.level, voice: q.voice, src: q.src, dd: tail, cvo: q.cvo, capture: q.capture)
+    let entry = Paced(slot: slot, track: q.track, stream: q.stream, fields: q.fields, level: q.level, voice: q.voice, src: q.src, dd: tail, cvo: q.cvo, capture: q.capture)
     if let Error(_) = rtp.pacer.push(mut p.pacer, int.widen(q.track), class, RTP_HEADER + size, now, entry) {
         list.push(mut p.free, slot)
         p.drops.paced += 1
@@ -472,10 +494,9 @@ fn pad_tracks(p: PeerSession) -> List[(u64, Option[u8])] {
         if !track.video || track.ended || !p.sections[si].twcc {
             continue
         }
-        let pt: Option[u8] = if track.rtx_ssrc == 0 {
-            None
-        } else {
-            any_rtx_pt(p.sections[si].agreed)
+        let pt: Option[u8] = match track.rtx {
+            Some(_) => any_rtx_pt(p.sections[si].agreed),
+            None => None,
         }
         match pt {
             Some(_) => list.push(mut rtx, (t, pt)),
@@ -512,9 +533,14 @@ fn pad_out(mut p: PeerSession, now: u64, pad: u8, mut out: Outbox) -> Result[(),
         return Ok(())
     }
     for (t, repair) in pad_tracks(p) {
-        let f = if let Some(rtx) = repair {
-            let f = rtp.header.Fields(marker: false, pt: rtx, seq: p.tracks[t].rtx_seq, ts: p.tracks[t].last_ts, ssrc: p.tracks[t].rtx_ssrc)
-            p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
+        let f = if let Some(rtx_payload) = repair {
+            let Some(rtx) = p.tracks[t].rtx else {
+                continue
+            }
+            let f = rtp.header.Fields(marker: false, pt: rtx_payload, seq: rtx.seq, ts: p.tracks[t].last_ts, ssrc: rtx.ssrc)
+            if let Some(mut current) = p.tracks[t].rtx {
+                current.seq = int.wrapping_add(current.seq, 1u16)
+            }
             f
         } else {
             let Some((index, ts)) = rtp.rewrite.pad(mut p.tracks[t].rewrite) else {
@@ -526,7 +552,7 @@ fn pad_out(mut p: PeerSession, now: u64, pad: u8, mut out: Outbox) -> Result[(),
         }
         let si: u64 = int.widen(p.tracks[t].section)
         let wide: u32 = int.widen(pad)
-        let q = Paced(slot: 0, track: int.narrow(t), media: false, guard: 0, fields: f, level: None, voice: false, src: p.who.gen, dd: 0, cvo: None, capture: None)
+        let q = Paced(slot: 0, track: int.narrow(t), stream: Padding, fields: f, level: None, voice: false, src: p.who.gen, dd: 0, cvo: None, capture: None)
         leg_ext(mut p, now, si, RTP_HEADER + wide, q)?
         let _ = rtp.rtx.write_probe(f, view p.ext, pad, mut p.pkt) ?=> |take x| Rtp(x)
         let tag = own_tag(p)
@@ -585,14 +611,13 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
     if p.closed || t >= list.len(p.tracks) || barred(p, q.src) {
         return Ok(())
     }
-    let ssrc = if q.media {
-        p.tracks[t].ssrc
-    } else if q.fields.ssrc == p.tracks[t].fec_ssrc {
-        p.tracks[t].fec_ssrc
-    } else {
-        p.tracks[t].rtx_ssrc
+    let current = match q.stream {
+        Media(guard: _) => q.fields.ssrc == p.tracks[t].ssrc,
+        Rtx => track_rtx_ssrc(p, t) == Some(q.fields.ssrc),
+        Fec => track_fec_ssrc(p, t) == Some(q.fields.ssrc),
+        Padding => q.fields.ssrc == p.tracks[t].ssrc || track_rtx_ssrc(p, t) == Some(q.fields.ssrc) || track_fec_ssrc(p, t) == Some(q.fields.ssrc),
     }
-    if ssrc == 0 || ssrc != q.fields.ssrc {
+    if !current {
         return Ok(())
     }
     let si: u64 = int.widen(p.tracks[t].section)
@@ -609,9 +634,12 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
         return Error(Capacity(Capacity(requested: len + 16, available: list.capacity(p.pkt) - list.len(p.pkt))))
     }
     list.append(mut p.pkt, list.slice(p.slab[at], 0, len))
-    let full = fec_protect(mut p, t, si, q.guard)
+    let full = match q.stream {
+        Media(guard: group) => fec_protect(mut p, t, si, group),
+        _ => false,
+    }
     seal_out(mut p, q.src, mut out)?
-    if q.media {
+    if let Media(guard: _) = q.stream {
         rtp.stats.on_sent(mut p.tracks[t].sent, len)
         p.tracks[t].last_ts = q.fields.ts
         p.tracks[t].last_pt = q.fields.pt
@@ -630,19 +658,21 @@ pub fn end_track(mut p: PeerSession, track: u16) {
     if t < list.len(p.tracks) {
         rtp.rewrite.close(mut p.tracks[t].rewrite)
         let _ = rtp.history.clear(mut p.tracks[t].history)
-        rtp.fec.clear(mut p.tracks[t].fec)
+        if let Some(mut f) = p.tracks[t].fec {
+            rtp.fec.clear(mut f.group)
+        }
         p.tracks[t].ended = true
         // The track's SRTP send streams end with it, so the session's stream bound counts
         // live down-tracks, not every one it has held (RTC-7).
         let ssrc = p.tracks[t].ssrc
-        let rtx = p.tracks[t].rtx_ssrc
-        let fec = p.tracks[t].fec_ssrc
+        let rtx = track_rtx_ssrc(p, t)
+        let fec = track_fec_ssrc(p, t)
         end_send(mut p, ssrc)
-        if rtx != 0 {
-            end_send(mut p, rtx)
+        if let Some(r) = rtx {
+            end_send(mut p, r)
         }
-        if fec != 0 {
-            end_send(mut p, fec)
+        if let Some(f) = fec {
+            end_send(mut p, f)
         }
     }
     unpace(mut p, track)
@@ -730,7 +760,7 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
     }
     let f = rtp.header.Fields(marker: marker, pt: pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
     let size = guard(mut p, t, leg.unit)
-    let q = Paced(slot: 0, track: track, media: true, guard: size, fields: f, level: leg.level, voice: leg.voice, src: leg.src, dd: 0, cvo: cvo, capture: leg.capture)
+    let q = Paced(slot: 0, track: track, stream: Media(guard: size), fields: f, level: leg.level, voice: leg.voice, src: leg.src, dd: 0, cvo: cvo, capture: leg.capture)
     let class: rtp.pacer.Class = if p.tracks[t].video {
         Video
     } else {

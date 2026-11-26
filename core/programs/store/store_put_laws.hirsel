@@ -477,7 +477,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     let mut ops = new_data_rows()
     list.reserve(mut ops.rest, n - 2)
     for slot_order in 0u64 .. n {
-        push_data_row(mut ops, DataOp(key: key_word(n - slot_order), value: None, trim: None))
+        push_data_row(mut ops, DataOp(key: key_word(n - slot_order), value: None, trim: None, prior: None))
     }
     // Independently observe the allocator's grant for the index list. The
     // encoder's ordering pass can fit into that grant without owning any key.
@@ -504,7 +504,8 @@ fn journal_test_order_workspace() -> Result[(), ()] {
 }
 
 fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    encode_staged(ci, None, None, mut ops, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset, FRAME_LIMIT)
+    let order = data_order(ops)?
+    encode_staged(ci, None, None, None, mut ops, order, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset, FRAME_LIMIT)
 }
 
 // Hand-derived COMMIT bytes: delete key 1, then put key 2 = 33. Check from

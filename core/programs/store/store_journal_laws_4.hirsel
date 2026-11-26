@@ -604,7 +604,7 @@ fn window_law_commit(ctx: DiskContext, offset: u64, head: u64, width: u64) -> By
     list.fill(mut value, width, 119u8)
     let key = result.unwrap(logical_key(1, key_word(head)))
     let mut data = new_data_rows()
-    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value)), trim: None))
+    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     let ci = CallInfo(id: CallId(store: ctx.store, branch: 0, version: head), at: head + 100, seed: 0)
     result.unwrap(encode_commit(ci, mut data, ctx.seq, offset))
 }

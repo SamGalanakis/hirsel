@@ -64,8 +64,7 @@ fn tiered_wait_for_fold(attempt: core.Cell[TieredTouchSet], base: PageTree, oper
 
 // The original root supplies every previous value. Sequential edits take
 // siblings from the private candidate's shape, including after an earlier merge.
-fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], base: PageTree, operations: DataRows, first_stamp: u64) -> Result[TieredWritePlan, Error] {
-    let order = capacity(data_order(operations))?
+fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], base: PageTree, operations: DataRows, order: DataOrder, first_stamp: u64) -> Result[TieredWritePlan, Error] {
     tiered_wait_for_fold(attempt, base, operations, order)?
     let mut staged = share_page_tree(base)
     let mut deltas: List[Option[TieredDataDelta]] = list.new()
@@ -169,10 +168,10 @@ fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollecti
     Ok(take freed)
 }
 
-fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ops: DataRows, first: u64) -> Result[Option[TieredWritePlan], Error] {
+fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ops: DataRows, order: DataOrder, first: u64) -> Result[Option[TieredWritePlan], Error] {
     for slot in 0u64 .. ops.count {
         if tiered_data_key(base, data_row(ops, slot).key) {
-            return Ok(Some(prepare_tiered_writes(attempt, visible, base, ops, first)?))
+            return Ok(Some(prepare_tiered_writes(attempt, visible, base, ops, order, first)?))
         }
     }
     Ok(None)

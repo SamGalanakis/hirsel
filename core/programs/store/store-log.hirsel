@@ -211,7 +211,7 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
     let _ = reserve_ids(mut tx, current.height)?
     let charge = memory_data_charge(tx, key, raw)
     let staged = stage_value(take raw, tx.roots.collections.inline)
-    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged))
+    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged), None)
     current.limits.next = following
     map.insert(mut tx.ops.logs, id, current)
     tx.frame_bytes = frame
@@ -512,7 +512,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
             }
             removed
         }
-        push_data_row(mut operations, DataOp(key: take key, value: None, trim: Some(JournalTrim(floor: state.limits.first, dropped: dropped))))
+        push_data_row(mut operations, DataOp(key: take key, value: None, trim: Some(JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
     }
     if operations.count == 0 {
         return Ok(replace(mut tx.ops.rows, new_data_rows()))

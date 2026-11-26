@@ -507,7 +507,7 @@ fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
     Ok(take raw)
 }
 
-type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
+type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, DataRefund)
 
 type IndexEdits {
     probes: List[(u32, Bytes)],
@@ -702,12 +702,7 @@ fn delete_impl(mut tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catal
         let Some(old) = transaction_row(tx, p)? else {
             return Ok(false)
         }
-        let previous = memory_data_charge(tx, p, old)
-        let refund = if tx.retain_old {
-            0u64
-        } else {
-            previous
-        }
+        let refund = row_refund(tx, p, old)
         let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
         for (_, ix) in indexes {
             let bound_index = registered_index(tx, table_id, schema, ix)?

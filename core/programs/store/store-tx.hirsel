@@ -3,7 +3,7 @@
 pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
     freeze(mut tx)
     let d = {
-        let mut draft = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), bases: share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+        let mut draft = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), base_collection: None, bases: share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
         let result = body(mut draft)
         drafted_tx(take draft, take result)
     }
@@ -114,14 +114,14 @@ fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, take newe
     let mut head = take first
     // Moved, not copied: the frame-tail key keeps the spare room it was made with.
     for slot in 0u64 .. order.min(staged, 2) {
-        let DataOp(key: take key, value: take value, trim: _) = replace(mut head[slot], DataOp(key: list.new(), value: None, trim: None))
+        let DataOp(key: take key, value: take value, prior: prior, ..) = replace(mut head[slot], DataOp(key: list.new(), value: None, trim: None, prior: None))
         let mut ignored = 0u64
-        let _ = save_data_op(mut ops, below, streams, mut ignored, take key, take value)
+        let _ = save_data_op(mut ops, below, streams, mut ignored, take key, take value, prior)
     }
     for take op in take rest {
-        let DataOp(key: take key, value: take value, trim: _) = take op
+        let DataOp(key: take key, value: take value, prior: prior, ..) = take op
         let mut ignored = 0u64
-        let _ = save_data_op(mut ops, below, streams, mut ignored, take key, take value)
+        let _ = save_data_op(mut ops, below, streams, mut ignored, take key, take value, prior)
     }
 }
 
@@ -173,7 +173,7 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
     // The work's views anchor it to `tx`: its slot ends, and the bound returns
     // the work's owned parts, before `tx` is written.
     let ran = {
-        let work = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), bases: share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+        let work = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), base_collection: None, bases: share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
         bound steps steps {
             let mut draft = take work
             let result = body(mut draft)
@@ -219,10 +219,10 @@ fn edit_frame(ops: DataOps, below: List[Arc[Staged]], extra: u64, key: Bytes, va
 
 fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(), Error] {
     let charge = memory_data_charge(tx, p, val)
-    let (old_charge, height) = put_charge(tx, p)?
+    let (old_charge, height, prior) = put_charge(mut tx, p)?
     let _ = reserve_ids(mut tx, height)?
     let value = stage_value(take val, tx.roots.collections.inline)
-    let slot_order = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value))
+    let slot_order = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value), prior)
     if tail {
         tx.frame_tail = slot_order
     }
@@ -231,7 +231,37 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(
     Ok(())
 }
 
-fn put_charge(tx: Tx, key: Bytes) -> Result[(u64, u64), Error] {
+type TxCollection {
+    id: u32,
+    map_stamp: u64,
+    root: Arc[std.page.Page],
+    kind: std.page_descriptor.CollectionKind
+}
+
+fn cache_collection(mut tx: Tx, key: Bytes) -> Result[(), Error] {
+    let id: u32 = list.word_be(key, 0)
+    let stamp = tree_stamp(tx.roots.collections)
+    if let Some(held) = view tx.base_collection {
+        if held.id == id && held.map_stamp == stamp {
+            return Ok(())
+        }
+    }
+    let collection = {
+        let Some((root, descriptor)) = std.page.collection_entry(tx.roots.collections.root, list.slice(key, 0, 4)) else {
+            return Error(Stale(id))
+        }
+        TxCollection(id: id, map_stamp: stamp, root: arc.share(root), kind: collection_descriptor(descriptor).kind)
+    }
+    tx.base_collection = Some(take collection)
+    Ok(())
+}
+
+fn cached_write_height(tx: Tx, held: TxCollection) -> u64 {
+    let child_depth: u64 = int.widen(std.page.level(std.page.image_of(held.root)))
+    tree_height(tx.roots.collections) + child_depth + 1
+}
+
+fn put_charge(mut tx: Tx, key: Bytes) -> Result[(u64, u64, Option[u32]), Error] {
     if let Some(_) = tx.attempt {
         let previous = transaction_row(tx, key)?
         let height = transaction_write_height(tx, key)?
@@ -243,37 +273,31 @@ fn put_charge(tx: Tx, key: Bytes) -> Result[(u64, u64), Error] {
             0u64
         } else {
             charge
-        }, height))
+        }, height, None))
     }
-    let Some(child) = std.page.collection_child(tx.roots.collections.root, list.slice(key, 0, 4)) else {
-        return Error(Stale(list.word_be(key, 0)))
+    cache_collection(mut tx, key)?
+    let Some(held) = view tx.base_collection else {
+        fail("store: collection cache is empty")
     }
     // Both retention modes find the previous charge, so a body takes the
     // same steps on a live store and on a replay fork that retains rows;
     // the selection takes none.
-    let previous = match op_slot(tx.ops, key) {
-        Some(slot) => match data_row(tx.ops.rows, slot).value {
+    let (previous, prior) = match staged_op(tx, key) {
+        Some(op) => (match op.value {
             Some(value) => entry(key, staged_bytes(value)),
-            None => 0,
-        },
+            None => 0u64,
+        }, op.prior),
         None => {
-            // The newest layer that staged the key wins.
-            let mut beneath: Option[u64] = None
-            for layer in tx.below {
-                if let Some(slot) = op_slot(layer.ops, key) {
-                    beneath = Some(match data_row(layer.ops.rows, slot).value {
-                        Some(value) => entry(key, staged_bytes(value)),
-                        None => 0,
-                    })
-                }
+            let base = std.page.lookup(held.root, list.slice(key, 4, list.len(key)))
+            let charge = match base {
+                Some(value) => entry(key, value),
+                None => 0u64,
             }
-            match beneath {
-                Some(found) => found,
-                None => match std.page.lookup(child, list.slice(key, 4, list.len(key))) {
-                    Some(value) => entry(key, value),
-                    None => 0,
-                },
-            }
+            (charge, if held.kind == CellCollection || held.kind == LogCollection {
+                None
+            } else {
+                Some(stored_prior(base))
+            })
         },
     }
     let old = if tx.retain_old {
@@ -281,30 +305,43 @@ fn put_charge(tx: Tx, key: Bytes) -> Result[(u64, u64), Error] {
     } else {
         previous
     }
-    let child_depth: u64 = int.widen(std.page.level(std.page.image_of(child)))
-    Ok((old, tree_height(tx.roots.collections) + child_depth + 1))
+    Ok((old, cached_write_height(tx, held), prior))
 }
 
-fn delete_refund(tx: Tx, key: Bytes) -> Result[Option[u64], Error] {
+type DataRefund {
+    charge: u64,
+    prior: Option[u32]
+}
+
+fn row_refund(tx: Tx, key: Bytes, value: Bytes) -> DataRefund {
+    // Both retention modes take the same steps, as in put_charge.
+    let previous = memory_data_charge(tx, key, value)
+    let prior: Option[u32] = if let Some(_) = tx.attempt {
+        None
+    } else if let Some(op) = staged_op(tx, key) {
+        op.prior
+    } else {
+        Some(stored_prior(Some(view value)))
+    }
+    DataRefund(charge: if tx.retain_old {
+        0u64
+    } else {
+        previous
+    }, prior: prior)
+}
+
+fn delete_refund(tx: Tx, key: Bytes) -> Result[Option[DataRefund], Error] {
     Ok(match transaction_row(tx, key)? {
-        Some(v) => {
-            // As in apply_put: both retention modes take the same steps.
-            let previous = memory_data_charge(tx, key, v)
-            Some(if tx.retain_old {
-                0u64
-            } else {
-                previous
-            })
-        },
+        Some(value) => Some(row_refund(tx, key, value)),
         None => None
     })
 }
 
-fn apply_delete(mut tx: Tx, take p: Bytes, refund: u64) -> Result[(), Error] {
+fn apply_delete(mut tx: Tx, take p: Bytes, refund: DataRefund) -> Result[(), Error] {
     let height = transaction_write_height(tx, p)?
     let _ = reserve_ids(mut tx, height)?
-    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None)
-    tx.resident = int.saturating_sub(tx.resident, refund)
+    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None, refund.prior)
+    tx.resident = int.saturating_sub(tx.resident, refund.charge)
     Ok(())
 }
 
@@ -357,21 +394,25 @@ fn transaction_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in 
     }
 }
 
-// The row this Tx or a layer beneath it staged for key, if any.
 fn staged_row(tx: Tx, key: Bytes) -> Option[Option[View[Bytes]]] in tx {
+    let Some(op) = staged_op(tx, key) else {
+        return None
+    }
+    Some(match op.value {
+        Some(raw) => Some(staged_bytes(raw)),
+        None => None,
+    })
+}
+
+// The row this Tx or a layer beneath it staged for key, if any.
+fn staged_op(tx: Tx, key: Bytes) -> Option[View[DataOp]] in tx {
     if let Some(slot) = op_slot(tx.ops, key) {
-        return Some(match data_row(tx.ops.rows, slot).value {
-            Some(raw) => Some(staged_bytes(raw)),
-            None => None,
-        })
+        return Some(data_row(tx.ops.rows, slot))
     }
     if let Some(at) = newest_layer(tx.below, false, key) {
         let layer = view tx.below[at]
         if let Some(slot) = op_slot(layer.ops, key) {
-            return Some(match data_row(layer.ops.rows, slot).value {
-                Some(raw) => Some(staged_bytes(raw)),
-                None => None,
-            })
+            return Some(data_row(layer.ops.rows, slot))
         }
     }
     None

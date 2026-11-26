@@ -1,14 +1,14 @@
-fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
+fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, order: DataOrder, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
     if let Some(record) = rec {
-        return encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view record), settlement, keyed, seq, offset, frame_limit)
+        return encode_frame(ci, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(view record), settlement, keyed, seq, offset, frame_limit)
     }
     match call {
-        Some(section) => encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view section.record), section.settlement, keyed, seq, offset, frame_limit),
-        None => encode_frame(ci, base, tiered, mut ops, tail, streams, None, None, keyed, seq, offset, frame_limit),
+        Some(section) => encode_frame(ci, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(view section.record), section.settlement, keyed, seq, offset, frame_limit),
+        None => encode_frame(ci, base, prior_stamp, tiered, mut ops, order, tail, streams, None, None, keyed, seq, offset, frame_limit),
     }
 }
 
-fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
+fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, order: DataOrder, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
     let keyed_size = match keyed {
         Some(draft) => keyed_frame_bytes(draft.edits),
         None => 0u64
@@ -52,7 +52,6 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[
     if size + 16 > frame_limit {
         return Error(Capacity(requested: size + 16, available: frame_limit))
     }
-    let order = data_order(ops)?
     let room = 16 + size + BINDING_BYTES
     let mut out: Bytes = if tail == 0 {
         bytebuf.from_tail(mut ops.first[0].key, room)
@@ -72,7 +71,7 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[
     le(mut out, ci.at, 8)?
     le(mut out, sections + keyed_sections, 1)?
     if data {
-        encode_data_ops(mut out, base, tiered, ops, order)?
+        encode_data_ops(mut out, base, prior_stamp, tiered, ops, order)?
     }
     if stream_count != 0u64 {
         encode_stream_ops(mut out, streams, stream_count, call, settlement)?
@@ -179,4 +178,83 @@ fn decode_call_fields(file: String, raw: Bytes, mut at: u64) -> Result[(KeyedCal
         _ => return Error(disk_fault(file, at - 1, Malformed)),
     }
     Ok((KeyedCallRecord(entry: take key, args: take args, revision: take revision, code: take code), settlement))
+}
+
+type DataOrder = InOrder | ReversePair | SortedSlots(List[u64])
+
+fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
+    let n = ops.count
+    if n < 2 {
+        return Ok(InOrder)
+    }
+    if n == 2 {
+        return Ok(if list.compare_bytes(data_row(ops, 0).key, data_row(ops, 1).key) == Greater {
+            ReversePair
+        } else {
+            InOrder
+        })
+    }
+    let mut slots: List[u64] = list.new()
+    list.try_reserve(mut slots, n)?
+    for slot_order in 0u64 .. n {
+        list.push(mut slots, slot_order)
+    }
+    list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
+        list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
+    })
+    Ok(SortedSlots(take slots))
+}
+
+fn ordered_row(ops: DataRows, order: DataOrder, slot_order: u64) -> View[DataOp] in ops {
+    let slot = match order {
+        InOrder => slot_order,
+        ReversePair => 1 - slot_order,
+        SortedSlots(slots) => slots[slot_order],
+    }
+    data_row(ops, slot)
+}
+
+fn stored_prior(raw: Option[View[Bytes]]) -> u32 {
+    match raw {
+        Some(value) => int.truncate(1 + list.len(value)),
+        None => 0,
+    }
+}
+
+fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[TieredDataDelta]]]], ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
+    let use_cached_prior = match base {
+        Some(head) => prior_stamp == Some(tree_stamp(head)),
+        None => false,
+    }
+    le(mut payload, 0, 1)?
+    le(mut payload, ops.count, 4)?
+    for slot_order in 0u64 .. ops.count {
+        let op = ordered_row(ops, order, slot_order)
+        let delta = match tiered {
+            Some(slots) => slots[slot_order],
+            None => None,
+        }
+        if let Some(trim) = op.trim {
+            let dropped = match delta {
+                Some(TieredDropped(bytes_dropped)) => bytes_dropped,
+                _ => trim.dropped,
+            }
+            encode_log_trim(mut payload, op.key, trim.floor, dropped)
+            continue
+        }
+        let prior = match (delta, use_cached_prior, op.prior, base) {
+            (Some(TieredPrior(prior)), _, _, _) => prior,
+            (_, true, Some(prior), _) => prior,
+            (_, _, _, Some(head)) => {
+                if collection_kind(head, list.slice(op.key, 0, 4)) == Some(LogCollection) {
+                    0u32
+                } else {
+                    stored_prior(get_page_row(head, op.key))
+                }
+            },
+            (_, _, _, None) => 0,
+        }
+        encode_data_op(mut payload, op.key, op.value, Some(prior))?
+    }
+    Ok(())
 }

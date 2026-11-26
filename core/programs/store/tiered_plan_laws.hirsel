@@ -20,10 +20,11 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     map.insert(mut visible, (8u64, 72u64), take source)
     let mut operations = new_data_rows()
-    push_data_row(mut operations, DataOp(key: log_key(9, 3)?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None))
-    push_data_row(mut operations, DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None))
+    push_data_row(mut operations, DataOp(key: log_key(9, 3)?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None, prior: None))
+    push_data_row(mut operations, DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None, prior: None))
     let missed = tiered_attempt(75, 0)
-    let Error(Missed) = plan_tiered_edits(base, missed, map.new(), operations, 101) else {
+    let order = capacity(data_order(operations))?
+    let Error(Missed) = plan_tiered_edits(base, missed, map.new(), operations, order, 101) else {
         fail("L63: a Cold plan must latch before the encoder runs")
     }
     let stopped = tiered_finish(take missed)
@@ -34,7 +35,7 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
         fail("L63: the first miss must seek the first op in wire order")
     }
     let attempt = tiered_attempt(75, 0)
-    let Some(take plan) = plan_tiered_edits(base, attempt, visible, operations, 101)? else {
+    let Some(take plan) = plan_tiered_edits(base, attempt, visible, operations, order, 101)? else {
         fail("L63: Tiered ops must have a plan before encoding")
     }
     // K=12 and V=6 charge 86 in either mode. The overwrite adds
@@ -44,7 +45,7 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     }
     let owner = StoreId(hi: 3, lo: 4)
     let call = CallInfo(id: CallId(store: owner, branch: 0, version: 1), at: 1, seed: 0)
-    let wire = capacity(encode_staged(call, Some(view base), Some(view plan.deltas), mut operations, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT))?
+    let wire = capacity(encode_staged(call, Some(view base), None, Some(view plan.deltas), mut operations, order, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT))?
     // The section starts at byte 37 and has a five-byte head. Each put
     // takes 31 bytes, and its prior comes 17 bytes after its tag.
     if list.len(wire) != 104 || word_be(wire, 51) != 2 || read_le(wire, 59, 4) != 7 || word_be(wire, 82) != 3 || read_le(wire, 90, 4) != 0 {

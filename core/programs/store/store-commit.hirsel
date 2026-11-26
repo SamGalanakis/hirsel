@@ -23,7 +23,7 @@ fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[
         }
         let mut roots = share_roots(base)
         let mut stamp_out = first
-        materialize_rows(mut roots.collections, ran.edits, false, first, mut stamp_out)?
+        materialize_ordered_rows(mut roots.collections, ran.edits, ran.order, false, first, mut stamp_out)?
         materialize_rows(mut roots.streams, ran.replies, false, first, mut stamp_out)?
         if let Some(keyed) = ran.keyed {
             materialize_keyed_edits(mut roots, keyed.edits, first, mut stamp_out)?
@@ -365,7 +365,7 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
                     Some(plan) => Some(view plan.deltas),
                     None => None,
                 }
-                prepared.frame = Some(encode_staged(ci, Some(view base), deltas, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, prepared.keyed, db.file_seq, db.file_end, db.limits.frame)?)
+                prepared.frame = Some(encode_staged(ci, Some(view base), Some(prepared.base_stamp), deltas, mut prepared.ops, prepared.order, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, prepared.keyed, db.file_seq, db.file_end, db.limits.frame)?)
             }
             Ok(Prepared(take prepared))
         },
@@ -390,10 +390,10 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
                 Some(_) => true,
                 None => false,
             }
-            materialize_rows(mut prepared.roots.collections, prepared.ops, memory_only, first, mut draw)?
+            materialize_ordered_rows(mut prepared.roots.collections, prepared.ops, prepared.order, memory_only, first, mut draw)?
             materialize_rows(mut prepared.roots.streams, prepared.stream_ops, false, first, mut draw)?
             if let Some(record) = attempt {
-                if let Some(take tiered_plan) = plan_tiered_edits(prepared.roots.collections, record, pins, prepared.ops, draw)? {
+                if let Some(take tiered_plan) = plan_tiered_edits(prepared.roots.collections, record, pins, prepared.ops, prepared.order, draw)? {
                     prepared.roots.collections = share_page_tree(tiered_plan.tree)
                     draw = tiered_plan.next_stamp
                     prepared.plan = Some(take tiered_plan)
@@ -418,6 +418,10 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
 // write plan, which stages them through the attempt's resolver.
 fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
     let order = capacity(data_order(operations))?
+    materialize_ordered_rows(mut tree, operations, order, memory_only, first, mut draw)
+}
+
+fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
     for slot_order in 0u64 .. operations.count {
         let op = ordered_row(operations, order, slot_order)
         if let Some(_) = op.trim {

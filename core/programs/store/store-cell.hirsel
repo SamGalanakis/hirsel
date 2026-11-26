@@ -351,8 +351,8 @@ fn seal_cell_edits(mut rows: DataRows, cells: Map[u32, CellEdit]) {
     for (id, edit) in cells {
         let key = result.unwrap(prefix(id))
         match edit {
-            CellPut(value) => push_data_row(mut rows, DataOp(key: take key, value: Some(clone(value)), trim: None)),
-            CellDelete => push_data_row(mut rows, DataOp(key: take key, value: None, trim: None)),
+            CellPut(value) => push_data_row(mut rows, DataOp(key: take key, value: Some(clone(value)), trim: None, prior: None)),
+            CellDelete => push_data_row(mut rows, DataOp(key: take key, value: None, trim: None, prior: None)),
             CellRevert => (),
         }
     }

@@ -539,7 +539,7 @@ fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size
         Some(take encoded) => Some(stage_value(take encoded, tx.roots.streams.inline)),
         None => None,
     }
-    let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, take raw)
+    let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, take raw, None)
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
     tx.extra_bytes = extra
     tx.wrote = true

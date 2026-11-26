@@ -11,6 +11,48 @@ fn prior_fixture_frame(wire: Bytes, at: u64, tag: u8, length: u64, prior: u64) -
 }
 
 @test
+fn cached_prior_conflict_safety(c: Clock) -> Result[(), Error] waits {
+    let mut db = raw_test_db(c, 1048576)
+    let Committed(_) = execute(mut db, 0, 20, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(34))
+    })? else {
+        return Error(Missing("initial row"))
+    }
+    let ci = call_info(db.store, 0, db.heads[0].head + 1, 21, db.heads[0].at)
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
+    let keep: Option[fn(Error) -> bool] = None
+    let Prepared(take draft) = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, None, map.new(), fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(16))?
+        rollback_writes_on_error(mut tx, fn(mut nested: Tx) -> Result[(), Error] {
+            put_bytes(mut nested, 1, key_word(7), prior_fixture_value(10))
+        })
+    }) else {
+        return Error(Missing("repeated write draft"))
+    }
+    let _ = log.finish(take reads)
+    let _ = cell.into_inner(take issued)
+    let mut staged = take draft
+    if staged.ops.count != 1 || data_row(staged.ops, 0).prior != Some(35u32) {
+        return Error(Missing("cached base width across repeated writes"))
+    }
+    let before = capacity(encode_staged(ci, Some(view db.heads[0].roots.collections), Some(staged.base_stamp), None, mut staged.ops, staged.order, NO_FRAME_TAIL, staged.stream_ops, None, None, None, None, 1, 72, FRAME_LIMIT))?
+    if !prior_fixture_frame(before, 0, 1, 77, 35) {
+        return Error(Missing("frame on the original head"))
+    }
+    let Committed(_) = execute(mut db, 0, 22, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(23))
+    })? else {
+        return Error(Missing("moved head"))
+    }
+    let after = capacity(encode_staged(ci, Some(view db.heads[0].roots.collections), Some(staged.base_stamp), None, mut staged.ops, staged.order, NO_FRAME_TAIL, staged.stream_ops, None, None, None, None, 1, 72, FRAME_LIMIT))?
+    if !prior_fixture_frame(after, 0, 1, 77, 24) {
+        return Error(Missing("frame on the moved head"))
+    }
+    Ok(())
+}
+
+@test
 fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     if !law_frames(c) {
         return Error(Missing("ordered data wire vectors"))

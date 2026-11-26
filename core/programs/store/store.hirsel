@@ -411,7 +411,8 @@ pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 type DataOp: shareable + send {
     key: Bytes,
     value: Option[StagedValue],
-    trim: Option[JournalTrim]
+    trim: Option[JournalTrim],
+    prior: Option[u32]
 }
 
 // Inline pages copy the bytes into the page image. Overflow pages share the
@@ -443,8 +444,8 @@ type DataRows: shareable + send {
 
 fn new_data_rows() -> DataRows {
     let first: Inline[DataOp, 2] =[
-        DataOp(key: list.new(), value: None, trim: None),
-        DataOp(key: list.new(), value: None, trim: None),
+        DataOp(key: list.new(), value: None, trim: None, prior: None),
+        DataOp(key: list.new(), value: None, trim: None, prior: None),
     ]
     DataRows(count: 0, first: take first, rest: list.new())
 }
@@ -513,6 +514,7 @@ pub opaque scoped type Tx {
     store: StoreId,
     indexes: View[IndexRegistry],
     roots: Roots,
+    base_collection: Option[TxCollection],
     bases: TailBases,
     ids: u64,
     private_from: u64,
@@ -1167,6 +1169,7 @@ type Ran[R, A] {
     value: Result[R, A],
     roots: Option[Roots],
     edits: DataRows,
+    order: DataOrder,
     replies: DataRows,
     keyed: Option[KeyedDraft],
     first_stamp: u64,
@@ -1198,6 +1201,8 @@ type Prepared[R, A] {
     live: u64,
     frame: Option[Bytes],
     ops: DataRows,
+    order: DataOrder,
+    base_stamp: u64,
     frame_tail: u64,
     stream_ops: DataRows,
     keyed: Option[KeyedDraft],
@@ -1270,7 +1275,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), base_collection: None, bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1327,12 +1332,16 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
     let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
     let DataOps(cells: take cells, ..) = take ops
     seal_cell_edits(mut rows, cells)
+    let order = match data_order(rows) {
+        Ok(take sorted) => take sorted,
+        Error(problem) => return RolledBack(Refused(Allocation(problem))),
+    }
     let DataOps(rows: take stream_rows, ..) = take stream_ops
     let tiered = match attempt {
         Some(_) => Some(db.tiered),
         None => None,
     }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, call: take call))
+    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
@@ -1342,7 +1351,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         Drifted(take name, take evidence) => return DriftStop(take name, take evidence),
         Prepared(take tx) => take tx,
     }
-    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
+    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, order: take order, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
     // A draft without a Tiered plan makes no call here: the draft's step
     // overhead is fixed (§13.3 call reserves).
     let freed = match take plan {
@@ -1369,7 +1378,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
             }
         }
     }
-    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
+    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, order: take order, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
 }
 
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
@@ -1602,12 +1611,14 @@ fn test_db(c: Clock, cap: u64) -> Db {
 // Stages one row in `ops` and returns its slot: `next_slot`, the next one, for a
 // key new to the transaction, else OPEN_FRAME_TAIL. A key a layer beneath
 // staged keeps its slot there, so `ops` holds the replacement uncounted.
-fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut next_slot: u64, take key: Bytes, take value: Option[StagedValue]) -> u64 {
+fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut next_slot: u64, take key: Bytes, take value: Option[StagedValue], prior: Option[u32]) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
         if slot < 2 {
             ops.rows.first[slot].value = take value
+            ops.rows.first[slot].prior = prior
         } else {
             ops.rows.rest[slot - 2].value = take value
+            ops.rows.rest[slot - 2].prior = prior
         }
         return OPEN_FRAME_TAIL
     }
@@ -1635,7 +1646,7 @@ fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut n
     if slot_order >= SCANNED_OPS {
         map.insert(mut ops.slots, clone(key), slot_order)
     }
-    push_data_row(mut ops.rows, DataOp(key: take key, value: take value, trim: None))
+    push_data_row(mut ops.rows, DataOp(key: take key, value: take value, trim: None, prior: prior))
     if beneath {
         OPEN_FRAME_TAIL
     } else {
@@ -1736,80 +1747,6 @@ fn le(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
 fn blob(mut out: Bytes, b: Bytes) -> Result[(), Capacity] {
     le(mut out, list.len(b), 4)?
     Ok(list.append(mut out, b))
-}
-
-type DataOrder = InOrder | ReversePair | SortedSlots(List[u64])
-
-fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
-    let n = ops.count
-    if n < 2 {
-        return Ok(InOrder)
-    }
-    if n == 2 {
-        return Ok(if list.compare_bytes(data_row(ops, 0).key, data_row(ops, 1).key) == Greater {
-            ReversePair
-        } else {
-            InOrder
-        })
-    }
-    let mut slots: List[u64] = list.new()
-    list.try_reserve(mut slots, n)?
-    for slot_order in 0u64 .. n {
-        list.push(mut slots, slot_order)
-    }
-    list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
-        list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
-    })
-    Ok(SortedSlots(take slots))
-}
-
-fn ordered_row(ops: DataRows, order: DataOrder, slot_order: u64) -> View[DataOp] in ops {
-    let slot = match order {
-        InOrder => slot_order,
-        ReversePair => 1 - slot_order,
-        SortedSlots(slots) => slots[slot_order],
-    }
-    data_row(ops, slot)
-}
-
-fn stored_prior(raw: Option[View[Bytes]]) -> u32 {
-    match raw {
-        Some(value) => int.truncate(1 + list.len(value)),
-        None => 0,
-    }
-}
-
-fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
-    le(mut payload, 0, 1)?
-    le(mut payload, ops.count, 4)?
-    for slot_order in 0u64 .. ops.count {
-        let op = ordered_row(ops, order, slot_order)
-        let delta = match tiered {
-            Some(slots) => slots[slot_order],
-            None => None,
-        }
-        if let Some(trim) = op.trim {
-            let dropped = match delta {
-                Some(TieredDropped(bytes_dropped)) => bytes_dropped,
-                _ => trim.dropped,
-            }
-            encode_log_trim(mut payload, op.key, trim.floor, dropped)
-            continue
-        }
-        let prior = match (delta, base) {
-            (Some(TieredPrior(prior)), _) => prior,
-            (_, Some(head)) => {
-                if collection_kind(head, list.slice(op.key, 0, 4)) == Some(LogCollection) {
-                    0u32
-                } else {
-                    stored_prior(get_page_row(head, op.key))
-                }
-            },
-            (_, None) => 0,
-        }
-        encode_data_op(mut payload, op.key, op.value, Some(prior))?
-    }
-    Ok(())
 }
 
 fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue], prior: Option[u32]) -> Result[(), Capacity] {

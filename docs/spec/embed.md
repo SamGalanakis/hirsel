@@ -213,7 +213,9 @@ slot**. It is built from the same runtime crates without the `standalone` featur
   nothing else process-wide ("Faults and signal stacks" below).
 - It never calls `exit` or `_exit`. Every run stop, a place's `Fail`, a stop by the host and
   a launch refusal end the runtime and are reported to the host (EMB-4). The process goes
-  on. The embed slot's objects reference neither `exit` nor `_exit`.
+  on. No embed-slot code path calls `exit` or `_exit`. The archive may still import them
+  through Rust std members that Hirsel never calls, so the law is behavioural (slice 2s), not
+  a symbol listing.
 - It ignores `SIGPIPE` per socket (`SO_NOSIGPIPE` on Darwin, `MSG_NOSIGNAL` on Linux), never
   process-wide.
 - It reads no environment variable, argument vector or inherited descriptor.
@@ -298,7 +300,12 @@ differs is how it ends:
 3. **Workers leave.** It returns to its worker's scheduler, which runs no further task of
    this generation. Every other worker sees the recorded end at its next scheduling point
    (a task switch, a park or a provider completion) and leaves the same way. A provider call
-   blocked in the host finishes, and its result is discarded.
+   blocked in the host finishes, and its result is discarded. Every provider wait is bounded
+   by its deadline or by the runtime's cancellation of host waits at a generation end, as at
+   a standalone run's end. An issued foreign `waits` call is the exception: it runs audited
+   native code (FFI-1, FFI-7), the runtime cannot interrupt it, and teardown, `ended` and a
+   `stop` wait until it returns. That is the one unbounded wait, and it is the foreign
+   code's.
 4. **Teardown.** Once every worker has left Hirsel code, the runtime releases every host
    resource the generation holds. These are its stacks, descriptors, handle tables, store
    and memory, as for a stopped run
@@ -422,7 +429,11 @@ callbacks.
 A generated binding (Swift in EMB-5, any later language the same way) is a codec and a set
 of typed stubs over these calls, with no protocol logic of its own.
 
-The runtime's client side is the same client kernel as the TypeScript client's. It keeps
+The runtime's client side implements the same client kernel as the TypeScript client
+(lane 3145). The two share one transition table: a set of executable vectors, each an input
+frame or host action and the effects and state it must produce. Both `client.ts` and the
+runtime's client run the vectors in their test harnesses, and the runtime's in-process
+effect adapter replaces the WebSocket one. The kernel keeps
 many calls in flight on one stream, with no limit of one call in flight per stream, so
 concurrent `call`s from the host are pipelined, not serialized. Calls beyond the session's
 1+q credits wait in the client, as in `client.ts`.

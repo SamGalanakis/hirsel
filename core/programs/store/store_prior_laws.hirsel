@@ -290,9 +290,9 @@ fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(u64,
         return Error(Missing("legacy head changed"))
     }
     // The current head still names both frozen format-4 entries.
-    // Only the HEADER's version (format 8) and §2.1 checksum change (libxxhash).
-    list.set_word_le(mut workspace.body, 24, 8u32)
-    list.set_word_le(mut workspace.body, 8, 0xd8334ff3a2fd8e90u64)
+    // Only the HEADER's version (format 10) and §2.1 checksum change (libxxhash).
+    list.set_word_le(mut workspace.body, 24, 10u32)
+    list.set_word_le(mut workspace.body, 8, 0x955d357b7eb4429eu64)
     let expected = copied(workspace.body)?
     let HistoryApplied(replaced) = history_write_head(mut client, Match(initial.etag), mut workspace.body, mut workspace.witness, deadline) else {
         return Error(Missing("replace fixture head"))

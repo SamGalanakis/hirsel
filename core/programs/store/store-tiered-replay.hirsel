@@ -144,3 +144,26 @@ fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut a
     account.total = total
     Ok(())
 }
+
+// H supersedes this collection on its proposed main root (§13.7). The
+// installed root and any fork or snapshot still hold their own overlay.
+fn discard_replayed_collection(mut tree: PageTree, id: u32) -> Result[(), Error] {
+    let replacement = {
+        let Some(previous) = view tree.replay else {
+            return Ok(())
+        }
+        let Some(removed) = std.omap.get(previous.collections, id) else {
+            return Ok(())
+        }
+        disk_allocation(scoped fn() -> Result[Option[Arc[ReplayBranch]], Error] {
+            let mut ids = previous.ids
+            let collections = std.omap.remove(mut ids, previous.collections, id)
+            if let None = std.omap.root(collections) {
+                return Ok(None)
+            }
+            Ok(Some(arc.new(ReplayBranch(collections: take collections, fork_time: clone(previous.fork_time), ids: ids, charged: previous.charged - removed.charged))))
+        })?
+    }
+    tree.replay = take replacement
+    Ok(())
+}

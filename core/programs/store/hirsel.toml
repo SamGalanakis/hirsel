@@ -739,3 +739,12 @@ limit = 268435456
 
 [tests.runs."store@1/store/test_l98_memory_index_cost"]
 limit = 134217728
+
+[tests.runs."store@1/store/test_l68_demote_prior_one"]
+limit = 134217728
+
+[tests.runs."store@1/store/test_l68_demote_insert"]
+limit = 134217728
+
+[tests.runs."store@1/store/test_l68_drift_before_rename"]
+limit = 134217728

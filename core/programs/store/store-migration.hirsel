@@ -47,6 +47,7 @@ type SchemaPlan: send {
     retained: bool,
     changed: bool,
     bindings: List[IndexRegistration],
+    superseded: List[u32],
     // Each declared Log's retention, in declaration order (§14.4a). Only a
     // whole declaration's install (`seal`, an activation) binds it.
     retention: List[LogRetention],
@@ -56,7 +57,7 @@ type SchemaPlan: send {
 }
 
 fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node, next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new(), retention: list.new(), preview: None, value_limit: db.limits.value)
+    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node, next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new(), superseded: list.new(), retention: list.new(), preview: None, value_limit: db.limits.value)
 }
 
 fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {

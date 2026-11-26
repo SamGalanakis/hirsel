@@ -148,7 +148,8 @@ type ProposedMain {
     activation: Option[HistoryActivation],
     // The import pin slot an installing cut removes with the replacement
     // (§3.5a "The kept import").
-    drop_pin: Option[u64]
+    drop_pin: Option[u64],
+    superseded: List[u32]
 }
 
 type HolderDelta = NoHolderChange | AddHead(Head, String) | RemoveHead(u64) | AddPin(Pin) | RemovePin(u64) | ReplacePin(u64, Pin) | ReplaceMain(ProposedMain, Option[u64])
@@ -706,7 +707,7 @@ pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
     if i == 0 || db.heads[i].parent != 0 || db.heads[0].head != db.heads[i].forked_at {
         return Error(Diverged(b.id))
     }
-    let merged = ProposedMain(roots: share_roots(db.heads[i].roots), head: db.heads[i].head, at: db.heads[i].at, tables: db.next_table, activation: None, drop_pin: None)
+    let merged = ProposedMain(roots: share_roots(db.heads[i].roots), head: db.heads[i].head, at: db.heads[i].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new())
     let publication = capacity(prepare_publication(db, 0, merged.head, merged.roots, db.next_node))?
     let commit_ticket = cut_install(mut db, ReplaceMain(take merged, Some(i)))?
     publish(take publication)
@@ -1959,20 +1960,6 @@ fn remove_store_row(mut tree: PageTree, key: Bytes, mut final_item: u64) -> Resu
     canonical_tree(mut tree)?
     final_item = next_stamp - 1
     Ok(())
-}
-
-fn remove_store_collection(mut tree: PageTree, id: u32, mut final_item: u64) -> Result[u64, Error] {
-    let key = prefix(id)?
-    let charge = match std.page.lookup(tree.root, key) {
-        Some(descriptor) => int.saturating_add(126, collection_descriptor(descriptor).row_bytes),
-        None => 0u64,
-    }
-    let first = stamp_after(final_item)?
-    let mut next_stamp = first
-    let _ = drop_collection(mut tree, id, first, mut next_stamp)?
-    canonical_tree(mut tree)?
-    final_item = next_stamp - 1
-    Ok(charge)
 }
 
 pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -3944,7 +3931,7 @@ fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scop
         cut_participants(db, delta)
     })?
     let CutParticipants(holders: take participants_held, roots: take roots, branches: take branches, heads: heads, promote: promote) = take participants
-    let mut staged = stage_tiered_cut(db, take roots, branches, heads, promote, pack_bytes)?
+    let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes)?
     db.next_node = staged.stamp_end - 1
     raise_materialized_pin(mut delta, staged)
     let holders = sealed_cut_holders(take participants_held, staged)?

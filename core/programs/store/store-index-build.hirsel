@@ -420,8 +420,17 @@ fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[bool, Error] {
         return Ok(false)
     }
     let mut roots = share_roots(plan.roots)
-    let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
-    define_store_collection(mut roots.collections, record.id, 2, mut plan.next_node)?
+    let id = record.id
+    let tiered = table_is_tiered(roots.collections, id)?
+    let charge = remove_store_collection(mut roots.collections, id, mut plan.next_node)?
+    if tiered {
+        discard_replayed_collection(mut roots.collections, id)?
+        define_empty_tiered_index(mut roots.collections, id, mut plan.next_node)?
+        capacity(list.try_reserve(mut plan.superseded, 1))?
+        list.push(mut plan.superseded, id)
+    } else {
+        define_store_collection(mut roots.collections, id, 2, mut plan.next_node)?
+    }
     let mut live_bytes = plan.live
     if !plan.retained {
         live_bytes = int.saturating_sub(live_bytes, charge)

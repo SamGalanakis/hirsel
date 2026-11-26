@@ -128,10 +128,38 @@ fn queue_live_dropped(dropped: List[DeferredFree], mut seen: Map[(u32, u64, u64)
     Ok(())
 }
 
+// Each superseded main collection releases its Cold root, or the Cold
+// frontier of a dirty Hot root. The old root remains authoritative until
+// the cut publishes. Its pages are queued under main without reading them.
+fn queue_superseded(db: Db, delta: HolderDelta, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree]) -> Result[(), Error] {
+    let ReplaceMain(replacement, _) = view delta else {
+        return Ok(())
+    }
+    let head = view db.heads[0]
+    for id in replacement.superseded {
+        let (root, _) = option.unwrap(std.page.collection_slot(head.roots.collections.root, prefix(id)?))
+        let mut effects: List[TieredFoldEffect] = list.new()
+        fold_record_lost(root, map.new(), map.new(), true, mut effects)?
+        for take effect in take effects {
+            if let FoldDropped(take target) = take effect {
+                let frame = tiered_frame_id(target)
+                let key = (head.id, frame.pack, frame.offset)
+                if !map.contains(seen, key) {
+                    capacity(map.try_reserve(mut seen, 1))?
+                    map.insert(mut seen, key, ())
+                    capacity(list.try_reserve(mut queued, 1))?
+                    list.push(mut queued, DeferredFree(branch_id: head.id, target: take target))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 // T2 then T4: every Hot Tiered page and blob that a participant reaches is
 // emitted once by stamp, class 4 then class 3, from the installed `next_pack`
 // upward.
-fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64) -> Result[TieredCutStage, Error] waits {
+fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64) -> Result[TieredCutStage, Error] waits {
     let id = db.store
     let first_pack = disk_state(db).pages.next_pack
     let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
@@ -146,6 +174,11 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     let mut replaced: List[TieredDrainKill] = list.new()
     let owners = fold_owners(branches, heads, disk_state(db).pages.forked)?
     let overlays = fold_cut_roots(pager, mut roots, branches, owners, promote, mut next_stamp, mut seen, mut queued, mut replaced)?
+    if let ReplaceMain(replacement, _) = delta {
+        if list.len(replacement.superseded) != 0 {
+            queue_superseded(db, delta, mut seen, mut queued)?
+        }
+    }
     // A Tiered -> Memory change installs its loaded tree like a fold does.
     let loaded = load_memory_residency(pager, mut roots, branches, disk_state(db).unload, mut next_stamp, mut queued)? || overlays
     // A promotion that emits nothing still installs its re-pointed

@@ -198,3 +198,148 @@ fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: boo
     close(take db)?
     Ok(good)
 }
+
+fn d7_index_write(mut db: Db, rows: Table[u64, u64], key: u64, value: u64) -> Result[(), Error] waits {
+    let ran = run(mut db, Some(100000), (copy_env(rows), key, value), fn(mut tx, input) -> Result[(), Error] {
+        put(mut tx, input.0, input.1, input.2)
+    })?
+    match take ran {
+        Committed(done) => durable(mut db, done.ticket),
+        Aborted(Undone(value: take problem, ..)) => Error(take problem),
+        _ => fail("L68: expected a committed write to the Tiered index"),
+    }
+}
+
+fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool) -> Result[(Db, IndexBuildSchema), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(182375272)?)?
+    let schema = index_build_schema(mut db, Migrate)?
+    d7_index_write(mut db, schema.rows, 1u64, 10u64)?
+    // The fixture skips only set_residency's public kind check.
+    residency_to_tiered(mut db, schema.by_v.id, prefix(schema.by_v.id)?)?
+    {
+        let base = view db.heads[0].roots.collections
+        let Some((ColdPage(_), descriptor)) = std.page.collection_slot(base.root, prefix(schema.by_v.id)?) else {
+            fail("L68: the checkpoint must store the index in a Cold leaf")
+        }
+        if collection_descriptor(descriptor).row_bytes != 86 {
+            fail("L68: the initial Many entry has a 20-byte key and an empty payload")
+        }
+    }
+    let primary = if overwrite {
+        1u64
+    } else {
+        2u64
+    }
+    d7_index_write(mut db, schema.rows, primary, 20u64)?
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, l70_open_options(182375272)?)?
+    let rebound = index_build_schema(mut reopened, Open)?
+    {
+        let tree = view reopened.heads[0].roots.collections
+        let inserted = law_read_key(rebound.by_v.id, 20u64, Some(primary))
+        let Some(ReplayRow(base: 0, now: ReplayPut(raw))) = tiered_replayed_row(tree, inserted) else {
+            fail("L68: the durable insert must replay with prior zero")
+        }
+        if list.len(raw) != 0 {
+            fail("L68: the replayed Many payload must be empty")
+        }
+        let old = law_read_key(rebound.by_v.id, 10u64, Some(1u64))
+        if overwrite {
+            let Some(ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(tree, old) else {
+                fail("L68(f): deleting a present empty payload needs prior one")
+            }
+        } else if let Some(_) = tiered_replayed_row(tree, old) {
+            fail("L68(g): the insert-only suffix must keep the original entry")
+        }
+    }
+    Ok((take reopened, take rebound))
+}
+
+fn d7_check_demoted(db: Db, schema: IndexBuildSchema, primary: u64) -> Result[(), Error] {
+    let Backfilling(None) = lix_state(db, "by_v")? else {
+        fail("L68: the schema cut must publish Backfilling(None)")
+    }
+    let tree = view db.heads[0].roots.collections
+    let Some((HotPage(root), fields)) = std.page.collection_slot(tree.root, prefix(schema.by_v.id)?) else {
+        fail("L68: the schema cut must publish the empty index root")
+    }
+    let descriptor = collection_descriptor(fields)
+    if descriptor.residency != ResidentTiered || descriptor.rows != 0 || descriptor.row_bytes != 0 || std.page.totals(root) != (0u64, 0u64) {
+        fail("L68: superseded entries must not reappear in the rebuilt root")
+    }
+    if let Some(_) = tiered_replayed_row(tree, law_read_key(schema.by_v.id, 20u64, Some(primary))) {
+        fail("L68: the new root must not retain the old overlay")
+    }
+    let logical = law_read_key(schema.rows.id, primary, None)
+    let Some(raw) = get_page_row(tree, logical) else {
+        fail("L68: the acknowledged table row must survive demotion")
+    }
+    if read_le(raw, 2, 8) != 20u64 {
+        fail("L68: the table row must retain its acknowledged value")
+    }
+    Ok(())
+}
+
+// Seal the real demotion candidate through the same cut used by rebuild.
+fn d7_demote_seal(mut db: Db, schema: IndexBuildSchema) -> Result[Bytes, Error] waits {
+    let mut plan = schema_plan(db)
+    if !demote_index(mut plan, schema.by_v.catalog_key)? {
+        fail("L68(f): the fixture must start with a Public index")
+    }
+    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, superseded: take superseded, ..) = take plan
+    db.next_node = ids
+    let replacement = ProposedMain(roots: take roots, head: db.heads[0].head + 1, at: db.heads[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded)
+    refused_cut_bytes(mut db, ReplaceMain(take replacement, None))
+}
+
+fn d7_demote_law(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool, drift: bool) -> Result[(), Error] waits {
+    let (take opened, schema) = d7_demote_input(d, c, r, tasks, overwrite)?
+    let mut db = take opened
+    let primary = if overwrite {
+        let sealed = d7_demote_seal(mut db, schema)?
+        close(take db)?
+        let name = if drift {
+            "MANIFEST.tmp"
+        } else {
+            "MANIFEST"
+        }
+        disk_write_synced(d, name, sealed)?
+        1u64
+    } else {
+        rebuild_index(mut db, schema.by_v)?
+        d7_check_demoted(db, schema, 2u64)?
+        close(take db)?
+        2u64
+    }
+    let mut recovered = open(tasks, d, c, r, l70_open_options(182375272)?)?
+    let rebound = index_build_schema(mut recovered, Open)?
+    if drift {
+        let Public = lix_state(recovered, "by_v")? else {
+            fail("L68(f): the previous catalog survives a refused schema cut")
+        }
+        let inserted = law_read_key(rebound.by_v.id, 20u64, Some(1u64))
+        if let None = tiered_replayed_row(recovered.heads[0].roots.collections, inserted) {
+            fail("L68(f): the previous overlay survives a refused schema cut")
+        }
+        let mut evidence: List[(u32, u32)] = list.new()
+        list.push(mut evidence, (rebound.rows.id, rebound.by_v.id))
+        trip_drift(mut recovered, 0, evidence)?
+    }
+    d7_check_demoted(recovered, rebound, primary)?
+    close(take recovered)
+}
+
+@test
+fn test_l68_demote_prior_one(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    d7_demote_law(d, c, r, tasks, true, false)
+}
+
+@test
+fn test_l68_drift_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    d7_demote_law(d, c, r, tasks, true, true)
+}
+
+@test
+fn test_l68_demote_insert(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    d7_demote_law(d, c, r, tasks, false, false)
+}

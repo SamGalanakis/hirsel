@@ -6,7 +6,8 @@ type TxView {
     draw: u64,
     layer: u64,
     row: u64,
-    dirty: Option[Arc[TxViewDirty]]
+    dirty: Option[Arc[TxViewDirty]],
+    popped: Option[u64]
 }
 
 type TxViewDirty: shareable + send {
@@ -18,7 +19,7 @@ fn share_tx_view(cache: core.Cell[Option[TxView]]) -> Option[TxView] {
         let Some(v) = view state else {
             return None
         }
-        Some(TxView(tree: share_page_tree(v.tree), first: v.first, draw: v.draw, layer: v.layer, row: v.row, dirty: clone(v.dirty)))
+        Some(TxView(tree: share_page_tree(v.tree), first: v.first, draw: v.draw, layer: v.layer, row: v.row, dirty: clone(v.dirty), popped: v.popped))
     })
 }
 
@@ -43,6 +44,9 @@ fn mark_tx_view_slot(cache: core.Cell[Option[TxView]], layer: u64, slot: Option[
             return
         }
         let mut v = take held
+        if v.layer == edit.0 && v.popped == Some(edit.1) {
+            v.popped = None
+        }
         if v.layer == edit.0 && edit.1 < v.row {
             if let Some(mut dirty) = v.dirty {
                 let reserved = arc.with_unique(mut dirty, scoped fn(mut pending: TxViewDirty) -> Result[(), Capacity] {
@@ -72,6 +76,13 @@ fn add_tx_view_slot(mut slots: Map[u64, ()], at: u64) -> Result[(), Capacity] {
 }
 
 fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
+    let ready = current_tx_view(tx)?
+    let share = share_page_tree(ready.tree)
+    cell.set(tx.view_tree, Some(take ready))
+    Ok(take share)
+}
+
+fn current_tx_view(tx: Tx) -> Result[TxView, Error] {
     // Take the cache out while editing it. An error or an interrupted bound
     // can discard the working tree without leaving a partially applied view.
     let mut v = match cell.replace(tx.view_tree, None) {
@@ -80,7 +91,7 @@ fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
             let Some(first) = int.checked_add(tx.ids, 1) else {
                 return Error(Limit(Ids))
             }
-            TxView(tree: share_page_tree(tx.roots.collections), first: first, draw: first, layer: 0, row: 0, dirty: None)
+            TxView(tree: share_page_tree(tx.roots.collections), first: first, draw: first, layer: 0, row: 0, dirty: None, popped: None)
         },
     }
     let memory_only = match tx.attempt {
@@ -95,9 +106,7 @@ fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
         v.row = 0
     }
     advance_tx_view(mut v, tx.ops.rows, memory_only)?
-    let share = share_page_tree(v.tree)
-    cell.set(tx.view_tree, Some(take v))
-    Ok(take share)
+    Ok(take v)
 }
 
 fn advance_tx_view(mut v: TxView, rows: DataRows, memory_only: bool) -> Result[(), Error] {
@@ -109,8 +118,11 @@ fn advance_tx_view(mut v: TxView, rows: DataRows, memory_only: bool) -> Result[(
         }
     }
     for slot in v.row .. rows.count {
-        materialize_row(mut v.tree, data_row(rows, slot), memory_only, v.first, mut v.draw)?
+        if v.popped != Some(slot) {
+            materialize_row(mut v.tree, data_row(rows, slot), memory_only, v.first, mut v.draw)?
+        }
     }
+    v.popped = None
     v.row = rows.count
     Ok(())
 }
@@ -520,12 +532,102 @@ fn delete_refund(tx: Tx, key: Bytes) -> Result[Option[DataRefund], Error] {
 }
 
 fn apply_delete(mut tx: Tx, take p: Bytes, refund: DataRefund) -> Result[(), Error] {
+    stage_delete(mut tx, take p, refund, false)
+}
+
+fn stage_delete(mut tx: Tx, take p: Bytes, refund: DataRefund, popped: bool) -> Result[(), Error] {
     let height = transaction_write_height(tx, p)?
     let _ = reserve_ids(mut tx, height)?
     let (_, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None, refund.prior)
-    mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
+    if popped {
+        if let None = replaced {
+            // The primary is already absent from the working tree. Index
+            // removals staged before it may still need to be applied.
+            cell.with(tx.view_tree, tx.ops.rows.count - 1, fn(mut state: Option[TxView], take slot: u64) -> () {
+                if let Some(mut cached) = state {
+                    if cached.row == slot {
+                        cached.row += 1
+                    } else {
+                        cached.popped = Some(slot)
+                    }
+                }
+            })
+        }
+    } else {
+        mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
+    }
     tx.resident = int.saturating_sub(tx.resident, refund.charge)
     Ok(())
+}
+
+/// Delete and return the first row in the table's encoded key order.
+pub fn pop_first[K, V](mut tx: Tx, t: Table[K, V]) -> Result[Option[(K, V)], Error] {
+    pop_table_edge(mut tx, t, false)
+}
+
+/// Delete and return the last row in the table's encoded key order.
+pub fn pop_last[K, V](mut tx: Tx, t: Table[K, V]) -> Result[Option[(K, V)], Error] {
+    pop_table_edge(mut tx, t, true)
+}
+
+fn pop_table_edge[K, V](mut tx: Tx, t: Table[K, V], reverse: bool) -> Result[Option[(K, V)], Error] {
+    let indexes = check_table_write(tx, t)?
+    let low = lower_bytes(t.id, Unbounded, false)?
+    let high = lower_bytes(t.id, Unbounded, true)?
+    let (take row, take candidate): (Option[(Bytes, Arc[Bytes])], Option[TxView]) = if let Some(take tiered) = tx_tiered_rows(tx, t.id, low, high, true)? {
+        let mut cursor = take tiered
+        (next_tiered_in(tx, mut cursor, reverse)?, None)
+    } else {
+        let mut cached = current_tx_view(tx)?
+        let row = pop_tx_view_edge(mut cached, t.id, low, reverse)?
+        (take row, Some(take cached))
+    }
+    let Some((take key, take raw)) = take row else {
+        if let Some(take cached) = take candidate {
+            cell.set(tx.view_tree, Some(take cached))
+        }
+        note_read(tx, Span(take low, take high))?
+        return Ok(None)
+    }
+    if reverse {
+        note_read(tx, Span(copied(key)?, take high))?
+    } else {
+        let mut after = copied(key)?
+        list.push(mut after, 0u8)
+        note_read(tx, Span(take low, take after))?
+    }
+    let k = decoded(std.codec.decode_key(t.key, list.slice(key, 4, list.len(key))))?
+    let v = row_value(t.readers, t.id, raw)?
+    let plan = plan_delete(tx, t.id, t.readers.current, indexes, key, raw)?
+    let popped = if let Some(take cached) = take candidate {
+        cell.set(tx.view_tree, Some(take cached))
+        true
+    } else {
+        false
+    }
+    if let Error(take e) = apply_delete_plan(mut tx, take key, take plan, popped) {
+        if popped {
+            cell.set(tx.view_tree, None)
+        }
+        return Error(take e)
+    }
+    Ok(Some((take k, take v)))
+}
+
+fn pop_tx_view_edge(mut cached: TxView, collection: u32, prefix_key: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    let Some(empty_root) = view cached.tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    let first = cached.first
+    let mut row: Option[(Bytes, Arc[Bytes])] = None
+    page_result(std.page.edit_collection(mut cached.tree.root, prefix_key, first, mut cached.draw, scoped fn(mut root: Arc[std.page.Page], mut draw: u64) -> Result[(), std.page.Error] {
+        row = std.page.pop_edge_with_empty(mut root, empty_root, reverse, first, mut draw)?
+        Ok(())
+    }))?
+    match take row {
+        Some((suffix, take value)) => Ok(Some((logical_key(collection, suffix)?, take value))),
+        None => Ok(None),
+    }
 }
 
 fn tree_height(tree: PageTree) -> u64 {

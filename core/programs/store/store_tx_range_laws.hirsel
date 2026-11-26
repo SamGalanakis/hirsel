@@ -1,22 +1,34 @@
 // Abort each probe so both lengths measure the same initial tree.
-fn tx_range_delete_probe(mut db: Db, t: Table[u64, u64], length: u64, steps: u64) -> bool waits {
-    let outcome = result.unwrap(run(mut db, None, (copy_env(t), copy_env(length), copy_env(steps)), fn(mut tx, env) -> Result[bool, Error] {
+fn tx_range_delete_probe(mut db: Db, t: Table[u64, u64], length: u64, steps: u64, direct: bool) -> bool waits {
+    let outcome = result.unwrap(run(mut db, None, (copy_env(t), copy_env(length), copy_env(steps), copy_env(direct)), fn(mut tx, env) -> Result[bool, Error] {
         let ran = rollback_writes_on_overrun(mut tx, env.2, scoped fn(mut work) -> Result[(), Error] {
             for i in 0u64 .. env.1 {
                 let first = i % 2 == 0
-                let row = if first {
-                    let mut rows = range(work, env.0, Unbounded, Unbounded)?
-                    next_in(work, mut rows)?
-                } else {
-                    let mut rows = range_reverse(work, env.0, Unbounded, Unbounded)?
-                    next_in(work, mut rows)?
-                }
                 let key = if first {
                     i / 2
                 } else {
                     2047 - i / 2
                 }
-                if row != Some((key, key * 2)) || !delete(mut work, env.0, key)? {
+                let row = if env.3 {
+                    if first {
+                        pop_first(mut work, env.0)?
+                    } else {
+                        pop_last(mut work, env.0)?
+                    }
+                } else {
+                    let edge = if first {
+                        let mut rows = range(work, env.0, Unbounded, Unbounded)?
+                        next_in(work, mut rows)?
+                    } else {
+                        let mut rows = range_reverse(work, env.0, Unbounded, Unbounded)?
+                        next_in(work, mut rows)?
+                    }
+                    if !delete(mut work, env.0, key)? {
+                        fail("transaction delete did not find the expected edge")
+                    }
+                    edge
+                }
+                if row != Some((key, key * 2)) {
                     fail("transaction range did not find the expected edge")
                 }
             }
@@ -36,6 +48,10 @@ fn tx_range_delete_probe(mut db: Db, t: Table[u64, u64], length: u64, steps: u64
 
 @test
 fn tx_pop_linear_steps(c: Clock) -> Result[(), Error] waits {
+    tx_edge_linear_steps(c, false)
+}
+
+fn tx_edge_linear_steps(c: Clock, direct: bool) -> Result[(), Error] waits {
     let mut db = test_db(c, 1073741824)
     law_table(mut db, "range steps", std.codec.key_u64(), std.codec.of_u64())?
     let t = table(mut db, "range steps", std.codec.key_u64(), std.codec.of_u64())?
@@ -50,19 +66,237 @@ fn tx_pop_linear_steps(c: Clock) -> Result[(), Error] waits {
     }
     let mut low = 0u64
     let mut high = 1u64
-    while !tx_range_delete_probe(mut db, t, 100, high) {
+    while !tx_range_delete_probe(mut db, t, 100, high, direct) {
         high *= 2
     }
     while low < high {
         let mid = low + (high - low) / 2
-        if tx_range_delete_probe(mut db, t, 100, mid) {
+        if tx_range_delete_probe(mut db, t, 100, mid, direct) {
             high = mid
         } else {
             low = mid + 1
         }
     }
-    if !tx_range_delete_probe(mut db, t, 1000, high * 25) {
+    if !tx_range_delete_probe(mut db, t, 1000, high * 25, direct) {
         return Error(Missing("1,000 range/delete steps exceed 25 times 100"))
     }
     Ok(())
+}
+
+fn tx_pop_check_order(tx: Tx, t: Table[u64, u64], model: std.omap.OMap[u64, u64], reverse: bool) -> Result[(), Error] {
+    let mut expected = if reverse {
+        std.omap.range_reverse(model, Unbounded, Unbounded)
+    } else {
+        std.omap.range(model, Unbounded, Unbounded)
+    }
+    let mut actual = if reverse {
+        range_reverse(tx, t, Unbounded, Unbounded)?
+    } else {
+        range(tx, t, Unbounded, Unbounded)?
+    }
+    loop {
+        let want = std.omap.next(mut expected)
+        if next_in(tx, mut actual)? != want {
+            return Error(Missing("range differs from the ordered model"))
+        }
+        if let None = want {
+            return Ok(())
+        }
+    }
+}
+
+fn tx_pop_check(tx: Tx, t: Table[u64, u64], model: std.omap.OMap[u64, u64]) -> Result[(), Error] {
+    if count(tx, t, Unbounded, Unbounded)? != std.omap.len(model) {
+        return Error(Missing("count differs from the ordered model"))
+    }
+    tx_pop_check_order(tx, t, model, false)?
+    tx_pop_check_order(tx, t, model, true)
+}
+
+fn tx_pop_model_insert(mut model: std.omap.OMap[u64, u64], mut ids: u64, key: u64, value: u64) {
+    let (take updated, _) = std.omap.insert_owned(mut ids, replace(mut model, std.omap.new()), key, value)
+    model = take updated
+}
+
+fn tx_pop_model_edge(mut tx: Tx, t: Table[u64, u64], mut model: std.omap.OMap[u64, u64], mut ids: u64, reverse: bool) -> Result[(), Error] {
+    let expected: Option[(u64, u64)] = {
+        let edge = if reverse {
+            std.omap.last(model)
+        } else {
+            std.omap.first(model)
+        }
+        match edge {
+            Some((key, value)) => Some((copy key, copy value)),
+            None => None,
+        }
+    }
+    let actual = if reverse {
+        pop_last(mut tx, t)?
+    } else {
+        pop_first(mut tx, t)?
+    }
+    let Some((key, value)) = expected else {
+        if actual != None {
+            return Error(Missing("pop on empty table returned a row"))
+        }
+        return Ok(())
+    }
+    if actual != Some((key, value)) {
+        return Error(Missing("pop differs from the ordered model"))
+    }
+    model = std.omap.remove(mut ids, model, key)
+    Ok(())
+}
+
+fn tx_pop_oracle_body(mut tx: Tx, t: Table[u64, u64]) -> Result[std.omap.OMap[u64, u64], Error] {
+    let mut model: std.omap.OMap[u64, u64] = std.omap.new()
+    let mut ids = 0u64
+    tx_pop_model_edge(mut tx, t, mut model, mut ids, false)?
+    tx_pop_model_edge(mut tx, t, mut model, mut ids, true)?
+    for key in 0u64 .. 256 {
+        put(mut tx, t, key, key * 2)?
+        tx_pop_model_insert(mut model, mut ids, key, key * 2)
+    }
+    let mut seed = 3024u64
+    for i in 0u64 .. 5000 {
+        seed = splitmix64(seed)
+        let key = (seed >> 16) % 256
+        let operation = seed % 13
+        match operation {
+            0u64 => {
+                let rolled = rollback_writes_on_error(mut tx, scoped fn(mut work) -> Result[(), Error] {
+                    let mut discarded = std.omap.snapshot(model)
+                    let mut private_ids = ids
+                    put(mut work, t, key, i)?
+                    tx_pop_model_insert(mut discarded, mut private_ids, key, i)
+                    tx_pop_model_edge(mut work, t, mut discarded, mut private_ids, true)?
+                    rollback_writes_on_error(mut work, scoped fn(mut inner) -> Result[(), Error] {
+                        let mut inner_model = std.omap.snapshot(discarded)
+                        let mut inner_ids = private_ids
+                        tx_pop_model_edge(mut inner, t, mut inner_model, mut inner_ids, false)?
+                        tx_pop_check(inner, t, inner_model)
+                    })?
+                    Error(Missing("rollback witness"))
+                })
+                if let Error(Missing(message)) = rolled {
+                    if message != "rollback witness" {
+                        return Error(Missing("nested rollback changed the witness"))
+                    }
+                } else {
+                    return Error(Missing("nested rollback did not return the witness"))
+                }
+            },
+            1u64 => {
+                rollback_writes_on_error(mut tx, scoped fn(mut work) -> Result[(), Error] {
+                    let mut accepted = std.omap.snapshot(model)
+                    let mut private_ids = ids
+                    put(mut work, t, key, i)?
+                    tx_pop_model_insert(mut accepted, mut private_ids, key, i)
+                    tx_pop_check(work, t, accepted)
+                })?
+                tx_pop_model_insert(mut model, mut ids, key, i)
+            },
+            n if n == 2 || n == 3 => tx_pop_model_edge(mut tx, t, mut model, mut ids, false)?,
+            n if n == 4 || n == 5 => tx_pop_model_edge(mut tx, t, mut model, mut ids, true)?,
+            6u64 => {
+                let existed = match std.omap.get(model, key) {
+                    Some(_) => true,
+                    None => false,
+                }
+                if delete(mut tx, t, key)? != existed {
+                    return Error(Missing("delete differs from the ordered model"))
+                }
+                model = std.omap.remove(mut ids, model, key)
+            },
+            _ => {
+                put(mut tx, t, key, i)?
+                tx_pop_model_insert(mut model, mut ids, key, i)
+            },
+        }
+        if count(tx, t, Unbounded, Unbounded)? != std.omap.len(model) {
+            return Error(Missing("count differs from the ordered model"))
+        }
+        tx_pop_check_order(tx, t, model, i % 2 != 0)?
+    }
+    Ok(take model)
+}
+
+fn tx_pop_index_edges(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let (t, ix) = law_indexed(mut db, "indexed pop", std.codec.key_u64(), std.codec.of_u64(), "bucket", code.describe(bucket), std.codec.key_u64())?
+    let outcome = run(mut db, None, (copy_env(t), copy_env(ix)), fn(mut tx, env) -> Result[(), Error] {
+        for k in 0u64 .. 3 {
+            put(mut tx, env.0, k, 4 * k)?
+        }
+        if pop_first(mut tx, env.0)? != Some((0u64, 0u64)) || pop_last(mut tx, env.0)? != Some((2u64, 8u64)) {
+            return Error(Missing("indexed pop picked the wrong edge"))
+        }
+        let mut rows = lookup(tx, env.1, Included(0u64), Included(0u64))?
+        if next_indexed(mut rows)? != Some((1u64, 4u64)) || next_indexed(mut rows)? != None {
+            return Error(Missing("indexed pop left a staged index entry"))
+        }
+        Ok(())
+    })?
+    if let Committed(_) = outcome {
+        Ok(())
+    } else {
+        Error(Missing("indexed pop transaction did not commit"))
+    }
+}
+
+@test
+fn tx_pop_and_range_oracle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.resident_limit = 1048576
+    let mut db = open(tasks, dir, c, r, options)?
+    law_table(mut db, "pop oracle", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "pop oracle", std.codec.key_u64(), std.codec.of_u64())?
+    let saved = run(mut db, Some(2000000000u64), copy_env(t), tx_pop_oracle_body)?
+    let (take expected, saved_ticket) = match take saved {
+        Committed(Done(value: take model, ticket: committed_ticket, ..)) => (take model, committed_ticket),
+        Aborted(Undone(value: take reason, ..)) => return Error(take reason),
+        Refused(problem) => return Error(Full(problem)),
+        Failed(Conflict(take name)) => return Error(Conflict(take name)),
+        Failed(Drift(take name)) => return Error(Drift(take name)),
+        Failed(Raised(causes)) => {
+            for cause in causes {
+                if let Fail(message) = cause.kind {
+                    fail(clone(message))
+                }
+            }
+            fail("pop model transaction raised")
+        },
+        Stopped(_) => fail("pop model transaction ran out of steps"),
+    }
+    durable(mut db, saved_ticket)?
+    let version_before = version(snapshot(db))
+    close(take db)?
+    let mut reopened = open(tasks, dir, c, r, options)?
+    let s = snapshot(reopened)
+    if version(s) != version_before {
+        return Error(Missing("journal replay changed the version"))
+    }
+    let reopened_table = table(mut reopened, "pop oracle", std.codec.key_u64(), std.codec.of_u64())?
+    let read_handle = reader(reopened, 0u64)?
+    let mut replayed = scan(read_handle, s, reopened_table, Unbounded, Unbounded)?
+    let mut model = std.omap.range(expected, Unbounded, Unbounded)
+    loop {
+        let want = std.omap.next(mut model)
+        if next(read_handle, mut replayed)? != want {
+            return Error(Missing("replayed table differs from the ordered model"))
+        }
+        if let None = want {
+            break
+        }
+    }
+    let replay_stamp = tree_stamp(s.roots.collections)
+    close(take reopened)?
+    let again = open(tasks, dir, c, r, options)?
+    if tree_stamp(snapshot(again).roots.collections) != replay_stamp {
+        return Error(Missing("the same journal replay assigned another root stamp"))
+    }
+    close(take again)?
+    tx_pop_index_edges(c)?
+    tx_edge_linear_steps(c, true)
 }

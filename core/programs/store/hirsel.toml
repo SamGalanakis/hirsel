@@ -222,6 +222,11 @@ dirs = ["."]
 "store_layout_laws.hirsel" = "store"
 "store_reexec_laws.hirsel" = "store"
 
+# The exact scan after each model operation keeps roughly 707,000 read
+# observations until the single transaction settles.
+[tests.runs."store@1/store/tx_pop_and_range_oracle"]
+limit = 167772160
+
 [tests.runs."store@1/store/test_memory_no_frame_limit"]
 limit = 134217728
 

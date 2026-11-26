@@ -2426,12 +2426,16 @@ fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
     }
 }
 
-pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
+fn check_table_write[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)], Error] {
     check_write_attempt(tx)?
     if let Some(stop) = tx.index_conflict {
         return Error(index_stop_error(stop)?)
     }
-    let indexes = writable(tx, t)?
+    writable(tx, t)
+}
+
+pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
+    let indexes = check_table_write(tx, t)?
     let tail = tx.frame_tail == OPEN_FRAME_TAIL
     let mut p = prefixed(t.id, 8, tail)?
     std.codec.encode_key(t.key, k, mut p)
@@ -2439,11 +2443,7 @@ pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
 }
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
-    check_write_attempt(tx)?
-    if let Some(stop) = tx.index_conflict {
-        return Error(index_stop_error(stop)?)
-    }
-    let indexes = writable(tx, t)?
+    let indexes = check_table_write(tx, t)?
     let key = encode_key(t.key, k)?
     delete_impl(mut tx, t.id, t.readers.current, indexes, key)
 }

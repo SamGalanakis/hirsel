@@ -13,3 +13,5 @@ one leaf is exhausted.
 resident row tree. An edit can carry the expected prior value length plus
 one, with zero for an absent row. A prior mismatch refuses the batch
 before the root is replaced.
+
+`pop_edge_with_empty` removes the least or greatest encoded row of a resident row tree in one descent. It returns the owned key and a shared value, or `None` if the tree is empty. It uses the caller's stamp-zero leaf if the tree becomes empty.

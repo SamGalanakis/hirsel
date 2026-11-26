@@ -697,37 +697,55 @@ fn bound_indexes(tx: Tx, table_id: u32, schema: u16) -> Result[List[(u64, Catalo
 // bound for it. The expiry sweep deletes through here by table id (§1.2).
 fn delete_impl(mut tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catalog)], key: Bytes) -> Result[bool, Error] {
     let p = logical_key(table_id, key)?
-    let mut frame = tx.frame_bytes
-    let (take edits, refund) = {
+    let plan = {
         let Some(old) = transaction_row(tx, p)? else {
             return Ok(false)
         }
-        let refund = row_refund(tx, p, old)
-        let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
-        for (_, ix) in indexes {
-            let bound_index = registered_index(tx, table_id, schema, ix)?
-            let removed = (bound_index.extract)(old, key)?
-            if let Sums = catalog_index(ix)?.shape {
-                plan_aggregate_edit(tx, mut pending, mut frame, ix, key, Some(take removed), None)?
-                continue
-            }
-            let IndexValue(keys: take keys, ..) = take removed
-            for take row in take keys {
-                append_index_remove(tx, mut pending, ix, key, take row, mut frame)?
-            }
-        }
-        (take pending, refund)
+        plan_delete(tx, table_id, schema, indexes, p, old)?
     }
+    apply_delete_plan(mut tx, take p, take plan, false)?
+    Ok(true)
+}
+
+type DeletePlan {
+    edits: IndexEdits,
+    refund: DataRefund,
+    frame: Option[u64],
+    indexed: bool
+}
+
+fn plan_delete(tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catalog)], p: Bytes, old: Bytes) -> Result[DeletePlan, Error] {
+    let key = list.slice(p, 4, list.len(p))
+    let mut frame = tx.frame_bytes
+    let refund = row_refund(tx, p, old)
+    let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
+    for (_, ix) in indexes {
+        let bound_index = registered_index(tx, table_id, schema, ix)?
+        let removed = (bound_index.extract)(old, key)?
+        if let Sums = catalog_index(ix)?.shape {
+            plan_aggregate_edit(tx, mut pending, mut frame, ix, key, Some(take removed), None)?
+            continue
+        }
+        let IndexValue(keys: take keys, ..) = take removed
+        for take row in take keys {
+            append_index_remove(tx, mut pending, ix, key, take row, mut frame)?
+        }
+    }
+    Ok(DeletePlan(edits: take pending, refund: refund, frame: frame, indexed: list.len(indexes) != 0))
+}
+
+fn apply_delete_plan(mut tx: Tx, take p: Bytes, take plan: DeletePlan, popped: bool) -> Result[(), Error] {
+    let DeletePlan(edits: take edits, refund: refund, frame: frame, indexed: indexed) = take plan
     let mut edit_plan = take edits
     if let Some(take seen) = replace(mut edit_plan.drift, None) {
         return Error(drift_stop(mut tx, take seen))
     }
-    frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame, transaction_limit(tx.limits))?
-    if list.len(indexes) > 0 {
+    let next_frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame, transaction_limit(tx.limits))?
+    if indexed {
         preflight_index_edits(tx, edit_plan, p)?
     }
     apply_edits(mut tx, take edit_plan)?
-    apply_delete(mut tx, take p, refund)?
-    tx.frame_bytes = frame
-    Ok(true)
+    stage_delete(mut tx, take p, refund, popped)?
+    tx.frame_bytes = next_frame
+    Ok(())
 }

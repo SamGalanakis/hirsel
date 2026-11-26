@@ -1,4 +1,6 @@
-# STORE-SPEC v2.145: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.146: the M4 store library (lane store-spec-1001)
+
+v2.146 (store-perf-tx-range-3024): built. Transactions materialize staged resident row edits incrementally for range, count, and index cursors. `pop_first` and `pop_last` delete and return a table's edge row (§1.3). No format change.
 
 v2.145 (store-retirement-cycle-design-3023): built. **Positive-inventory open cleanup breaks the retirement-pack cycle** (§2.6, §11.10 AP14, §11.12 AP16/AP21). Writing retired pack seqs into a class-2 retirement tree forced each cut after a drain to retire the previous cut's retirement pack into a new 127-byte class-2 pack forever, and mixed dead retirement frames into `pack_root`'s class-2 pack. Directory cuts now write `retirement_root = unlocated(0)` on every cut (matching genesis and `objects@1`), never building a retirement tree or drawing retirement stamps; unleased retired packs are unlinked in AP16 step 6 after `MANIFEST`'s rename and `sync_dir`, and leased packs stay in in-memory `carried` until their lease ends. At open, AP21 step 5 (`cleanup_page_manifest`) streams the store directory via `host.entries` / `host.next_entries` in O(1) memory (1,024-byte entry buffer, 64-item sorted batch, closing `HostEntries` before unlinking each batch) and removes every canonical `p-<seq>.tmp` and every canonical `p-<seq>` (seq ≥ 1) absent from the validated positive inventory L ∪ C, plus `MANIFEST.tmp` and `j-[prev_first, first_live)`. This reclaims step-6 crash orphans, formerly leased `carried` packs, and non-contiguous leftovers above `next_pack` in one pass. AP21 step 0 keeps validating a non-zero `retirement_root` if present in a Format 10 store, and its first cut retires that pack cleanly. Law T6 (`test_directory_drain_to_baseline`) goes green without change; the W2 crash harness adds `ENTRIES`/`NEXT_ENTRIES`/`CLOSE_ENTRIES`. No format change (Format 10 unchanged; removing the 36-byte `retirement_root` field is queued for Format 11). Reversible: code and text only.
 
@@ -1888,6 +1890,8 @@ pub fn fetch[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[V], Error]    
 pub fn fetch_many[K, V](tx: Tx, t: Table[K, V], keys: List[K]) -> Result[List[Option[V]], Error]   // v2.108: fetch per key, in order; Cold misses batched (§13.3)
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error]
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error]
+pub fn pop_first[K, V](mut tx: Tx, t: Table[K, V]) -> Result[Option[(K, V)], Error]
+pub fn pop_last[K, V](mut tx: Tx, t: Table[K, V]) -> Result[Option[(K, V)], Error]
 pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error]   // v2.59: stepped by next_in (§13.4)
 pub fn range_prefix[K, V, Q](tx: Tx, t: Table[K, V], q: Q, take prefix: codec.Key[Q]) -> Result[TxRows[K, V], Error]   // v2.57: keys whose leading components equal q
 pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error]   // v2.57: one Span, O(log N) (AP11 subtree counts)
@@ -1917,6 +1921,8 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
 pub scoped type IndexEntries[J, K, P]
 pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error]   // records the index gap only
 ```
+
+**Table edge pops (v2.146).** `pop_first` and `pop_last` delete and return the least or greatest row in the table's encoded key order, including writes staged in this Tx and its enclosing callbacks. An empty table returns `None`. Each pop records the same gap and row span as one unbounded forward or reverse range step, or the full table span on exhaustion. The value is returned through the table's current readers. The delete uses the same index, frame-limit, and rollback rules as `delete`. A resident table removes and reads the edge in one descent through its private page tree. A Tiered table resolves the edge through its attempt and stages the delete through the Tiered write plan. The private page tree does not enter the journal, whose rows still apply in encoded key order.
 
 **What `run` does.**
 - It runs `body` inside `isolate` in the caller's task. Reads append to a `Log[Read]` through a view. RUN: `tx_body` is the whole shape, with Tx, isolate, Log and `scoped[view]`, and it is ACCEPTED.

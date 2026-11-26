@@ -426,4 +426,5 @@ store@1/store/test_typed_resident src=d79de0b48325fc1b sig=427fd1fde8b78e21 run=
 store@1/store/test_typed_snapshot_task src=64478ff6b46e55a2 sig=d5992c7231b5adc0 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_unique_conflict_atomic src=f958ff21c4a91452 sig=be6bb03603d1c48c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/tiered_l70_refusals src=37c006c6e356c4d1 sig=2bdfd91ed2294075 run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/tx_pop_linear_steps src=90d53fe726af4f66 sig=2abd63b45df1f0c0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/tx_pop_and_range_oracle src=f9b373a78fe046d2 sig=e9edabe3396b8bbe run=e0b7a0a702e2cf42 bug=- oracle=- rows=pending
+store@1/store/tx_pop_linear_steps src=f8b39cc172c04d27 sig=1cdacc6acde5fb3a run=aff7b6b8625190d8 bug=- oracle=- rows=pending

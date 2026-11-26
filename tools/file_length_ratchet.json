@@ -66,9 +66,9 @@
     "reason": "std-omap-nth-2975"
   },
   "core/std/page.hirsel": {
-    "lines": 3835,
-    "raise_revision": 18,
-    "reason": "store-perf-batch-replay-3025"
+    "lines": 3890,
+    "raise_revision": 19,
+    "reason": "store-perf-tx-range-3024"
   },
   "core/std/prop.hirsel": {
     "lines": 1748,

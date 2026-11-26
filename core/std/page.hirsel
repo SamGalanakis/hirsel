@@ -1745,6 +1745,12 @@ fn private_delete(mut page: Page, key: Bytes) {
     if !hit {
         return ()
     }
+    delete_slot(mut page, slot)
+}
+
+fn delete_slot(mut page: Page, slot: u64) {
+    let lvl = level(page.image)
+    let n = count(page.image)
     page.loose = true
     let (old_rows, old_charge) = stored_totals(page.image, slot)
     let mut dead = u16_at(page.image.raw, 6) + entry_size(page.image, slot)
@@ -2613,17 +2619,44 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64, load: scoped fn(Pag
     Ok(Some(build_pieces(parent, domain, level(page.image), false, mut next)?))
 }
 
-fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Option[List[PagePiece]], Error] {
-    let Some(slot) = descend(page.image, key) else {
-        private_delete(mut page, key)
+fn edge_slot(image: Image, reverse: bool) -> u64 {
+    if reverse {
+        count(image) - 1
+    } else {
+        0
+    }
+}
+
+scoped type RemoveTarget = DeleteKey(View[Bytes]) | DeleteEdge(bool)
+
+fn remove_private(mut page: Page, target: RemoveTarget, private_from: u64, mut next: u64, mut row: Option[(Bytes, Arc[Bytes])], load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Option[List[PagePiece]], Error] {
+    let selected = match target {
+        DeleteKey(key) => descend(page.image, key),
+        DeleteEdge(reverse) => if level(page.image) == 0 {
+            None
+        } else {
+            Some(edge_slot(page.image, reverse))
+        },
+    }
+    let Some(slot) = selected else {
+        match target {
+            DeleteKey(key) => private_delete(mut page, key),
+            DeleteEdge(reverse) => {
+                let at = edge_slot(page.image, reverse)
+                let key = option.unwrap(key_at(page.image, at))
+                let value = shared_slot_value(page.image, page.blobs, entry_at(page.image, at))
+                row = Some((take key, take value))
+                delete_slot(mut page, at)
+            },
+        }
         return Ok(None)
     }
     let mut loaded: Option[Arc[Page]] = None
     let revised = match page.kids[slot] {
-        HotPage(mut kid) => remove_path(mut kid, key, private_from, mut next, load)?,
+        HotPage(mut kid) => remove_path(mut kid, target, private_from, mut next, mut row, load)?,
         ColdPage(place) => {
             let mut opened = load_edit_frame(place, level(page.image) - 1, load)?
-            let edited = remove_path(mut opened, key, private_from, mut next, load)?
+            let edited = remove_path(mut opened, target, private_from, mut next, mut row, load)?
             loaded = Some(take opened)
             take edited
         },
@@ -2645,11 +2678,11 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64, 
     rebalance_child(mut page, slot, mut next, load)
 }
 
-fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Option[List[PagePiece]], Error] {
+fn remove_path(mut root: Arc[Page], target: RemoveTarget, private_from: u64, mut next: u64, mut row: Option[(Bytes, Arc[Bytes])], load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Option[List[PagePiece]], Error] {
     if stamp(root.image) >= private_from {
         let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[PagePiece]], Error] {
             stamp_replay_edit(mut page, private_from, mut next)?
-            remove_private(mut page, key, private_from, mut next, load)
+            remove_private(mut page, target, private_from, mut next, mut row, load)
         })
         if let Some(take result) = take update {
             return take result
@@ -2657,7 +2690,7 @@ fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64
     }
     root = copy_with_stamp(root, take_stamp(mut next)?)
     option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[PagePiece]], Error] {
-        remove_private(mut page, key, private_from, mut next, load)
+        remove_private(mut page, target, private_from, mut next, mut row, load)
     }))
 }
 
@@ -2693,8 +2726,26 @@ fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]
     if !contains_row(root, key, load)? {
         return Ok(false)
     }
-    if let Some(parts) = remove_path(mut root, key, private_from, mut next, load)? {
-        finish_split(mut root, parts, mut next)?
+    let mut unused: Option[(Bytes, Arc[Bytes])] = None
+    let parts = remove_path(mut root, DeleteKey(view key), private_from, mut next, mut unused, load)?
+    finish_remove(mut root, parts, empty_root, mut next, load)?
+    Ok(true)
+}
+
+/// Remove an edge row from a resident tree and give back its encoded key and value.
+pub fn pop_edge_with_empty(mut root: Arc[Page], empty_root: Arc[Page], reverse: bool, private_from: u64, mut next: u64) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    if count(root.image) == 0 {
+        return Ok(None)
+    }
+    let mut row: Option[(Bytes, Arc[Bytes])] = None
+    let parts = remove_path(mut root, DeleteEdge(reverse), private_from, mut next, mut row, resident_edit_frame)?
+    finish_remove(mut root, parts, Some(view empty_root), mut next, resident_edit_frame)?
+    Ok(take row)
+}
+
+fn finish_remove(mut root: Arc[Page], parts: Option[List[PagePiece]], empty_root: Option[View[Arc[Page]]], mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[(), Error] {
+    if let Some(revised) = parts {
+        finish_split(mut root, revised, mut next)?
     }
     if count(root.image) == 0 {
         root = match empty_root {
@@ -2704,7 +2755,7 @@ fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]
     } else if count(root.image) == 1 && level(root.image) != 0 {
         root = edit_page(root.kids[0u64], level(root.image) - 1, load)?
     }
-    Ok(true)
+    Ok(())
 }
 
 fn contains_row(root: Arc[Page], key: Bytes, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[bool, Error] {
@@ -3605,18 +3656,22 @@ pub fn cursor_open_bounded(root: Arc[Page], boundary: Option[Bytes], inclusive: 
     take cursor
 }
 
+fn shared_slot_value(image: Image, blobs: List[BlobSlot], at: u64) -> Arc[Bytes] {
+    let cell_offset = at + 2 + u16_at(image.raw, at)
+    if image.raw[cell_offset] == 0 {
+        let width = u16_at(image.raw, cell_offset + 1)
+        let inline: Bytes = clone(list.slice(image.raw, cell_offset + 3, cell_offset + 3 + width))
+        arc.new(take inline)
+    } else {
+        let edge = ref_at(image.raw, cell_offset + 1)
+        arc.share(hot_body(blobs[edge.body]))
+    }
+}
+
 fn cursor_row(page: Arc[Page], slot: u64) -> CursorRow {
     let at = entry_at(page.image, slot)
     let key = read_slot_key(page.image, slot, at)
-    let cell_offset = at + 2 + u16_at(page.image.raw, at)
-    let shared = if page.image.raw[cell_offset] == 0 {
-        let width = u16_at(page.image.raw, cell_offset + 1)
-        let inline: Bytes = clone(list.slice(page.image.raw, cell_offset + 3, cell_offset + 3 + width))
-        arc.new(take inline)
-    } else {
-        let edge = ref_at(page.image.raw, cell_offset + 1)
-        arc.share(hot_body(page.blobs[edge.body]))
-    }
+    let shared = shared_slot_value(page.image, page.blobs, at)
     let collection: Option[Arc[Page]] = if page.image.domain == CollectionMap {
         Some(arc.share(hot_child(page.kids[slot])))
     } else {

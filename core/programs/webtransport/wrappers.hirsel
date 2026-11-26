@@ -125,17 +125,19 @@ pub fn write(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: qu
     Ok(n)
 }
 
-pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, WtError] {
+/// Write a shared payload range on a WT stream, whole or not at all; the range goes to
+/// quic.write_shared as it is, never copied.
+pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: quic.PayloadSlice, fin: bool) -> Result[bool, WtError] {
     let (i, k, j) = sendable(w, s, stream)?
     if queued(w.conns[i], stream) {
         return Ok(false)
     }
-    let n = list.len(data)
+    let n = quic.payload_len(data)
     if n > stream_send_room(w, i, k) {
         block_data(mut w, mut e, i, k, j, n)
         return Ok(false)
     }
-    let taken = match quic.write_shared(mut e, w.conns[i].handle, stream, quic.payload_whole(take data), fin) {
+    let taken = match quic.write_shared(mut e, w.conns[i].handle, stream, take data, fin) {
         Ok(taken) => taken,
         Error(err) => return Error(Quic(err)),
     }
@@ -154,6 +156,14 @@ pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, str
 
 /// Reset a WT stream with RESET_STREAM_AT at its header's length (draft-17 §4.4).
 pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError] {
+    reset_at(mut w, mut e, s, stream, code, 0)
+}
+
+/// Reset a WT stream with RESET_STREAM_AT past its header and the first `reliable` bytes
+/// the application wrote, which the peer still receives (draft-17 §4.4, RFC 9000
+/// RESET_STREAM_AT). A stream of another session is State, and nothing changes; a header
+/// still waiting for quic is Blocked.
+pub fn reset_at(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32, reliable: u64) -> Result[(), WtError] {
     let (i, k, j) = find_stream(w, s, stream)?
     if !w.conns[i].sessions[k].streams[j].send {
         return Error(State)
@@ -163,7 +173,10 @@ pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: qu
     if queued(w.conns[i], stream) {
         return Error(Blocked)
     }
-    match quic.reset(mut e, c, stream, h3_wire.application_code(code), header) {
+    if reliable > h3_wire.MAX_VARINT - header {
+        return Error(Quic(StreamState))
+    }
+    match quic.reset(mut e, c, stream, h3_wire.application_code(code), header + reliable) {
         Ok(()) => {
             let mut later = replace(mut w.backlog, list.new())
             refund_reset(mut w, e, i, k, stream, mut later)
@@ -171,6 +184,19 @@ pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: qu
             w.backlog = take later
             Ok(())
         },
+        Error(err) => Error(Quic(err)),
+    }
+}
+
+/// Set the send priority of session s's stream (QUIC-1). A stream of another session is
+/// State, and nothing changes.
+pub fn priority(w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, p: quic.Priority) -> Result[(), WtError] {
+    let (i, k, j) = find_stream(w, s, stream)?
+    if !w.conns[i].sessions[k].streams[j].send {
+        return Error(State)
+    }
+    match quic.priority(mut e, w.conns[i].handle, stream, p) {
+        Ok(()) => Ok(()),
         Error(err) => Error(Quic(err)),
     }
 }
@@ -192,9 +218,10 @@ pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: qui
 }
 
 /// Send a datagram on session s: its CONNECT stream's quarter id, then data (RFC 9297 §2.1).
-/// The quarter id is written into the FramedSlice prefix in front of a shared view of
-/// data, so the payload is not copied here; p and tag go to quic.send_datagram (QUIC-7).
-pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), WtError] {
+/// The quarter id is written into data's inline prefix in front of the headers already
+/// there, so the payload is not copied here; p goes to quic.send_datagram, and tag under
+/// the session's own owner (QUIC-7, WT-4).
+pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), WtError] {
     let (i, k) = find(w, s)?
     if !usable(w.conns[i], k) {
         return Error(State)
@@ -203,12 +230,23 @@ pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, da
     let quarter = sid / 4
     let mut prefix: Bytes = list.with_capacity(h3_wire.varint_len(quarter))
     h3_wire.write_varint(quarter, mut prefix)
-    let mut framed = quic.framed_from(quic.payload_whole(shared.share(data)))
+    let mut framed = take data
     if !quic.framed_prepend(mut framed, prefix) {
         return Error(State)
     }
-    match quic.send_datagram(mut e, w.conns[i].handle, take framed, p, quic.DatagramTag(owner: 0, tag: tag)) {
+    match quic.send_datagram(mut e, w.conns[i].handle, take framed, p, quic.DatagramTag(owner: datagram_owner(sid), tag: tag)) {
         Ok(()) => Ok(()),
         Error(err) => Error(Quic(err)),
     }
+}
+
+/// Drop session s's queued datagrams tagged `tag`, those in a polled but uncommitted
+/// suffix included, and return how many (QUIC-7). Another session's datagrams, whatever
+/// their tag, are not touched (WT-4).
+pub fn drop_datagrams(w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, tag: u64) -> u64 {
+    let Ok((i, k)) = find(w, s) else {
+        return 0
+    }
+    let quic.StreamId(sid) = w.conns[i].sessions[k].id
+    quic.drop_datagrams(mut e, w.conns[i].handle, quic.DatagramTag(owner: datagram_owner(sid), tag: tag))
 }

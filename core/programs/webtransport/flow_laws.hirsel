@@ -102,9 +102,9 @@ fn ready_session(events: List[webtransport.Event], s: webtransport.SessionHandle
     false
 }
 
-fn pooled_session(take l: webtransport.Limits) {
-    let mut server = server_side(clone(l), true)
-    let mut client = client_side(take l, true)
+/// Two sessions a client opens on one QUIC connection, both accepted and ready: the
+/// client's handles a and b, then the server's.
+fn pooled_pair(mut client: Side, mut server: Side) -> (webtransport.SessionHandle, webtransport.SessionHandle, webtransport.SessionHandle, webtransport.SessionHandle) {
     let a = result.unwrap(webtransport.connect(mut client.wt, mut client.q, 0, SERVER_ADDR, "https://server/one", pins(), list.new()))
     settle(mut client, mut server, 1)
     let ah = requested_handles(server.app)[0]
@@ -123,6 +123,13 @@ fn pooled_session(take l: webtransport.Limits) {
     if !ready_session(client.app, a) || !ready_session(client.app, b) {
         fail("both sessions become ready")
     }
+    (a, b, ah, bh)
+}
+
+fn pooled_session(take l: webtransport.Limits) {
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(take l, true)
+    let (a, b, ah, bh) = pooled_pair(mut client, mut server)
     // The second open is blocked until the receiver consumes and closes the first uni stream.
     let id = result.unwrap(webtransport.open(mut client.wt, mut client.q, a, false))
     if let Error(Blocked) = webtransport.open(mut client.wt, mut client.q, a, false) {
@@ -148,7 +155,7 @@ fn pooled_session(take l: webtransport.Limits) {
     if !writable {
         fail("WT_MAX_DATA must wake the session's blocked writer")
     }
-    if !result.unwrap(webtransport.write_shared(mut client.wt, mut client.q, a, id, shared.new(b"9abc"), true)) {
+    if !result.unwrap(webtransport.write_shared(mut client.wt, mut client.q, a, id, quic.payload_whole(shared.new(b"9abc")), true)) {
         fail("half a window now fits in one shared write")
     }
     settle(mut client, mut server, 8)
@@ -164,7 +171,7 @@ fn pooled_session(take l: webtransport.Limits) {
     // Resetting a wholly unsent write frees its reservation. Its final size is
     // the header alone, so the receiver has no body bytes to return as credit.
     let bidi = result.unwrap(webtransport.open(mut client.wt, mut client.q, b, true))
-    if result.unwrap(webtransport.write_shared(mut client.wt, mut client.q, b, bidi, shared.new(b"123456789"), false)) {
+    if result.unwrap(webtransport.write_shared(mut client.wt, mut client.q, b, bidi, quic.payload_whole(shared.new(b"123456789")), false)) {
         fail("a shared write past WT_MAX_DATA is atomic")
     }
     expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, b, bidi, b"12345678", false)), 8, "the other session has its whole window")
@@ -221,6 +228,82 @@ fn session_flow_control() -> Result[(), ()] {
     }
     pooled_session(small_windows())
     distinct_clients()
+    Ok(())
+}
+
+/// Every (session, stream) a client's Acked events name, in order.
+fn acked(events: List[webtransport.Event]) -> List[(webtransport.SessionHandle, quic.StreamId)] {
+    let mut got: List[(webtransport.SessionHandle, quic.StreamId)] = list.new()
+    for event in events {
+        if let Acked(s, id) = event {
+            list.push(mut got, (s, id))
+        }
+    }
+    take got
+}
+
+/// bug: priority or reset_at acts on a stream of another session on the same connection;
+/// reset_at drops the WT header or the caller's reliable prefix, or refunds the wrong
+/// credit after a short write; a stream's acknowledgement is lost, or reaches a session
+/// that does not own the stream.
+/// oracle: draft-17 §4.4 and RESET_STREAM_AT: the peer receives the stream header and the
+/// first reliable bytes, and the final size is their sum (here the 3-byte header 40 41 04
+/// plus 3); draft-17 §5.4 refunds the accepted bytes past it (8 - 3 = 5); a stream belongs
+/// to the one session its header names (draft-17 §4.2, §4.3).
+@test
+fn pooled_streams_stay_with_their_session() -> Result[(), ()] {
+    let l = small_windows()
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(take l, true)
+    let (a, b, ah, bh) = pooled_pair(mut client, mut server)
+    let sa = result.unwrap(webtransport.open(mut client.wt, mut client.q, a, false))
+    if let Error(State) = webtransport.priority(client.wt, mut client.q, b, sa, quic.Priority(urgency: 0, order: 0, then: 0)) {
+        ()
+    } else {
+        fail("priority on another session's stream is refused")
+    }
+    if let Error(State) = webtransport.reset_at(mut client.wt, mut client.q, b, sa, 5, 0) {
+        ()
+    } else {
+        fail("reset_at on another session's stream is refused")
+    }
+    expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, a, sa, b"aaaa", true)), 4, "the owner's stream still takes its write")
+    // A short write takes the window of 8, then RESET_STREAM_AT keeps 3 of its bytes.
+    let sb = result.unwrap(webtransport.open(mut client.wt, mut client.q, b, true))
+    expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, b, sb, b"123456789abc", false)), 8, "a short write takes one window")
+    result.unwrap(webtransport.reset_at(mut client.wt, mut client.q, b, sb, 12, 3))
+    let more = result.unwrap(webtransport.open(mut client.wt, mut client.q, b, false))
+    expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, b, more, b"wxyzwxyz", false)), 5, "the reset refunds the window less the reliable prefix")
+    let empty = result.unwrap(webtransport.open(mut client.wt, mut client.q, b, true))
+    expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, b, empty, b"", true)), 0, "a FIN alone needs no credit")
+    list.clear(mut client.app)
+    settle(mut client, mut server, 6)
+    let (body, fin) = read_all(mut server, ah, sa)
+    if body != b"aaaa" || !fin {
+        fail("the owner's stream is unchanged by the refused calls")
+    }
+    let mut reset_seen = 0u64
+    for event in server.app {
+        if let Reset(s: s, stream: id, code: code, final_size: size) = event {
+            if s != bh || id != sb || code != Some(12) || size != 6 {
+                fail("the reset reaches session b with code 12 and final size header + 3")
+            }
+            reset_seen += 1
+        }
+    }
+    expect(reset_seen, 1, "RESET_STREAM_AT is reported once")
+    let mut kept: Bytes = list.with_capacity(64)
+    let _ = webtransport.read(mut server.wt, mut server.q, bh, sb, mut kept)
+    if kept != b"123" {
+        fail("the peer reads exactly the reliable prefix")
+    }
+    let got = acked(client.app)
+    expect(list.len(got), 2, "each finished stream is acknowledged once")
+    for (s, id) in got {
+        if !((s == a && id == sa) || (s == b && id == empty)) {
+            fail("an acknowledgement reaches only the session that owns the stream")
+        }
+    }
     Ok(())
 }
 

@@ -148,7 +148,7 @@ pub fn main(a: Args, net: Net, clock: Clock, random: Random, out: Stdout) -> Res
                 Readable(s, id) => pump(mut wt, mut q, mut echoes, s, id),
                 Writable(s, id) => pump(mut wt, mut q, mut echoes, s, id),
                 Datagram(s, data) => {
-                    result.unwrap(webtransport.send_datagram(mut wt, mut q, s, shared.new(clone(data)), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+                    result.unwrap(webtransport.send_datagram(mut wt, mut q, s, quic.framed_from(quic.payload_share(data)), quic.Priority(urgency: 3, order: 0, then: 0), 0))
                 },
                 Closed(s: _, code: code, reason: reason) => {
                     let mut msg = string.from("closed ")

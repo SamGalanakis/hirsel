@@ -104,13 +104,18 @@ fn expire_datagrams(mut st: Streams, now: u64, rtt: u64) {
     }
 }
 
-/// Remove every datagram tagged `tag` from `l`; returns how many and the memory freed.
-fn remove_tagged(mut l: List[QueuedDatagram], tag: DatagramTag) -> (u64, u64) {
+/// Remove every datagram of `owner` from `l`, only those tagged `tag` when it is given;
+/// returns how many and the memory freed.
+fn remove_owned(mut l: List[QueuedDatagram], owner: u64, tag: Option[u64]) -> (u64, u64) {
     let mut count = 0u64
     let mut freed = 0u64
     let mut i = 0u64
     while i < list.len(l) {
-        if l[i].tag == tag {
+        let hit = l[i].tag.owner == owner && match tag {
+            Some(t) => l[i].tag.tag == t,
+            None => true,
+        }
+        if hit {
             count += 1
             freed += l[i].charge
             let last = list.len(l) - 1
@@ -187,12 +192,23 @@ pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlic
 /// uncommitted suffix included, and return how many. A datagram already committed is not
 /// recalled.
 pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: DatagramTag) -> u64 {
+    drop_matching(mut e, c, tag.owner, Some(tag.tag))
+}
+
+/// Remove every queued datagram whose owner is `owner`, whatever its tag, as drop_datagrams
+/// does (QUIC-7). A session layer calls it when the owner ends, so nothing it queued
+/// outlives it.
+pub fn drop_owner_datagrams(mut e: Endpoint, c: ConnectionHandle, owner: u64) -> u64 {
+    drop_matching(mut e, c, owner, None)
+}
+
+fn drop_matching(mut e: Endpoint, c: ConnectionHandle, owner: u64, tag: Option[u64]) -> u64 {
     let Some(i) = slot_at_mut(mut e, c) else {
         return 0
     }
     if let Some(mut conn) = e.connections[i] {
-        let (queued, freed) = remove_tagged(mut conn.streams.datagrams, tag)
-        let (staged, staged_freed) = remove_tagged(mut conn.streams.staged_datagrams, tag)
+        let (queued, freed) = remove_owned(mut conn.streams.datagrams, owner, tag)
+        let (staged, staged_freed) = remove_owned(mut conn.streams.staged_datagrams, owner, tag)
         conn.streams.held -= freed + staged_freed
         return queued + staged
     }

@@ -381,11 +381,16 @@ fn on_web_event(mut s: Session, mut io: Io, ours: webtransport.SessionHandle, ev
                 on_stream_stopped(mut s, mut io, stream, c64, mut out)
             }
         },
+        Acked(sh, stream) => {
+            if sh == ours {
+                on_stream_acked(mut s, stream)
+            }
+        },
         Datagram(sh, data) => {
             if sh == ours {
                 let _ = ensure_transport_ready(mut s, mut io, mut out)
                 if s.phase != Ended {
-                    on_datagram(mut s, mut io, data, mut out)
+                    on_datagram(mut s, mut io, quic.payload_bytes(data), mut out)
                 }
             }
         },
@@ -394,6 +399,18 @@ fn on_web_event(mut s: Session, mut io: Io, ours: webtransport.SessionHandle, ev
                 s.phase = Ended
                 clear_session_state(mut s)
                 list.push(mut out, Closed(code: int.widen(code)))
+            }
+        },
+        Refused(s: sh, reason: reason) => {
+            // A refused CONNECT never becomes a session: it ends this one (H6).
+            if sh == ours {
+                s.phase = Ended
+                clear_session_state(mut s)
+                let code: u64 = match reason {
+                    Status(n) => int.widen(n),
+                    Pin => ERR_PROTOCOL_VIOLATION,
+                }
+                list.push(mut out, Closed(code: code))
             }
         },
         _ => {},

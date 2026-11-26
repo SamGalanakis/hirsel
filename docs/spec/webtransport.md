@@ -108,7 +108,7 @@ pub type Request {
 }
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
 pub type Refusal = Status(u16) | Pin
-pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, reason: Refusal) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
+pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, reason: Refusal) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Acked(SessionHandle, quic.StreamId) | Datagram(SessionHandle, quic.PayloadSlice) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
 pub type WtError = UnknownSession | State | Url | Blocked | Quic(quic.QuicError)
 
 pub fn endpoint(take limits: Limits) -> Endpoint
@@ -120,10 +120,13 @@ pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: S
 pub fn open(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, bidi: bool) -> Result[quic.StreamId, WtError]
 pub fn read(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, mut into: Bytes) -> Result[(u64, bool), WtError]
 pub fn write(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Bytes, fin: bool) -> Result[u64, WtError]
-pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, WtError]
+pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: quic.PayloadSlice, fin: bool) -> Result[bool, WtError]
 pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError]
+pub fn reset_at(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32, reliable: u64) -> Result[(), WtError]
+pub fn priority(w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, p: quic.Priority) -> Result[(), WtError]
 pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError]
-pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), WtError]
+pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), WtError]
+pub fn drop_datagrams(w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, tag: u64) -> u64
 pub fn drain(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle)
 pub fn close(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, code: u32, reason: Bytes)
 pub fn dropped_datagrams(w: Endpoint) -> u64
@@ -154,50 +157,34 @@ QUIC or HTTP/3 failures first emit `Closed`.
 The package sits between `quic` and the application: it consumes the QUIC events of
 HTTP/3 streams, reads and writes the HTTP/3 control and QPACK streams itself, and hands the
 application only session events. The application reads and writes a session's streams
-through `read`, `write`, `write_shared`, `reset` and `stop`, never `quic`'s own. Each is a
-thin wrapper over the `quic` call of the same name that first checks the stream belongs to
-the session, and then does the session's accounting (WT-5): it charges `WT_MAX_DATA`, raises
-the session's windows as the application reads, maps a 32-bit application code to the
-draft-17 §4.4 range (WT-1), and resets with `RESET_STREAM_AT` at the stream header's
-length so the header always arrives. Stream data is never copied through this layer: the
-wrappers pass the caller's buffers and `Shared[Bytes]` straight to `quic`.
+through `read`, `write`, `write_shared`, `reset`, `reset_at`, `priority` and `stop`, never
+`quic`'s own, so an upper protocol such as `moq` never calls `quic` on a session's
+connection. Each is a thin wrapper over the `quic` call of the same name (`quic.reset` for
+both resets) that first checks the stream belongs to the session, and then does the
+session's accounting (WT-5): it charges `WT_MAX_DATA`, raises the session's windows as the
+application reads, and maps a 32-bit application code to the draft-17 §4.4 range (WT-1). A
+stream of another session, even one on the same connection, is `State`, and nothing about it
+changes. `reset_at(…, code, reliable)` resets with `RESET_STREAM_AT` at the stream header's
+length plus the first `reliable` bytes the application wrote, so the header and that prefix
+always arrive (draft-17 §4.4); `reset` is `reset_at` with `reliable` 0. `reliable` past what
+was written is `Quic(StreamState)`, and a peer without `reset_stream_at` makes it
+`Quic(Unsupported)`. `priority` sets the stream's `quic.Priority` (QUIC-1). Stream data is
+never copied through this layer: the wrappers pass the caller's buffers and
+`quic.PayloadSlice` straight to `quic`. `Acked(s, stream)` reports `quic`'s acknowledgement
+of a stream's last byte to the session that owns it, before the package forgets the
+stream.
 
 `Reset` and `Stopped` carry the peer's code mapped back to 32 bits, or `None` for a code
 outside the `WT_APPLICATION_ERROR` range, such as `WT_SESSION_GONE` (draft-17 §4.4: "a stream
 reset with no application error code"). A stream `open` returns, or a peer's stream, starts
 with its header (WT-4); `write` returns 0 and `write_shared` `false` while the header still
 waits for QUIC credit, and `Writable` follows once it is out. `send_datagram` writes the
-quarter stream id and the payload into one buffer, one copy of the payload, because a QUIC
-DATAGRAM frame's payload is a single run of bytes (RFC 9221 §4); a client may open streams
+quarter stream id into the `quic.FramedSlice` inline prefix (`quic.framed_prepend`), in
+front of any header the caller put there, so the payload is not copied here, and `receive`
+trims the quarter stream id off a received datagram with `quic.payload_trim_front`, so
+`Datagram(s, payload)` holds the received bytes without a copy. A client may open streams
 and send datagrams while its CONNECT awaits the response (draft-17 §4).
 `dropped_datagrams` counts the received datagrams dropped (WT-4).
-
-**Transport capability completion and zero-copy datagrams (text only, not yet built —
-media-seams-design-3072).** So upper protocols such as `moq` never bypass `webtransport` to call
-`quic` directly on a session's underlying connection, and never copy datagram payloads through
-this layer, WT-2's end-state wrapper surface adds three operations and adopts `quic.PayloadSlice`
-and `quic.FramedSlice` (QUIC-1):
-
-```hirsel unbuilt
-pub fn priority(w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, p: quic.Priority) -> Result[(), WtError]
-pub fn reset_at(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32, reliable: u64) -> Result[(), WtError]
-pub fn drop_datagrams(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, tag: u64) -> u64
-pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: quic.PayloadSlice, fin: bool) -> Result[bool, WtError]
-pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), WtError]
-```
-
-- `priority` validates that `stream` belongs to session `s` and forwards to `quic.priority`.
-- `reset_at` validates ownership, maps `code` via draft-17 §4.4, and calls
-  `quic.reset(..., h3_code, stream.header + reliable)` so both the WebTransport stream header and
-  the application's `reliable` prefix are delivered reliably before reset (`reset` is `reset_at`
-  with `reliable = 0`).
-- `send_datagram` and `drop_datagrams` namespace the caller's `tag` by session (`wt_tag(s, tag)`)
-  before calling `quic`, so two pooled WebTransport sessions sharing one QUIC connection never
-  drop each other's queued datagrams.
-- `send_datagram` prepends the quarter-stream-id varint directly into `FramedSlice.prefix`
-  (`quic.framed_prepend`, zero payload copies), and `receive` trims the incoming quarter-stream-id
-  varint from `quic.Event.Datagram` via `quic.payload_trim_front`, emitting
-  `Event.Datagram(s, quic.PayloadSlice)` with zero copies.
 
 `answer` is the application's verdict on a CONNECT: `Accept` sends `200` with the protocol
 it picked from the client's `WT-Available-Protocols` (draft-17 §3.3) in
@@ -285,9 +272,15 @@ deadline, which the caller folds into the `quic` driver's wait.
 - A datagram's payload is the quarter stream id of the CONNECT stream (a varint) then the
   data (RFC 9297 §2.1). One naming no session is dropped and counted, and a malformed quarter
   stream id, or one past 2^60 − 1, is `H3_DATAGRAM_ERROR`. `send_datagram` passes its
-  `quic.Priority` and `tag` to `quic.send_datagram` (QUIC-7). Datagrams a session's
-  application already queued are the application's to drop by `tag` (QUIC-7); the session's
-  end drops the ones it receives.
+  `quic.Priority` and `tag` to `quic.send_datagram` (QUIC-7) as `quic.DatagramTag(owner,
+  tag)`, where `owner` is the session's CONNECT stream id plus one. That owner is never 0,
+  the owner raw `quic` callers use, and never repeats on a connection, since QUIC never
+  reuses a stream id, so it needs no counter and cannot run out. `drop_datagrams(s, tag)`
+  removes the session's own queued datagrams tagged `tag`, those in a polled but uncommitted
+  packet included, and never another session's or a raw caller's, whatever their tags. The
+  session's end drops every datagram it queued and has not committed
+  (`quic.drop_owner_datagrams`), and the ones it buffered or receives; a datagram that
+  arrives later names no session and is dropped and counted.
 
 ## WT-5: Flow control and session limits
 

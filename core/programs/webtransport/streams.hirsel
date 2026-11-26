@@ -290,8 +290,9 @@ fn on_datagram(mut w: Endpoint, mut e: quic.Endpoint, i: u64, slice: quic.Payloa
         return
     }
     let sid = quarter * 4
-    let mut payload: Bytes = list.with_capacity(list.len(data) - at)
-    list.append(mut payload, list.slice(data, at, list.len(data)))
+    // The quarter id, which read_varint found within the slice, is trimmed off a shared
+    // view of the received backing: no copy.
+    let payload = option.unwrap(quic.payload_trim_front(quic.payload_share(slice), at))
     match place(w.conns[i], sid) {
         At(k) => list.push(mut out, Datagram(handle_of(w, i, k), take payload)),
         Wait => {

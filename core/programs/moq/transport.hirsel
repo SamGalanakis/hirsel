@@ -73,7 +73,7 @@ fn tx_write_shared(t: Transport, mut io: Io, stream: quic.StreamId, take data: S
             Error(e) => Error(Quic(e)),
         },
         Web(s: sh) => match io.w {
-            Some(mut w) => match webtransport.write_shared(mut w, mut io.q, sh, stream, take data, fin) {
+            Some(mut w) => match webtransport.write_shared(mut w, mut io.q, sh, stream, quic.payload_whole(take data), fin) {
                 Ok(b) => Ok(b),
                 Error(e) => Error(Web(e)),
             },
@@ -92,7 +92,9 @@ fn tx_reset(t: Transport, mut io: Io, stream: quic.StreamId, code: u64, reliable
         Web(s: sh) => {
             if let Some(mut w) = io.w {
                 let c32: u32 = int.truncate(code)
-                let _ = webtransport.reset(mut w, mut io.q, sh, stream, c32)
+                if let Error(_) = webtransport.reset_at(mut w, mut io.q, sh, stream, c32, reliable) {
+                    let _ = webtransport.reset(mut w, mut io.q, sh, stream, c32)
+                }
             }
         },
     }
@@ -113,7 +115,16 @@ fn tx_stop(t: Transport, mut io: Io, stream: quic.StreamId, code: u64) {
 }
 
 fn tx_priority(t: Transport, mut io: Io, stream: quic.StreamId, p: quic.Priority) {
-    let _ = quic.priority(mut io.q, tx_conn(t), stream, p)
+    match t {
+        Native(c: c) => {
+            let _ = quic.priority(mut io.q, c, stream, p)
+        },
+        Web(s: sh) => {
+            if let Some(w) = io.w {
+                let _ = webtransport.priority(w, mut io.q, sh, stream, p)
+            }
+        },
+    }
 }
 
 fn tx_send_datagram(t: Transport, mut io: Io, take data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), MoqError] {
@@ -123,7 +134,7 @@ fn tx_send_datagram(t: Transport, mut io: Io, take data: Shared[Bytes], p: quic.
             Error(e) => Error(Quic(e)),
         },
         Web(s: sh) => match io.w {
-            Some(mut w) => match webtransport.send_datagram(mut w, mut io.q, sh, data, p, tag) {
+            Some(mut w) => match webtransport.send_datagram(mut w, mut io.q, sh, quic.framed_from(quic.payload_whole(take data)), p, tag) {
                 Ok(()) => Ok(()),
                 Error(e) => Error(Web(e)),
             },
@@ -133,7 +144,13 @@ fn tx_send_datagram(t: Transport, mut io: Io, take data: Shared[Bytes], p: quic.
 }
 
 fn tx_drop_datagrams(t: Transport, mut io: Io, tag: u64) -> u64 {
-    quic.drop_datagrams(mut io.q, tx_conn(t), quic.DatagramTag(owner: 0, tag: tag))
+    match t {
+        Native(c: c) => quic.drop_datagrams(mut io.q, c, quic.DatagramTag(owner: 0, tag: tag)),
+        Web(s: sh) => match io.w {
+            Some(w) => webtransport.drop_datagrams(w, mut io.q, sh, tag),
+            None => 0,
+        },
+    }
 }
 
 fn tx_close(t: Transport, mut io: Io, code: u64, reason: Bytes) {

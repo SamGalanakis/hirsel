@@ -213,7 +213,7 @@ fn session_close_resets_its_streams_only() -> Result[(), ()] {
     let mut delivered = 0u64
     for event in server.app {
         if let Datagram(s, data) = event {
-            if s != b || data != b"dg" {
+            if s != b || quic.payload_bytes(data) != b"dg" {
                 fail("only session b's datagram is delivered")
             }
             delivered += 1
@@ -221,5 +221,139 @@ fn session_close_resets_its_streams_only() -> Result[(), ()] {
     }
     expect(delivered, 1, "session b's datagram")
     expect(webtransport.dropped_datagrams(server.wt), 1, "session a's datagram is dropped")
+    Ok(())
+}
+
+/// The payloads of every Datagram event of session s, in order.
+fn datagrams_of(events: List[webtransport.Event], s: webtransport.SessionHandle) -> List[Bytes] {
+    let mut got: List[Bytes] = list.new()
+    for event in events {
+        if let Datagram(at, data) = event {
+            if at == s {
+                list.push(mut got, clone(quic.payload_bytes(data)))
+            }
+        }
+    }
+    take got
+}
+
+fn datagram_count(events: List[webtransport.Event]) -> u64 {
+    let mut n = 0u64
+    for event in events {
+        if let Datagram(..) = event {
+            n += 1
+        }
+    }
+    n
+}
+
+fn send_on(mut side: Side, s: webtransport.SessionHandle, body: Bytes, tag: u64) {
+    let data = quic.framed_from(quic.payload_whole(shared.new(clone(body))))
+    result.unwrap(webtransport.send_datagram(mut side.wt, mut side.q, s, take data, quic.Priority(urgency: 3, order: 0, then: 0), tag))
+}
+
+/// Poll side once and leave its packets uncommitted, so its datagrams are staged.
+fn stage(mut side: Side, now: u64) {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let _ = quic.poll(mut side.q, now, mut wire, mut packets)
+}
+
+fn only(got: List[Bytes], want: Bytes, take what: String) {
+    if list.len(got) != 1 || got[0] != want {
+        fail(take what)
+    }
+}
+
+/// bug: two sessions on one connection share datagram tags, so one session's
+/// drop_datagrams removes the other's datagrams, or a raw quic drop removes a session's;
+/// a session's queued or staged datagrams outlive it and go out after it closed; a
+/// datagram for a closed session reaches a session opened later.
+/// oracle: draft-17 §4.2 and RFC 9297 §2.1: a datagram belongs to the one session its
+/// quarter stream id names; WT-4: drop_datagrams acts on the calling session's datagrams
+/// only, and a session's datagrams end with it. Each phase names exactly the payloads the
+/// peer must see.
+@test
+fn pooled_datagrams_stay_with_their_session() -> Result[(), ()] {
+    let l = limits(1024, 4, false)
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(take l, true)
+    let (a, b, ah, bh) = pooled_pair(mut client, mut server)
+    let webtransport.SessionHandle(conn: c, ..) = a
+    let full = 0xffffffffffffffffu64
+    // Equal full-width tags: dropping a's leaves b's.
+    send_on(mut client, a, b"a1", full)
+    send_on(mut client, b, b"b1", full)
+    expect(webtransport.drop_datagrams(client.wt, mut client.q, a, full), 1, "a's drop removes its datagram only")
+    list.clear(mut server.app)
+    settle(mut client, mut server, 6)
+    only(datagrams_of(server.app, bh), b"b1", "b's datagram survives a's drop of an equal tag")
+    expect(list.len(datagrams_of(server.app, ah)), 0, "a's dropped datagram is not sent")
+    // Distinct tags, and a raw quic datagram under owner 0 and tag 0, b's tag.
+    send_on(mut client, a, b"a2", 4)
+    send_on(mut client, b, b"b2", 0)
+    let mut raw: Bytes = list.new()
+    list.push(mut raw, 0x01)
+    list.append(mut raw, b"r2")
+    result.unwrap(quic.send_datagram(mut client.q, c, quic.framed_from(quic.payload_whole(shared.new(take raw))), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
+    expect(quic.drop_datagrams(mut client.q, c, quic.DatagramTag(owner: 0, tag: 0)), 1, "a raw drop removes the raw datagram only")
+    expect(webtransport.drop_datagrams(client.wt, mut client.q, a, 4), 1, "a's drop of its own tag")
+    list.clear(mut server.app)
+    settle(mut client, mut server, 7)
+    only(datagrams_of(server.app, bh), b"b2", "b's datagram survives the raw drop of its tag")
+    expect(datagram_count(server.app), 1, "nothing else arrives")
+    // Staged, then dropped, then the packet abandoned: only b's is requeued.
+    send_on(mut client, a, b"a3", 7)
+    send_on(mut client, b, b"b3", 7)
+    stage(mut client, 8)
+    expect(webtransport.drop_datagrams(client.wt, mut client.q, a, 7), 1, "a staged datagram is dropped")
+    quic.committed(mut client.q, 8, 0)
+    list.clear(mut server.app)
+    settle(mut client, mut server, 8)
+    only(datagrams_of(server.app, bh), b"b3", "the abandoned packet requeues b's datagram only")
+    expect(datagram_count(server.app), 1, "a's dropped datagram is not requeued")
+    // The server sends a datagram on a and its packet is held; the client stages a
+    // datagram on each session, then closes a before the packet is committed.
+    send_on(mut server, ah, b"late", 0)
+    let mut held: Bytes = list.with_capacity(64 * 1200)
+    let mut held_packets: List[quic.Output] = list.with_capacity(65)
+    let _ = quic.poll(mut server.q, 9, mut held, mut held_packets)
+    let mut n = 0u64
+    for output in held_packets {
+        if let Transmit(..) = output {
+            n += 1
+        }
+    }
+    quic.committed(mut server.q, 9, n)
+    send_on(mut client, a, b"a4", 0)
+    send_on(mut client, b, b"b4", 0)
+    stage(mut client, 9)
+    webtransport.close(mut client.wt, mut client.q, a, 0, b"")
+    quic.committed(mut client.q, 9, 0)
+    list.clear(mut server.app)
+    settle(mut client, mut server, 9)
+    only(datagrams_of(server.app, bh), b"b4", "b's datagram goes out after a closes")
+    expect(list.len(datagrams_of(server.app, ah)), 0, "a closed session's staged datagram is not sent")
+    // A third session opens; the held packet then arrives, for session a.
+    let d = result.unwrap(webtransport.connect(mut client.wt, mut client.q, 11, SERVER_ADDR, "https://server/three", pins(), list.new()))
+    list.clear(mut server.app)
+    settle(mut client, mut server, 11)
+    let dh = requested_handles(server.app)[0]
+    accept_session(mut server, dh)
+    settle(mut client, mut server, 12)
+    let dropped = webtransport.dropped_datagrams(client.wt)
+    list.clear(mut client.app)
+    let mut events: List[quic.Event] = list.new()
+    for output in held_packets {
+        if let Transmit(to: dest, at: at, len: len, ..) = output {
+            if dest == CLIENT_ADDR {
+                quic.receive_datagram(mut client.q, 13, SERVER_ADDR, 0, mut held, at, len, mut events)
+            }
+        }
+    }
+    webtransport.receive(mut client.wt, mut client.q, 13, events, mut client.app)
+    expect(datagram_count(client.app), 0, "a datagram for a closed session reaches no session")
+    expect(webtransport.dropped_datagrams(client.wt), dropped + 1, "it is counted dropped")
+    expect(list.len(datagrams_of(client.app, d)), 0, "the new session sees nothing")
     Ok(())
 }

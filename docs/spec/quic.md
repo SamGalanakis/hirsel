@@ -153,6 +153,7 @@ pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, relia
 pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError]
 pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority, tag: DatagramTag) -> Result[(), QuicError]
 pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: DatagramTag) -> u64
+pub fn drop_owner_datagrams(mut e: Endpoint, c: ConnectionHandle, owner: u64) -> u64
 pub fn payload_bytes_copied(e: Endpoint, c: ConnectionHandle) -> u64
 pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(), QuicError]
 pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Bytes)
@@ -564,11 +565,15 @@ it is dropped or expires. Past `send_bytes`, `send_datagram` is `Limit`. A datag
 smoothed RTT of the first `poll` that saw it is dropped and counted as `DatagramLate`.
 
 Each queued datagram carries a `Priority`, which schedules it among the streams (QUIC-1),
-and a `DatagramTag`: a structured `owner` (the caller's session generation, so one
-session's purge never reaches another's datagrams) and the caller's `tag`.
-`drop_datagrams(e, c, tag)` removes every queued datagram whose `DatagramTag` equals
-`tag`, including those in a polled but uncommitted suffix, and returns how
-many it removed; a datagram already committed to the socket is not recalled. MoQ tags
+and a `DatagramTag`: a structured `owner` and the caller's `tag`. `quic` gives `owner` no
+meaning beyond equality: a layer that shares one connection among sessions gives each
+session an owner no other session on the connection ever has (WT-4 uses the CONNECT stream
+id plus one), so one session's purge never reaches another's datagrams, and a raw caller
+uses owner 0. `drop_datagrams(e, c, tag)` removes every queued datagram whose `DatagramTag`
+equals `tag`, and `drop_owner_datagrams(e, c, owner)` every one whose `owner` is `owner`,
+whatever its tag, which a session layer calls when the session ends. Both include those in
+a polled but uncommitted suffix and return how many they removed; a datagram already
+committed to the socket is not recalled. MoQ tags
 datagrams by track so a revocation fence can purge them (MOQ-8).
 
 Received datagrams are delivered in arrival order as `Event.Datagram`, never reassembled and

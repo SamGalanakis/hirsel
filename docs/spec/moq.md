@@ -124,8 +124,8 @@ session ignores those of other connections or sessions. `poll` runs the session'
 (delivery timeouts, MOQ-5) and returns the next deadline. Request ids are even for the
 client and odd for the server (moqt-23 §6.4.2.1), counted per session. Object payloads are
 `Shared[Bytes]`: a relay forwards the same buffer to every subscriber with `write_shared` or
-`send_datagram`, never copying a payload (MOQ-6), except that `webtransport.send_datagram`
-copies one behind its quarter stream id (WT-2).
+`send_datagram`, never copying a payload (MOQ-6); `webtransport.send_datagram` writes its
+quarter stream id into the slice's inline prefix, not in front of a copy (WT-2).
 
 An `Object` keeps everything moqt-23 makes part of an object's identity or forwarding: its
 delivery `mode` and its `properties` (moqt-23 §2.1.1, §8.4), which a relay forwards

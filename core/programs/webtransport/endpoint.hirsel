@@ -30,7 +30,7 @@ pub type Verdict = Accept(protocol: Option[String], headers: List[(String, Strin
 
 pub type Refusal = Status(u16) | Pin
 
-pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, reason: Refusal) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
+pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, reason: Refusal) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Acked(SessionHandle, quic.StreamId) | Datagram(SessionHandle, quic.PayloadSlice) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
 
 /// UnknownSession names no session this endpoint holds; State is a call the session's phase
 /// does not allow (an answer to a session already answered); Url is a connect URL that is not
@@ -106,7 +106,7 @@ type Parked {
 
 type ParkedDatagram {
     sid: u64,
-    data: Bytes,
+    data: quic.PayloadSlice,
     since: u64
 }
 
@@ -226,9 +226,16 @@ fn counts_live(conn: Conn, k: u64) -> bool {
     }
 }
 
+/// The quic.DatagramTag owner of the session whose CONNECT stream is sid (WT-4): one more
+/// than sid, so it is never 0, the owner raw quic callers use, and never repeats within a
+/// connection, since quic never reuses a stream id there.
+fn datagram_owner(sid: u64) -> u64 {
+    sid + 1
+}
+
 /// Forget session k; emits Closed when the application holds it. Each of its streams is
-/// reset and stopped with WT_SESSION_GONE (draft-17 §6), and the streams and datagrams
-/// buffered for it go too (WT-4).
+/// reset and stopped with WT_SESSION_GONE (draft-17 §6); the datagrams it queued and has
+/// not committed are dropped, and the streams and datagrams buffered for it go too (WT-4).
 fn end_session(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, notify: bool, code: u32, take reason: Bytes, mut out: List[Event]) {
     if counts_live(w.conns[i], k) {
         w.live -= 1
@@ -254,6 +261,7 @@ fn end_session(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, notify: bo
         }
     }
     let quic.StreamId(sid) = w.conns[i].sessions[k].id
+    let _ = quic.drop_owner_datagrams(mut e, c, datagram_owner(sid))
     unpark(mut w, mut e, i, sid)
     if notify && app_holds(w.conns[i], k) {
         list.push(mut out, Closed(s: s, code: code, reason: take reason))
@@ -416,6 +424,8 @@ pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[qui
             Acked(c, id) => {
                 if let Some(i) = conn_index(w, c) {
                     if let Some(k) = owner(w.conns[i], id) {
+                        // The owner hears of it while the stream is still its own.
+                        list.push(mut out, Acked(handle_of(w, i, k), id))
                         settle_stream(mut w, mut e, i, k, id, false, true)
                     }
                 }

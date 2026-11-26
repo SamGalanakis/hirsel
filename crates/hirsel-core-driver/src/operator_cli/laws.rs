@@ -136,7 +136,7 @@ fn source_walk_manifest_approvals_and_refusals() {
 
     let grants = ["Clock", "Foreign=app@1/main/I", "Exec=tools.toml build"].map(str::to_owned);
     let (input, upload, source, approvals) =
-        super::submission(Some(root.clone()), None, None, grants.to_vec()).unwrap();
+        super::submission(Some(root.clone()), None, None, grants.to_vec(), &root).unwrap();
     assert!(upload.is_none());
     let crate::operator::Input::Source(manifest) = input else {
         panic!("--source did not submit a source manifest");

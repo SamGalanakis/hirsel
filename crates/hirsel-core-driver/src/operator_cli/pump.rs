@@ -7,6 +7,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The local end of an upload: `send_release` writes the admission bytes into one end of a
 /// socket pair, a pump relays them to the host as `Data`, and the host's `Need` parts are
@@ -29,9 +30,9 @@ impl Pump {
         let (peer, mut local) = UnixStream::pair()?;
         let store = upload.store.clone();
         let root = upload.root;
-        let sender = std::thread::spawn(move || {
-            send_release(&mut local, &store, root, &crate::launcher::limits())
-        });
+        let mut limits = upload.limits;
+        limits.timeout = Some(Duration::from_secs(600));
+        let sender = std::thread::spawn(move || send_release(&mut local, &store, root, &limits));
         let stopped = Arc::new(AtomicBool::new(false));
         let (mut input, stop, d) = (peer.try_clone()?, stopped.clone(), d.to_vec());
         let relay = std::thread::spawn(move || {

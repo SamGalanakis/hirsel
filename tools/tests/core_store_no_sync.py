@@ -500,7 +500,8 @@ class StoreNoSync(unittest.TestCase):
                 "--trusted",
             ]
             with tempfile.TemporaryFile(mode="w+") as output, subprocess.Popen(
-                [installed, "host", "--state", state, "--max-places", "1", "--lifecycle", "leader"],
+                [installed, "host", "--state", state, "--max-places", "1", "--lifecycle", "leader",
+                 "--admission", ROOT / "tools/tests/fixtures/host-admission.conf"],
                 stdout=output, stderr=output, env=env,
             ) as host:
                 try:

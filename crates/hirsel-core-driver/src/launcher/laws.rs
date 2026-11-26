@@ -321,7 +321,7 @@ int main(int argc, char **argv) {
     fs::set_permissions(&replacement, fs::Permissions::from_mode(0o500)).unwrap();
     let launcher = Launcher::new(&state, Leader, || {
         Ok(SwapImage {
-            stores: Stores::open(&state, super::limits().recipe_bytes)?,
+            stores: Stores::open(&state)?,
             replacement,
         })
     })
@@ -893,13 +893,13 @@ fn session_admission() {
     rig.launcher.admit_with(admission).unwrap();
     let fixture = Fixture::leaf();
     let (root, frame) = fixture.request();
-
     let admit = |a: u64, root: &[u8]| {
         Request::Admit(
             group(),
             attempt(a),
             Input::Attested(root.to_vec()),
             Approvals::default(),
+            super::admit::fixture_deadline_ms(),
         )
     };
     rig.ask(admit(1, &[7; 32]));
@@ -1128,7 +1128,7 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
 
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path();
-    let stores = Stores::open(state, 1 << 20).unwrap();
+    let stores = Stores::open(state).unwrap();
     let code = CodeStore::new(state.join("code"));
     let put = |kind, bytes: &[u8]| code.put(kind, bytes).unwrap();
     let kept_group = put(ObjectKind::Group, b"listed group");
@@ -1215,7 +1215,6 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     assert!(!held(ObjectKind::Body, garbage.hash) && !held(ObjectKind::Recipe, dropped.hash));
     assert!(stores.records().assembly(live.identity).is_ok());
     assert!(stores.records().assembly(old.identity).is_err());
-    // The dropped record and its image, the unlisted body and the dropped recipe.
     assert_eq!(removed, 4);
 
     let launcher = Launcher::new(state, Leader, || Ok(stores)).unwrap();
@@ -1228,6 +1227,7 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
         a,
         Input::Publication(published.hash.0.to_vec()),
         Approvals::default(),
+        super::admit::fixture_deadline_ms(),
     ));
     let answered = rig.until(|events| {
         events

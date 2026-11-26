@@ -14,7 +14,6 @@ use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
 mod lean;
 mod release;
 pub(crate) use release::local_admission_limits;
@@ -490,6 +489,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::AddWorkspace
             | Opt::Url
             | Opt::Control
+            | Opt::Admission
             | Opt::HostState
             | Opt::OperatorListen
             | Opt::PlatformHost

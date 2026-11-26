@@ -657,7 +657,7 @@ def first_party(meta: dict) -> str:
                    "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain",
                    "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives",
                    "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-scripted-record-runtime-pic"},
-        data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-driver/src/tape_tls_observe.c", "tools/loopback_peer.py"]')))
+        data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-driver/src/tape_tls_observe.c", "tools/loopback_peer.py", "tools/tests/fixtures/host-admission.conf"]')))
     out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py",
         files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_REPORT_EVALUATOR": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**", "core/core/**", "core/std/**"]) + ["crates/hirsel-core-rt/testdata/memory_report.c"]')))

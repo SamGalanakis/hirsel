@@ -1755,6 +1755,7 @@ pub fn tick(mut h: Host, now: Now) -> List[launcher.Request] waits {
     for name in retry {
         let _ = launch_dirty(mut h, name, false, mut out)
     }
+    expire_source_uploads(mut h, now.wall_ms)
     due_wakes(mut h, now, mut out)
     drain_later(mut h, mut out)
     turned(mut h, take out)
@@ -1776,6 +1777,14 @@ pub fn timers(h: Host) -> Timers waits {
     }
     let mut mono: Option[u64] = None
     for (_, v) in h.vol {
+        if let Some(adm) = v.admit {
+            if let Some(receive) = adm.receive {
+                wall = Some(match wall {
+                    Some(at) => order.min(at, receive.deadline_ms),
+                    None => receive.deadline_ms,
+                })
+            }
+        }
         if let Some(at) = v.retry_at {
             let earlier = match mono {
                 Some(m) => at < m,
@@ -1914,35 +1923,9 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
     Ok(take out)
 }
 
-// An admission still missing input fails this long after its Begin, across reattachments
+// The admission deadline starts at Begin and survives reattachment
 // (launch.md "The operator socket").
 const ADMISSION_MS: u64 = 600000u64
-
-// Opens the launcher's admission of request d's input under attempt `a` (launch.md "Publish
-// and assemble"), with the group's working directory, OLD's assembly and the operator's
-// Foreign and Exec lines. A publication's input is complete at once.
-fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], approved: launcher.Grants, genesis: bool, mut out: List[launcher.Request]) {
-    let complete = match input {
-        Attested(_) => false,
-        _ => true,
-    }
-    let old: Option[Bytes] = if genesis {
-        None
-    } else {
-        Some(clone(g.assembly))
-    }
-    // A recording group's every image carries the recording runtime, so each serving start
-    // can record (launch.md "Recording a group").
-    let recording = match g.record {
-        Some(_) => true,
-        None => false,
-    }
-    let approvals = launcher.Approvals(recording: recording, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old, packages: clone(g.packages))
-    list.push(mut out, Admit(group_of(name, g.incarnation), a, clone(input), take approvals))
-    let mut w = vol_read(h, name)
-    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(approved), stage: Uploading(0u64, false), summary: None, ended: complete, genesis: genesis, receive: None))
-    vol_put(mut h, name, take w)
-}
 
 fn sorted_unique(xs: List[String]) -> bool {
     let mut i = 1u64
@@ -2296,11 +2279,11 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
         },
     }
     map.insert(mut h.owners, clone(d), conn)
-    open_input(mut h, g.name, row, d, a, requested, gate, foreign, exec, launcher.no_grants(), now, mut out)
+    open_input(mut h, g.name, row, d, a, requested, gate, foreign, exec, launcher.no_grants(), now.wall_ms + ADMISSION_MS, now, mut out)
 }
 
 // Wakes a cold group, then opens request d's admission; a wake that cannot start fails d.
-fn admit_request(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], added: launcher.Grants, now: Now, mut out: List[launcher.Request]) waits {
+fn admit_request(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], added: launcher.Grants, deadline_ms: u64, now: Now, mut out: List[launcher.Request]) waits {
     // A registering group has no place to wake: its admission has no OLD.
     let genesis = registering(h, name)
     if !genesis && is_none(run_gen(h, name)) {
@@ -2309,7 +2292,7 @@ fn admit_request(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.A
             return
         }
     }
-    start_admission(mut h, name, g, d, a, input, foreign, exec, added, genesis, mut out)
+    start_admission(mut h, name, g, d, a, input, foreign, exec, added, genesis, deadline_ms, mut out)
 }
 
 // A group registers until its first release is assembled: its catalog row exists and its
@@ -2385,7 +2368,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             return
         },
     }
-    open_input(mut h, name, g, d, a, input, gate, foreign, exec, clone(r.approved), now, mut out)
+    open_input(mut h, name, g, d, a, input, gate, foreign, exec, clone(r.approved), r.deadline_ms, now, mut out)
 }
 
 // The group of request d's upload under attempt `a`, when connection `conn` owns it and
@@ -2812,7 +2795,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
     }
     map.insert(mut h.owners, clone(d), conn)
     list.push(mut out, bind_request(spec.name, g))
-    open_input(mut h, spec.name, g, d, a, requested, false, foreign, exec, launcher.no_grants(), now, mut out)
+    open_input(mut h, spec.name, g, d, a, requested, false, foreign, exec, launcher.no_grants(), now.wall_ms + ADMISSION_MS, now, mut out)
 }
 
 // A registering group's catalog row: no assembly yet, activation 0.
@@ -3471,106 +3454,4 @@ pub fn status(h: Host) -> Status waits {
     }
     let queued: List[Queued] = clone(h.queue)
     Status(dirty: dirty, max_places: max_places, probes: h.probes, due_wakes: h.due_wakes, arrival_wakes: h.arrival_wakes, queued: take queued, failing: take failing)
-}
-
-// The host's driver (§14.3 "Due times", §14.5): one queue of inputs, in which the
-// launcher's events arrive in stream order beside the due-time and backoff alarms. The
-// driver owns both waits: after every input it re-arms each on the host's current timer,
-// one absolute wall-time alarm on the minimum of the due index without the queued rows and
-// one monotonic alarm on the earliest backoff retry, and none where there is none. There is
-// no polling: nothing wakes the host before either minimum.
-// One input to the host's loop: a launcher event, a timer, the launcher session's end, an
-// operator connection accepted on operator.sock, one operator frame on connection `conn`,
-// that connection's end as read, or as written (its writer ended, flushed or failed).
-pub type Input: send = Got(launcher.Event) | DueAt(u64) | RetryAt(u64) | CollectTick | Lost | Joined(Socket) | Asked(u64, Bytes) | HungUp(u64) | Flushed(u64)
-
-type Armed {
-    at: u64,
-    waiting: Task[()]
-}
-
-pub opaque type Driver {
-    wall: Option[Armed],
-    mono: Option[Armed],
-    tasks: Tasks,
-    clock: Clock,
-    to: Sender[Input]
-}
-
-pub fn driver(tasks: Tasks, c: Clock, take to: Sender[Input]) -> Driver {
-    Driver(wall: None, mono: None, tasks: tasks, clock: c, to: take to)
-}
-
-// What each wait is armed on.
-pub fn armed(d: Driver) -> Timers {
-    let wall = match d.wall {
-        Some(a) => Some(a.at),
-        None => None
-    }
-    let mono = match d.mono {
-        Some(a) => Some(a.at),
-        None => None
-    }
-    Timers(wall_ms: wall, mono_ns: mono)
-}
-
-// Applies one input and re-arms both waits. A due or retry alarm is a tick at `now`.
-pub fn step(mut h: Host, mut d: Driver, take input: Input, now: Now) -> List[launcher.Request] waits {
-    let out = match take input {
-        Got(take e) => event(mut h, take e, now),
-        DueAt(_) => tick(mut h, now),
-        RetryAt(_) => tick(mut h, now),
-        CollectTick => match collect(mut h) {
-            Ok(take reqs) => take reqs,
-            Error(_) => list.new()
-        },
-        Asked(conn, body) => asked(mut h, conn, body, now),
-        HungUp(conn) => detach(mut h, conn),
-        Flushed(conn) => detach(mut h, conn),
-        Lost => list.new(),
-        Joined(_) => list.new(),
-    }
-    settle(mut d, h)
-    take out
-}
-
-// Re-arms both waits on the host's timers; the driver calls it after every input, and an
-// operator's request calls it after its commit.
-pub fn settle(mut d: Driver, h: Host) waits {
-    let want = timers(h)
-    let wall = replace(mut d.wall, None)
-    d.wall = arm(take wall, want.wall_ms)
-    if let None = d.wall {
-        if let Some(at) = want.wall_ms {
-            let waiting = std.clock.wall_alarm(d.tasks, d.clock, at, d.to, DueAt(at))
-            d.wall = Some(Armed(at: at, waiting: take waiting))
-        }
-    }
-    let mono = replace(mut d.mono, None)
-    d.mono = arm(take mono, want.mono_ns)
-    if let None = d.mono {
-        if let Some(at) = want.mono_ns {
-            let waiting = std.clock.alarm(d.tasks, d.clock, at, d.to, RetryAt(at))
-            d.mono = Some(Armed(at: at, waiting: take waiting))
-        }
-    }
-}
-
-// Keeps a wait already armed on `want`, and cancels any other.
-fn arm(take prior: Option[Armed], want: Option[u64]) -> Option[Armed] waits {
-    let Some(take held) = take prior else {
-        return None
-    }
-    if Some(held.at) == want {
-        return Some(take held)
-    }
-    let Armed(at: _, waiting: take running) = take held
-    let _ = task.cancel_join(take running)
-    None
-}
-
-pub fn stop(take d: Driver) waits {
-    let Driver(wall: take wall, mono: take mono, ..) = take d
-    let _ = arm(take wall, None)
-    let _ = arm(take mono, None)
 }

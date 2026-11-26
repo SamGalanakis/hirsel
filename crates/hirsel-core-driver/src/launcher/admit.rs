@@ -10,7 +10,7 @@ use super::session::{Approvals, Attempt, Failure, Grants, Green, Summary, Wire};
 use super::{Conn, Readiness};
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
-    NativeSemantics, ObjectKey, ObjectKind, send_release,
+    NativeSemantics, ObjectKey, ObjectKind, send_release_until,
 };
 use crate::code_store::{CodeStore, PUBLISH_RECIPE_STAGE};
 use crate::native::recipe_build::foreign_grant_lines;
@@ -28,11 +28,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-/// The launcher's admission bounds: the recipe and object limits of one release.
+// Keep decoder stack use bounded independently of the launcher's byte and work grants.
+const DECODER_NESTING: usize = 512;
+
+/// The control-only launcher's admission bounds, a test and embedding fixture. A launcher
+/// started with a platform host instead uses its declared admission envelope.
 pub(crate) fn limits() -> AdmissionLimits {
     AdmissionLimits {
         recipe_bytes: 16 << 20,
@@ -41,15 +45,19 @@ pub(crate) fn limits() -> AdmissionLimits {
         decoded_bytes: 2 << 30,
         members: 65_536,
         edges: 4 << 20,
-        nesting: 512,
+        nesting: DECODER_NESTING,
         outstanding: 196_608,
-        timeout: Some(Duration::from_secs(20)),
+        timeout: None,
     }
 }
 
 /// The bytes the code store holds for recipe `root`, checked against its name.
-pub(crate) fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io::Result<Recipe> {
-    let max = max as u64;
+pub(crate) fn read_recipe(
+    code: &CodeStore,
+    root: ContentHash,
+    max: Option<usize>,
+) -> io::Result<Recipe> {
+    let max = max.map_or(u64::MAX, |max| max as u64);
     let mut bytes = Vec::new();
     code.open(ObjectKind::Recipe, root)?
         .take(max.saturating_add(1))
@@ -201,8 +209,17 @@ pub(super) enum Source {
     Tree(Tree, Option<[u8; 32]>),
 }
 
-/// How long an admission may run the law gate, from its `Admit` (launch.md "The verdict").
-const ADMISSION_DEADLINE: Duration = Duration::from_secs(600);
+#[cfg(test)]
+pub(super) fn fixture_deadline_ms() -> u64 {
+    let expiry = std::time::SystemTime::now() + Duration::from_secs(600);
+    u64::try_from(
+        expiry
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
 
 /// The source a submitted tree's codec `bytes` admit; a gated one carries the SHA-256 of
 /// the tree's manifest, the bytes the operator's Begin named it by, which a green gate names.
@@ -311,12 +328,12 @@ impl Worker {
         attempt: Attempt,
         source: Source,
         approvals: Approvals,
+        deadline: Instant,
         tell: impl Fn(Note) + Send + 'static,
     ) -> io::Result<Self> {
         let (ours, theirs) = UnixStream::pair()?;
         let (go, gone) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let deadline = Instant::now() + ADMISSION_DEADLINE;
         let (conn, attested, local) = match source {
             Source::Attested(root) => (Some(Conn::new(poll, ours)?), Some(root), None),
             Source::Publication(root) => (None, None, Some((Ok(root), ours))),
@@ -351,6 +368,7 @@ impl Worker {
                     green,
                     &approvals,
                     &gone,
+                    deadline,
                     &tell,
                 );
                 if let Some(note) = note {
@@ -436,12 +454,27 @@ impl Worker {
     }
 }
 
+pub(super) fn deadline_from_wall_ms(deadline_ms: u64) -> Option<Instant> {
+    let now = Instant::now();
+    let wall = SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(deadline_ms))?;
+    let left = wall.duration_since(SystemTime::now()).ok()?;
+    now.checked_add(left).filter(|deadline| *deadline > now)
+}
+
 fn failure(error: AdmissionError) -> Failure {
     match error {
         AdmissionError::RecordingForeign(reason) | AdmissionError::Refused(reason) => {
             Failure::Denied(reason)
         }
         error => Failure::Invalid(error.to_string()),
+    }
+}
+
+/// A verifier or upload failure inside the exchange, with its wire phase attached.
+fn exchange_failure(error: AdmissionError) -> Failure {
+    match failure(error) {
+        Failure::Invalid(text) => Failure::Invalid(format!("admission exchange: {text}")),
+        denied => denied,
     }
 }
 
@@ -456,6 +489,10 @@ use protocol::{SOURCE_BYTES, TREE_BYTES};
 
 #[path = "gate.rs"]
 pub(crate) mod gate;
+
+#[path = "envelope.rs"]
+mod envelope;
+pub(crate) use envelope::{launcher_envelope, read_envelope, write_envelope};
 
 /// The most diagnostic bytes a refused compile reports; the rest is cut and marked.
 const DIAGNOSTIC_BYTES: usize = 64 << 10;
@@ -542,6 +579,9 @@ fn publish(
 ) -> Option<Result<(ContentHash, Option<Green>), Failure>> {
     let unrun =
         |e: &dyn std::fmt::Display| Some(Err(Failure::Invalid(format!("publish source: {e}"))));
+    if Instant::now() >= deadline {
+        return unrun(&"the admission deadline passed");
+    }
     let old = approvals.old.as_deref();
     if let Err(outside) = lock_roots_allowed(tree, &approvals.packages) {
         return Some(Err(outside));
@@ -608,10 +648,11 @@ fn publish(
         Ok(child) => child,
         Err(e) => return unrun(&e),
     };
-    let (status, stdout, stderr) = match gate::collect(child, cancel, None, DIAGNOSTIC_BYTES)? {
-        Ok(run) => run,
-        Err(e) => return unrun(&e),
-    };
+    let (status, stdout, stderr) =
+        match gate::collect(child, cancel, Some(deadline), DIAGNOSTIC_BYTES)? {
+            Ok(run) => run,
+            Err(e) => return unrun(&e),
+        };
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
     match status.code() {
@@ -709,21 +750,29 @@ fn work(
     green: Option<Green>,
     approvals: &Approvals,
     go: &mpsc::Receiver<()>,
+    deadline: Instant,
     tell: &impl Fn(Note),
 ) -> Option<Note> {
     let fail = |why| Some(Note::Failed(id, attempt, why));
     let start = Instant::now();
+    if start >= deadline {
+        return fail(Failure::Invalid(
+            "the admission deadline passed before verification".into(),
+        ));
+    }
     let foreign: BTreeSet<String> = approvals.foreign.iter().cloned().collect();
     let exec: BTreeSet<String> = approvals.exec.iter().cloned().collect();
     let workdir = PathBuf::from(&approvals.workdir);
     let mut connection = ControlConnection::local(peer);
     let admitted = std::thread::scope(|scope| {
         let sender = publication.map(|(root, mut local)| {
-            scope.spawn(move || send_release(&mut local, &ad.code, root, &ad.limits))
+            scope
+                .spawn(move || send_release_until(&mut local, &ad.code, root, &ad.limits, deadline))
         });
         let mut admitted = ad.store.admit_for_runtime(
             &mut connection,
             &ad.limits,
+            deadline,
             &NativeSemantics,
             approvals.recording,
             Some(&foreign),
@@ -732,15 +781,10 @@ fn work(
         );
         match &admitted {
             Err(AdmissionError::RecordingForeign(reason) | AdmissionError::Refused(reason)) => {
-                let _ = connection.refuse_before_need(reason);
+                let _ = connection.refuse_before_need(reason, deadline);
             }
             Ok(_) if attested.is_some() => {
-                let left = ad
-                    .limits
-                    .timeout
-                    .unwrap_or_default()
-                    .saturating_sub(start.elapsed());
-                if let Err(error) = connection.finished(left) {
+                if let Err(error) = connection.finished(deadline) {
                     admitted = Err(error);
                 }
             }
@@ -749,9 +793,11 @@ fn work(
         drop(connection);
         let sent = sender.map(|sender| sender.join());
         match (admitted, sent) {
-            (Err(error), _) => Err(failure(error)),
-            (Ok(_), Some(Err(_))) => Err(Failure::Invalid("publication sender failed".into())),
-            (Ok(_), Some(Ok(Err(error)))) => Err(failure(error)),
+            (Err(error), _) => Err(exchange_failure(error)),
+            (Ok(_), Some(Err(_))) => Err(Failure::Invalid(
+                "admission exchange: publication sender failed".into(),
+            )),
+            (Ok(_), Some(Ok(Err(error)))) => Err(exchange_failure(error)),
             (Ok(admitted), _) => Ok(admitted),
         }
     });
@@ -771,6 +817,11 @@ fn work(
     };
     let mut display = deploy_foreign_lines(recipe, root);
     display.push_str(&std::mem::take(&mut admitted.exec_lines));
+    if Instant::now() >= deadline {
+        return fail(Failure::Invalid(
+            "the admission deadline passed while describing the verified release".into(),
+        ));
+    }
     tell(Note::Admitted {
         id,
         attempt,
@@ -804,7 +855,7 @@ fn old_recipe(ad: &Admission, old: &[u8]) -> Result<Recipe, Failure> {
         .map_err(|_| Failure::Invalid("the old assembly name is not 32 bytes".into()))?;
     ad.records
         .assembly(ContentHash(key))
-        .and_then(|record| read_recipe(&ad.code, record.recipe, ad.limits.recipe_bytes))
+        .and_then(|record| read_recipe(&ad.code, record.recipe, None))
         .map_err(|e| Failure::Invalid(format!("old assembly: {e}")))
 }
 

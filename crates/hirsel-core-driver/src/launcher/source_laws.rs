@@ -64,7 +64,7 @@ fn source_tree_byte_and_content_limits_are_exact() {
 /// value of the constant of the same name in `launcher::protocol`.
 #[test]
 fn law_tree_limits_agree_with_launcher_hirsel() {
-    use super::admit::protocol::{MANIFEST_BYTES, SOURCE_BYTES, TREE_BYTES};
+    use super::admit::protocol::{MANIFEST_BYTES, MAX_FRAME, SOURCE_BYTES, TREE_BYTES};
     let source = include_str!("../../../../core/programs/platform/launcher.hirsel");
     let mut values = std::collections::BTreeMap::<&str, u64>::new();
     for line in source.lines() {
@@ -89,6 +89,7 @@ fn law_tree_limits_agree_with_launcher_hirsel() {
         ("SOURCE_BYTES", SOURCE_BYTES),
         ("MANIFEST_BYTES", MANIFEST_BYTES),
         ("TREE_BYTES", TREE_BYTES),
+        ("MAX_FRAME", MAX_FRAME),
     ] {
         let hirsel = values
             .get(name)
@@ -187,7 +188,7 @@ fn source_publishes_with_the_normal_checker() {
 
     let state = root.join("state");
     fs::create_dir_all(&state).unwrap();
-    let stores = Stores::open(&state, 1 << 20).unwrap();
+    let stores = Stores::open(&state).unwrap();
     let records = stores.records();
     let compile = Arc::clone(&child);
     let mode = Arc::new(Mutex::new(Compile::Normal));
@@ -246,6 +247,7 @@ fn source_publishes_with_the_normal_checker() {
             attempt(n),
             Input::Source(bytes, false),
             Approvals::default(),
+            super::admit::fixture_deadline_ms(),
         ));
         // A cold compile of core takes longer than `until` waits.
         let end = Instant::now() + Duration::from_secs(240);
@@ -324,7 +326,8 @@ fn source_publishes_with_the_normal_checker() {
             group(),
             attempt(7),
             Input::Source(tree(), false),
-            Approvals::default()
+            Approvals::default(),
+            super::admit::fixture_deadline_ms(),
         ))
         .is_empty()
     );
@@ -584,7 +587,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         .encode()
     };
     let toolchain = ContentHash([0x7c; 32]);
-    let stores = Stores::open(&state, 1 << 20).unwrap();
+    let stores = Stores::open(&state).unwrap();
     let admission = super::Admission::open(&state, stores.records(), super::limits(), 1 << 20)
         .unwrap()
         .compile_with(compiler.clone())
@@ -601,6 +604,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
             attempt(next),
             Input::Source(bytes.to_vec(), gate),
             Approvals::default(),
+            super::admit::fixture_deadline_ms(),
         ));
         // A cold compile of core takes longer than `until` waits.
         let end = Instant::now() + Duration::from_secs(240);

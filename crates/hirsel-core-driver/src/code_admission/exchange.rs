@@ -26,26 +26,23 @@ impl ControlConnection {
         }
     }
 
-    pub(crate) fn refuse_before_need(&mut self, reason: &str) -> io::Result<()> {
+    pub(crate) fn refuse_before_need(&mut self, reason: &str, deadline: Instant) -> io::Result<()> {
         if self.need_sent {
             return Ok(());
         }
-        crate::host::socket_option(
-            self.stream
-                .set_write_timeout(Some(std::time::Duration::from_secs(1))),
-        )?;
-        self.stream.write_all(&u64::MAX.to_le_bytes())?;
         let length = u32::try_from(reason.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
-        self.stream.write_all(&length.to_le_bytes())?;
-        self.stream.write_all(reason.as_bytes())
+        let mut exchange = Exchange::on(&mut self.stream, deadline);
+        exchange.write_frame(&u64::MAX.to_le_bytes())?;
+        exchange.write_frame(&length.to_le_bytes())?;
+        exchange.write_frame(reason.as_bytes())
     }
     /// After a verified admission, the input must end here: one more byte is trailing
-    /// input, and no end before `timeout` is a missing boundary.
-    pub(crate) fn finished(&mut self, timeout: std::time::Duration) -> Result<(), AdmissionError> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or(AdmissionError::Limit(Limit::Deadline))?;
-        match Exchange::on(&mut self.stream, deadline).read(&mut [0])? {
+    /// input, and no end before the deadline is a missing boundary.
+    pub(crate) fn finished(&mut self, deadline: Instant) -> Result<(), AdmissionError> {
+        let mut exchange = Exchange::on(&mut self.stream, deadline);
+        let read = exchange.read(&mut [0])?;
+        exchange.check_deadline()?;
+        match read {
             0 => Ok(()),
             _ => Err(AdmissionError::Malformed("trailing admission input")),
         }
@@ -216,7 +213,7 @@ impl<'a> Exchange<'a> {
             .ok_or(io::ErrorKind::TimedOut.into())
     }
 
-    fn check_deadline(&self) -> Result<(), AdmissionError> {
+    pub(super) fn check_deadline(&self) -> Result<(), AdmissionError> {
         self.remaining()?;
         Ok(())
     }
@@ -242,7 +239,16 @@ pub fn send_release(
     root: ContentHash,
     limits: &AdmissionLimits,
 ) -> Result<(), AdmissionError> {
-    let deadline = super::deadline(limits)?;
+    send_release_until(stream, store, root, limits, super::deadline(limits)?)
+}
+
+pub(crate) fn send_release_until(
+    stream: &mut UnixStream,
+    store: &CodeStore,
+    root: ContentHash,
+    limits: &AdmissionLimits,
+    deadline: Instant,
+) -> Result<(), AdmissionError> {
     let budget = super::budget(limits, Some(deadline));
     let held = budget.debit();
     let bytes = read_recipe(store, root, limits.recipe_bytes, &held)?;

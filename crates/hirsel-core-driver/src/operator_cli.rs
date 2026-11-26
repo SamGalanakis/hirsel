@@ -51,9 +51,8 @@ pub(crate) fn installed(name: &str) -> Result<PathBuf, Error> {
     Ok(installation.libexec(name))
 }
 
-/// `hirsel host --state S --max-places N --lifecycle managed|leader [--idle-ms M]`: the
-/// launcher in the foreground with this installation's platform host (launch.md "Starting
-/// the host").
+/// Run the launcher in the foreground with this installation's platform host
+/// (launch.md "Starting the host").
 pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, Error> {
     if invocation.positional.is_some() || !invocation.arguments.is_empty() {
         return Err(
@@ -77,7 +76,7 @@ pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, E
                 )?);
                 options.push((option, value));
             }
-            Opt::IdleMs => options.push((option, value)),
+            Opt::IdleMs | Opt::Admission => options.push((option, value)),
             _ => return Err("unexpected host option".into()),
         }
     }
@@ -146,18 +145,30 @@ struct Upload {
     store: CodeStore,
     root: ContentHash,
     recipe: Recipe,
+    limits: crate::code_admission::AdmissionLimits,
 }
 
 impl Upload {
-    fn open(root: Option<&str>, store: Option<PathBuf>) -> Result<Self, Error> {
+    fn open(root: Option<&str>, store: Option<PathBuf>, state: &Path) -> Result<Self, Error> {
         let root = parse_root(root.ok_or("expected a recipe hash")?)?;
         let store = CodeStore::new(store.ok_or("requires --code-store DIR")?);
-        let recipe =
-            crate::launcher::read_recipe(&store, root, crate::launcher::limits().recipe_bytes)?;
+        let limits = match crate::launcher::admit::read_envelope(state) {
+            Ok(limits) => limits,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(NoHost(format!(
+                    "no host has published admission bounds in {}",
+                    state.display()
+                ))
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let recipe = crate::launcher::read_recipe(&store, root, Some(limits.recipe_bytes))?;
         Ok(Self {
             store,
             root,
             recipe,
+            limits,
         })
     }
 }
@@ -238,8 +249,13 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
         }
     }
     let state = state.ok_or("register requires --state DIR")?;
-    let (input, upload, source, approvals) =
-        submission(source_dir, invocation.positional.as_deref(), code, lines)?;
+    let (input, upload, source, approvals) = submission(
+        source_dir,
+        invocation.positional.as_deref(),
+        code,
+        lines,
+        &state,
+    )?;
     if let Some(upload) = &upload {
         if let Some(reason) = approvals.check(&upload.recipe) {
             eprintln!("register: refused: {reason}");
@@ -345,8 +361,13 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         return status_of(&state, &d);
     }
     sort_grants(&mut decision);
-    let (input, upload, source, approvals) =
-        submission(source_dir, invocation.positional.as_deref(), code, lines)?;
+    let (input, upload, source, approvals) = submission(
+        source_dir,
+        invocation.positional.as_deref(),
+        code,
+        lines,
+        &state,
+    )?;
     if let Some(upload) = &upload
         && let Some(reason) = approvals.check(&upload.recipe)
     {
@@ -911,7 +932,7 @@ pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
         let recipe = crate::launcher::read_recipe(
             &CodeStore::new(state.join("code")),
             assembly.recipe,
-            usize::MAX,
+            None,
         )?;
         if let Some(reason) = foreign_recording_refusal(&recipe) {
             eprintln!("replay: refused: {reason}");

@@ -25,6 +25,8 @@ pub(crate) mod spawn;
 mod stores;
 
 pub(crate) use cgroup::Lifecycle;
+#[cfg(test)]
+use cli::bind_control;
 pub(crate) use cli::{parse_lifecycle, resolve_lifecycle, run};
 
 use hirsel_core_ids::{hex, launch::LAUNCH_IMAGE_ENV};
@@ -46,7 +48,9 @@ use std::process::{Command, ExitStatus};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-pub(crate) use admit::{Admission, Compiler, deploy_foreign_lines, limits, read_recipe};
+#[cfg(test)]
+use admit::limits;
+pub(crate) use admit::{Admission, Compiler, deploy_foreign_lines, read_recipe};
 
 /// Create `path` as a directory only its owner can enter, or check that it is one.
 pub(crate) fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
@@ -64,22 +68,6 @@ pub(crate) fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
         ));
     }
     path.canonicalize()
-}
-
-/// Bind a control socket at `path` that only its owner can connect to. A stale socket
-/// nobody answers on is replaced; a live one is in use.
-pub(crate) fn bind_control(path: &Path) -> io::Result<UnixListener> {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if !meta.file_type().is_socket() || UnixStream::connect(path).is_ok() {
-            return Err(io::ErrorKind::AddrInUse.into());
-        }
-        std::fs::remove_file(path)?;
-    }
-    let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
-    Ok(listener)
 }
 
 /// Concurrent admissions; a further `Admit` fails until one ends.
@@ -179,7 +167,7 @@ impl Conn {
     }
 
     fn queue(&mut self, value: &impl Wire) {
-        let _ = session::write_frame(&mut self.output, value);
+        self.closed |= session::write_frame(&mut self.output, value).is_err();
     }
 
     /// Write what the peer takes now; a stalled peer never blocks the loop.
@@ -608,8 +596,8 @@ impl<I: Images> Launcher<I> {
                 self.emit(Event::Fenced);
             }
             Request::Collect(roots) => self.collect(&roots),
-            Request::Admit(group, attempt, input, approvals) => {
-                self.admit(group, attempt, input, approvals)
+            Request::Admit(group, attempt, input, approvals, deadline_ms) => {
+                self.admit(group, attempt, input, approvals, deadline_ms)
             }
             Request::AdmitData(attempt, bytes) => self.admit_data(attempt, &bytes),
             Request::AdmitEnd(attempt) => self.admit_end(attempt),
@@ -632,7 +620,14 @@ impl<I: Images> Launcher<I> {
         ));
     }
 
-    fn admit(&mut self, group: Group, attempt: Attempt, input: Input, approvals: Approvals) {
+    fn admit(
+        &mut self,
+        group: Group,
+        attempt: Attempt,
+        input: Input,
+        approvals: Approvals,
+        deadline_ms: u64,
+    ) {
         let refusal = match (&self.admitting, self.listener(&group)) {
             (None, _) => Some("the launcher has no code store"),
             (_, None) => Some("unknown group"),
@@ -649,6 +644,10 @@ impl<I: Images> Launcher<I> {
                 Failure::Invalid(why.into()),
             ));
         }
+        let deadline = admit::deadline_from_wall_ms(deadline_ms);
+        let Some(deadline) = deadline else {
+            return self.admission_failed(attempt, "the admission deadline passed before Admit");
+        };
         let root = |r: &[u8]| {
             <[u8; 32]>::try_from(r)
                 .ok()
@@ -679,6 +678,7 @@ impl<I: Images> Launcher<I> {
             attempt,
             source,
             approvals,
+            deadline,
             move |note| {
                 let _ = sender.send(note);
                 admit::wake(&waker);

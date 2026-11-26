@@ -431,7 +431,7 @@ def host_law(args, root, work, engine, name):
     @contextmanager
     def running_host(idle_ms=None):
         with tempfile.TemporaryFile(mode='w+') as log:
-            command = [compiler, 'host', '--state', str(state), '--max-places', '1', '--lifecycle', 'leader']
+            command = [compiler, 'host', '--state', str(state), '--max-places', '1', '--lifecycle', 'leader', '--admission', str(root / 'tools/tests/fixtures/host-admission.conf')]
             if idle_ms is not None:
                 command += ['--idle-ms', str(idle_ms)]
             host = subprocess.Popen(command, stdout=log, stderr=log)

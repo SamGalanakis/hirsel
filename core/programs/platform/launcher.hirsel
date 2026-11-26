@@ -2,13 +2,17 @@
 // launcher (docs/spec/launch.md "The launcher", RUNNER-SPEC v2.27 §14.5).
 //
 // One session runs at a time on the launcher's control socket. Each frame is a u32
-// little-endian length, then one value-codec `Request` (host to launcher) or `Event`
+// little-endian length (at most 16 MiB, `MAX_FRAME`), then one value-codec `Request` (host to launcher) or `Event`
 // (launcher to host). Declared variant order fixes the u32 wire tags; the Rust launcher
 // (crates/hirsel-core-driver/src/launcher/session.rs) mirrors these types, and
 // launcher_wire.hirsel holds the byte vectors both sides check.
 //
 // `Fake` is the launcher's session rules without processes, for the platform host's
 // harness: it answers requests and lets a test end children and make listeners readable.
+// The largest launcher-control frame either side accepts. This is the launcher session
+// protocol's own bound, not the operator socket's.
+pub const MAX_FRAME: u64 = 16777216u64
+
 // A deploy attempt: 16 bytes, `hi` then `lo`, each little-endian.
 pub type Attempt: codec + send {
     hi: u64,
@@ -307,7 +311,7 @@ pub type Request: codec + send = Hello
 // The full root set: assembly record names.
     | Collect(List[Bytes])
 // Begin admitting an attempt for a group under the host's approvals.
-    | Admit(Group, Attempt, Input, Approvals)
+    | Admit(Group, Attempt, Input, Approvals, u64)
 // The next bounded chunk of an attested admission's exchange bytes.
     | AdmitData(Attempt, Bytes)
 // The attempt's input is complete; trailing or missing bytes fail it.
@@ -715,7 +719,7 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
             f.fenced = false
             push_event(mut out, Collected(0u64))
         },
-        Admit(_, _, _, _) => (),
+        Admit(_, _, _, _, _) => (),
         AdmitData(_, _) => (),
         AdmitEnd(_) => (),
         Assemble(_) => (),
@@ -800,4 +804,14 @@ pub fn accept(mut f: Fake, g: Group) {
 // Whether a collection fence is held.
 pub fn fenced(f: Fake) -> bool {
     f.fenced
+}
+
+// Read one launcher-control frame.
+pub fn read_frame(mut input: ReadHalf, until: Until) -> Option[Bytes] waits {
+    runner.read_frame(mut input, MAX_FRAME, until)
+}
+
+// Write one launcher-control frame.
+pub fn send_frame(mut output: WriteHalf, body: Bytes, until: Until) -> bool waits {
+    runner.send_frame(mut output, body, MAX_FRAME, until)
 }

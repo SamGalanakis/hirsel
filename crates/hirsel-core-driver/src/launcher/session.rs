@@ -6,7 +6,7 @@
 //! payload, and records their fields in order. Declared variant order is the tag. Each
 //! frame on the socket is a u32 little-endian length followed by one value.
 use crate::code_admission::ObjectKey;
-use std::io::{self, Write};
+use std::io;
 
 pub(crate) use super::grants::Grants;
 
@@ -173,7 +173,7 @@ pub(crate) enum Request {
     Release(Attempt),
     CollectBegin,
     Collect(Vec<Vec<u8>>),
-    Admit(Group, Attempt, Input, Approvals),
+    Admit(Group, Attempt, Input, Approvals, u64),
     AdmitData(Attempt, Vec<u8>),
     AdmitEnd(Attempt),
     Assemble(Attempt),
@@ -724,7 +724,7 @@ session_wire!(Request, "request tag", w, r;
         let n = r.count(4)?;
         Self::Collect((0..n).map(|_| r.bytes()).collect::<io::Result<_>>()?)
     },
-    12 => Admit(g, a, input, approvals) {
+    12 => Admit(g, a, input, approvals, deadline_ms) {
         g.put(w);
         a.put(w);
         input.put(w);
@@ -734,6 +734,7 @@ session_wire!(Request, "request tag", w, r;
         w.bytes(approvals.workdir.as_bytes());
         w.option(&approvals.old, |w, old| w.bytes(old));
         put_roots(w, &approvals.packages);
+        w.u64(*deadline_ms);
     } => Self::Admit(
         Group::get(r)?,
         Attempt::get(r)?,
@@ -746,6 +747,7 @@ session_wire!(Request, "request tag", w, r;
             old: r.option(Reader::bytes)?,
             packages: get_roots(r)?,
         },
+        r.u64()?,
     ),
     13 => AdmitData(a, bytes) {
         a.put(w);
@@ -983,17 +985,9 @@ session_wire!(Event, "event tag", w, r;
     } => Self::CutoverResult(Child::get(r)?, Attempt::get(r)?, HostReply::get(r)?),
 );
 
-/// The largest session frame either side accepts.
-pub(crate) const MAX_FRAME: usize = 16 << 20;
-
-pub(crate) fn write_frame(out: &mut impl Write, value: &impl Wire) -> io::Result<()> {
-    let body = value.encode();
-    let size = u32::try_from(body.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    let mut frame = Vec::with_capacity(4 + body.len());
-    frame.extend_from_slice(&size.to_le_bytes());
-    frame.extend_from_slice(&body);
-    out.write_all(&frame)
-}
+#[path = "frame.rs"]
+mod frame;
+pub(crate) use frame::{MAX_FRAME, write_frame};
 
 #[cfg(test)]
 #[path = "session_laws.rs"]

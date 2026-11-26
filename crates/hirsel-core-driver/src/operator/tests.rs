@@ -61,6 +61,21 @@ fn decision() -> Decision {
     }
 }
 
+// The two endpoints share the frame and reassembly limits of the operator protocol.
+#[test]
+fn protocol_constants_agree_with_hirsel() {
+    let source = include_str!("../../../../core/programs/platform/operator.hirsel");
+    for (name, rust) in [("MAX_FRAME", MAX_FRAME as u64), ("REPLY_BYTES", MAX_REPLY)] {
+        let prefix = format!("pub const {name}: u64 = ");
+        let hirsel = source
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|value| value.strip_suffix("u64"))
+            .and_then(|value| value.parse::<u64>().ok());
+        assert_eq!(hirsel, Some(rust), "{name}");
+    }
+}
+
 // The expected bytes are shared with core/programs/platform/operator_wire.hirsel. They were
 // derived from core/std/api/codec.md's format by an encoder written apart from both
 // implementations.

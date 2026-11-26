@@ -10,6 +10,7 @@ mod reservation;
 
 pub use crate::code_store::ObjectKind;
 use crate::code_store::{CodeStore, Object};
+pub(crate) use exchange::send_release_until;
 pub use exchange::{ControlConnection, send_release};
 pub use reservation::AdmissionStore;
 
@@ -36,6 +37,7 @@ pub struct ObjectKey {
 }
 
 /// Limits for one admission. The store separately owns the host-wide staging limit.
+#[derive(Clone, Copy, Debug)]
 pub struct AdmissionLimits {
     pub recipe_bytes: usize,
     pub closure_objects: usize,
@@ -344,20 +346,29 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
-        self.admit_for_runtime(connection, limits, semantics, false, None, None, None)
+        self.admit_for_runtime(
+            connection,
+            limits,
+            deadline(limits)?,
+            semantics,
+            false,
+            None,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn admit_for_runtime(
         &self,
         connection: &mut ControlConnection,
         limits: &AdmissionLimits,
+        deadline: Instant,
         semantics: &impl BackendSemantics,
         recording: bool,
         approved_foreign: Option<&std::collections::BTreeSet<String>>,
         approved_exec: Option<(&std::collections::BTreeSet<String>, &Path)>,
         attested: Option<ContentHash>,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
-        let deadline = deadline(limits)?;
         let mut exchange = Exchange::new(connection, deadline);
         let (root, recipe_bytes) = exchange.recipe(limits.recipe_bytes)?;
         check_hash(Recipe::hash(&recipe_bytes), root)?;
@@ -410,6 +421,7 @@ impl AdmissionStore {
                 read_verified(file, kind, object, budget)
             },
         )?;
+        exchange.check_deadline()?;
         Ok(AdmittedRelease {
             exec_lines,
             release,

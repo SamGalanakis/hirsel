@@ -2788,19 +2788,19 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
         let (mut client, peer) = UnixStream::pair().unwrap();
         let code = law.path("host-code");
         let mut limits = crate::request::local_admission_limits();
-        limits.timeout = Some(Duration::from_secs(10));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         limits.outstanding = 4096;
         std::thread::scope(|scope| {
             let sender = scope.spawn(|| {
-                crate::code_admission::send_release(&mut client, &CodeStore::new(&source), root, &limits)
+                crate::code_admission::send_release_until(&mut client, &CodeStore::new(&source), root, &limits, deadline)
             });
             let approved = BTreeSet::from(["ffi_laws@1/laws/Laws".to_owned()]);
             let admission = AdmissionStore::open(&code, 1 << 20).unwrap();
             let mut peer = ControlConnection::local(peer);
-            match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None, None) {
+            match admission.admit_for_runtime(&mut peer, &limits, deadline, &NativeSemantics, true, Some(&approved), None, None) {
                 Err(AdmissionError::RecordingForeign(reason)) => {
                     assert_eq!(reason, REFUSAL);
-                    peer.refuse_before_need(&reason).unwrap();
+                    peer.refuse_before_need(&reason, deadline).unwrap();
                 }
                 Err(error) => panic!("recording admission failed otherwise: {error}"),
                 Ok(_) => panic!("recording admission admitted foreign code"),

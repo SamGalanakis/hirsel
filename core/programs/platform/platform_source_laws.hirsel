@@ -45,7 +45,7 @@ fn gated_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let _ = begin_held(mut r, request_id(47u64), SourceBegin(take m, true), runner.fate.none())
     let mut gated = false
     for q in r.asked {
-        if let Admit(_, _, Source(_, true), _) = q {
+        if let Admit(_, _, Source(_, true), _, _) = q {
             gated = true
         }
     }
@@ -154,7 +154,7 @@ fn needed_on(r: Rig, conn: u64) -> (List[Bytes], bool) {
 fn admitted_tree(r: Rig) -> Option[launcher.Tree] {
     let mut out: Option[launcher.Tree] = None
     for q in r.asked {
-        if let Admit(_, _, Source(b, _), _) = q {
+        if let Admit(_, _, Source(b, _), _, _) = q {
             out = launcher.tree_of(b)
         }
     }
@@ -220,14 +220,21 @@ fn source_by_content(c: Clock, rnd: Random) -> Result[(), ()] waits {
     list.push(mut files, file("b/d.hirsel", a_bytes))
     list.push(mut files, file("e.hirsel", list.new()))
     let input = manifest_input(list.new(), files)
+    let expires = r.now.wall_ms + ADMISSION_MS
     let first = begin_with(mut r, request_id(61u64), input)
     let (keys, done) = needed_on(r, first)
     expect(done && list.len(keys) == 2u64 && keys[0u64] == digest_of(a_bytes) && keys[1u64] == digest_of(b_bytes), "content: the first Begin was not asked for each lacking digest once, in manifest order")
     expect(admits(r) == 0u64, "content: the host admitted before the blobs arrived")
     let both = both_bytes(a_bytes, b_bytes)
     upload(mut r, list.slice(both, 0u64, 2u64), false)
+    r.now.wall_ms += 100u64
     upload(mut r, list.slice(both, 2u64, 5u64), true)
     expect(admits(r) == 1u64, "content: the received source was not sent to Admit")
+    for q in r.asked {
+        if let Admit(_, _, Source(_, _), _, deadline) = q {
+            expect(deadline == expires, "content: upload reset the Begin deadline")
+        }
+    }
     let Some(tree) = admitted_tree(r) else {
         return fail("content: the Admit carried no tree")
     }

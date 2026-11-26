@@ -142,3 +142,29 @@ fn unadmitted(mut h: Host, a: launcher.Attempt, why: launcher.Failure) waits {
     set_stage(mut h, name, Unadmitted(clone(why)))
     fail_request(mut h, d.request, failure_class(why), failure_text(why))
 }
+
+// Opens the launcher's admission of request d's input under attempt `a` (launch.md "Publish
+// and assemble"), with the group's working directory, OLD's assembly and the operator's
+// Foreign and Exec lines. A publication's input is complete at once.
+fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], approved: launcher.Grants, genesis: bool, deadline_ms: u64, mut out: List[launcher.Request]) {
+    let complete = match input {
+        Attested(_) => false,
+        _ => true,
+    }
+    let old: Option[Bytes] = if genesis {
+        None
+    } else {
+        Some(clone(g.assembly))
+    }
+    // A recording group's every image carries the recording runtime, so each serving start
+    // can record (launch.md "Recording a group").
+    let recording = match g.record {
+        Some(_) => true,
+        None => false,
+    }
+    let approvals = launcher.Approvals(recording: recording, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old, packages: clone(g.packages))
+    list.push(mut out, Admit(group_of(name, g.incarnation), a, clone(input), take approvals, deadline_ms))
+    let mut w = vol_read(h, name)
+    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(approved), stage: Uploading(0u64, false), summary: None, ended: complete, genesis: genesis, receive: None))
+    vol_put(mut h, name, take w)
+}

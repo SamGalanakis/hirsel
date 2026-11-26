@@ -4,6 +4,13 @@ use super::{OptionId, OptionSpec};
 
 pub(super) static OPTIONS: &[OptionSpec] = &[
     option!(
+        Admission,
+        ["--admission"],
+        Some("FILE"),
+        ["host", "launcher"],
+        "Admission envelope the host declares for uploaded releases."
+    ),
+    option!(
         MaxPlaces,
         ["--max-places"],
         Some("N"),

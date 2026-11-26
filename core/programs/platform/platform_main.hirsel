@@ -20,7 +20,7 @@ type Reader: send {
 }
 
 fn read_event(mut input: ReadHalf) -> Option[launcher.Event] waits {
-    let Some(body) = operator.read_frame(mut input, Never) else {
+    let Some(body) = launcher.read_frame(mut input, Never) else {
         return None
     }
     let codec: std.codec.Codec[launcher.Event] = std.codec.of()
@@ -100,15 +100,14 @@ fn write_operator(take seed: Writer) -> () waits {
     let Writer(conn: conn, output: take output, frames: take frames, to: take to) = take seed
     let mut w = take output
     while let Ok(take body) = channel.receive(frames) {
+        let size = operator.frame_bytes(body)
         if !operator.send_frame(mut w, body, Never) {
             break
         }
+        let _ = channel.send(to, Wrote(conn, size))
     }
     let _ = channel.send(to, Flushed(conn))
 }
-
-// Answers a connection's writer may hold before the connection counts as stalled.
-const QUEUED_ANSWERS: u64 = 64u64
 
 // A connection reader's allowance: one largest frame and its header, with room to spare.
 const READER_BYTES: u64 = 17825792u64
@@ -118,7 +117,12 @@ const READER_BYTES: u64 = 17825792u64
 type Conn {
     reading: Option[Task[()]],
     frames: Option[Sender[Bytes]],
-    writing: Task[()]
+    writing: Task[()],
+    queued_bytes: u64,
+    busy: bool,
+    closing: bool,
+    incoming: List[Bytes],
+    ready: List[Bytes],
 }
 
 fn stop_reading(mut c: Conn) waits {
@@ -133,12 +137,52 @@ fn send_request(mut output: WriteHalf, r: launcher.Request) -> bool waits {
     if let Error(_) = std.codec.encode(codec, r, mut body) {
         return false
     }
-    operator.send_frame(mut output, body, Never)
+    launcher.send_frame(mut output, body, Never)
 }
 
-// Queues each answer the host decided on its connection's writer, never waiting on it. A
-// connection's last answer ends its sending side, and a connection whose writer is full or
-// gone is dropped and detached: one stalled operator never stalls the host.
+// One frame may be in the writer's mailbox or on the socket. Everything behind it stays
+// in the host's FIFO and is charged against the same byte budget until the writer reports it.
+fn send_pending(mut c: Conn) {
+    if c.busy {
+        return
+    }
+    if list.len(c.ready) == 0u64 {
+        c.ready = replace(mut c.incoming, list.new())
+        list.reverse(mut c.ready)
+    }
+    if let Some(take frame) = list.pop(mut c.ready) {
+        if let Some(writer) = c.frames {
+            if let Ok(()) = channel.try_send(writer, take frame) {
+                c.busy = true
+            }
+        }
+    } else if c.closing {
+        c.frames = None
+    }
+}
+
+fn queue_answer(mut c: Conn, take body: Bytes) -> bool {
+    if c.closing || list.len(body) > operator.REPLY_BYTES {
+        return false
+    }
+    let wire_bytes = operator.reply_wire_bytes(body)
+    if wire_bytes > operator.QUEUE_BYTES - c.queued_bytes {
+        return false
+    }
+    let frames = operator.answer_frames(take body)
+    if list.len(frames) == 0u64 {
+        return false
+    }
+    for take frame in frames {
+        list.push(mut c.incoming, take frame)
+    }
+    c.queued_bytes += wire_bytes
+    send_pending(mut c)
+    true
+}
+
+// A terminal answer closes the connection after the writer drains. A connection that
+// exceeds its byte budget is detached without blocking the host on its socket.
 fn answer(mut h: platform.Host, mut conns: Map[u64, Conn]) -> List[launcher.Request] waits {
     let mut out: List[launcher.Request] = list.new()
     for sent in platform.outgoing(mut h) {
@@ -146,23 +190,22 @@ fn answer(mut h: platform.Host, mut conns: Map[u64, Conn]) -> List[launcher.Requ
             continue
         }
         let mut live = take c
-        let mut queued = false
-        if let Some(take body) = operator.encode_answer(clone(sent.answer)) {
-            if let Some(f) = live.frames {
-                queued = match channel.try_send(f, take body) {
-                    Ok(()) => true,
-                    Error(_) => false,
-                }
-            }
-        }
-        if !queued || sent.close {
-            live.frames = None
-            stop_reading(mut live)
+        let queued = match operator.encode_answer(clone(sent.answer)) {
+            Some(take body) => queue_answer(mut live, take body),
+            None => false,
         }
         if !queued {
+            stop_reading(mut live)
+            let Conn(writing: take writer, ..) = take live
+            let _ = task.cancel_join(take writer)
             for take r in platform.detach(mut h, sent.conn) {
                 list.push(mut out, take r)
             }
+            continue
+        }
+        if sent.close {
+            live.closing = true
+            stop_reading(mut live)
         }
         map.insert(mut conns, sent.conn, take live)
     }
@@ -256,7 +299,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
                 let conn = next_conn
                 next_conn += 1u64
                 let (take rd, take wr) = net.split(take s)
-                let (frames, queue): (Sender[Bytes], Receiver[Bytes]) = channel.new(QUEUED_ANSWERS)
+                let (frames, queue): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
                 // A host without room for one more connection closes it; it never traps.
                 let Ok(take reader) = task.try_spawn(tasks, bytes READER_BYTES, Operator(conn: conn, input: take rd, to: channel.sender(operators)), read_operator) else {
                     continue
@@ -265,7 +308,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
                     let _ = task.cancel_join(take reader)
                     continue
                 }
-                map.insert(mut conns, conn, Conn(reading: Some(take reader), frames: Some(take frames), writing: take writer))
+                map.insert(mut conns, conn, Conn(reading: Some(take reader), frames: Some(take frames), writing: take writer, queued_bytes: 0u64, busy: false, closing: false, incoming: list.new(), ready: list.new()))
                 continue
             },
             Ok(take i) => take i,
@@ -275,14 +318,22 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
             // The client closed: its writer drains what is queued and then ends.
             HungUp(conn) => {
                 let _ = map.update(mut conns, conn, scoped fn(mut open: Conn) {
-                    open.frames = None
+                    open.closing = true
+                    send_pending(mut open)
                 })
             },
             Flushed(conn) => if let Some(take gone) = map.remove(mut conns, conn) {
                 let mut ending = take gone
                 stop_reading(mut ending)
-                let Conn(reading: _, frames: _, writing: take done) = take ending
+                let Conn(writing: take done, ..) = take ending
                 let _ = task.join(take done)
+            },
+            Wrote(conn, written) => {
+                let _ = map.update(mut conns, conn, scoped fn(mut open: Conn) {
+                    open.queued_bytes -= written
+                    open.busy = false
+                    send_pending(mut open)
+                })
             },
             _ => (),
         }
@@ -304,7 +355,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
     for take (_, take live) in take conns {
         let mut ending = take live
         stop_reading(mut ending)
-        let Conn(reading: _, frames: _, writing: take writing) = take ending
+        let Conn(writing: take writing, ..) = take ending
         let _ = task.cancel_join(take writing)
     }
     let _ = task.cancel_join(take reading)

@@ -15,6 +15,32 @@ pub const PATH: String = "operator.sock"
 
 pub const MAX_FRAME: u64 = 16777216u64
 
+// The largest logical reply a client reassembles from `Part` chunks.
+pub const REPLY_BYTES: u64 = 67108864u64
+
+// The length prefix is outside the frame. A Part body adds its tag, total, offset
+// and byte count to the chunk.
+const FRAME_HEADER: u64 = 4u64
+
+const PART_HEADER: u64 = 24u64
+
+const PART_BYTES: u64 = MAX_FRAME - PART_HEADER
+
+pub fn frame_bytes(body: Bytes) -> u64 {
+    FRAME_HEADER + list.len(body)
+}
+
+pub fn reply_wire_bytes(body: Bytes) -> u64 {
+    let n = list.len(body)
+    if n <= MAX_FRAME {
+        return FRAME_HEADER + n
+    }
+    n + ((n + PART_BYTES - 1u64) / PART_BYTES) * (FRAME_HEADER + PART_HEADER)
+}
+
+// The byte budget for a connection's unsent frames can hold one maximum-size reply.
+pub const QUEUE_BYTES: u64 = REPLY_BYTES + ((REPLY_BYTES + PART_BYTES - 1u64) / PART_BYTES) * (FRAME_HEADER + PART_HEADER)
+
 // A recorded group's tapes: each serving start writes `dir`/<recording ID in hex>.tape,
 // and its pin lasts `retention_s` seconds from the start.
 pub type Record: codec + send {
@@ -248,6 +274,33 @@ pub fn encode_answer(a: Answer) -> Option[Bytes] {
         return None
     }
     Some(out)
+}
+
+// One encoded answer as the frames that carry it. A reply larger than one frame goes as
+// in-order `Part` chunks; one over REPLY_BYTES has no frames and its connection is dropped.
+pub fn answer_frames(take body: Bytes) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    let total = list.len(body)
+    if total > REPLY_BYTES {
+        return out
+    }
+    if total <= MAX_FRAME {
+        list.push(mut out, take body)
+        return out
+    }
+    let mut at = 0u64
+    while at < total {
+        let end: u64 = order.min(total, at + PART_BYTES)
+        let chunk: Bytes = clone(list.slice(body, at, end))
+        let codec: std.codec.Codec[Answer] = std.codec.of()
+        let mut frame: Bytes = list.new()
+        if let Error(_) = std.codec.encode(codec, PartAnswer(total, at, take chunk), mut frame) {
+            return list.new()
+        }
+        list.push(mut out, take frame)
+        at = end
+    }
+    out
 }
 
 // The canonical bytes of a Begin: what a later Begin with the same D must equal.

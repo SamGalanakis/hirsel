@@ -474,7 +474,7 @@ fn carry_out(mut a: Actor, take r: launcher.Request, mut events: List[launcher.E
         CollectBegin => list.push(mut events, Fenced),
         Collect(_) => list.push(mut events, Collected(0u64)),
         CollectAbort => list.push(mut events, Collected(0u64)),
-        Admit(_, take attempt, _, _) => list.push(mut events, AdmissionFailed(take attempt, Unassembled(string.from("in-process launcher")))),
+        Admit(_, take attempt, _, _, _) => list.push(mut events, AdmissionFailed(take attempt, Unassembled(string.from("in-process launcher")))),
         AdmitData(_, _) => (),
         AdmitEnd(_) => (),
         Assemble(take attempt) => list.push(mut events, AdmissionFailed(take attempt, Unassembled(string.from("in-process launcher")))),

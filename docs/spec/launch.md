@@ -1156,8 +1156,8 @@ is its store, and its one Unix endpoint is the launcher's control socket; its ar
 that socket's root label and path, `max_places` and `idle_ms`. The host opens its catalog,
 connects, sends `Hello`, and then runs one loop over one queue. A reader task posts each
 launcher event into the queue in stream order, beside the host's two alarms: one absolute
-wall-time alarm on the earliest due time (RUNNER-SPEC §14.3) and one monotonic alarm on the
-earliest backoff retry (§14.5). After every input the host applies it, sends the requests
+wall-time alarm on the earliest due time (RUNNER-SPEC §14.3) or source upload deadline,
+and one monotonic alarm on the earliest backoff retry (§14.5). After every input the host applies it, sends the requests
 its commit allows in order, and re-arms each alarm on its current minimum, so neither wait
 is armed only at start and nothing polls. A lost session, or a frame that does not decode,
 ends the host with status 75. The launcher starts it again, and the new session's inventory
@@ -1171,11 +1171,12 @@ refused with the quota it exceeds. The host never evicts a live group to admit a
 
 `hirsel launcher --state S --control S/launcher.sock --lifecycle managed|leader
 --operator-listen S/operator.sock --platform-host PREFIX/libexec/hirsel/platform_main
---max-places N [--idle-ms M]` starts
-the platform host as its first and only bootstrap child. `--max-places` is required whenever
-the launcher starts the platform host (passing `--max-places` or `--idle-ms` without
-`--operator-listen` and `--platform-host` is a usage error), and `--lifecycle` is required on
-Linux ("Child lifecycle" below). N and M are positive decimals; `--idle-ms` defaults to 30000. The launcher binds both sockets mode 0600, creates `S/catalog`, and
+--admission FILE --max-places N [--idle-ms M]` starts the platform host as its first and only
+bootstrap child. `--admission` and `--max-places` are required whenever the launcher starts
+the platform host. Passing either option or `--idle-ms` without `--operator-listen` and
+`--platform-host` is a usage error. Linux requires `--lifecycle` ("Child lifecycle" below).
+N and M are positive decimals. `--idle-ms` defaults to 30000. The launcher binds both sockets
+mode 0600, creates `S/catalog`, and
 starts the installed executable with working directory S and the program-visible argv
 `platform_main ctl launcher.sock N M`. The host's grants are compiled into that executable:
 its `Dir` is `/proc/self/cwd/catalog` on Linux and `./catalog` on macOS. Its Net root `ctl`
@@ -1185,6 +1186,16 @@ uses the same `Dir` path. The store backup and restore helper's two `Dir` grants
 `/proc/self/fd/3` and `/proc/self/fd/4` on Linux and `/dev/fd/3` and `/dev/fd/4` on macOS.
 Nothing in the host changes its working directory. A missing executable is an
 incomplete installation, and the launcher ends with status 74.
+
+**The admission envelope.** FILE declares the published-release admission bounds as
+`recipe_bytes`, `closure_objects`, `object_bytes`, `decoded_bytes`, `members` and `edges`,
+one positive decimal `key=value` per line. `closure_objects` also fixes the redundant
+object-count reservation, while the decoder keeps its own hard nesting ceiling. The
+launcher refuses a missing, repeated or unknown key. Before it opens the operator socket
+it writes the effective envelope to `S/admission`, so an attested publisher reads the
+host's bounds before upload; the operator CLI uses that file for its local recipe read and
+object exchange. The envelope governs new admissions. Previously admitted releases keep
+their assembly records and can still start, replay, or be collected after a grant changes.
 
 **The operator listener.** The launcher passes the operator listener as descriptor 3 and
 names it in `HIRSEL_OPERATOR_LISTEN=PPID:3:UID`: the launcher's PID, the descriptor and the
@@ -1210,10 +1221,14 @@ again: the launcher ends with that status.
 
 **Operator loop.** Beside the launcher reader and both alarms, an accept task posts each
 operator connection into the host's one queue, a reader task per connection posts its
-frames, and a writer task per connection sends its answers from a bounded queue. A
-connection whose queue is full or whose write failed is dropped and detached, so no
-operator stalls the loop. A `Begin` before the session's inventory is reconciled is answered
-`Error(Busy)`.
+frames, and a writer task per connection sends its answers in order. A logical reply is
+bounded at 64 MiB. One larger than the 16 MiB frame limit is sent as ordered `Part` chunks
+whose frames fit that limit. The host charges queued frames, including the frame being
+written, for their wire bytes. The connection's byte budget fits one maximum-size reply
+with all its frame headers. Each completed write releases its charge. The host detaches a
+connection on a reply over the logical bound, a queue over its byte budget, or a write
+failure. A `Begin` before the session's inventory is
+reconciled is answered `Error(Busy)`.
 
 ### The operator socket
 
@@ -1327,12 +1342,12 @@ recording runtime cannot replay (a Foreign call) is refused before assembly.
 
 ### The operator CLI
 
-`hirsel host --state S --max-places N --lifecycle managed|leader [--idle-ms M]` runs the
-launcher of "Starting the host" with `--control S/launcher.sock`,
-`--operator-listen S/operator.sock` and the installation's `libexec/hirsel/platform_main`,
-and does not return. `--max-places` is required, and `--lifecycle` is required on Linux
-(on macOS `--lifecycle` defaults to `leader` and `managed` is refused). The state directory
-must be the operator's and mode 0700.
+`hirsel host --state S --admission FILE --max-places N --lifecycle managed|leader
+[--idle-ms M]` runs the launcher of "Starting the host" with `--control S/launcher.sock`,
+`--operator-listen S/operator.sock` and the installation's `libexec/hirsel/platform_main`.
+It requires `--admission` and `--max-places`. Linux requires `--lifecycle`. On macOS it
+defaults to `leader` and the launcher refuses `managed`. The state directory must be the
+operator's and mode 0700.
 
 The clients below connect to `S/operator.sock` only after checking that S is owned by their
 own UID with no group or other permission. Each prints `request <D hex>` on stderr before it
@@ -1612,9 +1627,9 @@ nothing:
 
    No `--laws` strength row is read: a row is never an input to acceptance (R28,
    [laws](../laws.md)). The gate runs inside the admission deadline and holds one of the
-   launcher's four admission slots while it runs. The launcher measures the deadline,
-   because only it runs the tests: 600 s from its `Admit` of the attempt, so each
-   admission, a repeated one too, gets a fresh one. A `check` or `test` child still running
+   launcher's four admission slots while it runs. The launcher takes the deadline from
+   `Admit`, so the gate has only the time left after upload and publication. A `check` or
+   `test` child still running
    at the deadline is killed with its process group, and the verdict is `Red` with the one
    row `the tests had not all ended by the admission deadline`.
 5. **The binding.** `Admitted`'s summary gains `gate: Option[Green(tree, H, toolchain)]`.
@@ -1980,7 +1995,12 @@ child endpoints, pidfds and cgroup population changes.
   record, is a host catalog row, which the host commits only after the launcher has
   answered that steps 1-3 are synced. Admission runs on the control session, one attempt
   per deploy attempt, at most four at once:
-  1. `Admit(group, attempt, input, approvals)` opens it. The input is `Attested(root)`,
+  1. `Admit(group, attempt, input, approvals, deadlineMs)` opens it. The last field is
+     the absolute Unix millisecond deadline the host recorded at Begin. It covers the
+     source upload, publication, law gate, verification, object exchange and final input
+     EOF. Reattachment keeps the original deadline. The launcher converts it to a
+     monotonic deadline on receipt and shares that deadline between its phases. A refusal
+     names the phase that ran out. The input is `Attested(root)`,
      whose recipe and objects the host relays from its client, or `Publication(root)`,
      whose objects the launcher reads from its own code store, or `Source(tree)`. A tree
      is the codec bytes of `launcher.Tree`: a package path, the grants and `--dir`

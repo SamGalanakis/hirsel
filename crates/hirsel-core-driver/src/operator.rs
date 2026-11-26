@@ -831,16 +831,21 @@ fn operator_uid() -> u32 {
 
 use crate::host::peer_uid;
 
-/// Connect to `state/operator.sock`. The state directory must be the operator's own and
-/// private, and the listener must run as the operator.
-pub(crate) fn connect(state: &Path) -> io::Result<Connection> {
+pub(crate) fn check_state(state: &Path) -> io::Result<()> {
     let meta = std::fs::metadata(state)?;
-    if meta.uid() != operator_uid() || meta.mode() & 0o077 != 0 {
+    if !meta.is_dir() || meta.uid() != operator_uid() || meta.mode() & 0o077 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "the host state directory is not the operator's private directory",
         ));
     }
+    Ok(())
+}
+
+/// Connect to `state/operator.sock`. The state directory must be the operator's own and
+/// private, and the listener must run as the operator.
+pub(crate) fn connect(state: &Path) -> io::Result<Connection> {
+    check_state(state)?;
     let stream = UnixStream::connect(state.join("operator.sock"))?;
     if peer_uid(&stream)? != operator_uid() {
         return Err(io::Error::new(
@@ -887,16 +892,24 @@ impl Connection {
         if total > MAX_REPLY || offset != 0 {
             return Err(malformed("operator reply parts"));
         }
-        let mut whole = Vec::with_capacity(total as usize);
+        let mut whole = Vec::new();
         let mut next = Some((total, offset, chunk));
         while let Some((t, at, chunk)) = next.take() {
-            if t != total || at != whole.len() as u64 || chunk.is_empty() {
+            if t != total
+                || at != whole.len() as u64
+                || chunk.is_empty()
+                || chunk.len() as u64 > total - at
+            {
                 return Err(malformed("operator reply parts"));
+            }
+            let needed = whole.len() + chunk.len();
+            if needed > whole.capacity() {
+                let capacity = needed.max(2 * whole.capacity()).min(total as usize);
+                whole
+                    .try_reserve_exact(capacity - whole.len())
+                    .map_err(io::Error::other)?;
             }
             whole.extend_from_slice(&chunk);
-            if whole.len() as u64 > total {
-                return Err(malformed("operator reply parts"));
-            }
             if whole.len() as u64 == total {
                 break;
             }

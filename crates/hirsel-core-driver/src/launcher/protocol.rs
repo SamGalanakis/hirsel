@@ -13,3 +13,6 @@ pub(crate) const MANIFEST_BYTES: usize = 1 << 20;
 /// more than its manifest's beyond the content, so every manifest within its limits
 /// assembles into a tree within this.
 pub(crate) const TREE_BYTES: usize = SOURCE_BYTES + MANIFEST_BYTES;
+
+/// The most codec bytes one launcher-control frame's body may take (`launcher.MAX_FRAME`).
+pub(crate) const MAX_FRAME: usize = 16 << 20;

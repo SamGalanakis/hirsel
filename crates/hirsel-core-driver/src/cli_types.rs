@@ -116,6 +116,7 @@ pub enum OptionId {
     CallTimeout,
     CallStream,
     Control,
+    Admission,
     HostState,
     OperatorListen,
     PlatformHost,

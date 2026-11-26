@@ -92,13 +92,14 @@ pub(super) fn submission(
     positional: Option<&str>,
     code: Option<PathBuf>,
     lines: Vec<String>,
+    state: &Path,
 ) -> Result<(Input, Option<Upload>, Option<Source>, Approvals), Error> {
     let mut grants = crate::package_dir::Grants::default();
     let Some(dir) = source else {
         for line in &lines {
             grant(&mut grants, line)?;
         }
-        let upload = Upload::open(positional, code)?;
+        let upload = Upload::open(positional, code, state)?;
         let input = Input::Attested(upload.root.0.to_vec());
         return Ok((input, Some(upload), None, approvals(grants)));
     };

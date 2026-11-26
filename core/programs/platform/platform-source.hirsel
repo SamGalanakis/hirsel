@@ -10,6 +10,7 @@ const NEED_PART: u64 = 4096u64
 // A source request's blobs still on their way: the needed files, one per digest in manifest
 // order, the one being received and its bytes so far, and the admission they lead to.
 type Receive {
+    deadline_ms: u64,
     manifest: launcher.Manifest,
     wanted: List[launcher.ManifestFile],
     at: u64,
@@ -126,9 +127,9 @@ fn assembled_tree(h: Host, incarnation: u64, m: launcher.Manifest) -> Result[Byt
 // Opens request d's admission of `requested` under attempt `a`. A source first answers its
 // owner `Need` with the blobs the group's set lacks, in parts, and receives them; with none
 // lacking it admits at once, from the set.
-fn open_input(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, requested: operator.Input, gate: bool, foreign: List[String], exec: List[String], added: launcher.Grants, now: Now, mut out: List[launcher.Request]) waits {
+fn open_input(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, requested: operator.Input, gate: bool, foreign: List[String], exec: List[String], added: launcher.Grants, deadline_ms: u64, now: Now, mut out: List[launcher.Request]) waits {
     if let Some(input) = relayed_input(requested) {
-        admit_request(mut h, name, g, d, a, input, foreign, exec, added, now, mut out)
+        admit_request(mut h, name, g, d, a, input, foreign, exec, added, deadline_ms, now, mut out)
         return
     }
     let Some(m) = manifest_in(requested) else {
@@ -159,19 +160,19 @@ fn open_input(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Atte
         }
     }
     if list.len(wanted) == 0u64 {
-        admit_source(mut h, name, g, d, a, m, gate, foreign, exec, added, now, mut out)
+        admit_source(mut h, name, g, d, a, m, gate, foreign, exec, added, deadline_ms, now, mut out)
         return
     }
     let mut v = vol_read(h, name)
-    let receive = Receive(manifest: take m, wanted: take wanted, at: 0u64, got: list.new(), gate: gate, foreign: clone(foreign), exec: clone(exec), approved: clone(added))
+    let receive = Receive(deadline_ms: deadline_ms, manifest: take m, wanted: take wanted, at: 0u64, got: list.new(), gate: gate, foreign: clone(foreign), exec: clone(exec), approved: clone(added))
     v.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(added), stage: Receiving, summary: None, ended: false, genesis: registering(h, name), receive: Some(take receive)))
     vol_put(mut h, name, take v)
 }
 
 // Admits request d's source, assembled from the group's set.
-fn admit_source(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, m: launcher.Manifest, gate: bool, foreign: List[String], exec: List[String], added: launcher.Grants, now: Now, mut out: List[launcher.Request]) waits {
+fn admit_source(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, m: launcher.Manifest, gate: bool, foreign: List[String], exec: List[String], added: launcher.Grants, deadline_ms: u64, now: Now, mut out: List[launcher.Request]) waits {
     match assembled_tree(h, g.incarnation, m) {
-        Ok(tree) => admit_request(mut h, name, g, d, a, Source(take tree, gate), foreign, exec, added, now, mut out),
+        Ok(tree) => admit_request(mut h, name, g, d, a, Source(take tree, gate), foreign, exec, added, deadline_ms, now, mut out),
         Error((class, why)) => fail_request(mut h, d, class, why),
     }
 }
@@ -182,6 +183,27 @@ fn receiving(h: Host, name: String) -> bool {
         Some(adm) => !is_none(adm.receive),
         None => false,
     }
+}
+
+// A source upload owns no launcher worker until its tree is ready.
+fn expire_source_uploads(mut h: Host, now_ms: u64) waits {
+    let mut expired: List[(String, Bytes)] = list.new()
+    for (name, v) in h.vol {
+        if let Some(adm) = v.admit {
+            if let Some(receive) = adm.receive {
+                if receive.deadline_ms <= now_ms {
+                    list.push(mut expired, (string.from(name), clone(adm.request)))
+                }
+            }
+        }
+    }
+    if list.len(expired) == 0u64 {
+        return
+    }
+    for (name, d) in expired {
+        refuse_blobs(mut h, name, d, "source upload passed the admission deadline")
+    }
+    notify(mut h)
 }
 
 // Ends the receiving admission of request d and fails it.
@@ -274,6 +296,10 @@ fn end_received(mut h: Host, name: String, d: Bytes, now: Now, mut out: List[lau
     let Some(r) = adm.receive else {
         return
     }
+    if now.wall_ms >= r.deadline_ms {
+        refuse_blobs(mut h, name, d, "source upload passed the admission deadline")
+        return
+    }
     if r.at < list.len(r.wanted) {
         refuse_blobs(mut h, name, d, path_text("the input ended within ", r.wanted[r.at].path, ""))
         return
@@ -285,7 +311,7 @@ fn end_received(mut h: Host, name: String, d: Bytes, now: Now, mut out: List[lau
             return
         },
     }
-    admit_source(mut h, name, g, d, adm.attempt, r.manifest, r.gate, r.foreign, r.exec, r.approved, now, mut out)
+    admit_source(mut h, name, g, d, adm.attempt, r.manifest, r.gate, r.foreign, r.exec, r.approved, r.deadline_ms, now, mut out)
 }
 
 // The digests that request d's manifest names, added to `kept`.

@@ -14,19 +14,17 @@ use std::sync::Arc;
 pub(crate) struct Stores {
     records: Arc<Records>,
     code: CodeStore,
-    recipe_bytes: usize,
 }
 
 impl Stores {
     /// The objects under `state`: assembly records and images in `objects`, recipes in the
     /// code store `code`.
-    pub(crate) fn open(state: &Path, recipe_bytes: usize) -> io::Result<Self> {
+    pub(crate) fn open(state: &Path) -> io::Result<Self> {
         let objects = state.join("objects");
         std::fs::create_dir_all(&objects)?;
         Ok(Self {
             records: Arc::new(Records::open(&objects)?),
             code: CodeStore::new(state.join("code")),
-            recipe_bytes,
         })
     }
 }
@@ -44,7 +42,7 @@ impl Images for Stores {
             .records
             .assembly(ContentHash(assembly))
             .map_err(|e| format!("assembly record: {e}"))?;
-        let recipe = super::read_recipe(&self.code, record.recipe, self.recipe_bytes)
+        let recipe = super::read_recipe(&self.code, record.recipe, None)
             .map_err(|e| format!("recipe: {e}"))?;
         let verified = self
             .records
@@ -76,7 +74,7 @@ impl Images for Stores {
             images.insert(record.digest);
             // A kept record whose recipe cannot be read stops the collection: what it
             // lists is unknown, so no code object may go.
-            let recipe = super::read_recipe(&self.code, record.recipe, self.recipe_bytes)?;
+            let recipe = super::read_recipe(&self.code, record.recipe, None)?;
             let key = key_of;
             code.insert(key(ObjectKind::Recipe, record.recipe));
             code.extend(recipe.groups.iter().map(|g| key(ObjectKind::Group, g.hash)));

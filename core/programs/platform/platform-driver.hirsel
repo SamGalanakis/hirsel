@@ -1,0 +1,102 @@
+// The host's driver (§14.3 "Due times", §14.5): one queue of inputs, in which the
+// launcher's events arrive in stream order beside the due-time and backoff alarms. The
+// driver owns both waits: after every input it re-arms each on the host's current timer,
+// one wall-time alarm on the earliest unqueued due time or source upload deadline, and one
+// monotonic alarm on the earliest backoff retry. Neither polls.
+// One input to the host's loop: a launcher event, a timer, the launcher session's end, an
+// operator connection accepted on operator.sock, one operator frame on connection `conn`,
+// that connection's end as read or written (its writer ended, flushed or failed), or one
+// answer frame's completion on connection `conn` with its byte length.
+pub type Input: send = Got(launcher.Event) | DueAt(u64) | RetryAt(u64) | CollectTick | Lost | Joined(Socket) | Asked(u64, Bytes) | HungUp(u64) | Flushed(u64) | Wrote(u64, u64)
+
+type Armed {
+    at: u64,
+    waiting: Task[()]
+}
+
+pub opaque type Driver {
+    wall: Option[Armed],
+    mono: Option[Armed],
+    tasks: Tasks,
+    clock: Clock,
+    to: Sender[Input]
+}
+
+pub fn driver(tasks: Tasks, c: Clock, take to: Sender[Input]) -> Driver {
+    Driver(wall: None, mono: None, tasks: tasks, clock: c, to: take to)
+}
+
+// What each wait is armed on.
+pub fn armed(d: Driver) -> Timers {
+    let wall = match d.wall {
+        Some(a) => Some(a.at),
+        None => None
+    }
+    let mono = match d.mono {
+        Some(a) => Some(a.at),
+        None => None
+    }
+    Timers(wall_ms: wall, mono_ns: mono)
+}
+
+// Applies one input and re-arms both waits. A due or retry alarm is a tick at `now`.
+pub fn step(mut h: Host, mut d: Driver, take input: Input, now: Now) -> List[launcher.Request] waits {
+    let out = match take input {
+        Got(take e) => event(mut h, take e, now),
+        DueAt(_) => tick(mut h, now),
+        RetryAt(_) => tick(mut h, now),
+        CollectTick => match collect(mut h) {
+            Ok(take reqs) => take reqs,
+            Error(_) => list.new()
+        },
+        Asked(conn, body) => asked(mut h, conn, body, now),
+        HungUp(conn) => detach(mut h, conn),
+        Flushed(conn) => detach(mut h, conn),
+        Wrote(_, _) => list.new(),
+        Lost => list.new(),
+        Joined(_) => list.new(),
+    }
+    settle(mut d, h)
+    take out
+}
+
+// Re-arms both waits on the host's timers; the driver calls it after every input, and an
+// operator's request calls it after its commit.
+pub fn settle(mut d: Driver, h: Host) waits {
+    let want = timers(h)
+    let wall = replace(mut d.wall, None)
+    d.wall = arm(take wall, want.wall_ms)
+    if let None = d.wall {
+        if let Some(at) = want.wall_ms {
+            let waiting = std.clock.wall_alarm(d.tasks, d.clock, at, d.to, DueAt(at))
+            d.wall = Some(Armed(at: at, waiting: take waiting))
+        }
+    }
+    let mono = replace(mut d.mono, None)
+    d.mono = arm(take mono, want.mono_ns)
+    if let None = d.mono {
+        if let Some(at) = want.mono_ns {
+            let waiting = std.clock.alarm(d.tasks, d.clock, at, d.to, RetryAt(at))
+            d.mono = Some(Armed(at: at, waiting: take waiting))
+        }
+    }
+}
+
+// Keeps a wait already armed on `want`, and cancels any other.
+fn arm(take prior: Option[Armed], want: Option[u64]) -> Option[Armed] waits {
+    let Some(take held) = take prior else {
+        return None
+    }
+    if Some(held.at) == want {
+        return Some(take held)
+    }
+    let Armed(at: _, waiting: take running) = take held
+    let _ = task.cancel_join(take running)
+    None
+}
+
+pub fn stop(take d: Driver) waits {
+    let Driver(wall: take wall, mono: take mono, ..) = take d
+    let _ = arm(take wall, None)
+    let _ = arm(take mono, None)
+}

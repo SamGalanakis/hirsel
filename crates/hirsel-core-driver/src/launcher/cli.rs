@@ -1,13 +1,15 @@
 //! CLI entry point for `hirsel launcher` (docs/spec/launch.md "Starting the host",
 //! "The launcher").
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 
-use super::admit::Admission;
+use super::admit::{Admission, launcher_envelope, write_envelope};
 use super::bootstrap;
 use super::cgroup::Lifecycle;
 use super::stores::Stores;
-use super::{Launcher, STAGING_BYTES, bind_control, limits, private_dir};
+use super::{Launcher, STAGING_BYTES, private_dir};
 
 /// Default idle timeout passed to the platform host when `--idle-ms` is omitted.
 const DEFAULT_IDLE_MS: u64 = 30_000;
@@ -36,7 +38,7 @@ pub(crate) fn run(
     invocation: crate::cli::Invocation,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     use crate::cli::OptionId as Opt;
-    let (mut control, mut state) = (None, None);
+    let (mut control, mut state, mut admission_file) = (None, None, None);
     let (mut operator, mut platform_host) = (None, None);
     let (mut max_places, mut idle_ms, mut lifecycle) = (None, None, None);
     for (option, value) in invocation.options {
@@ -44,6 +46,7 @@ pub(crate) fn run(
         let value = PathBuf::from(&text);
         match option {
             Opt::Control => control = Some(value),
+            Opt::Admission => admission_file = Some(value),
             Opt::HostState => state = Some(value),
             Opt::OperatorListen => operator = Some(value),
             Opt::PlatformHost => platform_host = Some(value),
@@ -77,14 +80,19 @@ pub(crate) fn run(
         }
         _ => return Err("--operator-listen and --platform-host go together".into()),
     };
+    let envelope = launcher_envelope(bootstrap_spec.is_some(), admission_file)?;
     let state = private_dir(state_arg)?;
     let mut admission = None;
+    let production = bootstrap_spec.is_some();
     let mut launcher = Launcher::new(&state, lifecycle, || {
-        let stores = Stores::open(&state, limits().recipe_bytes)?;
+        let stores = Stores::open(&state)?;
+        if production {
+            write_envelope(&state, &envelope)?;
+        }
         admission = Some(Admission::open(
             &state,
             stores.records(),
-            limits(),
+            envelope,
             STAGING_BYTES,
         )?);
         Ok(stores)
@@ -136,4 +144,20 @@ fn positive(text: &str, name: &str) -> Result<u64, Box<dyn std::error::Error>> {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("{name} takes a positive decimal").into()),
     }
+}
+
+/// Bind a control socket at `path` that only its owner can connect to. A stale socket
+/// nobody answers on is replaced; a live one is in use.
+pub(crate) fn bind_control(path: &Path) -> io::Result<UnixListener> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_socket() || UnixStream::connect(path).is_ok() {
+            return Err(io::ErrorKind::AddrInUse.into());
+        }
+        std::fs::remove_file(path)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
 }

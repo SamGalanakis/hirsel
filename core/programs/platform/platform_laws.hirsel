@@ -257,7 +257,7 @@ fn is_installed(p: Option[operator.Phase]) -> bool {
 fn admits(r: Rig) -> u64 {
     let mut n = 0u64
     for q in r.asked {
-        if let Admit(_, _, _, _) = q {
+        if let Admit(_, _, _, _, _) = q {
             n += 1u64
         }
     }
@@ -1686,7 +1686,7 @@ fn bind_then_admit(r: Rig, name: String) -> bool {
             Bind(g, _) if g.name == name && is_none(bind) => {
                 bind = Some(i)
             },
-            Admit(g, _, _, ap) if g.name == name && is_none(admit) => {
+            Admit(g, _, _, ap, _) if g.name == name && is_none(admit) => {
                 admit = Some((i, is_none(ap.old)))
             },
             _ => (),
@@ -1805,7 +1805,7 @@ fn operator_register(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let _ = register_as(mut r, request_id(6u64), registration("p", "s6"))
     let mut no_old = 0u64
     for q in r.asked {
-        if let Admit(g, _, _, ap) = q {
+        if let Admit(g, _, _, ap, _) = q {
             if g.name == "p" && is_none(ap.old) {
                 no_old += 1u64
             }

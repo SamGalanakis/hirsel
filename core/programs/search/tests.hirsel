@@ -491,3 +491,237 @@ fn bm25_histories(clock: Clock, random: Random) -> Result[(), ()] waits {
     }
     Ok(())
 }
+
+const KEYS: u64 = 2400
+
+type Diff {
+    published: u64,
+    merged: u64,
+    rebuilt: u64,
+    no_base: u64,
+    own_writes: u64,
+    deep: u64,
+    straddles: u64,
+    filtered: u64
+}
+
+// Steps the projector up to `rounds` times with pages of 1 to 300 rows, so
+// passes and merges stop between pages.
+fn step_body(mut db: store.Db, mut state: u64, rounds: u64, mut tally: Diff) waits {
+    for _ in 0u64 .. rounds {
+        let rows = 1 + draw(mut state) % 300
+        match store.project_step(mut db, "body", store.Limits(rows: rows, byte_limit: 1048576)) {
+            Ok(Published(_)) => {
+                tally.published += 1
+            },
+            Ok(Merged(_)) => {
+                tally.merged += 1
+            },
+            Ok(Idle) => break,
+            Ok(_) => {},
+            Error(_) => fail("search differential: a projector step failed"),
+        }
+    }
+}
+
+// One to six words over a skewed vocabulary with a stop word, so a common
+// term holds hundreds of postings across several blocks, lengths vary and
+// scores tie often.
+fn draw_long(mut state: u64) -> String {
+    let words: Inline[String, 8] =[string.from("red"), string.from("red"), string.from("red"), string.from("blue"), string.from("blue"), string.from("green"), string.from("gold"), string.from("the")]
+    let mut body = string.from("")
+    for i in 0u64 .. 1 + draw(mut state) % 6 {
+        if i > 0 {
+            string.push(mut body, " ")
+        }
+        string.push(mut body, words[draw(mut state) % 8])
+    }
+    take body
+}
+
+fn draw_query(mut state: u64) -> String {
+    let words: Inline[String, 5] =[string.from("red"), string.from("blue"), string.from("green"), string.from("gold"), string.from("the")]
+    let mut q = string.from("")
+    for i in 0u64 .. 1 + draw(mut state) % 3 {
+        if i > 0 {
+            string.push(mut q, " ")
+        }
+        string.push(mut q, words[draw(mut state) % 5])
+    }
+    take q
+}
+
+fn admits(m: u64, id: u64) -> bool {
+    m == 0 || id % m != 0
+}
+
+// Runs the steps, then the query, in one transaction, so the query sees its
+// own writes in the tail.
+fn diff_run(mut db: store.Db, docs: Docs, text: search.Text[u64, Doc], take steps: List[Step], q: String, k: u64, m: u64) -> Found waits {
+    let ran = result.unwrap(store.run(mut db, None, (store.copy_env(docs), store.copy_env(text), take steps, store.copy_env(q), k, m), fn(mut tx, input) -> Result[Found, store.Error] {
+        for step in input.2 {
+            match step {
+                Put(key, body) => store.put(mut tx, input.0, key, doc(body, true))?,
+                Delete(key) => {
+                    let _ = store.delete(mut tx, input.0, key)?
+                },
+            }
+        }
+        Ok(search.query(tx, input.1, input.3, input.4, search.defaults(), scoped fn(id: u64) -> bool {
+            admits(input.5, id)
+        }))
+    }))
+    match take ran {
+        Committed(take done) => clone(done.value),
+        _ => fail("search differential: the transaction did not commit"),
+    }
+}
+
+fn diff_look(db: store.Db, text: search.Text[u64, Doc], q: String, k: u64, m: u64) -> Found waits {
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(text), store.copy_env(q), k, m), fn(tx, input) -> Found {
+        search.query(tx, input.0, input.1, input.2, search.defaults(), scoped fn(id: u64) -> bool {
+            admits(input.3, id)
+        })
+    }))
+    match take looked {
+        Seen(take seen) => clone(seen.value),
+        _ => fail("search differential: the look did not run"),
+    }
+}
+
+fn admitted(take ranking: List[(u64, f64)], m: u64) -> List[(u64, f64)] {
+    let mut kept: List[(u64, f64)] = list.new()
+    for (key, score) in ranking {
+        if admits(m, key) {
+            list.push(mut kept, (key, score))
+        }
+    }
+    take kept
+}
+
+fn most_postings(model: List[Option[String]]) -> u64 {
+    let mut red = 0u64
+    for row in model {
+        if let Some(body) = view row {
+            for token in search.tokenize(search.tokenizer(stop_the()), body) {
+                if token == "red" {
+                    red += 1
+                    break
+                }
+            }
+        }
+    }
+    red
+}
+
+// One seeded history over KEYS rows: a bulk load, then rounds that write a
+// batch of puts and deletes, step the projector a few pages or to idle,
+// sometimes request a rebuild of its generations, and query inside the
+// writing transaction or through a look after it, with or without a filter.
+fn diff_history(clock: Clock, random: Random, seed: u64, mut tally: Diff) waits {
+    let (take opened, docs, text) = open_docs(clock, random, stop_the())
+    let mut db = take opened
+    let mut model: List[Option[String]] = list.new()
+    for _ in 0u64 .. KEYS {
+        list.push(mut model, None)
+    }
+    let mut state = seed
+    let mut based = false
+    for round in 0u64 .. 48 {
+        let mut steps: List[Step] = list.new()
+        let writes = if round < 4 {
+            600u64
+        } else {
+            draw(mut state) % 40
+        }
+        for _ in 0u64 .. writes {
+            let key = draw(mut state) % KEYS
+            if round >= 4 && draw(mut state) % 4 == 0 {
+                list.push(mut steps, Delete(key))
+                model[key] = None
+            } else {
+                let body = draw_long(mut state)
+                list.push(mut steps, Put(key, clone(body)))
+                model[key] = Some(take body)
+            }
+        }
+        let q = draw_query(mut state)
+        let k = match draw(mut state) % 4 {
+            0 => 1 + draw(mut state) % 10,
+            1 => 127 + draw(mut state) % 3,
+            2 => draw(mut state) % 40,
+            _ => 10,
+        }
+        let m = match draw(mut state) % 3 {
+            0 => 3u64,
+            _ => 0u64,
+        }
+        let inside = draw(mut state) % 2 == 0
+        let found = if inside {
+            diff_run(mut db, docs, text, take steps, q, k, m)
+        } else {
+            let _ = diff_run(mut db, docs, text, take steps, q, 0, 0)
+            diff_look(db, text, q, k, m)
+        }
+        let ranking = admitted(model_ranking(model, q), m)
+        if !based {
+            tally.no_base += 1
+        } else if inside && writes > 0 {
+            tally.own_writes += 1
+        }
+        if m != 0 {
+            tally.filtered += 1
+        }
+        if most_postings(model) > 2 * 128 {
+            tally.deep += 1
+        }
+        if k > 0 && list.len(ranking) > k && float.eq(ranking[k - 1].1, ranking[k].1) {
+            tally.straddles += 1
+        }
+        let Ok(hits) = take found else {
+            fail("search differential: a query failed")
+        }
+        if !exact(hits, ranking, k) {
+            fail("search differential: the top k differs from the exhaustive BM25 ranking")
+        }
+        if round >= 3 {
+            if draw(mut state) % 9 == 0 {
+                let _ = result.unwrap(store.rebuild(mut db, "body"))
+                tally.rebuilt += 1
+            }
+            let before = tally.published
+            let pages = if draw(mut state) % 3 == 0 {
+                1000u64
+            } else {
+                1 + draw(mut state) % 4
+            }
+            step_body(mut db, mut state, pages, mut tally)
+            if tally.published > before {
+                based = true
+            }
+        }
+    }
+    result.unwrap(store.close(take db))
+}
+
+/// bug: a block bound below one of its postings' contributions, a window
+/// skipped or a non-essential term left unread where a row could still enter
+/// the top k, a cursor left behind a window it did not read, a prune at an
+/// equal bound for a key that wins the tie, a key a newer
+/// generation or the tail rewrote or deleted scored from an older generation,
+/// a merge that drops a mask over an older generation or keeps an older
+/// mention, or a tail that leaves out the transaction's own writes, rank
+/// differently from the exhaustive BM25 ranking over every row.
+/// oracle: brute-force BM25 over the test's model rows, with ties broken in key order.
+@test
+fn block_max_differential(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let mut tally = Diff(published: 0, merged: 0, rebuilt: 0, no_base: 0, own_writes: 0, deep: 0, straddles: 0, filtered: 0)
+    for seed in 0u64 .. 3 {
+        diff_history(clock, random, seed * 104729 + 17, mut tally)
+    }
+    if tally.published < 6 || tally.merged == 0 || tally.rebuilt == 0 || tally.no_base == 0 || tally.own_writes == 0 || tally.deep == 0 || tally.straddles == 0 || tally.filtered == 0 {
+        fail("search differential: a history never published, merged, rebuilt, queried without a base, queried its own writes, held a deep term, tied at k or filtered")
+    }
+    Ok(())
+}

@@ -31,6 +31,12 @@ pub opaque type TableDecl[K, V] {
     handle: Table[K, V]
 }
 
+/// The handle `finish` returns for `t`, so a package that declares records
+/// on an open table can also bind them to it, as a projector's source.
+pub fn declared_table[K, V](t: TableDecl[K, V]) -> Table[K, V] {
+    clone(t.handle)
+}
+
 fn declaration_base(db: Db) -> DeclarationBase {
     DeclarationBase(store: db.store, opened: open_number(db), version: db.heads[0].head, stamp: db.next_node, changes: db.changes, live: db.resident)
 }

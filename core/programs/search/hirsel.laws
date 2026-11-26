@@ -1,5 +1,6 @@
 hirsel.laws 1
 search@1/example/find_document src=c270a58b90ac4420 sig=52677b55bcf4ac6c run=b1818af2b24835d3 bug=- oracle=- rows=pending
-search@1/tests/bm25_histories src=d3859edb0f273d72 sig=0a3a0967be502acf run=b1818af2b24835d3 bug=0c5220c1d57d6b6f oracle=3198b63929895f76 rows=pending
-search@1/tests/filtered_top_k src=823eea8ebaae5fbf sig=8cfd4040481020ff run=b1818af2b24835d3 bug=- oracle=- rows=pending
-search@1/tests/snapshot_bm25 src=fa5c7f2e019bd260 sig=a1c8f1da81bc470c run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/tests/block_max_differential src=826ae4798fd9f8a9 sig=8425dd8a83213093 run=b1818af2b24835d3 bug=3227d9ee6098eb7d oracle=3198b63929895f76 rows=pending
+search@1/tests/bm25_histories src=d3859edb0f273d72 sig=85d03d8d2eaa733d run=b1818af2b24835d3 bug=0c5220c1d57d6b6f oracle=3198b63929895f76 rows=pending
+search@1/tests/filtered_top_k src=823eea8ebaae5fbf sig=ceef49ec921045eb run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/tests/snapshot_bm25 src=fa5c7f2e019bd260 sig=35fa8008b69d5634 run=b1818af2b24835d3 bug=- oracle=- rows=pending

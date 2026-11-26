@@ -1,8 +1,12 @@
-// Search form A (OPTIMAL-STORE-ENDSTATE §III.3, Store 2.2): BM25 over a
-// store table. The postings are a Many entry index on the table and the
-// corpus and term statistics are one aggregate on it, both written in the
-// row's own transaction and built by the store's builder. A query is a
-// plain function of a store.Tx, so entry and query bodies can call it.
+// Search form B (OPTIMAL-STORE-ENDSTATE §III.3, Store 2.4): BM25 read
+// document at a time with block-max bounds over a store table. Corpus and
+// term statistics are one aggregate on the table, written in the row's own
+// transaction. Postings live in a projector's immutable generations, in
+// packed blocks of 128 per term with exact bounds; a query reads each
+// generation in block-max windows with a MaxScore split, masks every key a
+// newer generation or the exact tail mentions, and scores the tail's rows
+// from the rows themselves.
+// A query is a plain function of a store.Tx.
 /// One part of a row's analysis. `Corpus` puts the row in the corpus with
 /// its token count; `Posting` is one distinct term with its frequency in
 /// the row and the row's token count.
@@ -12,10 +16,106 @@ pub type Term: shareable + send = Corpus | Posting(String, u64, u64)
 /// `(Posting(term, tf, length), 1)` part per distinct term.
 pub type Terms = List[(Term, u64)]
 
-pub opaque type Text[K, V]: shareable + send {
-    postings: store.Index[(Term, u64), K, V, ()],
-    stats: store.Aggregate[Term],
+// A row as a generation holds it: its token count and its distinct terms
+// with their frequencies, or a mask over every older generation's row.
+type Mention: codec + send = Present(u64, List[(String, u64)]) | Masked
+
+// The header of one block of at most BLOCK postings of a term in a
+// generation, in key order: its last key bytes, its size, and per distinct
+// tf the least length of a posting with it, from which a query bounds the
+// block exactly.
+type Block: codec + send {
+    last: Bytes,
+    count: u64,
+    frontier: List[(u64, u64)]
+}
+
+// One block's postings, packed so a query reads them by offset without
+// decoding each one: the key bytes end to end, the u64 little-endian
+// offsets of the keys (count + 1 of them, from 0), per posting its tf and
+// the row's length as two u64 little-endian words, and per posting its
+// key's head (`key_head`) as one.
+type Packed: send {
+    keys: Bytes,
+    offsets: Bytes,
+    pairs: Bytes,
+    heads: Bytes
+}
+
+// A key's first eight bytes as a big-endian word, zero-padded. Heads order
+// as their keys do wherever they differ, so a query compares most keys as
+// one integer and reads the bytes only when two heads are equal.
+fn key_head(raw: Bytes) -> u64 {
+    if list.len(raw) >= 8 {
+        let head: u64 = list.word_be(raw, 0)
+        return head
+    }
+    let mut head = 0u64
+    for i in 0u64 .. 8 {
+        head = head << 8
+        if i < list.len(raw) {
+            let byte: u64 = int.widen(raw[i])
+            head = head | byte
+        }
+    }
+    head
+}
+
+// A block's postings as its row in `name.postings`: one Bytes value, the
+// count as a u64 little-endian word, then the offsets, the pairs, the heads
+// and the keys. Bytes is the one value the codec moves in bulk; a record's Bytes
+// fields decode byte by byte, which made a 4 KiB block cost 32,000 steps.
+fn pack(p: Packed) -> Bytes {
+    let count = list.len(p.pairs) / 16
+    let mut out: Bytes = list.with_capacity(8 + list.len(p.offsets) + list.len(p.pairs) + list.len(p.heads) + list.len(p.keys))
+    list.put_word_le(mut out, count)
+    list.append(mut out, p.offsets)
+    list.append(mut out, p.pairs)
+    list.append(mut out, p.heads)
+    list.append(mut out, p.keys)
+    take out
+}
+
+fn unpack(raw: Bytes) -> Result[Packed, store.Error] {
+    if list.len(raw) < 16 {
+        return Error(MigrationFault)
+    }
+    let count: u64 = list.word_le(raw, 0)
+    let pairs_at = 8 + 8 * (count + 1)
+    let heads_at = pairs_at + 16 * count
+    let keys_at = heads_at + 8 * count
+    if keys_at > list.len(raw) {
+        return Error(MigrationFault)
+    }
+    let mut offsets: Bytes = list.with_capacity(pairs_at - 8)
+    list.append(mut offsets, list.slice(raw, 8, pairs_at))
+    let mut pairs: Bytes = list.with_capacity(heads_at - pairs_at)
+    list.append(mut pairs, list.slice(raw, pairs_at, heads_at))
+    let mut heads: Bytes = list.with_capacity(keys_at - heads_at)
+    list.append(mut heads, list.slice(raw, heads_at, keys_at))
+    let mut keys: Bytes = list.with_capacity(list.len(raw) - keys_at)
+    list.append(mut keys, list.slice(raw, keys_at, list.len(raw)))
+    Ok(Packed(keys: take keys, offsets: take offsets, pairs: take pairs, heads: take heads))
+}
+
+// The derived tables, keyed by generation first: block headers and packed
+// postings (generation, term, block), each term's newest block number
+// (generation, term), and each row's mention (generation, key bytes). With the key codec and the extractor they are the fold's env.
+type Derived[K, V]: shareable + send {
+    blocks: store.Table[(u32, String, u32), Block],
+    postings: store.Table[(u32, String, u32), Bytes],
+    heads: store.Table[(u32, String), u32],
+    mentions: store.Table[(u32, Bytes), Mention],
     primary: std.codec.Key[K],
+    terms: StaticFn[fn(K, V) -> Result[Terms, Capacity]]
+}
+
+pub opaque type Text[K, V]: shareable + send {
+    docs: store.Table[K, V],
+    stats: store.Aggregate[Term],
+    projection: store.ProjectionDecl,
+    derived: Derived[K, V],
+    name: String,
     stop_words: List[String]
 }
 
@@ -33,7 +133,13 @@ const CORPUS_TAG: u8 = 0u8
 
 const POSTING_TAG: u8 = 1u8
 
-const MAX: u64 = 18446744073709551615u64
+const BLOCK: u64 = 128
+
+const LAST_BLOCK: u32 = 4294967295u32
+
+// Every commit of the fold is bounded at this many steps (STORE-SPEC §1.14
+// "Driving"); a page of `limits.rows` changes stays far below it.
+const FOLD_STEPS: u64 = 1099511627776u64
 
 /// The analysis of `text` under `analyzer`, in the form `declare`'s
 /// extractor returns. Terms are in first-appearance order.
@@ -57,49 +163,6 @@ pub fn analyze(analyzer: Tokenizer, text: String) -> Terms {
         list.push(mut parts, (Posting(take term, tf, length), 1u64))
     }
     take parts
-}
-
-// A posting entry's key: tag 1, the term, its frequency and the row's
-// length, so one term's entries are one contiguous range. A corpus part
-// is the one-byte key 0, which no term range reaches. The part's count is
-// not encoded: a posting's is always 1.
-fn encode_posting(part: (Term, u64), mut out: Bytes) {
-    match part.0 {
-        Corpus => std.codec.put_key_u8(CORPUS_TAG, mut out),
-        Posting(term, tf, length) => {
-            std.codec.put_key_u8(POSTING_TAG, mut out)
-            std.codec.put_key_string(term, mut out)
-            std.codec.put_key_u64(tf, mut out)
-            std.codec.put_key_u64(length, mut out)
-        },
-    }
-}
-
-fn decode_posting(raw: Bytes, mut at: u64) -> Result[(Term, u64), std.codec.DecodeError] {
-    let start = at
-    match std.codec.take_key_u8(raw, mut at)? {
-        0u8 => Ok((Corpus, 1u64)),
-        1u8 => {
-            let term = std.codec.take_key_string(raw, mut at)?
-            let tf = std.codec.take_key_u64(raw, mut at)?
-            let length = std.codec.take_key_u64(raw, mut at)?
-            Ok((Posting(take term, tf, length), 1u64))
-        },
-        _ => Error(Invalid(start)),
-    }
-}
-
-fn posting_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
-    std.codec.schema_tuple(mut s, 4)?
-    std.codec.schema_u8(mut s)
-    std.codec.schema_string(mut s)
-    std.codec.schema_u64(mut s)
-    std.codec.schema_u64(mut s)
-    Ok(())
-}
-
-fn posting_key() -> std.codec.Key[(Term, u64)] {
-    std.codec.key_make(code.describe(encode_posting), code.describe(decode_posting), code.describe(posting_schema))
 }
 
 // A statistics group's key: tag 0 for the corpus, tag 1 and the term for
@@ -135,26 +198,46 @@ fn group_key() -> std.codec.Key[Term] {
     std.codec.key_make(code.describe(encode_group), code.describe(decode_group), code.describe(group_schema))
 }
 
-fn stats_name(name: String) -> String {
+fn suffixed(name: String, suffix: String) -> String {
     let mut full = string.from(name)
-    string.push(mut full, ".stats")
+    string.push(mut full, suffix)
     take full
 }
 
-/// Declares search on `t`: a Many index `name` of its postings and an
-/// aggregate `name.stats` of its corpus and term statistics. `terms` gives
-/// a row's analysis, normally `Ok(search.analyze(analyzer, text))`. Its
-/// analyzer must use `stop_words`, which `query` applies to query text.
-pub fn declare[K, V](mut d: store.Declare, mut t: store.TableDecl[K, V], name: String, take stop_words: List[String], terms: StaticFn[fn(K, V) -> Result[Terms, Capacity]]) -> Result[Text[K, V], store.Error] {
-    let postings = store.index(mut d, mut t, name, Many, terms, posting_key())?
-    let stats = store.aggregate(mut d, mut t, stats_name(name), terms, group_key())?
-    let primary = store.primary_key(postings)
-    Ok(Text(postings: take postings, stats: take stats, primary: primary, stop_words: take stop_words))
+fn sub_table[J, W](mut d: store.Declare, name: String, suffix: String, take key: std.codec.Key[J], take value: std.codec.Codec[W]) -> Result[store.Table[J, W], store.Error] {
+    let decl = store.declare_table(mut d, suffixed(name, suffix), take key, take value)?
+    store.finish(mut d, take decl)
 }
 
-/// The store's handle on the postings index.
-pub fn posting_index[K, V](s: Text[K, V]) -> store.Index[(Term, u64), K, V, ()] {
-    clone(s.postings)
+/// Declares search on `t`: an aggregate `name.stats` of its corpus and term
+/// statistics, a projector `name` that folds the table into generations of
+/// block postings, and the projector's tables `name.blocks`,
+/// `name.postings`, `name.heads` and `name.mentions`. `terms` gives a row's analysis,
+/// normally `Ok(search.analyze(analyzer, text))`. Its analyzer must use
+/// `stop_words`, which `query` applies to query text.
+pub fn declare[K, V](mut d: store.Declare, mut t: store.TableDecl[K, V], name: String, take stop_words: List[String], terms: StaticFn[fn(K, V) -> Result[Terms, Capacity]]) -> Result[Text[K, V], store.Error] {
+    let stats = store.aggregate(mut d, mut t, suffixed(name, ".stats"), terms, group_key())?
+    let docs = store.declared_table(t)
+    let projection = store.projection(mut d, name)?
+    let block_key: std.codec.Key[(u32, String, u32)] = std.codec.key_of()
+    let block_value: std.codec.Codec[Block] = std.codec.of()
+    let blocks = sub_table(mut d, name, ".blocks", take block_key, take block_value)?
+    let packed_key: std.codec.Key[(u32, String, u32)] = std.codec.key_of()
+    let packed_value: std.codec.Codec[Bytes] = std.codec.of()
+    let postings = sub_table(mut d, name, ".postings", take packed_key, take packed_value)?
+    let head_key: std.codec.Key[(u32, String)] = std.codec.key_of()
+    let head_value: std.codec.Codec[u32] = std.codec.of()
+    let heads = sub_table(mut d, name, ".heads", take head_key, take head_value)?
+    let mention_key: std.codec.Key[(u32, Bytes)] = std.codec.key_of()
+    let mention_value: std.codec.Codec[Mention] = std.codec.of()
+    let mentions = sub_table(mut d, name, ".mentions", take mention_key, take mention_value)?
+    let derived = Derived(blocks: take blocks, postings: take postings, heads: take heads, mentions: take mentions, primary: store.key_codec(docs), terms: terms)
+    let applier: StaticFn[fn(mut store.Tx, Derived[K, V], store.Delta[K, V]) -> Result[(), store.Error]] = code.describe(fold_apply)
+    let merger: StaticFn[fn(mut store.Tx, Derived[K, V], store.Merge, store.Limits) -> Result[Option[Bytes], store.Error]] = code.describe(fold_merge)
+    let dropper: StaticFn[fn(mut store.Tx, Derived[K, V], u32, store.Limits) -> Result[bool, store.Error]] = code.describe(fold_drop)
+    let fold: store.Fold[Derived[K, V], K, V, store.Error] = store.Fold(env: clone(derived), apply: applier, merge: merger, drop: dropper)
+    store.projector(mut d, projection, docs, Local, fold, store.cadence(), FOLD_STEPS)?
+    Ok(Text(docs: take docs, stats: take stats, projection: take projection, derived: take derived, name: string.from(name), stop_words: take stop_words))
 }
 
 /// The store's handle on the statistics aggregate.
@@ -162,11 +245,243 @@ pub fn statistics[K, V](s: Text[K, V]) -> store.Aggregate[Term] {
     clone(s.stats)
 }
 
-/// Rebuilds both records from the table's first row; queries answer
-/// NotReady until `store.index_build_step` finishes them.
+/// Rebuilds the statistics from the table's first row and requests a
+/// rebuild of the postings' generations. Queries answer NotReady until
+/// `store.index_build_step` finishes the statistics; until the projector's
+/// rebuild publishes, they read the old generations and the tail.
 pub fn rebuild[K, V](mut db: store.Db, s: Text[K, V]) -> Result[(), store.Error] waits {
-    store.rebuild_index(mut db, s.postings)?
-    store.rebuild_aggregate(mut db, s.stats)
+    store.rebuild_aggregate(mut db, s.stats)?
+    let _ = store.rebuild(mut db, s.name)?
+    Ok(())
+}
+
+// The row's analysis as a generation holds it.
+fn mention_of(take parts: Result[Terms, Capacity]) -> Result[Mention, store.Error] {
+    let terms = match take parts {
+        Ok(take terms) => take terms,
+        Error(c) => return Error(Full(Allocation(c))),
+    }
+    let mut length = 0u64
+    let mut distinct: List[(String, u64)] = list.new()
+    for take (take part, count) in take terms {
+        match take part {
+            Corpus => {
+                length = count
+            },
+            Posting(take term, tf, _) => list.push(mut distinct, (take term, tf)),
+        }
+    }
+    Ok(Present(length, take distinct))
+}
+
+fn key_bytes[K](primary: std.codec.Key[K], key: K) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.encode_key(primary, key, mut out)
+    take out
+}
+
+// `frontier` with (tf, length) added: one pair per distinct tf in the block,
+// holding that tf's least length. A contribution is monotone in length at a
+// fixed tf, rounding included, so the pair bounds every posting with its tf.
+fn with_pair(take frontier: List[(u64, u64)], tf: u64, length: u64) -> List[(u64, u64)] {
+    let mut out: List[(u64, u64)] = list.with_capacity(list.len(frontier) + 1)
+    let mut found = false
+    for (held_tf, held_length) in frontier {
+        if held_tf == tf {
+            found = true
+            list.push(mut out, (held_tf, if length < held_length {
+                length
+            } else {
+                held_length
+            }))
+        } else {
+            list.push(mut out, (held_tf, held_length))
+        }
+    }
+    if !found {
+        list.push(mut out, (tf, length))
+    }
+    take out
+}
+
+fn empty_packed() -> Packed {
+    let mut offsets: Bytes = list.new()
+    list.put_word_le(mut offsets, 0u64)
+    Packed(keys: list.new(), offsets: take offsets, pairs: list.new(), heads: list.new())
+}
+
+// Appends one posting to its term's newest block in generation `g`, or
+// starts a block when that one is full. Rows reach a generation in key
+// order, so every block is in key order and its last key is its greatest.
+fn append_posting[K, V](mut tx: store.Tx, env: Derived[K, V], g: u32, term: String, raw: Bytes, tf: u64, length: u64) -> Result[(), store.Error] {
+    // A point read: a range opened in a transaction materializes every row
+    // it has staged, so a range per posting would make a page quadratic.
+    let newest: Option[(u32, Block)] = match store.fetch(tx, env.heads, (g, clone(term)))? {
+        Some(number) => {
+            let Some(take block) = store.fetch(tx, env.blocks, (g, clone(term), number))? else {
+                return Error(MigrationFault)
+            }
+            Some((number, take block))
+        },
+        None => None,
+    }
+    let (number, frontier, count, packed) = match take newest {
+        Some((number, take block)) => {
+            if block.count < BLOCK {
+                let Some(raw_packed) = store.fetch(tx, env.postings, (g, clone(term), number))? else {
+                    return Error(MigrationFault)
+                }
+                let Block(frontier: take frontier, count: count, ..) = take block
+                (number, take frontier, count, unpack(raw_packed)?)
+            } else {
+                (number + 1, list.new(), 0u64, empty_packed())
+            }
+        },
+        None => (0u32, list.new(), 0u64, empty_packed()),
+    }
+    let Packed(keys: take held_keys, offsets: take held_offsets, pairs: take held_pairs, heads: take held_heads) = take packed
+    let mut keys = take held_keys
+    let mut offsets = take held_offsets
+    let mut pairs = take held_pairs
+    let mut heads = take held_heads
+    list.append(mut keys, raw)
+    list.put_word_le(mut offsets, list.len(keys))
+    list.put_word_le(mut pairs, tf)
+    list.put_word_le(mut pairs, length)
+    list.put_word_le(mut heads, key_head(raw))
+    let block = Block(last: clone(raw), count: count + 1, frontier: with_pair(take frontier, tf, length))
+    if count == 0 {
+        store.put(mut tx, env.heads, (g, clone(term)), number)?
+    }
+    store.put(mut tx, env.blocks, (g, clone(term), number), block)?
+    store.put(mut tx, env.postings, (g, clone(term), number), pack(Packed(keys: take keys, offsets: take offsets, pairs: take pairs, heads: take heads)))
+}
+
+// Writes a row's mention into generation `g`, and a present row's postings.
+fn write_present[K, V](mut tx: store.Tx, env: Derived[K, V], g: u32, raw: Bytes, take mention: Mention) -> Result[(), store.Error] {
+    if let Present(length, terms) = view mention {
+        for (term, tf) in terms {
+            append_posting(mut tx, env, g, term, raw, tf, length)?
+        }
+    }
+    store.put(mut tx, env.mentions, (g, clone(raw)), mention)
+}
+
+// A put is the row's postings; a delete is a mask over older generations.
+fn fold_apply[K, V](mut tx: store.Tx, env: Derived[K, V], delta: store.Delta[K, V]) -> Result[(), store.Error] {
+    let raw = key_bytes(env.primary, delta.key)
+    let g = delta.generation
+    if let Some(_) = store.fetch(tx, env.mentions, (g, clone(raw)))? {
+        return Ok(())
+    }
+    match delta.value {
+        None => store.put(mut tx, env.mentions, (g, take raw), Masked),
+        Some(value) => {
+            let mention = mention_of((code.callable(env.terms))(delta.key, value))?
+            write_present(mut tx, env, g, raw, take mention)
+        },
+    }
+}
+
+// The first `rows` key bytes after `after` that any input mentions,
+// ascending. Every input contributes its own first `rows`, so no smaller key
+// of any input is missed.
+fn merge_keys[K, V](tx: store.Tx, env: Derived[K, V], inputs: List[u32], after: Option[Bytes], rows: u64) -> Result[List[Bytes], store.Error] {
+    let mut keys: List[Bytes] = list.new()
+    for generation in inputs {
+        let low: store.Bound[(u32, Bytes)] = match after {
+            Some(raw) => Excluded((generation, clone(raw))),
+            None => Included((generation, list.new())),
+        }
+        let mut cursor = store.range(tx, env.mentions, low, Excluded((generation + 1, list.new())))?
+        for _ in 0u64 .. rows {
+            let Some(((_, take raw), _)) = store.next_in(tx, mut cursor)? else {
+                break
+            }
+            list.push(mut keys, take raw)
+        }
+    }
+    std.list.sort(mut keys, list.compare_bytes)
+    let mut distinct: List[Bytes] = list.new()
+    for take raw in take keys {
+        if list.len(distinct) == rows {
+            break
+        }
+        let n = list.len(distinct)
+        if n == 0 || list.compare_bytes(distinct[n - 1], raw) != Equal {
+            list.push(mut distinct, take raw)
+        }
+    }
+    Ok(take distinct)
+}
+
+// One page of a merge: per key, the newest input's mention, in key order,
+// so `into`'s blocks are built as a fold builds them. A mask is kept only
+// when older generations remain below the run.
+fn fold_merge[K, V](mut tx: store.Tx, env: Derived[K, V], merge: store.Merge, limits: store.Limits) -> Result[Option[Bytes], store.Error] {
+    let keys = merge_keys(tx, env, merge.inputs, merge.resume, limits.rows)?
+    for raw in keys {
+        let mut newest: Option[Mention] = None
+        let mut at = list.len(merge.inputs)
+        while at > 0 {
+            at -= 1
+            if let Some(take found) = store.fetch(tx, env.mentions, (merge.inputs[at], clone(raw)))? {
+                newest = Some(take found)
+                break
+            }
+        }
+        match take newest {
+            Some(Masked) => {
+                if merge.masks {
+                    store.put(mut tx, env.mentions, (merge.into, clone(raw)), Masked)?
+                }
+            },
+            Some(take present) => write_present(mut tx, env, merge.into, raw, take present)?,
+            None => return Error(MigrationFault),
+        }
+    }
+    let n = list.len(keys)
+    if n < limits.rows {
+        return Ok(None)
+    }
+    Ok(Some(clone(keys[n - 1])))
+}
+
+// Deletes at most `rows` rows of `t` in [low, high); true while rows remain.
+fn drop_rows[J, W](mut tx: store.Tx, t: store.Table[J, W], take low: J, take high: J, rows: u64) -> Result[bool, store.Error] {
+    let (take keys, remains) = {
+        let mut cursor = store.range(tx, t, Included(take low), Excluded(take high))?
+        let mut keys: List[J] = list.new()
+        for _ in 0u64 .. rows {
+            let Some((take key, _)) = store.next_in(tx, mut cursor)? else {
+                break
+            }
+            list.push(mut keys, take key)
+        }
+        let more = match store.next_in(tx, mut cursor)? {
+            Some(_) => true,
+            None => false,
+        }
+        (take keys, more)
+    }
+    for key in keys {
+        let _ = store.delete(mut tx, t, key)?
+    }
+    Ok(remains)
+}
+
+fn fold_drop[K, V](mut tx: store.Tx, env: Derived[K, V], g: u32, limits: store.Limits) -> Result[bool, store.Error] {
+    let next = g + 1
+    if drop_rows(mut tx, env.postings, (g, string.from(""), 0u32), (next, string.from(""), 0u32), limits.rows)? {
+        return Ok(true)
+    }
+    if drop_rows(mut tx, env.blocks, (g, string.from(""), 0u32), (next, string.from(""), 0u32), limits.rows)? {
+        return Ok(true)
+    }
+    if drop_rows(mut tx, env.heads, (g, string.from("")), (next, string.from("")), limits.rows)? {
+        return Ok(true)
+    }
+    drop_rows(mut tx, env.mentions, (g, list.new()), (next, list.new()), limits.rows)
 }
 
 pub fn defaults() -> Bm25 {
@@ -280,8 +595,6 @@ pub fn rank(texts: List[String], text: String) -> List[Hit[u64]] {
     take hits
 }
 
-type Candidate = Rejected | Eligible(f64, f64)
-
 // Ranked first is the greater score, then the smaller key bytes.
 fn ranked[K](left: (Bytes, Hit[K]), right: (Bytes, Hit[K])) -> Order {
     if float.gt(left.1 .score, right.1 .score) {
@@ -334,11 +647,78 @@ fn keep_hit[K](mut hits: List[(Bytes, Hit[K])], k: u64, take hit: (Bytes, Hit[K]
     }
 }
 
+// The query's terms with a nonzero document frequency, in first-appearance
+// order, with their weights.
+type Weighted {
+    term: String,
+    weight: f64
+}
+
+// What scores one row: the query's terms, the parameters and the corpus's
+// mean length, all from the statistics the transaction sees.
+type Scoring {
+    terms: List[Weighted],
+    params: Bm25,
+    mean: f64
+}
+
+fn length_norm(scoring: Scoring, length: u64) -> f64 {
+    let size: f64 = float.from_int(length)
+    1.0 - scoring.params.b + scoring.params.b * (size / scoring.mean)
+}
+
+// A row's score from its own analysis: each query term's contribution in
+// query order, as form A adds them. None when the row holds no query term.
+fn row_score(scoring: Scoring, mention: Mention) -> Option[f64] {
+    let Present(length, held) = view mention else {
+        return None
+    }
+    let row_norm = length_norm(scoring, length)
+    let mut score: Option[f64] = None
+    for weighted in scoring.terms {
+        for (term, tf) in held {
+            if term == weighted.term {
+                let before = match score {
+                    Some(sum) => sum,
+                    None => 0.0,
+                }
+                score = Some(before + contribution(scoring.params, row_norm, weighted.weight, tf))
+            }
+        }
+    }
+    score
+}
+
+// Whether a hit of `score` at `raw` would enter the heap.
+fn enters[K](best: List[(Bytes, Hit[K])], k: u64, raw: Bytes, score: f64) -> bool {
+    if list.len(best) < k {
+        return true
+    }
+    let worst = view best[0]
+    float.gt(score, worst.1 .score) || (float.eq(score, worst.1 .score) && list.compare_bytes(raw, worst.0) == Less)
+}
+
+// Scores a row read from the source: the tail's rows, or every row when the
+// transaction has no published base.
+fn score_row[K, V](mut best: List[(Bytes, Hit[K])], k: u64, s: Text[K, V], scoring: Scoring, take key: K, value: V, allows: scoped fn(K) -> bool) -> Result[(), store.Error] {
+    let mention = mention_of((code.callable(s.derived.terms))(key, value))?
+    if let Some(score) = row_score(scoring, mention) {
+        let raw = key_bytes(s.derived.primary, key)
+        if enters(best, k, raw, score) && allows(key) {
+            keep_hit(mut best, k, (take raw, Hit(key: take key, score: score)))
+        }
+    }
+    Ok(())
+}
+
+const TAIL_PAGE: store.Limits = store.Limits(rows: 256, byte_limit: 1048576)
+
 /// The `k` best rows for `text` among the rows `tx` sees, best first, by
-/// BM25 with whole-corpus statistics. `allows` is asked once per candidate
-/// row and only allowed rows rank. Equal scores rank in increasing primary
-/// key order, the table's key codec order. A build in progress answers
-/// `NotReady` with the name of the record still building.
+/// BM25 with whole-corpus statistics. Equal scores rank in increasing primary
+/// key order, the table's key codec order. `allows` is asked once per row
+/// that would enter the top `k`, and only allowed rows rank; block-max
+/// pruning leaves rows that cannot reach the top `k` unscored and unasked. While the
+/// statistics build the query answers `NotReady` with their name.
 pub fn query[K, V](tx: store.Tx, s: Text[K, V], text: String, k: u64, params: Bm25, allows: scoped fn(K) -> bool) -> Result[List[Hit[K]], store.Error] {
     let corpus = store.totals(tx, s.stats, Corpus)?
     let mut hits: List[Hit[K]] = list.new()
@@ -347,55 +727,58 @@ pub fn query[K, V](tx: store.Tx, s: Text[K, V], text: String, k: u64, params: Bm
     }
     let n: f64 = float.from_int(corpus.count)
     let tokens: f64 = float.from_int(corpus.sum)
-    let mean = tokens / n
     let mut seen: std.set.Set[String] = std.set.new()
-    let mut candidates: Map[Bytes, Candidate] = map.new()
-    let mut keys: Map[Bytes, K] = map.new()
+    let mut terms: List[Weighted] = list.new()
     for take term in tokenize(tokenizer(clone(s.stop_words)), text) {
         if !std.set.insert(mut seen, clone(term)) {
             continue
         }
         let df = store.totals(tx, s.stats, Posting(clone(term), 0, 0))?.count
-        if df == 0 {
-            continue
-        }
-        let weight = inverse_frequency(corpus.count, df)
-        let low = (Posting(clone(term), 0, 0), 1u64)
-        let high = (Posting(take term, MAX, MAX), 1u64)
-        let mut rows = store.entries(tx, s.postings, Included(take low), Included(take high))?
-        while let Some((part, take key, _)) = store.next_entry(mut rows)? {
-            let (tf, length) = match part.0 {
-                Posting(_, tf, length) => (tf, length),
-                Corpus => continue,
-            }
-            let mut encoded: Bytes = list.new()
-            std.codec.encode_key(s.primary, key, mut encoded)
-            if !map.contains(candidates, encoded) {
-                let candidate = if allows(key) {
-                    let size: f64 = float.from_int(length)
-                    map.insert(mut keys, clone(encoded), take key)
-                    Eligible(1.0 - params.b + params.b * (size / mean), 0.0)
-                } else {
-                    Rejected
-                }
-                map.insert(mut candidates, clone(encoded), take candidate)
-            }
-            let _ = map.update(mut candidates, encoded, scoped fn(mut candidate: Candidate) {
-                if let Eligible(norm, score) = candidate {
-                    candidate = Eligible(norm, score + contribution(params, norm, weight, tf))
-                }
-            })
+        if df != 0 {
+            list.push(mut terms, Weighted(term: take term, weight: inverse_frequency(corpus.count, df)))
         }
     }
+    if list.len(terms) == 0 {
+        return Ok(take hits)
+    }
+    let scoring = Scoring(terms: take terms, params: params, mean: tokens / n)
     let mut best: List[(Bytes, Hit[K])] = list.new()
-    for take (take encoded, take key) in take keys {
-        if let Some(Eligible(_, score)) = map.get(candidates, encoded) {
-            keep_hit(mut best, k, (take encoded, Hit(key: take key, score: score)))
+    let mut tail: std.set.Set[Bytes] = std.set.new()
+    let mut resume: Option[Bytes] = None
+    loop {
+        let Some(take page) = store.read_tail(tx, s.projection, s.docs, take resume, TAIL_PAGE)? else {
+            // No published base for this transaction: score every row.
+            let mut rows = store.range(tx, s.docs, Unbounded, Unbounded)?
+            while let Some((take key, take value)) = store.next_in(tx, mut rows)? {
+                score_row(mut best, k, s, scoring, take key, value, allows)?
+            }
+            return Ok(ranked_hits(take best))
         }
+        let store.Tail(rows: take rows, next: take after) = take page
+        for take (take key, take value) in take rows {
+            let _ = std.set.insert(mut tail, key_bytes(s.derived.primary, key))
+            if let Some(row) = value {
+                score_row(mut best, k, s, scoring, take key, row, allows)?
+            }
+        }
+        let Some(take at) = take after else {
+            break
+        }
+        resume = Some(take at)
     }
-    std.list.sort(mut best, ranked)
-    for take (_, take hit) in take best {
+    let generations = store.projection_row(tx, s.projection)?.generations
+    for at in 0u64 .. list.len(generations) {
+        block_max_generation(mut best, k, tx, s, scoring, generations, at, tail, allows)?
+    }
+    Ok(ranked_hits(take best))
+}
+
+fn ranked_hits[K](take best: List[(Bytes, Hit[K])]) -> List[Hit[K]] {
+    let mut sorted = take best
+    std.list.sort(mut sorted, ranked)
+    let mut hits: List[Hit[K]] = list.with_capacity(list.len(sorted))
+    for take (_, take hit) in take sorted {
         list.push(mut hits, take hit)
     }
-    Ok(take hits)
+    take hits
 }

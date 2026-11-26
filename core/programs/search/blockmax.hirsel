@@ -1,0 +1,372 @@
+// Search form B's block-max reading of one generation (STORE-SPEC §1.2
+// "Search form B"): per-term cursors over packed blocks, block-max windows
+// and the MaxScore split. The query in search.hirsel runs it per generation.
+// A block's bound under the query's statistics: its largest contribution
+// over its frontier. Each correctly rounded operation of `contribution` is
+// monotone, so no posting's computed contribution exceeds it.
+fn block_bound(scoring: Scoring, weight: f64, block: Block) -> f64 {
+    let mut most: f64 = 0.0
+    for (tf, length) in block.frontier {
+        let c = contribution(scoring.params, length_norm(scoring, length), weight, tf)
+        if float.gt(c, most) {
+            most = c
+        }
+    }
+    most
+}
+
+// One query term's postings in one generation: its block headers and
+// bounds, the block `at` (the first whose last key is past every window
+// read so far) and, once loaded, that block's postings with `pos` the
+// current one, `head` its key's head and `stop` the first past the window.
+type Cursor {
+    blocks: List[Block],
+    bounds: List[f64],
+    at: u64,
+    loaded: bool,
+    data: Packed,
+    pos: u64,
+    stop: u64,
+    head: u64
+}
+
+fn compare_key(c: Cursor, p: u64, target: Bytes) -> Order {
+    let start: u64 = list.word_le(c.data.offsets, p * 8)
+    let end: u64 = list.word_le(c.data.offsets, p * 8 + 8)
+    list.compare_bytes(list.slice(c.data.keys, start, end), target)
+}
+
+fn key_copy(c: Cursor) -> Bytes {
+    let start: u64 = list.word_le(c.data.offsets, c.pos * 8)
+    let end: u64 = list.word_le(c.data.offsets, c.pos * 8 + 8)
+    let mut out: Bytes = list.with_capacity(end - start)
+    list.append(mut out, list.slice(c.data.keys, start, end))
+    take out
+}
+
+// Orders two cursors by their current keys: by head, then by bytes.
+fn compare_current(left: Cursor, right: Cursor) -> Order {
+    if left.head != right.head {
+        return if left.head < right.head {
+            Less
+        } else {
+            Greater
+        }
+    }
+    let ls: u64 = list.word_le(left.data.offsets, left.pos * 8)
+    let le: u64 = list.word_le(left.data.offsets, left.pos * 8 + 8)
+    let rs: u64 = list.word_le(right.data.offsets, right.pos * 8)
+    let re: u64 = list.word_le(right.data.offsets, right.pos * 8 + 8)
+    list.compare_bytes(list.slice(left.data.keys, ls, le), list.slice(right.data.keys, rs, re))
+}
+
+// The first posting from `from` in the loaded block whose key is past
+// `target`.
+fn first_after(c: Cursor, from: u64, target: Bytes) -> u64 {
+    let mut low = from
+    let mut high = c.blocks[c.at].count
+    while low < high {
+        let middle = low + (high - low) / 2
+        if compare_key(c, middle, target) == Greater {
+            high = middle
+        } else {
+            low = middle + 1
+        }
+    }
+    low
+}
+
+// Moves a cursor of a read block to its first posting before `stop` whose
+// key is at least `key` (with head `head`): a step when it is near, else a
+// binary search.
+fn catch_up(mut c: Cursor, head: u64, key: Bytes) {
+    if c.pos >= c.stop || behind(c, head, key) == false {
+        return
+    }
+    let mut low = c.pos + 1
+    let mut high = c.stop
+    if low < high {
+        set_pos(mut c, low)
+        if behind(c, head, key) {
+            low += 1
+            while low < high {
+                let middle = low + (high - low) / 2
+                if compare_key(c, middle, key) == Less {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+        }
+    }
+    set_pos(mut c, low)
+}
+
+fn behind(c: Cursor, head: u64, key: Bytes) -> bool {
+    if c.head != head {
+        return c.head < head
+    }
+    compare_key(c, c.pos, key) == Less
+}
+
+fn set_pos(mut c: Cursor, p: u64) {
+    c.pos = p
+    if p < c.blocks[c.at].count {
+        c.head = list.word_le(c.data.heads, p * 8)
+    }
+}
+
+// The current posting's contribution.
+fn posting_contribution(scoring: Scoring, weight: f64, c: Cursor) -> f64 {
+    let tf: u64 = list.word_le(c.data.pairs, c.pos * 16)
+    let length: u64 = list.word_le(c.data.pairs, c.pos * 16 + 8)
+    contribution(scoring.params, length_norm(scoring, length), weight, tf)
+}
+
+// Reads the cursor's block if it is not read, and sets `stop` to its first
+// posting past `end`.
+fn ready_cursor[K, V](tx: store.Tx, s: Text[K, V], g: u32, term: String, mut c: Cursor, low: Option[Bytes], end: Bytes) -> Result[(), store.Error] {
+    if !c.loaded {
+        load(tx, s, g, term, mut c, low)?
+    }
+    c.stop = if list.compare_bytes(c.blocks[c.at].last, end) == Equal {
+        c.blocks[c.at].count
+    } else {
+        first_after(c, c.pos, end)
+    }
+    Ok(())
+}
+
+// Reads block `at` and stands on its first posting past `low`.
+fn load[K, V](tx: store.Tx, s: Text[K, V], g: u32, term: String, mut c: Cursor, low: Option[Bytes]) -> Result[(), store.Error] {
+    let number: u32 = int.narrow(c.at)
+    let Some(raw) = store.fetch(tx, s.derived.postings, (g, clone(term), number))? else {
+        return Error(MigrationFault)
+    }
+    c.data = unpack(raw)?
+    c.loaded = true
+    let from = match low {
+        Some(after) => first_after(c, 0, after),
+        None => 0,
+    }
+    set_pos(mut c, from)
+    Ok(())
+}
+
+// Whether a bound keeps every row it covers out of the heap. Rows of equal
+// score rank by key, so once every live cursor stands at or past the worst
+// hit's key a bound equal to its score cannot enter either: in a corpus of
+// few distinct (tf, length) pairs most bounds tie the worst score exactly.
+fn cannot_enter(sum: f64, floor: f64, ties_lose: bool) -> bool {
+    float.lt(sum, floor) || (ties_lose && float.eq(sum, floor))
+}
+
+// Whether a newer generation or the tail mentions `raw`.
+fn masked[K, V](tx: store.Tx, s: Text[K, V], generations: List[store.Generation], at: u64, tail: std.set.Set[Bytes], raw: Bytes) -> Result[bool, store.Error] {
+    if std.set.contains(tail, raw) {
+        return Ok(true)
+    }
+    for newer in at + 1 .. list.len(generations) {
+        if let Some(_) = store.fetch(tx, s.derived.mentions, (generations[newer].id, clone(raw)))? {
+            return Ok(true)
+        }
+    }
+    Ok(false)
+}
+
+// Block-max top-k over generation `at` (Ding and Suel 2011; Lucene's
+// MaxScoreBulkScorer and Tantivy's block_wand read the same bounds): the
+// terms' postings are read in windows, each ending at the least last key of
+// the blocks the cursors stand in. A window whose blocks' bounds, summed in
+// query order, cannot reach the heap is passed without reading a posting.
+// Otherwise the terms split as MaxScore splits them (Turtle and Flood 1995):
+// those whose bounds, taken by increasing bound, cannot place a row alone
+// are read only at rows the others hold, and only when the row's bound with
+// them can still enter; each row read is scored exactly as form A scores it.
+// A block is read only when a window needs it.
+fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store.Tx, s: Text[K, V], scoring: Scoring, generations: List[store.Generation], at: u64, tail: std.set.Set[Bytes], allows: scoped fn(K) -> bool) -> Result[(), store.Error] {
+    let g = generations[at].id
+    let terms = list.len(scoring.terms)
+    let mut cursors: List[Cursor] = list.with_capacity(terms)
+    for weighted in scoring.terms {
+        let mut blocks: List[Block] = list.new()
+        let mut bounds: List[f64] = list.new()
+        {
+            let mut rows = store.range(tx, s.derived.blocks, Included((g, clone(weighted.term), 0u32)), Included((g, clone(weighted.term), LAST_BLOCK)))?
+            while let Some((_, take block)) = store.next_in(tx, mut rows)? {
+                list.push(mut bounds, block_bound(scoring, weighted.weight, block))
+                list.push(mut blocks, take block)
+            }
+        }
+        list.push(mut cursors, Cursor(blocks: take blocks, bounds: take bounds, at: 0, loaded: false, data: empty_packed(), pos: 0, stop: 0, head: 0))
+    }
+    let mut inside: List[bool] = list.new()
+    list.fill(mut inside, terms, false)
+    let mut held: List[bool] = list.new()
+    list.fill(mut held, terms, false)
+    let mut lead: List[bool] = list.new()
+    list.fill(mut lead, terms, false)
+    let mut ready: List[bool] = list.new()
+    list.fill(mut ready, terms, false)
+    // Every row at or before `low` is read.
+    let mut low: Option[Bytes] = None
+    loop {
+        let mut w = terms
+        for i in 0u64 .. terms {
+            if cursors[i].at < list.len(cursors[i].blocks) && (w == terms || list.compare_bytes(cursors[i].blocks[cursors[i].at].last, cursors[w].blocks[cursors[w].at].last) == Less) {
+                w = i
+            }
+        }
+        if w == terms {
+            return Ok(())
+        }
+        let end: Bytes = clone(cursors[w].blocks[cursors[w].at].last)
+        // The blocks that can hold a row in (low, end], and their bound.
+        let mut limit: f64 = 0.0
+        for i in 0u64 .. terms {
+            let c = view cursors[i]
+            inside[i] = c.at < list.len(c.blocks) && (c.at == 0 || list.compare_bytes(c.blocks[c.at - 1].last, end) == Less)
+            if inside[i] {
+                limit += c.bounds[c.at]
+            }
+        }
+        let full = list.len(best) == k
+        let mut ties_lose = false
+        if full {
+            if let Some(after) = view low {
+                ties_lose = list.compare_bytes(after, best[0].0) != Less
+            }
+        }
+        if full && cannot_enter(limit, best[0].1 .score, ties_lose) {
+            for i in 0u64 .. terms {
+                if inside[i] {
+                    if list.compare_bytes(cursors[i].blocks[cursors[i].at].last, end) == Equal {
+                        cursors[i].at += 1
+                        cursors[i].loaded = false
+                    } else if cursors[i].loaded {
+                        let next = first_after(cursors[i], cursors[i].pos, end)
+                        set_pos(mut cursors[i], next)
+                    }
+                }
+            }
+            low = Some(take end)
+            continue
+        }
+        for i in 0u64 .. terms {
+            lead[i] = inside[i]
+            ready[i] = false
+        }
+        if full {
+            loop {
+                let mut pick = terms
+                for i in 0u64 .. terms {
+                    if lead[i] && (pick == terms || float.lt(cursors[i].bounds[cursors[i].at], cursors[pick].bounds[cursors[pick].at])) {
+                        pick = i
+                    }
+                }
+                if pick == terms {
+                    break
+                }
+                lead[pick] = false
+                let mut alone: f64 = 0.0
+                for i in 0u64 .. terms {
+                    if inside[i] && !lead[i] {
+                        alone += cursors[i].bounds[cursors[i].at]
+                    }
+                }
+                if !cannot_enter(alone, best[0].1 .score, ties_lose) {
+                    lead[pick] = true
+                    break
+                }
+            }
+        }
+        for i in 0u64 .. terms {
+            if lead[i] {
+                ready_cursor(tx, s, g, scoring.terms[i].term, mut cursors[i], low, end)?
+                ready[i] = true
+            }
+        }
+        loop {
+            let mut m = terms
+            for i in 0u64 .. terms {
+                if lead[i] && cursors[i].pos < cursors[i].stop && (m == terms || compare_current(cursors[i], cursors[m]) == Less) {
+                    m = i
+                }
+            }
+            if m == terms {
+                break
+            }
+            for i in 0u64 .. terms {
+                held[i] = lead[i] && cursors[i].pos < cursors[i].stop && (i == m || compare_current(cursors[i], cursors[m]) == Equal)
+            }
+            let mut passes = false
+            if list.len(best) == k {
+                // The row's bound: its own contributions where the leading
+                // terms hold it, the others' block bounds, in query order.
+                let mut most: f64 = 0.0
+                for i in 0u64 .. terms {
+                    if held[i] {
+                        most += posting_contribution(scoring, scoring.terms[i].weight, cursors[i])
+                    } else if inside[i] && !lead[i] {
+                        most += cursors[i].bounds[cursors[i].at]
+                    }
+                }
+                passes = cannot_enter(most, best[0].1 .score, ties_lose)
+            }
+            if !passes {
+                let key = key_copy(cursors[m])
+                let head = cursors[m].head
+                for i in 0u64 .. terms {
+                    if inside[i] && !lead[i] {
+                        if !ready[i] {
+                            ready_cursor(tx, s, g, scoring.terms[i].term, mut cursors[i], low, end)?
+                            ready[i] = true
+                        }
+                        catch_up(mut cursors[i], head, key)
+                        held[i] = cursors[i].pos < cursors[i].stop && cursors[i].head == head && compare_key(cursors[i], cursors[i].pos, key) == Equal
+                    }
+                }
+                let mut score: f64 = 0.0
+                for i in 0u64 .. terms {
+                    if held[i] {
+                        score += posting_contribution(scoring, scoring.terms[i].weight, cursors[i])
+                    }
+                }
+                if enters(best, k, key, score) && !masked(tx, s, generations, at, tail, key)? {
+                    let decoded = std.codec.decode_key(s.derived.primary, key) ?=> Decode
+                    if allows(decoded) {
+                        // Later rows of the window have greater keys than
+                        // this one, so they lose a tie to the worst hit
+                        // exactly when this key is not less than its key.
+                        let tie_key: Bytes = clone(key)
+                        keep_hit(mut best, k, (take key, Hit(key: take decoded, score: score)))
+                        if list.len(best) == k {
+                            ties_lose = list.compare_bytes(tie_key, best[0].0) != Less
+                        }
+                    }
+                }
+            }
+            for i in 0u64 .. terms {
+                if held[i] {
+                    let next = cursors[i].pos + 1
+                    set_pos(mut cursors[i], next)
+                }
+            }
+        }
+        for i in 0u64 .. terms {
+            if inside[i] {
+                if list.compare_bytes(cursors[i].blocks[cursors[i].at].last, end) == Equal {
+                    cursors[i].at += 1
+                    cursors[i].loaded = false
+                } else if ready[i] {
+                    let next = cursors[i].stop
+                    set_pos(mut cursors[i], next)
+                } else if cursors[i].loaded {
+                    let next = first_after(cursors[i], cursors[i].pos, end)
+                    set_pos(mut cursors[i], next)
+                }
+            }
+        }
+        low = Some(take end)
+    }
+}

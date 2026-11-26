@@ -92,7 +92,7 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
                 note_phase_ack(mut c.keys, a.ranges)
             }
             let verdict = recovery.on_ack(mut c.recovery, now, index, a.ranges, ack_delay_ns(c, a.delay), a.ecn)
-            settle(mut c, index, verdict.acked, verdict.lost, mut events)
+            settle(mut c, now, index, verdict.acked, verdict.lost, mut events)
             Ok(Quiet)
         },
         Crypto(offset: offset, data: data) => {

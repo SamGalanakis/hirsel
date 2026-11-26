@@ -2,7 +2,7 @@
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 2, Media Wave 2 package 1
 of 4); design review applied the same day (media-w2-spec-fix-2918). Not built. Rules QUIC-1 to
-QUIC-10, laws Q1 to Q17, slices QS0 to QS8. The review's rulings are at the end.*
+QUIC-10, laws Q1 to Q18, slices QS0 to QS8. The review's rulings are at the end.*
 
 `quic` is a sans-IO QUIC version 1 endpoint, written in Hirsel under `core/programs/quic` <!-- doc-ref: planned -->.
 It is the transport under [WebTransport](webtransport.md), [MoQ](moq.md) and
@@ -67,7 +67,7 @@ linked into the package.
 | Streams | bidirectional and unidirectional, stream and connection flow control, RESET_STREAM, STOP_SENDING, RESET_STREAM_AT ([draft-ietf-quic-reliable-stream-reset](https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/)) | — (WebTransport requires RESET_STREAM_AT, webtrans-http3-17 §3.1) |
 | Datagrams | RFC 9221 DATAGRAM frames, never retransmitted, counted for congestion control | — |
 | Recovery | RFC 9002 loss detection, PTO, ACK frequency of every second ack-eliciting packet, `max_ack_delay` 25 ms; NewReno and CUBIC with HyStart++ ([RFC 9406](https://www.rfc-editor.org/rfc/rfc9406)) behind the `Controller` seam; pacing | BBRv3: still an Internet-Draft; later, behind the same seam (Design review, O2) |
-| Path MTU | 1,200 bytes base; DPLPMTUD ([RFC 8899](https://www.rfc-editor.org/rfc/rfc8899)) probes up to the lesser of `EndpointConfig.max_mtu` and the peer's `max_udp_payload_size`, never the socket's `slot_bytes` (65,792 under `UDP_GRO`); packets are built to the size the path has acknowledged (QUIC-1, **Path MTU**) | PMTU raise timer (RFC 8899 `PMTU_RAISE_TIMER`): a search ends when it converges and starts again only on a new path or a black hole |
+| Path MTU | 1,200 bytes base; DPLPMTUD ([RFC 8899](https://www.rfc-editor.org/rfc/rfc8899)) probes up to the lesser of `EndpointConfig.max_mtu` and the peer's `max_udp_payload_size`, never the socket's `slot_bytes` (65,792 under `UDP_GRO`), and re-probes after `PMTU_RAISE_TIMER` (600 s, §5.1.1) when converged below the ceiling; packets are built to the size the path has acknowledged (QUIC-1, **Path MTU**) | — |
 | ECN | RFC 9000 §13.4 validation from NET-16's `ecn` field; CE reaction as loss | L4S: deferred with SCReAM (C3) |
 | Key update | RFC 9001 §6 over TLS-8 `key_update`, with a non-consuming next-phase open (QS0) and the §6.6 AEAD limits | — |
 | Multipath | — | draft-ietf-quic-multipath: TLS-8 has the `QuicMultipath` profile, but no consumer needs it in Wave 2 |
@@ -150,7 +150,10 @@ state for a single socket". It is sans-IO and the package never calls the host:
   lesser of `max_mtu` and the peer's `max_udp_payload_size`; an acknowledged probe makes its
   size the validated one, and three losses of one size (RFC 8899 `MAX_PROBES`) refute it
   and every size above, after which the search halves the range between the validated size
-  and the largest one not refuted, to the byte. A lost probe is no congestion signal: it
+  and the largest one not refuted, to the byte. When the search converges below the ceiling,
+  RFC 8899 §5.1.1's `PMTU_RAISE_TIMER` (600 s) is armed and reported through `poll`'s next
+  deadline; on expiry the search re-enters above the validated size without lowering it, and
+  stops arming once the ceiling is reached. A lost probe is no congestion signal: it
   leaves the window alone and starts no persistent congestion period (RFC 9000 §14.4). A
   new peer address (§14.2.1) and persistent congestion while above 1,200 bytes (RFC 8899
   §4.3's black hole) both return the connection to 1,200 bytes and start the search again.
@@ -614,6 +617,13 @@ the package. RFC 9001's Appendix A vectors are TLS-8's PC1 and are not repeated 
   and refuses 1,465 bytes as `TooLarge`. *Oracle:* 1,496 less the 1-RTT header (1 byte, the
   server's 8-byte CID and a 4-byte packet number), the 16-byte AEAD tag and the DATAGRAM
   frame's type (1 byte) and length (2 bytes), by hand: a packet filled to exactly 1,496.
+- **Q18 `path_mtu_reprobes_after_raise_timer`.** Over a simulated 10 ms path under a 1,600
+  ceiling, the path initially carries 1,350 bytes, then rises to 1,496 bytes and later to
+  1,600 bytes. After converging at 1,350, `PMTU_RAISE_TIMER` (600 s) does not fire early;
+  once it fires, the search re-probes above 1,350 and reaches 1,496 (admitting 1,464 bytes
+  and refusing 1,465), re-arming the timer for 600 s; after the second expiry it reaches the
+  1,600 ceiling (admitting 1,568 bytes) and disarms the timer. *Oracle:* RFC 8899 §5.1.1 and
+  §5.2, plus exact 1-RTT packet room by hand.
 - **Q16 `pin_mismatch_refuses`.** A server whose leaf matches no pin in the client's list
   (`Cert` and `Spki` each off by one bit) is refused before any stream opens, with
   `Refused(Pin)` and TLS alert `bad_certificate` (QUIC error `0x012a`); a list `[old, new]`

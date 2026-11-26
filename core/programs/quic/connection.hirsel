@@ -321,7 +321,7 @@ fn confirm(mut c: Connection, now: u64) {
 }
 
 /// Apply recovery's verdict to the frames those packets carried.
-fn settle(mut c: Connection, index: u64, acked: List[u64], lost: List[u64], mut events: List[Event]) {
+fn settle(mut c: Connection, now: u64, index: u64, acked: List[u64], lost: List[u64], mut events: List[Event]) {
     let done = match index {
         0 => settle_space(mut c.initial, acked, lost),
         1 => settle_space(mut c.encrypted, acked, lost),
@@ -333,7 +333,7 @@ fn settle(mut c: Connection, index: u64, acked: List[u64], lost: List[u64], mut 
     // RFC 9000 §13.3: HANDSHAKE_DONE is sent again only until one copy is acknowledged.
     c.done_acked = c.done_acked || done.acked
     c.handshake_done = (c.handshake_done || done.lost) && !c.done_acked
-    settle_mtu(mut c, index, acked, lost)
+    settle_mtu(mut c, now, index, acked, lost)
 }
 
 /// Run the loss detection timer when it is due (RFC 9002 A.9).
@@ -351,7 +351,7 @@ fn recovery_due(mut c: Connection, now: u64, mut events: List[Event]) {
         return
     }
     match recovery.on_timeout(mut c.recovery, now) {
-        Lost(space: index, numbers: lost) => settle(mut c, index, list.new(), lost, mut events),
+        Lost(space: index, numbers: lost) => settle(mut c, now, index, list.new(), lost, mut events),
         Probe(space: index) => {
             let done = match index {
                 0 => probe_space(mut c.initial),

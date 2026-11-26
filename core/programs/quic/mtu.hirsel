@@ -9,20 +9,28 @@ const BASE_MTU: u64 = 1200
 /// as more than the path carries.
 const MAX_PROBES: u64 = 3
 
+/// RFC 8899 §5.1.1's PMTU_RAISE_TIMER: period before probing larger sizes again once a
+/// search converges below the ceiling (600 s).
+const PMTU_RAISE_TIMER: u64 = 600000000000
+
+const NO_HIGH: u64 = 0xffffffffffffffff
+
 /// The path's datagram size and the search above it. `size` is validated: packets are
 /// built to it. Sizes above `high` are refuted; `trying` is the size of the probe in
-/// flight (packet `probe`) or of the last one lost, `losses` its losses so far.
+/// flight (packet `probe`) or of the last one lost, `losses` its losses so far, and
+/// `raise_at` is RFC 8899 §5.1.1's PMTU_RAISE_TIMER deadline once converged below ceiling.
 type PathMtu {
     size: u64,
     high: u64,
     trying: u64,
     probe: Option[u64],
     losses: u64,
-    refuted: bool
+    refuted: bool,
+    raise_at: Option[u64]
 }
 
 fn base_mtu() -> PathMtu {
-    PathMtu(size: BASE_MTU, high: 0xffffffffffffffff, trying: 0, probe: None, losses: 0, refuted: false)
+    PathMtu(size: BASE_MTU, high: NO_HIGH, trying: 0, probe: None, losses: 0, refuted: false, raise_at: None)
 }
 
 /// The largest datagram this connection may send: the endpoint's max_mtu, and the peer's
@@ -65,7 +73,7 @@ fn reset_mtu(mut c: Connection) {
 
 /// Settle the probe in flight against an ACK's verdict. A probe's loss says nothing about
 /// congestion (RFC 9000 §14.4), so recovery does not react to it.
-fn settle_mtu(mut c: Connection, index: u64, acked: List[u64], lost: List[u64]) {
+fn settle_mtu(mut c: Connection, now: u64, index: u64, acked: List[u64], lost: List[u64]) {
     if recovery.take_collapse(mut c.recovery) && c.mtu.size > BASE_MTU {
         reset_mtu(mut c)
         return
@@ -82,6 +90,9 @@ fn settle_mtu(mut c: Connection, index: u64, acked: List[u64], lost: List[u64]) 
             c.mtu.probe = None
             c.mtu.losses = 0
             recovery.set_mss(mut c.recovery, c.mtu.size)
+            if c.mtu.high <= c.mtu.size {
+                c.mtu.raise_at = Some(deadline_after(now, PMTU_RAISE_TIMER))
+            }
             return
         }
     }
@@ -93,10 +104,34 @@ fn settle_mtu(mut c: Connection, index: u64, acked: List[u64], lost: List[u64]) 
                 c.mtu.high = c.mtu.trying - 1
                 c.mtu.losses = 0
                 c.mtu.refuted = true
+                if c.mtu.high <= c.mtu.size {
+                    c.mtu.raise_at = Some(deadline_after(now, PMTU_RAISE_TIMER))
+                }
             }
             return
         }
     }
+}
+
+/// RFC 8899 §5.1.1: when PMTU_RAISE_TIMER expires, re-enter the search above the
+/// validated size without lowering it.
+fn mtu_maintenance(mut c: Connection, now: u64) {
+    let Some(at) = c.mtu.raise_at else {
+        return
+    }
+    if now >= at {
+        c.mtu.high = NO_HIGH
+        c.mtu.losses = 0
+        c.mtu.refuted = false
+        c.mtu.raise_at = None
+    }
+}
+
+fn mtu_wake(c: Connection) -> Option[u64] {
+    if !recovery.confirmed(c.recovery) || !c.validated || c.application.hold_data {
+        return None
+    }
+    c.mtu.raise_at
 }
 
 /// Stage one probe after the packets of a poll: once the handshake is confirmed, on a
@@ -109,6 +144,7 @@ fn stage_mtu_probe(mut staged: List[Staged], mut c: Connection, now: u64, slot: 
     if let Some(_) = c.mtu.probe {
         return
     }
+    mtu_maintenance(mut c, now)
     let Some(size) = next_probe(c, mtu) else {
         return
     }
@@ -119,7 +155,8 @@ fn stage_mtu_probe(mut staged: List[Staged], mut c: Connection, now: u64, slot: 
     if !recovery.window_allows(c.recovery, pending, size) {
         return
     }
-    if let Some(_) = recovery.pacing_delay(c.recovery, now, pending, size) {
+    if let Some(at) = recovery.pacing_delay(c.recovery, now, pending, size) {
+        c.wake = earliest(c.wake, Some(at))
         return
     }
     let mut payload: Bytes = list.with_capacity(1)

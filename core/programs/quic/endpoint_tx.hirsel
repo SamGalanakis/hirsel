@@ -111,6 +111,7 @@ fn next_deadline(e: Endpoint) -> Option[u64] {
                 first = earliest(first, recovery.timer(c.recovery))
                 first = earliest(first, c.wake)
                 first = earliest(first, path_wake(c))
+                first = earliest(first, mtu_wake(c))
             }
         }
     }

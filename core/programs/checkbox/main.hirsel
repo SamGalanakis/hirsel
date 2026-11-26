@@ -187,9 +187,11 @@ fn serve_board(take app: BenchmarkBoard) -> Result[(), Exit] waits {
 // The store runner's publisher, owner and reader use unit-local channels.
 // The benchmark moves the whole application into an owned unit.
 pub fn shipping_benchmark(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
-    let app = BenchmarkBoard(net: n, directory: directory, web: web, clock: c, random: random, tasks: tasks, args: a, process: process, errors: errors)
-    let h = result.unwrap(task.spawn_unit(tasks, bytes 3221225472 - 1048576, take app, serve_board))
-    result.unwrap(task.join(take h))
+    runner.launch_server(a, c, code.describe(place), code.describe(schema), scoped fn() -> Result[(), Exit] waits {
+        let app = BenchmarkBoard(net: n, directory: directory, web: web, clock: c, random: random, tasks: tasks, args: a, process: process, errors: errors)
+        let h = result.unwrap(task.spawn_unit(tasks, bytes 3221225472 - 1048576, take app, serve_board))
+        result.unwrap(task.join(take h))
+    })
 }
 
 fn at_bit(raw: u32, expected_chunk: u32, expected_byte: u64, expected_mask: u8) -> bool {

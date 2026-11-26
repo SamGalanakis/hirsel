@@ -42,6 +42,7 @@ def inputs(work, source=PROGRAM / "main.hirsel", source_overrides=None):
         program = manifest.get("program", {}).get("module")
         packages.append({
             "package": {"name": package["name"], "version": str(package["major"])},
+            "toolchain": name == "runner",
             "dependencies": [core] + [
                 {"name": name, "version": str(dep["major"])}
                 for name, dep in manifest["dependencies"].items()

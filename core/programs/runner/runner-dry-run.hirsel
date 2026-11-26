@@ -186,7 +186,6 @@ fn operate_store_verify[G: send, H: shareable + inert + send, S: send](p: PlaceC
         let why = match seen.coverage {
             Walked => continue,
             NotPublic => "not Public",
-            Aggregate => "an aggregate",
             Unbound => "not bound by this release",
         }
         string.push(mut text, "not walked ")

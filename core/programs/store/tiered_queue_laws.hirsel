@@ -95,6 +95,107 @@ fn l87_options(floor: u64, budget: u64) -> Result[Options, Error] {
     Ok(take options)
 }
 
+fn drain_pack_sizes(d: Dir) -> Result[List[u64], Error] waits {
+    let mut sizes: List[u64] = list.new()
+    for listed in result.unwrap(std.dir.list(d, None)) {
+        if std.string.starts_with(listed.name, "p-") {
+            let file = disk_io(host.stat(d, listed.name))?
+            list.push(mut sizes, file.size)
+        }
+    }
+    list.sort(mut sizes, order.compare)
+    Ok(take sizes)
+}
+
+fn drain_directory(d: Dir, mut db: Db) -> Result[List[u64], Error] waits {
+    let mut previous = drain_pack_sizes(d)?
+    for _ in 0u64 .. 16 {
+        let _ = checkpoint(mut db)?
+        // A cut can replace the retirement-list pack at the same footprint.
+        let current = drain_pack_sizes(d)?
+        let pages = disk_state(db).pages
+        let (queued, _) = std.page.totals(pages.lists.deferred)
+        if current == previous && queued == 0 && map.len(pages.compaction.probes) == 0 {
+            return Ok(take current)
+        }
+        previous = take current
+    }
+    fail("Directory maintenance did not reach a stable footprint")
+}
+
+@test
+fn test_directory_drain_to_baseline(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let count_rows = 120u64
+    let directory = disk_test_directory(d)
+    let twin = disk_test_directory(d)
+    let events = l87_cold_log(directory, c, r, tasks, floor, count_rows, 48)?
+    let mut loaded = open(tasks, directory, c, r, l87_options(floor, 0)?)?
+    let before = snapshot(loaded)
+    let (held, _) = fork(mut loaded, "retained", before)?
+    let _ = checkpoint(mut loaded)?
+    let (lineage_rows, _) = std.page.totals(disk_state(loaded).pages.lists.lineage)
+    if lineage_rows == 0 {
+        fail("drain fixture did not publish lineage")
+    }
+    let fixture: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut loaded, Some(100000), copy_env((fixture, count_rows)), fn(mut tx: Tx, input: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, input.0, input.1)
+    })? else {
+        fail("drain fixture did not trim its rows")
+    }
+    let _ = delete_branch(mut loaded, held)?
+    let (queued, _) = std.page.totals(disk_state(loaded).pages.lists.deferred)
+    if queued == 0 {
+        fail("drain fixture did not publish deferred frees")
+    }
+    let heads = log_bounds(reader(loaded, VALUE_LIMIT + 1048576)?, snapshot(loaded), events)?
+    if heads.first != count_rows || heads.next != heads.first {
+        fail("drain fixture still has live rows")
+    }
+    close(take loaded)?
+    let options = l70_open_options(floor)?
+    let mut drained = open(tasks, directory, c, r, options)?
+    let observed = drain_directory(directory, mut drained)?
+    close(take drained)?
+    let mut fresh_db = open(tasks, twin, c, r, options)?
+    let mut declaring = declare(fresh_db, Migrate)?
+    let empty = declare_log(mut declaring, "events", std.codec.of_bytes(), Forever)?
+    let _ = seal(mut fresh_db, take declaring)?
+    set_residency(mut fresh_db, empty.binding.id, Tiered)?
+    let baseline = drain_directory(twin, mut fresh_db)?
+    close(take fresh_db)?
+    let (_, used) = read_page_manifest_file(directory)?
+    let (_, baseline_manifest) = read_page_manifest_file(twin)?
+    if used.lineage != baseline_manifest.lineage || used.deferred_frees != baseline_manifest.deferred_frees {
+        fail("drain left lineage or deferred-free pages beyond the fresh twin")
+    }
+    if observed != baseline {
+        let mut message = string.from("drain pack widths")
+        for width in observed {
+            string.push(mut message, " ")
+            string.push_u64(mut message, width)
+        }
+        string.push(mut message, ", fresh twin")
+        for width in baseline {
+            string.push(mut message, " ")
+            string.push_u64(mut message, width)
+        }
+        string.push(mut message, ", retirement pack bytes")
+        for (home, root) in[(directory, used.retirement_root), (twin, baseline_manifest.retirement_root)] {
+            let width = if root.stamp == 0 {
+                0u64
+            } else {
+                disk_io(host.stat(home, paged_pack_path(root.pack)?))?.size
+            }
+            string.push(mut message, " ")
+            string.push_u64(mut message, width)
+        }
+        fail(take message)
+    }
+    Ok(())
+}
+
 // L87 (a) through the cut (§13.6a T8 step 3): a journaled floor reopens as
 // a replay overlay; the fold cut detaches the whole first Cold leaf without
 // reading it and queues exactly that location for main. A second, idle cut

@@ -508,3 +508,142 @@ fn bucket_test_m2_sim_levels(c: Clock, r: Random, tasks: Tasks, seed_grant: Env)
         sim_law_ordered_levels(tasks, c, r, seed, true)
     }, "L55 sim_levels fixture")
 }
+
+type ReplaySchemaStep = CreateRows | AddIndex | RenameRows | ConvertRows | DropIndex | DropRows
+
+fn replay_rename_rows(mut migration: Migration) -> Result[(), Error] {
+    rename_table(mut migration, "rows", "renamed")
+}
+
+fn replay_convert_rows(mut migration: Migration) -> Result[(), Error] {
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    migrate_table(mut migration, "renamed", key, value, "renamed", key, value, fn(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+        Ok(Some((k, v * 2 + 1)))
+    })
+}
+
+fn replay_drop_rows(mut migration: Migration) -> Result[(), Error] {
+    drop_named_table(mut migration, "renamed")
+}
+
+type ReplaySchema {
+    control: Table[u64, u64],
+    rows: Option[Table[u64, u64]],
+    by_value: Option[Index[u64, u64, u64, ()]]
+}
+
+fn replay_schema_declare(mut db: Db, take decl: Declare, step_number: u64) -> Result[ReplaySchema, Error] waits {
+    let mut declaring = take decl
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let anchor = declare_table(mut declaring, "control", key, value)?
+    let control = finish(mut declaring, take anchor)?
+    let mut rows: Option[Table[u64, u64]] = None
+    let mut by_value: Option[Index[u64, u64, u64, ()]] = None
+    if step_number < 5 {
+        let name = if step_number < 2 {
+            "rows"
+        } else {
+            "renamed"
+        }
+        let mut target = declare_table(mut declaring, name, key, value)?
+        if step_number >= 1 && step_number < 4 {
+            by_value = Some(index(mut declaring, mut target, "by_value", Many, code.describe(crash_value), key)?)
+        }
+        rows = Some(finish(mut declaring, take target)?)
+    }
+    let _ = seal(mut db, take declaring)?
+    Ok(ReplaySchema(control: control, rows: rows, by_value: take by_value))
+}
+
+fn replay_schema_assert(db: Db, schema: ReplaySchema, step_number: u64, anchor_value: u64, kept: u64, latest: u64) -> Result[(), Error] waits {
+    let image = snapshot(db)
+    let reading = reader(db, 0)?
+    if version(image) != 2 * step_number + 2 || get(reading, image, schema.control, 1)? != Some(anchor_value) {
+        fail("schema replay lost the journal-only control write or version")
+    }
+    if has_table(image, "rows")? != (step_number < 2) || has_table(image, "renamed")? != (step_number >= 2 && step_number < 5) {
+        fail("schema replay restored the wrong table names")
+    }
+    if let Some(rows) = schema.rows {
+        let mut scanned = scan(reading, image, rows, Unbounded, Unbounded)?
+        if next(reading, mut scanned)? != Some((7u64, kept)) || next(reading, mut scanned)? != Some((8u64, latest)) || next(reading, mut scanned)? != None {
+            fail("schema replay restored the wrong table rows")
+        }
+        let catalog = index_catalog(db, rows.id)?
+        if let Some(ix) = view schema.by_value {
+            let mut indexed = find(reading, image, ix, Unbounded, Unbounded)?
+            if list.len(catalog) != 1 || next(reading, mut indexed)? != Some((7u64, kept)) || next(reading, mut indexed)? != Some((8u64, latest)) || next(reading, mut indexed)? != None {
+                fail("schema replay restored the wrong index entries")
+            }
+        } else if list.len(catalog) != 0 {
+            fail("schema replay restored a removed index")
+        }
+    }
+    Ok(())
+}
+
+// A Directory schema step is itself a covering cut. Immediately after
+// each step, append one data commit, then reopen against the unchanged
+// MANIFEST and check the journal suffix before the next schema step.
+@test
+fn test_schema_steps_journal_replay(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = disk_crash_options("schema")
+    let mut db = open(tasks, directory, c, r, options)?
+    options.create = false
+    let seed = match std.sim.world.test_seed(seed_grant) {
+        Some(sim_seed) => sim_seed,
+        None => 0u64,
+    }
+    let mut plan = std.sim.world.plan(seed)
+    let original = 1 + std.sim.world.pick(mut plan, 1000)
+    let steps: Inline[ReplaySchemaStep, 6] =[CreateRows, AddIndex, RenameRows, ConvertRows, DropIndex, DropRows]
+    let mut step_number = 0u64
+    for change in steps {
+        let declaring = match change {
+            RenameRows => declare_migration(db, tasks, code.describe(replay_rename_rows))?,
+            ConvertRows => declare_migration(db, tasks, code.describe(replay_convert_rows))?,
+            DropRows => declare_migration(db, tasks, code.describe(replay_drop_rows))?,
+            _ => declare(db, Migrate)?,
+        }
+        let schema = replay_schema_declare(mut db, take declaring, step_number)?
+        let (_, cut) = read_page_manifest_file(directory)?
+        if cut.branches[0].version != 2 * step_number + 1 {
+            fail("schema replay fixture did not publish its schema step")
+        }
+        let fixed = if step_number < 3 {
+            original
+        } else {
+            2 * original + 1
+        }
+        let latest = fixed + 1 + std.sim.world.pick(mut plan, 1000)
+        let anchor_value = latest + step_number
+        let ReplaySchema(control: take control, rows: take rows, ..) = take schema
+        let Committed(done) = run(mut db, None, (take control, take rows, fixed, latest, anchor_value, step_number), fn(mut tx: Tx, input: (Table[u64, u64], Option[Table[u64, u64]], u64, u64, u64, u64)) -> Result[(), Error] {
+            put(mut tx, input.0, 1, input.4)?
+            if let Some(target) = input.1 {
+                if input.5 == 0 {
+                    put(mut tx, target, 7u64, input.2)?
+                }
+                put(mut tx, target, 8u64, input.3)?
+            }
+            Ok(())
+        })? else {
+            fail("schema replay fixture did not commit its journal suffix")
+        }
+        durable(mut db, done.ticket)?
+        close(take db)?
+        let (_, after) = read_page_manifest_file(directory)?
+        if after.generation != cut.generation || after.first_live != cut.first_live || after.branches[0].version != cut.branches[0].version {
+            fail("schema replay fixture checkpointed its journal suffix")
+        }
+        db = open(tasks, directory, c, r, options)?
+        let reopening = declare(db, Open)?
+        let rebound = replay_schema_declare(mut db, take reopening, step_number)?
+        replay_schema_assert(db, rebound, step_number, anchor_value, fixed, latest)?
+        step_number += 1
+    }
+    close(take db)
+}

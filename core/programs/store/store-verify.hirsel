@@ -2,9 +2,8 @@
 // this release binds against its table, both ways. In the rows phase each
 // row's entries must be in the index with the row's payload. In the entries
 // phase each entry must come from a row that still produces it with that
-// payload. One slice reads both sides from main's head as it stands, so a
-// write between slices never makes a false finding. A finding is proof that
-// the index is wrong: a Repair walk counts it as drift and demotes the index
+// payload. Sums fold one head's rows and merge the result with its stored
+// totals. A Repair walk counts a finding as drift and demotes the index
 // (§I.3), so the builder rebuilds it. A Report walk (`hirsel store verify`)
 // only reports it, walks on through the same index, and never commits.
 /// Missing: a row's entry is absent. Extra: no row produces the entry.
@@ -29,6 +28,12 @@ pub type WalkReport: send {
 /// are only reported, every one of them, and the walk never commits.
 pub type WalkMode: send = Repair | Report
 
+type WalkSums: send {
+    head: u64,
+    groups: std.omap.OMap[Bytes, Totals],
+    ids: u64
+}
+
 pub opaque type IndexWalk: send {
     mode: WalkMode,
     // The catalog key and id of the index being walked.
@@ -36,15 +41,16 @@ pub opaque type IndexWalk: send {
     entries: bool,
     // The last primary key (rows) or entry key after the id (entries) checked.
     cursor: Option[Bytes],
+    sums: Option[WalkSums],
     checked: u64
 }
 
 pub fn begin_verify(mode: WalkMode) -> IndexWalk {
-    IndexWalk(mode: mode, at: None, entries: false, cursor: None, checked: 0)
+    IndexWalk(mode: mode, at: None, entries: false, cursor: None, sums: None, checked: 0)
 }
 
 /// Why a walk passes an index by: it checks Walked ones only.
-pub type WalkCoverage: send = Walked | NotPublic | Aggregate | Unbound
+pub type WalkCoverage: send = Walked | NotPublic | Unbound
 
 pub type IndexCoverage: send {
     table: u32,
@@ -53,7 +59,7 @@ pub type IndexCoverage: send {
 }
 
 /// Every index on main's head, in the order a walk takes them, and whether
-/// the walk checks it: an index that is not Public, an aggregate, or one
+/// the walk checks it: an index that is not Public or one
 /// this release binds no extractor to is passed by.
 pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
     let mut low: Bytes = list.new()
@@ -66,8 +72,6 @@ pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
         let record = decode_catalog(raw)?
         let coverage = if !record_public(raw) {
             NotPublic
-        } else if let Sums = record.shape {
-            Aggregate
         } else if let None = bound_extractor(db.indexes, record) {
             Unbound
         } else {
@@ -96,10 +100,6 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
             continue
         }
         let record = decode_catalog(raw)?
-        // An aggregate's rows are per-group totals, not per-row entries.
-        if let Sums = record.shape {
-            continue
-        }
         if let None = bound_extractor(db.indexes, record) {
             continue
         }
@@ -111,6 +111,7 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
             walk.at = Some((copied(key)?, record.id))
             walk.entries = false
             walk.cursor = None
+            walk.sums = None
         }
         return Ok(Some((take key, take record)))
     }
@@ -130,11 +131,14 @@ pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkRe
         walk.at = None
         walk.entries = false
         walk.cursor = None
+        walk.sums = None
         return Ok(WalkReport(checked: walk.checked, done: true, findings: list.new()))
     }
     let name = declaration_index_name(key)?
     let mut findings: List[WalkFinding] = list.new()
-    if walk.entries {
+    if let Sums = record.shape {
+        walk_sums(db, mut walk, record, name, limit, mut findings)?
+    } else if walk.entries {
         walk_entries(db, mut walk, record, name, limit, mut findings)?
     } else {
         walk_rows(db, mut walk, record, name, limit, mut findings)?
@@ -148,8 +152,11 @@ pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkRe
         let mut seen: List[(u32, u32)] = list.new()
         list.push(mut seen, (record.owner, record.id))
         trip_drift(mut db, 0, seen)?
-        // The index is no longer Public; the walk moves past it.
-        walk_past(mut walk)?
+        if let Some((_, id)) = walk.at {
+            if id == record.id {
+                walk_past(mut walk)?
+            }
+        }
     }
     Ok(WalkReport(checked: walk.checked, done: false, findings: take findings))
 }
@@ -167,12 +174,133 @@ fn walk_past(mut walk: IndexWalk) -> Result[(), Error] {
     walk.at = take past
     walk.entries = false
     walk.cursor = None
+    walk.sums = None
     Ok(())
 }
 
 fn walk_finding(mut findings: List[WalkFinding], name: String, entry_key: Bytes, fault: WalkFault) -> Result[(), Error] {
     capacity(list.try_reserve(mut findings, 1))?
     list.push(mut findings, WalkFinding(index: clone(name), entry: copied(entry_key)?, fault: fault))
+    Ok(())
+}
+
+// The fold may span slices. Restart it if a commit changed the head,
+// so comparisons and repair never use totals from different versions.
+fn walk_sums(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] waits {
+    let head = db.heads[0].head
+    match walk.sums {
+        Some(fold) if fold.head == head => (),
+        _ => {
+            walk.sums = Some(WalkSums(head: head, groups: std.omap.new(), ids: 0))
+            walk.entries = false
+            walk.cursor = None
+        },
+    }
+    if walk.entries {
+        return walk_sum_entries(db, mut walk, record, name, limit, mut findings)
+    }
+    let Some(extractor) = bound_extractor(db.indexes, record) else {
+        return Error(Stale(record.id))
+    }
+    let (take rows, done) = tiered_rows_after(db, record.owner, clone(walk.cursor), limit)?
+    for (logical, raw) in rows {
+        let primary = list.slice(logical, 4, list.len(logical))
+        let values = (extractor.extract)(raw, primary)?
+        let next_key = copied(primary)?
+        match walk.sums {
+            Some(mut fold) => fold_sum_row(mut fold, values)?,
+            None => fail("aggregate walk has no fold"),
+        }
+        walk.cursor = Some(take next_key)
+        walk.checked = int.saturating_add(walk.checked, 1)
+    }
+    if done {
+        walk.entries = true
+        walk.cursor = None
+    }
+    Ok(())
+}
+
+fn fold_sum_row(mut fold: WalkSums, values: IndexValue) -> Result[(), Error] {
+    let (take updated, issued) = disk_allocation(scoped fn() -> Result[(std.omap.OMap[Bytes, Totals], u64), Error] {
+        let mut ids = fold.ids
+        let mut groups: std.omap.OMap[Bytes, Totals] = clone(fold.groups)
+        for slot in 0u64 .. list.len(values.keys) {
+            let key = view values.keys[slot]
+            let (members, sum) = match std.omap.get(groups, key) {
+                Some(prior) => (prior.count, prior.sum),
+                None => (0u64, 0u64),
+            }
+            let Some(total) = int.checked_add(sum, values.sums[slot]) else {
+                return Error(Limit(Value))
+            }
+            let prior = replace(mut groups, std.omap.new())
+            let (take merged, _) = std.omap.insert_owned(mut ids, take prior, copied(key)?, Totals(count: members + 1, sum: total))
+            groups = take merged
+        }
+        Ok((take groups, ids))
+    })?
+    fold.groups = take updated
+    fold.ids = issued
+    Ok(())
+}
+
+// Merge the sorted expected groups and stored entries so a missing group
+// is found even when the aggregate has no entries.
+fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] {
+    let folded: std.omap.OMap[Bytes, Totals] = match walk.sums {
+        Some(fold) => clone(fold.groups),
+        None => fail("aggregate walk has no fold"),
+    }
+    let lower: std.omap.Bound[Bytes] = match walk.cursor {
+        Some(final_key) => Excluded(copied(final_key)?),
+        None => Unbounded,
+    }
+    let start = match walk.cursor {
+        Some(final_key) => Excluded(copied(final_key)?),
+        None => Included(prefix(record.id)?),
+    }
+    let mut groups = std.omap.range(folded, lower, Unbounded)
+    let mut indexed = byte_cursor(db.heads[0].roots.collections, take start, prefix(record.id + 1)?)?
+    let mut expected = std.omap.next(mut groups)
+    let mut actual = next_bytes(mut indexed)?
+    for step in 0u64 .. limit {
+        let relation = match expected {
+            Some((want, _)) => match actual {
+                Some((have, _)) => list.compare_bytes(want, have),
+                None => Less,
+            },
+            None => match actual {
+                Some(_) => Greater,
+                None => return walk_past(mut walk),
+            },
+        }
+        if relation == Less {
+            let (take key, _) = option.unwrap(replace(mut expected, None))
+            walk_finding(mut findings, name, key, Missing)?
+            walk.cursor = Some(take key)
+        } else {
+            let (take key, raw) = option.unwrap(replace(mut actual, None))
+            if relation == Greater {
+                walk_finding(mut findings, name, key, Extra)?
+            } else {
+                let (_, wanted) = option.unwrap(replace(mut expected, None))
+                if list.len(raw) != 16 || group_totals(raw)? != (wanted.count, wanted.sum) {
+                    walk_finding(mut findings, name, key, Payload)?
+                }
+            }
+            walk.cursor = Some(take key)
+        }
+        walk.checked = int.saturating_add(walk.checked, 1)
+        if step + 1 < limit {
+            if relation != Greater {
+                expected = std.omap.next(mut groups)
+            }
+            if relation != Less {
+                actual = next_bytes(mut indexed)?
+            }
+        }
+    }
     Ok(())
 }
 

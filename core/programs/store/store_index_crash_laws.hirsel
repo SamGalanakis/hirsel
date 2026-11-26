@@ -1,0 +1,131 @@
+type IndexBuildSchema {
+    rows: Table[u64, u64],
+    by_v: Index[u64, u64, u64, ()],
+    by_sum: Aggregate[u64]
+}
+
+fn index_build_parts(k: u64, v: u64) -> Result[List[(u64, u64)], Capacity] {
+    let mut parts: List[(u64, u64)] = list.with_capacity(3)
+    list.push(mut parts, (k % 5, v))
+    list.push(mut parts, (k % 5, 1u64))
+    if v % 2 == 0 {
+        list.push(mut parts, (5 + k % 3, v))
+    }
+    Ok(take parts)
+}
+
+fn index_build_open(d: Dir, c: Clock, r: Random, tasks: Tasks, create: bool) -> Result[(Db, IndexBuildSchema), Error] waits {
+    let mut options = disk_crash_options("index-build")
+    options.create = create
+    let mut db = open(tasks, d, c, r, options)?
+    let schema = index_build_schema(mut db, Open)?
+    Ok((take db, take schema))
+}
+
+fn index_build_schema(mut db: Db, mode: Mode) -> Result[IndexBuildSchema, Error] waits {
+    let mut d = declare(db, mode)?
+    let mut declared = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = index(mut d, mut declared, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let groups = aggregate(mut d, mut declared, "by_sum", code.describe(index_build_parts), std.codec.key_u64())?
+    let t = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok(IndexBuildSchema(rows: t, by_v: take ix, by_sum: groups))
+}
+
+fn index_build_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    disk_crash_init(d, c, r, tasks, "index-build")?
+    let mut db = open(tasks, d, c, r, disk_crash_options("index-build"))?
+    let _ = index_build_schema(mut db, Migrate)?
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+// Demotes both indexes and rebuilds them in chunks of 16 rows, one row changing
+// between chunks (behind the cursor or ahead of it).
+fn index_build_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (take opened, schema) = index_build_open(d, c, r, tasks, true)?
+    let mut db = take opened
+    rebuild_index(mut db, schema.by_v)?
+    rebuild_aggregate(mut db, schema.by_sum)?
+    let mut round = 0u64
+    while let Some(_) = index_build_step(mut db, 16)? {
+        let k = (round * 37) % 96
+        lix_write(mut db, schema.rows, k, Some(k + 500))?
+        round += 1
+    }
+    close(take db)
+}
+
+// Fold the table independently of the extractor and aggregate read path.
+// Compare the exact collection, including its size, so extra groups fail.
+fn index_build_sums_match(db: Db, schema: IndexBuildSchema) -> Result[bool, Error] waits {
+    let mut members: Inline[u64, 8] =[0; 8]
+    let mut sums: Inline[u64, 8] =[0; 8]
+    let image = snapshot(db)
+    let reading = reader(db, 0)?
+    for k in 0u64 .. 96 {
+        let Some(v) = get(reading, image, schema.rows, k)? else {
+            return Ok(false)
+        }
+        members[k % 5] += 1
+        sums[k % 5] += v + 1
+        if v % 2 == 0 {
+            members[5 + k % 3] += 1
+            sums[5 + k % 3] += v
+        }
+    }
+    let id = schema.by_sum.id
+    let mut stored = byte_cursor(image.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
+    for group in 0u64 .. 8 {
+        let Some((key, raw)) = next_bytes(mut stored)? else {
+            return Ok(false)
+        }
+        if list.len(key) != 12 || list.len(raw) != 16 {
+            return Ok(false)
+        }
+        let found_group: u64 = list.word_be(key, 4)
+        if found_group != group || read_le(raw, 0, 8) != members[group] || read_le(raw, 8, 8) != sums[group] {
+            return Ok(false)
+        }
+    }
+    Ok(match next_bytes(mut stored)? {
+        None => true,
+        Some(_) => false,
+    })
+}
+
+fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
+    let (take opened, schema) = index_build_open(d, c, r, tasks, false)?
+    let mut db = take opened
+    trust_store(mut db)?
+    let mut good = lix_serves(db, schema.by_v, "by_v")? || !required_new
+    if let Public = lix_state(db, "by_sum")? {
+        good = good && index_build_sums_match(db, schema)?
+    } else {
+        good = good && !required_new
+    }
+    // Resume the aggregate before overwrites can hide an incorrect total.
+    while let Backfilling(_) = lix_state(db, "by_sum")? {
+        if let None = index_build_step(mut db, 16)? {
+            return Ok(false)
+        }
+    }
+    good = good && index_build_sums_match(db, schema)?
+    for k in 0u64 .. 96 {
+        lix_write(mut db, schema.rows, k, Some(k + 2000))?
+    }
+    while let Some(_) = index_build_step(mut db, 16)? {}
+    good = good && lix_serves(db, schema.by_v, "by_v")? && index_build_sums_match(db, schema)?
+    let id = schema.by_v.id
+    let mut expected: List[Bytes] = list.new()
+    for k in 0u64 .. 96 {
+        let mut logical = prefix(id)?
+        list.put_word_be(mut logical, k + 2000)
+        list.put_word_be(mut logical, k)
+        list.push(mut expected, take logical)
+    }
+    good = good && lix_entries(db, id)? == expected
+    trust_indexes(mut db)?
+    close(take db)?
+    Ok(good)
+}

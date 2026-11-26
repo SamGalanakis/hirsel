@@ -163,6 +163,7 @@ dirs = ["."]
 "store_disk_laws.hirsel" = "store"
 "store_disk_laws_2.hirsel" = "store"
 "store_crash_laws.hirsel" = "store"
+"store_index_crash_laws.hirsel" = "store"
 "store_catchup_laws.hirsel" = "store"
 "store_crash_install_laws.hirsel" = "store"
 "store_law_schema.hirsel" = "store"
@@ -274,6 +275,9 @@ limit = 268435456
 limit = 268435456
 
 [tests.runs."store@1/store/test_l87_probe_across_a_fork"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_directory_drain_to_baseline"]
 limit = 268435456
 
 [tests.runs."store@1/store/test_l88_compaction_relocates_blobs"]

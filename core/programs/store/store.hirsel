@@ -4532,16 +4532,7 @@ fn journal_decode(file: String, kind: u16, raw: Bytes) -> Result[JournalEvent, E
     if kind == 0x0011 {
         return Ok(Commit(journal_decode_commit(file, raw)?))
     }
-    let mut at = 0u64
-    let id: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-    let parent: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-    let forked_at = disk_number(file, raw, mut at, 8)?
-    let name = disk_name(file, raw, mut at)?
-    let watermark = disk_number(file, raw, mut at, 8)?
-    if at != list.len(raw) || watermark == 0 {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    Ok(Fork(JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark)))
+    Ok(Fork(journal_decode_fork(file, raw)?))
 }
 
 fn journal_torn(why: Why) -> bool {

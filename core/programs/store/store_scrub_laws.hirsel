@@ -114,7 +114,9 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let d_name = paged_pack_path(d_seq)?
     let mut d_raw = disk_read_paged_file(path, d_name, 67108864)?
     let d_width = read_le(d_raw, 76, 4)
-    if old_stamp == read_le(d_raw, 96, 8) { fail("the stale frame needs a different stamp") }
+    if old_stamp == read_le(d_raw, 96, 8) {
+        fail("the stale frame needs a different stamp")
+    }
     list.set_word_le(mut d_raw, 96, old_stamp)
     let d_seal = capacity(disk_check(DiskContext(store: db.store, role: 3, seq: d_seq), 72, list.slice(d_raw, 72, 80), list.slice(d_raw, 88, 88 + d_width)))?
     list.set_word_le(mut d_raw, 80, d_seal)
@@ -147,9 +149,15 @@ fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     scrub_fill(mut db, t, 2000, 0)?
     let _ = checkpoint(mut db)?
     let mut listed = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
-    let Some((first, _)) = std.omap.next(mut listed) else { return Error(MigrationFault) }
-    let Some((second, _)) = std.omap.next(mut listed) else { return Error(MigrationFault) }
-    let Some((third, _)) = std.omap.next(mut listed) else { return Error(MigrationFault) }
+    let Some((first, _)) = std.omap.next(mut listed) else {
+        return Error(MigrationFault)
+    }
+    let Some((second, _)) = std.omap.next(mut listed) else {
+        return Error(MigrationFault)
+    }
+    let Some((third, _)) = std.omap.next(mut listed) else {
+        return Error(MigrationFault)
+    }
     let first_name = paged_pack_path(first)?
     let mut raw = disk_read_paged_file(path, first_name, 67108864)?
     // The 72-byte HEADER and the first frame's 16-byte envelope and payload.
@@ -253,20 +261,192 @@ fn disk_test_scrub_interleaved(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let mut steps = 0u64
     loop {
         let report = scrub_step(mut tour, 256)?
-        if list.len(report.faults) != 0 { fail("§11.17: a tour between commits and cuts found a fault") }
-        if let None = report.next { break }
+        if list.len(report.faults) != 0 {
+            fail("§11.17: a tour between commits and cuts found a fault")
+        }
+        if let None = report.next {
+            break
+        }
         steps += 1
-        if steps > 100000 { fail("§11.17: the tour never ended") }
+        if steps > 100000 {
+            fail("§11.17: the tour never ended")
+        }
         scrub_fill(mut db, t, 50 + steps % 450, steps)?
-        if steps % 4 == 0 { let _ = checkpoint(mut db)? }
+        if steps % 4 == 0 {
+            let _ = checkpoint(mut db)?
+        }
     }
-    if steps == 0 { fail("the fixture's tour fit one slice") }
+    if steps == 0 {
+        fail("the fixture's tour fit one slice")
+    }
     drop(take tour)
     let _ = checkpoint(mut db)?
     let mut again = begin_scrub(mut db)?
     let mut faults: List[Fault] = list.new()
     let _ = scrub_to_end(mut again, 4096, mut faults)?
-    if list.len(faults) != 0 { fail("§11.17: the store after the tour has a fault") }
+    if list.len(faults) != 0 {
+        fail("§11.17: the store after the tour has a fault")
+    }
     drop(take again)
     close(take db)
+}
+
+type CheckDamage: key = PinPointer | KeyedPointer | LineageEnvelope | RepeatedStamp | SuffixChecksum | ForkKeyedMeta
+
+fn check_test_dir(d: Dir) -> Dir waits {
+    let mut label = string.with_capacity(64)
+    string.push(mut label, "check-")
+    result.unwrap(host.mkdtemp(d, mut label))
+}
+
+fn check_test_pack(d: Dir, id: StoreId, seq: u64, image: std.page.Image, stale: bool) -> Result[std.page.PagePtr, Error] waits {
+    let ctx = DiskContext(store: id, role: 3, seq: seq)
+    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let mut ptr = capture_test_page(mut raw, ctx, image)?
+    if stale {
+        // The bytes on disk have a valid envelope. Only the pointer disagrees.
+        ptr.checksum = ptr.checksum ^ 1u64
+    }
+    disk_write_synced(d, paged_pack_path(seq)?, raw)?
+    Ok(ptr)
+}
+
+fn check_test_stamp(stamp: u64) -> Result[std.page.Image, Error] {
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: InlineValue(b"x")))
+    page_result(std.page.encode(rows, 0, stamp, Unprefixed))
+}
+
+fn check_test_inventory(d: Dir, id: StoreId, second: bool, width: u64) -> Result[std.page.PagePtr, Error] waits {
+    let mut rows: List[std.page.Entry] = list.with_capacity(2)
+    let packed = encode_pack_row(PagePack(class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: InlineValue(clone(packed))))
+    if second {
+        list.push(mut rows, std.page.Entry(key: key_word(2), cell: InlineValue(take packed)))
+    }
+    let image = page_result(std.page.encode(rows, 0, 2, Unprefixed))?
+    check_test_pack(d, id, 3, image, false)
+}
+
+fn check_test_packs(d: Dir, id: StoreId, mut m: PageManifest, damage: CheckDamage) -> Result[(String, u64, Why), Error] waits {
+    let image = check_test_stamp(1)?
+    let first = check_test_pack(d, id, 1, image, damage == PinPointer || damage == KeyedPointer)?
+    m.next_stamp = 3
+    m.next_pack = 4
+    m.pack_root = check_test_inventory(d, id, damage == RepeatedStamp, int.widen(first.len))?
+    if damage == KeyedPointer || damage == ForkKeyedMeta {
+        let zero = std.page.unlocated(0)
+        let mut keyed_roots: List[std.page.PagePtr] = list.with_capacity(7)
+        list.push(mut keyed_roots, first)
+        list.fill(mut keyed_roots, 6, zero)
+        m.branches[0].roots.keyed = take keyed_roots
+        return Ok(("p-1", 72u64, Checksum))
+    }
+    let held = if damage == RepeatedStamp {
+        m.branches[0].roots.catalog = first
+        check_test_pack(d, id, 2, image, false)?
+    } else {
+        first
+    }
+    let roots = LocatedRoots(collections: std.page.unlocated(0), streams: std.page.unlocated(0), catalog: held, keyed: list.new())
+    list.push(mut m.pins, LocatedPin(owner: ApplicationPin, name: "held", branch: 0, version: 0, roots: take roots, watermark: 3))
+    if damage == RepeatedStamp {
+        Ok(("p-2", 72u64, Malformed))
+    } else {
+        Ok(("p-1", 72u64, Checksum))
+    }
+}
+
+fn check_test_lineage(d: Dir, id: StoreId, mut m: PageManifest) -> Result[u64, Error] waits {
+    let ctx = DiskContext(store: id, role: 3, seq: 1)
+    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let edge = lineage_row(ForkRow(LineageFork(child: 1, parent: 0, watermark: 1, adopted: true)))
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: clone(edge.key), cell: InlineValue(clone(edge.value))))
+    let image = page_result(std.page.encode(rows, 0, 1, Unprefixed))?
+    m.lineage = capture_test_page(mut raw, ctx, image)?
+    let at = list.len(raw)
+    let _ = capture_test_page(mut raw, ctx, check_test_stamp(2)?)?
+    raw[at + 8] = raw[at + 8] ^ 1u8
+    disk_write_synced(d, "p-1", raw)?
+    m.next_pack = 2
+    m.next_stamp = 3
+    m.next_branch = 2
+    Ok(at)
+}
+
+fn check_test_end(d: Dir, id: StoreId, end: u64) -> Result[(), Error] waits {
+    let ctx = DiskContext(store: id, role: 4, seq: 1)
+    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let mut payload: Bytes = list.with_capacity(8)
+    list.put_word_le(mut payload, end)
+    list.append(mut raw, capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?)
+    disk_write_synced(d, "j-1.end", raw)
+}
+
+fn check_test_damage(d: Dir, c: Clock, damage: CheckDamage) -> Result[(), Error] waits {
+    let id = StoreId(hi: 7, lo: 3013)
+    let mut m = page_manifest_empty(default_limits())
+    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let mut journal = capacity(disk_header_bytes(ctx, 0, 0))?
+    let (path, at, reason) = match damage {
+        LineageEnvelope => ("p-1", check_test_lineage(d, id, mut m)?, Checksum),
+        SuffixChecksum => {
+            list.append(mut journal, capture_test_commit(ctx, 72, 1, 16, 0)?)
+            let suffix_at = list.len(journal)
+            list.append(mut journal, capture_test_commit(ctx, suffix_at, 2, 16, 0)?)
+            journal[suffix_at + 8] = journal[suffix_at + 8] ^ 1u8
+            check_test_end(d, id, list.len(journal))?
+            ("j-1", suffix_at, Checksum)
+        },
+        ForkKeyedMeta => {
+            let _ = check_test_packs(d, id, mut m, damage)?
+            m.limits.meta = 4096 - 147
+            capture_test_meta_ceiling(mut m)?
+            m.limits.meta = 4096
+            let payload = fork_test_payload(int.widen(m.next_branch), "fork")
+            list.append(mut journal, capacity(disk_seal(ctx, 72, 0x0013, 1, payload))?)
+            ("j-1", 72u64, Malformed)
+        },
+        _ => check_test_packs(d, id, mut m, damage)?,
+    }
+    disk_write_synced(d, "LOCK", b"")?
+    disk_write_synced(d, "MANIFEST", disk_page_manifest_bytes(id, m)?)?
+    disk_write_synced(d, "j-1", journal)?
+    let empty: List[Fault] = list.new()
+    let observed: core.Cell[List[Fault]] = cell.new(take empty)
+    let on_fault: scoped[view] fn(Fault) -> Result[(), Error] waits = scoped fn(found: Fault) -> Result[(), Error] {
+        let retained: Fault = clone(found)
+        cell.with(observed, take retained, fn(mut faults: List[Fault], take one: Fault) -> () {
+            list.push(mut faults, take one)
+        })
+        Ok(())
+    }
+    match prepare(d, c, Check) {
+        Ok(take prepared) => {
+            let checked = check_capture(take prepared, on_fault) ?=> |_| MigrationFault
+            if checked.faults != 1 {
+                return Error(MigrationFault)
+            }
+        },
+        Error(Corrupt(take fault)) => on_fault(fault)?,
+        Error(take problem) => return Error(take problem),
+    }
+    let faults = cell.into_inner(take observed)
+    if list.len(faults) != 1 || faults[0].file != path || faults[0].offset != at {
+        return Error(MigrationFault)
+    }
+    match (faults[0].why, reason) {
+        (Checksum, Checksum) => Ok(()),
+        (Malformed, Malformed) => Ok(()),
+        _ => Error(MigrationFault),
+    }
+}
+
+@test
+fn check_detects(d: Dir, c: Clock) -> Result[(), Error] waits {
+    for damage in[PinPointer, KeyedPointer, LineageEnvelope, RepeatedStamp, SuffixChecksum, ForkKeyedMeta] {
+        check_test_damage(check_test_dir(d), c, damage)?
+    }
+    Ok(())
 }

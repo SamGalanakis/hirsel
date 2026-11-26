@@ -28,6 +28,35 @@ fn capture_test_cover(d: Dir, c: Clock) -> Result[(), Error] waits {
     Ok(())
 }
 
+fn capture_test_checked(take prepared: PreparedCapture, reprice: u64, reserved: bool) -> Result[CheckTotals, Error] waits {
+    let reject_fault: scoped[view] fn(Fault) -> Result[(), Error] waits = fn(found: Fault) -> Result[(), Error] {
+        Error(Corrupt(clone(found)))
+    }
+    let checked = if reserved {
+        let need = capture_need(prepared).total + reprice
+        capacity(bound bytes need {
+            check_capture(take prepared, reject_fault)
+        })?
+    } else {
+        check_capture(take prepared, reject_fault)
+    }
+    match take checked {
+        Ok(summary) => Ok(summary),
+        Error(CheckStore(take problem)) => Error(take problem),
+        Error(CheckBudget(cause)) => Error(Full(Allocation(cause))),
+        Error(CheckRepeats(cause)) => Error(Full(Allocation(cause))),
+    }
+}
+
+fn capture_test_check_cover(d: Dir, c: Clock, repeat_bytes: u64) -> Result[(), Error] waits {
+    let reserved = capture_test_checked(prepare(d, c, Check)?, repeat_bytes, true)?
+    let admitted = capture_test_checked(prepare(d, c, Check)?, repeat_bytes, false)?
+    if reserved != admitted || reserved.faults != 0 || reserved.repeats != repeat_bytes {
+        fail("Check's reservation changed its output or measured the wrong number of repeats")
+    }
+    Ok(())
+}
+
 fn capture_test_page(mut raw: Bytes, ctx: DiskContext, source: std.page.Image) -> Result[std.page.PagePtr, Error] {
     let payload = std.page.payload(source)
     let offset = list.len(raw)
@@ -159,7 +188,8 @@ fn capture_test_reopens(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         fail("reopen fixture did not create 40 live segments")
     }
     let _ = take prepared
-    capture_test_cover(d, c)
+    capture_test_cover(d, c)?
+    capture_test_check_cover(d, c, 0)
 }
 
 fn capture_test_stored_blob(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
@@ -178,7 +208,8 @@ fn capture_test_stored_blob(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     }
     let _ = checkpoint(mut db)?
     close(take db)?
-    capture_test_cover(d, c)
+    capture_test_cover(d, c)?
+    capture_test_check_cover(d, c, 0)
 }
 
 @test
@@ -195,7 +226,8 @@ fn need_covers(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] w
     disk_write_synced(d, journal_path(1, "")?, raw)?
     let _ = take raw
     let _ = take manifest
-    capture_test_cover(d, c)?;
+    capture_test_cover(d, c)?
+    capture_test_check_cover(d, c, 16)?;
     let mut name = string.with_capacity(64)
     string.push(mut name, "reopens-")
     let reopened = result.unwrap(host.mkdtemp(d, mut name))

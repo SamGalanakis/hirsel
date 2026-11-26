@@ -100,17 +100,17 @@ fn capture_prefix(mut file: HostFile, path: String, mut source: CaptureChunk, at
     Ok(take raw)
 }
 
-fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk, ctx: DiskContext, limits: StoreLimits, at: u64, keep_commit: bool) -> Result[JournalFrame, Error] waits {
+type CapturePayload: key = SkipPayload | KeepCommit | KeepEvents
+
+fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk, ctx: DiskContext, limits: StoreLimits, at: u64, keep: CapturePayload) -> Result[JournalFrame, Error] waits {
     let head = capture_prefix(mut file, path, mut source, at, 16)?
     let frame = disk_read_frame_head(path, head, at)?
     if frame.size > source.end - at - 16 {
         return Error(disk_fault(path, at, Truncated))
     }
-    if frame.kind == 0x0011 && frame.size > transaction_limit(limits) {
-        return Error(disk_fault(path, at, Malformed))
-    }
-    let keep = keep_commit && frame.kind == 0x0011
-    let mut payload = disk_read_buffer(if keep {
+    let oversized = frame.kind == 0x0011 && frame.size > transaction_limit(limits)
+    let retained = !oversized && ((keep == KeepCommit && frame.kind == 0x0011) || (keep == KeepEvents && journal_event_kind(frame.kind)))
+    let mut payload = disk_read_buffer(if retained {
         frame.size
     } else {
         0u64
@@ -122,7 +122,7 @@ fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk
         let start = capture_chunk_at(mut file, path, mut source, offset)?
         let width = order.min(end - offset, list.len(source.raw) - start)
         std.check.add(mut check, source.raw, start, start + width)
-        if keep {
+        if retained {
             list.append(mut payload, list.slice(source.raw, start, start + width))
         }
         offset += width
@@ -131,14 +131,14 @@ fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk
         return Error(disk_fault(path, at, Checksum))
     }
     disk_check_frame_kind(path, ctx, frame.kind, frame.flags, at)?
-    Ok(JournalFrame(end: end, kind: frame.kind, payload: if keep {
+    Ok(JournalFrame(end: end, kind: frame.kind, payload: if retained {
         Some(take payload)
     } else {
         None
     }))
 }
 
-fn capture_scan_frames[S](mut file: HostFile, id: StoreId, seq: u64, limits: StoreLimits, durable_end: u64, end: u64, torn: bool, keep_commit: bool, mut state: S, consume: scoped[view] fn(mut S, String, u64, Bytes) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
+fn capture_scan_frames[S](mut file: HostFile, id: StoreId, seq: u64, limits: StoreLimits, durable_end: u64, end: u64, torn: bool, keep: CapturePayload, mut state: S, consume: scoped[view] fn(mut S, String, u64, u16, Bytes) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
     let path = journal_path(seq, "")?
     if durable_end < 72 || end < durable_end || disk_io(host.stat_file(mut file))?.size < end {
         return Error(disk_fault(path, end, Truncated))
@@ -148,7 +148,7 @@ fn capture_scan_frames[S](mut file: HostFile, id: StoreId, seq: u64, limits: Sto
     let mut at = 72u64
     let mut frames = 0u64
     while at < end {
-        let frame = match capture_read_frame(mut file, path, mut source, header.context, limits, at, keep_commit) {
+        let frame = match capture_read_frame(mut file, path, mut source, header.context, limits, at, keep) {
             Ok(take good) => take good,
             Error(Corrupt(take fault)) => {
                 if torn && at >= durable_end && journal_torn(fault.why) {
@@ -161,8 +161,11 @@ fn capture_scan_frames[S](mut file: HostFile, id: StoreId, seq: u64, limits: Sto
         if at < durable_end && frame.end > durable_end {
             return Error(disk_fault(path, at, Truncated))
         }
+        if frame.kind == 0x0011 && frame.end - at - 16 > transaction_limit(limits) {
+            return Error(disk_fault(path, at, Malformed))
+        }
         if let Some(payload) = view frame.payload {
-            consume(mut state, path, at, payload)?
+            consume(mut state, path, at, frame.kind, payload)?
         }
         frames += 1
         at = frame.end

@@ -9,8 +9,8 @@
 // 75 the store is held by a writer.
 //
 // `inspect` and `stats` (§15.6) capture fd 3, beside a live
-// writer; `verify` scrubs fd 3, a cloned image the driver made, and exits 1 on a
-// fault. Each ignores fd 4, which the driver points at fd 3.
+// writer. `verify` locks the image on fd 3 and checks its packs and journal.
+// Each ignores fd 4, which the driver points at fd 3.
 fn id_hex(hi: u64, lo: u64) -> String {
     let mut raw: Bytes = list.with_capacity(16)
     for word in[hi, lo] {
@@ -254,7 +254,7 @@ fn describe_fact(fact: store.DescribeLine, stats: bool, out: Stdout, err: Stderr
     }
 }
 
-fn describe_shortage(err: Stderr, verb: String, c: Capacity, parts: List[store.Part]) -> Result[(), Exit] waits {
+fn capture_shortage(err: Stderr, verb: String, c: Capacity, parts: List[store.Part]) -> Result[(), Exit] waits {
     let mut text = string.from("hirsel store: refused: ")
     string.push(mut text, full_refusal(Allocation(c)))
     string.push(mut text, ": ")
@@ -269,10 +269,14 @@ fn describe_shortage(err: Stderr, verb: String, c: Capacity, parts: List[store.P
         string.push(mut detail, "\n")
         let _ = stderr.write(err, detail)
     }
-    let mut remedy = string.from("hirsel store: the need is ")
-    string.push_u64(mut remedy, c.requested)
-    string.push(mut remedy, " bytes in the fixed 1 GiB store_tool root; no store_tool route reads a catalog this large\n")
-    let _ = stderr.write(err, remedy)
+    if verb == "verify" {
+        let _ = stderr.write(err, "hirsel store: the release that serves this store can verify it: hirsel store verify DIR --release EXE\n")
+    } else {
+        let mut remedy = string.from("hirsel store: the need is ")
+        string.push_u64(mut remedy, c.requested)
+        string.push(mut remedy, " bytes in the fixed 1 GiB store_tool root; no store_tool route reads a catalog this large\n")
+        let _ = stderr.write(err, remedy)
+    }
     Error(Exit(status: 1u8))
 }
 
@@ -284,7 +288,7 @@ fn describe(d: Dir, c: Clock, verb: String, out: Stdout, err: Stderr) -> Result[
             Error(Full(Allocation(cause))) => {
                 let mut parts: List[store.Part] = list.with_capacity(1)
                 list.push(mut parts, store.Part(name: "bootstrap", amount: cause.requested))
-                return describe_shortage(err, verb, cause, parts)
+                return capture_shortage(err, verb, cause, parts)
             },
             Error(Io(Other(24))) => return refused(err, "Io(Other(24)): EMFILE, 0 open packs"),
             Error(e) => return refused(err, store_refusal(e)),
@@ -296,7 +300,7 @@ fn describe(d: Dir, c: Clock, verb: String, out: Stdout, err: Stderr) -> Result[
             })
         }
         match take result {
-            Error(cause) => return describe_shortage(err, verb, cause, budget.parts),
+            Error(cause) => return capture_shortage(err, verb, cause, budget.parts),
             Ok(Error(Changed(file))) if file == "MANIFEST" => continue,
             Ok(Error(Io(Other(24)))) => return refused(err, "Io(Other(24)): EMFILE"),
             Ok(Error(e)) => return refused(err, store_refusal(e)),
@@ -313,50 +317,87 @@ fn describe(d: Dir, c: Clock, verb: String, out: Stdout, err: Stderr) -> Result[
     }
 }
 
-// `verify` without a release: one full scrub tour over the image, every
-// page's checksum and structure. Each fault is printed; any fault exits 1.
-fn scrub_image(d: Dir, c: Clock, r: Random, tasks: Tasks, take options: store.Options, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
-    options.create = false
-    let mut db = match store.open(tasks, d, c, r, options) {
-        Ok(take opened) => take opened,
-        Error(e) => return refused(err, store_refusal(e)),
+fn verify_fault(out: Stdout, fault: store.Fault) -> Result[(), store.Error] waits {
+    let mut text = string.from("scrub fault ")
+    string.push(mut text, fault.file)
+    string.push(mut text, " at ")
+    string.push_u64(mut text, fault.offset)
+    string.push(mut text, " ")
+    string.push(mut text, match fault.why {
+        Checksum => "Checksum",
+        Truncated => "Truncated",
+        Flags => "Flags",
+        Kind(_) => "Kind",
+        Header => "Header",
+        Gap(_) => "Gap",
+        Order => "Order",
+        Dangling(_) => "Dangling",
+        Absent => "Absent",
+        Malformed => "Malformed",
+        Regressed => "Regressed",
+    })
+    string.push(mut text, "\n")
+    match stdout.write(out, text) {
+        Ok(_) => Ok(()),
+        Error(_) => Error(Io(Closed)),
     }
-    let mut tour = match store.begin_scrub(mut db) {
-        Ok(take t) => take t,
-        Error(e) => return refused(err, store_refusal(e)),
-    }
-    let mut text = string.new()
-    let mut faults = 0u64
-    let mut checked = 0u64
-    loop {
-        let report = match store.scrub_step(mut tour, 16777216u64) {
-            Ok(take seen) => take seen,
-            Error(e) => return refused(err, store_refusal(e)),
-        }
-        checked = report.checked
-        for fault in report.faults {
-            faults += 1u64
-            string.push(mut text, "scrub fault ")
-            string.push(mut text, fault.file)
-            string.push(mut text, " at ")
-            string.push_u64(mut text, fault.offset)
-            string.push(mut text, "\n")
-        }
-        if let None = report.next {
-            break
-        }
-    }
-    let _ = store.close(take db)
-    string.push(mut text, "verify: scrubbed ")
-    string.push_u64(mut text, checked)
-    string.push(mut text, " bytes, ")
-    string.push_u64(mut text, faults)
+}
+
+fn verify_shortage(err: Stderr, cause: Capacity, name: String) -> Result[(), Exit] waits {
+    let mut parts: List[store.Part] = list.with_capacity(1)
+    list.push(mut parts, store.Part(name: clone(name), amount: cause.requested))
+    capture_shortage(err, "verify", cause, parts)
+}
+
+fn verify_done(out: Stdout, totals: store.CheckTotals) -> Result[(), Exit] waits {
+    let mut text = string.from("verify: scrubbed ")
+    string.push_u64(mut text, totals.scrubbed)
+    string.push(mut text, " bytes, walked ")
+    string.push_u64(mut text, totals.pages)
+    string.push(mut text, " pages, checked ")
+    string.push_u64(mut text, totals.journal)
+    string.push(mut text, " journal bytes (frames only; priors, trim dropped and uncertain fork keyed surcharge not checked, verify --release checks them), ")
+    string.push_u64(mut text, totals.faults)
     string.push(mut text, " faults\n")
     say(out, text)?
-    if faults != 0 {
+    if totals.faults != 0 {
         return Error(Exit(status: 1u8))
     }
     Ok(())
+}
+
+fn verify_image(d: Dir, c: Clock, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    let prepared = match store.prepare(d, c, Check) {
+        Ok(take found) => take found,
+        Error(Held) => {
+            let _ = stderr.write(err, "hirsel store: the store is held by a writer\n")
+            return Error(Exit(status: 75u8))
+        },
+        Error(Full(Allocation(cause))) => return verify_shortage(err, cause, "bootstrap"),
+        Error(Corrupt(take found)) => {
+            verify_fault(out, found) ?=> |_| Exit(status: 1u8)
+            return verify_done(out, store.CheckTotals(scrubbed: 0, pages: 0, journal: 0, faults: 1, repeats: 0))
+        },
+        Error(Io(Other(24))) => return refused(err, "Io(Other(24)): EMFILE, 0 open packs"),
+        Error(e) => return refused(err, store_refusal(e)),
+    }
+    let budget = store.capture_need(prepared)
+    let totals = match store.check_capture(take prepared, scoped fn(found: store.Fault) -> Result[(), store.Error] waits {
+        verify_fault(out, found)
+    }) {
+        Ok(take found) => take found,
+        Error(CheckBudget(cause)) => return capture_shortage(err, "verify", cause, budget.parts),
+        Error(CheckRepeats(cause)) => return verify_shortage(err, cause, "repeats"),
+        Error(CheckStore(Io(Other(24)))) => return refused(err, "Io(Other(24)): EMFILE, 0 open packs"),
+        Error(CheckStore(e)) => return refused(err, store_refusal(e)),
+    }
+    let mut text = string.from("hirsel store verify needs ")
+    string.push_u64(mut text, budget.total)
+    string.push(mut text, " bytes\nhirsel store verify repeats need ")
+    string.push_u64(mut text, totals.repeats)
+    string.push(mut text, " bytes\n")
+    let _ = stderr.write(err, text)
+    verify_done(out, totals)
 }
 
 pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, err: Stderr, argv: Args) -> Result[(), Exit] waits {
@@ -366,15 +407,15 @@ pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, 
     if verb == "inspect" || verb == "stats" {
         return describe(from, c, verb, out, err)
     }
+    if verb == "verify" {
+        return verify_image(from, c, out, err)
+    }
     let options = match store.sized(Directory, 2147483648u64) {
         Ok(take sized) => take sized,
         Error(_) => return refused(err, "Full"),
     }
     if verb == "backup" {
         return backup(from, to, c, r, tasks, take options, out, err)
-    }
-    if verb == "verify" {
-        return scrub_image(from, c, r, tasks, take options, out, err)
     }
     if verb != "restore" {
         return Error(Exit(status: 2u8))

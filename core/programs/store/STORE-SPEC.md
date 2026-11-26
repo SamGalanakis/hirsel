@@ -7675,7 +7675,7 @@ Two kinds of command read a store for an operator. `inspect`, `stats` and `verif
 |---|---|---|
 | `hirsel store inspect DIR` | `store_tool`, a prepared Directory capture | prints `store <id> head <H>`, then one line per collection: its form, name, exact row count and, for indexes and aggregates, state and revision |
 | `hirsel store stats DIR` | `store_tool`, a prepared Directory capture | the `inspect` lines with each collection's charged bytes, plus the journal prefix, the account at the cut, pins and pack rows |
-| `hirsel store verify DIR` | `store_tool`, on a copy | a full scrub (§11.17) of a copy of the image; prints each fault and `verify: scrubbed N bytes, F faults` |
+| `hirsel store verify DIR` | `store_tool`, a prepared Check on a copy | checks the listed packs, the checkpoint graph and the selected journal; prints each fault and the Check totals below |
 | `hirsel store verify DIR --release EXE` | the release, on a copy | the checks below, in `Report` mode |
 | `hirsel store repair DIR --release EXE` | the release, in place | the repair below |
 
@@ -7709,6 +7709,37 @@ chunks, with only its description projected. Stats prints the MANIFEST account l
 name, branch and version, and the listed pack rows with class, frames, live and bytes.
 Describe checks the files it reads. Use verify to check the rest of the image.
 
+**Prepared Check.** Offline verify holds LOCK exclusive on the directory it reads. It waits
+for a shared fence on each journal segment and syncs the segment. Each successor HEADER
+sets its predecessor's bound. A valid terminal END sets the durable floor, and locked recovery
+scans the terminal segment up to EOF or a torn frame at or beyond that floor. A first segment
+with an incomplete HEADER and no valid END yields no terminal. Check can still verify the
+checkpoint. A held writer lock refuses with exit 75. Check never opens a writer.
+
+1. **Envelope.** Walk the four list trees to collect the listed pack rows and the reached class-2
+   pack sequences. Require listed, retired and class-2 sequences to be disjoint. Read the listed
+   and class-2 packs in sequence order, one at a time, in 65,536-byte chunks. Check frame
+   envelopes, classes, stamp bounds and extension limits. For a listed pack, match the row's
+   frame and payload byte counts.
+2. **Reachability.** Walk the four list roots and every branch and pin's collections, streams,
+   catalog and keyed roots. Check accepted frame boundaries, AP20 pointer identity, class,
+   domain, level and page edge order. Stream BLOB values through the same chunk reader.
+   In the first walk a visited stamp stops descent and sets its repeat bit on a second arrival.
+   Reserve 16 bytes per distinct repeated stamp before a second walk. Clear the visited bits,
+   record each repeated stamp's first location, then require later arrivals to use that
+   location and page domain. Two reached copies of one stamp at different locations are
+   `Corrupt(Malformed)`.
+3. **Journal.** Read the selected prefix with a bounded reader and a view into one COMMIT
+   frame at a time. Check the recorded frame and value limits, version gaps, FORK id and
+   name uniqueness, the parent's head and branch and pin record bytes against the recorded
+   meta limit. Include a FORK's keyed-root surcharge when the parent has nonempty checkpointed
+   keyed roots and no keyed delete has made their occupancy uncertain.
+
+Offline Check leaves out prior values, trim `dropped` and the FORK keyed surcharge when
+its applicability depends on keyed replay. `verify --release` checks them. Offline Check prints
+`verify: scrubbed N bytes, walked P pages, checked J journal bytes (frames only; priors, trim dropped and uncertain fork keyed surcharge not checked, verify --release checks them), F faults`.
+Any fault exits 1.
+
 **Reservation.** A fixed `BOOTSTRAP` scope covers measurement. After preparation the tool
 reserves the sum of the parts below to describe the selected capture. It prints that need on
 success. On a reservation refusal it prints `Full(Allocation(requested, available))`, the parts
@@ -7716,15 +7747,23 @@ and the remedy `the need is <requested> bytes in the fixed 1 GiB store_tool root
 route reads a catalog this large`. Overflow refuses with the maximum u64
 figure. There is no row, stamp or suffix byte term.
 
-| Part | Describe bytes |
-|---|---|
-| bootstrap | two rounded MANIFEST file lengths, plus 2 × recorded meta + 4,096 for its decoded record, 1,048,672 for END, the recorded frame limit and the page path |
-| segments | 48 per selected segment |
-| held | 32 per pack-list row or reached page of any of the four lists |
-| deltas | 32 × next_table |
-| catalog | 32 per catalog record plus the sum of rounded name lengths |
-| chunk | 65,536 for the journal or catalog BLOB reader |
-| scratch | 8,192 for the projected revision and one output line |
+| Part | Describe bytes | Check bytes |
+|---|---|---|
+| bootstrap | two rounded MANIFEST file lengths, plus 2 × recorded meta + 4,096 for its decoded record, 1,048,672 for END, the recorded frame limit and the page path | same |
+| segments | 48 per selected segment | same |
+| lists | | 48 per counted list row or reached list page |
+| held | 32 per pack-list row or reached page of any of the four lists | |
+| deltas | 32 × next_table | |
+| catalog | 32 per catalog record plus the sum of rounded name lengths | |
+| bitmaps | | 2 × ⌈next_stamp/8⌉ |
+| branches | | 24 × (⌊meta/143⌋ + 1) |
+| chunk | 65,536 for the journal or catalog BLOB reader | 65,536 for the journal or pack reader |
+| scratch | 8,192 for the projected revision and one output line | 8,192 plus a second page path for a collection reached through the collection map |
+| repeats | | 16 per distinct repeated stamp, reserved after the first walk |
+
+If Check's first reservation fails, verify prints its need and parts. If the repeat reservation
+fails, verify prints the required repeat bytes and remaining bytes before the locate walk
+runs. Both refusals point to `hirsel store verify DIR --release EXE`.
 
 The page path is 65 × (8,400 + `PAGE_DECODED`). Under MEM-24, `std.page.decode` retains the
 input buffer and allocates no entry table. When the walk asks for an entry, the key and inline

@@ -67,7 +67,17 @@ fn capture_page(mut packs: CapturePacks, ptr: std.page.PagePtr, domain: std.page
     if width > PAGE_LIMIT {
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
-    let image = capture_with_pack(mut packs, path, ptr.pack, ptr.stamp, ptr.offset, class, scoped fn(mut file: HostFile) -> Result[std.page.Image, Error] waits {
+    capture_with_pack(mut packs, path, ptr.pack, ptr.stamp, ptr.offset, class, scoped fn(mut file: HostFile) -> Result[std.page.Image, Error] waits {
+        capture_read_page(mut file, path, id, ptr, domain, expected_level)
+    })
+}
+
+fn capture_read_page(mut file: HostFile, path: String, id: StoreId, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8]) -> Result[std.page.Image, Error] waits {
+    let width: u64 = int.widen(ptr.len)
+    if width > PAGE_LIMIT {
+        return Error(disk_fault(path, ptr.offset, Malformed))
+    }
+    let image = {
         let size = disk_io(host.stat_file(mut file))?.size
         if ptr.offset > size || 16 + width > size - ptr.offset {
             return Error(disk_fault(path, ptr.offset, Malformed))
@@ -87,8 +97,8 @@ fn capture_page(mut packs: CapturePacks, ptr: std.page.PagePtr, domain: std.page
         let mut buffer = take raw
         list.copy_within(mut buffer, 16, 0, width)
         list.truncate(mut buffer, width)
-        decode_located_page(path, ptr.offset, take buffer, domain)
-    })?
+        decode_located_page(path, ptr.offset, take buffer, domain)?
+    }
     let height = std.page.level(image)
     if height >= 65 || (if let Some(wanted) = expected_level {
         wanted != height
@@ -101,12 +111,17 @@ fn capture_page(mut packs: CapturePacks, ptr: std.page.PagePtr, domain: std.page
 }
 
 fn capture_walk_pages[S](mut packs: CapturePacks, ptr: std.page.PagePtr, class: u8, expected_level: Option[u8], mut state: S, mut pages: u64, row: scoped[view] fn(mut CapturePacks, mut S, String, u64, Bytes, std.page.Cell) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    capture_walk_list(mut packs, ptr, class, expected_level, mut state, mut pages, fn(mut _state: S, _ptr: std.page.PagePtr) {}, row)
+}
+
+fn capture_walk_list[S](mut packs: CapturePacks, ptr: std.page.PagePtr, class: u8, expected_level: Option[u8], mut state: S, mut pages: u64, page: scoped[view] fn(mut S, std.page.PagePtr), row: scoped[view] fn(mut CapturePacks, mut S, String, u64, Bytes, std.page.Cell) -> Result[(), Error] waits) -> Result[(), Error] waits {
     if ptr.stamp == 0 {
         return Ok(())
     }
     let path = paged_pack_path(ptr.pack)?
     let image = capture_page(mut packs, ptr, Unprefixed, class, expected_level)?
     pages = capture_add(pages, 1)
+    page(mut state, ptr)
     let height = std.page.level(image)
     for i in 0u64 .. std.page.count(image) {
         if height != 0 {
@@ -114,7 +129,7 @@ fn capture_walk_pages[S](mut packs: CapturePacks, ptr: std.page.PagePtr, class: 
                 return Error(disk_fault(path, ptr.offset, Malformed))
             }
             page_edge_order(path, ptr, child)?
-            capture_walk_pages(mut packs, child, class, Some(height - 1), mut state, mut pages, row)?
+            capture_walk_list(mut packs, child, class, Some(height - 1), mut state, mut pages, page, row)?
         } else {
             let slot = option.unwrap(std.page.entry(image, i))
             row(mut packs, mut state, path, ptr.offset, slot.key, slot.cell)?

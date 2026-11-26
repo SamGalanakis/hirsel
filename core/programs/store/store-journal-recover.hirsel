@@ -79,6 +79,19 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
     }
 }
 
+fn journal_decode_fork(file: String, raw: Bytes) -> Result[JournalFork, Error] {
+    let mut at = 0u64
+    let id: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
+    let parent: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
+    let forked_at = disk_number(file, raw, mut at, 8)?
+    let name = disk_name(file, raw, mut at)?
+    let watermark = disk_number(file, raw, mut at, 8)?
+    if at != list.len(raw) || watermark == 0 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    Ok(JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark))
+}
+
 fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
     let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
     if id < replay.state.next_branch || id == 4294967295 || map.contains(replay.names, name) {

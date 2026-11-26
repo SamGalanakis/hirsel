@@ -116,7 +116,7 @@ fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, o
     Ok(())
 }
 
-fn describe_commit(mut folded: DescribeFold, path: String, at: u64, raw: Bytes) -> Result[(), Error] {
+fn describe_commit(mut folded: DescribeFold, path: String, at: u64, _kind: u16, raw: Bytes) -> Result[(), Error] {
     let mut pos = 0u64
     let branch_id = disk_number(path, raw, mut pos, 4)?
     if branch_id != 0 {
@@ -238,6 +238,9 @@ fn describe_collection(mut packs: CapturePacks, names: List[DescribeName], root:
 
 pub fn describe_capture(take p: PreparedCapture, line: scoped[view] fn(DescribeLine) -> Result[(), Error] waits) -> Result[DescribeTotals, Error] waits {
     let mut capture = take p
+    if let Some(_) = capture.lock {
+        return Error(Unsupported(0))
+    }
     let mut packs = capture_packs(capture.dir, capture.id, capture.manifest, true, capture_add(capture.lists.pack_rows, capture.lists.pages))
     // Complete all lazy acquisitions before the first line. A reader whose
     // generation was retired can then retry without partial output.
@@ -278,7 +281,7 @@ fn describe_suffix(mut p: PreparedCapture) -> Result[(DescribeTotals, List[Descr
         let seq = p.segments[i].seq
         let end = p.segments[i].end
         let start = p.segments[i].start
-        let (_, frames) = capture_scan_frames(mut p.segments[i].file, p.id, seq, p.manifest.limits, end, end, false, true, mut folded, describe_commit)?
+        let (_, frames) = capture_scan_frames(mut p.segments[i].file, p.id, seq, p.manifest.limits, end, end, false, KeepCommit, mut folded, describe_commit)?
         frame_count = capture_add(frame_count, frames)
         journal_bytes = capture_add(journal_bytes, end - start)
     }

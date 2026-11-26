@@ -22,6 +22,10 @@ const END_IMAGE: u64 = 1048672
 
 const SEG: u64 = 48
 
+const CAPTURE_LIST_ROW: u64 = 48
+
+const CAPTURE_BRANCH: u64 = 24
+
 const PACK_HELD: u64 = 32
 
 const NAME_SLOT: u64 = 32
@@ -45,7 +49,8 @@ pub opaque type PreparedCapture: send {
     segments: List[PreparedSegment],
     lists: CaptureListCount,
     names: u64,
-    name_bytes: u64
+    name_bytes: u64,
+    lock: Option[HostFile]
 }
 
 fn capture_add(a: u64, b: u64) -> u64 {
@@ -64,11 +69,49 @@ fn capture_need_part(mut n: Need, name: String, amount: u64) {
     list.push(mut n.parts, Part(name: clone(name), amount: amount))
 }
 
+fn capture_bootstrap(p: PreparedCapture) -> u64 {
+    2 * round8(list.len(p.raw)) + 2 * p.manifest.limits.meta + 4096 + END_IMAGE + p.manifest.limits.frame + CAPTURE_PATH
+}
+
+fn capture_list_slots(p: PreparedCapture) -> u64 {
+    capture_add(p.lists.rows, p.lists.pages)
+}
+
+fn capture_bitmap_bytes(p: PreparedCapture) -> u64 {
+    let stamp = p.manifest.next_stamp
+    stamp / 8 + (if stamp % 8 == 0 {
+        0u64
+    } else {
+        1u64
+    })
+}
+
+fn capture_branch_slots(limits: StoreLimits) -> u64 {
+    limits.meta / 143 + 1
+}
+
+fn capture_check_scratch(p: PreparedCapture) -> u64 {
+    // A collections-map path can lead into a second page tree.
+    capture_bootstrap(p) + CAPTURE_PATH + CAPTURE_BRANCH * capture_branch_slots(p.manifest.limits) + JOURNAL_CHUNK_BYTES + CAPTURE_SCRATCH
+}
+
+fn capture_check_need(p: PreparedCapture) -> u64 {
+    let tables = capture_add(capture_mul(CAPTURE_LIST_ROW, capture_list_slots(p)), 2 * capture_bitmap_bytes(p))
+    capture_add(capture_add(capture_check_scratch(p), tables), capture_mul(SEG, list.len(p.segments)))
+}
+
 pub fn capture_need(p: PreparedCapture) -> Need {
-    let meta = p.manifest.limits.meta
     let mut n = Need(total: 0, parts: list.with_capacity(7))
-    capture_need_part(mut n, "bootstrap", 2 * round8(list.len(p.raw)) + 2 * meta + 4096 + END_IMAGE + p.manifest.limits.frame + CAPTURE_PATH)
+    capture_need_part(mut n, "bootstrap", capture_bootstrap(p))
     capture_need_part(mut n, "segments", capture_mul(SEG, list.len(p.segments)))
+    if let Some(_) = p.lock {
+        capture_need_part(mut n, "lists", capture_mul(CAPTURE_LIST_ROW, capture_list_slots(p)))
+        capture_need_part(mut n, "bitmaps", 2 * capture_bitmap_bytes(p))
+        capture_need_part(mut n, "branches", CAPTURE_BRANCH * capture_branch_slots(p.manifest.limits))
+        capture_need_part(mut n, "chunk", JOURNAL_CHUNK_BYTES)
+        capture_need_part(mut n, "scratch", CAPTURE_PATH + CAPTURE_SCRATCH)
+        return take n
+    }
     capture_need_part(mut n, "held", capture_mul(PACK_HELD, capture_add(p.lists.pack_rows, p.lists.pages)))
     capture_need_part(mut n, "deltas", capture_mul(32, int.widen(p.manifest.next_table)))
     capture_need_part(mut n, "catalog", capture_add(capture_mul(NAME_SLOT, p.names), p.name_bytes))
@@ -107,11 +150,18 @@ fn capture_measure_pages(mut packs: CapturePacks, manifest: PageManifest) -> Res
     Ok((lists, names, amount))
 }
 
-fn capture_measure(d: Dir) -> Result[CaptureSelection, Error] waits {
+fn capture_measure(d: Dir, locked: Option[Clock]) -> Result[CaptureSelection, Error] waits {
     let (take raw, id, take manifest) = read_only_manifest(d)?
     require_memory_manifest(manifest)?
     let mut packs = capture_packs(d, id, manifest, false, 0)
-    let measured = capture_measure_pages(mut packs, manifest)
+    let measured: Result[(CaptureListCount, u64, u64), Error] = if let Some(_) = locked {
+        match capture_lists(mut packs, manifest) {
+            Ok(tally) => Ok((tally, 0u64, 0u64)),
+            Error(take problem) => Error(take problem),
+        }
+    } else {
+        capture_measure_pages(mut packs, manifest)
+    }
     let (lists, names, amount) = match take measured {
         Ok(counted) => counted,
         Error(Io(NotFound)) => {
@@ -124,7 +174,7 @@ fn capture_measure(d: Dir) -> Result[CaptureSelection, Error] waits {
     }
     let mut segment_count = 0u64
     let mut ignored: List[PreparedSegment] = list.new()
-    match capture_segment_walk(d, id, manifest.first_live, false, mut segment_count, mut ignored) {
+    match capture_segment_walk(d, id, manifest.first_live, false, locked, mut segment_count, mut ignored) {
         Ok(_) => (),
         Error(take problem) => {
             if !capture_same_manifest(d, raw)? {
@@ -138,7 +188,7 @@ fn capture_measure(d: Dir) -> Result[CaptureSelection, Error] waits {
 
 // In the measurement pass no handle survives an iteration. In the second
 // pass a successor supplies the preceding handle's exact end.
-fn capture_segment_walk(d: Dir, id: StoreId, first: u64, hold: bool, mut segment_count: u64, mut segments: List[PreparedSegment]) -> Result[bool, Error] waits {
+fn capture_segment_walk(d: Dir, id: StoreId, first: u64, hold: bool, locked: Option[Clock], mut segment_count: u64, mut segments: List[PreparedSegment]) -> Result[bool, Error] waits {
     let mut seq = first
     loop {
         let path = journal_path(seq, "")?
@@ -148,6 +198,12 @@ fn capture_segment_walk(d: Dir, id: StoreId, first: u64, hold: bool, mut segment
             Error(NotFound) => return Error(disk_fault(path, 0, Header)),
             Error(problem) => return Error(Io(problem)),
         }
+        if let Some(c) = locked {
+            journal_wait_shared(mut file, c)?
+            if hold {
+                disk_io(host.sync(mut file))?
+            }
+        }
         let header_read = match read_disk_bytes(mut file, path, 0, 72) {
             Ok(take amount) => disk_read_header(path, amount, 2, Some(seq), Some(id)),
             Error(take problem) => Error(take problem),
@@ -155,7 +211,12 @@ fn capture_segment_walk(d: Dir, id: StoreId, first: u64, hold: bool, mut segment
         let header = match take header_read {
             Ok(found) => found,
             Error(Corrupt(take fault)) => {
-                if disk_exists(d, journal_path(seq + 1, "")?)? || capture_end(id, seq, capture_end_image(d, seq)?)? != None {
+                let successor = if let Some(next_seq) = int.checked_add(seq, 1) {
+                    disk_exists(d, journal_path(next_seq, "")?)?
+                } else {
+                    false
+                }
+                if successor || capture_end(id, seq, capture_end_image(d, seq)?)? != None {
                     return Error(Corrupt(take fault))
                 }
                 return Ok(true)
@@ -174,14 +235,17 @@ fn capture_segment_walk(d: Dir, id: StoreId, first: u64, hold: bool, mut segment
         } else {
             segment_count += 1
         }
-        seq += 1
+        let Some(next_seq) = int.checked_add(seq, 1) else {
+            return Ok(true)
+        }
+        seq = next_seq
     }
 }
 
 fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[PreparedSegment]) -> Result[bool, Error] waits {
     let d = s.dir
     let mut segment_count = s.segments
-    if !capture_segment_walk(d, s.id, s.manifest.first_live, true, mut segment_count, mut segments)? {
+    if !capture_segment_walk(d, s.id, s.manifest.first_live, true, None, mut segment_count, mut segments)? {
         return Ok(false)
     }
     let n = list.len(segments)
@@ -215,7 +279,7 @@ fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prep
         disk_io(host.sync(mut segments[tail].file))?
         let size = disk_io(host.stat_file(mut segments[tail].file))?.size
         let mut ignored = ()
-        let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, false, mut ignored, fn(mut _state: (), _path: String, _at: u64, _payload: Bytes) -> Result[(), Error] {
+        let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), Error] {
             Ok(())
         })?
         disk_io(host.unlock(mut segments[tail].file))?
@@ -228,12 +292,22 @@ fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prep
 }
 
 pub fn prepare(d: Dir, c: Clock, purpose: Purpose) -> Result[PreparedCapture, Error] waits {
-    if purpose != Describe {
+    if purpose == Copy {
         return Error(Unsupported(0))
+    }
+    let locked = if purpose == Check {
+        Some(c)
+    } else {
+        None
+    }
+    let lock = if purpose == Check {
+        Some(disk_lock(d, c, 0)?)
+    } else {
+        None
     }
     loop {
         let selection = capacity(bound bytes BOOTSTRAP {
-            capture_measure(d)
+            capture_measure(d, locked)
         })?
         let s = match take selection {
             Ok(take found) => take found,
@@ -244,7 +318,11 @@ pub fn prepare(d: Dir, c: Clock, purpose: Purpose) -> Result[PreparedCapture, Er
             list.with_capacity(s.segments)
         })?
         let selected = capacity(bound bytes BOOTSTRAP {
-            capture_segment_bounds(s, c, mut segments)
+            if purpose == Check {
+                capture_locked_bounds(s, c, mut segments)
+            } else {
+                capture_segment_bounds(s, c, mut segments)
+            }
         })?
         let stable = match take selected {
             Ok(stable) => stable,
@@ -259,6 +337,33 @@ pub fn prepare(d: Dir, c: Clock, purpose: Purpose) -> Result[PreparedCapture, Er
             continue
         }
         let CaptureSelection(dir: dir, raw: take raw, id: id, manifest: take manifest, lists: lists, names: names, name_bytes: amount, ..) = take s
-        return Ok(PreparedCapture(dir: dir, raw: take raw, id: id, manifest: take manifest, segments: take segments, lists: lists, names: names, name_bytes: amount))
+        return Ok(PreparedCapture(dir: dir, raw: take raw, id: id, manifest: take manifest, segments: take segments, lists: lists, names: names, name_bytes: amount, lock: take lock))
     }
+}
+
+// The caller owns LOCK. Every selected segment was fenced and synced before
+// its HEADER supplied a predecessor bound or its own tail was examined.
+fn capture_locked_bounds(s: CaptureSelection, c: Clock, mut segments: List[PreparedSegment]) -> Result[bool, Error] waits {
+    let mut segment_count = s.segments
+    if !capture_segment_walk(s.dir, s.id, s.manifest.first_live, true, Some(c), mut segment_count, mut segments)? {
+        return Error(disk_fault("MANIFEST", 72, Malformed))
+    }
+    disk_io(host.sync_dir(s.dir))?
+    let n = list.len(segments)
+    if n == 0 {
+        return Ok(true)
+    }
+    let tail = n - 1
+    let seq = segments[tail].seq
+    let durable_end = match disk_end(s.dir, s.id, seq)? {
+        Some(found) => found,
+        None => 72u64,
+    }
+    let size = disk_io(host.stat_file(mut segments[tail].file))?.size
+    let mut ignored = ()
+    let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), Error] {
+        Ok(())
+    })?
+    segments[tail].end = end
+    Ok(true)
 }

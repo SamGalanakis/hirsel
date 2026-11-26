@@ -3014,11 +3014,9 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(_) => 0,
         None if decl.structural => meet(),
         None => {
+            // CONC-2: a record or variant type is `cross` when it declares the bound
+            // and each field of each case is `cross`, which `check_declared_bounds` checks.
             let mut bounds = decl.declared & !PLAIN;
-            // L2: a variant crosses only when plain, which `plain_extra` gives.
-            if matches!(decl.body, DeclBody::Variant(_)) {
-                bounds &= !CROSS;
-            }
             for &i in &decl.summary.bound_params {
                 bounds &= at(i as usize);
             }

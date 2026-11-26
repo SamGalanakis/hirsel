@@ -1,5 +1,6 @@
 // Capabilities inside plain variants that cross units (docs/recording.md,
-// "Values"), and the survivors a helper's key objects leave (unit tapes U3).
+// "Values"), the survivors a helper's key objects leave (unit tapes U3), and
+// `cross` variants that move by case (CONC-2, CONC-15).
 // Included from recording_handles_native.rs, whose helpers it uses.
 
 /// Capabilities inside plain variants cross: the root sends itself an
@@ -408,5 +409,83 @@ fn rl9_key_objects_cross_as_snapshots() {
             ],
             "{backend:?}: survivor names and amounts"
         );
+    }
+}
+
+/// A `cross` variant whose cases carry a `String` and `Client` reply arms
+/// (CONC-2, CONC-15): it crosses as a spawn seed, as a helper's result and as
+/// a connection item, each case moving only its own fields.
+const RL9_VARIANTS: &str = r#"
+type Req: cross = Read(u64, String, Client[String]) | Stats(Client[u64])
+type Reply: cross = Text(u64, String) | Count(u64)
+
+fn answer(take r: Req) -> Reply waits {
+    match take r {
+        Read(n, take s, take back) => {
+            result.unwrap(conn.send(back, string.from(s)))
+            Text(n, take s)
+        }
+        Stats(take back) => {
+            result.unwrap(conn.send(back, 7))
+            Count(7)
+        }
+    }
+}
+
+fn score(take r: Reply, want: String) -> u64 {
+    match take r {
+        Text(n, take s) => if s == want { n } else { 1000 },
+        Count(k) => k
+    }
+}
+
+fn serve(take hello: Client[Client[Req]]) -> u64 waits {
+    let (c, i): (Client[Req], Inbox[Req]) = result.unwrap(conn.new(4, bytes 256))
+    result.unwrap(conn.send(hello, take c))
+    let a = answer(result.unwrap(conn.receive(i)))
+    let b = answer(result.unwrap(conn.receive(i)))
+    score(take a, "conn-read") + score(take b, "conn-read")
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (sc, si): (Client[String], Inbox[String]) = result.unwrap(conn.new(2, bytes 256))
+    let (nc, ni): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 0))
+    let h1 = result.unwrap(task.spawn_unit(tasks, bytes 65536, Read(3, string.from("seed-read"), take sc), answer))
+    if result.unwrap(conn.receive(si)) != "seed-read" { return Error(Exit(status: 3)) }
+    if score(result.unwrap(task.join(take h1)), "seed-read") != 3 { return Error(Exit(status: 4)) }
+    let h2 = result.unwrap(task.spawn_unit(tasks, bytes 65536, Stats(take nc), answer))
+    if result.unwrap(conn.receive(ni)) != 7 { return Error(Exit(status: 5)) }
+    if score(result.unwrap(task.join(take h2)), "seed-read") != 7 { return Error(Exit(status: 6)) }
+
+    let (hello, hello_in): (Client[Client[Req]], Inbox[Client[Req]]) = result.unwrap(conn.new(1, bytes 0))
+    let h3 = result.unwrap(task.spawn_unit(tasks, bytes 65536, take hello, serve))
+    let req = result.unwrap(conn.receive(hello_in))
+    let (sc2, si2): (Client[String], Inbox[String]) = result.unwrap(conn.new(2, bytes 256))
+    let (nc2, ni2): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 0))
+    let (left, _left_in): (Client[String], Inbox[String]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(req, Read(5, string.from("conn-read"), take sc2)))
+    result.unwrap(conn.send(req, Stats(take nc2)))
+    // Never received: the helper's inbox drops this item's String and Client.
+    result.unwrap(conn.send(req, Read(9, string.from("never-read"), take left)))
+    if result.unwrap(conn.receive(si2)) != "conn-read" { return Error(Exit(status: 7)) }
+    if result.unwrap(conn.receive(ni2)) != 7 { return Error(Exit(status: 8)) }
+    if result.unwrap(task.join(take h3)) != 12 { return Error(Exit(status: 9)) }
+    result.unwrap(stdout.write(out, "variants"))
+    Ok(())
+}
+"#;
+
+/// The oracle is the program's own literals: each reply and each joined
+/// result names the `String` the parent sent in that case, so a crossing
+/// that moved another case's words, or none of the active case's, prints
+/// nothing or exits with the status of the check it broke. (A units
+/// recording does not replay yet: unit operations are not replayed, units.rs.)
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_variants_cross_by_case() {
+    crate::openat2_required::require();
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        rl9_record(RL9_VARIANTS, dir.path(), "variants", backend, "variants");
     }
 }

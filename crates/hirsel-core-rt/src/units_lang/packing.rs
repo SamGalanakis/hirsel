@@ -3,7 +3,66 @@
 use super::*;
 use crate::units::ledger::conn::ConnCore;
 use hirsel_core_layout::cross::{self, ELEMENT, PADDING};
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
+
+/// The rows of `rows` that hold for the value at `value`: a variant's owner
+/// words and padding for its active case only (`cross::live`). Read before
+/// anything rewrites an owner word, since a variant's tag can sit in one (a
+/// sequence capacity's niche).
+///
+/// # Safety
+/// `value` holds an initialized value laid out as `rows` describe.
+pub(crate) unsafe fn live_rows<'r>(value: *const u8, rows: &'r [[u64; 4]]) -> Cow<'r, [[u64; 4]]> {
+    if !cross::guarded(rows) {
+        return Cow::Borrowed(rows);
+    }
+    Cow::Owned(cross::live(rows, &|at, width| {
+        let mut tag = [0; 8];
+        // SAFETY: a guard names the initialized tag word of a variant in the value.
+        unsafe {
+            ptr::copy_nonoverlapping(value.add(at as usize), tag.as_mut_ptr(), width as usize)
+        };
+        u64::from_le_bytes(tag)
+    }))
+}
+
+/// The charge of a seq of `len` elements at length capacity.
+pub(super) fn seq_charge(len: u64, logical: u64) -> u64 {
+    round8(len * logical)
+}
+
+/// The charge `x` carries across: its owners' content at length capacity.
+pub(super) unsafe fn item_charge(value: *const u8, owners: &[[u64; 4]]) -> u64 {
+    let mut total = 0u64;
+    for o in owners {
+        if o[1] == SEQ {
+            // SAFETY: the owner's length word is at offset 8.
+            let len = unsafe { word(value.add(o[0] as usize + 8)) };
+            total += seq_charge(len, o[3]);
+        }
+    }
+    total
+}
+
+/// `item_charge` over the rows that hold for the value (`live_rows`).
+pub(super) unsafe fn live_charge(value: *const u8, rows: &[[u64; 4]]) -> u64 {
+    // SAFETY: as `live_rows` and `item_charge`.
+    unsafe { item_charge(value, &live_rows(value, rows)) }
+}
+
+/// The owner rows an inbox keeps to drop the items no one received: clients
+/// and `Shared` holders, and every row of a guarded (variant) item, so the
+/// drop resolves each item's case.
+pub(super) fn inbox_owners(owners: &[[u64; 4]]) -> Vec<[u64; 4]> {
+    if cross::guarded(owners) {
+        return owners.to_vec();
+    }
+    owners
+        .iter()
+        .copied()
+        .filter(|o| o[1] == CLIENT || o[1] == SHARED)
+        .collect()
+}
 
 /// Copy a value's flat span, zeroing the padding in the destination.
 pub(crate) unsafe fn copy_flat(
@@ -130,10 +189,24 @@ pub(super) unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> 
     }
 }
 
+impl ConnCore {
+    /// The rows that hold for the item at `value`, when the rows are guarded.
+    ///
+    /// # Safety
+    /// `value` holds an initialized item of this connection.
+    pub(crate) unsafe fn live(&self, value: *const u8) -> Option<Vec<[u64; 4]>> {
+        // SAFETY: the caller's item is laid out as `rows` describe.
+        self.guarded
+            .then(|| unsafe { live_rows(value, &self.rows) }.into_owned())
+    }
+}
+
 /// A send can wait for a slot. Its call frame pins this source and its
 /// owners until the send has published or its settlement is taken.
 pub(crate) struct CrossSend {
     value: *const u8,
+    /// The rows that hold for the value, when its connection's are guarded.
+    pub(crate) rows: Option<Vec<[u64; 4]>>,
     pub(crate) sockets: Option<CrossingSockets>,
     #[cfg(test)]
     pub(crate) tag: u64,
@@ -143,6 +216,7 @@ impl CrossSend {
     pub(crate) fn new(value: *const u8) -> Self {
         Self {
             value,
+            rows: None,
             sockets: None,
             #[cfg(test)]
             tag: 0,
@@ -166,7 +240,10 @@ impl CrossSend {
             if conn.seqs.is_empty() {
                 return Box::default();
             }
-            let bytes: usize = conn.seqs.iter().map(|o| content(self.value, o).1).sum();
+            let rows = self.rows.as_deref().unwrap_or(&conn.rows);
+            let bytes: usize = cross::sequences(rows)
+                .map(|(o, _)| content(self.value, o).1)
+                .sum();
             if bytes == 0 && charge == 0 {
                 return Box::default();
             }
@@ -179,7 +256,7 @@ impl CrossSend {
             room[0].write(charge);
             let to = room.as_mut_ptr().add(1).cast::<u8>();
             let mut at = 0;
-            for (o, rows) in cross::sequences(&conn.rows) {
+            for (o, rows) in cross::sequences(rows) {
                 let (p, n) = content(self.value, o);
                 if n != 0 {
                     copy_elements(p, to.add(at), n, o[2] as usize, rows);
@@ -223,6 +300,7 @@ pub(super) unsafe fn unpack(
 ) {
     // SAFETY: `data` was packed for the same layout and `dest` is writable.
     unsafe {
+        let owners = &*live_rows(data.as_ptr(), owners);
         ptr::copy_nonoverlapping(data.as_ptr(), dest, bytes as usize);
         attach_sockets(context, dest, socket_offsets(owners), sockets);
         unpack_owners(
@@ -281,6 +359,8 @@ pub(super) unsafe fn drop_packed_owners(
     owners: &[[u64; 4]],
     sockets: Option<&CrossingSockets>,
 ) {
+    // SAFETY: the flat bytes hold the item as it was packed.
+    let owners = &*unsafe { live_rows(flat, owners) };
     if let Some(sockets) = sockets {
         let keys = sockets.lock().unwrap().discard();
         for key in keys {

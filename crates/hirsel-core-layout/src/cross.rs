@@ -5,8 +5,9 @@
 //! detached from the poller until taken. Capability, function and `Secret`
 //! words copy as bytes; their rows let a recorder write each one as its
 //! snapshot or identity (docs/recording.md, "Values"). A media key object
-//! also moves by its owner word. A plain variant's
-//! words and padding are listed per case, each case's behind a `CASE` row.
+//! also moves by its owner word. A variant's words and padding are listed per
+//! case, each case's behind a `CASE` row, so a crossing resolves them against
+//! the value's tag (`live`) before it reads or moves any owner word.
 use crate::{
     Body, Encoding, Field, FieldTy, Fixed, Handle, Layout, RecipeRow, Row, Tag, TypeRef, field_size,
 };
@@ -30,7 +31,7 @@ pub const SECRET: u64 = 6;
 /// A crossing list's plain elements can have capability words, function
 /// words, padding and case guards.
 pub const ELEMENT: u64 = 8;
-/// A guard: the rows it covers apply only while a plain variant
+/// A guard: the rows it covers apply only while a variant
 /// is in one case. Its row is `[tag offset, CASE | OTHER? | width << 8 |
 /// covered << 16, low, count]`: the case holds when the tag word (`width`
 /// bytes, zero-extended) less `low`, wrapping at the width, is below `count`,
@@ -61,8 +62,38 @@ pub fn owners(shapes: &[Row], recipes: &[RecipeRow], ty: TypeRef) -> Vec<[u64; 4
 /// element.
 pub fn live(rows: &[[u64; 4]], tag: &dyn Fn(u64, u64) -> u64) -> Vec<[u64; 4]> {
     let mut out = Vec::with_capacity(rows.len());
-    visit_live(rows, 0, tag, &mut |row| out.push(row));
+    visit_live(rows, 0, tag, &mut |row| out.push(row), &mut |_| {});
     out
+}
+
+/// The guards outside sequence elements whose case holds for a value, each
+/// reached through the guards that cover it.
+pub fn held_guards(rows: &[[u64; 4]], tag: &dyn Fn(u64, u64) -> u64) -> Vec<[u64; 4]> {
+    let mut out = Vec::new();
+    visit_live(rows, 0, tag, &mut |_| {}, &mut |guard| out.push(guard));
+    out
+}
+
+/// Whether the tag word `word` is inside guard `row`'s range, wrapping at its width.
+pub fn inside(row: &[u64; 4], word: u64) -> bool {
+    word.wrapping_sub(row[2]) & width_mask(row) < row[3]
+}
+
+/// The mask of a guard's tag word.
+pub fn width_mask(row: &[u64; 4]) -> u64 {
+    let width = (row[1] >> 8) & 0xff;
+    if width >= 8 {
+        u64::MAX
+    } else {
+        (1 << (8 * width)) - 1
+    }
+}
+
+/// Whether any of `rows` outside sequence elements is a guard, so that the
+/// rows that hold differ from value to value and a crossing resolves them
+/// with `live` first.
+pub fn guarded(rows: &[[u64; 4]]) -> bool {
+    rows.iter().any(|r| r[1] & (CASE | ELEMENT) == CASE)
 }
 
 /// The padding ranges of a value or of one sequence element.
@@ -73,11 +104,17 @@ pub fn padding(
     mut clear: impl FnMut(u64, u64),
 ) {
     let flag = if element { ELEMENT } else { 0 };
-    visit_live(rows, flag, tag, &mut |[at, kind, len, _]| {
-        if kind == (PADDING | flag) {
-            clear(at, len);
-        }
-    });
+    visit_live(
+        rows,
+        flag,
+        tag,
+        &mut |[at, kind, len, _]| {
+            if kind == (PADDING | flag) {
+                clear(at, len);
+            }
+        },
+        &mut |_| {},
+    );
 }
 
 /// Rows for a sequence's elements, starting just after the carrier row.
@@ -99,6 +136,7 @@ fn visit_live(
     flag: u64,
     tag: &dyn Fn(u64, u64) -> u64,
     visit: &mut impl FnMut([u64; 4]),
+    held: &mut impl FnMut([u64; 4]),
 ) {
     let mut i = 0;
     while i < rows.len() {
@@ -110,14 +148,9 @@ fn visit_live(
         }
         let covered = (r[1] >> 16) as usize;
         let width = (r[1] >> 8) & 0xff;
-        let mask = if width >= 8 {
-            u64::MAX
-        } else {
-            (1 << (8 * width)) - 1
-        };
-        let inside = tag(r[0], width).wrapping_sub(r[2]) & mask < r[3];
-        if inside != (r[1] & OTHER != 0) {
-            visit_live(&rows[i..i + covered], flag, tag, visit);
+        if inside(&r, tag(r[0], width)) != (r[1] & OTHER != 0) {
+            held(r);
+            visit_live(&rows[i..i + covered], flag, tag, visit, held);
         }
         i += covered;
     }
@@ -131,8 +164,7 @@ fn row(shapes: &[Row], recipes: &[RecipeRow], ty: TypeRef, at: u64, out: &mut Ve
         Body::Record(fields) => {
             fields_at(shapes, recipes, fields, fixed, 0, at, out);
         }
-        // A variant is cross only when plain, so its only owner words are
-        // capabilities and functions.
+        // Each case's owner words and padding hold only in that case.
         Body::Variant(cases) => {
             for (c, case) in cases.iter().enumerate() {
                 let mut inner = Vec::new();

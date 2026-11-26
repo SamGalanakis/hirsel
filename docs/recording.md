@@ -606,7 +606,7 @@ A snapshot starts with its kind tag: `Client` 0, `Shared` 1, `Socket` 2, `Listen
 `Sealer` 10, `Opener` 11, `HeaderMask` 12. Any other tag is corrupt. Plain values have no
 tag: the receiving type's layout says where they are. Because capabilities are plain, the
 `cross` descriptor of a value lists every capability word it holds, inside list elements,
-plain variants and `Shared` payloads included, so the recorder can snapshot each one.
+variants and `Shared` payloads included, so the recorder can snapshot each one.
 
 A `Secret` or key object that arrives has no bytes on replay in the receiving unit, whatever
 it had where it was made, so every use of it there passes the replay point with an issue
@@ -799,10 +799,15 @@ or a `Shared` payload, is:
 Parts come in owner order: the value's owner words by ascending offset, and each sequence's
 part is followed at once by the parts of the owner words inside its elements, element by
 element, before the next owner word of the value that holds the sequence. Padding crosses
-as zero, including any bytes outside a variant's tag and active fields. A plain variant
-holds owner words only in its active case: a capability or function word of that case is an
-owner word and gets a part. The `cross` descriptor lists each case's owner words and padding
-behind a guard row that names the case by its tag word, both inline and in sequence elements.
+as zero, including any bytes outside a variant's tag and active fields. A variant is its tag,
+in the plain bytes where its layout puts it, then its active case as a record of that case's
+fields: each owner word of that case (a sequence, client, socket, `Shared` holder, `Secret`,
+capability or function word) gets a part, and nothing of another case does. The `cross`
+descriptor lists each case's owner words and padding behind a guard row that names the case
+by its tag word, both inline and in sequence elements. A variant laid out in the niche of one
+of its owner words keeps its case in the plain bytes: a sequence's capacity is written as
+zero, which is outside its niche, and a `Shared` holder word of the case that holds it is
+written as 1, the first value past the null niche, so that zero still names the other case.
 A Media row names the owned word of a `KeyShare`, `Schedule`, `Sealer`, `Opener` or
 `HeaderMask`. It gets one handle part, and the native word is zeroed in the inline bytes.
 The format reads a

@@ -112,6 +112,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl9_secret_crosses_with_its_designation",
         "native::tests::rl9_helper_secret_charges_survive_by_designation",
         "native::tests::rl9_variant_capabilities_cross",
+        "native::tests::rl9_variants_cross_by_case",
         "native::tests::rl9_helper_key_object_survives_by_name",
         "native::tests::rl9_accepted_socket_crosses",
         "native::tests::rl9_key_objects_cross_as_snapshots",

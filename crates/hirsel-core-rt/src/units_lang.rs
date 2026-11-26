@@ -50,7 +50,10 @@ mod sockets;
 use sockets::{attach_sockets, detach_sockets, socket_offsets, take_sockets};
 pub(crate) mod takes;
 pub(crate) use packing::CrossSend;
-use packing::{drop_packed_owners, free_owners, pack, unpack, unpack_owners};
+use packing::{
+    drop_packed_owners, free_owners, inbox_owners, item_charge, live_charge, live_rows, pack,
+    unpack, unpack_owners,
+};
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
@@ -62,11 +65,6 @@ fn round8(n: u64) -> u64 {
     n.div_ceil(8) * 8
 }
 
-/// The charge of a seq of `len` elements at length capacity.
-fn seq_charge(len: u64, logical: u64) -> u64 {
-    round8(len * logical)
-}
-
 unsafe fn word(at: *const u8) -> u64 {
     // SAFETY: the caller's value holds a word here.
     unsafe { at.cast::<u64>().read_unaligned() }
@@ -74,19 +72,6 @@ unsafe fn word(at: *const u8) -> u64 {
 unsafe fn set_word(at: *mut u8, v: u64) {
     // SAFETY: as `word`.
     unsafe { at.cast::<u64>().write_unaligned(v) }
-}
-
-/// The charge `x` carries across: its owners' content at length capacity.
-unsafe fn item_charge(value: *const u8, owners: &[[u64; 4]]) -> u64 {
-    let mut total = 0u64;
-    for o in owners {
-        if o[1] == SEQ {
-            // SAFETY: the owner's length word is at offset 8.
-            let len = unsafe { word(value.add(o[0] as usize + 8)) };
-            total += seq_charge(len, o[3]);
-        }
-    }
-    total
 }
 
 // ---------------------------------------------------------------------------
@@ -399,11 +384,7 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             files: (*context).host_files,
             inbox,
             waiters: Waiters::default(),
-            owners: owners
-                .iter()
-                .copied()
-                .filter(|o| o[1] == CLIENT || o[1] == SHARED)
-                .collect(),
+            owners: inbox_owners(owners),
             charge: Some(held),
         }));
         u.inboxes.insert(key, ih);
@@ -531,9 +512,12 @@ unsafe fn conn_send<const REC: bool>(
     unsafe {
         let handle = client;
         let client = &(*client).client;
-        let owners = &client.0.seqs;
+        let live = client.0.live(value);
+        let owners: &[[u64; 4]] = live.as_deref().unwrap_or(&client.0.seqs);
+        let live_sockets: Option<Vec<u64>> = live.as_deref().map(|r| socket_offsets(r).collect());
         let task = tasks::current_task();
-        let offsets = || client.0.socket_offsets.iter().copied();
+        let sockets_at = live_sockets.as_deref().unwrap_or(&client.0.socket_offsets);
+        let offsets = || sockets_at.iter().copied();
         let mut local = MaybeUninit::<SendRec>::uninit();
         // The returnable form's state is in the record; the fast path that
         // never waits leaves it untouched.
@@ -546,7 +530,7 @@ unsafe fn conn_send<const REC: bool>(
                 return failed;
             }
             let charge = item_charge(value, owners);
-            let sockets = if client.0.socket_offsets.is_empty() {
+            let sockets = if offsets().next().is_none() {
                 None
             } else {
                 detach_sockets(context, value, offsets())
@@ -554,6 +538,7 @@ unsafe fn conn_send<const REC: bool>(
             // The item as a value, read before the send moves it.
             let mut send = takes::SendNote::new(context, handle, value, wait, sockets.as_ref());
             let mut source = CrossSend::new(value);
+            source.rows = live.clone();
             source.sockets = sockets.clone();
             let id = match UnitCtx::send_cross(client, source, charge, wait, || {
                 &mut (*tasks::lang_unit_for(task)).ctx
@@ -777,6 +762,8 @@ unsafe fn conn_receive<const REC: bool>(
                 }
             }
             let received = input.receive_cross(|bytes, flat, content, sockets| {
+                let live = c.live(flat);
+                let seqs = live.as_deref().unwrap_or(&c.seqs);
                 if c.seqs.is_empty() {
                     if c.stride != 0 {
                         ptr::copy_nonoverlapping(flat, dest, c.stride);
@@ -787,9 +774,14 @@ unsafe fn conn_receive<const REC: bool>(
                         block::admit_storage(payer, Some(bytes))?;
                     }
                     ptr::copy_nonoverlapping(flat, dest, c.stride);
-                    unpack_owners(context, payer, content, dest, &c.seqs);
+                    unpack_owners(context, payer, content, dest, seqs);
                 }
-                attach_sockets(context, dest, c.socket_offsets.iter().copied(), sockets);
+                match live.as_deref() {
+                    Some(rows) => attach_sockets(context, dest, socket_offsets(rows), sockets),
+                    None => {
+                        attach_sockets(context, dest, c.socket_offsets.iter().copied(), sockets)
+                    }
+                }
                 Ok::<_, Capacity>(())
             });
             if let Some(result) = received {
@@ -1013,7 +1005,8 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             Ok(b) => b,
             Err(e) => return refused(e.requested, e.available),
         };
-        let xs = item_charge(input, x.owners());
+        let xl = live_rows(input, x.owners());
+        let xs = item_charge(input, &xl);
         if xs > n {
             drop(held);
             return refused(xs, n);
@@ -1023,13 +1016,13 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let (k, hctx) = u.ctx.spawn_unit();
         let steps = crate::steps::remaining(&*context);
         // The entry writes each socket as it leaves: detached first.
-        let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
+        let sockets = detach_sockets(context, input, socket_offsets(&xl));
         #[cfg(feature = "record")]
         let tape = crate::tape::helper::spawn(context, n, steps, input, entry, sockets.as_ref());
         #[cfg(not(feature = "record"))]
         let tape = ();
-        let data = pack(input, x.bytes, x.owners());
-        free_owners(None, input, x.owners());
+        let data = pack(input, x.bytes, &xl);
+        free_owners(None, input, &xl);
         let shared = Arc::new(HelperShared {});
         let h = Box::into_raw(Box::new(HelperH {
             k,
@@ -1164,7 +1157,7 @@ fn helper_main(
         }
         let mut input = vec![0u8; (xb as usize).max(layout.input.bytes)];
         let payer = context.payer();
-        let xs = item_charge(data.as_ptr(), &xo);
+        let xs = live_charge(data.as_ptr(), &xo);
         if xs > 0 && block::admit_storage(payer, Some(xs)).is_err() {
             crate::process::stop(b"UnitLedger");
         }
@@ -1211,9 +1204,10 @@ fn helper_main(
             .chain(lu.homed.drain())
             .collect();
         let charges = files.registry.run_grants().hand_over(context.payer());
+        let rl = live_rows(result.as_ptr(), if failed == 0 { &ro } else { &[] });
         // The END writes each socket in the result as it leaves: detached first.
         let sockets = if failed == 0 {
-            detach_sockets(&mut context, result.as_ptr(), socket_offsets(&ro))
+            detach_sockets(&mut context, result.as_ptr(), socket_offsets(&rl))
         } else {
             None
         };
@@ -1221,7 +1215,7 @@ fn helper_main(
             failed: failed != 0,
             causes: context.causes.iter().map(CrossedCause::pack).collect(),
             result: if failed == 0 {
-                item_charge(result.as_ptr(), &ro)
+                item_charge(result.as_ptr(), &rl)
             } else {
                 0
             },
@@ -1245,9 +1239,9 @@ fn helper_main(
         };
         let mut ret = Value::empty();
         if failed == 0 {
-            let data = pack(result.as_ptr(), rb, &ro);
+            let data = pack(result.as_ptr(), rb, &rl);
             ret.set_item(data, sockets);
-            free_owners(None, result.as_ptr(), &ro);
+            free_owners(None, result.as_ptr(), &rl);
         }
         RESULTS
             .lock()
@@ -1345,7 +1339,7 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: Option<*mut u8>)
                 && let Some(dest) = dest
                 && !dest.is_null()
             {
-                let s = item_charge(v.item().as_ptr(), &hb.result.owners);
+                let s = live_charge(v.item().as_ptr(), &hb.result.owners);
                 let payer = held.partition(s);
                 unpack(
                     context,

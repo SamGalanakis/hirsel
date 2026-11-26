@@ -108,9 +108,17 @@ impl Machine<'_> {
         cross::owners(&self.m.types, &self.recipes, ty)
     }
 
+    /// The owner rows that hold for the value at `at`: a variant's for its
+    /// active case only.
+    fn live_owners(&self, at: u64, owners: &[[u64; 4]]) -> Vec<[u64; 4]> {
+        cross::live(owners, &|offset, width| {
+            self.load(at + offset, width as usize)
+        })
+    }
+
     /// What the value at `at` carries across: its buffers at their length.
     pub(super) fn cross_charge(&self, at: u64, owners: &[[u64; 4]]) -> u64 {
-        owners
+        self.live_owners(at, owners)
             .iter()
             .filter(|o| o[1] == SEQ && o[2] != 0)
             .map(|o| charge::seq(self.load(at + o[0] + 8, 8), o[3]).unwrap_or(u64::MAX))
@@ -118,6 +126,7 @@ impl Machine<'_> {
     }
 
     pub(super) fn check_cross_sockets(&self, at: u64, owners: &[[u64; 4]]) {
+        let owners = self.live_owners(at, owners);
         for owner in owners.iter().filter(|owner| owner[1] == SOCKET) {
             let key = self.load(at + owner[0], 8);
             if key & 3 != 0
@@ -136,8 +145,9 @@ impl Machine<'_> {
         let size = self.held(ty) as usize;
         let mut bytes = self.get(at, size).to_vec();
         self.clear_cross_padding(at, &mut bytes, owners, false);
+        let owners = self.live_owners(at, owners);
         let mut seqs = Vec::new();
-        for (&[offset, _, stride, logical], rows) in cross::sequences(owners) {
+        for (&[offset, _, stride, logical], rows) in cross::sequences(&owners) {
             if stride == 0 {
                 continue;
             }
@@ -186,6 +196,7 @@ impl Machine<'_> {
     /// `limit`, which has admitted `item.charge`.
     pub(super) fn cross_put(&mut self, dest: u64, item: &Item, owners: &[[u64; 4]], limit: &Limit) {
         self.put(dest, &item.bytes);
+        let owners = self.live_owners(dest, owners);
         let seqs = owners.iter().filter(|o| o[1] == SEQ && o[2] != 0);
         for (o, content) in seqs.zip(&item.seqs) {
             let carrier = dest + o[0];
@@ -205,6 +216,12 @@ impl Machine<'_> {
 
     /// Drop the handles owned by a crossing value that nobody took.
     pub(super) fn cross_discard(&mut self, item: &Item, owners: &[[u64; 4]]) {
+        let owners = cross::live(owners, &|offset, width| {
+            let mut word = [0; 8];
+            let at = offset as usize;
+            word[..width as usize].copy_from_slice(&item.bytes[at..at + width as usize]);
+            u64::from_le_bytes(word)
+        });
         for o in owners.iter().filter(|o| matches!(o[1], CLIENT | SOCKET)) {
             let at = o[0] as usize;
             let key = u64::from_le_bytes(item.bytes[at..at + 8].try_into().unwrap());

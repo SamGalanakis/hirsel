@@ -29,8 +29,8 @@ types are `cross`; `String`;
 `Shared[T]` ([CONC-15](#conc-15-units));
 `Socket` and `Listener`; the capability types; `Args`, `Child`, `Unique`, `Site` and
 `StaticFn`; and plain `fn`s. An own or resource record is `cross` when it declares the bound
-and each field type is `cross`; a nominal variant type is `cross` only when it is plain.
-Nothing else is: not owning closures, `Arc`, `Box`, `Map`, `Causes`, `Sender`, `Receiver`,
+and each field type is `cross`, and so is a nominal variant type when it declares the bound
+and each field type of each case is `cross`. Nothing else is: not owning closures, `Arc`, `Box`, `Map`, `Causes`, `Sender`, `Receiver`,
 `Latest`, `Inbox`, `HostFile`, `ReadHalf` or `WriteHalf`.
 
 ```hirsel
@@ -38,6 +38,12 @@ type Job: send { id: u64, name: String }
 ```
 ```hirsel
 type Ask: cross { n: u64, reply: Client[u64] }
+```
+```hirsel
+type Req: cross = Read(u64, String, Client[String]) | Stats(Client[u64])
+```
+```hirsel
+type Fan: cross = Out(Sender[u64]) | Done               // refused: CONC-2, Sender is not cross
 ```
 ```hirsel
 type Hello: cross { back: Inbox[u64] }                 // refused: CONC-2, Inbox is not cross
@@ -419,7 +425,8 @@ as an item of a connection ([CONC-17](#conc-17-connections)), and each of these 
 `cross` type ([CONC-2](#conc-2-the-send-bound)). A plain value is copied. A `List` or
 `String` crosses as a copy of its content: its old storage is refunded where it was charged,
 and the copy is charged where it arrives. A client, socket, listener, `Secret` or `Shared`
-holder moves as a handle.
+holder moves as a handle. A value of a variant type crosses as its case: the fields of the
+case it holds move as a record's fields do, and nothing of another case moves or is charged.
 The **content charge** of a value is the sum, over the lists and strings it holds, of
 length × element size rounded up to 8; a `Shared` holder's payload is not part of it.
 

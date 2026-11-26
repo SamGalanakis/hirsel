@@ -130,6 +130,10 @@ pub(crate) struct ConnCore {
     spare: UnsafeCell<CrossRoom>,
     pub(crate) stride: usize,
     pub(crate) rows: Box<[[u64; 4]]>,
+    /// Whether `rows` hold variant guards: then an item's owners are its
+    /// active case's, resolved per item, and `seqs` and `socket_offsets`
+    /// list every case's.
+    pub(crate) guarded: bool,
     pub(crate) seqs: Box<[[u64; 4]]>,
     pub(crate) socket_offsets: Box<[u64]>,
     free: Option<Box<Mutex<FreeArrivals>>>,
@@ -467,6 +471,7 @@ impl UnitCtx {
             spare: UnsafeCell::new(Box::default()),
             stride,
             rows: owners.into(),
+            guarded: hirsel_core_layout::cross::guarded(owners),
             seqs: owners
                 .iter()
                 .copied()

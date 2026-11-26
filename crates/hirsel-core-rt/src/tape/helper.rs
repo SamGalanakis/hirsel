@@ -16,8 +16,8 @@ use crate::net::CrossingSockets;
 use crate::units_lang::packing::{append, copy_elements, copy_flat};
 use crate::units_lang::{Cross, SpawnEntry};
 use hirsel_core_layout::cross::{
-    CAPABILITY, CLIENT, ELEMENT, FUNCTION, MEDIA, PADDING, SECRET, SEQ, SHARED, SOCKET, elements,
-    live,
+    CAPABILITY, CLIENT, ELEMENT, FUNCTION, MEDIA, OTHER, PADDING, SECRET, SEQ, SHARED, SOCKET,
+    elements, held_guards, inside, live, width_mask,
 };
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -527,16 +527,17 @@ pub(super) unsafe fn value(
         // SAFETY: an owner row names initialized words of the value.
         unsafe { base.add(at as usize).cast::<u64>().read_unaligned() }
     };
-    // Each owner row with the element rows that follow it, a plain variant's
-    // rows only for its case.
-    let rows = live(x.owners(), &|at, width| {
+    let tag = |at: u64, width: u64| {
         let mut word = [0u8; 8];
         // SAFETY: a guard names the initialized tag word of a variant in the value.
         unsafe {
             std::ptr::copy_nonoverlapping(base.add(at as usize), word.as_mut_ptr(), width as usize)
         };
         u64::from_le_bytes(word)
-    });
+    };
+    // Each owner row with the element rows that follow it, a variant's rows
+    // only for its case.
+    let rows = live(x.owners(), &tag);
     let mut owners = Vec::new();
     let mut i = 0;
     while i < rows.len() {
@@ -635,6 +636,24 @@ pub(super) unsafe fn value(
                 parts.extend(unsafe { value((node + 8) as *const u8, &payload, None, handle) }?);
             }
             _ => word_part(kind, read(at), &mut parts, handle)?,
+        }
+    }
+    // A variant laid out in an owner word's niche (a `Shared` holder's null)
+    // keeps its case: a word whose zero would name another case is written
+    // as the first value past the niche (recording.md, "Values").
+    for guard in held_guards(x.owners(), &tag) {
+        let width = ((guard[1] >> 8) & 0xff) as usize;
+        let Some(start) = guard[0].checked_sub(x.at).map(|s| s as usize) else {
+            continue;
+        };
+        if guard[1] & OTHER == 0 || start + width > plain.len() {
+            continue;
+        }
+        let mut word = [0u8; 8];
+        word[..width].copy_from_slice(&plain[start..start + width]);
+        if inside(&guard, u64::from_le_bytes(word)) {
+            let past = guard[2].wrapping_add(guard[3]) & width_mask(&guard);
+            plain[start..start + width].copy_from_slice(&past.to_le_bytes()[..width]);
         }
     }
     let mut out = Vec::with_capacity(plain.len() + parts.len() + 20);

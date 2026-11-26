@@ -22,7 +22,10 @@ use crate::{
     block::Block,
     tasks,
     units::ledger::{ArrivalRef, Body, Port},
-    units_lang::{Cross, LangUnit, packing::copy_flat},
+    units_lang::{
+        Cross, LangUnit,
+        packing::{copy_flat, live_rows},
+    },
 };
 use hirsel_core_layout::cross::{CAPABILITY, CASE, ELEMENT, FUNCTION, PADDING, SEQ, SHARED};
 use std::ptr::{self, NonNull};
@@ -118,9 +121,10 @@ pub unsafe extern "C" fn hirsel_core_shared_new(
         });
         let payload = header.add(1).cast::<u8>();
         copy_flat(x, payload, 0, size as usize, rows);
-        // What the node holds of its home's limit: the node and each buffer.
+        // What the node holds of its home's limit: the node and each buffer
+        // (a variant's, its active case's).
         let held = charge
-            + rows
+            + live_rows(payload, rows)
                 .iter()
                 .filter(|o| o[1] == SEQ)
                 .map(|o| round8(word(payload.add(o[0] as usize + 16)) * o[3]))
@@ -233,7 +237,8 @@ pub(crate) unsafe fn clean(unit: &mut LangUnit, context: *mut Context, node: *mu
         } else {
             std::slice::from_raw_parts(owners, rows as usize)
         };
-        for o in rows {
+        // A variant payload's owners are its active case's.
+        for o in live_rows(payload, rows).iter() {
             match o[1] {
                 SEQ => {
                     let at = payload.add(o[0] as usize);

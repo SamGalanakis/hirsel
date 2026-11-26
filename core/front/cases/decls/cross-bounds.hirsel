@@ -47,3 +47,15 @@ fn send_write(take half: WriteHalf, to: Client[WriteHalf]) waits {
 // expect: compared CONC-2 at 36:23 | core@1/core/ReadHalf | cross
 // expect: refuse CONC-2 at 40:23
 // expect: compared CONC-2 at 40:23 | core@1/core/WriteHalf | cross
+
+// CONC-2: a variant type that declares cross is cross when each field of each case is, so
+// a request with a String and Client reply arms crosses; one with a Sender arm is refused.
+type Req: cross = Read(u64, String, Client[String]) | Stats(Client[u64])
+
+type Fan: cross = Out(Sender[u64]) | Done
+
+fn open_req() {
+    let r: Result[(Client[Req], Inbox[Req]), Capacity] = conn.new(1, bytes 0)
+}
+// expect: refuse CONC-2 at 55:23
+// expect: compared CONC-2 at 55:23 | core@1/core/Sender[u64] | cross

@@ -49,6 +49,7 @@ import tempfile
 import tomllib
 
 from action_sizes_from_log import CALIBRATED_CPUS, CPU_CLASSES, MAX_CPUS, compile_cpus
+import compiler_source
 import generated
 import prepare
 import rust_environment
@@ -78,14 +79,10 @@ LITERAL = re.compile(r'"([^"\\\n]+)"')
 READS = generated.Reads(ROOT)
 
 # What each build script reads besides its own file, as repository paths.
-BUILD_SCRIPT_SOURCES = {
-    "hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs", "core/front/support/cases.rs"],
-}
+BUILD_SCRIPT_SOURCES = {"hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs", "core/front/support/cases.rs"]}
 
 BUILD_SCRIPT_INPUTS = {
     "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
-    "hirsel-core-driver": ["core/core/**", "core/std/**/*.hirsel",
-                          "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/programs/runner/frame-schema.bin"],
 }
 
 # Their tests live in integration/proof targets, not these empty entry points.
@@ -562,13 +559,15 @@ def first_party(meta: dict) -> str:
         if build and name not in ("hirsel-llvm", "hirsel-llvm-lazy"):
             build_script = f"{name}-build-script"
             src = pathlib.Path(build["src_path"])
+            script_srcs, inputs, exclude, input_paths = compiler_source.build_script(READS, ROOT, member, nodes, packages, members) if name == "hirsel-core-driver" else (BUILD_SCRIPT_SOURCES.get(name), BUILD_SCRIPT_INPUTS[name], [], None)
             out.append("\n" + call(
                 "hirsel_build_script",
                 name=build_script,
                 crate_root=relative(src),
-                srcs=Raw(f"glob({starlark(BUILD_SCRIPT_SOURCES[name], 4)})") if name in BUILD_SCRIPT_SOURCES else [relative(src)],
+                srcs=Raw(f"glob({starlark(script_srcs, 4)})") if script_srcs else [relative(src)],
                 deps=sorted(deps["build"]),
-                inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)}, exclude = {starlark(['core/std/tests/**'] if name == 'hirsel-core-driver' else [], 4)})"),
+                inputs=Raw(f"glob({starlark(inputs, 4)}, exclude = {starlark(exclude, 4)})"),
+                input_paths=input_paths,
                 features=features,
                 **common,
             ))

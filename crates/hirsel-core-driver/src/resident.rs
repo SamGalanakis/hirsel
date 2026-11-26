@@ -82,13 +82,28 @@ pub(crate) fn serving() -> bool {
     SERVING.load(Ordering::Relaxed)
 }
 
-/// The toolchain a process runs, by content: its compiler executable's
-/// identity, which names its products ([`crate::reuse::compiler_identity`]).
+/// The toolchain a process runs, by content: its compiler executable's link
+/// identity ([`crate::reuse::executable_identity`]), read once at load. A
+/// server answers only clients of the same file, so a rebuilt compiler never
+/// talks to its predecessor's server even when both share a compiler identity.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Debug)]
 struct Toolchain(ContentHash);
 impl Toolchain {
     fn loaded() -> io::Result<Self> {
-        crate::reuse::compiler_identity().map(Self)
+        static LOADED: std::sync::LazyLock<io::Result<ContentHash>> =
+            std::sync::LazyLock::new(|| {
+                hirsel_core_front::cost_scope!("non-check", "compiler executable identity");
+                // The linker has already identified this executable. Read that
+                // immutable note, rather than hashing the whole compiler.
+                crate::reuse::executable_identity(&mut std::fs::File::open(
+                    crate::host::current_image()?,
+                )?)
+            });
+        LOADED
+            .as_ref()
+            .copied()
+            .map(Self)
+            .map_err(|e| io::Error::other(e.to_string()))
     }
     /// The toolchain the executable's file holds now: a rebuilt or replaced
     /// one has another, and a deleted one none.

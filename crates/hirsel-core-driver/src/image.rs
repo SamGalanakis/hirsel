@@ -168,7 +168,7 @@ pub(crate) fn closure_image(
     let mut input = ImageInput::prepare(input, false)?;
     let digest = ContentHash::of_parts(
         "hirsel.workspace-dependency-image.v2",
-        [&compiler_identity()?.0[..], &input.digest()?.0[..]],
+        [&compiler_identity().0[..], &input.digest()?.0[..]],
     );
     let store = request
         .store
@@ -229,7 +229,7 @@ impl CoreImage {
         let Some(root) = decode::<ImageRoot>(&bytes) else {
             return Ok(None);
         };
-        if root.compiler != compiler_identity()? {
+        if root.compiler != compiler_identity() {
             return Ok(None);
         }
         let indexed = Arc::new(crate::image_index::DiskIndex::new(path)?);
@@ -606,7 +606,7 @@ impl Driver {
         let mut writer = crate::image_index::Writer::new(reader.clone());
         let outward = product.index.outward();
         let directory = ImageDirectory {
-            compiler: compiler_identity()?,
+            compiler: compiler_identity(),
             inputs,
             stamps,
             index: Arc::new(product.index.publish(&mut writer)?),
@@ -631,7 +631,7 @@ impl Driver {
         let (sections, pages) = writer.finish(&store)?;
         let sections_hash = store.put(&sections.encode()?)?;
         let identity = store.put(&encode(&ImageRoot {
-            compiler: compiler_identity()?,
+            compiler: compiler_identity(),
             directory: directory_hash,
             namespace,
             source_stamp,

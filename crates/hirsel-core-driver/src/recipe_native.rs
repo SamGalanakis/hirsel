@@ -580,7 +580,7 @@ impl Memos {
         }
         let key = key(
             "hirsel.recipe-unit-index.v2",
-            &(crate::reuse::compiler_identity()?, entry),
+            &(crate::reuse::compiler_identity(), entry),
         )?;
         let read = cached(&Store::cas(&options.cas)?, key)?
             .and_then(|bytes| crate::decode::<UnitIndex>(&bytes))

@@ -40,3 +40,6 @@ cxx_library(
     preferred_linkage = "static",
     visibility = ["PUBLIC"],
 )
+
+# The compiler identity hashes these sources (crates/hirsel-core-driver/src/compiler_source.rs).
+filegroup(name = "compiler-source", srcs = glob(["**"], exclude = ["BUCK"]), visibility = ["PUBLIC"])

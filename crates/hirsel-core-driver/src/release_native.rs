@@ -406,7 +406,7 @@ pub(super) fn emit_release_image(
     };
     let jobs = hirsel_guard::jobs() as u32;
     let entry = &instance.definition;
-    let compiler = compiler_identity()?;
+    let compiler = compiler_identity();
     let llvm = crate::tool_inputs::llvm_library()?;
     // A program beside its separately lowered std does not hold every body
     // that writes a blob's `W`, so its widths stay dynamic (the width

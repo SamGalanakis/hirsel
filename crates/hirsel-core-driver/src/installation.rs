@@ -288,10 +288,15 @@ pub(crate) fn spec_url_for(release: Option<&str>, spec_file: &str, anchor: &str)
     format!("{REPOSITORY_URL}/blob/{git_ref}/{spec_file}#{anchor}")
 }
 
+/// The compiler identity's source digest, as build.rs computes it, and its law.
+#[cfg(test)]
+#[path = "compiler_source.rs"]
+mod compiler_source;
+
 pub(crate) fn print_version() -> io::Result<()> {
     let executable = std::env::current_exe()?;
     let installed = Installed::discover(&executable)?;
-    let compiler = crate::reuse::compiler_identity()?;
+    let compiler = crate::reuse::compiler_identity();
     println!("hirsel {}", version());
     println!("compiler {}", hex(compiler));
     println!("docs {DOCS_URL}");

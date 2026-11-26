@@ -201,7 +201,7 @@ impl PackageProduct {
 fn cache_path(root: &Path, sources: ContentHash) -> io::Result<PathBuf> {
     let identity = ContentHash::of_parts(
         "hirsel.package-product.v1",
-        [&compiler_identity()?.0[..], &sources.0],
+        [&compiler_identity().0[..], &sources.0],
     );
     Ok(root.join(
         identity

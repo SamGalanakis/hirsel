@@ -797,7 +797,7 @@ impl<'a> Generator<'a> {
     /// units: every side of one kin is lowered by the same generator. The
     /// runtime a program links is not one: the side's code reads none of it.
     fn kin(&self) -> io::Result<ContentHash> {
-        let compiler = crate::reuse::compiler_identity()?;
+        let compiler = crate::reuse::compiler_identity();
         let llvm = crate::tool_inputs::llvm_library()?;
         crate::native::key(
             "hirsel.core-std-kin.v1",

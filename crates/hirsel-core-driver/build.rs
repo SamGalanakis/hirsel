@@ -1,4 +1,6 @@
 // Freeze installed library sources and identities when the toolchain is built.
+#[path = "src/compiler_source.rs"]
+mod compiler_source;
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
@@ -86,6 +88,22 @@ fn main() {
     generated.push_str(&format!(
         "pub const DIGEST: [u8;32] = {core:?};\npub const STD_DIGEST: [u8;32] = {:?};\n",
         <[u8; 32]>::from(combined.finalize())
+    ));
+    // The compiler identity (docs/building.md, "Compiler identity"): the
+    // compiler's source closure and pins, and the library sources it bundles.
+    let repository = root.parent().unwrap();
+    let (source, watched) =
+        compiler_source::digest(repository, "crates/hirsel-core-driver").unwrap();
+    for path in watched {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let mut identity = Sha256::new();
+    identity.update(b"hirsel.compiler-identity.v1");
+    identity.update(source);
+    identity.update(Sha256::digest(generated.as_bytes()));
+    generated.push_str(&format!(
+        "pub const COMPILER: [u8;32] = {:?};\n",
+        <[u8; 32]>::from(identity.finalize())
     ));
     fs::write(
         Path::new(&env::var("OUT_DIR").unwrap()).join("core_sources.rs"),

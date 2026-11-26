@@ -565,7 +565,7 @@ impl Driver {
             }
         }
         meter.finish("load/source files and hashes");
-        let compiler = compiler_identity()?;
+        let compiler = compiler_identity();
         meter.finish("load/compiler identity");
         let image = match &request.library {
             LibraryInput::Image(i) | LibraryInput::ReachableImage(i) => Some(Arc::clone(i)),

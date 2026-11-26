@@ -70,3 +70,6 @@ printf '%s\\n' 'static COMPONENT: &[u8] = include_bytes!("engine.so");' \
 """,
     visibility = ["PUBLIC"],
 )
+
+# The compiler identity hashes these sources (crates/hirsel-core-driver/src/compiler_source.rs).
+filegroup(name = "compiler-source", srcs = glob(["**"], exclude = ["BUCK"]), visibility = ["PUBLIC"])

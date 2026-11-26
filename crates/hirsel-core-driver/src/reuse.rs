@@ -1287,22 +1287,20 @@ thread_local! {
     /// Tests stand in for another compiler build with another identity.
     pub(crate) static TOOLCHAIN: std::cell::Cell<Option<ContentHash>> = const { std::cell::Cell::new(None) };
 }
-pub(crate) fn compiler_identity() -> io::Result<ContentHash> {
+/// What the compiler is: its source closure, pins and bundled libraries, fixed
+/// when the toolchain is built (build.rs; docs/building.md, "Compiler
+/// identity"). Not where it was linked: a cross and a native build of one
+/// source share it.
+pub(crate) fn compiler_identity() -> ContentHash {
     #[cfg(test)]
     if let Some(identity) = TOOLCHAIN.get() {
-        return Ok(identity);
+        return identity;
     }
-    static ID: std::sync::LazyLock<io::Result<ContentHash>> = std::sync::LazyLock::new(|| {
-        hirsel_core_front::cost_scope!("non-check", "compiler executable identity");
-        // The linker has already identified this executable. Read that immutable
-        // note, rather than scanning and hashing the whole compiler on every launch.
-        executable_identity(&mut std::fs::File::open(crate::host::current_image()?)?)
-    });
-    ID.as_ref()
-        .copied()
-        .map_err(|e| io::Error::other(e.to_string()))
+    ContentHash(crate::product::bundled::COMPILER)
 }
 
+/// An executable file's link identity: its linker build ID, else its bytes.
+/// It names the file a resident compiler serves from, not its products.
 pub fn executable_identity(reader: &mut (impl io::Read + io::Seek)) -> io::Result<ContentHash> {
     use object::Object as _;
     let linked = {

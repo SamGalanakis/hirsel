@@ -357,7 +357,7 @@ fn emit_unit(
 pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::Result<Vec<u8>> {
     let mut environment = encode(&(
         crate::native_object::SCHEMA,
-        compiler_identity()?,
+        compiler_identity(),
         runtime,
         engine_library(options.backend)?,
         &options.target,

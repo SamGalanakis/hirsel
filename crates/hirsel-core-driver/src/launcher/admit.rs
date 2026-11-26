@@ -646,17 +646,7 @@ fn publish(
                     )));
                 }
                 Ok(gate::Verdict::Green) => {
-                    let toolchain = match ad
-                        .toolchain
-                        .map_or_else(crate::reuse::compiler_identity, Ok)
-                    {
-                        Ok(identity) => identity,
-                        Err(e) => {
-                            return Some(Err(Failure::Invalid(format!(
-                                "law gate: the toolchain identity: {e}"
-                            ))));
-                        }
-                    };
+                    let toolchain = ad.toolchain.unwrap_or_else(crate::reuse::compiler_identity);
                     Some(Green {
                         tree: digest.to_vec(),
                         root: Vec::new(),

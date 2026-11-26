@@ -37,7 +37,7 @@ pub(super) fn build_key(
     key(
         "hirsel.core-build.v1",
         &(
-            crate::compiler_identity()?,
+            crate::compiler_identity(),
             toolchain,
             recipe,
             objects,

@@ -1,4 +1,6 @@
-# STORE-SPEC v2.141: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.142: the M4 store library (lane store-spec-1001)
+
+v2.142 (run-bucket-stream-spec-2877, Sam's rulings of 2026-11-26): text only, not yet built. **The Bucket host stream** (§12.11, `store-bucket-stream`). A host that opts in packs the commit frames of all its attached Places into shared create-only batch objects under one stream root, with one register `reg` per stream, so a commit costs 1 Class A and 1 Class B per batch instead of 2 Class A per Place and an idle head poll. It folds in AMENDED-BUCKET-STREAM, the Astra sign-off (A1–A5) and the Fable sign-off (M1–M12); §12.11.16 maps each item to its paragraph. Sam's three rulings: (1) Q4 amended for attached Places only: a claimant writes one revocable `Held` register row before its head replace, a standalone claim still writes nothing before it, and the attached residual is stated (§12.3 claim and residual, §12.11.5); (2) `Batching` has no default; (3) the typed API, `Config.journal: Option[StreamPlan]` and `streamed(a, slot)`. Changed elsewhere: §12's clock rule (the stream's timers); §12.1 (`Attached(sid)`); §12.2 (the head row, the ATTACH pointer, "What each head write sets", the provider contract pointer, step 5a skipped on a streamed genesis); §12.3 (One owner per advance, claim intro, residual, Recovery's history order, no idle head poll on an attached Place, `Health.Latched`, Local reads bound); §12.4 (weak levels refused); §12.5 (`fresh` is `Behind` while a hold is present, `fresh_snapshot`); §12.6 (reclaim never touches a stream); §12.7 (export and backup settle or cut); §12.9 (`HEAD_OBJECT_LIMIT` 66,304, head buffers 132,608); §12.10 (L90 pointer); §11.1 (kinds 0x0100–0x0105); §13.9 (archival writes the stream tails as entries). New kinds are MUST = 1 under §2.7, with no format bump: a reader without them refuses an attached head as `Unsupported(0x0100)`, and an un-streamed store writes none. Decisions taken in this text, each reversible until built: kinds 0x0100 ATTACH, 0x0101 INDEX, 0x0102 TERM (the terminal fence), 0x0103 REG, 0x0104 XINDEX, 0x0105 FOOTER and roles 11–14; claims never elect, and only a host janitor elects on another stream, as a Collecting incarnation (A4, M9); a commit after a latch returns `Latched(cause)`. Laws: L90 is listed in §12.11.15 and owed by the build.
 
 v2.141 (run-store-per-store-limits-2852): built. **Per-store limits** (§11.1 AP4a). (1) `Options.limits` and `Overrides.limits` are `Option[StoreLimits]`, `StoreLimits { frame, value, meta }`: the journal frame limit (16 + the COMMIT payload), the stored-value limit and the MANIFEST record limit. Each is at most today's ceiling (`FRAME_LIMIT` 16,777,296, `VALUE_LIMIT` 16,711,680, `META_LIMIT` 16,777,216), with floors value ≥ 4,096, meta ≥ 4,096 and frame ≥ value + 65,616 (the ceilings' own gap, so a full key and a full value still fit one COMMIT); limits outside them are `Missing("value_limit")`, `Missing("frame_limit")` or `Missing("meta_limit")`. `None` is the ceilings at genesis, so defaults are unchanged. (2) **Genesis records them in the MANIFEST** (AP14's value, meta and transaction slots) and every later open reads them from there. They are durable because replay, the recovery floor and every cut must agree with the open that wrote the journal: a limit taken from the caller's Options on each open would let a reopen with larger limits accept a frame the writer never could, or one with smaller limits call a valid store corrupt. A crash between genesis and the first commit reopens with the recorded limits. (3) **A differing Config is refused**: an open, a read-only open or an object open whose `limits` is `Some(l)` with l unequal to the recorded limits is `LimitsDiffer(recorded)`, before the writer starts; `None` adopts the recorded limits. (4) **Every check uses the store's limits**: commit admission (`Limit(Value)` and `Limit(Transaction)` in put, Cell, Log, stream and index writes, and the migration builder's value check), the frame encoder and the `FRAME_LIMIT` wait, replay (a COMMIT payload over the recorded transaction limit or a data value over the recorded value limit is `Corrupt(Malformed)`), the MANIFEST size check (`manifest_limit` = the 316 fixed bytes + meta), S10's T against meta, the journal floor (`checkpoint_bytes` + frame), and import and install against NEW's limits (a PREPARED target whose limits differ from the installing store's is `LimitsDiffer`). (5) **sizes.hirsel uses the store's limits**: the cut step is a full key plus the store's value, and the journal and recovery terms use its frame, so `disk_reservation`, `directory_writer_need` and the Bucket plan shrink with them. (6) **Export and import carry the limits**: the exported MANIFEST holds them, PREPARED's target gains `limits: Option[StoreLimits]` (AP1b: 4 bytes for `None`, 28 for `Some`), a follower and an export replay read them, and the history genesis packet records the store's. (7) **A small Place asks for small limits**: platform `local`'s Place sizing passes `small_place_limits()` = frame 327,760, value 262,144 (std.wsock's default message), meta 65,536. Its Directory need (group 64 KiB, pack 64 KiB, resident 1 MiB, 64 commits) is 1,840,112 bytes, 34,934,196 at the ceilings; a 1-lane Bucket Place at the same group and pack plans 6,202,790 (writer 6,201,452), 72,787,342 at the ceilings. `Options` gains a 32-byte `Option[StoreLimits]`, which the follower's provision box and reply slot each carry, so the follower starter is 1,258 bytes (was 1,194) and the default Bucket place plan 72,787,342 (was 72,787,278); a default Directory need is unchanged. (8) **Format 10.** The MANIFEST's key and page slots (always 4,096) now hold the value and meta limits, and the transaction slot holds frame − 16; the key limit and page target stay format constants. A format-9 store is `Unsupported(9)`, with no migration. Kept at the ceilings, because they bound decoding of bytes no store's limits chose: READER_PIN_MIN, the projector and writer pin minima, the readers term, the per-kind decode ceilings (§2.3), the commit wire's blob ceilings, the history entry and read limits, the export and object-import file reads, the sealed MANIFEST kind limit, keyed-claims policy checks, prepared-import row validation (which has no store; install refuses differing limits), index payloads in the bulk builder (the put path checks the store's value) and the object follower's rebase replay. Laws: `journal_test_small_limits` (a commit one byte over a small frame limit is `Limit(Transaction)` and one at it is accepted, before and after reopen; a reopen with the default limits is `LimitsDiffer(small)`), `journal_test_genesis_limits` (a crash after genesis, before the first commit, reopens with the recorded small limits), `journal_test_replay_over_limit` (a frame over the recorded limit is `Corrupt`), `small_directory_place_need` and `small_bucket_place_plan_at_floor` (the hand-derived figures above; the default 64 MiB-group need is unchanged at 101,977,524). Reversible: the format word is one way; the limits are code and text.
 
@@ -3980,6 +3982,7 @@ Integers are little-endian unless marked BE, as in §2. "str" and "bytes" have �
 | 0x0087 | round entry op | ROUND (role 9) | 1 | 16,715,784 | §3.5a "The kept import" (v2.129) |
 | 0x0088 | steps metadata | STEPS (role 10) | 1 | 1,048,832 | §3.5a "Catch-up" (v2.138) |
 | 0x0089 | step | STEPS (role 10) | 1 | 16,715,784 | §3.5a "Catch-up" (v2.138) |
+| 0x0100–0x0105 | ATTACH, INDEX, TERM, REG, XINDEX, FOOTER | `head` (ATTACH); host stream objects of roles 11 REGISTER, 12 BATCH, 13 XINDEX (14 PROBE holds only a HEADER) | 1 | ATTACH 512; INDEX 4 + 8 + 4 + 68 × `max_slots`; TERM 32; REG 1,048,576; XINDEX 16,777,216; FOOTER 32 | §12.11.2 (v2.142, not yet built) |
 
 **Retired kinds are refused whatever their MUST bit (M3).** A format-3 file holding a frame of kind 0x0020 or 0x0030 is `Unsupported(kind)`, whether its MUST bit is 0 or 1. This is an exception to §2.7 rule 4, which skips an unknown MUST = 0 kind: a retired kind is known, not unknown. A known kind found in a file of another role, or a PAGE in a class-1 pack or a BLOB in a class-0 or class-2 pack, is `Corrupt(Kind(kind))`.
 
@@ -4922,11 +4925,12 @@ Background, design history and prior art: `/workspace/code/hirsel-briefs/store-m
 
 **Citations.** In this section "Astra #n" can name the v2.46 attack (m2-attack-1924, its An) or the v2.47 re-check (m2-recheck-astra-1932, its #n), and "Fable Fn" the v2.46 review while "Fable L/S/A n" the re-check. CHANGES-v2.47's table is the authoritative map from each re-check finding to its rule, and CHANGES-v2.46's from each earlier finding.
 
-**One rule about clocks.** No *safety* rule reads a clock. Fencing, freshness, staleness, reclaim and the claim are decided by positions, epochs and register bytes. Two *liveness* rules use the local monotonic clock only:
+**One rule about clocks.** No *safety* rule reads a clock. Fencing, freshness, staleness, reclaim and the claim are decided by positions, epochs and register bytes. These *liveness* rules use the local monotonic clock only:
 - request deadlines (`op_ms`, `deadline_ns`, `claim_ms`);
-- the idle head poll (§12.3).
+- the idle head poll (§12.3), which an attached Place does not run;
+- a host stream's timers (§12.11.13): the batching window `max_wait_ms`; `hold_ms`, after which a service settles to clear a hold, and the `hold_ms / 4` stall poll; a janitor's election age `4 × hold_ms`, measured from its first observation; a straggler pin's `pin_ttl_s`; and the idle register poll `idle_poll_ms`.
 
-Neither compares clocks across machines.
+None compares clocks across machines. Each timer only triggers an action that a CAS, a create or a head write decides.
 
 ### 12.1 The authority
 
@@ -4976,6 +4980,8 @@ HEAD records the store identity (in its HEADER), the current `activation` and th
 - objects@1 only: if the live client fails §12.2's transport check ("Which endpoints the store accepts"), the result is `Endpoint(Insecure)` or `Endpoint(Unproven)`.
 - sim@1 only (v2.73): a client that is not a `std.sim.s3` client is `Endpoint(NotSimulator)`. A `SimLevels` outside §12.2's AUTHORITY ranges (more than 15 weak names, or a name of 0 or over 64 bytes) is `Limit(Name)`, and a name given twice, the strongest included, is `Exists(name)`. Both are refused before any request.
 
+- A head that carries ATTACH (§12.11.2), opened through an Authority that `streamed` did not return, is `Attached(sid)`. A follower, read-only open, scrub or verify gets the same unless its Authority came from `stream_reader` (§12.11.9).
+
 None of these is retried by `open`'s claim loop, and none writes a byte.
 
 **Open identity (§1.12, Astra #19, #22).**
@@ -5002,7 +5008,7 @@ The rest of this section is objects@1. sim@1 is the same protocol over a `std.si
 
 | Key | Role | Bytes | Written by |
 |---|---|---|---|
-| `head` | 7 | HEADER(seq = position) ‖ HEAD ‖ AUTHORITY | genesis: create (`If-None-Match: *`); after that only `store_if` with `Match(t)` (§12.3) |
+| `head` | 7 | HEADER(seq = position) ‖ HEAD ‖ AUTHORITY, then ATTACH while the Place is attached to a host stream (§12.11.2) | genesis: create (`If-None-Match: *`); after that only `store_if` with `Match(t)` (§12.3) |
 | `e-<position>-<epoch>-<digest>` | 2 | one entry: HEADER(seq = position, `prev_end` 0) ‖ LINK ‖ body frames | create-only |
 | `m-<generation>-<epoch>-<digest>` | 1 | a MANIFEST (AP14) | create-only |
 | `p-<seq>-<epoch>-<digest>` | 3 | a pack (class 0, 1 or 2) | create-only multipart (`upload(NoClobber)`, `parts`, `complete`) |
@@ -5036,6 +5042,8 @@ The rest of this section is objects@1. sim@1 is the same protocol over a `std.si
 
 Leaf rows ascend strictly by seq across every chunk of a level, and a reader checks that order across chunk boundaries.
 
+ATTACH (0x0100) and the host stream's own keys and frames (`reg`, `b-`, `x-`, `probe`; INDEX, TERM, REG, XINDEX, FOOTER) are defined in §12.11.2. The stream's keys sit under the deployment's stream root, never under a Place prefix.
+
 **HEAD rules.** These are checked on every head read, and each failure is `Corrupt(Malformed)` (Fable A3):
 - `epoch ≥ 1`, `position ≥ 1`, `1 ≤ entry_epoch ≤ epoch`, `1 ≤ c_epoch ≤ epoch`, `1 ≤ floor ≤ c_position ≤ position`;
 - `len` and `c_len` are at least 72 + 40 and at most `ENTRY_READ_LIMIT` (below);
@@ -5048,6 +5056,12 @@ Before writing a head, a holder computes `epoch + 1` (a claim) or `position + 1`
 - A **claim** copies `position`, `entry_epoch`, `len`, `digest`, every `c_*`, `floor`, `activation` and `binding` unchanged, and changes only `epoch` and `holder`.
 - An **advance** sets `position` to p + 1, and `entry_epoch` to its own epoch with the new entry's `len` and `digest`. It changes `c_*` and `floor` only when the entry is a CHECKPOINT, and `activation` and `binding` only for an activation CHECKPOINT (§12.7).
 - A claim also copies the AUTHORITY frame **byte for byte** (Fable S2).
+- **ATTACH** (§12.11.2) is present only on an attached Place. A standalone head write never writes it, except a claim through `streamed`, which adds it (§12.11.5). On an attached Place:
+  - a **claim** appends the incumbent's tail to `sealed` (unless it is empty, or when `sealed` would reach 8 entries it sets `live := None`), sets `live` to the claimant's stream, and copies `settles`;
+  - an **advance** (a CLAIM entry or a direct-service entry) copies ATTACH;
+  - a **settle** head write moves `live.from` past exactly the frames its entry holds and raises `settles` by 1, so it never repeats a head body;
+  - a **cut** sets `sealed := []` and `live := (its stream, inc, (next seq, 0))`;
+  - **close**'s last head write drops ATTACH; nothing else does (§12.11.11).
 
 So the latest entry's name is always in HEAD: after any number of claims with no advance between them, the latest entry is still `e-<position>-<entry_epoch>-<digest>`.
 
@@ -5125,6 +5139,8 @@ Retirement on objects@1 is reclaim's (§12.6): a pack is garbage when no retaine
 4. **create-if-absent** for entries, MANIFESTs, packs and chunks (`If-None-Match: *` on PUT and on multipart `complete`);
 5. **read-after-write** by exact key for every acknowledged object, and a LIST that shows every object created before it was issued. LIST is used only by genesis's empty check, by recovery and followers as a fetch hint (§12.3), and as reclaim's candidate source. A lagging LIST only slows a fetch or leaves garbage.
 
+A host stream (§12.11.3) extends items 1–3 to its register `reg` and item 4 to its batch, TERM, XINDEX and `probe` objects.
+
 The client maps **412** to `Mismatch` (for `If-Match`) and `Exists` (for `If-None-Match`). A **409** on a conditional PUT (S3's `ConditionalRequestConflict`: a conflicting request was in flight) is **retried with the same tag and body** within the budget, and is never `Mismatch` (Fable F7). Multipart completion has its own rule (above).
 
 **Which endpoints the store accepts (v2.77).** The store never asks which company runs an endpoint. It checks the transport at every open (writer, genesis, import and follower) before any write, and the protocol at genesis. It never uses the AUTHORITY recorded in the head.
@@ -5173,6 +5189,7 @@ The authority uses `store_if_retry`. It resends uncertain requests within the sa
 - **One request at a time.** Every head request and entry create of the holder is the journal task's, sent over its `std.object.Requests`: entry creates, head writes and their Q5 resends and GETs, `fresh_snapshot` GETs and idle polls. It sends them one at a time and receives each reply before it sends the next. While a cut holds the Requests (§12.2, "When a cut runs"), the cut sends pack and MANIFEST requests and no head request, and the journal sends none. Readers' GETs (pagers, followers) use their own lanes and never request the head for the holder: a pager forwards a NotFound to the journal (§13). This holds on any lane count, so a one-lane Bucket is a valid configuration.
 - **An advance is decided by its own replies.** Only the Q5 rule's replies to the advance's head write decide it. A `fresh_snapshot` GET and an idle poll run only between advances, when no head write is outstanding. They decide only the holder's pair for later work: another pair makes the holder `Fenced(e)`, and they never decide an advance.
 - Once an advance is Advanced, its tickets are acked. A later `Fenced` applies to later work and never revokes that success.
+- **An attached Place** (§12.11) commits through its host stream: its tickets are acked by the stream's ack rule (§12.11.4), not by a head write. Its head task still owns its head tag and every write to it (the CLAIM entry, settles, cuts, direct-service entries), one request at a time as above, and the stream's service never writes a Place's head (§12.11.12).
 
 **Genesis** (no head and `o.create`; Astra #4, #6, #9, #12, #20, #21, Fable L2):
 1. GET `head` returns NotFound. Without `o.create` the result is `NotFound`. Run §12.1's checks for the no-head case, which refuse `o.expect = Some(_)` and `o.activation = Some(v ≠ 0)`. This all happens before any write. A racing `Lost` later can never switch an open that failed these checks onto the claim path.
@@ -5183,7 +5200,7 @@ The authority uses `store_if_retry`. It resends uncertain requests within the sa
 3. Draw the identity and the holder (16 bytes each, `Random`).
 4. Create the base: the genesis MANIFEST `m-1-1-<d>` (§3.4 step 2's fields in AP14's layout: generation 1, `next_pack` 1, `first_live` 1, `prev_first` 1, empty list roots, main at version 0, `account` 0). **A standalone import** (§12.7) instead creates its validated packs `p-<seq>-1-<d>`, any locator chunks and its MANIFEST here, all at epoch 1.
 5. Create entry 1, `e-1-1-<d₁>`: HEADER(seq 1, epoch 1), LINK(0, 0, 0), MARK{generation 1, epoch 1, the MANIFEST's len and digest; floor 1; depth; no earlier retained}, and the LOCATE root (empty for a plain genesis). **The base is an ordinary CHECKPOINT.**
-   5a. (v2.77) Send entry 1's bytes to its key with `If-None-Match: *`, then with `If-Match` on a tag no object carries. Both must be refused, else `Endpoint(IgnoresIfNoneMatch)` or `Endpoint(IgnoresIfMatch)` (§12.2).
+   5a. (v2.77) Send entry 1's bytes to its key with `If-None-Match: *`, then with `If-Match` on a tag no object carries. Both must be refused, else `Endpoint(IgnoresIfNoneMatch)` or `Endpoint(IgnoresIfMatch)` (§12.2). A streamed genesis skips this step because its host stream's service probed the endpoint (§12.11.3 rule 7, §12.11.5 "Streamed genesis").
 6. Create `head` with `Absent`: HEAD{epoch 1, holder, activation 0, position 1, entry_epoch 1, len₁, d₁, c = (1, 1, len₁, d₁), floor 1, binding all-zero}, and the grant's AUTHORITY. Apply the Q5 rule.
    - A loser of a genesis race gets `Lost` and **returns `Lost`**. It never retries into a claim (Fable L5).
    - The loser's objects are epoch-1 debris that reclaim removes (§12.6) or a later genesis skips.
@@ -5191,7 +5208,7 @@ The authority uses `store_if_retry`. It resends uncertain requests within the sa
 
 So every head names a CHECKPOINT, and HEAD has no "absent checkpoint" encoding. Recovery always starts from a MANIFEST. A crash or `Undecided` anywhere before step 6 leaves only debris, and the next `open` with `create` finishes genesis with no operator. A delayed `Absent` request of the crashed attempt can still apply. That is an ordinary genesis race, and the second opener's step 6 gets `Mismatch` then `Lost`.
 
-**Claim** (every writer `open` of an existing store; Q4, Astra #5, #13, Fable L3, L5; v2.48 Delta #5). **A claim fences only the exact head it has already recovered and admitted.** Every step before the replace writes nothing, and a claimant that cannot serve the admitted head never deposes the incumbent:
+**Claim** (every writer `open` of an existing store; Q4, Astra #5, #13, Fable L3, L5; v2.48 Delta #5). **A claim fences only the exact head it has already recovered and admitted.** For a standalone Place, every step before the replace writes nothing, and a claimant that cannot serve the admitted head never deposes the incumbent. A claim of a Place attached to a host stream (its head carries ATTACH) follows §12.11.5 instead: it writes exactly one thing before the replace, a revocable `Held` row in the stream's register, and the second half of the rule holds for it unchanged (Sam's ruling of 2026-11-26). The steps below are the standalone claim:
 1. **GET `head`**: its bytes and tag. **Check** the live client's transport (§12.2), once for this open; no later step repeats it. This GET's (epoch e, holder) is **the claim's pair**, fixed for the whole open (v2.49, Check #2). A rebase or catch-up changes the admitted head A, never the pair.
    - **The pair check.** Every head GET of the claim before its replace applies compares its (epoch, holder) with the claim's pair **first**: step 3's witness GET and each of its retries, and step 4's final GET and its catch-up witness GETs. Step 5's Q5 GET makes it only after the Q5 rule's exact-bytes test: its own body (epoch e + 1, this holder) is Claimed, and only other bytes are compared with the pair. The check ends when the replace applies; the CLAIM advance, the idle poll and `fresh_snapshot` follow §12.3's holder rules. A different pair returns `Lost` at once, before the GET's head is classified, before its CHECKPOINT entry is fetched and before anything is adopted from it. `Lost` outranks `Corrupt`: a missing object seen under another holder's head says nothing about the incumbent this claim recovered.
 2. **Check** §12.1's opening checks on those bytes: identity, AUTHORITY, declaration, activation and binding. Also check that `epoch + 1` and `position + 1` do not reach 2⁶³ (`Limit(Ids)`). Any failure returns with nothing written.
@@ -5212,6 +5229,8 @@ So every head names a CHECKPOINT, and HEAD has no "absent checkpoint" encoding. 
 
 **The residual (stated).** After a won replace, only the CLAIM advance can fail: a claimant crash, or `Remote` or `Undecided` on its entry or head write. That leaves a head of epoch e + 1 that no open holds, and the next open claims e + 2. No memory admission, recovery or catch-up runs after the fence, so a healthy incumbent is never deposed by a claimant that turns out unable to serve it (v2.48 replaces v2.47's step 5 and its residual for the delta's growth).
 
+**The residual for an attached Place (stated, v2.142).** Its claimant writes a `Held` row before the replace, so a claimant that fails admission or crashes mid-claim pauses that one Place's commit acks: until the incumbent reads the Abandoned row (a refusal), or for up to `hold_ms` (about 2 s, a crash), after which the incumbent pays one settle head write, clears the hold and resumes (§12.11.5, §12.11.6). It still never writes the replace after a refusal, so the incumbent is never deposed by it.
+
 **The claim loop (Q4, Fable F4, L5, Astra #13).** A claim attempt ends in one of three ways besides success:
 - **The incumbent advanced** (step 4 saw a moved head, or step 5's Q5 GET showed the claim's pair at another position). The incumbent is the claim's pair, and only its own advances, cuts and reclaims are caught up or rebased over. The claimant catches up privately and repeats step 4. After a step-5 `Mismatch` it first backs off with jitter from `Random` (base 10 ms, doubling, at most 1 s); a moved head at step 4 wrote nothing and repeats at once.
 - **The pair changed**: a head GET before the replace applied (final, witness, or a Q5 GET that is not this claimant's own body) shows another pair than step 1's, so another claimant won, and `open` returns `Lost` at once. It never adopts that claimant's head, never rebases onto it, and never deposes a fresh claimant mid-recovery (v2.49). The launcher decides whether to try again.
@@ -5231,6 +5250,8 @@ Progress is conditional, and stated as such. An attempt succeeds when its replac
 3. **Load the checkpoint** in the order "Reading" gives (§12.2), then run AP21 steps 0–5 over it.
 4. **Apply** entries c + 1..p in position order. Each is fetched whole, with exactly its recorded `len`, and its digest, HEADER and frames are checked before apply. GROUP frames apply exactly as §3.4 step 6. CLAIM frames change no state. A CHECKPOINT entry above c cannot occur (`Corrupt(Malformed)`), because HEAD names the latest. Fetches may run ahead on parallel lanes, bounded by the per-lane buffer (§12.9).
 5. **Account** as §3.4 step 7. There is no rotation: the next entry is p + 1.
+
+A head that carries ATTACH is recovered in history order (§12.11.9): each sealed tail is applied after the entries up to its `at`, and the live tail after entry p. Step 4 never applies an entry above a sealed tail's `at` before that tail.
 
 **Advance** (the journal task, one group, replacing §3.3's write and sync for objects@1):
 1. Create the entry at p + 1: LINK to entry p, then the group's frames. The entry write is not a commit point. `Uncertain` and `Exists` resolve as create-only says, and an unresolved failure is `Remote(e)`, sticky poison with nothing acked.
@@ -5259,17 +5280,19 @@ At most one head write is outstanding, and entry p + 2 is created only after p +
 
 The poll runs only while the Db is open: a runner that unloads the place (`idle_ms`, RUNNER §14.4) closes it, and the poll stops. It does not run during a cut's uploads, because a head write is then imminent and decides the same question.
 
+**An attached Place makes no idle head poll** (§12.11.13). Its host stream's service GETs the register every `idle_poll_ms` while no batch is decided, and the Place GETs its head only while a hold stalls it, every `hold_ms / 4`.
+
 **Health (Astra #14, Fable L6).**
 
 ```hirsel
-pub type Health = Ok(u32) | Fenced(u64) | Undecided | Poisoned(IoError) | Remote(std.object.Error)   // Ok carries consecutive failed polls
+pub type Health = Ok(u32) | Fenced(u64) | Undecided | Poisoned(IoError) | Remote(std.object.Error) | Latched(StreamLatch)   // Ok carries consecutive failed polls (failed register reads on an attached Place); Latched: §12.11.10
 pub fn health(db: Db) -> Health                                              // the current value
 pub fn on_unhealthy[M: send](mut db: Db, take to: Sender[M], take m: M) -> Result[(), Error]   // sends m once, when health leaves Ok
 ```
 
 The poll, the Q5 rule and poison set it, and it never returns to `Ok` within an open. `on_unhealthy` registers one message, which the journal task sends on `to` when health first leaves `Ok` (at once if it already has). Delivery is an ordinary channel send into the caller's own inbox, as `clock.alarm` delivers, so an idle receiver wakes on it with no new task primitive. A full or closed channel is the receiver's: the health value stays set and every later store call returns the error. RUNNER-SPEC v2.34 registers the head's inbox and ends the run abnormally on that message (RUNNER §2.1 "Poison and fence"). The value-returning `healthy` of v2.46's text is `health`.
 
-**Local reads.** Plain `snapshot(db)` and every query stay local reads at V, with no authority request: RAM for Memory collections, and for Tiered ones (§13) the cache or an immutable pack GET, never `head`. So a partitioned, unkilled holder serves reads of its own durable or visible state until its next head write or poll reaches the bucket. Under a working path to the bucket, and given a serviced timer, a free lane and a completing request, that lasts at most `head_poll_ms` plus one request's deadline. The bound is liveness, not safety. A client that needs current state uses `fresh` or `fresh_snapshot`. The poll costs one conditional GET per interval per idle holder, nothing while groups flow (an advance confirms the head), and one lane and the head buffer (§12.9).
+**Local reads.** Plain `snapshot(db)` and every query stay local reads at V, with no authority request: RAM for Memory collections, and for Tiered ones (§13) the cache or an immutable pack GET, never `head`. So a partitioned, unkilled holder serves reads of its own durable or visible state until its next head write or poll reaches the bucket. Under a working path to the bucket, and given a serviced timer, a free lane and a completing request, that lasts at most `head_poll_ms` plus one request's deadline; for an attached Place, `idle_poll_ms + hold_ms / 4` plus two requests' deadlines (§12.11.13). The bound is liveness, not safety. A client that needs current state uses `fresh` or `fresh_snapshot`. The poll costs one conditional GET per interval per idle holder, nothing while groups flow (an advance confirms the head), and one lane and the head buffer (§12.9).
 
 **Holder change.** A claim keeps every commit for which `durable_at(L)` returned, for every level L whose declared `survives` is 2. On objects@1 that is its one level (§12.4).
 
@@ -5298,6 +5321,8 @@ The poll, the Q5 rule and poison set it, and it never returns to `Ok` within an 
 - **Charges.** The `LevelSync` cell, the open's `WeakSynced` handling and one waiter list per declared level are charged to the opener at open, beside §12.9's fixed buffers. `sizes.hirsel` gives the exact figure. The `LevelWorld`'s task and log are charged to the law that made it, through `bytes`.
 
 L55 and L56 run on sim@1.
+
+**A host stream refuses weak levels.** `journal_service` and `streamed` over a sim@1 grant with any weak level are `Stream(WeakLevels)` before any request (§12.11.1): a weak barrier is per entry, and an attached Place's commits are not entries.
 
 ### 12.5 Followers and fresh reads
 
@@ -5374,14 +5399,14 @@ pub fn claim_of(db: Db) -> Result[Claim, Error]                                 
 - **The head of a capture (v2.49, Check #1).** `follower_head(f)` returns the store identity, HEAD `activation`, HEAD `binding` and the (epoch, holder) of the head that the published state was loaded from. It is published with the roots and applied position, so it and every `snapshot_follower` taken before the next `catch_up` describe **one capture**: the activation, binding and pair are the head's, and the rows are the state at that head. A follower opened with `expect = Some(id)` makes §12.1's identity check (`Foreign`, and `NotFound` with no head); a follower makes none of the activation, binding or declaration checks, which select a writer. `claim_of(db)` returns a holder's own pair, fixed for its open (§12.3). log@1 has no HEAD and no pair, so on a log@1 follower or Db both are `Missing("head")`.
 - **Fresh (Astra #5, #11, Fable F9).**
   - On objects@1, `fresh`, `fresh_snapshot` and the idle poll send `If-None-Match` with the last observed tag. A 304 keeps the cached HEAD. A 200 goes through normal HEAD validation, even if the provider always returns a body. The tag lives only in memory and is outside the store and release identities.
-  - `fresh(f)` reads the head once and catches up to it. It shows every commit whose Advanced was applied to the register before the call began, because such a head write precedes the GET in the register's linear order.
+  - `fresh(f)` reads the head once and catches up to it. It shows every commit whose Advanced was applied to the register before the call began, because such a head write precedes the GET in the register's linear order. On a Place attached to a host stream it runs one follower round (§12.11.9) and shows every commit whose batch was acked before the call; while a hold row for the Place is present it returns `Behind(applied)` at its deadline.
   - `fresh_snapshot(db)` on the holder (v2.73):
     - It first drains `durable`. Every outstanding head write ends in Advanced, Fenced or Undecided by its own Q5 replies, each within its own budget. A drain that ends Fenced or Undecided returns that error.
     - The journal task then makes one head GET between advances (§12.3, "One owner per advance"). `deadline_ns` bounds that GET only. It compares **(epoch, holder)**, never the tag. Another pair is `Fenced(e)`, sticky. A failed GET or the deadline is `Remote(e)` and changes no health, because it is a read.
     - During a cut, the request waits in the journal's inbox until the cut hands the Requests back.
     - It returns a Snapshot at the holder's **durable** version, the last Advanced group. Because the caller holds `mut db` and no commit is made during the call, that is also V. It never shows a commit that an Undecided group could take back.
 
-    The holder keeps the roots of its last durable version for this and for subscription batches.
+    The holder keeps the roots of its last durable version for this and for subscription batches. On an attached holder the one GET is a register GET then a head GET (§12.11.9); a present hold row waits until `deadline_ns`, then returns `Behind(position)`.
   - Either costs one head GET, plus the entry GETs a follower lacks. There are no leases.
 - **A missing object (Astra #8, #17, Fable A2, F12).** A follower works from one **capture**: the CHECKPOINT c_f its published state was loaded from, and the chain from c_f to its applied head. On NotFound for a named object:
   - **An entry at position q.** GET `head`. If q < the head's `floor`, the result is `Reclaimed(floor)`. Otherwise the entry is on the chain (every head ever applied is a prefix of every later chain, because a claim keeps the position), so it is live, and the result is `Corrupt(Fault{file: name, offset: 0, why: Absent})`.
@@ -5424,6 +5449,7 @@ pub fn claim_of(db: Db) -> Result[Claim, Error]                                 
   - a smaller `retain` drops the oldest;
   - before `retain` checkpoints exist, the set is all of them, down to genesis's entry 1 (floor 1).
 - HEAD carries the latest `floor`, equal to its checkpoint's MARK `floor` (§12.2, "Floor agreement").
+- **Reclaim never touches a host stream.** It lists and deletes only under the Place's own prefix, and the stream root is disjoint from every Place prefix (§12.11.1). A stream's batches are retired only by its own release rule (§12.11.8).
 
 **What a cold read needs is live (v2.48, Delta #2).** Recovery (§12.3 steps 1–4), a claim's recovery and a follower's start read only: `head`; the CHECKPOINT entry at c = HEAD `c_position`; the MANIFEST its MARK names; its locator's chunks and packs; and the entries c + 1..p on the chain from the head. Every one is in the live set below for the head's own checkpoint: c ≥ floor and the entries above it are on the chain, and c is retained, so its MARK's MANIFEST and its locator's chunks and packs are live. None of these reads names a checkpoint below c, so no lawful reclaim, `retain` 1 included, can remove anything a cold read of the current head needs. A reclaim that runs *during* a read can remove what an *older* head named. That is the witness case of §12.5, and a claim's rebase (§12.3), which happens only under the claim's own pair: a reclaim by another holder ends the claim with `Lost` (v2.49).
 
@@ -5476,6 +5502,7 @@ This needs the provider contract (§12.2): with a non-linearizable head, two hol
   - the terminal EXPORT fields name `j-<c>` and its end offset.
 
   So the unchanged prepare opener (R1, R3) and AP21 read it through their normal entry point. A `Fenced` interruption restarts the whole attempt.
+- **Export and backup of an attached Place (v2.142).** First, with `sealed` empty, the holder settles its live tail as GROUP entries (§12.11.11), which keeps ATTACH and is never refused for memory; with `sealed` non-empty it runs a cut and returns the cut's refusal if it is refused. Either way the head it then captures has no frame outside its entries, so P_x and the scratch above are unchanged. Only close drops ATTACH.
 - **Prepared install is one activation CHECKPOINT advance on the exact validated head.** §3.5a's V3–V6 and C1–C7 run on the holder unchanged, through AP1b, AP21, the exact account, the target limits, the attempt and the digest.
   - **The activation commit version t** is the exported main head + 1, the version the cut writes main at and the key of its `releases` row (RUNNER §6, whose deploy calls it `v`; `install_prepared`'s `release_at`). It is not OLD's activation + 1: with OLD's activation at 3 and the exported head at 9, t is 10 (Delta #3).
   - The point of no return is no longer the MANIFEST rename. It is **the head write of the CHECKPOINT entry that names the activation cut**, with `Match(own last tag)`, setting HEAD `activation` to t and HEAD `binding` to NEW's identity digest.
@@ -5517,7 +5544,7 @@ This needs the provider contract (§12.2): with a non-linearizable head, two hol
 |---|---|---|
 | client lanes | `requested_lanes × lane_bytes` (std.object.start) | as v2.43 |
 | entry buffers | 2 × round8(max(152, 112 + `group_bytes`) + 33) | the history packet and its comparison buffer. The width includes the activation binding and enough space for a CLAIM. A singleton frame over `group_bytes` takes an on-demand buffer of exactly its entry's size, charged and refusable before the frame is accepted (Fable nit). |
-| head buffers | 2 × `HEAD_OBJECT_LIMIT` = 2 × (72 + 16 + 136 + 16 + 65,536) = 131,552 | the body sent, and a GET for the Q5 comparison, a `fresh_snapshot` and the idle poll. The journal has one request in flight on any lane count (§12.3), so two are exact (v2.73) |
+| head buffers | 2 × `HEAD_OBJECT_LIMIT` = 2 × (72 + 16 + 136 + 16 + 65,536 + 16 + 512) = 132,608 (v2.142: + ATTACH's frame head and 512-byte limit, §12.11.2) | the body sent, and a GET for the Q5 comparison, a `fresh_snapshot` and the idle poll. The journal has one request in flight on any lane count (§12.3), so two are exact (v2.73) |
 | history key | round8(60) = 64 | the history workspace's reusable key |
 | journal timer task | 4096 + 288 | the timer grant and the task charge for a result of `()` (MEM-24) |
 | journal worker task | 4 × `group_bytes` + 524,288 + 1,112,000 + 352 | the journal grant, including one reclaim LIST page, and the task charge for a result of `Result[(), Error]` (MEM-24) |
@@ -5631,6 +5658,374 @@ Deleted with §11.18: the generation-publish parts of L4, "the fence" and BK5's 
    - `sizes.hirsel`: the open's sim charge.
    Then L55-1, L55-2, L55-3 and L56-W. L56's Runner half uses the sim@1 `Backing` arm (RUNNER v2.55.3). The client sends its `Requests` to the head. The native loopback case covers the one-level gate.
 5. **L54-W and L54-H**, after their listing step.
+
+The host stream's laws, L90, are listed in §12.11.15 and owed by its build.
+
+### 12.11 The Bucket host stream (`store-bucket-stream`, v2.142, not yet built)
+
+Ratified by Sam on 2026-11-26 (09:20 CET). The design history is outside the repo, in the research folder `hirsel-briefs/research-1126/shared-journal-batching/`: MOONSHOT-DESIGN (the first design), AMENDED-BUCKET-STREAM (the base protocol), ASTRA-SIGNOFF (cited "A1"–"A5") and FABLE-SIGNOFF (cited "M1"–"M12"), and FINAL-BUCKET-STREAM-BRIEF, which holds Sam's three rulings. Where those files and this section differ, this section is the contract. §12.11.16 maps every A and M item to the paragraph that closes it.
+
+**What it is.** A host that opts in runs one **host stream**: one writer that packs the commit frames of every Place it serves into shared, create-only **batch** objects in the Places' bucket. It replaces each Place's two Class A writes per advance (entry and head) with one batch create shared by all of them, and each Place's idle head poll with one register read per batch. A Place stays a store of its own. It keeps its own `head`, its checkpoints, its packs, its cuts and its identity. The head references the stream tail; it never copies it.
+
+**Scope.** objects@1, and sim@1 whose grant has no weak level (§12.11.1). log@1, memory@1 and a Disk stream are out of scope. A "batch" is one stream object, and "stream" here is never §1.8's stream position.
+
+#### 12.11.0 Rulings, as applied
+
+| Ruling | How this section applies it |
+|---|---|
+| **Zero cost when unused** | A program that never calls `journal_service` constructs nothing: no service, register, doorbell, poll or pin. An un-streamed Place writes the head bytes, keys and requests of v2.141 exactly, because ATTACH is a separate frame present only while a Place is attached and HEAD stays 136 bytes (law L90-Z0). The one shared figure that moves is `HEAD_OBJECT_LIMIT`, which grows by ATTACH's 528 bytes for every reader (§12.11.2). |
+| **M2, the hold before H** (Sam, ruling 1) | A claimant of an **attached** Place writes one revocable `Held` row in the stream's register before its head replace H. A **standalone** Place keeps Q4 literally: its claim writes nothing before the replace (§12.3). The substance of Q4 holds for both: a claimant that refuses or crashes never writes H, and the incumbent resumes (§12.11.5, §12.11.6). |
+| **No batching default** (Sam, ruling 2) | `StreamPlan.batching` is a required `Batching` value. The library has no default value, constructor or fallback for it. Every program that streams chooses its latency against its Class A cost (§12.11.1). |
+| **Typed API** (Sam, ruling 3; Fable §4) | `platform.local`'s `Config.journal: Option[StreamPlan]`, and `store.streamed(a, slot)`, which takes the slot `journal_slot` returned. "Streamed without a journal" cannot be written. The stream reference in the head is the **attachment** (ATTACH), so HEAD's release `binding` keeps its name and bytes. |
+| **Cut for good** | A Disk stream and `StreamPlan.Both`, headless genesis, claims across sleep, inline pointer frames, sharded streams, a public `settle`, `Backing.*.journal` and rewrite batches. A frame too large for the open batch closes it and goes into a batch of its own, because `max_batch_bytes ≥ FRAME_LIMIT + 4,096`. |
+| **Two exits** | A Place leaves the stream only by a **cut** (§12.2, "When a cut runs"), which consumes every tail into a checkpoint, or by a **close settle**, which writes the tail as GROUP entries and drops ATTACH (§12.11.11). Direct service after 8 sealed tails (§12.11.5 step 6) is not an exit: the Place stays attached until its cut. |
+
+#### 12.11.1 Names and API
+
+- **Host stream** S, named by `sid` (16 bytes). **Incarnation** `inc` (u64) is the stream's epoch, raised by each election (§12.11.7). **Holder** (16 bytes, `Random`) is the service process that holds `inc`. The service's identity is the pair (inc, holder).
+- **Stream root.** Every stream object sits under `<root>/s-<sid>/`, where `root` is the deployment's `StreamPlan.prefix` in the Places' bucket. Every host and every reader of one deployment names the same root.
+
+```hirsel
+pub type Batching: cross { max_wait_ms: u64, max_batch_bytes: u64 }   // no default (Sam 2026-11-26); max_wait_ms 0 sends each batch as soon as the previous one is decided
+pub type StreamLimits: cross {
+    max_frames: u32, max_slots: u32, max_pins: u32, hold_ms: u64, idle_poll_ms: u64,
+    prescan_batches: u64, index_every: u64, pin_ttl_s: u64, recover_parallel: u32, slot_bytes: u64 }
+pub fn stream_limits() -> StreamLimits      // max_frames 4,096, max_slots 512, max_pins 4,096, hold_ms 2,000, idle_poll_ms 1,000,
+                                            // prescan_batches 4,096, index_every 512, pin_ttl_s 86,400, recover_parallel 16, slot_bytes 65,536
+pub type StreamPlan: cross { sid: Bytes, prefix: String, batching: Batching, limits: StreamLimits }
+pub opaque type JournalService                                   // not send: holds the service task's handle
+pub opaque type JournalSlot: cross                               // one Place's data connection client and its slot number
+pub type StreamRoot: cross { prefix: String }
+pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u64) -> Result[JournalService, Refusal] waits
+pub fn journal_slot(mut s: JournalService, p: PlacePlan) -> Result[JournalSlot, Error] waits
+pub fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, Error]   // a writer Authority whose opens attach
+pub fn stream_reader(take a: Authority, root: StreamRoot) -> Result[Authority, Error]   // a read-only Authority (§12.11.9)
+pub fn close_journal_service(take s: JournalService) -> Result[(), Error] waits
+```
+
+- **Platform.** `platform.local`'s `Config` gains `journal: Option[StreamPlan]`. `None` is v2.141's behavior, byte for byte. `Some(plan)` makes the actor start one `journal_service` and hand each Place start job a `JournalSlot` (a `cross` value), which the job passes to `streamed`.
+- **There is no default `Batching`.** `max_wait_ms` is the window in which the service gathers frames after the first one arrives (0: none). `max_batch_bytes` is at least `FRAME_LIMIT + 4,096` and at most 2³²; a value outside is `Missing("max_batch_bytes")`. The other limits have defaults in `stream_limits()`, because none of them prices a commit.
+- **max_rows is derived.** The register holds at most `max_rows = 2 × max_slots` rows. `max_slots` is 1 to 10,698, so `max_rows × 49 + 110 ≤ REG_LIMIT` (1 MiB). A value outside is `Missing("max_slots")`. There is no separate `max_rows` setting (M8).
+- **Refusals before any request (M12).** Each is typed and writes nothing:
+  - `journal_service`: `sid` not 16 bytes is `Missing("sid")`; a `prefix` over 1,024 bytes is `Limit(Name)`; `Missing(name)` for a limit outside its range (`hold_ms` ≥ 4 × the authority's `op_ms`, `idle_poll_ms` ≥ 1, `index_every` ≥ 1, `recover_parallel` ≥ 1, `slot_bytes` ≥ 4,096, `max_pins` ≥ 2); a budget below the service's fixed part plus `max_slots` slot charges (§12.11.12) is `Full(Allocation(c))`; an authority that is not objects@1 or sim@1 is `Unsupported(authority)`; sim@1 with a weak level is `Stream(WeakLevels)` (M7).
+  - `journal_slot`: `Full(Slots(c))` when every ordinary slot is taken (one slot is the janitor's, §12.11.8); `Full(Pins(c))` at `max_pins` pins.
+  - `streamed`: `Foreign` unless the Authority's endpoint, region and bucket are the service's; `Stream(Overlap)` when the Place's `prefix` and the stream root overlap (one is a prefix of the other at a `/` boundary, or they are equal), so the stream's keys are never inside a Place prefix (genesis's LIST would refuse them, §12.3) and no Place key is inside the stream root; `Stream(WeakLevels)` for a sim@1 grant with a weak level.
+- **A streamed open** is an ordinary writer `open` (§12.3) through the Authority `streamed` returned. It attaches the Place: genesis (§12.11.5, "Streamed genesis") or a claim (§12.11.5). Its commits go to its slot, and the service acks them (§12.11.4).
+
+**Changed types.**
+
+```hirsel
+pub type StoreCapacity = … | Slots(Capacity) | Pins(Capacity) | Register(Capacity)   // gains three cases; every earlier case (§11.16, §13.3's Cache) stands
+pub type StreamRefusal = WeakLevels | Overlap
+pub type StreamLatch = Superseded | Batch | Register | Unreachable
+pub type Error = … | Attached(Bytes) | Stream(StreamRefusal) | Latched(StreamLatch) | …   // Attached: a non-streamed opener found ATTACH; the value is the live sid, or 16 zero bytes when `live` is None. Latched: the Place's host stream latched (§12.11.10)
+pub type Why = … | Regressed                                                   // a register body with a lower rev than one already seen
+pub type Health = Ok(u32) | Fenced(u64) | Undecided | Poisoned(IoError) | Remote(std.object.Error) | Latched(StreamLatch)
+```
+
+#### 12.11.2 Objects and frames
+
+**Stream objects** extend §12.2's names. Each is a format-3 file whose HEADER carries the Place authority's `authority` value, identity = `sid`, the role below, `seq` as below and `epoch` = the writing incarnation's `inc`. Numbers are decimal, zero-padded to 20 digits, as in §12.2.
+
+| Key under `<root>/s-<sid>/` | Role | Write rule | Body |
+|---|---|---|---|
+| `reg` | 11 REGISTER | Created once with `Absent`, then only `If-Match`. Never deleted or recreated. A 404 after the stream's creation is `Corrupt(Fault{file: reg, offset: 0, why: Absent})`, which latches the stream (§12.11.10). | HEADER(seq 0) ‖ REG |
+| `b-<inc>-<seq>` | 12 BATCH | Create-only (`If-None-Match: *`). A 412 is resolved by one GET: exact bytes are Applied; a TERM body is the terminal fence (§12.11.7), and the writer latches `Superseded`; any other bytes are `Corrupt(Fault{file, 0, Malformed})` and latch `Batch`. | HEADER(seq) ‖ INDEX ‖ the frames ‖ FOOTER, or HEADER(seq) ‖ TERM |
+| `x-<k>` | 13 XINDEX | Create-only, with the batch 412 rule (no TERM). `k` rises across incarnations. | HEADER(seq k) ‖ XINDEX |
+| `probe` | 14 PROBE | Created once, with `Absent`, before `reg`. Never written with other bytes. | HEADER(seq 0) only |
+
+**Frames** (new kinds under §2.7's rule 1; the reviewed numbers are kept, so 0x0102 is TERM):
+
+| Frame | Kind | MUST | Limit | Payload |
+|---|---|---|---|---|
+| ATTACH | 0x0100 | 1 | 512 | `settles u64`; `live` (a u8 tag 0/1, then `sid [16] ‖ inc u64 ‖ from_seq u64 ‖ from_frame u32`); `count u8` (0–8), then `count` sealed entries `sid [16] ‖ inc u64 ‖ from_seq u64 ‖ from_frame u32 ‖ cutoff u64 ‖ at u64` (52 B). At most 8 + 37 + 1 + 416 = 462 bytes. |
+| INDEX | 0x0101 | 1 | 4 + 8 + 4 + 68 × `max_slots` | `byte_len u32 ‖ seen_rev u64 ‖ count u32`, then `count` rows `store [16] ‖ epoch u64 ‖ offset u32 ‖ len u32 ‖ frames u32 ‖ digest [32]` (68 B), one per Place with frames in the batch, ascending by `store` |
+| TERM | 0x0102 | 1 | 32 | `sid [16] ‖ inc u64 ‖ seq u64`: the terminal fence of incarnation `inc` at `seq` |
+| REG | 0x0103 | 1 | **`REG_LIMIT` = 1,048,576** | the register (below) |
+| XINDEX | 0x0104 | 1 | 16,777,216 | for each (store, epoch) with rows in `[low, covers_through]`, the batch seqs that hold its frames; then the pins in force when it was written (§12.11.8) |
+| FOOTER | 0x0105 | 1 | 32 | `body_digest [32]`, SHA-256 over HEADER through the last frame before FOOTER |
+
+- **ATTACH** is the frame after AUTHORITY in `head`, present only while the Place is attached. `live` names the stream that holds the Place's current tail, from the position `(from_seq, from_frame)`: frame index `from_frame` of the Place's slice in batch `from_seq` (M4). Each `sealed` entry is an earlier tail that a claim froze: the Place's frames of `(sid, inc)` from `(from_seq, from_frame)` through the end of its slice in batch `cutoff`, which are immutable. `at` is the entry position at which the tail was frozen. `settles` rises by 1 on every settle head write (§12.11.6), so two settles never write the same head body (M1). ATTACH rules, each `Corrupt(Malformed)` otherwise: `sealed` is in non-decreasing `at` order, each `at` ≤ HEAD `position`; each sealed entry has `cutoff ≥ from_seq`, and when `cutoff = from_seq` its slice has a frame at `from_frame` or later; `count ≤ 8`.
+- **A non-streamed opener refuses an attached head.** A writer, genesis, import or export whose Authority is not from `streamed`, that reads a head carrying ATTACH, returns `Attached(sid)` before any write (§12.1). A follower, `open_read_only`, scrub or verify without a stream root returns the same; with one, it reads the tails (§12.11.9).
+- **`HEAD_OBJECT_LIMIT`** is 72 + 16 + 136 + 16 + 65,536 + 16 + 512 = **66,304** bytes, so §12.9's head buffers are 2 × 66,304 = 132,608. `sizes.hirsel` derives every figure that uses it.
+- **INDEX** is the first frame after HEADER. A reader range-GETs the first 4 KiB, which holds HEADER, INDEX's head and its first 58 rows, and issues a second range GET only when `byte_len` says INDEX is longer. A full read checks FOOTER's `body_digest`; a slice read checks its row's `digest` (SHA-256 of the slice).
+- **REG**:
+  ```
+  rev u64                   every applied write sets the read rev + 1
+  sid [16], inc u64, holder [16]
+  kind u8                   0 Serving, 1 Collecting (a janitor's GC-only incarnation, §12.11.7)
+  low: (inc u64, seq u64)   batches below low may be deleted; it never falls
+  index: u8 tag, then { k u64, len u64, digest u64 (xxh3-64), covers_through: (inc u64, seq u64) }
+  count u32, then count rows { store [16], epoch u64, token [16], rev_hold u64, state u8 (0 Held, 1 Abandoned) }   49 B each
+  ```
+  The fixed part is 110 bytes. A REG write is valid only if `rev` is the read rev + 1 and none of `inc`, `low` or `index.k` falls; a reader checks it. REG is MUST = 1 because its limit is over `UNKNOWN_LIMIT` (§2.7 rule 3, M8).
+
+#### 12.11.3 The provider contract, extended to the register
+
+§12.2's provider contract also names `reg` in items 1–3 (a linearizable conditional PUT and GET, and a non-recurring validator), and batch, TERM, XINDEX and `probe` objects in item 4. Item 5 is unchanged. These rules are added:
+1. **Rising rev.** A reader that has seen rev r refuses a body with a lower rev as `Corrupt(Fault{file: reg, 0, Regressed})`. It is the client's guard against an old body seen again.
+2. **No 304 evidence.** The client sends only unconditional GETs of `reg`. A 304, or a response whose body and tag do not come from one response, is a failed read. A failed or cached read, a cached 404 included, decides nothing and permits no ack. The stream uses the Places' endpoint under §12.2's endpoint rules.
+3. **Q5 on the register, with merge.** `Applied`: done. `Uncertain`: resend the same bytes with the same `If-Match`. `Mismatch`: GET `reg`; exact bytes are done; the intent already present is done (a hold: its own token is there with the `rev_hold` stored; a removal: the tokens are gone); otherwise rebuild from the new body and retry within the budget. A rebuild only adds or edits the writer's own rows, removes the rows the writer is entitled to remove (§12.11.6, with M1's fixed set), or raises `low` and `index` when the new body's values are still lower. It never drops a row the writer did not remove by right.
+4. **Concurrent rows never overwrite each other.** Two claimants of one (Place, epoch) each add their own token, and both rows stand.
+5. **Bounded.** A hold that would pass `max_rows` refuses `Full(Register(c))` with nothing written, and the claim returns it. A claim never elects (§12.11.7).
+6. **Rotating the incarnation reauthorizes nothing.** A service whose register read shows another (inc, holder) latches `Superseded` for good (§12.11.10).
+7. **Probes on an immutable key (M12).** At stream creation the service creates `probe` with `Absent`, then `reg` with `Absent`. At every election, before its CAS, it sends `probe`'s exact bytes to `probe` twice: with `If-None-Match: *`, and with `If-Match` on a tag no object carries (`"hirsel-store-condition-probe"`). Both must be refused (412, or the provider's 304), else `Endpoint(IgnoresIfNoneMatch)` or `Endpoint(IgnoresIfMatch)`. `probe` is immutable, so an endpoint that ignores the condition rewrites identical bytes. A streamed genesis on that endpoint skips §12.3's step 5a, because the service probed this endpoint.
+
+#### 12.11.4 Writer cycle and the ack rule
+
+The service is strictly sequential, with at most one batch create outstanding, so `seen_rev` never falls as `seq` rises.
+
+```
+loop:
+  gather slot frames until max_wait_ms passes after the first, or max_batch_bytes or max_frames is reached
+      (a stalled or latched Place contributes nothing)
+  seen_rev := the rev of the last successful register GET
+  CREATE b-<inc>-<seq>        (Q5: Uncertain → resend exactly; 412 → GET and §12.11.2's rule; budget gone → latch)
+  GET reg, issued after the create completed        -- 1 Class B per batch
+  decide the batch; seq += 1
+```
+
+**The ack rule.** After batch n's create is Applied, the service acks X's frames in n only when a register body R satisfies all of:
+- R comes from a GET issued after n's create completed, or is the Applied result of the service's own CAS issued after then;
+- `R.inc` and `R.holder` are the service's own;
+- R holds no row (Held or Abandoned) for (X, e_X), where e_X is the epoch at which the service serves X;
+- every earlier batch is decided, and X is not latched.
+
+A response authorizes only batches whose create completed before its request was issued. A delayed or failed response never unlatches anything.
+
+**The second authority: a sealed cutoff.** When X's head shows an epoch above e_X and `sealed` holds (S, inc, …, cutoff k), X's outstanding frames in batches ≤ k end `Ok`, and those in batches > k end `Fenced`. **Missing evidence (A3).** When X's head shows an epoch above e_X and no sealed entry for (S, inc), because a cut consumed it before A observed it, A cannot learn k, and X's outstanding frames end `Undecided`; the next claim's head decides whether they are in the history, exactly as for an `Undecided` advance (§12.3). No other evidence decides an X frame.
+
+**Stall.** A row for (X, e_X) stalls X: its frames in unacked batches stay outstanding; X goes into no later batch and its new commits wait in its slot; no cut of X starts; X's head task GETs X's head every `hold_ms / 4` and reports each result to the service (§12.11.12). §12.11.6 says how X resumes.
+
+**Lemma 1 (an acked frame lies under every cutoff).** If a hold for (X, e) applies at rev h, and its H later applies, then every batch whose X frames were acked at epoch e by a register body has `seen_rev < h`, and its create completed before h applied. *Proof.* Let R_n ack batch n. If R_n linearizes after h, the row was removed first, by a rule of §12.11.6, and none lets this hold's H apply afterwards: (a) the service's Applied settle changed the head body (it raised `settles`), so H's `Match` fails; (b, e) a row is Abandoned only when its claimant will never send H for it; (c) the service already saw X at a higher epoch and latched X; (d) the old incarnation acks nothing more; (f) X's head no longer names (S, inc) as `live`, so the head bytes H matched are gone. M1's fixed set means no token added after the settle's head write is issued is removed by (a) or (b). So R_n precedes h, and `seen_rev(n) = rev(R_{n−1}) ≤ rev(R_n) < h`. ∎
+
+#### 12.11.5 Claim of an attached Place (Q4 as amended for attached Places)
+
+This replaces §12.3's claim steps 3–5 for a Place X whose head carries ATTACH. Standalone Places keep §12.3 unchanged. The cases:
+- `live = (S_A, inc_A, from)` and `inc_A` equals S_A's current register inc, with `kind` Serving: steps 1–7 below.
+- `inc_A` below the register's inc: the old incarnation never acks again. Use §12.11.7's **no-hold rule**, which skips steps 3 and 4.
+- No ATTACH (a standalone head opened through `streamed`): §12.3's claim, unchanged, and its replace writes ATTACH{`settles` 0, `live := (S_B, inc_B, (next seq, 0))`, `sealed := []`}.
+- `live = None` (direct service, step 6): §12.3's claim with no hold. The CLAIM is an entry, ATTACH is copied, and the open-time cut is forced.
+
+The claimant keeps the **settled part** (the history up to the live tail, §12.11.9) and the **overlay** (the live tail applied copy-on-write over it). They are never merged before step 6.
+
+1. **GET head.** §12.3 steps 1–2 unchanged: the pair check and §12.1's checks. The claim's pair (e, holder) is fixed.
+2. **Private recovery and pre-scan.** Recover the settled part in history order (§12.11.9). Build the overlay from the live tail: GET `reg`, read `x-<k>` when `covers_through ≥ from`, then the INDEX of each later batch, until the first batch §12.11.8's 404 rule calls *not yet created*, or earlier when `prescan_batches` or half of `o.claim_ms` runs out (only the delta needs a bound). **Admit** both against `resident_limit` (AP15).
+3. **Hold.** CAS `reg` to add `{X, e, token: Random, rev_hold: rev + 1, Held}`, with §12.11.3's merge. `Full(Register(c))` returns with nothing written. If the merge finds `inc` above `inc_A`, write no row and switch to the no-hold rule.
+4. **Delta scan and admission.** From where step 2 stopped, include batch m while it is present and `seen_rev(m) < rev_hold`; stop at the first batch absent or with `seen_rev ≥ rev_hold`. **k** is the last batch included. *Bound:* with D the batches present when the hold applied and not yet scanned, the delta is at most D + 1 batches: at most one batch with `seen_rev < rev_hold` completes its create after the hold applies. Apply X's slices to the overlay and **re-admit**. **On any failure** (`Full(Resident(c))`, `Corrupt`, `Remote`) mark the row `Abandoned` (rule e) and return the failure. Nothing was fenced, and the incumbent unholds (§12.11.6 b) and keeps serving.
+5. **Final head GET.** Another pair: abandon the row, `Lost`. The claim's pair at another position or with other ATTACH bytes (the incumbent advanced, settled or cut): abandon the row, discard the overlay, catch the settled part up from the new head, or rebase when its checkpoint or `sealed` changed, and re-dispatch among the cases above; a new hold has a new token, each repeat bounded by `o.claim_ms`. Exactly step 1's bytes: go on with tag t.
+6. **H** with `Match(t)` writes HEAD{e + 1, holder, every other field copied} and ATTACH{`settles` copied, `sealed := old.sealed ++ (S_A, inc_A, from, cutoff k, at p_A)`, `live := (S_B, inc_B, (S_B's next seq, 0))`}. It is the one authoritative publication; the tail is referenced, never copied, and nothing beyond k is published. Q5 resolves it as §12.3 step 5 does; a Mismatch at the claim's pair goes to step 5's second case. **No empty tail is sealed** (Fable §3): when X has no frame of `(S_A, inc_A)` at or after `from` up to k, H appends nothing to `sealed`. **Sealed overflow:** when the new `sealed` would have 8 entries, H writes `live := None` instead: B serves X **direct**, with commits as entries through X's head task as in §12.3, and the forced open-time cut consumes `sealed`; that cut's head write sets `live := (S_B, inc_B, (next seq, 0))` and `sealed := []`.
+7. **The CLAIM rides S_B** (as an entry when `live` is None) as X's first frame there. `open` returns once it is acked; `Fenced` makes `open` return `Lost`. The open-time cut runs when `sealed` names a stream or incarnation other than (S_B, inc_B), or when `sealed` has 4 or more entries. A refused cut does not fail the open (AP16).
+
+**Q4 for attached Places (M2, Sam's ruling 1).** A claimant of an attached Place writes exactly one thing before H: its revocable `Held` row. It never writes H after a refusal: steps 2 and 4 both admit before H, so a claimant that cannot serve the head is refused with no head byte written, and **a healthy incumbent is never deposed by a claimant that turns out unable to serve it**. The residual is stated: a claimant that fails admission or crashes after its hold pauses that one Place's acks (its other Places are unaffected). On a refusal the incumbent resumes by rule (b) once it reads the Abandoned row. On a crash it resumes by rule (a) after up to `hold_ms` (about 2 s), at the cost of one settle head write.
+
+**Lemma 2.** If H applies, the claimant's state holds every frame acked for (X, e), and every frame for (X, e) acked afterwards (by the sealed cutoff) is in it. *Proof.* By Lemma 1 every frame acked before the hold lies in a batch with `seen_rev < rev_hold` that completed before the hold; `seen_rev` is monotone in seq, so such a batch has seq ≤ k; the release rule (§12.11.8) deletes no batch X's head still contains, so the scan read it, or the 404 rule restarted the attempt. A batch above k was absent at the scan or has `seen_rev ≥ rev_hold`, so its X frames were never acked. ∎
+
+**Ticket outcome at A.** A's stall poll shows epoch > e with `sealed ∋ (S_A, inc_A, …, cutoff k)`: frames in batches ≤ k end `Ok`, those above end `Fenced`, for good (`sealed` is copied by every later claim until a cut consumes it). With no such sealed entry, they end `Undecided` (§12.11.4). A latches X in memory and removes its rows for (X, e₀ ≤ e) by rule (c).
+
+**Streamed genesis.** §12.3's genesis with three changes: step 5a is skipped when the service probed this endpoint (§12.11.3 rule 7); step 6 creates `head` with `Absent` and ATTACH{`settles` 0, `live := (S, inc, (next seq, 0))`, `sealed := []`}; step 7's CLAIM is X's first frame in S, and `open` returns once it is acked. That is 4 Class A: LIST, MANIFEST, entry 1, head. A crash before the CLAIM is acked leaves a head whose tail is empty, which a later claim reads as §12.3 reads a head with no CLAIM.
+
+#### 12.11.6 Unhold, and who may remove a row
+
+The service unholds X at epoch e in one of two ways.
+- **(b) Every row for (X, e) is Abandoned.** One CAS removes exactly the tokens of the register body that showed every row Abandoned. Its Applied result is the R that acks X's stalled batches (§12.11.4), and X resumes.
+- **(a) The oldest Held row for (X, e) was first observed `hold_ms` ago** on the service's monotonic clock (liveness only).
+  1. The service asks X's head task (§12.11.12) for a **settle**: GROUP entries carrying X's live tail from `live.from`, stalled frames included, each entry's head write moving `live.from` past exactly the frames that entry holds and raising `settles` by 1. With an empty tail it is one head write that changes only `settles`. It runs even when `sealed` is non-empty (the entries come after the sealed tails in history order, §12.11.9), except under archival (§12.11.11). It is never a cut, so a refused cut cannot block it.
+  2. Once its last head write has Applied, CAS the register to remove the **fixed set**: the tokens for (X, e) in a register body whose GET completed before the settle's first head write was issued.
+  3. The Applied result of that CAS is the R that acks the stalled tickets, provided it holds no row for (X, e); otherwise X stays stalled.
+
+  If the settle gets Mismatch and then the head shows another pair, a claimant's H won: end the tickets as in §12.11.5 and remove by (c). If the settle applied, any H in flight gets Mismatch and its claimant follows §12.11.5 step 5.
+
+**The fixed set (M1).** Under (a) and (b) the service removes only the tokens it observed in that one completed GET. On a merge retry it never removes a newer token, and a settle whose head write did not apply removes no row.
+
+**Removal rules.** Only these remove a row:
+- **(a)** the service, after its own Applied settle of X's head, the fixed set only;
+- **(b)** the service, when every observed row is Abandoned, the fixed set only;
+- **(c)** the service, for (X, e₀), after it observed X's head at an epoch above e₀ and latched X;
+- **(d)** an election (§12.11.7), which ends the old incarnation;
+- **(e)** a claimant, which only marks its *own* row Abandoned, and only when it will never send H for it: before sending H, or after H resolved as Mismatch. A claimant whose H is Undecided never abandons its row;
+- **(f)** the service, for (X, e), once it has observed X's head at epoch e with `live` not naming (S, inc): X closed or was cut and settled away from S, so the head bytes any claimant's H could match are gone (A2, M1).
+
+No claimant, janitor or reader removes another's row.
+
+| Event | State left | Resolution |
+|---|---|---|
+| B crashes after its hold, before H | Held row; head unchanged | A unholds by (a) after `hold_ms`. |
+| B refuses at step 2 or 4 | Abandoned row | A unholds by (b). |
+| B crashes after H, before its CLAIM is acked | Head at e + 1; S_A's tail sealed at k | The next claimant copies `sealed`. A ends its tickets. Nothing is applied twice. |
+| H is Undecided | As §12.3 step 5 | `open` returns `Undecided`; the row stays Held; A's (a) settle applies (H lost) or is fenced (H won). |
+| A closes X after B's pre-scan; B's hold lands; B crashes | Held row; X's head has no ATTACH | A removes it by (f) once it reads X's head (its pin poll, §12.11.8). |
+| A's settle Applied, removal CAS lost | Rows remain | A retries the fixed set (§12.11.3 rule 3). B's H already failed. |
+| B and C claim at epoch e | Two rows | At most one H applies at tag t. The loser abandons its row. |
+
+#### 12.11.7 Election, incarnations and the terminal fence
+
+**Election** (service start, on the configured `sid`):
+1. GET `reg` (at stream creation: create `probe` and `reg`).
+2. Run §12.11.3's probes.
+3. CAS `{rev + 1, inc + 1, holder: Random, kind: Serving, rows: []}`. **On Mismatch** the elector GETs `reg` and goes on only if the fresh body still has the incarnation it read at step 1 and still meets its precondition (for a janitor, §12.11.8's trigger); otherwise it stops and elects nothing (A4). It never rebuilds an election over a fresh winner.
+4. **Terminal fence (A5).** Before its first batch, ack or `low` move, the new incarnation fences the old one: starting at the old incarnation's first seq not known to exist, it creates `b-<old_inc>-<term>` with the TERM body `{sid, old_inc, term}` (`If-None-Match: *`). A 412 whose GET shows a batch means a late batch of the old incarnation landed: `term += 1` and repeat. A 412 showing the same TERM bytes is done (another fencer wrote it). The fence is the old incarnation's durable end: no batch at or above `term` can ever be created, so pin rebuild and every no-hold claimant see one terminal sequence.
+5. Rebuild the old incarnation's pins from durable state (§12.11.8) before the first `low` move.
+
+**The zombie.** The old process's next register read shows another (inc, holder), and it latches `Superseded` (§12.11.10). Its batch create at or above the fence gets 412 with TERM bytes and latches `Superseded`. By Lemma 1 with h = the election's rev, every frame it acked lies in a batch that completed before the election.
+
+**After `Superseded` (M9).** The service serves no more Places on that sid. If its owner reopens Places in the same process, the service draws a fresh `sid` (`Random`), creates that stream and serves them on it. The next process start uses the configured `sid` again and elects on it.
+
+**The no-hold rule.** A claim of X whose `live.inc` is below the register's inc skips the hold and delta. Its cutoff k is the last batch of `live.inc` below the terminal fence. If the claimant finds no TERM where it meets the first 404, it creates it there itself (step 4's loop). So it never takes a cutoff the fence does not also bound. It is sound because a frame the zombie acked lies in a batch completed before the election, so below the fence; a zombie batch can land only below the fence, and then the claimant's scan, which runs to the fence, reads it; and the rows the election cleared belonged to an incarnation that can never ack again.
+
+**Claims never elect (A4).** A claimant whose hold meets `Full(Register(c))` returns it. Only a host's janitor elects on another host's stream (§12.11.8), and only on its trigger. A service never re-elects after `Superseded`; only a latch caused by its own uncertainty re-elects, on its own sid.
+
+#### 12.11.8 Retirement, GC and the janitor
+
+**Invariants.** `low` only rises. A batch, TERM or XINDEX object is deleted only after the register CAS that raised `low` above it has Applied. `(inc, seq)` and `k` only rise, so names are never reused. **Containment:** batch (sid, inc_b, seq_b) lies in a `sealed` entry when that entry has the same sid and inc and `from_seq ≤ seq_b ≤ cutoff`, and in a `live` ref when it has the same sid and inc and `from_seq ≤ seq_b`.
+
+**The release rule.** `low` passes batch b only once every Place with an INDEX row in b has a head, observed after the row was written, in which neither `live` nor any `sealed` entry contains b. For its own attached Places the service uses the head summary each Place last reported (§12.11.12).
+
+**Pins come from durable state.** INDEX rows and XINDEX lists record which Places have frames in which batches. A Place attached with no frame yet pins nothing. After an election the new incarnation rebuilds the pins of `[low, the terminal fence)` before its first `low` move, reading `x-<k>`, then the INDEX of every old-incarnation batch past `covers_through` up to the fence. For a Place whose state is not in memory (sealed-pending, or held by the old incarnation), the service GETs its head on its own read lane every `idle_poll_ms` until the release rule holds. Like a follower's GET, it never decides an advance; it does apply rule (f).
+
+**Index checkpoint**, every `index_every` batches: create `x-<k+1>`; CAS `reg` with the new `index`, `low` at the highest seq the release rule allows, and the rows rules (c) and (f) drop; then delete the objects below the new `low`. 2 Class A.
+
+**A 404 is never an end of stream by itself.** On a 404 for batch (inc, s), the reader GETs `reg` and then X's head, both issued after the 404:
+
+| Case | Meaning | Action |
+|---|---|---|
+| `(inc, s) < low`, head unchanged | Retired, empty for X | Skip to `low`; use XINDEX or INDEX to find X's next batch. |
+| `(inc, s) < low`, head changed | Retired; the history moved | Restart the whole attempt from the new head. |
+| `(inc, s) ≥ low`, and `≤ covers_through`, or in a sealed range, or below a batch already seen present | Possibly a create that raced the first GET (A5) | **Re-GET the batch once.** Present: continue normally. Still 404: `Corrupt(Fault{file, 0, Absent})`. |
+| `(inc, s)` at or above a TERM of `inc` | The incarnation's end | Stop: no batch exists there. |
+| otherwise: `inc` is the live ref's inc and `s` is above every seq known | Not yet created | A valid stop for §12.11.5 steps 2 and 4, the no-hold rule (which then fences, §12.11.7) and followers (§12.11.9) only. |
+
+**Forced settle of a straggler (M9).** A pin older than `pin_ttl_s`, or any pin once the count reaches `max_pins`, is cleared by the host's janitor **only when X's head names the janitor's own stream as `live`**: it opens X streamed through the reserved slot (a claim with the open-time cut forced) and closes it, which settles. When another stream is `live`, that host's forced open-time cut owns the pin, and `Full(Pins(c))` is the backpressure. **Headroom (A5):** one slot and its pin are reserved for the janitor, so `journal_slot` never gives them out and `max_pins` never refuses the janitor's own open.
+
+**Dead and collecting streams (M9).** A host's janitor may elect on another stream S′ under the deployment's root, as a **Collecting** incarnation (`kind` 1) that serves no Place, writes no batch and acks nothing, only when:
+- it holds, or has just cut, a Place whose head names S′ in `live` or `sealed`, so S′ holds a pin it needs cleared; and
+- S′ is Serving and a row on it has carried the same token for at least `4 × hold_ms`, measured from the janitor's first observation of that token on its own monotonic clock (a live service removes an Abandoned row at once and a Held one within `hold_ms`), or S′ is Collecting and its `rev` has been unchanged for at least `4 × hold_ms` from first observation.
+
+The Collecting incarnation fences, rebuilds pins, then raises `low` and deletes as the release rule allows. Once every batch is gone only `probe` and `reg` remain. Rule (d) makes the election safe. Its residual is availability only, and is stated: a Serving S′ that is alive but paused for `4 × hold_ms` with an unremoved row latches `Superseded` when it resumes; its outstanding tickets end `Undecided` and no acked commit is lost (§12.11.10). A Collecting incarnation that dies is replaced by the next janitor that needs its pins.
+
+#### 12.11.9 History order, recovery and readers
+
+- `HEAD.position`, LINK and a CHECKPOINT's `c` count **entries only**. Batches, ATTACH and stream frames never take an entry position.
+- **History** is: checkpoint c; the entries through `at₁`; sealed tail 1; the entries in (`at₁`, `at₂`], then sealed tail 2, and so on; the entries in (`at_n`, position]; then the live tail from `live.from`. `at` never decreases along `sealed`.
+- **Every recovery applies the history in exactly that order (A3)**: a writer's recovery (§12.3), a claim's settled part (§12.11.5), direct service (`live = None`), a follower's start and catch-up, export, scrub and verify. Recovery never applies the entries before a sealed tail that precedes them, and never runs entry-only while `sealed` is non-empty.
+- **`Position{store, branch, version}`** (§1.8) is unaffected, because versions are per commit. The reader checks per-branch continuity across entries, sealed tails and the live tail, and a gap is `Corrupt`.
+- **The reader handle (M10).** `stream_reader(a, root)` gives a read-only Authority for a follower, `open_read_only`, scrub or verify. It never elects, takes no slot and never writes the register. It reads a sealed tail's slices directly; it reads `reg` only to follow a live tail. With `live = None` it reads the sealed tails and entries in history order and no `reg`.
+- **A follower's round.** At exact head bytes Hd with epoch e and `live = (S, inc, from)`:
+  1. read X's slices of batches from `from`, stopping at the first not yet created (§12.11.8);
+  2. GET `S/reg`, issued after the last batch read completed;
+  3. GET X's head, issued after step 2's response;
+  4. act on it:
+     - same inc, no row for (X, e), head bytes exactly Hd: publish X's frames from every batch below the stop; `fresh` advances to them;
+     - head at epoch > e with `sealed ∋ (S, inc, …, cutoff k)`: apply through k only, then **every later sealed tail in order**, then follow the new `live`. A follower that missed several migrations never skips an intermediate sealed tail (A3);
+     - head at epoch > e with no sealed entry for (S, inc), or at epoch e with other bytes (a settle, cut or advance): re-follow from the new head in history order, skipping every commit whose (branch, version) is at or below what it already published on that branch;
+     - otherwise (a row is present, or inc changed, with head Hd): publish nothing new. The follower is `Behind` until the claim resolves or the head moves.
+
+  *Why it is sound.* Suppose a batch completed before a register read R showing no row and the same inc, and a head read after R showed Hd. No H had applied when the head was read. Any later hold has `rev_hold > rev(R) ≥ seen_rev`, and every removal rule is preceded by a head change (a, c, f), a dead incarnation (d) or no H at all (b, e). So every later cutoff includes the batch, and a published frame is never rolled back.
+- **`fresh` (M3).** `fresh(f)` on an attached Place shows every commit whose batch the stream acked before the call, by one round. While a row for (X, e) is present, or inc changed, `fresh` returns `Behind(applied)` at its deadline. So its contract ("every commit Advanced before the call") holds for an attached Place only once no hold is active.
+- **`fresh_snapshot(db)` on an attached holder** first drains `durable` (each outstanding frame ends `Ok`, `Fenced`, `Undecided`, or latched). Its stall-free answer is one register GET and one head GET, issued in that order between batches: own (inc, holder), no row for (X, e) and its own pair return the durable version. A row present waits for the stall to resolve until `deadline_ns`, then returns `Behind(position)` with the holder's durable main position. Another pair is `Fenced(e)`; another (inc, holder) is the latch.
+
+#### 12.11.10 Latch, tickets, recovery rate, quarantine
+
+**The latch belongs to an incarnation (inc, holder).** It never clears; a new incarnation this process wins starts unlatched. It is raised by: a batch create whose budget runs out after possible delivery (**Unreachable**); a 412 on a batch create whose GET shows bytes that are neither its own nor TERM (**Batch**); `reg` missing, malformed or regressed (**Register**); a register read showing another (inc, holder), or TERM at its own batch key (**Superseded**).
+
+**Tickets at the latch.** An acked ticket stays `Ok` at the level it reached. Every outstanding ticket of every attached Db ends `Undecided`, under `Superseded` too, because a later no-hold claim may include an unacked batch, so `Fenced` would be wrong. Each Db's health becomes `Latched(cause)`, `on_unhealthy` fires (§12.3), every later commit returns `Latched(cause)` until the Place is reopened, and blocked senders wake. The pending batch has one completion owner, the service, even if a Place disconnects.
+
+**Recovery after a self-latch.** Re-elect on its own sid (§12.11.7), then reopen the Places, `recover_parallel` at a time, by the no-hold claim: per Place H (1 A) and about 4 B; the CLAIM rides the new incarnation; the open-time cut runs only when `sealed` has 4 or more entries, because the sealed tail names the host's own stream. For N = 500 at about 0.2 s per claim that is about 6.3 s, at most 80 A/s, 500 A in total.
+
+**Quarantine.** A slice whose row digest fails quarantines that Place only (`Corrupt` at its open). A batch whose FOOTER fails affects only the Places with rows in it. A corrupt XINDEX sends readers to the INDEX frames from `low`. A corrupt register latches the stream.
+
+#### 12.11.11 Exits: cut, settle, close, export, backup and archival
+
+- **A cut** (AP16, paused) drains X's slot and consumes every sealed tail and the live tail into the checkpoint. Its head write sets ATTACH to `sealed := []`, `live := (S, inc, (next seq, 0))`. That write also ends direct service.
+- **A settle** writes GROUP entries carrying the live tail from `live.from` at the next positions. Each entry's head write moves `live.from` past exactly the frames that entry holds and raises `settles` (M4). It keeps ATTACH. Its head writes are at least one, so "2 A per close" is a minimum.
+- **Close** with `sealed` empty settles and then writes a head without ATTACH. With `sealed` non-empty it cuts and then drops ATTACH; a refused cut keeps ATTACH and the pin, and the janitor retries (§12.11.8). Close is the only operation that drops ATTACH.
+- **Export and backup (M5)** with `sealed` empty run the settle (which keeps ATTACH and is never refused for memory) and then export from the settled head. With `sealed` non-empty they run a cut and return its refusal if it is refused. So `P_x` and the exported history are §12.7's, and the holder keeps serving.
+- **Archival (M6).** While `archive_on` ≠ 0 (§13.9), an attached Place keeps every commit a chain entry before its cut seals a window:
+  - every cut first settles: it writes each sealed tail, in `sealed` order, and then the live tail as GROUP entries, so the archive segment names them. This is the one case where a sealed tail is rewritten as entries.
+  - while `sealed` is non-empty, no other entry is written above `sealed[0].at`: a settle (unhold, close or export), a direct-service entry or a CLAIM entry first writes the sealed tails as GROUP entries in order and sets `sealed := []`. So every `at` equals the head position whenever a sealed tail is rewritten, and history order is kept. Direct service therefore never arises while archival is on.
+
+#### 12.11.12 Connections, head ownership and charges (CONC-17)
+
+The service runs in the actor's unit (CONC-17; RUNNER §14.11: only `cross` values cross a unit boundary).
+- **Per slot**, one data connection created by the service, with room `slot_bytes`, charged once to the service's budget at `journal_slot` and never to the Place's shard. A frame larger than `slot_bytes` is sent in chunks.
+- **The doorbell** is one shared connection of `max_slots` u32 items. A Place rings it after a send only when its slot's `rung` flag is clear, and the service clears the flag when it drains the slot, so at most one ring per slot is pending and a ring never waits (M11).
+- **Acks never wait on a Place (M11).** Each slot has one latest-value ack item, `{acked_through: u64 (batch seq), outcome: Option[StreamLatch or a sealed-cutoff verdict]}`. The service sends it with `try_send` on the Place-owned reply connection. A full connection coalesces: the newer value replaces the pending one. A slow Place never stalls the service or another Place.
+- **Per-Place admission.** Each batch takes at most `max_batch_bytes / active slots` from a slot, rounded up to one whole frame. A full slot blocks only its own Place.
+- **Head ownership (§12.3, "One owner per advance").** X's head task owns X's head tag and every write to it: a CLAIM entry, cuts, settles (including §12.11.6's unhold settle, which the service *requests* over the reply connection) and direct-service entries. The service never writes a Place's head. After each of its head writes and each stall poll, the Place sends the service a head summary over its slot: epoch, position, `live`, and the `sealed` cutoffs.
+- **What stays charged (M11).** A streamed Place's open reserves §12.9's entry buffers, head buffers and history key as any holder does, so direct service, settles and cuts need no new charge; it builds a GROUP in the entry buffers, and a frame over `group_bytes` takes the on-demand buffer as on any holder. It does not reserve the journal worker task's group buffers (`4 × group_bytes`), its timer task or its group channel: those are the per-Place frame journal the stream replaces, and the slot's room is the service's.
+- **The service's budget** is a fixed part (a batch buffer of `max_batch_bytes`, a register buffer of `REG_LIMIT` + 88, the XINDEX buffer, its client lanes, the doorbell, and the task charges) plus `max_slots` × (slot room + the ack item). `journal_service` refuses when it does not fit. `sizes.hirsel` derives the exact figure. The memory and handoff savings are measured, not claimed.
+
+#### 12.11.13 Liveness timers and polls
+
+No safety rule reads a clock. §12's clock rule names these liveness timers for the stream, each on the local monotonic clock and each only triggering an action that a CAS or a head write decides:
+- `max_wait_ms`, the batching window;
+- `hold_ms`, after which the service runs the unhold settle (rule a), and `hold_ms / 4`, the stall poll;
+- `4 × hold_ms`, a janitor's election age, from first observation (§12.11.8);
+- `pin_ttl_s`, a straggler pin's age before the forced settle;
+- `idle_poll_ms`, the idle register poll.
+
+**No idle head poll for an attached Place (M3).** §12.3's idle head poll does not run while a Place is attached. The service instead GETs `reg` every `idle_poll_ms` when no batch was decided in that interval. A row for one of its Places makes that Place stall and poll its head (§12.11.4), and another (inc, holder) latches the stream, so a fenced attached Place learns it within `idle_poll_ms + hold_ms / 4` plus two request deadlines. That is its bound for §12.3's "Local reads". Health's `Ok(n)` counts consecutive failed register reads for an attached Place.
+
+#### 12.11.14 Cost
+
+Fable's benchmark: 6 hosts, 1,000 commits/s, 166.7 activations/s, $13.14 per Class A/s·month and $1.0512 per Class B/s·month. Per batch the stream costs exactly 1 Class A (the create) and 1 Class B (the register GET). The rest is per Place: genesis 4 A; close 2 A or more; a hold 1 A and H 1 A per migration, plus the forced open-time cut (3–4 A) when the stream is foreign; an index checkpoint 2 A per `index_every` batches.
+
+| Item | v2.141 | Streamed, `max_wait_ms` 100 |
+|---|---|---|
+| Commit writes | 2,000 A | 35 A (batches) |
+| Commit-path reads | 10,000 B (head polls) | 35 B (one `reg` GET per batch) |
+| Genesis | 8 A each = 1,333 A | 4 A each = 667 A |
+| Hosted genesis cut | 500–667 A | 500–667 A (unchanged) |
+| Close | in commit writes | 2 A each = 333 A |
+| Index checkpoints | — | 12 A |
+| **Total per month** | **$61.1k–63.2k** | **$20.5k–22.7k** |
+
+Without the hosted genesis cut the streamed column is about $14.0k, 1.9% from Fable's $14,246 at W = 100 ms. The figure holds only with no idle head poll (§12.11.13) and M8's register size. `max_wait_ms` 0 gives about 86 batch A/s instead of 35 (+$0.7k/month). That is the price of the choice §12.11.1 makes every program state.
+
+#### 12.11.15 Laws L90 (owed, over `std.sim.s3`; to be written by the build)
+
+The build adds these in a new law file, `bucket_stream_laws.hirsel`, over `std.sim.s3`'s S0 holds and request log (§12.10). The oracle of each is the request log, the register's rev history and the set of acked tickets, never the store under test. Smoke runs 16 seeds within 15 s and nightly runs 256.
+
+| Law | Must hold | The bug only it catches |
+|---|---|---|
+| **L90-Q4** (Astra's decisive case) | A acks X's frame in n after B's pre-scan; B's `resident_limit` fits n − 1 and not n. B returns `Full(Resident)`, the log has no H, the row ends Abandoned, A unholds by (b) and acks X's next commit, and a fresh reader sees n. | writing H after a failed delta admission; a cutoff at the pre-scan point |
+| **L90-F** (follower) | A follower that saw n + 1 absent publishes through n only, and publishes n + 1 only after a clean round or a sealed cutoff ≥ n + 1. | a reader that skips the register read or the head GET after it |
+| **L90-H** (hold, abandon, unhold) | (i) A's settle and B's H race at one tag, each order. Exactly one head write applies. If A's, B goes to step 5 with nothing applied twice. If B's, A's tickets end `Ok` through k and `Fenced` above it. (ii) **M1 token pinning:** after A's settle applies, C's hold lands before A's removal CAS. A's retry keeps C's row, X stays stalled, and C's later H fails. (iii) **M1 idle settle:** with an empty tail, A's settle still changes the tag (`settles`), and a slow claimant's H gets Mismatch. | removing a row without a prior applied settle; removing a newer token on retry; a settle that writes identical bytes |
+| **L90-O** (orphan hold, A2 / rule f) | B pre-scans, A closes X (ATTACH dropped), B's hold lands, B crashes. A removes the row after reading X's head, and the register never reaches `Full`. | a row no rule removes |
+| **L90-8** (direct service, A3) | Eight migrations with refused cuts; version 1 in sealed tail 1; direct service commits version 2 as an entry; crash. The next open and a cold follower recover versions 1 then 2. A follower that missed two migrations applies the middle sealed tail. A's stalled ticket, whose cutoff B cut away before A's first stall poll, ends `Undecided`. | entries applied before sealed tails; a follower that skips a sealed tail; a ticket decided without evidence |
+| **L90-T** (terminal fence, A5) | An old-incarnation batch m with X frames is held across the election; pin rebuild meets m absent; m is released and lands. The fence is at or after m's seq. A no-hold claimant's cutoff and the rebuilt pins name the same end, and `low` never passes a batch X's head still contains. A zombie create at the fence latches `Superseded`, not `Batch`. | pins and a no-hold cutoff that disagree; a TERM read as corruption |
+| **L90-B4** (404 cases, A5) | Astra's example (retired, head unchanged: skip to `low`, and B's state holds X's acked frame from 11); the head-moved variant (restart); the sealed-range variant (`low` never passes 10); and **the racing create**: a reader's 404 for n, then n created and checkpointed with `low ≤ n`. The re-GET finds n and the read continues. None ends in `Corrupt` or an end of stream. | treating a 404 as an end of stream or corruption without the reread |
+| **L90-Z** (zombie election) | A's GET is held across A′'s election; A created batch m before it. A latches `Superseded`, m is never acked, A's outstanding tickets end `Undecided`, and the no-hold claim's history holds every frame A acked. | reauthorization by a dropped row or a stale GET; a `Fenced` outcome |
+| **L90-R** (register Q5) | B's and C's holds from one rev, B's reply lost. The resend gets 412, the GET shows its token with its stored `rev_hold`, and the write is done. Both rows stand, and each rev in the history is its predecessor + 1. | a non-idempotent resend; a merge that drops another row |
+| **L90-C** (capacity and the janitor, A4, M9) | With `max_slots` 2 (`max_rows` 4), the fifth concurrent claim returns `Full(Register)` with no write of its own and no election. Variant: A dead with aged rows; only a janitor that needs A's pins elects (Collecting), and every frame A acked is in the history. Variant: A paused, not dead, for 4 × `hold_ms`: it resumes latched `Superseded`, its tickets end `Undecided`, and no acked frame is lost. Variant: two janitors race; the loser's recheck stops it. | a claim that elects; an unbounded register; a stranded dead stream; a second election over a fresh winner |
+| **L90-N** (blast radius) | 32 Places; every batch create attempt dropped, so the stream latches. Acked tickets stay `Ok`, outstanding ones `Undecided`, and all 32 reopen within ⌈32/16⌉ rounds with at most 32 A for H. | re-election storms; unbounded recovery |
+| **L90-X** (crash at each step) | A crash after each claim step 1–7 and each unhold step: each outcome is §12.11.6's table row, and every acked frame is present after the next open. | any step that writes before admission |
+| **L90-E** (exits, M5, M6) | Export with `sealed` empty settles and keeps ATTACH; with `sealed` non-empty it cuts or returns the cut's refusal. With archival on, a cut's segment names every commit of the window, sealed tails included, in history order. | an export that drops ATTACH; an archived window missing stream commits |
+| **L90-P** (plan and refusals, M7, M12) | A `max_batch_bytes` below `FRAME_LIMIT + 4,096`, an overlapping prefix, a sim@1 grant with a weak level, and a slot for another bucket each return their typed refusal, and the request log is empty. | a hidden default or a refusal after I/O |
+| **L90-K** (cost) | 32 Places on one host, 1,000 commits over a fixed schedule, `max_wait_ms` 0 and 100. The request log has exactly one batch PUT and one `reg` GET per batch, no idle head GET from an attached Place, and the batch count is as hand-derived for each window. | stream traffic that grows with Places, not batches |
+| **L90-Z0** (zero cost) | No `journal_service`: a Place opens, commits and closes; the request log and head bytes equal v2.141's, and no `s-` key appears. | stream machinery in the default path |
+
+#### 12.11.16 Closure of A1–A5 and M1–M12
+
+| Item | Closed by |
+|---|---|
+| A1 / M2 (hold before H, Q4 amended) | §12.11.0; §12.11.5 "Q4 for attached Places"; §12.3 claim (standalone unchanged); L90-Q4 |
+| A2 (orphan hold after close) | §12.11.6 rule (f) and its table row; §12.11.8 pin polls; L90-O |
+| A3 (strict order, followers, missing cutoff) | §12.11.9 history order and follower round; §12.11.4 "Missing evidence"; L90-8 |
+| A4 (no timer takeover by claims; election recheck) | §12.11.7 "Claims never elect" and step 3's recheck; §12.11.8 janitor trigger and its stated residual (a paused, alive Serving stream with an aged row latches `Superseded`; no acked commit is lost); L90-C |
+| A5 (terminal fence; B4 re-GET; janitor headroom) | §12.11.7 step 4 and the no-hold rule; §12.11.8 404 table and "Headroom"; L90-T, L90-B4 |
+| M1 (fixed token set; `settles`; rule f; laws) | §12.11.2 ATTACH `settles`; §12.11.6 (a), (b), "The fixed set", (f); L90-H (ii), (iii); L90-O |
+| M3 (§16 completeness) | §12's clock rule; §12.2 "What each head write sets"; §12.11.9 `fresh`; §12.11.13 |
+| M4 (multi-entry settle cursor) | §12.11.2 `(from_seq, from_frame)`; §12.11.6 (a) step 1; §12.11.11 settle |
+| M5 (export and backup) | §12.11.11; §12.7; L90-E |
+| M6 (archival) | §12.11.11 "Archival"; §13.9; L90-E |
+| M7 (sim@1 weak levels) | §12.11.1 refusals; §12.4; L90-P |
+| M8 (register capacity) | §12.11.1 derived `max_rows`; §12.11.2 `REG_LIMIT`, MUST = 1 |
+| M9 (dead and superseded streams) | §12.11.7 "After `Superseded`"; §12.11.8 forced settle and "Dead and collecting streams"; L90-C |
+| M10 (read-only openers) | §12.11.1 `stream_reader`; §12.11.9 "The reader handle" |
+| M11 (CONC-17 acks, doorbell, charges) | §12.11.12 |
+| M12 (immutable probe key; root outside Place prefixes; typed refusals) | §12.11.3 rule 7; §12.11.1 `Stream(Overlap)` and the refusals; L90-P |
+| Fable §3 polish (no empty sealed tail) | §12.11.5 step 6 |
 
 ## 13. Tiered collections (Store M3, v2.56, not yet built)
 
@@ -6682,6 +7077,8 @@ pub fn drop_archive(mut db: Db, below: u64) -> Result[Ticket, Error] waits      
 3. The cut adds the index row [c′, c) → that segment.
 4. The cut then sets `archive_on` to c (turning on) or to 0 (turning off), or leaves it unchanged.
 5. If archival is on after the cut, it writes the anchor rows for c (§14.10, v2.61). The anchors, the segment and the index row become durable in this generation, before it publishes the coverage they give.
+
+**An attached Place (v2.142, §12.11.11).** A commit carried in a host stream's batch is not a chain entry, so while `archive_on` ≠ 0 a Place attached to a host stream first writes its stream tails as GROUP entries: every cut settles each sealed tail, in `sealed` order, and then the live tail before step 2, so the segment names every commit of the window; and while `sealed` is non-empty, no other entry is written above `sealed[0].at` until the sealed tails are written as entries. Direct service does not arise under archival.
 
 So a disabling cut still seals the part it covered. An off-then-on sequence appends a new range and leaves the earlier rows unchanged. Turning archival on at a cut with no prior cut since genesis starts the first window at that cut.
 

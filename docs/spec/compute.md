@@ -1,16 +1,22 @@
 # Compute
 
 *Specified 2026-11-26 (Fleet Hyperscale Summit verdict, spec-only cutover, plus lane 3087
-placement simulation gate `GATE=desk`). Rules COMP-1 to COMP-10. Not built; all Hirsel type
+placement simulation gate `GATE=desk`; re-scoped 2026-11-26 as a reusable core scheduler). Rules
+COMP-1 to COMP-9. Not built; all Hirsel type
 sketches carry `unbuilt` fences. Archetype C compute placement lives exclusively in this
 specification and never inside `fleet@1`
 ([FLT-1](fleet.md#flt-1-three-workload-archetypes),
 [FLT-3](fleet.md#flt-3-control-place-fleet1-and-controller-takeover)).*
 
-Hirsel Compute (`compute@1`) runs Archetype C elastic remote workloads — Tier 1 native units and
-contained Wasm tasks, and Tier 2 one-use microVM sandboxes — inside the existing single-binary
-`hirsel` launcher and `platform` host. Workers alone admit work against real host resources;
+Hirsel Compute (`compute@1`) is the core scheduler for Archetype C elastic remote workloads:
+native units and contained Wasm tasks, run inside the existing single-binary `hirsel` launcher
+and `platform` host. It is a reusable part of the Hirsel ecosystem that any program or service
+can use to run work on enrolled hosts. Workers alone admit work against real host resources;
 `fleet@1` never tracks compute slots or sits on the create path.
+
+A **principal** is the owner of grants on whose behalf compute runs. Every create names exactly
+one principal; the principal's grants bound what the execution may do, and its hard
+concurrency limit (COMP-2) bounds how many of its executions may be live at once.
 
 ## COMP-1: Separation from Archetypes A and B
 
@@ -33,7 +39,7 @@ liveness:
   [QUIC](quic.md) endpoints** with separate drive tasks and reserved CPU and transport turns for
   control traffic. A saturating compute burst must never delay heartbeats, cause false suspicion,
   or trip [FLT-4](fleet.md#flt-4-scoped-takeover-barrier-membership-routing-and-drain)'s
-  correlated-disruption breaker (`ControlLiveness`, COMP-10).
+  correlated-disruption breaker (`ControlLiveness`, COMP-9).
 
 ## COMP-2: Worker-only admission and the capacity ledger
 
@@ -53,8 +59,7 @@ capacity[class] = min(
     map_count_slots(class),
     fd_slots(compute_pool.fds, class),
     conn_table_slots(compute_pool.conns, class),
-    start_concurrency_slots(class),
-    tier_specific_slots(class)
+    start_concurrency_slots(class)
 )
 ```
 
@@ -64,20 +69,48 @@ capacity[class] = min(
   or starting execution; downstream exhaustion paths (unit stack mapping, Wasm `HostMemory`, or
   launcher descriptor exhaustion) become unreachable from compute.
 - **Per-create checks at redemption.** Before converting a reservation into occupancy, the worker
-  verifies caller authentication, tenant authorization and rights, host cordon state,
+  verifies caller authentication, principal authorization and grants, the principal's limit
+  right (below), host cordon state,
   [FLT-6](fleet.md#flt-6-code-trust-revocation-clearance-transport-and-bucket-boundaries) release
   clearance and anti-rollback marks, grant subset, and full resource availability.
-- **Lifetime boundaries.** Warm stock, pre-restored paused clones, in-flight starts, active
+- **Lifetime boundaries.** Warm stock, in-flight starts, active
   occupants, orphans, and retiring children remain charged against the physical ledger until
   their matching termination or reset receipt retires them (`NoOverAdmit`). Start completion
   releases only the start-concurrency charge, never occupancy.
 - **Shedding and control protection.** Under overload, a worker stops offering new capacity and
   sheds excess create traffic before expensive decode or allocation while protecting retirement,
-  revocation, and control work. Quota refusals are reported distinctly from host saturation
-  (`Refused(Quota)` vs. `Refused(Capacity)`).
+  revocation, and control work. Limit refusals are reported distinctly from host saturation
+  (`Refused(Limit)` vs. `Refused(Capacity)`).
 - *Implementation note (non-normative):* background pre-mapping of native unit stack stock is a
-  candidate optimization to keep `mmap`/`munmap` off the Tier 1 create path; if adopted, warm
-  stock and mapping-count ceilings enter `capacity[class]` and require separate qualification.
+  candidate optimization to keep `mmap`/`munmap` off the native unit create path; if adopted,
+  warm stock and mapping-count ceilings enter `capacity[class]` and require separate
+  qualification.
+
+### Hard per-principal concurrency limits
+
+Each principal `p` has a concurrency limit: the number of its executions that may be live at
+once. Limits are **hard**: zero overshoot, including during partitions, restarts, and desk
+failover. The admission ledger enforces them with **escrowed rights**, not counters:
+
+- **Disjoint escrow per worker.** A principal's allocation in a cell (COMP-8) is split into
+  disjoint per-worker escrows with `sum_w escrow[p][w] <= allocation[p][cell]`. The split is an
+  epoch-versioned escrow table, signed and installed per cell the same way as the federation
+  manifest (COMP-8). Moving rights between workers decreases the donor before increasing the
+  recipient, so the sum bound holds at every intermediate state.
+- **Debit with the slot.** Admission debits one right from `escrow[p][w]` in the same atomic
+  full-vector debit that funds the slot. A worker with no unspent right for `p` refuses before
+  running (`WorkerLimitRefusal`, a definitive first-send refusal). Offers (COMP-3) carry which
+  principals the worker still holds rights for, and the desk grants an offer to a create for
+  `p` only from a worker holding a right for `p`.
+- **Refund on the termination receipt.** A right returns to the worker's escrow only on the same
+  termination or reset receipt that retires the slot (`NoOverAdmit`). Expiry, desk restart, or
+  loss of contact never refunds it.
+- **Stranded during a partition.** Rights held by an unreachable worker stay spent until that
+  worker returns and accounts for its executions (COMP-5), or an operator terminates them through
+  an audited action on the record.
+
+`NoOverLimit`: for every principal `p` and cell `c`, the number of live admitted executions of
+`p` in `c` never exceeds `allocation[p][c]`.
 
 ## COMP-3: Placement (credit desk — decided)
 
@@ -102,11 +135,11 @@ The following mechanisms are explicitly absent from `compute@1` and must not be 
 
 ### Deployment latency condition
 
-Lane 3087 measured sparse Tier 1 create latency overhead at `+100 us` p50 for `100 us` desk RTT,
+Lane 3087 measured sparse create latency overhead at `+100 us` p50 for `100 us` desk RTT,
 crossing the `200 us` added-latency bound at approximately `200 us` effective desk RTT
 (dispatcher-to-desk and worker-to-desk round-trip time including desk service delay). Cells
 **must** place shard desks within the cell topology such that effective desk RTT stays strictly
-below `200 us` for Tier 1 sparse-create workloads.
+below `200 us` for sparse-create workloads.
 
 ### Roles and exclusive credit protocol
 
@@ -118,12 +151,13 @@ Three soft-state roles run inside the single `hirsel` binary:
 - **Credit desk (shard team).** A soft-state rendezvous on fixed roster-ordered **desk teams**
   named in the cell's signed roster, with each class hashed to one shard/team. In steady state,
   the highest-ranked member of the shard's team is the shard primary and owns the pop transition
-  for every connected worker. The desk holds offers and per-dispatcher, per-tenant demand counts
-  (`Ask(class, tenant, n)`) — never payloads — and pops each offer to at most one dispatcher
-  (`GrantExclusive`), choosing among waiting tenants in proportion to their allocations. *(Team
+  for every connected worker. The desk holds offers and per-dispatcher, per-principal demand
+  counts (`Ask(class, principal, n)`) — never payloads — and pops each offer to at most one
+  dispatcher (`GrantExclusive`), choosing among waiting principals in proportion to their
+  allocations. *(Team
   size, such as 3 hosts per team, is a non-normative deployment configuration parameter.)*
-- **Dispatcher.** Runs in the trusted host process (never inside untrusted tenant code). Parks
-  waiting creates within a bounded per-tenant pending cap until a grant arrives or the caller's
+- **Dispatcher.** Runs in the trusted host process (never inside untrusted user code). Parks
+  waiting creates within a bounded per-principal pending cap until a grant arrives or the caller's
   deadline expires; sends the create directly to the granted worker and returns the handle.
   Workers hold no queue. A create with no deadline receives an immediate `PlaceNoCredit` when the
   desk holds no matching offer.
@@ -156,12 +190,12 @@ owner_epoch)` per shard at any instant:
 | **Redeem** | `SlotOffered(c, _)` with `c.worker_run == local_run`, matching credit, and valid COMP-2 checks | `SlotOffered -> SlotBusy(c, generation)`; admit once (`OneLiveCredit`, `SingleUse`) |
 | **Withdraw** | `SlotOffered(c, _)` on desk stream reset, `Abandon`, drain, overload, or owner handoff | `SlotOffered -> SlotFree`; credit `c` is permanently invalidated (`WithdrawIsFinal`) |
 | **Handoff** | Worker transfers shard ownership from current owner `A` to reachable team member `B` | Atomically **Withdraw** every `SlotOffered` credit granted to `A` (fencing `A` via `WithdrawIsFinal`), advance `owner_epoch += 1`, set active owner to `(B, owner_epoch)`, and emit `AssumeOwner(shard, owner_epoch)` + fresh `Offer(..., owner_epoch)` to `B` |
-| **Release** | `SlotBusy(c, generation)` after retirement receipts (COMP-5 / COMP-9) | `SlotBusy -> SlotFree`; remember bounded last outcome per slot |
+| **Release** | `SlotBusy(c, generation)` after retirement receipts (COMP-5) | `SlotBusy -> SlotFree`; remember bounded last outcome per slot |
 
 ### Dead dispatchers, partition handoff, and recovery bounds
 
 - **Dead or stalled dispatchers.** The desk records outstanding grants per dispatcher connection
-  and caps outstanding grants per connection and per tenant. On disconnect, the desk clears that
+  and caps outstanding grants per connection and per principal. On disconnect, the desk clears that
   dispatcher's demand and sends `Abandon(slot, c)` to each affected worker; the worker withdraws
   if still `SlotOffered(c, _)` and ignores `Abandon` if already `SlotBusy`. After redemption,
   withdrawal, or rejection, an idempotent settlement keyed by grant releases the connection's
@@ -203,7 +237,7 @@ owner_epoch)` per shard at any instant:
   only when no prior worker exchange may have had effects (COMP-4). In simulation and telemetry,
   a terminal `Refused(Capacity)` counts as a **false `Overloaded`** if and only if at least one
   physically idle, eligible, compatible slot existed in the cell at that terminal refusal.
-- **Placement safety invariants (proved in Veil / checked in TLC and Quint, COMP-10):**
+- **Placement safety invariants (proved in Veil / checked in TLC and Quint, COMP-9):**
   - `OneLiveCredit`: for each slot, at most one credit can redeem, and only while `SlotOffered`.
   - `SingleUse`: a credit transitions a slot to `SlotBusy` at most once across all runs.
   - `GrantExclusive`: a desk member grants each offered credit to at most one dispatcher, and at
@@ -223,7 +257,7 @@ pub type RetryClass: codec + key + send = RetryPure | RetryKeyed | RetryEffectfu
 
 pub type AttemptId: codec + key + send {
     caller_id: u64,
-    tenant_id: u64,
+    principal_id: u64,
     session_id: u64,
     seq: u64,
     digest_lo: u64,
@@ -234,21 +268,21 @@ pub type CreateOutcome: codec + key + send =
     Created(u64)
     | Duplicate(u64)
     | RefusedCapacity
-    | RefusedQuota
+    | RefusedLimit
     | Undecided
 ```
 
 | Class | Condition | Behavior after an ambiguous send |
 |---|---|---|
 | **`pure`** | Empty grant subset, deterministic ([SEM-8](semantics.md#sem-8-determinism)), and duplicate-tolerant | May be re-dispatched on a fresh worker exchange within budget; duplicate work is invisible apart from physical occupancy until reclaimed. |
-| **`keyed`** | Every reachable effectful sink enforces receiver-checked idempotency on a tenant-scoped logical sub-operation ID and payload digest across workers and retries | May be re-dispatched within budget; every receiver atomically commits deduplication, effect, and replayable outcome, refusing a reused ID with a conflicting digest. |
-| **`effectful`** | Everything else, including every Tier 2 sandbox with `Net` and any promised single interactive handle | **Created inert, then activated on the pinned handle.** Never re-dispatched on ambiguity. Pinned recovery queries or replays only the original worker and attempt; if unresolved, returns `Undecided`. |
+| **`keyed`** | Every reachable effectful sink enforces receiver-checked idempotency on a principal-scoped logical sub-operation ID and payload digest across workers and retries | May be re-dispatched within budget; every receiver atomically commits deduplication, effect, and replayable outcome, refusing a reused ID with a conflicting digest. |
+| **`effectful`** | Everything else, including any execution holding a `Net` grant and any promised single interactive handle | **Created inert, then activated on the pinned handle.** Never re-dispatched on ambiguity. Pinned recovery queries or replays only the original worker and attempt; if unresolved, returns `Undecided`. |
 
 ### Attempt identity and restart fence
 
 Attempt identity is owned by the **caller**, distinct from any placement grant (COMP-3):
 
-- Each logical attempt is bound to `(caller, tenant, non-reusable session, sequence, request
+- Each logical attempt is bound to `(caller, principal, non-reusable session, sequence, request
   digest)` and, when dispatched to a worker, to the target worker's live `(host, run)`
   (COMP-6).
 - Within a worker `run`, the worker reserves deduplication state at admission and advances an
@@ -269,14 +303,14 @@ Attempt identity is owned by the **caller**, distinct from any placement grant (
   - for an **`effectful`** attempt whose send to `(host, run)` was unanswered, observing `run'`
     resolves to `Undecided` — the coordinator never re-binds that effectful attempt to `run'`;
   - for **`pure`** and **`keyed`** attempts, a retry opens a fresh attempt on a new target
-    `(host', run')` (where `SEM-8` or the durable receiver's own tenant-scoped idempotency table
+    `(host', run')` (where `SEM-8` or the durable receiver's own principal-scoped idempotency table
     — not the volatile worker — enforces cross-restart deduplication).
 
 ### Inert effectful create and pinned activation
 
 An `effectful` create prepares an **inert checkout** on the admitting worker without executing
 user code that holds external grants. User code holding grants starts only on an authenticated
-activation targeting the returned pinned handle (for Tier 2, `Bind` followed by `Run`, COMP-9). A
+activation targeting the returned pinned handle. A
 duplicate inert create before activation therefore performs no external effect; it holds a slot,
 is accounted for, and is reclaimed. Once a send to a worker is unanswered, no fresh worker is
 ever chosen for an `effectful` request; only a definitive first-send refusal from the worker
@@ -290,19 +324,17 @@ permits a new attempt within budget.
   **1 cross-cell spill** (COMP-8). Placement-tier probes (COMP-3) are accounted separately from
   worker exchanges.
 - **Coordinator death.** The coordinator is volatile. A coordinator that dies ends that internal
-  invocation as `Undecided`, loses all authority to retry, and may drop its reply to the caller
-  (the outward-facing caller recovery contract for `Undecided` is open in
-  [Open (owner: Sam)](#open-owner-sam), #1).
+  invocation as `Undecided`, loses all authority to retry, and may drop its reply to the caller.
 - **Total outcomes for a living coordinator (`TotalOutcome`).** Every living, scheduled
   coordinator invocation resolves to exactly one of `Created`, `Duplicate`, `Refused(Capacity)`,
-  `Refused(Quota)`, or `Undecided` within budget and by its deadline. Internal placement or
+  `Refused(Limit)`, or `Undecided` within budget and by its deadline. Internal placement or
   worker replies (COMP-3 placement outcomes, `PlacementMiss`, `WorkerCapacityRefusal`,
-  `Gone(may_have_run)`) are resolved by the dispatcher and never leak raw to callers.
+  `WorkerLimitRefusal`, `Gone(may_have_run)`) are resolved by the dispatcher and never leak raw to callers.
   `Refused(Capacity)` is returned only when every prior worker exchange is known to have had no
   outstanding effect (either a `PlacementMiss` before any worker send, or definitive first-send
   refusals on all prior sends).
 
-## COMP-5: Restart custody (`AccountBeforeMint`) and volatile scope
+## COMP-5: Restart custody (`AccountBeforeMint` by `ReapBeforeMint`) and volatile scope
 
 Compute kernels operate under the volatile scope clause **K11-V** of
 [FLT-7](fleet.md#flt-7-proof-ready-protocol-kernel-contract-k1k13): a volatile ledger persists
@@ -311,32 +343,29 @@ dies with its ledger or is accounted for before its slot is reused.
 
 Because compute children are spawned by the launcher as siblings of the `platform` host process,
 a host-process crash can leave compute children running while the volatile admission ledger is
-lost. Compute therefore enforces **`AccountBeforeMint`**:
+lost. Compute therefore enforces **`AccountBeforeMint`**: a host advertises no capacity until
+every surviving compute child has been accounted for. It meets that invariant by
+**`ReapBeforeMint`**: every surviving child is killed, never re-adopted.
 
 1. **Draw fresh `run` and start closed.** After any host-process restart, the worker draws a
    fresh, non-reusable `run` identifier (COMP-6), starts closed, and advertises or mints **zero**
    capacity. All placement credits and volatile dedup sessions from prior runs are irrevocably
-   invalidated by the `run` mismatch (COMP-3, COMP-4).
+   invalidated by the `run` mismatch (COMP-3, COMP-4), and pre-restart sessions stay closed
+   (`LateUnknownId`).
 2. **Fence old session.** At the launcher, fence the previous host session including any queued
-   launch or bind commands, close old proxy sessions, and cancel pending proxy dials so no
-   in-flight spawn can complete after custody inspection.
-3. **Account for every survivor.** Inspect the launcher's **compute custody class** only (never
-   Archetype A Place runners or Archetype B serving children). Every surviving compute child must
-   be accounted for — either re-adopted into the physical ledger or killed with its descendants
-   gone and empty-custody acknowledgement observed from the launcher — before any capacity is
-   advertised or any slot is reused. If cleanup cannot be established, the successor remains
-   closed. If re-adoption is enabled (subject to [Open (owner: Sam)](#open-owner-sam), #1), any
-   re-adopted caller session must also restore its persisted session retirement floor before
-   accepting further creates on that session; otherwise pre-restart sessions remain irrevocably
-   closed (`LateUnknownId`).
+   launch commands, so no in-flight spawn can complete after custody inspection.
+3. **Reap every survivor.** Inspect the launcher's **compute custody class** only (never
+   Archetype A Place runners or Archetype B serving children). Kill every surviving compute
+   child and wait until its descendants are gone and the launcher acknowledges empty custody.
+   Only then are its slots and principal limit rights (COMP-2) refunded and capacity advertised.
+   If cleanup cannot be established, the successor remains closed.
 
-Whether surviving sandboxes on a host-process restart are killed (`ReapBeforeMint`) or re-adopted
-through a launcher-held custody note is an open product decision in
-[Open (owner: Sam)](#open-owner-sam) (#1). `AccountBeforeMint` holds under either choice.
+An in-flight `effectful` attempt on the old `run` resolves to `Undecided` (COMP-4); the reap
+guarantees it is no longer running once the successor opens.
 
 ## COMP-6: Opaque, versioned handles
 
-Every created sandbox or running compute task is addressed by an **opaque, versioned handle**:
+Every running compute execution is addressed by an **opaque, versioned handle**:
 
 ```hirsel unbuilt
 pub type ComputeHandle: codec + key + send {
@@ -354,8 +383,7 @@ pub type ComputeHandle: codec + key + send {
   governs wire format evolution without exposing internal layout to callers.
 - **Internal tuple and freshness.** Internally the handle carries `(cell, host, run, slot,
   generation)` plus an **authenticated secret**. `run` is a fresh per-host-process-start value
-  (also fencing pre-restart placement credits and attempt sessions, COMP-3–COMP-5, and keying
-  usage batches), and `generation` is a non-wrapping per-slot sequence (refusing counter wrap).
+  (also fencing pre-restart placement credits and attempt sessions, COMP-3–COMP-5), and `generation` is a non-wrapping per-slot sequence (refusing counter wrap).
   Together with a fresh cryptographic boot key, `(run, slot, generation)` derives a
   domain-separated authenticated secret whose wire width is sized to the fleet-lifetime
   collision/forgery risk budget before freezing the wire format.
@@ -365,14 +393,14 @@ pub type ComputeHandle: codec + key + send {
   compute handle. Compute fencing never requires a `fleet@1` write on host-process restart.
 - **Rights checked on every use (`HandleFresh`).** Routing fields (`cell`, `host`) confer no
   authority. Every operation on a handle (`activate`, `exec`, `signal`, `kill`, `status`)
-  authenticates the caller and verifies tenant identity, current rights, live `(run, slot,
+  authenticates the caller and verifies principal identity, current grants, live `(run, slot,
   generation)`, and the authenticated secret. Host identifiers are never reused within a fleet:
   a known retired slot, `run`, or host returns `Gone`, while an unreachable owner returns
   `Undecided` (neither settles prior external effects).
 
 ## COMP-7: Contained Wasm pricing and slot rules
 
-Tier 1 contained Wasm compute tasks obey
+Contained Wasm compute tasks obey
 [FFI-10 through FFI-16](foreign.md#ffi-10-contained-modules-and-their-build) with zero divergence
 in observable results, step counts, failure order, or replay tapes:
 
@@ -404,7 +432,7 @@ in observable results, step counts, failure order, or replay tapes:
   step counts, byte admissions/refunds, failure order, and slice-end positions across element
   segments, extended constants, tight step+byte limits, and slice boundaries.
 - **Capacity accounting.** Virtual address space slots, MEM-19 resident bytes, and concurrently
-  mounted async stacks are each terms of `capacity[class]` (COMP-2); hosts shard tenant execution
+  mounted async stacks are each terms of `capacity[class]` (COMP-2); hosts shard execution
   processes under the single physical host ledger when needed. *(Implementation note,
   non-normative: storing prepared modules in a lock-free once-initialized slot on the module
   record rather than behind a global mutex is a candidate create-path optimization, subject to
@@ -418,16 +446,15 @@ and local `compute_pool`. A cell failure is contained to that cell.
 
 - **Signed manifest of disjoint per-cell allocations.** In the first cut there is **no running
   federation root Place**. Federation state is a root-signed, epoch-versioned **federation
-  manifest** listing cells, their SPKI pins, residency tags, and disjoint per-cell tenant
-  allocations satisfying `sum_c allocation[t][c] <= entitlement[t]`. Each cell installs the
+  manifest** listing cells, their SPKI pins, residency tags, and disjoint per-cell principal
+  allocations satisfying `sum_c allocation[p][c] <= limit[p]`. Each cell installs the
   manifest through its existing `fleet@1` root-signed keyset and durable anti-rollback path
   ([FLT-6](fleet.md#flt-6-code-trust-revocation-clearance-transport-and-bucket-boundaries)),
-  making manifest installation durable and K11-covered per cell. (Whether per-tenant concurrency
-  enforcement inside a cell uses hard worker escrow or soft counted limits awaits
-  [Open (owner: Sam)](#open-owner-sam), #2.)
+  making manifest installation durable and K11-covered per cell. Inside a cell, the allocation is
+  enforced by hard worker escrow (COMP-2).
 - **Decrease before increase.** Shifting allocation from donor cell `X` to recipient cell `Y`
   requires two signed manifests: the first lowers `X` and waits for durable evidence/receipt that
-  `X` has relinquished the moved rights; the second raises `Y`. `sum <= entitlement` holds at
+  `X` has relinquished the moved rights; the second raises `Y`. `sum <= limit` holds at
   every intermediate state. Rebalancing is an external operator or program tool emitting signed
   manifests.
 - **One-hop spill (`SpillDepth <= 1`).** When local placement in the home cell cannot satisfy a
@@ -435,68 +462,17 @@ and local `compute_pool`. A cell failure is contained to that cell.
   request carries a `spilled` mark, and a receiving cell never forwards a marked request again.
 - **Summary picks the cell; remote placement decides.** Cells exchange fresh, quantized
   per-cell/class headroom summaries. The home coordinator uses those summaries (filtered by
-  residency, tenant entitlement, release clearance, and grant policy) to pick one target cell,
+  residency, principal limit, release clearance, and grant policy) to pick one target cell,
   then sends an exact placement request to that cell's placement tier (COMP-3). A stale summary
   costs at most an exact placement refusal, never a broadcast launch storm.
 - **Destination protection.** Receiving cells serve local cell demand before spilled demand and
-  enforce inbound per-source, per-class, per-tenant, and aggregate spill caps. Sending cells cap
+  enforce inbound per-source, per-class, per-principal, and aggregate spill caps. Sending cells cap
   outbound spill requests and bytes and suppress spill when fresh remote headroom is absent or
   local observer health is suspect.
 - **Cross-cell handle resolution.** Handles carry `(cell, host)` resolved via the manifest and
-  target cell roster; no quota crosses a cell boundary at run time.
+  target cell roster; no limit right crosses a cell boundary at run time.
 
-## COMP-9: Tier 2 full-OS sandboxes
-
-Tier 2 runs on a dedicated KVM-capable host class using the same `compute@1` admission ledger,
-handle contract, retry classes, and custody rules as Tier 1:
-
-- **One launcher-supervised VMM per one-use guest.** Each guest runs inside one dedicated
-  launcher-supervised VMM process (Firecracker-class) packaged with the single release
-  distribution — no fleet-wide VMM daemon, no shell wrapper, and no serving-child-plus-VMM
-  process pair. Every checked-out guest is one-use and destroyed on release.
-- **No network device in the guest.** Guests have no `virtio-net` device and incur zero
-  per-guest TAP, `netns`, `veth`, route, firewall, or RTNL provisioning (qualified by an
-  end-to-end host kernel network-configuration trace). Each VMM runs inside a launcher-enforced
-  cgroup v2 leaf (memory, pids, CPU, I/O), unprivileged UID, restricted filesystem view,
-  allowlisted fd set, no inherited credentials, and a VMM-version-specific seccomp policy.
-  *(Implementation note, non-normative: placing all VMM processes into one shared empty network
-  namespace created once at host boot with an `AF_UNIX`-only seccomp filter is a candidate
-  hardening design, subject to its own lock-trace and launcher qualification.)*
-- **File-backed templates and single-tenant frame sharing.** Immutable, signed, content-hashed
-  **file-backed** templates (pinning guest kernel, root disk, RAM/device snapshot, VMM version,
-  CPU template, and policy) are restored into paused VMMs ahead of demand so process creation and
-  snapshot open stay off the create path. Each clone uses private writable disk and RAM mappings.
-  Clean template page frames are **shared strictly within a single tenant's trust domain**
-  (independent physical backing per tenant, with cross-domain page deduplication excluded from
-  qualified hosts).
-- **Per-clone uniqueness (`SeedBeforeRun`) and open template-content policy.** Over a
-  host-initiated control channel, the worker delivers fresh host entropy, lease identity, and
-  wall time (`Bind{seed, lease, wall_time}`) and sends `Run` and tenant credentials only after
-  guest acknowledgement (`SeedBeforeRun`). What state a template snapshot is allowed to contain
-  (init-only bootstrap, pre-warmed runtimes with reseed hooks, or customer snapshots) and the
-  outward-facing Tier 2 isolation contract are **open questions** in
-  [Open (owner: Sam)](#open-owner-sam) (#4).
-- **Per-tenant vsock proxy child.** Guest egress crosses `virtio-vsock` to a launcher-supervised
-  **per-tenant Hirsel child** holding only that tenant's delegated `Net` ceiling. The VMM holds
-  zero tenant network authority, and the host admission ledger parses zero guest proxy traffic.
-  The proxy authenticates arrival by private host endpoint and live checkout generation (never
-  trusting guest-chosen CID, port, or tenant strings) and checks every connect, redirect, and
-  resolved address/port against the specific live lease's narrower grant.
-- **Host-side handoff and reclaim invariants:**
-  - `EgressAfterRun`: the proxy opens no outbound stream for a lease before `Run` is sent.
-  - `DialBelongsToLease`: every pending outbound dial carries `(slot, lease generation)` from
-    host-owned state; any completion whose generation is no longer live is closed before a byte
-    moves.
-  - `OneLeasePerVm`: a restored VMM serves at most one checkout.
-  - `RevokeBeforeReuse`: a Tier 2 slot (and any tenant quota right, if escrowed under
-    [Open (owner: Sam)](#open-owner-sam), #2) is refunded and reusable only after **both**
-    receipts arrive:
-    1. **Reap receipt** from launcher custody: the VMM and all descendants have exited, the
-       cgroup leaf is empty, and writable backing is discarded.
-    2. **Broker-close receipt** from the tenant proxy child: all vsock sessions for that lease
-       are closed and all pending dials are cancelled.
-
-## COMP-10: Verification and proof split
+## COMP-9: Verification and proof split
 
 Compute follows [FLT-7](fleet.md#flt-7-proof-ready-protocol-kernel-contract-k1k13) pure reducer
 kernels (`step(state, ev)` and bounded `keys(ev)`, K1–K13 with K11-V) and
@@ -511,10 +487,9 @@ model-based testing on `SM1` traces):
 
 | Component | Required safety invariants |
 |---|---|
-| Worker admission & custody | `NoOverAdmit`, `AccountBeforeMint`, `HandleFresh`, attempt-identity deduplication, `LateUnknownId` retirement floor, and cross-restart `run` fencing (COMP-4, COMP-5) |
+| Worker admission & custody | `NoOverAdmit`, `NoOverLimit`, `AccountBeforeMint` (by `ReapBeforeMint`), `HandleFresh`, attempt-identity deduplication, `LateUnknownId` retirement floor, and cross-restart `run` fencing (COMP-4, COMP-5) |
 | Placement & dispatcher | Placement invariants defined in COMP-3 (`OneLiveCredit`, `SingleUse`, `GrantExclusive`, `WithdrawIsFinal`); dispatcher `TotalOutcome` (living coordinator within 3 worker exchanges and 1 spill), `OutcomeSoundness`, `EffectfulNeverRedispatched` |
-| Federation | `SpillDepth <= 1`, `sum_c allocation[t][c] <= entitlement[t]` across every manifest step |
-| Tier 2 lifecycle | `SeedBeforeRun`, `EgressAfterRun`, `DialBelongsToLease`, `OneLeasePerVm`, `RevokeBeforeReuse` |
+| Federation and escrow | `SpillDepth <= 1`, `sum_c allocation[p][c] <= limit[p]` across every manifest step, `sum_w escrow[p][w] <= allocation[p][c]` across every escrow table step |
 | Non-interference | Build-time check: compute modules import neither `OutboxCmd` nor `Key` from `core/programs/fleet/types.hirsel` |
 | Contained Wasm | Reference-entry differential (CoW-off oracle) before any pooled/CoW optimization |
 
@@ -532,26 +507,26 @@ message-delay, and partition schedules are verified as separate fault/liveness c
 - **Burst bound (deterministic oracle).** *Preconditions:* a homogeneous eligible class with
   reachable workers and shard primary, dispatcher pending caps `>= N`, all `f_i` free slots
   already funded and offered (or bounded mint/grant/delivery RTT `<= r`), per-slot start service
-  time `<= s`, window `W`, caller deadlines `>= t`, sufficient tenant quota, fair service, no
+  time `<= s`, window `W`, caller deadlines `>= t`, no binding principal limit, fair service, no
   failures, and no slot releases within `[0, t]`. *Oracle:* creates started by time `t` are at
   least `min(N, sum_i min(f_i, W * floor(t / (s + r))))`. Includes **zero-slack conservation**:
   `N = sum f_i`, `W = 1`, `deadline = max_i f_i * (s + r)` with zero creates left unstarted.
 - **Immediate creates (deterministic oracle).** *Preconditions:* `N` no-deadline creates for one
   eligible class arriving at a reachable placement tier currently holding `q` ready matching-class
-  offers, with sufficient tenant quota, fair service, and no failures. *Oracle:* exactly
+  offers, with no binding principal limit, fair service, and no failures. *Oracle:* exactly
   `min(N, q)` are granted and the remaining `max(0, N - q)` terminate as `PlacementMiss`
   (`Refused(Capacity)`).
 - **Steady-state blocking (Erlang-B statistical oracle).** *Preconditions:* a homogeneous
   single-class pooled loss system with `C` total funded slots, open-loop Poisson arrival rate
   `lambda`, mean occupancy `1 / mu` (offered load `A = lambda / mu` Erlangs), no waiting
-  (no-deadline arrivals), sufficient tenant quota, and no failures. *Oracle:* **Erlang-B**
+  (no-deadline arrivals), no binding principal limit, and no failures. *Oracle:* **Erlang-B**
   `B(C, A)` gives the exact blocking lower bound; simulated refusal probability must match
   `B(C, A)` within the stated excess attributable to offer window `W` and in-flight grant RTT,
   with false `Overloaded` tracked separately (COMP-3).
 - **Separate fault, fairness, overload, and control-liveness cases.** Asymmetric-partition
   stranded-slot re-offer within the stated recovery bound under COMP-3's liveness assumptions,
   `ControlLiveness` (zero missed A/B heartbeat or `Directory[K]` renewal deadlines under
-  saturating compute bursts), tenant max-min fairness, zero spill while home capacity is
+  saturating compute bursts), principal max-min fairness, zero spill while home capacity is
   available, and metastability recovery after excess load ends.
 
 ## Dependencies
@@ -572,30 +547,11 @@ stack, generation handles, deadline heap, and ready queue (lane 3060, landed); f
 pointwise K10 advisory merge (lane 3056, landed); and the placement simulation gate extending
 lane 3056's simulator (lane `fleet-placement-sim-gate-3087`, decided `GATE=desk`).
 
-## Open (owner: Sam)
+## Rulings
 
-The following five outward-facing contracts are **open questions** awaiting Sam's ruling. None is
-decided by this specification:
+Rulings of 2026-11-26 (Sam re-scoped compute to a reusable core scheduler; both reversible):
 
-1. **Sandbox lifetime across a host-process restart (and caller-visible `Undecided`).** Should
-   surviving compute sandboxes be killed on a host-process restart (`ReapBeforeMint`), or should
-   they survive and be re-adopted through a launcher-held custody note? What outward-facing
-   recovery or ambiguity contract should callers see after an ambiguous create (`Undecided`)?
-2. **Hard tenant limits vs. soft limits.** Should tenant concurrency limits be hard escrowed
-   rights at workers (zero overshoot, stranded during a host partition, refunded only on reap and
-   broker-close receipts), or soft counted limits that can overshoot during partitions and
-   rebuilds?
-3. **Billing promise.** Should Hirsel promise a hard spend cap (candidate: headroom funded in
-   batches through the same escrow) or a best-effort spend cap? What usage loss bound on a
-   host-process crash is acceptable (candidate: at most one unflushed batch), and should billing
-   be per logical create or per physical execution?
-4. **Tier 2 isolation contract.** What outward-facing Tier 2 isolation contract should Hirsel
-   promise regarding template contents — candidate: templates snapshotted only from trusted
-   initialization (no tenant code or secrets, pre-warmed runtimes only where Hirsel maintains a
-   reseed hook, no customer-supplied snapshots) — and how should single-tenant template page-frame
-   sharing (decided architecturally in COMP-9) be framed publicly?
-5. **Wording of the public "beyond Modal" claim.** What wording and disclosure terms should Sam
-   adopt for any public "beyond Modal" claim? (Proposals to choose among or revise: physical
-   worker count, distinct useful starts per second over consecutive seconds, simultaneously live
-   full-OS guests, published offered/accepted/refused counts, and keeping Tier 1 measurements
-   distinct from full-OS Tier 2 claims.)
+1. **Host-process restart reaps.** In-flight compute is killed and accounted for before capacity
+   is re-advertised (`ReapBeforeMint`, COMP-5).
+2. **Principal limits are hard.** Escrowed rights at workers, zero overshoot, stranded during a
+   partition, refunded only on termination receipts (COMP-2).

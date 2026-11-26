@@ -334,7 +334,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::TypeArguments if matches!(self.p.target(self.at, c[0]), Some(Target::Builtin(name)) if self.p.index.symbols.text(*name) == "Inline") =>
             {
                 if c.len() != 3 {
-                    let message = "Inline takes an element type and a literal length";
+                    let message = "Inline takes an element type and a length";
                     self.refuse_type_arguments(n, c.len() - 1, 2, message);
                     return ERROR;
                 }
@@ -343,17 +343,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if element == ERROR {
                     return ERROR;
                 }
-                let Some(count) = crate::decls::literal_length(self.p.item(self.at), c[2]) else {
-                    self.refuse(
-                        if self.kind(c[2]) == NodeKind::Literal {
-                            "LANG-3"
-                        } else {
-                            "SEM-9"
-                        },
-                        c[2],
-                        "Inline length is a literal fitting its integer type and u64",
-                    );
-                    return ERROR;
+                let count = match self.p.registered_inline_length(self.at, c[2]) {
+                    Ok(count) => count,
+                    Err(why) => {
+                        if let Some((rule, message)) = why {
+                            self.refuse(rule, c[2], message);
+                        }
+                        return ERROR;
+                    }
                 };
                 let element_kind = kind(&self.p.decls, &self.t, element, &self.params);
                 if element_kind == Kind::Scoped {

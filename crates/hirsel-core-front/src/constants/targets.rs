@@ -124,6 +124,7 @@ impl Program<'_> {
             ascribing: false,
             target,
             targeted: false,
+            early: false,
         };
         let value = if Some(ty) == string {
             cx.static_string(expr, ty)
@@ -192,6 +193,7 @@ impl Program<'_> {
             ascribing: false,
             target: None,
             targeted: false,
+            early: false,
         };
         let value = cx.expr(n, want, true);
         let values = if cx.targeted {

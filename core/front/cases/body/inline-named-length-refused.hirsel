@@ -1,0 +1,35 @@
+// expect: refuse SEM-9 at 28:24
+// expect: refuse SEM-9 at 29:24
+// expect: refuse SEM-9 at 30:24
+// expect: refuse SEM-9 at 31:24
+// expect: refuse SEM-9 at 33:24
+// expect: refuse SEM-9 at 34:24
+// expect: refuse LANG-20 at 26:17
+// expect: refuse SEM-9 at 35:35
+// expect: message SEM-9 at 28:24 | constant `COMPUTED` cannot be an Inline length: its initialiser calls a function, so it is computed after checking
+// expect: message SEM-9 at 29:24 | constant `NEG` cannot be an Inline length: it is negative
+// expect: message SEM-9 at 30:24 | constant `SIZE` cannot be an Inline length: its initialiser holds more than integer literals, operators and other length constants
+// expect: message SEM-9 at 31:24 | constant `FLAG` cannot be an Inline length: its type is not an integer type
+// expect: message SEM-9 at 33:24 | an Inline length is an integer literal or the name of a length constant; `P` is not a constant
+// expect: message SEM-9 at 34:24 | constant `READS_COMPUTED` cannot be an Inline length: its initialiser calls a function, so it is computed after checking
+// expect: message SEM-9 at 35:35 | constant `COMPUTED` cannot be an Inline length: its initialiser calls a function, so it is computed after checking
+// SEM-9: an Inline length names a length constant. A computed constant, a negative
+// one, one whose initialiser reads a layout, one that is not an integer and a name
+// that is no constant are refused at the length; a constant refused itself is
+// refused once, at the constant (LANG-20).
+fn four() -> u64 { 4 }
+const COMPUTED: u64 = four()
+const NEG: i64 = -4
+type P { x: u64 }
+const SIZE: u64 = bytes[P]
+const FLAG: bool = true
+const BAD: u8 = 200 + 100
+const READS_COMPUTED: u64 = COMPUTED + 1
+type A { x: Inline[u8, COMPUTED] }
+type B { x: Inline[u8, NEG] }
+type C { x: Inline[u8, SIZE] }
+type D { x: Inline[u8, FLAG] }
+type E { x: Inline[u8, BAD] }
+type F { x: Inline[u8, P] }
+type G { x: Inline[u8, READS_COMPUTED] }
+fn h() -> u64 { let x: Inline[u8, COMPUTED] = [0u8; 4]; 0 }

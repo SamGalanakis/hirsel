@@ -1147,7 +1147,7 @@ impl Program<'_> {
                         refusal(
                             "LANG-12",
                             self.site(at, n),
-                            "Inline takes an element type and a literal length",
+                            "Inline takes an element type and a length",
                         )
                         .with_comparison(
                             counted(children.len() - 1, "type argument"),
@@ -1161,18 +1161,15 @@ impl Program<'_> {
                 if element == ERROR {
                     return ERROR;
                 }
-                let count = literal_length(item, children[2]);
-                let Some(count) = count else {
-                    self.refusals.push(refusal(
-                        if item.tree.node(children[2]).kind == NodeKind::Literal {
-                            "LANG-3"
-                        } else {
-                            "SEM-9"
-                        },
-                        self.site(at, children[2]),
-                        "Inline length is a literal fitting its integer type and u64",
-                    ));
-                    return ERROR;
+                let count = match self.inline_length(at, children[2]) {
+                    Ok(count) => count,
+                    Err(why) => {
+                        if let Some((rule, message)) = why {
+                            let site = self.site(at, children[2]);
+                            self.refusals.push(refusal(rule, site, message));
+                        }
+                        return ERROR;
+                    }
                 };
                 self.pending.push(Pending::Array {
                     ty: element,

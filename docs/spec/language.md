@@ -749,6 +749,9 @@ constants it names, without running anything.
 - **Manifest constants** are evaluated once, before any body is checked, in dependency
   order, by the rules of [semantics](semantics.md). They belong to the declarations: types,
   retention ([PROG-6](programs.md#prog-6-one-meaning)) and checking may read their values.
+  An integer one whose initialiser holds only integer literals, operators and other such
+  constants is a **length constant**, and an `Inline` length may name it
+  ([SEM-9](semantics.md#sem-9-inline-arrays)).
 - **Computed constants** are evaluated after their initialiser and
   every function it can reach are checked. The initialiser's retained code
   ([PROG-10](programs.md#prog-10-code-addresses)) runs as a call with no argument, with the
@@ -942,6 +945,11 @@ direction says "`Bytes` or `String`", but `Bytes` is `List[u8]` and no `List` is
 (core, "Literals"), so the static byte type is `FrozenBytes`, the type a byte-string literal
 already takes in static storage, and `Bytes` stays refused. Every program accepted before is
 accepted with the same values. Reversible before 1.0: the spec, the front and the driver.
+
+Version note (2026-11-26, comptime-phase5-2883; COMPTIME-DIRECTION decision 8, ruled A;
+built): a length constant may be an `Inline` length (SEM-9), so a type reads a manifest
+constant's value. No type reads a computed constant's. Reversible before 1.0: the spec and
+the front.
 
 ### LANG-21: Operators
 

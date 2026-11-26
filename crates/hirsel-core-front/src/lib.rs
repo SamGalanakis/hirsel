@@ -125,6 +125,10 @@ pub struct Program<'a> {
     /// Each `match` scrutinee and `if` condition that is a constant expression, by its
     /// item and node: its value on each target (PROG-6).
     pub(crate) constant_branches: HashMap<(ItemRef, NodeId), [ConstValue; 3]>,
+    /// Each constant an `Inline` length may name, by definition, evaluated when a
+    /// header first names it (SEM-9); `None` while its evaluation is under way.
+    pub(crate) length_constants:
+        HashMap<DefinitionId, Option<Result<ConstValue, constants::LengthWhy>>>,
     /// This program's own definitions by path. A path lives once, in its
     /// row: an entry is hashed and compared through its row's path.
     by_path: hashbrown::HashTable<Def>,
@@ -712,6 +716,7 @@ impl<'a> Program<'a> {
                 ids
             },
             constant_branches: HashMap::new(),
+            length_constants: HashMap::new(),
             by_path: hashbrown::HashTable::new(),
             library_paths: library.map(|l| std::sync::Arc::new(l.paths.clone())),
             core_never: index

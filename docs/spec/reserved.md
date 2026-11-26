@@ -288,7 +288,7 @@ gap `D800`–`DFFF`; shareable owning callables (`own[shareable] fn`), which wou
 need every capture `shareable` and OWN-4 to admit the closure, its calls already only
 viewing the environment (LANG-14), and would add a second calling mode, from several tasks; code generic over the numeric types: the bounds `integer` and
 `float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
-library writes one function per width; generics over an `Inline` length; float lanes, 64-byte vectors, vectors in fields and collections, and checked lane arithmetic, whose `+` would fail with `Overflow` when any lane overflows, at the operator ([SEM-11](semantics.md#sem-11-vectors)); persistent mutable views; derivation other than a codec's (SEM-10); contracts and
+library writes one function per width; generics over an `Inline` length, and a length written as an expression or computed by a function ([SEM-9](semantics.md#sem-9-inline-arrays)); float lanes, 64-byte vectors, vectors in fields and collections, and checked lane arithmetic, whose `+` would fail with `Overflow` when any lane overflows, at the operator ([SEM-11](semantics.md#sem-11-vectors)); persistent mutable views; derivation other than a codec's (SEM-10); contracts and
 facts; `@varint` (R25); documents in segments (R26); the store, runners and places; a step grant for
 finalizers, which would let cleanup under an exhausted step bound take steps ([MEM-30](budgets.md#mem-30-step-bounds)).
 

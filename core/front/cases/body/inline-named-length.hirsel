@@ -1,0 +1,49 @@
+// expect: accept
+// expect: size Key 32
+// expect: size Halves 32
+// expect: run go() = 48
+// SEM-9: an Inline length may name a length constant, an integer constant whose
+// initialiser holds only integer literals, operators and other length constants;
+// the type is the type its value names as a literal, so Inline[u8, KEY_LEN] and
+// Inline[u8, 32] pass for each other both ways.
+const KEY_LEN: u64 = 32
+
+const HALF: u8 = 16
+
+const WIDE: u64 = KEY_LEN + HALF_WIDE
+
+const HALF_WIDE: u64 = 16
+
+type Key {
+    data: Inline[u8, KEY_LEN]
+}
+
+type Halves {
+    low: Inline[u8, HALF],
+    high: Inline[u8, 16]
+}
+
+fn widen(k: Inline[u8, 32]) -> Inline[u8, KEY_LEN] {
+    k
+}
+
+fn narrow(k: Inline[u8, KEY_LEN]) -> Inline[u8, 32] {
+    k
+}
+
+fn count(xs: Inline[u8, WIDE]) -> u64 {
+    let mut n: u64 = 0
+    for _ in xs {
+        n += 1
+    }
+    n
+}
+
+fn go() -> u64 {
+    let key = Key(data: narrow(widen([1; 32])))
+    let halves = Halves(low:[2; 16], high:[3; 16])
+    let wide: Inline[u8, 48] =[0; 48]
+    let a: u64 = int.widen(key.data[31])
+    let b: u64 = int.widen(halves.low[15])
+    count(wide) + a + b - 3
+}

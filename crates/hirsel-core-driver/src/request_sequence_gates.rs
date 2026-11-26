@@ -82,6 +82,7 @@ const GATES: &[(&str, Gate)] = &[
     ("index_builtin", Gate::Fallback),
     ("index_duplicate", Gate::Fallback),
     ("inline_cycle", Gate::Fallback),
+    ("inline_length_value", Gate::Fallback), // comptime-phase5-2883: b's type reads a.N; the second step refuses b
     ("keyword_module", Gate::Fallback),
     ("lang12_direct", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("lang12_mutual_break", Gate::Fallback),
@@ -153,6 +154,11 @@ const GATES: &[(&str, Gate)] = &[
 #[rustfmt::skip]
 fn layer_sequences() -> Vec<Seq> {
     vec![
+        // SEM-9: b's type names a.N as its Inline length, so a.N's value is part of
+        // b's declarations; the second step makes b's return refuse.
+        seq("inline_length_value", vec![
+            check(app(&[("a.hirsel", "a", "pub const N:u64=2"), ("b.hirsel", "b", "type K{x:Inline[u8,a.N]}\nfn f(k:K)->Inline[u8,2]{k.x}")])),
+            check(app(&[("a.hirsel", "a", "pub const N:u64=3"), ("b.hirsel", "b", "type K{x:Inline[u8,a.N]}\nfn f(k:K)->Inline[u8,2]{k.x}")]))]),
         seq("header_respaced", vec![
             check(app(&[("a.hirsel", "a", "pub type T{x:u8}\npub fn f(x:u8)->u8{x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")])),
             check(app(&[("a.hirsel", "a", "pub type T{ x : u8 }\npub fn f( x : u8 ) -> u8 {x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")]))]),

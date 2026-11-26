@@ -3,6 +3,7 @@
 mod bytes;
 mod computed;
 mod index;
+mod lengths;
 mod targets;
 
 use crate::*;
@@ -11,6 +12,8 @@ use hirsel_core_layout::Scalar;
 use hirsel_core_syntax::{NodeId, NodeKind, TokenKind};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+
+pub use lengths::LengthWhy;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Constant {
@@ -25,6 +28,8 @@ pub struct Constant {
     /// the run of the generated function under its path, after checking.
     #[serde(default)]
     pub computed: bool,
+    /// Whether an `Inline` length may name it, and why not (SEM-9).
+    pub length: Result<(), LengthWhy>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ConstValue {
@@ -68,6 +73,7 @@ impl Program<'_> {
                 let ty = self.lower_ty(at, type_node, &[]);
                 let ty = self.outside_vector(at, type_node, ty, "a constant");
                 let targets = (!initialised).then(|| self.toolchain(at, ty)).flatten();
+                let length = self.length_constant(definition).map(|_| ());
                 let id = self.constants.len() as u32;
                 self.constant_ids[definition.0 as usize] = Some(id);
                 let ty = if initialised || targets.is_some() {
@@ -83,6 +89,7 @@ impl Program<'_> {
                     targets,
                     expr,
                     computed: false,
+                    length,
                 });
             }
         }
@@ -190,64 +197,6 @@ impl Program<'_> {
             }
         }
     }
-    /// LANG-7 constant heads and explicit projections read the published field.
-    pub(crate) fn constant_field(
-        &self,
-        from: ModuleId,
-        value: ConstValue,
-        name: &str,
-    ) -> Result<ConstValue, &'static str> {
-        let ConstData::Fields {
-            start,
-            len,
-            case: None,
-        } = value.data
-        else {
-            return Err("LANG-11");
-        };
-        let index = match self.types.kind(value.ty) {
-            TyKind::Tuple(_) => name.parse::<usize>().map_err(|_| "LANG-11")?,
-            TyKind::Adt(d, _) => {
-                let decl = &self.decls[d.index()];
-                if decl.opaque && decl.site.module != from {
-                    return Err("PROG-2");
-                }
-                match &decl.body {
-                    DeclBody::Record(fs) => {
-                        fs.iter().position(|f| f.name == name).ok_or("LANG-11")?
-                    }
-                    _ => return Err("LANG-11"),
-                }
-            }
-            _ => return Err("LANG-11"),
-        };
-        if index < len as usize {
-            Ok(self.constant_parts[start as usize + index])
-        } else {
-            Err("LANG-11")
-        }
-    }
-    pub(crate) fn constant_field_refusal(
-        &self,
-        rule: &str,
-        site: Site,
-        span: hirsel_core_syntax::Span,
-        value: ConstValue,
-        name: &str,
-    ) -> Refusal {
-        let refusal = refusal(rule, site, "constant field is absent or opaque");
-        if rule == "LANG-11"
-            && let TyKind::Adt(d, _) = self.types.kind(value.ty)
-        {
-            let path = self.decls[d.index()].path.clone();
-            return refusal.with_unresolved(
-                name,
-                span,
-                hirsel_core_resolve::NameScope::Field(path),
-            );
-        }
-        refusal
-    }
     fn const_refuse(&mut self, at: ItemRef, n: NodeId, message: &str) {
         self.refusals
             .push(refusal("LANG-20", self.site(at, n), message));
@@ -261,6 +210,9 @@ struct ConstCx<'p, 'a> {
     target: Option<usize>,
     /// Set when a read needed a target this evaluation does not have.
     targeted: bool,
+    /// A length constant evaluated before constants are registered: a name reads
+    /// another length constant (SEM-9).
+    early: bool,
 }
 impl ConstCx<'_, '_> {
     fn fail(&mut self, n: NodeId, message: &str) -> Option<ConstValue> {
@@ -366,6 +318,13 @@ impl ConstCx<'_, '_> {
             },
             NodeKind::Literal => self.literal(n, want, false)?,
             NodeKind::BytesOf => self.bytes_of(kids[0])?,
+            NodeKind::Path if self.early => {
+                let Some(Target::Definition(def)) = self.p.resolved(self.at, n).map(|u| u.target)
+                else {
+                    return None;
+                };
+                self.p.length_constant(def).ok()?
+            }
             NodeKind::Path => {
                 let Some(use_) = self.p.resolved(self.at, n) else {
                     return None;

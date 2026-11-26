@@ -269,9 +269,26 @@ checked IR its compiler made: it is still the same on every engine and optimisat
 
 ### SEM-9: Inline arrays
 
-`Inline[T, n]`, where `n` is an integer literal, is `n` values of type `T` held inline, with
-no block: its size is `n` × the size of `T` and it admits nothing. `n` is a value from 0 to
-`2^64 − 1`; a suffix on it is not part of the type, so `Inline[u8, 2u8]` is `Inline[u8, 2]`.
+`Inline[T, n]`, where `n` is an integer literal or names a length constant, is `n` values of
+type `T` held inline, with no block: its size is `n` × the size of `T` and it admits nothing.
+`n` is a value from 0 to `2^64 − 1`; a suffix on it is not part of the type, so
+`Inline[u8, 2u8]` is `Inline[u8, 2]`.
+
+**Named lengths.** A **length constant** is a manifest constant
+([LANG-20](language.md#lang-20-constants)) of an integer type whose initialiser holds only
+integer literals, operators and other length constants. A length names one bare or through
+its module, `Inline[u8, KEY_LEN]` or `Inline[u8, keys.LEN]`. It is evaluated with the
+declarations, before any body is checked, and the type is the type its value names: with
+`KEY_LEN` 32, `Inline[u8, KEY_LEN]` is `Inline[u8, 32]`, either passes for the other, and no
+program can tell them apart. A length that names anything else is refused at the length: a
+computed constant, whose value no type reads (LANG-20); a constant whose initialiser reads
+`bytes[T]`, a field, an element or a construction, which would need layouts before types
+exist; a constant whose type is not an integer type or whose value is negative; and a name
+that is no constant. A constant refused itself is refused once, at the constant. No length
+depends on `target`: a type is the same on every target. A length constant's value is part of
+every type that names it, as a literal's is, so changing the value changes those types, and
+whatever is keyed by them, as editing the literal would. The count of `[x; n]` and a vector's
+lane count (SEM-11) stay integer literals.
 `T` is plain or own, and the array has `T`'s kind and its bounds
 ([core](core.md#built-in-types)); a type parameter is a valid `T` only when its bounds prove
 it plain, and `n = 0` changes neither. `[a, b, c]` builds one from its elements, evaluated
@@ -293,6 +310,26 @@ fn scale(x: u64, k: u64) -> u64 { x * POW10[k] }
 ```hirsel
 fn first(xs: Inline[u64, 3]) -> u64 { xs[3] }              // fails with Bounds when called
 ```
+```hirsel
+const KEY_LEN: u64 = 32
+const BLOCK: u64 = KEY_LEN * 2
+type Key { data: Inline[u8, KEY_LEN], pad: Inline[u8, BLOCK] }
+fn raw(k: Key) -> Inline[u8, 32] { k.data }                // the same type as Inline[u8, KEY_LEN]
+```
+```hirsel
+fn four() -> u64 { 4 }
+const N: u64 = four()
+type T { xs: Inline[u8, N] }                               // refused: SEM-9, N is computed
+```
+
+Version note (2026-11-26, comptime-phase5-2883; COMPTIME-DIRECTION decision 8 and T2.1,
+ruled A; built, and its examples are checked): an `Inline` length may name a length
+constant. It was "an integer literal". Decision 8 admits a manifest constant expression;
+this admits a name only, which needs no change to the grammar, and `Inline[u32, A * B]` is
+written `const N: u64 = A * B` and `Inline[u32, N]`. A length constant excludes `bytes[T]`,
+projections and indexing because types are lowered before layouts exist. Reversible before
+1.0: widening to expressions, or to `bytes[T]` once layouts can be ordered before the types
+that need them, turns refusals into acceptances and changes no accepted type.
 
 ### SEM-10: Codecs
 

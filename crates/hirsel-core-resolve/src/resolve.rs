@@ -1,6 +1,9 @@
 use crate::{index::path_tokens, *};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, Symbol, TokenId, sym};
 
+mod constructors;
+mod lengths;
+
 /// Expression nesting the resolver walks before it refuses the item as a resource
 /// refusal (PROG-6).
 pub const RESOLVE_NESTING_LIMIT: u32 = 384;
@@ -573,48 +576,6 @@ impl<'a> Resolver<'a, '_> {
             }),
         );
         m.map(Target::Module)
-    }
-    fn has_variant(&self, name: Symbol) -> bool {
-        self.index.variants(name).any(|id| {
-            let d = self.index.get(id);
-            d.site.module == self.module
-                || d.public
-                    && !d.opaque
-                    && self
-                        .index
-                        .reachable_from(self.package, self.index.module_package(d.site.module))
-        })
-    }
-    fn constructor(&mut self, n: NodeId, name: Symbol) -> Target {
-        let target = Target::ContextualConstructor { name };
-        self.record(
-            n,
-            Namespace::Value,
-            LookupScope::Variants(self.module),
-            name,
-            true,
-            LookupResult::Found(target),
-        );
-        target
-    }
-    fn variant_or_missing(&mut self, n: NodeId, name: Symbol) -> Target {
-        if self.has_variant(name) {
-            self.constructor(n, name)
-        } else {
-            self.record(
-                n,
-                Namespace::Value,
-                LookupScope::Variants(self.module),
-                name,
-                true,
-                LookupResult::Missing,
-            );
-            // After a lost statement the name may be one it bound (PROG-8).
-            if self.lost {
-                return Target::Missing;
-            }
-            self.missing(n)
-        }
     }
     fn missing(&mut self, n: NodeId) -> Target {
         self.missing_name(n, None)
@@ -1452,6 +1413,7 @@ impl<'a> Resolver<'a, '_> {
                     }
                 }
                 NodeKind::Error => {}
+                NodeKind::TypeArguments if self.inline_length(c) => {}
                 _ => {
                     if let [child] = c {
                         n = *child;

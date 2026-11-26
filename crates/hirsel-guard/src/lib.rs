@@ -17,11 +17,17 @@
 //! a compiler that reserves address space it never touches stays inside it,
 //! where an address-space limit would not.
 //!
+//! That is Linux. Darwin ignores the data limit, so there the limit is one
+//! `mimalloc` arena that every `malloc` in the process draws from, and
+//! children read `HIRSEL_MEMORY_LIMIT` themselves (`host/darwin.rs` states
+//! what it does not hold).
+//!
 //! In debug builds it also traps every allocation and free made while a Free
 //! recorder section is open on the calling thread ([`section`]): such a call
 //! ends the process with exit status [`SECTION_STATUS`]. Sections write only
 //! room reserved before them and run no destructor (design §5 Op sections).
 pub mod admission;
+mod host;
 mod thread;
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -273,7 +279,7 @@ fn set_limit() {
     {
         return;
     }
-    // getenv and the rlimit calls do not allocate, so they are safe here.
+    // getenv and the host's limit calls do not allocate, so they are safe here.
     let oracle = unsafe { libc::getenv(c"HIRSEL_GUARD_ORACLE".as_ptr()) };
     admission::oracle(
         !oracle.is_null() && unsafe { std::ffi::CStr::from_ptr(oracle) }.to_bytes() == b"1",
@@ -285,16 +291,7 @@ fn set_limit() {
         let text = unsafe { std::ffi::CStr::from_ptr(text) }.to_bytes();
         parse_limit(text).unwrap_or_else(|| malformed(text))
     };
-    let mut current = libc::rlimit {
-        rlim_cur: libc::RLIM_INFINITY,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut current) };
-    let limited = libc::rlimit {
-        rlim_cur: requested.min(current.rlim_cur),
-        rlim_max: current.rlim_max,
-    };
-    unsafe { libc::setrlimit(libc::RLIMIT_DATA, &limited) };
+    host::set_limit(requested);
     STATE.store(SET, Ordering::Release);
 }
 
@@ -329,22 +326,8 @@ pub fn parse_limit(text: &[u8]) -> Option<u64> {
 /// shadow address space at startup, which any data limit refuses. Every other
 /// child inherits the limit.
 pub fn sanitized(command: &mut std::process::Command) -> &mut std::process::Command {
-    use std::os::unix::process::CommandExt;
-    // getrlimit and setrlimit are async-signal-safe system calls.
-    unsafe {
-        command.pre_exec(|| {
-            let mut current = libc::rlimit {
-                rlim_cur: libc::RLIM_INFINITY,
-                rlim_max: libc::RLIM_INFINITY,
-            };
-            libc::getrlimit(libc::RLIMIT_DATA, &mut current);
-            current.rlim_cur = current.rlim_max;
-            if libc::setrlimit(libc::RLIMIT_DATA, &current) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        })
-    }
+    host::lift_for_sanitizer(command);
+    command
 }
 
 /// The worker count allowed by the process's available CPUs and `HIRSEL_JOBS`.
@@ -441,23 +424,12 @@ impl Line {
 /// ends it, naming the limit; any other failure panics with its error.
 #[cold]
 pub fn spawn_failed(stack: usize, error: std::io::Error) -> ! {
-    let used = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            let line = status.lines().find(|l| l.starts_with("VmData:"))?;
-            line.split_whitespace().nth(1)?.parse::<u64>().ok()
-        })
-        .map(|kib| kib << 10);
-    let mut current = libc::rlimit {
-        rlim_cur: libc::RLIM_INFINITY,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut current) };
     if matches!(
         error.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
-    ) && used.is_some_and(|used| used.saturating_add(stack as u64) > current.rlim_cur)
-    {
+    ) && host::limit().is_some_and(|limit| {
+        host::data_used().is_some_and(|used| used.saturating_add(stack as u64) > limit)
+    }) {
         exhausted(stack);
     }
     panic!("thread creation failed: {error}");
@@ -574,21 +546,15 @@ pub fn foreign_exhausted(library: &[u8], reason: &[u8]) -> ! {
 }
 
 fn limit_reached(failed: impl FnOnce(&mut Line)) -> ! {
-    let mut current = libc::rlimit {
-        rlim_cur: libc::RLIM_INFINITY,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut current) };
     let mut line = Line::new();
     line.text(b"hirsel: memory limit ");
-    if current.rlim_cur == libc::RLIM_INFINITY {
-        line.text(b"unlimited");
-    } else {
-        line.size(current.rlim_cur);
-    }
+    match host::limit() {
+        Some(limit) => line.size(limit),
+        None => line.text(b"unlimited"),
+    };
     line.text(b" reached (HIRSEL_MEMORY_LIMIT); ");
     failed(&mut line);
-    if let Some(kib) = resident_peak_kib() {
+    if let Some(kib) = host::resident_peak_kib() {
         line.text(b" with a resident peak of ")
             .number(kib >> 10)
             .text(b"M");
@@ -613,41 +579,6 @@ fn limit_reached(failed: impl FnOnce(&mut Line)) -> ! {
               (tools/buck2/test_sizes.bzl); report the program that grew rather than raising it.\n",
     )
     .exit(EXIT_STATUS)
-}
-
-/// The process's resident peak (`VmHWM`), read without allocating: it tells
-/// growth apart from reservations the data limit also counts.
-fn resident_peak_kib() -> Option<u64> {
-    let mut status = [0u8; 4096];
-    let fd = unsafe {
-        libc::open(
-            c"/proc/self/status".as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return None;
-    }
-    let mut len = 0;
-    while len < status.len() {
-        let n = unsafe { libc::read(fd, status[len..].as_mut_ptr().cast(), status.len() - len) };
-        if n <= 0 {
-            break;
-        }
-        len += n as usize;
-    }
-    unsafe { libc::close(fd) };
-    let status = &status[..len];
-    let at = status.windows(6).position(|w| w == b"VmHWM:")? + 6;
-    let mut kib = None::<u64>;
-    for &byte in &status[at..] {
-        match byte {
-            b' ' | b'\t' if kib.is_none() => {}
-            b'0'..=b'9' => kib = Some(kib.unwrap_or(0) * 10 + u64::from(byte - b'0')),
-            _ => break,
-        }
-    }
-    kib
 }
 
 #[cold]
@@ -879,6 +810,11 @@ mod tests {
     #[test]
     fn a_thread_stack_past_the_limit_ends_the_process_with_the_message() {
         let output = child("tests::stack_child", &[("HIRSEL_MEMORY_LIMIT", "64M")]);
+        if !host::KERNEL_LIMIT {
+            // Darwin's limit is an allocator arena, which thread stacks bypass.
+            assert!(String::from_utf8_lossy(&output.stdout).contains("stack accepted"));
+            return;
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(EXIT_STATUS), "{stderr}");
         assert!(
@@ -920,6 +856,11 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
+        if !host::KERNEL_LIMIT {
+            // Darwin: a guarded child reads the limit it inherits in the variable.
+            assert!(stdout.contains("guarded soft 100663296\n"), "{stdout}");
+            return;
+        }
         // A shell inherits the soft limit; a guarded child asking for 8G keeps it.
         assert!(stdout.contains("shell soft 98304\n"), "{stdout}");
         assert!(stdout.contains("guarded soft 100663296\n"), "{stdout}");
@@ -930,6 +871,11 @@ mod tests {
     #[test]
     fn inheritance_child() {
         if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        if !host::KERNEL_LIMIT {
+            let guarded = child("tests::soft_limit_child", &[]);
+            print!("{}", String::from_utf8_lossy(&guarded.stdout));
             return;
         }
         let shell = Command::new("/bin/sh")
@@ -954,11 +900,6 @@ mod tests {
             return;
         }
         let _ = Box::new(0u8);
-        let mut current = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut current) };
-        println!("guarded soft {}", current.rlim_cur);
+        println!("guarded soft {}", host::limit().unwrap_or(u64::MAX));
     }
 }

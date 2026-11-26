@@ -8,3 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 libc = { version = "0.2", default-features = false }
+
+# Darwin's memory limit is a mimalloc arena; `override` makes mimalloc the
+# process's malloc zone (src/host/darwin.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["override"] }

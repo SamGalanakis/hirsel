@@ -226,7 +226,7 @@ store@1/store/stream_age_refusal_survives_longer_retention src=b6df413a313f9ae2 
 store@1/store/stream_quota_preserves_eviction_floor src=36d83b090a60b66e sig=7ab35b0b35ae3428 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/stream_quota_reopen_lost_response src=fe743aa5023324d9 sig=9a0caf7a86408cf6 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_abort_budget src=2b31ad4ef0faf5bd sig=ae3cae68a0a16fa1 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_ace_model_oracle_smoke src=8a12618cfe8d3ef9 sig=91444e950578c0a9 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/test_ace_model_oracle_smoke src=8a12618cfe8d3ef9 sig=b9ffa060dd0c9ecf run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_aggregate_declared_over_chunks src=f84b08d0c8c7f6e6 sig=8ef25c6470dbb421 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_aggregate_fold_law src=b6997a30fd3ec6d8 sig=44534d9827f5bcb9 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_aggregate_moves_and_empties_groups src=9c205a02e47768cb sig=e437edab7a5ba684 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
@@ -396,6 +396,7 @@ store@1/store/test_l88_two_pins_share_one_copy src=f31b40876fb882d0 sig=b98685e5
 store@1/store/test_l88_two_pins_share_one_copy_crash_after_rename src=3a5c3e6b8316c1d3 sig=b98685e507543888 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l88_two_pins_share_one_copy_crash_before_rename src=242d6e30aa81649a sig=b98685e507543888 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l88_two_pins_share_one_copy_refused_cut src=aefe0e22bcf833f4 sig=b98685e507543888 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/test_l98_memory_index_cost src=dcb36c798f8bd79e sig=874331110571d9ba run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/test_lineage_fork_row_through_replay src=a10d50931ac728fd sig=3df7ed22653cffe6 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_local_projector_laws src=1a7d37352ea5500b sig=e0f86c0a5c1fb7a4 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_local_projector_pin_ownership src=7993ecb572bbc3cf sig=768c0323589fc785 run=ea720f3846592392 bug=- oracle=- rows=pending

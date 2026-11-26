@@ -736,3 +736,6 @@ limit = 536870912
 
 [tests.runs."store@1/store/test_empty_commit_follower_and_weak_level"]
 limit = 268435456
+
+[tests.runs."store@1/store/test_l98_memory_index_cost"]
+limit = 134217728

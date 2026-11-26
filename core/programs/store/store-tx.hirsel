@@ -582,7 +582,7 @@ fn pop_table_edge[K, V](mut tx: Tx, t: Table[K, V], reverse: bool) -> Result[Opt
     let high = lower_bytes(t.id, Unbounded, true)?
     let (take row, take candidate): (Option[(Bytes, Arc[Bytes])], Option[TxView]) = if let Some(take tiered) = tx_tiered_rows(tx, t.id, low, high, true)? {
         let mut cursor = take tiered
-        (next_tiered_in(tx, mut cursor, reverse)?, None)
+        (next_tiered_in(tx.roots.collections, tx.attempt, tx.pins, cursor.collection, cursor.staged, mut cursor.from, mut cursor.to, reverse)?, None)
     } else {
         let mut cached = current_tx_view(tx)?
         let row = pop_tx_view_edge(mut cached, t.id, low, reverse)?

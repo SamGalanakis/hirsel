@@ -253,3 +253,135 @@ fn test_tiered_tx_reads_see_staged_overlay_and_cold_rows(d: Dir, c: Clock, r: Ra
     tx_read_look(cold, folded)?
     close(take cold)
 }
+
+// L98(d) exercises each Memory index cursor at a real step and byte boundary.
+fn l98_memory_case(tx: Tx, input: (TxReadHandles, u64, Option[u64])) -> Result[bool, Error] {
+    if let Some(grant_bytes) = input.2 {
+        return capacity(bound bytes grant_bytes {
+            l98_memory_read(tx, input.0, input.1)
+        })?
+    }
+    l98_memory_read(tx, input.0, input.1)
+}
+
+fn l98_memory_read(tx: Tx, handles: TxReadHandles, which: u64) -> Result[bool, Error] {
+    if which >= 6 {
+        let root = view tx.roots.collections.root
+        let key = prefix(handles.ix.id)?
+        return Ok(if which == 6 {
+            if let Some(_) = std.page.collection_child(root, key) {
+                true
+            } else {
+                false
+            }
+        } else {
+            if let Some(_) = std.page.collection_slot(root, key) {
+                true
+            } else {
+                false
+            }
+        })
+    }
+    if which >= 4 {
+        let mut rows = entries(tx, handles.ix, Unbounded, Unbounded)?
+        if next_entry(mut rows)? != Some((1u64, 1u64, ())) {
+            return Ok(false)
+        }
+        return Ok(which == 4 || (next_entry(mut rows)? == Some((1u64, 5u64, ())) && next_entry(mut rows)? == None))
+    }
+    let mut rows = match which {
+        0 => lookup(tx, handles.ix, Included(2u64), Included(1u64))?,
+        1 => lookup(tx, handles.ix, Included(1u64), Included(1u64))?,
+        2 => lookup(tx, handles.ix, Included(2u64), Included(2u64))?,
+        _ => lookup_prefix(tx, handles.ix, 1u64, std.codec.key_u64())?,
+    }
+    let first = next_indexed(mut rows)?
+    Ok(if which == 0 || which == 2 {
+        first == None
+    } else {
+        first == Some((1u64, 1u64))
+    })
+}
+
+fn l98_threshold(r: Reader, s: Snapshot, handles: TxReadHandles, which: u64, grant_bytes: bool) -> Result[u64, Error] waits {
+    let mut lo = 0u64
+    let mut hi = if grant_bytes {
+        65536u64
+    } else {
+        10000u64
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let steps = if grant_bytes {
+            10000u64
+        } else {
+            mid
+        }
+        let grant = if grant_bytes {
+            Some(mid)
+        } else {
+            None
+        }
+        match look(r, s, Some(steps), (copy_env(handles), which, grant), l98_memory_case)? {
+            Seen(Seen(value: Ok(true), ..)) => {
+                hi = mid
+            },
+            Stopped(_, _) => {
+                lo = mid + 1
+            },
+            Refused(_, _) => {
+                lo = mid + 1
+            },
+            Seen(Seen(value: Error(Full(Allocation(_))), ..)) => {
+                lo = mid + 1
+            },
+            _ => fail("L98(d): Memory index returned a row or error outside the model"),
+        }
+    }
+    Ok(lo)
+}
+
+@test
+fn test_l98_memory_index_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(182375272)?)?
+    let handles = tx_read_handles(mut db, Migrate)?
+    let Committed(_) = run(mut db, None, copy_env(handles.rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 1u64)?
+        put(mut tx, t, 5u64, 5u64)
+    })? else {
+        fail("L98(d): fixture writes must commit")
+    }
+    // Parent thresholds, in order: empty, hit, miss, prefix, partial, exhausted.
+    let before_memory: Inline[u64, 6] =[187, 506, 283, 566, 294, 382]
+    let before_mixed: Inline[u64, 6] =[191, 580, 287, 640, 294, 382]
+    let before_bytes: Inline[u64, 6] =[64, 568, 432, 568, 424, 472]
+    for mixed in[false, true] {
+        if mixed {
+            set_residency(mut db, handles.plain.id, Tiered)?
+        }
+        let snap = snapshot(db)
+        let reading = reader(db, READER_PIN_MIN)?
+        let before = if mixed {
+            before_mixed
+        } else {
+            before_memory
+        }
+        for which in 0u64 .. 6 {
+            let steps = l98_threshold(reading, snap, handles, which, false)?
+            let allowed = if which == 0 {
+                before[which]
+            } else {
+                before[which] + 20
+            }
+            if steps > allowed || l98_threshold(reading, snap, handles, which, true)? != before_bytes[which] {
+                fail("L98(d): Memory index exceeded its step allowance or changed its byte boundary")
+            }
+        }
+        let child = l98_threshold(reading, snap, handles, 6, false)?
+        let slot = l98_threshold(reading, snap, handles, 7, false)?
+        if slot > child + 22 {
+            fail("L98(d): the descriptor and slot lookup exceeded its step allowance")
+        }
+    }
+    close(take db)
+}

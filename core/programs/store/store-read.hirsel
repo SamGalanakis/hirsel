@@ -308,7 +308,7 @@ fn open_snapshot_rows[K, V](s: Snapshot, source: u32, take low: Bytes, take high
         collection_cursor(data, source, low, high, reverse)?
     }
     let done = if let None = cursor {
-        !tiered
+        !tiered || list.len(low) < 4
     } else {
         false
     }
@@ -548,7 +548,7 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
         }
     }
     let mut found = match r.tiered {
-        Some(mut tiered) => next_tiered_in(tx, mut tiered, r.reverse)?,
+        Some(mut tiered) => next_tiered_in(tx.roots.collections, tx.attempt, tx.pins, tiered.collection, tiered.staged, mut tiered.from, mut tiered.to, r.reverse)?,
         None => None,
     }
     if let None = found {
@@ -615,7 +615,8 @@ pub scoped type IndexRows[K, V] {
     reads: View[core.Log[Read]],
     low: Bytes,
     high: Bytes,
-    tiered: Option[TxIndexTiered]
+    tiered: Option[TxIndexTiered],
+    tiered_index: Option[u32]
 }
 
 /// The key codec of the index's table. Rows rank in the order of the bytes
@@ -646,18 +647,57 @@ pub fn lookup_prefix[J, K, V, P, Q](tx: Tx, ix: Index[J, K, V, P], q: Q, take ke
 
 fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take high: Bytes) -> Result[IndexRows[K, V], Error] in tx {
     let tree = transaction_collection_pages(tx)?
-    let cursor = collection_cursor(tree, ix.id, low, high, false)?
+    let (take cursor, cold) = open_index_cursor(tree, ix.id, low, high)?
     let rows = PageRows(cursor: take cursor, data: take tree, decoder: index_decoder(ix))
-    Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high, tiered: tx_index_tiered(tx)?))
+    Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high, tiered: tx_index_tiered(tx)?, tiered_index: if cold {
+        Some(ix.id)
+    } else {
+        None
+    }))
+}
+
+fn open_index_cursor(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result[(Option[CollectionCursor], bool), Error] {
+    if low >= high {
+        return Ok((None, false))
+    }
+    let leading = prefix(id)?
+    if list.len(low) < 4 || list.slice(low, 0, 4) != leading {
+        return Ok((None, false))
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, leading) else {
+        return Ok((None, false))
+    }
+    if descriptor[53] != 0 {
+        return Ok((None, true))
+    }
+    let HotPage(root) = edge else {
+        fail("store: a Memory index has a Cold root")
+    }
+    let start = Some(copied(list.slice(low, 4, list.len(low)))?)
+    let stop = if list.len(high) >= 4 && list.slice(high, 0, 4) == leading {
+        Some(copied(list.slice(high, 4, list.len(high)))?)
+    } else {
+        None
+    }
+    let walk = std.page.cursor_open_bounded(root, start, true, false, take stop)
+    Ok((Some(CollectionCursor(walk: take walk, leading: take leading)), false))
 }
 
 // Index entry scans (STORE-SPEC §1.3): one collection cursor per `entries` call, opened on
 // the first step, with no probe and no reopen. Each step records the span the copying
 // range scan recorded and lends the row's key and value bytes from the page.
-type EntryCursor: send = Unopened(PageTree) | Open(CollectionCursor) | Exhausted
+type EntryCursor: send = Unopened(PageTree) | Open(CollectionCursor) | OpenTiered(PageTree, std.omap.OMap[Bytes, Option[Arc[Bytes]]]) | Exhausted
+
+scoped type EntryRead {
+    attempt: View[Option[core.Cell[TieredTouchSet]]],
+    pins: View[Map[TieredCacheKey, Arc[TieredFrame]]],
+    below: View[List[Arc[Staged]]],
+    ops: View[DataOps]
+}
 
 pub opaque scoped type IndexEntries[J, K, P] {
     cursor: EntryCursor,
+    read: EntryRead,
     reads: View[core.Log[Read]],
     low: Bytes,
     high: Bytes,
@@ -679,16 +719,21 @@ pub fn entries[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Boun
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     let tree = transaction_collection_pages(tx)?
-    Ok(IndexEntries(cursor: Unopened(take tree), reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec, lendable: ix.lendable))
+    let read = EntryRead(attempt: tx.attempt, pins: tx.pins, below: view tx.below, ops: view tx.ops)
+    Ok(IndexEntries(cursor: Unopened(take tree), read: take read, reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec, lendable: ix.lendable))
 }
 
 // One step: `visit` gets the row's full index key (`id ‖ suffix`), value and payload readers. The span up
 // to `key ‖ 0x00` is recorded before an error from `visit` is returned.
-fn step_entry[P, T](mut cursor: EntryCursor, reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, id: u32, payload: Option[Arc[Readers[P]]], visit: scoped[view] fn(Bytes, Bytes, Option[Arc[Readers[P]]]) -> Result[T, Error]) -> Result[Option[T], Error] {
+fn step_entry[P, T](mut cursor: EntryCursor, read: EntryRead, reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, id: u32, payload: Option[Arc[Readers[P]]], visit: scoped[view] fn(Bytes, Bytes, Option[Arc[Readers[P]]]) -> Result[T, Error]) -> Result[Option[T], Error] {
     if let Unopened(_) = cursor {
         if let Unopened(take tree) = replace(mut cursor, Exhausted) {
-            if let Some(take opened) = collection_cursor(tree, id, low, high, false)? {
-                cursor = Open(take opened)
+            let (take opened, cold) = open_index_cursor(tree, id, low, high)?
+            if cold {
+                let staged = tx_tiered_staged(tree, read.below, read.ops, Some(id))?
+                cursor = OpenTiered(take tree, take staged)
+            } else if let Some(take walk) = take opened {
+                cursor = Open(take walk)
             }
         }
     }
@@ -701,6 +746,13 @@ fn step_entry[P, T](mut cursor: EntryCursor, reads: View[core.Log[Read]], mut lo
             let value = visit(list.slice(after, 0, list.len(after) - 1), raw, payload)
             (take after, take value)
         }),
+        OpenTiered(tree, staged) => {
+            if let Some((key, raw)) = next_tiered_index_row(tree, read.attempt, read.pins, staged, id, low, high)? {
+                note_index_step(reads, mut low, high, Some(view key))?
+                return Ok(Some(visit(key, raw, payload)?))
+            }
+            None
+        },
         _ => None,
     }
     match take stepped {
@@ -742,7 +794,7 @@ fn entry_parts[J, K](kind: IndexKind, index_key: std.codec.Key[J], primary_codec
 
 pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error] {
     let (id, kind, index_key, primary, payload_codec) = (r.id, r.kind, r.key, r.primary, r.payload_codec)
-    step_entry(mut r.cursor, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[P]]]) -> Result[(J, K, P), Error] {
+    step_entry(mut r.cursor, r.read, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[P]]]) -> Result[(J, K, P), Error] {
         let (take j, take k, start) = entry_parts(kind, index_key, primary, key, raw)?
         let payload = list.slice(raw, start, list.len(raw))
         let value = match row_readers {
@@ -779,7 +831,7 @@ fn lends_codes(registered: Readers[List[i8]], payload: Bytes) -> bool {
 /// of the built-in `List[i8]` codec is lent from the page instead of copied.
 pub fn next_i8_entry[K, T](mut r: IndexEntries[(), K, List[i8]], visit: scoped[view] fn(take K, I8Code) -> T) -> Result[Option[T], Error] {
     let (id, kind, index_key, primary, payload_codec, lendable) = (r.id, r.kind, r.key, r.primary, r.payload_codec, r.lendable)
-    step_entry(mut r.cursor, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[List[i8]]]]) -> Result[T, Error] {
+    step_entry(mut r.cursor, r.read, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[List[i8]]]]) -> Result[T, Error] {
         let (_, take k, start) = entry_parts(kind, index_key, primary, key, raw)?
         let payload = list.slice(raw, start, list.len(raw))
         match row_readers {
@@ -819,6 +871,33 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
             r.low = take boundary
             return take value
         }
+    }
+    if let Some(index_id) = r.tiered_index {
+        let stepped = {
+            let Some(context) = view r.tiered else {
+                fail("store: a Tiered index read without an attempt")
+            }
+            if let Some((key, raw)) = next_tiered_index_row(r.rows.data, context.attempt, context.pins, context.staged, index_id, r.low, r.high)? {
+                let mut boundary = copied(r.low)?
+                note_index_step(r.reads, mut boundary, r.high, Some(view key))?
+                let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
+                    log.append(r.reads, Point(copied(observed)?))
+                    Ok(())
+                }
+                let row = tx_tiered_index_row(context, r.rows.decoder, r.rows.data, key, raw, seen)
+                Some((take boundary, take row))
+            } else {
+                None
+            }
+        }
+        if let Some((take boundary, take row)) = take stepped {
+            r.low = take boundary
+            return Ok(match row? {
+                Some((take value, _)) => Some(take value),
+                None => None,
+            })
+        }
+        r.tiered_index = None
     }
     note_index_step(r.reads, mut r.low, r.high, None)?
     Ok(None)

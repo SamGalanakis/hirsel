@@ -207,7 +207,7 @@ fn walk_sums(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
         },
     }
     if walk.entries {
-        return walk_sum_entries(db, mut walk, record, name, limit, mut findings)
+        return walk_sum_entries(db, mut walk, record, name, limit, mut findings, direct)
     }
     let Some(extractor) = bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
@@ -255,9 +255,71 @@ fn fold_sum_row(mut fold: WalkSums, values: IndexValue) -> Result[(), Error] {
     Ok(())
 }
 
+type VerifyEntries = VerifyMemoryEntries(PageRange) | VerifyTieredEntries(List[(Bytes, Bytes)], u64)
+
+fn open_verify_entries(db: Db, id: u32, cursor: Option[Bytes], limit: u64, direct: bool) -> Result[VerifyEntries, Error] waits {
+    let data = view db.heads[0].roots.collections
+    if table_is_tiered(data, id)? {
+        let (take rows, _) = tiered_rows_after_mode(db, id, clone(cursor), limit, direct)?
+        return Ok(VerifyTieredEntries(take rows, 0))
+    }
+    let start = match cursor {
+        Some(after) => Excluded(logical_key(id, after)?),
+        None => Included(prefix(id)?),
+    }
+    Ok(VerifyMemoryEntries(byte_cursor(data, take start, prefix(id + 1)?)?))
+}
+
+fn next_verify_entry(mut walk: VerifyEntries) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    match walk {
+        VerifyMemoryEntries(mut cursor) => next_bytes(mut cursor),
+        VerifyTieredEntries(rows, mut at) => {
+            if at == list.len(rows) {
+                return Ok(None)
+            }
+            let (key, raw) = view rows[at]
+            at += 1
+            Ok(Some((copied(key)?, arc.new(copied(raw)?))))
+        },
+    }
+}
+
+type WalkPoint = WalkResident | WalkReader(Reader) | WalkDirect(Dir)
+
+fn walk_point_source(db: Db, s: Snapshot, id: u32, direct: bool) -> Result[WalkPoint, Error] waits {
+    if !table_is_tiered(s.roots.collections, id)? {
+        return Ok(WalkResident)
+    }
+    if direct {
+        if let Some(state) = view db.disk {
+            if let Some(d) = state.d {
+                return Ok(WalkDirect(d))
+            }
+        }
+        if let None = view db.pager {
+            return Error(Io(Closed))
+        }
+    }
+    Ok(WalkReader(reader(db, db.writer_pin_bytes)?))
+}
+
+fn walk_point[R](db: Db, s: Snapshot, source: WalkPoint, key: Bytes, visit: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    let tree = view s.roots.collections
+    match source {
+        WalkResident => visit(get_page_row(tree, key)),
+        WalkReader(r) => snapshot_point(r, s, key, visit),
+        WalkDirect(d) => {
+            let Some(inventory) = view tree.paging else {
+                return Error(Io(Closed))
+            }
+            read_tiered_point_direct(d, db.store, inventory, s.open, s.branch, db.writer_pin_bytes, tree, key, visit)
+        },
+    }
+}
+
 // Merge the sorted expected groups and stored entries so a missing group
 // is found even when the aggregate has no entries.
-fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] {
+fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let folded: std.omap.OMap[Bytes, Totals] = match walk.sums {
         Some(fold) => clone(fold.groups),
         None => fail("aggregate walk has no fold"),
@@ -266,14 +328,14 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, 
         Some(final_key) => Excluded(copied(final_key)?),
         None => Unbounded,
     }
-    let start = match walk.cursor {
-        Some(final_key) => Excluded(copied(final_key)?),
-        None => Included(prefix(record.id)?),
+    let after = match walk.cursor {
+        Some(final_key) => Some(copied(list.slice(final_key, 4, list.len(final_key)))?),
+        None => None,
     }
     let mut groups = std.omap.range(folded, lower, Unbounded)
-    let mut indexed = byte_cursor(db.heads[0].roots.collections, take start, prefix(record.id + 1)?)?
+    let mut indexed = open_verify_entries(db, record.id, after, limit, direct)?
     let mut expected = std.omap.next(mut groups)
-    let mut actual = next_bytes(mut indexed)?
+    let mut actual = next_verify_entry(mut indexed)?
     for step in 0u64 .. limit {
         let relation = match expected {
             Some((want, _)) => match actual {
@@ -307,7 +369,7 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, 
                 expected = std.omap.next(mut groups)
             }
             if relation != Less {
-                actual = next_bytes(mut indexed)?
+                actual = next_verify_entry(mut indexed)?
             }
         }
     }
@@ -315,14 +377,15 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, 
 }
 
 // Rows phase: up to `limit` rows after the cursor, each extracted with the
-// bound extractor and looked up in the index collection, which is resident.
+// bound extractor and looked up by the index collection's residency.
 fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let cursor = match walk.cursor {
         Some(final_key) => Some(copied(final_key)?),
         None => None,
     }
     let (take rows, done) = tiered_rows_after_mode(db, record.owner, cursor, limit, direct)?
-    let collections = view db.heads[0].roots.collections
+    let s = snapshot(db)
+    let source = walk_point_source(db, s, record.id, direct)?
     let Some(extractor) = bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
     }
@@ -330,11 +393,15 @@ fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
         let primary = list.slice(logical, 4, list.len(logical))
         let values = (extractor.extract)(raw, primary)?
         for entry_key in values.keys {
-            match get_page_row(collections, entry_key) {
-                None => walk_finding(mut findings, name, entry_key, Missing)?,
-                Some(stored) => if stored != values.payload {
-                    walk_finding(mut findings, name, entry_key, Payload)?
-                },
+            let fault = walk_point(db, s, source, entry_key, scoped fn(found: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
+                Ok(match found {
+                    None => Some(Missing),
+                    Some(stored) if stored != values.payload => Some(Payload),
+                    _ => None,
+                })
+            })?
+            if let Some(found) = fault {
+                walk_finding(mut findings, name, entry_key, found)?
             }
         }
         walk.cursor = Some(copied(primary)?)
@@ -351,52 +418,15 @@ fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
 // its row in its payload; a Many entry ends with it. The row is read as a
 // point read, through the pager when the table is Tiered.
 fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
-    let low = match walk.cursor {
-        Some(final_key) => {
-            let mut k = prefix(record.id)?
-            list.append(mut k, final_key)
-            Excluded(take k)
-        },
-        None => Included(prefix(record.id)?),
-    }
     let s = snapshot(db)
-    let is_tiered = table_is_tiered(s.roots.collections, record.owner)?
-    let direct_dir: Option[Dir] = if is_tiered && direct {
-        match view db.disk {
-            Some(state) => state.d,
-            None => None,
-        }
-    } else {
-        None
-    }
-    let opened_reader: Option[Reader] = if is_tiered {
-        if let Some(_) = direct_dir {
-            None
-        } else {
-            if direct {
-                let has_pager_task = match view db.disk {
-                    Some(state) => match view state.pager_task {
-                        Some(_) => true,
-                        None => false,
-                    },
-                    None => false,
-                }
-                if !has_pager_task {
-                    return Error(Io(Closed))
-                }
-            }
-            Some(reader(db, db.writer_pin_bytes)?)
-        }
-    } else {
-        None
-    }
-    let mut indexed = byte_cursor(s.roots.collections, take low, prefix(record.id + 1)?)?
+    let source = walk_point_source(db, s, record.owner, direct)?
+    let mut indexed = open_verify_entries(db, record.id, clone(walk.cursor), limit, direct)?
     let Some(extractor) = bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
     }
     let mut read = 0u64
     while read < limit {
-        let Some((take entry_key, raw)) = next_bytes(mut indexed)? else {
+        let Some((take entry_key, raw)) = next_verify_entry(mut indexed)? else {
             walk_past(mut walk)?
             break
         }
@@ -407,23 +437,9 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limi
         }
         let mut logical = prefix(record.owner)?
         list.append(mut logical, primary)
-        let fault = if !is_tiered {
-            walk_check_entry_row(extractor, entry_key, raw, primary, get_page_row(s.roots.collections, logical))?
-        } else if let Some(d) = direct_dir {
-            let Some(inventory) = view s.roots.collections.paging else {
-                return Error(Io(Closed))
-            }
-            read_tiered_point_direct(d, db.store, inventory, s.open, s.branch, db.writer_pin_bytes, s.roots.collections, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
-                walk_check_entry_row(extractor, entry_key, raw, primary, stored)
-            })?
-        } else {
-            let Some(r) = view opened_reader else {
-                return Error(Io(Closed))
-            }
-            snapshot_point(r, s, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
-                walk_check_entry_row(extractor, entry_key, raw, primary, stored)
-            })?
-        }
+        let fault = walk_point(db, s, source, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
+            walk_check_entry_row(extractor, entry_key, raw, primary, stored)
+        })?
         if let Some(found) = fault {
             walk_finding(mut findings, name, entry_key, found)?
         }

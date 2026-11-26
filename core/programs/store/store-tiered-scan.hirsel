@@ -122,8 +122,12 @@ fn tiered_scan_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheK
     while start < stop {
         let found = {
             let cold_low = list.slice(start, 4, list.len(start))
-            let stop_collection: u32 = list.word_be(stop, 0)
-            let cold_high = if stop_collection == collection {
+            let stop_collection: Option[u32] = if list.len(stop) >= 4 {
+                Some(list.word_be(stop, 0))
+            } else {
+                None
+            }
+            let cold_high = if stop_collection == Some(collection) {
                 Some(list.slice(stop, 4, list.len(stop)))
             } else {
                 None

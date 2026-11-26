@@ -32,13 +32,13 @@ fn tx_tiered_descriptor(tx: Tx, collection: u32) -> Result[bool, Error] {
 
 // The rows the Tx stages for Tiered table collections, the newest op for a
 // key winning. With `only`, the rows of that collection.
-fn tx_tiered_staged(tx: Tx, only: Option[u32]) -> Result[std.omap.OMap[Bytes, Option[Arc[Bytes]]], Error] {
+fn tx_tiered_staged(tree: PageTree, below: List[Arc[Staged]], ops: DataOps, only: Option[u32]) -> Result[std.omap.OMap[Bytes, Option[Arc[Bytes]]], Error] {
     let mut staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]] = std.omap.new()
     let mut ids = 0u64
-    for layer in tx.below {
-        tx_tiered_stage_rows(tx.roots.collections, layer.ops.rows, only, mut ids, mut staged)?
+    for layer in below {
+        tx_tiered_stage_rows(tree, layer.ops.rows, only, mut ids, mut staged)?
     }
-    tx_tiered_stage_rows(tx.roots.collections, tx.ops.rows, only, mut ids, mut staged)?
+    tx_tiered_stage_rows(tree, ops.rows, only, mut ids, mut staged)?
     Ok(take staged)
 }
 
@@ -79,7 +79,7 @@ fn tx_tiered_rows(tx: Tx, collection: u32, low: Bytes, high: Bytes, staged: bool
         return Ok(None)
     }
     let rows = if staged {
-        tx_tiered_staged(tx, Some(collection))?
+        tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
     } else {
         std.omap.new()
     }
@@ -90,7 +90,7 @@ fn tx_index_tiered(tx: Tx) -> Result[Option[TxIndexTiered], Error] in tx {
     if let None = tx.attempt {
         return Ok(None)
     }
-    Ok(Some(TxIndexTiered(attempt: tx.attempt, pins: tx.pins, staged: tx_tiered_staged(tx, None)?)))
+    Ok(Some(TxIndexTiered(attempt: tx.attempt, pins: tx.pins, staged: tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, None)?)))
 }
 
 fn tx_tiered_stopped(attempt: core.Cell[TieredTouchSet]) -> Result[(), Error] {
@@ -101,25 +101,24 @@ fn tx_tiered_stopped(attempt: core.Cell[TieredTouchSet]) -> Result[(), Error] {
 }
 
 // The next row of a Tiered Tx cursor, or None once [from, to) is spent.
-fn next_tiered_in(tx: Tx, mut t: TxTieredRows, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    let tree = view tx.roots.collections
-    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, prefix(t.collection)?) else {
-        return Error(Stale(t.collection))
+fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], collection: u32, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut from: Bytes, mut to: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, prefix(collection)?) else {
+        return Error(Stale(collection))
     }
-    let Some(attempt) = tx.attempt else {
+    let Some(attempt) = view attempt_record else {
         fail("store: a Tiered Tx read without an attempt record")
     }
     tx_tiered_stopped(attempt)?
     let overlay = match tree.replay {
-        Some(replay) => std.omap.get(replay.collections, t.collection),
+        Some(replay) => std.omap.get(replay.collections, collection),
         None => None,
     }
-    while t.from < t.to {
+    while from < to {
         let nearest = {
             let mut cursor = if reverse {
-                std.omap.range_reverse(t.staged, Included(clone(t.from)), Excluded(clone(t.to)))
+                std.omap.range_reverse(staged, Included(clone(from)), Excluded(clone(to)))
             } else {
-                std.omap.range(t.staged, Included(clone(t.from)), Excluded(clone(t.to)))
+                std.omap.range(staged, Included(clone(from)), Excluded(clone(to)))
             }
             std.omap.next(mut cursor)
         }
@@ -129,13 +128,13 @@ fn next_tiered_in(tx: Tx, mut t: TxTieredRows, reverse: bool) -> Result[Option[(
             Some((key, _)) => if reverse {
                 let mut after = copied(key)?
                 list.push(mut after, 0u8)
-                (take after, copied(t.to)?)
+                (take after, copied(to)?)
             } else {
-                (copied(t.from)?, copied(key)?)
+                (copied(from)?, copied(key)?)
             },
-            None => (copied(t.from)?, copied(t.to)?),
+            None => (copied(from)?, copied(to)?),
         }
-        let (take start, take stop) = tiered_scan_bounds(descriptor, t.collection, take low, take high)?
+        let (take start, take stop) = tiered_scan_bounds(descriptor, collection, take low, take high)?
         let cold = if start < stop {
             let hint = if reverse {
                 view stop
@@ -148,7 +147,7 @@ fn next_tiered_in(tx: Tx, mut t: TxTieredRows, reverse: bool) -> Result[Option[(
             } else {
                 ValuesFrom
             })
-            let found = tiered_scan_row(attempt, tx.pins, edge, t.collection, overlay, start, stop, reverse)?
+            let found = tiered_scan_row(attempt, pins, edge, collection, overlay, start, stop, reverse)?
             tiered_seek(attempt, SeekOperation)
             take found
         } else {
@@ -158,17 +157,17 @@ fn next_tiered_in(tx: Tx, mut t: TxTieredRows, reverse: bool) -> Result[Option[(
             Some(take row) => take row,
             None => {
                 let Some((take key, take staged_value)) = take nearest else {
-                    t.from = copied(t.to)?
+                    from = copied(to)?
                     return Ok(None)
                 }
                 let Some(take value) = take staged_value else {
                     // A staged delete: step past it.
                     if reverse {
-                        t.to = take key
+                        to = take key
                     } else {
                         let mut after = take key
                         list.push(mut after, 0u8)
-                        t.from = take after
+                        from = take after
                     }
                     continue
                 }
@@ -176,15 +175,21 @@ fn next_tiered_in(tx: Tx, mut t: TxTieredRows, reverse: bool) -> Result[Option[(
             },
         }
         if reverse {
-            t.to = copied(key)?
+            to = copied(key)?
         } else {
             let mut after = copied(key)?
             list.push(mut after, 0u8)
-            t.from = take after
+            from = take after
         }
         return Ok(Some((take key, take value)))
     }
     Ok(None)
+}
+
+fn next_tiered_index_row(tree: PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    let mut start = copied(low)?
+    let mut stop = copied(high)?
+    next_tiered_in(tree, attempt, pins, id, staged, mut start, mut stop, false)
 }
 
 // The rows of a Tiered table in [low, high): the committed count by rank
@@ -234,7 +239,7 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
         }
         tiered_count_overlay(overlay, low, high, base_count)?
     }
-    let staged = tx_tiered_staged(tx, Some(collection))?
+    let staged = tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
     let mut total = committed
     let mut cursor = std.omap.range(staged, Included(copied(low)?), Excluded(copied(high)?))
     while let Some((key, value)) = std.omap.next(mut cursor) {

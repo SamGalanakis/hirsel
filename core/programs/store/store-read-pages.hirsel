@@ -84,6 +84,9 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
             if tiered_rows || tiered_owner {
                 let (take input, take grant, root) = snapshot_pager(r, s, inventory)?
                 let start = scan_page_start(low, id)?
+                if list.len(start) < 4 || start >= high {
+                    return Ok(Page(rows: list.new(), byte_count: 0, next: None))
+                }
                 let hint = list.slice(start, 4, list.len(start))
                 let edits = match data.replay {
                     Some(replay) => std.omap.get(replay.collections, source),

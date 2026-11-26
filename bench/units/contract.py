@@ -23,6 +23,9 @@ MIN_ARM_NS = 1_000_000_000
 FOREIGN_SHARE_LIMIT = .015
 CONNECTIONS = (256, 2048, 8192)
 CASES = tuple(case for case in regimes.WORKLOADS if case != "calibrate")
+WEEKLY_REGIMES = ("fanin", "pipeline", "checkbox")
+WEEKLY_A1 = ("ext4", 256, "hardware")
+WEEKLY_A1_OFFER = 3000
 ARMS = ("hirsel", "tokio")
 A1_SIDES = ("untied", "tokiow8")
 A1_BINARIES = ("a1/bin/session_u", "a1/bin/twin", "a1/bin/loadgen",
@@ -62,13 +65,14 @@ def regime_widths(full):
     return (1, 4, 8) if full else (1, 8)
 
 
-def expected_rows(suites, cases, full):
+def expected_rows(suites, cases, full, *, weekly=False):
     rows = {}
     if "a1" in suites:
-        for storage, size, sha in a1_cells(full):
+        for storage, size, sha in (WEEKLY_A1,) if weekly else a1_cells(full):
             label = f"{storage}/{size}/{sha}"
-            rows["A1", label] = storage, size, sha, not full
-            if full:
+            if not weekly:
+                rows["A1", label] = storage, size, sha, not full
+            if full or weekly:
                 rows["A1", label + "/matched"] = storage, size, sha, True
     if "regimes" in suites:
         for case in cases:

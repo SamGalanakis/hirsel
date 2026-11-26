@@ -32,7 +32,7 @@ from bench.units.contract import (
     A1_BINARIES, A1_SIDES, ARMS, BUILD_CPUS, BUILD_JOBS, BUILD_MEMORY_BYTES, CASES,
     CHECKBOX_BINARIES, CPU_DEFAULTS, FOREIGN_SHARE_LIMIT, HOLD_POLICY, MEASUREMENT_MEMORY_BYTES,
     MIN_ARM_NS, REGIME_BINARIES, SYNC_POLICY, VERSION, a1_cells, expected_rows, regime_grains,
-    regime_widths, valid_topology,
+    regime_widths, valid_topology, WEEKLY_A1, WEEKLY_A1_OFFER, WEEKLY_REGIMES,
 )
 
 MATCHED_OFFER = 3000
@@ -45,8 +45,8 @@ def now():
     return datetime.now(timezone.utc)
 
 
-def run_config(*, full, suites, cases, repeats, reverse, cpu_sets):
-    return {"mode": "full" if full else "quick", "families": suites,
+def run_config(*, full, suites, cases, repeats, reverse, cpu_sets, weekly=False):
+    return {"mode": "weekly" if weekly else "full" if full else "quick", "families": suites,
             "regimes": list(cases) if "regimes" in suites else [], "repeats": repeats,
             "reverse": reverse, "build_cpus": BUILD_CPUS, "build_jobs": BUILD_JOBS,
             "build_memory_limit_bytes": BUILD_MEMORY_BYTES, "measurement_memory_limit_bytes": MEASUREMENT_MEMORY_BYTES,
@@ -442,11 +442,11 @@ def matched_a1(runner, raw, cell_name, cell, offer, repeats, phase, profile=None
     return result
 
 
-def run_a1(report, cache, full, repeats, reverse, cpu_sets):
+def run_a1(report, cache, full, repeats, reverse, cpu_sets, *, weekly):
     scale.PORT, scale.TOOL_PORT = pick_ports()
     runner = A1Runner(cache / "a1", report.out, hold_guard=guard(cpu_sets, report.out),
                       cpu_sets={role: mask(cpus) for role, cpus in cpu_sets.items()})
-    cells = a1_cells(full)
+    cells = (WEEKLY_A1,) if weekly else a1_cells(full)
     for storage, sha in dict.fromkeys((storage, sha) for storage, _, sha in cells):
         found = {}
         populations = [size for fs, size, backend in cells if (fs, backend) == (storage, sha)]
@@ -455,7 +455,8 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
                 cell_name = f"A1-{connections}"
                 cell = scale.SCALE_CELLS[cell_name] | {"journal": storage, "software_sha": sha == "software"}
                 label = f"{storage}/{connections}/{sha}"
-                metrics = (("offer_turns_per_s", "goodput_turns_per_s", "intended_arrival_p99_ns")
+                metrics = (("intended_arrival_p99_ns", "cpu_us_per_turn") if weekly else
+                           ("offer_turns_per_s", "goodput_turns_per_s", "intended_arrival_p99_ns")
                            if full else ("cpu_us_per_turn",))
                 path = report.out / f"{label.replace('/', '-')}-{'search' if full else 'matched'}.jsonl"
                 with path.open("w") as raw:
@@ -463,10 +464,12 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
                         runner.search(raw, cell_name, cell, A1_SIDES, [2 if reverse else 1], {})
                         samples = search_samples(path)
                     else:
-                        samples = matched_a1(runner, raw, cell_name, cell, MATCHED_OFFER,
+                        offer = WEEKLY_A1_OFFER if weekly else MATCHED_OFFER
+                        samples = matched_a1(runner, raw, cell_name, cell, offer,
                                              repeats, reverse + len(found) * repeats)
                 sync = ratio(samples, "sync_groups_per_turn")
-                report.row("A1", label, samples, metrics, filesystem=storage, connections=connections,
+                report.row("A1", label + ("/matched" if weekly else ""), samples, metrics,
+                           filesystem=storage, connections=connections,
                            kind="ceiling" if full else "matched", raw=path.name,
                            sync_groups_match=(sync is not None and abs(sync - 1) <= .05) if not full else None)
                 found[connections] = samples
@@ -487,7 +490,7 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
                              found[256], found[8192])
 
 
-def run_regimes(report, cache, cases, full, repeats, reverse, cpu_sets):
+def run_regimes(report, cache, cases, full, repeats, reverse, cpu_sets, *, profiles):
     bins = cache / "regimes"
     index = 0
     orders = cycle((ARMS[::-1], ARMS) if reverse else (ARMS, ARMS[::-1]))
@@ -514,7 +517,7 @@ def run_regimes(report, cache, cases, full, repeats, reverse, cpu_sets):
                                     "cpu_us_per_turn": median(cpu) if cpu else None, "arms": values}
                 report.row("Regimes", f"{case}/{grain}ns/w{width}", reduced, ("work_per_s", "speedup_vs_w1"),
                            case=case, grain_ns=grain, width=width, kind="work_rate")
-        if full:
+        if profiles:
             profile = regime_pair(report.out, bins, case, 0 if case == "checkbox" else 10_000,
                                   8, index, orders, cpu_sets, profile=True)
             index += 1
@@ -527,6 +530,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--quick", action="store_true")
     mode.add_argument("--full", action="store_true")
+    mode.add_argument("--weekly", action="store_true", help="run the weekly board's matched cells")
     parser.add_argument("--cells", default="a1,regimes", help="comma-separated families")
     parser.add_argument("--regimes", help="comma-separated workloads from the multicore suite")
     parser.add_argument("--out", type=Path)
@@ -537,9 +541,11 @@ def main():
     parser.add_argument("--repeats", type=int)
     parser.add_argument("--reverse", action="store_true", help="reverse the first paired arm")
     parser.add_argument("--deadline-seconds", type=int, help="limit time waiting and measuring after builds")
+    parser.add_argument("--plan", action="store_true", help="list the selected cells without preparing the host")
     args = parser.parse_args()
     suites = args.cells.split(",")
-    cases = args.regimes.split(",") if args.regimes else CASES if args.full else QUICK_REGIMES
+    cases = args.regimes.split(",") if args.regimes else (
+        WEEKLY_REGIMES if args.weekly else CASES if args.full else QUICK_REGIMES)
     if set(suites) - {"a1", "regimes"} or len(set(suites)) != len(suites):
         parser.error("select a1, regimes or a1,regimes")
     if set(cases) - set(CASES) or len(set(cases)) != len(cases) or (args.regimes and "regimes" not in suites):
@@ -547,6 +553,17 @@ def main():
     if (args.repeats is not None and args.repeats < 1
             or args.deadline_seconds is not None and args.deadline_seconds < 1):
         parser.error("repeats and deadline must be positive")
+    repeats = args.repeats or (1 if args.full else 3)
+    if args.weekly and (repeats < 3 or ("regimes" in suites and set(cases) != set(WEEKLY_REGIMES))):
+        parser.error("weekly mode requires fanin, pipeline and checkbox at three or more repeats")
+    full_regimes = args.full or args.weekly
+    expected = expected_rows(suites, cases, full_regimes, weekly=args.weekly)
+    if args.plan:
+        for goal, label in expected:
+            count = repeats if goal == "Regimes" or not (args.full or args.weekly) else 1
+            offer = f", {WEEKLY_A1_OFFER} turns/s" if args.weekly and goal == "A1" else ""
+            print(f"{goal} {label} ({count} repeat{'s' if count != 1 else ''}{offer})")
+        return 0
     cpu_sets = {role: getattr(args, f"{role}_cpus") for role in CPU_DEFAULTS}
     if not valid_topology(cpu_sets):
         parser.error("use CPUs 0-3, 16-19 or 24-27, with eight server CPUs and disjoint server and load roles")
@@ -563,23 +580,25 @@ def main():
         parser.error("output and cache must be outside the checkout")
     out.mkdir(parents=True)
     cache.mkdir(parents=True, exist_ok=True)
-    repeats = args.repeats or (1 if args.full else 3)
-    config = run_config(full=args.full, suites=suites, cases=cases, repeats=repeats,
+    config = run_config(full=args.full, weekly=args.weekly, suites=suites, cases=cases, repeats=repeats,
                         reverse=args.reverse, cpu_sets=cpu_sets)
-    expected = expected_rows(suites, cases, args.full)
     report = Report(out, commit, config, expected)
+    if args.weekly:
+        signal.signal(signal.SIGTERM, scale.stop_at_deadline)
     try:
         with measurement_slot(cache / "run.lock"):
             report.data["binary_sha256"] = prepare(cache, commit, suites, cases)
             report.data["toolchain"] = read(cache / "toolchain.json")
             report.save()
             signal.signal(signal.SIGALRM, scale.stop_at_deadline)
-            signal.setitimer(signal.ITIMER_REAL, args.deadline_seconds or (14400 if args.full else 1800))
+            signal.setitimer(signal.ITIMER_REAL, args.deadline_seconds or (14400 if full_regimes else 1800))
             try:
                 if "a1" in suites:
-                    run_a1(report, cache, args.full, repeats, args.reverse, cpu_sets)
+                    run_a1(report, cache, args.full, 1 if args.weekly else repeats, args.reverse,
+                           cpu_sets, weekly=args.weekly)
                 if "regimes" in suites:
-                    run_regimes(report, cache, cases, args.full, repeats, args.reverse, cpu_sets)
+                    run_regimes(report, cache, cases, full_regimes, repeats, args.reverse, cpu_sets,
+                                profiles=args.full)
             finally:
                 signal.setitimer(signal.ITIMER_REAL, 0)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, scale.Deadline) as error:

@@ -31,6 +31,10 @@ LANG = {"hirsel-plain": False, "hirsel-tls": True, "hirsel-plain-epoll": False, 
 MODES = RUST | LANG
 
 
+def transfer_modes(args):
+    return args.mode or [mode for mode in RUST if mode != "ktls"] + (list(LANG) if args.hirsel else [])
+
+
 def command(*args):
     return list(map(str, args))
 
@@ -138,7 +142,7 @@ def timing_window():
 
 
 def lock_timing(stack):
-    stack.enter_context(hold(REGIMES, BOARD))
+    stack.enter_context(hold(REGIMES, BOARD, memory_bytes=2 << 30))
     timing_window()
 
 
@@ -161,7 +165,7 @@ def server(binary, cert, cpu, tls, measure):
 
 def run(args, work, results):
     cpu = command("taskset", "-c", args.client_cpu)
-    modes = args.mode or [mode for mode in RUST if mode != "ktls"] + (list(LANG) if args.hirsel else [])
+    modes = transfer_modes(args)
     selection = [(mode, method) for mode in modes for method in ("put", "get")]
     event = {"time": "cycles", "instructions": "instructions:u"}.get(args.stage)
     measure = "verify" if args.stage == "smoke" else "measure"
@@ -295,6 +299,7 @@ def main():
     parser.add_argument("--client-cpu", type=int)
     parser.add_argument("--server-cpu", type=int)
     parser.add_argument("--boat", action="store_true", help="use a Boat VM without the local host timing locks")
+    parser.add_argument("--plan", action="store_true", help="list the timing matrix")
     args = parser.parse_args()
     probe = args.stage in ("profile", "abort")
     if args.check and args.stage != "abort":
@@ -324,6 +329,13 @@ def main():
         parser.error("Hirsel modes require --hirsel")
     if args.stage == "allocations" and not args.preload and (not args.mode or any(mode in RUST for mode in args.mode)):
         parser.error("Rust allocation counts require the glibc allocation preload")
+    if args.plan:
+        if args.stage != "time":
+            parser.error("--plan requires the time stage")
+        for mode in transfer_modes(args):
+            for method in ("put", "get"):
+                print(f"{mode} {method} ({args.samples} repeats of {args.requests} requests)")
+        return
     with tempfile.TemporaryDirectory(dir=args.output.resolve().parent, prefix="samples-") as work:
         with args.output.open("x") as results:
             stage = {"profile": profile, "abort": abort_trials}.get(args.stage, run)

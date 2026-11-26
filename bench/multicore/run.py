@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure one process-tree sample per workload, language, and worker count."""
+"""Measure process-tree samples by workload, language, and worker count."""
 import argparse
 from contextlib import nullcontext
 from datetime import datetime
@@ -29,7 +29,7 @@ else:
 sys.path.insert(0, str(ROOT / "core/tools"))
 from bench_cpus import add_cpu_sets, cpu_list, sibling_cpus, smt_activity, validate_cpu_sets
 from std_native import wait_load
-from timing_shield import hold, measurement_affinity
+from timing_shield import RESERVED, hold, measurement_affinity, uses_shield
 
 LOCK = Path("/tmp/hirsel-langarena-measure.lock")
 WIDTHS = (1, 2, 4, 8, 12, 16)
@@ -220,23 +220,25 @@ def measured_command(directory, cpus, command, profile=False, cycles=False):
 
 def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False,
             *, command=None, profile=False, allow_smt=False, cycles=False,
-            shipping_units=False, launch_measurement=None):
+            shipping_units=False, launch_measurement=None, repeat=None):
     width = len(cpus)
     siblings = sibling_cpus(cpus, allow_smt=allow_smt)
     command = command or sample_command(bins, case, language, width, size, s0)
     if not command[0].is_file():
         return {"status": "missing-binary"}
-    directory = out / f"{case}-{language.lower()}-{width}"
+    name = f"{case}-{language.lower()}-{width}"
+    directory = out / (name if repeat is None else f"{name}-r{repeat}")
     directory.mkdir()
     launch = (launch_measurement or measured_command)(directory, cpus, command, profile, cycles)
     env = sample_env(width, language, shipping_units=shipping_units)
     stdin = sample_stdin(bins, case, language)
     if lock_path:
         wait_load()
-    with hold(lock_path) if lock_path else nullcontext():
+    extra = (set(cpus) | set(siblings)) - RESERVED if lock_path and uses_shield((lock_path,)) else ()
+    with hold(lock_path, also=extra) if lock_path else nullcontext():
         with (smt_activity(siblings, f"{case}/{language}/{width}") as busy, stdin.open("rb") as inp,
               (directory / "stdout").open("wb") as out_file, (directory / "stderr").open("wb") as err):
-            result = subprocess.run(launch, cwd=ROOT, env=env,
+            result = subprocess.run(launch, cwd=bins if case == "knucleotide" else ROOT, env=env,
                                     stdin=inp, stdout=out_file, stderr=err)
     cpu_list = ",".join(map(str, cpus))
     row = {"status": "ok", "cpus": cpu_list, "smt_busy_percent": busy}
@@ -301,13 +303,16 @@ def validate_sample(directory, case, wanted, cpus, kernel=False):
 
 
 def table(rows):
-    index = {(s["case"], s["language"], s["width"]): s for s in rows}
-    widths = [width for width in WIDTHS if any(row["width"] == width for row in rows)]
+    index = {}
+    for row in rows:
+        index.setdefault((row["case"], row["language"], row["width"]), []).append(row)
+    widths = sorted({row["width"] for row in rows})
 
     def value(case, language, width, field):
-        row = index.get((case, language, width), {})
-        if row.get("status") == "ok":
-            return row.get(field)
+        samples = index.get((case, language, width), [])
+        if (samples and {row.get("repeats", 1) for row in samples} == {len(samples)}
+                and all(row["status"] == "ok" and field in row for row in samples)):
+            return statistics.median(row[field] for row in samples)
         return None
 
     def ratio(left, right):
@@ -354,7 +359,7 @@ def table(rows):
                     )
                     cells.append(fmt(metric))
                 if field == "kernel_seconds" and not any(
-                    "kernel_seconds" in index.get((case, language, width), {}) for width in widths
+                    value(case, language, width, "kernel_seconds") is not None for width in widths
                 ):
                     continue
                 if any((case, language, width) in index for width in widths):
@@ -373,7 +378,8 @@ def table(rows):
     if failures:
         print("\nUnavailable samples\n")
         for row in failures:
-            print(f"- {row['case']} {row['language']} {row['width']}: {row['status']}")
+            repeat = f" repeat {row['repeat']}" if "repeat" in row else ""
+            print(f"- {row['case']} {row['language']} {row['width']}{repeat}: {row['status']}")
 
 
 def stderr_metrics(directory):
@@ -628,7 +634,7 @@ def main():
     parser.add_argument("--bins", type=Path, help="binaries and FASTA from build.py")
     parser.add_argument("--out", type=Path, help="new evidence directory outside the repository")
     parser.add_argument("--case", nargs="+", choices=SIZES | S0_SIZES | regimes.WORKLOADS)
-    parser.add_argument("--workers", nargs="+", type=int, choices=WIDTHS)
+    parser.add_argument("--workers", nargs="+", type=int, choices=range(1, 17))
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=LANGUAGES)
     selection.add_argument("--standard-rust", action="store_true", help="measure published Rust data inputs")
@@ -642,7 +648,8 @@ def main():
     parser.add_argument("--allow-smt", action="store_true",
                         help="allow benchmark and load CPU assignments to share cores or CPUs")
     parser.add_argument("--cycles", action="store_true", help="also count user cycles in grain samples")
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, help="samples per point (default: 3 for regimes, 1 otherwise)")
+    parser.add_argument("--plan", action="store_true", help="list the selected workload points")
     parser.add_argument("--repeat-workers", nargs="+", type=int, default=(1, 4, 8))
     parser.add_argument("--crossover-width", type=int, default=8, help="width to compare to 1 when rendering grain results")
     parser.add_argument("--profile", action="store_true", help="collect perf stacks instead of stat counters")
@@ -652,6 +659,11 @@ def main():
     parser.add_argument("--block-process-check", metavar="NAME",
                         help="hold the lock for a grain block and reject it if NAME appears at either boundary")
     args = parser.parse_args()
+    if args.repeats is not None and (args.repeats < 1 or args.read):
+        parser.error("--repeats requires a positive count and a new run")
+    args.repeats = args.repeats or (3 if args.regimes else 1)
+    if args.plan and (args.read or args.regimes):
+        parser.error("--plan selects runtime workloads")
     if args.block_process_check and (not args.regimes or args.read):
         parser.error("--block-process-check requires a grain measurement")
     if args.also_lock and (not args.block_process_check or args.also_lock.resolve() == args.lock.resolve()):
@@ -662,10 +674,11 @@ def main():
             regimes.render(rows, args.crossover_width)
             return 0 if rows and all(row["status"] == "ok" for row in rows) else 1
     else:
-        if args.bins is None or args.out is None:
+        if not args.plan and (args.bins is None or args.out is None):
             parser.error("--bins and --out are required to measure")
-        bins, out = args.bins.resolve(), args.out.resolve()
-        if out.is_relative_to(ROOT) or out.exists():
+        bins = args.bins.resolve() if args.bins else None
+        out = args.out.resolve() if args.out else None
+        if out and (out.is_relative_to(ROOT) or out.exists()):
             parser.error("--out must be a new directory outside the repository")
         workers = args.workers or ([1] if args.s0 else (1, 2, 4, 8, 16) if args.regimes else WIDTHS)
         assigned = measurement_affinity(*(path for path in (args.lock, args.also_lock) if path))
@@ -689,33 +702,44 @@ def main():
             return run_regimes(args, parser, bins, out, workers)
         if args.s0 and args.standard_rust:
             parser.error("--s0 and --standard-rust select different workloads")
-        validate_cpu_sets(parser, args, width=max(workers), measure_affinity=assigned)
-        os.sched_setaffinity(0, args.build_cpus)
         sizes = S0_SIZES if args.s0 else STANDARD_RUST_SIZES if args.standard_rust else SIZES
         languages = ("Rust",) if args.standard_rust else args.languages or LANGUAGES
         cases = tuple(dict.fromkeys(args.case or sizes))
         if any(case not in sizes for case in cases):
             parser.error("the requested workload is outside the selected suite")
+        points = [(case, width, tuple(side for side in applicable(case, args.s0) if side in languages))
+                  for case in cases for width in sorted(set(workers))]
+        if args.plan:
+            for case, width, sides in points:
+                for language in sides:
+                    print(f"{case} {language} W{width} ({args.repeats} repeat{'s' if args.repeats != 1 else ''})")
+            return 0
+        validate_cpu_sets(parser, args, width=max(workers), allow_smt=args.allow_smt,
+                          measure_affinity=assigned)
+        os.sched_setaffinity(0, args.build_cpus)
         oracles = {case: S0_WORK[case] if args.s0 else expected(case, bins / "input.fasta", args.standard_rust)
                    for case in cases}
         out.mkdir(parents=True)
         rows = []
-        for case in cases:
+        for case, width, sides in points:
             kernel = args.standard_rust or case == "mandelbrot"
             size = sizes[case]
-            for width in sorted(set(workers)):
-                for language in applicable(case, args.s0):
-                    if language not in languages:
-                        continue
+            for repeat in range(1, args.repeats + 1):
+                for language in sides if repeat % 2 else reversed(sides):
                     try:
                         result = observe(bins, out, case, language, args.measure_cpus[:width], size,
-                                         oracles[case], kernel, args.lock, args.s0)
+                                         oracles[case], kernel, args.lock, args.s0, allow_smt=args.allow_smt,
+                                         repeat=repeat if args.repeats > 1 else None)
                     except ValueError as error:
                         parser.error(str(error))
                     rows.append(result | {"case": case, "language": language, "width": width, "size": size})
-                    print(f"{case} {language} {width}: {result['status']}", file=sys.stderr, flush=True)
+                    if args.repeats > 1:
+                        rows[-1]["repeat"] = repeat
+                        rows[-1]["repeats"] = args.repeats
+                    print(f"{case} {language} W{width} repeat {repeat}: {result['status']}",
+                          file=sys.stderr, flush=True)
                     (out / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")
-    keys = [(row["case"], row["language"], row["width"]) for row in rows]
+    keys = [(row["case"], row["language"], row["width"], row.get("repeat", 1)) for row in rows]
     if len(keys) != len(set(keys)):
         parser.error("more than one sample for the same point")
     for case in {row["case"] for row in rows}:

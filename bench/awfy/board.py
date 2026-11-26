@@ -1183,29 +1183,8 @@ def collect_units(evidence, out, args):
         evidence["units"]["sha256"] = build.sha256(path)
 
 
-def comparison_report(evidence):
-    units_rows = []
-    if "units" in evidence["families"]:
-        units = evidence.get("units", {})
-        try:
-            if "path" not in units:
-                raise ValueError(units.get("reason", "owner export collection did not complete"))
-            path = Path(units["path"])
-            if build.sha256(path) != units["sha256"]:
-                raise ValueError("owner export changed since collection")
-            units_rows = comparison_units.import_rows(path, evidence["commit"])
-            units = units | {"status": ("qualified" if all(row["status"] == "ok" for row in units_rows)
-                                        else "incomplete")}
-        except (OSError, ValueError, KeyError, TypeError, ArithmeticError) as error:
-            reason = str(error)
-            units = units | {"status": "incomplete", "reason": reason}
-            units_rows = [comparison_units.rejected_row(key, reason) for key in comparison_units.expected()]
-        evidence = evidence | {"units": units}
-    return comparison.summary(evidence, units_rows)
-
-
 def save_comparison(out, evidence):
-    report = comparison_report(evidence)
+    report = comparison_units.report(evidence)
     write_json(out / "comparison.json", report)
     (out / "comparison.md").write_text(comparison.markdown(report))
     return report
@@ -1222,6 +1201,8 @@ def run_comparison(out, args):
         "started": datetime.now().astimezone().isoformat(),
     }
     selected = set(families)
+    if args.weekly_units:
+        evidence["weekly_units"] = True
     try:
         validate_sources(args, selected)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -1369,7 +1350,7 @@ def main():
                 raise ValueError("comparison revision mismatch")
             if evidence["pins"] != PINS:
                 raise ValueError("comparison peer pins mismatch")
-            report = comparison_report(evidence)
+            report = comparison_units.report(evidence)
             print(comparison.markdown(report), end="")
             return 0 if report["selection_complete"] else 1
         except (*receipt.INVALID_RECEIPT, ArithmeticError) as error:
@@ -1402,6 +1383,7 @@ def main():
                         help="measure a selected family; repeat to select several")
     parser.add_argument("--units-receipt", type=lambda path: Path(path).resolve(),
                         help="use a qualified same-revision fair.json")
+    parser.add_argument("--weekly-units", action="store_true", help="require the weekly units inventory")
     parser.add_argument("--units-deadline-seconds", type=int, help="owner producer measurement budget")
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=LOCK)
@@ -1419,6 +1401,8 @@ def main():
             parser.error("select each comparison family once")
         if (args.units_receipt or args.units_deadline_seconds is not None) and "units" not in families:
             parser.error("units options require the units family")
+        if args.weekly_units and (not args.units_receipt or families != ["units"]):
+            parser.error("--weekly-units requires --comparison-family units and --units-receipt")
         if args.units_deadline_seconds is not None and args.units_deadline_seconds < 1:
             parser.error("--units-deadline-seconds must be positive")
         if (set(args.build_cpus) != set(range(8, 12)) or set(args.measure_cpus) != set(range(16, 20))):
@@ -1427,7 +1411,7 @@ def main():
             parser.error("comparison requires the shared hirsel-board.lock")
         if args.units_deadline_seconds is None:
             args.units_deadline_seconds = 14400
-    elif args.comparison_family or args.units_receipt or args.units_deadline_seconds is not None:
+    elif args.comparison_family or args.units_receipt or args.units_deadline_seconds is not None or args.weekly_units:
         parser.error("comparison options require --comparison")
     os.sched_setaffinity(0, args.build_cpus)
     out = args.out.resolve()

@@ -1,6 +1,6 @@
 """Keep other host workloads off the local timing CPUs during a shared hold."""
 import argparse
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, ExitStack, nullcontext
 import fcntl
 import json
 import os
@@ -153,7 +153,7 @@ def exit_on_signal(signum, _frame):
 
 
 @contextmanager
-def shielded(also):
+def shielded(also, memory_bytes=None):
     handlers = {sig: signal.signal(sig, exit_on_signal) for sig in SIGNALS}
     original = None
     keeper = None
@@ -167,7 +167,10 @@ def shielded(also):
                 # Keep the original cgroup occupied until our pipe closes.
                 keeper = subprocess.Popen(["/bin/cat"], stdin=subprocess.PIPE,
                                           stdout=subprocess.DEVNULL)
-                enter_scope()
+                properties = () if memory_bytes is None else (
+                    ("MemoryMax", "t", str(memory_bytes)), ("MemorySwapMax", "t", "0"),
+                )
+                enter_scope(properties)
             shield(also)
         yield
     finally:
@@ -202,18 +205,22 @@ def file_locks(paths, *, blocking=True):
 
 
 @contextmanager
-def hold(*paths, blocking=True, force=False, also=()):
+def hold(*paths, blocking=True, force=False, also=(), memory_bytes=None):
     local = uses_shield(paths, force)
     if also and not local:
         raise RuntimeError("extra timing CPUs require the local timing shield")
+    journal = os.environ.get("HIRSEL_BOARD_HOLD_LOG")
+    if journal:
+        with Path(journal).open("a") as log:
+            log.write("attempted\n")
     # Hold both canonical locks during the update and restore. Older callers
     # may take either lock independently and must never have their CPUs moved.
-    with file_locks((REGIMES, BOARD, *paths) if local else paths, blocking=blocking):
-        if local:
-            with shielded(also):
-                yield
-        else:
-            yield
+    with (file_locks((REGIMES, BOARD, *paths) if local else paths, blocking=blocking),
+          shielded(also, memory_bytes) if local else nullcontext()):
+        if journal:
+            with Path(journal).open("a") as log:
+                log.write("admitted\n")
+        yield
 
 
 def clear_stale():

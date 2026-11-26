@@ -188,6 +188,19 @@ esac
                 for alert, contents in expected.items():
                     self.assertEqual(alert.read_text(), contents)
                 self.assertIn("- " + result, followups.read_text())
+            weekly = subprocess.check_output(
+                [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups,
+                 "--service-failure-tier", "weekly"],
+                env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": "1",
+                                  "MONITOR_INVOCATION_ID": ""},
+                text=True,
+            )
+            self.assertIn("Hirsel weekly board incomplete (exit 1)", weekly)
+            self.assertIn("-u hirsel-board-weekly.service", weekly)
+            self.assertEqual((base / "alerts" / f"{weekly[:10]}-weekly.txt").read_text(), weekly)
+            for alert, contents in expected.items():
+                self.assertEqual(alert.read_text(), contents)
+            self.assertIn("- " + weekly, followups.read_text())
             self.assertTrue(followups.read_text().startswith("Existing entry\n"))
 
     def test_failed_fetch_preserves_last_complete_and_alerts_when_stale(self):

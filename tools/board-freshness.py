@@ -153,7 +153,7 @@ def atomic_write(path, content):
         pending.replace(path)
 
 
-def service_failure(base, followups):
+def service_failure(base, followups, tier="nightly"):
     now = datetime.now(timezone.utc)
     status = os.environ.get("MONITOR_EXIT_STATUS", "")
     if os.environ.get("MONITOR_EXIT_CODE") == "exited" and status in ("1", "2", "3"):
@@ -163,12 +163,13 @@ def service_failure(base, followups):
         result = os.environ.get("MONITOR_SERVICE_RESULT", "unknown")
         detail = f"failed ({result}{', status ' + status if status else ''})"
     invocation = os.environ.get("MONITOR_INVOCATION_ID")
+    suffix = "-weekly" if tier == "weekly" else ""
     journal = (f"journalctl --user _SYSTEMD_INVOCATION_ID={invocation}" if invocation
-               else "journalctl --user -u hirsel-board.service")
-    line = f"{timestamp(now.timestamp())} Hirsel nightly board {detail}. See `{journal}`."
+               else f"journalctl --user -u hirsel-board{suffix}.service")
+    line = f"{timestamp(now.timestamp())} Hirsel {tier} board {detail}. See `{journal}`."
     alerts = base / "alerts"
     alerts.mkdir(exist_ok=True)
-    with (alerts / f"{now.date()}.txt").open("a") as stream:
+    with (alerts / f"{now.date()}{suffix}.txt").open("a") as stream:
         stream.write(line + "\n")
     with followups.open("a") as stream:
         stream.write(f"\n- {line}\n")
@@ -182,6 +183,7 @@ def main():
     parser.add_argument("--alert", action="store_true")
     parser.add_argument("--service-failure", type=Path, metavar="FOLLOWUPS",
                         help="record the failing systemd invocation")
+    parser.add_argument("--service-failure-tier", choices=("nightly", "weekly"))
     parser.add_argument("--last-complete-commit", action="store_true")
     parser.add_argument("--record", type=Path, help="attempt run directory")
     parser.add_argument("--started", type=int)
@@ -192,11 +194,13 @@ def main():
     parser.add_argument("--vopr-status", type=int)
     parser.add_argument("--law-status", type=int)
     args = parser.parse_args()
+    if args.service_failure_tier and not args.service_failure:
+        parser.error("--service-failure-tier requires --service-failure")
     args.base.mkdir(parents=True, exist_ok=True)
     with (args.base / "freshness.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if args.service_failure:
-            service_failure(args.base, args.service_failure)
+            service_failure(args.base, args.service_failure, args.service_failure_tier or "nightly")
             return
         if args.record:
             if args.started is None or not args.step:

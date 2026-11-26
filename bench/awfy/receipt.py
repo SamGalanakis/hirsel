@@ -933,7 +933,7 @@ def main():
     comparison = commands.add_parser("compare", help="compare instructions and peak RSS in matched receipts")
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
-    comparison.add_argument("--threshold", type=threshold, default=INSTRUCTION_LIMIT, metavar="PERCENT")
+    comparison.add_argument("--threshold", type=threshold, metavar="PERCENT")
     comparison.add_argument("--aa", action="store_true", help="require identical candidate identities")
     cycles = commands.add_parser("cycle-pairs", help="qualify named runtime rows with interleaved counter pairs")
     cycles.add_argument("baseline", type=Path, help="base receipt directory or --multicore build directory")
@@ -989,7 +989,8 @@ def main():
         if args.action == "elf-census":
             print(json.dumps(elf_census.census(args.baseline, args.candidate), indent=2))
             return 0
-        return compare(args.baseline, args.candidate, args.threshold, aa=args.aa)
+        from receipt_aa import compare_command
+        return compare_command(args)
     except (KeyError, OSError, ValueError, TypeError, AttributeError, re.error, subprocess.SubprocessError) as error:
         print(f"{args.action}: {error}", file=sys.stderr)
         return REFUSED

@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import re
+from statistics import median
 import sys
 
 import build
@@ -17,7 +18,7 @@ from bench.units.contract import (
     A1_BINARIES, A1_SIDES, ARMS, BUILD_CPUS, BUILD_JOBS, BUILD_MEMORY_BYTES, CASES,
     CHECKBOX_BINARIES, CPU_DEFAULTS, FOREIGN_SHARE_LIMIT, HOLD_POLICY, MEASUREMENT_MEMORY_BYTES,
     MIN_ARM_NS, REGIME_BINARIES, SYNC_POLICY, VERSION, admits_hold, expected_rows, timing_window_open,
-    valid_topology,
+    valid_topology, WEEKLY_A1_OFFER, WEEKLY_REGIMES,
 )
 
 OWNER_SIDES = dict(zip(ARMS, A1_SIDES, strict=True))
@@ -33,8 +34,9 @@ QUANTILES = {
 }
 
 
-def expected():
-    return expected_rows(("a1", "regimes"), CASES, full=True)
+def expected(*, weekly=False):
+    return expected_rows(("a1", "regimes"), WEEKLY_REGIMES if weekly else CASES,
+                         full=True, weekly=weekly)
 
 
 def board_label(key):
@@ -88,14 +90,17 @@ def clean_hold(hold, started, updated, arms):
             and hold["clean"] is True and set(hold["arm_cpu"]) == set(arms) and admits_hold(hold))
 
 
-def validate_config(export, commit):
+def validate_config(export, commit, *, weekly):
     require(export["commit"] == commit, "units revision mismatch")
     config = export["config"]
-    require(export["version"] == VERSION and config["mode"] == "full" and config["repeats"] == 1
+    repeats = config["repeats"]
+    cases = WEEKLY_REGIMES if weekly else CASES
+    require(export["version"] == VERSION and config["mode"] == ("weekly" if weekly else "full")
+            and type(repeats) is int and (repeats >= 3 if weekly else repeats == 1)
             and sorted(config["families"]) == ["a1", "regimes"]
-            and sorted(config["regimes"]) == sorted(CASES),
-            "units requires one full, untaped A1 and 17-regime export")
-    keys = expected()
+            and sorted(config["regimes"]) == sorted(cases),
+            "units configuration differs from the selected cell and repeat inventory")
+    keys = expected(weekly=weekly)
     declared, seen = (unique_rows(export[name]) for name in ("expected_rows", "rows"))
     require(declared.keys() == seen.keys() == keys.keys(), "incomplete units label set")
     require(all(declared[key]["status"] == row["status"] and row["status"] in ("ok", "rejected")
@@ -176,49 +181,61 @@ def regime_samples(row, key, config, root, started, updated, baselines):
     count, checksum = regimes.receipt(case, work.size, ROUNDS[grain])
     expected_output = f"{count} {checksum}\n".encode()
     cpus = ",".join(map(str, config["server_cpus"][:width]))
-    out, pair_paths = {}, set()
+    by_arm, pairs = {}, {}
+    timed_service = bool(work.connections or case == "checkbox")
     for arm in ARMS:
         summary = row["samples"][arm]
-        require(summary["status"] == "ok" and len(summary["arms"]) == 1, f"{arm} regime arm incomplete")
-        sample, = summary["arms"]
-        path = evidence_path(root, str(Path(sample["path"]) / "stdout"))
-        pair_paths.add(path.parent.parent)
-        require(sample["status"] == "ok" and sample["cpus"] == cpus and sample["iterations"] == count
-                and sample["checksum"] == checksum and sample["sha256"] == hashlib.sha256(expected_output).hexdigest()
-                and path.read_bytes() == expected_output, f"{arm} regime count, topology or output mismatch")
-        if arm == "hirsel":
-            require(sample["pool"]["workers"] == width, "Hirsel regime uses the wrong worker pool")
-        timed_service = bool(work.connections or case == "checkbox")
-        if timed_service:
-            server_codes = (0, 130) if case == "checkbox" else (0,)
-            require(sample["server_status"] in server_codes and sample["load_status"] == 0
-                    and sample["load_cpus"] == ",".join(map(str, config["load_cpus"])),
-                    f"{arm} regime server or loader failed")
-        rate = count / sample["service_seconds" if timed_service else "seconds"]
+        repeats = summary["arms"]
+        require(summary["status"] == "ok" and len(repeats) == config["repeats"], f"{arm} regime repeats incomplete")
+        rates = []
+        for sample in repeats:
+            path = evidence_path(root, str(Path(sample["path"]) / "stdout"))
+            pair_path = path.parent.parent
+            pair = pairs.setdefault(pair_path, {})
+            require(arm not in pair, f"{arm} regime repeat reuses a hold")
+            pair[arm] = sample
+            require(sample["status"] == "ok" and sample["cpus"] == cpus and sample["iterations"] == count
+                    and sample["checksum"] == checksum
+                    and sample["sha256"] == hashlib.sha256(expected_output).hexdigest()
+                    and path.read_bytes() == expected_output, f"{arm} regime count, topology or output mismatch")
+            if arm == "hirsel":
+                require(sample["pool"]["workers"] == width, "Hirsel regime uses the wrong worker pool")
+            if timed_service:
+                server_codes = (0, 130) if case == "checkbox" else (0,)
+                require(sample["server_status"] in server_codes and sample["load_status"] == 0
+                        and sample["load_cpus"] == ",".join(map(str, config["load_cpus"])),
+                        f"{arm} regime server or loader failed")
+            rate = count / sample["service_seconds" if timed_service else "seconds"]
+            require(close(sample["work_per_s"], rate), f"{arm} regime work rate is invalid")
+            rates.append(rate)
+        rate = median(rates)
         baseline = rate if width == 1 else baselines[case, grain, arm]
         speedup = rate / baseline
-        require(close(sample["work_per_s"], rate) and close(summary["work_per_s"], rate)
+        require(close(summary["work_per_s"], rate)
                 and close(summary["speedup_vs_w1"], speedup), f"{arm} regime work rate or speedup is invalid")
-        out[arm] = summary | {"work_per_s": rate, "speedup_vs_w1": speedup,
-                              "timing": "service seconds" if timed_service else "process seconds"}
-    require(len(pair_paths) == 1, "regime arms are from different holds")
-    pair_path, = pair_paths
-    pair = receipt.read(evidence_path(root, str(pair_path.relative_to(root) / "pair.json")))
-    hold = pair["hold"]
-    require(clean_hold(hold, started, updated, ARMS)
-            and (hold["case"], hold["grain_ns"], hold["width"]) == key
-            and sorted(hold["order"]) == list(ARMS)
-            and pair["samples"] == {arm: out[arm]["arms"][0] for arm in ARMS},
-            "regime pair receipt or hold is unqualified")
+        by_arm[arm] = summary | {"work_per_s": rate, "speedup_vs_w1": speedup,
+                                 "timing": "service seconds" if timed_service else "process seconds"}
+    windows = []
+    for pair_path, samples in pairs.items():
+        pair = receipt.read(evidence_path(root, str(pair_path.relative_to(root) / "pair.json")))
+        hold = pair["hold"]
+        require(set(samples) == set(ARMS) and clean_hold(hold, started, updated, ARMS)
+                and (hold["case"], hold["grain_ns"], hold["width"]) == key
+                and sorted(hold["order"]) == list(ARMS) and pair["samples"] == samples,
+                "regime pair receipt or hold is unqualified")
+        windows.append(tuple(datetime.fromisoformat(hold[field]) for field in ("started", "finished")))
+    windows.sort()
+    require(all(left[1] <= right[0] for left, right in zip(windows, windows[1:])),
+            "regime repeats overlap")
     if width == 1:
-        baselines.update({(case, grain, arm): summary["work_per_s"] for arm, summary in out.items()})
-    return out
+        baselines.update({(case, grain, arm): summary["work_per_s"] for arm, summary in by_arm.items()})
+    return by_arm
 
 
-def import_rows(path, commit):
+def import_rows(path, commit, *, weekly=False):
     path = path.resolve()
     export = receipt.read(path)
-    keys, seen, config, started, updated = validate_config(export, commit)
+    keys, seen, config, started, updated = validate_config(export, commit, weekly=weekly)
     rows, baselines = [], {}
     for key, identity in keys.items():
         row = seen[key]
@@ -234,6 +251,9 @@ def import_rows(path, commit):
                         for name in binaries), "missing units binary identities")
             if key[0] == "A1":
                 samples = a1_samples(row, identity, path.parent, started, updated)
+                if weekly:
+                    require(all(sample["offer_turns_per_s"] == WEEKLY_A1_OFFER for sample in samples.values()),
+                            "A1 weekly matched offer differs")
                 fields = MATCHED_METRICS if identity[-1] else CEILING_METRICS
                 quantiles = tuple(field for field in QUANTILES if any(field in sample for sample in samples.values()))
                 notes = "SHA-256 " + identity[2] + ", one durable sync per group."
@@ -251,7 +271,30 @@ def import_rows(path, commit):
                 if ratio := comparison.divide(samples["hirsel"].get(field), samples["tokio"].get(field)):
                     result["ratios"]["tokio"][field] = ratio
             result["metrics"] += quantiles
-            rows.append(result | {"notes": notes, "mode": "full", "commit": commit})
+            rows.append(result | {"notes": notes, "mode": config["mode"], "commit": commit})
         except (OSError, ValueError, KeyError, TypeError, ArithmeticError) as error:
             rows.append(rejected_row(key, str(error)))
     return rows
+
+
+def report(evidence):
+    units_rows = []
+    if "units" in evidence["families"]:
+        units = evidence.get("units", {})
+        weekly = evidence.get("weekly_units", False)
+        try:
+            if "path" not in units:
+                raise ValueError(units.get("reason", "owner export collection did not complete"))
+            path = Path(units["path"])
+            if build.sha256(path) != units["sha256"]:
+                raise ValueError("owner export changed since collection")
+            units_rows = import_rows(path, evidence["commit"], weekly=weekly)
+            units = units | {"status": ("qualified" if all(row["status"] == "ok" for row in units_rows)
+                                        else "incomplete")}
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+            reason = str(error)
+            units = units | {"status": "incomplete", "reason": reason}
+            units_rows = [rejected_row(key, reason)
+                          for key in expected(weekly=weekly)]
+        evidence = evidence | {"units": units}
+    return comparison.summary(evidence, units_rows)

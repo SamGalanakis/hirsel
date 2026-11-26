@@ -265,6 +265,8 @@ def main():
     knees = {(name, route): service.sweep(name, route, args.minimum_rate, args.maximum_rate,
                                          args.dwell, args.tail_seconds)
              for route in ROUTES for name in SERVERS}
+    (out / "knees.json").write_text(json.dumps({f"{name}/{route}": data
+                                              for (name, route), data in knees.items()}, indent=2) + "\n")
     latency_table(knees)
     if args.soak_seconds:
         soaks = {}

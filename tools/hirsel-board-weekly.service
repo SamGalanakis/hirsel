@@ -1,0 +1,16 @@
+[Unit]
+Description=Hirsel weekly capacity and multicore board
+OnFailure=hirsel-board-weekly-failure.service
+
+[Service]
+Type=oneshot
+CPUAffinity=0-11 16-27
+WorkingDirectory=%h/.local/share/hirsel-board/weekly-main
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HIRSEL_BOARD_GO=%h/.local/share/hirsel-board/peers/go1.26.4/bin/go
+Environment=TZ=UTC
+TimeoutStartSec=4h 45min
+TimeoutStopSec=30s
+ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-board/weekly-main fetch --quiet origin main
+ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-board/weekly-main switch --quiet --detach origin/main
+ExecStart=/usr/bin/python3 %h/.local/share/hirsel-board/weekly-main/bench/awfy/weekly_board.py

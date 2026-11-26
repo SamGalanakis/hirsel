@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append nightly board runs to SQLite and detect per-row changes."""
+"""Append board runs to SQLite and detect per-row changes."""
 import argparse
 from collections import defaultdict, deque
 from contextlib import closing
@@ -30,6 +30,7 @@ SUITES = {"AWFY original": "awfy", "AWFY pool/index": "pool", "LangArena": "aren
 NUMERIC = r"([0-9,.]+)"
 COMPARE = re.compile(rf"(.+) {NUMERIC} -> {NUMERIC}( B/session| B| KiB)? \(.*")
 TIME_WINDOW = 7
+WEEKLY_GOAL = "Weekly capacity"
 
 
 def read(path):
@@ -103,12 +104,30 @@ def samples(report):
                     yield goal, name, side, metric, contract, value, reference
 
 
+def weekly_samples(report):
+    contract = json.dumps(report["contract"], sort_keys=True)
+    for label, item in report["metrics"].items():
+        row, metric = label.rsplit("/", 1)
+        value = number(item)
+        if value is not None and value >= 0:
+            yield WEEKLY_GOAL, row, "observed", metric, contract, value, None
+
+
 def append(db, runs):
     for run in runs:
         if not run.is_dir():
             raise ValueError(f"{run}: expected a board run directory")
         with db:
             db.execute("BEGIN IMMEDIATE")
+            if weekly := read(run / "weekly.json"):
+                if "finished" not in weekly:
+                    continue
+                db.execute("INSERT OR REPLACE INTO runs VALUES (?, ?, ?, ?, ?)", (
+                    run.name, weekly["started"], weekly["commit"], weekly["complete"], int(not weekly["complete"]),
+                ))
+                db.executemany("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                               ((run.name, *sample) for sample in weekly_samples(weekly)))
+                continue
             report = read(run / "board/board.json")
             attempt = read(run / "attempt.json")
             started = attempt.get("started")
@@ -148,7 +167,16 @@ def trend(values):
     return 0
 
 
-def detect(db):
+def weekly_change(values):
+    if len(values) < TIME_WINDOW:
+        return 0, None, None
+    earlier = list(values)
+    old, new = earlier[:4], earlier[4:]
+    direction = int(min(new) > max(old)) - int(max(new) < min(old))
+    return direction, median(old), median(new)
+
+
+def detect(db, only=None):
     windows = defaultdict(lambda: deque(maxlen=TIME_WINDOW))
     directions = {}
     query = """
@@ -159,7 +187,13 @@ def detect(db):
     for run, commit, goal, row, side, metric, contract, value, reference in db.execute(query):
         key = (goal, row, side, metric, contract)
         window = windows[key]
-        if metric in ("seconds", "wall_seconds"):
+        if goal == WEEKLY_GOAL:
+            window.append(value)
+            direction, before, value = weekly_change(window)
+            changed = direction and direction != directions.get(key)
+            directions[key] = direction
+            kind = "change-point"
+        elif metric in ("seconds", "wall_seconds"):
             window.append(value)
             direction = trend(window)
             changed = direction and direction != directions.get(key)
@@ -171,7 +205,7 @@ def detect(db):
             changed = before is not None and step(metric, before, value)
             window.append(value)
             kind = "step"
-        if changed:
+        if changed and (only is None or run == only):
             print(json.dumps(dict(run=run, commit=commit, goal=goal, row=row, side=side,
                                   metric=metric, kind=kind, before=before, after=value)))
 
@@ -184,7 +218,9 @@ def main():
         subparser = commands.add_parser(command)
         subparser.add_argument("--base", type=Path, default=default)
         if command == "append":
-            subparser.add_argument("run", type=Path, nargs="?", help="omit to backfill base/runs")
+            subparser.add_argument("run", type=Path, nargs="?", help="omit to backfill nightly and weekly runs")
+        else:
+            subparser.add_argument("--run", help="print changes seen at one run")
     args = parser.parse_args()
     try:
         args.base.mkdir(parents=True, exist_ok=True)
@@ -192,9 +228,10 @@ def main():
             db.execute("PRAGMA foreign_keys = ON")
             db.executescript(SCHEMA)
             if args.command == "append":
-                append(db, [args.run] if args.run else sorted(args.base.glob("runs/*/")))
+                weekly_runs = [path.parent for path in args.base.glob("weekly-runs/*/weekly.json")]
+                append(db, [args.run] if args.run else sorted([*args.base.glob("runs/*/"), *weekly_runs]))
             else:
-                detect(db)
+                detect(db, args.run)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
         print(f"board history: {error}", file=sys.stderr)
         return 1

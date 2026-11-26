@@ -43,7 +43,7 @@ pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
         let rows = repair_board(mark)
         let mut groups: List[OwedGroup] = list.new()
         list.push(mut groups, fixture_owed_group(1u32, rows))
-        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: take rows, groups: take groups, ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
+        let owed = Owe(session: 7u64, version: version, body: Content(OweContent(generations: take generations, complete: take complete, rows: take rows, groups: take groups, ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64)))
         if let Error(_) = wire_update(mut owner, mut work, Update(version: version, content: Some(take owed), outcomes: list.new())) {
             delivered = false
         }
@@ -115,7 +115,7 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool w
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     owner.publisher = Some(channel.sender(to))
     owner.joined = Some(1u64)
-    owner.phase = 3u8
+    wire_law_open(mut owner, law_caller(1u64))
     list.reserve(mut owner.leaving, 1u64)
     owner.join_lease = Some(result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(to))))
     wire_subscribed(mut owner, mut work, 8u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
@@ -182,7 +182,7 @@ fn repair_offer(mut b: Board[(), Qh], mut joined: List[Joiner]) -> u64 waits {
     repair(mut b, mut joined, mut owes)
     let mut offered = 0u64
     for o in owes {
-        offered += list.len(o.complete)
+        offered += list.len(owe_content_view(o).complete)
     }
     let mut waiting: List[Replies] = list.new()
     let at = store.version(b.base)
@@ -228,7 +228,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let (to_pub, from_pub): (Sender[PubIn], Receiver[PubIn]) = channel.new(8u64)
     owner.me = Some(channel.sender(to_owner))
     owner.publisher = Some(take to_pub)
-    owner.phase = 3u8
+    wire_law_open(mut owner, law_caller(1u64))
     owner.joined = Some(7u64)
     list.push(mut owner.subs, (1u32, 1u64))
     list.push(mut owner.pub_subs, 1u32)
@@ -238,7 +238,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     owner.taken = Some(take root)
     let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(grants: None, who: 7u64, to: take to_owner, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 7u64, to: take to_owner, closed: None, ended: list.new(), reset: None, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64, http_credit: None))
     // The first repair: due, and the owner drained.
     let _ = mark_due(mut b.subs, 7u64, 1u32)
     joined[0].due = true
@@ -309,7 +309,7 @@ pub fn law_join_waits(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let (back_to, back): (Sender[Receiver[PubIn]], Receiver[Receiver[PubIn]]) = channel.new(1u64)
     owner.me = Some(take to_owner)
     owner.publisher = Some(channel.sender(to_pub))
-    owner.phase = 3u8
+    wire_law_open(mut owner, law_caller(1u64))
     // Another session's message fills PubIn.
     result.unwrap(channel.try_send(to_pub, PubIn(e: Drained)))
     let subscribe: ServicePlan = PlannedSubscribe(1u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))

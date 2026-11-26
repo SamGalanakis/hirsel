@@ -30,13 +30,13 @@ pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     for owed in owes {
         match owed.session {
             1u64 => {
-                first = !owed.reset && list.len(owed.rows) == 1u64
+                first = !owe_is_reset(owed) && list.len(owe_content_view(owed).rows) == 1u64
             },
             2u64 => {
-                second = owed.reset && list.len(owed.rows) == 0u64
+                second = owe_is_reset(owed) && list.len(owe_content_view(owed).rows) == 0u64
             },
             3u64 => {
-                third = !owed.reset && list.len(owed.rows) == 1u64
+                third = !owe_is_reset(owed) && list.len(owe_content_view(owed).rows) == 1u64
             },
             _ => return false,
         }
@@ -119,9 +119,9 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
             _ => return false,
         }
         let ok = if n == 0u64 {
-            o.version == v1 && list.len(o.complete) == 1u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8))
+            o.version == v1 && list.len(owe_content_view(o).complete) == 1u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8))
         } else {
-            o.version == v3 && list.len(o.complete) == 0u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(7u8))
+            o.version == v3 && list.len(owe_content_view(o).complete) == 0u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(7u8))
         }
         if !ok {
             return false
@@ -156,10 +156,10 @@ fn drain_content(from: Receiver[WireEvent], mut versions: List[u64], sub: u32, m
             Ok(take x) => {
                 let Notice(e: take e) = publisher_notice(take x)
                 if let Updated(Update(version: _, content: Some(take o), outcomes: _)) = take e {
-                    for s in o.complete {
+                    for s in owe_content_view(o).complete {
                         named = named || s == sub
                     }
-                    for w in o.rows {
+                    for w in owe_content_view(o).rows {
                         named = named || w.sub == sub
                     }
                     list.push(mut versions, o.version)
@@ -301,8 +301,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut ended: List[TerminalUpdate] = list.new()
     list.push(mut ended, TerminalUpdate(sub: 1u32, generation: 0u64, version: at, outcome: Refused(Overloaded)))
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
-    list.push(mut joined, Joiner(grants: None, who: 2u64, to: take m_to, closed: None, ended: take ended, reset: false, read_failed: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: None, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 2u64, to: take m_to, closed: None, ended: take ended, reset: None, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut outcomes: List[KeyedDone] = list.new()
     list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded)))
     let mut waiting: List[Replies] = list.new()
@@ -392,9 +392,8 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let mut service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), "fixture")
     service.context.marked = true
-    service.context.phase = 3u8
     // Past hello every session holds a Caller; a Subscribe without one ends it (1008).
-    service.context.caller = Some(law_caller(7u64))
+    wire_law_open(mut service.context, law_caller(7u64))
     service.context.me = Some(channel.sender(inbox))
     service.context.publisher = Some(channel.sender(to))
     let k1 = query_key(code.describe(q1))
@@ -460,7 +459,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
         let mut groups: List[OwedGroup] = list.new()
         list.push(mut groups, fixture_owed_group(1u32, rows))
         list.push(mut groups, fixture_owed_group(3u32, rows))
-        let o = Owe(session: 7u64, version: 9u64, generations: fixture_generations(generation), complete: list.new(), rows: take rows, groups: take groups, ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
+        let o = Owe(session: 7u64, version: 9u64, body: Content(OweContent(generations: fixture_generations(generation), complete: list.new(), rows: take rows, groups: take groups, ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64)))
         if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(4u32, 0u32, no_arg(), None), 0u64))) {
             return false
         }
@@ -595,13 +594,13 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let (full_to, _full_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let (progressed, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(grants: None, who: 4u64, to: take full_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 4u64, to: take full_to, closed: None, ended: list.new(), reset: None, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut bounced = 0u64
     let mut i = 0u64
     while i < list.len(owes_c) {
         if owes_c[i].session == 4u64 {
             let o = list.remove(mut owes_c, i)
-            if list.len(o.rows) > 0u64 {
+            if list.len(owe_content_view(o).rows) > 0u64 {
                 bounced += 1u64
             }
             overloaded(mut b.subs, mut joined[0], take o)
@@ -612,10 +611,10 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let marked = joined[0].due && list.len(joined[0].ended) == 0u64
     let mut ended = 0u64
     for o in owes_c {
-        if o.session == 2u64 && o.reset {
+        if o.session == 2u64 && owe_is_reset(o) {
             ended += 1u64
         }
-        for e in o.ended {
+        for e in owe_content_view(o).ended {
             let raised_fail = match e.outcome {
                 Failed(Raised(n)) => n == 5u32,
                 _ => false
@@ -641,7 +640,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let _ = channel.try_send(progressed, ())
     let mut fixed: List[Owe] = list.new()
     repair(mut b, mut joined, mut fixed)
-    let image = list.len(fixed) == 1u64 && fixed[0].session == 4u64 && fixed[0].version == store.version(b.base) && list.len(fixed[0].complete) == 1u64 && fixed[0].complete[0] == 1u32 && list.len(fixed[0].ended) == 0u64 && !fixed[0].reset && list.len(fixed[0].rows) == 2u64 && fixed[0].rows[0].sub == 1u32 && fixed[0].rows[1].sub == 1u32 && !joined[0].due
+    let image = list.len(fixed) == 1u64 && fixed[0].session == 4u64 && fixed[0].version == store.version(b.base) && list.len(owe_content_view(fixed[0]).complete) == 1u64 && owe_content_view(fixed[0]).complete[0] == 1u32 && list.len(owe_content_view(fixed[0]).ended) == 0u64 && !owe_is_reset(fixed[0]) && list.len(owe_content_view(fixed[0]).rows) == 2u64 && owe_content_view(fixed[0]).rows[0].sub == 1u32 && owe_content_view(fixed[0]).rows[1].sub == 1u32 && !joined[0].due
     bounced == 1u64 && marked && ended == 3u64 && c_fences && b_fences && list.len(owes_b) == 0u64 && kept && list.len(idle) == 0u64 && image
 }
 

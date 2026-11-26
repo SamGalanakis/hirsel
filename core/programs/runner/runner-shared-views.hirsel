@@ -226,7 +226,7 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
         Ok(take output) => take output,
         Error(problem) => {
             if let Some(entry) = sub_at(b.subs, who, sub) {
-                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: entry.generation, version: at, outcome: Refused(Budget(capacity_room(problem)))))
+                append_terminal(mut owes[0u64], sub, entry.generation, Refused(Budget(capacity_room(problem))))
             }
             end_entry(mut b.subs, who, sub)
             return list.remove(mut owes, 0u64)
@@ -253,12 +253,14 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
             match complete_group(frame_limit, current_image.value, materialized) {
                 Ok(take packed) => {
                     clear_due(mut b.subs, id)
-                    owes[0u64].rows = wire_rows(take materialized, sub)
-                    owes[0u64].group_bytes = 4u64 + list.len(packed)
-                    list.push(mut owes[0u64].groups, OwedGroup(sub: sub, payload: take packed))
-                    owes[0u64].frame_limit = frame_limit
-                    stamp_rows(mut owes[0u64].generations, sub, generation)
-                    list.push(mut owes[0u64].complete, sub)
+                    if let Content(mut content) = owes[0u64].body {
+                        content.rows = wire_rows(take materialized, sub)
+                        content.group_bytes = 4u64 + list.len(packed)
+                        list.push(mut content.groups, OwedGroup(sub: sub, payload: take packed))
+                        content.frame_limit = frame_limit
+                        stamp_rows(mut content.generations, sub, generation)
+                        list.push(mut content.complete, sub)
+                    }
                 },
                 Error(problem) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, Refused(Budget(capacity_room(problem)))),
             }
@@ -267,7 +269,9 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
         Error(Faulted(take why, _)) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),
         Error(Lost(problem, _)) => {
             reset_session(mut b.subs, mut owes, who, at)
-            owes[0u64].read_failed = read_failed(problem)
+            if let Reset(mut reset) = owes[0u64].body {
+                reset.read_failed = read_failed(problem)
+            }
         },
         Error(_) => reset_session(mut b.subs, mut owes, who, at),
     }

@@ -116,7 +116,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                 match take reserved {
                     Ok(take fences) => {
                         minted += 1u64
-                        list.push(mut joined, Joiner(grants: None, who: minted, to: take to, closed: take closed, ended: list.new(), reset: false, read_failed: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64, http_credit: take http_credit))
+                        list.push(mut joined, Joiner(grants: None, who: minted, to: take to, closed: take closed, ended: list.new(), reset: None, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64, http_credit: take http_credit))
                         let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
                         // v2.22: the Subscribe that made the owner join, at this base (G3).
                         if let Some(take f) = take first {

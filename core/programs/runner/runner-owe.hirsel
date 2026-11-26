@@ -1,0 +1,113 @@
+// What one step owes one session: at `version`, the subs whose whole initial result it
+// carries, its rows and its Ended subs; or a Reset and nothing else.
+type TerminalUpdate: send {
+    sub: u32,
+    generation: u64,
+    version: u64,
+    outcome: Outcome
+}
+
+type OweContent: send {
+    generations: List[(u32, u64)],
+    complete: List[u32],
+    rows: List[SubRow],
+    groups: List[OwedGroup],
+    ended: List[TerminalUpdate],
+    group_bytes: u64,
+    frame_limit: u64
+}
+
+type OweReset: send {
+    read_failed: bool
+}
+
+type OweBody: send = Content(OweContent) | Reset(OweReset)
+
+type Owe: send {
+    session: u64,
+    version: u64,
+    body: OweBody
+}
+
+fn empty_owe_content() -> OweContent {
+    OweContent(generations: list.new(), complete: list.new(), rows: list.new(), groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64)
+}
+
+fn empty_owe(session: u64, version: u64) -> Owe {
+    Owe(session: session, version: version, body: Content(empty_owe_content()))
+}
+
+fn reset_owe(session: u64, version: u64, failed: bool) -> Owe {
+    Owe(session: session, version: version, body: Reset(OweReset(read_failed: failed)))
+}
+
+fn owe_read_failed(o: Owe) -> bool {
+    match o.body {
+        Reset(reset) => reset.read_failed,
+        _ => false,
+    }
+}
+
+fn owe_is_reset(o: Owe) -> bool {
+    match o.body {
+        Reset(_) => true,
+        _ => false,
+    }
+}
+
+fn joiner_is_reset(j: Joiner) -> bool {
+    match j.reset {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn joiner_read_failed(j: Joiner) -> bool {
+    match j.reset {
+        Some(reset) => reset.read_failed,
+        None => false,
+    }
+}
+
+fn merge_owe(mut into: Owe, take from: Owe) {
+    let Owe(session: _, version: v, body: take incoming) = take from
+    let prior = replace(mut into.body, Reset(OweReset(read_failed: false)))
+    into.body = match take prior {
+        Reset(reset) => match take incoming {
+            Reset(add) => Reset(OweReset(read_failed: reset.read_failed || add.read_failed)),
+            Content(_) => Reset(take reset),
+        },
+        Content(content0) => match take incoming {
+            Reset(take reset) => Reset(take reset),
+            Content(take add0) => {
+                let mut content = content0
+                let OweContent(generations: take add_generations, complete: take add_complete, rows: take add_rows, groups: take add_groups, ended: take add_ended, group_bytes: add_group_bytes, frame_limit: add_frame_limit) = take add0
+                let has_content = list.len(add_complete) != 0u64 || list.len(add_rows) != 0u64 || list.len(add_groups) != 0u64
+                let already_has_content = list.len(content.complete) != 0u64 || list.len(content.rows) != 0u64 || list.len(content.groups) != 0u64
+                if has_content && (!already_has_content || v < into.version) {
+                    into.version = v
+                }
+                content.group_bytes = int.saturating_add(content.group_bytes, add_group_bytes)
+                if add_frame_limit < content.frame_limit {
+                    content.frame_limit = add_frame_limit
+                }
+                for g in add_generations {
+                    list.push(mut content.generations, g)
+                }
+                for sub in add_complete {
+                    list.push(mut content.complete, sub)
+                }
+                for take r in take add_rows {
+                    list.push(mut content.rows, take r)
+                }
+                for take group in take add_groups {
+                    list.push(mut content.groups, take group)
+                }
+                for take e in take add_ended {
+                    list.push(mut content.ended, take e)
+                }
+                Content(take content)
+            },
+        },
+    }
+}

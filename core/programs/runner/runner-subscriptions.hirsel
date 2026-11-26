@@ -468,29 +468,6 @@ fn due_subs(subs: Subscriptions, who: u64) -> List[u32] {
     take due
 }
 
-// What one step owes one session: at `version`, the subs whose whole initial result it
-// carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
-type TerminalUpdate: send {
-    sub: u32,
-    generation: u64,
-    version: u64,
-    outcome: Outcome
-}
-
-type Owe: send {
-    session: u64,
-    version: u64,
-    generations: List[(u32, u64)],
-    complete: List[u32],
-    rows: List[SubRow],
-    groups: List[OwedGroup],
-    ended: List[TerminalUpdate],
-    group_bytes: u64,
-    frame_limit: u64,
-    reset: bool,
-    read_failed: bool
-}
-
 type PublisherReads: send {
     changes: own[send] fn(store.Reader, Option[store.Snapshot], store.Snapshot, Bytes, Bytes, store.Limits) -> Result[store.ChangePage, store.Error] waits,
     span: own[send] fn(store.Reader, mut store.SpanRows, bool) -> Result[Option[store.Change], store.Error] waits
@@ -536,7 +513,7 @@ fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
         }
         i += 1u64
     }
-    list.push(mut owes, Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false))
+    list.push(mut owes, empty_owe(who, version))
     i
 }
 
@@ -563,12 +540,12 @@ fn projection_error(take e: store.Error, take dependencies: List[store.Read]) ->
 
 fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) -> Owe waits {
     let version = store.version(b.base)
-    let mut o = Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
+    let mut o = empty_owe(who, version)
     let rows = match row_log() {
         Ok(take x) => take x,
         Error(c) => {
             let _ = remove_sub(mut b.subs, who, sub)
-            list.push(mut o.ended, TerminalUpdate(sub: sub, generation: generation, version: version, outcome: Refused(Budget(capacity_room(c)))))
+            append_terminal(mut o, sub, generation, Refused(Budget(capacity_room(c))))
             return take o
         },
     }
@@ -593,15 +570,17 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
                 (Ok(assigned), Ok(take packed)) => {
                     match add_subscription(mut b.subs, who, sub, generation, take input, Some((take key, take image)), assigned, list.new()) {
                         Ok(()) => {
-                            o.rows = wire_rows(take projected, sub)
-                            o.group_bytes = 4u64 + list.len(packed)
-                            list.push(mut o.groups, OwedGroup(sub: sub, payload: take packed))
-                            o.frame_limit = limit
-                            stamp_rows(mut o.generations, sub, generation)
-                            list.push(mut o.complete, sub)
+                            if let Content(mut content) = o.body {
+                                content.rows = wire_rows(take projected, sub)
+                                content.group_bytes = 4u64 + list.len(packed)
+                                list.push(mut content.groups, OwedGroup(sub: sub, payload: take packed))
+                                content.frame_limit = limit
+                                stamp_rows(mut content.generations, sub, generation)
+                                list.push(mut content.complete, sub)
+                            }
                         },
                         Error(_) => {
-                            o.reset = true
+                            o.body = Reset(OweReset(read_failed: false))
                         },
                     }
                 },
@@ -616,8 +595,7 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
             if let Ok(assigned) = charge {
                 let _ = add_subscription(mut b.subs, who, sub, generation, take input, None, assigned, take dependencies)
             }
-            o.reset = true
-            o.read_failed = read_failed(problem)
+            o.body = Reset(OweReset(read_failed: read_failed(problem)))
         },
         Error(Covered(_)) => fail("runner: query image was not staged"),
     }
@@ -634,12 +612,14 @@ fn retain_initial_failure(mut subs: Subscriptions, mut out: Owe, sub: u32, gener
             return
         }
     }
-    out.reset = true
+    out.body = Reset(OweReset(read_failed: false))
 }
 
 fn append_terminal(mut out: Owe, sub: u32, generation: u64, take why: Outcome) {
     let version = out.version
-    list.push(mut out.ended, TerminalUpdate(sub: sub, generation: generation, version: version, outcome: take why))
+    if let Content(mut content) = out.body {
+        list.push(mut content.ended, TerminalUpdate(sub: sub, generation: generation, version: version, outcome: take why))
+    }
 }
 
 fn initial_view[G: send, H: shareable + inert + send](b: Board[G, H], key: ViewKey, input: SubscriptionInput, rows: Log[Row]) -> Result[Arc[Viewed], Queried] waits {
@@ -708,7 +688,7 @@ fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: By
 fn reset_session(mut subs: Subscriptions, mut owes: List[Owe], who: u64, version: u64) {
     end_session(mut subs, who)
     let k = owe(mut owes, who, version)
-    owes[k] = Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: true, read_failed: false)
+    owes[k] = reset_owe(who, version, false)
 }
 
 fn reset_subscriptions(mut subs: Subscriptions, mut owes: List[Owe], version: u64) {
@@ -783,27 +763,32 @@ fn end_round_sub(mut subs: Subscriptions, mut out: Owe, id: SubId, generation: u
 }
 
 fn append_round_group(mut out: Owe, id: SubId, generation: u64, projected: List[Row], packed: Arc[Bytes], limit: u64) -> bool {
-    if out.reset {
-        return true
+    if let Content(mut content) = out.body {
+        content.group_bytes = int.saturating_add(content.group_bytes, 4u64 + list.len(packed))
+        if limit < content.frame_limit {
+            content.frame_limit = limit
+        }
+        let envelope = 24u64 + 4u64 * list.len(content.complete)
+        if int.saturating_add(envelope, content.group_bytes) > content.frame_limit {
+            return false
+        }
+        for row in projected {
+            list.push(mut content.rows, SubRow(sub: id.sub, key: clone(row.key), value: clone(row.value)))
+        }
+        list.push(mut content.groups, OwedGroup(sub: id.sub, payload: arc.share(packed)))
+        stamp_rows(mut content.generations, id.sub, generation)
     }
-    out.group_bytes = int.saturating_add(out.group_bytes, 4u64 + list.len(packed))
-    if limit < out.frame_limit {
-        out.frame_limit = limit
-    }
-    if !owe_frame_fits(out) {
-        return false
-    }
-    for row in projected {
-        list.push(mut out.rows, SubRow(sub: id.sub, key: clone(row.key), value: clone(row.value)))
-    }
-    list.push(mut out.groups, OwedGroup(sub: id.sub, payload: arc.share(packed)))
-    stamp_rows(mut out.generations, id.sub, generation)
     true
 }
 
 fn owe_frame_fits(out: Owe) -> bool {
-    let envelope = 24u64 + 4u64 * list.len(out.complete)
-    int.saturating_add(envelope, out.group_bytes) <= out.frame_limit
+    match out.body {
+        Content(content) => {
+            let envelope = 24u64 + 4u64 * list.len(content.complete)
+            int.saturating_add(envelope, content.group_bytes) <= content.frame_limit
+        },
+        Reset(_) => true,
+    }
 }
 
 type GroupProjection {
@@ -869,7 +854,9 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
             let mut i = 0u64
             while i < list.len(owes) {
                 map.insert(mut fenced.sessions, owes[i].session, ())
-                owes[i].read_failed = failed
+                if let Reset(mut reset) = owes[i].body {
+                    reset.read_failed = failed
+                }
                 i += 1u64
             }
             b.base = take newest
@@ -979,7 +966,9 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
                 }
                 let k = owe(mut owes, id.who, version)
                 reset_session(mut subs, mut owes, id.who, version)
-                owes[k].read_failed = failed
+                if let Reset(mut reset) = owes[k].body {
+                    reset.read_failed = failed
+                }
             }
         },
     }

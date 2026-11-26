@@ -23,10 +23,10 @@ type GroupLawPayload: codec {
 }
 
 fn group_payload(owing: Owe) -> Option[GroupLawPayload] {
-    if list.len(owing.groups) != 1u64 {
+    if list.len(owe_content_view(owing).groups) != 1u64 {
         return None
     }
-    Some(result.unwrap(std.codec.decode(std.codec.of(), owing.groups[0u64].payload)))
+    Some(result.unwrap(std.codec.decode(std.codec.of(), owe_content_view(owing).groups[0u64].payload)))
 }
 
 fn group_number(encoded_value: Bytes, expected: u64) -> bool {
@@ -67,7 +67,7 @@ fn view_image_at(images: List[ViewImage], who: u64) -> Option[u64] {
 }
 
 fn apply_view(mut images: List[ViewImage], owing: Owe) -> bool {
-    if list.len(owing.complete) != 0u64 {
+    if list.len(owe_content_view(owing).complete) != 0u64 {
         if let Some(i) = view_image_at(images, owing.session) {
             let _ = list.remove(mut images, i)
         }
@@ -77,7 +77,7 @@ fn apply_view(mut images: List[ViewImage], owing: Owe) -> bool {
         Some(i) => i,
         None => return false,
     }
-    for g in owing.groups {
+    for g in owe_content_view(owing).groups {
         let groups: std.codec.Codec[GroupLawPayload] = std.codec.of()
         let payload = match std.codec.decode(groups, g.payload) {
             Ok(take p) => take p,
@@ -157,7 +157,7 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     let Some(initial) = group_payload(first) else {
         return Error("first complete must carry a full group")
     }
-    if list.len(first.complete) != 1u64 || list.len(joined.complete) != 1u64 || list.compare_bytes(first.groups[0u64].payload, joined.groups[0u64].payload) != Equal || !group_number(initial.value, 1u64) || list.len(initial.rows) != 1u64 || initial.rows[0u64].slot != 0u16 {
+    if list.len(owe_content_view(first).complete) != 1u64 || list.len(owe_content_view(joined).complete) != 1u64 || list.compare_bytes(owe_content_view(first).groups[0u64].payload, owe_content_view(joined).groups[0u64].payload) != Equal || !group_number(initial.value, 1u64) || list.len(initial.rows) != 1u64 || initial.rows[0u64].slot != 0u16 {
         return Error("subscribers did not get the same initial image")
     }
     if !apply_view(mut images, first) || !apply_view(mut images, joined) || !view_images_match(images, key1, model) {
@@ -194,7 +194,7 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     let Some(atomic) = group_payload(moved[0u64]) else {
         return Error("slot move split the group")
     }
-    if list.compare_bytes(moved[0u64].groups[0u64].payload, moved[1u64].groups[0u64].payload) != Equal || !group_number(atomic.value, 0u64) || list.len(atomic.rows) != 2u64 || atomic.rows[0u64].slot != 0u16 || atomic.rows[0u64].value != None || atomic.rows[1u64].slot != 1u16 || atomic.rows[0u64].key != atomic.rows[1u64].key {
+    if list.compare_bytes(owe_content_view(moved[0u64]).groups[0u64].payload, owe_content_view(moved[1u64]).groups[0u64].payload) != Equal || !group_number(atomic.value, 0u64) || list.len(atomic.rows) != 2u64 || atomic.rows[0u64].slot != 0u16 || atomic.rows[0u64].value != None || atomic.rows[1u64].slot != 1u16 || atomic.rows[0u64].key != atomic.rows[1u64].key {
         return Error("new value, removal and insertion must share one group")
     }
     let Some(value_bytes) = atomic.rows[1u64].value else {
@@ -248,7 +248,7 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     let Some(repaired) = group_payload(full) else {
         return Error("repair needs a full group")
     }
-    if list.len(full.complete) != 1u64 || !group_number(repaired.value, 1u64) || list.len(repaired.rows) != 1u64 || repaired.rows[0u64].slot != 1u16 {
+    if list.len(owe_content_view(full).complete) != 1u64 || !group_number(repaired.value, 1u64) || list.len(repaired.rows) != 1u64 || repaired.rows[0u64].slot != 1u16 {
         return Error("repair elided or misplaced content")
     }
     if !apply_view(mut images, full) || !view_images_match(images, key1, model) {

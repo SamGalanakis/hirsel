@@ -49,8 +49,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
     let (owner, events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
     s.me = Some(take owner)
     let caller = option.unwrap(anonymous_caller(random))
-    s.caller = Some(take caller)
-    s.phase = 3u8
+    wire_law_open(mut s, take caller)
     wire_know(mut s, reg, take key)
     wire_know(mut s, reg, take transact_key)
     for stream in 0u32 .. 5u32 {
@@ -188,17 +187,17 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool {
     let Service(context: take initial, ..) = take service
     let mut s = take initial
     let mut work = wire_work()
-    s.phase = 2u8
     let caller = option.unwrap(anonymous_caller(random))
-    s.caller = Some(take caller)
     let entry_codec: std.codec.Codec[Result[Bytes, u32]] = std.codec.of()
     let entry = w3c_key(code.identity(code.describe(w3c_tx)), std.codec.of_u32(), entry_codec)
-    wire_know(mut s, reg, clone(entry))
     let mut unknown: Bytes = list.new()
     list.append(mut unknown, string.as_bytes("missing"))
     let missing = wire_key(Want(identity: take unknown, args_fp: 0u64, result_fp: 0u64))
-    wire_know(mut s, reg, take missing)
-    wire_know(mut s, reg, clone(entry))
+    let mut entries: List[(Bytes, Known)] = list.new()
+    list.push(mut entries, wire_known_entry(reg, clone(entry)))
+    list.push(mut entries, wire_known_entry(reg, take missing))
+    list.push(mut entries, wire_known_entry(reg, clone(entry)))
+    s.handshake = Placing(caller: take caller, entries: take entries, next: 0u64)
     if wire_can_read(s) {
         return false
     }
@@ -245,8 +244,8 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool {
     std.codec.put_u32(0u32, mut old)
     let mut changed: Bytes = list.new()
     std.codec.put_u32(1u32, mut changed)
-    let named: Bytes = match s.caller {
-        Some(who) => wire_stream(who, store.StreamId(t: 0u64, n: 1u64)),
+    let named: Bytes = match s.handshake {
+        Open(caller: who, ..) => wire_stream(who, store.StreamId(t: 0u64, n: 1u64)),
         _ => return false
     }
     let digest = store.request_digest(entry, old)
@@ -272,7 +271,7 @@ pub fn law_join_cleanup() -> bool {
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(grants: None, who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: None, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let _ = take lease
     let mut subs = subscriptions()
     let mut waiting: List[Replies] = list.new()
@@ -354,8 +353,7 @@ fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random
     let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), to_head, clock, tasks, wire_defaults(1048576u64), string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
-    owner.phase = 3u8
-    owner.caller = Some(take caller)
+    wire_law_open(mut owner, take caller)
     owner.me = Some(take to_owner)
     let put_codec: std.codec.Codec[Result[u64, u32]] = std.codec.of()
     let large_codec: std.codec.Codec[Result[Bytes, u32]] = std.codec.of()
@@ -482,9 +480,9 @@ pub fn law_full_head_waits(tasks: Tasks, clock: Clock, random: Random) -> bool w
         let RunRequest(Req(e: take got)) = result.unwrap(channel.try_receive(rig.requests)) else {
             return false
         }
-        let named = match rig.owner.caller {
-            Some(c) => wire_stream(c, store.StreamId(t: 0u64, n: int.widen(stream))),
-            None => return false
+        let named = match rig.owner.handshake {
+            Open(caller: c, ..) => wire_stream(c, store.StreamId(t: 0u64, n: int.widen(stream))),
+            _ => return false
         }
         match take got {
             Requested(take q) => if q.stream != named {
@@ -594,7 +592,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, config, string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
-    owner.phase = 3u8
+    wire_law_open(mut owner, law_caller(1u64))
     let mut work = wire_work()
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
     let (told, who): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)

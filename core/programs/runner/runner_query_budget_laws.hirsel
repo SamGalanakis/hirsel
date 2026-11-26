@@ -44,7 +44,7 @@ fn budget_board(db: store.Db, h: Qh, base: store.Snapshot, bytes_limit: u64, ste
 }
 
 fn budget_complete(owing: Owe) -> bool {
-    !owing.reset && list.len(owing.complete) == 1 && list.len(owing.ended) == 0
+    !owe_is_reset(owing) && list.len(owe_content_view(owing).complete) == 1 && list.len(owe_content_view(owing).ended) == 0
 }
 
 fn budget_reader_allocation(db: store.Db, h: Qh) -> bool waits {
@@ -131,10 +131,10 @@ fn budget_split_image(db: store.Db, h: Qh, input: BudgetQuery, steps: u64) -> bo
 }
 
 fn budget_ended(o: Owe, sub: u32, steps: u64, byte_limit: bool) -> bool {
-    if o.reset || list.len(o.ended) != 1 || o.ended[0u64].sub != sub {
+    if owe_is_reset(o) || list.len(owe_content_view(o).ended) != 1 || owe_content_view(o).ended[0u64].sub != sub {
         return false
     }
-    match o.ended[0u64].outcome {
+    match owe_content_view(o).ended[0u64].outcome {
         Failed(OutOfBytes(_)) => byte_limit,
         Failed(OutOfTime(n)) => !byte_limit && n == steps,
         _ => false,
@@ -172,7 +172,7 @@ fn budget_projection_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u6
         b.reads = slow_budget_reader(steps)
     }
     let stopped = at_base(mut b, 1, 7, take key, budget_arguments(input))
-    if !budget_ended(stopped, 7, steps, byte_limit) || list.len(stopped.rows) != 0 || list.len(stopped.complete) != 0 || !ended_entry(b.subs, SubId(who: 1, sub: 7, serial: 0)) {
+    if !budget_ended(stopped, 7, steps, byte_limit) || list.len(owe_content_view(stopped).rows) != 0 || list.len(owe_content_view(stopped).complete) != 0 || !ended_entry(b.subs, SubId(who: 1, sub: 7, serial: 0)) {
         return false
     }
     b.reads = publisher_reads()
@@ -191,14 +191,14 @@ fn budget_projection_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u6
         return false
     }
     let owed = view delta[0u64]
-    owed.session == 1 && !owed.reset && list.len(owed.ended) == 0 && list.len(owed.groups) == 1 && owed.groups[0u64].sub == 8
+    owed.session == 1 && !owe_is_reset(owed) && list.len(owe_content_view(owed).ended) == 0 && list.len(owe_content_view(owed).groups) == 1 && owe_content_view(owed).groups[0u64].sub == 8
 }
 
 fn budget_run_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u64) -> bool waits {
     let (take prepared, take key) = budget_board(db, h, store.snapshot(db), 1048576, steps)
     let mut b = take prepared
     let stopped = at_base(mut b, 1, 7, take key, budget_arguments(input))
-    if !budget_ended(stopped, 7, steps, false) || list.len(stopped.rows) != 0 || list.len(stopped.complete) != 0 {
+    if !budget_ended(stopped, 7, steps, false) || list.len(owe_content_view(stopped).rows) != 0 || list.len(owe_content_view(stopped).complete) != 0 {
         return false
     }
     let mut fenced = Fenced(sessions: map.new())
@@ -228,14 +228,14 @@ fn budget_cover_trial(db: store.Db, h: Qh, base: store.Snapshot, newest: store.S
     let mut failed_sessions: u64 = 0
     let mut other_group = false
     for owed in delta {
-        if owed.reset {
+        if owe_is_reset(owed) {
             fail("L8: a Cover-only overrun must not reset its session")
         }
         if budget_ended(owed, 7, steps, false) {
             failed_sessions += 1
         }
         if owed.session == 1 {
-            for batch in owed.groups {
+            for batch in owe_content_view(owed).groups {
                 if batch.sub == 8 {
                     other_group = true
                 }

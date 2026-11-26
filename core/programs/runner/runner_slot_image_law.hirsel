@@ -202,7 +202,7 @@ fn image_law_expect(owing: Owe, rows: List[Row], value: Option[u64], complete: b
         Some(n) => image_law_number(n),
         None => list.new()
     }
-    if owing.reset || list.len(owing.ended) != 0u64 || (list.len(owing.complete) == 1u64) != complete || payload.value != expected || list.len(payload.rows) != list.len(rows) {
+    if owe_is_reset(owing) || list.len(owe_content_view(owing).ended) != 0u64 || (list.len(owe_content_view(owing).complete) == 1u64) != complete || payload.value != expected || list.len(payload.rows) != list.len(rows) {
         return Error(clone(message))
     }
     for i in 0u64 .. list.len(rows) {
@@ -326,10 +326,10 @@ fn image_law_move(clock: Clock, random: Random) -> Result[(), String] waits {
     image_law_expect(image_law_one(step(mut board, db)), want, Some(1u64), false, "Log move split rows or value")?
     image_law_write(mut db, h, Setting(2u64))
     let refused = image_law_one(step(mut board, db))
-    if list.len(refused.groups) != 0u64 || list.len(refused.ended) != 1u64 {
+    if list.len(owe_content_view(refused).groups) != 0u64 || list.len(owe_content_view(refused).ended) != 1u64 {
         return Error("another Log satisfied a bound slot")
     }
-    let Failed(Raised(5u32)) = refused.ended[0u64].outcome else {
+    let Failed(Raised(5u32)) = owe_content_view(refused).ended[0u64].outcome else {
         return Error("wrong Log did not raise 5")
     }
     result.unwrap(store.close(take db))

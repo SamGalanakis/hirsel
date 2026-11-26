@@ -47,7 +47,7 @@ fn wire_subscribed[G: send](mut s: WireSession[G], mut work: WireWork, sub: u32,
 }
 
 fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[G], r: Registry[G, H], sub: u32, wire_slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
-    if s.phase != 3u8 {
+    let Open(caller: subject, entries: entries) = view s.handshake else {
         return Error(1008u16)
     }
     let fresh: u64 = int.widen(sub)
@@ -59,11 +59,10 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[
         return Ok(ResumeReset)
     }
     let index: u64 = int.widen(wire_slot)
-    if index >= list.len(s.entries) {
+    if index >= list.len(entries) {
         return Ok(SubscriptionRefusal(sub, Refused(NoEntry)))
     }
-    let cloned: Bytes = clone(s.entries[index])
-    let key = take cloned
+    let key: Bytes = clone(entries[index].0)
     if !map.contains(r.slots, key) {
         let outcome: Outcome = if map.contains(r.t.gone, key) {
             Failed(Gone)
@@ -102,10 +101,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[
             Error(_) => return Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
         }
     }
-    let caller: Caller = match s.caller {
-        Some(held) => clone(held),
-        None => return Error(1008u16),
-    }
+    let caller: Caller = clone(subject)
     let room_req = match entry.ephemeral {
         Some(registered) => Some(RoomRequest(key: RoomKey(entry: registered.index, arg: clone(arg)), codec: (registered.codecs)(), bounds: registered.bounds)),
         None => None,

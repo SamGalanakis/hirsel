@@ -440,7 +440,7 @@ fn sse_law_retire_state(c: Clock, r: Random) waits {
     let _ = at_base(mut board, 1u64, 7u32, clone(key), no_arg())
     let (live, _live_rx): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.with_capacity(2u64)
-    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take live, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take live, closed: None, ended: list.new(), reset: None, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let baseline = map.len(board.subs.indexed)
     let (out, inbox): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let version = store.version(board.base)
@@ -452,7 +452,7 @@ fn sse_law_retire_state(c: Clock, r: Random) waits {
         let Join(to: take to, mark: take mark, first: Some(take first), ..) = sse_law_take_join(inbox) else {
             fail("L9p HTTP did not carry a subscription")
         }
-        list.push(mut joined, Joiner(grants: None, who: id, to: take to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: take mark, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+        list.push(mut joined, Joiner(grants: None, who: id, to: take to, closed: None, ended: list.new(), reset: None, mark: take mark, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
         let JoinSubscribe(sub, generation, input: take staged_input) = take first
         let mut owes: List[Owe] = list.new()
         publish_wire_subscription(mut board, mut joined, mut owes, id, sub, generation, take staged_input)
@@ -521,15 +521,15 @@ fn sse_law_partial_reset(random: Random, tasks: Tasks, empty: String) waits {
     result.unwrap(channel.send(events, wire_event(JoinReady)))
     let mut frames: List[Owe] = list.new()
     let index = owe(mut frames, 1u64, 1u64)
-    list.push(mut frames[index].complete, 0u32)
-    list.push(mut frames[index].groups, OwedGroup(sub: 0u32, payload: arc.new(std.http.copy_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x00"))))
+    owe_law_push_complete(mut frames[index], 0u32)
+    owe_law_push_group(mut frames[index], OwedGroup(sub: 0u32, payload: arc.new(std.http.copy_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x00"))))
     result.unwrap(channel.send(events, wire_event(FromRunner(update(1u64, Some(list.remove(mut frames, index)), list.new())))))
     result.unwrap(std.http_client.finish_request(mut client, 65536u64))
     if sse_law_event(mut client) != sse_law_vector(empty, 1u64) {
         fail("L16 slow client missed initial Batch")
     }
     let terminal = owe(mut frames, 1u64, 2u64)
-    frames[terminal].reset = true
+    frames[terminal].body = Reset(OweReset(read_failed: false))
     result.unwrap(channel.send(events, wire_event(FromRunner(update(2u64, Some(list.remove(mut frames, terminal)), list.new())))))
     let until = std.clock.deadline_after_ms(host.mono_ns(c), 1001u64)
     host.sleep_until(c, until)
@@ -587,7 +587,7 @@ fn sse_law_retire_requests(c: Clock, r: Random, tasks: Tasks, n: Net) waits {
         result.unwrap(channel.send(events, wire_event(JoinReady)))
         let mut owed: List[Owe] = list.new()
         let index = owe(mut owed, 1u64, 1u64)
-        list.push(mut owed[index].ended, TerminalUpdate(sub: 0u32, generation: 1u64, version: 1u64, outcome: Refused(Overloaded)))
+        owe_law_push_ended(mut owed[index], TerminalUpdate(sub: 0u32, generation: 1u64, version: 1u64, outcome: Refused(Overloaded)))
         sse_law_fill_publisher(to)
         result.unwrap(channel.send(events, wire_event(FromRunner(update(1u64, Some(list.remove(mut owed, index)), list.new())))))
         result.unwrap(std.http_client.finish_request(mut read, 4096u64))
@@ -624,9 +624,9 @@ fn sse_expiry_batch(events: Sender[WireEvent], version: u64, complete: bool) wai
     let mut frames: List[Owe] = list.new()
     let index = owe(mut frames, 1u64, version)
     if complete {
-        list.push(mut frames[index].complete, 0u32)
+        owe_law_push_complete(mut frames[index], 0u32)
     }
-    list.push(mut frames[index].groups, OwedGroup(sub: 0u32, payload: arc.new(std.http.copy_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x00"))))
+    owe_law_push_group(mut frames[index], OwedGroup(sub: 0u32, payload: arc.new(std.http.copy_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x00"))))
     let _ = channel.send(events, wire_event(FromRunner(update(version, Some(list.remove(mut frames, index)), list.new()))))
 }
 
@@ -720,7 +720,7 @@ fn sse_law_ended_vector(c: Clock, r: Random, tasks: Tasks, n: Net, vectors: SseL
     let events = sse_expiry_complete(from, mut client, vectors.empty, version)
     let mut frames: List[Owe] = list.new()
     let index = owe(mut frames, 1u64, version)
-    list.push(mut frames[index].ended, TerminalUpdate(sub: 0u32, generation: 1u64, version: version, outcome: Refused(Deadline)))
+    owe_law_push_ended(mut frames[index], TerminalUpdate(sub: 0u32, generation: 1u64, version: version, outcome: Refused(Deadline)))
     result.unwrap(channel.send(events, wire_event(FromRunner(update(version, Some(list.remove(mut frames, index)), list.new())))))
     if sse_law_event(mut client) != string.as_bytes(vectors.ended) || sse_law_body(mut client) != b"" {
         fail("L16 Ended must end after one complete event")

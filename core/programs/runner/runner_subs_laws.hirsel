@@ -71,7 +71,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     law_set(mut db, mut model, t, 1u64, 1u64)
     b.newest = Some(store.snapshot(db))
     let first = at_base(mut b, 0u64, 1u32, clone(k1), no_arg())
-    if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
+    if first.version != 4u64 || list.len(owe_content_view(first).complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
         return false
     }
     list.push(mut watched, Watched(who: 0u64, sub: 1u32, q: Q1))
@@ -102,7 +102,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
         return false
     }
     let empty_result = at_base(mut b, 1u64, 3u32, clone(k1), no_arg())
-    if list.len(empty_result.complete) != 1u64 || empty_result.complete[0] != 3u32 || list.len(empty_result.rows) != 0u64 || !apply(mut cl, take empty_result) {
+    if list.len(owe_content_view(empty_result).complete) != 1u64 || owe_content_view(empty_result).complete[0] != 3u32 || list.len(owe_content_view(empty_result).rows) != 0u64 || !apply(mut cl, take empty_result) {
         return false
     }
     list.push(mut watched, Watched(who: 1u64, sub: 3u32, q: Q1))
@@ -119,7 +119,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     let owes = step(mut b, db)
     let mut faulted = false
     for o in owes {
-        for e in o.ended {
+        for e in owe_content_view(o).ended {
             faulted = o.session == 0u64 && e.sub == 2u32 && match e.outcome {
                 Failed(Raised(n)) => n == 5u32,
                 _ => false,
@@ -192,10 +192,11 @@ pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
     if map.len(fenced.sessions) != 2 || !map.contains(fenced.sessions, 1u64) || !map.contains(fenced.sessions, 2u64) {
         return false
     }
-    if list.len(projected) != 1 || projected[0].session != 1 || list.len(projected[0].rows) != 2 || list.len(projected[0].groups) != 1 || projected[0].reset || list.len(projected[0].ended) != 0 {
+    if list.len(projected) != 1 || projected[0].session != 1 || list.len(owe_content_view(projected[0]).rows) != 2 || list.len(owe_content_view(projected[0]).groups) != 1 || owe_is_reset(projected[0]) || list.len(owe_content_view(projected[0]).ended) != 0 {
         return false
     }
-    let rows = view projected[0].rows
+    let projected_content = owe_content_view(projected[0])
+    let rows = view projected_content.rows
     let inserted = view rows[0]
     let removed = view rows[1]
     inserted.sub == 1 && removed.sub == 1 && inserted.value == Some(clone(b"\x14\x00\x00\x00\x00\x00\x00\x00")) && removed.value == None && list.slice(inserted.key, 4u64, list.len(inserted.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x02" && list.slice(removed.key, 4u64, list.len(removed.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x03"

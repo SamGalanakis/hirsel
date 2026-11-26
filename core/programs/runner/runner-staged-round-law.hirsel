@@ -37,7 +37,7 @@ fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks
     fence_round(mut joined, Fenced(sessions: map.new()), a, mut rounds)
     let visible = latest.handle(rounds.round)
     let initial = at_base_generation(mut b, 1u64, 1u32, 1u64, failed_read_sub())
-    if list.len(initial.complete) != 1u64 {
+    if list.len(owe_content_view(initial).complete) != 1u64 {
         return Error("initial subscription")
     }
     let before = option.unwrap(sub_at(b.subs, 1u64, 1u32)).charge
@@ -98,10 +98,10 @@ fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks
     let Some(content) = view received.content else {
         return Error("Release omitted the group")
     }
-    if received.version != v || list.len(content.groups) != 1u64 || content.groups[0u64].sub != 1u32 {
+    if received.version != v || list.len(owe_content_view(content).groups) != 1u64 || owe_content_view(content).groups[0u64].sub != 1u32 {
         return Error("released group version or subscriber")
     }
-    if list.compare_bytes(content.groups[0u64].payload, b"\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x0c\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x01\x00\x00\x00\x08\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00") != Equal {
+    if list.compare_bytes(owe_content_view(content).groups[0u64].payload, b"\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x0c\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x01\x00\x00\x00\x08\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00") != Equal {
         return Error("released group bytes differ from the slot-zero row update")
     }
     let Head(db: take completed, ..) = take hd

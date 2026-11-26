@@ -39,7 +39,7 @@ fn failed_read_owner(mut joined: List[Joiner], mut rounds: RoundRegister, who: u
     let root = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
     let identity = latest.new(arc.new(OwnerNumber(number: who)))
     let fences = result.unwrap(fence_reserve(mut rounds, latest.handle(root)))
-    list.push(mut joined, Joiner(grants: None, who: who, to: channel.sender(to), closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: Some(take identity), fence: Some(take fences), due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: who, to: channel.sender(to), closed: None, ended: list.new(), reset: None, mark: None, identity: Some(take identity), fence: Some(take fences), due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     FailedReadOwner(from: take from, fence: take root, to: take to)
 }
 
@@ -63,7 +63,7 @@ fn failed_read_reset(owner: FailedReadOwner, at: u64) -> bool {
     let Refused(Overloaded) = received.outcomes[1u64].outcome else {
         return false
     }
-    received.version == at && content.reset && list.len(content.complete) == 0u64 && list.len(content.rows) == 0u64 && list.len(content.ended) == 0u64 && received.outcomes[0u64].p == 17u64 && received.outcomes[1u64].p == 18u64
+    received.version == at && owe_is_reset(content) && list.len(owe_content_view(content).complete) == 0u64 && list.len(owe_content_view(content).rows) == 0u64 && list.len(owe_content_view(content).ended) == 0u64 && received.outcomes[0u64].p == 17u64 && received.outcomes[1u64].p == 18u64
 }
 
 fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase) -> bool waits {
@@ -94,7 +94,7 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
     let register = latest.handle(rounds.round)
     fence_round(mut joined, Fenced(sessions: map.new()), a, mut rounds)
     let first = at_base_generation(mut b, 1u64, 1u32, 1u64, failed_read_sub())
-    if list.len(first.complete) != 1u64 || first.complete[0u64] != 1u32 || list.len(first.rows) != 2u64 || !release_load(register, owner.fence, a) {
+    if list.len(owe_content_view(first).complete) != 1u64 || owe_content_view(first).complete[0u64] != 1u32 || list.len(owe_content_view(first).rows) != 2u64 || !release_load(register, owner.fence, a) {
         return false
     }
     let mut cl = Client(caches: list.new(), last: list.new())
@@ -161,7 +161,7 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
     } else {
         0u64
     }
-    if restarted.version != at || list.len(restarted.complete) != 1u64 || restarted.complete[0u64] != 1u32 || list.len(restarted.rows) != expected {
+    if restarted.version != at || list.len(owe_content_view(restarted).complete) != 1u64 || owe_content_view(restarted).complete[0u64] != 1u32 || list.len(owe_content_view(restarted).rows) != expected {
         return false
     }
     apply(mut cl, take restarted) && image_matches(cl, keys, model, watched)

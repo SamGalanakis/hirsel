@@ -90,12 +90,11 @@ fn leaving_sub_does_not_block_successor(clock: Clock, random: Random, tasks: Tas
     let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), head_to, clock, tasks, config, string.new())
     let Service(context: take initial, ..) = take service
     let mut ctx = take initial
-    ctx.phase = 3u8
+    wire_law_open(mut ctx, law_caller(1u64))
     ctx.publisher = Some(take pub_to)
     ctx.joined = Some(23u64)
     ctx.next_sub = 8u64
     ctx.sub_generation = 1u64
-    ctx.caller = Some(law_caller(1u64))
     list.push(mut ctx.subs, (7u32, 1u64))
     list.push(mut ctx.pub_subs, 7u32)
     let mut work = wire_work()
@@ -105,8 +104,9 @@ fn leaving_sub_does_not_block_successor(clock: Clock, random: Random, tasks: Tas
         return Error(1u64)
     }
     let reg = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
-    list.push(mut ctx.entries, http_law_key(reg.t.exported[1u64]))
-    list.push(mut ctx.known, 1u8)
+    if let Open(entries: mut entries, ..) = ctx.handshake {
+        list.push(mut entries, (http_law_key(reg.t.exported[1u64]), Registered))
+    }
     let next = result.unwrap(wire_plan_subscribe(mut ctx, reg, 8u32, 0u32, b"\x00\x00\x00\x00", None))
     if let PlannedSubscribe(..) = next {} else {
         return Error(2u64)

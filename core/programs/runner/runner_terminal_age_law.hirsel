@@ -11,7 +11,7 @@ fn fixture_owed_group(sub: u32, rows: List[SubRow]) -> OwedGroup {
 fn terminal_age_owe(task: u64, at: u64, sub: u32) -> List[Owe] {
     let mut updates: List[Owe] = list.new()
     let row = owe(mut updates, task, at)
-    list.push(mut updates[row].ended, TerminalUpdate(sub: sub, generation: 1u64, version: at, outcome: Refused(Overloaded)))
+    owe_law_push_ended(mut updates[row], TerminalUpdate(sub: sub, generation: 1u64, version: at, outcome: Refused(Overloaded)))
     take updates
 }
 
@@ -19,7 +19,7 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
     let _ = channel.try_send(to, wire_event(FromRunner(update(6u64, None, list.new()))))
-    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take to, closed: None, ended: list.new(), reset: None, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut active = subscriptions()
     let mut waiting: List[Replies] = list.new()
     settle(mut active, mut joined, mut waiting, terminal_age_owe(1u64, 7u64, 1u32), 7u64)
@@ -30,9 +30,9 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     let _ = result.unwrap(channel.try_receive(inbox))
     let mut fresh: List[Owe] = list.new()
     let fresh_index = owe(mut fresh, 1u64, 9u64)
-    list.push(mut fresh[fresh_index].generations, (3u32, 1u64))
-    list.push(mut fresh[fresh_index].complete, 3u32)
-    list.push(mut fresh[fresh_index].groups, fixture_owed_group(3u32, list.new()))
+    owe_law_stamp(mut fresh[fresh_index], 3u32, 1u64)
+    owe_law_push_complete(mut fresh[fresh_index], 3u32)
+    owe_law_push_group(mut fresh[fresh_index], fixture_owed_group(3u32, list.new()))
     settle(mut active, mut joined, mut waiting, take fresh, 9u64)
     let event = result.unwrap(channel.try_receive(inbox))
     let Notice(e: Updated(take pending)) = publisher_notice(take event) else {

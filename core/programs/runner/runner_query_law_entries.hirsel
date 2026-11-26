@@ -1,3 +1,47 @@
+fn owe_content_view(o: Owe) -> OweContent {
+    match o.body {
+        Content(content) => OweContent(generations: clone(content.generations), complete: clone(content.complete), rows: clone(content.rows), groups: clone(content.groups), ended: clone(content.ended), group_bytes: content.group_bytes, frame_limit: content.frame_limit),
+        Reset(_) => empty_owe_content(),
+    }
+}
+
+fn owe_law_push_complete(mut o: Owe, sub: u32) {
+    if let Content(mut content) = o.body {
+        list.push(mut content.complete, sub)
+    }
+}
+
+fn owe_law_push_group(mut o: Owe, take group: OwedGroup) {
+    if let Content(mut content) = o.body {
+        list.push(mut content.groups, take group)
+    }
+}
+
+fn owe_law_push_ended(mut o: Owe, take ended: TerminalUpdate) {
+    if let Content(mut content) = o.body {
+        list.push(mut content.ended, take ended)
+    }
+}
+
+fn owe_law_stamp(mut o: Owe, sub: u32, generation: u64) {
+    if let Content(mut content) = o.body {
+        list.push(mut content.generations, (sub, generation))
+    }
+}
+
+fn wire_law_open[G: send](mut s: WireSession[G], take caller: Caller) {
+    s.handshake = Open(caller: take caller, entries: list.new())
+}
+
+// Tests seed an already-open session one entry at a time.
+fn wire_know[G: send, H: shareable + inert + send](mut s: WireSession[G], r: Registry[G, H], take key: Bytes) {
+    if let Open(caller: _, entries: mut entries, ..) = s.handshake {
+        list.push(mut entries, wire_known_entry(r, take key))
+    } else {
+        fail("runner law: wire_know requires an open session")
+    }
+}
+
 fn law_query_table(h: Qh) -> store.Table[u64, u64] {
     clone(h.t)
 }

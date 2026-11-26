@@ -122,6 +122,10 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
     }
 }
 
+type Known: send = Neither | Registered | Gone
+
+type Handshake: send = AwaitHello | Binding(List[Want]) | Placing(caller: Caller, entries: List[(Bytes, Known)], next: u64) | Flushing(caller: Caller, entries: List[(Bytes, Known)]) | Open(caller: Caller, entries: List[(Bytes, Known)])
+
 pub opaque type WireSession[G: send]: send {
     room_link: Option[RoomLink],
     anonymous: Caller,
@@ -135,14 +139,8 @@ pub opaque type WireSession[G: send]: send {
     n_place: u64,
     me: Option[Sender[WireEvent]],
     publisher: Option[Sender[PubIn]],
-    caller: Option[Caller],
-    // known: per entry, 1 registered, 2 gone, 0 neither (set at Hello from the one Registry).
-    phase: u8,
-    wants: List[Want],
-    entries: List[Bytes],
-    known: List[u8],
+    handshake: Handshake,
     launch: Option[GrantedLaunch[G]],
-    placing: u64,
     pending: Option[WirePending],
     held: Map[Bytes, WireHeld],
     refusals: u64,
@@ -179,12 +177,16 @@ pub fn wire_service[G: send](random: Random, take session_wire: Option[BindGrant
 fn wire_service_with_head[G: send](random: Random, take session_wire: Option[BindGrant[G]], take grants: Option[CallGrant[G]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G]] {
     let anonymous = option.unwrap(anonymous_caller(random))
     let retirement = wire_retirement(head, anonymous)
-    let context: WireSession[G] = WireSession(room_link: None, anonymous: take anonymous, wire: take session_wire, grants: take grants, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64, me: None, publisher: None, caller: None, phase: 0u8, wants: list.new(), entries: list.new(), known: list.new(), launch: None, placing: 0u64, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64, joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false, holding: false, leaving: list.new(), deferred_subs: list.new(), next_sub: 0u64, progress: None, taken: None, completes: 0u64, told_taken: 0u64)
+    let context: WireSession[G] = WireSession(room_link: None, anonymous: take anonymous, wire: take session_wire, grants: take grants, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64, me: None, publisher: None, handshake: AwaitHello, launch: None, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64, joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false, holding: false, leaving: list.new(), deferred_subs: list.new(), next_sub: 0u64, progress: None, taken: None, completes: 0u64, told_taken: 0u64)
     Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live, retirement: Some(take retirement), flush_subscriptions: wire_flush_subscriptions)
 }
 
 fn wire_can_read[G: send](s: WireSession[G]) -> bool {
-    (s.phase == 0u8 || s.phase == 3u8) && (match s.pending {
+    (match s.handshake {
+        AwaitHello => true,
+        Open(..) => true,
+        _ => false
+    }) && (match s.pending {
         None => true,
         _ => false
     }) && match s.joining {
@@ -241,19 +243,16 @@ pub type ServicePlan: send = NoAction | PlanRefusal(StreamId, u64, Refusal) | Pl
 fn wire_plan_call[G: send, H: shareable + inert + send](mut s: WireSession[G], r: Registry[G, H], take pending: WirePending) -> Result[ServicePlan, u16] {
     let WirePending(stream: stream, p: p, wire_slot: wire_slot, deadline: deadline_ms, arg: take arg, at: at, grows: _) = take pending
     let index: u64 = int.widen(wire_slot)
-    if index >= list.len(s.entries) {
-        return Ok(PlanRefusal(stream, p, NoEntry))
-    }
-    let caller: Caller = match s.caller {
-        Some(a) => {
-            let copied: Caller = clone(a)
-            take copied
+    let (caller, key): (Caller, Bytes) = match s.handshake {
+        Open(caller, entries) => {
+            if index >= list.len(entries) {
+                return Ok(PlanRefusal(stream, p, NoEntry))
+            }
+            (clone(caller), clone(entries[index].0))
         },
         _ => return Error(1008u16),
     }
     let mut entries: List[Bytes] = list.new()
-    let copied_key: Bytes = clone(s.entries[index])
-    let key = take copied_key
     let copied_entry: Bytes = clone(key)
     let key_copy = take copied_entry
     list.push(mut entries, take key_copy)
@@ -524,16 +523,16 @@ fn wire_service_allocate[G: send, H: shareable + inert + send](mut s: WireSessio
     }
 }
 
-// Adds a Hello entry with what the shared Registry knows of it: 1 registered, 2 gone, 0 neither.
-fn wire_know[G: send, H: shareable + inert + send](mut s: WireSession[G], r: Registry[G, H], take key: Bytes) {
-    list.push(mut s.known, if map.contains(r.slots, key) {
-        1u8
+// Classify a Hello entry against the shared Registry.
+fn wire_known_entry[G: send, H: shareable + inert + send](r: Registry[G, H], take key: Bytes) -> (Bytes, Known) {
+    let known: Known = if map.contains(r.slots, key) {
+        Registered
     } else if map.contains(r.t.gone, key) {
-        2u8
+        Gone
     } else {
-        0u8
-    })
-    list.push(mut s.entries, take key)
+        Neither
+    }
+    (take key, known)
 }
 
 fn wire_accept_hello[G: send, H: shareable + inert + send](mut s: WireSession[G], r: Registry[G, H], take identity_result: Option[Caller]) -> Result[(), u16] {
@@ -544,12 +543,19 @@ fn wire_accept_hello[G: send, H: shareable + inert + send](mut s: WireSession[G]
     if list.len(caller.subject) > SUBJECT_MAX {
         return Error(1008u16)
     }
-    s.caller = Some(take caller)
-    let wanted = replace(mut s.wants, list.new())
-    for take want in take wanted {
-        wire_know(mut s, r, wire_key(want))
+    let prior = replace(mut s.handshake, AwaitHello)
+    let wanted = match take prior {
+        Binding(take wanted) => take wanted,
+        take other => {
+            s.handshake = take other
+            return Error(1008u16)
+        },
     }
-    s.phase = 2u8
+    let mut entries: List[(Bytes, Known)] = list.new()
+    for take want in take wanted {
+        list.push(mut entries, wire_known_entry(r, wire_key(want)))
+    }
+    s.handshake = Placing(caller: take caller, entries: take entries, next: 0u64)
     Ok(())
 }
 
@@ -622,6 +628,54 @@ fn wire_carries_complete(f: Frame) -> bool {
     }
 }
 
+fn wire_open_after_flush[G: send](mut s: WireSession[G]) {
+    if let Flushing(..) = s.handshake {
+        let prior = replace(mut s.handshake, AwaitHello)
+        s.handshake = match take prior {
+            Flushing(caller: take caller, entries: take entries) => Open(caller: take caller, entries: take entries),
+            take other => take other,
+        }
+    }
+}
+
+fn wire_place_frame[G: send](mut s: WireSession[G], mut work: WireWork) -> Result[Option[Frame], u16] {
+    let prior = replace(mut s.handshake, AwaitHello)
+    match take prior {
+        Placing(caller: take caller, entries: take entries, next: next) => {
+            if next == 0u64 {
+                let for_welcome: Caller = clone(caller)
+                if list.len(entries) == 0u64 {
+                    s.handshake = Flushing(caller: take caller, entries: take entries)
+                } else {
+                    s.handshake = Placing(caller: take caller, entries: take entries, next: 1u64)
+                }
+                let q: u32 = int.narrow(s.config.q)
+                let Some(sample) = work.stream_time else {
+                    return Error(1011u16)
+                }
+                return Ok(Some(Welcome(take for_welcome, q, s.config.budget, result.unwrap(launch_digest()), clone(s.target), s.n_place, sample.now_ms, sample.retention_ms)))
+            }
+            let index = next - 1u64
+            let wire_slot: u32 = int.narrow(index)
+            let answer: Entry = match entries[index].1 {
+                Registered => Ready(wire_slot),
+                Neither => Gone,
+                Gone => Gone,
+            }
+            if index + 1u64 == list.len(entries) {
+                s.handshake = Flushing(caller: take caller, entries: take entries)
+            } else {
+                s.handshake = Placing(caller: take caller, entries: take entries, next: next + 1u64)
+            }
+            Ok(Some(Placed(take answer)))
+        },
+        take other => {
+            s.handshake = take other
+            wire_take_output(s, mut work)
+        },
+    }
+}
+
 fn wire_step[G: send](mut s: WireSession[G], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
     let stepped = wire_step_input(mut s, mut work, take input)
     wire_offer_taken(mut s, work)
@@ -640,19 +694,15 @@ fn wire_step_input[G: send](mut s: WireSession[G], mut work: WireWork, take inpu
         },
         WClient(take frame, at) => match take frame {
             Hello(take token, take wanted) => {
-                if s.phase != 0u8 {
+                if let AwaitHello = s.handshake {} else {
                     return Error(1008u16)
                 }
-                s.phase = 1u8
-                s.wants = take wanted
+                s.handshake = Binding(take wanted)
                 wire_begin_hello(s, mut work, take token)?
             },
             Call(stream, p, wire_slot, deadline, take arg) => {
-                if s.phase != 3u8 {
-                    return Error(1008u16)
-                }
-                let key = match s.caller {
-                    Some(caller) => slot_key(wire_stream(caller, stream), p),
+                let key = match s.handshake {
+                    Open(caller, ..) => slot_key(wire_stream(caller, stream), p),
                     _ => return Error(1008u16)
                 }
                 let grows = match map.get(s.held, key) {
@@ -674,7 +724,7 @@ fn wire_step_input[G: send](mut s: WireSession[G], mut work: WireWork, take inpu
             // and steps the plan as WPrepared; a Subscribe never reaches the step.
             Subscribe(_, _, _, _) => return Error(1008u16),
             Unsubscribe(sub) => {
-                if s.phase != 3u8 {
+                if let Open(..) = s.handshake {} else {
                     return Error(1008u16)
                 }
                 wire_stop_sub(mut s, mut work.output, sub)
@@ -729,37 +779,9 @@ fn wire_step_input[G: send](mut s: WireSession[G], mut work: WireWork, take inpu
             if !writable {
                 return Ok(None)
             }
-            if s.phase == 4u8 {
-                s.phase = 3u8
-            }
-            if s.phase == 2u8 {
-                if s.placing == 0u64 {
-                    s.placing += 1u64
-                    if list.len(s.entries) == 0u64 {
-                        s.phase = 4u8
-                    }
-                    let caller: Caller = match s.caller {
-                        Some(caller) => clone(caller),
-                        None => return Error(1008u16),
-                    }
-                    let q: u32 = int.narrow(s.config.q)
-                    let Some(sample) = work.stream_time else {
-                        return Error(1011u16)
-                    }
-                    return Ok(Some(Welcome(take caller, q, s.config.budget, result.unwrap(launch_digest()), clone(s.target), s.n_place, sample.now_ms, sample.retention_ms)))
-                }
-                let index = s.placing - 1u64
-                let wire_slot: u32 = int.narrow(index)
-                let answer: Entry = if s.known[index] == 1u8 {
-                    Ready(wire_slot)
-                } else {
-                    Gone
-                }
-                s.placing += 1u64
-                if index + 1u64 == list.len(s.entries) {
-                    s.phase = 4u8
-                }
-                return Ok(Some(Placed(take answer)))
+            wire_open_after_flush(mut s)
+            if let Placing(..) = s.handshake {
+                return wire_place_frame(mut s, mut work)
             }
             return wire_take_output(s, mut work)
         },
@@ -832,30 +854,29 @@ resource type WireJoinLease: send {
 // a head answer could reach the writer while that conflicting send is being prepared.
 fn wire_check_live[G: send](s: WireSession[G], f: Frame) -> Option[u16] {
     if let Call(stream, p, wire_slot, _, arg) = f {
-        let index: u64 = int.widen(wire_slot)
-        if index >= list.len(s.entries) {
-            return None
-        }
-        let key = s.entries[index]
-        if s.known[index] == 0u8 {
-            return None
-        }
-        let named: Bytes = match s.caller {
-            Some(caller) => wire_stream(caller, stream),
-            _ => return None
-        }
-        let position = slot_key(named, p)
-        let prior: Option[store.RequestDigest] = match map.get(s.held, position) {
-            Some(h) => if h.forwarded || list.len(h.owed) != 0u64 {
-                Some(h.digest)
-            } else {
-                None
-            },
-            _ => None
-        }
-        if let Some(digest) = prior {
-            if digest != store.request_digest(key, arg) {
-                return Some(1008u16)
+        if let Open(caller, entries) = s.handshake {
+            let index: u64 = int.widen(wire_slot)
+            if index >= list.len(entries) {
+                return None
+            }
+            let key = entries[index].0
+            if let Neither = entries[index].1 {
+                return None
+            }
+            let named: Bytes = wire_stream(caller, stream)
+            let position = slot_key(named, p)
+            let prior: Option[store.RequestDigest] = match map.get(s.held, position) {
+                Some(h) => if h.forwarded || list.len(h.owed) != 0u64 {
+                    Some(h.digest)
+                } else {
+                    None
+                },
+                _ => None
+            }
+            if let Some(digest) = prior {
+                if digest != store.request_digest(key, arg) {
+                    return Some(1008u16)
+                }
             }
         }
     }

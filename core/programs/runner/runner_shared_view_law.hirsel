@@ -25,7 +25,7 @@ fn shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
     let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let first = at_base_generation(mut b, 1u64, 10u32, 1u64, shared_input(key, 136u64, 1u8, refund))
     let joined = at_base_generation(mut b, 2u64, 20u32, 1u64, shared_input(key, 65536u64, 2u8, refund))
-    if list.len(first.complete) != 1u64 || list.len(joined.complete) != 1u64 {
+    if list.len(owe_content_view(first).complete) != 1u64 || list.len(owe_content_view(joined).complete) != 1u64 {
         return Error("joining a plain view did not complete")
     }
     if map.len(b.subs.indexed) != 1u64 {
@@ -56,10 +56,10 @@ fn shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
     }
     let mut rejected = false
     for owed in changes {
-        if list.len(owed.rows) != 0u64 {
+        if list.len(owe_content_view(owed).rows) != 0u64 {
             return Error("due subscriber received a delta")
         }
-        for ended in owed.ended {
+        for ended in owe_content_view(owed).ended {
             if owed.session == 1u64 && ended.sub == 10u32 {
                 if let Refused(Budget(_)) = ended.outcome {
                     rejected = true
@@ -71,7 +71,7 @@ fn shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
         return Error("a larger read image did not charge the subscriber")
     }
     let current = at_base_generation(mut b, 3u64, 30u32, 1u64, shared_input(key, 65536u64, 3u8, refund))
-    if list.len(current.complete) != 1u64 || list.len(current.rows) != 1u64 {
+    if list.len(owe_content_view(current).complete) != 1u64 || list.len(owe_content_view(current).rows) != 1u64 {
         return Error("join did not get the refreshed image")
     }
     Ok(())

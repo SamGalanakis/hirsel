@@ -86,7 +86,7 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     let owner = failed_read_owner(mut joined, mut rounds, 1)
     fence_round(mut joined, Fenced(sessions: map.new()), 5, mut rounds)
     let initial = at_base_generation(mut b, 1, 1u32, 1, failed_read_sub())
-    if list.len(initial.complete) != 1 {
+    if list.len(owe_content_view(initial).complete) != 1 {
         fail("L56: the subscription did not start")
     }
     let operation = code.describe(sim_release_tx)
@@ -144,7 +144,7 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     let Some(content) = view got.content else {
         fail("L56: the release did not carry a subscription batch")
     }
-    if got.version != 7 || list.len(content.groups) != 1 || list.len(got.outcomes) != 1 || got.outcomes[0].p != 0 {
+    if got.version != 7 || list.len(owe_content_view(content).groups) != 1 || list.len(got.outcomes) != 1 || got.outcomes[0].p != 0 {
         fail("L56: the received batch or reply did not identify the release")
     }
     if let Returned(data) = got.outcomes[0].outcome {

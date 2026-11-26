@@ -88,33 +88,36 @@ fn http_counted_span(input: Bytes, mut at: u64) -> Result[std.http1.Span, store.
 fn http_project_owes[G: send, H: shareable + inert + send](mut b: Board[G, H], mut owes: List[Owe]) {
     for index in 0u64 .. list.len(owes) {
         let who = owes[index].session
-        for g in 0u64 .. list.len(owes[index].groups) {
-            let sub = owes[index].groups[g].sub
-            let before = list.len(owes[index].groups[g].payload)
-            let envelope = 24u64 + 4u64 * list.len(owes[index].complete)
-            let occupied = int.saturating_add(envelope, owes[index].group_bytes - before)
-            let available = int.saturating_sub(owes[index].frame_limit, occupied)
-            let keys = http_group_for(b, who, sub, owes[index].groups[g].payload, available)
-            match take keys {
-                None => (),
-                Some(Ok(take payload)) => {
-                    owes[index].group_bytes = owes[index].group_bytes - before + list.len(payload)
-                    owes[index].groups[g].payload = take payload
-                    list.clear(mut owes[index].rows)
-                },
-                Some(Error(take problem)) => {
-                    let generation = match sub_generation(owes[index].generations, sub) {
-                        Some(n) => n,
-                        None => 0u64
-                    }
-                    list.clear(mut owes[index].complete)
-                    list.clear(mut owes[index].groups)
-                    list.clear(mut owes[index].rows)
-                    owes[index].group_bytes = 0u64
-                    append_terminal(mut owes[index], sub, generation, take problem)
-                    end_entry(mut b.subs, who, sub)
-                    break
-                },
+        let at = owes[index].version
+        if let Content(mut content) = owes[index].body {
+            for g in 0u64 .. list.len(content.groups) {
+                let sub = content.groups[g].sub
+                let before = list.len(content.groups[g].payload)
+                let envelope = 24u64 + 4u64 * list.len(content.complete)
+                let occupied = int.saturating_add(envelope, content.group_bytes - before)
+                let available = int.saturating_sub(content.frame_limit, occupied)
+                let keys = http_group_for(b, who, sub, content.groups[g].payload, available)
+                match take keys {
+                    None => (),
+                    Some(Ok(take payload)) => {
+                        content.group_bytes = content.group_bytes - before + list.len(payload)
+                        content.groups[g].payload = take payload
+                        list.clear(mut content.rows)
+                    },
+                    Some(Error(take problem)) => {
+                        let generation = match sub_generation(content.generations, sub) {
+                            Some(n) => n,
+                            None => 0u64
+                        }
+                        list.clear(mut content.complete)
+                        list.clear(mut content.groups)
+                        list.clear(mut content.rows)
+                        content.group_bytes = 0u64
+                        list.push(mut content.ended, TerminalUpdate(sub: sub, generation: generation, version: at, outcome: take problem))
+                        end_entry(mut b.subs, who, sub)
+                        break
+                    },
+                }
             }
         }
     }

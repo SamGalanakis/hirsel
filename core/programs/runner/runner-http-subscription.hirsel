@@ -61,7 +61,10 @@ fn offer_content(owner: Joiner, take notice: Notice) -> Offered {
     }
     let batch = match notice.e {
         Updated(current) => match current.content {
-            Some(content) => list.len(content.groups) != 0u64,
+            Some(content) => match content.body {
+                Content(body) => list.len(body.groups) != 0u64,
+                _ => false,
+            },
             None => false
         },
         _ => false,
@@ -133,17 +136,20 @@ fn http_admitted(mut owner: HttpOwner) -> Result[(), Refusal] {
 
 fn http_frame(take notice: Notice) -> Option[HttpFrame] {
     if let Notice(e: Updated(Update(version: version, content: Some(take update_body), ..))) = take notice {
-        let Owe(reset: reset, complete: complete, groups: take groups, ended: take ended, ..) = take update_body
-        if reset {
-            return Some(HttpReset(version))
-        }
-        for take terminal in take ended {
-            let TerminalUpdate(outcome: take outcome, version: at, ..) = take terminal
-            return Some(HttpEnded(at, take outcome))
-        }
-        for take group in take groups {
-            let OwedGroup(payload: take data, ..) = take group
-            return Some(HttpBatch(version, list.len(complete) > 0u64, take data))
+        let Owe(body: take update_kind, ..) = take update_body
+        match take update_kind {
+            Reset(_) => return Some(HttpReset(version)),
+            Content(take content) => {
+                let OweContent(complete: complete, groups: take groups, ended: take ended, ..) = take content
+                for take terminal in take ended {
+                    let TerminalUpdate(outcome: take outcome, version: at, ..) = take terminal
+                    return Some(HttpEnded(at, take outcome))
+                }
+                for take group in take groups {
+                    let OwedGroup(payload: take data, ..) = take group
+                    return Some(HttpBatch(version, list.len(complete) > 0u64, take data))
+                }
+            },
         }
     }
     None

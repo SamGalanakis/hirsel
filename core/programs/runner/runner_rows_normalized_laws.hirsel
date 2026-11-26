@@ -142,7 +142,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
     let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
-    if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
+    if list.len(owe_content_view(initial).complete) != 1u64 || list.len(owe_content_view(initial).rows) != 1u64 || !row_is(owe_content_view(initial).rows[0], account_key(1u8), account_value(10u8, 7u8)) {
         return false
     }
     // G2: row 2, put at schema 1, arrives from changes with the same normalization.
@@ -154,7 +154,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
         _ => return false,
     }
     let owes = step(mut b, db)
-    list.len(owes) == 1u64 && list.len(owes[0].rows) == 1u64 && row_is(owes[0].rows[0], account_key(2u8), account_value(20u8, 9u8))
+    list.len(owes) == 1u64 && list.len(owe_content_view(owes[0]).rows) == 1u64 && row_is(owe_content_view(owes[0]).rows[0], account_key(2u8), account_value(20u8, 9u8))
 }
 
 fn faulting_new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
@@ -190,7 +190,7 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     result.unwrap(bind_query_slots(mut bound_registry, h))
     let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
-    !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64 && list.len(o.ended) == 1u64 && o.ended[0].sub == 7u32 && ended_entry(b.subs, SubId(who: 1u64, sub: 7u32, serial: 0u64)) && match o.ended[0].outcome {
+    !owe_is_reset(o) && list.len(owe_content_view(o).rows) == 0u64 && list.len(owe_content_view(o).complete) == 0u64 && list.len(owe_content_view(o).ended) == 1u64 && owe_content_view(o).ended[0].sub == 7u32 && ended_entry(b.subs, SubId(who: 1u64, sub: 7u32, serial: 0u64)) && match owe_content_view(o).ended[0].outcome {
         Failed(Raised(5u32)) => balance == 10u64,
         Failed(OutOfTime(4096u64)) => balance == 11u64,
         _ => false,

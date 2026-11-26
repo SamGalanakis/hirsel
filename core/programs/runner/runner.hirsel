@@ -3052,8 +3052,7 @@ type Joiner {
     to: Sender[WireEvent],
     closed: Option[Receiver[()]],
     ended: List[TerminalUpdate],
-    reset: bool,
-    read_failed: bool,
+    reset: Option[OweReset],
     mark: Option[Receiver[()]],
     identity: Option[Latest[OwnerNumber]],
     fence: Option[FenceSet],
@@ -3119,7 +3118,7 @@ fn retire_read_failure(mut j: Joiner) {
 
 fn reset_waiting(joined: List[Joiner], owner: u64) -> bool {
     for j in joined {
-        if j.read_failed {
+        if joiner_read_failed(j) {
             if let Some(identity) = j.identity {
                 if latest.read(identity).number == owner {
                     return true
@@ -3140,7 +3139,7 @@ fn publish_wire_subscription[G: send, H: shareable + inert + send](mut b: Board[
             return
         }
         let next = at_base_generation(mut b, who, sub, generation, take input)
-        if next.read_failed {
+        if owe_read_failed(next) {
             retire_read_failure(mut joined[i])
             end_session(mut b.subs, who)
         }
@@ -3209,7 +3208,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             Some(id) => latest.read(id).number,
             None => 0u64
         }
-        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
+        let empty = empty_owe(who, at)
         while content_index < list.len(contents) && contents[content_index].session < who {
             content_index += 1u64
         }
@@ -3221,24 +3220,20 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             take empty
         }
         let old = replace(mut joined[i].ended, list.new())
-        if joined[i].reset || next.reset || !owe_frame_fits(next) {
-            let _ = replace(mut next.generations, list.new())
-            let _ = replace(mut next.complete, list.new())
-            let _ = replace(mut next.rows, list.new())
-            let _ = replace(mut next.groups, list.new())
-            let _ = replace(mut next.ended, list.new())
-            next.reset = true
-            next.read_failed = next.read_failed || joined[i].read_failed
+        if joiner_is_reset(joined[i]) || owe_is_reset(next) || !owe_frame_fits(next) {
+            let failed = owe_read_failed(next) || joiner_read_failed(joined[i])
+            next.body = Reset(OweReset(read_failed: failed))
             end_session(mut subs, who)
             joined[i].due = false
         } else if list.len(old) > 0u64 {
-            let now = replace(mut next.ended, take old)
-            for take ended in now {
-                list.push(mut next.ended, take ended)
+            if let Content(mut content) = next.body {
+                let now = replace(mut content.ended, take old)
+                for take ended in now {
+                    list.push(mut content.ended, take ended)
+                }
             }
         }
-        joined[i].reset = false
-        joined[i].read_failed = false
+        joined[i].reset = None
         let (take recipient, take rows) = match reply_bucket(waiting, owner) {
             Some(k) => {
                 let Replies(recipient: take r, rows: take rows) = list.remove(mut waiting, k)
@@ -3246,12 +3241,14 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             },
             None => (None, list.new()),
         }
-        let has_content = next.reset || list.len(next.complete) > 0u64 || list.len(next.rows) > 0u64 || list.len(next.groups) > 0u64 || list.len(next.ended) > 0u64
+        let (has_content, handing) = match next.body {
+            Reset(_) => (true, 0u64),
+            Content(content) => (list.len(content.complete) > 0u64 || list.len(content.rows) > 0u64 || list.len(content.groups) > 0u64 || list.len(content.ended) > 0u64, list.len(content.complete)),
+        }
         if !has_content && list.len(rows) == 0u64 {
             i += 1u64
             continue
         }
-        let handing = list.len(next.complete)
         let content = if has_content {
             Some(take next)
         } else {
@@ -3302,22 +3299,30 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // A full inbox bounced this content: a Reset waits and covers it all; otherwise each live sub
 // it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, groups: take groups, ended: take ended, reset: reset, read_failed: failed, ..) = take o
+    let Owe(session: who, body: take body, ..) = take o
     // A token taken before this bounce never counts after it (§3 "Repair").
     j.progressed = false
-    if reset || j.reset {
-        j.reset = true
-        j.read_failed = j.read_failed || failed
-        j.ended = list.new()
-        return
-    }
-    for group in groups {
-        if mark_due(mut subs, who, group.sub) {
-            j.due = true
-        }
-    }
-    for take x in ended {
-        list.push(mut j.ended, take x)
+    match take body {
+        Reset(reset) => {
+            let failed = reset.read_failed || joiner_read_failed(j)
+            j.reset = Some(OweReset(read_failed: failed))
+            j.ended = list.new()
+        },
+        Content(take content) => {
+            if joiner_is_reset(j) {
+                j.ended = list.new()
+                return
+            }
+            let OweContent(groups: take groups, ended: take ended, ..) = take content
+            for group in groups {
+                if mark_due(mut subs, who, group.sub) {
+                    j.due = true
+                }
+            }
+            for take x in take ended {
+                list.push(mut j.ended, take x)
+            }
+        },
     }
 }
 
@@ -3340,17 +3345,19 @@ fn repair[G: send, H: shareable + inert + send](mut b: Board[G, H], mut joined: 
         if took {
             joined[i].progressed = true
         }
-        if joined[i].due && joined[i].progressed && !joined[i].reset && caught_up(joined[i]) {
+        if joined[i].due && joined[i].progressed && !joiner_is_reset(joined[i]) && caught_up(joined[i]) {
             joined[i].due = false
             joined[i].progressed = false
             let who = joined[i].who
             for sub in due_subs(b.subs, who) {
                 let fresh = repair_entry(mut b, who, sub, at)
                 let k = owe(mut owes, who, at)
-                if fresh.read_failed {
+                if owe_read_failed(fresh) {
                     retire_read_failure(mut joined[i])
                     reset_session(mut b.subs, mut owes, who, at)
-                    owes[k].read_failed = true
+                    if let Reset(mut reset) = owes[k].body {
+                        reset.read_failed = true
+                    }
                     break
                 }
                 merge_owe(mut owes[k], take fresh)
@@ -3366,38 +3373,6 @@ fn caught_up(j: Joiner) -> bool {
     match j.taken {
         Some(t) => latest.read(t).n >= j.handed,
         None => true
-    }
-}
-
-fn merge_owe(mut into: Owe, take from: Owe) {
-    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, groups: take groups, ended: take ended, group_bytes: group_bytes, frame_limit: frame_limit, reset: reset, read_failed: failed) = take from
-    let has_content = list.len(complete) != 0u64 || list.len(rows) != 0u64 || list.len(groups) != 0u64
-    let already_has_content = list.len(into.complete) != 0u64 || list.len(into.rows) != 0u64 || list.len(into.groups) != 0u64
-    if has_content && (!already_has_content || v < into.version) {
-        into.version = v
-    }
-    into.group_bytes = int.saturating_add(into.group_bytes, group_bytes)
-    if frame_limit < into.frame_limit {
-        into.frame_limit = frame_limit
-    }
-    if reset {
-        into.reset = true
-    }
-    into.read_failed = into.read_failed || failed
-    for g in generations {
-        list.push(mut into.generations, g)
-    }
-    for sub in complete {
-        list.push(mut into.complete, sub)
-    }
-    for take r in rows {
-        list.push(mut into.rows, take r)
-    }
-    for take group in groups {
-        list.push(mut into.groups, take group)
-    }
-    for take e in ended {
-        list.push(mut into.ended, take e)
     }
 }
 
@@ -3582,26 +3557,30 @@ fn slot_key(stream: Bytes, p: u64) -> Bytes {
 // keeps them, and the owner drops their rows and Endeds until a Batch completes the sub's
 // resubscription, an Ended ends it, or a Reset ends them all.
 fn hand(to: Sender[Down], take o: Owe, mut dropped: List[u32], take outcomes: List[KeyedDone]) -> () waits {
-    let Owe(session: _, version: v, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed, ..) = take o
-    if reset {
-        list.clear(mut dropped)
-        let _ = channel.send(to, KeyedReset(v, take outcomes))
-        return
-    }
-    for sub in complete {
-        forgive(mut dropped, sub)
-    }
-    let heard = unheard(take rows, dropped)
-    if list.len(complete) > 0u64 || list.len(heard) > 0u64 || list.len(outcomes) > 0u64 {
-        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: take outcomes)))
-    }
-    for take e in take ended {
-        let TerminalUpdate(sub: sub, outcome: take why, ..) = take e
-        if has_sub(dropped, sub) {
-            forgive(mut dropped, sub)
-        } else {
-            let _ = channel.send(to, Ended(sub, take why))
-        }
+    let Owe(session: _, version: v, body: take body) = take o
+    match take body {
+        Reset(_) => {
+            list.clear(mut dropped)
+            let _ = channel.send(to, KeyedReset(v, take outcomes))
+        },
+        Content(take owed) => {
+            let OweContent(complete: take complete, rows: take rows, ended: take ended, ..) = take owed
+            for sub in complete {
+                forgive(mut dropped, sub)
+            }
+            let heard = unheard(take rows, dropped)
+            if list.len(complete) > 0u64 || list.len(heard) > 0u64 || list.len(outcomes) > 0u64 {
+                let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: take outcomes)))
+            }
+            for take e in take ended {
+                let TerminalUpdate(sub: sub, outcome: take why, ..) = take e
+                if has_sub(dropped, sub) {
+                    forgive(mut dropped, sub)
+                } else {
+                    let _ = channel.send(to, Ended(sub, take why))
+                }
+            }
+        },
     }
 }
 
@@ -3704,32 +3683,37 @@ fn apply(mut c: Client, take o: Owe) -> bool {
     if !seen {
         list.push(mut c.last, (o.session, o.version))
     }
-    if o.reset {
-        while let Some(j) = first_of(c, o.session) {
-            let _ = list.remove(mut c.caches, j)
-        }
-        return true
+    let Owe(session: who, body: take body, ..) = take o
+    match take body {
+        Reset(_) => {
+            while let Some(j) = first_of(c, who) {
+                let _ = list.remove(mut c.caches, j)
+            }
+            true
+        },
+        Content(take owed) => {
+            let OweContent(complete: take complete, rows: take rows, ended: take ended, ..) = take owed
+            for sub in complete {
+                drop_cache(mut c, who, sub)
+                list.push(mut c.caches, Cached(who: who, sub: sub, rows: map.new()))
+            }
+            for take row in take rows {
+                let SubRow(sub: sub, key: take key, value: take value) = take row
+                let k = match cached(c, who, sub) {
+                    Some(k) => k,
+                    None => return false,
+                }
+                let _ = map.remove(mut c.caches[k].rows, key)
+                if let Some(take v) = take value {
+                    map.insert(mut c.caches[k].rows, take key, take v)
+                }
+            }
+            for e in ended {
+                drop_cache(mut c, who, e.sub)
+            }
+            true
+        },
     }
-    for sub in o.complete {
-        drop_cache(mut c, o.session, sub)
-        list.push(mut c.caches, Cached(who: o.session, sub: sub, rows: map.new()))
-    }
-    let Owe(session: who, version: _, generations: _, complete: _, rows: take rows, ended: take ended, ..) = take o
-    for take row in rows {
-        let SubRow(sub: sub, key: take key, value: take value) = take row
-        let k = match cached(c, who, sub) {
-            Some(k) => k,
-            None => return false,
-        }
-        let _ = map.remove(mut c.caches[k].rows, key)
-        if let Some(take v) = take value {
-            map.insert(mut c.caches[k].rows, take key, take v)
-        }
-    }
-    for e in ended {
-        drop_cache(mut c, who, e.sub)
-    }
-    true
 }
 
 fn first_of(c: Client, who: u64) -> Option[u64] {

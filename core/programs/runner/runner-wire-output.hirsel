@@ -341,31 +341,36 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
     let mut generations: List[(u32, u64)] = list.new()
     let mut computed = 0u64
     if current {
-        let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, groups: take groups, ended: take stopped, reset: reset, read_failed: failed, ..) = option.unwrap(take content)
+        let Owe(session: _, version: content_version, body: take body) = option.unwrap(take content)
         computed = content_version
-        s.completes += list.len(complete)
-        if reset {
-            if !failed && s.reset_seen {
-                return Error(1008u16)
-            }
-            if !failed {
-                s.reset_seen = true
-            }
-            return wire_reset_rows(mut s, mut output, version, take done, take marks)
+        match take body {
+            Reset(reset) => {
+                if !reset.read_failed && s.reset_seen {
+                    return Error(1008u16)
+                }
+                if !reset.read_failed {
+                    s.reset_seen = true
+                }
+                return wire_reset_rows(mut s, mut output, version, take done, take marks)
+            },
+            Content(take owed) => {
+                let OweContent(generations: take stamps, complete: take complete, groups: take groups, ended: take stopped, ..) = take owed
+                s.completes += list.len(complete)
+                generations = take stamps
+                let _ = wire_drop_stale(mut generations, s.subs)
+                for take group in take groups {
+                    if let Some(_) = sub_generation(generations, group.sub) {
+                        list.push(mut live_groups, take group)
+                    }
+                }
+                for sub in complete {
+                    if let Some(_) = sub_generation(generations, sub) {
+                        list.push(mut live_complete, sub)
+                    }
+                }
+                ended = take stopped
+            },
         }
-        generations = take stamps
-        let _ = wire_drop_stale(mut generations, s.subs)
-        for take group in groups {
-            if let Some(_) = sub_generation(generations, group.sub) {
-                list.push(mut live_groups, take group)
-            }
-        }
-        for sub in complete {
-            if let Some(_) = sub_generation(generations, sub) {
-                list.push(mut live_complete, sub)
-            }
-        }
-        ended = take stopped
     }
     let reserve = wire_outcome_reserve(s.config)
     let envelope = 24u64 + 4u64 * list.len(live_complete)

@@ -124,7 +124,8 @@ type StreamService {
     bell: Client[u32],
     timer: Option[Task[()]],
     poll_at: u64,
-    gc: StreamGcState
+    gc: StreamGcState,
+    janitor_asks: List[JanitorAsk]
 }
 
 fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits {
@@ -163,7 +164,7 @@ fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits
         }
     }
     let _ = channel.send(ready, Ok(()))
-    let mut service = StreamService(lane: take lane, client: take client, clock, plan: take plan, op_ms, slots: list.new(), rings: take rings, reports: take reports, control: take control, waiting: list.new(), tickets: list.new(), prefixes: take prefixes, observed_rows: list.new(), active_settles: list.new(), stall_polls: list.new(), next_settle_id: 1, last_reg_ns: now, tasks, bell: take bell, timer: None, poll_at: 0, gc: take gc)
+    let mut service = StreamService(lane: take lane, client: take client, clock, plan: take plan, op_ms, slots: list.new(), rings: take rings, reports: take reports, control: take control, waiting: list.new(), tickets: list.new(), prefixes: take prefixes, observed_rows: list.new(), active_settles: list.new(), stall_polls: list.new(), next_settle_id: 1, last_reg_ns: now, tasks, bell: take bell, timer: None, poll_at: 0, gc: take gc, janitor_asks: list.new())
     stream_service_arm_next(mut service)
     let result = stream_service_loop(mut service)
     if let Some(take running) = replace(mut service.timer, None) {
@@ -224,8 +225,16 @@ fn stream_service_control(mut s: StreamService) -> Result[bool, Error] waits {
     loop {
         match channel.try_receive(s.control) {
             Ok(NewSlot(take answers)) => {
-                let granted = stream_new_slot(mut s)
+                let granted = stream_new_slot(mut s, false)
                 let _ = channel.send(answers, take granted)
+            },
+            Ok(NewReservedSlot(take answers)) => {
+                let granted = stream_new_slot(mut s, true)
+                let _ = channel.send(answers, take granted)
+            },
+            Ok(JanitorPoll(take answers)) => {
+                let drained = replace(mut s.janitor_asks, list.new())
+                let _ = channel.send(answers, take drained)
             },
             Ok(StopService) => return Ok(false),
             Error(_) => return Ok(true),
@@ -234,13 +243,16 @@ fn stream_service_control(mut s: StreamService) -> Result[bool, Error] waits {
 }
 
 // A free slot, or a new one while fewer than `max_slots` - 1 are given out
-// (one is the janitor's, §12.11.8). Refuses `Full(Pins)` once active pins
-// reach `max_pins` - 1 (one pin stays reserved for the janitor).
-fn stream_new_slot(mut s: StreamService) -> Result[(Client[SlotMsg], u32), Error] {
-    let pins_limit: u64 = int.widen(s.plan.limits.max_pins)
-    let max_ordinary_pins = pins_limit - 1
-    if list.len(s.gc.pins) >= max_ordinary_pins {
-        return Error(Full(Pins(Capacity(requested: 1, available: 0))))
+// (one is the janitor's, §12.11.8). Ordinary slots refuse `Full(Pins)` once
+// active pins reach `max_pins` - 1; the reserved janitor slot uses the last
+// slot and is never refused by `max_pins` (A5).
+fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotMsg], u32), Error] {
+    if !reserved {
+        let pins_limit: u64 = int.widen(s.plan.limits.max_pins)
+        let max_ordinary_pins = pins_limit - 1
+        if list.len(s.gc.pins) >= max_ordinary_pins {
+            return Error(Full(Pins(Capacity(requested: 1, available: 0))))
+        }
     }
     let made: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(STREAM_SLOT_ITEMS, bytes s.plan.limits.slot_bytes)
     let (take data, take inbox) = capacity(take made)?
@@ -251,8 +263,12 @@ fn stream_new_slot(mut s: StreamService) -> Result[(Client[SlotMsg], u32), Error
         }
     }
     let slot_count: u64 = int.widen(s.plan.limits.max_slots)
-    let ordinary = slot_count - 1
-    if list.len(s.slots) >= ordinary {
+    let limit = if reserved {
+        slot_count
+    } else {
+        slot_count - 1
+    }
+    if list.len(s.slots) >= limit {
         for i in 0u64 .. list.len(s.slots) {
             if stream_slot_closed(mut s.slots[i]) {
                 let _ = replace(mut s.slots[i], ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))

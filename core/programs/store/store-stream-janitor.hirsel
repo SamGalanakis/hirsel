@@ -1,0 +1,258 @@
+// The host stream's janitor (STORE-SPEC §12.11.6 A4, §12.11.8 M9/A5):
+// - owns the reserved slot & pin headroom for closing a Place with a Held row
+//   and no head task (after `hold_ms`) or a straggler pin (after `pin_ttl_s`
+//   or at `max_pins`);
+// - watches foreign streams whose pins this host needs cleared and elects a
+//   Collecting incarnation (`kind = 1`) once a Serving token or Collecting rev
+//   stays unchanged for `4 * hold_ms` (with A4 election recheck).
+type JanitorAsk: send = JanitorOrphanHold(StoreId, String, u64) | JanitorStragglerPin(StoreId, String)
+
+// Opens a Place streamed on the service's reserved slot (never refused by
+// `max_pins` or ordinary `max_slots`, §12.11.8 A5) and closes it so H raises
+// the epoch (triggering rule (c) for orphan Held rows) and close settles/cuts
+// and drops ATTACH (clearing straggler pins).
+fn stream_janitor_close_place(tasks: Tasks, mut service: JournalService, take authority: Authority, c: Clock, r: Random, options: Options) -> Result[(), Error] waits {
+    let slot = journal_reserved_slot(mut service)?
+    let attached = streamed(take authority, take slot)?
+    let mut db = open_authority(tasks, take attached, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    close(take db)
+}
+
+// Per-foreign-stream janitor watcher (§12.11.8 "Dead and collecting streams"):
+// polls `S'/reg` every `idle_poll_ms` only while `needs_pin` is true, and
+// returns a Collecting election trigger once a Serving row carries the same
+// token for `4 * hold_ms` or a Collecting register's `rev` stays unchanged for
+// `4 * hold_ms`.
+type ForeignStreamWatch {
+    sid: HostStreamId,
+    dir: String,
+    needs_pin: bool,
+    hold_ms: u64,
+    idle_poll_ms: u64,
+    watched_tokens: List[(StoreId, u64)],
+    collecting_rev: Option[(u64, u64)]
+}
+
+// Trigger returned by `stream_foreign_watch_poll` once `4 * hold_ms` elapses:
+// `Some(tok)` for a Serving stream's aged token, `None` for a stalled Collecting rev.
+type CollectingTrigger: send = TriggerServing(StoreId) | TriggerCollecting(u64)
+
+fn stream_foreign_watch(sid: HostStreamId, root: String, needs_pin: bool, hold_ms: u64, idle_poll_ms: u64) -> ForeignStreamWatch {
+    ForeignStreamWatch(sid, dir: stream_key(root, stream_dir(sid)), needs_pin, hold_ms, idle_poll_ms, watched_tokens: list.new(), collecting_rev: None)
+}
+
+fn stream_foreign_watch_poll(mut watch: ForeignStreamWatch, mut lane: StreamLane, mut client: std.object.Client, now: u64, deadline: u64) -> Result[Option[CollectingTrigger], Error] waits {
+    if !watch.needs_pin {
+        list.clear(mut watch.watched_tokens)
+        watch.collecting_rev = None
+        return Ok(None)
+    }
+    stream_reg_read(mut lane, mut client, deadline)?
+    let limit_ns = int.saturating_mul(int.saturating_mul(4, watch.hold_ms), 1000000)
+    if lane.reg.collecting {
+        list.clear(mut watch.watched_tokens)
+        if let Some((prev_rev, first_ns)) = watch.collecting_rev {
+            if prev_rev == lane.reg.rev {
+                if now >= int.saturating_add(first_ns, limit_ns) {
+                    return Ok(Some(TriggerCollecting(prev_rev)))
+                }
+                return Ok(None)
+            }
+        }
+        watch.collecting_rev = Some((lane.reg.rev, now))
+        return Ok(None)
+    }
+    watch.collecting_rev = None
+    // Prune tokens no longer present on S'/reg.
+    let mut i = 0u64
+    while i < list.len(watch.watched_tokens) {
+        let tok = watch.watched_tokens[i].0
+        let mut present = false
+        for row in lane.reg.rows {
+            if same(row.token, tok) {
+                present = true
+                break
+            }
+        }
+        if !present {
+            let _ = list.remove(mut watch.watched_tokens, i)
+        } else {
+            i += 1
+        }
+    }
+    // Add newly observed tokens and check if any reached 4 * hold_ms.
+    for row in lane.reg.rows {
+        let mut found_ns: Option[u64] = None
+        for (tok, seen_ns) in watch.watched_tokens {
+            if same(tok, row.token) {
+                found_ns = Some(seen_ns)
+                break
+            }
+        }
+        match found_ns {
+            Some(first_ns) => if now >= int.saturating_add(first_ns, limit_ns) {
+                return Ok(Some(TriggerServing(row.token)))
+            },
+            None => {
+                capacity(list.try_reserve(mut watch.watched_tokens, 1))?
+                list.push(mut watch.watched_tokens, (row.token, now))
+            },
+        }
+    }
+    Ok(None)
+}
+
+// Elects a Collecting incarnation (`kind = 1`) on foreign stream S' under the
+// A4 precondition recheck (§12.11.7 step 3, §12.11.8 M9), fences the old
+// incarnation with TERM, and rebuilds its pins into `StreamGcState`.
+// Returns `Ok(None)` if a Mismatch recheck showed the precondition cleared
+// before the CAS applied, or `Error(Latched(Superseded))` if another elector
+// won first (never rebuilding over a fresh winner).
+fn stream_collecting_elect(mut lane: StreamLane, mut client: std.object.Client, trigger: CollectingTrigger, now: u64, deadline: u64) -> Result[Option[(StreamGcState, Map[StoreId, String])], Error] waits {
+    let fenced_term = stream_elect_with_check(mut lane, mut client, true, Some(trigger), deadline)?
+    let Some(term) = fenced_term else {
+        return Ok(None)
+    }
+    let mut gc = stream_gc_new(lane.reg)
+    let mut prefixes: Map[StoreId, String] = map.new()
+    let old_inc = lane.inc - 1
+    stream_gc_rebuild(mut gc, mut prefixes, mut client, lane, old_inc, term, now, deadline)?
+    Ok(Some((take gc, take prefixes)))
+}
+
+// Runs one GC pass of a Collecting incarnation: polls heads of every pinned
+// Place whose prefix is known, raises `low` as far as the release rule allows,
+// checkpoints `x-<k+1>`, and deletes retired batches, TERMs, and old XINDEX.
+// Serves no Place, writes no batch, and acks nothing.
+fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut prefixes: Map[StoreId, String], mut client: std.object.Client, extra_prefixes: Map[StoreId, String], now: u64, deadline: u64) -> Result[bool, Error] waits {
+    for (st, pfx) in extra_prefixes {
+        let _ = map.try_reserve(mut prefixes, 1)
+        map.insert(mut prefixes, st, string.from(pfx))
+    }
+    let mut targets: List[(StoreId, String)] = list.new()
+    for held_pin in gc.pins {
+        let pfx = if string.byte_len(held_pin.prefix) != 0 {
+            string.from(held_pin.prefix)
+        } else {
+            match map.get(prefixes, held_pin.store) {
+                Some(found) => string.from(found),
+                None => continue,
+            }
+        }
+        capacity(list.try_reserve(mut targets, 1))?
+        list.push(mut targets, (held_pin.store, take pfx))
+    }
+    for (store, place_prefix) in targets {
+        let key = stream_key(place_prefix, "head")
+        let mut scratch = replace(mut lane.compare, list.new())
+        let fetched = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
+            let _ = history_fetch(mut c, key, mut scratch, deadline)?
+            Ok(())
+        })
+        lane.compare = take scratch
+        if let Error(_) = fetched {
+            continue
+        }
+        let Ok((_, take attach)) = history_decode_head_attach(lane.compare) else {
+            continue
+        }
+        let ranges = stream_attach_head_ranges(attach, lane.sid)
+        stream_gc_record_head(mut gc, prefixes, lane.reg.low_inc, lane.reg.low_seq, store, lane.inc, 0, ranges, now)?
+    }
+    let (new_low_inc, new_low_seq) = stream_gc_compute_low(gc, lane.reg, lane.inc, 1)
+    if !stream_pair_below(lane.reg.low_inc, lane.reg.low_seq, new_low_inc, new_low_seq) {
+        return Ok(list.len(gc.pins) == 0)
+    }
+    let old_k = match lane.reg.index {
+        Some(x) => x.k,
+        None => 0u64,
+    }
+    let next_k = old_k + 1
+    stream_gc_refresh_pins(mut gc, prefixes, new_low_inc, new_low_seq, now)?
+    let mut snap_entries: List[XIndexEntry] = list.new()
+    for e in gc.entries {
+        let mut bs: List[(u64, u64)] = list.new()
+        for (bi, bseq) in e.batches {
+            if !stream_pair_below(bi, bseq, new_low_inc, new_low_seq) {
+                capacity(list.try_reserve(mut bs, 1))?
+                list.push(mut bs, (bi, bseq))
+            }
+        }
+        if list.len(bs) != 0 {
+            capacity(list.try_reserve(mut snap_entries, 1))?
+            list.push(mut snap_entries, XIndexEntry(store: e.store, epoch: e.epoch, batches: take bs))
+        }
+    }
+    let snap_pins = disk_allocation(scoped fn() -> Result[List[StreamPin], Error] {
+        Ok(clone(gc.pins))
+    })?
+    let covers_inc = lane.inc - 1
+    let covers_seq = match stream_gc_fence_of(gc.fences, covers_inc) {
+        Some(term) if term > 1 => term - 1,
+        _ => 0u64,
+    }
+    let xidx = XIndex(k: next_k, low_inc: new_low_inc, low_seq: new_low_seq, covers_inc, covers_seq, entries: take snap_entries, pins: take snap_pins)
+    let mut xbuf: Bytes = list.new()
+    let reg_idx = stream_xindex_encode(mut xbuf, lane.sid, lane.inc, lane.authority_kind, xidx)?
+    let mut xname = string.with_capacity(32)
+    stream_xindex_key(mut xname, next_k)
+    let xkey = stream_key(lane.dir, xname)
+    let (take created, take back) = std.object.store_if_retry(mut client, xkey, Absent, take xbuf, deadline)
+    xbuf = take back
+    match take created {
+        Ok(Applied(_)) => (),
+        Ok(Mismatch) => {
+            let mut cmp: Bytes = list.new()
+            capacity(list.try_reserve(mut cmp, list.len(xbuf)))?
+            let (take got, take cback) = std.object.fetch(mut client, xkey, take cmp, deadline)
+            cmp = take cback
+            if let Error(_) = got {
+                return Ok(false)
+            }
+            if cmp != xbuf {
+                return Error(disk_fault(xkey, 0, Malformed))
+            }
+        },
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    match stream_reg_write(mut lane, mut client, Checkpoint(new_low_inc, new_low_seq, reg_idx), deadline)? {
+        Written => (),
+        Moved => return Error(Latched(Superseded)),
+    }
+    let _ = stream_gc_prune_entries(mut gc, lane.reg.low_inc, lane.reg.low_seq)?
+    stream_gc_refresh_pins(mut gc, prefixes, lane.reg.low_inc, lane.reg.low_seq, now)?
+    // Delete every retired batch, TERM and old XINDEX strictly below new low.
+    let mut name = string.with_capacity(48)
+    let mut cur_inc = gc.deleted_inc
+    let mut cur_seq = gc.deleted_seq
+    while stream_pair_below(cur_inc, cur_seq, lane.reg.low_inc, lane.reg.low_seq) {
+        if cur_inc < lane.reg.low_inc {
+            let Some(term) = stream_gc_fence_of(gc.fences, cur_inc) else {
+                cur_inc += 1
+                cur_seq = 1
+                continue
+            }
+            while cur_seq <= term {
+                stream_batch_key(mut name, cur_inc, cur_seq)
+                let key = stream_key(lane.dir, name)
+                let _ = std.object.erase(mut client, key, deadline)
+                cur_seq += 1
+            }
+            cur_inc += 1
+            cur_seq = 1
+        } else {
+            stream_batch_key(mut name, cur_inc, cur_seq)
+            let key = stream_key(lane.dir, name)
+            let _ = std.object.erase(mut client, key, deadline)
+            cur_seq += 1
+        }
+    }
+    gc.deleted_inc = lane.reg.low_inc
+    gc.deleted_seq = order.max(lane.reg.low_seq, 1)
+    if old_k > 0 && old_k < next_k {
+        stream_xindex_key(mut name, old_k)
+        let old_x = stream_key(lane.dir, name)
+        let _ = std.object.erase(mut client, old_x, deadline)
+    }
+    Ok(list.len(gc.pins) == 0)
+}

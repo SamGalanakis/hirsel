@@ -1,0 +1,517 @@
+// L90-O (variant 2: Held row with no head task) and L90-C (capacity, dead
+// stream Collecting GC, paused stream latch, and racing janitors)
+// (STORE-SPEC §12.11.6 A4, §12.11.8 M9/A5, §12.11.15).
+const JANITOR_OP_MS: u64 = 500
+
+const JANITOR_HOLD_MS: u64 = 2000
+
+const JANITOR_IDLE_MS: u64 = 500
+
+fn stream_janitor_sid_b() -> HostStreamId {
+    HostStreamId(hi: 0x0102030405060708, lo: 0x191a1b1c1d1e1f20)
+}
+
+fn stream_janitor_plan(sid: HostStreamId, max_slots: u32, max_pins: u32, pin_ttl_s: u64) -> StreamPlan {
+    let mut limits = stream_limits()
+    limits.max_slots = max_slots
+    limits.max_pins = max_pins
+    limits.hold_ms = JANITOR_HOLD_MS
+    limits.idle_poll_ms = JANITOR_IDLE_MS
+    limits.pin_ttl_s = pin_ttl_s
+    limits.index_every = 1
+    StreamPlan(sid, prefix: string.from(STREAM_SERVICE_ROOT), batching: Batching(max_wait_ms: 0, max_batch_bytes: FRAME_LIMIT + 4096), limits: take limits)
+}
+
+fn stream_janitor_service(s: BucketSim, tasks: Tasks, r: Random, seed: u64, sid: HostStreamId, max_slots: u32, max_pins: u32, pin_ttl_s: u64) -> Result[JournalService, Error] waits {
+    let plan = stream_janitor_plan(sid, max_slots, max_pins, pin_ttl_s)
+    let client = stream_service_client(s, tasks, seed, "", "us-east-1")?
+    let authority = object_authority(take client, "bucket", JANITOR_OP_MS)
+    Ok(journal_service(tasks, take authority, plan, stream_service_budget(plan), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn stream_janitor_options(create: bool) -> Options {
+    let mut options = bucket_order_options(create)
+    options.head_poll_ms = 500
+    options.claim_ms = 3500
+    options
+}
+
+fn stream_janitor_open_attached(s: BucketSim, tasks: Tasks, r: Random, mut service: JournalService, seed: u64, place_prefix: String) -> Result[Db, Error] waits {
+    let slot = journal_slot(mut service)?
+    let client = stream_service_client(s, tasks, seed, place_prefix, "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", JANITOR_OP_MS), take slot)?
+    Ok(open_authority(tasks, take attached, s.time, r, stream_janitor_options(false)) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+// L90-O variant 2 (§12.11.6 A4, §12.11.15) + straggler pin headroom (§12.11.8 A5):
+// X's Db is dropped without close so X's head still names (S_A, 1) as live
+// with no connected head task. B's Held row lands and B crashes. Host A's
+// janitor opens & closes X on the reserved slot at `hold_ms`, clearing B's
+// Held row by rule (c) well before Host C's foreign watcher reaches 4 * hold_ms,
+// so Host C never elects and A never latches.
+@test
+fn bucket_stream_orphan_hold_no_head_task(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg_a = stream_service_key(string.from("reg"))
+    let s = bucket_law_sim(tasks, c, 141, None, list.new())
+    let outcome = stream_orphan_no_head_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let Some(final_obj) = map.get(report.objects, reg_a) else {
+        fail("L90-O(2): S_A reg missing")
+    }
+    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    if final_reg.inc != 1 || final_reg.collecting {
+        fail("L90-O(2): foreign janitor unexpectedly elected on healthy S_A")
+    }
+    if list.len(final_reg.rows) != 0 {
+        fail("L90-O(2): orphan Held row was not removed by rule (c)")
+    }
+    Ok(())
+}
+
+fn stream_orphan_no_head_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    // max_slots = 3 (2 ordinary + 1 reserved janitor), normal pin headroom so
+    // the trigger tested here is specifically the orphan Held row at `hold_ms`.
+    let mut svc_a = stream_janitor_service(s, tasks, r, 81, stream_law_sid(), 3, 8, 86400)?
+    let mut svc_c = stream_janitor_service(s, tasks, r, 82, stream_janitor_sid_b(), 4, 8, 86400)?
+    stream_gc_make_place(s, tasks, r, 83, string.from("pX/"))?
+    stream_gc_make_place(s, tasks, r, 84, string.from("pY/"))?
+    // Y opens on A, commits, then migrates to C so C holds a Place sealed on S_A.
+    let mut y_a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 85, string.from("pY/"))?
+    bucket_law_commit(mut y_a, 1)?
+    let mut y_c = stream_janitor_open_attached(s, tasks, r, mut svc_c, 86, string.from("pY/"))?
+    let _ = take y_a
+    // Cut Y on C so Y releases its S_A pin while we test X at max_pins = 2;
+    // keep C's ForeignStreamWatch actively polling S_A/reg with needs_pin = true.
+    let cut_y = checkpoint(mut y_c)?
+    durable(mut y_c, cut_y)?
+    std.clock.sleep_ns(s.time, 600 * 1000000)
+    // X opens on A, commits row 1, then X's Db is dropped without close -> no head task!
+    let mut x_a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 87, string.from("pX/"))?
+    bucket_law_commit(mut x_a, 1)?
+    let x_store = x_a.store
+    let x_epoch = claim_of(x_a)?.epoch
+    let _ = take x_a
+    // B writes a Held row for (X, x_epoch) on S_A/reg and crashes.
+    stream_unhold_raw_hold(s, tasks, 88, x_store, x_epoch, StoreId(hi: 99, lo: 1))?
+    // Host C watches S_A/reg every idle_poll_ms while Host A's janitor handles asks.
+    let mut watch_c = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut lane_c = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 55, lo: 1))?
+    lane_c.dir = string.from(watch_c.dir)
+    let mut client_c = stream_service_client(s, tasks, 89, "", "us-east-1")?
+    let mut janitor_ran = false
+    for step in 0u64 .. 16u64 {
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+        let now = host.mono_ns(s.time)
+        let due = std.object.deadline_after_ms(client_c, JANITOR_OP_MS)
+        if let Some(_) = stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due)? {
+            let _ = take client_c
+            let _ = close(take y_c)
+            let _ = close_journal_service(take svc_a)
+            let _ = close_journal_service(take svc_c)
+            fail("L90-O(2): Host C's foreign watcher reached 4 * hold_ms despite Host A's janitor")
+        }
+        let asks = journal_janitor_asks(mut svc_a)?
+        for take ask in take asks {
+            match take ask {
+                JanitorOrphanHold(_, take pfx, _) => {
+                    let jclient = stream_service_client(s, tasks, 200 + step, pfx, "us-east-1")?
+                    let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
+                    stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false))?
+                    janitor_ran = true
+                },
+                JanitorStragglerPin(_, take pfx) => {
+                    let jclient = stream_service_client(s, tasks, 240 + step, pfx, "us-east-1")?
+                    let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
+                    stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false))?
+                },
+            }
+        }
+    }
+    let _ = take client_c
+    if !janitor_ran {
+        let _ = close(take y_c)
+        let _ = close_journal_service(take svc_a)
+        let _ = close_journal_service(take svc_c)
+        fail("L90-O(2): Host A's janitor did not run on the orphan Held row")
+    }
+    // Verify A never latched and can still open & commit a Place.
+    let mut x_again = stream_janitor_open_attached(s, tasks, r, mut svc_a, 91, string.from("pX/"))?
+    if bucket_law_rows(mut x_again)? != 1 {
+        fail("L90-O(2): X lost its acked row after janitor close")
+    }
+    bucket_law_commit(mut x_again, 2)?
+    close(take x_again)?
+    close(take y_c)?
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_c)
+}
+
+// L90-C (§12.11.7 A4, §12.11.8 M9, §12.11.15):
+// 1. max_slots = 2 (max_rows = 4): 5th concurrent claim returns Full(Register)
+//    with no write and no election.
+// 2. Dead stream A with aged rows: only a janitor that needs A's pins elects
+//    Collecting (kind = 1), deletes every batch after release, and every acked
+//    frame is in the history.
+// 3. Paused alive stream A across 4 * hold_ms: resumes latched Superseded,
+//    outstanding tickets end Undecided, and no acked frame is lost.
+// 4. Two janitors race: the loser's A4 recheck stops it (inc ends at 2, not 3).
+@test
+fn bucket_stream_capacity_and_janitor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    stream_l90c_register_full(c, r, tasks)?
+    stream_l90c_dead_collecting(c, r, tasks)?
+    stream_l90c_paused_superseded(c, r, tasks)?
+    stream_l90c_racing_janitors(c, r, tasks)
+}
+
+fn stream_l90c_register_full(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let s = bucket_law_sim(tasks, c, 142, None, list.new())
+    let outcome = stream_l90c_register_full_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let Some(final_obj) = map.get(report.objects, reg) else {
+        fail("L90-C(1): reg missing")
+    }
+    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    if final_reg.inc != 1 {
+        fail("L90-C(1): refused claimant elected on Full(Register)")
+    }
+    let mut window = false
+    for q in report.requests {
+        if q.method == "GET" && q.key == "l90c1-start" {
+            window = true
+        }
+        if q.method == "GET" && q.key == "l90c1-end" {
+            window = false
+        }
+        if window && q.method == "PUT" && (q.key == reg || q.key == "p1/head") {
+            fail("L90-C(1): 5th claimant issued a write despite Full(Register)")
+        }
+    }
+    Ok(())
+}
+
+fn stream_l90c_register_full_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    // max_slots = 2 -> max_rows = 4.
+    let mut svc_a = stream_janitor_service(s, tasks, r, 81, stream_law_sid(), 2, 8, 86400)?
+    let mut svc_b = stream_janitor_service(s, tasks, r, 82, stream_janitor_sid_b(), 2, 8, 86400)?
+    stream_gc_make_place(s, tasks, r, 83, string.from("p1/"))?
+    let mut a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 84, string.from("p1/"))?
+    bucket_law_commit(mut a, 1)?
+    let store_id = a.store
+    let epoch = claim_of(a)?.epoch
+    // Fill all 4 rows of S_A/reg.
+    for i in 1u64 .. 5u64 {
+        stream_unhold_raw_hold(s, tasks, 90 + i, store_id, epoch, StoreId(hi: 500, lo: i))?
+    }
+    // 5th concurrent claim through svc_b (max_rows = 4) must return Full(Register)
+    // with zero writes to S_A/reg or p1/head.
+    let slot_b = journal_slot(mut svc_b)?
+    let client_b = stream_service_client(s, tasks, 99, "p1/", "us-east-1")?
+    let attached_b = streamed(object_authority(take client_b, "bucket", JANITOR_OP_MS), take slot_b)?
+    stream_service_marker(s, tasks, string.from("l90c1-start"))?
+    match open_authority(tasks, take attached_b, s.time, r, stream_janitor_options(false)) {
+        Error(Refusal(error: Full(Register(_)), ..)) => (),
+        _ => fail("L90-C(1): 5th concurrent claim did not return Full(Register)"),
+    }
+    stream_service_marker(s, tasks, string.from("l90c1-end"))?
+    let _ = take a
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_b)
+}
+
+fn stream_l90c_dead_collecting(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg_a = stream_service_key(string.from("reg"))
+    let b1_1 = stream_service_key(string.from("b-00000000000000000001-00000000000000000001"))
+    let b1_2 = stream_service_key(string.from("b-00000000000000000001-00000000000000000002"))
+    let b1_3 = stream_service_key(string.from("b-00000000000000000001-00000000000000000003"))
+    let b2_prefix = stream_service_key(string.from("b-00000000000000000002-"))
+    let s = bucket_law_sim(tasks, c, 143, None, list.new())
+    let outcome = stream_l90c_dead_collecting_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let Some(final_obj) = map.get(report.objects, reg_a) else {
+        fail("L90-C(2): S_A reg missing")
+    }
+    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    if final_reg.inc != 2 || !final_reg.collecting {
+        fail("L90-C(2): S_A did not end in Collecting incarnation 2")
+    }
+    if map.contains(report.objects, b1_1) || map.contains(report.objects, b1_2) || map.contains(report.objects, b1_3) {
+        fail("L90-C(2): Collecting janitor did not delete retired inc 1 batches")
+    }
+    for q in report.requests {
+        if q.method == "PUT" && string.starts_with(q.key, b2_prefix) {
+            fail("L90-C(2): Collecting incarnation wrote a batch object")
+        }
+    }
+    Ok(())
+}
+
+fn stream_l90c_dead_collecting_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_janitor_service(s, tasks, r, 81, stream_law_sid(), 4, 8, 86400)?
+    let mut svc_c = stream_janitor_service(s, tasks, r, 82, stream_janitor_sid_b(), 4, 8, 86400)?
+    stream_gc_make_place(s, tasks, r, 83, string.from("p1/"))?
+    let mut a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 84, string.from("p1/"))? // batch 1
+    bucket_law_commit(mut a, 1)? // batch 2
+    bucket_law_commit(mut a, 2)? // batch 3
+    let store_id = a.store
+    let epoch = claim_of(a)?.epoch
+    // Simulate dead host A: drop Place without closing, stop A's service, leave aged Held row.
+    let _ = take a
+    close_journal_service(take svc_a)?
+    stream_unhold_raw_hold(s, tasks, 85, store_id, epoch, StoreId(hi: 700, lo: 1))?
+    // A janitor with needs_pin = false must NEVER trigger an election even after 4 * hold_ms.
+    let mut no_need = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), false, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut no_lane = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 601, lo: 1))?
+    no_lane.dir = string.from(no_need.dir)
+    let mut no_client = stream_service_client(s, tasks, 86, "", "us-east-1")?
+    for _ in 0u64 .. 10u64 {
+        let now = host.mono_ns(s.time)
+        let due = std.object.deadline_after_ms(no_client, JANITOR_OP_MS)
+        if let Some(_) = stream_foreign_watch_poll(mut no_need, mut no_lane, mut no_client, now, due)? {
+            let _ = take no_client
+            let _ = close_journal_service(take svc_c)
+            fail("L90-C(2): janitor without a pin on S_A triggered an election")
+        }
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+    }
+    let _ = take no_client
+    // Host C needs S_A's pins -> watches S_A/reg across 4 * hold_ms, elects Collecting.
+    let mut watch_c = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut lane_c = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 602, lo: 1))?
+    lane_c.dir = string.from(watch_c.dir)
+    let mut client_c = stream_service_client(s, tasks, 87, "", "us-east-1")?
+    let mut triggered: Option[CollectingTrigger] = None
+    for _ in 0u64 .. 20u64 {
+        let now = host.mono_ns(s.time)
+        let due = std.object.deadline_after_ms(client_c, JANITOR_OP_MS)
+        if let Some(trig) = stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due)? {
+            triggered = Some(trig)
+            break
+        }
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+    }
+    let Some(trig) = triggered else {
+        let _ = take client_c
+        let _ = close_journal_service(take svc_c)
+        fail("L90-C(2): janitor did not trigger after 4 * hold_ms on dead S_A")
+    }
+    let Some((take gc_built, take pfx_built)) = stream_collecting_elect(mut lane_c, mut client_c, trig, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS))? else {
+        let _ = take client_c
+        let _ = close_journal_service(take svc_c)
+        fail("L90-C(2): Collecting election did not win")
+    }
+    let mut gc = take gc_built
+    let mut pfxs = take pfx_built
+    // Host C now claims X (no-hold rule over Collecting inc 2!), verifies all acked rows, and cuts X.
+    let mut x_c = stream_janitor_open_attached(s, tasks, r, mut svc_c, 88, string.from("p1/"))?
+    if bucket_law_rows(mut x_c)? != 2 {
+        let _ = take client_c
+        let _ = close(take x_c)
+        let _ = close_journal_service(take svc_c)
+        fail("L90-C(2): Host C missed acked frame from dead S_A")
+    }
+    let cut_x = checkpoint(mut x_c)?
+    durable(mut x_c, cut_x)?
+    let mut extra: Map[StoreId, String] = map.new()
+    map.insert(mut extra, store_id, string.from("p1/"))
+    let all_gone = stream_collecting_sweep(mut lane_c, mut gc, mut pfxs, mut client_c, extra, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS))?
+    let _ = take client_c
+    if !all_gone {
+        let _ = close(take x_c)
+        let _ = close_journal_service(take svc_c)
+        fail("L90-C(2): Collecting sweep did not clear all pins after cut")
+    }
+    close(take x_c)?
+    close_journal_service(take svc_c)
+}
+
+fn stream_l90c_paused_superseded(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg_a = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // With index_every = 512: PUT reg #1 create, #2 elect inc 1, #3 raw hold,
+    // #4 Host C's Collecting elect inc 2. Park A's settle PUTs on p1/head (#5..)
+    // until PUT reg #4 applies so the Held row persists across 4 * hold_ms.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1000, until: Applied("PUT", clone(reg_a), 4), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 144, None, list.new(), take holds, std.sim.world.plan(144))
+    let outcome = stream_l90c_paused_superseded_run(s, tasks, r)
+    let _ = bucket_law_report(take s)
+    outcome
+}
+
+fn stream_l90c_paused_superseded_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut plan_a = stream_janitor_plan(stream_law_sid(), 4, 8, 86400)
+    plan_a.limits.index_every = 512
+    let client_a = stream_service_client(s, tasks, 81, "", "us-east-1")?
+    let mut svc_a = journal_service(tasks, object_authority(take client_a, "bucket", JANITOR_OP_MS), plan_a, stream_service_budget(plan_a), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem
+    let mut svc_c = stream_janitor_service(s, tasks, r, 82, stream_janitor_sid_b(), 4, 8, 86400)?
+    stream_gc_make_place(s, tasks, r, 83, string.from("p1/"))?
+    let mut a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 84, string.from("p1/"))? // batch 1
+    let t1 = stream_unhold_commit_ticket(mut a, 1)?
+    durable(mut a, t1)? // batch 2
+    let store_id = a.store
+    let epoch = claim_of(a)?.epoch
+    // Add an unremoved Held row on S_A/reg, then commit row 2 so batch 3 stalls!
+    stream_unhold_raw_hold(s, tasks, 85, store_id, epoch, StoreId(hi: 710, lo: 1))?
+    let t2 = stream_unhold_commit_ticket(mut a, 2)?
+    // Host C's janitor observes the Held row for 4 * hold_ms and elects Collecting inc 2!
+    let mut watch_c = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut lane_c = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 610, lo: 1))?
+    lane_c.dir = string.from(watch_c.dir)
+    let mut client_c = stream_service_client(s, tasks, 86, "", "us-east-1")?
+    let mut triggered: Option[CollectingTrigger] = None
+    for _ in 0u64 .. 24u64 {
+        let now = host.mono_ns(s.time)
+        let due = std.object.deadline_after_ms(client_c, JANITOR_OP_MS)
+        if let Some(trig) = stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due)? {
+            triggered = Some(trig)
+            break
+        }
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+    }
+    let Some(trig) = triggered else {
+        let _ = take client_c
+        fail("L90-C(3): janitor did not trigger after 4 * hold_ms on paused S_A")
+    }
+    let Some(_) = stream_collecting_elect(mut lane_c, mut client_c, trig, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS))? else {
+        let _ = take client_c
+        fail("L90-C(3): Collecting election did not win")
+    }
+    let _ = take client_c
+    // Let A's next poll observe inc 2 and latch Superseded.
+    std.clock.sleep_ns(s.time, (JANITOR_IDLE_MS + 200) * 1000000)
+    durable(mut a, t1)?
+    match durable(mut a, t2) {
+        Error(Undecided) => (),
+        _ => fail("L90-C(3): paused A's outstanding ticket did not end Undecided"),
+    }
+    match health(a) {
+        Latched(Superseded) => (),
+        _ => fail("L90-C(3): paused A did not latch Superseded"),
+    }
+    // Reopen through C (no-hold rule) recovers every acked frame (and batch 3 before TERM).
+    let mut x_c = stream_janitor_open_attached(s, tasks, r, mut svc_c, 87, string.from("p1/"))?
+    if bucket_law_rows(mut x_c)? != 2 {
+        fail("L90-C(3): reopen after Collecting election lost an acked frame")
+    }
+    close(take x_c)?
+    let _ = close(take a)
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_c)
+}
+
+type RacingJanitorJob: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    seed: u64,
+    holder: StoreId,
+    trigger: CollectingTrigger
+}
+
+fn stream_racing_janitor_task(take job: RacingJanitorJob) -> Result[bool, Error] waits {
+    let RacingJanitorJob(endpoint, clock, tasks, seed, holder, trigger) = take job
+    let mut client = stream_endpoint_client(endpoint, clock, tasks, seed, "", "us-east-1")?
+    let mut lane = stream_lane(stream_law_sid(), 1, 8, holder)?
+    lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(stream_law_sid()))
+    let due = std.object.deadline_after_ms(client, JANITOR_OP_MS)
+    let res = stream_collecting_elect(mut lane, mut client, trigger, host.mono_ns(clock), due)
+    let _ = take client
+    match take res {
+        Ok(Some(_)) => Ok(true),
+        Error(Latched(Superseded)) => Ok(false),
+        Ok(None) => Ok(false),
+        Error(take other) => Error(take other),
+    }
+}
+
+fn stream_l90c_racing_janitors(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // PUT reg #1: create; #2: elect inc 1; #3: raw hold; #4 & #5: the two racing janitors!
+    // Hold #4 until #5 is requested so both race at the exact same ETag.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(reg), from: 4, count: 1, until: Requested("PUT", clone(reg), 5), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 145, None, list.new(), take holds, std.sim.world.plan(145))
+    let outcome = stream_l90c_racing_janitors_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let Some(final_obj) = map.get(report.objects, reg) else {
+        fail("L90-C(4): reg missing")
+    }
+    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    if final_reg.inc != 2 || !final_reg.collecting {
+        fail("L90-C(4): loser rebuilt over fresh winner (expected inc == 2)")
+    }
+    // PUT reg total: 3 setup + 2 racing = 5 attempts, 4 applied (loser sent NO retry).
+    if stream_law_puts(report, reg) != (5, 4) {
+        fail("L90-C(4): expected exactly 5 reg PUTs and 4 applied")
+    }
+    Ok(())
+}
+
+fn stream_l90c_racing_janitors_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_janitor_service(s, tasks, r, 81, stream_law_sid(), 4, 8, 86400)?
+    close_journal_service(take svc_a)?
+    let tok = StoreId(hi: 800, lo: 1)
+    stream_unhold_raw_hold(s, tasks, 82, StoreId(hi: 1, lo: 1), 1, tok)?
+    let j1 = task.spawn(tasks, bytes 16777216, RacingJanitorJob(endpoint: s.endpoint, clock: s.time, tasks, seed: 210, holder: StoreId(hi: 901, lo: 1), trigger: TriggerServing(tok)), stream_racing_janitor_task)
+    let j2 = task.spawn(tasks, bytes 16777216, RacingJanitorJob(endpoint: s.endpoint, clock: s.time, tasks, seed: 211, holder: StoreId(hi: 902, lo: 1), trigger: TriggerServing(tok)), stream_racing_janitor_task)
+    let w1 = result.unwrap(task.join(take j1))?
+    let w2 = result.unwrap(task.join(take j2))?
+    if w1 == w2 {
+        fail("L90-C(4): expected exactly one winning janitor")
+    }
+    Ok(())
+}
+
+// Forced settle of a straggler pin on the reserved slot (§12.11.8 M9/A5):
+// even when ordinary slots and ordinary pins are full (`max_slots = 2`,
+// `max_pins = 2`), the janitor receives `JanitorStragglerPin` and opens+closes
+// the straggler Place through `journal_reserved_slot`, freeing the pin.
+@test
+fn bucket_stream_janitor_straggler_pin(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 146, None, list.new())
+    let outcome = stream_straggler_pin_run(s, tasks, r)
+    let _ = bucket_law_report(take s)
+    outcome
+}
+
+fn stream_straggler_pin_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc = stream_janitor_service(s, tasks, r, 81, stream_law_sid(), 2, 2, 1)?
+    stream_gc_make_place(s, tasks, r, 82, string.from("p1/"))?
+    let mut p1 = stream_janitor_open_attached(s, tasks, r, mut svc, 83, string.from("p1/"))?
+    bucket_law_commit(mut p1, 1)?
+    // Drop p1 without closing so it leaves a straggler pin on S_A.
+    let _ = take p1
+    // Ordinary journal_slot is refused by max_pins == 2.
+    match journal_slot(mut svc) {
+        Error(Full(Pins(_))) => (),
+        _ => fail("straggler pin test: expected Full(Pins) before janitor clears pin"),
+    }
+    let mut cleared = false
+    for step in 0u64 .. 8u64 {
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+        let asks = journal_janitor_asks(mut svc)?
+        for take ask in take asks {
+            if let JanitorStragglerPin(_, take pfx) = take ask {
+                let jclient = stream_service_client(s, tasks, 260 + step, pfx, "us-east-1")?
+                let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
+                stream_janitor_close_place(tasks, mut svc, take jauth, s.time, r, stream_janitor_options(false))?
+                cleared = true
+            }
+        }
+        if cleared {
+            break
+        }
+    }
+    if !cleared {
+        let _ = close_journal_service(take svc)
+        fail("straggler pin test: janitor did not receive JanitorStragglerPin")
+    }
+    std.clock.sleep_ns(s.time, 50 * 1000000)
+    // Pin is cleared -> ordinary journal_slot succeeds again!
+    let _slot_ok = journal_slot(mut svc)?
+    close_journal_service(take svc)
+}

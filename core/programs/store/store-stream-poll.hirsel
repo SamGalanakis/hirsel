@@ -241,6 +241,20 @@ fn stream_mark_stalled(mut s: StreamService, store: StoreId, epoch: u64) {
     }
 }
 
+fn stream_reap_closed_slots(mut s: StreamService) {
+    for i in 0u64 .. list.len(s.slots) {
+        let has_inbox = match s.slots[i].inbox {
+            Some(_) => true,
+            None => false,
+        }
+        if has_inbox && stream_slot_closed(mut s.slots[i]) {
+            s.slots[i].inbox = None
+            s.slots[i].place = None
+            s.slots[i].unsent = None
+        }
+    }
+}
+
 // Evaluates the current `s.lane.reg` body for every stalled or row-bearing
 // (store, epoch): applies rule (b) on all-Abandoned rows, triggers rule (a)
 // settle once a Held row reaches `hold_ms`, sends stall head polls on served
@@ -249,6 +263,7 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
     if stream_is_latched(s.lane) {
         return Ok(())
     }
+    stream_reap_closed_slots(mut s)
     if s.lane.reg.inc != s.lane.inc || !same(s.lane.reg.holder, s.lane.holder) {
         s.lane.latched = Some(Superseded)
         stream_service_latched(mut s, Superseded)
@@ -348,8 +363,10 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
                 stream_answer(mut s.slots[slot_i], SlotSettle(sid_num, through_seq, s.lane.seq))
             }
         } else {
-            // Orphan-row head poll (§12.11.6 A2): apply rule (c) or rule (f).
-            stream_orphan_head_poll(mut s, store, epoch, deadline)?
+            // Orphan-row head poll (§12.11.6 A2, A4): apply rule (c) or (f),
+            // or ask the host's janitor to open and close X if the oldest Held
+            // row has reached `hold_ms` and X still names (S, inc) as live.
+            stream_orphan_head_poll(mut s, store, epoch, now >= int.saturating_add(oldest_ns, hold_ns), deadline)?
         }
     }
     Ok(())
@@ -364,14 +381,44 @@ fn stream_pair_in(pairs: List[(StoreId, u64)], store: StoreId, epoch: u64) -> bo
     false
 }
 
-// Orphan-row head poll (§12.11.6 A2): fetches `<place_prefix>head` on the
+fn stream_push_janitor_ask(mut s: StreamService, take ask: JanitorAsk) {
+    let mut dup = false
+    for existing in s.janitor_asks {
+        let same_ask = match existing {
+            JanitorOrphanHold(sa, _, ea) => match ask {
+                JanitorOrphanHold(sb, _, eb) => same(sa, sb) && ea == eb,
+                _ => false,
+            },
+            JanitorStragglerPin(sa, _) => match ask {
+                JanitorStragglerPin(sb, _) => same(sa, sb),
+                _ => false,
+            },
+        }
+        if same_ask {
+            dup = true
+            break
+        }
+    }
+    if dup {
+        return
+    }
+    if let Ok(()) = list.try_reserve(mut s.janitor_asks, 1) {
+        list.push(mut s.janitor_asks, take ask)
+    }
+}
+
+// Orphan-row head poll (§12.11.6 A2, A4): fetches `<place_prefix>head` on the
 // service's read lane and removes the row by rule (c) if epoch > e or by
-// rule (f) if epoch == e and `live` no longer names (S, inc).
-fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, deadline: u64) -> Result[(), Error] waits {
-    let key = match map.get(s.prefixes, store) {
-        Some(place_prefix) => stream_key(place_prefix, "head"),
+// rule (f) if epoch == e and `live` no longer names (S, inc). When `aged` is
+// true (oldest Held row >= `hold_ms`) and `live` still names (S, inc), emits a
+// `JanitorOrphanHold` ask so the host's janitor opens and closes X on the
+// reserved slot.
+fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, aged: bool, deadline: u64) -> Result[(), Error] waits {
+    let place_prefix = match map.get(s.prefixes, store) {
+        Some(found) => string.from(found),
         None => return Ok(()),
     }
+    let key = stream_key(place_prefix, "head")
     let mut scratch = replace(mut s.lane.compare, list.new())
     let fetched = stream_at_root(mut s.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
         let _ = history_fetch(mut c, key, mut scratch, deadline)?
@@ -385,10 +432,11 @@ fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, dea
         return Ok(())
     }
     let obs_epoch = capture.head.pair.epoch
+    let mut still_live = false
     let intent: Option[RegIntent] = if obs_epoch > epoch {
         Some(ClearEpoch(store, obs_epoch))
     } else if obs_epoch == epoch {
-        let still_live = match attach {
+        still_live = match attach {
             Some(a) => match a.live {
                 Some(r) => stream_same(r.sid, s.lane.sid) && r.inc == s.lane.inc,
                 None => false,
@@ -402,6 +450,9 @@ fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, dea
         }
     } else {
         None
+    }
+    if still_live && aged {
+        stream_push_janitor_ask(mut s, JanitorOrphanHold(store, string.from(place_prefix), epoch))
     }
     if let Some(take action) = take intent {
         match stream_reg_write(mut s.lane, mut s.client, take action, deadline) {
@@ -433,10 +484,8 @@ fn stream_service_arm_next(mut s: StreamService) waits {
         target = order.min(target, sp.next_poll_ns)
     }
     for obs in s.observed_rows {
-        if let Some(_) = stream_serving_slot(s, obs.store, obs.epoch) {
-            if !stream_has_active_settle(s, obs.store, obs.epoch) {
-                target = order.min(target, int.saturating_add(obs.first_seen_ns, hold_ns))
-            }
+        if !stream_has_active_settle(s, obs.store, obs.epoch) {
+            target = order.min(target, int.saturating_add(obs.first_seen_ns, hold_ns))
         }
     }
     if let Some(_) = s.timer {
@@ -464,6 +513,7 @@ fn stream_service_poll(mut s: StreamService) -> Result[(), Error] waits {
     if stream_is_latched(s.lane) {
         return Ok(())
     }
+    stream_reap_closed_slots(mut s)
     let now = host.mono_ns(s.clock)
     if let Some(_) = s.timer {
         if now >= s.poll_at {
@@ -476,11 +526,9 @@ fn stream_service_poll(mut s: StreamService) -> Result[(), Error] waits {
     let mut need_reg = now >= int.saturating_add(s.last_reg_ns, idle_ns)
     if !need_reg {
         for obs in s.observed_rows {
-            if let Some(_) = stream_serving_slot(s, obs.store, obs.epoch) {
-                if !stream_has_active_settle(s, obs.store, obs.epoch) && now >= int.saturating_add(obs.first_seen_ns, hold_ns) {
-                    need_reg = true
-                    break
-                }
+            if !stream_has_active_settle(s, obs.store, obs.epoch) && now >= int.saturating_add(obs.first_seen_ns, hold_ns) {
+                need_reg = true
+                break
             }
         }
     }

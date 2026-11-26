@@ -378,17 +378,38 @@ fn stream_fence_incarnation(mut client: std.object.Client, dir: String, sid: Hos
     }
 }
 
+fn stream_trigger_holds(trigger: Option[CollectingTrigger], reg: StreamRegister) -> bool {
+    match trigger {
+        None => true,
+        Some(TriggerServing(tok)) => {
+            if reg.collecting {
+                return false
+            }
+            for row in reg.rows {
+                if same(row.token, tok) {
+                    return true
+                }
+            }
+            false
+        },
+        Some(TriggerCollecting(want_rev)) => reg.collecting && reg.rev == want_rev,
+    }
+}
+
 // Election (§12.11.3 rule 7, §12.11.7 steps 1–4): reads `reg` (creating
 // `probe` and `reg` when absent), probes the endpoint's conditions on `probe`,
 // CASes `{rev + 1, inc + 1, holder, collecting, low, index, rows: []}` without
-// rebuilding over a fresh winner (A4), and fences `old_inc` with TERM when
-// `old_inc > 0`. Returns `Some(term)` when an old incarnation was fenced.
-fn stream_elect(mut lane: StreamLane, mut client: std.object.Client, collecting: bool, deadline: u64) -> Result[Option[u64], Error] waits {
+// rebuilding over a fresh winner (A4) and verifying `trigger` on Mismatch,
+// then fences `old_inc` with TERM when `old_inc > 0`.
+fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, collecting: bool, trigger: Option[CollectingTrigger], deadline: u64) -> Result[Option[u64], Error] waits {
     let probe = stream_key(lane.dir, "probe")
     let reg = stream_key(lane.dir, "reg")
     match stream_reg_read(mut lane, mut client, deadline) {
         Ok(()) => (),
         Error(Corrupt(Fault(why: Absent, ..))) => {
+            if collecting {
+                return Ok(None)
+            }
             let _ = stream_header(mut lane.body, lane.sid, ROLE_PROBE, 0, 0, lane.authority_kind)?
             history_create(mut client, probe, mut lane.body, mut lane.compare, deadline)?
             let first = StreamRegister(rev: 1, sid: lane.sid, inc: 0, holder: StoreId(hi: 0, lo: 0), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
@@ -405,6 +426,9 @@ fn stream_elect(mut lane: StreamLane, mut client: std.object.Client, collecting:
             }
         },
         Error(take problem) => return Error(take problem),
+    }
+    if !stream_trigger_holds(trigger, lane.reg) {
+        return Ok(None)
     }
     let _ = stream_header(mut lane.body, lane.sid, ROLE_PROBE, 0, 0, lane.authority_kind)?
     history_check_conditions(mut client, probe, mut lane.body, deadline)?
@@ -438,6 +462,9 @@ fn stream_elect(mut lane: StreamLane, mut client: std.object.Client, collecting:
                 if lane.reg.inc != old_inc {
                     return Error(Latched(Superseded))
                 }
+                if !stream_trigger_holds(trigger, lane.reg) {
+                    return Ok(None)
+                }
             },
             Error(take problem) => return Error(Remote(take problem)),
         }
@@ -460,6 +487,10 @@ fn stream_elect(mut lane: StreamLane, mut client: std.object.Client, collecting:
     }
     let term = stream_fence_incarnation(mut client, lane.dir, lane.sid, old_inc, lane.authority_kind, start_seq, mut lane.body, mut lane.compare, deadline)?
     Ok(Some(term))
+}
+
+fn stream_elect(mut lane: StreamLane, mut client: std.object.Client, collecting: bool, deadline: u64) -> Result[Option[u64], Error] waits {
+    stream_elect_with_check(mut lane, mut client, collecting, None, deadline)
 }
 
 fn stream_start_fresh(mut lane: StreamLane, mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {

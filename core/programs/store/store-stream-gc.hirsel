@@ -710,6 +710,34 @@ fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error]
         }
         let ranges = stream_attach_head_ranges(attach, s.lane.sid)
         stream_gc_record_head(mut s.gc, s.prefixes, s.lane.reg.low_inc, s.lane.reg.low_seq, store, obs_inc, obs_seq, ranges, now)?
+        // Forced settle of a straggler pin (§12.11.8 M9): when X's head still
+        // names our own stream as `live` and its pin reached `pin_ttl_s` or
+        // active pins reached `max_pins - 1`, ask our janitor to close X on the
+        // reserved slot.
+        let own_live = match attach {
+            Some(a) => match a.live {
+                Some(r) => stream_same(r.sid, s.lane.sid) && r.inc == s.lane.inc,
+                None => false,
+            },
+            None => false,
+        }
+        if own_live {
+            let ttl_ns = int.saturating_mul(s.plan.limits.pin_ttl_s, 1000000000)
+            let pins_limit: u64 = int.widen(s.plan.limits.max_pins)
+            let at_cap = list.len(s.gc.pins) >= pins_limit - 1
+            let mut straggler = at_cap
+            if !straggler {
+                for hp in s.gc.pins {
+                    if same(hp.store, store) && now >= int.saturating_add(hp.first_pinned_ns, ttl_ns) {
+                        straggler = true
+                        break
+                    }
+                }
+            }
+            if straggler {
+                stream_push_janitor_ask(mut s, JanitorStragglerPin(store, string.from(place_prefix)))
+            }
+        }
     }
     Ok(())
 }

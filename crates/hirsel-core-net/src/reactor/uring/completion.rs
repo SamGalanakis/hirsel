@@ -1,4 +1,4 @@
-use super::super::REMOVED;
+use super::super::{REMOVED, ReactorPlan};
 use super::{Ring, Submissions, Uring, enter_queue, push_entry, queue_due};
 use io_uring::squeue;
 use std::{
@@ -22,7 +22,7 @@ unsafe impl Send for FileCompletion {}
 #[derive(Default)]
 struct Credits {
     tcp_data: usize,
-    files: HashMap<u16, FileCompletion>,
+    files: HashMap<u32, FileCompletion>,
 }
 
 pub(in crate::reactor) struct Completion {
@@ -33,9 +33,9 @@ pub(in crate::reactor) struct Completion {
 }
 
 impl Completion {
-    pub(super) fn open(entries: u32, zc: bool) -> io::Result<Self> {
-        let ring = Ring::new(Uring::ENTRIES, entries, false)?;
-        ring.iowq_max_workers(2, 1)?;
+    pub(super) fn open(plan: ReactorPlan, zc: bool) -> io::Result<Self> {
+        let ring = Ring::new(plan.sq_entries, plan.completion_cq, false)?;
+        ring.iowq_max_workers(plan.iowq_bounded, plan.iowq_unbounded)?;
         let sparse = zc && ring.buffers_sparse(super::sendzc::REGISTERED).is_ok();
         Ok(Self {
             ring,
@@ -71,7 +71,7 @@ impl Completion {
 
     pub(super) unsafe fn push_file(
         &self,
-        unit: u16,
+        unit: u32,
         entry: squeue::Entry,
         context: *const (),
         complete: unsafe fn(*const (), i32),
@@ -118,7 +118,7 @@ impl Completion {
             match cqe.user_data() {
                 REMOVED => {}
                 data if data & FILE != 0 => {
-                    let file = self.credits().files.remove(&(data as u16)).unwrap();
+                    let file = self.credits().files.remove(&(data as u32)).unwrap();
                     // SAFETY: the issuing unit pins the reply until this one callback.
                     unsafe { (file.complete)(file.context, cqe.result()) };
                 }

@@ -39,10 +39,3 @@ fn invalid_env(name: &str, expected: &str) -> ! {
     eprintln!("hirsel: {name} must be {expected}");
     std::process::exit(2);
 }
-pub(super) fn lifo_on() -> bool {
-    std::env::var("HIRSEL_UNTIED_LIFO")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(1)
-        != 0
-}

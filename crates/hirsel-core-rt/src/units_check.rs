@@ -67,8 +67,8 @@
 //! every thread waits with no timeout pending while a goal is unmet (stuck
 //! for ever), or when the bound passes.
 use super::{
-    BASE, Base, Memory, POOL, Pool, RUN, RunFn, TABLE, UNTIED_ON, USTATS, create_unit, cur,
-    enable_pool, maybe_yield, park as unit_park, pool, take_xready, wake_id, worker_main,
+    BASE, Base, POOL, RUN, RunFn, TABLE, UNTIED_ON, USTATS, create_unit, cur, enable_pool,
+    maybe_yield, park as unit_park, pool, take_xready, wake_id, worker_main,
 };
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -1165,27 +1165,16 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     (case.params)(&mut |lo, hi| lo + st.rand() % (hi - lo + 1));
     NEEDED.store(case.goals, Ordering::Relaxed);
     super::LIVE.store(case.units as usize, Ordering::SeqCst);
-    let _ = POOL.set(Pool {
+    let plan = super::UntiedPlan::derive(
+        case.units as usize,
         w,
-        locals: (0..w).map(|_| super::Mutex::new(VecDeque::new())).collect(),
-        lifo: (0..w)
-            .map(|_| super::AtomicPtr::new(std::ptr::null_mut()))
-            .collect(),
-        lifo_runs: (0..w).map(|_| super::AtomicU32::new(0)).collect(),
-        lifo_on: true,
-        injector: super::Mutex::new(VecDeque::new()),
-        memory: Memory::new(),
-        queued: super::AtomicUsize::new(0),
-        searching: super::AtomicUsize::new(0),
-        idle: super::Mutex::new(Vec::with_capacity(w)),
-        nsleep: super::AtomicUsize::new(0),
-        handed: (0..w).map(|_| super::AtomicBool::new(false)).collect(),
-        slots: pollers.into_iter().map(super::Slot::new).collect(),
-        uring: false,
-        net_used: super::AtomicBool::new(true),
-        stop: super::AtomicBool::new(false),
-        spin_ns: 5_000,
-    });
+        0,
+        super::plan::HostEnvelope::UNLIMITED,
+        super::plan::ReactorChoice::Readiness,
+    )
+    .unwrap();
+    let _ = POOL.set(super::launch::new_pool(plan, pollers, 5_000));
+    pool().net_used.store(true, Ordering::Relaxed);
     static BODY: std::sync::OnceLock<fn(u32) -> u8> = std::sync::OnceLock::new();
     let _ = BODY.set(case.body);
     static DISPATCH: fn(&crate::entry::OsConfig) -> u8 = |_| (BODY.get().unwrap())(this_unit());
@@ -1194,7 +1183,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     let _ = BASE.set(Base(unsafe { std::mem::zeroed() }));
     enable_pool();
     let p = pool();
-    std::mem::forget(p.memory.start());
+    std::mem::forget(p.memory.start(p.plan.memory_stack_bytes).unwrap());
     for id in 0..case.units {
         create_unit(id);
     }

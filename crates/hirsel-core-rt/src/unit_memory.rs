@@ -198,16 +198,15 @@ impl Memory {
         }
     }
 
-    pub(super) fn start(&'static self) -> MemoryThread {
+    pub(super) fn start(&'static self, stack_bytes: usize) -> std::io::Result<MemoryThread> {
         let thread = thread::Builder::new()
             .name("hirsel-memory".into())
-            .stack_size(256 << 10)
-            .spawn(|| self.run())
-            .unwrap();
-        MemoryThread {
+            .stack_size(stack_bytes)
+            .spawn(|| self.run())?;
+        Ok(MemoryThread {
             memory: self,
             thread: Some(thread),
-        }
+        })
     }
 
     /// Run `job` on the memory thread.

@@ -45,7 +45,7 @@ pub(super) unsafe fn file_request_pool(entry: hirsel_core_net::FileEntry) -> std
     // queuing the entry or leave this frame before its one completion.
     assert!(unsafe {
         p.slots[worker_ix()].poller.submit_file(
-            (*cur()).id as u16,
+            (*cur()).id,
             entry,
             (&raw const answer).cast(),
             complete,

@@ -36,13 +36,13 @@ impl Sockets {
         flags: Ready,
         mut ready: impl FnMut(u64),
     ) {
-        let index = identity as u32 as usize;
+        let index = identity as usize & (SOCKET_SLOT_LIMIT - 1);
         let Some(slot) = slots.get_mut(index) else {
             return;
         };
         // A shared tag keeps 16 generation bits. A stale edge that matches
         // only readies a waiter that retries its syscall.
-        if slot.generation & 0xffff != (identity >> 32) as u32 & 0xffff {
+        if slot.generation & 0xffff != (identity >> SOCKET_SLOT_BITS) as u32 & 0xffff {
             return;
         }
         let Some(r) = slot.record.as_mut() else {

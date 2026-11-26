@@ -4,18 +4,20 @@ use std::cell::RefCell;
 
 thread_local! {
     /// The slot thread's event buffer. A wait reports the prefix it wrote,
-    /// so the buffer is filled once per thread, not on every poll: 256 packed
-    /// events are 3 KiB, about 600 stores per poll when built on the stack.
-    static EVENTS: RefCell<[Event; 256]> = const { RefCell::new([Event::EMPTY; 256]) };
+    /// so the buffer is filled once per thread, not on every poll.
+    static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Poll one slot and return the number of units queued by socket arrivals.
 /// `None` waits for an event and `Some(0)` is nonblocking.
 fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) -> usize {
-    EVENTS.with_borrow_mut(|evs| poll_slot_into(p, ix, timeout_ns, evs))
+    EVENTS.with_borrow_mut(|evs| {
+        evs.resize(2 * p.plan.reactor.poll_batch as usize, Event::EMPTY);
+        poll_slot_into(p, ix, timeout_ns, evs)
+    })
 }
 
-fn poll_slot_into(p: &Pool, ix: usize, timeout_ns: Option<u64>, evs: &mut [Event; 256]) -> usize {
+fn poll_slot_into(p: &Pool, ix: usize, timeout_ns: Option<u64>, evs: &mut [Event]) -> usize {
     let slot = &p.slots[ix];
     bump(S_GPOLLS);
     if timeout_ns != Some(0) {
@@ -31,7 +33,11 @@ fn poll_slot_into(p: &Pool, ix: usize, timeout_ns: Option<u64>, evs: &mut [Event
         } else {
             timeout_ns
         };
-        let n = sync::wait(slot.handle, &mut evs[..128], timeout_ns);
+        let n = sync::wait(
+            slot.handle,
+            &mut evs[..p.plan.reactor.poll_batch as usize],
+            timeout_ns,
+        );
         slot.last_poll.store(now(), Ordering::Relaxed);
         slot.poller.dispatch_udp_slot(&mut evs[..n])
     };

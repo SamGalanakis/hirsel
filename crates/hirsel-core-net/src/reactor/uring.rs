@@ -2,7 +2,7 @@
 //! its mailbox, and the multishot polls of its watched descriptors.
 use super::COMPLETION_READY;
 use super::{
-    Backend, POLL_BATCH, PollEvents, Poller, REGISTER_SEND_MSG_RING, Turn, WAKE, sendzc,
+    Backend, PollEvents, Poller, REGISTER_SEND_MSG_RING, ReactorPlan, Turn, WAKE, sendzc,
     sys::INTEREST,
 };
 use crate::ready::{Event, Ready};
@@ -56,6 +56,7 @@ pub(super) fn msg_ring_wake(fd: i32) -> io::Result<()> {
 /// with a MSG_RING completion. The owner learns of pending task work from
 /// `IORING_SQ_TASKRUN` without a syscall.
 pub(super) struct Uring {
+    pub(super) plan: ReactorPlan,
     pub(super) ring: Ring,
     /// The mailbox: entries for the owner to submit, in order.
     sq: Mutex<Submissions>,
@@ -160,32 +161,34 @@ fn enter_queue(
 }
 
 impl Uring {
-    pub(super) const ENTRIES: u32 = 64;
-    /// NODROP retains completions past this capacity. The owner enters
-    /// with GETEVENTS to flush them once reaping has made room. A turn reaps
-    /// at most 256 events (the runtime's poll buffer), so a larger queue only
-    /// pins more pages: 4,096 entries pinned 68 KiB in every process.
-    const READINESS_ENTRIES: u32 = 256;
-    /// One SQ batch's completions: the most an entry posts is two, a
-    /// zero-copy send's result and notification. More in flight wait on the
-    /// kernel's overflow list (NODROP) until reaping makes room.
-    pub(super) const COMPLETION_ENTRIES: u32 = Self::ENTRIES * 2;
+    #[cfg(test)]
+    pub(super) const ENTRIES: u32 = ReactorPlan::DEFAULT.sq_entries;
+
+    #[cfg(test)]
+    pub(super) fn open() -> io::Result<Uring> {
+        Self::open_with(ReactorPlan::DEFAULT)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_cq_size(completions: u32) -> io::Result<Uring> {
+        Self::with_cq_sizes(completions, ReactorPlan::DEFAULT.completion_cq)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_cq_sizes(readiness: u32, completion: u32) -> io::Result<Uring> {
+        Self::open_with(ReactorPlan {
+            readiness_cq: readiness,
+            completion_cq: completion,
+            ..ReactorPlan::DEFAULT
+        })
+    }
 
     /// A ring whose kernel runs multishot polls, bounded waits and blind
-    /// MSG_RING wakes. Any refusal (an old kernel, a seccomp filter,
-    /// `io_uring_disabled`) is an error, and the caller uses epoll.
-    pub(super) fn open() -> io::Result<Uring> {
-        Self::with_cq_size(Self::READINESS_ENTRIES)
-    }
-
-    pub(super) fn with_cq_size(completions: u32) -> io::Result<Uring> {
-        Self::with_cq_sizes(completions, Self::COMPLETION_ENTRIES)
-    }
-
-    pub(super) fn with_cq_sizes(readiness: u32, completion: u32) -> io::Result<Uring> {
+    /// MSG_RING wakes.
+    pub(super) fn open_with(plan: ReactorPlan) -> io::Result<Uring> {
         use io_uring::opcode;
         let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
-        let ring = Ring::new(Self::ENTRIES, readiness, true)?;
+        let ring = Ring::new(plan.sq_entries, plan.readiness_cq, true)?;
         if !ring.supports(&[
             opcode::PollAdd::CODE,
             opcode::PollRemove::CODE,
@@ -200,11 +203,12 @@ impl Uring {
             return Err(unsupported());
         }
         let zc = ring.supports(&[opcode::SendZc::CODE, opcode::AsyncCancel::CODE])?;
-        let completion = Completion::open(completion, zc)?;
+        let completion = Completion::open(plan, zc)?;
         // SAFETY: the completion ring owns this fd and pins it through the clone.
         let completion_fd = unsafe { BorrowedFd::borrow_raw(completion.ring.as_raw_fd()) };
         let completion_fd = Arc::new(completion_fd.try_clone_to_owned()?);
         let uring = Uring {
+            plan,
             ring,
             sq: Mutex::default(),
             watched: Mutex::default(),
@@ -273,7 +277,7 @@ impl Uring {
     pub(super) fn wait(&self, out: &mut [Event], timeout_ns: Option<u64>) -> io::Result<usize> {
         let dropped = self.ring.dropped();
         self.completion.check_dropped()?;
-        let limit = POLL_BATCH as usize;
+        let limit = self.plan.poll_batch as usize;
         let mut remaining = limit;
         let mut completion_left = limit;
         let n = self.completion.reap(self, out, &mut completion_left);
@@ -391,7 +395,7 @@ impl Poller {
         crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Filled once: a turn reports the prefix it wrote, so the buffer
         // keeps its length rather than being refilled every turn.
-        events.resize(2 * POLL_BATCH as usize, Event::EMPTY);
+        events.resize(2 * ring.plan.poll_batch as usize, Event::EMPTY);
         let len = ring.wait(&mut events, timeout_ns)?;
         let len = self.dispatch_udp_slot(&mut events[..len]);
         Ok(Some(PollEvents(events, len)))
@@ -432,7 +436,7 @@ impl Poller {
     /// `complete` must publish the result without unwinding or polling.
     pub unsafe fn submit_file(
         &self,
-        unit: u16,
+        unit: u32,
         entry: FileEntry,
         context: *const (),
         complete: unsafe fn(*const (), i32),

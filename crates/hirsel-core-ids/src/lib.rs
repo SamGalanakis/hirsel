@@ -3,6 +3,9 @@
 //! types or lowered code, so old and new front ends, storage and native code can
 //! name the same definition without depending on each other.
 
+#[cfg(unix)]
+pub mod cgroup;
+
 pub mod dir_port;
 pub mod encoding;
 pub mod hex;

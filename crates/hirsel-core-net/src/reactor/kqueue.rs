@@ -352,7 +352,7 @@ impl Poller {
     /// None: no `FileEntry` exists on this host.
     pub unsafe fn submit_file(
         &self,
-        _unit: u16,
+        _unit: u32,
         entry: FileEntry,
         _context: *const (),
         _complete: unsafe fn(*const (), i32),

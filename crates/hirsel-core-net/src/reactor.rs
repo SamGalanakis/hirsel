@@ -24,6 +24,8 @@ mod sendzc;
 pub(crate) use epoll as sys;
 #[cfg(target_os = "macos")]
 pub(crate) use kqueue as sys;
+mod plan;
+pub use plan::ReactorPlan;
 mod udp_group;
 #[cfg(target_os = "linux")]
 mod uring;
@@ -50,7 +52,8 @@ pub enum TxState {
     Sent(i32),
 }
 
-const POLL_BATCH: i32 = 128;
+const POLL_BATCH: i32 = ReactorPlan::DEFAULT.poll_batch as i32;
+
 /// A wake's tag: the eventfd's on epoll, a MSG_RING completion's on io_uring,
 /// the user event's on kqueue.
 const WAKE: u64 = u64::MAX;
@@ -202,15 +205,22 @@ fn is_loopback(peer: &std::net::SocketAddr) -> bool {
 
 /// The process's reactor, chosen at its first use and fixed after.
 pub fn reactor() -> io::Result<Reactor> {
-    CHOSEN.get_or_init(choose).clone().map_err(|message| {
-        eprintln!("{message}");
-        io::Error::new(io::ErrorKind::InvalidInput, message)
-    })
+    reactor_with(ReactorPlan::DEFAULT)
+}
+
+fn reactor_with(plan: ReactorPlan) -> io::Result<Reactor> {
+    CHOSEN
+        .get_or_init(|| choose(plan))
+        .clone()
+        .map_err(|message| {
+            eprintln!("{message}");
+            io::Error::new(io::ErrorKind::InvalidInput, message)
+        })
 }
 
 /// Darwin has one reactor; `auto` and `kqueue` name it.
 #[cfg(target_os = "macos")]
-fn choose() -> Result<Reactor, String> {
+fn choose(_plan: ReactorPlan) -> Result<Reactor, String> {
     match std::env::var_os(REACTOR_ENV) {
         Some(v) if v != "auto" && v != "kqueue" => Err(format!(
             "{REACTOR_ENV}={} is not a reactor; use auto or kqueue",
@@ -221,7 +231,7 @@ fn choose() -> Result<Reactor, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn choose() -> Result<Reactor, String> {
+fn choose(plan: ReactorPlan) -> Result<Reactor, String> {
     {
         {
             let send_zc = match std::env::var_os(SEND_ZC_ENV) {
@@ -248,10 +258,10 @@ fn choose() -> Result<Reactor, String> {
                 }
                 _ => false,
             };
-            if !forced && !release_allows_uring(&kernel_release()) {
+            if plan.force_epoll || (!forced && !release_allows_uring(&kernel_release())) {
                 return Ok(Reactor::Epoll);
             }
-            match Uring::open() {
+            match Uring::open_with(plan) {
                 Ok(probed) => {
                     *PROBED.lock().unwrap_or_else(|e| e.into_inner()) = Some(probed);
                     Ok(Reactor::IoUring)
@@ -335,17 +345,25 @@ impl Poller {
     }
     #[cfg(target_os = "linux")]
     fn new_uring() -> io::Result<Arc<Self>> {
+        Self::new_uring_with(ReactorPlan::DEFAULT)
+    }
+    #[cfg(target_os = "linux")]
+    fn new_uring_with(plan: ReactorPlan) -> io::Result<Arc<Self>> {
         let probed = PROBED.lock().unwrap_or_else(|e| e.into_inner()).take();
-        Ok(Self::from_uring(probed.map_or_else(Uring::open, Ok)?))
+        let ring = probed.filter(|ring| ring.plan == plan);
+        Ok(Self::from_uring(
+            ring.map_or_else(|| Uring::open_with(plan), Ok)?,
+        ))
     }
     #[cfg(target_os = "linux")]
     fn from_uring(ring: Uring) -> Arc<Self> {
+        let event_capacity = 2 * ring.plan.poll_batch as usize;
         Arc::new(Self {
             backend: Backend::Uring(ManuallyDrop::new(Box::new(ring))),
             udp_groups: ManuallyDrop::new(OnceLock::new()),
             udp_budget: Mutex::default(),
             udp_deferred: ManuallyDrop::default(),
-            events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
+            events: Mutex::new(Vec::with_capacity(event_capacity)),
             operations: &PollOperations {
                 poll: Self::poll_uring,
                 wake: Self::wake_ring,
@@ -479,8 +497,11 @@ impl Poller {
 }
 
 fn tag(index: usize, generation: u32) -> u64 {
-    index as u64 | (u64::from(generation & 0xffff) << 32)
+    index as u64 | (u64::from(generation & 0xffff) << SOCKET_SLOT_BITS)
 }
+
+const SOCKET_SLOT_BITS: u32 = 24;
+const SOCKET_SLOT_LIMIT: usize = 1 << SOCKET_SLOT_BITS;
 
 /// Where the calling thread is in a unit pool: its unit and the worker slot
 /// it runs on, whose poller it owns.
@@ -494,7 +515,7 @@ pub struct Here {
 /// registry adds each descriptor to the poller of the slot it registers on
 /// (its home), tagged with the owning unit, and never polls it: the slot
 /// polls and hands each edge to its unit, which dispatches it as one of its
-/// own events wherever it runs. A shared tag is the unit in the top 16 bits,
+/// own events wherever it runs. A shared tag is the unit in the top 24 bits,
 /// the low 16 bits of the slot generation, then the slot index.
 struct SlotPollers {
     pollers: Vec<Arc<Poller>>,
@@ -505,14 +526,25 @@ struct SlotPollers {
 const COMPLETION_READY: u64 = u64::MAX - 2;
 static SHARED: Mutex<Option<Arc<SlotPollers>>> = Mutex::new(None);
 /// Bits of a shared tag below the unit.
-pub const SHARED_UNIT_SHIFT: u32 = 48;
+pub const SHARED_UNIT_SHIFT: u32 = 40;
+/// Unit field reserved for poller-owned events.
+pub const RESERVED_UNIT: u32 = (1 << (64 - SHARED_UNIT_SHIFT)) - 1;
 /// Make the process's slot pollers, one per worker slot; the first takes the
 /// probe's ring. `here` names the calling unit and slot, or None outside one
 /// (such a registry keeps a private poller).
-pub fn slot_pollers(workers: usize, here: fn() -> Option<Here>) -> io::Result<Vec<Arc<Poller>>> {
+pub fn slot_pollers(
+    workers: usize,
+    plan: ReactorPlan,
+    here: fn() -> Option<Here>,
+) -> io::Result<Vec<Arc<Poller>>> {
+    let reactor = reactor_with(plan)?;
     share(
         (0..workers)
-            .map(|_| Poller::new())
+            .map(|_| match reactor {
+                #[cfg(target_os = "linux")]
+                Reactor::IoUring if !plan.force_epoll => Poller::new_uring_with(plan),
+                _ => Poller::new_readiness(),
+            })
             .collect::<io::Result<_>>()?,
         here,
     )
@@ -538,9 +570,8 @@ fn share(pollers: Vec<Arc<Poller>>, here: fn() -> Option<Here>) -> io::Result<Ve
     Ok(pollers)
 }
 fn shared_tag(unit: u32, index: usize, generation: u32) -> u64 {
-    // Unit 0xffff is the ring's own: wake, poll removals and transmit slots.
-    assert!(unit < 0xffff, "unit {unit} is reserved");
-    (u64::from(unit) << SHARED_UNIT_SHIFT) | (u64::from(generation & 0xffff) << 32) | index as u64
+    assert!(unit < RESERVED_UNIT, "unit {unit} is reserved");
+    (u64::from(unit) << SHARED_UNIT_SHIFT) | tag(index, generation)
 }
 
 struct Record {
@@ -651,7 +682,7 @@ impl Sockets {
     /// Reserve descriptor table slots before a provider creates its resources.
     pub fn reserve(&mut self, count: usize) -> io::Result<()> {
         let new = count.saturating_sub(self.free.len());
-        if self.slots.len().saturating_add(new) > u32::MAX as usize {
+        if self.slots.len().saturating_add(new) > SOCKET_SLOT_LIMIT {
             return Err(io::Error::from_raw_os_error(libc::EMFILE));
         }
         self.slots
@@ -688,12 +719,15 @@ impl Sockets {
         let index = if let Some(index) = self.free.pop() {
             index
         } else {
-            let index = u32::try_from(self.slots.len()).ok()?;
+            let index = self.slots.len();
+            if index >= SOCKET_SLOT_LIMIT {
+                return None;
+            }
             self.slots.push(Slot {
                 generation: 1,
                 record: None,
             });
-            index
+            index as u32
         };
         let slot = &mut self.slots[index as usize];
         slot.record = Some(record);

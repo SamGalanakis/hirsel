@@ -13,7 +13,7 @@ use std::{
 };
 
 // Unit 0xffff is reserved for poller-owned registrations.
-const FIRST: u64 = 0xffff_0000_0000_0000;
+const FIRST: u64 = (super::RESERVED_UNIT as u64) << super::SHARED_UNIT_SHIFT;
 const LAST: u64 = super::COMPLETION_READY;
 
 struct Group {

@@ -543,7 +543,7 @@ fn a_completion_overflow_burst_loses_no_completion() {
         // SAFETY: NOP has one result and its counter is pinned.
         assert!(unsafe {
             poller.submit_file(
-                u16::try_from(unit).unwrap(),
+                u32::try_from(unit).unwrap(),
                 io_uring::opcode::Nop::new().build(),
                 std::ptr::from_ref(calls).cast(),
                 count,
@@ -881,3 +881,50 @@ fn kernel_offers_io_uring() -> bool {
 mod choice_tests;
 #[path = "udp_tests.rs"]
 mod udp_tests;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reactor_plan_single_source_and_memlock_fallback() {
+    let config = ReactorPlan {
+        iowq_bounded: 1,
+        force_epoll: true,
+        ..ReactorPlan::for_batch(64)
+    };
+    assert_eq!(choose(config).unwrap(), Reactor::Epoll);
+
+    let config = ReactorPlan {
+        force_epoll: false,
+        ..config
+    };
+    let ring = match Uring::open_with(config) {
+        Ok(ring) => ring,
+        Err(error) if !kernel_offers_io_uring() => {
+            eprintln!("io_uring unavailable: {error}");
+            return;
+        }
+        Err(error) => panic!("host offers io_uring but refused the derived ring: {error}"),
+    };
+    assert_eq!(ring.ring.cq_entries(), 128);
+    assert_eq!(ring.completion.ring.cq_entries(), 64);
+    assert_eq!(ring.plan.poll_batch, 64);
+    let poller = Poller::from_uring(ring);
+    let mut events = vec![crate::ready::Event::EMPTY; 2 * config.poll_batch as usize];
+    let mut peers = Vec::new();
+    for index in 0..96 {
+        let (socket, peer) = UnixStream::pair().unwrap();
+        let fd = Arc::new(OwnedFd::from(socket));
+        let tag = shared_tag(0x10_000, index, 1);
+        poller.add(&fd, tag, true).unwrap();
+        peers.push((fd, peer));
+    }
+    let count = poller.wait_slot(&mut events, Some(10_000_000)).unwrap();
+    assert!(
+        (1..=64).contains(&count),
+        "readiness batch returned {count}"
+    );
+    assert!(
+        events[..count]
+            .iter()
+            .all(|event| event.token() >> SHARED_UNIT_SHIFT == 0x10_000)
+    );
+}

@@ -155,7 +155,7 @@ impl Watches {
     }
 
     pub(in crate::reactor) fn submit_recovery(&mut self, ring: &Uring) -> io::Result<bool> {
-        let mut left = Uring::ENTRIES;
+        let mut left = ring.plan.sq_entries;
         while let Some(work) = self.work.front() {
             if left == 0 || left == 1 && matches!(work, Work::Replace(..)) {
                 break;

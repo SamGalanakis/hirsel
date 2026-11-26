@@ -29,10 +29,16 @@ mod env;
 pub(crate) use env::workers;
 #[path = "units_hooks.rs"]
 mod hooks;
+#[path = "units_launch.rs"]
+mod launch;
 #[path = "units_ledger.rs"]
 pub(crate) mod ledger;
+pub(crate) use launch::launch;
+#[path = "units_plan.rs"]
+mod plan;
 pub(crate) use hooks::untied;
 use hooks::{UNTIED_ON, enable_pool, pool_hooks};
+use plan::UntiedPlan;
 #[path = "units_reply.rs"]
 mod reply;
 pub(crate) use reply::{Reply, file_request, uses_file_ring};
@@ -326,7 +332,7 @@ pub(crate) struct Pool {
     /// LIFO slot), so a request and its reply stay on one core.
     lifo: Vec<AtomicPtr<Unit>>,
     lifo_runs: Vec<AtomicU32>,
-    lifo_on: bool,
+    plan: UntiedPlan,
     injector: Mutex<VecDeque<UP>>,
     memory: Memory,
     /// Units in the local queues and the injector. The LIFO slots are not
@@ -812,7 +818,7 @@ fn enqueue(p: &Pool, u: &Unit) {
     #[cfg(feature = "testing")]
     observe::queued(u);
     let ix = worker_ix();
-    if ix < p.w && p.lifo_on && !cur().is_null() {
+    if ix < p.w && !cur().is_null() {
         // Woken by the unit running on this worker: it runs here next.
         // Only this worker accesses its private slot.
         let prev = p.lifo[ix].load(Ordering::Relaxed);
@@ -1308,68 +1314,4 @@ fn merge_stats() {
             total.fetch_add(local.get(), Ordering::Relaxed);
         }
     });
-}
-
-/// Run `run` as `k` root units (a program has one; the reference bench two) on
-/// `w` workers; the worst status wins.
-pub(crate) fn launch(
-    k: usize,
-    w: usize,
-    input: &crate::entry::OsConfig,
-    run: &(dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
-) -> u8 {
-    let spin_ns = env::idle_spin_ns();
-    // One poller per worker slot for the descriptors its units register.
-    let pollers = hirsel_core_net::slot_pollers(w, here)
-        .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-    let _ = POOL.set(Pool {
-        w,
-        locals: (0..w).map(|_| Mutex::new(VecDeque::new())).collect(),
-        lifo: (0..w)
-            .map(|_| AtomicPtr::new(std::ptr::null_mut()))
-            .collect(),
-        lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
-        lifo_on: env::lifo_on(),
-        injector: Mutex::new(VecDeque::new()),
-        memory: Memory::new(),
-        queued: AtomicUsize::new(0),
-        searching: AtomicUsize::new(0),
-        idle: Mutex::new(Vec::with_capacity(w)),
-        nsleep: AtomicUsize::new(0),
-        handed: (0..w).map(|_| AtomicBool::new(false)).collect(),
-        uring: pollers[0].reactor().completes_files(),
-        slots: pollers.into_iter().map(Slot::new).collect(),
-        net_used: AtomicBool::new(false),
-        stop: AtomicBool::new(false),
-        spin_ns,
-    });
-    // SAFETY: the launch joins every worker before `run` goes out of scope.
-    let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) =
-        unsafe { std::mem::transmute(run) };
-    let _ = RUN.set(RunFn(run));
-    let _ = BASE.set(Base(*input));
-    LIVE.store(k, Ordering::SeqCst);
-    enable_pool();
-    let p = pool();
-    let memory_thread = p.memory.start();
-    for i in 0..k {
-        create_unit(i as u32);
-    }
-    std::thread::scope(|scope| {
-        for ix in 0..w {
-            std::thread::Builder::new()
-                .name(format!("hirsel-w{ix}"))
-                .stack_size(1 << 20)
-                .spawn_scoped(scope, move || worker_main(p, ix))
-                .unwrap();
-        }
-    });
-    drop(memory_thread);
-    // Every recording block is in its file before the run reports.
-    #[cfg(feature = "record")]
-    crate::tape::writer::flush();
-    if std::env::var_os("HIRSEL_XSTATS").is_some() {
-        report::print(p);
-    }
-    WORST.load(Ordering::Relaxed)
 }

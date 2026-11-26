@@ -4,6 +4,7 @@
 //! runtime site waits on an address yet, so the seam has no address wait.
 #[cfg(target_os = "macos")]
 mod darwin;
+pub(crate) mod envelope;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

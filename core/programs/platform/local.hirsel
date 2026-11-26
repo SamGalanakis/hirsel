@@ -24,15 +24,12 @@ pub type Supplied: send {
     net: Net
 }
 
-// A start sees a view of the host's seed: the services a place's grants are made from.
-// A start that registered its place returns the Factory that holds that registration, and
-// the host starts its later groups with it (RUNNER-SPEC §14.9: one registration per host and
-// factory while the place and n_place stay the same).
-pub opaque type Factory[T: send]: send {
-    start: own[send] fn(take Launch[T], T) -> (Result[Started, Refused], Option[Factory[T]])
+// The constructor ties the plain maker to its concrete PlaceConfig. Its
+// dispatch stays in the actor; only the maker and a copied seed enter a shard.
+pub opaque type Factory[T: cross]: send {
+    launch: own[send] fn(take ShardLaunch[T], Tasks, u64) -> Result[Task[()], Refused],
+    copy_seed: fn(T) -> T,
 }
-
-type Make[T: send, G: send, H: shareable + inert + send, S: send]: send = Plain(fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) | Seeded(fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S], Capacity])
 
 pub type Unloaded: send {
     name: String,
@@ -53,13 +50,13 @@ pub type Seed = own[send] fn(mut store.Db) -> Result[(), String] waits
 // Up: a child reached Ready and the host accepted it. Down: a child ended.
 pub type Change: send = Up(String) | Down(Unloaded)
 
-pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Denied | Failed(String) | Stopping
+pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Denied | Failed(String) | Stopping | Configuration
 
 // `root` holds the host's catalog (`root/host`) and every group's store (`root/<name>`).
 // `place_bytes` is the budget every live child shares; `max_places` bounds the sessions
 // and is, with `idle_ms`, the host's Config (§14.2, §14.4). `sessions` is the wire
 // sessions every place admits at once (`PlaceConfig.max_sessions`).
-pub type Config[T: send]: send {
+pub type Config[T: cross]: send {
     root: Dir,
     options: store.Options,
     factory: Factory[T],
@@ -67,6 +64,7 @@ pub type Config[T: send]: send {
     max_places: u64,
     idle_ms: u64,
     place_bytes: u64,
+    units: u64,
     sessions: u64,
     tasks: Tasks,
     clock: Clock,
@@ -99,35 +97,13 @@ pub opaque type Lease: send {
     dialer: Option[std.wsock.Dialer]
 }
 
-// The child task's own bytes on top of operate's: the operate task's charge, the phase
-// handoff, its dial connection (64 + DIALS × size(Dial), no room: a Dial holds only
-// clients) and its last message.
-const DIALS: u64 = 16u64
-
-const PLACE_TASK_BYTES: u64 = 65536u64
-
 // The host task's own bytes on top of the place budget, its catalog store and the store a
 // create seeds: its timers, inboxes and the bookkeeping of each child and session.
 const LOCAL_BYTES: u64 = 1048576u64
 
 const NEXT_ID: u64 = 0u64
 
-type Launch[T: send]: send {
-    supplied: Supplied,
-    backing: runner.Backing,
-    sizing: PlaceSizing,
-    selection: runner.Selection,
-    idle: u64,
-    sessions: u64,
-    available: u64,
-    stop: Receiver[()],
-    status: Latest[runner.Status],
-    to: Sender[In],
-    name: String,
-    gen: u64,
-}
-
-type PlaceSizing: send {
+type PlaceSizing: cross {
     sizes: store.Overrides,
     need: u64,
 }
@@ -140,11 +116,6 @@ fn place_sizing(options: store.Options) -> PlaceSizing {
     sizes.group_commits = Some(options.group_commits)
     sizes.lock_wait_ms = Some(options.lock_wait_ms)
     PlaceSizing(sizes, need: store.directory_writer_need(sizes))
-}
-
-type Started {
-    task: Task[()],
-    charge: u64
 }
 
 type AccessReply = Sender[Result[Option[Lease], Refused]]
@@ -164,34 +135,16 @@ type ReadReply = Sender[Result[Bytes, Refused]]
 
 type Downs = Sender[Result[u64, Refused]]
 
-type In: send = Host(platform.Input) | Up(String, u64, std.wsock.Dialer) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
+type In: send = Host(platform.Input) | Shard(runner.PlaceEvent) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
 
-type PlaceJob[G: send, H: shareable + inert + send, S: send]: send {
-    placing: runner.Placing[G, H],
-    config: runner.PlaceConfig[G, H, S],
-    dialer: std.wsock.Dialer,
-    stop: Receiver[()],
-    status: Latest[runner.Status],
-    to: Sender[In],
-    name: String,
-    gen: u64,
-    need: u64,
-}
-
-type Operated[G: send, H: shareable + inert + send, S: send]: send {
-    placing: runner.Placing[G, H],
-    config: runner.PlaceConfig[G, H, S],
-    stop: Receiver[()],
-    status: Latest[runner.Status],
-    watch: Sender[Receiver[runner.Phase]],
-}
-
-// A live child: the host's identity for it, its stop, its status and its task.
+// The actor owns a child's stop client, mirror, and reservation.
 type Kid {
     child: launcher.Child,
-    stop: Option[Sender[()]],
+    stop: Option[Client[()]],
+    stopping: bool,
     status: Latest[runner.Status],
-    task: Option[Task[()]],
+    job: u64,
+    shard: u64,
     charge: u64,
     expect: Option[(u64, u64)],
     ready: bool,
@@ -213,11 +166,13 @@ type Sessions {
     next_id: u64
 }
 
-type Actor[T: send] {
+type Actor {
     h: platform.Host,
     driving: platform.Driver,
-    factory: Factory[T],
-    seed: T,
+    shards: List[Shard],
+    next_job: u64,
+    admitting: bool,
+    pending: List[Launch],
     root: Dir,
     options: store.Options,
     sizing: PlaceSizing,
@@ -228,14 +183,10 @@ type Actor[T: send] {
     watching: Map[u64, Map[u64, Sender[()]]],
     next_watch: u64,
     waiters: Map[u64, List[(u64, Downs)]],
-    place_bytes: u64,
     sessions: u64,
-    used: u64,
     tasks: Tasks,
     clock: Clock,
     random: Random,
-    net: Net,
-    me: Sender[In],
     watch: Option[Sender[Change]],
     kids: List[Kid],
     routes: List[(String, AccessReply)],
@@ -250,7 +201,7 @@ type Actor[T: send] {
     unloaded: List[Unloaded],
 }
 
-type Begin[T: send]: send {
+type Begin[T: cross]: send {
     config: Config[T],
     inbox: Receiver[In],
     me: Sender[In],
@@ -279,116 +230,12 @@ type Forward: send {
     to: Sender[In]
 }
 
-// ---- factories ----
-pub fn factory[T: send, G: send, H: shareable + inert + send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Factory[T] {
-    held_factory(Plain(make), None)
-}
-
-// A factory whose `make` also sees the host's seed. `make` is still a plain fn, so only
-// linked code runs as a group.
-pub fn seeded_factory[T: send, G: send, H: shareable + inert + send, S: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Factory[T] {
-    held_factory(Seeded(make), None)
-}
-
-fn held_factory[T: send, G: send, H: shareable + inert + send, S: send](make: Make[T, G, H, S], take held: Option[runner.Placing[G, H]]) -> Factory[T] {
-    let made = fn(take request: Launch[T], seed: T) -> (Result[Started, Refused], Option[Factory[T]]) {
-        let config = match make {
-            Plain(f) => f(clone(request.supplied)),
-            Seeded(f) => f(clone(request.supplied), seed),
-        }
-        let Ok(take settings) = take config else {
-            return (Error(Full), None)
-        }
-        // The held registration when it fits this config, else a new one the next
-        // Factory holds.
-        let (take placing, fresh) = match held {
-            Some(kept) => if runner.placing_fits(kept, settings) {
-                (runner.share_placing(kept), false)
-            } else {
-                (runner.placing_of(settings), true)
-            },
-            None => (runner.placing_of(settings), true),
-        }
-        let next = if fresh {
-            Some(held_factory(make, Some(runner.share_placing(placing))))
-        } else {
-            None
-        }
-        (start_made(take request, take placing, take settings), take next)
-    }
-    Factory(start: take made)
-}
-
-fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take request: Launch[T], take placing: runner.Placing[G, H], take made: runner.PlaceConfig[G, H, S]) -> Result[Started, Refused] {
-    let Launch(supplied: supplied, backing: take backing, sizing, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
-    let mut config = take made
-    config.backing = take backing
-    config.sizes = sizing.sizes
-    config.selection = selection
-    config.idle = Some(idle)
-    config.max_sessions = sessions
-    // The place is dialed in process, and its sizing counts each session's dial room.
-    let (dialing, dials) = match std.wsock.dials(DIALS) {
-        Ok(take pair) => take pair,
-        Error(_) => return Error(Full)
-    }
-    config.listen = InProcess(take dials)
-    let overhead = match runner.placed_bytes(placing, config) {
-        Ok(total) => total,
-        Error(_) => return Error(Full)
-    }
-    let need = int.saturating_add(overhead, int.saturating_add(sizing.need, 1048576u64))
-    let charge = int.saturating_add(need, PLACE_TASK_BYTES)
-    if charge > available {
-        return Error(Full)
-    }
-    let job = PlaceJob(placing: take placing, config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
-    let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
-    let running = task.spawn(supplied.tasks, bytes charge, take job, run)
-    Ok(Started(task: take running, charge: charge))
-}
-
-// The child task: operate runs in a child of it so this task can read its phases. Its
-// last message is Down, sent after operate has returned and so after the store is closed.
-fn run_place[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G, H, S]) -> () waits {
-    let to = channel.sender(job.to)
-    let name = string.from(job.name)
-    let gen = job.gen
-    let ended = operated(take job)
-    let _ = channel.send(to, Down(take name, gen, take ended))
-}
-
-fn operated[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
-    let PlaceJob(placing: take placing, config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need) = take job
-    let tasks = config.tasks
-    let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
-    let request = Operated(placing: take placing, config: take config, stop: take halt, status: take root, watch: take handoff)
-    let run: fn(take Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits = run_operate
-    let running = task.spawn(tasks, bytes need, take request, run)
-    if let Ok(take phases) = channel.receive(phases_from) {
-        while let Ok(phase) = channel.receive(phases) {
-            if let Ready = phase {
-                let _ = channel.send(to, Up(string.from(name), gen, std.wsock.copy_dialer(dialing)))
-            }
-        }
-    }
-    match task.join(take running) {
-        Ok(take ended) => take ended,
-        Error(_) => Error(Missing("operate")),
-    }
-}
-
-fn run_operate[G: send, H: shareable + inert + send, S: send](take request: Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
-    let Operated(placing: take placing, config: take config, stop: take halt, status: take root, watch: take phases) = take request
-    runner.operate_placed(take placing, take config, take halt, root, Some(take phases))
-}
-
 // ---- the launcher side ----
-fn now[T: send](a: Actor[T]) -> platform.Now {
+fn now(a: Actor) -> platform.Now {
     platform.Now(wall_ms: host.wall_ms(a.clock), mono_ns: host.mono_ns(a.clock))
 }
 
-fn kid_index[T: send](a: Actor[T], c: launcher.Child) -> Option[u64] {
+fn kid_index(a: Actor, c: launcher.Child) -> Option[u64] {
     for i in 0u64 .. list.len(a.kids) {
         if launcher.same_child(a.kids[i].child, c) {
             return Some(i)
@@ -397,7 +244,7 @@ fn kid_index[T: send](a: Actor[T], c: launcher.Child) -> Option[u64] {
     None
 }
 
-fn kid_of[T: send](a: Actor[T], name: String, gen: u64) -> Option[u64] {
+fn kid_of(a: Actor, name: String, gen: u64) -> Option[u64] {
     for i in 0u64 .. list.len(a.kids) {
         let c = a.kids[i].child
         if c.group.name == name {
@@ -411,7 +258,7 @@ fn kid_of[T: send](a: Actor[T], name: String, gen: u64) -> Option[u64] {
     None
 }
 
-fn group_has_kid[T: send](a: Actor[T], name: String) -> bool {
+fn group_has_kid(a: Actor, name: String) -> bool {
     for k in a.kids {
         if k.child.group.name == name {
             return true
@@ -421,18 +268,13 @@ fn group_has_kid[T: send](a: Actor[T], name: String) -> bool {
 }
 
 fn stop_kid(mut k: Kid) {
-    if let Some(take s) = replace(mut k.stop, None) {
-        let _ = channel.try_send(s, ())
-    }
-}
-
-fn selection_of(activation: u64) -> runner.Selection {
-    Current(activation)
+    k.stopping = true
+    let _ = replace(mut k.stop, None)
 }
 
 // Carries out a Start of a serving child: the group's store at root/<workdir>, the
 // activation the host names, and the host's idle bound.
-fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[launcher.Event]) waits {
+fn start(mut a: Actor, take l: launcher.Launch, mut events: List[launcher.Event]) waits {
     let launcher.Launch(group: take group, workdir: take workdir, mode: take mode, assembly: take assembly, ..) = take l
     let role = launcher.role_of(mode)
     if let Install(_) = role {
@@ -445,7 +287,9 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
     }
     let child = launcher.Child(group: clone(group), role: Serving(gen))
     if let Some(i) = kid_index(a, child) {
-        list.push(mut events, Launched(take child, Started))
+        if a.kids[i].charge != 0u64 {
+            list.push(mut events, Launched(take child, Started))
+        }
         return
     }
     if a.halting || group_has_kid(a, group.name) {
@@ -457,35 +301,76 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
         refuse_start(mut a, take child, Failed(string.from("workdir")), mut events)
         return
     }
-    let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let root = match runner.status_root() {
         Ok(take made) => take made,
         Error(_) => {
-            refuse_start(mut a, take child, Full, mut events);
+            refuse_start(mut a, take child, Full, mut events)
             return
         },
     }
-    let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
-    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizing: a.sizing, selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions, available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
-    let (take outcome, take next) = (a.factory.start)(take launched, a.seed)
-    if let Some(take holding) = take next {
-        a.factory = take holding
+    let job = a.next_job
+    a.next_job += 1u64
+    list.push(mut a.kids, Kid(child: take child, stop: None, stopping: false, status: take root, job: job, shard: 0u64, charge: 0u64, expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly), dialer: None))
+    list.push(mut a.pending, Launch(job: job, name: string.from(group.name), dir: dir, sizing: a.sizing, version: serve.activation, idle: serve.idle, sessions: a.sessions, available: 0u64))
+}
+
+// Admissions are serialized because placement uses the exact charges already
+// accepted. The actor keeps serving other requests while a shard decides.
+fn dispatch_start(mut a: Actor) waits {
+    while !a.admitting && list.len(a.pending) != 0u64 {
+        let mut launch = list.remove(mut a.pending, 0u64)
+        let Some(i) = job_index(a, launch.job) else {
+            fail("local: missing pending child")
+        }
+        let shard = most_room(a.shards)
+        a.kids[i].shard = shard
+        launch.available = a.shards[shard].room
+        if let Error(_) = conn.try_send(a.shards[shard].to, Start(take launch)) {
+            admit_place(mut a, i, None, Stopping)
+        } else {
+            a.admitting = true
+        }
     }
-    match take outcome {
-        Ok(take begun) => {
-            let Started(task: take running, charge: charged) = take begun
-            a.used += charged
-            list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged, expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly), dialer: None))
-            list.push(mut events, Launched(take child, Started))
+}
+
+fn job_index(a: Actor, job: u64) -> Option[u64] {
+    for i in 0u64 .. list.len(a.kids) {
+        if a.kids[i].job == job {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn admit_place(mut a: Actor, i: u64, take admitted: Option[(Client[()], u64)], take why: Refused) waits {
+    a.admitting = false
+    let mut events: List[launcher.Event] = list.new()
+    match take admitted {
+        Some((take stop_to, charge)) => {
+            a.shards[a.kids[i].shard].room -= charge
+            a.kids[i].charge = charge
+            if !a.kids[i].stopping {
+                a.kids[i].stop = Some(take stop_to)
+            }
+            list.push(mut events, Launched(clone(a.kids[i].child), Started))
         },
-        Error(take why) => refuse_start(mut a, take child, take why, mut events),
+        None => {
+            let gone = list.remove(mut a.kids, i)
+            let name = string.from(gone.child.group.name)
+            answer_unloads(mut a, name, Error(clone(why)))
+            answer_reads(mut a, name)
+            refuse_start(mut a, clone(gone.child), take why, mut events)
+            report_retired(mut a, name, mut events)
+        },
     }
+    let reqs = apply_events(mut a, take events)
+    apply(mut a, take reqs)
 }
 
 // A serving start this launcher refuses is reported to the host as `Spawn`, and its group's
 // waiting routes are answered with `why` once the host has applied the refusal, unless the
 // host started the group again at once (§14.9 "Ends").
-fn refuse_start[T: send](mut a: Actor[T], take child: launcher.Child, take why: Refused, mut events: List[launcher.Event]) {
+fn refuse_start(mut a: Actor, take child: launcher.Child, take why: Refused, mut events: List[launcher.Event]) {
     list.push(mut a.refused, (string.from(child.group.name), clone(why)))
     list.push(mut events, Refused(take child, Spawn(refused_text(why))))
 }
@@ -500,10 +385,11 @@ fn refused_text(why: Refused) -> String {
         Denied => string.from("Denied"),
         Failed(e) => string.from(e),
         Stopping => string.from("Stopping"),
+        Configuration => string.from("Configuration"),
     }
 }
 
-fn retire[T: send](mut a: Actor[T], take g: launcher.Group, mut events: List[launcher.Event]) {
+fn retire(mut a: Actor, take g: launcher.Group, mut events: List[launcher.Event]) {
     if !group_has_kid(a, g.name) {
         list.push(mut events, Retired(take g))
         return
@@ -517,7 +403,7 @@ fn retire[T: send](mut a: Actor[T], take g: launcher.Group, mut events: List[lau
 }
 
 // A removed group's listener closes: its store goes too when the host retired it Delete.
-fn closed[T: send](mut a: Actor[T], take g: launcher.Group) waits {
+fn closed(mut a: Actor, take g: launcher.Group) waits {
     if let Some(r) = platform.retirement(a.h, g.name) {
         if let Delete = r.disposition {
             let _ = std.dir.remove_all(a.root, r.workdir)
@@ -537,12 +423,14 @@ fn closed[T: send](mut a: Actor[T], take g: launcher.Group) waits {
 // One host request, carried out in this process. Admission, assembly, collection and
 // cutover belong to launched groups; a group here has no deploy, so the host never asks
 // for them, and each is answered as a launcher that has none would answer it.
-fn carry_out[T: send](mut a: Actor[T], take r: launcher.Request, mut events: List[launcher.Event]) waits {
+fn carry_out(mut a: Actor, take r: launcher.Request, mut events: List[launcher.Event]) waits {
     match take r {
         Hello => {
             let mut children: List[launcher.ChildState] = list.new()
             for k in a.kids {
-                list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started, selection: Some(clone(k.selected)), answer: None))
+                if k.charge != 0u64 {
+                    list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started, selection: Some(clone(k.selected)), answer: None))
+                }
             }
             list.push(mut events, Inventory(take children, list.new(), list.new()))
         },
@@ -573,22 +461,27 @@ fn carry_out[T: send](mut a: Actor[T], take r: launcher.Request, mut events: Lis
     }
 }
 
+fn apply_events(mut a: Actor, take events: List[launcher.Event]) -> List[launcher.Request] waits {
+    let mut reqs: List[launcher.Request] = list.new()
+    for take e in take events {
+        let n = now(a)
+        for take r in platform.event(mut a.h, take e, n) {
+            list.push(mut reqs, take r)
+        }
+    }
+    take reqs
+}
+
 // Carries out the host's requests and applies the events they produce until the host
 // asks for nothing more, then rearms its timers and answers the routes it can.
-fn apply[T: send](mut a: Actor[T], take reqs: List[launcher.Request]) waits {
+fn apply(mut a: Actor, take reqs: List[launcher.Request]) waits {
     let mut todo = take reqs
     while list.len(todo) > 0u64 {
         let mut events: List[launcher.Event] = list.new()
         for take r in take todo {
             carry_out(mut a, take r, mut events)
         }
-        todo = list.new()
-        for take e in take events {
-            let n = now(a)
-            for take more in platform.event(mut a.h, take e, n) {
-                list.push(mut todo, take more)
-            }
-        }
+        todo = apply_events(mut a, take events)
     }
     platform.settle(mut a.driving, a.h)
     while let Some((take name, take why)) = list.pop(mut a.refused) {
@@ -624,7 +517,7 @@ fn serves(k: Kid) -> bool {
 
 // A route is answered once the host has accepted a child of its group as Ready, and is
 // refused when its group is gone.
-fn answer_routes[T: send](mut a: Actor[T]) waits {
+fn answer_routes(mut a: Actor) waits {
     let mut kept: List[(String, AccessReply)] = list.new()
     while let Some((take name, take reply)) = list.pop(mut a.routes) {
         let answer: Option[Result[Option[Lease], Refused]] = match platform.serving_ready(a.h, name) {
@@ -651,7 +544,7 @@ fn answer_routes[T: send](mut a: Actor[T]) waits {
     a.routes = take kept
 }
 
-fn refuse_routes[T: send](mut a: Actor[T], name: String, why: Refused) {
+fn refuse_routes(mut a: Actor, name: String, why: Refused) {
     let mut kept: List[(String, AccessReply)] = list.new()
     while let Some((take at, take reply)) = list.pop(mut a.routes) {
         if at == name {
@@ -663,7 +556,7 @@ fn refuse_routes[T: send](mut a: Actor[T], name: String, why: Refused) {
     a.routes = take kept
 }
 
-fn routed[T: send](a: Actor[T], name: String) -> bool {
+fn routed(a: Actor, name: String) -> bool {
     for r in a.routes {
         if r.0 == name {
             return true
@@ -675,14 +568,12 @@ fn routed[T: send](a: Actor[T], name: String) -> bool {
 // A child reached Ready: the launcher reports the store it opened, as a hosted place does
 // on its private endpoint. A store other than the one the host recorded for the group is
 // reported as a mismatch and the child is stopped.
-fn on_up[T: send](mut a: Actor[T], name: String, gen: u64, take dialing: std.wsock.Dialer) waits {
-    let Some(i) = kid_of(a, name, gen) else {
-        return
-    }
+fn on_up(mut a: Actor, i: u64, take dialing: std.wsock.Dialer) waits {
     if a.kids[i].ready {
         return
     }
     let s = latest.read(a.kids[i].status)
+    let name = string.from(a.kids[i].child.group.name)
     let child: launcher.Child = clone(a.kids[i].child)
     let mut events: List[launcher.Event] = list.new()
     let mismatch = match a.kids[i].expect {
@@ -705,13 +596,7 @@ fn on_up[T: send](mut a: Actor[T], name: String, gen: u64, take dialing: std.wso
             let _ = channel.try_send(w, Up(string.from(name)))
         }
     }
-    let mut reqs: List[launcher.Request] = list.new()
-    for take e in take events {
-        let n = now(a)
-        for take r in platform.event(mut a.h, take e, n) {
-            list.push(mut reqs, take r)
-        }
-    }
+    let reqs = apply_events(mut a, take events)
     apply(mut a, take reqs)
 }
 
@@ -744,15 +629,10 @@ fn start_refused(e: runner.StartError) -> Refused {
 // the routes waiting on its group only when the host does not start the group again at
 // once: a first failure is retried at once, and a start at 0 refused because genesis had
 // already run relaunches at the store's activation (§14.5 "Genesis").
-fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[runner.Ended, runner.StartError]) waits {
-    let Some(i) = kid_of(a, name, gen) else {
-        return
-    }
-    let mut k = list.remove(mut a.kids, i)
-    if let Some(take t) = replace(mut k.task, None) {
-        let _ = task.join(take t)
-    }
-    a.used -= k.charge
+fn on_down(mut a: Actor, i: u64, take ended: Result[runner.Ended, runner.StartError]) waits {
+    let k = list.remove(mut a.kids, i)
+    let name = string.from(k.child.group.name)
+    a.shards[k.shard].room += k.charge
     answer_reads(mut a, name)
     let mut events: List[launcher.Event] = list.new()
     let mut failed: Option[Refused] = None
@@ -766,25 +646,9 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
     }
     let readable = !a.halting && routed(a, name)
     list.push(mut events, Ended(clone(k.child), end_of(ended, readable)))
-    let mut kept: List[launcher.Group] = list.new()
-    while let Some(take g) = list.pop(mut a.retiring) {
-        if g.name == name && !group_has_kid(a, name) {
-            list.push(mut events, Retired(take g))
-        } else {
-            list.push(mut kept, take g)
-        }
-    }
-    a.retiring = take kept
+    report_retired(mut a, name, mut events)
     let unloaded = Unloaded(name: string.from(name), ended: clone(ended))
-    let mut waiting: List[(String, Sender[Result[Unloaded, Refused]])] = list.new()
-    while let Some((take at, take reply)) = list.pop(mut a.unloads) {
-        if at == name {
-            let _ = channel.try_send(reply, Ok(clone(unloaded)))
-        } else {
-            list.push(mut waiting, (take at, take reply))
-        }
-    }
-    a.unloads = take waiting
+    answer_unloads(mut a, name, Ok(clone(unloaded)))
     if a.halting {
         list.push(mut a.unloaded, clone(unloaded))
     }
@@ -794,18 +658,57 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
     if let Some(w) = a.watch {
         let _ = channel.try_send(w, Down(take unloaded))
     }
-    let mut reqs: List[launcher.Request] = list.new()
-    for take e in take events {
-        let n = now(a)
-        for take r in platform.event(mut a.h, take e, n) {
-            list.push(mut reqs, take r)
-        }
-    }
+    let reqs = apply_events(mut a, take events)
     apply(mut a, take reqs)
     if let Some(take why) = take failed {
         if !group_has_kid(a, name) {
             refuse_routes(mut a, name, take why)
         }
+    }
+}
+
+fn answer_unloads(mut a: Actor, name: String, answer: Result[Unloaded, Refused]) {
+    let mut waiting: List[(String, Sender[Result[Unloaded, Refused]])] = list.new()
+    while let Some((take at, take reply)) = list.pop(mut a.unloads) {
+        if at == name {
+            let _ = channel.try_send(reply, clone(answer))
+        } else {
+            list.push(mut waiting, (take at, take reply))
+        }
+    }
+    a.unloads = take waiting
+}
+
+fn report_retired(mut a: Actor, name: String, mut events: List[launcher.Event]) {
+    let mut kept: List[launcher.Group] = list.new()
+    while let Some(take g) = list.pop(mut a.retiring) {
+        if g.name == name && !group_has_kid(a, name) {
+            list.push(mut events, Retired(take g))
+        } else {
+            list.push(mut kept, take g)
+        }
+    }
+    a.retiring = take kept
+}
+
+fn on_shard(mut a: Actor, take event: runner.PlaceEvent) waits {
+    let job = match event {
+        StartDecided(id, _) => id,
+        StatusChanged(id, _, _) => id,
+        PlaceDown(id, _) => id,
+    }
+    let Some(i) = job_index(a, job) else {
+        return
+    }
+    match take event {
+        StartDecided(_, take admitted) => admit_place(mut a, i, take admitted, Full),
+        StatusChanged(_, take image, take dial) => {
+            latest.publish(a.kids[i].status, arc.new(runner.status_of_image(image)))
+            if let Some(take dialing) = take dial {
+                on_up(mut a, i, take dialing)
+            }
+        },
+        PlaceDown(_, take image) => on_down(mut a, i, runner.end_of_image(image)),
     }
 }
 
@@ -868,9 +771,9 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
     }
 }
 
-fn run_local[T: send](take begin: Begin[T]) -> () waits {
+fn run_local[T: cross](take begin: Begin[T]) -> () waits {
     let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
-    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes, sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
+    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes, units: units, sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
     // A reopened host keeps its recorded Config; this one applies to a new catalog only.
     let (opened_host, listed_sessions, hello) = match open_host(tasks, root, clock, random, options, platform.Config(max_places: max_places, idle_ms: idle_ms)) {
         Ok(take opened) => take opened,
@@ -879,15 +782,24 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
             return
         },
     }
+    let (shards, forwarding_places) = match start_shards(making, seed, units, place_bytes, max_places, tasks, clock, random, net, me) {
+        Ok(take made) => take made,
+        Error(take why) => {
+            let _ = store.close(platform.close(take opened_host))
+            let _ = channel.send(ready, Error(take why))
+            return
+        },
+    }
     let (host_to, host_from): (Sender[platform.Input], Receiver[platform.Input]) = channel.new(64u64)
     let fwd: fn(take Forward) -> () waits = forward_host
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
     let sizing = place_sizing(options)
-    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, sizing, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), refused: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
+    let mut a = Actor(h: take opened_host, driving: take timers, shards: take shards, next_job: 0u64, admitting: false, pending: list.new(), root: root, options: take options, sizing, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), sessions: sessions, tasks: tasks, clock: clock, random: random, watch: take watch, kids: list.new(), routes: list.new(), refused: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
     apply(mut a, take hello)
+    dispatch_start(mut a)
     let _ = channel.send(ready, Ok(()))
     let mut halted: Option[Sender[List[Unloaded]]] = None
     while let Ok(take m) = channel.receive(inbox) {
@@ -897,8 +809,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
                 let reqs = platform.step(mut a.h, mut a.driving, take i, n)
                 apply(mut a, take reqs)
             },
-            Up(take name, gen, take dialing) => on_up(mut a, name, gen, take dialing),
-            Down(take name, gen, take ended) => on_down(mut a, name, gen, take ended),
+            Shard(take event) => on_shard(mut a, take event),
             Create(take key, take seeding, take reply) => {
                 let answer: Result[u64, Refused] = if a.halting {
                     Error(Stopping)
@@ -964,6 +875,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
                 }
             },
         }
+        dispatch_start(mut a)
         if a.halting && list.len(a.kids) == 0u64 {
             break
         }
@@ -977,7 +889,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     while let Some((_, _, take r)) = list.pop(mut a.reads) {
         let _ = channel.try_send(r, Error(Stopping))
     }
-    let Actor(h: take ended_host, driving: take ended_timers, unloaded: take unloaded, waiters: take waiters, ..) = take a
+    let Actor(h: take ended_host, driving: take ended_timers, unloaded: take unloaded, waiters: take waiters, shards: take ending_shards, ..) = take a
     for take (_, waiting) in take waiters {
         for take (_, r) in take waiting {
             let _ = channel.try_send(r, Error(Stopping))
@@ -985,7 +897,13 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     }
     platform.stop(take ended_timers)
     let _ = store.close(platform.close(take ended_host))
+    for take shard in take ending_shards {
+        let Shard(to: take to, running: take running, ..) = take shard
+        let _ = conn.send(to, Shutdown)
+        let _ = task.join(take running)
+    }
     let _ = take inbox
+    let _ = task.join(take forwarding_places)
     let _ = task.join(take forwarding)
     if let Some(reply) = take halted {
         let _ = channel.send(reply, take unloaded)

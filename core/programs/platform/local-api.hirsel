@@ -46,7 +46,10 @@ fn session_maps_bytes(max_places: u64) -> Option[u64] {
 
 // What a host spends: its places' budget, its catalog store, the store a create seeds and
 // its own task, whose session maps grow to `max_places`.
-pub fn host_bytes(options: store.Options, max_places: u64, place_bytes: u64) -> Result[u64, Refused] {
+pub fn host_bytes(options: store.Options, max_places: u64, place_bytes: u64, units: u64) -> Result[u64, Refused] {
+    if units == 0u64 {
+        return Error(Configuration)
+    }
     let Some(catalog) = catalog_options(options, max_places) else {
         return Error(Full)
     }
@@ -67,7 +70,13 @@ pub fn host_bytes(options: store.Options, max_places: u64, place_bytes: u64) -> 
     let Some(need) = int.checked_add(place_bytes, owned) else {
         return Error(Full)
     }
-    Ok(need)
+    let Some(helpers) = int.checked_mul(shard_overhead(max_places)?, units) else {
+        return Error(Full)
+    }
+    let Some(total) = int.checked_add(need, helpers) else {
+        return Error(Full)
+    }
+    Ok(total)
 }
 
 pub fn doorway() -> Doorway {
@@ -79,12 +88,15 @@ pub fn door_of(w: Doorway) -> Door {
     Door(to: channel.sender(w.to))
 }
 
-pub fn local[T: send](take way: Doorway, take config: Config[T]) -> Result[Local, Refused] waits {
+pub fn local[T: cross](take way: Doorway, take config: Config[T]) -> Result[Local, Refused] waits {
+    if config.units == 0u64 {
+        return Error(Configuration)
+    }
     if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 {
         return Error(Full)
     }
     let tasks = config.tasks
-    let need = host_bytes(config.options, config.max_places, config.place_bytes)?
+    let need = host_bytes(config.options, config.max_places, config.place_bytes, config.units)?
     let Doorway(to: take to, inbox: take inbox) = take way
     let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)

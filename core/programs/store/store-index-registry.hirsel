@@ -292,7 +292,7 @@ fn index_claims(state: IndexState, primary: Bytes) -> bool {
 /// last primary key whose entries are complete, None before the first
 /// chunk. Failed keeps the two primary keys a chunk found under one Unique
 /// key. Only Public serves reads. `attention` reports it per index.
-pub type IndexState: shareable + send = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
+pub type IndexState: codec + shareable + send = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
 
 // The state tag is an index record's last byte, so a read checks Public
 // without decoding the record.

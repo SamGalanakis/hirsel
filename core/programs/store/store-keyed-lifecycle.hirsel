@@ -35,23 +35,32 @@ pub fn recovery_policy(recovery: ClaimRecovery) -> View[KeyedPolicy] in recovery
     view recovery.completion.policy
 }
 
-pub fn claim_clock(db: Db) -> Clock { db.clock }
+pub fn claim_clock(db: Db) -> Clock {
+    db.clock
+}
 
 pub fn recover_claim(db: Db, encoded: Bytes) -> Result[Option[ClaimRecovery], Error] {
     let roots = view db.heads[0u64].roots
-    if let None = keyed_lookup(roots.keyed, CLAIM_OPEN, encoded) { return Ok(None) }
-    let Some(raw_claim) = keyed_lookup(roots.keyed, CLAIMS, encoded) else { return Error(malformed(0)) }
+    if let None = keyed_lookup(roots.keyed, CLAIM_OPEN, encoded) {
+        return Ok(None)
+    }
+    let Some(raw_claim) = keyed_lookup(roots.keyed, CLAIMS, encoded) else {
+        return Error(malformed(0))
+    }
     let state = claim_parse(raw_claim)?
-    if state.replied { return Error(malformed(0)) }
+    if state.replied {
+        return Error(malformed(0))
+    }
     let op_end = claim_op_end(encoded)?
     let principal_end = claim_principal_end(encoded, op_end)?
     let op = list.slice(encoded, 0, op_end)
-    let Some(raw_policy) = keyed_lookup(roots.keyed, KEYED_OPS, op) else { return Error(malformed(0)) }
+    let Some(raw_policy) = keyed_lookup(roots.keyed, KEYED_OPS, op) else {
+        return Error(malformed(0))
+    }
     let policy = read_keyed_policy(raw_policy)?
     let arguments = copied(list.slice(raw_claim, 41, list.len(raw_claim)))?
     let caller = Caller(issuer: encoded[op_end], subject: copied(list.slice(encoded, op_end + 2, principal_end))?)
-    let claim = ClaimKey(op: copied(list.slice(op, 1, op_end))?, caller: take caller,
-        key: copied(list.slice(encoded, principal_end + 1, list.len(encoded)))?)
+    let claim = ClaimKey(op: copied(list.slice(op, 1, op_end))?, caller: take caller, key: copied(list.slice(encoded, principal_end + 1, list.len(encoded)))?)
     let committed = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0u64].head))
     let completion = ClaimCompletion(ticket: committed, key: copied(encoded)?, request: state.digest, policy: take policy, admitted_width: list.len(raw_claim))
     Ok(Some(ClaimRecovery(claim: take claim, arguments: take arguments, completion: take completion)))
@@ -61,9 +70,9 @@ pub fn has_keyed_ops(db: Db) -> bool {
     list.len(db.heads[0u64].roots.keyed) != 0
 }
 
-pub type ClaimExpiry: key + send = Never | Finite(u64)
+pub type ClaimExpiry: key = Never | Finite(u64)
 
-pub type DroppedClaimOp: send {
+pub type DroppedClaimOp: shareable + cross {
     op: Bytes,
     last_expiry: ClaimExpiry
 }

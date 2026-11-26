@@ -316,11 +316,11 @@ fn report_attention(db: store.Db, done: Upkeep, drain: Option[HeadDrain], mut re
 // empty until the head's first turn. `Status.upkeep` counts the head's idle
 // upkeep (Head.upkeep) beside it, republished when a count moves. Republished
 // at the current phase, so the watch channel gets no send.
-fn publish_store(status: Latest[Status], mut current: Status, take seen: store.Attention, counts: UpkeepCounts) -> Result[(), StartError] {
+fn publish_store(status: Latest[Status], observer: Option[StatusObserver], mut current: Status, take seen: store.Attention, counts: UpkeepCounts) -> Result[(), StartError] waits {
     current.store = take seen
     current.upkeep = counts
     let now = current.phase
-    publish_phase(status, None, mut current, now)
+    publish_phase(status, None, observer, mut current, now)
 }
 
 fn copy_status(value: Status) -> Status {

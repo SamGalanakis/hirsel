@@ -1,0 +1,181 @@
+type StopInput: send = InUnit(Receiver[()]) | FromUnit(Inbox[()])
+
+type IncomingStop: send {
+    from: StopInput,
+    to: Sender[LifeEvent]
+}
+
+fn watch_stop(take seed: IncomingStop) -> () waits {
+    match seed.from {
+        InUnit(from) => {
+            let _ = channel.receive(from)
+        },
+        FromUnit(from) => {
+            let _ = conn.receive(from)
+        },
+    }
+    let _ = channel.send(seed.to, StopRequested)
+}
+
+fn publish_phase(status: Latest[Status], watch: Option[Sender[Phase]], observer: Option[StatusObserver], mut current: Status, phase: Phase) -> Result[(), StartError] waits {
+    current.phase = phase
+    let copied: Status = clone(current)
+    let value = take copied
+    let shared = arc.new(take value)
+    latest.publish(status, take shared)
+    if let Some(observe) = observer {
+        send_status(observe, current)?
+    }
+    if let Some(to) = watch {
+        let _ = channel.try_send(to, phase)
+    }
+    Ok(())
+}
+
+fn status_watch(take watch: Option[Sender[Receiver[Phase]]]) -> Result[Option[Sender[Phase]], StartError] {
+    match take watch {
+        Some(take handoff) => {
+            let (to, from): (Sender[Phase], Receiver[Phase]) = channel.new(6u64)
+            if let Error(_) = channel.try_send(handoff, take from) {
+                return Ok(None)
+            }
+            Ok(Some(take to))
+        },
+        None => Ok(None),
+    }
+}
+
+pub type PlaceEvent: cross = StartDecided(u64, Option[(core.Client[()], u64)]) | StatusChanged(u64, Shared[StatusImage], Option[std.wsock.Dialer]) | PlaceDown(u64, Shared[EndImage])
+
+pub type StatusObserver: send {
+    job: u64,
+    to: core.Client[PlaceEvent],
+    dialer: std.wsock.Dialer,
+}
+
+fn send_status(observer: StatusObserver, s: Status) -> Result[(), StartError] waits {
+    let dial = if let Ready = s.phase {
+        Some(std.wsock.copy_dialer(observer.dialer))
+    } else {
+        None
+    }
+    let _ = conn.send(observer.to, StatusChanged(observer.job, status_image(s)?, take dial))
+    Ok(())
+}
+
+// Lists of reports contain owned strings and cannot cross. The image carries
+// the attention value in its typed codec and every other field directly.
+pub opaque type StatusImage: shareable + cross {
+    phase: Phase,
+    digest: Bytes,
+    target: String,
+    n_place: u64,
+    release: Bytes,
+    activation: u64,
+    store_id: (u64, u64),
+    retain_from: u64,
+    addr: Option[Addr],
+    attention: Bytes,
+    upkeep: UpkeepCounts,
+}
+
+fn status_image(s: Status) -> Result[Shared[StatusImage], StartError] {
+    let mut attention: Bytes = list.new()
+    let codec: std.codec.Codec[store.Attention] = std.codec.of()
+    std.codec.encode(codec, s.store, mut attention) ?=> |_| Missing("status image")
+    Ok(shared.new(StatusImage(phase: s.phase, digest: clone(s.digest), target: string.from(s.target), n_place: s.n_place, release: clone(s.release), activation: s.activation, store_id: s.store_id, retain_from: s.retain_from, addr: s.addr, attention: take attention, upkeep: s.upkeep)))
+}
+
+pub fn status_of_image(s: Shared[StatusImage]) -> Status {
+    let codec: std.codec.Codec[store.Attention] = std.codec.of()
+    Status(phase: s.phase, digest: clone(s.digest), target: string.from(s.target), n_place: s.n_place, release: clone(s.release), activation: s.activation, store_id: s.store_id, retain_from: s.retain_from, addr: s.addr, store: result.unwrap(std.codec.decode(codec, s.attention)), upkeep: s.upkeep)
+}
+
+// Ends keep the full StartError that unload and watch return. The only open
+// error with a noncross field is the install report's list of owned groups.
+type OpenImage: shareable + cross = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | PredecessorChanged(Bytes) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoGrant(Bytes) | BindNoGrant | TriggerNoGrant(Bytes) | CallNotGranted(Bytes) | Unsettled(Bytes) | Operator(OperatorRefusal)
+
+type StartImage: shareable + cross = Open(OpenImage) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Full(Capacity)
+
+pub opaque type EndImage: shareable + cross {
+    result: Result[Ended, StartImage]
+}
+
+fn held_report_image(report: fate.HeldReport) -> Bytes {
+    let mut image: Bytes = list.new()
+    let codec: std.codec.Codec[fate.HeldReport] = std.codec.of()
+    result.unwrap(std.codec.encode(codec, report, mut image))
+    take image
+}
+
+fn open_image(take problem: OpenError) -> OpenImage {
+    match take problem {
+        Store(take first) => Store(take first),
+        Place(take first) => Place(take first),
+        Migrate(take first) => Migrate(take first),
+        NotCurrent(take first) => NotCurrent(take first),
+        IdentityUnknown => IdentityUnknown,
+        StoreMismatch(expected, found) => StoreMismatch(expected, found),
+        PublisherStopped => PublisherStopped,
+        InstallVersion(take first) => InstallVersion(take first),
+        PredecessorChanged(take first) => PredecessorChanged(take first),
+        InstallUncertain(take first) => InstallUncertain(take first),
+        KeyedOpDropped(take first) => KeyedOpDropped(take first),
+        KeyedOpQuotaChanged(take first, old, next) => KeyedOpQuotaChanged(take first, old, next),
+        KeyedOpChanged(take first, take second) => KeyedOpChanged(take first, take second),
+        KeyedNoGrant(take first) => KeyedNoGrant(take first),
+        BindNoGrant => BindNoGrant,
+        TriggerNoGrant(take first) => TriggerNoGrant(take first),
+        CallNotGranted(take first) => CallNotGranted(take first),
+        Unsettled(report) => Unsettled(held_report_image(report)),
+        Operator(take first) => Operator(take first),
+    }
+}
+
+fn open_of_image(problem: OpenImage) -> OpenError {
+    let codec: std.codec.Codec[fate.HeldReport] = std.codec.of()
+    match problem {
+        Store(first) => Store(clone(first)),
+        Place(first) => Place(clone(first)),
+        Migrate(first) => Migrate(clone(first)),
+        NotCurrent(first) => NotCurrent(clone(first)),
+        IdentityUnknown => IdentityUnknown,
+        StoreMismatch(expected, found) => StoreMismatch(expected, found),
+        PublisherStopped => PublisherStopped,
+        InstallVersion(first) => InstallVersion(first),
+        PredecessorChanged(first) => PredecessorChanged(clone(first)),
+        InstallUncertain(first) => InstallUncertain(clone(first)),
+        KeyedOpDropped(first) => KeyedOpDropped(clone(first)),
+        KeyedOpQuotaChanged(first, old, next) => KeyedOpQuotaChanged(clone(first), old, next),
+        KeyedOpChanged(first, second) => KeyedOpChanged(clone(first), clone(second)),
+        KeyedNoGrant(first) => KeyedNoGrant(clone(first)),
+        BindNoGrant => BindNoGrant,
+        TriggerNoGrant(first) => TriggerNoGrant(clone(first)),
+        CallNotGranted(first) => CallNotGranted(clone(first)),
+        Unsettled(image) => Unsettled(result.unwrap(std.codec.decode(codec, image))),
+        Operator(first) => Operator(first),
+    }
+}
+
+pub fn end_image(take ended: Result[Ended, StartError]) -> Shared[EndImage] {
+    let result: Result[Ended, StartImage] = match take ended {
+        Ok(done) => Ok(done),
+        Error(Open(take e)) => Error(Open(open_image(take e))),
+        Error(Listen(e)) => Error(Listen(e)),
+        Error(Missing(take what)) => Error(Missing(take what)),
+        Error(Exceeds(take b)) => Error(Exceeds(take b)),
+        Error(Full(c)) => Error(Full(c)),
+    }
+    shared.new(EndImage(result: take result))
+}
+
+pub fn end_of_image(image: Shared[EndImage]) -> Result[Ended, StartError] {
+    match image.result {
+        Ok(done) => Ok(done),
+        Error(Open(e)) => Error(Open(open_of_image(e))),
+        Error(Listen(e)) => Error(Listen(e)),
+        Error(Missing(what)) => Error(Missing(string.from(what))),
+        Error(Exceeds(b)) => Error(Exceeds(clone(b))),
+        Error(Full(c)) => Error(Full(c)),
+    }
+}

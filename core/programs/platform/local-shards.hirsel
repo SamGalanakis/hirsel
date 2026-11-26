@@ -1,0 +1,256 @@
+const DIALS: u64 = 16u64
+
+const PLACE_TASK_BYTES: u64 = 65536u64
+
+type Launch: cross {
+    job: u64,
+    name: String,
+    dir: Dir,
+    sizing: PlaceSizing,
+    version: u64,
+    idle: u64,
+    sessions: u64,
+    available: u64,
+}
+
+type ShardCommand: cross = Start(Launch) | Finished(u64, Shared[runner.EndImage]) | Shutdown
+
+type ShardLaunch[T: cross]: cross {
+    seed: T,
+    max_places: u64,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    net: Net,
+    events: Client[runner.PlaceEvent],
+    ready: Client[Client[ShardCommand]],
+}
+
+type Make[T: cross, G: send, H: shareable + inert + send, S: send]: cross = Plain(fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) | Seeded(fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S], Capacity])
+
+type ShardSeed[T: cross, G: send, H: shareable + inert + send, S: send]: cross {
+    launch: ShardLaunch[T],
+    make: Make[T, G, H, S],
+}
+
+type Shard {
+    to: Client[ShardCommand],
+    running: Task[()],
+    room: u64,
+}
+
+type PlaceNotice: send {
+    events: Client[runner.PlaceEvent],
+    finished: Client[ShardCommand],
+    admitted: Receiver[()],
+    job: u64,
+}
+
+type PlaceTask[G: send, H: shareable + inert + send, S: send]: send {
+    placing: runner.Placing[G, H],
+    config: runner.PlaceConfig[G, H, S],
+    dialer: std.wsock.Dialer,
+    stop: Inbox[()],
+    notice: PlaceNotice,
+    need: u64,
+}
+
+type Operated[G: send, H: shareable + inert + send, S: send]: send {
+    placing: runner.Placing[G, H],
+    config: runner.PlaceConfig[G, H, S],
+    stop: Inbox[()],
+    observer: runner.StatusObserver,
+}
+
+type ForwardPlaces: send {
+    from: Inbox[runner.PlaceEvent],
+    to: Sender[In],
+}
+
+// The unseeded maker has nothing to copy across the unit boundary.
+pub fn factory[G: send, H: shareable + inert + send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Factory[()] {
+    shard_factory(Plain(make), fn(_empty: ()) -> () {
+        ()
+    })
+}
+
+pub fn seeded_factory[T: cross, G: send, H: shareable + inert + send, S: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S], Capacity], copy_seed: fn(T) -> T) -> Factory[T] {
+    shard_factory(Seeded(make), copy_seed)
+}
+
+fn shard_factory[T: cross, G: send, H: shareable + inert + send, S: send](make: Make[T, G, H, S], copy_seed: fn(T) -> T) -> Factory[T] {
+    let launch = fn(take entry: ShardLaunch[T], tasks: Tasks, allowance: u64) -> Result[Task[()], Refused] {
+        let seed: ShardSeed[T, G, H, S] = ShardSeed(launch: take entry, make: clone(make))
+        let run: fn(take ShardSeed[T, G, H, S]) -> () waits = run_shard
+        Ok(task.spawn_unit(tasks, bytes allowance, take seed, run) ?=> |_| Full)
+    }
+    Factory(launch: take launch, copy_seed: copy_seed)
+}
+
+// Each helper has a separate control allowance for its root, connection and
+// registrations, plus room for the task headers and handles of its live places.
+fn shard_overhead(max_places: u64) -> Result[u64, Refused] {
+    let header = option.unwrap(charge.task(bytes[()], 0u64))
+    let connections = 192u64 + DIALS * bytes[std.wsock.Dial]
+    let per_child = header + connections + bytes[(u64, Task[()])] + bytes[ShardCommand]
+    let Some(children) = int.checked_mul(max_places, per_child) else {
+        return Error(Full)
+    }
+    let Some(total) = int.checked_add(LOCAL_BYTES, children) else {
+        return Error(Full)
+    }
+    Ok(total)
+}
+
+fn start_shards[T: cross](maker: Factory[T], seed: T, units: u64, place_bytes: u64, max_places: u64, tasks: Tasks, clock: Clock, random: Random, net: Net, me: Sender[In]) -> Result[(List[Shard], Task[()]), Refused] waits {
+    let share = place_bytes / units
+    let helper_header = option.unwrap(charge.task(bytes[()], 0u64))
+    let allowance = share + shard_overhead(max_places)? - helper_header
+    let (events, event_in): (Client[runner.PlaceEvent], Inbox[runner.PlaceEvent]) = conn.new(256u64, bytes 0u64) ?=> |_| Full
+    let mut shards: List[Shard] = list.new()
+    for _ in 0u64 .. units {
+        let (ready, commands): (Client[Client[ShardCommand]], Inbox[Client[ShardCommand]]) = conn.new(1u64, bytes 0u64) ?=> |_| Full
+        let launch = ShardLaunch(seed: (maker.copy_seed)(seed), max_places: max_places, tasks: tasks, clock: clock, random: random, net: net, events: conn.client(events), ready: take ready)
+        let running = (maker.launch)(take launch, tasks, allowance)?
+        let to = conn.receive(commands) ?=> |_| Full
+        list.push(mut shards, Shard(to: take to, running: take running, room: share))
+    }
+    let forward = ForwardPlaces(from: take event_in, to: channel.sender(me))
+    let forwarding = task.try_spawn(tasks, bytes 65536u64, take forward, forward_places) ?=> |_| Full
+    Ok((take shards, take forwarding))
+}
+
+fn forward_places(take relay: ForwardPlaces) -> () waits {
+    while let Ok(take event) = conn.receive(relay.from) {
+        if let Error(_) = channel.send(relay.to, Shard(take event)) {
+            return
+        }
+    }
+}
+
+fn most_room(shards: List[Shard]) -> u64 {
+    let mut best = 0u64
+    for i in 1u64 .. list.len(shards) {
+        if shards[i].room > shards[best].room {
+            best = i
+        }
+    }
+    best
+}
+
+fn run_shard[T: cross, G: send, H: shareable + inert + send, S: send](take seed: ShardSeed[T, G, H, S]) -> () waits {
+    let ShardSeed(launch: take entry, make: take make) = take seed
+    let ShardLaunch(seed: take services, max_places: max_places, tasks: tasks, clock: clock, random: random, net: net, events: take events, ready: take ready) = take entry
+    // At most one completion per live place and one undecided Start can
+    // wait here. A Start's only variable content is its local session name.
+    let made: Result[(Client[ShardCommand], Inbox[ShardCommand]), Capacity] = conn.new(max_places + 1u64, bytes 256u64)
+    let Ok((take to, take commands)) = take made else {
+        return
+    }
+    if let Error(_) = conn.send(ready, conn.client(to)) {
+        return
+    }
+    let _ = take ready
+    let mut held: Option[runner.Placing[G, H]] = None
+    let mut running: List[(u64, Task[()])] = list.with_capacity(max_places)
+    while let Ok(take cmd) = conn.receive(commands) {
+        match take cmd {
+            Start(take launch) => {
+                let job = launch.job
+                let supplied = Supplied(name: string.from(launch.name), tasks: tasks, clock: clock, random: random, net: net)
+                let config = match make {
+                    Plain(f) => f(take supplied),
+                    Seeded(f) => f(take supplied, services),
+                }
+                let (start_to, start_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+                let admission = match take config {
+                    Ok(take settings) => {
+                        let use_held = match held {
+                            Some(h) => runner.placing_fits(h, settings),
+                            None => false,
+                        }
+                        if !use_held {
+                            held = Some(runner.placing_of(settings))
+                        }
+                        let Some(registered) = view held else {
+                            fail("shard: missing registration")
+                        }
+                        let placing = runner.share_placing(registered)
+                        let notice = PlaceNotice(events: conn.client(events), finished: conn.client(to), admitted: take start_from, job: job)
+                        match start_made(take launch, take placing, take settings, take notice, tasks) {
+                            Ok((take stop_to, charge, take place)) => {
+                                list.push(mut running, (job, take place))
+                                Some((take stop_to, charge))
+                            },
+                            Error(_) => None,
+                        }
+                    },
+                    Error(_) => None,
+                }
+                if let Error(_) = conn.send(events, StartDecided(job, take admission)) {
+                    return
+                }
+                let _ = channel.try_send(start_to, ())
+            },
+            Finished(job, take ended) => {
+                for i in 0u64 .. list.len(running) {
+                    if running[i].0 == job {
+                        let (_, take place) = list.remove(mut running, i)
+                        let _ = task.join(take place)
+                        break
+                    }
+                }
+                if let Error(_) = conn.send(events, PlaceDown(job, take ended)) {
+                    return
+                }
+            },
+            Shutdown => return,
+        }
+    }
+}
+
+fn start_made[G: send, H: shareable + inert + send, S: send](take launch: Launch, take placing: runner.Placing[G, H], take made: runner.PlaceConfig[G, H, S], take notice: PlaceNotice, tasks: Tasks) -> Result[(Client[()], u64, Task[()]), Refused] {
+    let mut config = take made
+    config.backing = Disk(launch.dir)
+    config.sizes = launch.sizing.sizes
+    config.selection = Current(launch.version)
+    config.idle = Some(launch.idle)
+    config.max_sessions = launch.sessions
+    let (dialing, dials) = std.wsock.dials(DIALS) ?=> |_| Full
+    config.listen = InProcess(take dials)
+    let overhead = runner.placed_bytes(placing, config) ?=> |_| Full
+    let need = int.saturating_add(overhead, int.saturating_add(launch.sizing.need, 1048576u64))
+    let charge = int.saturating_add(need, PLACE_TASK_BYTES)
+    if charge > launch.available {
+        return Error(Full)
+    }
+    let (stopping, halt): (Client[()], Inbox[()]) = conn.new(1u64, bytes 0u64) ?=> |_| Full
+    let job = PlaceTask(placing: take placing, config: take config, dialer: take dialing, stop: take halt, notice: take notice, need: need)
+    let running = task.try_spawn(tasks, bytes charge, take job, run_place) ?=> |_| Full
+    Ok((take stopping, charge, take running))
+}
+
+fn run_place[G: send, H: shareable + inert + send, S: send](take job: PlaceTask[G, H, S]) -> () waits {
+    let PlaceTask(placing: take placing, config: take config, dialer: take dialing, stop: take halt, notice: take notice, need: need) = take job
+    let PlaceNotice(events: take events, finished: take finished, admitted: take admitted, job: id) = take notice
+    if let Error(_) = channel.receive(admitted) {
+        return
+    }
+    let observe = runner.StatusObserver(job: id, to: conn.client(events), dialer: take dialing)
+    let req = Operated(placing: take placing, config: take config, stop: take halt, observer: take observe)
+    let running = task.spawn(req.config.tasks, bytes need, take req, run_operate)
+    let ended = match task.join(take running) {
+        Ok(take result) => take result,
+        Error(_) => runner.end_image(Error(Missing("operate"))),
+    }
+    let _ = conn.send(finished, Finished(id, take ended))
+}
+
+fn run_operate[G: send, H: shareable + inert + send, S: send](take request: Operated[G, H, S]) -> Shared[runner.EndImage] waits {
+    let Operated(placing: take placing, config: take config, stop: take halt, observer: take observer) = take request
+    let ended = match runner.status_root() {
+        Ok(take root) => runner.operate_sharded(take placing, take config, take halt, root, take observer),
+        Error(capacity) => Error(Full(capacity)),
+    }
+    runner.end_image(take ended)
+}

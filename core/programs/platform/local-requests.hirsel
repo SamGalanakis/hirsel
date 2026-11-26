@@ -53,7 +53,7 @@ fn group_spec(name: String) -> platform.NewGroup {
     platform.NewGroup(name: string.from(name), tenant: string.new(), workdir: string.from(name), author: Trusted, listen: string.new(), front: None, store: string.new(), memory: None, assembly: list.new(), activation: 0u64, args: list.new(), record: None)
 }
 
-fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {
+fn seed_store(a: Actor, dir: Dir, seed: Seed) -> Result[(), Refused] waits {
     let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) {
         Ok(take v) => take v,
         Error(e) => return Error(Failed(store_text("session store: ", e)))
@@ -83,7 +83,7 @@ fn remove_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Res
 }
 
 // A create is idempotent by its key, and an id is never reused once committed.
-fn on_create[T: send](mut a: Actor[T], take key: Bytes, take seed: Seed) -> Result[u64, Refused] waits {
+fn on_create(mut a: Actor, take key: Bytes, take seed: Seed) -> Result[u64, Refused] waits {
     if let Some(id) = map.get(a.s.by_key, key) {
         return Ok(id)
     }
@@ -113,7 +113,7 @@ fn on_create[T: send](mut a: Actor[T], take key: Bytes, take seed: Seed) -> Resu
 
 // Unlists a session and removes its group in one commit. The answer comes when the host
 // has closed the group, after its child, if any, has drained, and its store is deleted.
-fn on_delete[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[(), Refused]]) waits {
+fn on_delete(mut a: Actor, id: u64, take reply: Sender[Result[(), Refused]]) waits {
     let key: Bytes = match map.get(a.s.by_id, id) {
         Some(k) => clone(k),
         None => {
@@ -144,7 +144,7 @@ fn on_delete[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[(), Re
     refuse_routes(mut a, name, Unknown)
 }
 
-fn on_listing[T: send](a: Actor[T]) -> List[u64] {
+fn on_listing(a: Actor) -> List[u64] {
     let mut ids: List[u64] = list.new()
     for (id, _) in a.s.by_id {
         list.push(mut ids, id)
@@ -153,7 +153,7 @@ fn on_listing[T: send](a: Actor[T]) -> List[u64] {
 }
 
 // The group of a listed session; a session not listed is Unknown.
-fn listed[T: send](a: Actor[T], id: u64) -> Result[String, Refused] {
+fn listed(a: Actor, id: u64) -> Result[String, Refused] {
     if map.contains(a.s.by_id, id) {
         Ok(name_of(id))
     } else {
@@ -162,14 +162,14 @@ fn listed[T: send](a: Actor[T], id: u64) -> Result[String, Refused] {
 }
 
 // ---- marks ----
-fn marks_of[T: send](a: Actor[T], id: u64) -> Marks {
+fn marks_of(a: Actor, id: u64) -> Marks {
     match map.get(a.marks, id) {
         Some(m) => Marks(ups: m.ups, downs: m.downs, nudges: m.nudges),
         None => Marks(ups: 0u64, downs: 0u64, nudges: 0u64),
     }
 }
 
-fn put_marks[T: send](mut a: Actor[T], id: u64, take m: Marks) {
+fn put_marks(mut a: Actor, id: u64, take m: Marks) {
     map.insert(mut a.marks, id, take m)
     if let Some(watchers) = map.get(a.watching, id) {
         for (_, to) in watchers {
@@ -178,7 +178,7 @@ fn put_marks[T: send](mut a: Actor[T], id: u64, take m: Marks) {
     }
 }
 
-fn count_up[T: send](mut a: Actor[T], id: u64) {
+fn count_up(mut a: Actor, id: u64) {
     if !map.contains(a.s.by_id, id) {
         return
     }
@@ -186,7 +186,7 @@ fn count_up[T: send](mut a: Actor[T], id: u64) {
     put_marks(mut a, id, Marks(ups: m.ups + 1u64, downs: m.downs, nudges: m.nudges))
 }
 
-fn on_nudge[T: send](mut a: Actor[T], id: u64) {
+fn on_nudge(mut a: Actor, id: u64) {
     if !map.contains(a.s.by_id, id) {
         return
     }
@@ -194,7 +194,7 @@ fn on_nudge[T: send](mut a: Actor[T], id: u64) {
     put_marks(mut a, id, Marks(ups: m.ups, downs: m.downs, nudges: m.nudges + 1u64))
 }
 
-fn count_down[T: send](mut a: Actor[T], id: u64) {
+fn count_down(mut a: Actor, id: u64) {
     if !map.contains(a.s.by_id, id) {
         return
     }
@@ -217,7 +217,7 @@ fn count_down[T: send](mut a: Actor[T], id: u64) {
     }
 }
 
-fn on_await[T: send](mut a: Actor[T], id: u64, after: u64, take reply: Downs) {
+fn on_await(mut a: Actor, id: u64, after: u64, take reply: Downs) {
     if !map.contains(a.s.by_id, id) {
         let _ = channel.try_send(reply, Error(Unknown));
         return
@@ -235,7 +235,7 @@ fn on_await[T: send](mut a: Actor[T], id: u64, after: u64, take reply: Downs) {
     map.insert(mut a.waiters, id, take waiting)
 }
 
-fn on_watch[T: send](mut a: Actor[T], id: u64, take notify: Sender[()], reply: Sender[u64]) {
+fn on_watch(mut a: Actor, id: u64, take notify: Sender[()], reply: Sender[u64]) {
     a.next_watch += 1u64
     let mut watchers = match map.remove(mut a.watching, id) {
         Some(take old) => take old,
@@ -249,7 +249,7 @@ fn on_watch[T: send](mut a: Actor[T], id: u64, take notify: Sender[()], reply: S
     }
 }
 
-fn on_unwatch[T: send](mut a: Actor[T], id: u64, token: u64) {
+fn on_unwatch(mut a: Actor, id: u64, token: u64) {
     if let Some(take old) = map.remove(mut a.watching, id) {
         let mut watchers = take old
         let _ = map.remove(mut watchers, token)
@@ -262,7 +262,7 @@ fn on_unwatch[T: send](mut a: Actor[T], id: u64, token: u64) {
 // Wakes the group (§14.3, an operator request) and answers when the host has a Ready child
 // for it. A route during a child's drain waits for the next child, which the drain's end
 // starts because the route makes it readable.
-fn on_route[T: send](mut a: Actor[T], id: u64, take reply: AccessReply) waits {
+fn on_route(mut a: Actor, id: u64, take reply: AccessReply) waits {
     let name = match listed(a, id) {
         Ok(take n) => take n,
         Error(why) => {
@@ -282,7 +282,7 @@ fn on_route[T: send](mut a: Actor[T], id: u64, take reply: AccessReply) waits {
     }
 }
 
-fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] waits {
+fn on_peek(a: Actor, id: u64) -> Result[Lease, Refused] waits {
     let name = listed(a, id)?
     let Some(gen) = platform.serving_ready(a.h, name) else {
         return match platform.wake_row(a.h, name) {
@@ -302,7 +302,7 @@ fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] waits {
 
 // The local actor owns all child starts. A cold read runs in that actor after
 // the prior child has closed its store and before any next child can open it.
-fn check_cold[T: send](a: Actor[T], name: String, check: ColdCheck) -> Result[(), Refused] waits {
+fn check_cold(a: Actor, name: String, check: ColdCheck) -> Result[(), Refused] waits {
     if group_has_kid(a, name) {
         return Error(Busy)
     }
@@ -319,7 +319,7 @@ fn check_cold[T: send](a: Actor[T], name: String, check: ColdCheck) -> Result[()
     }
 }
 
-fn run_read[T: send](a: Actor[T], name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
+fn run_read(a: Actor, name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
     let Ok(dir) = std.dir.narrow(a.root, name) else {
         return Error(Unknown)
     }
@@ -334,7 +334,7 @@ fn run_read[T: send](a: Actor[T], name: String, r: ColdRead) -> Result[Bytes, Re
 
 // A read waits while a child of the session lives. It runs once that child has closed
 // the store, before the host can start the next, so it never reads beside a head.
-fn on_read[T: send](mut a: Actor[T], id: u64, take r: ColdRead, take reply: ReadReply) waits {
+fn on_read(mut a: Actor, id: u64, take r: ColdRead, take reply: ReadReply) waits {
     let name = match listed(a, id) {
         Ok(take n) => take n,
         Error(why) => {
@@ -349,7 +349,7 @@ fn on_read[T: send](mut a: Actor[T], id: u64, take r: ColdRead, take reply: Read
     let _ = channel.try_send(reply, run_read(a, name, r))
 }
 
-fn answer_reads[T: send](mut a: Actor[T], name: String) waits {
+fn answer_reads(mut a: Actor, name: String) waits {
     if group_has_kid(a, name) {
         return
     }
@@ -364,7 +364,7 @@ fn answer_reads[T: send](mut a: Actor[T], name: String) waits {
     a.reads = take kept
 }
 
-fn refuse_reads[T: send](mut a: Actor[T], name: String) {
+fn refuse_reads(mut a: Actor, name: String) {
     let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
     while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
         if at == name {
@@ -376,7 +376,7 @@ fn refuse_reads[T: send](mut a: Actor[T], name: String) {
     a.reads = take kept
 }
 
-fn on_access[T: send](mut a: Actor[T], id: u64, check: ColdCheck, wake: bool, take reply: AccessReply) waits {
+fn on_access(mut a: Actor, id: u64, check: ColdCheck, wake: bool, take reply: AccessReply) waits {
     match on_peek(a, id) {
         Ok(take lease) => {
             let _ = channel.try_send(reply, Ok(Some(take lease)));
@@ -397,7 +397,7 @@ fn on_access[T: send](mut a: Actor[T], id: u64, check: ColdCheck, wake: bool, ta
     }
 }
 
-fn on_unload[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[Unloaded, Refused]]) waits {
+fn on_unload(mut a: Actor, id: u64, take reply: Sender[Result[Unloaded, Refused]]) waits {
     let name = match listed(a, id) {
         Ok(take n) => take n,
         Error(why) => {

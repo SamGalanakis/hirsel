@@ -55,7 +55,7 @@ fn start_local_sized(dir: Dir, take dir_name: String, make: fn(take local.Suppli
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
     let options = disk_options()
-    let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
+    let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, units: 1u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
     let made = match local.local(local.doorway(), take config) {
         Ok(take made) => take made,
         Error(_) => fail("local: refused a valid configuration")
@@ -764,7 +764,7 @@ pub fn law_local_creates_to_max_places(parent: Dir, clock: Clock, random: Random
     let mut dir_name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
     let making: local.Factory[()] = local.factory(quick_place)
-    let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: CREATES, idle_ms: 60000u64, place_bytes: 1048576u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: None)
+    let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: CREATES, idle_ms: 60000u64, place_bytes: 1048576u64, units: 1u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: None)
     let made = match local.local(local.doorway(), take config) {
         Ok(take made) => take made,
         Error(_) => return Error("local: refused a valid configuration")
@@ -811,4 +811,105 @@ pub fn law_local_creates_to_max_places(parent: Dir, clock: Clock, random: Random
 @test
 fn test_local_creates_to_max_places(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
     law_local_creates_to_max_places(parent, clock, random, tasks, net)
+}
+
+fn create_shard_session(d: local.Door, key: Bytes) -> u64 waits {
+    let seed: local.Seed = fn(mut _db: store.Db) -> Result[(), String] {
+        Ok(())
+    }
+    result.unwrap(local.create(d, clone(key), take seed))
+}
+
+// A waits for B's token without yielding. B waits for a direct request from A
+// and replies with 41. The 42 can only come from concurrent place execution.
+fn local_units_run_together(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    let mut path = string.with_capacity(32u64)
+    let root = result.unwrap(host.mkdtemp(parent, mut path))
+    let (events, reports): (Client[ProgressEvent], Inbox[ProgressEvent]) = result.unwrap(conn.new(4u64, bytes 128u64))
+    let cfg = local.Config(root: root, options: disk_options(), factory: local.seeded_factory(progress_settings, copy_progress), seed: Progress(events: conn.client(events)), max_places: 2u64, idle_ms: 60000u64, place_bytes: 134217728u64, units: 2u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None)
+    let host = result.unwrap(local.local(local.doorway(), take cfg))
+    let d = local.door(host)
+    let b = result.unwrap(local.route(d, create_shard_session(d, b"b")))
+    let a = result.unwrap(local.route(d, create_shard_session(d, b"a")))
+    let keys = result.unwrap(runner.fixture.entry_keys(code.describe(progress_registry)))
+    let peer = task.spawn(tasks, bytes 4194304u64, ProgressCall(lease: take b, entry: runner.fixture.granted_entry(code.describe(pass_token)), keys: clone(keys), clock: c, random: r, tasks: tasks, events: conn.client(events)), call_progress)
+    let go = match conn.receive(reports) {
+        Ok(Peer(take go)) => take go,
+        Ok(CallFailed(take why)) => return Error(take why),
+        _ => return Error("local: the peer did not reach its token wait"),
+    }
+    let spinner = task.spawn(tasks, bytes 4194304u64, ProgressCall(lease: take a, entry: runner.fixture.granted_entry(code.describe(spin_for_token)), keys: take keys, clock: c, random: r, tasks: tasks, events: conn.client(events)), call_progress)
+    let Spinner(take back) = result.unwrap(conn.receive(reports)) else {
+        return Error("local: the spinner did not enter its poll loop")
+    }
+    // Relay only the running spinner's reply handle. The token is sent by B.
+    result.unwrap(conn.send(go, take back))
+    let first = result.unwrap(conn.receive(reports))
+    let second = result.unwrap(conn.receive(reports))
+    let got = match (first, second) {
+        (Answered(41u64), Answered(42u64)) => true,
+        (Answered(42u64), Answered(41u64)) => true,
+        _ => false,
+    }
+    let _ = task.join(take spinner)
+    let _ = task.join(take peer)
+    let _ = local.stop(take host)
+    result.unwrap(std.dir.remove_all(parent, path))
+    if !got {
+        return Error("local: the spinning place did not receive the other place's token")
+    }
+    Ok(())
+}
+
+const SHARD_SHARE: u64 = 67108864u64
+
+fn sized_shard_place(take s: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity] {
+    let wide = s.name == local.name_of(0u64)
+    let mut settings = quick_place(take s)?
+    if wide {
+        settings.n_publisher = SHARD_SHARE
+    }
+    Ok(take settings)
+}
+
+// The large place adds 63 MiB to the small one's charge. The small place
+// already costs over 1 MiB in fixed charges and fits in the 64 MiB share.
+// Thus the large one costs more than 64 MiB and at most 127 MiB.
+fn local_shard_full(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    let mut path = string.with_capacity(32u64)
+    let root = result.unwrap(host.mkdtemp(parent, mut path))
+    let cfg = local.Config(root: root, options: disk_options(), factory: local.factory(sized_shard_place), seed: (), max_places: 2u64, idle_ms: 60000u64, place_bytes: 2u64 * SHARD_SHARE, units: 2u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None)
+    let made = result.unwrap(local.local(local.doorway(), take cfg))
+    let d = local.door(made)
+    let large = create_shard_session(d, b"large")
+    let small = create_shard_session(d, b"small")
+    let refused = match local.route(d, large) {
+        Error(Full) => true,
+        _ => false
+    }
+    let admitted = match local.route(d, small) {
+        Ok(_) => true,
+        _ => false
+    }
+    let _ = local.stop(take made)
+    result.unwrap(std.dir.remove_all(parent, path))
+    if !refused || !admitted {
+        return Error("local: admission must use one shard's room")
+    }
+    Ok(())
+}
+
+fn local_units_zero(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    let cfg = local.Config(root: parent, options: disk_options(), factory: local.factory(quick_place), seed: (), max_places: 1u64, idle_ms: 60000u64, place_bytes: SHARD_SHARE, units: 0u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None)
+    match local.local(local.doorway(), take cfg) {
+        Error(Configuration) => Ok(()),
+        _ => Error("local: zero units must be refused as Configuration"),
+    }
+}
+
+@test
+fn test_local_units_run_together(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    local_units_zero(d, c, r, tasks, n)?
+    local_shard_full(d, c, r, tasks, n)?
+    local_units_run_together(d, c, r, tasks, n)
 }

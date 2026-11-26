@@ -24,9 +24,9 @@ pub type HttpBinding: codec + shareable + send {
     steps: u64,
 }
 
-pub type BindCheck: codec + send = NoEntry | Mode | Op | DuplicateOp | Fields | Path | Shape(u8, u8) | Status | StreamStatus(String) | Route | MetadataBytes
+pub type BindCheck: codec + shareable + cross = NoEntry | Mode | Op | DuplicateOp | Fields | Path | Shape(u8, u8) | Status | StreamStatus(String) | Route | MetadataBytes
 
-pub type BindError: codec + send {
+pub type BindError: codec + shareable + cross {
     op: String,
     check: BindCheck
 }

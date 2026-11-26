@@ -42,7 +42,7 @@ fn memory_page_images(db: Db) -> u64 {
 /// writer demoted the index for it, to Backfilling(None) until it is rebuilt
 /// (§1.2). A drift found while the index was already Backfilling(None), or
 /// on a branch, demotes nothing, so `demoted` can be less than `count`.
-pub type IndexDrift: shareable + send {
+pub type IndexDrift: codec + shareable + send {
     table: u32,
     id: u32,
     index: String,
@@ -52,7 +52,7 @@ pub type IndexDrift: shareable + send {
 
 /// One declared index on main's head and its build state, read from its
 /// catalog record.
-pub type IndexReport: shareable + send {
+pub type IndexReport: codec + shareable + send {
     table: u32,
     id: u32,
     index: String,
@@ -69,7 +69,7 @@ pub type IndexReport: shareable + send {
 /// with an error other than a fence. Each failed pass stays pending and runs
 /// again on a later journal turn (§II.4); `reclaim_pending` is true from a
 /// failure until a pass succeeds. Both are 0 and false off Bucket.
-pub type Attention: shareable + send {
+pub type Attention: codec + shareable + send {
     indexes: List[IndexReport],
     drift: List[IndexDrift],
     reclaim_failures: u64,

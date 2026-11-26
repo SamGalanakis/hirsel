@@ -1,0 +1,92 @@
+type ProgressEvent: cross = Peer(Client[Client[u64]]) | Spinner(Client[u64]) | Answered(u64) | CallFailed(String)
+
+type Progress: cross {
+    events: Client[ProgressEvent]
+}
+
+fn copy_progress(p: Progress) -> Progress {
+    Progress(events: conn.client(p.events))
+}
+
+fn progress_mint(p: Progress, _handles: Hd, _arg: ()) -> Result[Progress, Capacity] {
+    Ok(copy_progress(p))
+}
+
+fn progress_binding(_p: Progress, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    runner.ingress.caller((), credential)
+}
+
+fn pass_token(p: Progress, _caller: runner.Caller, take _arg: u64) -> Result[u64, Capacity] waits {
+    let (go, incoming): (Client[Client[u64]], Inbox[Client[u64]]) = conn.new(1u64, bytes 0u64)?
+    result.unwrap(conn.send(p.events, Peer(take go)))
+    let back = result.unwrap(conn.receive(incoming))
+    result.unwrap(conn.try_send(back, 41u64))
+    Ok(41u64)
+}
+
+fn spin_for_token(p: Progress, _caller: runner.Caller, take _arg: u64) -> Result[u64, Capacity] waits {
+    let (back, incoming): (Client[u64], Inbox[u64]) = conn.new(1u64, bytes 0u64)?
+    result.unwrap(conn.try_send(p.events, Spinner(take back)))
+    for _ in 0u64 .. 5000000u64 {
+        if let Ok(token) = conn.try_receive(incoming) {
+            return Ok(token + 1u64)
+        }
+    }
+    let _ = conn.receive(incoming)
+    Ok(0u64)
+}
+
+fn progress_entries() -> runner.triggers.Entries {
+    let mut entries = runner.triggers.empty_entries()
+    result.unwrap(runner.triggers.allow(mut entries, result.unwrap(runner.triggers.granted(code.describe(pass_token)))))
+    result.unwrap(runner.triggers.allow(mut entries, result.unwrap(runner.triggers.granted(code.describe(spin_for_token)))))
+    take entries
+}
+
+fn progress_registry(mut r: runner.Registry[Progress, Hd]) -> Result[(), runner.RegisterError] {
+    runner.granted(mut r, code.describe(pass_token), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(spin_for_token), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn progress_settings(take s: local.Supplied, p: Progress) -> Result[runner.PlaceConfig[Progress, Hd, Progress], Capacity] {
+    let bind = runner.Mint(seed: copy_progress(p), mint: progress_mint, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
+    let calls = runner.Mint(seed: copy_progress(p), mint: progress_mint, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
+    let gives: runner.Grants[Progress, Hd, Progress] = runner.Grants(attempt: None, call: Some(runner.CallMint(mint: take calls, entries: progress_entries())), claim: None, bind: Some(take bind))
+    let mut session = local_wire()
+    session.n_granted = 131072u64
+    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(progress_registry), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: s.net, tasks: s.tasks, clock: s.clock, random: s.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 2000u64), wire: Some(runner.wire(code.describe(progress_binding), 4096u64, 65536u64)), grants: Some(take gives), triggers: None, idle: None))
+}
+
+type ProgressCall: send {
+    lease: local.Lease,
+    entry: runner.fixture.Callee[u64, u64],
+    keys: List[Bytes],
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    events: Client[ProgressEvent],
+}
+
+fn call_progress(take job: ProgressCall) -> () waits {
+    let ProgressCall(lease: take lease, entry: take entry, keys: take keys, clock: clock, random: r, tasks: tasks, events: take events) = take job
+    let dial = option.unwrap(local.dialer(lease))
+    let made = runner.fixture.client_dial(tasks, dial, clock, r, keys, local_wire().socket, Some(runner.ingress.credential(r)), None)
+    let Ok(take client) = take made else {
+        let _ = conn.send(events, CallFailed("dial"))
+        return
+    }
+    let mut c = take client
+    let answer = match runner.fixture.call(mut c, entry, 0u64, 20000u32) {
+        Ok(replied) => match replied.answer {
+            Returned(n) => Answered(n),
+            Refused(Budget(_)) => CallFailed("granted call budget"),
+            Refused(NotAllowed) => CallFailed("granted call not allowed"),
+            Refused(Deadline) => CallFailed("call deadline"),
+            Failed(_) => CallFailed("granted call failed"),
+            _ => CallFailed("unexpected call outcome"),
+        },
+        Error(_) => CallFailed("fixture call error"),
+    }
+    let _ = conn.send(events, take answer)
+    runner.fixture.close(take c)
+}

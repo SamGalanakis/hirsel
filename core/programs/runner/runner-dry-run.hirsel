@@ -32,7 +32,7 @@ fn run_store_op[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G,
 
 // Why `hirsel store verify` or `repair` ends nonzero: problems found, or
 // (repair only) an export lease held by a deploy preparing from the store.
-pub type OperatorRefusal: send = Unverified(u64)
+pub type OperatorRefusal: shareable + cross = Unverified(u64)
 
 fn push_operator_refusal(mut line: String, refusal: OperatorRefusal) {
     match refusal {

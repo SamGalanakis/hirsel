@@ -1,4 +1,4 @@
-pub type TieredRefusal: send = Memory | Migrate | Export | Install | Authority | Tail
+pub type TieredRefusal: shareable + cross = Memory | Migrate | Export | Install | Authority | Tail
 
 pub fn tiered_refusal_text(reason: TieredRefusal) -> String {
     string.from(match reason {

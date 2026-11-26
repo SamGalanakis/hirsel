@@ -22,6 +22,7 @@ runner = { major = 1, path = "../runner" }
 "platform_main.hirsel" = "platform_main"
 "store-tool.hirsel" = "store_tool"
 "local.hirsel" = "local"
+"local-shards.hirsel" = "local"
 "local-api.hirsel" = "local"
 "local-requests.hirsel" = "local"
 
@@ -32,6 +33,7 @@ dirs = ["."]
 
 [tests.sources]
 "local-laws.hirsel" = "local_laws"
+"local-progress-fixture.hirsel" = "local_laws"
 "launcher_wire.hirsel" = "launcher"
 "operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
@@ -84,3 +86,6 @@ limit = 134217728
 # The place budget and the host's catalog store, sized for 256 sessions with KEY_LIMIT keys.
 [tests.runs."platform@1/local_laws/test_local_creates_to_max_places"]
 limit = 134217728
+
+[tests.runs."platform@1/local_laws/test_local_units_run_together"]
+limit = 268435456

@@ -19,7 +19,7 @@ pub type Request: send {
     body: RequestBody
 }
 
-pub type Error: send = InvalidRequest | State | NoSpace | Connect(NetError) | Write(NetError) | Receive(NetError) | MalformedHead | UnsupportedSwitch | BodyFraming | TooLarge | Deadline | Cancelled
+pub type Error: shareable + cross = InvalidRequest | State | NoSpace | Connect(NetError) | Write(NetError) | Receive(NetError) | MalformedHead | UnsupportedSwitch | BodyFraming | TooLarge | Deadline | Cancelled
 
 /// Adds an explicit Idempotency-Key as a quoted lower-case hexadecimal string.
 /// Refuses an empty key or a second Idempotency-Key field.

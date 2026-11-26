@@ -1,5 +1,5 @@
 // Why an object endpoint cannot hold an objects@1 or sim@1 store (§12.2).
-pub type EndpointRefusal: send = Insecure | Unproven | NotSimulator | IgnoresIfNoneMatch | IgnoresIfMatch
+pub type EndpointRefusal: shareable + cross = Insecure | Unproven | NotSimulator | IgnoresIfNoneMatch | IgnoresIfMatch
 
 pub fn endpoint_refusal_text(reason: EndpointRefusal) -> String {
     string.from(match reason {
@@ -20,7 +20,9 @@ fn history_check_endpoint(mut client: std.object.Client, deadline: u64) -> Resul
     if std.object.proven(client) {
         // The client refuses any answer without the loopback simulator's
         // proof for its credential, so one answered request proves it.
-        let location = capacity(bound bytes 16 { std.object.bucket_location(mut client, deadline) })?
+        let location = capacity(bound bytes 16 {
+            std.object.bucket_location(mut client, deadline)
+        })?
         let Ok(_) = location else {
             return Error(Endpoint(Unproven))
         }

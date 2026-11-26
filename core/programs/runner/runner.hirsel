@@ -54,7 +54,7 @@ pub type Group: codec + send {
     rows: List[Row]
 }
 
-pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds | InvalidBinding(BindError) | Diverged(u64)
+pub type RegisterError: shareable + cross = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds | InvalidBinding(BindError) | Diverged(u64)
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
@@ -70,7 +70,7 @@ pub fn stream_key(c: Caller, id: StreamId) -> Result[Bytes, Capacity] {
     store.stream_key_bytes(store.StreamKey(caller: clone(c), id: id))
 }
 
-pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
+pub type FoundActivation: shareable + cross = Empty | Legacy | Active(u64, Bytes, Bytes)
 
 // `Reopen` opens the store at its current activation, or runs genesis on an empty
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
@@ -142,7 +142,7 @@ pub type TriggerConfig: send {
 
 // `Exceeds` names a PlaceConfig or WireConfig setting, its value and the most this
 // place accepts for it (RUNNER-SPEC §12.1, runner.md "Sizing a place").
-pub type Bound: send {
+pub type Bound: shareable + cross {
     name: String,
     value: u64,
     limit: u64
@@ -210,16 +210,6 @@ fn status_response(value: Status) -> Result[(bool, String), Capacity] {
     Ok((ready, take body))
 }
 
-type IncomingStop: send {
-    from: Receiver[()],
-    to: Sender[LifeEvent]
-}
-
-fn watch_stop(take seed: IncomingStop) -> () waits {
-    let _ = channel.receive(seed.from)
-    let _ = channel.send(seed.to, StopRequested)
-}
-
 type DrainTimer: send {
     to: Sender[LifeEvent],
     clock: Clock,
@@ -239,31 +229,6 @@ resource type TemporaryBacking {
 } drop(temporary) {
     if list.len(string.as_bytes(temporary.name)) != 0u64 {
         let _ = std.dir.remove_all(temporary.dir, temporary.name)
-    }
-}
-
-fn publish_phase(status: Latest[Status], watch: Option[Sender[Phase]], mut current: Status, phase: Phase) -> Result[(), StartError] {
-    current.phase = phase
-    let copied: Status = clone(current)
-    let value = take copied
-    let shared = arc.new(take value)
-    latest.publish(status, take shared)
-    if let Some(to) = watch {
-        let _ = channel.try_send(to, phase)
-    }
-    Ok(())
-}
-
-fn status_watch(take watch: Option[Sender[Receiver[Phase]]]) -> Result[Option[Sender[Phase]], StartError] {
-    match take watch {
-        Some(take handoff) => {
-            let (to, from): (Sender[Phase], Receiver[Phase]) = channel.new(6u64)
-            if let Error(_) = channel.try_send(handoff, take from) {
-                return Ok(None)
-            }
-            Ok(Some(take to))
-        },
-        None => Ok(None),
     }
 }
 
@@ -305,25 +270,30 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
 
 pub fn operate[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     let made = placing_of(p)
-    operate_with_report(take made, take p, take stop, status, take watching, None)
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, None)
 }
 
 pub fn operate_report[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
     let made = placing_of(p)
-    operate_with_report(take made, take p, take stop, status, take watching, Some(errors))
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, Some(errors))
 }
 
 // operate with the place's registration already made: a host that launches one Place many
 // times passes the one shared Placing (`placing_for`) and registers nothing per launch.
 pub fn operate_placed[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    operate_with_report(take made, take p, take stop, status, take watching, None)
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, None)
 }
 
 pub fn operate_placed_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
-    operate_with_report(take made, take p, take stop, status, take watching, Some(errors))
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, Some(errors))
 }
 
-fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
+// A local shard gets its stop from the owning unit and reports every status publication.
+pub fn operate_sharded[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Inbox[()], status: Latest[Status], take observer: StatusObserver) -> Result[Ended, StartError] waits {
+    operate_with_report(take made, take p, FromUnit(take stop), status, None, Some(take observer), None)
+}
+
+fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: StopInput, status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], take observer: Option[StatusObserver], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place
@@ -398,7 +368,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
     let mut current = copy_status(latest.read(status))
     let mut opening_read: Bytes = list.new()
     current.n_place = n_place
-    publish_phase(status, watch, mut current, Starting(Recovering))?
+    publish_phase(status, watch, observer, mut current, Starting(Recovering))?
     let (to, inbox): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
     let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(65u64)
     let hosting = start_host_control(tasks, clock, n_place, head_to, to)?
@@ -411,15 +381,22 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
     let initial: Option[DrainWindow] = None
     let root = arc.new(initial)
     let drain = latest.new(take root)
-    let stopping: Option[Task[()]] = match channel.try_receive(stop) {
-        Error(Empty) => {
-            let incoming = IncomingStop(from: take stop, to: channel.sender(to))
-            Some(task.spawn(tasks, bytes 4096u64, take incoming, watch_stop))
+    let pending_stop = match stop {
+        InUnit(from) => match channel.try_receive(from) {
+            Error(Empty) => false,
+            _ => true
         },
-        _ => {
-            let _ = channel.try_send(to, StopRequested);
-            None
+        FromUnit(from) => match conn.try_receive(from) {
+            Error(Empty) => false,
+            _ => true
         },
+    }
+    let stopping: Option[Task[()]] = if pending_stop {
+        let _ = channel.try_send(to, StopRequested)
+        None
+    } else {
+        let incoming = IncomingStop(from: take stop, to: channel.sender(to))
+        Some(task.spawn(tasks, bytes 4096u64, take incoming, watch_stop))
     }
     let head = place_head_bytes(n_place, n_publisher, place_grant_bytes(place_grants) ?=> Full) ?=> Full
     let granting = place_grant_start(take place_grants)
@@ -573,7 +550,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                     stop_config
                 }
                 drain_waiter = Some(start_drain(bounds, started, clock, tasks, to, drain)?)
-                publish_phase(status, watch, mut current, Draining)?
+                publish_phase(status, watch, observer, mut current, Draining)?
                 idle_state = IdleWaiting
                 if idle_stop {
                     let _ = channel.try_send(head_to, HeadClose)
@@ -591,7 +568,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
             Recovered => if place_stopping(phase) {
                 let _ = channel.try_send(head_to, HeadClose)
             } else {
-                publish_phase(status, watch, mut current, Starting(Activating))?
+                publish_phase(status, watch, observer, mut current, Starting(Activating))?
                 let _ = channel.try_send(head_to, HeadContinue)
             },
             Activated(take release, version, identity, retained, take read) => {
@@ -601,14 +578,14 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                 current.store_id = identity
                 current.retain_from = retained
                 if place_stopping(phase) {
-                    publish_phase(status, None, mut current, Draining)?
+                    publish_phase(status, None, observer, mut current, Draining)?
                     let _ = channel.try_send(head_to, HeadClose)
                 } else {
-                    publish_phase(status, watch, mut current, Starting(Publishing))?
+                    publish_phase(status, watch, observer, mut current, Starting(Publishing))?
                     let _ = channel.try_send(head_to, HeadContinue)
                 }
             },
-            StoreAttention(take seen, counts) => publish_store(status, mut current, take seen, counts)?,
+            StoreAttention(take seen, counts) => publish_store(status, observer, mut current, take seen, counts)?,
             Published(take pub_to) => if place_stopping(phase) {
                 let _ = channel.try_send(head_to, HeadClose)
             } else {
@@ -616,7 +593,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                     Some(Tcp(at)) => match host.listen(net, at, 128u16) {
                         Ok((take listener, address)) => {
                             current.addr = Some(address)
-                            publish_phase(status, watch, mut current, Starting(Listening(address)))?
+                            publish_phase(status, watch, observer, mut current, Starting(Listening(address)))?
                             ready = Some((Sockets(take listener), take pub_to))
                         },
                         Error(problem) => {
@@ -637,7 +614,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                 let _ = channel.try_send(head_to, HeadClose)
             },
             StoreAccepted => if !place_online(phase) && !place_stopping(phase) {
-                publish_phase(status, watch, mut current, Ready)?
+                publish_phase(status, watch, observer, mut current, Ready)?
                 phase = match phase {
                     DeferredStop(_) => DeferredStop(true),
                     _ => OnlinePlace
@@ -698,7 +675,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                 finishing = SettledPlace
             },
             WritesPaused => if !place_stopping(phase) {
-                publish_phase(status, watch, mut current, Paused)?
+                publish_phase(status, watch, observer, mut current, Paused)?
             },
             WritesResumed => match phase {
                 DeferredStop(was_online) => {
@@ -711,7 +688,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                 },
                 DrainingPlace(_) => (),
                 ExpiredPlace(_) => (),
-                _ => publish_phase(status, watch, mut current, Ready)?,
+                _ => publish_phase(status, watch, observer, mut current, Ready)?,
             },
             RetirePlace => {
                 finishing = match finishing {

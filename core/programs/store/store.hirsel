@@ -6,7 +6,7 @@ pub type StoreId: codec + key {
 
 pub type StorageKind: send = Directory() | Bucket(std.object.Bucket)
 
-pub type Caller: codec + key + shareable + send {
+pub type Caller: codec + key + shareable + cross {
     issuer: u8,
     subject: Bytes
 }
@@ -17,19 +17,19 @@ pub const VALUE_LIMIT: u64 = 16711680
 
 const FORMAT_VALUE_MAX: u64 = 16711680
 
-pub type Limit = Key | Value | Transaction | Name | Ids | Manifest | Triggers
+pub type Limit: shareable + cross = Key | Value | Transaction | Name | Ids | Manifest | Triggers
 
-pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed
+pub type Why: shareable + cross = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed
 
-pub type Fault: send {
+pub type Fault: shareable + cross {
     file: String,
     offset: u64,
     why: Why
 }
 
-pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity)
+pub type StoreCapacity: shareable + cross = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String)
+pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String)
 
 type Roots = PageRoots
 

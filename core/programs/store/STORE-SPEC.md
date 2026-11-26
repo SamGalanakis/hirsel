@@ -5492,6 +5492,8 @@ This needs the provider contract (§12.2): with a non-linearizable head, two hol
 - A still-live missing object is `Corrupt(.. Absent)`.
 - Followers hold no lease and may restart (§12.5).
 
+**Reclaim dry-run and version-bound purge (CLOUD #7).** `reclaim_preview(mut db, max_items)` runs the same retention capture, lease protection, archive refusal and selectors (`history_dead_key`, `history_dead_upload`) with a private copy of the sweep cursor and zero erase/abort side effects. It returns a bounded `ReclaimList` (`Complete | Bounded(omitted)`) that distinguishes the single entry sweep page (`SweepEntry`) from live-range orphans (`LiveRangeEntry`), `ManifestObject`, `LocatorObject`, `PackObject` and `PendingUpload` (preserving duplicate upload keys with multiplicity), stamped with `RECLAIM_TOOL_VERSION`, `RECLAIM_FORMAT_VERSION` (`DISK_FORMAT`) and `StoreId`. `reclaim_purge(mut db, plan)` refuses before any I/O with `ToolVersionMismatch`, `FormatVersionMismatch` or `StoreMismatch` if any of those stamps differ, and otherwise rechecks every planned item against a fresh reclaim pass before erasing or aborting it, counting ineligible items in `PurgeReport.skipped`. Law: `bucket_test_m2_reclaim_preview_and_purge` (`store_reclaim_laws.hirsel`).
+
 ### 12.7 Export, prepared install and standalone import (Astra #2, #7, #15, #20)
 
 - **Export** is a holder operation, as §3.5a's E1–E3. On objects@1 it captures one head, its CHECKPOINT entry c, the MANIFEST, the locator and its packs, and the exact terminal entry position P_x, under the §12.6 lease. It writes the scratch as **an ordinary log@1 directory image (Astra #7)**:

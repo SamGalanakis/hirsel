@@ -49,6 +49,7 @@ store@1/store/bucket_test_m2_prepared_install src=97826551c155567a sig=14e959775
 store@1/store/bucket_test_m2_q5_matrix src=4a625237f5375ca5 sig=7706dab9ebd1344e run=db39366644a2cf00 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_reclaim_candidates src=ac9bff8d1925b3f3 sig=a08eda82e54a6443 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_reclaim_execution src=82bf54ef52fb4eae sig=f52a33b861c9643a run=dbf6722727633166 bug=- oracle=- rows=pending
+store@1/store/bucket_test_m2_reclaim_preview_and_purge src=4cc88c8435064dc5 sig=ff569af509e3fe7d run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_reclaim_retry src=81ca1ee1354435ee sig=633baaaef4712b20 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_reclaim_uploads src=84e7e8813f6df5fa sig=36ee7df246820f99 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_register_fence src=399f7dfea10dc959 sig=965da0f5e055b0ac run=9aa0248743abeb43 bug=- oracle=- rows=pending

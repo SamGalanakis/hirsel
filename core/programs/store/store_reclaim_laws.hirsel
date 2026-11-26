@@ -1,0 +1,207 @@
+// CLOUD #7 reclaim dry-run preview and version-bound purge laws (STORE-SPEC §12.6).
+fn count_reclaim_item(items: List[ReclaimItem], kind: ReclaimKind, key: String) -> u64 {
+    let mut found = 0u64
+    for item in items {
+        if item.kind == kind && item.key == key {
+            found += 1u64
+        }
+    }
+    found
+}
+
+fn lane_sweep_cursor(db: Db) -> SweepCursor waits {
+    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    result.unwrap(channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)))
+    let parked = result.unwrap(channel.receive(paused))
+    let cursor = parked.sweep
+    result.unwrap(channel.send(resume, take parked))
+    cursor
+}
+
+fn reclaim_preview_setup(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(Db, std.object.Client, String, String, String, String, String, String, String, u64), Error] waits {
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    options.retain = 1
+    let first = bucket_law_authority(sim, tasks, "s3.test", 1)?
+    let mut seed = open_authority(tasks, take first, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    let _ = law_table(mut seed, "kept", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = checkpoint(mut seed)?
+    reclaim_barrier(seed)?
+    close(take seed)?
+    let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let after_seed = history_decode_head(workspace.witness)?
+    if after_seed.head.floor < 2 {
+        fail("retain-one seed checkpoint did not advance floor past entry 1")
+    }
+    let dead_sweep = history_key("e-", HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xaaaa))
+    let dead_manifest = history_key("m-", HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xbbbb))
+    let dead_pack = history_key("p-", HistoryRef(seq: 50, epoch: 1, len: 1, digest: 0xcccc))
+    let mut sweep_bytes = string.into_bytes(string.from("sweep"))
+    let mut manifest_bytes = string.into_bytes(string.from("manifest!"))
+    let mut pack_bytes = string.into_bytes(string.from("pack-dead-123"))
+    history_create(mut witness, dead_sweep, mut sweep_bytes, mut workspace.compare, deadline)?
+    history_create(mut witness, dead_manifest, mut manifest_bytes, mut workspace.compare, deadline)?
+    history_create(mut witness, dead_pack, mut pack_bytes, mut workspace.compare, deadline)?
+    // Two duplicate pending uploads under the same old-epoch key, plus one current-epoch upload.
+    let dead_upload = pending_pack_name(60, 1)
+    let live_upload = pending_pack_name(61, 2)
+    let _ = std.object.upload(mut witness, dead_upload, NoClobber, deadline) ?=> Remote
+    let _ = std.object.upload(mut witness, dead_upload, NoClobber, deadline) ?=> Remote
+    let _ = std.object.upload(mut witness, live_upload, NoClobber, deadline) ?=> Remote
+    options.create = false
+    let second = bucket_law_authority(sim, tasks, "s3.test", 3)?
+    let mut writer = open_authority(tasks, take second, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    if claim_of(writer)?.epoch != 2 {
+        fail("reclaim preview fixture opened at unexpected epoch")
+    }
+    let kept = table(mut writer, "kept", std.codec.key_u64(), std.codec.of_u64())?
+    let committed = run(mut writer, None, kept, fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 42u64)
+    })?
+    let Committed(take receipt) = take committed else {
+        fail("reclaim preview fixture write did not commit")
+    }
+    durable(mut writer, receipt.ticket)?
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let current = history_decode_head(workspace.witness)?
+    let dead_live_range = history_key("e-", HistoryRef(seq: current.head.entry.seq, epoch: 2, len: 1, digest: 0xdddd))
+    let future_entry = history_key("e-", HistoryRef(seq: current.head.entry.seq + 1, epoch: 2, len: 1, digest: 0xeeee))
+    let mut orphan_bytes = string.into_bytes(string.from("orphan-live"))
+    let mut future_bytes = string.into_bytes(string.from("future"))
+    history_create(mut witness, dead_live_range, mut orphan_bytes, mut workspace.compare, deadline)?
+    history_create(mut witness, future_entry, mut future_bytes, mut workspace.compare, deadline)?
+    // Hand-derived exact byte total of the four dead objects (uploads have 0 bytes).
+    let expected_bytes = 5u64 + 9u64 + 13u64 + 11u64
+    Ok((take writer, take witness, take dead_sweep, take dead_live_range, take dead_manifest, take dead_pack, take dead_upload, take live_upload, take future_entry, expected_bytes))
+}
+
+// CLOUD #7: preview uses the exact reclaim selector with a private sweep cursor and zero
+// side effects, preserves duplicate pending-upload multiplicity, honors bounds, and stamps
+// tool and format versions. Purge refuses any mismatched tool version, format version, or
+// store identity before I/O, and rechecks eligibility on real execution.
+@test
+fn bucket_test_m2_reclaim_preview_and_purge(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // Arm 1: preview-only run checks zero DELETE / Abort requests in the sim history.
+    let sim_dry = bucket_law_sim(tasks, c, 20261, None, list.new())
+    let setup_dry = reclaim_preview_setup(c, r, tasks, sim_dry)
+    let (writer_dry0, witness_dry0, dead_sweep, dead_live_range, dead_manifest, dead_pack, dead_upload, live_upload, future_entry, expected_bytes) = match take setup_dry {
+        Ok(take parts) => take parts,
+        Error(take problem) => {
+            let _ = bucket_law_finish(take sim_dry)
+            return Error(take problem)
+        },
+    }
+    let mut writer_dry = take writer_dry0
+    let mut witness_dry = take witness_dry0
+    let before_cursor = lane_sweep_cursor(writer_dry)
+    let preview = reclaim_preview(mut writer_dry, 1000u64)?
+    let after_cursor = lane_sweep_cursor(writer_dry)
+    if before_cursor.position != after_cursor.position || before_cursor.epoch != after_cursor.epoch || before_cursor.digest != after_cursor.digest {
+        fail("reclaim_preview mutated the writer's sweep cursor")
+    }
+    if preview.tool_version != RECLAIM_TOOL_VERSION || preview.format_version != RECLAIM_FORMAT_VERSION {
+        fail("reclaim_preview did not stamp tool and format versions")
+    }
+    if preview.store.hi != writer_dry.store.hi || preview.store.lo != writer_dry.store.lo {
+        fail("reclaim_preview did not stamp store identity")
+    }
+    if preview.status != Complete {
+        fail("unbounded reclaim_preview was not Complete")
+    }
+    if list.len(preview.items) != 6u64 || preview.total_bytes != expected_bytes {
+        fail("reclaim_preview count or byte total disagreed with hand-derived oracle")
+    }
+    if count_reclaim_item(preview.items, SweepEntry, dead_sweep) != 1u64 || count_reclaim_item(preview.items, LiveRangeEntry, dead_live_range) != 1u64 || count_reclaim_item(preview.items, ManifestObject, dead_manifest) != 1u64 || count_reclaim_item(preview.items, PackObject, dead_pack) != 1u64 || count_reclaim_item(preview.items, PendingUpload, dead_upload) != 2u64 || count_reclaim_item(preview.items, PendingUpload, live_upload) != 0u64 || count_reclaim_item(preview.items, LiveRangeEntry, future_entry) != 0u64 {
+        fail("reclaim_preview items disagreed with hand-derived oracle")
+    }
+    // Bounded preview caps output and reports the omitted count.
+    let bounded = reclaim_preview(mut writer_dry, 2u64)?
+    if list.len(bounded.items) != 2u64 || bounded.status != Bounded(4u64) {
+        fail("bounded reclaim_preview did not honor max_items or omitted count")
+    }
+    // Version and store mismatches refuse BEFORE any I/O or deletion.
+    let mut bad_tool: ReclaimList = clone(preview)
+    bad_tool.tool_version = RECLAIM_TOOL_VERSION + 1u64
+    match reclaim_purge(mut writer_dry, take bad_tool) {
+        Error(ToolVersionMismatch(want, got)) if want == RECLAIM_TOOL_VERSION && got == RECLAIM_TOOL_VERSION + 1u64 => (),
+        _ => fail("reclaim_purge did not refuse a list from another tool version"),
+    }
+    let mut bad_format: ReclaimList = clone(preview)
+    bad_format.format_version = RECLAIM_FORMAT_VERSION + 1u64
+    match reclaim_purge(mut writer_dry, take bad_format) {
+        Error(FormatVersionMismatch(want, got)) if want == RECLAIM_FORMAT_VERSION && got == RECLAIM_FORMAT_VERSION + 1u64 => (),
+        _ => fail("reclaim_purge did not refuse a list from another format version"),
+    }
+    let mut bad_store: ReclaimList = clone(preview)
+    bad_store.store = StoreId(hi: writer_dry.store.hi + 1u64, lo: writer_dry.store.lo)
+    match reclaim_purge(mut writer_dry, take bad_store) {
+        Error(StoreMismatch) => (),
+        _ => fail("reclaim_purge did not refuse a list from another store"),
+    }
+    // Preview + refused purges must leave every dead object and pending upload untouched.
+    let deadline_dry = std.object.deadline_after_ms(witness_dry, BUCKET_LAW_OP_MS)
+    let mut ws_dry = history_buffers(65536)?
+    for name in[string.from(dead_sweep), string.from(dead_live_range), string.from(dead_manifest), string.from(dead_pack), string.from(future_entry)] {
+        let _ = history_fetch(mut witness_dry, name, mut ws_dry.compare, deadline_dry)?
+    }
+    let _ = take witness_dry
+    close(take writer_dry)?
+    let dry_report = bucket_law_finish(take sim_dry)
+    // Only epoch 1's own seed reclaim may have sent DELETEs; none of our dead keys or uploads were touched.
+    for name in[dead_sweep, dead_live_range, dead_manifest, dead_pack, future_entry] {
+        if !map.contains(dry_report.objects, name) {
+            fail("reclaim_preview or refused purge deleted an object")
+        }
+    }
+    if list.len(dry_report.pending) != 3u64 {
+        fail("reclaim_preview or refused purge aborted a pending upload")
+    }
+    // Arm 2: real purge of a valid list (with one ineligible future key injected to prove recheck).
+    let sim_purge = bucket_law_sim(tasks, c, 20262, None, list.new())
+    let setup_purge = reclaim_preview_setup(c, r, tasks, sim_purge)
+    let (writer0, witness0, p_sweep, p_live_range, p_manifest, p_pack, p_dead_upload, p_live_upload, p_future, p_bytes) = match take setup_purge {
+        Ok(take parts) => take parts,
+        Error(take problem) => {
+            let _ = bucket_law_finish(take sim_purge)
+            return Error(take problem)
+        },
+    }
+    let mut writer = take writer0
+    let mut witness = take witness0
+    let mut plan = reclaim_preview(mut writer, 1000u64)?
+    list.push(mut plan.items, ReclaimItem(kind: LiveRangeEntry, key: clone(p_future), size: 6u64))
+    let purged = match reclaim_purge(mut writer, take plan) {
+        Ok(report) => report,
+        Error(_) => fail("reclaim_purge failed on a valid version-matched list"),
+    }
+    if purged.deleted != 4u64 || purged.aborted != 2u64 || purged.skipped != 1u64 || purged.freed_bytes != p_bytes {
+        fail("reclaim_purge report disagreed with hand-derived oracle")
+    }
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut ws = history_buffers(65536)?
+    for gone in[p_sweep, p_live_range, p_manifest, p_pack] {
+        if let Error(Remote(NotFound)) = history_fetch(mut witness, gone, mut ws.compare, deadline) {} else {
+            fail("reclaim_purge left a planned dead object behind")
+        }
+    }
+    let _ = history_fetch(mut witness, p_future, mut ws.compare, deadline)?
+    let _ = history_fetch(mut witness, "head", mut ws.witness, deadline)?
+    let current = history_decode_head(ws.witness)?
+    let mut cold = history_reader(take witness, deadline)
+    let recovered = history_paged_capture(mut cold, current.head, 1048576)?
+    let _ = take cold
+    if recovered.state.tips[0].head == 0u64 {
+        fail("reclaim_purge damaged live recovery state")
+    }
+    close(take writer)?
+    let purge_report = bucket_law_finish(take sim_purge)
+    if list.len(purge_report.pending) != 1u64 || list.contains(purge_report.pending, p_dead_upload) || !list.contains(purge_report.pending, p_live_upload) {
+        fail("reclaim_purge aborted the wrong set of pending uploads")
+    }
+    Ok(())
+}

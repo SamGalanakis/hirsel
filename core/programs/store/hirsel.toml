@@ -147,6 +147,7 @@ dirs = ["."]
 "bucket_stream_claim_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
+"store_reclaim_laws.hirsel" = "store"
 "authority_laws.hirsel" = "store"
 "follower_laws.hirsel" = "store"
 "replication_laws.hirsel" = "store"

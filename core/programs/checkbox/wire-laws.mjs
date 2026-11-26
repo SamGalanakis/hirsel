@@ -89,9 +89,10 @@ async function image(client, sub) {
 async function toggle_smoke() {
   const runtime = await loadRuntime();
   const state = await mkdtemp(join(tmpdir(), 'checkbox-client-'));
+  const credential = randomBytes(16);
   let client;
   try {
-    client = await runtime.Client.open({url: url.href, frame: Frame, wants: want, kinds: kind, identity, credential: randomBytes(16),
+    client = await runtime.Client.open({url: url.href, frame: Frame, wants: want, kinds: kind, identity, credential: async () => credential,
       storage: new runtime.NodeStorage(state)});
     await client.whenReady();
     const {toggle} = bind(client).call.main;

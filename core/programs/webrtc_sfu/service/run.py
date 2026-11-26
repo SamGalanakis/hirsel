@@ -49,7 +49,9 @@ def inputs(work, root_package=PROGRAM):
             dependencies.append(visit(directory / dep["path"]) if "path" in dep else {"name": name, "version": str(dep["major"])})
         program = manifest.get("program", {}).get("module")
         package = {"name": manifest["package"]["name"], "version": str(manifest["package"]["major"])}
-        packages.append({"package": package, "dependencies": dependencies, "sources": [
+        # Only the checkout's runner supplies the launch words needed by sdk ts.
+        toolchain = directory == (ROOT / "core/programs/runner").resolve()
+        packages.append({"package": package, "dependencies": dependencies, "toolchain": toolchain, "sources": [
             {"file": str(directory / file), "modules": module.split("."), "signatures": False}
             for file, module in manifest["sources"].items()
             if module != program or directory == root_package

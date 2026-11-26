@@ -4,7 +4,7 @@
 /// The relay serves only the SFU: media holds the SFU's media addresses and port ranges,
 /// host the relay host's other addresses (TURN-7 `local`). lifetime_s is every minted
 /// credential's lifetime, from its mint.
-pub type RelayPlan {
+pub type RelayPlan: send {
     realm: Bytes,
     lifetime_s: u32,
     media: List[turn.Allow],

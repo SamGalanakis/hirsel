@@ -1,0 +1,230 @@
+// The exported entry has a static schema. The service sizes the listener's live
+// connections and the SFU's media admissions from its launch plan.
+pub const WIRE_PEERS: u32 = int.narrow(runner.WIRE_OWNER_LIMIT)
+
+pub const ROOM_ARG_BYTES: u64 = 4u64
+
+pub type Config {
+    listen: Addr,
+    media_ip: u32,
+    media_lo: u16,
+    media_hi: u16,
+    turn: Addr,
+    seconds: u64,
+    owners: u64,
+    relay_bytes: u64,
+    limits: webrtc_sfu.router.RoomLimits,
+    session: webrtc_sfu.peer.PeerLimits,
+    pool: webrtc_sfu.signal.PoolLimits,
+    queues: webrtc_sfu.units.MediaQueues,
+    relay_sockets: webrtc_sfu.signal.RelaySocketPlan
+}
+
+pub type ConfigError = UnknownFlag(String) | MissingValue(String) | InvalidAddress(String) | InvalidInteger(String, ParseError) | RequiredPositive(String) | UnitCount | OwnerLimit | MediaPorts | MediaAddress | RepairWindow | DtlsTransport | RelaySockets | MediaBudget(unit: u16, need: u64, available: u64)
+
+type Settings {
+    listen: Addr,
+    media: Addr,
+    units: u16,
+    turn: Addr,
+    rooms: u32,
+    participants: u16,
+    unit_bytes: u64,
+    down_tracks: u16,
+    dtls_mtu: u16,
+    dtls_message_bytes: u32,
+    repair_pps: u32,
+    relay_allocations: u16,
+    audio_forward: u8,
+    seconds: u64
+}
+
+fn address(name: String, value: String) -> Result[Addr, ConfigError] {
+    let Some((ip_text, port_text)) = std.string.split_once(value, ":") else {
+        return Error(InvalidAddress(string.from(name)))
+    }
+    let Some(ip) = std.ingress_policy.parse_ip(ip_text) else {
+        return Error(InvalidAddress(string.from(name)))
+    }
+    let port: u16 = parsed(name, int.parse(port_text))?
+    Ok(Addr(ip: ip, port: port))
+}
+
+fn parsed[T](name: String, take r: Result[T, ParseError]) -> Result[T, ConfigError] {
+    match take r {
+        Ok(take n) => Ok(take n),
+        Error(e) => Error(InvalidInteger(string.from(name), e)),
+    }
+}
+
+/// Reads the deployment's flag/value pairs in order. The last value of a repeated
+/// flag wins. All values must parse and the resulting room, media and relay plans must fit.
+pub fn parse(a: Args) -> Result[Config, ConfigError] {
+    let dtls_defaults = webrtc_sfu.peer.DTLS_DEFAULT
+    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), rooms: 0u32, participants: 0u16, unit_bytes: 0u64, down_tracks: 0u16, dtls_mtu: dtls_defaults.mtu, dtls_message_bytes: dtls_defaults.max_message, repair_pps: webrtc_sfu.peer.DEFAULT_REPAIR.packets_per_second, relay_allocations: 0u16, audio_forward: 0u8, seconds: 0u64)
+    let mut i = 0u64
+    while i < args.len(a) {
+        let name = option.unwrap(args.get(a, i))
+        let Some(value) = args.get(a, i + 1) else {
+            return Error(MissingValue(string.from(name)))
+        }
+        if name == "--listen" {
+            s.listen = address(name, value)?
+        } else if name == "--media" {
+            s.media = address(name, value)?
+        } else if name == "--turn" {
+            s.turn = address(name, value)?
+        } else if name == "--rooms" {
+            s.rooms = parsed(name, int.parse(value))?
+        } else if name == "--participants" {
+            s.participants = parsed(name, int.parse(value))?
+        } else if name == "--unit-bytes" {
+            s.unit_bytes = parsed(name, int.parse(value))?
+        } else if name == "--down-tracks" {
+            s.down_tracks = parsed(name, int.parse(value))?
+        } else if name == "--dtls-mtu" {
+            s.dtls_mtu = parsed(name, int.parse(value))?
+        } else if name == "--dtls-message-bytes" {
+            s.dtls_message_bytes = parsed(name, int.parse(value))?
+        } else if name == "--repair-pps" {
+            s.repair_pps = parsed(name, int.parse(value))?
+        } else if name == "--relay-allocations" {
+            s.relay_allocations = parsed(name, int.parse(value))?
+        } else if name == "--units" {
+            s.units = parsed(name, int.parse(value))?
+        } else if name == "--audio-forward" {
+            s.audio_forward = parsed(name, int.parse(value))?
+        } else if name == "--seconds" {
+            s.seconds = parsed(name, int.parse(value))?
+        } else {
+            return Error(UnknownFlag(string.from(name)))
+        }
+        i += 2
+    }
+    if s.units == 0 || s.units > webrtc_sfu.router.UNITS_MAX {
+        return Error(UnitCount)
+    }
+    if s.rooms == 0 {
+        return Error(RequiredPositive("--rooms"))
+    }
+    if s.participants == 0 {
+        return Error(RequiredPositive("--participants"))
+    }
+    if s.unit_bytes == 0 {
+        return Error(RequiredPositive("--unit-bytes"))
+    }
+    if s.down_tracks == 0 {
+        return Error(RequiredPositive("--down-tracks"))
+    }
+    if s.relay_allocations == 0 {
+        return Error(RequiredPositive("--relay-allocations"))
+    }
+    plan(s)
+}
+
+fn plan(s: Settings) -> Result[Config, ConfigError] {
+    // Each room has one SFU connection. Leave a second transport slot per browser
+    // for the page or a connection that is still closing.
+    let rooms: u64 = int.widen(s.rooms)
+    let participants: u64 = int.widen(s.participants)
+    let owners = rooms * (2u64 * participants + 1u64)
+    let Some(relay_bytes) = runner.room_relay_bytes(owners, int.widen(s.rooms), WIRE_PEERS, ROOM_ARG_BYTES) else {
+        return Error(OwnerLimit)
+    }
+    let Some(last) = int.checked_add(s.media.port, s.units - 1u16) else {
+        return Error(MediaPorts)
+    }
+    let V4(media_ip) = s.media.ip else {
+        return Error(MediaAddress)
+    }
+    let mut repair = webrtc_sfu.peer.DEFAULT_REPAIR
+    repair.packets_per_second = s.repair_pps
+    let Some(repair_slots) = webrtc_sfu.peer.repair_slots(repair) else {
+        return Error(RepairWindow)
+    }
+    let (limits, session, pool_limits) = media_plan(s, repair, repair_slots)
+    if !webrtc_sfu.peer.dtls_transport_fits(session.dtls_transport) {
+        return Error(DtlsTransport)
+    }
+    let queues = webrtc_sfu.units.media_queues(pool_limits.sessions)
+    let Some(relay_sockets) = webrtc_sfu.signal.relay_socket_plan(s.relay_allocations, queues.datagram_bytes, s.repair_pps) else {
+        return Error(RelaySockets)
+    }
+    check_media_budget(s, limits, session, pool_limits, queues)?
+    Ok(Config(listen: s.listen, media_ip, media_lo: s.media.port, media_hi: last, turn: s.turn, seconds: s.seconds, owners, relay_bytes, limits, session, pool: pool_limits, queues, relay_sockets))
+}
+
+fn media_plan(s: Settings, repair: webrtc_sfu.peer.RepairProfile, repair_slots: u32) -> (webrtc_sfu.router.RoomLimits, webrtc_sfu.peer.PeerLimits, webrtc_sfu.signal.PoolLimits) {
+    let tracks: u32 = int.widen(s.down_tracks)
+    let ids = int.saturating_mul(s.participants, 4u16)
+    let limits = webrtc_sfu.router.RoomLimits(participants: s.participants, ids: ids, publications: 8, down_tracks: tracks, audio_forward: s.audio_forward, pause_delay_ms: 1000, pause: false)
+    let mut transport = webrtc_sfu.peer.DTLS_DEFAULT
+    transport.mtu = s.dtls_mtu
+    transport.max_message = s.dtls_message_bytes
+    let packets: u64 = int.widen(repair_slots)
+    let rtx_bytes = packets * webrtc_sfu.peer.SLOT
+    let session = webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: s.down_tracks, rtx_bytes: rtx_bytes, pacer_packets: 256, start_bps: 300000, dtls_transport: transport, repair_profile: repair)
+    let units: u32 = int.widen(s.units)
+    let participants: u32 = int.widen(s.participants)
+    let sessions = (s.rooms * participants + units - 1) / units
+    let pool = webrtc_sfu.signal.PoolLimits(units: s.units, unit_bytes: s.unit_bytes, rooms: s.rooms, sessions: sessions, inflight: webrtc_sfu.signal.INFLIGHT, media_take: 1024, room_pps: 100000, open_pps: None)
+    (limits, session, pool)
+}
+
+fn check_media_budget(s: Settings, limits: webrtc_sfu.router.RoomLimits, session: webrtc_sfu.peer.PeerLimits, pool: webrtc_sfu.signal.PoolLimits, queues: webrtc_sfu.units.MediaQueues) -> Result[(), ConfigError] {
+    let cost = webrtc_sfu.signal.room_cost(limits, session)
+    let sessions = int.saturating_mul(cost.per_session, int.widen(pool.sessions))
+    let mut per_session = sessions
+    if s.units > 1 {
+        let count: u64 = int.widen(pool.sessions)
+        let remote_tracks = count * int.widen(s.down_tracks)
+        per_session = int.saturating_add(per_session, int.saturating_mul(cost.per_remote, remote_tracks))
+    }
+    for k in 0u16 .. s.units {
+        let share = if k == 0 {
+            cost.replicated + cost.control
+        } else {
+            cost.replicated
+        }
+        let rooms = int.saturating_mul(share, int.widen(s.rooms))
+        let fixed = webrtc_sfu.signal.pool_unit_bytes(k, pool, session, queues)
+        let need = int.saturating_add(fixed, int.saturating_add(rooms, per_session))
+        if need > s.unit_bytes {
+            return Error(MediaBudget(unit: k, need: need, available: s.unit_bytes))
+        }
+    }
+    Ok(())
+}
+
+const USAGE: String = "usage: service --rooms N --participants N --unit-bytes N --down-tracks N --relay-allocations N [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--dtls-mtu N] [--dtls-message-bytes N] [--repair-pps N] [--audio-forward N] [--seconds N]"
+
+/// Preserves the command's startup diagnostics for each typed refusal.
+pub fn message(e: ConfigError) -> String {
+    match e {
+        UnknownFlag(_) => string.from(USAGE),
+        MissingValue(_) => string.from(USAGE),
+        InvalidAddress(_) => string.from(USAGE),
+        InvalidInteger(_, _) => string.from(USAGE),
+        RequiredPositive(_) => string.from(USAGE),
+        UnitCount => string.from(USAGE),
+        OwnerLimit => {
+            let mut line = string.from("room plan exceeds the signaling owner limit ")
+            string.push_u64(mut line, runner.WIRE_OWNER_LIMIT)
+            take line
+        },
+        MediaPorts => string.from("media ports exceed the UDP port range"),
+        MediaAddress => string.from("media requires an IPv4 address"),
+        RepairWindow => string.from("--repair-pps does not fit the RTP history window"),
+        DtlsTransport => string.from("invalid --dtls-mtu or --dtls-message-bytes"),
+        RelaySockets => string.from("invalid TURN relay socket plan"),
+        MediaBudget(unit, need, available) => {
+            let mut line = string.from("media unit ")
+            string.push_u64(mut line, int.widen(unit))
+            string.push(mut line, " needs ")
+            string.push_u64(mut line, need)
+            string.push(mut line, " bytes for the room plan, --unit-bytes provides ")
+            string.push_u64(mut line, available)
+            take line
+        },
+    }
+}

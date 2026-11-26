@@ -15,12 +15,12 @@ const PAYLOAD_MAX: u64 = 65507
 /// Every response this relay builds fits here; from_client grows out to it.
 const RESPONSE_MAX: u64 = 512
 
-pub type Prefix {
+pub type Prefix: send {
     ip: Ip,
     bits: u8
 }
 
-pub type Allow {
+pub type Allow: send {
     prefix: Prefix,
     ports_lo: u16,
     ports_hi: u16

@@ -732,9 +732,9 @@ module (`signal_turn.hirsel`), and the turn package names no application.
   TCP, put the media unit's own port (7810 or 7811) in every CreatePermission's
   XOR-PEER-ADDRESS, and Chromium's ChannelBind carries the same port. The relay keeps
   judging CreatePermission on the full address; no IP-only rule is needed.
-- **Built in N1.** webrtc_sfu's `service/main.hirsel` runs the relay beside the room
-  place and `signal.serve_pool` in one process (webrtc.md, N1 decisions): the adapter mints
-  each admission's credentials with `mint_session`, sends `Servers`, and forwards
+- **Built in N1.** webrtc_sfu's `service/main.hirsel` runs `webrtc_sfu.turn_runtime`
+  beside the room place and `signal.serve_pool` in one process (webrtc.md, N1 decisions).
+  The adapter mints each admission's credentials with `mint_session`, sends `Servers`, and forwards
   `relay_revoke` to the relay, which applies it with `apply_revoke`. `relay_only_session`
   stays the in-process law; N1's `relay_only_udp` and `relay_only_tcp` are the browser
   cases.

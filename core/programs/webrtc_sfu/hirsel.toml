@@ -40,6 +40,7 @@ rtp_jitter = { major = 1, path = "../rtp_jitter" }
 "units_io.hirsel" = "units"
 "signal.hirsel" = "signal"
 "signal_turn.hirsel" = "signal"
+"turn_runtime.hirsel" = "turn_runtime"
 "signal_build.hirsel" = "signal"
 "signal_serve.hirsel" = "signal"
 "signal_pool.hirsel" = "signal"

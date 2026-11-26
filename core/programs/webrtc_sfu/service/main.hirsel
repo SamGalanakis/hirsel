@@ -2,24 +2,16 @@
 // runs three places side by side.
 // - The room place: a runner place with numbered rooms whose message is `webrtc_sfu.signal.Signal`. It
 //   serves the browser page and the WebSocket wire on `--listen`.
-// - The SFU (`webrtc_sfu.signal.serve`): `--units` media units on consecutive UDP ports from
+// - The SFU (`webrtc_sfu.signal.serve_pool`): `--units` media units on consecutive UDP ports from
 //   `--media`, joined to the room through `room_client`.
 // - The TURN relay place: a UDP socket and a TCP listener on `--turn`, and a pool of
 //   relayed addresses. Its policy is the relay-only one (TURN-7): it relays only to the
 //   media units' ports. Signaling mints each admission's TURN credentials from the master
 //   the relay shares, and forwards each ended admission's revoke to it (TURN-9).
-// Usage: service --rooms N --participants N --unit-bytes N --down-tracks N --relay-allocations N
-//                [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT]
-//                [--audio-forward N] [--seconds N]
 // Stdout, one event per line: `listening <port>`, `turn <udp|tcp> <conn> <hex>` for each
 // STUN request a TURN client sends (the browsers' requests, for N1's captures),
 // `allocations <count>`, `revoked <subject> <deleted>`, `served <error>`.
-const MS: u64 = 1000000
-
 const SECOND: u64 = 1000000000
-
-// Relay authentication, connection state and protocol work, beside socket reservations.
-const RELAY_WORK_BYTES: u64 = 67108864
 
 // Each credential's lifetime, from its mint (turn.md U8: the relay's credential_max_s).
 const LIFETIME_S: u32 = 3600
@@ -28,16 +20,10 @@ fn admit(tx: store.Tx, unused: (), author: runner.Caller, take argument: u32) ->
     Ok(runner.Answer(value: Join, covers: runner.covers()))
 }
 
-// The exported entry has a static schema. The service sizes the listener's live
-// connections and the SFU's media admissions from its launch plan.
-const WIRE_PEERS: u32 = int.narrow(runner.WIRE_OWNER_LIMIT)
-
-const ROOM_ARG_BYTES: u64 = 4u64
-
 fn room(mut reg: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
     let state: std.codec.Codec[List[Bytes]] = std.codec.of()
     let message: std.codec.Codec[webrtc_sfu.signal.Signal] = std.codec.of()
-    runner.room(mut reg, code.describe(admit), runner.slots(), state, message, runner.RoomBounds(peers: WIRE_PEERS, state: runner.STATE_MAX, message: runner.MESSAGE_MAX), 4096u64, ROOM_ARG_BYTES, runner.DEFAULT_STEPS)
+    runner.room(mut reg, code.describe(admit), runner.slots(), state, message, runner.RoomBounds(peers: config.WIRE_PEERS, state: runner.STATE_MAX, message: runner.MESSAGE_MAX), 4096u64, config.ROOM_ARG_BYTES, runner.DEFAULT_STEPS)
 }
 
 fn schema(mut d: store.Declare) -> Result[(), store.Error] {
@@ -61,115 +47,6 @@ fn asset(path: Bytes) -> Option[std.wsock.Asset] {
     None
 }
 
-type Settings {
-    listen: Addr,
-    media: Addr,
-    units: u16,
-    turn: Addr,
-    rooms: u32,
-    participants: u16,
-    unit_bytes: u64,
-    down_tracks: u16,
-    dtls_mtu: u16,
-    dtls_message_bytes: u32,
-    repair_pps: u32,
-    relay_allocations: u16,
-    audio_forward: u8,
-    seconds: u64
-}
-
-fn address(value: String) -> Option[Addr] {
-    let Some((ip_text, port_text)) = std.string.split_once(value, ":") else {
-        return None
-    }
-    let Some(ip) = std.ingress_policy.parse_ip(ip_text) else {
-        return None
-    }
-    let Ok(port) = (int.parse(port_text) : Result[u16, ParseError]) else {
-        return None
-    }
-    Some(Addr(ip: ip, port: port))
-}
-
-fn settings(a: Args) -> Option[Settings] {
-    let dtls_defaults = webrtc_sfu.peer.DTLS_DEFAULT
-    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), rooms: 0u32, participants: 0u16, unit_bytes: 0u64, down_tracks: 0u16, dtls_mtu: dtls_defaults.mtu, dtls_message_bytes: dtls_defaults.max_message, repair_pps: webrtc_sfu.peer.DEFAULT_REPAIR.packets_per_second, relay_allocations: 0u16, audio_forward: 0u8, seconds: 0u64)
-    let mut i = 0u64
-    while i < args.len(a) {
-        let name = option.unwrap(args.get(a, i))
-        let value = args.get(a, i + 1)?
-        if name == "--listen" {
-            s.listen = address(value)?
-        } else if name == "--media" {
-            s.media = address(value)?
-        } else if name == "--turn" {
-            s.turn = address(value)?
-        } else if name == "--rooms" {
-            let Ok(n) = (int.parse(value) : Result[u32, ParseError]) else {
-                return None
-            }
-            s.rooms = n
-        } else if name == "--participants" {
-            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
-                return None
-            }
-            s.participants = n
-        } else if name == "--unit-bytes" {
-            let Ok(n) = (int.parse(value) : Result[u64, ParseError]) else {
-                return None
-            }
-            s.unit_bytes = n
-        } else if name == "--down-tracks" {
-            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
-                return None
-            }
-            s.down_tracks = n
-        } else if name == "--dtls-mtu" {
-            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
-                return None
-            }
-            s.dtls_mtu = n
-        } else if name == "--dtls-message-bytes" {
-            let Ok(n) = (int.parse(value) : Result[u32, ParseError]) else {
-                return None
-            }
-            s.dtls_message_bytes = n
-        } else if name == "--repair-pps" {
-            let Ok(n) = (int.parse(value) : Result[u32, ParseError]) else {
-                return None
-            }
-            s.repair_pps = n
-        } else if name == "--relay-allocations" {
-            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
-                return None
-            }
-            s.relay_allocations = n
-        } else if name == "--units" {
-            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
-                return None
-            }
-            s.units = n
-        } else if name == "--audio-forward" {
-            let Ok(n) = (int.parse(value) : Result[u8, ParseError]) else {
-                return None
-            }
-            s.audio_forward = n
-        } else if name == "--seconds" {
-            let Ok(n) = (int.parse(value) : Result[u64, ParseError]) else {
-                return None
-            }
-            s.seconds = n
-        } else {
-            return None
-        }
-        i += 2
-    }
-    if s.units == 0 || s.units > webrtc_sfu.router.UNITS_MAX || s.rooms == 0 || s.participants == 0 || s.unit_bytes == 0 || s.down_tracks == 0 || s.relay_allocations == 0 {
-        return None
-    }
-    Some(s)
-}
-
 fn say(out: Stdout, line: String) waits {
     let mut text = string.from(line)
     string.push(mut text, "\n")
@@ -181,12 +58,6 @@ fn say_number(out: Stdout, tag: String, n: u64) waits {
     string.push(mut line, " ")
     string.push_u64(mut line, n)
     say(out, line)
-}
-
-fn copy_of(b: Bytes) -> Bytes {
-    let mut out: Bytes = list.with_capacity(list.len(b))
-    list.append(mut out, b)
-    out
 }
 
 fn zeros(n: u64) -> Bytes {
@@ -215,255 +86,6 @@ fn place_config(n: Net, web: Dir, c: Clock, random: Random, tasks: Tasks, listen
     runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(room), n_place: 1048576u64, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: owners, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(listen), net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
-// ---- The TURN relay place (TURN-11) ----
-type RelayStart: send {
-    net: Net,
-    clock: Clock,
-    random: Random,
-    out: Stdout,
-    turn: Addr,
-    master: Secret,
-    nonce: Secret,
-    // The plan's parts (RelayPlan is not send): the media units' address and ports.
-    media_ip: u32,
-    media_lo: u16,
-    media_hi: u16,
-    sockets: webrtc_sfu.signal.RelaySocketPlan,
-    revokes: Receiver[webrtc_sfu.signal.RelayRevoke],
-    ready: Sender[()],
-    until: u64
-}
-
-type Stream {
-    conn: u64,
-    reader: ReadHalf,
-    writer: WriteHalf,
-    client: Addr,
-    buffer: Bytes,
-    framer: turn.Framer,
-    open: bool
-}
-
-fn now_of(clock: Clock) -> turn.Now {
-    turn.Now(mono_ns: host.mono_ns(clock), unix_s: host.wall_ms(clock) / 1000)
-}
-
-fn transmit(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
-    let mut tx: List[UdpTx] = list.with_capacity(1)
-    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
-    let _ = host.udp_send(mut socket, data, tx, Never)
-}
-
-fn send_all(mut writer: WriteHalf, data: Bytes) -> bool waits {
-    let end = list.len(data)
-    let mut pos = 0u64
-    while pos < end {
-        let Ok(count) = host.send_pair(mut writer, list.slice(data, pos, end), b"", Never) else {
-            return false
-        }
-        if count == 0 {
-            return false
-        }
-        pos += count
-    }
-    true
-}
-
-/// The datagrams on `socket` before `until`, appended to `messages`.
-fn arrive(mut socket: UdpSocket, until: Until, mut data: Bytes, mut packets: List[UdpPacket], mut messages: List[(Addr, Bytes)]) waits {
-    list.clear(mut data)
-    list.clear(mut packets)
-    if let Ok(_) = host.udp_recv(mut socket, mut data, mut packets, until) {
-        for d in packets {
-            let UdpPacket(peer: source, at: start, len: size, ..) = d
-            list.push(mut messages, (source, copy_of(list.slice(data, start, start + size))))
-        }
-    }
-}
-
-/// Whole framed messages read from `s` before `until`; false once it ended or lost framing.
-fn stream_in(mut s: Stream, until: Until, mut messages: List[Bytes]) -> bool waits {
-    turn.frame_consumed(mut s.framer, mut s.buffer)
-    list.reserve(mut s.buffer, 4096)
-    match host.recv_bounded(mut s.reader, mut s.buffer, 4096, until) {
-        Ok(0) => return false,
-        Ok(_) => (),
-        Error(TimedOut) => return true,
-        Error(_) => return false,
-    }
-    loop {
-        let Ok(next) = turn.frame_next(mut s.framer, s.buffer) else {
-            return false
-        }
-        let Message(range) = next else {
-            return true
-        }
-        list.push(mut messages, copy_of(list.slice(s.buffer, range.lo, range.hi)))
-    }
-}
-
-// A STUN request (RFC 8489 section 5: top bits 00, class bits 0) is logged whole, so N1 can
-// read what a browser's TURN client sends.
-fn capture(out: Stdout, transport: String, conn: u64, m: Bytes) waits {
-    if list.len(m) < 20 || m[0] & 0xc0 != 0 || m[0] & 0x01 != 0 || m[1] & 0x10 != 0 {
-        return
-    }
-    let mut line = string.from("turn ")
-    string.push(mut line, transport)
-    string.push(mut line, " ")
-    string.push_u64(mut line, conn)
-    string.push(mut line, " ")
-    string.push(mut line, std.hex.encode(m))
-    say(out, line)
-}
-
-fn to_client(mut server: UdpSocket, mut streams: List[Stream], o: turn.Origin, data: Bytes) waits {
-    match o.ingress {
-        Udp(_) => transmit(mut server, o.client, data),
-        Stream(conn) => {
-            for i in 0u64 .. list.len(streams) {
-                if streams[i].conn == conn && streams[i].open {
-                    if !send_all(mut streams[i].writer, data) {
-                        streams[i].open = false
-                    }
-                }
-            }
-        },
-    }
-}
-
-fn from_client(mut rl: turn.Relay, clock: Clock, rnd: Random, mut server: UdpSocket, mut pools: List[UdpSocket], pool_addrs: List[Addr], mut streams: List[Stream], o: turn.Origin, m: Bytes) waits {
-    let mut packet = copy_of(m)
-    let mut reply = zeros(0)
-    match turn.from_client(mut rl, now_of(clock), rnd, o, mut packet, mut reply) {
-        Ok(Reply(to, k)) => to_client(mut server, mut streams, to, list.slice(reply, 0, k)),
-        Ok(ToPeer(relayed, to, range)) => {
-            for i in 0u64 .. list.len(pool_addrs) {
-                if pool_addrs[i] == relayed {
-                    transmit(mut pools[i], to, list.slice(packet, range.lo, range.hi))
-                }
-            }
-        },
-        _ => (),
-    }
-}
-
-fn relay_place(take s: RelayStart) -> Result[(), turn.TurnError] waits {
-    let RelayStart(net: n, clock: clock, random: r, out: out, turn: at, master: take master, nonce: take nonce, media_ip: media_ip, media_lo: media_lo, media_hi: media_hi, sockets: sockets, revokes: take revokes, ready: take ready, until: until) = take s
-    let options = webrtc_sfu.signal.relay_udp_options(sockets)
-    let Ok((take server_socket, local)) = host.udp_bind(n, at, options) else {
-        say(out, "relay cannot bind its UDP port")
-        return Error(Config)
-    }
-    let mut server = take server_socket
-    let Ok((take owned_listener, _)) = host.listen(n, local, 16) else {
-        say(out, "relay cannot listen on its TCP port")
-        return Error(Config)
-    }
-    let mut listener = take owned_listener
-    let Ok((take bound_sockets, take pool_addrs)) = webrtc_sfu.signal.bind_relay_pool(n, at.ip, sockets) else {
-        say(out, "relay cannot bind the requested allocation sockets")
-        return Error(Config)
-    }
-    let mut pools = take bound_sockets
-    let config = webrtc_sfu.signal.relay_config(plan_of(media_ip, media_lo, media_hi, at.ip))?
-    let mut rl = turn.relay(take config, r, take master, take nonce, clone(pool_addrs))?
-    say_number(out, "turn listening", int.widen(local.port))
-    if let Error(_) = channel.send(ready, ()) {
-        return Ok(())
-    }
-    let mut streams: List[Stream] = list.new()
-    let mut next_conn = 1u64
-    let mut live = 0u64
-    let UdpOptions(slots, slot_bytes: _) = options
-    let mut data: Bytes = list.with_capacity(webrtc_sfu.signal.relay_udp_buffer_bytes(sockets))
-    let mut packets: List[UdpPacket] = list.with_capacity(int.widen(slots))
-    while host.mono_ns(clock) < until {
-        let now = host.mono_ns(clock)
-        while let Ok(v) = channel.try_receive(revokes) {
-            let deleted = match webrtc_sfu.signal.apply_revoke(mut rl, v, now_of(clock)) {
-                Ok(k) => k,
-                Error(_) => 0,
-            }
-            let mut line = string.from("revoked ")
-            string.push(mut line, result.unwrap(string.from_utf8(copy_of(v.subject))))
-            string.push(mut line, " ")
-            string.push_u64(mut line, deleted)
-            say(out, line)
-        }
-        let mut datagrams: List[(Addr, Bytes)] = list.new()
-        arrive(mut server, At(clock, now + MS), mut data, mut packets, mut datagrams)
-        for (from, m) in datagrams {
-            capture(out, "udp", 0, m)
-            from_client(mut rl, clock, r, mut server, mut pools, pool_addrs, mut streams, turn.Origin(ingress: Udp(local), client: from), m)
-        }
-        for i in 0u64 .. list.len(pools) {
-            let relayed = pool_addrs[i]
-            let mut from_peers: List[(Addr, Bytes)] = list.new()
-            arrive(mut pools[i], At(clock, host.mono_ns(clock)), mut data, mut packets, mut from_peers)
-            for (from, m) in from_peers {
-                let mut slot = zeros(turn.HEADROOM)
-                list.append(mut slot, m)
-                list.append(mut slot, b"\x00\x00\x00")
-                let lo = turn.HEADROOM
-                if let Ok(ToClient(o, range)) = turn.from_peer(mut rl, now_of(clock), relayed, from, mut slot, lo, lo + list.len(m)) {
-                    to_client(mut server, mut streams, o, list.slice(slot, range.lo, range.hi))
-                }
-            }
-        }
-        if let Ok((socket, client)) = host.accept(mut listener, At(clock, host.mono_ns(clock))) {
-            let conn = next_conn
-            next_conn += 1
-            if let Ok(_) = turn.connected(mut rl, conn, local, client, now_of(clock)) {
-                let (reader, writer) = net.split(take socket)
-                list.push(mut streams, Stream(conn: conn, reader: take reader, writer: take writer, client: client, buffer: list.new(), framer: turn.framer(), open: true))
-            }
-        }
-        for i in 0u64 .. list.len(streams) {
-            if !streams[i].open {
-                continue
-            }
-            let mut messages: List[Bytes] = list.new()
-            let alive = stream_in(mut streams[i], At(clock, host.mono_ns(clock)), mut messages)
-            let o = turn.Origin(ingress: Stream(streams[i].conn), client: streams[i].client)
-            for m in messages {
-                capture(out, "tcp", int.widen(o.client.port), m)
-                from_client(mut rl, clock, r, mut server, mut pools, pool_addrs, mut streams, o, m)
-            }
-            if !alive {
-                streams[i].open = false
-            }
-        }
-        let mut i = 0u64
-        while i < list.len(streams) {
-            if streams[i].open {
-                i += 1
-            } else {
-                turn.disconnected(mut rl, streams[i].conn)
-                let _ = list.remove(mut streams, i)
-            }
-        }
-        loop {
-            match turn.relay_poll(mut rl, now_of(clock)) {
-                Close(conn) => {
-                    for k in 0u64 .. list.len(streams) {
-                        if streams[k].conn == conn {
-                            streams[k].open = false
-                        }
-                    }
-                },
-                _ => break,
-            }
-        }
-        let count = turn.relay_counts(rl).allocations
-        if count != live {
-            live = count
-            say_number(out, "allocations", live)
-        }
-    }
-    Ok(())
-}
-
 // The relay-only plan (TURN-7): relay only to the media units' ports, from the TURN host.
 fn plan_of(media_ip: u32, lo: u16, hi: u16, turn_ip: Ip) -> webrtc_sfu.signal.RelayPlan {
     let mut media: List[turn.Allow] = list.new()
@@ -475,59 +97,10 @@ fn plan_of(media_ip: u32, lo: u16, hi: u16, turn_ip: Ip) -> webrtc_sfu.signal.Re
 
 // ---- The process ----
 fn sealed(b: Bytes, uses: String) -> Option[Secret] {
-    match secret.seal(copy_of(b), uses) {
+    match secret.seal(clone(b), uses) {
         Ok(take s) => Some(take s),
         Error(_) => None,
     }
-}
-
-fn media_plan(s: Settings, repair: webrtc_sfu.peer.RepairProfile, repair_slots: u32) -> (webrtc_sfu.router.RoomLimits, webrtc_sfu.peer.PeerLimits, webrtc_sfu.signal.PoolLimits) {
-    let tracks: u32 = int.widen(s.down_tracks)
-    let ids = int.saturating_mul(s.participants, 4u16)
-    let limits = webrtc_sfu.router.RoomLimits(participants: s.participants, ids: ids, publications: 8, down_tracks: tracks, audio_forward: s.audio_forward, pause_delay_ms: 1000, pause: false)
-    let mut transport = webrtc_sfu.peer.DTLS_DEFAULT
-    transport.mtu = s.dtls_mtu
-    transport.max_message = s.dtls_message_bytes
-    let packets: u64 = int.widen(repair_slots)
-    let rtx_bytes = packets * webrtc_sfu.peer.SLOT
-    let session = webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: s.down_tracks, rtx_bytes: rtx_bytes, pacer_packets: 256, start_bps: 300000, dtls_transport: transport, repair_profile: repair)
-    let units: u32 = int.widen(s.units)
-    let participants: u32 = int.widen(s.participants)
-    let sessions = (s.rooms * participants + units - 1) / units
-    let pool = webrtc_sfu.signal.PoolLimits(units: s.units, unit_bytes: s.unit_bytes, rooms: s.rooms, sessions: sessions, inflight: webrtc_sfu.signal.INFLIGHT, media_take: 1024, room_pps: 100000, open_pps: None)
-    (limits, session, pool)
-}
-
-fn media_fits(s: Settings, limits: webrtc_sfu.router.RoomLimits, session: webrtc_sfu.peer.PeerLimits, pool: webrtc_sfu.signal.PoolLimits, queues: webrtc_sfu.units.MediaQueues, out: Stdout) -> bool waits {
-    let cost = webrtc_sfu.signal.room_cost(limits, session)
-    let sessions = int.saturating_mul(cost.per_session, int.widen(pool.sessions))
-    let mut per_session = sessions
-    if s.units > 1 {
-        let count: u64 = int.widen(pool.sessions)
-        let remote_tracks = count * int.widen(s.down_tracks)
-        per_session = int.saturating_add(per_session, int.saturating_mul(cost.per_remote, remote_tracks))
-    }
-    for k in 0u16 .. s.units {
-        let share = if k == 0 {
-            cost.replicated + cost.control
-        } else {
-            cost.replicated
-        }
-        let rooms = int.saturating_mul(share, int.widen(s.rooms))
-        let fixed = webrtc_sfu.signal.pool_unit_bytes(k, pool, session, queues)
-        let need = int.saturating_add(fixed, int.saturating_add(rooms, per_session))
-        if need > s.unit_bytes {
-            let mut line = string.from("media unit ")
-            string.push_u64(mut line, int.widen(k))
-            string.push(mut line, " needs ")
-            string.push_u64(mut line, need)
-            string.push(mut line, " bytes for the room plan, --unit-bytes provides ")
-            string.push_u64(mut line, s.unit_bytes)
-            say(out, line)
-            return false
-        }
-    }
-    true
 }
 
 // `hirsel sdk ts` runs the program to describe its place: launch_server answers that
@@ -539,55 +112,22 @@ pub fn main(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Task
 }
 
 fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
-    let Some(s) = settings(a) else {
-        say(out, "usage: service --rooms N --participants N --unit-bytes N --down-tracks N --relay-allocations N [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--dtls-mtu N] [--dtls-message-bytes N] [--repair-pps N] [--audio-forward N] [--seconds N]")
-        return Error(Exit(status: 2u8))
-    }
-    // Each room has one SFU connection. Leave a second transport slot per browser
-    // for the page or a connection that is still closing.
-    let rooms: u64 = int.widen(s.rooms)
-    let participants: u64 = int.widen(s.participants)
-    let owners = rooms * (2u64 * participants + 1u64)
-    let Some(relay_bytes) = runner.room_relay_bytes(owners, int.widen(s.rooms), WIRE_PEERS, ROOM_ARG_BYTES) else {
-        say_number(out, "room plan exceeds the signaling owner limit", runner.WIRE_OWNER_LIMIT)
-        return Error(Exit(status: 2u8))
-    }
-    let Some(last) = int.checked_add(s.media.port, s.units - 1u16) else {
-        say(out, "media ports exceed the UDP port range")
-        return Error(Exit(status: 2u8))
-    }
-    let V4(media_ip) = s.media.ip else {
-        say(out, "media requires an IPv4 address")
-        return Error(Exit(status: 2u8))
-    }
-    let mut repair = webrtc_sfu.peer.DEFAULT_REPAIR
-    repair.packets_per_second = s.repair_pps
-    let Some(repair_slots) = webrtc_sfu.peer.repair_slots(repair) else {
-        say(out, "--repair-pps does not fit the RTP history window")
-        return Error(Exit(status: 2u8))
-    }
-    let (limits, session, pool_limits) = media_plan(s, repair, repair_slots)
-    if !webrtc_sfu.peer.dtls_transport_fits(session.dtls_transport) {
-        say(out, "invalid --dtls-mtu or --dtls-message-bytes")
-        return Error(Exit(status: 2u8))
-    }
-    let queues = webrtc_sfu.units.media_queues(pool_limits.sessions)
-    let Some(relay_sockets) = webrtc_sfu.signal.relay_socket_plan(s.relay_allocations, queues.datagram_bytes, s.repair_pps) else {
-        say(out, "invalid TURN relay socket plan")
-        return Error(Exit(status: 2u8))
-    }
-    if !media_fits(s, limits, session, pool_limits, queues, out) {
-        return Error(Exit(status: 2u8))
+    let c = match config.parse(a) {
+        Ok(c) => c,
+        Error(e) => {
+            say(out, config.message(e))
+            return Error(Exit(status: 2u8))
+        },
     }
     let start = host.mono_ns(clock)
-    let until = if s.seconds == 0 {
+    let until = if c.seconds == 0 {
         0xffffffffffffffffu64
     } else {
-        int.saturating_add(start, int.saturating_mul(s.seconds, SECOND))
+        int.saturating_add(start, int.saturating_mul(c.seconds, SECOND))
     }
     // The room place.
-    let config = place_config(n, web, clock, random, tasks, s.listen, owners, relay_bytes)
-    let Ok(overhead) = runner.operate_bytes(config) else {
+    let room_config = place_config(n, web, clock, random, tasks, c.listen, c.owners, c.relay_bytes)
+    let Ok(overhead) = runner.operate_bytes(room_config) else {
         say(out, "the signaling room plan does not fit")
         return Error(Exit(status: 3u8))
     }
@@ -595,14 +135,14 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         return Error(Exit(status: 3u8))
     }
     let (halt, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let place = Operated(config: take config, stop: take stop, status: latest.handle(root))
+    let place = Operated(config: take room_config, stop: take stop, status: latest.handle(root))
     let need = overhead + 1074790400u64 + 1048576u64
     let Ok(running) = task.try_spawn(tasks, bytes need + 16777216u64, take place, run_place) else {
         say(out, "the room place does not fit")
         return Error(Exit(status: 3u8))
     }
     // The relay place, configured from the plan signaling mints by.
-    let plan = plan_of(media_ip, s.media.port, last, s.turn.ip)
+    let plan = plan_of(c.media_ip, c.media_lo, c.media_hi, c.turn.ip)
     let mut master_bytes = zeros(32)
     host.random(random, mut master_bytes)
     let mut nonce_bytes = zeros(32)
@@ -613,9 +153,9 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     list.fill(mut master_bytes, 32, 0)
     let (revoke_to, revoked): (Sender[webrtc_sfu.signal.RelayRevoke], Receiver[webrtc_sfu.signal.RelayRevoke]) = channel.new(256u64)
     let (relay_ready, relay_started): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let relay_start = RelayStart(net: n, clock: clock, random: random, out: out, turn: s.turn, master: take relay_master, nonce: take nonce, media_ip: media_ip, media_lo: s.media.port, media_hi: last, sockets: relay_sockets, revokes: take revoked, ready: take relay_ready, until: until)
-    let relay_need = RELAY_WORK_BYTES + webrtc_sfu.signal.relay_socket_bytes(relay_sockets)
-    let Ok(relaying) = task.try_spawn(tasks, bytes relay_need, take relay_start, relay_place) else {
+    let relay_start = webrtc_sfu.turn_runtime.Start(net: n, clock: clock, random: random, out: out, listen: c.turn, master: take relay_master, nonce: take nonce, plan: clone(plan), sockets: c.relay_sockets, revokes: take revoked, ready: take relay_ready, until: until)
+    let relay_need = webrtc_sfu.turn_runtime.reserve_bytes(c.relay_sockets)
+    let Ok(relaying) = task.try_spawn(tasks, bytes relay_need, take relay_start, webrtc_sfu.turn_runtime.run) else {
         say_number(out, "the relay place needs bytes", relay_need)
         let _ = channel.send(halt, ())
         let _ = task.join(take running)
@@ -627,7 +167,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         let _ = task.join(take running)
         return Error(Exit(status: 3u8))
     }
-    say_number(out, "listening", int.widen(s.listen.port))
+    say_number(out, "listening", int.widen(c.listen.port))
     // The SFU, on this task.
     let keys = match runner.client.entry_keys(code.describe(room)) {
         Ok(take k) => take k,
@@ -637,16 +177,16 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     // `idle_ms` with nothing read and calls the link lost only when that ping goes unanswered
     // for another `idle_ms`.
     let mut binds: List[Addr] = list.new()
-    for k in 0u16 .. s.units {
-        list.push(mut binds, Addr(ip: s.media.ip, port: s.media.port + k))
+    for k in 0u16 .. c.pool.units {
+        list.push(mut binds, Addr(ip: V4(c.media_ip), port: c.media_lo + k))
     }
-    let (order_to, orders): (Sender[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]], Receiver[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]]) = channel.new(int.widen(s.rooms))
-    let (reports, _reported): (Sender[webrtc_sfu.signal.PoolReport], Receiver[webrtc_sfu.signal.PoolReport]) = channel.new(int.widen(s.rooms))
-    for i in 0u32 .. s.rooms {
-        let mut arg: Bytes = list.with_capacity(ROOM_ARG_BYTES)
+    let (order_to, orders): (Sender[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]], Receiver[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]]) = channel.new(int.widen(c.pool.rooms))
+    let (reports, _reported): (Sender[webrtc_sfu.signal.PoolReport], Receiver[webrtc_sfu.signal.PoolReport]) = channel.new(int.widen(c.pool.rooms))
+    for i in 0u32 .. c.pool.rooms {
+        let mut arg: Bytes = list.with_capacity(config.ROOM_ARG_BYTES)
         std.codec.put_u32(i, mut arg)
         let name = webrtc_sfu.signal.room_name(arg)
-        let dial = runner.room_client.Dial(tasks, net: n, address: s.listen, clock: clock, random, keys: clone(keys), token: None, socket: runner.wire_defaults(262144u64).socket, entry: 0u32, arg: take arg, within_ms: 5000u64, idle_ms: 10000u64)
+        let dial = runner.room_client.Dial(tasks, net: n, address: c.listen, clock: clock, random, keys: clone(keys), token: None, socket: runner.wire_defaults(262144u64).socket, entry: 0u32, arg: take arg, within_ms: 5000u64, idle_ms: 10000u64)
         let embed = webrtc_sfu.signal.Embed(wrap: fn(take m: webrtc_sfu.signal.Signal) -> webrtc_sfu.signal.Signal {
             take m
         }, unwrap: fn(take m: webrtc_sfu.signal.Signal) -> Option[webrtc_sfu.signal.Signal] {
@@ -654,9 +194,9 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         }, admit: fn(j: webrtc_sfu.signal.PeerJoin) -> webrtc_sfu.signal.PeerRights {
             webrtc_sfu.signal.PeerRights(publish: true)
         })
-        let _ = channel.send(order_to, Open(name: name, dial: take dial, limits: limits, embed: take embed))
+        let _ = channel.send(order_to, Open(name: name, dial: take dial, limits: c.limits, embed: take embed))
     }
-    let pool = webrtc_sfu.signal.Pool(tasks, net: n, clock, random, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: session, limits: pool_limits, timing: webrtc_sfu.signal.DEFAULT_TIMING, queues: queues, orders: take orders, reports: take reports, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
+    let pool = webrtc_sfu.signal.Pool(tasks, net: n, clock, random, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: c.session, limits: c.pool, timing: webrtc_sfu.signal.DEFAULT_TIMING, queues: c.queues, orders: take orders, reports: take reports, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
     match webrtc_sfu.signal.serve_pool(take pool) {
         Ok(_) => (),
         Error(e) => {

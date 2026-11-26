@@ -2771,8 +2771,9 @@ W12 and W13 in `speaker_laws.hirsel`):
 
 **N1 decisions.** Gaps the spec left open, decided while N1 was built (2626)
 
-- **Deployment.** `service/main.hirsel` runs the room place, `signal.serve_pool` (one room) and the TURN
-  relay in one process on 127.0.0.1: the place listens on its listen address (7800) and
+- **Deployment.** `service/main.hirsel` reads `service/config.hirsel`'s launch plan
+  and runs the room place, `signal.serve_pool` (one room) and `webrtc_sfu.turn_runtime`
+  in one process on 127.0.0.1. The place listens on its listen address (7800) and
   serves the call page (`index.html`, the bundled `page.ts`) from its site directory, the
   media units bind the media address and the next port (7810, 7811), and the relay listens
   on the TURN address (3478) over UDP and TCP. The relay's `allow` is the media units' addresses (TURN-7). `run.py

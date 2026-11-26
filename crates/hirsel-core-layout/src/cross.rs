@@ -4,8 +4,9 @@
 //! and `Shared` holders. Sockets and listeners move with their host state,
 //! detached from the poller until taken. Capability, function and `Secret`
 //! words copy as bytes; their rows let a recorder write each one as its
-//! snapshot or identity (docs/recording.md, "Values").
-use crate::{Body, FieldTy, Handle, Layout, RecipeRow, Row, TypeRef, field_size};
+//! snapshot or identity (docs/recording.md, "Values"). A plain variant's
+//! words are listed per case, each case's behind a `CASE` row.
+use crate::{Body, Encoding, FieldTy, Handle, Layout, RecipeRow, Row, Tag, TypeRef, field_size};
 
 /// A sequence carrier (pointer, length, capacity).
 pub const SEQ: u64 = 0;
@@ -26,6 +27,16 @@ pub const SECRET: u64 = 6;
 /// sequence's elements, at its offset in the element. A crossing list's
 /// elements are plain, so the base kind is `CAPABILITY` or `FUNCTION`.
 pub const ELEMENT: u64 = 8;
+/// A guard: the rows it covers name owner words only while a plain variant
+/// is in one case. Its row is `[tag offset, CASE | OTHER? | width << 8 |
+/// covered << 16, low, count]`: the case holds when the tag word (`width`
+/// bytes, zero-extended) less `low`, wrapping at the width, is below `count`,
+/// or, with `OTHER`, when it is not (a niche's dataful case). The covered rows
+/// follow it, and a guard counts as one of its outer guard's rows with its own
+/// covered rows. Inside a sequence's elements it is flagged `ELEMENT` too.
+pub const CASE: u64 = 16;
+/// Set on a `CASE` row whose case is the words outside its range.
+pub const OTHER: u64 = 32;
 
 /// Each owner of a value of row `ty`, as `[offset, kind, element bytes, element
 /// logical size]`, in field order; each `SEQ` row is followed at once by its
@@ -36,15 +47,89 @@ pub fn owners(shapes: &[Row], recipes: &[RecipeRow], ty: TypeRef) -> Vec<[u64; 4
     out
 }
 
+/// The rows of `rows` that hold for a value, with each `CASE` row resolved
+/// by `tag`, which reads `width` bytes at an offset: a guard and its covered
+/// rows go, and the covered rows stay when its case holds. Element rows
+/// (offsets inside an element) pass through for the caller to resolve per
+/// element.
+pub fn live(rows: &[[u64; 4]], tag: &dyn Fn(u64, u64) -> u64) -> Vec<[u64; 4]> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut i = 0;
+    while i < rows.len() {
+        let r = rows[i];
+        i += 1;
+        if r[1] & CASE == 0 || r[1] & ELEMENT != 0 {
+            out.push(r);
+            continue;
+        }
+        let covered = (r[1] >> 16) as usize;
+        let width = (r[1] >> 8) & 0xff;
+        let mask = if width >= 8 {
+            u64::MAX
+        } else {
+            (1 << (8 * width)) - 1
+        };
+        let inside = tag(r[0], width).wrapping_sub(r[2]) & mask < r[3];
+        if inside != (r[1] & OTHER != 0) {
+            out.extend(live(&rows[i..i + covered], tag));
+        }
+        i += covered;
+    }
+    out
+}
+
 fn row(shapes: &[Row], recipes: &[RecipeRow], ty: TypeRef, at: u64, out: &mut Vec<[u64; 4]>) {
-    // A variant is cross only when plain, so it owns nothing.
-    let (Body::Record(fields), Layout::Fixed(fixed)) =
-        (&shapes[ty.index()].body, &recipes[ty.index()].layout)
-    else {
+    let Layout::Fixed(fixed) = &recipes[ty.index()].layout else {
         return;
     };
-    for (field, offset) in fields.iter().zip(&fixed.offsets[0]) {
-        held(shapes, recipes, &field.ty, at + offset, out);
+    match &shapes[ty.index()].body {
+        Body::Record(fields) => {
+            for (field, offset) in fields.iter().zip(&fixed.offsets[0]) {
+                held(shapes, recipes, &field.ty, at + offset, out);
+            }
+        }
+        // A variant is cross only when plain, so its cases hold only
+        // capability and function words, each case's behind its guard.
+        Body::Variant(cases) => {
+            for (c, case) in cases.iter().enumerate() {
+                let mut inner = Vec::new();
+                for (field, offset) in case.fields.iter().zip(&fixed.offsets[c]) {
+                    held(shapes, recipes, &field.ty, at + offset, &mut inner);
+                }
+                match fixed.tag {
+                    _ if inner.is_empty() => {}
+                    None => out.extend(inner),
+                    Some(tag) => {
+                        out.push(guard(&tag, c as u32, at, inner.len() as u64));
+                        out.extend(inner);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The `CASE` row of case `c` of a variant at `at` whose tag is `tag`.
+fn guard(tag: &Tag, c: u32, at: u64, covered: u64) -> [u64; 4] {
+    let head = CASE | tag.width << 8 | covered << 16;
+    match tag.encoding {
+        Encoding::Niche {
+            dataful,
+            first,
+            last,
+            start,
+        } if c == dataful => [
+            at + tag.offset,
+            head | OTHER,
+            start,
+            u64::from(last - first) + 1,
+        ],
+        _ => [
+            at + tag.offset,
+            head,
+            crate::case_word(tag, c).unwrap_or(0),
+            1,
+        ],
     }
 }
 
@@ -59,8 +144,8 @@ fn held(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64, out: &mut 
             out.extend(
                 inner
                     .into_iter()
-                    .filter(|o| matches!(o[1], CAPABILITY | FUNCTION))
-                    .map(|[offset, kind, _, _]| [offset, kind | ELEMENT, 0, 0]),
+                    .filter(|o| matches!(o[1], CAPABILITY | FUNCTION) || o[1] & CASE != 0)
+                    .map(|[offset, kind, low, count]| [offset, kind | ELEMENT, low, count]),
             );
         }
         FieldTy::Handle(Handle::Client) => out.push([at, CLIENT, 0, 0]),

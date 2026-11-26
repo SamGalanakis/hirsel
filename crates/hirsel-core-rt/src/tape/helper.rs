@@ -13,7 +13,7 @@ use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
 use crate::units_lang::Cross;
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, ELEMENT, FUNCTION, SECRET, SEQ, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, ELEMENT, FUNCTION, SECRET, SEQ, SHARED, live};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// Stream numbers: unique in the process, so in each recording's file.
@@ -472,8 +472,16 @@ pub(super) unsafe fn value(
         // SAFETY: an owner row names initialized words of the value.
         unsafe { base.add(at as usize).cast::<u64>().read_unaligned() }
     };
-    // Each owner row with the element rows that follow it.
-    let rows = x.owners();
+    // Each owner row with the element rows that follow it, a plain variant's
+    // rows only for its case.
+    let rows = live(x.owners(), &|at, width| {
+        let mut word = [0u8; 8];
+        // SAFETY: a guard names the initialized tag word of a variant in the value.
+        unsafe {
+            std::ptr::copy_nonoverlapping(base.add(at as usize), word.as_mut_ptr(), width as usize)
+        };
+        u64::from_le_bytes(word)
+    });
     let mut owners = Vec::new();
     let mut i = 0;
     while i < rows.len() {
@@ -522,16 +530,26 @@ pub(super) unsafe fn value(
                 }
                 // Each element's owner words zeroed, then their parts.
                 let mut elements = elements.to_vec();
-                let mut inner = inner.to_vec();
-                inner.sort_by_key(|o| o[0]);
+                let inner: Vec<_> = inner
+                    .iter()
+                    .map(|&[offset, kind, low, count]| [offset, kind & !ELEMENT, low, count])
+                    .collect();
                 let mut tail = Vec::new();
                 for e in 0..len as usize {
-                    for &[offset, kind, ..] in &inner {
-                        let at = e * element as usize + offset as usize;
+                    let base = e * element as usize;
+                    let mut words = live(&inner, &|at, width| {
+                        let at = base + at as usize;
+                        let mut word = [0u8; 8];
+                        word[..width as usize].copy_from_slice(&elements[at..at + width as usize]);
+                        u64::from_le_bytes(word)
+                    });
+                    words.sort_by_key(|o| o[0]);
+                    for [offset, kind, ..] in words {
+                        let at = base + offset as usize;
                         let held = &mut elements[at..at + 8];
                         let word = u64::from_le_bytes((&*held).try_into().unwrap());
                         held.fill(0);
-                        word_part(kind & !ELEMENT, word, &mut tail, handle)?;
+                        word_part(kind, word, &mut tail, handle)?;
                         count += 1;
                     }
                 }

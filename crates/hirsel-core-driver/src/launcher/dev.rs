@@ -145,7 +145,7 @@ pub(crate) fn open(
                 HostReply::Opened(ready) if expected.is_none_or(|v| v == ready.version) => {
                     let endpoint = child.endpoint.as_mut().expect("serving endpoint");
                     endpoint.stream.set_nonblocking(false)?;
-                    endpoint.stream.set_write_timeout(Some(POLL))?;
+                    crate::host::socket_option(endpoint.stream.set_write_timeout(Some(POLL)))?;
                     write_frame(&mut endpoint.stream, &HostCommand::StoreAccepted)?;
                     endpoint.stream.set_nonblocking(true)?;
                     if child.exited()?.is_some() {

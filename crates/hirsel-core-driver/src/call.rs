@@ -972,7 +972,7 @@ impl Session {
         let left = deadline.saturating_duration_since(Instant::now());
         let stream = TcpStream::connect_timeout(&address, left.max(Duration::from_millis(1)))
             .map_err(|e| format!("connect {}:{}: {e}", url.host, url.port))?;
-        stream.set_nodelay(true)?;
+        crate::host::socket_option(stream.set_nodelay(true))?;
         let mut session = Self {
             stream,
             input: Vec::new(),
@@ -1025,7 +1025,7 @@ impl Session {
         if left.is_zero() {
             return Err("timed out waiting for the server".into());
         }
-        self.stream.set_read_timeout(Some(left))?;
+        crate::host::socket_option(self.stream.set_read_timeout(Some(left)))?;
         let mut buffer = [0u8; 65536];
         match self.stream.read(&mut buffer) {
             Ok(0) => Err("server closed the connection".into()),

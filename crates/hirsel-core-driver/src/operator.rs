@@ -276,7 +276,7 @@ impl Connection {
     }
 
     pub(crate) fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
-        self.stream.set_read_timeout(timeout)
+        crate::host::socket_option(self.stream.set_read_timeout(timeout))
     }
 
     pub(crate) fn send(&mut self, ask: &Ask) -> io::Result<()> {

@@ -35,9 +35,9 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 
 impl Reader {
     fn new(stream: TcpStream) -> Result<Self, Error> {
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(HANDSHAKE))?;
-        stream.set_write_timeout(Some(HANDSHAKE))?;
+        crate::host::socket_option(stream.set_nodelay(true))?;
+        crate::host::socket_option(stream.set_read_timeout(Some(HANDSHAKE)))?;
+        crate::host::socket_option(stream.set_write_timeout(Some(HANDSHAKE)))?;
         Ok(Self {
             stream,
             buffered: Vec::new(),
@@ -193,7 +193,7 @@ pub(super) struct Socket {
 
 impl Socket {
     fn new(mut reader: Reader, mask: bool) -> Result<Self, Error> {
-        reader.stream.set_read_timeout(None)?;
+        crate::host::socket_option(reader.stream.set_read_timeout(None))?;
         let sender = Arc::new(Sender {
             stream: Mutex::new(reader.stream.try_clone()?),
             mask,
@@ -293,8 +293,8 @@ impl Drop for Socket {
 
 fn relay_http(mut client: Reader, addr: SocketAddr, request: String) -> Result<(), Error> {
     let mut server = TcpStream::connect_timeout(&addr, HANDSHAKE)?;
-    server.set_read_timeout(Some(HANDSHAKE))?;
-    server.set_write_timeout(Some(HANDSHAKE))?;
+    crate::host::socket_option(server.set_read_timeout(Some(HANDSHAKE)))?;
+    crate::host::socket_option(server.set_write_timeout(Some(HANDSHAKE)))?;
     for line in request.split("\r\n").take_while(|line| !line.is_empty()) {
         if !line
             .split_once(':')

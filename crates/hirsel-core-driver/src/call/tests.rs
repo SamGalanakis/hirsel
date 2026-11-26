@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn call_reports_a_server_that_closed_before_the_read() {
+    use std::net::{Shutdown, TcpListener};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+    drop(server);
+    // Wait for the EOF before the session sets its read timeout.
+    assert_eq!(stream.peek(&mut [0]).unwrap(), 0);
+
+    let mut session = Session {
+        stream,
+        input: Vec::new(),
+        deadline: Instant::now() + Duration::from_secs(10),
+    };
+    assert_eq!(
+        session.message().unwrap_err().to_string(),
+        "server closed the connection"
+    );
+}
+
+#[test]
 fn call_wrong_typed_flags_refuse_before_any_connection() {
     // Bug: encoding a flag without checking it against the Describe schema.
     // Oracle: docs/spec/sdk.md, "Calling an entry from the terminal": a flag

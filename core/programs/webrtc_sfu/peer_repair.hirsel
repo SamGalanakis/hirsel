@@ -1,0 +1,45 @@
+/// Packet rate and retention budget for one peer's repair and feedback. The
+/// history also bounds each down-track's unambiguous NACK sequence window.
+pub type RepairProfile: key {
+    packets_per_second: u32,
+    history_ns: u64,
+    feedback_ns: u64
+}
+
+pub const DEFAULT_REPAIR: RepairProfile = RepairProfile(packets_per_second: 1024, history_ns: 1000000000, feedback_ns: 50000000)
+
+type RepairWindow {
+    packets: u32,
+    counters: u32
+}
+
+const NS_PER_SECOND: u64 = 1000000000
+
+fn packets_in(rate: u32, duration: u64) -> Option[u64] {
+    let wide: u64 = int.widen(rate)
+    let packets_ns = int.checked_mul(wide, duration)?
+    let whole = packets_ns / NS_PER_SECOND
+    if packets_ns % NS_PER_SECOND == 0 {
+        Some(whole)
+    } else {
+        Some(whole + 1)
+    }
+}
+
+fn repair_window(profile: RepairProfile) -> Option[RepairWindow] {
+    if profile.feedback_ns == 0 || profile.feedback_ns > profile.history_ns {
+        return None
+    }
+    let count = packets_in(profile.packets_per_second, profile.history_ns)?
+    if count == 0 || count > int.widen(rtp.history.MAX_SLOTS) {
+        return None
+    }
+    let tick = packets_in(profile.packets_per_second, profile.feedback_ns)?
+    Some(RepairWindow(packets: int.narrow(count), counters: int.narrow(order.max(64u64, tick))))
+}
+
+/// Packet slots in one repair horizon, including the ingress RTX ring's target.
+pub fn repair_slots(profile: RepairProfile) -> Option[u32] {
+    let plan = repair_window(profile)?
+    Some(plan.packets)
+}

@@ -68,15 +68,15 @@ fn pairs_of(from: u8, to: u8, more: Option[(u8, u8)]) -> List[(u8, u8)] {
 // participants allowed 64 down-tracks each; and RED and FlexFEC on.
 fn shapes() -> List[Filled] {
     let mut all: List[Filled] = list.new()
-    list.push(mut all, Filled(limits: router.RoomLimits(participants: 1, ids: 1, publications: 1, down_tracks: 1, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 2, down_tracks: 1, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT), offer: shape_offer(1), pairs: pairs_of(0, 1, None), downs: 1))
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 1, ids: 1, publications: 1, down_tracks: 1, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 2, down_tracks: 1, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR), offer: shape_offer(1), pairs: pairs_of(0, 1, None), downs: 1))
     let mut eight: List[(u8, u8)] = list.new()
     for k in 0u8 .. 8u8 {
         list.push(mut eight, (k, 8u8))
     }
-    list.push(mut all, Filled(limits: router.RoomLimits(participants: 256, ids: 256, publications: 8, down_tracks: 1, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 9, down_tracks: 1, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT), offer: shape_offer(8), pairs: clone(eight), downs: 1))
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 256, ids: 256, publications: 8, down_tracks: 1, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 9, down_tracks: 1, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR), offer: shape_offer(8), pairs: clone(eight), downs: 1))
     // Two participants publish 16 in all, so each takes every one: 16 of its 64.
-    list.push(mut all, Filled(limits: router.RoomLimits(participants: 2, ids: 2, publications: 8, down_tracks: 64, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 9, down_tracks: 64, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT), offer: shape_offer(8), pairs: take eight, downs: 16))
-    list.push(mut all, Filled(limits: router.RoomLimits(participants: 4, ids: 4, publications: 2, down_tracks: 2, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 4, down_tracks: 2, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT), offer: red_fec_offer(), pairs: pairs_of(0, 2, Some((1u8, 3u8))), downs: 2))
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 2, ids: 2, publications: 8, down_tracks: 64, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 9, down_tracks: 64, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR), offer: shape_offer(8), pairs: take eight, downs: 16))
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 4, ids: 4, publications: 2, down_tracks: 2, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 4, down_tracks: 2, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR), offer: red_fec_offer(), pairs: pairs_of(0, 2, Some((1u8, 3u8))), downs: 2))
     all
 }
 
@@ -118,7 +118,7 @@ fn room_left(most: u64) -> u64 {
 fn pool_unsubscribe_frees_down_tracks() -> Result[(), router.RouterError] {
     let room = room_id()
     let mut r = router.router(provide.random(30390))
-    let limits = peer.PeerLimits(sections: 3, down_tracks: 8, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT)
+    let limits = peer.PeerLimits(sections: 3, down_tracks: 8, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
     router.reserve_pool(mut r, router.pool_bounds(1, 1, 2, limits))
     router.open_room(mut r, room, room_limits())?
     let mut offer = minimal_head(b" a b c")
@@ -373,7 +373,7 @@ fn funded_pool_admits_declared_topology() -> Result[(), router.RouterError] {
 
 fn topology_room(participants: u16, sections: u8, tracks: u16) -> Result[router.Router, router.RouterError] {
     let limits = router.RoomLimits(participants: participants, ids: participants, publications: int.widen(sections), down_tracks: int.widen(tracks), audio_forward: 0, pause_delay_ms: 5000, pause: false)
-    let session = peer.PeerLimits(sections: sections, down_tracks: tracks, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT)
+    let session = peer.PeerLimits(sections: sections, down_tracks: tracks, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
     let count: u64 = int.widen(participants)
     let rows = router.pool_bounds(2, 1, (count + 1) / 2, session)
     let mut r = router.observer(provide.random(35000))

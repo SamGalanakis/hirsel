@@ -63,7 +63,7 @@ fn admit(mut r: router.Router, seed: u64, offer: Bytes, id: u64) -> Client {
 }
 
 fn admit_with(mut r: router.Router, seed: u64, offer: Bytes, id: u64, pacer_packets: u32) -> Client {
-    admit_limits(mut r, seed, offer, id, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: pacer_packets, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT))
+    admit_limits(mut r, seed, offer, id, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: pacer_packets, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR))
 }
 
 fn admit_limits(mut r: router.Router, seed: u64, offer: Bytes, id: u64, limits: peer.PeerLimits) -> Client {
@@ -537,4 +537,59 @@ fn rsize_nack_is_answered_with_rtx() -> Result[(), router.RouterError] {
         }
     }
     Ok(())
+}
+
+/// bug: the fixed 1,024-entry egress history evicts recent packets at high rates.
+/// oracle: 2,201 packets spaced 450 microseconds apart stay within one second.
+/// RFC 4588 names the missing packet's original sequence in the RTX payload.
+@test
+fn repair_keeps_the_first_packet_at_high_rate() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(35011))
+    let room = room_id()
+    router.open_room(mut r, room, room_limits())?
+    let mut profile = peer.DEFAULT_REPAIR
+    profile.packets_per_second = 2500
+    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 4194304, pacer_packets: 64, start_bps: 20000000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: profile)
+    let mut publisher = admit_limits(mut r, 35012, session_offer(), 1, limits)
+    let mut offer = minimal_head(b" d")
+    recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
+    list.append(mut offer, b"a=rtcp-rsize\n")
+    let mut subscriber = admit_limits(mut r, 35013, offer, 2, limits)
+    let publication = router.publish(mut r, room, publisher.who, 0)?
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    router.subscribe(mut r, room, subscriber.who, publication, 0, Layer(encoding: 0, spatial: 0, temporal: 0), 0, mut out)?
+    let (media_ssrc, repair_ssrc) = option.unwrap(router.track_ssrcs(r, room, subscriber.who, publication))
+    peer.clear_outbox(mut out)
+    let mut earliest_seq = 0u16
+    let mut newest_seq = 0u16
+    let mut now = 10 * MS
+    for k in 0u16 .. 2201u16 {
+        let ts: u32 = int.widen(k)
+        let packet = media_carrying(mut publisher.cs, MEDIA_SSRC, 300 + k, 40 * ts, b"a", 96, vp8_key())
+        feed(mut r, now, publisher.who, publisher.at, packet, mut out)
+        let got = one(received(mut subscriber, out), "each source packet reaches the subscriber")
+        if k == 0 {
+            earliest_seq = got.h.seq
+        }
+        newest_seq = got.h.seq
+        peer.clear_outbox(mut out)
+        now += 450000u64
+    }
+    let mut pairs: List[(u16, u16)] = list.with_capacity(1)
+    list.push(mut pairs, (earliest_seq, 0u16))
+    let request = rsize_nack(mut subscriber.cs, media_ssrc, newest_seq, pairs)
+    feed(mut r, now, subscriber.who, subscriber.at, request, mut out)
+    let _ = router.poll(mut r, now + MS, mut out)
+    let repair_ssrc_value = option.unwrap(repair_ssrc)
+    for got in received(mut subscriber, out) {
+        if got.h.ssrc != repair_ssrc_value {
+            continue
+        }
+        let payload = payload_of(got)
+        let osn: u16 = list.word_be(payload, 0)
+        if osn == earliest_seq && same(list.slice(payload, 2, list.len(payload)), vp8_key()) {
+            return Ok(())
+        }
+    }
+    fail("no RTX carried the first packet within the funded repair horizon")
 }

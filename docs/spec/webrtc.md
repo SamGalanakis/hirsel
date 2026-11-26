@@ -1708,7 +1708,11 @@ adapter's allocation bounds (each `rtp` constructor has a `*_heap` price beside 
 The session's DTLS transport sets its MTU, timers, message width and ahead window.
 The room ledger reserves its receive-side handshake budget as part of `per_session`.
 The service checks the configured MTU and message width against the media unit's grant
-before binding. `bridge` and `cascade` are 0: no bridge or cascade attaches to a
+before binding. The peer's repair profile sizes the RTP history and TWCC logs from the
+packet rate and retention interval, and the codec counters from the feedback interval.
+The default retains one second at 1,024 packets per second and sends feedback every 50 ms.
+The service derives its ingress RTX ring from the same packet count. `bridge` and
+`cascade` are 0: no bridge or cascade attaches to a
 pooled room in this build (CAS-6 and MOQ-8 add them), so W34 has nothing of theirs to
 measure yet. Each unit keeps a **ledger**: `unit_bytes` minus the fixed per-unit cost
 (`units.fixed_bytes` plus `signal.serve_bytes`), minus every open room's `replicated`,

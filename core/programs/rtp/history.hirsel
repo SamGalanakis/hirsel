@@ -3,6 +3,9 @@ pub type Lookup = Found(u64) | Missing | Throttled | BeforeSwitch
 // An index is at most 2^48 - 1 (RTP-2), so this marks an empty slot.
 const EMPTY: u64 = 0xffffffffffffffff
 
+/// Half of the RTP sequence space.
+pub const MAX_SLOTS: u32 = 32768
+
 // A slot's index, when it was sent and last resent, and its value.
 type Slot[P] {
     index: u64,
@@ -19,8 +22,8 @@ pub opaque type History[P] {
 
 pub fn history[P](slots: u32, max_age_ns: u64) -> Result[History[P], Capacity] {
     let n: u64 = int.widen(slots)
-    if n == 0 || n > 32768 {
-        return Error(Capacity(requested: n, available: 32768))
+    if n == 0 || slots > MAX_SLOTS {
+        return Error(Capacity(requested: n, available: int.widen(MAX_SLOTS)))
     }
     let mut rows: Columns[Slot[P]] = columns.new()
     columns.try_reserve(mut rows, n)?

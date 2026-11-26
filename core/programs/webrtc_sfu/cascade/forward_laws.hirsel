@@ -602,7 +602,7 @@ fn congested_link_costs_its_rooms(tasks: Tasks) -> Result[(), ()] waits {
 /// ledger (`bound bytes cost.cascade`), `signal.Ledger`, and `limits.rooms`.
 @test
 fn attach_cost_is_exact() -> Result[(), ()] {
-    let session = peer.PeerLimits(sections: 4, down_tracks: 4, rtx_bytes: 65536, pacer_packets: 16, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT)
+    let session = peer.PeerLimits(sections: 4, down_tracks: 4, rtx_bytes: 65536, pacer_packets: 16, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
     let mut link_lim = cascade.default_link_limits()
     link_lim.rooms = 2
     link_lim.layers = 8

@@ -105,7 +105,7 @@ fn say_as(mut r: Sig, p: u32, take s: signal.Signal) {
 fn serve_builds(mut r: Sig) waits {
     for take b in signal.home_builds(mut r.a, mut r.l, mut r.out) {
         let Party(id: take unit_id, certificate: _) = party(16100)
-        let built = signal.build(signal.Home(id: take unit_id, at: r.h.addrs[b.home], policy: sdp.default_policy(), limits: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT)), provide.random(16200), b)
+        let built = signal.build(signal.Home(id: take unit_id, at: r.h.addrs[b.home], policy: sdp.default_policy(), limits: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)), provide.random(16200), b)
         let (_, take outcome) = result.unwrap(take built)
         let signal.Build(who: who, home: home, peer: p, version: _, offer: take offer, publish: _, ..) = take b
         let mut ufrag: Bytes = list.new()
@@ -763,5 +763,5 @@ fn law_ledger(units: u64, sessions: u32) -> signal.Ledger {
             1073741824
         })
     }
-    signal.ledger(take free, sessions, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT))
+    signal.ledger(take free, sessions, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR))
 }

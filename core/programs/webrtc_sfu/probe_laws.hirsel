@@ -66,7 +66,7 @@ fn probe_room_from(seed: u64, limits: router.RoomLimits, rtx: Bytes, start_bps: 
     let p = admit(mut r, seed + 1, simulcast_offer(), 1)
     let mut offer = minimal_head(b" d")
     recv_section(mut offer, b"d", b"96", rtx, b"1", b"3")
-    let s = admit_limits(mut r, seed + 2, offer, 2, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: start_bps, dtls_transport: peer.DTLS_DEFAULT))
+    let s = admit_limits(mut r, seed + 2, offer, 2, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: start_bps, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR))
     let mut seqs: List[u16] = list.new()
     for k in 0u16 .. 3u16 {
         list.push(mut seqs, 100 * k)
@@ -500,7 +500,7 @@ fn two_publishers(seed: u64, until: u64, a_f: u64, start_bps: u64) -> List[Heard
     let mut offer = minimal_head(b" d e")
     recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
     recv_section(mut offer, b"e", b"96", b"97", b"1", b"3")
-    let s = admit_limits(mut r, seed + 2, offer, 2, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: start_bps, dtls_transport: peer.DTLS_DEFAULT))
+    let s = admit_limits(mut r, seed + 2, offer, 2, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: start_bps, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR))
     let mut a_seqs: List[u16] = list.new()
     let mut seqs: List[u16] = list.new()
     for k in 0u16 .. 3u16 {

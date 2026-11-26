@@ -101,7 +101,7 @@ fn service_answers_over_the_room(c: Clock, random: Random, tasks: Tasks, net: Ne
     let (reports, _reported): (Sender[signal.PoolReport], Receiver[signal.PoolReport]) = channel.new(16u64)
     let _ = channel.send(order_to, Open(name: signal.room_name(b"room"), dial: sfu_dial(tasks, net, c, random, address), limits: revoke_limits(), embed: take embed))
     let limits = signal.PoolLimits(units: 2, unit_bytes: 67108864, rooms: 1, sessions: 8, inflight: 1, media_take: 1024, room_pps: 100000, open_pps: None)
-    let pool = signal.Pool(tasks: tasks, net: net, clock: c, random: random, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT), limits: limits, timing: signal.DEFAULT_TIMING, queues: units.DEFAULT_MEDIA_QUEUES, orders: take orders, reports: take reports, until: until, relay: None)
+    let pool = signal.Pool(tasks: tasks, net: net, clock: c, random: random, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR), limits: limits, timing: signal.DEFAULT_TIMING, queues: units.DEFAULT_MEDIA_QUEUES, orders: take orders, reports: take reports, until: until, relay: None)
     let served = signal.serve_pool(take pool)
     let answer = result.unwrap(task.join(take browser))
     let _ = runner.fixture.end(take running, 5000u64)

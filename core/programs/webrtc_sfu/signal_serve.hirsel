@@ -384,6 +384,9 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     if !peer.dtls_transport_fits(session.dtls_transport) {
         return Error(Router(Peer(Dtls(Config))))
     }
+    if peer.repair_slots(session.repair_profile) == None {
+        return Error(Router(Peer(RepairConfig)))
+    }
     if !timing_valid(timing) {
         return Error(Timers)
     }

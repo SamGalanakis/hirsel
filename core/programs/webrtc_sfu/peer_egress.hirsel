@@ -136,11 +136,11 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
         let group = rtp.fec.group() ?=> |c| Capacity(c)
         fec = Some(FecState(ssrc: draw(mut p), seq: first_seq, key: false, group: take group, policy: rtp.fec.policy()))
     }
-    let history: rtp.history.History[Record] = rtp.history.history(HISTORY_SLOTS, HISTORY_AGE_NS) ?=> |c| Capacity(c)
+    let history: rtp.history.History[Record] = rtp.history.history(p.repair_window.packets, p.limits.repair_profile.history_ns) ?=> |c| Capacity(c)
     let rewrite = rtp.rewrite.rewrite(clock, REWRITE_RANGES, REWRITE_FRAMES, int.widen(first_seq), first_ts) ?=> |c| Capacity(c)
-    let pictures = rtp.counter.counter(15, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
-    let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
-    let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
+    let pictures = rtp.counter.counter(15, Compact, p.repair_window.counters) ?=> |c| Capacity(c)
+    let tl0s = rtp.counter.counter(8, Compact, p.repair_window.counters) ?=> |c| Capacity(c)
+    let frames = rtp.counter.counter(16, Translate, p.repair_window.counters) ?=> |c| Capacity(c)
     let mut slot = 0u64
     while p.track_slots[slot] != NO_TRACK {
         slot += 1
@@ -934,7 +934,8 @@ pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll {
         }
         if now >= p.next_feedback {
             let _ = feedback(mut p, now, mut out)
-            p.next_feedback = now + FEEDBACK_NS
+            // `loss.due` keeps every missing sequence beyond this turn's NACK pairs.
+            p.next_feedback = int.saturating_add(now, p.limits.repair_profile.feedback_ns)
         }
     }
     if list.len(out.pkts) > before {

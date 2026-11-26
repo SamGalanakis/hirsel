@@ -1,7 +1,7 @@
 hirsel.laws 1
 platform@1/launcher/session_vectors src=c62f609781132ebf sig=2e381daeb6f01e5c run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_creates_to_max_places src=fa37a6e40b218868 sig=ee8bd6fd038ec848 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_genesis_recovers src=09457b71afcaaf51 sig=37b07403cacc1024 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=8b2d32f30d798483 sig=b132091e3879bdea run=e81300d3a4e5f718 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_idle_unload src=c2ed5b8c04a1bf90 sig=4f0f3cefb94c9d09 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_one_head src=06c6b117f8d457c4 sig=b77da5ccc3a535ec run=e81300d3a4e5f718 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_reopen_keeps src=cef5d3a5c1d67afb sig=e07f6de0a8568e5c run=e81300d3a4e5f718 bug=- oracle=- rows=pending
@@ -9,6 +9,7 @@ platform@1/local_laws/test_local_route_during_unload src=531f52e1f91df2c8 sig=d1
 platform@1/local_laws/test_local_stale_dial src=dd30ad9fbfb8340a sig=2b87913e0c276c17 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_start_full src=9f5f47bbd8f3604b sig=54261b9f412d9726 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_units_run_together src=60d9409b9a163a17 sig=1e51323dfecf1119 run=187babd0c26a7c43 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_workdir_held_once src=9588863a1eaadf86 sig=9f9fea50baa2db4e run=15d0e5c89dad2cca bug=- oracle=- rows=pending
 platform@1/local_laws/test_platform_serve_budgets src=e0cbda9af8c5677e sig=3435abc20e17ab54 run=b8c2d9d0b4181905 bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=16116a8bf0cf3db3 sig=365b0781a8e4a490 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=d5952778d488ffdc sig=bd9cab5ad845e8e9 run=b1818af2b24835d3 bug=- oracle=- rows=pending

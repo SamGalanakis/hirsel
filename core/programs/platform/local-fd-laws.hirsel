@@ -1,0 +1,139 @@
+// A session's workdir is held open once (§14.9): Linux names each open file of this
+// process in /proc/self/fdinfo, and an fdinfo's `ino:` line names the inode it holds.
+// The inode the fdinfo of `fd` names, or None when the descriptor closed while listing.
+fn fd_inode(proc: Dir, fd: String) -> Option[String] waits {
+    let mut path = string.from("self/fdinfo/")
+    string.push(mut path, fd)
+    let Ok(text) = std.file.read_string(proc, path) else {
+        return None
+    }
+    let mut at = 0u64
+    while let Some((line, next)) = string.next_line(text, at) {
+        if let Some(ino) = string.strip_prefix(line, "ino:") {
+            return Some(string.from(string.trim_ascii(ino)))
+        }
+        at = next
+    }
+    None
+}
+
+fn open_fds(proc: Dir) -> List[String] waits {
+    let mut out: List[String] = list.new()
+    for e in result.unwrap(std.dir.list(proc, Some(string.from("self/fdinfo")))) {
+        list.push(mut out, string.from(e.name))
+    }
+    out
+}
+
+fn open_inodes(proc: Dir) -> List[String] waits {
+    let mut out: List[String] = list.new()
+    for fd in open_fds(proc) {
+        if let Some(i) = fd_inode(proc, fd) {
+            list.push(mut out, take i)
+        }
+    }
+    out
+}
+
+fn occurrences(xs: List[String], x: String) -> u64 {
+    let mut n = 0u64
+    for y in xs {
+        if y == x {
+            n += 1u64
+        }
+    }
+    n
+}
+
+// The inode of directory `name` below `d`: the one inode a narrow of it holds once more.
+// Descriptor numbers are reused (the listing's own takes the lowest free one), inodes are
+// not. The narrowed descriptor stays open, so `inode_fds` counts it.
+fn dir_inode(proc: Dir, d: Dir, name: String) -> String waits {
+    let before = open_inodes(proc)
+    let _ = result.unwrap(std.dir.narrow(d, name))
+    let after = open_inodes(proc)
+    let mut found: Option[String] = None
+    for i in after {
+        if occurrences(after, i) > occurrences(before, i) {
+            found = Some(string.from(i))
+        }
+    }
+    option.unwrap(take found)
+}
+
+// How many of this process's descriptors hold inode `ino`.
+fn inode_fds(proc: Dir, ino: String) -> u64 waits {
+    let mut n = 0u64
+    for fd in open_fds(proc) {
+        if let Some(i) = fd_inode(proc, fd) {
+            if i == ino {
+                n += 1u64
+            }
+        }
+    }
+    n
+}
+
+// The session's workdir descriptors the host holds: the law's own probe holds one more.
+fn host_held(proc: Dir, ino: String) -> u64 waits {
+    inode_fds(proc, ino) - 1u64
+}
+
+// §14.9: starting, refusing and re-waking a session holds at most one descriptor of its
+// workdir. The first host's budget is below one child's charge, so every route's start is
+// refused `Full`; the second host's children idle out after 50 ms, so each route wakes the
+// session again. Wrong implementation: each start opens root/<workdir> before admission and
+// never releases it, so the host holds one descriptor per start (local-dir-fd-leak-2878).
+pub fn law_local_workdir_held_once(parent: Dir, proc: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    let mut full_name = string.with_capacity(32u64)
+    let full_dir = result.unwrap(host.mkdtemp(parent, mut full_name))
+    let full = start_local_sized(full_dir, take full_name, quick_place, 60000u64, 1048576u64, clock, random, tasks, net)
+    let full_ino = dir_inode(proc, full_dir, local.name_of(A))
+    let mut refused = true
+    for _ in 0u64 .. 8u64 {
+        if let Error(Full) = local.route(full.door, A) {} else {
+            refused = false
+        }
+    }
+    let full_held = host_held(proc, full_ino)
+    let full_ended = end_local(parent, take full)
+    let mut wake_name = string.with_capacity(32u64)
+    let wake_dir = result.unwrap(host.mkdtemp(parent, mut wake_name))
+    let wake = start_local_in(wake_dir, take wake_name, quick_place, 50u64, clock, random, tasks, net)
+    let wake_ino = dir_inode(proc, wake_dir, local.name_of(A))
+    let mut woke = true
+    for _ in 0u64 .. 4u64 {
+        match local.route(wake.door, A) {
+            Ok(take lease) => {
+                let _ = take lease
+            },
+            Error(_) => {
+                woke = false
+            },
+        }
+        if let Up(_) = next_change(wake.changes) {} else {
+            woke = false
+        }
+        if let Down(_) = next_change(wake.changes) {} else {
+            woke = false
+        }
+    }
+    let wake_held = host_held(proc, wake_ino)
+    let wake_ended = end_local(parent, take wake)
+    if !refused || !woke || !full_ended || !wake_ended {
+        return Error(string.from("local: the refusals and wakes did not run as the law drives them"))
+    }
+    if full_held > 1u64 || wake_held > 1u64 {
+        let mut why = string.from("local: workdir descriptors held after 8 Full refusals: ")
+        string.push_u64(mut why, full_held)
+        string.push(mut why, ", after 4 wakes: ")
+        string.push_u64(mut why, wake_held)
+        return Error(take why)
+    }
+    Ok(())
+}
+
+@test
+fn test_local_workdir_held_once(proc: Dir, parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    law_local_workdir_held_once(parent, proc, clock, random, tasks, net)
+}

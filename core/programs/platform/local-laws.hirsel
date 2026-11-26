@@ -279,6 +279,16 @@ fn copy_tree(d: Dir, from: String, to: String) waits {
     }
 }
 
+fn empty_tree(d: Dir, name: String) waits {
+    let sub = result.unwrap(std.dir.narrow(d, name))
+    for e in result.unwrap(std.dir.list(sub, None)) {
+        match e.kind {
+            Directory => result.unwrap(std.dir.remove_all(sub, e.name)),
+            _ => result.unwrap(std.file.remove(sub, e.name)),
+        }
+    }
+}
+
 fn path_in(dir: String, name: String) -> String {
     let mut p = string.from(dir)
     string.push(mut p, "/")
@@ -316,7 +326,9 @@ pub fn law_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tas
     copy_tree(dir, session, "kept")
     result.unwrap(std.dir.remove_all(dir, "host"))
     let again = start_local_in(dir, take dir_name, quick_place, 60000u64, clock, random, tasks, net)
-    result.unwrap(std.dir.remove_all(dir, session))
+    // The host keeps the session's workdir open, so the crash's store replaces what the
+    // directory holds, not the directory.
+    empty_tree(dir, session)
     copy_tree(dir, "kept", session)
     let answered = match local.route(again.door, A) {
         Ok(take held) => {

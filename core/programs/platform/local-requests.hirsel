@@ -96,11 +96,12 @@ fn on_create(mut a: Actor, take key: Bytes, take seed: Seed) -> Result[u64, Refu
     }
     let id = a.s.next_id
     let name = name_of(id)
+    let _ = map.remove(mut a.workdirs, name)
     let _ = std.dir.remove_all(a.root, name)
     if let Error(_) = std.dir.create_dir(a.root, name) {
         return Error(Failed("session dir"))
     }
-    let Ok(dir) = std.dir.narrow(a.root, name) else {
+    let Some(dir) = workdir_of(mut a, name) else {
         return Error(Failed("session dir"))
     }
     seed_store(a, dir, seed)?
@@ -306,11 +307,11 @@ fn on_peek(a: Actor, id: u64) -> Result[Lease, Refused] waits {
 
 // The local actor owns all child starts. A cold read runs in that actor after
 // the prior child has closed its store and before any next child can open it.
-fn check_cold(a: Actor, name: String, check: ColdCheck) -> Result[(), Refused] waits {
+fn check_cold(mut a: Actor, name: String, check: ColdCheck) -> Result[(), Refused] waits {
     if group_has_kid(a, name) {
         return Error(Busy)
     }
-    let Ok(dir) = std.dir.narrow(a.root, name) else {
+    let Some(dir) = workdir_of(mut a, name) else {
         return Error(Unknown)
     }
     let Ok(take reader) = store.open_read_only(dir, a.clock, a.options) else {
@@ -323,8 +324,8 @@ fn check_cold(a: Actor, name: String, check: ColdCheck) -> Result[(), Refused] w
     }
 }
 
-fn run_read(a: Actor, name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
-    let Ok(dir) = std.dir.narrow(a.root, name) else {
+fn run_read(mut a: Actor, name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
+    let Some(dir) = workdir_of(mut a, name) else {
         return Error(Unknown)
     }
     let Ok(take reader) = store.open_read_only(dir, a.clock, a.options) else {
@@ -350,7 +351,7 @@ fn on_read(mut a: Actor, id: u64, take r: ColdRead, take reply: ReadReply) waits
         list.push(mut a.reads, (take name, take r, take reply));
         return
     }
-    let _ = channel.try_send(reply, run_read(a, name, r))
+    let _ = channel.try_send(reply, run_read(mut a, name, r))
 }
 
 fn answer_reads(mut a: Actor, name: String) waits {
@@ -360,7 +361,7 @@ fn answer_reads(mut a: Actor, name: String) waits {
     let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
     while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
         if at == name {
-            let _ = channel.try_send(reply, run_read(a, at, r))
+            let _ = channel.try_send(reply, run_read(mut a, at, r))
         } else {
             list.push(mut kept, (take at, take r, take reply))
         }
@@ -392,7 +393,7 @@ fn on_access(mut a: Actor, id: u64, check: ColdCheck, wake: bool, take reply: Ac
             return
         },
     }
-    if let Error(take why) = check_cold(a, name_of(id), check) {
+    if let Error(take why) = check_cold(mut a, name_of(id), check) {
         let _ = channel.try_send(reply, Error(take why))
     } else if wake {
         on_route(mut a, id, take reply)

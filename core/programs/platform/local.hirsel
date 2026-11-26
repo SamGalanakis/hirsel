@@ -178,6 +178,9 @@ type Actor {
     admitting: bool,
     pending: List[Launch],
     root: Dir,
+    // Each session workdir's Dir, narrowed once: a Dir holds its host descriptor until the
+    // run ends (core.md, DirOp), so every start, refusal, wake and cold read reuses it.
+    workdirs: Map[String, Dir],
     options: store.Options,
     sizing: PlaceSizing,
     max_sessions: u64,
@@ -301,7 +304,7 @@ fn start(mut a: Actor, take l: launcher.Launch, mut events: List[launcher.Event]
         return
     }
     let _ = std.dir.create_dir(a.root, workdir)
-    let Ok(dir) = std.dir.narrow(a.root, workdir) else {
+    let Some(dir) = workdir_of(mut a, workdir) else {
         refuse_start(mut a, take child, Failed(string.from("workdir")), mut events)
         return
     }
@@ -316,6 +319,19 @@ fn start(mut a: Actor, take l: launcher.Launch, mut events: List[launcher.Event]
     a.next_job += 1u64
     list.push(mut a.kids, Kid(child: take child, stop: None, stopping: false, status: take root, job: job, shard: 0u64, charge: 0u64, expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly), dialer: None))
     list.push(mut a.pending, Launch(job: job, name: string.from(group.name), dir: dir, sizing: a.sizing, version: serve.activation, idle: serve.idle, sessions: a.sessions, available: 0u64))
+}
+
+// The session's workdir root/<name>, narrowed only the first time it is used. Its entry
+// goes when the directory does: a Delete's close and a create of the same id.
+fn workdir_of(mut a: Actor, name: String) -> Option[Dir] waits {
+    if let Some(d) = map.get(a.workdirs, name) {
+        return Some(d)
+    }
+    let Ok(d) = std.dir.narrow(a.root, name) else {
+        return None
+    }
+    map.insert(mut a.workdirs, string.from(name), d)
+    Some(d)
 }
 
 // Admissions are serialized because placement uses the exact charges already
@@ -410,6 +426,7 @@ fn retire(mut a: Actor, take g: launcher.Group, mut events: List[launcher.Event]
 fn closed(mut a: Actor, take g: launcher.Group) waits {
     if let Some(r) = platform.retirement(a.h, g.name) {
         if let Delete = r.disposition {
+            let _ = map.remove(mut a.workdirs, r.workdir)
             let _ = std.dir.remove_all(a.root, r.workdir)
         }
     }
@@ -799,7 +816,7 @@ fn run_local[T: cross](take begin: Begin[T]) -> () waits {
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
     let sizing = place_sizing(options)
-    let mut a = Actor(h: take opened_host, driving: take timers, shards: take shards, next_job: 0u64, admitting: false, pending: list.new(), root: root, options: take options, sizing, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), sessions: sessions, tasks: tasks, clock: clock, random: random, watch: take watch, kids: list.new(), routes: list.new(), refused: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
+    let mut a = Actor(h: take opened_host, driving: take timers, shards: take shards, next_job: 0u64, admitting: false, pending: list.new(), root: root, workdirs: map.new(), options: take options, sizing, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), sessions: sessions, tasks: tasks, clock: clock, random: random, watch: take watch, kids: list.new(), routes: list.new(), refused: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
     apply(mut a, take hello)

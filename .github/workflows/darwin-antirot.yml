@@ -1,0 +1,114 @@
+name: Darwin anti-rot
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Darwin laws and native proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    outputs:
+      setup: ${{ steps.setup.outcome }}
+      laws: ${{ steps.laws.outcome }}
+      failed-laws: ${{ steps.laws.outputs.failures }}
+      proof: ${{ steps.proof.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare the pinned native toolchain
+        id: setup
+        run: |
+          rust=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$rust" --profile minimal --no-self-update
+          cargo fetch --locked
+          python3 tools/buck2/prepare.py --local
+      - name: Darwin laws
+        id: laws
+        run: |
+          buck=.buck2/bin/buck2
+          targets=$("$buck" uquery 'kind("^_darwin_", root//:)')
+          if [[ -z "$targets" ]]; then
+            echo 'Buck found no Darwin laws' >&2
+            exit 1
+          fi
+          failures=()
+          while IFS= read -r target; do
+            if ! "$buck" test -j4 "$target"; then
+              failures+=("${target#root//:}")
+            fi
+          done <<< "$targets"
+          printf 'failures=%s\n' "${failures[*]}" >> "$GITHUB_OUTPUT"
+          ((${#failures[@]} == 0))
+      - name: Native toolchain proof
+        id: proof
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: .buck2/bin/buck2 test -j4 //tools/buck2/native-toolchain:proof
+
+  metadata:
+    name: Darwin metadata check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the workspace for aarch64-apple-darwin
+        run: |
+          rust=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$rust" --profile minimal --no-self-update
+          python3 tools/buck2/bootstrap_rust_toolchain.py
+          python3 tools/darwin_check.py
+
+  report:
+    name: File or update failure issues
+    needs: [native, metadata]
+    if: ${{ failure() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    concurrency:
+      group: hirsel-issue-reporter
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Report failed checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          NATIVE_SETUP: ${{ needs.native.outputs.setup }}
+          LAWS: ${{ needs.native.outputs.laws }}
+          FAILED_LAWS: ${{ needs.native.outputs.failed-laws }}
+          PROOF: ${{ needs.native.outputs.proof }}
+          METADATA_RESULT: ${{ needs.metadata.result }}
+        run: |
+          status=0
+          report() {
+            python3 tools/ci/report_failure.py "$@" || status=1
+          }
+          if [[ "$NATIVE_RESULT" == failure ]]; then
+            if [[ "$NATIVE_SETUP" != success ]]; then
+              report darwin-native-setup 'Preparing the native toolchain on Linux failed.'
+            elif [[ "$LAWS" == failure && -n "$FAILED_LAWS" ]]; then
+              read -r -a failures <<< "$FAILED_LAWS"
+              for law in "${failures[@]}"; do
+                report "$law" "Buck failed the target \`//$law\` in the Darwin laws step."
+              done
+            elif [[ "$LAWS" != success ]]; then
+              report darwin-laws 'The Darwin laws step failed before it returned individual results.'
+            fi
+            if [[ "$PROOF" == failure ]]; then
+              report native-toolchain:proof 'The native toolchain proof failed on Linux.'
+            fi
+          fi
+          if [[ "$METADATA_RESULT" == failure ]]; then
+            report darwin-check 'The Darwin metadata check job failed on Linux.'
+          fi
+          exit "$status"

@@ -87,6 +87,15 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Foreign => string.push(mut line, "a handle from another store"),
         MigrationFault => string.push(mut line, "the migration faulted"),
         ExportDirectory => string.push(mut line, "an export directory, not a place store"),
+        LimitsDiffer(recorded) => {
+            string.push(mut line, "the store records limits frame ");
+            string.push_u64(mut line, recorded.frame);
+            string.push(mut line, ", value ");
+            string.push_u64(mut line, recorded.value);
+            string.push(mut line, ", meta ");
+            string.push_u64(mut line, recorded.meta);
+            string.push(mut line, "; the config names others")
+        },
         Fenced(_) => string.push(mut line, "another writer claimed the bucket store"),
         Lost => string.push(mut line, "the bucket store writer claim was lost"),
         Undecided => string.push(mut line, "the object store head write has an unknown outcome"),

@@ -11,12 +11,6 @@ pub type Caller: codec + key + shareable + cross {
     subject: Bytes
 }
 
-pub const FRAME_LIMIT: u64 = 16777296
-
-pub const VALUE_LIMIT: u64 = 16711680
-
-const FORMAT_VALUE_MAX: u64 = 16711680
-
 pub type Limit: shareable + cross = Key | Value | Transaction | Name | Ids | Manifest | Triggers
 
 pub type Why: shareable + cross = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed
@@ -29,7 +23,7 @@ pub type Fault: shareable + cross {
 
 pub type StoreCapacity: shareable + cross = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity)
 
-pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String)
+pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String) | LimitsDiffer(StoreLimits)
 
 type Roots = PageRoots
 
@@ -63,6 +57,7 @@ pub opaque type Db {
     branch_names: Map[String, u32],
     pins: List[Pin],
     record_bytes: u64,
+    limits: StoreLimits,
     next_pin: u64,
     next_branch: u32,
     next_node: u64,
@@ -537,6 +532,8 @@ pub opaque scoped type Tx {
     // wrong (§I.3). The transaction fails, and the index is demoted.
     drift: Option[List[(u32, u32)]],
     frame_bytes: Option[u64],
+    // The recorded limits (§11.1 AP4a) every check in the body reads.
+    limits: StoreLimits,
     wrote: bool,
     ops: DataOps,
     info: CallInfo,
@@ -606,7 +603,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new(), attention_seq: 0, bases: no_tail_bases(), projectors: list.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), limits: named_limits(o.limits), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new(), attention_seq: 0, bases: no_tail_bases(), projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -729,7 +726,7 @@ fn pin_root_bytes(name: String, roots: Roots) -> u64 {
 }
 
 fn check_manifest_addition(db: Db, extra: u64) -> Result[(), Error] {
-    if extra > META_LIMIT - db.record_bytes {
+    if extra > db.limits.meta - db.record_bytes {
         Error(Limit(Manifest))
     } else {
         Ok(())
@@ -1273,7 +1270,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1378,7 +1375,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
     if let Some(raw) = frame {
         let size = list.len(raw)
-        while disk_state(db).inflight > FRAME_LIMIT - size {
+        while disk_state(db).inflight > db.limits.frame - size {
             let acknowledged = journal_receive(db)
             journal_ack(mut db, take acknowledged)?
         }
@@ -2392,7 +2389,7 @@ fn insert_row(mut ids: u64, mut roots: Roots, take p: Bytes, take raw: Bytes) ->
 
 // AP13. Collect and admit the encoded workspace, sort the destination
 // records, then build the table and each index bottom up.
-fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes) -> Result[Built, Error] {
+fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes, value_limit: u64) -> Result[Built, Error] {
     let mut roots = take base
     let schema = std.codec.schema(to_value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
@@ -2426,10 +2423,10 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
             // The source row's width sizes the buffer, so an upgrade that keeps
             // the row's size encodes it with no regrowth.
             let width = order.max(source_width, 2 + std.codec.least(to_value))
-            let mut raw: Bytes = list.with_capacity(order.min(width, VALUE_LIMIT))
+            let mut raw: Bytes = list.with_capacity(order.min(width, value_limit))
             capacity(le(mut raw, int.widen(number), 2))?
             std.codec.encode(to_value, v2, mut raw) ?=> |_| Limit(Value)
-            if list.len(raw) > VALUE_LIMIT {
+            if list.len(raw) > value_limit {
                 return Error(Limit(Value))
             }
             let charge = 62 + round8(4 + list.len(encoded)) + round8(list.len(raw))
@@ -2515,7 +2512,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
     let id = plan.next_table
     let base = share_roots(plan.roots)
     let mut ids = plan.next_node
-    let built = migrate_build(plan.roots.collections, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to_name, to_key, to_value, f, id, meta.next, target)
+    let built = migrate_build(plan.roots.collections, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to_name, to_key, to_value, f, id, meta.next, target, plan.value_limit)
     plan.next_node = ids
     let Built(roots: take roots, live: live_bytes, read, written) = built?
     keep_schema(mut plan, take roots, live_bytes, id + 1)?
@@ -2669,7 +2666,7 @@ fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, ret
 }
 
 // Store disk format. STORE-SPEC §2.3 and §11.10.
-const DISK_FORMAT: u64 = 9
+const DISK_FORMAT: u64 = 10
 
 type DiskContext {
     store: StoreId,
@@ -3051,7 +3048,9 @@ pub type PreparedTarget: codec + send {
     resident_limit: u64,
     pack_bytes: u64,
     checkpoint_bytes: u64,
-    journal_limit: u64
+    journal_limit: u64,
+    // NEW's limits (§11.1 AP4a); None keeps the store's, others must match.
+    limits: Option[StoreLimits]
 }
 
 type PreparedMeta: codec + send {
@@ -3489,7 +3488,8 @@ type TargetLimits {
     resident: u64,
     pack: u64,
     checkpoint: u64,
-    journal: u64
+    journal: u64,
+    frame: u64
 }
 
 fn catalog_bytes_equal(a: Bytes, b: Bytes) -> bool {
@@ -3699,7 +3699,8 @@ type DiskStartup: send {
     end_file: HostFile,
     header: Bytes,
     creation: Bytes,
-    pages: PageDisk
+    pages: PageDisk,
+    limits: StoreLimits
 }
 
 fn remember_roots(mut owners: Map[IncomingEdge, u64], kind: u8, owner: u64, roots: LocatedRoots) {
@@ -3762,6 +3763,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
     let mut loaded = match take selected {
         Ok((id, take manifest)) => {
             check_expected_store(options.expect, id)?
+            check_limits(options.limits, manifest.limits)?
             let validated = select_page_manifest(d, id, take manifest)?
             let loaded = disk_loaded(id, take validated)?
             // §13.8: a catalog with a Tiered collection opens only on a funded
@@ -3779,13 +3781,13 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
                 return Error(NotFound)
             }
             let id = capacity(disk_identity(r))?
-            let manifest = page_manifest_empty()
+            let manifest = page_manifest_empty(named_limits(options.limits))
             let mut creation = disk_creation_block()?
             let (take segment, take end_file, take header) = disk_new_segment(d, c, id, 1, 0, mut creation)?
             disk_publish_manifest(d, id, manifest)?
             let genesis = capacity(main_state(empty_roots(), 0, 0))?
             let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
-            return Ok(DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages))
+            return Ok(DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: named_limits(options.limits)))
         },
         Error(take problem) => return Error(take problem),
     }
@@ -3818,7 +3820,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
     let (take segment, take end_file, take header) = disk_new_segment(d, c, loaded.store, seq, last_end, mut creation)?
     let DiskLoaded(store: id, manifest: take manifest, lists: take lists, locations: take locations, ..) = take loaded
     let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, compaction: no_tiered_compaction())
-    Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages))
+    Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: manifest.limits))
 }
 
 type DiskSession {
@@ -3964,17 +3966,6 @@ fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
     Ok(())
 }
 
-fn journal_floor(checkpoint_bytes: u64, journal_limit: u64) -> Option[Capacity] {
-    let Some(floor) = int.checked_add(checkpoint_bytes, FRAME_LIMIT) else {
-        return Some(Capacity(requested: 18446744073709551615u64, available: journal_limit))
-    }
-    if floor > journal_limit {
-        Some(Capacity(requested: floor, available: journal_limit))
-    } else {
-        None
-    }
-}
-
 type JournalChannels {
     frames: Sender[JournalMsg],
     queued: Receiver[JournalMsg],
@@ -4021,6 +4012,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
     loop {
         let (take raw, id, take manifest) = read_only_manifest(d)?
         check_expected_store(options.expect, id)?
+        check_limits(options.limits, manifest.limits)?
         let candidate = capture_walk(d, id, manifest.first_live, restarted)?
         let Some(take selected) = take candidate else {
             restarted = true
@@ -4070,7 +4062,9 @@ fn open_checks(options: Options) -> Result[(), Error] {
     if options.group_bytes == 0 {
         return Error(Missing("group_bytes"))
     }
-    if let Some(problem) = journal_floor(options.checkpoint_bytes, options.journal_limit) {
+    check_named_limits(options.limits)?
+    // Before the MANIFEST is read, the floor uses the named limits or the ceilings.
+    if let Some(problem) = journal_floor(options.checkpoint_bytes, options.journal_limit, named_limits(options.limits).frame) {
         return Error(Full(Journal(problem)))
     }
     Ok(())
@@ -4079,7 +4073,7 @@ fn open_checks(options: Options) -> Result[(), Error] {
 fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: DiskSession) -> Result[Db, Error] waits {
     let DiskSession(lock: take lock, startup: take startup) = take session
     let zero_extension = disk_io(host.zero_extension(d))?
-    let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages) = take startup
+    let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: limits) = take startup
     let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
         Ok(empty_db(c, id, options))
     })?
@@ -4096,6 +4090,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         None
     }
     db.fence = fence
+    db.limits = limits
     db.next_node = next_node
     db.next_table = next_table
     db.file_seq = seq
@@ -4180,7 +4175,7 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut
         Some(wanted) => wanted.pack,
         None => disk_state(db).options.pack_bytes,
     }
-    let limit = cut_output_bytes(pack_bytes)
+    let limit = cut_output_bytes(pack_bytes, db.limits)
     disk_cut_with_limit(mut db, take delta, write_seal, target, pack_bytes, limit, mut timing)
 }
 
@@ -4412,7 +4407,9 @@ type JournalCommit {
     data: List[JournalOp],
     streams: List[JournalOp],
     keyed: List[KeyedEdit],
-    call: Option[CallSection]
+    call: Option[CallSection],
+    // The COMMIT payload's length, checked against the recorded limits.
+    payload: u64
 }
 
 type JournalFork {
@@ -4597,7 +4594,7 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
             return Error(disk_fault(file, at, Malformed))
         }
     }
-    Ok(JournalCommit(branch: br, version: head, at: wall, data: take data, streams: take streams, keyed: take keyed, call: take call))
+    Ok(JournalCommit(branch: br, version: head, at: wall, data: take data, streams: take streams, keyed: take keyed, call: take call, payload: list.len(raw)))
 }
 
 fn journal_decode(file: String, kind: u16, raw: Bytes) -> Result[JournalEvent, Error] {
@@ -4792,10 +4789,12 @@ type JournalReplay {
     record_bytes: u64,
     next_node: u64,
     tiered: ReplayTieredAccount,
-    forked: List[LineageFork]
+    forked: List[LineageFork],
+    // The recorded limits every replayed frame is checked against (§11.1 AP4a).
+    limits: StoreLimits
 }
 
-fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Error] {
+fn journal_replay(take state: State, next_node: u64, limits: StoreLimits) -> Result[JournalReplay, Error] {
     let (take names, total) = disk_allocation(scoped fn() -> Result[(Map[String, u32], u64), Error] {
         let mut names: Map[String, u32] = map.new()
         capacity(map.try_reserve(mut names, list.len(state.tips)))?
@@ -4810,7 +4809,7 @@ fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Er
         Ok((take names, total))
     })?
     let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0)
-    Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new()))
+    Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new(), limits: limits))
 }
 
 fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount) -> Result[(), Error] {
@@ -4909,6 +4908,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
     if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
         return Error(disk_fault(file, 0, Gap(commit.version)))
     }
+    replay_within_limits(file, replay.limits, commit)?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered)?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered)?
     if list.len(commit.keyed) != 0 {
@@ -4918,7 +4918,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
         canonical_roots(mut replay.state.tips[i].roots)?
         replay.next_node = draw - 1
         replay.record_bytes = replay.record_bytes - before + keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
-        if replay.record_bytes > META_LIMIT {
+        if replay.record_bytes > replay.limits.meta {
             return Error(disk_fault(file, 0, Malformed))
         }
     }

@@ -785,7 +785,7 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
         let Some(refund) = delete_refund(tx, target)? else {
             return Error(Missing("bucket entry"))
         }
-        let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, target, None, tx.frame_bytes)?
+        let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, target, None, tx.frame_bytes, transaction_limit(tx.limits))?
         apply_delete(mut tx, take target, refund)?
         tx.frame_bytes = frame
         Ok(found)

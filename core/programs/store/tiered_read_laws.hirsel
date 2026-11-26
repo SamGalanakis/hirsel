@@ -270,8 +270,7 @@ fn l62_replay_read_tree(base: std.page.PagePtr) -> Result[PageTree, Error] {
     Ok(take tree)
 }
 
-fn l62_read_point_bytes(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree,
-    key: Bytes) -> Result[Option[Bytes], Error] waits {
+fn l62_read_point_bytes(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, key: Bytes) -> Result[Option[Bytes], Error] waits {
     read_tiered_point(source, grant, root, tree, key, fn(raw: Option[View[Bytes]]) -> Result[Option[Bytes], Error] {
         match raw {
             Some(value) => Ok(Some(copied(value)?)),
@@ -422,7 +421,6 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     if tiered_plan_prior(initial, visible, before, key)? != 7 {
         fail("L63: the first root's stored value is six bytes")
     }
-
     let reference = std.page.BlobRef(stamp: 30, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
     list.clear(mut rows)
     list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(reference)))
@@ -436,7 +434,6 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     if tiered_plan_prior(deciding, visible, moved, key)? != 1026 || tiered_attempt_state(deciding).touched_bytes != 95 {
         fail("L63: a rerun must read the deciding leaf's BLOB length without touching its body")
     }
-
     let mut account = ReplayTieredAccount(total: 258, exact: false)
     let mut ids = 102u64
     let before_edit = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
@@ -516,7 +513,6 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     if split.frames != 1 || split.index != 100 || split.live != 12 || split.payload_bytes != 169 {
         fail("L68: a refused frame changed the pack")
     }
-
     let mut complete = begin_tiered_pack(owner, 8, 4, 238)?
     let Some(left) = add_tiered_pack_frame(mut complete, first, 9, first_key, locate)? else {
         fail("L68: the first indexed BLOB did not fit")
@@ -530,8 +526,7 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     list.push(mut packed_frames, TieredEmitFrame(collection: 9, stamp_in_image: second.stamp, key: clone(second_key), frame: clone(second)))
     let layout = layout_tiered_packs(take packed_frames, 4, 8, 238)?
     let expected_pack = planned_tiered_pack(layout, layout.packs[0u64])
-    if list.len(layout.packs) != 1 || layout.packs[0u64].size != 238 || expected_pack.payload_bytes != 227 ||
-        expected_pack.index != 128 || expected_pack.live != 24 || expected_pack.frames != 2 || expected_pack.class != 4 {
+    if list.len(layout.packs) != 1 || layout.packs[0u64].size != 238 || expected_pack.payload_bytes != 227 || expected_pack.index != 128 || expected_pack.live != 24 || expected_pack.frames != 2 || expected_pack.class != 4 {
         fail("T4: the pack row must use the actual front-coded width before emission")
     }
     if left.offset != 72 || right.offset != 100 || pack.index != 128 || pack.payload_bytes != 227 || pack.live != 24 || pack.frames != 2 {
@@ -559,8 +554,7 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     }
     let mut last_offset = 0u64
     let decoded_index = decode_pack_index("p-8", pack.index, payload, mut last_offset)?
-    if decoded_index.prev != 0 || list.len(decoded_index.rows) != 2 || decoded_index.rows[0u64].key != first_key || decoded_index.rows[1u64].key != second_key ||
-        decoded_index.rows[1u64].stamp != 32 || decoded_index.rows[1u64].len != 12 || decoded_index.rows[1u64].kind != 0x22 || decoded_index.rows[1u64].collection != 9 || last_offset != 100 {
+    if decoded_index.prev != 0 || list.len(decoded_index.rows) != 2 || decoded_index.rows[0u64].key != first_key || decoded_index.rows[1u64].key != second_key || decoded_index.rows[1u64].stamp != 32 || decoded_index.rows[1u64].len != 12 || decoded_index.rows[1u64].kind != 0x22 || decoded_index.rows[1u64].collection != 9 || last_offset != 100 {
         fail("L68: the index did not describe the second BLOB")
     }
     Ok(())
@@ -580,7 +574,11 @@ fn test_l63_branch_split_reuses_cold_divider() -> Result[(), Error] {
     let mut children: List[std.page.Slot] = list.with_capacity(71)
     for slot in 0u64 .. 70 {
         let ptr = std.page.PagePtr(pack: 8, offset: 72 + 61 * slot, len: 45, checksum: 11, stamp: slot + 1)
-        let divider: Bytes = if slot == 0 { list.new() } else { key_word(slot) }
+        let divider: Bytes = if slot == 0 {
+            list.new()
+        } else {
+            key_word(slot)
+        }
         list.push(mut children, ColdPage(ptr))
         list.push(mut branches, std.page.Entry(key: take divider, cell: Child(std.page.Branch(child: ptr, rows: 1, charge: 86))))
     }
@@ -627,7 +625,6 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
     list.push(mut held_roots, share_roots(roots))
     let mut holders: List[HeldPage] = list.with_capacity(3)
     note_held_roots(mut holders, 0, 0, roots)
-
     let mut installed = new_page_locations()
     let cold = PagePack(class: 3, frames: 1, live: 0, payload_bytes: 220, index: 168)
     capacity(disk_index_put(mut installed.packs, 8, cold, pack_edge_charge))?
@@ -672,7 +669,6 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let mut roots = empty_roots()
     roots.collections.root = page_result(std.page.attach(take image, take children, list.new()))?
     let capture = share_roots(roots)
-
     let id = prefix(9)?
     let mut draft = begin_tiered_pack(owner, 8, 3, 4096)?
     let frame = PackFrame(stamp: 40, size: 37, body: PageBody(arc.share(leaf)))
@@ -693,7 +689,6 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     if old_value != value || tree_stamp(roots.collections) != 101 {
         fail("L68: install changed the prior leaf or failed to restamp the new map")
     }
-
     let mut held_roots: List[Roots] = list.with_capacity(1)
     list.push(mut held_roots, share_roots(roots))
     let mut holders: List[HeldPage] = list.with_capacity(3)
@@ -704,7 +699,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let cut_plan = plan_page_cut(base, holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 9, 1048576, map.new(), None, mut ids)?
     let mut buffers = cut_output_buffers(cut_plan, 1048576, 1048576)?
     let layout = write_page_cut(fixtures, owner, take cut_plan, mut buffers)?
-    let mut manifest = page_manifest_empty()
+    let mut manifest = page_manifest_empty(default_limits())
     manifest.next_pack = layout.lists.run_packs.next_pack
     manifest.next_stamp = ids
     manifest.next_table = 10
@@ -720,8 +715,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let Some((ColdPage(found), descriptor)) = std.page.collection_slot(loaded.holders[0u64].collections.root, id) else {
         fail("L68: recovery lost the installed Cold slot")
     }
-    if found != place || place.offset != 72 || place.len != 37 || inventory.index != 125 || inventory.payload_bytes != 186 ||
-        read_le(descriptor, 44, 8) != 78 {
+    if found != place || place.offset != 72 || place.len != 37 || inventory.index != 125 || inventory.payload_bytes != 186 || read_le(descriptor, 44, 8) != 78 {
         fail("L68: the reopened descriptor or pack extent differs from the cut")
     }
     let verified = read_tiered_frame("p-8", owner, TieredPage(found), payload_bytes, 0, ids)?
@@ -753,13 +747,11 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     list.push(mut children, ColdPage(base))
     let mut tree = new_page_tree(CollectionMap, 1024)
     tree.root = page_result(std.page.attach(take image, take children, list.new()))?
-
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let mut ids = 101u64
     let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 1, next: 4)))
     let trim = JournalOp(key: take id, value: None, prior: 0, trim: Some(JournalTrim(floor: 2, dropped: 86)))
     replay_tiered_op("j-1", mut tree, mut ids, mut account, before, trim)?;
-
     // There is no pager to answer. The former first row is in the base but
     // the new descriptor masks it. A retained row still needs the pager.
     let (requests, receiver): (Sender[TieredPagerMessage], Receiver[TieredPagerMessage]) = channel.new(1)
@@ -806,7 +798,11 @@ fn test_l70_pager_admits_cache_backing(d: Dir, tasks: Tasks) -> Result[(), Error
 fn l63_edit_leaf(first_key: u64, n: u64, widths: (u64, u64), stamp: u64) -> Result[Arc[std.page.Page], Error] {
     let mut rows: List[std.page.Entry] = list.with_capacity(n)
     for offset in 0u64 .. n {
-        let width = if offset == 0 { widths.0 } else { widths.1 }
+        let width = if offset == 0 {
+            widths.0
+        } else {
+            widths.1
+        }
         let mut bytes_out: Bytes = list.with_capacity(width)
         list.fill(mut bytes_out, width, 111u8)
         list.push(mut rows, std.page.Entry(key: key_word(first_key + offset), cell: InlineValue(take bytes_out)))
@@ -907,8 +903,7 @@ fn test_l63_pinned_row_edit_discards_a_missed_candidate() -> Result[(), Error] {
     map.insert(mut visible, (8u64, 1204u64), take second)
     let retry = tiered_attempt(1379, 0)
     let ready = stage_tiered_row(retry, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids)?
-    if tiered_attempt_state(retry).touched_bytes != 1379 || std.page.lookup(ready, key_word(10)) != None || std.page.totals(ready) != (3u64, 330u64) ||
-        std.page.totals(base) != (4u64, 1408u64) {
+    if tiered_attempt_state(retry).touched_bytes != 1379 || std.page.lookup(ready, key_word(10)) != None || std.page.totals(ready) != (3u64, 330u64) || std.page.totals(base) != (4u64, 1408u64) {
         fail("L63: the retry must apply once and keep its base intact")
     }
     Ok(())

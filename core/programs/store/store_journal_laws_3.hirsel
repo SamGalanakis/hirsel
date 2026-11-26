@@ -138,7 +138,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
         let payload = list.slice(raw, 16, size)
         result.unwrap(journal_decode_commit("fixture", payload))
     }
-    let mut replay = journal_replay(capacity(current_state(db))?, db.next_node)?
+    let mut replay = journal_replay(capacity(current_state(db))?, db.next_node, db.limits)?
     result.unwrap(journal_apply("fixture", mut replay, Commit(take commit)))
     db.heads[i].roots = share_roots(replay.state.tips[i].roots)
     db.heads[i].head = replay.state.tips[i].head

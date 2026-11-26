@@ -1,0 +1,120 @@
+// A store's limits: the ceilings, the floors, and the checks that use them
+// (STORE-SPEC §11.1 AP4a).
+pub const FRAME_LIMIT: u64 = 16777296
+
+pub const VALUE_LIMIT: u64 = 16711680
+
+const FORMAT_VALUE_MAX: u64 = 16711680
+
+/// A store's own limits (§11.1 AP4a). Genesis records them in the MANIFEST,
+/// every later open reads them back, and every limit check uses them:
+/// `frame` bounds a journal frame (16 + the COMMIT payload), `value` a stored
+/// value, `meta` the MANIFEST's branch and pin records.
+pub type StoreLimits: codec + shareable + cross {
+    frame: u64,
+    value: u64,
+    meta: u64
+}
+
+/// Today's ceilings, the limits of a store made without any.
+pub fn default_limits() -> StoreLimits {
+    StoreLimits(frame: FRAME_LIMIT, value: VALUE_LIMIT, meta: META_LIMIT)
+}
+
+// The least frame and value a store may record, and the room a frame keeps
+// beyond its value: a full key, a full value and the COMMIT's fixed fields
+// fit one frame, as at the ceilings (16,777,296 − 16,711,680).
+const LIMIT_VALUE_FLOOR: u64 = 4096
+
+const LIMIT_META_FLOOR: u64 = 4096
+
+const LIMIT_FRAME_ROOM: u64 = 65616
+
+fn limits_valid(l: StoreLimits) -> Option[String] {
+    if l.value < LIMIT_VALUE_FLOOR || l.value > VALUE_LIMIT {
+        return Some(string.from("value_limit"))
+    }
+    if l.frame < l.value + LIMIT_FRAME_ROOM || l.frame > FRAME_LIMIT {
+        return Some(string.from("frame_limit"))
+    }
+    if l.meta < LIMIT_META_FLOOR || l.meta > META_LIMIT {
+        return Some(string.from("meta_limit"))
+    }
+    None
+}
+
+fn limits_fit(l: StoreLimits) -> bool {
+    match limits_valid(l) {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn same_limits(a: StoreLimits, b: StoreLimits) -> bool {
+    a.frame == b.frame && a.value == b.value && a.meta == b.meta
+}
+
+fn named_limits(o: Option[StoreLimits]) -> StoreLimits {
+    match o {
+        Some(l) => l,
+        None => default_limits(),
+    }
+}
+
+// The COMMIT payload limit: the frame less its 16-byte head.
+fn transaction_limit(l: StoreLimits) -> u64 {
+    l.frame - 16
+}
+
+/// The limits this store records (§11.1 AP4a).
+pub fn store_limits(db: Db) -> StoreLimits {
+    db.limits
+}
+
+// An open that names limits must name the recorded ones (§11.1 AP4a).
+fn check_limits(wanted: Option[StoreLimits], found: StoreLimits) -> Result[(), Error] {
+    if let Some(l) = wanted {
+        if !same_limits(l, found) {
+            return Error(LimitsDiffer(found))
+        }
+    }
+    Ok(())
+}
+
+// The journal must hold a checkpoint and one more frame of the store's
+// frame limit (§11.1 AP4a).
+fn journal_floor(checkpoint_bytes: u64, journal_limit: u64, frame: u64) -> Option[Capacity] {
+    let Some(floor) = int.checked_add(checkpoint_bytes, frame) else {
+        return Some(Capacity(requested: 18446744073709551615u64, available: journal_limit))
+    }
+    if floor > journal_limit {
+        Some(Capacity(requested: floor, available: journal_limit))
+    } else {
+        None
+    }
+}
+
+// A frame or value past the recorded limits was never admitted (§11.1 AP4a).
+fn replay_within_limits(file: String, limits: StoreLimits, commit: JournalCommit) -> Result[(), Error] {
+    if commit.payload > transaction_limit(limits) {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    for op in commit.data {
+        if let Some(value) = view op.value {
+            if list.len(value) > limits.value {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+        }
+    }
+    Ok(())
+}
+
+// Limits an open names must lie between the floors and the ceilings.
+fn check_named_limits(limits: Option[StoreLimits]) -> Result[(), Error] {
+    if let Some(l) = limits {
+        if let Some(name) = limits_valid(l) {
+            return Error(Missing(name))
+        }
+    }
+    Ok(())
+}

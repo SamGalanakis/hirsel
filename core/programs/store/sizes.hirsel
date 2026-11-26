@@ -30,6 +30,10 @@ pub type Options: send {
     stream_retention_ms: u64,
     streams_per_caller_max: u64,
     streams_max: u64,
+    // The store's frame, value and MANIFEST limits (§11.1 AP4a). Genesis
+    // records them; None records today's ceilings, and an open with None
+    // takes the recorded ones. An open naming others is LimitsDiffer.
+    limits: Option[StoreLimits],
 }
 
 pub type Overrides: cross {
@@ -45,6 +49,7 @@ pub type Overrides: cross {
     dirty_bytes: Option[u64],
     pager_task_bytes: Option[u64],
     readers: Option[u64],
+    limits: Option[StoreLimits],
 }
 
 pub type Shortage: send {
@@ -63,7 +68,17 @@ const KEY_LIMIT: u64 = 4096
 // store puts before it (§1.3).
 pub const ROW_KEY_LIMIT: u64 = KEY_LIMIT - 4
 
-const CUT_STEP_BYTES: u64 = KEY_LIMIT + VALUE_LIMIT
+// A small Place's limits (§11.1 AP4a): a value as large as std.wsock's
+// default message (256 KiB), a frame of that value with today's 65,616-byte
+// gap to the frame, and 64 KiB of MANIFEST metadata.
+pub fn small_place_limits() -> StoreLimits {
+    StoreLimits(frame: 327760, value: 262144, meta: 65536)
+}
+
+// One cut step holds a full key and a full value of the store.
+fn cut_step_bytes(l: StoreLimits) -> u64 {
+    KEY_LIMIT + l.value
+}
 
 pub opaque type WriterPlan: send {
     total: u64,
@@ -102,7 +117,7 @@ fn writer_shortage(have: u64, parts: WriterParts) -> Shortage {
 }
 
 pub fn derived_sizes() -> Overrides {
-    Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+    Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None)
 }
 
 pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage] {
@@ -284,7 +299,7 @@ pub fn planned_capture(p: PlacePlan) -> Option[FollowerPlan] {
 }
 
 pub fn writer_plan(kind: Kind, o: Options) -> Result[WriterPlan, Shortage] {
-    let fixed = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit), checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes), group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms), cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes), dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: None)
+    let fixed = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit), checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes), group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms), cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes), dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: None, limits: o.limits)
     let (_, take writer) = writer_reservation(kind, 18446744073709551615u64, fixed)?
     Ok(take writer)
 }
@@ -320,7 +335,7 @@ fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, 
 
 fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
     let tiered = tiered_sizes(kind, resident, o)
-    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2, stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: 256u64, streams_max: resident / 4096u64)
+    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2, stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: 256u64, streams_max: resident / 4096u64, limits: o.limits)
 }
 
 // The Directory journal worker's grant beyond its group buffer, holding its
@@ -354,8 +369,8 @@ fn writer_state_bytes() -> u64 {
 }
 
 // The largest pack or MANIFEST file a cut writes (§3.9).
-fn cut_output_bytes(pack: u64) -> u64 {
-    order.max(pack, page_manifest_file_size(MANIFEST_LIMIT, 1))
+fn cut_output_bytes(pack: u64, l: StoreLimits) -> u64 {
+    order.max(pack, page_manifest_file_size(manifest_limit(l), 1))
 }
 
 fn history_workspace_bytes(packet: u64, compare: u64) -> Option[u64] {
@@ -373,11 +388,11 @@ fn cut_history_packet_room() -> u64 {
     189 + BINDING_BYTES + (4 * bytes[u64]) * (HISTORY_LOCATE_ROWS + CUT_HISTORY_RETAIN_LIMIT)
 }
 
-fn bucket_cut_parts(pack: u64) -> WriterParts {
+fn bucket_cut_parts(pack: u64, l: StoreLimits) -> WriterParts {
     let mut parts = writer_parts()
     let unbounded = 18446744073709551615u64
-    let output = cut_output_bytes(pack)
-    let manifest = option.unwrap(charge.seq(bytes[u8], cut_output_bytes(0)))
+    let output = cut_output_bytes(pack, l)
+    let manifest = option.unwrap(charge.seq(bytes[u8], cut_output_bytes(0, l)))
     let staging = option.unwrap(charge.seq(bytes[u8], order.min(output, HISTORY_PART_BYTES))) + option.unwrap(charge.seq(bytes[Bytes], 1))
     // PackBuffers.out stays live through the MANIFEST PUT. The cut has
     // its own history workspace and may grow its comparison buffer to
@@ -395,7 +410,9 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
     let unbounded = 18446744073709551615u64
     let pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
     let checkpoint_budget = size_or(o.checkpoint_bytes, pack)
-    let floor = int.checked_add(checkpoint_budget, FRAME_LIMIT)
+    let l = named_limits(o.limits)
+    let frame = l.frame
+    let floor = int.checked_add(checkpoint_budget, frame)
     let minimum_journal = size_or(floor, unbounded)
     let journal = size_or(o.journal_limit, minimum_journal)
     let group = size_or(o.group_bytes, 4 * MIB)
@@ -403,10 +420,10 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         Some(n) => n,
         None => 64u32
     }
-    let mut valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64
+    let mut valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64 && limits_fit(l)
     let mut parts = writer_parts()
     let mut cut_parts = writer_parts()
-    let mut recovery = JOURNAL_CHUNK_BYTES + FRAME_LIMIT
+    let mut recovery = JOURNAL_CHUNK_BYTES + frame
     if let Bucket(config) = kind {
         let lanes = std.object.lane_reservation(config)
         valid = valid && lanes != None
@@ -421,22 +438,22 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         // entry beside its decoded frame. The checkpoint can hold its entry
         // beside a pack read. The growing suffix and location tables remain
         // charged at the call that allocates them.
-        let fetched_entry = option.unwrap(charge.seq(bytes[u8], object_writer_entry_room(order.max(group_room, FRAME_LIMIT))))
-        let checkpoint_read = int.checked_add(option.unwrap(charge.seq(bytes[u8], cut_history_packet_room())), size_or(charge.seq(bytes[u8], cut_output_bytes(pack)), unbounded))
-        recovery = order.max(fetched_entry + FRAME_LIMIT, size_or(checkpoint_read, unbounded))
-        cut_parts = bucket_cut_parts(pack)
+        let fetched_entry = option.unwrap(charge.seq(bytes[u8], object_writer_entry_room(order.max(group_room, frame))))
+        let checkpoint_read = int.checked_add(option.unwrap(charge.seq(bytes[u8], cut_history_packet_room())), size_or(charge.seq(bytes[u8], cut_output_bytes(pack, l)), unbounded))
+        recovery = order.max(fetched_entry + frame, size_or(checkpoint_read, unbounded))
+        cut_parts = bucket_cut_parts(pack, l)
     } else {
         let aligned_room = journal_group_room(order.min(group, 4294967295u64))
         let worker = charge.task(bytes[Result[(), Error]], aligned_room + JOURNAL_WORKER_SLACK)
         writer_add(mut parts, "journal_worker", size_or(worker, unbounded))
         writer_add(mut parts, "journal_creation", option.unwrap(charge.seq(bytes[u8], 4096)))
-        writer_add(mut cut_parts, "cut_output", cut_output_bytes(pack))
+        writer_add(mut cut_parts, "cut_output", cut_output_bytes(pack, l))
     }
     writer_add(mut parts, "journal_channels", journal_channel_bytes(int.widen(commits)))
     writer_add(mut parts, "writer_state", writer_state_bytes())
-    let write = 2 * FRAME_LIMIT
+    let write = 2 * frame
     writer_add(mut cut_parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
-    writer_add(mut cut_parts, "cut_step", CUT_STEP_BYTES)
+    writer_add(mut cut_parts, "cut_step", cut_step_bytes(l))
     let cut_fixed = size_or(writer_total(cut_parts), unbounded)
     let derived = match writer_total(parts) {
         Some(lifetime) => {
@@ -459,12 +476,12 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         }
         writer_add(mut parts, "checkpoint_task_work", work)
     } else if write >= recovery {
-        writer_add(mut parts, "staged_frame", FRAME_LIMIT)
-        writer_add(mut parts, "frames_in_flight", FRAME_LIMIT)
+        writer_add(mut parts, "staged_frame", frame)
+        writer_add(mut parts, "frames_in_flight", frame)
     } else {
         if let Directory = kind {
             writer_add(mut parts, "journal_chunk", JOURNAL_CHUNK_BYTES)
-            writer_add(mut parts, "recovered_frame", FRAME_LIMIT)
+            writer_add(mut parts, "recovered_frame", frame)
         } else {
             writer_add(mut parts, "recovery", recovery)
         }
@@ -486,7 +503,7 @@ pub opaque type FollowerPlan: send {
 }
 
 pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
-    let effective = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit), checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes), group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms), cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes), dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: Some(0))
+    let effective = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit), checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes), group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms), cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes), dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: Some(0), limits: o.limits)
     let (take sized_options, writer) = writer_reservation(kind, 18446744073709551615u64, effective)?
     let transport = if let Bucket(lanes) = kind {
         option.unwrap(std.object.lane_reservation(lanes))

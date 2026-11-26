@@ -44,7 +44,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     let before = share_roots(source.db.heads[0].roots)
     let state = deploy_result(capacity(current_state(source.db)))?
-    let initial = deploy_result(journal_replay(take state, source.db.next_node))?
+    let initial = deploy_result(journal_replay(take state, source.db.next_node, source.db.limits))?
     let steps = read_steps(d, stamp)?
     let replayed = deploy_result(replay_export(d, id, base.terminal, base.end, stamp.terminal, stamp.end, steps, take initial))?
     if replayed.state.tips[0].head != stamp.head {

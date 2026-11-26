@@ -689,7 +689,7 @@ fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
 }
 
 fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
-    result.unwrap(journal_replay(result.unwrap(main_state(take roots, head, at)), next_node))
+    result.unwrap(journal_replay(result.unwrap(main_state(take roots, head, at)), next_node, default_limits()))
 }
 
 fn disk_window_width(commit_number: u64) -> u64 {

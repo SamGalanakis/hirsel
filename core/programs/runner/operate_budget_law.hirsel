@@ -71,7 +71,7 @@ fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfi
 fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: String, key: Secret) -> PlaceConfig[(), (), ()] {
     let bucket = BucketBacking(net: n, place: std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), credentials: std.cred.from_secret("access", secret.share(key), ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64)
     let mut config = budget_config(Bucket(take bucket), c, r, tasks, n)
-    config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(65536u64), pack_bytes: Some(65536u64), group_bytes: Some(65536u64), group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+    config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(65536u64), pack_bytes: Some(65536u64), group_bytes: Some(65536u64), group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None)
     take config
 }
 

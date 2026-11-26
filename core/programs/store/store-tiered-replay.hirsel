@@ -11,7 +11,7 @@ type ReplayTieredAccount: shareable + send {
 }
 
 fn journal_replay_manifest(take state: State, manifest: PageManifest) -> Result[JournalReplay, Error] {
-    let mut replay = journal_replay(take state, manifest.next_stamp - 1)?
+    let mut replay = journal_replay(take state, manifest.next_stamp - 1, manifest.limits)?
     replay.tiered.total = manifest.account_tiered
     Ok(take replay)
 }

@@ -156,8 +156,8 @@ fn history_claim_packet(mut raw: Bytes, head: HistoryHead) -> Result[(), Error] 
     capacity(history_seal(mut raw, ctx, 112, 0x0040))
 }
 
-fn history_manifest_packet(mut raw: Bytes, id: StoreId, kind: u8) -> Result[HistoryRef, Error] {
-    raw = disk_page_manifest_bytes(id, page_manifest_empty())?
+fn history_manifest_packet(mut raw: Bytes, id: StoreId, kind: u8, limits: StoreLimits) -> Result[HistoryRef, Error] {
+    raw = disk_page_manifest_bytes(id, page_manifest_empty(limits))?
     let ctx = DiskContext(store: id, role: 1, seq: 1)
     let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
     capacity(history_append_header(mut header, ctx, 1, kind))?
@@ -207,8 +207,8 @@ fn history_check_conditions(mut client: std.object.Client, key: String, mut raw:
     }
 }
 
-fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
-    let manifest = history_manifest_packet(mut buffers.packet, id, kind)?
+fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64, limits: StoreLimits) -> Result[HistoryRegister, Error] waits {
+    let manifest = history_manifest_packet(mut buffers.packet, id, kind, limits)?
     history_create(mut client, history_key("m-", manifest), mut buffers.packet, mut buffers.compare, deadline)?
     let locator = HistoryLocateRoot(depth: 0, rows: list.new())
     history_publish_base(mut client, id, holder, kind, authority, manifest, locator, mut buffers, deadline)

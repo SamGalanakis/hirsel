@@ -549,7 +549,7 @@ fn mn_row(dir: Dir, clock: Clock, random: Random, tasks: Tasks, id: triggers.Id)
 
 fn mn_disk(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take grants: runner.Grants[Mn, Hd, MnSeed]) -> runner.PlaceConfig[Mn, Hd, MnSeed] {
     let mut config = mn_settings(clock, random, tasks, net, Disk(dir), Some(take grants), false, true)
-    config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+    config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None)
     take config
 }
 

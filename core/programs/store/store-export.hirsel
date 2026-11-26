@@ -628,7 +628,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     let mut decoded_packs = deploy_result(disk_loaded(id, take validated))?
     let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
     list.clear(mut decoded_packs.all)
-    let replay = deploy_result(journal_replay(take initial, decoded_packs.manifest.next_stamp - 1))?
+    let replay = deploy_result(journal_replay(take initial, decoded_packs.manifest.next_stamp - 1, decoded_packs.manifest.limits))?
     let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, 72, stamp.terminal, stamp.end, list.new(), take replay))?
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)

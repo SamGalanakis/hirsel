@@ -148,7 +148,7 @@ fn refusal_noop(mut _phase: Migration) -> Result[(), Error] {
 
 fn refusal_import(digest: Inline[u8, 32]) -> ValidatedImport {
     let base = ExportStamp(attempt: list.new(), store_hi: 0, store_lo: 0, opened: 0, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 0, end: 0)
-    let target = PreparedTarget(describe: list.new(), release: list.new(), digest: list.new(), resident_limit: 0, pack_bytes: 0, checkpoint_bytes: 0, journal_limit: 0)
+    let target = PreparedTarget(describe: list.new(), release: list.new(), digest: list.new(), resident_limit: 0, pack_bytes: 0, checkpoint_bytes: 0, journal_limit: 0, limits: None)
     let meta = PreparedMeta(base: take base, target: take target, next_table: 1, changes: 0, ranges: 0)
     ValidatedImport(meta: take meta, delta: list.new(), ranges: list.new(), rewrites: list.new(), digest: digest, charge: 0)
 }
@@ -760,7 +760,7 @@ fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
 fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
     let fixtures = disk_test_directory(d)
     let owner = StoreId(hi: 3, lo: 4)
-    let mut manifest = page_manifest_empty()
+    let mut manifest = page_manifest_empty(default_limits())
     manifest.next_pack = 11
     manifest.next_stamp = 102
     manifest.next_table = 10
@@ -806,7 +806,7 @@ fn l68_replay_base() -> Result[JournalReplay, Error] {
     list.push(mut slots, ColdPage(std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)))
     let mut roots = empty_roots()
     roots.collections.root = page_result(std.page.attach(take image, take slots, list.new()))?
-    let mut manifest = page_manifest_empty()
+    let mut manifest = page_manifest_empty(default_limits())
     manifest.account_tiered = 172
     manifest.next_stamp = 101
     journal_replay_manifest(capacity(main_state(take roots, 0, 0))?, manifest)
@@ -815,7 +815,7 @@ fn l68_replay_base() -> Result[JournalReplay, Error] {
 fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[JournalEvent, Error] {
     let mut ops: List[JournalOp] = list.new()
     list.push(mut ops, JournalOp(key: log_key(9, 2)?, value: Some(string.into_bytes(string.from(value))), prior: prior, trim: None))
-    Ok(Commit(JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), keyed: list.new(), call: None)))
+    Ok(Commit(JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), keyed: list.new(), call: None, payload: 0)))
 }
 
 fn l68_check_replay_root(tree: PageTree, rows: u64, charge: u64, expected_value: String) -> Result[(), Error] {
@@ -915,7 +915,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let until = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut source = history_reader(take client, until)
     let owner = StoreId(hi: 3, lo: 4)
-    let mut manifest = page_manifest_empty()
+    let mut manifest = page_manifest_empty(default_limits())
     manifest.next_pack = 11
     manifest.next_stamp = 102
     manifest.next_table = 10
@@ -942,8 +942,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let Some(object) = pack.object else {
         fail("L68: a Bucket pack needs its immutable object name")
     }
-    if object.seq != 8 || object.epoch != 1 || object.len != 220 || object.digest != 79 ||
-        pack.inventory.index != 168 || paging.generation != 1 {
+    if object.seq != 8 || object.epoch != 1 || object.len != 220 || object.digest != 79 || pack.inventory.index != 168 || paging.generation != 1 {
         fail("L68: reopening changed the immutable name or pack extent")
     }
     let mut truncated = cold

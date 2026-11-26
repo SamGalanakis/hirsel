@@ -217,7 +217,7 @@ pub fn cell_set[V](mut tx: Tx, c: Cell[V], v: V) -> Result[(), Error] {
     let mut raw: Bytes = list.new()
     list.put_word_le(mut raw, c.binding.readers.current)
     std.codec.encode(c.binding.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    if list.len(raw) > VALUE_LIMIT {
+    if list.len(raw) > tx.limits.value {
         return Error(Limit(Value))
     }
     stage_cell(mut tx, c.binding.id, Some(take raw))
@@ -300,7 +300,7 @@ fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Err
             } else {
                 0u64
             }
-            if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > 16777280 {
+            if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > transaction_limit(tx.limits) {
                 return Error(Limit(Transaction))
             }
             Some(after)

@@ -190,7 +190,7 @@ fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], 
     }
     let (take description, take record) = prepare_activation(registered, p.n_place, prepare_open_result(store.describe_declarations(p.clock, p.schema))?) ?=> |problem| Open(Place(problem))
     let ReleaseRecord(release: take release, digest: take image, binding: take binding, ..) = take record
-    let target = store.PreparedTarget(describe: take description, release: take release, digest: take image, resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes, checkpoint_bytes: p.options.checkpoint_bytes, journal_limit: p.options.journal_limit)
+    let target = store.PreparedTarget(describe: take description, release: take release, digest: take image, resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes, checkpoint_bytes: p.options.checkpoint_bytes, journal_limit: p.options.journal_limit, limits: p.options.limits)
     let snapshot = store.staged_snapshot(source, staged)
     let tables = prepare_open_result(declared_triggers(registered, handles, snapshot))?
     let old = prepare_old_entries(source)?

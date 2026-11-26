@@ -248,21 +248,21 @@ fn format3_end() -> Bytes {
 }
 
 // Wire vectors derived from the spec tables with libxxhash.
-fn format9_manifest() -> Bytes {
+fn format10_manifest() -> Bytes {
     let words: Inline[u64, 86] =[
         0x0000003800010001,
-        0x45c5d41cbebe7f57,
+        0x3307f36c43cc41f5,
         0x45524f5453524948,
-        0x0000000100000009,
+        0x000000010000000a,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
         0x0000000000000001,
         0x0000000000000000,
         0x0000025200010031,
-        0xf183e438fe39d308,
+        0x2dcb5a2ee84d393f,
         0x0000000000000001,
-        0x0000100000001000,
+        0x0100000000ff0000,
         0x0100004000000400,
         0x0000000000000064,
         0x0000000100000001,
@@ -625,7 +625,7 @@ fn refuse_frozen_format3(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
 fn format4_manifest_law() -> Result[(), Error] {
     let path = "MANIFEST"
     let id = StoreId(hi: 1, lo: 2)
-    let mut m = page_manifest_empty()
+    let mut m = page_manifest_empty(default_limits())
     m.next_stamp = 100
     m.next_pack = 50
     m.first_live = 7
@@ -641,7 +641,7 @@ fn format4_manifest_law() -> Result[(), Error] {
     m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
     let roots: LocatedRoots = clone(m.branches[0].roots)
     list.push(mut m.pins, LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
-    let oracle = format9_manifest()
+    let oracle = format10_manifest()
     if disk_page_manifest_bytes(id, m)? != oracle {
         return Error(Foreign)
     }
@@ -659,10 +659,10 @@ fn format4_manifest_law() -> Result[(), Error] {
         return Error(Foreign)
     }
     let mut old_header = copied(list.slice(oracle, 0, 72))?
-    list.set_word_le(mut old_header, 24, 8u32)
-    list.set_word_le(mut old_header, 8, 0x387e81c410b2bab6u64)
+    list.set_word_le(mut old_header, 24, 9u32)
+    list.set_word_le(mut old_header, 8, 0x45c5d41cbebe7f57u64)
     match disk_read_header(path, old_header, 1, Some(1), Some(id)) {
-        Error(Unsupported(8)) => (),
+        Error(Unsupported(9)) => (),
         _ => return Error(Foreign),
     }
     let mut overflow = copied(payload)?

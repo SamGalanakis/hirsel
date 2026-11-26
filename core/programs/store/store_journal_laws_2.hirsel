@@ -54,7 +54,7 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
 // L51(a) and (k). Main is 147 bytes. 43,575 full pins and
 // pins named with 143 and 144 bytes bring the total to 16,777,069.
 fn fork_limit_manifest() -> PageManifest {
-    let mut manifest = page_manifest_empty()
+    let mut manifest = page_manifest_empty(default_limits())
     manifest.fence = 1
     let roots: LocatedRoots = clone(manifest.branches[0].roots)
     let padding = string.repeat("x", 249)

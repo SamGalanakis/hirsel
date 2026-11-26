@@ -57,7 +57,7 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     let Some(refund) = delete_refund(tx, p)? else {
         return Ok(false)
     }
-    let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, tx.frame_bytes)?
+    let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, tx.frame_bytes, transaction_limit(tx.limits))?
     apply_delete(mut tx, take p, refund)?
     tx.frame_bytes = frame
     Ok(true)
@@ -136,10 +136,20 @@ pub fn law_model(seed: u64) -> Result[(), ()] {
             let drawn = std.prop.span(mut src, 1, fn(mut choice: std.prop.Source) -> Option[(u64, u64)] {
                 // 99% continuation puts about half the tapes at depth 64.
                 // Record a stop at the cap too, so deleting a span still replays.
-                let more = std.prop.weighted(mut choice, if i < 128 { 99 } else { 0 }, 100)
-                if more && i < 128 { Some(std.prop.draw(mut choice, command)) } else { None }
+                let more = std.prop.weighted(mut choice, if i < 128 {
+                    99
+                } else {
+                    0
+                }, 100)
+                if more && i < 128 {
+                    Some(std.prop.draw(mut choice, command))
+                } else {
+                    None
+                }
             })
-            let Some(operation) = drawn else { break }
+            let Some(operation) = drawn else {
+                break
+            }
             list.push(mut tape, operation)
         }
         take tape
@@ -494,7 +504,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
 }
 
 fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    encode_staged(ci, None, None, mut ops, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset)
+    encode_staged(ci, None, None, mut ops, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset, FRAME_LIMIT)
 }
 
 // Hand-derived COMMIT bytes: delete key 1, then put key 2 = 33. Check from

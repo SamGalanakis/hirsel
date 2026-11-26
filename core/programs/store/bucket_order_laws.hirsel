@@ -27,8 +27,12 @@ fn bucket_order_open(tasks: Tasks, r: Random, clock: Clock, endpoint: std.sim.s3
 // An empty commit still advances the main version. This keeps schema changes
 // and their automatic cuts out of the head request schedule.
 fn bucket_order_commit(mut db: Db) -> Result[Ticket, Error] waits {
-    let written = run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), Error] { Ok(()) })?
-    let Committed(done) = written else { fail("the ordered test commit was refused") }
+    let written = run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), Error] {
+        Ok(())
+    })?
+    let Committed(done) = written else {
+        fail("the ordered test commit was refused")
+    }
     Ok(done.ticket)
 }
 
@@ -51,7 +55,9 @@ fn bucket_order_fresh(take writer: OrderedWriter) -> Result[(), Error] waits {
         }
         return Ok(())
     }
-    if version(observed?) != 3 { fail("L57-a: fresh missed the applied position 5") }
+    if version(observed?) != 3 {
+        fail("L57-a: fresh missed the applied position 5")
+    }
     durable(mut db, third)?
     if let FencedAfterRead = writer.ordering {
         let _ = channel.send(writer.read_done, ())
@@ -70,12 +76,21 @@ fn bucket_order_history(report: std.sim.s3.Report) -> bool {
     let request_id = report.head_writes[4].request
     // Successful PUT (reply lost), conditional retry, Q5 witness, fresh probe.
     for req in report.requests {
-        if req.key != "head" { continue }
-        if req.request == request_id { found = 1; continue }
+        if req.key != "head" {
+            continue
+        }
+        if req.request == request_id {
+            found = 1;
+            continue
+        }
         match found {
             0 => (),
-            1 if req.method == "PUT" && req.status == 412 && !req.applied => { found += 1 },
-            2 if req.method == "GET" && req.status == 200 => { found += 1 },
+            1 if req.method == "PUT" && req.status == 412 && !req.applied => {
+                found += 1
+            },
+            2 if req.method == "GET" && req.status == 200 => {
+                found += 1
+            },
             3 if req.method == "GET" && req.status == 304 => return true,
             _ => return false,
         }
@@ -100,13 +115,17 @@ fn bucket_order_fresh_case(tasks: Tasks, c: Clock, r: Random, seed: u64, orderin
         Overtaken => {
             result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", 5))
             let successor = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
-            if version(snapshot(successor)) != 2 { fail("L57-a: the successor recovered the unapplied commit") }
+            if version(snapshot(successor)) != 2 {
+                fail("L57-a: the successor recovered the unapplied commit")
+            }
             close(take successor)?
         },
         FencedAfterRead => {
             result.unwrap(channel.receive(complete))
             let successor = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
-            if version(snapshot(successor)) != 3 { fail("L57-a: the successor lost the applied commit") }
+            if version(snapshot(successor)) != 3 {
+                fail("L57-a: the successor lost the applied commit")
+            }
             close(take successor)?
             result.unwrap(channel.send(go, ()))
         },
@@ -123,8 +142,7 @@ fn bucket_order_fresh_case(tasks: Tasks, c: Clock, r: Random, seed: u64, orderin
             }
         },
         _ => {
-            if list.len(report.head_writes) < 5 || read_le(report.head_writes[4].data, 120, 8) != 5 ||
-                !bucket_order_history(report) {
+            if list.len(report.head_writes) < 5 || read_le(report.head_writes[4].data, 120, 8) != 5 || !bucket_order_history(report) {
                 fail("L57-a: head requests did not follow the reply-loss and fresh sequence")
             }
         },
@@ -143,7 +161,11 @@ fn bucket_ack_fixture(tasks: Tasks, c: Clock, seed: u64) -> BucketSim {
     for i in 0u64 .. 256 {
         // Keep one clean connection after each seeded fault so the law
         // reaches every commit without exhausting a retry budget.
-        let fault = if i % 2 == 0 { 0u64 } else { std.sim.world.pick(mut choices, 4) }
+        let fault = if i % 2 == 0 {
+            0u64
+        } else {
+            std.sim.world.pick(mut choices, 4)
+        }
         list.push(mut words, fault << 62)
         list.push(mut words, seed + i)
     }
@@ -169,16 +191,22 @@ fn bucket_ack_commits(tasks: Tasks, r: Random, sim: BucketSim, replaced: bool) -
             Error(take problem) => Error(take problem),
         }
         if replaced && i > 4 {
-            if let Error(Fenced(1)) = acked {} else { fail("VP1: the deposed holder acknowledged a commit") }
+            if let Error(Fenced(1)) = acked {} else {
+                fail("VP1: the deposed holder acknowledged a commit")
+            }
             continue
         }
         acked?
         let due = std.object.deadline_after_ms(marker_client, BUCKET_LAW_OP_MS)
         let (seen, _) = std.object.fetch(mut marker_client, bucket_ack_marker(i), list.new(), due)
-        if let Error(NotFound) = seen {} else { fail("VP1: the acknowledgement marker must be absent") }
+        if let Error(NotFound) = seen {} else {
+            fail("VP1: the acknowledgement marker must be absent")
+        }
         if replaced && i == 4 {
             let successor = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
-            if version(snapshot(successor)) != 4 { fail("VP1: the successor did not inherit four acknowledged commits") }
+            if version(snapshot(successor)) != 4 {
+                fail("VP1: the successor did not inherit four acknowledged commits")
+            }
             close(take successor)?
         }
     }
@@ -228,7 +256,9 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
             let prior = view report.head_writes[previous_index]
             let prior_capture = history_decode_head(prior.data)?
             let previous = prior_capture.head
-            let Some(precondition) = event.if_match else { fail("VP1: HEAD replaced without an If-Match") }
+            let Some(precondition) = event.if_match else {
+                fail("VP1: HEAD replaced without an If-Match")
+            }
             if precondition != prior.etag || event.if_none_match != None || !same(previous.store, current.store) || prior.etag == event.etag || list.slice(prior.data, 240, list.len(prior.data)) != list.slice(event.data, 240, list.len(event.data)) {
                 fail("VP1: HEAD did not condition on its predecessor or changed the authority")
             }
@@ -260,7 +290,9 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
     }
     for (key, at) in last_head {
         let event = view report.head_writes[at]
-        let Some(present) = map.get(report.objects, key) else { fail("VP1: the applied HEAD disappeared") }
+        let Some(present) = map.get(report.objects, key) else {
+            fail("VP1: the applied HEAD disappeared")
+        }
         if event.etag != present.etag || event.data != present.data {
             fail("VP1: the last applied HEAD differs from the stored HEAD")
         }
@@ -276,7 +308,7 @@ type WitnessCut {
 }
 
 fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
-    let mut manifest = page_manifest_empty()
+    let mut manifest = page_manifest_empty(default_limits())
     manifest.generation = generation
     manifest.first_live = pos
     manifest.prev_first = pos
@@ -288,13 +320,15 @@ fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef
     let retained = HistoryRetention(floor: pos, earlier: list.new())
     let locate = HistoryLocateRoot(depth: 0, rows: list.new())
     let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate)?
-    let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding: [0; 32])
+    let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding:[0; 32])
     Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
 fn witness_create(mut client: std.object.Client, key: String, data: Bytes, due: u64) -> Result[std.object.ETag, Error] waits {
     let (created, _) = std.object.store_if(mut client, key, Absent, clone(data), due)
-    let Applied(meta) = created ?=> Remote else { fail("L52-W: a fixture key already existed") }
+    let Applied(meta) = created ?=> Remote else {
+        fail("L52-W: a fixture key already existed")
+    }
     Ok(meta.etag)
 }
 
@@ -302,7 +336,9 @@ fn witness_publish(mut client: std.object.Client, selected: HistoryHead, declara
     let mut data: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
     history_encode_head(mut data, selected, declaration)?
     let (result, _) = std.object.store_if(mut client, "head", precondition, take data, due)
-    let Applied(meta) = result ?=> Remote else { fail("L52-W: a fixture head lost its precondition") }
+    let Applied(meta) = result ?=> Remote else {
+        fail("L52-W: a fixture head lost its precondition")
+    }
     Ok(meta.etag)
 }
 
@@ -326,7 +362,10 @@ fn witness_claim(take actor: WitnessClaimant) -> Result[(), Error] waits {
     opts.retain = 1
     let grant = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
     match open_authority(actor.tasks, take grant, actor.clock, actor.r, opts) {
-        Ok(take unexpected) => { let _ = take unexpected; fail("L52-W: B opened after the pair changed") },
+        Ok(take unexpected) => {
+            let _ = take unexpected;
+            fail("L52-W: B opened after the pair changed")
+        },
         Error(Refusal(error: take reason, ..)) => Error(take reason),
     }
 }
@@ -335,17 +374,29 @@ fn witness_ceiling_check(report: std.sim.s3.Report, removed: String, next_cut: u
     let mut missing = false
     let mut head_reads = 0u64
     for event in report.requests {
-        if event.method != "GET" { continue }
+        if event.method != "GET" {
+            continue
+        }
         if missing {
-            if event.key == "head" && event.status == 200 { head_reads += 1 }
+            if event.key == "head" && event.status == 200 {
+                head_reads += 1
+            }
             if blocked_entry != "" && event.key == blocked_entry {
                 fail("L52-W: B read a checkpoint after observing another pair")
             }
         }
-        if event.key == removed && event.status == 404 { missing = true }
+        if event.key == removed && event.status == 404 {
+            missing = true
+        }
     }
-    if !missing || head_reads != 1 { fail("L52-W: a missing checkpoint did not cause exactly one fresh head GET") }
-    if list.len(report.head_writes) != (if next_cut == 22 { 5 } else { 7 }) {
+    if !missing || head_reads != 1 {
+        fail("L52-W: a missing checkpoint did not cause exactly one fresh head GET")
+    }
+    if list.len(report.head_writes) != (if next_cut == 22 {
+        5
+    } else {
+        7
+    }) {
         fail("L52-W: B wrote a head or C missed an advance")
     }
     let last_write = report.head_writes[list.len(report.head_writes) - 1]
@@ -389,7 +440,6 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
         std.object.erase(mut publisher, manifest_key, due) ?=> Remote
         result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", entry_key, 1))
     }
-
     let client = bucket_law_client_with(sim, tasks, "s3.test", 23, true)?
     let mut opts = bucket_order_options(false)
     opts.retain = 1
@@ -409,10 +459,11 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
         witness_ceiling_check(report, entry_key, 24, "")
     } else {
         // C has already read its checkpoint when its sweep removes C20.
-        if list.len(report.head_writes) != 5 { fail("L52-W: the successor's head writes were missing") }
+        if list.len(report.head_writes) != 5 {
+            fail("L52-W: the successor's head writes were missing")
+        }
         let body = view report.head_writes[3].data
-        let reference = HistoryRef(seq: read_le(body, 120, 8), epoch: read_le(body, 128, 8),
-            len: read_le(body, 136, 8), digest: read_le(body, 144, 8))
+        let reference = HistoryRef(seq: read_le(body, 120, 8), epoch: read_le(body, 128, 8), len: read_le(body, 136, 8), digest: read_le(body, 144, 8))
         let claimed_entry = history_key("e-", reference)
         witness_ceiling_check(report, manifest_key, 22, claimed_entry)
     }

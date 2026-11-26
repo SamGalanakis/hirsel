@@ -39,7 +39,12 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         return Error(Drift)
     }
     let target = view staged.meta.target
-    if let Some(problem) = journal_floor(target.checkpoint_bytes, target.journal_limit) {
+    if let Some(wanted) = target.limits {
+        if !same_limits(wanted, db.limits) {
+            return Error(Store(LimitsDiffer(db.limits)))
+        }
+    }
+    if let Some(problem) = journal_floor(target.checkpoint_bytes, target.journal_limit, db.limits.frame) {
         return Error(FullNew(Journal(problem)))
     }
     let disk_limit = disk_state(db).options.resident_limit
@@ -77,7 +82,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         return Error(Expired)
     }
     db.ceiling = disk_limit
-    let limits = TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit)
+    let limits = TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit, frame: db.limits.frame)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.target = Some(limits)
     })

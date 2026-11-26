@@ -210,7 +210,7 @@ fn crash_install_prepared(mut db: Db, d: Dir, c: Clock, tasks: Tasks, attempt: B
 fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, image: u8, journal_cap: u64) -> Result[Inline[u8, 32], DeployError] waits {
     let mut source = open_export(scratch, c, attempt, disk_crash_options("install"))?
     let staged = deploy_result(stage_next(source, tasks))?
-    let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: journal_cap)
+    let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: journal_cap, limits: None)
     write_prepared(mut source, staged, scratch, take header)?
     let checked = validate_prepared(scratch)?
     let work = reserve_import(mut db, take checked)?
@@ -286,15 +286,15 @@ fn expired_cutover_keeps_old_serving(d: Dir, c: Clock, r: Random, tasks: Tasks) 
 
 fn crash_prepared_meta(d: Dir) -> Result[Bytes, DeployError] waits {
     let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
-    // AP1b gives 212 + 32 bytes for this fixture's 32-byte describe.
-    let frame = scratch_result(read_disk_bytes(mut file, "PREPARED", 72, 16 + 244))?
+    // AP1b gives 216 + 32 bytes for this fixture's 32-byte describe and no limits.
+    let frame = scratch_result(read_disk_bytes(mut file, "PREPARED", 72, 16 + 248))?
     scratch_result(disk_io(host.close(take file)))?
     let kind: u16 = list.word_le(frame, 0)
     let width: u32 = list.word_le(frame, 4)
-    if kind != 0x0081 || width != 244 {
+    if kind != 0x0081 || width != 248 {
         fail("unexpected PREPARED metadata frame")
     }
-    deploy_result(copied(list.slice(frame, 16, 260)))
+    deploy_result(copied(list.slice(frame, 16, 264)))
 }
 
 // Exercise the pre-rename refusals together with a fresh export after drift.
@@ -322,7 +322,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let limited_meta = crash_prepared_meta(scratch_limit)?
     let fitted: u64 = list.word_le(fitted_meta, 216)
     let limited: u64 = list.word_le(limited_meta, 216)
-    if fitted != 16781392 || limited != 16781391 || list.slice(fitted_meta, 0, 216) != list.slice(limited_meta, 0, 216) || list.slice(fitted_meta, 224, 244) != list.slice(limited_meta, 224, 244) {
+    if fitted != 16781392 || limited != 16781391 || list.slice(fitted_meta, 0, 216) != list.slice(limited_meta, 0, 216) || list.slice(fitted_meta, 224, 248) != list.slice(limited_meta, 224, 248) {
         fail("PREPARED did not preserve the exact target options")
     }
     match crash_apply(mut db, attempt, blocked) {

@@ -101,7 +101,7 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
         Error(disk_fault(file, 0, Malformed))
     })?
     let charge = branch_root_bytes(name, roots)
-    if charge > META_LIMIT - replay.record_bytes {
+    if charge > replay.limits.meta - replay.record_bytes {
         return Error(disk_fault(file, 0, Malformed))
     }
     capacity(list.try_reserve(mut replay.state.tips, 1))?

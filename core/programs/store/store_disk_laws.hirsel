@@ -99,7 +99,7 @@ pub fn law_frame_size(c: Clock) -> bool {
         let physical = result.unwrap(logical_key(id, key))
         if operation % 5 == 0 {
             if model[k].present {
-                size = result.unwrap(edit_frame(ops, below, 0, physical, None, size))
+                size = result.unwrap(edit_frame(ops, below, 0, physical, None, size, 16777280))
                 let _ = save_data_op(mut ops, below, false, mut rows, take physical, None)
                 model[k].present = false
                 model[k].op = 2
@@ -113,7 +113,7 @@ pub fn law_frame_size(c: Clock) -> bool {
             }
             let mut value: Bytes = list.with_capacity(width)
             list.fill(mut value, width, int.truncate(operation))
-            size = result.unwrap(edit_frame(ops, below, 0, physical, Some(width), size))
+            size = result.unwrap(edit_frame(ops, below, 0, physical, Some(width), size, 16777280))
             let _ = save_data_op(mut ops, below, false, mut rows, take physical, Some(PageValue(take value)))
             model[k].present = true
             model[k].op = 1
@@ -230,7 +230,7 @@ pub fn disk_law_frames() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 3, seq: 7)
     let raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
-    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 200, 228, 92, 182, 58, 209, 121, 121, 72, 73, 82, 83, 84, 79, 82, 69, 9, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 116, 100, 132, 100, 62, 102, 56, 225, 72, 73, 82, 83, 84, 79, 82, 69, 10, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     if list.len(raw) != 72 {
         return false
     }
@@ -741,7 +741,7 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
             return false
         }
     }
-    let mut too_new = page_manifest_empty()
+    let mut too_new = page_manifest_empty(default_limits())
     too_new.fence = 2
     result.unwrap(disk_publish_manifest(d, id, too_new))
     let left: Bytes = list.new()
@@ -754,7 +754,7 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
         return false
     }
     // AP21 rejects the corrupt list before removing any file.
-    let mut damaged = page_manifest_empty()
+    let mut damaged = page_manifest_empty(default_limits())
     damaged.next_pack = 2
     damaged.next_stamp = 2
     damaged.pack_root = std.page.PagePtr(pack: 1, offset: 72, len: 60, checksum: 0, stamp: 1)
@@ -781,19 +781,19 @@ fn disk_test_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()
 
 @test
 fn journal_test_floor() -> Result[(), ()] {
-    let Some(short) = journal_floor(67108864, 83886159) else {
+    let Some(short) = journal_floor(67108864, 83886159, FRAME_LIMIT) else {
         return Error(())
     }
     if short.requested != 83886160 || short.available != 83886159 {
         return Error(())
     }
-    if let Some(_) = journal_floor(67108864, 83886160) {
+    if let Some(_) = journal_floor(67108864, 83886160, FRAME_LIMIT) {
         return Error(())
     }
-    if let Some(_) = journal_floor(18446744073692774319, 18446744073709551615) {
+    if let Some(_) = journal_floor(18446744073692774319, 18446744073709551615, FRAME_LIMIT) {
         return Error(())
     }
-    let Some(overflow) = journal_floor(18446744073692774320, 18446744073709551615) else {
+    let Some(overflow) = journal_floor(18446744073692774320, 18446744073709551615, FRAME_LIMIT) else {
         return Error(())
     }
     if overflow.requested != 18446744073709551615 || overflow.available != 18446744073709551615 {

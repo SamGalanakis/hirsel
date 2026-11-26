@@ -246,7 +246,7 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
                 return Ok(())
             }
             if let Some(refund) = delete_refund(tx, key)? {
-                frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
+                frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, transaction_limit(tx.limits))?
                 push_index_edit(mut edits, RemoveRow(take key, refund))
             }
             continue

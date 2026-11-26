@@ -185,6 +185,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         })?
         open_heads(mut prepared, take state)?
         prepared.next_node = replay.next_node
+        prepared.limits = replay.limits
         prepared.next_table = replay.state.next_table
         prepared.resident = journal_account(replay)?
         rebuild_keyed_credit(mut prepared, 0, options.journal_limit)?
@@ -330,7 +331,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, participants.holders, participants.roots)?
     over_ceiling(base.account, available_resident(db))?
     if let Some(wanted) = target {
-        if let Some(problem) = journal_floor(wanted.checkpoint, wanted.journal) {
+        if let Some(problem) = journal_floor(wanted.checkpoint, wanted.journal, wanted.frame) {
             return Error(Full(Journal(problem)))
         }
         over_ceiling(base.account, wanted.resident)?

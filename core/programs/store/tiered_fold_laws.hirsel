@@ -54,8 +54,7 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
     let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
     let _ = replay_overlay_trim(mut overlay, "j-1", 72, 9, initial, JournalTrim(floor: 2, dropped: 172))?
     let next_key = log_key(9, 3)?
-    replay_overlay_edit(mut overlay, "j-1", 90, next_key, 0,
-        ReplayPut(arc.new(string.into_bytes(string.from("next")))))?
+    replay_overlay_edit(mut overlay, "j-1", 90, next_key, 0, ReplayPut(arc.new(string.into_bytes(string.from("next")))))?
     verify_tiered_fold(source, base, overlay)?
     let limits = LogBounds(first: 0, next: 3)
     let empty = std.page.empty(0, 0, Collection)
@@ -66,9 +65,7 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
     let HotPage(take ready) = fold_materialize_row(source, kept, empty, next_key, appended, 1024, true, 41, mut stamp, mut ignored)? else {
         fail("L79: the overlay append must make a fresh leaf")
     }
-    if std.page.totals(ready) != (2u64, 172u64) || std.page.lookup(ready, key_word(0)) != None ||
-        std.page.lookup(ready, key_word(1)) != None || std.page.lookup(ready, key_word(2)) != Some(string.as_bytes("stored")) ||
-        std.page.lookup(ready, key_word(3)) != Some(string.as_bytes("next")) {
+    if std.page.totals(ready) != (2u64, 172u64) || std.page.lookup(ready, key_word(0)) != None || std.page.lookup(ready, key_word(1)) != None || std.page.lookup(ready, key_word(2)) != Some(string.as_bytes("stored")) || std.page.lookup(ready, key_word(3)) != Some(string.as_bytes("next")) {
         fail("L79: only the retained Cold row and the replay append belong to the fold")
     }
     Ok(())
@@ -152,8 +149,7 @@ fn l79_cut_emits_folded_tree(source: TieredPageSource, base: std.page.PagePtr, o
 fn l64_fold_with_writer_pin(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr) -> Result[(), Error] waits {
     // The fixture's leaf frame occupies all writer room:
     // 16 + 24 + 7 + 3 * (2 + 1 + 1 + 2 + 6 + 2) = 89.
-    let demand = TieredPointDemand(target: TieredPage(base), key: key_word(2), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(),
-        siblings: list.new(), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
+    let demand = TieredPointDemand(target: TieredPage(base), key: key_word(2), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
     let held = tiered_point_delivery(source.pager, take demand)?
     l79_fold_checks(source, base)?
     let empty = std.page.empty(0, 0, Collection)
@@ -172,8 +168,12 @@ fn l64_fold_with_writer_pin(source: TieredPageSource, base: std.page.PagePtr, pa
     if detached != base {
         fail("L87(a): the drop must retain the exact old Cold location")
     }
-    if survivor != right || stamp != 43 { fail("L64: a collapsed root must keep its original Cold location") }
-    if let Some(_) = held.failure { fail("L64: the writer's leaf must be readable") }
+    if survivor != right || stamp != 43 {
+        fail("L64: a collapsed root must keep its original Cold location")
+    }
+    if let Some(_) = held.failure {
+        fail("L64: the writer's leaf must be readable")
+    }
     if CUT_PIN_BYTES != 19944296 || list.len(held.frames) != 1 || tiered_frame_charge(held.frames[0u64]) != 89 {
         fail("L64: the independent fold must retain the full writer pin")
     }
@@ -188,7 +188,7 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let (parent, right) = l79_fold_parent(fixtures, owner, base)?
     let mut ids = 0u64
     let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
-    for ptr in [base, right, parent] {
+    for ptr in[base, right, parent] {
         let width: u64 = int.widen(ptr.len)
         let inventory = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
         let (take updated, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: inventory, object: None))
@@ -234,13 +234,11 @@ fn test_l70_tiered_sizes_include_cut_quota(d: Dir, tasks: Tasks) -> Result[(), E
         fail("L70: the Tiered plan must fit at the exact resident floor")
     }
     let owner = StoreId(hi: 3, lo: 4)
-    let funding = TieredPagerFunding(cache_bytes: exact.cache_bytes, writer_pin_bytes: exact.writer_pin_bytes,
-        pager_task_bytes: exact.pager_task_bytes, cut_pins: true)
+    let funding = TieredPagerFunding(cache_bytes: exact.cache_bytes, writer_pin_bytes: exact.writer_pin_bytes, pager_task_bytes: exact.pager_task_bytes, cut_pins: true)
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(d), funding, 1)?
     let _ = pager_reader_grant(requests, VALUE_LIMIT + MIB)?
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))
-
     // W + U now demands one extra cache byte at the same q. K stays fixed.
     overrides.readers = Some(VALUE_LIMIT + MIB + 1)
     overrides.resident_limit = Some(floor + 1)
@@ -248,7 +246,6 @@ fn test_l70_tiered_sizes_include_cut_quota(d: Dir, tasks: Tasks) -> Result[(), E
     if readers_fit.cache_bytes != 52232192 + 1 || readers_fit.writer_pin_bytes != 34471936 {
         fail("L70: Reader reservations and the separate cut quota must both fit")
     }
-
     overrides.readers = None
     // At the old floor, 64 MiB fits for both W and D. P is 16 MiB.
     // 268,030,824 - 19,944,296 - 67,108,864 - 16,777,216 - 67,108,864
@@ -313,16 +310,15 @@ fn l87_probe_queue_roots(source: TieredPageSource, parent: std.page.PagePtr, lea
 fn l87_fold_fork_shape(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
     let mut stamp = 51u64
     let roots = l79_cut_table(base, 5, 430, mut stamp)?
-    let mut manifest = page_manifest_empty()
+    let mut manifest = page_manifest_empty(default_limits())
     manifest.next_stamp = stamp
     manifest.account_tiered = 430
     let mut replay = journal_replay_manifest(capacity(main_state(take roots, 0, 0))?, manifest)?
     let mut deleted: List[JournalOp] = list.with_capacity(1)
     list.push(mut deleted, JournalOp(key: log_key(9, 2)?, value: None, prior: 7, trim: None))
-    journal_apply("j-1", mut replay, Commit(JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), keyed: list.new(), call: None)))?
+    journal_apply("j-1", mut replay, Commit(JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), keyed: list.new(), call: None, payload: 0)))?
     journal_apply("j-1", mut replay, Fork(JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 60)))?
     journal_apply("j-1", mut replay, l68_replay_put(1, 2, 0, "stored")?)?
-
     let mut parent_tree = share_page_tree(replay.state.tips[0u64].roots.collections)
     let mut child_tree = share_page_tree(replay.state.tips[1u64].roots.collections)
     stamp = stamp_after(replay.next_node)?
@@ -350,14 +346,11 @@ fn l87_fold_fork_shape(source: TieredPageSource, base: std.page.PagePtr) -> Resu
     let child_image = std.page.image_of(child_rows)
     // Deleting the last key in the left leaf merges the two underfull leaves.
     // Restoring that key in the child stays in its copy of the merged leaf.
-    if std.page.level(parent_image) != 0 || std.page.level(child_image) != 0 ||
-        std.page.totals(parent_rows) != (4u64, 344u64) || std.page.totals(child_rows) != (5u64, 430u64) ||
-        std.page.stamp(parent_image) == std.page.stamp(child_image) {
+    if std.page.level(parent_image) != 0 || std.page.level(child_image) != 0 || std.page.totals(parent_rows) != (4u64, 344u64) || std.page.totals(child_rows) != (5u64, 430u64) || std.page.stamp(parent_image) == std.page.stamp(child_image) {
         fail("L87(d): the child must apply its own edit after materializing the fork-time merge")
     }
     Ok(())
 }
-
 
 fn l87_drain_skips_moved_row(source: TieredPageSource, parent: std.page.PagePtr, older: std.page.PagePtr, queued_blob: std.page.BlobRef) -> Result[(), Error] waits {
     let mut queue = TieredDeferredQueue(rows: std.omap.new(), issued: 0, next_seq: 0)
@@ -367,8 +360,7 @@ fn l87_drain_skips_moved_row(source: TieredPageSource, parent: std.page.PagePtr,
     let mut rewritten: Map[u64, ()] = map.new()
     map.insert(mut rewritten, seq, ())
     let first = drain_tiered_frees(source, mut queue, rewritten, 1)?
-    if list.len(first) != 1 || first[0u64].frame != replaced_page(older) ||
-        std.omap.len(queue.rows) != 2 || queue.next_seq != 3 {
+    if list.len(first) != 1 || first[0u64].frame != replaced_page(older) || std.omap.len(queue.rows) != 2 || queue.next_seq != 3 {
         fail("L87(a): the drain must skip a rewritten row without spending a page read")
     }
     let (found_seq, kept) = {
@@ -378,7 +370,7 @@ fn l87_drain_skips_moved_row(source: TieredPageSource, parent: std.page.PagePtr,
         let std.page.Entry(key: order_key, cell: InlineValue(contents)) = deferred_free_entry(seq, held) else {
             fail("L87(a): a queue row must contain its own PAGE reference")
         }
-        let mut manifest = page_manifest_empty()
+        let mut manifest = page_manifest_empty(default_limits())
         manifest.deferred_next = queue.next_seq
         let (found_seq, restored_free) = decode_deferred_free("deferred_frees", 72, order_key, contents, manifest)?
         let TieredPage(kept) = restored_free.target else {
@@ -394,8 +386,7 @@ fn l87_drain_skips_moved_row(source: TieredPageSource, parent: std.page.PagePtr,
         fail("L87(a): T8 must write the retained queue value at its original sequence")
     }
     let second = drain_tiered_frees(source, mut queue, map.new(), 1)?
-    if list.len(second) != 1 || second[0u64].frame != replaced_page(parent) ||
-        std.omap.len(queue.rows) != 3 || queue.next_seq != 5 {
+    if list.len(second) != 1 || second[0u64].frame != replaced_page(parent) || std.omap.len(queue.rows) != 3 || queue.next_seq != 5 {
         fail("L87(a): a subsequent cut drains the prior rewrite and appends its two children")
     }
     Ok(())
@@ -407,8 +398,7 @@ fn l88_memory_load_restamps(source: TieredPageSource, root: std.page.PagePtr, bo
     let Some(HotPage(found)) = std.page.child_slot(first, 0) else {
         fail("L88(g): the new Memory tree must have resident children")
     }
-    if std.page.stamp(std.page.image_of(found)) != 100 || std.page.stamp(std.page.image_of(first)) != 102 ||
-        next_stamp != 103 || std.page.totals(first) != (5u64, 430u64) {
+    if std.page.stamp(std.page.image_of(found)) != 100 || std.page.stamp(std.page.image_of(first)) != 102 || next_stamp != 103 || std.page.totals(first) != (5u64, 430u64) {
         fail("L88(g): the old Cold tree must receive new stamps without changing its rows")
     }
     let mut queued: List[DeferredFree] = list.new()
@@ -422,7 +412,6 @@ fn l88_memory_load_restamps(source: TieredPageSource, root: std.page.PagePtr, bo
     if released != root {
         fail("L88(g): the old Cold location must remain a probe root")
     }
-
     let mut rows: List[std.page.Entry] = list.new()
     list.push(mut rows, std.page.Entry(key: key_word(0), cell: BlobValue(body)))
     let image = page_result(std.page.encode(rows, 0, 60, Collection))?
@@ -457,7 +446,6 @@ fn l88_tiered_emission_restamps(owner: StoreId) -> Result[(), Error] {
     let Some(BlobEdge(original)) = std.page.owning_edge(std.page.image_of(memory_root), 0) else {
         fail("L88(g): the Memory leaf must own the large value")
     }
-
     let mut draw = 200u64
     let restamped = restamp_tiered_emission(HotPage(arc.share(memory_root)), 9, mut draw)?
     let root_stamp = restamped.pages[0u64].frame.stamp
@@ -469,7 +457,6 @@ fn l88_tiered_emission_restamps(owner: StoreId) -> Result[(), Error] {
     if for_other_holder.pages[0u64].frame.stamp != 203 || for_other_holder.blobs[0u64].frame.stamp != 202 {
         fail("L88(g): independent residency changes must not share stamped frames")
     }
-
     let TieredCutFrames(blobs: take cut_blobs, pages: take cut_pages, ..) = take restamped
     let blob_run = layout_tiered_packs(take cut_blobs, 4, 11, 4096)?
     let page_run = layout_tiered_packs(take cut_pages, 3, blob_run.next_pack, 4096)?

@@ -6,7 +6,9 @@ fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[
         return Ok(())
     }
     if let None = ran.keyed {
-        if ran.edits.count == 0 && ran.replies.count == 0 { return Ok(()) }
+        if ran.edits.count == 0 && ran.replies.count == 0 {
+            return Ok(())
+        }
     }
     let (take candidate, after) = disk_allocation(scoped fn() -> Result[(Roots, u64), Error] {
         let Some(base) = view ran.roots else {
@@ -39,7 +41,9 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
     if ran.prepared_roots {
         return Ok(false)
     }
-    if let Some(_) = ran.keyed { return Ok(false) }
+    if let Some(_) = ran.keyed {
+        return Ok(false)
+    }
     if let Some(_) = db.heads[i].following {
         return Ok(false)
     }
@@ -149,7 +153,9 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
             settled_tiered_bytes(db.tiered, retaining(db), db.heads[i].roots.collections, roots.collections, draft.edits)
         }
         match total {
-            Ok(n) => { draft.tiered = Some(n) },
+            Ok(n) => {
+                draft.tiered = Some(n)
+            },
             Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
             Error(take problem) => return Error(take problem),
         }
@@ -201,7 +207,9 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
                     None => true,
                     Some(raw) => result.unwrap(stream_state(staged_bytes(raw))).state == 2u8,
                 }
-                if settled { let _ = map.remove(mut db.admits, drafted_reply.key) }
+                if settled {
+                    let _ = map.remove(mut db.admits, drafted_reply.key)
+                }
             }
         }
     }
@@ -357,7 +365,7 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
                     Some(plan) => Some(view plan.deltas),
                     None => None,
                 }
-                prepared.frame = Some(encode_staged(ci, Some(view base), deltas, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, prepared.keyed, db.file_seq, db.file_end)?)
+                prepared.frame = Some(encode_staged(ci, Some(view base), deltas, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, prepared.keyed, db.file_seq, db.file_end, db.limits.frame)?)
             }
             Ok(Prepared(take prepared))
         },

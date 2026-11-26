@@ -273,14 +273,14 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     }
     let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 6, seq: 3)
     let mut prepared_file = result.unwrap(open_frames(d, "PREPARED", ctx))
-    let meta = PreparedMeta(base: ExportStamp(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: PreparedTarget(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456), next_table: 1, changes: 0, ranges: 0)
+    let meta = PreparedMeta(base: ExportStamp(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: PreparedTarget(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456, limits: None), next_table: 1, changes: 0, ranges: 0)
     let codec: std.codec.Codec[PreparedMeta] = std.codec.of()
     result.unwrap(write_prepared_frame(mut prepared_file, 0x0081, codec, meta))
     result.unwrap(finish_frames(take prepared_file))
-    // AP1b: a 32-byte description makes a 244-byte payload. The four
+    // AP1b: a 32-byte description and no limits make a 248-byte payload. The four
     // option words start at payload offset 192 (file offset 280).
-    let bytes_on_disk = result.unwrap(disk_read_paged_file(d, "PREPARED", 332))
-    if list.len(bytes_on_disk) != 332 || read_le(bytes_on_disk, 72, 2) != 0x0081 || read_le(bytes_on_disk, 76, 4) != 244 || read_le(bytes_on_disk, 280, 8) != 1048576 || read_le(bytes_on_disk, 288, 8) != 1048576 || read_le(bytes_on_disk, 296, 8) != 67108864 || read_le(bytes_on_disk, 304, 8) != 268435456 {
+    let bytes_on_disk = result.unwrap(disk_read_paged_file(d, "PREPARED", 336))
+    if list.len(bytes_on_disk) != 336 || read_le(bytes_on_disk, 72, 2) != 0x0081 || read_le(bytes_on_disk, 76, 4) != 248 || read_le(bytes_on_disk, 280, 8) != 1048576 || read_le(bytes_on_disk, 288, 8) != 1048576 || read_le(bytes_on_disk, 296, 8) != 67108864 || read_le(bytes_on_disk, 304, 8) != 268435456 {
         return false
     }
     if !prepared_read_boundary_sweep(d, tasks) {
@@ -383,7 +383,7 @@ fn rewrite_law_replace(mut migration: Migration) -> Result[(), Error] {
 }
 
 fn rewrite_law_target() -> PreparedTarget {
-    PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: 2097152, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392)
+    PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: 2097152, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392, limits: None)
 }
 
 fn rewrite_law_append(d: Dir, base: Bytes, id: u32, keys: (u64, Option[u64]), truncated: bool) -> Result[(), DeployError] waits {
@@ -543,7 +543,7 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     rewrite_law_refusals(mut staged, exported_rows)
     write_prepared(mut source, staged, scratch, rewrite_law_target())?
     let empty = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
-    if list.len(empty) != 332 {
+    if list.len(empty) != 336 {
         fail("L51(e″): preparation without rewrites has a suffix")
     }
     rewrite_law_append(scratch, empty, exported_rows.id, (3u64, None), false)?

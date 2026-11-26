@@ -54,7 +54,11 @@ fn group_spec(name: String) -> platform.NewGroup {
 }
 
 fn seed_store(a: Actor, dir: Dir, seed: Seed) -> Result[(), Refused] waits {
-    let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) {
+    // A Place's store records the limits its runner opens it with (STORE-SPEC
+    // §11.1 AP4a), so the seeding open makes it with the Place's limits.
+    let mut opening: store.Options = clone(a.options)
+    opening.limits = a.sizing.sizes.limits
+    let mut db = match store.open(a.tasks, dir, a.clock, a.random, take opening) {
         Ok(take v) => take v,
         Error(e) => return Error(Failed(store_text("session store: ", e)))
     }

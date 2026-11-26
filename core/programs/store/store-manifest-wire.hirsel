@@ -46,6 +46,8 @@ type PageManifest: shareable + send {
     generation: u64,
     fence: u32,
     inline: u64,
+    // The store's limits, recorded at genesis and kept by every cut (AP4a).
+    limits: StoreLimits,
     next_stamp: u64,
     next_branch: u32,
     next_table: u32,
@@ -67,12 +69,12 @@ type PageManifest: shareable + send {
     pins: List[LocatedPin]
 }
 
-fn page_manifest_empty() -> PageManifest {
+fn page_manifest_empty(limits: StoreLimits) -> PageManifest {
     let zero = std.page.unlocated(0)
     let roots = LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
     let mut branches: List[LocatedBranch] = list.with_capacity(1)
     list.push(mut branches, LocatedBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: roots))
-    PageManifest(generation: 1, fence: 0, inline: 1024, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, retirement_root: zero, branches: take branches, pins: list.new())
+    PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, retirement_root: zero, branches: take branches, pins: list.new())
 }
 
 fn page_manifest_size(m: PageManifest) -> u64 {
@@ -110,10 +112,10 @@ fn put_located_roots(mut out: Bytes, roots: LocatedRoots) {
 
 fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[(), Error] {
     capacity(le(mut raw, m.generation, 8))?
-    capacity(le(mut raw, 4096, 4))?
-    capacity(le(mut raw, 4096, 4))?
+    capacity(le(mut raw, m.limits.value, 4))?
+    capacity(le(mut raw, m.limits.meta, 4))?
     capacity(le(mut raw, m.inline, 4))?
-    capacity(le(mut raw, FRAME_LIMIT - 16, 4))?
+    capacity(le(mut raw, transaction_limit(m.limits), 4))?
     capacity(le(mut raw, m.next_stamp, 8))?
     capacity(le(mut raw, int.widen(m.next_branch), 4))?
     capacity(le(mut raw, int.widen(m.next_table), 4))?
@@ -237,14 +239,15 @@ fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageMan
     }
     let mut at = 0u64
     let generation = disk_number(file, raw, mut at, 8)?
-    let keys = disk_number(file, raw, mut at, 4)?
-    let page_target = disk_number(file, raw, mut at, 4)?
+    let value = disk_number(file, raw, mut at, 4)?
+    let meta = disk_number(file, raw, mut at, 4)?
     let inline = disk_number(file, raw, mut at, 4)?
     let transaction = disk_number(file, raw, mut at, 4)?
     if generation != number {
         return Error(disk_fault(file, 0, Header))
     }
-    if keys != 4096 || page_target != 4096 || inline > 1024 || transaction != FRAME_LIMIT - 16 {
+    let limits = StoreLimits(frame: transaction + 16, value: value, meta: meta)
+    if inline > 1024 || !limits_fit(limits) || list.len(raw) > manifest_limit(limits) {
         return Error(disk_fault(file, at, Malformed))
     }
     let next_stamp = disk_number(file, raw, mut at, 8)?
@@ -320,7 +323,7 @@ fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageMan
         list.push(mut pins, LocatedPin(owner: owner, name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
     }
     read_keyed_roots(file, raw, mut at, mut branches, mut pins)?
-    Ok(PageManifest(generation: generation, fence: 0, inline: inline, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, archive_on: archive_on, archive: archive, archive_drop: archive_drop, sweep: sweep, pack_root: pack_root, retirement_root: retirement_root, branches: take branches, pins: take pins))
+    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, archive_on: archive_on, archive: archive, archive_drop: archive_drop, sweep: sweep, pack_root: pack_root, retirement_root: retirement_root, branches: take branches, pins: take pins))
 }
 
 fn manifest_account(m: PageManifest) -> u64 {

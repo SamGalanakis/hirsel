@@ -113,6 +113,10 @@ fn place_sizing(options: store.Options) -> PlaceSizing {
     sizes.resident_limit = Some(options.resident_limit)
     sizes.pack_bytes = Some(options.pack_bytes)
     sizes.group_bytes = Some(int.widen(options.group_bytes))
+    // Each Place is a small store (STORE-SPEC §11.1 AP4a): it records the
+    // small limits at genesis, so its frame, cut and recovery terms are a
+    // few hundred KiB instead of 16 MiB each.
+    sizes.limits = Some(store.small_place_limits())
     sizes.group_commits = Some(options.group_commits)
     sizes.lock_wait_ms = Some(options.lock_wait_ms)
     PlaceSizing(sizes, need: store.directory_writer_need(sizes))

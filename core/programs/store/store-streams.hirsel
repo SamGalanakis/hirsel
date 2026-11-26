@@ -519,7 +519,7 @@ fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size
             0u64
         }
         extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, tx.below, true, key), head + 5 + list.len(key) + payload + call_size)
-        if int.saturating_add(frame_bytes, extra) - data_head - 16 > 16777280 {
+        if int.saturating_add(frame_bytes, extra) - data_head - 16 > transaction_limit(tx.limits) {
             return Error(Limit(Transaction))
         }
     }
@@ -761,8 +761,8 @@ fn reverse_byte_cursor(data: PageTree, low: Bytes, high: Bytes) -> Result[PageRa
 fn next_bytes(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     next_page_range(mut rows)
 }
-// Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
 
+// Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
 // F2: the account after only the reply writes `ops`, against the base `streams` tree.
 fn stream_live(db: Db, streams: PageTree, ops: DataOps) -> Result[u64, Capacity] {
     let retained = retaining(db)

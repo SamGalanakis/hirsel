@@ -194,14 +194,14 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
     let mut raw: Bytes = list.new()
     list.put_word_le(mut raw, l.binding.readers.current)
     std.codec.encode(l.binding.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    if list.len(raw) > VALUE_LIMIT {
+    if list.len(raw) > tx.limits.value {
         return Error(Limit(Value))
     }
     let frame: Option[u64] = match tx.frame_bytes {
         None => None,
         Some(before) => {
             let after = before + 25 + list.len(raw)
-            if int.saturating_add(after, tx.extra_bytes) - 16 > 16777280 {
+            if int.saturating_add(after, tx.extra_bytes) - 16 > transaction_limit(tx.limits) {
                 return Error(Limit(Transaction))
             }
             Some(after)
@@ -418,7 +418,7 @@ fn trim_log_floor(mut tx: Tx, id: u32, seq: u64) -> Result[(), Error] {
                 0u64
             }
             let after = before - masked_wire + added
-            if int.saturating_add(after, tx.extra_bytes) - 16 > 16777280 {
+            if int.saturating_add(after, tx.extra_bytes) - 16 > transaction_limit(tx.limits) {
                 return Error(Limit(Transaction))
             }
             Some(after)

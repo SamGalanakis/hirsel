@@ -208,7 +208,7 @@ fn lcu_writes(seed: u64, mut next_value: u64, rows: u64) -> List[(u64, Option[u6
 }
 
 fn lcu_target() -> PreparedTarget {
-    PreparedTarget(describe: install_fixture_bytes(32u64, 66u8), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: 16781392u64)
+    PreparedTarget(describe: install_fixture_bytes(32u64, 66u8), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: 16781392u64, limits: None)
 }
 
 // The child ships PREPARED once; OLD validates it and keeps it.

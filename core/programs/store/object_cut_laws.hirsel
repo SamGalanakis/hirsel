@@ -13,7 +13,7 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
     let old_checkpoint = history_key("e-", held.head.checkpoint)
     let (take previous, _) = history_checkpoint(mut source.client, held.head, source.deadline)?
     let retained = history_retain(previous, held.head.checkpoint, 4, 1)?
-    let mut page_manifest = page_manifest_empty()
+    let mut page_manifest = page_manifest_empty(default_limits())
     page_manifest.generation = 2
     page_manifest.first_live = 4
     page_manifest.prev_first = 4
@@ -489,7 +489,7 @@ fn stage_object_preparation(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, at
     let image = export_copy(take pending)?
     let mut source = open_export(image.dir, c, attempt, disk_crash_options("install"))?
     let staged = deploy_result(stage_next(source, tasks))?
-    let target = PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: resident, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392)
+    let target = PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: resident, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392, limits: None)
     write_prepared(mut source, staged, image.dir, take target)?
     let checked = validate_prepared(image.dir)?
     let work = reserve_import(mut db, take checked)?
@@ -744,7 +744,7 @@ fn object_conflict_race(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] wa
     let mut a_buf = history_buffers(1024)?
     let mut b_buf = history_buffers(1024)?
     let due = std.object.deadline_after_ms(first, BUCKET_LAW_OP_MS)
-    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut a_buf, due)?
+    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut a_buf, due, default_limits())?
     history_claim_packet(mut a_buf.packet, a.head)?
     let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buf, due)? else {
         fail("the genesis claim did not advance")
@@ -777,7 +777,7 @@ fn object_conflict_budget(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] 
     let metadata = history_config_bytes(object_history_config(std.object.bucket_config(client), "bucket"))?
     let mut scratch = history_buffers(1024)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let genesis = history_publish_genesis(mut client, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut scratch, due)?
+    let genesis = history_publish_genesis(mut client, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut scratch, due, default_limits())?
     let original: Bytes = clone(scratch.body)
     let mut candidate = genesis.head
     history_claim_packet(mut scratch.packet, genesis.head)?

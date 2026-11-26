@@ -1,18 +1,25 @@
-fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
     if let Some(record) = rec {
-        return encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view record), settlement, keyed, seq, offset)
+        return encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view record), settlement, keyed, seq, offset, frame_limit)
     }
     match call {
-        Some(section) => encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view section.record), section.settlement, keyed, seq, offset),
-        None => encode_frame(ci, base, tiered, mut ops, tail, streams, None, None, keyed, seq, offset),
+        Some(section) => encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view section.record), section.settlement, keyed, seq, offset, frame_limit),
+        None => encode_frame(ci, base, tiered, mut ops, tail, streams, None, None, keyed, seq, offset, frame_limit),
     }
 }
 
-fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    let keyed_size = match keyed { Some(draft) => keyed_frame_bytes(draft.edits), None => 0u64 }
+fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
+    let keyed_size = match keyed {
+        Some(draft) => keyed_frame_bytes(draft.edits),
+        None => 0u64
+    }
     let data = ops.count != 0 || (streams.count == 0 && keyed_size == 0)
     let control = stream_control_slot(streams)
-    let control_count = if let Some(_) = control { 1u64 } else { 0u64 }
+    let control_count = if let Some(_) = control {
+        1u64
+    } else {
+        0u64
+    }
     let stream_count = streams.count - control_count
     let sections = (if data {
         1u64
@@ -23,7 +30,11 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[
     } else {
         0u64
     }) + control_count
-    let keyed_sections = if keyed_size == 0 { 0u64 } else { 1u64 }
+    let keyed_sections = if keyed_size == 0 {
+        0u64
+    } else {
+        1u64
+    }
     let mut size = 21 + 5 * sections + keyed_size
     for slot in 0u64 .. ops.count {
         let operation = data_row(ops, slot)
@@ -38,7 +49,9 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[
             }
         }
     }
-    if size + 16 > FRAME_LIMIT { return Error(Capacity(requested: size + 16, available: FRAME_LIMIT)) }
+    if size + 16 > frame_limit {
+        return Error(Capacity(requested: size + 16, available: frame_limit))
+    }
     let order = data_order(ops)?
     let room = 16 + size + BINDING_BYTES
     let mut out: Bytes = if tail == 0 {
@@ -70,7 +83,9 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[
         let operation = data_row(streams, slot)
         encode_data_op(mut out, operation.key, operation.value, None)?
     }
-    if let Some(draft) = keyed { encode_keyed_edits(mut out, draft.edits)? }
+    if let Some(draft) = keyed {
+        encode_keyed_edits(mut out, draft.edits)?
+    }
     seal_frame(mut out, DiskContext(store: ci.id.store, role: 2, seq: seq), offset)?
     Ok(take out)
 }
@@ -133,7 +148,9 @@ fn call_fields_size(entry_key: Bytes, args: Bytes, revision: Option[Bytes], sign
 
 fn decode_call(file: String, raw: Bytes, mut at: u64, take stream: Bytes) -> Result[CallSection, Error] {
     let (take fields, settlement) = decode_call_fields(file, raw, mut at)?
-    let Some(take name) = parse_stream_key(stream) else { return Error(disk_fault(file, at, Malformed)) }
+    let Some(take name) = parse_stream_key(stream) else {
+        return Error(disk_fault(file, at, Malformed))
+    }
     let KeyedCallRecord(entry: take entry_key, args: take args, revision: take revision, code: take signature) = take fields
     let record = CallRecord(key: take entry_key, args: take args, stream: take name, revision: take revision, code: take signature)
     Ok(CallSection(record: take record, settlement: settlement))

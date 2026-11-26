@@ -1,0 +1,147 @@
+// Module store: a store's own limits (§11.1 AP4a): admission at and one
+// byte over the small Place limits, genesis recording, and replay.
+// AP4a: one commit of two rows, 262,144 B and n B, under table 1. Its
+// payload is 16 + 26 + 2 × 25 + 262,144 + n = 262,236 + n bytes, as in L29.
+// Returns 1 for committed and durable, 0 for Limit(Transaction), 2 otherwise.
+fn journal_small_commit(mut db: Db, n: u64) -> u8 waits {
+    let done = result.unwrap(run(mut db, None, n, fn(mut tx, call_env) -> Result[u64, Error] {
+        for k in 0u64 .. 2 {
+            let size = if k == 1 {
+                call_env
+            } else {
+                262144u64
+            }
+            let mut value: Bytes = list.with_capacity(size)
+            list.fill(mut value, size, 0u8)
+            put_bytes(mut tx, 1, key_word(k), value)?
+        }
+        Ok(0u64)
+    }))
+    match take done {
+        Committed(x) => {
+            result.unwrap(durable(mut db, x.ticket))
+            1u8
+        },
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => 0u8,
+        _ => 2u8,
+    }
+}
+
+// AP4a: a store made with the small Place limits (frame 327,760, so
+// T = 327,744) admits a payload of 262,236 + n while 262,220 + n <= T:
+// n = 65,524 is at the limit and 65,525 one byte over. The ceilings would
+// admit both. The same holds after a reopen that names no limits, because
+// the store reads its limits from the MANIFEST; a reopen naming the
+// ceilings is LimitsDiffer with the recorded limits.
+pub fn journal_law_small_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = disk_test_directory(d)
+    let small = small_place_limits()
+    let mut options = journal_crash_options()
+    options.resident_limit = 4194304
+    options.limits = Some(small)
+    let mut db = result.unwrap(open(tasks, dir, c, r, options))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if journal_small_commit(mut db, 65525) != 0u8 || journal_small_commit(mut db, 65524) != 1u8 {
+        return false
+    }
+    result.unwrap(close(take db))
+    options.limits = None
+    let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
+    if !same_limits(store_limits(reopened), small) || page_row_count(reopened.heads[0].roots.collections) != 2 {
+        return false
+    }
+    if journal_small_commit(mut reopened, 65525) != 0u8 || journal_small_commit(mut reopened, 65524) != 1u8 {
+        return false
+    }
+    result.unwrap(close(take reopened))
+    options.limits = Some(default_limits())
+    match open(tasks, dir, c, r, options) {
+        Error(LimitsDiffer(found)) => same_limits(found, small),
+        _ => false,
+    }
+}
+
+@test
+fn journal_test_small_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_small_limits(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// AP4a: genesis publishes the limits in the MANIFEST before any frame. A
+// writer that dies after genesis, before its first commit, reopens with the
+// recorded limits when its Config names none.
+pub fn journal_law_genesis_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = disk_test_directory(d)
+    let small = small_place_limits()
+    let mut options = journal_crash_options()
+    options.limits = Some(small)
+    let first = result.unwrap(disk_session(dir, c, r, options))
+    if !same_limits(first.startup.limits, small) {
+        return false
+    }
+    let DiskSession(lock: take lock, startup: _) = take first
+    result.unwrap(disk_io(host.close(take lock)))
+    options.limits = None
+    let db = result.unwrap(open(tasks, dir, c, r, options))
+    let kept = same_limits(store_limits(db), small) && db.heads[0].head == 0
+    result.unwrap(close(take db))
+    kept
+}
+
+@test
+fn journal_test_genesis_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_genesis_limits(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// AP4a: replay checks each frame against the recorded limits, not the
+// ceilings. A default store journals one commit of two 200,000 B rows
+// (payload 16 + 26 + 2 × 25 + 400,000 = 400,092, each value under the small
+// value limit). With its MANIFEST republished to record the small limits
+// (T = 327,744), the reopen's replay finds the frame over T: Corrupt.
+pub fn journal_law_replay_over_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 4194304
+    let mut db = result.unwrap(open(tasks, dir, c, r, options))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let done = result.unwrap(run(mut db, None, 200000u64, fn(mut tx, call_env) -> Result[u64, Error] {
+        for k in 0u64 .. 2 {
+            let mut value: Bytes = list.with_capacity(call_env)
+            list.fill(mut value, call_env, 0u8)
+            put_bytes(mut tx, 1, key_word(k), value)?
+        }
+        Ok(option.unwrap(tx.frame_bytes))
+    }))
+    let Committed(x) = take done else {
+        return false
+    }
+    if x.value != 400092 {
+        return false
+    }
+    result.unwrap(durable(mut db, x.ticket))
+    result.unwrap(close(take db))
+    let (id, take manifest) = result.unwrap(read_page_manifest_file(dir))
+    let mut lowered = take manifest
+    lowered.limits = small_place_limits()
+    result.unwrap(disk_publish_manifest(dir, id, lowered))
+    match open(tasks, dir, c, r, options) {
+        Error(Corrupt(_)) => true,
+        _ => false,
+    }
+}
+
+@test
+fn journal_test_replay_over_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_replay_over_limit(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

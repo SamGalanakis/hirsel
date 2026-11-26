@@ -580,7 +580,7 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
 
 fn retention_base(id: StoreId) -> Result[WitnessCut, Error] {
     let mut raw_manifest: Bytes = list.with_capacity(1024)
-    let base = history_manifest_packet(mut raw_manifest, id, 1)?
+    let base = history_manifest_packet(mut raw_manifest, id, 1, default_limits())?
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let entry_ref = history_genesis_packet(mut raw_entry, id, 1, base, HistoryLocateRoot(depth: 0, rows: list.new()))?
     let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18))

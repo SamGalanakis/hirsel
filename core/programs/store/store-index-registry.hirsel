@@ -493,7 +493,7 @@ fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
 // is incomplete, so a remove there may find nothing.
 fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
     if let Some(refund) = delete_refund(tx, key)? {
-        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
+        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, transaction_limit(tx.limits))?
         push_index_edit(mut edits, RemoveRow(take key, refund))
         return Ok(())
     }
@@ -580,6 +580,9 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
             for (_, ix) in indexes {
                 let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
                 let incoming = (bound_index.extract)(raw, primary)?
+                if list.len(incoming.payload) > tx.limits.value {
+                    return Error(Limit(Value))
+                }
                 if let Sums = ix.shape {
                     let old = match previous {
                         Some(value) => Some((bound_index.extract)(value, primary)?),
@@ -687,7 +690,7 @@ fn delete_impl(mut tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catal
     if let Some(take seen) = replace(mut edit_plan.drift, None) {
         return Error(drift_stop(mut tx, take seen))
     }
-    frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame)?
+    frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame, transaction_limit(tx.limits))?
     if list.len(indexes) > 0 {
         preflight_index_edits(tx, edit_plan, p)?
     }

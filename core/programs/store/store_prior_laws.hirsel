@@ -7,8 +7,7 @@ fn prior_fixture_value(width: u64) -> Bytes {
 fn prior_fixture_frame(wire: Bytes, at: u64, tag: u8, length: u64, prior: u64) -> bool {
     // 16 (frame) + 21 (COMMIT) + 5 (data section) gives the op tag.
     // The 12-byte logical key follows its u32 length, then the prior.
-    read_le(wire, at + 4, 4) == length - 16 && wire[at + 42] == tag &&
-        read_le(wire, at + 43, 4) == 12 && read_le(wire, at + 59, 4) == prior
+    read_le(wire, at + 4, 4) == length - 16 && wire[at + 42] == tag && read_le(wire, at + 43, 4) == 12 && read_le(wire, at + 59, 4) == prior
 }
 
 // Pre-prior format 4, frozen from the format tables with libxxhash. The
@@ -17,7 +16,11 @@ fn legacy4_header(role: u8, bucketed: bool) -> Bytes {
     let mut wire: Bytes = list.with_capacity(72)
     list.put_word_le(mut wire, 0x0000003800010001u64)
     let checksum: u64 = match role {
-        1 => if bucketed { 0x5c6ae52a18ccd6b2u64 } else { 0xe0f2a21e936a02feu64 },
+        1 => if bucketed {
+            0x5c6ae52a18ccd6b2u64
+        } else {
+            0xe0f2a21e936a02feu64
+        },
         2 => 0x1b4139a107227ef7,
         _ => 0xc07ca99a378f2a2f,
     }
@@ -25,11 +28,19 @@ fn legacy4_header(role: u8, bucketed: bool) -> Bytes {
     list.append(mut wire, string.as_bytes("HIRSTORE"))
     list.put_word_le(mut wire, 4u32)
     list.push(mut wire, role)
-    list.push(mut wire, if bucketed { 1u8 } else { 0u8 })
+    list.push(mut wire, if bucketed {
+        1u8
+    } else {
+        0u8
+    })
     list.put_word_le(mut wire, 0u16)
     list.put_word_le(mut wire, 1u64)
     list.put_word_le(mut wire, 2u64)
-    list.put_word_le(mut wire, if bucketed { 1u64 } else { 0u64 })
+    list.put_word_le(mut wire, if bucketed {
+        1u64
+    } else {
+        0u64
+    })
     list.put_word_le(mut wire, 1u64)
     list.put_word_le(mut wire, 0u64)
     take wire
@@ -37,10 +48,17 @@ fn legacy4_header(role: u8, bucketed: bool) -> Bytes {
 
 fn legacy4_manifest(bucketed: bool) -> Bytes {
     let mut wire = legacy4_header(1, bucketed)
-    let words: Inline[u64, 10] = [
-        0x000001cf00010031, 0xb51851a0c4a366ff, 1,
-        0x0000100000001000, 0x0100004000000400, 1,
-        0x0000000100000001, 1, 1, 1,
+    let words: Inline[u64, 10] =[
+        0x000001cf00010031,
+        0xb51851a0c4a366ff,
+        1,
+        0x0000100000001000,
+        0x0100004000000400,
+        1,
+        0x0000000100000001,
+        1,
+        1,
+        1,
     ]
     for word in words {
         list.put_word_le(mut wire, word)
@@ -71,11 +89,7 @@ fn refuse_legacy4_directory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
         Error(Unsupported(4)) => (),
         _ => return Error(Missing("format 4 directory refusal")),
     }
-    if disk_exists(directory, "LOCK")? || disk_exists(directory, "j-2")? ||
-        disk_read_file(directory, "MANIFEST", 551)? != manifest ||
-        disk_read_file(directory, "j-1", 72)? != segment ||
-        disk_read_file(directory, "j-1.end", 96)? != ending ||
-        disk_read_file(directory, "MANIFEST.tmp", 20)? != debris {
+    if disk_exists(directory, "LOCK")? || disk_exists(directory, "j-2")? || disk_read_file(directory, "MANIFEST", 551)? != manifest || disk_read_file(directory, "j-1", 72)? != segment || disk_read_file(directory, "j-1.end", 96)? != ending || disk_read_file(directory, "MANIFEST.tmp", 20)? != debris {
         return Error(Missing("format 4 directory changed"))
     }
     Ok(())
@@ -93,7 +107,7 @@ fn refuse_legacy4_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), 
     // refusal itself, even when the enclosing entry passes its format check.
     let base = history_genesis_packet(mut workspace.packet, id, 1, manifest, HistoryLocateRoot(depth: 0, rows: list.new()))?
     history_create(mut client, history_key("e-", base), mut workspace.packet, mut workspace.compare, deadline)?
-    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: id), activation: 0, entry: base, checkpoint: base, floor: 1, binding: [0; 32])
+    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: id), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
     let place = std.object.bucket_config(client)
     let authority = history_config_bytes(object_history_config(take place, "bucket"))?
     history_encode_head(mut workspace.body, head, authority)?
@@ -141,7 +155,9 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let seq = db.file_seq
     let Committed(initial) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         put_bytes(mut tx, 1, key_word(7), prior_fixture_value(34))
-    })? else { return Error(Missing("insert")) }
+    })? else {
+        return Error(Missing("insert"))
+    }
     // entry(12, 34) = 62 + 16 + 40 = 118.
     if db.resident != baseline + 118 || db.file_end != start + 101 {
         return Error(Missing("insert charge or length"))
@@ -150,7 +166,9 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let Committed(changed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         put_bytes(mut tx, 1, key_word(7), prior_fixture_value(16))?
         put_bytes(mut tx, 1, key_word(7), prior_fixture_value(10))
-    })? else { return Error(Missing("overwrite")) }
+    })? else {
+        return Error(Missing("overwrite"))
+    }
     // entry(12, 10) = 62 + 16 + 16 = 94. Only one put survives in the frame.
     if db.resident != baseline + 94 || db.file_end != start + 101 + 77 {
         return Error(Missing("overwrite charge or length"))
@@ -158,18 +176,18 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let Committed(removed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         let _ = delete_bytes(mut tx, 1, key_word(7))?
         Ok(())
-    })? else { return Error(Missing("delete")) }
+    })? else {
+        return Error(Missing("delete"))
+    }
     if db.resident != baseline || db.file_end != start + 101 + 77 + 63 {
         return Error(Missing("delete charge or length"))
     }
     durable(mut db, removed.ticket)?
     let path = capacity(disk_path("j-", seq, ""))?
     let wire = read_journal_prefix(dir, path, start + 241)?
-    if !prior_fixture_frame(wire, start, 1, 101, 0) || !prior_fixture_frame(wire, start + 101, 1, 77, 35) ||
-        !prior_fixture_frame(wire, start + 178, 2, 63, 11) {
+    if !prior_fixture_frame(wire, start, 1, 101, 0) || !prior_fixture_frame(wire, start + 101, 1, 77, 35) || !prior_fixture_frame(wire, start + 178, 2, 63, 11) {
         return Error(Missing("table prior bytes"))
     }
-
     let body_at = start + 101 + 16
     let mut body = copied(list.slice(wire, body_at, start + 178))?
     list.set_word_le(mut body, 43, 34u32)
@@ -191,8 +209,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     }
     close(take db)?
     let reopened = open(tasks, dir, c, r, options)?
-    if reopened.resident != baseline || page_row_count(reopened.heads[0].roots.collections) != 0 ||
-        reopened.heads[0].head != removed.info.id.version {
+    if reopened.resident != baseline || page_row_count(reopened.heads[0].roots.collections) != 0 || reopened.heads[0].head != removed.info.id.version {
         return Error(Missing("replayed table account"))
     }
     close(take reopened)
@@ -201,9 +218,10 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
 fn check_overlapping_put(body: Bytes) -> Result[(), Error] {
     let commit = journal_decode_commit("format-4 suffix", body)?
     let top = commit.data[0]
-    let Some(raw) = view top.value else { return Error(Missing("overlapping put")) }
-    if list.len(commit.data) != 1 || top.key != logical_key(1, key_word(7))? ||
-        top.prior != 5 || list.len(raw) != 1 || raw[0] != 0xa5 {
+    let Some(raw) = view top.value else {
+        return Error(Missing("overlapping put"))
+    }
+    if list.len(commit.data) != 1 || top.key != logical_key(1, key_word(7))? || top.prior != 5 || list.len(raw) != 1 || raw[0] != 0xa5 {
         return Error(Missing("overlapping put interpretation"))
     }
     Ok(())
@@ -271,7 +289,6 @@ fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(u64,
     if initial.etag != after_old.etag || first_head != workspace.body {
         return Error(Missing("legacy head changed"))
     }
-
     // The current head still names both frozen format-4 entries.
     // Only the HEADER's version (format 8) and §2.1 checksum change (libxxhash).
     list.set_word_le(mut workspace.body, 24, 8u32)
@@ -321,7 +338,9 @@ fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         let commit = run(mut db, None, (copy_env(primary), new_value), fn(mut tx: Tx, args: (Table[u64, u32], u32)) -> Result[(), Error] {
             put(mut tx, args.0, 9u64, args.1)
         })?
-        let Committed(done) = commit else { return Error(Missing("covering put")) }
+        let Committed(done) = commit else {
+            return Error(Missing("covering put"))
+        }
         durable(mut db, done.ticket)?
         if new_value == 7 {
             let path = capacity(disk_path("j-", seq, ""))?
@@ -330,9 +349,7 @@ fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
             // The 20-byte Many key follows the primary's 31-byte put.
             let op = start + 42 + 31
             let found: u32 = list.word_be(raw, op + 5)
-            if raw[op] != 1 || read_le(raw, op + 1, 4) != 20 || found != projected_index.id ||
-                read_le(raw, op + 25, 4) != 7 || read_le(raw, op + 29, 4) != 6 ||
-                read_le(raw, op + 33, 2) != 0 || read_le(raw, op + 35, 4) != 7 {
+            if raw[op] != 1 || read_le(raw, op + 1, 4) != 20 || found != projected_index.id || read_le(raw, op + 25, 4) != 7 || read_le(raw, op + 29, 4) != 6 || read_le(raw, op + 33, 2) != 0 || read_le(raw, op + 35, 4) != 7 {
                 return Error(Missing("covering prior wire charge"))
             }
         }
@@ -340,7 +357,9 @@ fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let expected = db.resident
     close(take db)?
     let recovered = open(tasks, directory, c, r, options)?
-    if recovered.resident != expected { return Error(Missing("covering prior replay charge")) }
+    if recovered.resident != expected {
+        return Error(Missing("covering prior replay charge"))
+    }
     close(take recovered)
 }
 
@@ -365,23 +384,28 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let receipt = checkpoint(mut db)?
     durable(mut db, receipt)?
     close(take db)?
-
     let mut reopened = open(tasks, directory, c, r, options)?
     if reopened.resident != baseline + 12582990 {
         return Error(Missing("12 MiB prior seed charge"))
     }
     if let Some(raw) = get_page_row(reopened.heads[0].roots.collections, logical) {
-        if list.len(raw) != width { return Error(Missing("12 MiB seed size")) }
+        if list.len(raw) != width {
+            return Error(Missing("12 MiB seed size"))
+        }
     } else {
         return Error(Missing("12 MiB seed row"))
     }
     let start = reopened.file_end
     let seq = reopened.file_seq
     let removed = run(mut reopened, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
-        if !delete_bytes(mut tx, 1, key_word(7))? { return Error(Missing("delete 12 MiB")) }
+        if !delete_bytes(mut tx, 1, key_word(7))? {
+            return Error(Missing("delete 12 MiB"))
+        }
         Ok(())
     })?
-    let Committed(done) = removed else { return Error(Missing("delete commit")) }
+    let Committed(done) = removed else {
+        return Error(Missing("delete commit"))
+    }
     durable(mut reopened, done.ticket)?
     let path = capacity(disk_path("j-", seq, ""))?
     let wire = read_journal_prefix(directory, path, start + 63)?
@@ -391,7 +415,9 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let mut body = copied(list.slice(wire, start + 16, start + 63))?
     list.set_word_le(mut body, 43, 16711681u32)
     let at_ceiling = journal_decode_commit(path, body)?
-    if at_ceiling.data[0].prior != 16711681 { return Error(Missing("maximum wire prior")) }
+    if at_ceiling.data[0].prior != 16711681 {
+        return Error(Missing("maximum wire prior"))
+    }
     list.set_word_le(mut body, 43, 16711682u32)
     match journal_decode_commit(path, body) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
@@ -437,7 +463,9 @@ fn retained_fixture_write(mut db: Db, k: u64, v: u64) -> Result[(), Error] waits
         list.put_word_le(mut raw, word)
         put_bytes(mut tx, 1, key_word(args.0), raw)
     })?
-    let Committed(committed) = outcome else { return Error(Missing("retained root write")) }
+    let Committed(committed) = outcome else {
+        return Error(Missing("retained root write"))
+    }
     durable(mut db, committed.ticket)
 }
 
@@ -456,23 +484,27 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let cut = checkpoint(mut db)?
     durable(mut db, cut)?
     close(take db)?
-
     // Key 1, pinned 2:A and head 2:B are three distinct 86-byte versions.
     options.resident_limit = baseline + 258
     let mut writer = open(tasks, directory, c, r, options)?
-    if writer.resident != baseline + 258 { return Error(Missing("retained fixture baseline")) }
+    if writer.resident != baseline + 258 {
+        return Error(Missing("retained fixture baseline"))
+    }
     retained_fixture_write(mut writer, 2, 2)?
-    if writer.resident != baseline + 172 { return Error(Missing("retained live settle")) }
+    if writer.resident != baseline + 172 {
+        return Error(Missing("retained live settle"))
+    }
     close(take writer)?
-
     let mut replayed = open(tasks, directory, c, r, options)?
-    if replayed.resident != baseline + 172 { return Error(Missing("retained replay settle")) }
+    if replayed.resident != baseline + 172 {
+        return Error(Missing("retained replay settle"))
+    }
     {
         // Attach an untouched Tiered sibling with no resolvable page at its
         // pointer. Only its 126-byte Memory descriptor belongs to this walk.
         let mut state = capacity(main_state(share_roots(replayed.heads[0].roots), replayed.heads[0].head, 0))?
         install_cold_companion(mut state.tips[0].roots, 101)?
-        let mut restored = journal_replay(take state, 102)?
+        let mut restored = journal_replay(take state, 102, default_limits())?
         if journal_account(restored)? != baseline + 172 + 126 {
             return Error(Missing("single mixed root Memory account"))
         }
@@ -484,7 +516,9 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         }
     }
     retained_fixture_write(mut replayed, 3, 3)?
-    if replayed.resident != baseline + 258 { return Error(Missing("retained reopen admission")) }
+    if replayed.resident != baseline + 258 {
+        return Error(Missing("retained reopen admission"))
+    }
     close(take replayed)
 }
 
@@ -501,9 +535,10 @@ fn journal_test_v264_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     }
     let first = view trace.head_writes[0u64]
     let second = view trace.head_writes[1u64]
-    let Some(predecessor) = second.if_match else { return Error(Missing("legacy fixture HEAD precondition")) }
-    if first.key != "head" || first.data != original || first.if_match != None || first.if_none_match != Some("*") ||
-        second.key != "head" || second.data != current || first.etag == second.etag || predecessor != first.etag || second.if_none_match != None {
+    let Some(predecessor) = second.if_match else {
+        return Error(Missing("legacy fixture HEAD precondition"))
+    }
+    if first.key != "head" || first.data != original || first.if_match != None || first.if_none_match != Some("*") || second.key != "head" || second.data != current || first.etag == second.etag || predecessor != first.etag || second.if_none_match != None {
         return Error(Missing("legacy fixture HEAD history"))
     }
     covering_prior_case(d, c, r, tasks)?

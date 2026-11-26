@@ -99,7 +99,7 @@ fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previou
         let old = option.unwrap(old_capture.remote)
         if latest.checkpoint.seq <= old.current.entry.seq {
             let state = copy_follow_state(old_capture.state)?
-            let initial = journal_replay(take state, old.next_node)?
+            let initial = journal_replay(take state, old.next_node, default_limits())?
             over_ceiling(journal_account(initial)?, ceiling)?
             return history_rebase_suffix(mut source, latest, old.current.entry, take initial, ceiling)
         }

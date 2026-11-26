@@ -88,7 +88,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
         let mut raw: Bytes = list.new()
         capacity(le(mut raw, int.widen(current.number), 2))?
         std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-        if list.len(raw) > VALUE_LIMIT {
+        if list.len(raw) > staged.plan.value_limit {
             return Error(Limit(Value))
         }
         let _ = row_value(t.readers, t.id, raw)?
@@ -138,7 +138,7 @@ fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> R
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    if list.len(raw) > VALUE_LIMIT {
+    if list.len(raw) > plan.value_limit {
         return Error(Limit(Value))
     }
     let mut live_bytes = plan.live

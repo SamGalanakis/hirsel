@@ -103,6 +103,54 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
     result.unwrap(task.join(take running))
 }
 
+// §1.1 and §11.1 AP4a: a small Directory Place records the small limits
+// (frame 327,760, value 262,144, meta 65,536) and reserves under 2 MiB.
+// With a 64 KiB group, 64 commits and the 1 MiB resident floor:
+//   journal worker: (65,536 + 4,096) + 32,768 + 288 + 64 = 102,752
+//   segment creation block: 4,096
+//   journal channels for 64 commits: 416 × 64 + 576 = 27,200
+//   writer state: 1,968
+//   resident: 1,048,576
+//   write peak: 2 × 327,760 = 655,520, above the cut phase
+//     max(65,536, 72 + 16 + 316 + 65,536 + 20) + 65,536 + 2 × 95,326
+//     + (4,096 + 262,144) = 588,388 and recovery 65,536 + 327,760 = 393,296
+//   total: 1,840,112 <= 2,097,152
+// The same sizes with the ceilings need 34,934,196 (the cut phase,
+// 33,749,604, wins there; directory_grant_covers_journal_worker keeps the
+// default figure).
+@test
+fn small_directory_place_need(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut o = group_override(65536)
+    o.pack_bytes = Some(65536)
+    o.resident_limit = Some(MIB)
+    o.limits = Some(small_place_limits())
+    let need = 1840112u64
+    if directory_writer_need(o) != need || need > 2 * MIB {
+        fail("§11.1 AP4a: the small Directory Place need")
+    }
+    o.limits = None
+    if directory_writer_need(o) != 34934196u64 {
+        fail("§1.1: the same sizes at the ceilings")
+    }
+    o.limits = Some(small_place_limits())
+    match planned(Directory, need - 1, o) {
+        Error(short) if short.need == need => (),
+        _ => fail("§11.1 AP4a: one byte below the small Directory need was admitted"),
+    }
+    let place = planned(Directory, need, o) ?=> |_| Missing("small directory sizing")
+    let options = planned_options(place)
+    let kept = match options.limits {
+        Some(l) => same_limits(l, small_place_limits()),
+        None => false,
+    }
+    if planned_bytes(place) != need || !kept {
+        fail("§11.1 AP4a: the small Directory Place at its exact share")
+    }
+    let input = GrantedOpen(tasks, d: disk_test_directory(d), c, r, options: take options)
+    let running = task.spawn(tasks, bytes need, take input, granted_open_commit)
+    result.unwrap(task.join(take running))
+}
+
 type GrantedBucketOpen: send {
     endpoint: std.sim.s3.Endpoint,
     network: Net,
@@ -136,7 +184,8 @@ fn granted_bucket_cut(take input: GrantedBucketOpen) -> Result[(), Error] waits 
 //     16,777,640 for the comparison buffer, 2 × 65,776 for heads and 64 for the key
 //   PUT: max(8 MiB + 24 for one multipart part, 16,777,640 for the encoded MANIFEST)
 //   cut work: 65,536 + 2 × ceil(1,048,576 / 11) + (4,096 + 16,711,680)
-// T_floor = 72,786,004. The place needs T_floor + 80 + 1,194 = 72,787,278.
+// T_floor = 72,786,004. The place needs T_floor + 80 + 1,258 = 72,787,342
+// (the follower starter's 1,258 is L85's; Options carries its 32-byte limits).
 @test
 fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let lanes = bucket_law_lanes(1)
@@ -144,7 +193,7 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let mut o = group_override(65536)
     o.pack_bytes = Some(65536)
     let writer_need = 72786004u64
-    let need = 72787278u64
+    let need = 72787342u64
     let place = result.unwrap(planned(kind, need, o))
     if planned_bytes(place) != need || planned_options(place).resident_limit != MIB {
         fail("§1.1: the Bucket place plan at its exact share")
@@ -171,6 +220,49 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     }
     if writer_bytes(writer) != writer_need {
         fail("§1.1: the Bucket writer plan at its exact grant")
+    }
+    let sim = bucket_law_sim(tasks, c, 2151, None, list.new())
+    let input = GrantedBucketOpen(endpoint: clone(sim.endpoint), network: sim.network, c: sim.time, r, tasks, options: planned_options(place))
+    let running = task.spawn(tasks, bytes writer_need, take input, granted_bucket_cut)
+    let opened = task.join(take running)
+    let _ = bucket_law_finish(take sim)
+    result.unwrap(take opened)
+}
+
+// §1.1 and §11.1 AP4a: the same Bucket place with the small limits. The
+// lifetime terms (3,243,968 before resident) do not depend on the limits.
+// The cut still wins, at 1,908,908 B:
+//   output: 72 + 16 + 316 + 65,536 + 20 = 65,960 (MANIFEST file bound)
+//   workspace: 1,056,960 for the packet, 65,960 for the comparison
+//     buffer, 2 × 65,776 for heads and 64 for the key = 1,254,536
+//   PUT: max(65,960 + 24 for the one multipart part, 65,960) = 65,984
+//   cut work: 65,536 + 2 × 95,326 + (4,096 + 262,144) = 522,428
+// above the write peak 2 × 327,760 = 655,520 and recovery
+// max(327,912 + 327,760, 1,056,960 + 65,960) = 1,122,920.
+// T_floor = 3,243,968 + 1,048,576 + 1,908,908 = 6,201,452; the place needs
+// 6,201,452 + 80 + 1,258 = 6,202,790 (72,787,342 at the ceilings).
+@test
+fn small_bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let lanes = bucket_law_lanes(1)
+    let kind: Kind = Bucket(lanes)
+    let mut o = group_override(65536)
+    o.pack_bytes = Some(65536)
+    o.limits = Some(small_place_limits())
+    let writer_need = 6201452u64
+    let need = 6202790u64
+    let place = result.unwrap(planned(kind, need, o))
+    if planned_bytes(place) != need || planned_options(place).resident_limit != MIB {
+        fail("§11.1 AP4a: the small Bucket place plan at its exact share")
+    }
+    let writer = result.unwrap(writer_plan(kind, planned_options(place)))
+    if writer_bytes(writer) != writer_need {
+        fail("§11.1 AP4a: the small Bucket writer plan at its exact grant")
+    }
+    let Error(refused) = planned(kind, need - 1, o) else {
+        fail("§11.1 AP4a: one byte below the small Bucket floor was admitted")
+    }
+    if refused.need != need {
+        fail("§11.1 AP4a: the small Bucket shortage must name the whole place grant")
     }
     let sim = bucket_law_sim(tasks, c, 2151, None, list.new())
     let input = GrantedBucketOpen(endpoint: clone(sim.endpoint), network: sim.network, c: sim.time, r, tasks, options: planned_options(place))

@@ -665,6 +665,46 @@ fn batch_law_rows(ops: List[u64], prior: u32) -> Result[List[JournalOp], Error] 
 // stamps (per-row replay needs four). Inserting keys 3 and 4 live leaves the
 // canonical 4-row leaf, 24 + 4 x (4 + 8 + 3 + 8) - 3 x 7 = 95 bytes, with no
 // spare capacity, beside the 24 + 4 + 4 + 3 + descriptor byte map leaf.
+// A leaf left with one row beside full siblings must join (a T/4 merge):
+// the in-place branch declines and the rebuild joins, page for page.
+fn batch_law_join() -> Result[(), Error] {
+    let mut base = std.page.empty(0, 0, Collection)
+    let mut fill: List[std.page.BatchEdit] = list.new()
+    for k in 0u64 .. 400 {
+        list.push(mut fill, std.page.BatchEdit(key: key_word(k), value: Some(BatchBytes(prior_fixture_value(160))), prior: None))
+    }
+    let mut ids = 1u64
+    page_result(std.page.apply_sorted_batch(mut base, fill, 1024, mut ids))?
+    let leaves = std.page.count(std.page.image_of(base))
+    if std.page.level(std.page.image_of(base)) != 1 || leaves < 3 {
+        return Error(Missing("join fixture is not one branch of leaves"))
+    }
+    // Keep only key 0 of leaf 0 and every other row of leaf 1, so the
+    // one-row leaf is under T/4 and fits beside its halved sibling.
+    let first_high = option.unwrap(std.page.key_at(std.page.image_of(base), 1))
+    let second_high = option.unwrap(std.page.key_at(std.page.image_of(base), 2))
+    let mut thinned: List[std.page.BatchEdit] = list.new()
+    for k in 1u64 .. 400 {
+        let key = key_word(k)
+        if list.compare_bytes(key, second_high) != Less {
+            break
+        }
+        if list.compare_bytes(key, first_high) == Less || k % 2 == 0 {
+            list.push(mut thinned, std.page.BatchEdit(key: take key, value: None, prior: None))
+        }
+    }
+    let mut edited = arc.share(base)
+    let mut rebuilt = arc.share(base)
+    let mut edited_ids = ids
+    let mut rebuilt_ids = ids
+    page_result(std.page.apply_sorted_batch(mut edited, thinned, 1024, mut edited_ids))?
+    page_result(std.page.rebuild_sorted_batch(mut rebuilt, thinned, 1024, mut rebuilt_ids))?
+    if edited_ids != rebuilt_ids || std.page.count(std.page.image_of(rebuilt)) != leaves - 1 {
+        return Error(Missing("one-row leaf did not join"))
+    }
+    batch_law_same_pages(edited, rebuilt)
+}
+
 fn batch_law_3152() -> Result[(), Error] {
     let mut base = new_page_tree(CollectionMap, 1024)
     let mut ids = 0u64
@@ -733,6 +773,7 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
     let mut replay_ids = oracle_ids
     let mut account = ReplayTieredAccount(total: 0, exact: true)
     batch_law_3152()?
+    batch_law_join()?
     let mut edited: List[Arc[std.page.Page]] = list.new()
     let mut rebuilt: List[Arc[std.page.Page]] = list.new()
     for id in 1u32 .. 3 {

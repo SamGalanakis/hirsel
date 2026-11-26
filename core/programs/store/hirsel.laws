@@ -220,7 +220,7 @@ store@1/store/read_tail_step_budget src=33660962a0c8bdd8 sig=363e18be52c92982 ru
 store@1/store/reexecute_zero_data_write_serve src=2724dd267e299e2a sig=8cc4843573a8deca run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/small_bucket_place_plan_at_floor src=dbe626e3f6dcceff sig=c7a68864aace086e run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/small_directory_place_need src=2d4056db6c7ff73b sig=2b983f60ad1fc89c run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/sorted_batch_equivalence src=e38da2fbb8f88616 sig=6dd09b01efb28645 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/sorted_batch_equivalence src=de69dcdbe4c2dcf5 sig=2db77cc5c01270ce run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/staged_row_layout_charge src=374cc488b82ac03f sig=cb8ab6cd6311148f run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/stream_age_refusal_survives_longer_retention src=b6df413a313f9ae2 sig=ba8ee40e7da83c82 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/stream_quota_preserves_eviction_floor src=36d83b090a60b66e sig=7ab35b0b35ae3428 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

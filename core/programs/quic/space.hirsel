@@ -343,3 +343,15 @@ fn probe_space(mut s: Space, count: u64) -> bool {
     s.probes = order.min(order.max(s.probes, count), 2)
     done
 }
+
+/// Queue unacknowledged CRYPTO ranges in flight for immediate retransmission without
+/// sending a spurious PING if every CRYPTO byte was already acknowledged on another copy.
+fn resend_unacked_crypto(mut s: Space) {
+    for i in 0u64 .. list.len(s.flights) {
+        let f = s.flights[i]
+        owe(mut s, f.crypto_at, f.crypto_end)
+    }
+    if list.len(s.resend) != 0 {
+        s.probes = order.min(order.max(s.probes, 1), 2)
+    }
+}

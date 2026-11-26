@@ -177,3 +177,102 @@ fn application_pto_retransmits_stream_and_confirms_on_1rtt_ack() -> Result[(), (
     }
     Ok(())
 }
+
+/// bug: when the server's ServerHello Initial is corrupted in transit and the client
+/// resends its Initial before the server's PTO fires, the server answers with an
+/// ACK-only Initial (43-45 B) instead of resending ServerHello, forcing the client to
+/// wait for the server's PTO (or time out under repeated corruption).
+/// oracle: RFC 9002 §6.2.2.1 & §6.2.4 and RFC 9000 §8.1/§14.1: on a duplicate client
+/// Initial while Initial/Handshake CRYPTO is unacknowledged, the server immediately
+/// resends unacknowledged Initial (coalesced with the ACK, padded to 1,200 B) and
+/// Handshake CRYPTO within one RTT and within the 3x anti-amplification budget, without
+/// waiting for its own PTO.
+@test
+fn server_resends_initial_crypto_on_duplicate_client_initial() -> Result[(), ()] {
+    let mut server = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), long_idle()))))
+    let mut client = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, long_idle()))
+    let mut at_client: List[quic.Event] = list.new()
+    let mut at_server: List[quic.Event] = list.new()
+    let mut server_rx = 0u64
+    let mut server_tx = 0u64
+    // Client sends Initial pn=0; server receives it at t = 10 ms (server PTO at 1,009 ms).
+    let client_init0 = drain_datagrams(mut client, 0)
+    for d in client_init0 {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        server_rx += len
+        quic.receive_datagram(mut server, 10 * MS, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+    }
+    // Corrupt server's Initial pn=0 (ServerHello) in transit; deliver both packets to client.
+    let flight0 = drain_datagrams(mut server, 10 * MS)
+    let mut saw_initial = false
+    for d in flight0 {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        server_tx += len
+        if wire[0] & 0xf0 == 0xc0 {
+            saw_initial = true
+            wire[len - 1] = wire[len - 1] ^ 0xff
+        }
+        quic.receive_datagram(mut client, 20 * MS, SERVER_ADDR, 0, mut wire, 0, len, mut at_client)
+    }
+    if !saw_initial || quic.drop_count(client, PacketProtection) == 0 {
+        fail("corrupted ServerHello was not dropped by packet protection")
+    }
+    // Client's PTO fires early relative to the server (e.g. a peer with a 150 ms initial
+    // PTO): client produces a genuine duplicate Initial (pn=1), arriving at server at
+    // t = 160 ms, well before the server's 1,009 ms PTO.
+    quic.timeout(mut client, 1005 * MS, mut at_client)
+    let client_init1 = drain_datagrams(mut client, 1005 * MS)
+    if list.len(client_init1) == 0 {
+        fail("client did not resend its Initial on PTO")
+    }
+    for d in client_init1 {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        server_rx += len
+        quic.receive_datagram(mut server, 160 * MS, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+    }
+    // Without calling server timeout (160 ms << 1,009 ms PTO), the server must resend
+    // ServerHello (1,200 B Initial coalescing ACK + CRYPTO) and Handshake immediately.
+    let reply = drain_datagrams(mut server, 160 * MS)
+    let mut resent_initial = false
+    let mut resent_handshake = false
+    for d in reply {
+        let len = list.len(d)
+        server_tx += len
+        if d[0] & 0xf0 == 0xc0 && len >= 1200 {
+            resent_initial = true
+        } else if d[0] & 0xf0 == 0xe0 {
+            resent_handshake = true
+        }
+    }
+    if server_tx > 3 * server_rx {
+        fail("server exceeded 3x anti-amplification budget on duplicate Initial")
+    }
+    if !resent_initial || !resent_handshake {
+        fail("server did not immediately resend ServerHello and Handshake on duplicate client Initial")
+    }
+    // Deliver the server's immediate resend to the client (one RTT later) and verify the
+    // handshake completes without ever waiting for the server's PTO.
+    for d in reply {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        quic.receive_datagram(mut client, 1025 * MS, SERVER_ADDR, 0, mut wire, 0, len, mut at_client)
+    }
+    for d in drain_datagrams(mut client, 1025 * MS) {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        quic.receive_datagram(mut server, 170 * MS, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+    }
+    for d in drain_datagrams(mut server, 170 * MS) {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        quic.receive_datagram(mut client, 1045 * MS, SERVER_ADDR, 0, mut wire, 0, len, mut at_client)
+    }
+    if !connected(at_client) || !connected(at_server) {
+        fail("handshake did not complete within one RTT of duplicate client Initial")
+    }
+    Ok(())
+}

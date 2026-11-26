@@ -178,6 +178,8 @@ fn apply_packet_with(mut c: Connection, now: u64, kind: codec.PacketKind, input:
     }
     let mut r = take frame_reader
     let mut ack = false
+    let mut dup_initial_crypto = false
+    let initial_at = c.initial.crypto_in.at
     c.probing_only = true
     while true {
         let f = match codec.next_frame_into(input, mut r, mut ack_ranges) {
@@ -186,6 +188,13 @@ fn apply_packet_with(mut c: Connection, now: u64, kind: codec.PacketKind, input:
             Error(e) => return Error(codec_failure(e)),
         }
         c.probing_only = c.probing_only && probing_frame(f)
+        if kind == Initial {
+            if let Crypto(offset: offset, data: data) = f {
+                if data.len > 0 && offset < initial_at {
+                    dup_initial_crypto = true
+                }
+            }
+        }
         match apply_frame(mut c, now, kind, f, input, ack_ranges, mut acked, mut lost, mut events)? {
             Quiet => (),
             ElicitsAck => {
@@ -202,6 +211,19 @@ fn apply_packet_with(mut c: Connection, now: u64, kind: codec.PacketKind, input:
     let level = packet_level(kind)
     drain_tls(mut c, now, random, mtu, level, mut events)?
     note_receive(mut c, now, level, opened.number, ack, ecn)
+    if dup_initial_crypto {
+        if let Server = c.side {
+            // RFC 9002 §6.2.2.1 & §6.2.4: a duplicate client Initial shows the client
+            // has not yet received ServerHello; resend unacknowledged Initial (and
+            // already-committed Handshake) CRYPTO right away, coalesced with the Initial
+            // ACK, staying within the RFC 9000 §8.1 anti-amplification budget enforced by
+            // `staged_connection`.
+            resend_unacked_crypto(mut c.initial)
+            if list.len(c.encrypted.crypto_out) == c.encrypted.crypto_committed {
+                resend_unacked_crypto(mut c.encrypted)
+            }
+        }
+    }
     if let Some(_) = c.encrypted.send {
         recovery.set_handshake_keys(mut c.recovery, now)
     }

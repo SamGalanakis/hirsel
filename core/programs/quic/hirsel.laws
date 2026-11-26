@@ -19,6 +19,7 @@ quic@1/laws/rebind_validates_new_path src=467466103ef42875 sig=ae32795d71c85765 
 quic@1/laws/retry_validates_address src=1e1ff01d1d686dc6 sig=1e3f32157e06fa3b run=c2c0c6612d4cbb79 bug=64d6f3081a145d18 oracle=05cf59ba42461ee5 rows=pending
 quic@1/laws/rfc9001_client_initial_parses src=f5c1078900cb58d0 sig=ea8646914cb42ab8 run=c2c0c6612d4cbb79 bug=2b6627b21f13d095 oracle=765a5db8a2b054c1 rows=pending
 quic@1/laws/server_pto_probes_initial_and_handshake_together src=29de0d1fcf0b6f26 sig=133eb16773eb0e79 run=c2c0c6612d4cbb79 bug=a5dd0490c87ffd9a oracle=7bb0547a62a3ce44 rows=pending
+quic@1/laws/server_resends_initial_crypto_on_duplicate_client_initial src=a7d334e9f669de08 sig=b08a54c312486b74 run=c2c0c6612d4cbb79 bug=baf89e8a2949717d oracle=a18e4d93c757c394 rows=pending
 quic@1/laws/stateless_reset_closes_and_never_loops src=12326c775d61c6bc sig=c5bbf5716edd8d01 run=c2c0c6612d4cbb79 bug=e14fc711c196a607 oracle=54b16fe028393217 rows=pending
 quic@1/laws/steer_reaches_owner src=5d02736a2cb2662a sig=9ddf1823cfdeaeb3 run=c7b2a52baff70a63 bug=fa0dc5dc8d7b3c3a oracle=44a7d82934c72886 rows=pending
 quic@1/laws/varint_and_packet_number_vectors src=4234e282146e0c27 sig=faac2b82272d6d6f run=c2c0c6612d4cbb79 bug=4286390f4d5d8a55 oracle=322d7d0b04d42bd7 rows=pending

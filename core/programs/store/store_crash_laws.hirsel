@@ -632,16 +632,19 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, final_item)?
+    close(take db)?
     let saved = open_read_only(child, c, result.unwrap(sized(Directory, 2147483648u64)))?
     let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
         fail("read-only open missed a durable journal row")
     }
-    if !typed_put(mut db, opened_rows, 7, 71) {
+    let mut again = open(tasks, child, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
+    let again_rows = table(mut again, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut again, again_rows, 7, 71) {
         fail("could not commit replacement row")
     }
-    checkpoint(mut db)?
-    close(take db)?
+    checkpoint(mut again)?
+    close(take again)?
     let newer = open_read_only(child, c, result.unwrap(sized(Directory, 2147483648u64)))?
     if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(newer.snapshot) != 3 || read_only_get(newer, rows, 7)? != Some(71u64) {
         fail("read-only reads changed after the writer replaced the row")

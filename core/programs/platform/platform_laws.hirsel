@@ -1395,7 +1395,7 @@ fn offline_is(d: Dir, c: Clock, id: Bytes, now: u64, want: Option[Bytes]) -> boo
     }
 }
 
-// `pin_offline_reader` (launch.md "Replaying a recording"): with the catalog on disk, the
+// `pin_offline_reader` (launch.md "Replaying a recording"): with the catalog closed on disk, the
 // offline reader gives the live host's answer for the same ID and second: the pin's assembly
 // strictly before its expiry, `Gone` at the expiry, for a removed pin and for an unknown ID,
 // from the journal before any checkpoint. A directory with no catalog is an error, never
@@ -1429,11 +1429,11 @@ fn pin_offline_reader(d: Dir, c: Clock, rnd: Random, tasks: Tasks) -> Result[(),
         Ok(Found(a)) => a == image(),
         _ => false
     }
+    let _ = result.unwrap(store.close(close(take h)))
     expect(live_found && offline_is(at, c, id, expires - 1u64, Some(image())), "offline: the reader missed a pin the live host resolves")
     expect(offline_is(at, c, id, expires, None), "offline: the reader resolved a pin at its expiry")
     expect(offline_is(at, c, gone, 0u64, None) && offline_is(at, c, unknown, 0u64, None), "offline: the reader resolved a removed or unknown pin")
     expect(!offline_is(none, c, id, 0u64, None), "offline: a directory with no catalog was Gone")
-    let _ = store.close(close(take h))
     Ok(())
 }
 

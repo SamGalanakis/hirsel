@@ -33,7 +33,7 @@ platform@1/platform/node_incarnation src=4f2a27aad3eec68d sig=e37ebbcc1d3d855e r
 platform@1/platform/operator_register src=250f38a566f4e3ae sig=ad53408c5986d8f0 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/operator_request_identity src=13289ea0edf5cda0 sig=d2977ae9dc484bef run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/pin_expiry src=e1c4b8062adcb321 sig=68e667ec9147f657 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-platform@1/platform/pin_offline_reader src=1e8bd0973967c23b sig=7e6e7dcd62f80e9b run=ea720f3846592392 bug=- oracle=- rows=pending
+platform@1/platform/pin_offline_reader src=239286c7be2ee21f sig=7e6e7dcd62f80e9b run=ea720f3846592392 bug=- oracle=- rows=pending
 platform@1/platform/reservation_generations src=22efd3f0cd73ded3 sig=263bf9398cab2600 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/source_blob_checked src=5f20b79f059b51b4 sig=19b5fb40d0f79d12 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/source_blobs_rooted_across_crash src=9b787d5622df5f45 sig=26dd505ea7bbdb98 run=b1818af2b24835d3 bug=- oracle=- rows=pending

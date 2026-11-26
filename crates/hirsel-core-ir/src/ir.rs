@@ -233,10 +233,10 @@ pub enum BinaryOp {
     Max,
     MinNumber,
     MaxNumber,
-    /// Integers only: the operand's bits rotated left by the count modulo the width,
-    /// the count read as unsigned; never fails (LLVM `fshl` with both inputs equal,
-    /// Cranelift `rotl`). Last, so no stored variant index moves (FORM #112).
+    /// Rotates an integer left by the unsigned count modulo its width. Never fails.
     Rotl,
+    /// Upper 64 bits of the exact product of two u64 operands. Never fails.
+    MulHigh,
 }
 impl BinaryOp {
     /// Whether the op on operands of `ty` can fail and so names a failure block.

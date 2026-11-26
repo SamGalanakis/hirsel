@@ -67,19 +67,8 @@ impl FunctionEmitter<'_> {
         self.load_with(&Type::I64, &at, &memory)
     }
 
-    fn map_product_halves(&mut self, a: &Value, b: &Value) -> [Value; 2] {
-        let wide = Type::Int(128);
-        let a = self.zext(&Type::I64, a, &wide);
-        let b = self.zext(&Type::I64, b, &wide);
-        let product = self.bin(Binary::Mul, &wide, &a, &b);
-        let low = self.cast(Cast::Trunc, &wide, &product, &Type::I64);
-        let high = self.bin(Binary::LShr, &wide, &product, &int(64));
-        let high = self.cast(Cast::Trunc, &wide, &high, &Type::I64);
-        [low, high]
-    }
-
     fn map_fold(&mut self, a: &Value, b: &Value) -> Value {
-        let [low, high] = self.map_product_halves(a, b);
+        let [low, high] = self.unsigned_product_halves(a, b);
         self.bin(Binary::Xor, &Type::I64, &low, &high)
     }
 
@@ -120,7 +109,7 @@ impl FunctionEmitter<'_> {
         let high = self.load(&u, &high_at, 1);
         let a = self.bin(Binary::Xor, &u, &z, &low);
         let b = self.bin(Binary::Xor, &u, &s1, &high);
-        let [low, high] = self.map_product_halves(&a, &b);
+        let [low, high] = self.unsigned_product_halves(&a, &b);
         self.emit_to(next_z, Operation::Binary(Binary::Xor, &u, &low, &high));
         self.emit_to(
             next_data,

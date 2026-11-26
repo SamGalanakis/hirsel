@@ -69,6 +69,7 @@ fn int_bits(op: BinaryOp, width: u32, a: u64, c: u64) -> Option<u64> {
         BinaryOp::BitAnd => Some(a & c),
         BinaryOp::BitOr => Some(a | c),
         BinaryOp::BitXor => Some(a ^ c),
+        BinaryOp::MulHigh => Some(crate::scalar::mul_high(a, c)),
         BinaryOp::Rotl => {
             let (x, n) = (low(a), low(c) % u64::from(width));
             Some(low(x << n | x.checked_shr(width - n as u32).unwrap_or(0)))

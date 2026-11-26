@@ -102,6 +102,17 @@ impl FunctionEmitter<'_> {
             }
         }
     }
+    pub(super) fn unsigned_product_halves(&mut self, a: &Value, b: &Value) -> [Value; 2] {
+        let wide = Type::Int(128);
+        let a = self.zext(&Type::I64, a, &wide);
+        let b = self.zext(&Type::I64, b, &wide);
+        let product = self.bin(Binary::Mul, &wide, &a, &b);
+        let low = self.cast(Cast::Trunc, &wide, &product, &Type::I64);
+        let high = self.bin(Binary::LShr, &wide, &product, &int(64));
+        let high = self.cast(Cast::Trunc, &wide, &high, &Type::I64);
+        [low, high]
+    }
+
     pub(super) fn binary(
         &mut self,
         t: Ty,
@@ -203,6 +214,10 @@ impl FunctionEmitter<'_> {
                     _ => Binary::Xor,
                 };
                 self.bin(bit, &tt, a, b)
+            }
+            BinaryOp::MulHigh => {
+                let [_, high] = self.unsigned_product_halves(a, b);
+                high
             }
             BinaryOp::Rotl => self.intrinsic(
                 &format!("llvm.fshl.{tt}"),

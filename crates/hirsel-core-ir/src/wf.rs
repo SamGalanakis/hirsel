@@ -924,18 +924,18 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             need(t == c.ty(right)? && t == c.ty(result)?, || {
                 "binary operand types".into()
             })?;
+            let integer = t.int().is_some();
             let ok = match op {
-                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                    t.int().is_some() || t == bool_ty
-                }
+                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => integer || t == bool_ty,
                 BinaryOp::MinNumber | BinaryOp::MaxNumber => t.is_float(),
+                BinaryOp::MulHigh => t == Ty::Scalar(Scalar::U64),
                 BinaryOp::Min
                 | BinaryOp::Max
                 | BinaryOp::Add
                 | BinaryOp::Sub
                 | BinaryOp::Mul
-                | BinaryOp::Div => t.int().is_some() || t.is_float(),
-                _ => t.int().is_some(),
+                | BinaryOp::Div => integer || t.is_float(),
+                _ => integer,
             };
             need(ok, || format!("{op:?} on {t:?}"))?;
             c.fail(fail, op.can_fail(t))

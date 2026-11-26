@@ -167,6 +167,7 @@ tags!(BinaryOp {
     12 => MinNumber,
     13 => MaxNumber,
     14 => Rotl,
+    15 => MulHigh,
 });
 
 tags!(CompareOp {

@@ -2322,31 +2322,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(join);
         Some(self.pointer(to, n))
     }
-    /// Base-2^32 long multiplication. Each limb product fits u64; the two carry
-    /// sums are bounded by 2^64-2^32, and high is at most u64::MAX-1.
     fn mul_wide(&mut self, a: ValueId, b: ValueId, tuple: TyId, n: NodeId) -> Option<ValueId> {
         let ty = Ty::Scalar(Scalar::U64);
-        let mask = self.konst(ty, 0xffff_ffff, n)?;
-        let shift = self.konst(ty, 32, n)?;
-        let a0 = self.numeric_binary(ty, BinaryOp::BitAnd, a, mask, n)?;
-        let b0 = self.numeric_binary(ty, BinaryOp::BitAnd, b, mask, n)?;
-        let a1 = self.numeric_binary(ty, BinaryOp::Shr, a, shift, n)?;
-        let b1 = self.numeric_binary(ty, BinaryOp::Shr, b, shift, n)?;
-        let w0 = self.numeric_binary(ty, BinaryOp::Mul, a0, b0, n)?;
-        let carry = self.numeric_binary(ty, BinaryOp::Shr, w0, shift, n)?;
-        let cross = self.numeric_binary(ty, BinaryOp::Mul, a1, b0, n)?;
-        let t = self.numeric_binary(ty, BinaryOp::Add, cross, carry, n)?;
-        let w1 = self.numeric_binary(ty, BinaryOp::BitAnd, t, mask, n)?;
-        let w2 = self.numeric_binary(ty, BinaryOp::Shr, t, shift, n)?;
-        let cross = self.numeric_binary(ty, BinaryOp::Mul, a0, b1, n)?;
-        let w1 = self.numeric_binary(ty, BinaryOp::Add, w1, cross, n)?;
-        let carry = self.numeric_binary(ty, BinaryOp::Shr, w1, shift, n)?;
-        let high = self.numeric_binary(ty, BinaryOp::Mul, a1, b1, n)?;
-        let high = self.numeric_binary(ty, BinaryOp::Add, high, w2, n)?;
-        let high = self.numeric_binary(ty, BinaryOp::Add, high, carry, n)?;
-        let low = self.numeric_binary(ty, BinaryOp::Shl, w1, shift, n)?;
-        let bottom = self.numeric_binary(ty, BinaryOp::BitAnd, w0, mask, n)?;
-        let low = self.numeric_binary(ty, BinaryOp::BitOr, low, bottom, n)?;
+        let high = self.numeric_binary(ty, BinaryOp::MulHigh, a, b, n)?;
+        let low = self.numeric_arith(ty, ArithOp::Mul, a, b, n)?;
         let place = self.place_ty(tuple, n)?;
         let to = self.new_slot(place, n);
         for (i, value) in [high, low].into_iter().enumerate() {

@@ -42,10 +42,12 @@ fn send(mut r: recovery.Recovery, now: u64, number: u64, size: u64) {
 
 /// bug: RTT estimation, packet- or time-threshold loss, PTO backoff or persistent
 /// congestion departs from RFC 9002, so a sender retransmits too early, too late or
-/// keeps a window persistent congestion should have collapsed.
+/// keeps a window persistent congestion should have collapsed; or, end to end, the
+/// peer's max_ack_delay never reaches the PTO, a probe does not leave when its timer
+/// fires, or lost stream data is not sent again when it is declared lost.
 /// oracle: RFC 9002 Appendix A.4-A.10 and B.3-B.8, evaluated by hand below.
 @test
-fn loss_recovery_matches_rfc9002() -> Result[(), ()] {
+fn loss_recovery_matches_rfc9002(tasks: Tasks) -> Result[(), ()] waits {
     // A server (peer address validated), confirmed, max_ack_delay 25 ms, NewReno.
     // B.3: cwnd = min(10 * 1200, max(14720, 2400)) = 12000.
     let mut r = recovery.new(Reno, 1200, true)
@@ -153,6 +155,9 @@ fn loss_recovery_matches_rfc9002() -> Result[(), ()] {
     eq("cwnd 5", recovery.window(r), 3000)
     eq("pto count reset", recovery.pto_count(r), 0)
     eq("in flight 5", recovery.bytes_in_flight(r), 0)
+    // The same three traces end to end: a client writes a stream through sim.udp to a
+    // server on quic.drive, and drops the datagrams named below on its way out.
+    q9_end_to_end(tasks)
     Ok(())
 }
 
@@ -554,4 +559,273 @@ fn handshake_done_is_retransmitted() -> Result[(), ()] {
         fail("an end kept retransmitting after the handshake")
     }
     Ok(())
+}
+
+// Q9 end to end. Three NewReno clients (one per case) and one server on a 10 ms one-way
+// sim.udp path with no impairment. Every ACK leaves the instant its packet arrives
+// (ACK Delay 0), so every RTT sample is exactly 20 ms: srtt = 20 ms from the first
+// sample on (A.7), and rttvar starts at 10 ms and falls by a quarter per sample, below
+// 0.25 ms after 13 samples. After the 30 warm-up rounds 4 * rttvar < kGranularity, so
+// the PTO is 20 + 1 + 25 (the peer's default max_ack_delay) = 46 ms (A.8). Each client
+// writes 100-byte chunks, one packet each, so it never fills its window and is
+// application limited: B.5 grows nothing and cwnd is B.3's 12000 at T.
+const Q9_WARM: u64 = 200 * MS
+
+const Q9_ROUNDS: u64 = 30
+
+/// T, when each case's burst is written: the last warm-up round's 40 ms after it.
+const Q9_T: u64 = Q9_WARM + Q9_ROUNDS * 40 * MS
+
+const Q9_END: u64 = Q9_T + 1600 * MS
+
+const Q9_CHUNK: u64 = 100
+
+pub type Q9Plan: send {
+    clock: Clock,
+    socket: UdpSocket,
+    case: u64
+}
+
+/// From T: each datagram the client sent (dropped ones included) and each change of its
+/// congestion window, in nanoseconds after T; and its smoothed RTT and window at T.
+pub type Q9Trace: send {
+    sends: List[u64],
+    changed: List[u64],
+    windows: List[u64],
+    srtt: u64,
+    window: u64
+}
+
+fn q9_transport() -> quic.TransportConfig {
+    let mut t = stream_transport(1024 * KIB, 1024 * KIB, 1024 * KIB)
+    t.max_idle_ms = 30000
+    t.cc = NewReno
+    take t
+}
+
+/// Datagrams counted from T that the path loses: the first of four (single loss), the
+/// last of two (tail loss), and the first four (persistent congestion).
+fn q9_dropped(case: u64, index: u64) -> bool {
+    match case {
+        0 => index == 0,
+        1 => index == 1,
+        _ => index < 4,
+    }
+}
+
+/// Send everything the client has at `now`, losing what q9_dropped names; the wake.
+fn q9_flush(mut e: quic.Endpoint, mut socket: UdpSocket, now: u64, case: u64, mut trace: Q9Trace) -> u64 waits {
+    let mut wake = Q9_END
+    for _ in 0u64 .. 64 {
+        let mut out: Bytes = list.with_capacity(16 * 1500)
+        let mut outputs: List[quic.Output] = list.with_capacity(16)
+        wake = match quic.poll(mut e, now, mut out, mut outputs) {
+            Some(t) => order.min(t, Q9_END),
+            None => Q9_END,
+        }
+        let mut tx: List[UdpTx] = list.with_capacity(16)
+        let mut count = 0u64
+        for o in outputs {
+            if let Transmit(to: to, at: at, len: len, ecn: ecn, ..) = o {
+                count += 1
+                let mut lost = false
+                if now >= Q9_T {
+                    lost = q9_dropped(case, list.len(trace.sends))
+                    list.push(mut trace.sends, now - Q9_T)
+                }
+                if !lost {
+                    list.push(mut tx, UdpTx(to, at: at, len: len, ecn: ecn))
+                }
+            }
+        }
+        if count == 0 {
+            quic.committed(mut e, now, 0)
+            break
+        }
+        if list.len(tx) > 0 {
+            let _ = result.unwrap(host.udp_send(mut socket, out, tx, Never))
+        }
+        quic.committed(mut e, now, count)
+    }
+    wake
+}
+
+fn q9_client(take plan: Q9Plan) -> Q9Trace waits {
+    let Q9Plan(clock, socket: take given, case) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(50 + case), endpoint_config(), None))
+    let _ = result.unwrap(quic.connect(mut e, 0, SIM_SERVER, "server", cert_pin(old_digest()), None, q9_transport()))
+    let burst = match case {
+        0 => 4u64,
+        1 => 2u64,
+        _ => 1u64,
+    }
+    let chunk = pattern(Q9_CHUNK, 7)
+    let mut stream: Option[(quic.ConnectionHandle, quic.StreamId)] = None
+    let mut warm = 0u64
+    let mut burst_sent = false
+    let mut last = 0u64
+    let mut trace = Q9Trace(sends: list.new(), changed: list.new(), windows: list.new(), srtt: 0, window: 0)
+    let mut events: List[quic.Event] = list.new()
+    let mut data: Bytes = list.with_capacity(64 * 1536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= Q9_END {
+            break
+        }
+        quic.timeout(mut e, now, mut events)
+        for event in events {
+            if let Connected(c: h, ..) = event {
+                stream = Some((h, result.unwrap(quic.open(mut e, h, true))))
+            }
+        }
+        list.clear(mut events)
+        if let Some((c, _)) = stream {
+            if burst_sent {
+                if let Some((_, _, _, window, _)) = quic.path_state(e, c) {
+                    if window != last {
+                        last = window
+                        list.push(mut trace.changed, now - Q9_T)
+                        list.push(mut trace.windows, window)
+                    }
+                }
+            }
+        }
+        let mut wake = q9_flush(mut e, mut socket, now, case, mut trace)
+        if let Some((c, id)) = stream {
+            if warm < Q9_ROUNDS && now >= Q9_WARM + warm * 40 * MS {
+                warm += 1
+                let _ = result.unwrap(quic.write(mut e, c, id, chunk, false))
+                wake = q9_flush(mut e, mut socket, now, case, mut trace)
+            } else if warm == Q9_ROUNDS && !burst_sent && now >= Q9_T {
+                burst_sent = true
+                if let Some((_, _, _, window, srtt)) = quic.path_state(e, c) {
+                    trace.window = window
+                    trace.srtt = srtt
+                    last = window
+                }
+                // One write per packet: a write before the poll would share its packet.
+                for _ in 0u64 .. burst {
+                    let _ = result.unwrap(quic.write(mut e, c, id, chunk, false))
+                    wake = q9_flush(mut e, mut socket, now, case, mut trace)
+                }
+            }
+        }
+        if warm < Q9_ROUNDS {
+            wake = order.min(wake, Q9_WARM + warm * 40 * MS)
+        } else if !burst_sent {
+            wake = order.min(wake, Q9_T)
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+        match host.udp_recv(mut socket, mut data, mut packets, At(clock, order.max(wake, now + 1))) {
+            Ok(_) => (),
+            Error(TimedOut) => (),
+            Error(_) => fail("sim.udp receive failed"),
+        }
+        let at = host.mono_ns(clock)
+        for p in packets {
+            let UdpPacket(peer, at: start, len, truncated, ecn) = p
+            if !truncated {
+                quic.receive_datagram(mut e, at, peer, ecn, mut data, start, len, mut events)
+            }
+        }
+    }
+    take trace
+}
+
+/// The server acknowledges on quic.drive and never reads, so it sends no flow-control
+/// update and nothing ack-eliciting after the handshake: the client sends no ACKs.
+fn q9_server(take plan: Q9Plan) -> u64 waits {
+    let Q9Plan(clock, socket: take given, ..) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), q9_transport()))))
+    let mut opened = 0u64
+    let mut events: List[quic.Event] = list.new()
+    while host.mono_ns(clock) < Q9_END {
+        result.unwrap(quic.drive(mut e, clock, mut socket, Q9_END, mut events))
+        for event in events {
+            if let Opened(..) = event {
+                opened += 1
+            }
+        }
+        list.clear(mut events)
+    }
+    opened
+}
+
+/// One case: its sends from T exactly, and exactly one change of window, at `at` ms.
+fn q9_case(take what: String, t: Q9Trace, sends: List[u64], at: u64, window: u64) {
+    if t.sends != sends || list.len(t.changed) != 1 {
+        fail(take what)
+        return
+    }
+    if t.changed[0] != at * MS || t.windows[0] != window {
+        fail(take what)
+    }
+}
+
+fn q9_end_to_end(tasks: Tasks) waits {
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 10 * MS
+    let script = std.sim.world.Script(tail_seed: 9, streams: list.new())
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(1, 0, 0)
+    let sim = std.sim.udp.Server(config, plan: std.sim.world.plan_from(script, 0), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim, std.sim.udp.serve)
+    let (take server_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_SERVER, SIM_SOCKET))
+    let server = task.spawn(tasks, bytes 4194304, Q9Plan(clock, socket: take server_socket, case: 0), q9_server)
+    let mut clients: List[Task[Q9Trace]] = list.new()
+    for case in 0u64 .. 3 {
+        let at = Addr(ip: V4(0x0a000010u32 + int.narrow(case)), port: 4433)
+        let (take socket, _) = result.unwrap(host.udp_bind(vnet, at, SIM_SOCKET))
+        list.push(mut clients, task.spawn(tasks, bytes 4194304, Q9Plan(clock, socket: take socket, case: case), q9_client))
+    }
+    // Joined last case first: traces[2 - case].
+    let mut traces: List[Q9Trace] = list.new()
+    while let Some(take t) = list.pop(mut clients) {
+        list.push(mut traces, result.unwrap(task.join(take t)))
+    }
+    if result.unwrap(task.join(take server)) != 3 {
+        fail("the server did not see each client's stream")
+    }
+    result.unwrap(task.join(take served))
+    for t in traces {
+        eq("end-to-end srtt at T", t.srtt, 20 * MS)
+        eq("end-to-end cwnd at T", t.window, 12000)
+    }
+    // Single loss. Packets p1-p4 at T; p1 lost. ACK of p2-p4 at T + 20: largest 4 >=
+    // 1 + kPacketThreshold, p1 lost (A.10). B.6: cwnd = 12000 / 2 = 6000, recovery from
+    // T + 20. p1's chunk leaves again at once; its ACK at T + 40 is for a packet sent at
+    // T + 20 <= the recovery start, so no growth (B.5), and nothing is in flight after.
+    let mut single: List[u64] = list.new()
+    for v in[0u64, 0u64, 0u64, 0u64, 20u64] {
+        list.push(mut single, v * MS)
+    }
+    q9_case("single loss: sends from T, or cwnd 6000 at T + 20", traces[2], single, 20, 6000)
+    // Tail loss. p1 and p2 at T; p2 lost. ACK of p1 at T + 20: p2 is above the largest
+    // acknowledged, so neither threshold applies; the PTO is T + 46 (A.8). The probe (p3,
+    // a PING) leaves at T + 46 and its ACK arrives at T + 66: p2 sent at T, loss_delay
+    // 9/8 * 20 = 22.5 ms, T + 22.5 <= T + 66, so p2 is lost then (A.10) and its chunk
+    // leaves again. The PTO left the window alone (§7.5); the loss halves it to 6000.
+    let mut tail_sends: List[u64] = list.new()
+    for v in[0u64, 0u64, 46u64, 66u64] {
+        list.push(mut tail_sends, v * MS)
+    }
+    q9_case("tail loss: sends from T, or cwnd 6000 at T + 66", traces[1], tail_sends, 66, 6000)
+    // Persistent congestion. p1 at T and the probes at each PTO are lost: PTO k fires
+    // at the previous probe + 46 * 2^(k-1) ms, so probes at T + 46, T + 46 + 92 = T + 138
+    // and T + 138 + 184 = T + 322. The fourth PTO, at T + 322 + 368 = T + 690, sends p5,
+    // which arrives; its ACK at T + 710 declares p1 and p2 lost by the packet threshold
+    // and p3 and p4 by time. B.8: the congestion event would leave 6000, but p1-p4 are
+    // contiguous ack-eliciting losses after the first RTT sample spanning 322 ms >
+    // 3 * 46 = 138 ms (§7.6.2): cwnd = kMinimumWindow 2400 and the recovery period ends.
+    // p1's chunk leaves again at T + 710; its ACK finds the sender application limited,
+    // so nothing grows (B.5).
+    let mut persistent: List[u64] = list.new()
+    for v in[0u64, 46u64, 138u64, 322u64, 690u64, 710u64] {
+        list.push(mut persistent, v * MS)
+    }
+    q9_case("persistent congestion: sends from T, or cwnd 2400 at T + 710", traces[0], persistent, 710, 2400)
 }

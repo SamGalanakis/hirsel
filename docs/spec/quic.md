@@ -554,11 +554,12 @@ the package. RFC 9001's Appendix A vectors are TLS-8's PC1 and are not repeated 
   that reset each other, started from a 1,500-byte trigger, exchange a bounded number of
   resets and stop, each one shorter than the last. *Oracle:* RFC 9000 §10.3 and §10.3.3, by
   hand.
-- **Q9 `loss_recovery_matches_rfc9002`.** Scripted `sim.udp` traces (a single loss, a tail
-  loss, three PTOs in a row, persistent congestion) against a hand trace of RFC 9002
-  Appendix A and B's pseudocode: each packet's declared-lost time, each PTO time and the
-  congestion window after each ACK. *Oracle:* the pseudocode, worked by hand in the law's
-  comments.
+- **Q9 `loss_recovery_matches_rfc9002`.** Traces (a single loss, a tail loss, three PTOs in
+  a row, persistent congestion) against a hand trace of RFC 9002 Appendix A and B's
+  pseudocode: each packet's declared-lost time, each PTO time and the congestion window
+  after each ACK, first on the recovery module and then end to end through a stream over
+  a 10 ms `sim.udp` path whose client loses the datagrams each case names. *Oracle:* the
+  pseudocode, worked by hand in the law's comments.
 - **Q10 `cubic_matches_rfc9438`.** A scripted ACK sequence through a loss: `W_max`, `K` and
   `W_cubic(t)` at chosen `t`, and HyStart++'s exit round. *Oracle:* RFC 9438 §4 and RFC 9406
   §4's formulas, by hand.

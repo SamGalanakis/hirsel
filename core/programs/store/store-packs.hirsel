@@ -97,13 +97,32 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
     Ok(())
 }
 
-fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known: PageLocations) -> Result[std.page.PagePtr, Error] {
-    emit_located_frame(mut out, context, frame, scoped fn(stamp: u64) -> std.page.PagePtr {
-        let Some(location) = disk_index_get(known.frames, stamp) else {
-            fail("store: missing emitted child")
+// The place a parent records for a child. A child written earlier in the same
+// pack is installed only after the pack, so its checksum comes from `emitted`,
+// the pack's frames so far in offset order.
+fn child_place(known: PageLocations, seq: u64, emitted: List[std.page.PagePtr], stamp: u64) -> std.page.PagePtr {
+    let Some(location) = disk_index_get(known.frames, stamp) else {
+        fail("store: missing emitted child")
+    }
+    let place = location.place
+    if place.pack != seq {
+        return place
+    }
+    let mut low = 0u64
+    let mut high = list.len(emitted)
+    while low < high {
+        let middle = low + (high - low) / 2
+        if emitted[middle].offset < place.offset {
+            low = middle + 1
+        } else {
+            high = middle
         }
-        location.place
-    })
+    }
+    if low < list.len(emitted) && emitted[low].stamp == stamp {
+        emitted[low]
+    } else {
+        place
+    }
 }
 
 fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[std.page.PagePtr, Error] {
@@ -138,29 +157,33 @@ fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, lo
     Ok(std.page.PagePtr(pack: context.seq, offset: offset, len: size, checksum: checksum, stamp: frame.stamp))
 }
 
-fn install_emitted_place(mut known: PageLocations, located: std.page.PagePtr) -> Result[(), Error] {
-    let updated = disk_allocation(scoped fn() -> Result[DiskIndex[u64, FrameLocation], Error] {
-        let mut frames = disk_index_share(known.frames)
-        let _ = capacity(disk_index_update(mut frames, located.stamp, frame_edge_charge, fn(mut location: FrameLocation) {
-            location.place = located
-        }))?
-        Ok(take frames)
-    })?
-    known.frames = take updated
-    Ok(())
-}
-
+// The pack's places are installed together once every frame is emitted, so the
+// frame index is shared and its nodes copied once per pack, not once per frame.
 fn encode_pack(id: StoreId, layout: PackRun, pack: PlannedPack, mut known: PageLocations, mut out: Bytes) -> Result[(), Error] {
     list.clear(mut out)
     let context = DiskContext(store: id, role: 3, seq: pack.seq)
-    let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        capacity(disk_header_bytes(context, 0, 0))
+    let (take header, take reserved) = disk_allocation(scoped fn() -> Result[(Bytes, List[std.page.PagePtr]), Error] {
+        let places: List[std.page.PagePtr] = list.with_capacity(pack.end - pack.first)
+        Ok((capacity(disk_header_bytes(context, 0, 0))?, take places))
     })?
+    let mut emitted = take reserved
     list.append(mut out, header)
     for slot in pack.first .. pack.end {
-        let located = emit_pack_frame(mut out, context, layout.frames[slot], known)?
-        install_emitted_place(mut known, located)?
+        let located = emit_located_frame(mut out, context, layout.frames[slot], scoped fn(stamp: u64) -> std.page.PagePtr {
+            child_place(known, pack.seq, emitted, stamp)
+        })?
+        list.push(mut emitted, located)
     }
+    let updated = disk_allocation(scoped fn() -> Result[DiskIndex[u64, FrameLocation], Error] {
+        let mut frames = disk_index_share(known.frames)
+        for located in emitted {
+            let _ = capacity(disk_index_update(mut frames, located.stamp, frame_edge_charge, fn(mut location: FrameLocation) {
+                location.place = located
+            }))?
+        }
+        Ok(take frames)
+    })?
+    known.frames = take updated
     Ok(())
 }
 

@@ -12,6 +12,10 @@ on:
         default: none
         options: [none, linux-platform, unexplained-skip]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

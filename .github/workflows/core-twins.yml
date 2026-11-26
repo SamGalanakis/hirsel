@@ -4,6 +4,11 @@ on:
     paths: ["core/**", ".github/workflows/core-twins.yml"]
   pull_request:
     paths: ["core/**", ".github/workflows/core-twins.yml"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   twins:
     runs-on: ubuntu-latest

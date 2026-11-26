@@ -308,19 +308,6 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: 
     Ok(take retired)
 }
 
-fn build_retirement_list(retired: List[u64], mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
-    let mut rows: List[std.page.Row] = list.with_capacity(list.len(retired))
-    for seq in retired {
-        let key = key_word(seq)
-        list.push(mut rows, std.page.Row(key: take key, value: list.new(), charge: 70))
-    }
-    let built = page_result(std.page.bulk(rows, Unprefixed, 1024, mut next_stamp))?
-    match take built {
-        Some(take root) => Ok(take root),
-        None => Ok(std.page.empty(0, 0, Unprefixed)),
-    }
-}
-
 type PagedLists: shareable + send {
     packs: Arc[std.page.Page],
     retired: Arc[std.page.Page],
@@ -463,22 +450,9 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQ
     list.sort(mut removals, fn(a: u64, b: u64) -> Order {
         order.compare(a, b)
     })
-    if list.len(removals) != 0 {
-        let Some(span) = int.checked_mul(2, list.len(removals)) else {
-            return Error(Limit(Ids))
-        }
-        let Some(end) = int.checked_add(next_stamp, span + 1) else {
-            return Error(Limit(Ids))
-        }
-        let _ = cell.replace(issued, end)
-    }
-    let retired = build_retirement_list(removals, mut next_stamp)?
-    record_fresh_tree(mut known, retired, 2)?
-    add_page_source(mut known, std.page.stamp(std.page.image_of(retired)), ListSource(1))?
-    plan_tree_frames(known, moves, retired, mut emission)
     let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
     apply_pack_layout(mut known, pack_plan)?
-    Ok(ListLayout(roots: PagedLists(packs: take pack_root, retired: take retired, deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows)), run_packs: take pack_plan, removals: take removals))
+    Ok(ListLayout(roots: PagedLists(packs: take pack_root, retired: std.page.empty(0, 0, Unprefixed), deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows)), run_packs: take pack_plan, removals: take removals))
 }
 
 type PageRetryBase: send {

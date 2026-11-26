@@ -63,6 +63,7 @@ fn durable(mode: u8) -> bool {
 struct Bridge {
     fs: FileSystem,
     files: BTreeMap<u64, File>,
+    listings: BTreeMap<u64, (Vec<String>, usize)>,
     // (inode, open file description) -> exclusive
     locks: BTreeMap<(u64, u64), bool>,
     next_file: u64,
@@ -180,6 +181,9 @@ impl Bridge {
             }
             // Even a failed close consumes the descriptor.
             return failure.unwrap_or_default();
+        }
+        if op == sync::CLOSE_ENTRIES {
+            return self.close_entries(handle);
         }
         // The out-of-process witness records returned durability even when a
         // different task has just encountered the simulated filesystem cut.
@@ -640,6 +644,8 @@ impl Bridge {
                     Self::error(5)
                 }
             }
+            sync::ENTRIES => self.open_entries(path),
+            sync::NEXT_ENTRIES => self.next_entries(handle, data, len),
             124 => Outcome {
                 value: 1,
                 ..Outcome::default()
@@ -668,6 +674,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
     Box::into_raw(Box::new(Bridge {
         fs: FileSystem::default(),
         files: BTreeMap::new(),
+        listings: BTreeMap::new(),
         locks: BTreeMap::new(),
         next_file: 1,
         phase: 0,
@@ -757,7 +764,7 @@ pub unsafe extern "C" fn store_crash_syncs(p: *const c_void, op: u8, handle: u64
 pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
     // SAFETY: the C run wrapper owns p through its three synchronous runs.
     let bridge = unsafe { &mut *p.cast::<Bridge>() };
-    assert!(bridge.files.is_empty(), "run leaked provider file handles");
+    bridge.assert_no_leaked_handles();
     if phase >= 2 {
         // The first crash in L25(b) is process-only. The next opener sees
         // the pending rename and must make it durable before any removal.

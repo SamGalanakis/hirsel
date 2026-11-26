@@ -219,7 +219,7 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
     uint8_t path[4096];
     const uint8_t *used_path=r->path;
     size_t path_len=r->path_len;
-    if(r->handle>=scratch_handle && (r->operation==0 || r->operation==8)) {
+    if(r->handle>=scratch_handle && (r->operation==0 || r->operation==8 || r->operation==44)) {
         int count=snprintf((char *)path,sizeof path,"scratch-%llu/",(unsigned long long)(r->handle-scratch_handle));
         if(count<0 || r->path_len>sizeof path-(size_t)count) abort();
         memcpy(path+count,r->path,r->path_len);
@@ -230,7 +230,7 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
         used_path,path_len,r->buffer.data,r->buffer.len,r->buffer.capacity);
     if(!out.error.tag) {
         if(r->operation==1 || r->operation==37) r->buffer.len+=(size_t)out.value;
-        if(r->operation==18) r->buffer.len+=(size_t)out.written;
+        if(r->operation==18 || r->operation==45) r->buffer.len+=(size_t)out.written;
     }
     if(bl7.enabled) {
         if(r->operation==12 && r->buffer.len==7 && !memcmp(r->buffer.data,"RELEASE",7)) {

@@ -7,6 +7,10 @@ use super::{
     SECOND_SEGMENT_SYNC_FAILURE, WindowObservation, fork_frame_start, is_segment,
 };
 
+pub(super) const ENTRIES: u8 = 44;
+pub(super) const NEXT_ENTRIES: u8 = 45;
+pub(super) const CLOSE_ENTRIES: u8 = 48;
+
 impl Bridge {
     /// Counts one sync for journal-sync-count, explicit or carried by a
     /// Durable or Direct write (§3.3b).
@@ -154,6 +158,70 @@ impl Bridge {
             Outcome::default()
         } else {
             Self::error(5)
+        }
+    }
+
+    pub(super) fn close_entries(&mut self, handle: u64) -> Outcome {
+        self.listings.remove(&handle);
+        Outcome::default()
+    }
+
+    pub(super) fn assert_no_leaked_handles(&self) {
+        assert!(self.files.is_empty(), "run leaked provider file handles");
+        assert!(
+            self.listings.is_empty(),
+            "run leaked provider listing handles"
+        );
+    }
+
+    pub(super) fn open_entries(&mut self, path: &[u8]) -> Outcome {
+        let prefix = std::str::from_utf8(path).expect("Hirsel String path");
+        let names: Vec<String> = self
+            .fs
+            .snapshot()
+            .names
+            .into_keys()
+            .filter_map(|entry| {
+                let rest = if prefix.is_empty() {
+                    entry.as_str()
+                } else {
+                    entry.strip_prefix(prefix)?
+                };
+                (!rest.is_empty() && !rest.contains('/')).then(|| rest.to_owned())
+            })
+            .collect();
+        let id = self.next_file;
+        self.next_file += 1;
+        self.listings.insert(id, (names, 0));
+        Outcome {
+            value: id,
+            ..Outcome::default()
+        }
+    }
+
+    pub(super) fn next_entries(&mut self, handle: u64, data: &mut [u8], len: usize) -> Outcome {
+        let Some((names, cursor)) = self.listings.get_mut(&handle) else {
+            return Self::error(5);
+        };
+        let mut at = len;
+        let mut count = 0u64;
+        while *cursor < names.len() {
+            let bytes = names[*cursor].as_bytes();
+            let need = 3 + bytes.len();
+            if data.len() - at < need {
+                break;
+            }
+            data[at] = 0; // File
+            data[at + 1..at + 3].copy_from_slice(&(bytes.len() as u16).to_le_bytes());
+            data[at + 3..at + need].copy_from_slice(bytes);
+            at += need;
+            *cursor += 1;
+            count += 1;
+        }
+        Outcome {
+            value: count,
+            written: (at - len) as u64,
+            ..Outcome::default()
         }
     }
 }

@@ -18,7 +18,7 @@ The disposition table for every 3107 finding and lane row is in `hirsel-briefs/s
 - `store-health-types.hirsel` is in `"status"`;
 - `main.hirsel` is in `"main"`.
 
-Together they hold 3,013 top-level declarations. 571 of these are public: 568 in `"store"` (two of them the aliases `Health` and `StreamLatch`), 2 in `"status"` and 1 in `"main"`. Any subsystem can reach any other subsystem's private fields. `Db` (39 fields) and `DiskState` (34 fields) interleave Directory and Object state. `store.hirsel` (4,816 lines) mixes leaf types, codecs, holders, catalog, Directory I/O, transactions and transfer.
+Together they hold 3,020 top-level declarations. 573 of these are public: 570 in `"store"` (two of them the aliases `Health` and `StreamLatch`), 2 in `"status"` and 1 in `"main"`. Any subsystem can reach any other subsystem's private fields. `Db` (39 fields) and `DiskState` (34 fields) interleave Directory and Object state. `store.hirsel` (4,806 lines) mixes leaf types, codecs, holders, catalog, Directory I/O, transactions and transfer.
 
 The v3 end state:
 
@@ -43,7 +43,7 @@ Under `PROG-9` (`docs/spec/programs.md:252-299`), `code.identity(code.describe(f
 ### 2.2 Rules
 
 - **R1 — Root keeps every public declaration.**
-  - Every `pub` declaration of module `"store"` stays declared in `"store"` for the whole cutover, with its current header. That is 568 declarations: 211 nominal types, 2 aliases, 343 functions and 12 constants.
+  - Every `pub` declaration of module `"store"` stays declared in `"store"` for the whole cutover, with its current header. That is 570 declarations: 212 nominal types, 2 aliases, 344 functions and 12 constants.
   - This includes the 33 pinned types listed in 3107. It also includes `StreamId`, `StreamKey`, `ExportStamp`, `KeyedPolicy`, `KeyedCallRecord`, `ScrubRound`, `ScrubHistory`, `IndexState`, `IndexDrift`, `IndexReport`, `Attention`, `RowSchemas`, `PreparedTarget`, `CallRecord`, `DeclaredCollection`, `Binding`, `Generation`, `Image`, `Pass`, `Merge`, `Projection`, `Retain`, `Reclaim*`, `StoreLimits`, `StoreId`, `Caller`, `HostStreamId`, `StreamRefusal`, `TieredRefusal`, `EndpointRefusal`, `Position`, `Options` and every other public type.
   - `Health` and `StreamLatch` stay in `"status"`. Their existing root aliases stay as they are.
   - The full per-file list is §3.4, and `store.hirsel`'s list is §7.1.
@@ -121,7 +121,7 @@ Layer 8:   object_writer         (ObjectWriterState, object queue, slot relay fr
 Layer 9:   read                  (ReaderState, ReadOnlyState, cursors, changes, visitors over neutral inputs)
 Layer 10:  txn                   (TxState, PendingRep, accounting, call streams, commit drafting over passed limits)
 Layer 11:  transfer  maintenance (copy/lease/import state; walkers, pure fold work, expiry)
-Layer 12:  store                 (all 568 public declarations, Db/DiskState, coordinators, R3 orchestration, adapters)
+Layer 12:  store                 (all 570 public declarations, Db/DiskState, coordinators, R3 orchestration, adapters)
 Layer 13:  main
 ```
 
@@ -279,7 +279,7 @@ Rules for reading the table:
 | 119 | `store-migration.hirsel` | 12/11 | `catalog` (L3) | `Migration`, `CollectionKind`, `CollectionInfo`, `list_collections`, `stage_migration`, `run_migration`, `ConflictKeys`, `BackfillOutcome`, `MigrationBackfill`, `MigrationChange`, `MigrationPreview`, `preview_migration` | `schema_plan`, `stage_migration_plan` | — |
 | 120 | `store-projector.hirsel` | 27/53 | `maintenance` (L14) | `Binding`, `Generation`, `Image`, `Pass`, `Merge`, `Projection`, `Live`, `Cadence`, `cadence`, `Source`, `ProjectionDecl`, `Delta`, `Fold`, `Stepped`, `ProjectError`, `projection`, `projector`, `main_commit_version`, `projector_names`, `project_step`, `binding`, `live`, `projection_row`, `rebuild`, `pinned`, `pin`, `unpin` | `projector_run`, `source_reader`, `step_declared`, `projector_slot`, `read_projection`, `project_target`, `project_binding`, `borrowed_projection_base`, `pin_projection_target`, `project_commit`, `discard_projection_pass`, `discard_merge`, `retire_projection`, `rebind_projection`, `publish_projection_page`, `continue_projection`, `merge_projection`, `tend_projection`, `step_projector`, `pin_index`, `owned_pin`, `replace_projector_pin`, `pin_shares_head`, `change_pin`, `pin_delta`, `remove_pin` | — |
 | 121 | `store-tail.hirsel` | 3/8 | `pages` (L2) | `key_codec`, `Tail`, `read_tail` | — | — |
-| 122 | `store-read.hirsel` | 36/32 | `read` (L11) | `table_identity`, `Reader`, `reader`, `follower_reader`, `read_only_reader`, `staged_reader`, `copy_env`, `SpanRows`, `open_span_changes`, `next_span_change`, `span_changes`, `Rows`, `get`, `count_at`, `scan`, `scan_reverse`, `find`, `next`, `range`, `range_reverse`, `range_prefix`, `count`, `TxRows`, `next_in`, `IndexRows`, `IndexEntries`, `primary_key`, `lookup`, `lookup_prefix`, `entries`, `next_indexed`, `next_entry`, `ReadOnly`, `read_only_table`, `read_only_get`, `read_only_snapshot` | — | — |
+| 122 | `store-read.hirsel` | 38/37 | `read` (L11) | `table_identity`, `Reader`, `reader`, `follower_reader`, `read_only_reader`, `staged_reader`, `copy_env`, `SpanRows`, `open_span_changes`, `next_span_change`, `span_changes`, `Rows`, `get`, `count_at`, `scan`, `scan_reverse`, `find`, `next`, `range`, `range_reverse`, `range_prefix`, `count`, `TxRows`, `next_in`, `IndexRows`, `IndexEntries`, `I8Code`, `primary_key`, `lookup`, `lookup_prefix`, `entries`, `next_indexed`, `next_entry`, `next_i8_entry`, `ReadOnly`, `read_only_table`, `read_only_get`, `read_only_snapshot` | — | — |
 | 123 | `store-read-pages.hirsel` | 4/8 | `read` (L11) | `scan_page`, `find_page`, `scan_next`, `find_next` | — | — |
 | 124 | `store-cell.hirsel` | 9/21 | `txn` (L12) | `Cell`, `cell_identity`, `cell_schemas`, `declare_cell`, `cell_fetch`, `cell_get`, `cell_set`, `cell_clear`, `published_cell` | — | — |
 | 125 | `store-log.hirsel` | 20/23 | `txn` (L12) | `Log`, `LogBounds`, `log_identity`, `log_schemas`, `Retain`, `declare_log`, `retain_step`, `append`, `bounds`, `log_fetch`, `last`, `log_bounds`, `log_get`, `log_last`, `log_scan`, `log_range`, `trim_before`, `published_log`, `tail_window`, `window_changes` | `bind_retention` | — |
@@ -910,7 +910,7 @@ Lanes land in order on top of each other. Each lane:
 ### L11 — `read`
 - **Move.** `store-read.hirsel`, `store-read-pages.hirsel` and `store-changes.hirsel` privates, over a neutral `read.ReaderInput`.
 - **v3.1.** `next_index_page` calls L12's `tx_tiered_index_row`, so it lands with `txn` (§3.5).
-- **Stays.** `check_table_read`, `open_range`, `open_range_bounds`, `check_index_read` and `open_lookup` (Tx-bound) stay with `Tx`. `staged_reader` and the prepared-export adapter stay at the root. `Reader`, `ReadOnly`, `RowView`, `Visit`, `SharedCapture` and all 36 public `store-read.hirsel` declarations stay at the root with R4's contracts.
+- **Stays.** `check_table_read`, `open_range`, `open_range_bounds`, `check_index_read` and `open_lookup` (Tx-bound) stay with `Tx`. `staged_reader` and the prepared-export adapter stay at the root. `Reader`, `ReadOnly`, `RowView`, `Visit`, `SharedCapture` and all 38 public `store-read.hirsel` declarations stay at the root with R4's contracts. The index entry cursor of v2.155 (3101) follows the same split: its private `EntryCursor`, `step_entry`, `entry_parts`, `lends_codes` and `lends_i8_rows` move with the `read` privates, while `IndexEntries`, `I8Code`, `entries`, `next_entry` and `next_i8_entry` stay at the root.
 - **Laws.** `store_read_laws`, `store_cursor_laws`, `store_changes_laws`, `store_changes_page_law`, `store_diff_laws`; O1; O4 (`ReaderState` control and `RowView` escape).
 
 ### L12 — `txn`

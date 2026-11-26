@@ -1,4 +1,4 @@
-# Store spec v2.154
+# Store spec v2.155
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -421,7 +421,16 @@ pub scoped type IndexRows[K, V]          // index cursor, primary Table, View[Lo
 pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error]   // records the index gap it scanned and Point(table id ‖ Key[K]) per row returned
 pub scoped type IndexEntries[J, K, P]
 pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error]   // records the index gap only
+pub scoped type I8Code = Lent(View[Bytes]) | Owned(List[i8])
+pub fn next_i8_entry[K, T](mut r: IndexEntries[(), K, List[i8]], visit: scoped[view] fn(take K, I8Code) -> T) -> Result[Option[T], Error]   // v2.155: lends current-schema List[i8] codes from the page
 ```
+
+**Single-open index entry scan (v2.155).** `entries` checks the index read (`Foreign`, `Stale`, `NotReady` and a malformed record, in that order), computes both bounds and takes the transaction's collection pages, exactly as before; it opens no cursor. The first `next_entry` or `next_i8_entry` opens one cursor on the index's collection, and every later step continues it. There is no probe, no second open and no outer cursor over the collection map. An index with no collection is exhausted at that first step.
+- **Read spans and key order.** Rows come in the collection's encoded key order. Each step records `Span(low, id ‖ suffix ‖ 0x00)` and moves `low` there before the row is decoded, so the span is in the read set even when the step then returns an error. Exhaustion records `Span(low, high)` once. These are the spans of the copying range scan.
+- **Key decoding.** Each step decodes the index key and the primary key with the index's key codecs before it reads the payload, as `next_entry` always has. A custom key decoder's error is returned at the same row and offset, before any payload check.
+- **Lending.** `next_i8_entry` lends a row's code as `Lent(bytes)` when the index's current payload readers decode with the built-in `List[i8]` decoder (`std.codec.same_decoder`, a PROG-9 identity comparison made once when the `Index` handle is built, with no allocation, with or without compiler revisions) and the row carries the current schema number, a u32 count and exactly that many bytes. Each byte is one signed element. Every other row (an older schema number, a malformed row, another payload codec or no payload readers) is decoded as `next_entry` decodes it and passed as `Owned(list)`, or its error is returned. Values, errors and their order are those of `next_entry`.
+- **Charges.** Neither entry point charges more bytes or MEM-30 reference steps than the copying scan of `c1595a59` on any input; the per-class deltas are in `core/programs/vector/README.md`. Building an `Index` handle costs 5 more reference steps and no bytes for the identity comparison.
+- **Placement.** The public `IndexEntries`, `I8Code`, `entries`, `next_entry` and `next_i8_entry` stay in `"store"`. The private `EntryCursor`, `step_entry`, `entry_parts`, `lends_codes` and `lends_i8_rows` are `store-read.hirsel` privates and move with the `read` module in L11 of `MODULES.md` v3.
 
 **Table edge pops (v2.146).** `pop_first` and `pop_last` delete and return the least or greatest row in the table's encoded key order, including writes staged in this Tx and its enclosing callbacks. An empty table returns `None`. Each pop records the same gap and row span as one unbounded forward or reverse range step, or the full table span on exhaustion. The value is returned through the table's current readers. The delete uses the same index, frame-limit, and rollback rules as `delete`. A resident table removes and reads the edge in one descent through its private page tree. A Tiered table resolves the edge through its attempt and stages the delete through the Tiered write plan. The private page tree does not enter the journal, whose rows still apply in encoded key order.
 

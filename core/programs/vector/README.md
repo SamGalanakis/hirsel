@@ -55,6 +55,40 @@ A query scans the whole index once and scores every code: `O(n · d)` for
 records one read span over the whole index, so a transaction that queries
 conflicts with any concurrent write to the table.
 
+Store lends each current-schema code from the page (`store.next_i8_entry`),
+so a query copies no code. A hit is built only when it would
+enter the top `k`. The index is opened once, at the first row step. Older
+schema rows and malformed rows are decoded as before.
+
+Charges against the copying scan of `c1595a59` (its Vector loop over
+`store.next_entry`), by hand from MEM-24 and the MEM-30 reference count, one
+step per call and back edge (`d` is the code length; `u16_at` is 3 steps,
+`entry_at` 10, `read_le` 3). The old Store frame per row is `next_entry`,
+`next_bytes`, `next_page_range`, `cursor_next` (40 with `cursor_row`),
+`logical_key` (6) and `note_index_step` (8): 58. The new one is
+`next_i8_entry`, `step_entry`, `cursor_read` (25), the key closure (8), the
+span (3), `entry_parts` and the visit: 43. Calls both paths make (key and
+primary decode, `row_value`) are left out. Neither delta is ever
+positive, and the refusal value and its order are unchanged in every class.
+
+| Input | Bytes | Reference steps |
+| --- | --- | --- |
+| `Foreign`, `Stale`, `NotReady` or malformed index, any `k` | 0 | 0: the same calls run up to the same readiness check, before `list.len(q)` |
+| `k == 0` on a ready index | − the range open (bound copies and the outer cursor) | − the range open: no cursor is opened |
+| Empty index, `k > 0` | − the outer cursor and its bound copies | − the outer cursor's open and first step |
+| Current-schema row, `Every` or `Only` | − key copy, logical key, value copy, span key copy and its growth, `List[i8]` backing (`d` rounded to 8); the span keys are allocated at their exact size | Store frame 58 → 43 calls (45 when the leaf has a key prefix, + 2 on a leaf's first row), − the list decode's `d` element reads, pushes and back edges; + 9 for the lend check, + `d` byte widenings, + 1 top-`k` length read |
+| Row outside an `Only` filter | − the same, and no code is touched | − the same, and no code is touched |
+| Code of another length | as its row class | as its row class; the same `Dimensions` value at the same row |
+| Older schema or malformed row | − the cursor copies | Store frame 58 → 43 calls, + the lend check: 2 for a row under 6 bytes, 6 for an older schema, 9 for a bad count; at worst (bad count, key prefix, a leaf's first row) 58 → 56 |
+| Compiler revisions present or absent | 0 | 0: no revision value is read or built |
+
+Building the `Index` handle at declaration takes 5 more reference steps and
+no bytes. The step law `exact_charges` runs the copying scan as a reference
+on an empty index, `k == 0`, current rows, a short code and a backfilling
+index. At the least step limit the reference finishes under, the query must
+return the same value. A query that read `list.len(q)` before readiness, or
+that probed and reopened the index, or built revision values, fails it.
+
 ## Form B
 
 ### Declaring

@@ -618,19 +618,6 @@ pub scoped type IndexRows[K, V] {
     tiered: Option[TxIndexTiered]
 }
 
-pub opaque scoped type IndexEntries[J, K, P] {
-    cursor: PageRange,
-    reads: View[core.Log[Read]],
-    low: Bytes,
-    high: Bytes,
-    id: u32,
-    kind: IndexKind,
-    key: std.codec.Key[J],
-    primary: std.codec.Key[K],
-    payload: Option[Arc[Readers[P]]],
-    payload_codec: std.codec.Codec[P]
-}
-
 /// The key codec of the index's table. Rows rank in the order of the bytes
 /// it writes, which is the order a package breaks ties in.
 pub fn primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> std.codec.Key[K] {
@@ -664,13 +651,147 @@ fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take 
     Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high, tiered: tx_index_tiered(tx)?))
 }
 
+// Index entry scans (STORE-SPEC §1.3): one collection cursor per `entries` call, opened on
+// the first step, with no probe and no reopen. Each step records the span the copying
+// range scan recorded and lends the row's key and value bytes from the page.
+type EntryCursor: send = Unopened(PageTree) | Open(CollectionCursor) | Exhausted
+
+pub opaque scoped type IndexEntries[J, K, P] {
+    cursor: EntryCursor,
+    reads: View[core.Log[Read]],
+    low: Bytes,
+    high: Bytes,
+    id: u32,
+    kind: IndexKind,
+    key: std.codec.Key[J],
+    primary: std.codec.Key[K],
+    payload: Option[Arc[Readers[P]]],
+    payload_codec: std.codec.Codec[P],
+    lendable: bool
+}
+
+/// A signed-byte code a `next_i8_entry` step passes on: lent from the page when the row
+/// holds the current schema's built-in `List[i8]` encoding, decoded otherwise.
+pub scoped type I8Code = Lent(View[Bytes]) | Owned(List[i8])
+
 pub fn entries[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexEntries[J, K, P], Error] in tx {
     check_index_read(tx, ix)?
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     let tree = transaction_collection_pages(tx)?
-    let cursor = byte_cursor(tree, Included(copied(low)?), high)?
-    Ok(IndexEntries(cursor: take cursor, reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec))
+    Ok(IndexEntries(cursor: Unopened(take tree), reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec, lendable: ix.lendable))
+}
+
+// One step: `visit` gets the row's full index key (`id ‖ suffix`), value and payload readers. The span up
+// to `key ‖ 0x00` is recorded before an error from `visit` is returned.
+fn step_entry[P, T](mut cursor: EntryCursor, reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, id: u32, payload: Option[Arc[Readers[P]]], visit: scoped[view] fn(Bytes, Bytes, Option[Arc[Readers[P]]]) -> Result[T, Error]) -> Result[Option[T], Error] {
+    if let Unopened(_) = cursor {
+        if let Unopened(take tree) = replace(mut cursor, Exhausted) {
+            if let Some(take opened) = collection_cursor(tree, id, low, high, false)? {
+                cursor = Open(take opened)
+            }
+        }
+    }
+    let stepped = match cursor {
+        Open(mut walking) => std.page.cursor_read(mut walking.walk, scoped fn(suffix: Bytes, raw: Bytes) -> (Bytes, Result[T, Error]) {
+            let mut after: Bytes = list.with_capacity(5 + list.len(suffix))
+            list.put_word_be(mut after, id)
+            list.append(mut after, suffix)
+            list.push(mut after, 0u8)
+            let value = visit(list.slice(after, 0, list.len(after) - 1), raw, payload)
+            (take after, take value)
+        }),
+        _ => None,
+    }
+    match take stepped {
+        Some((take after, take value)) => {
+            if low < high {
+                let start = replace(mut low, clone(after))
+                log.append(reads, Span(take start, take after))
+            }
+            Ok(Some(value?))
+        },
+        None => {
+            cursor = Exhausted
+            note_index_step(reads, mut low, high, None)?
+            Ok(None)
+        },
+    }
+}
+
+// The index key and primary key of an entry, and where its payload starts in `raw`.
+fn entry_parts[J, K](kind: IndexKind, index_key: std.codec.Key[J], primary_codec: std.codec.Key[K], key: Bytes, raw: Bytes) -> Result[(J, K, u64), Error] {
+    let mut at = 4u64
+    let j = decoded(std.codec.take_key_with(key, mut at, index_key))?
+    let payload_start = if let Unique = kind {
+        if at != list.len(key) {
+            return Error(malformed(at))
+        }
+        unique_owner_end(raw)?
+    } else {
+        0u64
+    }
+    let primary = if let Unique = kind {
+        list.slice(raw, 4, payload_start)
+    } else {
+        list.slice(key, at, list.len(key))
+    }
+    let k = decoded(std.codec.decode_key(primary_codec, primary))?
+    Ok((take j, take k, payload_start))
+}
+
+pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error] {
+    let (id, kind, index_key, primary, payload_codec) = (r.id, r.kind, r.key, r.primary, r.payload_codec)
+    step_entry(mut r.cursor, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[P]]]) -> Result[(J, K, P), Error] {
+        let (take j, take k, start) = entry_parts(kind, index_key, primary, key, raw)?
+        let payload = list.slice(raw, start, list.len(raw))
+        let value = match row_readers {
+            Some(registered) => row_value(registered, id, payload)?,
+            None => decoded(std.codec.decode(payload_codec, payload))?,
+        }
+        Ok((take j, take k, take value))
+    })
+}
+
+// Whether an index's current payload rows decode with the built-in `List[i8]` decoder
+// (PROG-9 identity: no allocation, with or without revisions).
+fn lends_i8_rows[P](payload: Option[Arc[Readers[P]]]) -> bool {
+    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
+    match payload {
+        Some(registered) => std.codec.same_decoder(registered.codec, codes),
+        None => false,
+    }
+}
+
+// Whether `payload` is a well-formed current-schema `List[i8]` row: the schema number,
+// a u32 count and exactly that many bytes. Any other row goes through `row_value`, which
+// returns the same value or error the copying scan returns.
+fn lends_codes(registered: Readers[List[i8]], payload: Bytes) -> bool {
+    let n = list.len(payload)
+    if n < 6 || read_le(payload, 0, 2) != int.widen(registered.current) {
+        return false
+    }
+    read_le(payload, 2, 4) == n - 6
+}
+
+/// The next entry of an index whose payload is `List[i8]`, passed to `visit` with its
+/// primary key. Records, refuses and orders exactly as `next_entry`; a current-schema row
+/// of the built-in `List[i8]` codec is lent from the page instead of copied.
+pub fn next_i8_entry[K, T](mut r: IndexEntries[(), K, List[i8]], visit: scoped[view] fn(take K, I8Code) -> T) -> Result[Option[T], Error] {
+    let (id, kind, index_key, primary, payload_codec, lendable) = (r.id, r.kind, r.key, r.primary, r.payload_codec, r.lendable)
+    step_entry(mut r.cursor, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[List[i8]]]]) -> Result[T, Error] {
+        let (_, take k, start) = entry_parts(kind, index_key, primary, key, raw)?
+        let payload = list.slice(raw, start, list.len(raw))
+        match row_readers {
+            Some(registered) => {
+                if lendable && lends_codes(registered, payload) {
+                    return Ok(visit(take k, Lent(list.slice(payload, 6, list.len(payload)))))
+                }
+                Ok(visit(take k, Owned(row_value(registered, id, payload)?)))
+            },
+            None => Ok(visit(take k, Owned(decoded(std.codec.decode(payload_codec, payload))?))),
+        }
+    })
 }
 
 fn note_index_step(reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, last_key: Option[View[Bytes]]) -> Result[(), Error] {
@@ -723,36 +844,6 @@ fn next_index_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: Row
         }
         Ok((take boundary, take value))
     })
-}
-
-pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error] {
-    let Some((take key, take raw)) = next_bytes(mut r.cursor)? else {
-        note_index_step(r.reads, mut r.low, r.high, None)?
-        return Ok(None)
-    }
-    note_index_step(r.reads, mut r.low, r.high, Some(view key))?
-    let mut at = 4u64
-    let j = decoded(std.codec.take_key_with(key, mut at, r.key))?
-    let payload_start = if let Unique = r.kind {
-        if at != list.len(key) {
-            return Error(malformed(at))
-        }
-        unique_owner_end(raw)?
-    } else {
-        0u64
-    }
-    let primary = if let Unique = r.kind {
-        list.slice(raw, 4, payload_start)
-    } else {
-        list.slice(key, at, list.len(key))
-    }
-    let k = decoded(std.codec.decode_key(r.primary, primary))?
-    let payload = list.slice(raw, payload_start, list.len(raw))
-    let value = match r.payload {
-        Some(registered) => row_value(registered, r.id, payload)?,
-        None => decoded(std.codec.decode(r.payload_codec, payload))?,
-    }
-    Ok(Some((take j, take k, take value)))
 }
 
 /// The main-branch snapshot recovered by a read-only open.

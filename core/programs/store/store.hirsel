@@ -1784,7 +1784,9 @@ pub opaque type Index[J, K, V, P]: shareable + send {
     payload: Option[Arc[Readers[P]]],
     payload_codec: std.codec.Codec[P],
     // The record was Public in the catalog root page `catalog_page` names.
-    public: bool
+    public: bool,
+    // Current payload rows decode with the built-in List[i8] decoder, so next_i8_entry may lend them.
+    lendable: bool
 }
 
 type PageRows[K, V]: send {
@@ -2189,7 +2191,8 @@ fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalo
         Some(raw) => record_public(raw),
         None => false,
     }
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: entry_kind(catalog_index(c)?.shape)?, payload: take payload, payload_codec: payload_codec, public: public))
+    let lendable = lends_i8_rows(payload)
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: entry_kind(catalog_index(c)?.shape)?, payload: take payload, payload_codec: payload_codec, public: public, lendable: lendable))
 }
 
 fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32) -> Result[(), Error] {

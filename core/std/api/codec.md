@@ -6,8 +6,9 @@
 writer (each a described function, `StaticFn`), a lower bound on the encoded length, and whether its encoding set is empty.
 `revision(c)` and `key_revision(k)` return the three parts'
 [code revisions](../../../docs/spec/programs.md#prog-9-code-descriptors), 96 bytes,
-which change with any default literal or `via` body decoding reads. `of[T]()` is the only way a program
-names one. The checker resolves it per instance:
+which change with any default literal or `via` body decoding reads. `same_decoder(a, b)` compares
+the two decoders' static identities, allocates nothing and works with or without revisions.
+`of[T]()` is the only way a program names one. The checker resolves it per instance:
 
 | T | `of[T]()` is |
 |---|---|

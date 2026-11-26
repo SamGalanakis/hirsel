@@ -1,0 +1,139 @@
+// Form A step charges against the copying scan of c1595a59.
+// The query loop of c1595a59, kept as the step reference: it takes each row
+// through `next_entry`, which copies the code into a List[i8], and scores that.
+// It makes the calls `query` makes before its first step.
+fn copying_query(tx: store.Tx, ix: store.Index[(), u64, List[i8], List[i8]], metric: vector.Metric, q: List[i8], k: u64) -> Found {
+    let mut best: List[vector.Hit[u64]] = list.new()
+    let mut entries = store.entries(tx, ix, Unbounded, Unbounded) ?=> |e| Store(e)
+    if k == 0 {
+        return Ok(take best)
+    }
+    let width = list.len(q)
+    while let Some((_, take key, take code)) = (store.next_entry(mut entries) ?=> |e| Store(e)) {
+        let actual = list.len(code)
+        if actual != width {
+            return Error(Dimensions(width, actual))
+        }
+        copying_keep(mut best, k, vector.Hit(key: take key, score: vector.score(metric, q, code)))
+    }
+    Ok(take best)
+}
+
+fn copying_keep(mut best: List[vector.Hit[u64]], k: u64, take hit: vector.Hit[u64]) {
+    let count = list.len(best)
+    if count == k && best[count - 1].score >= hit.score {
+        return
+    }
+    let mut at = count
+    while at > 0 && best[at - 1].score < hit.score {
+        at -= 1
+    }
+    std.list.insert(mut best, at, take hit)
+    if list.len(best) > k {
+        list.truncate(mut best, k)
+    }
+}
+
+// One look that runs the copying scan or `vector.query` under `bound steps limit`.
+fn charged(db: store.Db, near: Near, metric: vector.Metric, q: List[i8], k: u64, limit: u64, copying: bool) -> Result[Found, OutOfTime] waits {
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(near), store.copy_env(metric), store.copy_env(q), k, limit, copying), fn(tx, input) -> Result[Found, OutOfTime] {
+        let ix = vector.entry_index(input.0)
+        if input.5 {
+            bound steps input.4 {
+                copying_query(tx, ix, input.1, input.2, input.3)
+            }
+        } else {
+            bound steps input.4 {
+                vector.query(tx, input.0, input.2, input.3, Every)
+            }
+        }
+    }))
+    match take looked {
+        Seen(take seen) => clone(seen.value),
+        _ => fail("vector charges: the look did not run"),
+    }
+}
+
+fn same_found(a: Found, b: Found) -> bool {
+    match (view a, view b) {
+        (Ok(x), Ok(y)) => same_hits(x, y),
+        (Error(Store(NotReady(x))), Error(Store(NotReady(y)))) => x == y,
+        (Error(Dimensions(w, x)), Error(Dimensions(y, z))) => w == y && x == z,
+        _ => false,
+    }
+}
+
+// The least step limit the copying scan finishes under must also let
+// `vector.query` finish, with the same hits or the same refusal. Returns that answer.
+fn no_more_steps(db: store.Db, near: Near, metric: vector.Metric, q: List[i8], k: u64) -> Found waits {
+    let mut high = 1u64
+    while let Error(_) = charged(db, near, metric, q, k, high, true) {
+        high *= 2
+    }
+    let mut low = high / 2
+    while low + 1 < high {
+        let mid = low + (high - low) / 2
+        if let Ok(_) = charged(db, near, metric, q, k, mid, true) {
+            high = mid
+        } else {
+            low = mid
+        }
+    }
+    let Ok(reference) = charged(db, near, metric, q, k, high, true) else {
+        fail("vector charges: the copying scan's least limit did not repeat")
+    }
+    let Ok(lent) = charged(db, near, metric, q, k, high, false) else {
+        fail("vector charges: the query took more steps than the copying scan")
+    }
+    if !same_found(reference, lent) {
+        fail("vector charges: the query's answer differs from the copying scan's")
+    }
+    take reference
+}
+
+fn hit_count(take found: Found) -> u64 {
+    match take found {
+        Ok(hits) => list.len(hits),
+        _ => fail("vector charges: a ready index refused the query"),
+    }
+}
+
+/// bug: a query that reads the query length before the readiness check, probes
+/// and reopens the index, or builds code revision values before its first row
+/// takes steps the copying scan does not, so a caller at the copying scan's
+/// limit sees OutOfTime in place of its answer or NotReady (the 4d83d1e2 scan).
+/// oracle: the c1595a59 query loop over `next_entry`, run on the same rows at its least step limit.
+@test
+fn exact_charges(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let (take opened, points, near) = open_points(clock, random, L2)
+    let mut db = take opened
+    let q = four(3, -1, 0, 7)
+    if hit_count(no_more_steps(db, near, L2, q, 3)) != 0 {
+        fail("vector charges: an empty index returned hits")
+    }
+    let mut steps: List[Step] = list.new()
+    for key in 1u64 .. 9 {
+        let k8: i8 = int.narrow(key)
+        list.push(mut steps, Put(key, four(k8, -k8, 1, 0)))
+    }
+    let _ = run_query(mut db, points, near, take steps, q, 0)
+    if hit_count(no_more_steps(db, near, L2, q, 0)) != 0 || hit_count(no_more_steps(db, near, L2, q, 3)) != 3 {
+        fail("vector charges: k == 0 must return no hits and k == 3 three")
+    }
+    let mut short: List[i8] = list.new()
+    list.push(mut short, 1)
+    list.push(mut short, 2)
+    let mut more: List[Step] = list.new()
+    list.push(mut more, Put(0, take short))
+    let _ = run_query(mut db, points, near, take more, q, 0)
+    let Error(Dimensions(4, 2)) = no_more_steps(db, near, L2, q, 3) else {
+        fail("vector charges: the short code must refuse the query")
+    }
+    result.unwrap(store.rebuild_index(mut db, vector.entry_index(near)))
+    let Error(Store(NotReady(_))) = no_more_steps(db, near, L2, q, 3) else {
+        fail("vector charges: a backfilling index must refuse the query")
+    }
+    result.unwrap(store.close(take db))
+    Ok(())
+}

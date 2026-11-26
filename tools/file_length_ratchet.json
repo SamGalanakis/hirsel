@@ -28,14 +28,14 @@
     "lines": 1936
   },
   "core/programs/store/store.hirsel": {
-    "lines": 4816,
-    "raise_revision": 19,
-    "reason": "hardcoded-batch2-groupb-3083"
+    "lines": 4806,
+    "raise_revision": 20,
+    "reason": "vector-single-open-design-3101"
   },
   "core/std/codec.hirsel": {
-    "lines": 2633,
-    "raise_revision": 1,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 2695,
+    "raise_revision": 2,
+    "reason": "vector-single-open-design-3101"
   },
   "core/std/float.hirsel": {
     "lines": 2263,

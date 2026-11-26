@@ -77,6 +77,25 @@ pub fn score(metric: Metric, q: List[i8], code: List[i8]) -> i64 {
     total
 }
 
+// `score` over a code lent as its stored bytes, each a signed byte.
+fn score_lent(metric: Metric, q: List[i8], code: Bytes) -> i64 {
+    let mut total = 0i64
+    for i in 0u64 .. list.len(q) {
+        let a: i64 = int.widen(q[i])
+        let signed: i8 = int.truncate(code[i])
+        let c: i64 = int.widen(signed)
+        match metric {
+            Dot => {
+                total += a * c
+            },
+            L2 => {
+                total -= (a - c) * (a - c)
+            },
+        }
+    }
+    total
+}
+
 // Keeps the k best hits in rank order: score descending, then scan order.
 // A later entry ranks after an earlier one with the same score, so a full
 // list admits only a strictly better hit.
@@ -107,17 +126,39 @@ pub fn query[K, V](tx: store.Tx, v: Vectors[K, V], q: List[i8], k: u64, filter: 
         return Ok(take best)
     }
     let width = list.len(q)
-    while let Some((_, take key, take code)) = (store.next_entry(mut entries) ?=> |e| Store(e)) {
+    // Store lends each current-schema code from the page; a hit is copied out only when
+    // it would enter the top k.
+    while let Some(step) = (store.next_i8_entry(mut entries, scoped fn(take key: K, code: store.I8Code) -> Result[Option[Hit[K]], Error] {
         if let Only(_) = filter {
             if !allows(filter, v.ordinal, key) {
-                continue
+                return Ok(None)
             }
         }
-        let actual = list.len(code)
-        if actual != width {
-            return Error(Dimensions(width, actual))
+        let total = match code {
+            Lent(raw) => {
+                let actual = list.len(raw)
+                if actual != width {
+                    return Error(Dimensions(width, actual))
+                }
+                score_lent(v.metric, q, raw)
+            },
+            Owned(owned) => {
+                let actual = list.len(owned)
+                if actual != width {
+                    return Error(Dimensions(width, actual))
+                }
+                score(v.metric, q, owned)
+            },
         }
-        keep(mut best, k, Hit(key: take key, score: score(v.metric, q, code)))
+        let count = list.len(best)
+        if count == k && best[count - 1].score >= total {
+            return Ok(None)
+        }
+        Ok(Some(Hit(key: take key, score: total)))
+    }) ?=> |e| Store(e)) {
+        if let Some(take hit) = step? {
+            keep(mut best, k, take hit)
+        }
     }
     Ok(take best)
 }

@@ -129,10 +129,16 @@ impl Encoder {
                 put_varint(out, *gap);
                 self.task(out, start, *task);
             }
-            Frame::Retired { gap, task, pool } => {
+            Frame::Retired {
+                gap,
+                task,
+                stream,
+                pool,
+            } => {
                 out.push(F_RETIRED);
                 put_varint(out, *gap);
                 self.task(out, start, *task);
+                out.extend_from_slice(&stream.to_le_bytes());
                 put_varint(out, *pool);
             }
             Frame::Choose { gap, index } => put_choose(out, *gap, *index),
@@ -468,11 +474,17 @@ impl Decoder {
                 F_RETIRED => {
                     let gap = c.varint()?;
                     let task = self.task(head, &mut c)?;
+                    let stream = c.u32()?;
                     let pool = c.varint()?;
                     if pool < 2 {
                         return Err(Corrupt);
                     }
-                    Frame::Retired { gap, task, pool }
+                    Frame::Retired {
+                        gap,
+                        task,
+                        stream,
+                        pool,
+                    }
                 }
                 F_CHOOSE => {
                     let (gap, index) = (c.varint()?, c.varint()?);

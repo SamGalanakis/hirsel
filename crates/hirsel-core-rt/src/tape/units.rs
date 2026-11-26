@@ -193,7 +193,7 @@ fn recording<R>(group: Option<Group>, f: impl FnOnce(&mut Live) -> R) -> Option<
         .flatten()
 }
 
-fn stream(live: &Live) -> u32 {
+pub(super) fn stream(live: &Live) -> u32 {
     live.recorder.as_ref().map_or(0, |r| r.stream)
 }
 
@@ -575,6 +575,9 @@ pub(crate) enum Arrival<'a> {
         registry: *mut crate::host_file::Registry,
         /// Kept connections and `Shared` nodes by address, with their amounts.
         survivors: &'a [(usize, u64)],
+        /// Kept `Secret` designations, sealed bytes and UDP pools by name:
+        /// kind, origin kind, stream, ordinal, amount.
+        charges: &'a [(u8, Option<u8>, u32, u64, u64)],
         /// Why other survivors cannot be named, if there are any.
         unnamed: Option<&'static str>,
     },
@@ -657,6 +660,7 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 outcome,
                 registry,
                 survivors,
+                charges,
                 unnamed,
             } => {
                 let Some(ordinal) = live.takes.helpers.remove(&key) else {
@@ -699,21 +703,23 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 }
                 // Each survivor by its address: a `Shared` node (kind 1),
                 // whose entry ends at its release, else a connection (kind
-                // 0). Written in (kind, stream, ordinal) order, which no
-                // address decides.
-                let mut named = Vec::with_capacity(survivors.len());
+                // 0); then the named charges. Written in (kind, origin kind,
+                // stream, ordinal, amount) order, which no address decides.
+                let mut named = Vec::with_capacity(survivors.len() + charges.len());
                 for &(key, amount) in survivors {
                     let node = nodes(|n| n.get(&key).map(|e| (1u8, e.stream, e.ordinal)));
                     let conn = || conns(|c| c.get(&key).map(|e| (0u8, e.stream, e.ordinal)));
                     let Some((kind, stream, ordinal)) = node.or_else(conn) else {
                         return live.cut(UNNAMED_SURVIVOR);
                     };
-                    named.push((kind, stream, ordinal, amount));
+                    named.push((kind, None, stream, ordinal, amount));
                 }
+                named.extend_from_slice(charges);
                 named.sort_unstable();
                 put_varint(&mut body, named.len() as u64);
-                for (kind, stream, ordinal, amount) in named {
+                for (kind, origin, stream, ordinal, amount) in named {
                     body.push(kind);
+                    body.extend(origin);
                     body.extend_from_slice(&stream.to_le_bytes());
                     put_varint(&mut body, ordinal);
                     body.extend_from_slice(&amount.to_le_bytes());

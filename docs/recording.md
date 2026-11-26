@@ -562,8 +562,12 @@ Later host operations on a handle that arrived are issues in the receiving unit'
 checked and delivered there like any other. A replayed snapshot designates nothing on the
 host, as every replayed handle does. A socket's `RETIRED` frame is in the stream of the
 **refunded unit** ([UDP sockets and batches](spec/net.md#net-16-udp-sockets-and-batches)), at the
-position where that unit folds it, and it names the socket by the stream number and
-ordinal of the unit that dropped it.
+position where that unit folds it, and it names the pool by its home: the stream number
+`u32` whose object ordinal it is, then the pool id (`ordinal << 1`, plus 1 for a group's
+intake). That is the name its helper-end survivor carries (kinds 5 and 6 below), so a pool
+an owner adopted from a helper is named the same in the owner's `RETIRED`. A replay of a
+unit whose `RETIRED` names another stream's pool faults, as per-stream replay of helpers is
+not built.
 
 **Designations across units.** A designation is its origin kind (`Granted` 0, `Sealed` 1,
 `Derived` 2, `Unwrapped` 3, `Fetched` 4, `GeneratedP256` 5, `Prompted` 6), the stream
@@ -800,7 +804,7 @@ task bit is 0, because a take names no task. Then:
 | 1 | close | inbox ordinal `varint` |
 | 2 | seal answer | connection ordinal `varint` |
 | 3 | settlement | the send's `ISSUE` position `varint`; outcome `u8`: 0 `Accepted` and nothing, 1 `Closed` and the returned item as a value, 2 `Withdrawn` and nothing |
-| 4 | helper end | helper ordinal `varint`; outcome `u8`: 0 a result and the result as a value, 1 `Failed` and its causes, 2 `Cancelled` and its causes; survivor count `varint`, then the survivors in ascending (kind, stream, ordinal) order |
+| 4 | helper end | helper ordinal `varint`; outcome `u8`: 0 a result and the result as a value, 1 `Failed` and its causes, 2 `Cancelled` and its causes; survivor count `varint`, then the survivors in ascending (kind, origin kind, stream, ordinal, amount) order |
 | 6 | last release | making stream `u32`; connection ordinal `varint` in that stream; retained header `u64`; unused room `u64` |
 | 7 | shared release | home stream `u32`; node ordinal `varint` |
 | 8 | cancel | nothing |
@@ -822,7 +826,12 @@ task bit is 0, because a take names no task. Then:
   that made it. A later `last release`, `shared release`, `RETIRED` or refund then names one
   survivor, however many helper levels it passed through. Any other kind is `Corrupt`.
   The owner that keeps a kind 2, 4 or 7 survivor is its paying unit from then on, and takes
-  its refund as above.
+  its refund as above. Every designation narrowed from sealed bytes keeps their origin, so
+  two narrowed designations of the same bytes are two kind 2 survivors with one name, each
+  with its own amount. A kind 5 survivor is a socket's pool (a group's intake included) and
+  a kind 6 survivor a group member's queue; the owner that keeps one records its later
+  `RETIRED`. A survivor lists only the charges the owner took over at the end take: one
+  released between the helper's end and the take is not a survivor.
 - A settlement's position must name a `CONN_SEND` `ISSUE` of this stream that is still
   outstanding. The settlement completes it, as a `DONE` would, and its task may issue
   again. Any other position is `Corrupt`.

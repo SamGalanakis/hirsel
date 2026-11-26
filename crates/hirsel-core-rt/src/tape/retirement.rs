@@ -3,24 +3,48 @@ use super::{schedule::Group, *};
 use crate::{limit::Payer, udp_net::SocketCharge};
 use std::sync::Arc;
 
+/// A pool's `RETIRED`: the unit that records it, and the pool's name, which
+/// is fixed where the pool was made.
 #[derive(Clone, Copy)]
 pub(crate) struct Retirement {
     group: Group,
+    /// Survivor kind: 5 a socket's pool, 6 a group member's queue.
+    kind: u8,
+    /// The pool's home stream, whose object ordinal it is.
+    stream: u32,
     pool: u64,
 }
 
 impl Retirement {
-    pub(crate) fn new(provider: Provider, handle: u64, intake: bool) -> Self {
+    /// A pool of the unit whose provider made `handle`; `queue` for a group
+    /// member's queue. Taken before any host lock: it reads the unit's cell.
+    pub(crate) fn new(provider: Provider, handle: u64, intake: bool, queue: bool) -> Self {
+        let group = Group::root(cell_of(provider.state), generation_of(handle));
         Self {
-            group: Group::root(cell_of(provider.state), generation_of(handle)),
+            group,
+            kind: if queue && !intake { 6 } else { 5 },
+            stream: group.with(|live| units::stream(live)).unwrap_or(0),
             pool: pool_id(handle, intake),
         }
     }
 
     pub(crate) fn record(self) {
         if let Some(owner) = crate::tasks::current_group().filter(|g| g.same(self.group)) {
-            owner.record_retirement(self.pool);
+            owner.record_retirement(self.stream, self.pool);
         }
+    }
+
+    /// An owner adopts the pool at a helper's end take: its `RETIRED` is the
+    /// owner's from then on, and still names the pool's home.
+    pub(crate) fn adopt(&mut self) {
+        if let Some(owner) = crate::tasks::current_group() {
+            self.group = owner;
+        }
+    }
+
+    /// Its name in a helper end's survivor list: kind, stream, ordinal.
+    pub(crate) fn survivor(self) -> (u8, u32, u64) {
+        (self.kind, self.stream, self.pool >> 1)
     }
 }
 
@@ -89,15 +113,21 @@ pub(crate) fn served_udp_pools(
                 live.register_udp_pools(first, members, intake);
                 return Some(ServedPoolSet { owner, first });
             }
+            let stream = units::stream(live);
+            let kind = if intake.is_some() { 6 } else { 5 };
             for (index, member) in members.iter().enumerate() {
                 member.record_retirement(Retirement {
                     group: owner,
+                    kind,
+                    stream,
                     pool: pool_id(first + index as u64, false),
                 });
             }
             if let Some(intake) = intake {
                 intake.record_retirement(Retirement {
                     group: owner,
+                    kind: 5,
+                    stream,
                     pool: pool_id(first, true),
                 });
             }
@@ -153,12 +183,25 @@ impl Live {
     }
 
     pub(super) fn replay_retirements(&mut self, owner: u64, payer: Payer) {
+        let own = units::stream(self);
         let Some(replay) = self.replayer.as_mut().filter(|_| self.fault.is_none()) else {
             return;
         };
-        while let Ok(&Frame::Retired { gap, task, pool }) = replay.peek() {
+        while let Ok(&Frame::Retired {
+            gap,
+            task,
+            stream,
+            pool,
+        }) = replay.peek()
+        {
             if gap.checked_add(self.schedule.last) != Some(self.schedule.events) || task != owner {
                 break;
+            }
+            // A pool adopted from a helper is named in its home stream, whose
+            // pools a replay of this unit alone does not hold.
+            if stream != own {
+                self.schedule_fault(None);
+                return;
             }
             let Some(entry) = self
                 .udp_retirements

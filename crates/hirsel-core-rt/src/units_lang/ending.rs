@@ -16,19 +16,24 @@ pub(super) unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
         .as_ref()
         .and_then(|m| m.get(&(Arc::as_ptr(&h.port) as usize)))
         .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
+    let held = h.charge.as_mut().unwrap();
+    // The charges taken over are the survivors the take lists: one still held
+    // at the hand-over may have been released since. A refund or `RETIRED`
+    // of one folds after this take.
+    let taken = crate::secret::take_over(&ended.charges, |bytes| held.partition(bytes));
     #[cfg(feature = "record")]
     // SAFETY: by this function's contract.
     unsafe {
-        takes::end_take(u, h.k, ended, h.files)
+        takes::end_take(u, h.k, ended, &taken, h.files)
     };
-    let held = h.charge.as_mut().unwrap();
+    #[cfg(not(feature = "record"))]
+    let _ = taken;
     for &(key, bytes) in &ended.survivors {
         u.retained.insert(key, held.split(bytes));
     }
     if ended.run_grants != 0 {
         u.run_grants.push(held.split(ended.run_grants));
     }
-    crate::secret::take_over(&ended.charges, |bytes| held.partition(bytes));
     let causes = ended
         .causes
         .iter()

@@ -21,12 +21,13 @@ impl Group {
 pub(super) struct TapeHooks;
 
 impl Hooks for TapeHooks {
-    fn record_retirement(&self, group: Group, pool: u64) {
+    fn record_retirement(&self, group: Group, stream: u32, pool: u64) {
         group.with(|live| {
             if live.mode == Mode::Record {
                 live.write_input(Frame::Retired {
                     gap: 0,
                     task: group.task,
+                    stream,
                     pool,
                 });
             }

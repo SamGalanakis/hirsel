@@ -315,6 +315,15 @@ impl Call {
                 );
                 return count_value(first);
             }
+            // Each pool's name reads its unit's cell, so it is taken before
+            // the allowance's lock.
+            let queue = self.group.is_some();
+            let retirements = (self.served.ids.iter())
+                .map(|&id| crate::tape::Retirement::new(self.provider, id, false, queue))
+                .collect::<Vec<_>>();
+            let intake = queue.then(|| {
+                crate::tape::Retirement::new(self.provider, self.served.ids[0], true, true)
+            });
             let cells = allowance.charges.lock().unwrap();
             let mut first = 0;
             for (index, tape_id) in self.served.ids.iter().copied().enumerate() {
@@ -331,18 +340,11 @@ impl Call {
                 cells[&key]
                     .upgrade()
                     .unwrap()
-                    .record_retirement(crate::tape::Retirement::new(self.provider, tape_id, false));
+                    .record_retirement(retirements[index]);
             }
-            if self.group.is_some() {
+            if let Some(intake) = intake {
                 let key = first + self.served.ids.len() as u64;
-                cells[&key]
-                    .upgrade()
-                    .unwrap()
-                    .record_retirement(crate::tape::Retirement::new(
-                        self.provider,
-                        self.served.ids[0],
-                        true,
-                    ));
+                cells[&key].upgrade().unwrap().record_retirement(intake);
             }
             count_value(self.key)
         }

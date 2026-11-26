@@ -219,8 +219,10 @@ impl Drop for Charge {
 /// takes the charge over (CONC-15).
 pub(crate) struct ChargeCell {
     charge: Mutex<Option<Charge>>,
+    /// A UDP pool's `RETIRED`, reached under `charge`'s lock: the end take
+    /// that adopts the charge makes it the owner's.
     #[cfg(feature = "record")]
-    retirement: std::sync::OnceLock<crate::tape::Retirement>,
+    retirement: Mutex<Option<crate::tape::Retirement>>,
     #[cfg(feature = "record")]
     retired: std::sync::atomic::AtomicBool,
 }
@@ -236,7 +238,7 @@ impl ChargeCell {
         Arc::new(Self {
             charge: Mutex::new(Some(charge)),
             #[cfg(feature = "record")]
-            retirement: std::sync::OnceLock::new(),
+            retirement: Mutex::new(None),
             #[cfg(feature = "record")]
             retired: std::sync::atomic::AtomicBool::new(false),
         })
@@ -253,15 +255,22 @@ impl ChargeCell {
 
     #[cfg(feature = "record")]
     pub(crate) fn record_retirement(&self, retirement: crate::tape::Retirement) {
-        assert!(self.retirement.set(retirement).is_ok());
+        let _charge = self.charge.lock().unwrap();
+        assert!(
+            self.retirement
+                .lock()
+                .unwrap()
+                .replace(retirement)
+                .is_none()
+        );
     }
 
     #[cfg(feature = "record")]
     pub(crate) fn retire(&self) {
-        let Some(&retirement) = self.retirement.get() else {
+        let mut charge = self.charge.lock().unwrap();
+        let Some(retirement) = *self.retirement.lock().unwrap() else {
             return;
         };
-        let mut charge = self.charge.lock().unwrap();
         self.retired
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let previous = charge.take();
@@ -311,6 +320,9 @@ pub(crate) type HandedOver = Vec<HandedCharge>;
 pub(crate) struct HandedCharge {
     weak: Weak<ChargeCell>,
     bytes: u64,
+    /// Its survivor name: kind, origin kind for a designation, stream, ordinal.
+    #[cfg(feature = "record")]
+    pub(crate) name: Option<(u8, Option<u8>, u32, u64)>,
     // A pool can physically retire between the hand-over and the end take.
     // Keep its pending tape identity until the new payer can receive the input.
     #[cfg(feature = "record")]
@@ -319,35 +331,57 @@ pub(crate) struct HandedCharge {
 
 impl HandedCharge {
     pub(crate) fn new(cell: &Arc<ChargeCell>, bytes: u64) -> Self {
+        #[cfg(feature = "record")]
+        let retirement = *cell.retirement.lock().unwrap();
         Self {
             weak: Arc::downgrade(cell),
             bytes,
             #[cfg(feature = "record")]
-            retiring: cell.retirement.get().is_some().then(|| cell.clone()),
+            name: retirement.map(|r| {
+                let (kind, stream, ordinal) = r.survivor();
+                (kind, None, stream, ordinal)
+            }),
+            #[cfg(feature = "record")]
+            retiring: retirement.is_some().then(|| cell.clone()),
         }
     }
 }
 
+impl HandedCharge {
+    #[cfg(feature = "record")]
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
 /// The owner's end take moves each still-held charge to its part of the
-/// helper's reservation.
-pub(crate) fn take_over(handed: &HandedOver, mut payer: impl FnMut(u64) -> Payer) {
-    for handed in handed {
+/// helper's reservation, and gives back the indices of the charges it took:
+/// the survivors its `TAKE` lists. A pool's `RETIRED` becomes the owner's.
+pub(crate) fn take_over(handed: &HandedOver, mut payer: impl FnMut(u64) -> Payer) -> Vec<usize> {
+    let mut taken = Vec::new();
+    for (index, handed) in handed.iter().enumerate() {
         if let Some(cell) = handed.weak.upgrade() {
             let mut charge = cell.charge.lock().unwrap();
             if charge.is_none() {
+                taken.push(index);
                 let adopted = Charge(payer(handed.bytes), handed.bytes);
                 #[cfg(feature = "record")]
-                if let Some(_retiring) = &handed.retiring
-                    && cell.retired.load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    drop(charge);
-                    adopted.retire(*cell.retirement.get().unwrap());
-                    continue;
+                if handed.retiring.is_some() {
+                    let mut retirement = cell.retirement.lock().unwrap();
+                    let retirement = retirement.as_mut().unwrap();
+                    retirement.adopt();
+                    if cell.retired.load(std::sync::atomic::Ordering::Relaxed) {
+                        let retirement = *retirement;
+                        drop(charge);
+                        adopted.retire(retirement);
+                        continue;
+                    }
                 }
                 *charge = Some(adopted);
             }
         }
     }
+    taken
 }
 
 struct Entry {
@@ -424,9 +458,20 @@ impl Secrets {
         let mut handed = Vec::new();
         let mut refunds = Vec::new();
         for entry in self.entries.iter().flatten() {
-            for cell in [&entry.charge, &entry.secret.seal].into_iter().flatten() {
+            for (_kind, cell) in [(2, &entry.charge), (7, &entry.secret.seal)] {
+                let Some(cell) = cell else { continue };
                 if let Some(c) = cell.take_charge(payer) {
-                    handed.push(HandedCharge::new(cell, c.1));
+                    #[cfg_attr(not(feature = "record"), allow(unused_mut))]
+                    let mut charge = HandedCharge::new(cell, c.1);
+                    // Every designation of sealed bytes shares their origin,
+                    // so the seal's name is the same from any of them.
+                    #[cfg(feature = "record")]
+                    {
+                        let (origin, ordinal) = entry.secret.origin.wire();
+                        charge.name =
+                            Some((_kind, Some(origin), entry.secret.origin.stream, ordinal));
+                    }
+                    handed.push(charge);
                     refunds.push(c);
                 }
             }

@@ -464,8 +464,8 @@ impl std::fmt::Display for FrameEvidence<'_> {
             Frame::Wait { gap, task }
             | Frame::Done { gap, task, .. }
             | Frame::Wake { gap, task }
-            | Frame::Cancel { gap, task } => write!(f, "task={task} gap={gap}"),
-            Frame::Retired { gap, task, pool } => write!(f, "task={task} gap={gap} pool={pool}"),
+            | Frame::Cancel { gap, task }
+            | Frame::Retired { gap, task, .. } => write!(f, "task={task} gap={gap}"),
             Frame::Op {
                 task,
                 op,

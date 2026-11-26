@@ -507,9 +507,12 @@ pub enum Frame {
         gap: u64,
         task: u64,
     },
+    /// A UDP pool's retirement folded here, naming the pool by its home
+    /// stream and the pool id there.
     Retired {
         gap: u64,
         task: u64,
+        stream: u32,
         pool: u64,
     },
     Choose {

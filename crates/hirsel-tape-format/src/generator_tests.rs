@@ -420,6 +420,7 @@ fn generated_frame_variants_round_trip() {
         Frame::Retired {
             gap: 6,
             task: 9,
+            stream: 3,
             pool: 2,
         },
         Frame::Choose { gap: 7, index: 2 },

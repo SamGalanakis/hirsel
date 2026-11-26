@@ -642,3 +642,72 @@ fn rl9_secret_crosses_with_its_designation() {
         );
     }
 }
+
+/// A helper seals a `Secret`, narrows it and returns the narrowed one; the
+/// sealed designation is released before the helper ends.
+const RL9_SURVIVORS: &str = r#"
+fn sealer(take n: u64) -> Secret {
+    let mut b: Bytes = list.with_capacity(1)
+    list.push(mut b, 7)
+    let own = result.unwrap(secret.seal(take b, "mac"))
+    result.unwrap(secret.narrow(own, "mac"))
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, 3, sealer))
+    let kept = result.unwrap(task.join(take h))
+    result.unwrap(stdout.write(out, "kept"))
+    Ok(())
+}
+"#;
+
+/// A helper's `Secret` charges that outlive it are survivors of its owner's
+/// end take, named by designation (recording.md, "Unit stream format":
+/// kinds 2 and 7), hand-derived before the first run. The helper, stream 1,
+/// makes its first seal, designation (1, stream 1, 0); a seal of one byte
+/// under "mac" (no `tls_send` patterns) charges (0 + 1 + 39) & !7 = 40 to
+/// the sealed bytes (kind 7), and the narrow charges (0 + 0 + 39) & !7 = 32
+/// to its own designation (kind 2), which keeps the sealed designation's
+/// origin. The returned secret holds both after the helper ends.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_helper_secret_charges_survive_by_designation() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, Survivor};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_SURVIVORS,
+            dir.path(),
+            "survivors",
+            backend,
+            "kept",
+            &["Tasks", "Stdout"],
+        );
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let root = &streams[0].1;
+        let ends: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } => match body.arrival() {
+                    Arrival::HelperEnd(_, _, survivors) => Some(survivors),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let survivor = |kind, amount| Survivor {
+            kind,
+            origin_kind: Some(1),
+            stream: 1,
+            ordinal: 0,
+            amount,
+        };
+        assert_eq!(
+            ends,
+            [vec![survivor(2, 32), survivor(7, 40)]],
+            "{backend:?}: the helper end's survivors"
+        );
+    }
+}

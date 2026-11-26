@@ -20,7 +20,7 @@ pub(super) trait Hooks: Sync {
     fn wake(&self, group: Group, request: *mut Request);
     fn cancel(&self, group: Group, source: Option<Group>) -> bool;
     fn consume_input(&self, group: Group);
-    fn record_retirement(&self, group: Group, pool: u64);
+    fn record_retirement(&self, group: Group, stream: u32, pool: u64);
     fn replay_retirements(&self, group: Group, payer: crate::limit::Payer);
     fn source(&self, cell: &Cell, handle: u64) -> Option<(Provider, u64)>;
     fn net_rules(&self, cell: &Cell, handle: u64) -> u64;
@@ -100,8 +100,8 @@ impl Group {
     pub fn cancel(self, source: Option<Self>) -> bool {
         self.cell.hooks.cancel(self, source)
     }
-    pub(crate) fn record_retirement(self, pool: u64) {
-        self.cell.hooks.record_retirement(self, pool);
+    pub(crate) fn record_retirement(self, stream: u32, pool: u64) {
+        self.cell.hooks.record_retirement(self, stream, pool);
     }
     pub(crate) fn replay_retirements(self, payer: crate::limit::Payer) {
         self.cell.hooks.replay_retirements(self, payer);

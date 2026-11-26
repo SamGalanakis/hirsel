@@ -232,19 +232,29 @@ impl SendNote {
 }
 
 /// The owner's helper-end `TAKE`, with the helper's outcome and the
-/// connections and `Shared` nodes it paid for that survive it.
+/// connections, `Shared` nodes and `taken` charges it paid for that survive it.
 #[cfg(feature = "record")]
 pub(super) unsafe fn end_take(
     u: &mut LangUnit,
     key: usize,
     ended: &Ended,
+    taken: &[usize],
     files: *mut crate::host_file::Files,
 ) {
     let Some(outcome) = &ended.tape_end else {
         return;
     };
-    let unnamed = (!ended.charges.is_empty())
-        .then_some("a helper end keeps a Secret or UDP charge, which this build does not name");
+    let mut charges = Vec::with_capacity(taken.len());
+    let mut unnamed = None;
+    for &index in taken {
+        let handed = &ended.charges[index];
+        match handed.name {
+            Some((kind, origin, stream, ordinal)) => {
+                charges.push((kind, origin, stream, ordinal, handed.bytes()));
+            }
+            None => unnamed = Some(UNNAMED_CHARGE),
+        }
+    }
     let registry = if files.is_null() {
         std::ptr::null_mut()
     } else {
@@ -256,8 +266,13 @@ pub(super) unsafe fn end_take(
         outcome,
         registry,
         survivors: &ended.survivors,
+        charges: &charges,
         unnamed,
     };
     // SAFETY: an end take carries no item; its registry is the owner's.
     unsafe { tape::take(u.tape(), u.pumping, arrival) };
 }
+
+#[cfg(feature = "record")]
+const UNNAMED_CHARGE: &str =
+    "a helper end keeps a key object or agreement registry entry, which this build does not name";

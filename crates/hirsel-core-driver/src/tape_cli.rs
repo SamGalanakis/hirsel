@@ -125,9 +125,14 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
                 print!("{at} ");
                 match frame {
                     Frame::Wait { gap, task } => println!("WAIT gap={gap} task={task}"),
-                    Frame::Retired { gap, task, pool } => {
+                    Frame::Retired {
+                        gap,
+                        task,
+                        stream,
+                        pool,
+                    } => {
                         println!(
-                            "RETIRED gap={gap} task={task} ordinal={} intake={}",
+                            "RETIRED gap={gap} task={task} stream={stream} ordinal={} intake={}",
                             pool >> 1,
                             pool & 1 != 0
                         );

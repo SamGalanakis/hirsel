@@ -415,27 +415,6 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
     open_declared(take db, take t, first)
 }
 
-fn st[T](take r: Result[T, store.Error]) -> Result[T, Refused] {
-    match take r {
-        Ok(take v) => Ok(take v),
-        Error(take e) => Error(Store(take e))
-    }
-}
-
-// Commits a decision. The caller may act on it within the turn; the turn's end makes it
-// durable before any request or answer it decided leaves the host.
-fn decided[R](mut h: Host, take attempted: Result[store.Outcome[R, Refused], store.Error]) -> Result[R, Refused] {
-    match take attempted {
-        Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
-            h.unsynced = Some(ticket)
-            Ok(take value)
-        },
-        Ok(Aborted(store.Undone(value: take why, ..))) => Error(take why),
-        Ok(_) => Error(Missing("commit")),
-        Error(take e) => Error(Store(take e)),
-    }
-}
-
 // Ends a host turn: one sync covers every decision of the turn, since the journal is a
 // FIFO prefix. A failed sync fails the host: nothing that turn or any later one decided
 // leaves, and the restart recovers the durable catalog.

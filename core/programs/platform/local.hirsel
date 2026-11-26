@@ -848,7 +848,10 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
     let Ok(dir) = std.dir.narrow(root, "host") else {
         return Error(Failed(string.from("host dir")))
     }
-    let mut db = match store.open(tasks, dir, clock, random, clone(options)) {
+    let Some(catalog) = catalog_options(options, first.max_places) else {
+        return Error(Full)
+    }
+    let mut db = match store.open(tasks, dir, clock, random, take catalog) {
         Ok(take v) => take v,
         Error(_) => return Error(Failed(string.from("host store")))
     }

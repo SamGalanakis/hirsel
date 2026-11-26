@@ -1517,14 +1517,6 @@ fn logical_key(id: u32, key: Bytes) -> Result[Bytes, Error] {
     Ok(take p)
 }
 
-fn round8(n: u64) -> u64 {
-    ((n + 7) / 8) * 8
-}
-
-fn entry(key: Bytes, val: Bytes) -> u64 {
-    62 + round8(list.len(key)) + round8(list.len(val))
-}
-
 pub fn body_capacity(mut tx: Tx, problem: Capacity) {
     tx.refusal = Some(problem)
 }

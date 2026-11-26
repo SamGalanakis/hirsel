@@ -8,9 +8,45 @@ fn refused_of(r: platform.Refused) -> Refused {
         Retiring => Retiring,
         Missing(what) => Failed(string.from(what)),
         Denied(why) => Failed(string.from(why)),
-        Store(_) => Failed(string.from("store")),
+        Store(e) => Failed(store_text("catalog store: ", e)),
         FrontConfig(_) => Failed("invalid front configuration"),
     }
+}
+
+fn capacity_text(mut s: String, kind: String, c: Capacity) {
+    string.push(mut s, kind)
+    string.push(mut s, " needs ")
+    string.push_u64(mut s, c.requested)
+    string.push(mut s, " bytes, has ")
+    string.push_u64(mut s, c.available)
+}
+
+// A store error, named so a refused create or start says which store and which bound or
+// fault refused it.
+fn store_text(which: String, e: store.Error) -> String {
+    let mut s = string.from(which)
+    match e {
+        Full(Journal(c)) => capacity_text(mut s, "journal", c),
+        Full(Resident(c)) => capacity_text(mut s, "resident", c),
+        Full(Allocation(c)) => capacity_text(mut s, "allocation", c),
+        Full(Cache(c)) => capacity_text(mut s, "cache", c),
+        Limit(Key) => string.push(mut s, "a key over KEY_LIMIT"),
+        Limit(Value) => string.push(mut s, "a value over VALUE_LIMIT"),
+        Limit(Transaction) => string.push(mut s, "a transaction over its frame limit"),
+        Limit(_) => string.push(mut s, "a store limit"),
+        Io(_) => string.push(mut s, "io"),
+        Poisoned(_) => string.push(mut s, "poisoned"),
+        Conflict(name) => {
+            string.push(mut s, "conflict on ")
+            string.push(mut s, name)
+        },
+        Drift(name) => {
+            string.push(mut s, "drift in ")
+            string.push(mut s, name)
+        },
+        _ => string.push(mut s, "refused"),
+    }
+    s
 }
 
 fn group_spec(name: String) -> platform.NewGroup {
@@ -20,7 +56,7 @@ fn group_spec(name: String) -> platform.NewGroup {
 fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {
     let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) {
         Ok(take v) => take v,
-        Error(_) => return Error(Failed("seed store"))
+        Error(e) => return Error(Failed(store_text("session store: ", e)))
     }
     let seeded = seed(mut db)
     let _ = store.close(take db)

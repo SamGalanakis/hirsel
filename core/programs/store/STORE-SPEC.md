@@ -2242,7 +2242,7 @@ When the Db is poisoned, step 1 is skipped: anything still queued is dropped by 
 **All state is in memory for M4.** Files are read whole (finding 10), so the store's resident size grows with the data. `resident_limit` bounds it.
 
 **The account.** The writer keeps one u64, `resident`, in accounted bytes:
-- Each row of the trees counts `entry(k, v) = 62 + r8(|k|) + r8(|v|)`, where `r8` rounds up to 8 and a table row's `|v|` includes its 2-byte schema number (D1).
+- Each row of the trees counts `entry(k, v) = 62 + r8(|k|) + r8(|v|)`, where `r8` rounds up to 8 and a table row's `|v|` includes its 2-byte schema number (D1). A caller prices a table row with `resident_row_bytes(key, value)`, which takes the encoded key and the codec value and adds the 4-byte table id and the 2-byte schema number, and bounds an encoded key by `ROW_KEY_LIMIT` = `KEY_LIMIT` − 4 = 4,092 (RUNNER-SPEC v2.85: `local` sizes its catalog with them).
   - 48 is the two `Bytes` handles (24 each, core.md, `List` row).
   - `r8` is each handle's storage (budgets.md:105).
   - 14 is the node share per entry at 998's minimum occupancy of 16. That is the node itself (72), its parent entry (48) and the checkpoint task's record for it (96), all divided by 16.

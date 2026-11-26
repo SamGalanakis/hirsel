@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.84: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.85: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,18 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.85 (the catalog store is sized for max_places; lane local-4000-commit-2844)
+
+`local` opened its catalog store at `root/host` with the session store's `Options`. A host whose seeded stores are small (the lash swarm's 1 MiB `resident_limit`) filled its catalog after about 2,000 creates, because every session adds catalog rows. The refusal surfaced as `Failed("commit")`: `platform.decided` folded every `Ok` outcome that was not `Committed` into `Missing("commit")`.
+
+| # | Item | Change | Where |
+|---|---|---|---|
+| 1 | The catalog's options | **CHANGED** | §14.9 "Shape". The catalog store's `resident_limit` is the session store's plus `max_places` times the largest resident charge one session adds to the catalog (`local.session_catalog_bytes`): its `sessions` and `keys` rows at a `store.ROW_KEY_LIMIT` key, and the five rows `platform.undeployed_group_bytes` prices for its group. Each row is priced by `store.resident_row_bytes`, Store's own charge. `host_bytes` prices the catalog's writer at these options. |
+| 2 | A refused catalog transaction | **CHANGED** | §14.9 "Ends". `platform.decided` reports a refused or failed catalog transaction as `Store(Full(capacity))`, `Store(Conflict)` or `Store(Drift)`; `local` answers it `Failed` with the store, the capacity and its figures ("catalog store: resident needs N bytes, has M"). |
+| 3 | Law | **NEW: `local_creates_to_max_places`** | §14.9 laws. |
+
+Open: a deleted session's catalog rows (`retired`, request rows) are not counted against `max_places`; a host that creates and deletes past `max_places` sessions is not covered by this sizing.
 
 ## CHANGES-v2.84 (the in-process transport as built; lane platform-local-scale-2815, slice 1)
 
@@ -321,7 +333,7 @@ Reversible: one field of the binding's result and the owner's latch; the close c
 Text only, not yet built. RUNNER v2.54 derived X itself, from `service_bytes([])` and `follower_starter_bytes()`. L60 pinned a root of 49,616,253 that restated Store's figures, and when Store's starter charge moved from 1,034 to 1,098 the literal fell 64 bytes short (49,616,317). Platform priced a store with `disk_store_bytes`, a Runner copy of the old manifest maximum, 16,777,476. That copy is now 164 bytes below Store's 16,777,640, and it ignores the journal worker, the channels and the cut's working bound. Both are one defect: a caller restating a provider's price. The fix:
 - **The store term.** The head's store term is `store.planned_bytes(plan)`, where `plan = store.planned(kind, share, p.sizes)` and share = root limit − `operate_bytes` − 1 MiB. Runner computes no X, and no max(T, L + …).
 - **Deleted from Runner.** `disk_store_bytes`, and every byte literal that prices a Store, a channel, a task or a box. Runner's own terms derive from its own types through MEM-33's `bytes[T]` and `charge.*`, in §12.1 "Store sizes" and in the relay and wire budgets. The relay's `RELAY_*` record and item sizes and the wire protocol's frame records are `bytes` of their record types. The counts stay Runner's: positions per caller, sends, inbox slots.
-- **Platform.** `host_bytes` asks Store for one writer's price, `store.writer_bytes(store.writer_plan(Directory, options))`, and keeps its owner count of two stores (the catalog and the one a create seeds).
+- **Platform.** `host_bytes` asks Store for one writer's price, `store.writer_bytes(store.writer_plan(Directory, options))`, and keeps its owner count of two stores (the catalog and the one a create seeds). (v2.85) The catalog's writer is priced at the catalog's own options, §14.9 "Shape".
 - **Laws.** L60's literal roots are rewritten: each case adds Runner's own hand-derived terms to the `planned_bytes` that Store publishes. Store's figures are pinned only by Store's own laws (STORE §1.1, §12.10 L85).
 
 Reversible: the spec only.
@@ -2764,7 +2776,7 @@ L40 runs in the runner's prepare harness and L44 in the runner's place harness, 
 
 `local` (store/local.hirsel) is the platform host with an in-process launcher. A program that hosts first-party places in its own process, such as the harness gateway, uses it.
 
-**Shape.** `local.local(config)` opens the host's catalog store at `root/host` and starts one actor that owns the `platform.Host` and every place task. The config names the place factory, the seed every start sees, `max_places`, the idle time each start gets, the wire sessions each place admits, the bytes each place may use and a watch channel. The actor answers the host's requests as a launcher would:
+**Shape.** `local.local(config)` opens the host's catalog store at `root/host` (v2.85: with the session store's options and a `resident_limit` grown by `max_places` times the most one session adds to the catalog) and starts one actor that owns the `platform.Host` and every place task. The config names the place factory, the seed every start sees, `max_places`, the idle time each start gets, the wire sessions each place admits, the bytes each place may use and a watch channel. The actor answers the host's requests as a launcher would:
 - `Hello` gets an inventory of the live place tasks; `Bind` is answered `Bound` with no listener (an in-process place takes its connections through `route`).
 - `Start` of a serving child makes the group's workdir under the root and starts the factory's place on `Disk(root/workdir)` at `Current(activation)`, as a hosted child selects (launch.md "Activation"), with the host's idle time as `PlaceConfig.idle` and its session count as `PlaceConfig.max_sessions`. A repeated `Start` of the same child answers `Launched`; a second child for a group, or any start while the host stops, is refused `Held`. (v2.73) A start whose charge (operate's bytes, the store share, 1 MiB and the place task's own bytes) does not fit the room left in `place_bytes` is refused `Spawn("Full")`, and so is one whose place `operate`'s sizing refuses; no place task runs. A non-serving start is refused: an in-process host has no deploy.
 - `Stop` and `Kill` both drain the place. A task cannot be killed; `operate` cuts a drain only at its own deadline.
@@ -2792,6 +2804,7 @@ these groups runs on their first serving start at activation 0.
 | `local_idle_unload`: an idle child stops by `operate`'s drain, ends `Stopped`, and its group is routed again only after the store is closed | the launcher reports the end when it asks the child to stop, so the next child finds the store held | §14.4 |
 | `local_reopen_keeps`: a group routed again after an unload keeps its committed writes, and a trigger that came due while it was unloaded runs | the next child starts on a fresh store or a fresh activation | §14.1, §14.4 |
 | `local_start_full` (v2.73): a host whose `place_bytes` (1 MiB) is below one child's charge is routed to its one group, so every start of the group is refused for size. The route is answered `Full`, and no child reaches Ready | the refusal is reported to the host, but the route waits for a child that never starts, or it is answered `Failed` | §14.2, §14.9 "Ends" |
+| `local_creates_to_max_places` (v2.85): a host whose session stores have a 1 MiB `resident_limit` creates `max_places` (256) sessions, each with a key at `store.ROW_KEY_LIMIT` less 2 bytes. Every create answers its id, and the listing holds all 256 | the catalog is opened with the session store's options and fills near the 120th create, or the refusal is reported as `Failed("commit")` | §14.9 "Shape" |
 | `local_genesis_recovers` (v2.32): a group's store was activated by its genesis (version 1), and the host's catalog holds no activation for it. A task cannot be killed in-process, so the law builds the crash's durable state: it removes `root/host` and adds the group again. The next route is answered by a Ready child at activation 1 | the start at 0 is refused `NotCurrent(Active(1))`, the route is refused before the host acts, or the group never records 1, so it never serves without an operator | §14.5 "Genesis" |
 
 ### 14.10 Prior art (each source opened)

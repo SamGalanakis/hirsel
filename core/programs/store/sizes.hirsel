@@ -59,6 +59,10 @@ const CUT_FIXED_BYTES: u64 = 65536
 
 const KEY_LIMIT: u64 = 4096
 
+// The longest encoded key a table row may have: KEY_LIMIT less the 4-byte table id the
+// store puts before it (§1.3).
+pub const ROW_KEY_LIMIT: u64 = KEY_LIMIT - 4
+
 const CUT_STEP_BYTES: u64 = KEY_LIMIT + VALUE_LIMIT
 
 pub opaque type WriterPlan: send {
@@ -558,4 +562,24 @@ fn branch_record_bytes(name: String) -> u64 {
 
 fn pin_record_bytes(name: String) -> u64 {
     130 + string.byte_len(name)
+}
+
+fn round8(n: u64) -> u64 {
+    ((n + 7) / 8) * 8
+}
+
+fn entry(key: Bytes, val: Bytes) -> u64 {
+    stored_row_charge(list.len(key), list.len(val))
+}
+
+fn stored_row_charge(key: u64, value: u64) -> u64 {
+    int.saturating_add(62 + round8(key), round8(value))
+}
+
+// What one table row adds to the resident account (§1.11), for a key that encodes to `key`
+// bytes and a value that encodes to `value` bytes: the stored row adds the 4-byte table id
+// before the key and the 2-byte schema tag before the value. An owner sizes
+// `resident_limit` for the rows it bounds with it.
+pub fn resident_row_bytes(key: u64, value: u64) -> u64 {
+    stored_row_charge(int.saturating_add(key, 4), int.saturating_add(value, 2))
 }

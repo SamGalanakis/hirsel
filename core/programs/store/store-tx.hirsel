@@ -192,7 +192,7 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
 }
 
 fn put_frame(tx: Tx, key: Bytes, value: Bytes, frame: Option[u64]) -> Result[Option[u64], Error] {
-    if list.len(key) > 4096 {
+    if list.len(key) > KEY_LIMIT {
         return Error(Limit(Key))
     }
     let size = list.len(value)

@@ -79,3 +79,7 @@ limit = 134217728
 # The Bucket writer (cut phase, STORE-SPEC §1.1 v2.78) beside its follower service.
 [tests.runs."platform@1/platform/bucket_hand_install_adopts_at_12"]
 limit = 134217728
+
+# The place budget and the host's catalog store, sized for 256 sessions with KEY_LIMIT keys.
+[tests.runs."platform@1/local_laws/test_local_creates_to_max_places"]
+limit = 134217728

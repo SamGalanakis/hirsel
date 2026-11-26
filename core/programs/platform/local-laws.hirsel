@@ -741,3 +741,74 @@ fn test_platform_serve_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net
         _ => Error("L60: platform.serve must report the exact Store shortage"),
     }
 }
+
+// §14.2, §14.9 "Shape": `max_places` bounds the sessions a host lists, so every create
+// under it is listed. The law's sessions have keys at Store's ROW_KEY_LIMIT (4,090 non-zero
+// bytes encode to 4,092), and its session store options keep `disk_options`' 1 MiB
+// resident limit. Wrong implementation: the catalog opens on the session store's
+// options, so a create far below `max_places` is refused once its rows pass that
+// limit (2815's N=4,000 run: create 2,059 refused `Failed("commit")`).
+const CREATES: u64 = 256u64
+
+fn long_key(i: u64) -> Bytes {
+    let mut key: Bytes = list.with_capacity(store.ROW_KEY_LIMIT - 2u64)
+    for _ in 0u64 .. store.ROW_KEY_LIMIT - 4u64 {
+        list.push(mut key, 0x61u8)
+    }
+    list.push(mut key, int.truncate(i / 255u64 + 1u64))
+    list.push(mut key, int.truncate(i % 255u64 + 1u64))
+    key
+}
+
+pub fn law_local_creates_to_max_places(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    let mut dir_name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
+    let making: local.Factory[()] = local.factory(quick_place)
+    let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: CREATES, idle_ms: 60000u64, place_bytes: 1048576u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: None)
+    let made = match local.local(local.doorway(), take config) {
+        Ok(take made) => take made,
+        Error(_) => return Error("local: refused a valid configuration")
+    }
+    let door = local.door(made)
+    let mut refused: Option[String] = None
+    for i in 0u64 .. CREATES {
+        let unseeded: local.Seed = fn(mut db: store.Db) -> Result[(), String] {
+            Ok(())
+        }
+        match local.create(door, long_key(i), take unseeded) {
+            Ok(id) if id == i => (),
+            Ok(_) => {
+                refused = Some(string.from("local: create took another id"))
+                break
+            },
+            Error(take why) => {
+                let mut s = string.from("local: create ")
+                string.push_u64(mut s, i)
+                string.push(mut s, " of ")
+                string.push_u64(mut s, CREATES)
+                string.push(mut s, " refused")
+                if let Failed(text) = why {
+                    string.push(mut s, ": ")
+                    string.push(mut s, text)
+                }
+                refused = Some(take s)
+                break
+            },
+        }
+    }
+    let listed = list.len(local.listing(door))
+    let _ = local.stop(take made)
+    result.unwrap(std.dir.remove_all(parent, dir_name))
+    if let Some(take why) = refused {
+        return Error(take why)
+    }
+    if listed != CREATES {
+        return Error("local: the host lists fewer sessions than it created")
+    }
+    Ok(())
+}
+
+@test
+fn test_local_creates_to_max_places(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    law_local_creates_to_max_places(parent, clock, random, tasks, net)
+}

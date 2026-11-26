@@ -1,7 +1,6 @@
 // Module platform: adding and removing groups (§14.1 "A new group", §14.5 "Removing a
 // group"). A caller that keeps its own rows in the host's store commits them in the same
 // transaction as the group's.
-
 pub type NewGroup: send {
     name: String,
     tenant: String,
@@ -20,7 +19,9 @@ pub type NewGroup: send {
 // Adds a group: `Clean(None)` at gen 0 under a new incarnation (§14.1 "A new group"),
 // then the launcher binds its listener.
 pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], Refused] waits {
-    add_group_with(mut h, spec, (), fn(mut tx: store.Tx, unused: ()) -> Result[(), store.Error] { Ok(()) })
+    add_group_with(mut h, spec, (), fn(mut tx: store.Tx, unused: ()) -> Result[(), store.Error] {
+        Ok(())
+    })
 }
 
 // Adds a group and commits `also`'s writes in the same transaction, so a catalog the
@@ -34,24 +35,24 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut st
     let made = {
         let t = view h.t
         store.run(mut h.db, None, ((also, store.copy_env(env)), store.copy_env(spec), store.copy_env(t)), fn(mut tx, call_env) -> Result[GroupRow, Refused] {
-            if let Some(_) = st(store.fetch(tx, call_env.2.groups, call_env.1.name))? {
+            if let Some(_) = st(store.fetch(tx, call_env.2 .groups, call_env.1 .name))? {
                 return Error(Exists)
             }
             check_front_registration(tx, call_env.2, call_env.1 .listen, call_env.1 .front)?
-            let mut u = usage_of(tx, call_env.2, call_env.1.tenant)?
-            if let Some(q) = quota_of(tx, call_env.2, call_env.1.tenant)? {
+            let mut u = usage_of(tx, call_env.2, call_env.1 .tenant)?
+            if let Some(q) = quota_of(tx, call_env.2, call_env.1 .tenant)? {
                 if u.groups >= q.groups {
-                    return Error(Full(Groups(string.from(call_env.1.tenant), q.groups)))
+                    return Error(Full(Groups(string.from(call_env.1 .tenant), q.groups)))
                 }
             }
             let mut meta = meta_of(tx, call_env.2)?
-            let g = GroupRow(tenant: string.from(call_env.1.tenant), workdir: string.from(call_env.1.workdir), author: call_env.1.author, listen: string.from(call_env.1.listen), front: clone(call_env.1 .front), store: string.from(call_env.1.store), memory: call_env.1.memory, assembly: clone(call_env.1.assembly), activation: call_env.1.activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1.args), record: clone(call_env.1.record))
+            let g = GroupRow(tenant: string.from(call_env.1 .tenant), workdir: string.from(call_env.1 .workdir), author: call_env.1 .author, listen: string.from(call_env.1 .listen), front: clone(call_env.1 .front), store: string.from(call_env.1 .store), memory: call_env.1 .memory, assembly: clone(call_env.1 .assembly), activation: call_env.1 .activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1 .args), record: clone(call_env.1 .record))
             meta.next_incarnation += 1u64
-            st(store.put(mut tx, call_env.2.meta, 0u64, meta))?
-            st(store.put(mut tx, call_env.2.groups, call_env.1.name, g))?
-            st(store.put(mut tx, call_env.2.wake, call_env.1.name, WakeRow(wake: Clean(None), gen: 0u64)))?
+            st(store.put(mut tx, call_env.2 .meta, 0u64, meta))?
+            st(store.put(mut tx, call_env.2 .groups, call_env.1 .name, g))?
+            st(store.put(mut tx, call_env.2 .wake, call_env.1 .name, WakeRow(wake: Clean(None), gen: 0u64)))?
             u.groups += 1u64
-            st(store.put(mut tx, call_env.2.usage, call_env.1.tenant, u))?
+            st(store.put(mut tx, call_env.2 .usage, call_env.1 .tenant, u))?
             st((call_env.0 .0)(mut tx, call_env.0 .1))?
             Ok(g)
         })
@@ -65,7 +66,9 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut st
 // Removes a group (§14.5 "Removing a group"): a Clean one at once; a Dirty one, failing or
 // not, is retired: a durable mark, then `Retire`, then one transaction at `Retired`.
 pub fn remove(mut h: Host, name: String, disposition: Disposition) -> Result[List[launcher.Request], Refused] waits {
-    remove_with(mut h, name, disposition, (), fn(mut tx: store.Tx, unused: ()) -> Result[(), store.Error] { Ok(()) })
+    remove_with(mut h, name, disposition, (), fn(mut tx: store.Tx, unused: ()) -> Result[(), store.Error] {
+        Ok(())
+    })
 }
 
 // Removes a group and commits `also`'s writes in the transaction that removes or retires it.
@@ -78,14 +81,14 @@ fn remove_turn[E: inert](mut h: Host, name: String, disposition: Disposition, en
     let made = {
         let t = view h.t
         store.run(mut h.db, None, ((also, store.copy_env(env)), store.copy_env(disposition), store.copy_env(name), store.copy_env(t)), fn(mut tx, call_env) -> Result[(GroupRow, bool), Refused] {
-            let Some(found_g) = st(store.fetch(tx, call_env.3.groups, call_env.2))? else {
+            let Some(found_g) = st(store.fetch(tx, call_env.3 .groups, call_env.2))? else {
                 return Error(Unknown)
             }
             let mut g = found_g
             if let Some(_) = g.retiring {
                 return Error(Retiring)
             }
-            let Some(w) = st(store.fetch(tx, call_env.3.wake, call_env.2))? else {
+            let Some(w) = st(store.fetch(tx, call_env.3 .wake, call_env.2))? else {
                 return Error(Unknown)
             }
             st((call_env.0 .0)(mut tx, call_env.0 .1))?
@@ -96,7 +99,7 @@ fn remove_turn[E: inert](mut h: Host, name: String, disposition: Disposition, en
                 },
                 Dirty(_) => {
                     g.retiring = Some(call_env.1)
-                    st(store.put(mut tx, call_env.3.groups, call_env.2, g))?
+                    st(store.put(mut tx, call_env.3 .groups, call_env.2, g))?
                     Ok((g, false))
                 },
             }
@@ -118,4 +121,64 @@ fn remove_turn[E: inert](mut h: Host, name: String, disposition: Disposition, en
         list.push(mut out, Retire(group_of(name, g.incarnation)))
     }
     Ok(take out)
+}
+
+fn encoded_key_len[K](k: std.codec.Key[K], x: K) -> u64 {
+    let mut out: Bytes = list.new()
+    std.codec.encode_key(k, x, mut out)
+    list.len(out)
+}
+
+fn encoded_len[T](c: std.codec.Codec[T], x: T) -> Option[u64] {
+    let mut out: Bytes = list.new()
+    if let Error(_) = std.codec.encode(c, x, mut out) {
+        return None
+    }
+    Some(list.len(out))
+}
+
+// The most a group added from `spec` can hold in the host's resident account at once, for
+// a group that never deploys and whose starts record no store claim (an in-process host's,
+// §14.9): its group row at its largest (a store id, the largest activation, incarnation
+// and generation, retiring), its wake row, its dirty mark, its due entry and its
+// retirement. Store prices each row (STORE-SPEC §1.11).
+pub fn undeployed_group_bytes(spec: NewGroup) -> Option[u64] {
+    let max = 18446744073709551615u64
+    let name_key = encoded_key_len(std.codec.key_string(), spec.name)
+    let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, listen: string.from(spec.listen), front: clone(spec.front), store: string.from(spec.store), memory: spec.memory, assembly: clone(spec.assembly), activation: max, retained: list.new(), recovery: None, store_id: Some((max, max)), store_claim: None, incarnation: max, retiring: Some(Delete), args: clone(spec.args), record: clone(spec.record))
+    let groups: std.codec.Codec[GroupRow] = std.codec.of()
+    let wakes: std.codec.Codec[WakeRow] = std.codec.of()
+    let retirements: std.codec.Codec[Retired] = std.codec.of()
+    let dirty_wake = encoded_len(wakes, WakeRow(wake: Dirty(max), gen: max))?
+    let clean_wake = encoded_len(wakes, WakeRow(wake: Clean(Some(max)), gen: max))?
+    let mut total = store.resident_row_bytes(name_key, encoded_len(groups, g)?)
+    total = int.checked_add(total, store.resident_row_bytes(name_key, order.max(dirty_wake, clean_wake)))?
+    total = int.checked_add(total, store.resident_row_bytes(name_key, encoded_len(std.codec.of_u64(), max)?))?
+    total = int.checked_add(total, store.resident_row_bytes(encoded_key_len(due_key(), DueKey(at: max, name: string.from(spec.name))), encoded_len(std.codec.of_u8(), 0u8)?))?
+    int.checked_add(total, store.resident_row_bytes(name_key, encoded_len(retirements, Retired(workdir: string.from(spec.workdir), disposition: Delete))?))
+}
+
+fn st[T](take r: Result[T, store.Error]) -> Result[T, Refused] {
+    match take r {
+        Ok(take v) => Ok(take v),
+        Error(take e) => Error(Store(take e))
+    }
+}
+
+// Commits a decision. The caller may act on it within the turn; the turn's end makes it
+// durable before any request or answer it decided leaves the host.
+fn decided[R](mut h: Host, take attempted: Result[store.Outcome[R, Refused], store.Error]) -> Result[R, Refused] {
+    match take attempted {
+        Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
+            h.unsynced = Some(ticket)
+            Ok(take value)
+        },
+        Ok(Aborted(store.Undone(value: take why, ..))) => Error(take why),
+        Ok(Refused(cap)) => Error(Store(Full(cap))),
+        Ok(Failed(Conflict(take name))) => Error(Store(Conflict(take name))),
+        Ok(Failed(Drift(take name))) => Error(Store(Drift(take name))),
+        Ok(Failed(Raised(_))) => Error(Missing("commit: the catalog transaction raised")),
+        Ok(Stopped(_)) => Error(Missing("commit: the catalog transaction ran out of time")),
+        Error(take e) => Error(Store(take e)),
+    }
 }

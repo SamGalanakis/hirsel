@@ -1,13 +1,67 @@
 // Module local (package store): the host's request API. Each call asks the host task
 // through its inbox and waits for the answer; `local` starts the task (local.hirsel).
-// What a host spends: its places' budget, its catalog store, the store a create seeds
-// and its own task.
-pub fn host_bytes(options: store.Options, place_bytes: u64) -> Result[u64, Refused] {
-    let plan = store.writer_plan(Directory, options) ?=> |_| Full
-    let Some(stores) = int.checked_mul(store.writer_bytes(plan), 2u64) else {
+// What one session can hold in the host's catalog at once: its two catalog rows, with
+// a key at Store's ROW_KEY_LIMIT, and its group's rows (platform.undeployed_group_bytes).
+fn session_catalog_bytes() -> Option[u64] {
+    let max = 18446744073709551615u64
+    let mut longest: Bytes = list.with_capacity(store.ROW_KEY_LIMIT)
+    for _ in 0u64 .. store.ROW_KEY_LIMIT {
+        list.push(mut longest, 0u8)
+    }
+    let keys: std.codec.Codec[Bytes] = std.codec.of()
+    let ids: std.codec.Codec[u64] = std.codec.of()
+    let mut id_key: Bytes = list.new()
+    std.codec.encode_key(std.codec.key_u64(), max, mut id_key)
+    let mut key_value: Bytes = list.new()
+    if let Error(_) = std.codec.encode(keys, longest, mut key_value) {
+        return None
+    }
+    let mut id_value: Bytes = list.new()
+    if let Error(_) = std.codec.encode(ids, max, mut id_value) {
+        return None
+    }
+    let catalog_rows = int.checked_add(store.resident_row_bytes(list.len(id_key), list.len(key_value)), store.resident_row_bytes(store.ROW_KEY_LIMIT, list.len(id_value)))?
+    int.checked_add(catalog_rows, platform.undeployed_group_bytes(group_spec(name_of(max)))?)
+}
+
+// The host's catalog store: the session store's options, with room in the resident
+// account for `max_places` sessions beside the host's own rows (§14.9 "Shape").
+fn catalog_options(options: store.Options, max_places: u64) -> Option[store.Options] {
+    let per_session = session_catalog_bytes()?
+    let mut o: store.Options = clone(options)
+    o.resident_limit = int.checked_add(options.resident_limit, int.checked_mul(per_session, max_places)?)?
+    Some(take o)
+}
+
+// The actor's own bytes for `max_places` sessions: the two catalog maps, with a key at
+// ROW_KEY_LIMIT, and the marks map.
+fn session_maps_bytes(max_places: u64) -> Option[u64] {
+    let by_id = charge.map(bytes[u64], bytes[Bytes], max_places)?
+    let by_key = charge.map(bytes[Bytes], bytes[u64], max_places)?
+    let marks_map = charge.map(bytes[u64], bytes[Marks], max_places)?
+    let key = charge.seq(1u64, store.ROW_KEY_LIMIT)?
+    let keys = int.checked_mul(int.checked_mul(key, 2u64)?, max_places)?
+    int.checked_add(int.checked_add(by_id, by_key)?, int.checked_add(marks_map, keys)?)
+}
+
+// What a host spends: its places' budget, its catalog store, the store a create seeds and
+// its own task, whose session maps grow to `max_places`.
+pub fn host_bytes(options: store.Options, max_places: u64, place_bytes: u64) -> Result[u64, Refused] {
+    let Some(catalog) = catalog_options(options, max_places) else {
         return Error(Full)
     }
-    let Some(owned) = int.checked_add(stores, LOCAL_BYTES) else {
+    let catalog_plan = store.writer_plan(Directory, catalog) ?=> |_| Full
+    let session_plan = store.writer_plan(Directory, options) ?=> |_| Full
+    let Some(maps) = session_maps_bytes(max_places) else {
+        return Error(Full)
+    }
+    let Some(stores) = int.checked_add(store.writer_bytes(catalog_plan), store.writer_bytes(session_plan)) else {
+        return Error(Full)
+    }
+    let Some(own) = int.checked_add(LOCAL_BYTES, maps) else {
+        return Error(Full)
+    }
+    let Some(owned) = int.checked_add(stores, own) else {
         return Error(Full)
     }
     let Some(need) = int.checked_add(place_bytes, owned) else {
@@ -30,7 +84,7 @@ pub fn local[T: send](take way: Doorway, take config: Config[T]) -> Result[Local
         return Error(Full)
     }
     let tasks = config.tasks
-    let need = host_bytes(config.options, config.place_bytes)?
+    let need = host_bytes(config.options, config.max_places, config.place_bytes)?
     let Doorway(to: take to, inbox: take inbox) = take way
     let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)

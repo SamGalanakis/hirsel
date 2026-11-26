@@ -14,10 +14,11 @@ import tomllib
 
 SOURCE = "crates/hirsel-core-driver/src/compiler_source.rs"
 # The build script's own sources, and the library sources it bundles.
-SOURCES = ["crates/hirsel-core-driver/build.rs", SOURCE]
+SOURCES = ["crates/hirsel-core-driver/build.rs", SOURCE,
+           "crates/hirsel-core-driver/src/operator_schema.rs"]
 TOOLCHAIN_MANIFEST = "core/programs/toolchain-packages.toml"
 BUNDLED = ["core/core/**", "core/std/**/*.hirsel", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel",
-           TOOLCHAIN_MANIFEST, "core/programs/runner/frame-schema.bin"]
+           "core/programs/platform/operator.hirsel", TOOLCHAIN_MANIFEST, "core/programs/runner/frame-schema.bin"]
 
 
 def toolchain_packages(reads, root: pathlib.Path) -> list[str]:

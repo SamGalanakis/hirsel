@@ -1,6 +1,8 @@
 // Freeze installed library sources and identities when the toolchain is built.
 #[path = "src/compiler_source.rs"]
 mod compiler_source;
+#[path = "src/operator_schema.rs"]
+mod operator_schema;
 use sha2::{Digest, Sha256};
 use std::{
     env,
@@ -105,6 +107,12 @@ fn main() {
         println!("cargo:rustc-env=HIRSEL_RELEASE_VERSION={version}");
     }
     let root = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../core");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let operator = root.join("programs/platform/operator.hirsel");
+    println!("cargo:rerun-if-changed={}", operator.display());
+    let operator_wire = operator_schema::generate(&fs::read_to_string(operator).unwrap());
+    fs::write(out.join("operator_wire.rs"), &operator_wire).unwrap();
+
     let mut generated = String::new();
     let core = package(&root.join("core"), "SOURCES", &mut generated);
     let std = package(&root.join("std"), "STD_SOURCES", &mut generated);
@@ -164,14 +172,11 @@ fn main() {
     let mut identity = Sha256::new();
     identity.update(b"hirsel.compiler-identity.v1");
     identity.update(source);
+    identity.update(Sha256::digest(operator_wire.as_bytes()));
     identity.update(Sha256::digest(generated.as_bytes()));
     generated.push_str(&format!(
         "pub const COMPILER: [u8;32] = {:?};\n",
         <[u8; 32]>::from(identity.finalize())
     ));
-    fs::write(
-        Path::new(&env::var("OUT_DIR").unwrap()).join("core_sources.rs"),
-        generated,
-    )
-    .unwrap();
+    fs::write(out.join("core_sources.rs"), generated).unwrap();
 }

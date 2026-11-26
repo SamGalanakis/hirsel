@@ -508,7 +508,13 @@ operations it names; nothing else about them may be inferred from an implementat
   `b`, all of it on `Ok`, and `written` counts the bytes of `b` committed, at any byte
   boundary; `stdout.write(out, s)` and `stderr.write` are those operations on
   `string.as_bytes(s)`. So the rest of a partial write is `list.slice(b, written, len)`,
-  a view of bytes, and no caller has to form a `String` from a part of a scalar. `host.try_lock` tries
+  a view of bytes, and no caller has to form a `String` from a part of a scalar. On macOS
+  the kernel gives no count for a write it took part of and then failed, as when a pipe's
+  reader goes away while the writer waits for room. So the host there waits for room in a
+  pipe or a stream socket before each write longer than `PIPE_BUF` and offers no more than
+  that room, which the kernel takes whole: `written` is exact while the program is the
+  stream's only writer, and with another writer it is never more than was committed.
+  `host.try_lock` tries
   an exclusive advisory lock without waiting: `Ok(true)` when the handle holds it (also when
   it already did), `Ok(false)` when another holder has it, and on an error it acquires
   nothing. `host.unlock` of an unlocked handle returns `Ok(())`; a failed unlock leaves the

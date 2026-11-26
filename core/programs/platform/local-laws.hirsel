@@ -58,7 +58,7 @@ fn start_local_sized(dir: Dir, take dir_name: String, make: fn(take local.Suppli
 fn start_local_with(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, place_bytes: u64, take options: store.Options, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
-    let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, units: 1u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), journal: None)
+    let config = local.Config(root: dir, backing: DiskBacking, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, units: 1u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), journal: None)
     let made = match local.local(local.doorway(), take config) {
         Ok(take made) => take made,
         Error(Full) => fail("local: refused a valid configuration (Full)"),
@@ -784,7 +784,7 @@ pub fn law_local_creates_to_max_places(parent: Dir, clock: Clock, random: Random
     let mut dir_name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
     let making: local.Factory[()] = local.factory(quick_place)
-    let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: CREATES, idle_ms: 60000u64, place_bytes: 1048576u64, units: 1u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, journal: None)
+    let config = local.Config(root: dir, backing: DiskBacking, options: disk_options(), factory: take making, seed: (), max_places: CREATES, idle_ms: 60000u64, place_bytes: 1048576u64, units: 1u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, journal: None)
     let made = match local.local(local.doorway(), take config) {
         Ok(take made) => take made,
         Error(_) => return Error("local: refused a valid configuration")
@@ -846,7 +846,7 @@ fn local_units_run_together(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: N
     let mut path = string.with_capacity(32u64)
     let root = result.unwrap(host.mkdtemp(parent, mut path))
     let (events, reports): (Client[ProgressEvent], Inbox[ProgressEvent]) = result.unwrap(conn.new(4u64, bytes 128u64))
-    let cfg = local.Config(root: root, options: disk_options(), factory: local.seeded_factory(progress_settings, copy_progress), seed: Progress(events: conn.client(events)), max_places: 2u64, idle_ms: 60000u64, place_bytes: 134217728u64, units: 2u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: None)
+    let cfg = local.Config(root: root, backing: DiskBacking, options: disk_options(), factory: local.seeded_factory(progress_settings, copy_progress), seed: Progress(events: conn.client(events)), max_places: 2u64, idle_ms: 60000u64, place_bytes: 134217728u64, units: 2u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: None)
     let host = result.unwrap(local.local(local.doorway(), take cfg))
     let d = local.door(host)
     let b = result.unwrap(local.route(d, create_shard_session(d, b"b")))
@@ -898,7 +898,7 @@ fn sized_shard_place(take s: local.Supplied) -> Result[runner.PlaceConfig[(), Hd
 fn local_shard_full(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
     let mut path = string.with_capacity(32u64)
     let root = result.unwrap(host.mkdtemp(parent, mut path))
-    let cfg = local.Config(root: root, options: disk_options(), factory: local.factory(sized_shard_place), seed: (), max_places: 2u64, idle_ms: 60000u64, place_bytes: 2u64 * SHARD_SHARE, units: 2u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: None)
+    let cfg = local.Config(root: root, backing: DiskBacking, options: disk_options(), factory: local.factory(sized_shard_place), seed: (), max_places: 2u64, idle_ms: 60000u64, place_bytes: 2u64 * SHARD_SHARE, units: 2u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: None)
     let made = result.unwrap(local.local(local.doorway(), take cfg))
     let d = local.door(made)
     let large = create_shard_session(d, b"large")
@@ -920,14 +920,14 @@ fn local_shard_full(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> R
 }
 
 fn local_units_zero(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
-    let cfg = local.Config(root: parent, options: disk_options(), factory: local.factory(quick_place), seed: (), max_places: 1u64, idle_ms: 60000u64, place_bytes: SHARD_SHARE, units: 0u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: None)
+    let cfg = local.Config(root: parent, backing: DiskBacking, options: disk_options(), factory: local.factory(quick_place), seed: (), max_places: 1u64, idle_ms: 60000u64, place_bytes: SHARD_SHARE, units: 0u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: None)
     match local.local(local.doorway(), take cfg) {
         Error(Configuration) => (),
         _ => return Error("local: zero units must be refused as Configuration"),
     }
     let limits = store.StreamLimits(max_slots: 512, max_pins: 4096, hold_ms: 2000, idle_poll_ms: 1000, index_every: 512, pin_ttl_s: 86400, slot_bytes: 65536)
     let plan = store.StreamPlan(sid: store.HostStreamId(hi: 1, lo: 2), prefix: string.from("streams"), batching: store.Batching(max_wait_ms: 0, max_batch_bytes: 16781312), limits)
-    let cfg_stream = local.Config(root: parent, options: disk_options(), factory: local.factory(quick_place), seed: (), max_places: 1u64, idle_ms: 60000u64, place_bytes: SHARD_SHARE, units: 1u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: Some(take plan))
+    let cfg_stream = local.Config(root: parent, backing: DiskBacking, options: disk_options(), factory: local.factory(quick_place), seed: (), max_places: 1u64, idle_ms: 60000u64, place_bytes: SHARD_SHARE, units: 1u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: Some(take plan))
     match local.local(local.doorway(), take cfg_stream) {
         Error(Configuration) => Ok(()),
         _ => Error("local: a Disk host stream must be refused as Configuration"),

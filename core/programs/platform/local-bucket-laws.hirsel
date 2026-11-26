@@ -1,0 +1,212 @@
+// S1 Bucket backing laws for `platform.local` (STORE-SPEC §12.11.1, RUNNER-SPEC §14.9):
+// selectable standalone (`journal: None`) and streamed (`journal: Some(plan)`) Bucket
+// backing over a real loopback S3 service.
+type LocalS3Loopback: send {
+    listener: Listener,
+    service: std.sim.s3.Loopback,
+    clock: Clock
+}
+
+fn serve_local_s3(take job: LocalS3Loopback) -> () waits {
+    let LocalS3Loopback(listener: take listener, service: take service, clock: clock) = take job
+    let mut serving = take listener
+    let _ = std.sim.s3.serve_loopback(mut serving, take service, clock)
+}
+
+fn loopback_endpoint(port: u16) -> String {
+    let mut url = string.from("http://127.0.0.1:")
+    string.push_u64(mut url, int.widen(port))
+    url
+}
+
+fn bucket_law_options(lanes: std.object.LaneConfig) -> store.Options {
+    let mut o = result.unwrap(store.sized(Bucket(lanes), 134217728u64))
+    o.resident_limit = 1048576u64
+    o.checkpoint_bytes = 65536u64
+    o.pack_bytes = 65536u64
+    o.group_bytes = 65536u32
+    o.group_commits = 1u32
+    o.head_poll_ms = 600000u64
+    o
+}
+
+fn has_batch_segment(k: String) -> bool {
+    let raw = string.as_bytes(k)
+    let n = list.len(raw)
+    if n < 3u64 {
+        return false
+    }
+    for i in 0u64 .. (n - 2u64) {
+        if raw[i] == 47u8 && raw[i + 1u64] == 98u8 && raw[i + 2u64] == 45u8 {
+            return true
+        }
+    }
+    false
+}
+
+fn list_bucket_keys(n: Net, tasks: Tasks, c: Clock, r: Random, endpoint: String, key: Secret) -> List[String] waits {
+    let spot = std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "local-s1", prefix: "", style: Path)
+    let creds = std.cred.from_secret("AKIALOCALS1", secret.share(key), "")
+    let lanes = std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64)
+    let due = std.clock.deadline_after_ms(host.mono_ns(c), 15000u64)
+    let mut client = result.unwrap(std.object.start(n, tasks, take spot, take creds, None, System, c, r, lanes, due))
+    let mut out: List[String] = list.new()
+    let mut after = string.new()
+    loop {
+        let mut entries: List[std.object.Entry] = list.with_capacity(64u64)
+        let page = result.unwrap(std.object.list(mut client, "", after, mut entries, std.clock.deadline_after_ms(host.mono_ns(c), 15000u64)))
+        for e in entries {
+            list.push(mut out, std.object.key_text(e.key))
+        }
+        if !page.truncated {
+            break
+        }
+        after = std.object.key_text(page.after)
+    }
+    let _ = take client
+    out
+}
+
+fn run_local_bucket_law(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, streamed: bool) -> Result[(), String] waits {
+    let (take listener, at) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 64u16))
+    let secret_raw = string.into_bytes(string.from("local-s1-bucket-secret-key-000000"))
+    let key = result.unwrap(secret.seal(take secret_raw, "kdf"))
+    let service = std.sim.s3.Loopback(bucket: "local-s1", access_key: "AKIALOCALS1", aws_region: "us-east-1", root: secret.share(key), exists_status: 412u16, max_body: 16777216u64)
+    let s3_task = task.spawn(tasks, bytes 16777216u64, LocalS3Loopback(listener: take listener, service: take service, clock: clock), serve_local_s3)
+    let endpoint = loopback_endpoint(at.port)
+    let lanes = std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64)
+    let spot = std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "local-s1", prefix: "", style: Path)
+    let creds = std.cred.from_secret("AKIALOCALS1", secret.share(key), "")
+    let lb = local.local_bucket(take spot, take creds, lanes, "bucket", 15000u64)
+    let journal: Option[store.StreamPlan] = if streamed {
+        let limits = store.StreamLimits(max_slots: 8u32, max_pins: 16u32, hold_ms: 60000u64, idle_poll_ms: 1000u64, index_every: 512u64, pin_ttl_s: 86400u64, slot_bytes: 65536u64)
+        Some(store.StreamPlan(sid: store.HostStreamId(hi: 7u64, lo: 11u64), prefix: string.from("streams"), batching: store.Batching(max_wait_ms: 0u64, max_batch_bytes: 16781392u64), limits: take limits))
+    } else {
+        None
+    }
+    let mut dir_name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
+    let cfg = local.Config(root: dir, backing: BucketBacking(take lb), options: bucket_law_options(lanes), factory: local.factory(keeping_place), seed: (), max_places: 2u64, idle_ms: 60000u64, place_bytes: 33554432u64, units: 1u64, sessions: 2u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, journal: take journal)
+    let made = match local.local(local.doorway(), take cfg) {
+        Ok(take h) => take h,
+        Error(Full) => {
+            let _ = task.cancel_join(take s3_task)
+            let _ = std.dir.remove_all(parent, dir_name)
+            return Error("S1: local Bucket host refused Full")
+        },
+        Error(Configuration) => {
+            let _ = task.cancel_join(take s3_task)
+            let _ = std.dir.remove_all(parent, dir_name)
+            return Error("S1: local Bucket host refused Configuration")
+        },
+        Error(Failed(take why)) => {
+            let _ = task.cancel_join(take s3_task)
+            let _ = std.dir.remove_all(parent, dir_name)
+            return Error(take why)
+        },
+        Error(_) => {
+            let _ = task.cancel_join(take s3_task)
+            let _ = std.dir.remove_all(parent, dir_name)
+            return Error("S1: local Bucket host failed to start")
+        },
+    }
+    let door = local.door(made)
+    let unseeded: local.Seed = fn(mut _db: store.Db) -> Result[(), String] {
+        Ok(())
+    }
+    let id = match local.create(door, string.into_bytes(string.from("bucket-a")), take unseeded) {
+        Ok(id) => id,
+        Error(_) => {
+            let _ = local.stop(take made)
+            let _ = task.cancel_join(take s3_task)
+            let _ = std.dir.remove_all(parent, dir_name)
+            return Error("S1: create on Bucket host failed")
+        },
+    }
+    let wanted = kept_keys()
+    let first = match local.route(door, id) {
+        Ok(take lease) => take lease,
+        Error(_) => {
+            let _ = local.stop(take made)
+            let _ = task.cancel_join(take s3_task)
+            let _ = std.dir.remove_all(parent, dir_name)
+            return Error("S1: first route on Bucket host failed")
+        },
+    }
+    let client = connect_lease(first, tasks, net, clock, random, wanted)
+    let _ = ping_call(client, wanted, wanted[0u64], 0u64, 42u64)
+    let _ = runner.wire_client.close(take client)
+    let _ = take first
+    let unloaded = match local.unload(door, id) {
+        Ok(done) => match done.ended {
+            Ok(Stopped(_)) => true,
+            _ => false,
+        },
+        Error(_) => false,
+    }
+    let second = match local.route(door, id) {
+        Ok(take lease) => take lease,
+        Error(_) => {
+            let _ = local.stop(take made)
+            let _ = task.cancel_join(take s3_task)
+            let _ = std.dir.remove_all(parent, dir_name)
+            return Error("S1: second route on Bucket host failed")
+        },
+    }
+    let reader = connect_lease(second, tasks, net, clock, random, wanted)
+    let kept_write = ping_call(reader, wanted, wanted[1u64], 0u64, 42u64) == 42u64
+    let _ = runner.wire_client.close(take reader)
+    let _ = take second
+    let _ = local.stop(take made)
+    let keys = list_bucket_keys(net, tasks, clock, random, endpoint, secret.share(key))
+    let _ = task.cancel_join(take s3_task)
+    let _ = std.dir.remove_all(parent, dir_name)
+    let mut has_head = false
+    let mut has_reg = false
+    let mut has_batch = false
+    let mut has_stream = false
+    for k in keys {
+        if k == "s0/head" {
+            has_head = true
+        }
+        if string.starts_with(k, "streams/s-") {
+            has_stream = true
+            if string.ends_with(k, "/reg") {
+                has_reg = true
+            }
+            if has_batch_segment(k) {
+                has_batch = true
+            }
+        }
+    }
+    if !unloaded || !kept_write || !has_head {
+        return Error("S1: Bucket place did not persist and reopen its committed write in the bucket")
+    }
+    if streamed {
+        if !has_reg || !has_batch {
+            return Error("S1: streamed Bucket host did not write stream register and batch objects")
+        }
+    } else if has_stream {
+        return Error("S1: standalone Bucket host wrote stream objects with journal: None")
+    }
+    Ok(())
+}
+
+// S1 (STORE-SPEC §12.11.1, RUNNER-SPEC §14.9): standalone Bucket backing in
+// `platform.local` runs without `Config.journal`, persists to `s0/head` in the
+// bucket across unload/reopen, and writes no stream objects. Catches hard-coded
+// `Disk` backing or accidental stream attachment on standalone hosts.
+@test
+fn test_local_bucket_standalone(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    run_local_bucket_law(parent, clock, random, tasks, net, false)
+}
+
+// S1 (STORE-SPEC §12.11.1, RUNNER-SPEC §14.9): streamed Bucket backing in
+// `platform.local` starts one `journal_service` from `Config.journal`, hands
+// each Place a `JournalSlot` through `store.streamed`, persists across
+// unload/reopen, and writes stream register and batch objects under the stream
+// root. Catches `Config.journal` being ignored or falling back to Disk/standalone.
+@test
+fn test_local_bucket_streamed(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    run_local_bucket_law(parent, clock, random, tasks, net, true)
+}

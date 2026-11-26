@@ -15,12 +15,13 @@ pub type SimBacking: send {
     op_ms: u64
 }
 
-pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking) | Sim(SimBacking)
+pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking) | StreamedBucket(BucketBacking, store.JournalSlot) | Sim(SimBacking)
 
 fn persistent_backing(backing: Backing) -> bool {
     match backing {
         Disk(_) => true,
         Bucket(_) => true,
+        StreamedBucket(_, _) => true,
         Sim(_) => true,
         _ => false
     }
@@ -111,6 +112,25 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
                         None => take authority,
                     }
                     Ok(store.open_authority(tasks, take configured, clock, random, options) ?=> |refusal| BucketOpen(take refusal, op_ms))
+                },
+                Error(take problem) => Error(Remote(take problem)),
+            }
+        },
+        StreamedBucket(take bucket, take journal_slot) => {
+            let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms, cache) = take bucket
+            let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), op_ms)
+            match std.object.start(net, tasks, take place, take credentials, None, System, clock, random, lanes, deadline) {
+                Ok(take client) => {
+                    let authority = store.object_authority(take client, level, op_ms)
+                    let configured = match cache {
+                        Some((dir, cache_bytes)) => store.objects_cache(take authority, dir, cache_bytes),
+                        None => take authority,
+                    }
+                    let attached = match store.streamed(take configured, take journal_slot) {
+                        Ok(take streamed_authority) => take streamed_authority,
+                        Error(take problem) => return Error(Start(Open(Store(take problem)))),
+                    }
+                    Ok(store.open_authority(tasks, take attached, clock, random, options) ?=> |refusal| BucketOpen(take refusal, op_ms))
                 },
                 Error(take problem) => Error(Remote(take problem)),
             }

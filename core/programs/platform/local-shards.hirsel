@@ -2,10 +2,12 @@ const DIALS: u64 = 16u64
 
 const PLACE_TASK_BYTES: u64 = 65536u64
 
+type LaunchBacking: cross = LaunchDisk(Dir) | LaunchBucket(LocalBucket) | LaunchStreamedBucket(LocalBucket, store.JournalSlot)
+
 type Launch: cross {
     job: u64,
     name: String,
-    dir: Dir,
+    backing: LaunchBacking,
     sizing: PlaceSizing,
     version: u64,
     idle: u64,
@@ -142,8 +144,9 @@ fn run_shard[T: cross, G: send, H: shareable + inert + send, S: send](take seed:
     let ShardSeed(launch: take entry, make: take make) = take seed
     let ShardLaunch(seed: take services, max_places: max_places, tasks: tasks, clock: clock, random: random, net: net, events: take events, ready: take ready) = take entry
     // At most one completion per live place and one undecided Start can
-    // wait here. A Start's only variable content is its local session name.
-    let made: Result[(Client[ShardCommand], Inbox[ShardCommand]), Capacity] = conn.new(max_places + 1u64, bytes 256u64)
+    // wait here. A Start carries its session name and, for Bucket hosts, its
+    // bucket config and optional JournalSlot strings.
+    let made: Result[(Client[ShardCommand], Inbox[ShardCommand]), Capacity] = conn.new(max_places + 1u64, bytes 4096u64)
     let Ok((take to, take commands)) = take made else {
         return
     }
@@ -177,7 +180,7 @@ fn run_shard[T: cross, G: send, H: shareable + inert + send, S: send](take seed:
                         }
                         let placing = runner.share_placing(registered)
                         let notice = PlaceNotice(events: conn.client(events), finished: conn.client(to), admitted: take start_from, job: job)
-                        match start_made(take launch, take placing, take settings, take notice, tasks) {
+                        match start_made(take launch, take placing, take settings, take notice, tasks, net) {
                             Ok((take stop_to, charge, take place)) => {
                                 list.push(mut running, (job, take place))
                                 Some((take stop_to, charge))
@@ -209,19 +212,24 @@ fn run_shard[T: cross, G: send, H: shareable + inert + send, S: send](take seed:
     }
 }
 
-fn start_made[G: send, H: shareable + inert + send, S: send](take launch: Launch, take placing: runner.Placing[G, H], take made: runner.PlaceConfig[G, H, S], take notice: PlaceNotice, tasks: Tasks) -> Result[(Client[()], u64, Task[()]), Refused] {
+fn start_made[G: send, H: shareable + inert + send, S: send](take launch: Launch, take placing: runner.Placing[G, H], take made: runner.PlaceConfig[G, H, S], take notice: PlaceNotice, tasks: Tasks, net: Net) -> Result[(Client[()], u64, Task[()]), Refused] {
+    let Launch(backing: take launch_backing, sizing: sizing, version: version, idle: idle, sessions: sessions, available: available, ..) = take launch
     let mut config = take made
-    config.backing = Disk(launch.dir)
-    config.sizes = launch.sizing.sizes
-    config.selection = Current(launch.version)
-    config.idle = Some(launch.idle)
-    config.max_sessions = launch.sessions
+    config.backing = match take launch_backing {
+        LaunchDisk(dir) => Disk(dir),
+        LaunchBucket(take b) => Bucket(runner_bucket(take b, net)),
+        LaunchStreamedBucket(take b, take slot) => StreamedBucket(runner_bucket(take b, net), take slot),
+    }
+    config.sizes = sizing.sizes
+    config.selection = Current(version)
+    config.idle = Some(idle)
+    config.max_sessions = sessions
     let (dialing, dials) = std.wsock.dials(DIALS) ?=> |_| Full
     config.listen = InProcess(take dials)
     let overhead = runner.placed_bytes(placing, config) ?=> |_| Full
-    let need = int.saturating_add(overhead, int.saturating_add(launch.sizing.need, runner.PLACE_KEEP))
+    let need = int.saturating_add(overhead, int.saturating_add(sizing.need, runner.PLACE_KEEP))
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
-    if charge > launch.available {
+    if charge > available {
         return Error(Full)
     }
     let (stopping, halt): (Client[()], Inbox[()]) = conn.new(1u64, bytes 0u64) ?=> |_| Full

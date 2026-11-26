@@ -4287,7 +4287,7 @@ Deleted with §11.18: the generation-publish parts of L4, "the fence" and BK5's 
    Then L55-1, L55-2, L55-3 and L56-W. L56's Runner half uses the sim@1 `Backing` arm (RUNNER v2.55.3). The client sends its `Requests` to the head. The native loopback case covers the one-level gate.
 5. **L54-W and L54-H**, after their listing step.
 
-The host stream's laws, L90, are listed in §12.11.15 and owed by its build.
+The host stream's laws, L90, are listed in §12.11.15; the `bucket_stream_*laws.hirsel` files hold its shipped cases.
 
 ### 12.11 The Bucket host stream
 
@@ -4339,7 +4339,7 @@ pub fn stream_reader(take a: Authority, root: StreamRoot) -> Result[Authority, E
 pub fn close_journal_service(take s: JournalService) -> Result[(), Error] waits
 ```
 
-- **Platform.** `platform.local`'s `Config` gains `journal: Option[StreamPlan]`. `None` is v2.141's behavior, byte for byte. `Some(plan)` makes the actor start one `journal_service` and hand each Place start job a `JournalSlot` (a `cross` value), which the job passes to `streamed`.
+- **Platform.** `platform.local`'s `Config` gains `backing: PlaceBacking` (`DiskBacking` or `BucketBacking(LocalBucket)`) and `journal: Option[StreamPlan]`. `None` is v2.141's behavior, byte for byte: a `BucketBacking` host then starts each Place on its own standalone Bucket store under `<prefix>/<name>/`. `Some(plan)` on a `BucketBacking` host makes the actor start one `journal_service` and hand each Place start job a `JournalSlot` (a `cross` value), which the job passes to `streamed`. `Some(_)` on a `DiskBacking` host is refused `Configuration` (a Disk stream is out of scope, §12.11.0).
 - **There is no default `Batching`.** `max_wait_ms` is the window in which the service gathers frames after the first one arrives (0: none). `max_batch_bytes` must fit a minimum-sized Store frame plus the encoded one-row batch envelope and be at most 2³². Before sending an attachment, the writer checks that its recorded frame limit plus that envelope fits. The envelope is HEADER, INDEX with one row, and FOOTER. Either bounds violation returns `Stream(Bound(MaxBatchBytes))`. The caller supplies `StreamLimits`.
 - **max_rows is derived.** The register holds at most `max_rows = 2 × max_slots` rows. `max_slots` is 1 to 10,698, so `max_rows × 49 + 110 ≤ REG_LIMIT` (1 MiB). A value outside is `Stream(Bound(MaxSlots))`. There is no separate `max_rows` setting (M8).
 - **Refusals before any request (M12).** Each is typed and writes nothing:

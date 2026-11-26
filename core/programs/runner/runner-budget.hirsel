@@ -221,6 +221,7 @@ fn place_store[G: send, H: shareable + inert + send, S: send](placing: Placing[G
     let kind: store.Kind = match p.backing {
         Memory => Memory,
         Bucket(b) => Bucket(b.lanes),
+        StreamedBucket(b, _) => Bucket(b.lanes),
         Sim(b) => Bucket(std.object.request_lanes(b.requests)),
         _ => Directory,
     }

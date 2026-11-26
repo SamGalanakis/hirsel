@@ -53,19 +53,76 @@ fn group_spec(name: String) -> platform.NewGroup {
     platform.NewGroup(name: string.from(name), tenant: string.new(), workdir: string.from(name), author: Trusted, listen: string.new(), front: None, store: string.new(), memory: None, assembly: list.new(), activation: 0u64, args: list.new(), record: None)
 }
 
-fn seed_store(a: Actor, dir: Dir, seed: Seed) -> Result[(), Refused] waits {
+// Seeds a session's store: Ok(true) when seeded. On Bucket a prefix keeps what an earlier
+// seed of the same id committed before a failure or crash left it unlisted, so a store past
+// genesis (version 0, STORE-SPEC §12.3) is never seeded again: Ok(false), and the create
+// moves to the next id.
+fn seed_store(mut a: Actor, name: String, seed: Seed) -> Result[bool, Refused] waits {
     // A Place's store records the limits its runner opens it with (STORE-SPEC
     // §11.1 AP4a), so the seeding open makes it with the Place's limits.
     let mut opening: store.Options = clone(a.options)
     opening.limits = a.sizing.sizes.limits
-    let mut db = match store.open(a.tasks, dir, a.clock, a.random, take opening) {
-        Ok(take v) => take v,
-        Error(e) => return Error(Failed(store_text("session store: ", e)))
+    let bucket_session: Option[LocalBucket] = match a.backing {
+        DiskBacking => None,
+        BucketBacking(b) => Some(share_bucket_with_prefix(b, bucket_session_prefix(b.prefix, name))),
+    }
+    let mut db = match take bucket_session {
+        None => {
+            let _ = map.remove(mut a.workdirs, name)
+            let _ = std.dir.remove_all(a.root, name)
+            if let Error(_) = std.dir.create_dir(a.root, name) {
+                return Error(Failed("session dir"))
+            }
+            let Some(dir) = workdir_of(mut a, name) else {
+                return Error(Failed("session dir"))
+            }
+            match store.open(a.tasks, dir, a.clock, a.random, take opening) {
+                Ok(take v) => take v,
+                Error(e) => return Error(Failed(store_text("session store: ", e))),
+            }
+        },
+        Some(take b) => {
+            let place = std.object.Bucket(endpoint: string.from(b.endpoint), aws_region: string.from(b.aws_region), bucket: string.from(b.bucket), prefix: string.from(b.prefix), style: bucket_style(b.path_style))
+            let credentials = std.cred.from_secret(string.from(b.access_key_id), secret.share(b.secret), string.from(b.session_token))
+            let lanes = bucket_lane_config(b)
+            let deadline = std.clock.deadline_after_ms(host.mono_ns(a.clock), b.op_ms)
+            let client = match std.object.start(a.net, a.tasks, take place, take credentials, None, System, a.clock, a.random, lanes, deadline) {
+                Ok(take c) => take c,
+                Error(_) => return Error(Failed("session bucket client")),
+            }
+            let base = store.object_authority(take client, string.from(b.level), b.op_ms)
+            let authority = match a.journal {
+                Some(mut svc) => {
+                    let slot = match store.journal_slot(mut svc) {
+                        Ok(take s) => take s,
+                        Error(Full(_)) => return Error(Full),
+                        Error(take e) => return Error(Failed(store_text("session stream slot: ", take e))),
+                    }
+                    match store.streamed(take base, take slot) {
+                        Ok(take attached) => take attached,
+                        Error(Stream(_)) => return Error(Configuration),
+                        Error(Foreign) => return Error(Configuration),
+                        Error(take e) => return Error(Failed(store_text("session stream: ", take e))),
+                    }
+                },
+                None => take base,
+            }
+            match store.open_authority(a.tasks, take authority, a.clock, a.random, take opening) {
+                Ok(take v) => take v,
+                Error(store.Refusal(error: take e, ..)) => return Error(Failed(store_text("session store: ", take e))),
+            }
+        },
+    }
+    if let BucketBacking(_) = a.backing {
+        if store.version(store.snapshot(db)) != 0u64 {
+            let _ = store.close(take db)
+            return Ok(false)
+        }
     }
     let seeded = seed(mut db)
     let _ = store.close(take db)
     match take seeded {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         Error(take why) => Error(Failed(take why))
     }
 }
@@ -94,17 +151,10 @@ fn on_create(mut a: Actor, take key: Bytes, take seed: Seed) -> Result[u64, Refu
     if map.len(a.s.by_id) >= a.max_sessions {
         return Error(Full)
     }
-    let id = a.s.next_id
-    let name = name_of(id)
-    let _ = map.remove(mut a.workdirs, name)
-    let _ = std.dir.remove_all(a.root, name)
-    if let Error(_) = std.dir.create_dir(a.root, name) {
-        return Error(Failed("session dir"))
+    let mut id = a.s.next_id
+    while !seed_store(mut a, name_of(id), seed)? {
+        id += 1u64
     }
-    let Some(dir) = workdir_of(mut a, name) else {
-        return Error(Failed("session dir"))
-    }
-    seed_store(a, dir, seed)?
     let reqs = match add_listed(mut a.h, a.s.catalog, id, key) {
         Ok(take r) => take r,
         Error(r) => return Error(refused_of(r))
@@ -311,6 +361,9 @@ fn check_cold(mut a: Actor, name: String, check: ColdCheck) -> Result[(), Refuse
     if group_has_kid(a, name) {
         return Error(Busy)
     }
+    if let BucketBacking(_) = a.backing {
+        return Error(Configuration)
+    }
     let Some(dir) = workdir_of(mut a, name) else {
         return Error(Unknown)
     }
@@ -325,6 +378,9 @@ fn check_cold(mut a: Actor, name: String, check: ColdCheck) -> Result[(), Refuse
 }
 
 fn run_read(mut a: Actor, name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
+    if let BucketBacking(_) = a.backing {
+        return Error(Configuration)
+    }
     let Some(dir) = workdir_of(mut a, name) else {
         return Error(Unknown)
     }

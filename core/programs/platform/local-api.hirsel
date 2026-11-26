@@ -29,6 +29,7 @@ fn session_catalog_bytes() -> Option[u64] {
 fn catalog_options(options: store.Options, max_places: u64) -> Option[store.Options] {
     let per_session = session_catalog_bytes()?
     let mut o: store.Options = clone(options)
+    o.authority = Directory()
     o.resident_limit = int.checked_add(options.resident_limit, int.checked_mul(per_session, max_places)?)?
     Some(take o)
 }
@@ -44,9 +45,13 @@ fn session_maps_bytes(max_places: u64) -> Option[u64] {
     int.checked_add(int.checked_add(by_id, by_key)?, int.checked_add(marks_map, keys)?)
 }
 
-// What a host spends: its places' budget, its catalog store, the store a create seeds and
-// its own task, whose session maps grow to `max_places`.
+// What a host spends: its places' budget, its catalog store, the store a create seeds,
+// any host stream service, and its own task, whose session maps grow to `max_places`.
 pub fn host_bytes(options: store.Options, max_places: u64, place_bytes: u64, units: u64) -> Result[u64, Refused] {
+    host_bytes_for(DiskBacking, options, max_places, place_bytes, units, None)
+}
+
+pub fn host_bytes_for(backing: PlaceBacking, options: store.Options, max_places: u64, place_bytes: u64, units: u64, journal: Option[store.StreamPlan]) -> Result[u64, Refused] {
     if units == 0u64 {
         return Error(Configuration)
     }
@@ -54,17 +59,42 @@ pub fn host_bytes(options: store.Options, max_places: u64, place_bytes: u64, uni
         return Error(Full)
     }
     let catalog_plan = store.writer_plan(Directory, catalog) ?=> |_| Full
-    let session_plan = store.writer_plan(Directory, options) ?=> |_| Full
+    let session_kind: store.Kind = match backing {
+        DiskBacking => Directory,
+        BucketBacking(b) => Bucket(bucket_lane_config(b)),
+    }
+    let session_plan = store.writer_plan(session_kind, options) ?=> |_| Full
     let Some(maps) = session_maps_bytes(max_places) else {
         return Error(Full)
     }
     let Some(stores) = int.checked_add(store.writer_bytes(catalog_plan), store.writer_bytes(session_plan)) else {
         return Error(Full)
     }
+    let mut stream_extra = 0u64
+    if let BucketBacking(b) = backing {
+        if let Some(plan) = journal {
+            let Some(lanes) = std.object.lane_reservation(bucket_lane_config(b)) else {
+                return Error(Full)
+            }
+            let Some(with_resolver) = int.checked_add(lanes, b.lane_bytes) else {
+                return Error(Full)
+            }
+            let Some(with_lanes) = int.checked_add(store.stream_service_bytes(plan), with_resolver) else {
+                return Error(Full)
+            }
+            let Some(total_stream) = int.checked_add(with_lanes, 262144u64) else {
+                return Error(Full)
+            }
+            stream_extra = total_stream
+        }
+    }
+    let Some(with_stream) = int.checked_add(stores, stream_extra) else {
+        return Error(Full)
+    }
     let Some(own) = int.checked_add(LOCAL_BYTES, maps) else {
         return Error(Full)
     }
-    let Some(owned) = int.checked_add(stores, own) else {
+    let Some(owned) = int.checked_add(with_stream, own) else {
         return Error(Full)
     }
     let Some(need) = int.checked_add(place_bytes, owned) else {
@@ -92,16 +122,18 @@ pub fn local[T: cross](take way: Doorway, take config: Config[T]) -> Result[Loca
     if config.units == 0u64 {
         return Error(Configuration)
     }
-    // `platform.local` currently serves Directory stores; Disk streams are
-    // refused (STORE-SPEC §12.11.0). `journal: None` preserves v2.141 behavior.
-    if let Some(_) = config.journal {
-        return Error(Configuration)
+    // Disk streams are refused (STORE-SPEC §12.11.0). Bucket hosts support both
+    // standalone (`journal: None`) and streamed (`journal: Some(plan)`) backing.
+    if let DiskBacking = config.backing {
+        if let Some(_) = config.journal {
+            return Error(Configuration)
+        }
     }
     if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 {
         return Error(Full)
     }
     let tasks = config.tasks
-    let need = host_bytes(config.options, config.max_places, config.place_bytes, config.units)?
+    let need = host_bytes_for(config.backing, config.options, config.max_places, config.place_bytes, config.units, config.journal)?
     let Doorway(to: take to, inbox: take inbox) = take way
     let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)

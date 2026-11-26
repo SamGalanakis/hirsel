@@ -1,0 +1,96 @@
+// Module local (package platform): Bucket backing and host stream setup for `platform.local`
+// (S1, RUNNER-SPEC §14.9, STORE-SPEC §12.11.1). Each session `s<id>` takes prefix
+// `<prefix>/<name>/`.
+pub type LocalBucket: cross {
+    endpoint: String,
+    aws_region: String,
+    bucket: String,
+    prefix: String,
+    path_style: bool,
+    access_key_id: String,
+    secret: Secret,
+    session_token: String,
+    lanes: u64,
+    lane_bytes: u64,
+    level: String,
+    op_ms: u64,
+}
+
+pub fn local_bucket(place: std.object.Bucket, take credentials: std.cred.Credentials, lanes: std.object.LaneConfig, level: String, op_ms: u64) -> LocalBucket {
+    let path_style = match place.style {
+        Path => true,
+        Virtual => false,
+    }
+    let std.cred.Credentials(access_key_id: take access_key_id, secret: take secret, session_token: take session_token, ..) = take credentials
+    LocalBucket(endpoint: string.from(place.endpoint), aws_region: string.from(place.aws_region), bucket: string.from(place.bucket), prefix: string.from(place.prefix), path_style: path_style, access_key_id: take access_key_id, secret: take secret, session_token: take session_token, lanes: lanes.requested_lanes, lane_bytes: lanes.lane_bytes, level: string.from(level), op_ms: op_ms)
+}
+
+pub type PlaceBacking: send = DiskBacking | BucketBacking(LocalBucket)
+
+fn bucket_lane_config(b: LocalBucket) -> std.object.LaneConfig {
+    std.object.LaneConfig(requested_lanes: b.lanes, lane_bytes: b.lane_bytes)
+}
+
+fn bucket_style(path_style: bool) -> std.object.Style {
+    if path_style {
+        Path
+    } else {
+        Virtual
+    }
+}
+
+fn bucket_root_prefix(base: String) -> String {
+    if string.byte_len(base) == 0u64 {
+        return string.new()
+    }
+    if string.ends_with(base, "/") {
+        return string.from(base)
+    }
+    let mut out = string.with_capacity(string.byte_len(base) + 1u64)
+    string.push(mut out, base)
+    string.push(mut out, "/")
+    out
+}
+
+fn bucket_session_prefix(base: String, name: String) -> String {
+    let root = bucket_root_prefix(base)
+    let mut out = string.with_capacity(string.byte_len(root) + string.byte_len(name) + 1u64)
+    string.push(mut out, root)
+    string.push(mut out, name)
+    string.push(mut out, "/")
+    out
+}
+
+fn share_bucket_with_prefix(b: LocalBucket, take prefix: String) -> LocalBucket {
+    LocalBucket(endpoint: string.from(b.endpoint), aws_region: string.from(b.aws_region), bucket: string.from(b.bucket), prefix: take prefix, path_style: b.path_style, access_key_id: string.from(b.access_key_id), secret: secret.share(b.secret), session_token: string.from(b.session_token), lanes: b.lanes, lane_bytes: b.lane_bytes, level: string.from(b.level), op_ms: b.op_ms)
+}
+
+fn runner_bucket(take b: LocalBucket, net: Net) -> runner.BucketBacking {
+    let LocalBucket(endpoint: take endpoint, aws_region: take aws_region, bucket: take bucket, prefix: take prefix, path_style: path_style, access_key_id: take access_key_id, secret: take secret, session_token: take session_token, lanes: lanes, lane_bytes: lane_bytes, level: take level, op_ms: op_ms) = take b
+    let place = std.object.Bucket(endpoint: take endpoint, aws_region: take aws_region, bucket: take bucket, prefix: take prefix, style: bucket_style(path_style))
+    let credentials = std.cred.from_secret(take access_key_id, take secret, take session_token)
+    runner.BucketBacking(net: net, place: take place, credentials: take credentials, lanes: std.object.LaneConfig(requested_lanes: lanes, lane_bytes: lane_bytes), level: take level, op_ms: op_ms, cache: None)
+}
+
+fn open_journal_service(tasks: Tasks, net: Net, clock: Clock, random: Random, b: LocalBucket, plan: store.StreamPlan) -> Result[store.JournalService, Refused] waits {
+    let place = std.object.Bucket(endpoint: string.from(b.endpoint), aws_region: string.from(b.aws_region), bucket: string.from(b.bucket), prefix: bucket_root_prefix(b.prefix), style: bucket_style(b.path_style))
+    let credentials = std.cred.from_secret(string.from(b.access_key_id), secret.share(b.secret), string.from(b.session_token))
+    let lanes = bucket_lane_config(b)
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), b.op_ms)
+    let client = match std.object.start(net, tasks, take place, take credentials, None, System, clock, random, lanes, deadline) {
+        Ok(take c) => take c,
+        Error(_) => return Error(Failed(string.from("host stream object client"))),
+    }
+    let authority = store.object_authority(take client, string.from(b.level), b.op_ms)
+    let budget = store.stream_service_bytes(plan)
+    match store.journal_service(tasks, take authority, plan, budget, clock, random) {
+        Ok(take svc) => Ok(take svc),
+        Error(store.Refusal(error: take e, ..)) => match take e {
+            Stream(_) => Error(Configuration),
+            Limit(Name) => Error(Configuration),
+            Unsupported(_) => Error(Configuration),
+            Full(_) => Error(Full),
+            take other => Error(Failed(store_text("host stream: ", take other))),
+        },
+    }
+}

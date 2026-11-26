@@ -53,6 +53,48 @@ impl CrossedCause {
         }
     }
 
+    /// A cause a replayed helper end delivers: a `Fail` message of
+    /// capacity 0 is static text, run-lived as the run's own literals are.
+    #[cfg(feature = "record")]
+    pub(super) fn replayed(c: crate::tape::units::replay::DueCause) -> Self {
+        let cause = match c.kind {
+            causes::FAIL => {
+                let len = c.message.len() as u64;
+                let data = if c.capacity == 0 {
+                    c.message.clone().leak().as_mut_ptr()
+                } else {
+                    ptr::null_mut()
+                };
+                Cause::fail(
+                    StringMessage {
+                        data,
+                        len,
+                        capacity: c.capacity,
+                    },
+                    c.site,
+                )
+            }
+            causes::CAPACITY => Cause::capacity(
+                crate::Capacity {
+                    requested: c.bytes.0,
+                    available: c.bytes.1,
+                },
+                c.site,
+            ),
+            kind => Cause::new(kind, c.site),
+        };
+        let (owned_message, message_charge) = if c.kind == causes::FAIL && c.capacity != 0 {
+            (c.message, charge::seq(c.capacity, 1).unwrap())
+        } else {
+            (Vec::new(), 0)
+        };
+        Self {
+            cause,
+            owned_message,
+            message_charge,
+        }
+    }
+
     pub(super) fn unpack(self, context: &Context, held: &mut Held) -> Cause {
         let mut cause = self.cause;
         if self.message_charge != 0 {

@@ -45,6 +45,7 @@ mod ending;
 pub use crossing::{Cross, SpawnEntry};
 use crossing::{TapeHelper, tape_group};
 use ending::end_take;
+pub(crate) use ending::{abandon, cancel};
 pub(crate) mod packing;
 #[cfg(feature = "record")]
 pub(crate) mod replay;
@@ -1430,40 +1431,6 @@ pub(crate) unsafe fn join<const REC: bool>(
             causes: chain.into_raw(),
             status: 0,
         })
-    }
-}
-
-/// `task.cancel` on a helper's handle: its `UNIT_CANCEL`, then the request.
-pub(crate) unsafe fn cancel(task: *mut tasks::Task) {
-    #[cfg(feature = "record")]
-    // SAFETY: the owner's handle pins the helper.
-    crate::tape::units::cancel(tasks::current_group(), unsafe { (*helper_of(task)).k });
-    // SAFETY: forwarded.
-    unsafe { request_cancel(task) }
-}
-
-/// Ask a helper to cancel: an arrival at its port, taken in its own order.
-unsafe fn request_cancel(task: *mut tasks::Task) {
-    let h = helper_of(task);
-    // SAFETY: the owner's handle pins the helper's port.
-    unsafe {
-        if !(*h).ended {
-            (*h).port.publish(crate::units::ledger::ArrivalRef::boxed(
-                crate::units::ledger::Body::Cancel,
-            ));
-        }
-    }
-}
-
-/// Drop a helper's handle: cancel, wait for its end (shielded), drop the result.
-pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u8 {
-    // SAFETY: the caller transfers the handle.
-    unsafe {
-        request_cancel(task);
-        wait_end::<false>(context, helper_of(task), 0, true, false);
-        tasks::before_commit();
-        consume(context, helper_of(task), None);
-        0
     }
 }
 

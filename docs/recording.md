@@ -777,7 +777,7 @@ or a byte string with bytes left after its last field is `Corrupt`.
 The head is 20 bytes. The check covers the stream number, so a
 block moved between streams fails its check. Each stream's block 0 is its **header block**,
 with flags 0; its later blocks hold frames. The
-root's header block payload holds the current format tag (`0x000f`) and the tape id every check
+root's header block payload holds the current format tag (`0x0010`) and the tape id every check
 uses.
 
 **Helper stream header.** A helper stream's header block payload is:
@@ -884,8 +884,9 @@ from a delivery position and the two members of a sealer pair. An agreement's sh
 operand uses origin kind 2 and the receiving ordinal `u64`. This applies even if the
 object was constructed virtually. A refused send keeps its sending unit's name. A key object made outside a recorded unit has no origin to write and cuts the recording that encounters it.
 
-The format tag is `0x000f` because the media origin can include a charge ordinal and
-the SFrame schedule snapshot carries its sending block.
+The format tag is `0x0010` because a `Fail` cause carries its message's capacity, which
+the join charges (format `0x000f` gave the media origin a charge ordinal and the SFrame
+schedule snapshot its sending block).
 
 A capability (tag 5) that arrives gets its new ordinal in the receiving unit, and its later
 operations there belong to that unit, on that ordinal. If the same word arrives again, the
@@ -926,7 +927,9 @@ task bit is 0, because a take names no task. Then:
 
 - **Causes** are a count `varint` of at least 1, then each cause of the chain, primary
   first: its kind `u8` in `CauseKind`'s declared order (`Overflow` 0 to `OutOfTime` 7), its
-  site `u64`, then for `Fail` its message as `bytes`, for `Capacity` its requested and
+  site `u64`, then for `Fail` its message as `bytes` and the message's `String` capacity
+  as a `varint` (0 for static text, which no limit pays for; the owner's join admits a
+  message of that capacity, so its replay charges what the run did), for `Capacity` its requested and
   available bytes as two `u64`s, and nothing for the others.
 - A **survivor** is its kind `u8` (connection 0, `Shared` node 1, `Secret` designation 2,
   key object 3, agreement registry entry 4, `UdpSocket` pool 5, group queue 6, sealed bytes
@@ -1058,7 +1061,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00 00 00 00                stream 0
 00 00 00 00 00 00 00 00    seq 0
 4b 00 00 00                len 75
-0f 00                      format version
+10 00                      format version
 01                         kind Run
 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f   tape id
 00                         identity: empty bytes
@@ -1069,7 +1072,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00                         chooser FIFO
 00                         arg: empty bytes
 00                         grants: empty bytes
-70 23 13 bf d2 df 26 d6    check
+ce 20 70 18 15 56 07 e4    check
 ```
 
 Block 1 (stream 0, seq 1, flags `END`, 25-byte payload), 53 bytes:

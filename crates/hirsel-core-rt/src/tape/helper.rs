@@ -800,6 +800,8 @@ fn encode_causes(causes: &[&Cause]) -> Vec<u8> {
                 };
                 put_varint(&mut out, text.len() as u64);
                 out.extend_from_slice(text);
+                // Its String capacity, 0 for static text: the join charges it.
+                put_varint(&mut out, m.capacity);
             }
             CAPACITY => {
                 out.extend_from_slice(&(cause.message.data as u64).to_le_bytes());

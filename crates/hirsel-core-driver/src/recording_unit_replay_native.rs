@@ -357,3 +357,142 @@ fn u4d_helper_streams_replay_as_units() {
         );
     }
 }
+
+/// A helper that fails with an owned message, and one its owner cancels
+/// while it sleeps.
+const U5_ENDS: &str = r#"
+type Nap { clock: Clock, until: u64 }
+
+fn boom(take n: u64) -> u64 {
+    let mut m = string.with_capacity(40)
+    string.push(mut m, "boom ")
+    string.push_u64(mut m, n)
+    fail(take m)
+}
+
+fn nap(take x: Nap) -> u64 waits {
+    host.sleep_until(x.clock, x.until)
+    1
+}
+
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let f = result.unwrap(task.spawn_unit(tasks, bytes 65536, 5, boom))
+    match task.join(take f) { Error(Failed(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status: 3)) }
+    let mut c = result.unwrap(task.spawn_unit(tasks, bytes 65536, Nap(clock: clock, until: 18446744073709551615), nap))
+    task.cancel(mut c)
+    match task.join(take c) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status: 4)) }
+    result.unwrap(stdout.write(out, "units"))
+    Ok(())
+}
+"#;
+
+/// Failed and cancelled helper ends replay: the owner's end take delivers
+/// the recorded causes to its join, and its `UNIT_CANCEL` is checked.
+/// - The intact tape (streams root, root.0, root.1) replays `Sealed` in full
+///   and with each `--unit` alone. Red before: the root's failed end take
+///   and its `UNIT_CANCEL` were refused (exit 2).
+/// - The root's stream, by hand: the `GRANT`s of `Tasks`, `Clock` and
+///   `Stdout` (1-3), the `UNIT_SPAWN` of `boom` (4), its end `TAKE` (5), the
+///   `UNIT_SPAWN` of `nap` (6), its `UNIT_CANCEL` (7), its end `TAKE` (8),
+///   the write's OP (9) and the `END` (10).
+/// - (e) The failed end `TAKE` names ordinal 99: exactly one line,
+///   `Diverged(Take) at 5 in root`.
+/// - (f) The `UNIT_CANCEL` names object 99: exactly one line,
+///   `Diverged(Object) at 7 in root`.
+/// - (g) root.0's `END` message reads "boon 5": root.0's stream after its
+///   entry holds only that `END` (no host operation), so exactly one line,
+///   `Diverged(Outcome) at 1 in root.0`.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_failed_and_cancelled_helper_ends_replay() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::Index;
+    use std::os::unix::fs::FileExt;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(U5_ENDS, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut options = native_options(backend, dir.path());
+        options.runtime = env_record_runtime();
+        options.recording = true;
+        options.grant_mask = ["Tasks", "Clock", "Stdout"]
+            .iter()
+            .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
+        options.cas = dir.path().join(format!("u5-store-{backend:?}"));
+        options.output = dir.path().join(format!("u5-{backend:?}"));
+        let program = product.build(&entry, &options).unwrap().executable;
+        let path = dir.path().join(format!("u5-{backend:?}.tape"));
+        let (code, out, err) = tape_run(&program, &[], Some(&path));
+        assert_eq!((code, out.as_str()), (Some(0), "units"), "{backend:?}: {err}");
+        let tape = std::fs::read(&path).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let read = |at: u64, b: &mut [u8]| file.read_at(b, at);
+        let (index, header) = Index::open(read).unwrap();
+        let paths: std::collections::BTreeMap<String, u32> =
+            index.paths().map(|(s, n)| (n, s)).collect();
+        let names: Vec<_> = paths.keys().map(String::as_str).collect();
+        assert_eq!(names, ["root", "root.0", "root.1"], "{backend:?}");
+
+        for unit in [None, Some("root"), Some("root.0"), Some("root.1")] {
+            let (code, out, err) = u4_replay(&program, &path, unit);
+            assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "", ""), "{backend:?} {unit:?}");
+        }
+        let one_line = |tape: &[u8], name: &str, prefix: &str| {
+            let corrupt = dir.path().join(format!("u5-{backend:?}-{name}.tape"));
+            std::fs::write(&corrupt, tape).unwrap();
+            let (code, out, err) = u4_replay(&program, &corrupt, None);
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} {name}: {err}");
+            let lines: Vec<_> = err.lines().collect();
+            assert!(
+                matches!(&lines[..], [l] if l.starts_with(prefix)),
+                "{backend:?} {name}: {err}"
+            );
+        };
+
+        // (e) The failed end: tag 4, the ordinal, Failed (1), one cause of
+        // kind Fail (4).
+        let wrong = u4_patched(&tape, &header.tape_id, 0, |payload| {
+            let Some(at) = payload
+                .windows(5)
+                .position(|w| w[0] == 4 && w[2] == 1 && w[3] == 1 && w[4] == 4)
+            else {
+                return false;
+            };
+            payload[at + 1] = 99;
+            true
+        });
+        one_line(&wrong, "failed", "replay: Diverged(Take) at 5 in root ");
+
+        // (f) The UNIT_CANCEL OP: code 167, the object, the empty literal and
+        // the Out (status 0, value 0).
+        let wrong = u4_patched(&tape, &header.tape_id, 0, |payload| {
+            let Some(at) = payload
+                .windows(5)
+                .position(|w| w[0] == 167 && w[2..] == [0, 0, 0])
+            else {
+                return false;
+            };
+            payload[at + 1] = 99;
+            true
+        });
+        one_line(&wrong, "cancel", "replay: Diverged(Object) at 7 in root ");
+
+        // (g) root.0's END message.
+        let wrong = u4_patched(&tape, &header.tape_id, paths["root.0"], |payload| {
+            let Some(at) = payload.windows(6).position(|w| w == b"boom 5") else {
+                return false;
+            };
+            payload[at + 3] = b'n';
+            true
+        });
+        one_line(&wrong, "message", "replay: Diverged(Outcome) at 1 in root.0 ");
+    }
+}

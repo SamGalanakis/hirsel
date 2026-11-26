@@ -39,25 +39,24 @@ pub(super) fn replaying<R>(group: Option<Group>, f: impl FnOnce(&mut Live) -> R)
         .flatten()
 }
 
-/// A replayed `UNIT_SPAWN` with its arguments, or why this build does not
-/// replay it: checked as a provider issue is. The helper's handle takes its
-/// ordinal, and the helper starts nothing: its stream replays as its own
-/// unit. A delivered stream the tape does not hold is that child's verdict
-/// `Truncated at 0`, unless the unit replays alone; the spawner goes on.
-pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'static str>) {
-    replaying(group, |live| {
-        let args = match args {
-            Ok(args) => Args::of_parts(&[&args]),
-            Err(why) => return live.refuse_replay(why),
-        };
-        let task = group.map_or(0, |g| g.task);
-        live.unit_commit(task);
-        let rep = live.replayer.as_mut().unwrap();
+impl Live {
+    /// A replayed unit operation, checked as a provider issue is: the
+    /// stream's next frame is its `OP`, with this task, code, object and
+    /// arguments. Its outcome value, or None once the replay has ended.
+    pub(super) fn unit_op_replayed(
+        &mut self,
+        task: u64,
+        op: u8,
+        object: u64,
+        args: &Args,
+    ) -> Option<u64> {
+        self.unit_commit(task);
+        let rep = self.replayer.as_mut().unwrap();
         let observed = IssueEvidence {
             task,
-            op: op::UNIT_SPAWN,
-            object: 0,
-            args: &args,
+            op,
+            object,
+            args,
         };
         let frame = match rep.next() {
             Ok(frame) => frame,
@@ -65,22 +64,23 @@ pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'st
                 if let Fault::Diverged(_) = fault {
                     rep.note_next(format_args!("{observed}"));
                 }
-                return live.stop_replay(fault);
+                self.stop_replay(fault);
+                return None;
             }
         };
         let mismatch = match &frame {
             Frame::Op {
                 task: t,
-                op,
-                object,
+                op: o,
+                object: b,
                 args: stored,
                 ..
             } => {
                 if *t != task {
                     Some(Mismatch::Schedule)
-                } else if *op != op::UNIT_SPAWN {
+                } else if *o != op {
                     Some(Mismatch::Op)
-                } else if *object != 0 {
+                } else if *b != object {
                     Some(Mismatch::Object)
                 } else if stored.operands() != args.operands() {
                     Some(Mismatch::Arg)
@@ -93,12 +93,32 @@ pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'st
         };
         if let Some(kind) = mismatch {
             let fault = rep.compared(kind, &frame, format_args!("{observed}"));
-            return live.stop_replay(fault);
+            self.stop_replay(fault);
+            return None;
         }
         let Frame::Op { out, .. } = frame else {
-            unreachable!("a matched UNIT_SPAWN is an OP")
+            unreachable!("a matched unit operation is an OP")
         };
-        live.schedule.events += 1;
+        self.schedule.events += 1;
+        Some(out.value)
+    }
+}
+
+/// A replayed `UNIT_SPAWN` with its arguments, or why this build does not
+/// replay it: checked as a provider issue is. The helper's handle takes its
+/// ordinal, and the helper starts nothing: its stream replays as its own
+/// unit. A delivered stream the tape does not hold is that child's verdict
+/// `Truncated at 0`, unless the unit replays alone; the spawner goes on.
+pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'static str>) {
+    replaying(group, |live| {
+        let args = match args {
+            Ok(args) => Args::of_parts(&[&args]),
+            Err(why) => return live.refuse_replay(why),
+        };
+        let task = group.map_or(0, |g| g.task);
+        let Some(value) = live.unit_op_replayed(task, op::UNIT_SPAWN, 0, &args) else {
+            return;
+        };
         let ordinal = live.unit_object();
         live.takes.helpers.insert(key, ordinal);
         let rep = live.replayer.as_mut().unwrap();
@@ -107,7 +127,7 @@ pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'st
         if rep.alone {
             return;
         }
-        let held = u32::try_from(out.value).is_ok_and(|s| rep.streams.contains_key(&s));
+        let held = u32::try_from(value).is_ok_and(|s| rep.streams.contains_key(&s));
         if held || live.replay_abort.is_none() {
             return;
         }
@@ -118,23 +138,79 @@ pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'st
     });
 }
 
-/// A helper's end that a recorded `TAKE` delivers now: the handle's key and
-/// its result, packed for the handle's result type.
-pub(crate) struct DueEnd {
-    pub(crate) key: usize,
-    pub(crate) packed: Vec<u8>,
+/// A replayed `UNIT_CANCEL` on helper `key`, checked as an issue. The
+/// helper's own stream holds its cancel take, so the request reaches nothing.
+pub(crate) fn cancel(group: Option<Group>, key: usize) {
+    replaying(group, |live| {
+        let Some(&ordinal) = live.takes.helpers.get(&key) else {
+            return;
+        };
+        let task = group.map_or(0, |g| g.task);
+        let args = Args::Literal(Vec::new());
+        live.unit_op_replayed(task, op::UNIT_CANCEL, ordinal, &args);
+    });
+}
+
+/// A cause of a helper's recorded failure, as the owner's join delivers it.
+pub(crate) struct DueCause {
+    pub(crate) kind: u8,
+    pub(crate) site: u64,
+    /// `Fail`'s text and its `String` capacity (0 for static text).
+    pub(crate) message: Vec<u8>,
+    pub(crate) capacity: u64,
+    /// `Capacity`'s requested and available bytes.
+    pub(crate) bytes: (u64, u64),
+}
+
+/// What a recorded `TAKE` delivers now.
+pub(crate) enum Due {
+    /// A helper's end: the handle's key, and its result packed for the
+    /// handle's result type, or the causes it failed or was cancelled with.
+    End {
+        key: usize,
+        outcome: Result<Vec<u8>, Vec<DueCause>>,
+    },
+    /// A cancellation request for the unit's root.
+    Cancel,
+}
+
+fn due_causes(causes: &[format::Cause<'_>]) -> Vec<DueCause> {
+    causes
+        .iter()
+        .map(|c| {
+            let mut cause = DueCause {
+                kind: c.kind,
+                site: c.site,
+                message: Vec::new(),
+                capacity: 0,
+                bytes: (0, 0),
+            };
+            match c.detail {
+                format::CauseDetail::Fail { message, capacity } => {
+                    cause.message = message.to_vec();
+                    cause.capacity = capacity;
+                }
+                format::CauseDetail::Capacity {
+                    requested,
+                    available,
+                } => cause.bytes = (requested, available),
+                format::CauseDetail::None => {}
+            }
+            cause
+        })
+        .collect()
 }
 
 /// The `TAKE` due at this take point (`pump`: a scheduler pump, kind 1), if
-/// the stream's next frame is one: the end it delivers. `layout` gives a
-/// helper handle's result layout by its key. A take this point passed, one
-/// naming no helper of the unit, or a result of another layout ends the
-/// replay `Diverged(Take)`.
+/// the stream's next frame is one: what it delivers. `layout` gives a helper
+/// handle's result layout by its key. A take this point passed, one naming
+/// no helper of the unit, or a result of another layout ends the replay
+/// `Diverged(Take)`.
 pub(crate) fn due(
     group: Option<Group>,
     pump: bool,
     layout: impl Fn(usize) -> Option<(u64, Vec<[u64; 4]>)>,
-) -> Option<DueEnd> {
+) -> Option<Due> {
     replaying(group, |live| {
         live.fresh_takes();
         let (events, last, count) = (live.schedule.events, live.schedule.last, live.takes.count);
@@ -175,12 +251,20 @@ pub(crate) fn due(
                     live.refuse_replay("a helper end that hands its owner survivors");
                     return None;
                 }
-                (ordinal, value.bytes().to_vec())
+                (ordinal, Ok(value.bytes().to_vec()))
             }
-            Arrival::HelperEnd(..) => {
-                live.refuse_replay("a failed or cancelled helper's end");
-                return None;
+            Arrival::HelperEnd(
+                ordinal,
+                HelperOutcome::Failed(causes) | HelperOutcome::Cancelled(causes),
+                survivors,
+            ) => {
+                if !survivors.is_empty() {
+                    live.refuse_replay("a helper end that hands its owner survivors");
+                    return None;
+                }
+                (ordinal, Err(due_causes(&causes)))
             }
+            Arrival::Cancel => return Some(Due::Cancel),
             other => {
                 live.refuse_replay(unsupported(&other));
                 return None;
@@ -191,19 +275,23 @@ pub(crate) fn due(
             .helpers
             .iter()
             .find_map(|(&key, &o)| (o == ordinal).then_some(key));
-        let packed = key
-            .and_then(&layout)
-            .ok_or(Unpacked::Layout)
-            .and_then(|(bytes, owners)| {
-                let held =
-                    &mut |_: u64, _: &mut format::Cursor<'_>| Err(Unpacked::Unsupported(HELD));
-                let bytes = bytes as usize;
-                packed(&value, vec![0; bytes], (0, bytes), &owners, held)
-            });
-        match (key, packed) {
-            (Some(key), Ok(packed)) => {
+        let outcome = match value {
+            Ok(value) => key
+                .and_then(&layout)
+                .ok_or(Unpacked::Layout)
+                .and_then(|(bytes, owners)| {
+                    let held =
+                        &mut |_: u64, _: &mut format::Cursor<'_>| Err(Unpacked::Unsupported(HELD));
+                    let bytes = bytes as usize;
+                    packed(&value, vec![0; bytes], (0, bytes), &owners, held)
+                })
+                .map(Ok),
+            Err(causes) => key.map(|_| Err(causes)).ok_or(Unpacked::Layout),
+        };
+        match (key, outcome) {
+            (Some(key), Ok(outcome)) => {
                 live.takes.helpers.remove(&key);
-                Some(DueEnd { key, packed })
+                Some(Due::End { key, outcome })
             }
             (_, Err(Unpacked::Unsupported(why))) => {
                 live.refuse_replay(why);

@@ -9,12 +9,12 @@ const ID: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 fn root_header() -> Vec<u8> {
     // The published example, including the published check.
     [
-        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x0f\0\x01".as_slice(),
+        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x10\0\x01".as_slice(),
         &ID,
         &[0; 37],
         b"\0\0\x01\0\0\0\0\0",
         &[0; 11],
-        b"\x70\x23\x13\xbf\xd2\xdf\x26\xd6",
+        b"\xce\x20\x70\x18\x15\x56\x07\xe4",
     ]
     .concat()
 }
@@ -198,7 +198,7 @@ fn take_cases() {
             // Helper 3 Failed: a Fail at site 5 saying "no", then a Capacity at
             // site 6 asking 64 with 16 available; no survivors.
             &[
-                4, 3, 1, 2, 4, 5, 0, 0, 0, 0, 0, 0, 0, 2, b'n', b'o', 6, 6, 0, 0, 0, 0, 0, 0, 0,
+                4, 3, 1, 2, 4, 5, 0, 0, 0, 0, 0, 0, 0, 2, b'n', b'o', 8, 6, 6, 0, 0, 0, 0, 0, 0, 0,
                 64, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
             Arrival::HelperEnd(
@@ -207,7 +207,10 @@ fn take_cases() {
                     Cause {
                         kind: 4,
                         site: 5,
-                        detail: CauseDetail::Fail(b"no"),
+                        detail: CauseDetail::Fail {
+                            message: b"no",
+                            capacity: 8,
+                        },
                     },
                     Cause {
                         kind: 6,
@@ -590,7 +593,7 @@ fn entry_and_end() {
 }
 
 #[test]
-fn format_15_bytes_rl6() {
+fn format_16_bytes_rl6() {
     let root = root_header();
     let source = [root.clone(), EXAMPLE_END.to_vec()].concat();
     let (mut index, header) = Index::open(read(&source)).unwrap();

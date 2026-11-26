@@ -75,8 +75,16 @@ pub struct Cause<'a> {
 #[derive(Debug, Eq, PartialEq)]
 pub enum CauseDetail<'a> {
     None,
-    Fail(&'a [u8]),
-    Capacity { requested: u64, available: u64 },
+    /// The message's text and its `String` capacity: 0 for static text, which
+    /// no limit pays for. The capacity is what the join charges for the text.
+    Fail {
+        message: &'a [u8],
+        capacity: u64,
+    },
+    Capacity {
+        requested: u64,
+        available: u64,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -348,7 +356,10 @@ fn causes<'a>(c: &mut Cursor<'a>) -> Result<Vec<Cause<'a>>, Corrupt> {
             let kind = tag(c, 7)?;
             let site = c.u64()?;
             let detail = match kind {
-                4 => CauseDetail::Fail(c.bytes()?),
+                4 => CauseDetail::Fail {
+                    message: c.bytes()?,
+                    capacity: c.varint()?,
+                },
                 6 => CauseDetail::Capacity {
                     requested: c.u64()?,
                     available: c.u64()?,

@@ -63,33 +63,51 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
                 .get(&key)
                 .map(|&h| unsafe { ((*h).result.bytes, (*h).result.owners.clone()) })
         };
-        let Some(end) = tape::due(Some(group), u.pumping, layout) else {
-            return;
+        let (key, outcome) = match tape::due(Some(group), u.pumping, layout) {
+            None => return,
+            Some(tape::Due::Cancel) => {
+                if !u.root.is_null() {
+                    // SAFETY: the unit's root task is live while the unit runs.
+                    unsafe { tasks::hirsel_core_cancel(ptr::null_mut(), u.root) };
+                }
+                continue;
+            }
+            Some(tape::Due::End { key, outcome }) => (key, outcome),
         };
-        let h = u.helpers[&end.key];
+        let h = u.helpers[&key];
         let hctx = u
             .unstarted
-            .remove(&end.key)
+            .remove(&key)
             .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
-        // SAFETY: as above; the packed result has the handle's result layout.
-        let (port, result) = unsafe {
-            (
-                Arc::as_ptr(&(*h).port) as usize,
-                item_charge(end.packed.as_ptr(), &(*h).result.owners),
-            )
-        };
-        let ended = Ended {
-            failed: false,
-            causes: Vec::new(),
-            result,
-            survivors: Vec::new(),
-            run_grants: 0,
-            charges: Vec::new(),
-            tape_end: None,
+        // SAFETY: as above.
+        let port = unsafe { Arc::as_ptr(&(*h).port) as usize };
+        let mut ret = Value::empty();
+        let ended = match outcome {
+            Ok(packed) => {
+                // SAFETY: the packed result has the handle's result layout.
+                let result = unsafe { item_charge(packed.as_ptr(), &(*h).result.owners) };
+                ret.set_item(packed, None);
+                Ended {
+                    failed: false,
+                    causes: Vec::new(),
+                    result,
+                    survivors: Vec::new(),
+                    run_grants: 0,
+                    charges: Vec::new(),
+                    tape_end: None,
+                }
+            }
+            Err(causes) => Ended {
+                failed: true,
+                causes: causes.into_iter().map(CrossedCause::replayed).collect(),
+                result: 0,
+                survivors: Vec::new(),
+                run_grants: 0,
+                charges: Vec::new(),
+                tape_end: None,
+            },
         };
         RESULTS.lock().unwrap().insert(port, ended);
-        let mut ret = Value::empty();
-        ret.set_item(end.packed, None);
         hctx.end_helper(Some(ret), false);
     }
 }

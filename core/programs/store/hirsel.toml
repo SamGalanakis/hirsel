@@ -215,6 +215,9 @@ limit = 134217728
 [tests.runs."store@1/store/bucket_stream_ack_after_create"]
 limit = 134217728
 
+[tests.runs."store@1/store/bucket_stream_ack_after_lost_read"]
+limit = 134217728
+
 # The pager reserves C + K + P = 80,794,472 B at the Tiered floor,
 # plus the Task allocation and request channel.
 [tests.runs."store@1/store/test_l70_tiered_sizes_include_cut_quota"]

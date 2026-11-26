@@ -25,8 +25,27 @@ fn stream_key(dir: String, name: String) -> String {
     take key
 }
 
+// One Place's frames in a created batch whose ack is not yet decided.
+type PendingSlice: send {
+    seq: u64,
+    store: StoreId,
+    epoch: u64
+}
+
+// The ack rule's verdict on one pending slice. A stalled slice stays
+// outstanding (§12.11.4).
+type SliceDecision: send {
+    seq: u64,
+    store: StoreId,
+    epoch: u64,
+    acked: bool
+}
+
 // One writer of a stream's objects: the service's incarnation, or a claimant
-// adding its hold. `reg` and `tag` are the last register body it read or wrote.
+// adding its hold. `reg` and `tag` are the last register body it read or
+// wrote. `pending` are the slices of created batches not yet decided, and
+// `stalled` the (store, epoch) pairs a register row stalls. A latched lane
+// writes nothing more (§12.11.10).
 type StreamLane {
     client: std.object.Client,
     dir: String,
@@ -39,7 +58,10 @@ type StreamLane {
     reg: StreamRegister,
     tag: std.object.ETag,
     body: Bytes,
-    compare: Bytes
+    compare: Bytes,
+    pending: List[PendingSlice],
+    stalled: List[PendingSlice],
+    latched: Option[StreamLatch]
 }
 
 fn stream_lane(take client: std.object.Client, sid: HostStreamId, authority_kind: u8, max_rows: u64, holder: StoreId) -> Result[StreamLane, Error] {
@@ -51,7 +73,28 @@ fn stream_lane(take client: std.object.Client, sid: HostStreamId, authority_kind
         list.with_capacity(room)
     })?
     let empty = StreamRegister(rev: 0, sid, inc: 0, holder: StoreId(hi: 0, lo: 0), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
-    Ok(StreamLane(client: take client, dir: stream_dir(sid), sid, authority_kind, max_rows, inc: 0, holder, seq: 1, reg: take empty, tag: std.object.ETag(octets:[0; 64], len: 0), body: take body, compare: take compare))
+    Ok(StreamLane(client: take client, dir: stream_dir(sid), sid, authority_kind, max_rows, inc: 0, holder, seq: 1, reg: take empty, tag: std.object.ETag(octets:[0; 64], len: 0), body: take body, compare: take compare, pending: list.new(), stalled: list.new(), latched: None))
+}
+
+fn stream_latch(mut lane: StreamLane, cause: StreamLatch) -> Error {
+    lane.latched = Some(cause)
+    Latched(cause)
+}
+
+fn stream_latched(lane: StreamLane) -> Result[(), Error] {
+    match lane.latched {
+        Some(cause) => Error(Latched(cause)),
+        None => Ok(()),
+    }
+}
+
+fn stream_stalled(lane: StreamLane, store: StoreId, epoch: u64) -> bool {
+    for p in lane.stalled {
+        if same(p.store, store) && p.epoch == epoch {
+            return true
+        }
+    }
+    false
 }
 
 // An unconditional GET of `reg` (§12.11.3 rule 2). A 404 after creation is
@@ -76,8 +119,13 @@ fn stream_reg_read(mut lane: StreamLane, deadline: u64) -> Result[(), Error] wai
 }
 
 // What a register write means to do, so a Mismatch can tell whether it is
-// already done and rebuild it over a fresh body (§12.11.3 rule 3).
-type RegIntent: send = Hold(RegRow)
+// already done and rebuild it over a fresh body (§12.11.3 rule 3). A hold
+// names the incarnation it was taken against (§12.11.5 step 3).
+type RegIntent: send = Hold(RegRow, u64)
+
+// `Moved`: the register's incarnation rose past the one a hold was taken
+// against, so no row was written and the claim takes the no-hold rule.
+type RegWrite = Written | Moved
 
 fn stream_hold_rev(reg: StreamRegister, token: StoreId) -> Option[u64] {
     for row in reg.rows {
@@ -90,7 +138,7 @@ fn stream_hold_rev(reg: StreamRegister, token: StoreId) -> Option[u64] {
 
 fn stream_intent_present(intent: RegIntent, reg: StreamRegister) -> bool {
     match intent {
-        Hold(row) => match stream_hold_rev(reg, row.token) {
+        Hold(row, _) => match stream_hold_rev(reg, row.token) {
             Some(_) => true,
             None => false,
         },
@@ -105,7 +153,7 @@ fn stream_intent_apply(intent: RegIntent, base: StreamRegister, max_rows: u64) -
     })?
     built.rev = base.rev + 1
     match intent {
-        Hold(row) => {
+        Hold(row, _) => {
             let rows = list.len(base.rows) + 1
             if rows > max_rows {
                 return Error(Full(Register(Capacity(requested: stream_register_bytes(rows), available: stream_register_bytes(max_rows)))))
@@ -120,9 +168,21 @@ fn stream_intent_apply(intent: RegIntent, base: StreamRegister, max_rows: u64) -
 // A conditional write of `reg` with Q5 and the merge (§12.11.3 rule 3).
 // `Applied` is done. `Uncertain` resends the same bytes with the same
 // If-Match. `Mismatch` reads `reg`: exact bytes or the intent already present
-// is done, and otherwise the write is rebuilt over the fresh body.
-fn stream_reg_write(mut lane: StreamLane, intent: RegIntent, deadline: u64) -> Result[(), Error] waits {
+// is done, and otherwise the write is rebuilt over the fresh body. Resends
+// that run out after an `Uncertain` leave the write `Undecided`.
+fn stream_intent_moved(intent: RegIntent, reg: StreamRegister) -> bool {
+    match intent {
+        Hold(_, against) => reg.inc > against,
+    }
+}
+
+fn stream_reg_write(mut lane: StreamLane, intent: RegIntent, deadline: u64) -> Result[RegWrite, Error] waits {
+    stream_latched(lane)?
+    if stream_intent_moved(intent, lane.reg) {
+        return Ok(Moved)
+    }
     let key = stream_key(lane.dir, "reg")
+    let mut uncertain = false
     let mut candidate = stream_intent_apply(intent, lane.reg, lane.max_rows)?
     stream_register_encode(mut lane.body, candidate, lane.authority_kind)?
     let mut pre = lane.tag
@@ -133,21 +193,30 @@ fn stream_reg_write(mut lane: StreamLane, intent: RegIntent, deadline: u64) -> R
             Ok(Applied(take meta)) => {
                 lane.reg = take candidate
                 lane.tag = meta.etag
-                return Ok(())
+                return Ok(Written)
             },
             Ok(Mismatch) => {
                 stream_reg_read(mut lane, deadline)?
                 if lane.compare == lane.body || stream_intent_present(intent, lane.reg) {
-                    return Ok(())
+                    return Ok(Written)
                 }
+                if stream_intent_moved(intent, lane.reg) {
+                    return Ok(Moved)
+                }
+                uncertain = false
                 candidate = stream_intent_apply(intent, lane.reg, lane.max_rows)?
                 stream_register_encode(mut lane.body, candidate, lane.authority_kind)?
                 pre = lane.tag
             },
-            Error(Uncertain(_)) => (),
+            Error(Uncertain(_)) => {
+                uncertain = true
+            },
             Error(Retriable(_)) => (),
             Error(take problem) => return Error(Remote(take problem)),
         }
+    }
+    if uncertain {
+        return Error(Undecided)
     }
     Error(Remote(Retriable(Deadline)))
 }
@@ -206,7 +275,9 @@ fn stream_start_fresh(mut lane: StreamLane, deadline: u64) -> Result[(), Error] 
 
 // Creates `b-<inc>-<seq>` (§12.11.2). A 412 is resolved by one GET: exact
 // bytes are Applied, a TERM is the terminal fence (`Superseded`), and any
-// other bytes are `Corrupt(Malformed)`, which latches `Batch`.
+// other bytes are `Corrupt(Malformed)`, which latches `Batch`. A create
+// whose resends run out has an unknown outcome at this seq, so the lane
+// latches `Unreachable` and never writes the seq with other bytes.
 fn stream_batch_put(mut lane: StreamLane, slices: List[BatchSlice], deadline: u64) -> Result[(), Error] waits {
     let size = stream_batch_size(slices) + BINDING_BYTES
     capacity(list.try_reserve(mut lane.body, size))?
@@ -220,19 +291,21 @@ fn stream_batch_put(mut lane: StreamLane, slices: List[BatchSlice], deadline: u6
     match take outcome {
         Ok(Applied(_)) => Ok(()),
         Ok(Mismatch) => {
-            match history_fetch(mut lane.client, key, mut lane.compare, deadline) {
-                Ok(_) => (),
-                Error(take problem) => return Error(take problem),
+            if let Error(_) = history_fetch(mut lane.client, key, mut lane.compare, deadline) {
+                return Error(stream_latch(mut lane, Unreachable))
             }
             if lane.compare == lane.body {
                 return Ok(())
             }
             match stream_batch_head(key, lane.compare, lane.sid, lane.inc, lane.seq) {
-                Ok(Term(_, _)) => Error(Latched(Superseded)),
-                _ => Error(disk_fault(key, 0, Malformed)),
+                Ok(Term(_, _)) => Error(stream_latch(mut lane, Superseded)),
+                _ => {
+                    lane.latched = Some(Batch)
+                    Error(disk_fault(key, 0, Malformed))
+                },
             }
         },
-        Error(take problem) => Error(Remote(take problem)),
+        Error(_) => Error(stream_latch(mut lane, Unreachable)),
     }
 }
 
@@ -253,22 +326,60 @@ fn stream_ack_rule(reg: StreamRegister, inc: u64, holder: StoreId, store: StoreI
     Ack
 }
 
-// One writer cycle (§12.11.4): create the batch, then GET `reg`, issued after
-// the create completed, and decide each slice by the ack rule. The result is
-// true for each slice whose frames are acked and false for each stalled one.
-fn stream_cycle(mut lane: StreamLane, slices: List[BatchSlice], deadline: u64) -> Result[List[bool], Error] waits {
-    stream_batch_put(mut lane, slices, deadline)?
-    lane.seq += 1
-    stream_reg_read(mut lane, deadline)?
-    let mut acked: List[bool] = capacity(bound bytes (list.len(slices) + 64) {
-        list.with_capacity(list.len(slices))
-    })?
-    for s in slices {
-        match stream_ack_rule(lane.reg, lane.inc, lane.holder, s.store, s.epoch) {
-            Superseded => return Error(Latched(Superseded)),
-            Stall => list.push(mut acked, false),
-            Ack => list.push(mut acked, true),
+// Decides every pending slice from one `reg` GET issued after their creates
+// completed (§12.11.4). A failed read decides nothing and keeps them pending;
+// a body with another (inc, holder) latches `Superseded`, and a register
+// missing or corrupt latches `Register`.
+fn stream_decide(mut lane: StreamLane, mut decided: List[SliceDecision], deadline: u64) -> Result[(), Error] waits {
+    match stream_reg_read(mut lane, deadline) {
+        Ok(()) => (),
+        Error(Corrupt(take fault)) => {
+            lane.latched = Some(Register)
+            return Error(Corrupt(take fault))
+        },
+        Error(take problem) => return Error(take problem),
+    }
+    capacity(list.try_reserve(mut decided, list.len(lane.pending)))?
+    capacity(list.try_reserve(mut lane.stalled, list.len(lane.pending)))?
+    let pending = replace(mut lane.pending, list.new())
+    for p in pending {
+        match stream_ack_rule(lane.reg, lane.inc, lane.holder, p.store, p.epoch) {
+            Superseded => return Error(stream_latch(mut lane, Superseded)),
+            Stall => {
+                if !stream_stalled(lane, p.store, p.epoch) {
+                    list.push(mut lane.stalled, p)
+                }
+                list.push(mut decided, SliceDecision(seq: p.seq, store: p.store, epoch: p.epoch, acked: false))
+            },
+            Ack => list.push(mut decided, SliceDecision(seq: p.seq, store: p.store, epoch: p.epoch, acked: true)),
         }
     }
-    Ok(take acked)
+    Ok(())
+}
+
+// Decides the slices a failed read left pending. The next cycle may create a
+// batch only once this has succeeded, so every earlier batch is decided.
+fn stream_decide_pending(mut lane: StreamLane, deadline: u64) -> Result[List[SliceDecision], Error] waits {
+    stream_latched(lane)?
+    let mut decided: List[SliceDecision] = list.new()
+    stream_decide(mut lane, mut decided, deadline)?
+    Ok(take decided)
+}
+
+// One writer cycle (§12.11.4), entered with nothing pending: create the
+// batch, read `reg` after its create completed, and decide each slice by the
+// ack rule. `slices` hold no stalled Place (`stream_stalled`). On a failed
+// read the error returns and the slices stay pending for
+// `stream_decide_pending`.
+fn stream_cycle(mut lane: StreamLane, slices: List[BatchSlice], deadline: u64) -> Result[List[SliceDecision], Error] waits {
+    stream_latched(lane)?
+    stream_batch_put(mut lane, slices, deadline)?
+    capacity(list.try_reserve(mut lane.pending, list.len(slices)))?
+    for s in slices {
+        list.push(mut lane.pending, PendingSlice(seq: lane.seq, store: s.store, epoch: s.epoch))
+    }
+    lane.seq += 1
+    let mut decided: List[SliceDecision] = list.new()
+    stream_decide(mut lane, mut decided, deadline)?
+    Ok(take decided)
 }

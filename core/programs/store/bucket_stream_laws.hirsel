@@ -233,7 +233,10 @@ fn stream_law_holder(take actor: StreamHolder) -> Result[u64, Error] waits {
     let mut lane = stream_law_lane(actor.endpoint, actor.clock, actor.tasks, actor.seed, actor.token)?
     let due = stream_law_due(lane)
     stream_reg_read(mut lane, due)?
-    stream_reg_write(mut lane, Hold(RegRow(store: actor.store, epoch: actor.epoch, token: actor.token, rev_hold: 0, abandoned: false)), due)?
+    let against = lane.reg.inc
+    let Written = stream_reg_write(mut lane, Hold(RegRow(store: actor.store, epoch: actor.epoch, token: actor.token, rev_hold: 0, abandoned: false), against), due)? else {
+        fail("a hold saw the incarnation move with no election")
+    }
     match stream_hold_rev(lane.reg, actor.token) {
         Some(rev) => Ok(rev),
         None => fail("a hold write returned without its row"),
@@ -322,8 +325,38 @@ fn bucket_stream_ack_after_create(c: Clock, r: Random, tasks: Tasks) -> Result[(
     let _ = bucket_law_report(take s)
     held?
     let acked = decided?
-    if list.len(acked) != 2 || acked[0] || !acked[1] {
+    if list.len(acked) != 2 || acked[0].acked || !acked[1].acked {
         fail("the ack rule acked a held Place's frames or stalled a free one")
+    }
+    Ok(())
+}
+
+// L90 ack rule, a lost read (§12.11.4): every GET of `reg` after batch 1's
+// create is dropped, so the cycle returns an error with batch 1 undecided.
+// Nothing is acked from it, and the next good read decides batch 1's slices
+// before any later batch is created. Red for a cycle that drops its slices
+// on a failed read: batch 1's frames would never be decided.
+@test
+fn bucket_stream_ack_after_lost_read(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_key(stream_dir(stream_law_sid()), "reg")
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // GET 1 is the start's; GETs 2–6 are the cycle's read and its resends.
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(reg), from: 2, count: 5, until: At(0), then: Drop))
+    let s = bucket_law_sim_holds(tasks, c, 61, None, list.new(), take holds, std.sim.world.plan(61))
+    let mut service = stream_law_lane(s.endpoint, s.time, tasks, 61, StoreId(hi: 50, lo: 1))?
+    stream_start_fresh(mut service, stream_law_due(service))?
+    let mut slices: List[BatchSlice] = list.new()
+    list.push(mut slices, stream_law_slice(70, stream_law_bytes(1, 3, 1)))
+    let lost = stream_cycle(mut service, slices, stream_law_due(service))
+    let later = stream_decide_pending(mut service, stream_law_due(service))
+    let _ = take service
+    let _ = bucket_law_report(take s)
+    if let Ok(_) = lost {
+        fail("a cycle decided a batch with every register read dropped")
+    }
+    let decided = later?
+    if list.len(decided) != 1 || decided[0].seq != 1 || !decided[0].acked {
+        fail("the next good read did not decide the undecided batch")
     }
     Ok(())
 }

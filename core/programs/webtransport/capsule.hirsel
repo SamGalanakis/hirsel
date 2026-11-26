@@ -235,7 +235,7 @@ pub fn close(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, code: u32,
     if stage == 1 {
         // Stream 0 was promised to the caller but never opened.
         quic.close(mut e, c, h3_wire.H3_NO_ERROR, list.new())
-        drop_conn(mut w, i, mut ignored)
+        drop_conn(mut w, i, false, mut ignored)
     }
 }
 

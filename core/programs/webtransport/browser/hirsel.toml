@@ -1,0 +1,12 @@
+[package]
+name = "webtransport_browser_echo"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+quic = { major = 1, path = "../../quic" }
+webtransport = { major = 1, path = ".." }
+
+[sources]
+"echo.hirsel" = "main"

@@ -28,7 +28,9 @@ pub type Request {
 
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
 
-pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, status: u16) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
+pub type Refusal = Status(u16) | Pin
+
+pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, reason: Refusal) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
 
 /// UnknownSession names no session this endpoint holds; State is a call the session's phase
 /// does not allow (an answer to a session already answered); Url is a connect URL that is not
@@ -144,14 +146,15 @@ pub opaque type Endpoint {
     live: u64,
     now: u64,
     backlog: List[Event],
-    dropped: u64
+    dropped: u64,
+    certificates: Option[BrowserRotation]
 }
 
 /// The largest SETTINGS payload read; a larger one is H3_EXCESSIVE_LOAD.
 const SETTINGS_MAX: u64 = 4096
 
 pub fn endpoint(take limits: Limits) -> Endpoint {
-    Endpoint(limits: take limits, conns: list.new(), live: 0, now: 0, backlog: list.new(), dropped: 0)
+    Endpoint(limits: take limits, conns: list.new(), live: 0, now: 0, backlog: list.new(), dropped: 0, certificates: None)
 }
 
 /// The QUIC transport both roles use: draft-17 §3.1 needs QUIC datagrams and RESET_STREAM_AT;
@@ -262,18 +265,22 @@ fn end_session(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, notify: bo
 /// the application holds is Closed.
 fn fail_conn(mut w: Endpoint, mut e: quic.Endpoint, i: u64, code: u64, mut out: List[Event]) {
     quic.close(mut e, w.conns[i].handle, code, list.new())
-    drop_conn(mut w, i, mut out)
+    drop_conn(mut w, i, false, mut out)
 }
 
 /// The connection is gone, and its streams with it.
-fn drop_conn(mut w: Endpoint, i: u64, mut out: List[Event]) {
+fn drop_conn(mut w: Endpoint, i: u64, pin_refused: bool, mut out: List[Event]) {
     for k in 0u64 .. list.len(w.conns[i].sessions) {
         if counts_live(w.conns[i], k) {
             w.live -= 1
         }
         if app_holds(w.conns[i], k) {
             let s = SessionHandle(conn: w.conns[i].handle, id: w.conns[i].sessions[k].id)
-            list.push(mut out, Closed(s: s, code: 0, reason: list.new()))
+            if pin_refused && w.conns[i].client {
+                list.push(mut out, Refused(s: s, reason: Pin))
+            } else {
+                list.push(mut out, Closed(s: s, code: 0, reason: list.new()))
+            }
         }
     }
     w.dropped += list.len(w.conns[i].parked_datagrams)
@@ -413,9 +420,13 @@ pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[qui
                     }
                 }
             },
-            Closed(c, _) => {
+            Closed(c, cause) => {
                 if let Some(i) = conn_index(w, c) {
-                    drop_conn(mut w, i, mut out)
+                    let pin_refused = match cause {
+                        Refused(Pin) => true,
+                        _ => false,
+                    }
+                    drop_conn(mut w, i, pin_refused, mut out)
                 }
             },
         }

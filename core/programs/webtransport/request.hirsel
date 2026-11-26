@@ -690,7 +690,7 @@ fn response(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, fields: List[
         }
         return false
     }
-    list.push(mut out, Refused(s: s, status: n))
+    list.push(mut out, Refused(s: s, reason: Status(n)))
     let _ = quic.stop(mut e, c, id, h3_wire.H3_NO_ERROR)
     end_session(mut w, mut e, i, k, false, 0, list.new(), mut out)
     false

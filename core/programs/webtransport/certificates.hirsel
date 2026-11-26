@@ -1,0 +1,92 @@
+// WT-7: a pair of short-lived P-256 identities for browser certificate hashes.
+const MAX_CERT_SECONDS: i64 = 14 * 86400
+
+const ROTATE_SECONDS: i64 = 13 * 86400
+
+pub type CertificateError = Lifetime | Key(KeyError) | Certificate(std.x509_build.BuildError) | State | Quic(quic.QuicError)
+
+pub opaque type BrowserIdentity {
+    identity: quic.handshake.Identity,
+    digest: Inline[u8, 32],
+    rotate_at: i64
+}
+
+type BrowserRotation {
+    current: Inline[u8, 32],
+    rotate_at: i64,
+    next: BrowserIdentity
+}
+
+/// Mint a browser identity. W3C WebTransport §6.4 permits P-256 and a validity
+/// period of at most two weeks for serverCertificateHashes.
+pub fn browser_identity(r: Random, serial: u64, name: String, not_before: std.time.Timestamp, not_after: std.time.Timestamp) -> Result[BrowserIdentity, CertificateError] {
+    let first_second = std.time.unix_secs(not_before)
+    let end = std.time.unix_secs(not_after)
+    if end <= first_second || end - first_second > MAX_CERT_SECONDS {
+        return Error(Lifetime)
+    }
+    let mut public: Bytes = list.with_capacity(65)
+    let key = match secret.p256_key(r, "sign(p256)", mut public) {
+        Ok(take key) => take key,
+        Error(err) => return Error(Key(err)),
+    }
+    let der = match std.x509_build.self_signed_p256(key, r, public, serial, name, not_before, not_after) {
+        Ok(take der) => take der,
+        Error(err) => return Error(Certificate(err)),
+    }
+    let digest = std.sha256.hash(der)
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, take der)
+    let identity: quic.handshake.Identity = Identity(chain: take chain, key: take key, alg: P256)
+    Ok(BrowserIdentity(identity: take identity, digest: digest, rotate_at: order.min(first_second + ROTATE_SECONDS, end)))
+}
+
+/// Start a QUIC server with the current identity and publish both certificate pins.
+pub fn browser_server(mut w: Endpoint, r: Random, take config: quic.EndpointConfig, take current: BrowserIdentity, take next: BrowserIdentity) -> Result[quic.Endpoint, CertificateError] {
+    if let Some(_) = w.certificates {
+        return Error(State)
+    }
+    if current.digest == next.digest {
+        return Error(State)
+    }
+    let BrowserIdentity(identity: take identity, digest: digest, rotate_at: due) = take current
+    let server = match quic.endpoint(r, take config, Some((take identity, transport(w.limits)))) {
+        Ok(take q) => take q,
+        Error(err) => return Error(Quic(err)),
+    }
+    w.certificates = Some(BrowserRotation(current: digest, rotate_at: due, next: take next))
+    Ok(take server)
+}
+
+/// Old connections keep their TLS state. Only new connections use the promoted identity.
+pub fn rotate(mut w: Endpoint, mut e: quic.Endpoint, take next: BrowserIdentity) -> Result[(), CertificateError] {
+    if let Some(mut pair) = w.certificates {
+        if next.digest == pair.next.digest || next.digest == pair.current {
+            return Error(State)
+        }
+        let BrowserIdentity(identity: take identity, digest: digest, rotate_at: due) = replace(mut pair.next, take next)
+        quic.set_identity(mut e, take identity)
+        pair.current = digest
+        pair.rotate_at = due
+        return Ok(())
+    }
+    Error(State)
+}
+
+/// The server rotates before this wall-clock instant, in Unix seconds.
+pub fn certificate_rotation_at(w: Endpoint) -> Option[i64] {
+    match w.certificates {
+        Some(pair) => Some(pair.rotate_at),
+        None => None,
+    }
+}
+
+/// Publish current first, then the certificate that the next rotation will serve.
+pub fn certificate_hashes(w: Endpoint) -> List[quic.handshake.Pin] {
+    let mut pins: List[quic.handshake.Pin] = list.with_capacity(2)
+    if let Some(pair) = w.certificates {
+        list.push(mut pins, Cert(pair.current))
+        list.push(mut pins, Cert(pair.next.digest))
+    }
+    take pins
+}

@@ -1,0 +1,93 @@
+const CERT_START: i64 = 1795651200
+
+const DAY: i64 = 86400
+
+fn certificate(serial: u64, days: i64) -> Result[webtransport.BrowserIdentity, webtransport.CertificateError] {
+    let start = option.unwrap(std.time.from_unix(CERT_START, 0))
+    let end = option.unwrap(std.time.from_unix(CERT_START + days * DAY, 0))
+    webtransport.browser_identity(provide.random(serial), serial, "server", start, end)
+}
+
+fn rotation_address(port: u16) -> Addr {
+    Addr(ip: V4(0x7f000001u32), port: port)
+}
+
+fn fresh_rotation_client(mut server: Side, take trust: List[quic.handshake.Pin], port: u16, accepted: bool) -> (Side, webtransport.SessionHandle, Option[webtransport.SessionHandle]) {
+    let seed: u64 = int.widen(port)
+    let mut client = client_side_seed(limits(1024, 4, false), true, seed)
+    let id = result.unwrap(webtransport.connect(mut client.wt, mut client.q, 0, SERVER_ADDR, "https://server/echo", take trust, list.new()))
+    list.clear(mut server.app)
+    settle_address(mut client, mut server, rotation_address(port), 1)
+    if accepted {
+        let at_server = requested_handles(server.app)
+        expect(list.len(at_server), 1, "the certificate permits a fresh CONNECT")
+        accept_session(mut server, at_server[0])
+        settle_address(mut client, mut server, rotation_address(port), 2)
+        if !ready_session(client.app, id) {
+            fail("the fresh session reaches Ready")
+        }
+        return (take client, id, Some(at_server[0]))
+    }
+    expect(requested(server.app), 0, "an old-only pin fails before CONNECT")
+    let mut pin_failed = false
+    for event in client.app {
+        if let Refused(s: denied, reason: Pin) = event {
+            pin_failed = pin_failed || denied == id
+        }
+    }
+    if !pin_failed {
+        fail("the old-only pin is refused as Pin")
+    }
+    (take client, id, None)
+}
+
+fn old_only(both: List[quic.handshake.Pin]) -> List[quic.handshake.Pin] {
+    let mut one: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut one, clone(both[0]))
+    take one
+}
+
+/// bug: rotation can strand clients with the published pair, accept a stale pin, change
+/// existing connections' state, or serve a certificate browsers reject for lifetime.
+/// oracle: W3C WebTransport §6.4 and QUIC-3's any-pin rule, on four distinct connections.
+@test
+fn certificate_rotation_accepts_either() -> Result[(), ()] {
+    if let Error(Lifetime) = certificate(101, 15) {
+        ()
+    } else {
+        fail("a 15-day certificate must be refused before serving")
+    }
+    let mut wt = webtransport.endpoint(limits(1024, 4, false))
+    let current = result.unwrap(certificate(102, 14))
+    let next = result.unwrap(certificate(103, 14))
+    let q = result.unwrap(webtransport.browser_server(mut wt, provide.random(17), endpoint_config(), take current, take next))
+    if webtransport.certificate_rotation_at(wt) != Some(CERT_START + 13 * DAY) {
+        fail("the rotation deadline is at 13 days")
+    }
+    let before = webtransport.certificate_hashes(wt)
+    expect(list.len(before), 2, "both certificate hashes are published")
+    let mut server = Side(q: take q, wt: take wt, driven: true, raw: list.new(), app: list.new())
+    let (first_client, a, old_server) = fresh_rotation_client(mut server, clone(before), 24211, true)
+    let mut first = take first_client
+    let _ = fresh_rotation_client(mut server, old_only(before), 24212, true)
+    result.unwrap(webtransport.rotate(mut server.wt, mut server.q, result.unwrap(certificate(104, 14))))
+    let after = webtransport.certificate_hashes(server.wt)
+    expect(list.len(after), 2, "both pins are still published after rotation")
+    if let (Cert(want), Cert(got)) = (before[1], after[0]) {
+        if got != want {
+            fail("the advertised next pin is promoted")
+        }
+    } else {
+        fail("browser hashes are certificate pins")
+    }
+    let _ = fresh_rotation_client(mut server, clone(before), 24213, true)
+    let _ = fresh_rotation_client(mut server, old_only(before), 24214, false)
+    let id = result.unwrap(webtransport.open(mut first.wt, mut first.q, a, false))
+    expect(result.unwrap(webtransport.write(mut first.wt, mut first.q, a, id, b"old connection", true)), 14, "the original connection still writes")
+    settle_address(mut first, mut server, rotation_address(24211), 3)
+    let (body, fin) = read_all(mut server, option.unwrap(old_server), id)
+    if body != b"old connection" || !fin {
+        fail("the original connection survives the rotation")
+    }
+    Ok(())
+}

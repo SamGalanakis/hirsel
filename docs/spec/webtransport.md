@@ -86,7 +86,8 @@ pub type SessionHandle = SessionHandle(conn: quic.ConnectionHandle, id: quic.Str
 pub type Limits { authorities: List[String], origins: List[String], require_origin: bool, sessions: u16, sessions_per_connection: u16, pending_connects: u16, streams_bidi: u64, streams_uni: u64, data: u64, buffered: u16, buffered_datagrams: u16, header_bytes: u32 }
 pub type Request { authority: String, path: String, origin: Option[String], protocols: List[String], headers: List[(String, String)] }
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
-pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, status: u16) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
+pub type Refusal = Status(u16) | Pin
+pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, reason: Refusal) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
 
 pub type WtError = UnknownSession | State | Url | Quic(quic.QuicError)
 
@@ -105,7 +106,11 @@ pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: qui
 pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), WtError]
 pub fn drain(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle)
 pub fn close(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, code: u32, reason: Bytes)
-pub fn rotate(mut w: Endpoint, mut e: quic.Endpoint, take next: quic.Identity)
+pub opaque type BrowserIdentity
+pub fn browser_identity(r: Random, serial: u64, name: String, not_before: std.time.Timestamp, not_after: std.time.Timestamp) -> Result[BrowserIdentity, CertificateError]
+pub fn browser_server(mut w: Endpoint, r: Random, take config: quic.EndpointConfig, take current: BrowserIdentity, take next: BrowserIdentity) -> Result[quic.Endpoint, CertificateError]
+pub fn rotate(mut w: Endpoint, mut e: quic.Endpoint, take next: BrowserIdentity) -> Result[(), CertificateError]
+pub fn certificate_rotation_at(w: Endpoint) -> Option[i64]
 pub fn certificate_hashes(w: Endpoint) -> List[quic.Pin]
 pub fn dropped_datagrams(w: Endpoint) -> u64
 ```
@@ -121,7 +126,8 @@ stream id within a connection.
 a QUIC connection with the pins (QUIC-3),
 and returns the session's handle at once, pending. `Ready` follows once the QUIC handshake
 has completed, both SETTINGS have arrived, and the server has answered `200`; `Refused`
-follows any other status, and `Closed` follows a QUIC or HTTP/3 failure first.
+reports a non-success status as `Status(n)` or a TLS pin mismatch as `Pin`. Other
+QUIC or HTTP/3 failures first emit `Closed`.
 
 The package sits between `quic` and the application: it consumes the QUIC events of
 HTTP/3 streams, reads and writes the HTTP/3 control and QPACK streams itself, and hands the
@@ -290,14 +296,17 @@ P-256 and valid for at most 14 days (W3C WebTransport,
 [§ 6.4 serverCertificateHashes](https://w3c.github.io/webtransport/#dom-webtransportoptions-servercertificatehashes)).
 That hash is exactly `quic.Pin.Cert` (QUIC-3).
 
-The server holds two identities, each minted with `std.x509_build.self_signed_p256` and a key
-from `secret.p256_key`: the *current* one, which `quic` serves, and the *next* one.
+`browser_identity` rejects validity intervals outside (0, 14 days] before minting with
+`std.x509_build.self_signed_p256` and a key from `secret.p256_key`.
+`browser_server` starts QUIC with the *current* identity and keeps the *next* one.
 `certificate_hashes(w)` is `[Cert(current), Cert(next)]`, and whatever page or signaling
 serves the client publishes it, so a client fetched at any time holds a list that contains
 the certificate served now and the one served after the next rotation. `rotate(w, e, next)`
 makes the old next identity current through `quic.set_identity` (live connections keep
 theirs) and takes `next` as the new next. The server rotates before the current certificate
-is 13 days old. A client pinned only to a certificate that has rotated out is refused with
+is 13 days old, or before expiration for a shorter-lived identity.
+`certificate_rotation_at` returns that Unix second for the server's scheduler.
+A new connection pinned only to a certificate that has rotated out is refused with
 `Refused(Pin)`.
 
 ## Laws
@@ -331,7 +340,9 @@ Red first in `core/programs/webtransport/laws.hirsel` unless named.
 - **T5 `browser_echo`.** Headless Chromium and Firefox, through `serverCertificateHashes`,
   open a session, echo a bidi stream of 10 MiB and 1,000 datagrams, then close with code 7 and
   reason `"bye"`, which the server reports as `Closed(_, 7, "bye")`. Nightly on Boat.
-  *Oracle:* the browser's `WebTransportCloseInfo` and the hashes.
+  *Oracle:* the browser's `WebTransportCloseInfo` and the hashes. Run T5 and T10 with
+  `python3 core/programs/webtransport/browser/run.py --compiler HIRSEL --runtime PIC_ARCHIVE --linker LD_LLD --work DIR`.
+  Boat mints the echo identities in the VM.
 - **T6 `buffered_streams_bounded`.** Under `sim.udp`, a client whose CONNECT is delayed
   opens `buffered` + 5 streams: the first `buffered` are delivered once the session is
   accepted, the rest are reset with `WT_BUFFERED_STREAM_REJECTED`, and a refused session's

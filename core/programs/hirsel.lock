@@ -232,6 +232,11 @@ source = "member:webtransport"
 edges = ["quic@1", "std@1"]
 
 [[package]]
+id = "webtransport_browser_echo@1"
+source = "member:webtransport/browser"
+edges = ["quic@1", "std@1", "webtransport@1"]
+
+[[package]]
 id = "wire@1"
 source = "member:wire"
 edges = ["platform@1", "runner@1", "std@1", "store@1"]

@@ -252,6 +252,7 @@ class Preparation(unittest.TestCase):
             compiler.write_text(f"#!{sys.executable}\n" + r'''
 import hashlib, json, pathlib, sys
 args = sys.argv
+assert args[args.index("--test-timeout") + 1] == "300"
 definitions = [args[i + 1] for i, arg in enumerate(args) if arg == "--exact"]
 if any("/exec/" in name for name in definitions):
     print(json.dumps({"accepted": False, "diagnostics": [{"primary": {"module": "contract-0.hirsel"}}]}))

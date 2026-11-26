@@ -17,6 +17,8 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
+# Seed zero has the same execution bound as the sweep in tools/sim-campaign.
+SEED_TIMEOUT_SECONDS = 300
 CANARY = 'std@1/tests/campaign_canary/seed_residue'
 GENERATED_KINDS = ('postgres', 'contracts', 'runner-adapters', 'canary')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
@@ -318,6 +320,7 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
     reports.mkdir(parents=True, exist_ok=True)
     prefix = '' if not attempt else f'retry-{attempt}-'
     base = [str(compiler), 'test', '--release', '--backend', 'llvm', '-j', str(jobs), '--seed', '0',
+            '--test-timeout', str(SEED_TIMEOUT_SECONDS),
             '--store', str(scratch / 'objects'), '--json']
     normal = ['--runtime', str(runtime)] if runtime else []
     libraries = ['--libraries', str(ROOT / 'core')] if runtime else []

@@ -1,6 +1,37 @@
 use super::*;
 use crate::tasks::channel_clock;
 
+/// Remove the timer a completed I/O operation registered under its token.
+/// # Safety
+/// The provider is live and belongs to a Clock capability.
+pub(crate) unsafe fn retire_deadline(provider: &Provider, token: u64) {
+    if owns(provider) {
+        // SAFETY: the provided Clock pins its cell.
+        let Cell::Clock(clock) = (unsafe { cell(provider.state) }) else {
+            unreachable!("a Clock designates a clock cell");
+        };
+        lock(clock).timers.retain(|&(_, _, t)| t != token);
+    }
+}
+
+/// The clock and deadline from the served call's adapter (NOTES 35).
+/// # Safety
+/// `request` is a pinned call on a port of this vocabulary.
+pub(super) unsafe fn call_until(vocab: Vocab, request: &Request) -> Option<(Provider, u64, u64)> {
+    // SAFETY: the adapters pin the request type selected by the operation.
+    unsafe {
+        match (vocab, request.operation) {
+            (Vocab::Exec, EXEC_WAIT) => (*request.path.cast::<Call<ProcCall>>()).data.until,
+            (Vocab::Net, op) if unix_operation(op) => (*request.path.cast::<UnixRequest>()).until,
+            (Vocab::Net, op) if udp_operation(op) => crate::udp_net::served::until(request),
+            (Vocab::Net, _) | (Vocab::Exec, RECV_BOUNDED | SEND_PAIR) => {
+                (*request.path.cast::<crate::net::NetworkRequest>()).until
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ClockCell {
     pub(super) mono: u64,

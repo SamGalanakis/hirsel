@@ -596,6 +596,28 @@ impl Due {
         }
     }
 }
+
+fn deadline_source(provider: Provider, clock: u64) -> Option<(Provider, u64)> {
+    // Deadline scheduling is outside the program's taped clock reads.
+    #[cfg(feature = "record")]
+    if crate::tape::owns(&provider) {
+        return crate::tape::source(&provider, clock);
+    }
+    Some((provider, clock))
+}
+
+/// Retire a completed operation's timer on a provided clock.
+/// # Safety
+/// The clock provider and handle in `until` are live.
+pub(crate) unsafe fn retire_deadline(until: Option<(Provider, u64, u64)>, token: u64) {
+    if let Some((provider, clock, _)) = until
+        && let Some((provider, _)) = deadline_source(provider, clock)
+    {
+        // SAFETY: the caller pins the clock through retirement.
+        unsafe { crate::provide::retire_deadline(&provider, token) };
+    }
+}
+
 /// The deadline `until` for the operation `token`. On the OS clock it is the
 /// program deadline plus the provider's epoch, as `sleep_wait` converts it,
 /// against a fresh host read. Any other clock answers its own SLEEP_UNTIL wait
@@ -610,13 +632,7 @@ pub(crate) unsafe fn deadline(
         let Some((p, clock, at)) = until else {
             return Due::Never;
         };
-        // This is host scheduling, outside the program's clock reads.
-        #[cfg(feature = "record")]
-        let Some((p, clock)) = (if crate::tape::owns(&p) {
-            crate::tape::source(&p, clock)
-        } else {
-            Some((p, clock))
-        }) else {
+        let Some((p, clock)) = deadline_source(p, clock) else {
             return Due::Never;
         };
         let host = |at: u64| {

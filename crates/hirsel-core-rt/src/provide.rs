@@ -28,10 +28,10 @@ use crate::unix_net::{
     UnixRequest,
 };
 use crate::{Context, causes, provider::*};
-pub(crate) use clock::ChannelClock;
-use clock::ClockCell;
 #[cfg(test)]
 pub(crate) use clock::hirsel_core_clock_advance_to;
+pub(crate) use clock::{ChannelClock, retire_deadline};
+use clock::{ClockCell, call_until};
 use hirsel_core_ids::dir_port::DirOp;
 use hirsel_core_layout::charge::PROVIDE_CELL;
 use hirsel_core_net::{
@@ -716,37 +716,16 @@ const TIMED_OUT: Outcome = Outcome {
     kind: 0,
 };
 
-/// A served Net call's deadline (NOTES 35): its adapter's `until`, asked of
-/// the until's own Clock as every Net provider asks it (NOTES 12), so a
-/// virtual deadline is reached only by `clock.advance_to`. Other ports'
-/// calls have none.
-/// # Safety
-/// `request` is a caller's pinned request on this port.
-unsafe fn due(port: &Mutex<Port>, request: &Request, token: u64) -> crate::os_net::Due {
-    let vocab = lock(port).vocab;
-    // SAFETY: the adapters pin the request type selected by the operation.
-    unsafe {
-        let until = match (vocab, request.operation) {
-            (Vocab::Exec, EXEC_WAIT) => (*request.path.cast::<Call<ProcCall>>()).data.until,
-            (Vocab::Net, op) if unix_operation(op) => (*request.path.cast::<UnixRequest>()).until,
-            (Vocab::Net, op) if udp_operation(op) => crate::udp_net::served::until(request),
-            (Vocab::Net, _) | (Vocab::Exec, RECV_BOUNDED | SEND_PAIR) => {
-                (*request.path.cast::<crate::net::NetworkRequest>()).until
-            }
-            _ => None,
-        };
-        crate::os_net::deadline(until, token)
-    }
-}
-
 /// Wait for a queued call's answer until its deadline, or time it out.
 /// # Safety
-/// As `due`.
+/// `request` is the caller's pinned request on this port.
 unsafe fn await_call(port: &Mutex<Port>, request: &Request, token: u64) -> Step {
-    // SAFETY: forwarded.
-    match unsafe { due(port, request, token) } {
+    // SAFETY: this call pins its adapter and clock.
+    let until = unsafe { call_until(lock(port).vocab, request) };
+    match unsafe { crate::os_net::deadline(until, token) } {
         crate::os_net::Due::Passed => {
-            collect(port, token, Some(timed_out(request.operation))).map_or_else(pending, done)
+            unsafe { collect(port, request, token, Some(timed_out(request.operation))) }
+                .map_or_else(pending, done)
         }
         due => Step {
             kind: STEP_PENDING,
@@ -848,7 +827,14 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
 /// A caller's resume or abort: collect the answer, or with `end` settle the
 /// unanswered call with it: cancelled (status 1, which `deliver` records) or
 /// timed out. A reply to a call settled so is Withdrawn.
-fn collect(port: &Mutex<Port>, token: u64, end: Option<Outcome>) -> Option<Outcome> {
+/// # Safety
+/// `request` is the caller's pinned request on this port.
+unsafe fn collect(
+    port: &Mutex<Port>,
+    request: &Request,
+    token: u64,
+    end: Option<Outcome>,
+) -> Option<Outcome> {
     let mut port = lock(port);
     let id = port.by_token(token)?;
     let call = port.calls.get_mut(&id).expect("live call");
@@ -863,6 +849,10 @@ fn collect(port: &Mutex<Port>, token: u64, end: Option<Outcome>) -> Option<Outco
     };
     port.calls.get_mut(&id).expect("live call").finished = true;
     port.prune(id);
+    let vocab = port.vocab;
+    drop(port);
+    // SAFETY: the call still pins its adapter and clock through delivery.
+    unsafe { crate::os_net::retire_deadline(call_until(vocab, request), token) };
     Some(outcome)
 }
 
@@ -916,7 +906,9 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
         }
         (Cell::Port(port), operation) if operation != CLOSE_CALL && operation != CLOSE_SERVED => {
             // SAFETY: a caller's operation pins its request through delivery.
-            let passed = unsafe { due(port, request, token) } == crate::os_net::Due::Passed;
+            let until = unsafe { call_until(lock(port).vocab, request) };
+            let passed =
+                unsafe { crate::os_net::deadline(until, token) } == crate::os_net::Due::Passed;
             let mut p = lock(port);
             let words = match p.vocab {
                 Vocab::Stream => {
@@ -984,6 +976,10 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 };
                 outcome.error = IoError { tag, code: 0 };
             }
+            drop(p);
+            // The deadline check can arm the clock even if no call was queued.
+            // SAFETY: the request still pins the clock.
+            unsafe { crate::os_net::retire_deadline(until, token) };
         }
         (Cell::Port(port), CLOSE_CALL) => {
             let mut p = lock(port);
@@ -1021,7 +1017,8 @@ unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -
     let (cell, request) = unsafe { (cell(state), &*request) };
     match (cell, request.operation) {
         (Cell::Port(port), PORT_NEXT) => next_step(state, port, token),
-        (Cell::Port(port), _) => match collect(port, token, None) {
+        // SAFETY: the caller's request is pinned through delivery.
+        (Cell::Port(port), _) => match unsafe { collect(port, request, token, None) } {
             Some(outcome) => done(outcome),
             // SAFETY: the caller's request stays pinned while it waits.
             None => unsafe { await_call(port, request, token) },
@@ -1064,7 +1061,8 @@ unsafe extern "C" fn abort(
                     _ => cancelled,
                 }
             };
-            collect(port, token, Some(end)).unwrap_or(end)
+            // SAFETY: the caller's request is pinned through delivery.
+            unsafe { collect(port, request, token, Some(end)) }.unwrap_or(end)
         }
         (cell, _) => {
             quiet::forget_wait(cell, token);

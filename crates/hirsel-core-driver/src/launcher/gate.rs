@@ -10,6 +10,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// The grants a gate test may hold; `Dir` is allowed separately, as a relative path.
 const ALLOWED: [&str; 5] = ["Clock", "Random", "Stdout", "Stderr", "Tasks"];
@@ -43,10 +44,12 @@ pub(super) fn scratch(state: &Path, tree: &Tree) -> io::Result<tempfile::TempDir
 }
 
 /// Wait for a child started in its own process group and keep at most `cap` bytes of each
-/// pipe, marking a cut. `None` is a cancelled run.
+/// pipe, marking a cut. `None` is a cancelled run; a run still going at `deadline` is
+/// killed and is a `TimedOut` error.
 pub(super) fn collect(
     mut child: Child,
     cancel: &AtomicBool,
+    deadline: Option<Instant>,
     cap: usize,
 ) -> Option<io::Result<(ExitStatus, Vec<u8>, Vec<u8>)>> {
     let read = |pipe: Option<Box<dyn Read + Send>>| {
@@ -81,7 +84,7 @@ pub(super) fn collect(
             .take()
             .map(|p| Box::new(p) as Box<dyn Read + Send>),
     );
-    let status = wait_for_compile(&mut child, cancel);
+    let status = wait_for_compile(&mut child, cancel, deadline);
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
     if cancel.load(Ordering::Relaxed) {
@@ -186,18 +189,19 @@ pub(super) fn authority(tree: &Tree) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The gate's steps 1, 2 and 4 on `tree`: the authority check, `hirsel check PACKAGE
-/// --frozen` over the tests' sources, then `hirsel test PACKAGE --frozen --json` in a fresh scratch under the launcher's compiler and package stores and
-/// the pass cache `STATE/test-results`, read as a verdict. `None` is a cancelled run.
+/// The gate's steps 2 and 4 on `tree`, after its authority check: `hirsel check PACKAGE
+/// --frozen` over the tests' sources, then `hirsel test PACKAGE --frozen --json`, both in
+/// `source`, the publish scratch's tree, under the launcher's compiler and package stores
+/// and the pass cache `STATE/test-results`, read as a verdict. A run still going at
+/// `deadline` is red. `None` is a cancelled run.
 pub(crate) fn gate(
     compiler: &Compiler,
     state: &Path,
     tree: &Tree,
+    source: &Path,
     cancel: &AtomicBool,
+    deadline: Instant,
 ) -> Option<Result<Verdict, Failure>> {
-    if let Err(denied) = authority(tree) {
-        return Some(Err(denied));
-    }
     let unrun = |e: &dyn std::fmt::Display| Some(Err(Failure::Invalid(format!("law gate: {e}"))));
     let cache = state.join("test-results");
     if let Err(e) = fs::DirBuilder::new().mode(0o700).create(&cache)
@@ -205,10 +209,6 @@ pub(crate) fn gate(
     {
         return unrun(&e);
     }
-    let dir = match scratch(state, tree) {
-        Ok(dir) => dir,
-        Err(e) => return unrun(&e),
-    };
     let path = |name: &str| state.join(name).to_string_lossy().into_owned();
     let stores = [
         tree.package.clone(),
@@ -232,20 +232,26 @@ pub(crate) fn gate(
             return None;
         }
         command
-            .current_dir(dir.path().join("tree"))
+            .current_dir(source)
             .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         match command.spawn() {
-            Ok(child) => collect(child, cancel, REPORT_BYTES),
+            Ok(child) => collect(child, cancel, Some(deadline), REPORT_BYTES),
             Err(e) => Some(Err(e)),
         }
     };
     // `hirsel test` lists the tests of the modules that parse, and publish checks only the
     // program: a test source that does not check would drop its tests from the run unseen.
+    let late = || {
+        Some(Ok(Verdict::Red(vec![
+            "the tests had not all ended by the admission deadline".into(),
+        ])))
+    };
     let (status, _, stderr) = match run("check", &[])? {
         Ok(run) => run,
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => return late(),
         Err(e) => return unrun(&e),
     };
     if !status.success() {
@@ -258,6 +264,7 @@ pub(crate) fn gate(
     let more = ["--json".into(), "--test-cache".into(), path("test-results")];
     let (_, stdout, stderr) = match run("test", &more)? {
         Ok(run) => run,
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => return late(),
         Err(e) => return unrun(&e),
     };
     Some(Ok(verdict(&stdout, &String::from_utf8_lossy(&stderr))))

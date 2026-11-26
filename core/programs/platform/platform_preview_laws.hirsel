@@ -246,7 +246,7 @@ fn change_tag(c: operator.EntryChange) -> u64 {
     }
 }
 
-fn release_source(grant: String, required_id: u8) -> launcher.Input {
+fn release_source(grant: String, required_id: u8) -> operator.Input {
     let mut key = bytes_of(32u64, required_id)
     std.codec.put_u64(0u64, mut key)
     std.codec.put_u64(0u64, mut key)
@@ -260,7 +260,7 @@ fn release_source(grant: String, required_id: u8) -> launcher.Input {
     let codec: std.codec.Codec[launcher.Tree] = std.codec.of()
     let mut out: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, tree, mut out))
-    Source(take out)
+    SourceInput(take out)
 }
 
 fn source_admitted(mut r: Rig, take diff: launcher.Grants) waits {

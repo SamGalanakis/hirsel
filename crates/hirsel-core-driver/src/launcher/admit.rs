@@ -6,7 +6,7 @@
 //! published by `hirsel publish` in a child process under the host's caches, and then
 //! admitted as that publication.
 use super::objects::Records;
-use super::session::{Approvals, Attempt, Failure, Grants, Reader, Summary, Wire, Writer};
+use super::session::{Approvals, Attempt, Failure, Grants, Green, Reader, Summary, Wire, Writer};
 use super::{Conn, Readiness};
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
@@ -103,6 +103,8 @@ pub(crate) struct Admission {
     state: PathBuf,
     limits: AdmissionLimits,
     compiler: Compiler,
+    /// The compiler identity a green gate names; `None` reads this executable's.
+    toolchain: Option<ContentHash>,
     /// Held while a worker writes an assembly record and tells the loop, and while the
     /// loop collects: a collection never removes a record whose `Assembled` it has not seen.
     pub(super) publish: Mutex<()>,
@@ -131,6 +133,7 @@ impl Admission {
             state: state.to_owned(),
             limits,
             compiler: own_compiler(),
+            toolchain: None,
             publish: Mutex::new(()),
         })
     }
@@ -139,6 +142,13 @@ impl Admission {
     #[cfg(test)]
     pub(crate) fn compile_with(mut self, compiler: Compiler) -> Self {
         self.compiler = compiler;
+        self
+    }
+
+    /// This admission, naming `toolchain` as the compiler identity of a green gate.
+    #[cfg(test)]
+    pub(crate) fn toolchain(mut self, toolchain: ContentHash) -> Self {
+        self.toolchain = Some(toolchain);
         self
     }
 
@@ -186,8 +196,20 @@ pub(super) enum Source {
     Attested(ContentHash),
     /// The launcher's own code store sends it.
     Publication(ContentHash),
-    /// The worker publishes this source into the code store, which then sends it.
-    Tree(Tree),
+    /// The worker publishes this source into the code store, which then sends it. With
+    /// the tree's digest, the law gate runs on it first.
+    Tree(Tree, Option<[u8; 32]>),
+}
+
+/// How long an admission may run the law gate, from its `Admit` (launch.md "The verdict").
+const ADMISSION_DEADLINE: Duration = Duration::from_secs(600);
+
+/// The source a submitted tree's codec `bytes` admit; a gated one carries their SHA-256,
+/// which a green gate names.
+pub(super) fn source(bytes: &[u8], gated: bool) -> Result<Source, Failure> {
+    use sha2::Digest as _;
+    let digest = gated.then(|| sha2::Sha256::digest(bytes).into());
+    Ok(Source::Tree(tree(bytes)?, digest))
 }
 
 /// Most files in one submitted tree.
@@ -284,22 +306,28 @@ impl Worker {
         let (ours, theirs) = UnixStream::pair()?;
         let (go, gone) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + ADMISSION_DEADLINE;
         let (conn, attested, local) = match source {
             Source::Attested(root) => (Some(Conn::new(poll, ours)?), Some(root), None),
             Source::Publication(root) => (None, None, Some((Ok(root), ours))),
-            Source::Tree(tree) => (None, None, Some((Err(tree), ours))),
+            Source::Tree(tree, gate) => (None, None, Some((Err((tree, gate)), ours))),
         };
         let cancelled = cancel.clone();
         std::thread::Builder::new()
             .name("hirsel-admit".into())
             .spawn(move || {
+                let mut green = None;
                 let publication = match local {
                     None => None,
                     Some((Ok(root), ours)) => Some((root, ours)),
-                    Some((Err(tree), ours)) => {
-                        match publish(&admission, &tree, approvals.old.as_deref(), &cancelled) {
+                    Some((Err((tree, gate)), ours)) => {
+                        let old = approvals.old.as_deref();
+                        match publish(&admission, &tree, gate, old, &cancelled, deadline) {
                             None => return,
-                            Some(Ok(root)) => Some((root, ours)),
+                            Some(Ok((root, gated))) => {
+                                green = gated;
+                                Some((root, ours))
+                            }
                             Some(Err(why)) => return tell(Note::Failed(id, attempt, why)),
                         }
                     }
@@ -311,6 +339,7 @@ impl Worker {
                     theirs,
                     attested,
                     publication,
+                    green,
                     &approvals,
                     &gone,
                     &tell,
@@ -459,13 +488,6 @@ impl Wire for Tree {
 }
 
 #[path = "gate.rs"]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Begin's gate field is planned; the gate law drives the step"
-    )
-)]
 pub(crate) mod gate;
 
 /// The most diagnostic bytes a refused compile reports; the rest is cut and marked.
@@ -473,9 +495,19 @@ const DIAGNOSTIC_BYTES: usize = 64 << 10;
 
 /// Leave the group leader waitable until the group is killed, so its PID cannot be
 /// reused between observing its exit and signalling the remaining processes.
-pub(super) fn wait_for_compile(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+/// A run still going at `deadline` is killed and is a `TimedOut` error.
+pub(super) fn wait_for_compile(
+    child: &mut Child,
+    cancel: &AtomicBool,
+    deadline: Option<Instant>,
+) -> io::Result<ExitStatus> {
     let pid = child.id() as libc::pid_t;
+    let mut late = false;
     while !cancel.load(Ordering::Relaxed) {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            late = true;
+            break;
+        }
         // SAFETY: waitid writes into a siginfo for our own child without reaping it.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = unsafe {
@@ -500,7 +532,14 @@ pub(super) fn wait_for_compile(child: &mut Child, cancel: &AtomicBool) -> io::Re
     }
     // SAFETY: spawn put the unreaped child at the head of its own process group.
     unsafe { libc::kill(-pid, libc::SIGKILL) };
-    child.wait()
+    let status = child.wait()?;
+    if late {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the run passed its deadline",
+        ));
+    }
+    Ok(status)
 }
 
 fn source_unit(tree: &Tree) -> String {
@@ -522,16 +561,26 @@ fn source_unit(tree: &Tree) -> String {
 
 /// Publish `tree` into the launcher's code store with `hirsel publish`, run on a fresh copy
 /// of the tree under the host's compiler and package stores, and return its recipe root.
-/// The recipe stays private until the compiler exits successfully. The child inherits the
-/// toolchain's memory limit (`HIRSEL_MEMORY_LIMIT`). `None` is a cancelled compile.
+/// The recipe stays private until the compiler exits successfully and, when `gate` holds
+/// the tree's digest, the law gate is green on the same scratch; the green verdict is
+/// returned beside the root. The child inherits the toolchain's memory limit
+/// (`HIRSEL_MEMORY_LIMIT`). `None` is a cancelled compile.
 fn publish(
     ad: &Admission,
     tree: &Tree,
+    gate: Option<[u8; 32]>,
     old: Option<&[u8]>,
     cancel: &AtomicBool,
-) -> Option<Result<ContentHash, Failure>> {
+    deadline: Instant,
+) -> Option<Result<(ContentHash, Option<Green>), Failure>> {
     let unrun =
         |e: &dyn std::fmt::Display| Some(Err(Failure::Invalid(format!("publish source: {e}"))));
+    // The gate's authority check costs no compile, so it comes first.
+    if gate.is_some()
+        && let Err(denied) = gate::authority(tree)
+    {
+        return Some(Err(denied));
+    }
     let dir = match gate::scratch(&ad.state, tree) {
         Ok(dir) => dir,
         Err(e) => return unrun(&e),
@@ -588,31 +637,79 @@ fn publish(
         Ok(child) => child,
         Err(e) => return unrun(&e),
     };
-    let (status, stdout, stderr) = match gate::collect(child, cancel, DIAGNOSTIC_BYTES)? {
+    let (status, stdout, stderr) = match gate::collect(child, cancel, None, DIAGNOSTIC_BYTES)? {
         Ok(run) => run,
         Err(e) => return unrun(&e),
     };
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
-    Some(match status.code() {
-        Some(0) => stdout
-            .split_whitespace()
-            .last()
-            .and_then(|root| crate::native::recipe_build::parse_root(root).ok())
-            .ok_or_else(|| Failure::Invalid(format!("publish source printed no recipe: {stdout}")))
-            .and_then(|root| {
-                store_source_recipe(ad, stage, root)
-                    .map_err(|e| Failure::Invalid(format!("publish source: {e}")))
+    match status.code() {
+        Some(0) => {}
+        Some(hirsel_guard::EXIT_STATUS) => {
+            return Some(Err(Failure::Exhausted(format!(
+                "publish source {}: {stderr}",
+                source_unit(tree)
+            ))));
+        }
+        Some(_) => return Some(Err(Failure::Uncompiled(stderr.into_owned()))),
+        None => {
+            return Some(Err(Failure::Uncompiled(format!(
+                "the compiler ended by {status}\n{stderr}"
+            ))));
+        }
+    }
+    let Some(root) = stdout
+        .split_whitespace()
+        .last()
+        .and_then(|root| crate::native::recipe_build::parse_root(root).ok())
+    else {
+        return Some(Err(Failure::Invalid(format!(
+            "publish source printed no recipe: {stdout}"
+        ))));
+    };
+    let green = match gate {
+        None => None,
+        Some(digest) => {
+            match gate::gate(&ad.compiler, &ad.state, tree, &source, cancel, deadline)? {
+                Err(why) => return Some(Err(why)),
+                Ok(gate::Verdict::Red(rows)) => return Some(Err(Failure::Red(rows))),
+                Ok(gate::Verdict::Lost) => {
+                    return Some(Err(Failure::GateLost(
+                        "the compiler's session was lost while the law gate ran".into(),
+                    )));
+                }
+                Ok(gate::Verdict::Green) => {
+                    let toolchain = match ad
+                        .toolchain
+                        .map_or_else(crate::reuse::compiler_identity, Ok)
+                    {
+                        Ok(identity) => identity,
+                        Err(e) => {
+                            return Some(Err(Failure::Invalid(format!(
+                                "law gate: the toolchain identity: {e}"
+                            ))));
+                        }
+                    };
+                    Some(Green {
+                        tree: digest.to_vec(),
+                        root: Vec::new(),
+                        toolchain: toolchain.0.to_vec(),
+                    })
+                }
+            }
+        }
+    };
+    Some(
+        store_source_recipe(ad, stage, root)
+            .map_err(|e| Failure::Invalid(format!("publish source: {e}")))
+            .map(|root| {
+                let green = green.map(|green| Green {
+                    root: root.0.to_vec(),
+                    ..green
+                });
+                (root, green)
             }),
-        Some(hirsel_guard::EXIT_STATUS) => Err(Failure::Exhausted(format!(
-            "publish source {}: {stderr}",
-            source_unit(tree)
-        ))),
-        Some(_) => Err(Failure::Uncompiled(stderr.into_owned())),
-        None => Err(Failure::Uncompiled(format!(
-            "the compiler ended by {status}\n{stderr}"
-        ))),
-    })
+    )
 }
 
 fn store_source_recipe(
@@ -648,6 +745,7 @@ fn work(
     peer: UnixStream,
     attested: Option<ContentHash>,
     publication: Option<(ContentHash, UnixStream)>,
+    green: Option<Green>,
     approvals: &Approvals,
     go: &mpsc::Receiver<()>,
     tell: &impl Fn(Note),
@@ -704,7 +802,10 @@ fn work(
     let recipe = admitted.release().recipe();
     let root = admitted.release().root();
     let summary = match summary(ad, recipe, approvals.old.as_deref()) {
-        Ok(summary) => summary,
+        Ok(summary) => Summary {
+            gate: green,
+            ..summary
+        },
         Err(why) => return fail(why),
     };
     let mut display = deploy_foreign_lines(recipe, root);

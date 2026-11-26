@@ -10,7 +10,7 @@ fn untrusted_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(errored(r, foreign, DeniedClass) && admits(r) == 0u64, "untrusted: a source granting Foreign was sent to Admit")
     let exec = begin_with(mut r, request_id(42u64), source_of("Exec=tools.toml build"))
     expect(errored(r, exec, DeniedClass) && admits(r) == 0u64, "untrusted: a source granting Exec was sent to Admit")
-    let junk = begin_with(mut r, request_id(43u64), Source(list.new()))
+    let junk = begin_with(mut r, request_id(43u64), SourceInput(list.new()))
     expect(errored(r, junk, InvalidClass) && admits(r) == 0u64, "untrusted: bytes that are no tree were not Invalid")
     let _ = begin_with(mut r, request_id(44u64), source_of("Stderr"))
     expect(admits(r) == 1u64, "untrusted: a plain source was not sent to Admit")
@@ -32,15 +32,43 @@ fn untrusted_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     Ok(())
 }
 
+// `gated_source_admission` (launch.md "The law gate"): Begin's `gate` asks the launcher to run
+// the tree's tests before it admits. Only a source input can be gated: a gated attested
+// input is Invalid before any Admit. A gated source goes to Admit with the gate set, and a
+// Red verdict fails the request with class Red and the failing tests and assembles nothing.
+@test
+fn gated_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = admission_case(c, rnd, None, Trusted)
+    let attested = begin_held(mut r, request_id(46u64), AttestedInput(image_two()), runner.fate.none(), true)
+    expect(errored(r, attested, InvalidClass) && admits(r) == 0u64, "gate: a gated attested input was not Invalid")
+    let _ = begin_held(mut r, request_id(47u64), source_of("Stderr"), runner.fate.none(), true)
+    let mut gated = false
+    for q in r.asked {
+        if let Admit(_, _, Source(_, true), _) = q {
+            gated = true
+        }
+    }
+    expect(admits(r) == 1u64 && gated, "gate: a gated source was not sent to Admit with the gate set")
+    let mut rows: List[String] = list.new()
+    list.push(mut rows, "tests::adds: failed with status 1")
+    let mut red: List[launcher.Event] = list.new()
+    list.push(mut red, AdmissionFailed(r.a, Red(take rows)))
+    feed(mut r, take red)
+    expect(phase_failed(status_of(mut r, request_id(47u64)), RedClass, "tests::adds: failed with status 1"), "gate: a Red verdict did not fail the request with class Red and its tests")
+    expect(asked_of(r, 4u64) == 0u64, "gate: a Red admission was assembled")
+    unplug(mut r)
+    Ok(())
+}
+
 // A source input: a tree of no files publishing with `grant`.
-fn source_of(grant: String) -> launcher.Input {
+fn source_of(grant: String) -> operator.Input {
     let mut grants: List[String] = list.new()
     list.push(mut grants, string.from(grant))
     let tree = launcher.Tree(package: ".", grants: take grants, dirs: list.new(), files: list.new(), required_entries: list.new())
     let codec: std.codec.Codec[launcher.Tree] = std.codec.of()
     let mut out: Bytes = list.new()
     let _ = std.codec.encode(codec, tree, mut out)
-    Source(take out)
+    SourceInput(take out)
 }
 
 fn phase_failed(p: Option[operator.Phase], class: operator.Class, detail: String) -> bool {

@@ -165,7 +165,7 @@ fn source_publishes_with_the_normal_checker() {
         rig.ask(Request::Admit(
             group(),
             attempt(n),
-            Input::Source(bytes),
+            Input::Source(bytes, false),
             Approvals::default(),
         ));
         // A cold compile of core takes longer than `until` waits.
@@ -244,7 +244,7 @@ fn source_publishes_with_the_normal_checker() {
         rig.ask(Request::Admit(
             group(),
             attempt(7),
-            Input::Source(tree()),
+            Input::Source(tree(), false),
             Approvals::default()
         ))
         .is_empty()
@@ -411,15 +411,20 @@ fn source_trees_stay_inside_their_scratch() {
     assert_eq!(super::admit::tree(&kept.encode()), Ok(kept));
 }
 
-/// The law gate (launch.md "The law gate"): a test granted anything beyond the allow list,
-/// or a `Dir` that leaves its working directory, is `Denied` before any test runs or the
-/// pass cache is made; a failing test is `Red` naming it; an all-passing tree is `Green`,
-/// and its passes are recorded under `STATE/test-results`, never the user's cache.
+/// The law gate (launch.md "The law gate"), driven by a gated `Admit(Source(tree, true))`:
+/// a test granted anything beyond the allow list, or a `Dir` that leaves its working
+/// directory, is `Denied` before any test runs or the pass cache is made; a failing test,
+/// or a test source that does not parse, is `Red` naming it and records no recipe; an
+/// all-passing tree admits with `Admitted.gate` naming the tree's digest, the published
+/// root and the toolchain, and its passes are recorded under `STATE/test-results`, never
+/// the user's cache. The same failing tree without the gate admits with no gate.
 #[test]
 fn law_gate_denies_authority_and_reads_the_verdict() {
-    use super::admit::gate::{Verdict, gate};
+    use super::stores::Stores;
+    use crate::code_store::{CodeStore, ObjectKind};
     use crate::native::tests::process::request_command_at;
-    use std::sync::atomic::AtomicBool;
+    use hirsel_core_ids::ContentHash;
+    use sha2::Digest as _;
 
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_owned();
@@ -459,7 +464,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         Ok(report)
     });
     let state = root.join("state");
-    fs::create_dir_all(state.join("source")).unwrap();
+    fs::create_dir_all(&state).unwrap();
     let app = root.join("app");
     fs::create_dir_all(&app).unwrap();
     let tree = |tests: &str, body: &str| {
@@ -492,9 +497,55 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
             files: files.into(),
             ..Tree::default()
         }
+        .encode()
+    };
+    let toolchain = ContentHash([0x7c; 32]);
+    let stores = Stores::open(&state, 1 << 20).unwrap();
+    let admission = super::Admission::open(&state, stores.records(), super::limits(), 1 << 20)
+        .unwrap()
+        .compile_with(compiler.clone())
+        .toolchain(toolchain);
+    let launcher = Launcher::new(&state, || Ok(stores)).unwrap();
+    let mut rig = Rig { dir, launcher };
+    rig.launcher.admit_with(admission).unwrap();
+    rig.bind();
+    let mut next = 0;
+    let mut admit = |rig: &mut Rig<Stores>, bytes: &[u8], gate: bool| {
+        next += 1;
+        rig.ask(Request::Admit(
+            group(),
+            attempt(next),
+            Input::Source(bytes.to_vec(), gate),
+            Approvals::default(),
+        ));
+        // A cold compile of core takes longer than `until` waits.
+        let end = Instant::now() + Duration::from_secs(240);
+        let mut seen = Vec::new();
+        while !seen
+            .iter()
+            .any(|e| matches!(e, Event::Admitted(..) | Event::AdmissionFailed(..)))
+        {
+            assert!(Instant::now() < end, "timed out with {seen:?}");
+            rig.launcher.turn(Duration::from_millis(50)).unwrap();
+            seen.extend(rig.launcher.take_events());
+        }
+        rig.ask(Request::Release(attempt(next)));
+        seen
+    };
+    let recipes = || -> BTreeSet<PathBuf> {
+        let code = CodeStore::new(state.join("code"));
+        let kind = code
+            .path(ObjectKind::Recipe, ContentHash([0; 32]))
+            .parent()
+            .unwrap()
+            .to_owned();
+        fs::read_dir(kind)
+            .into_iter()
+            .flatten()
+            .map(|e| e.unwrap().path())
+            .collect()
     };
     let green = "@test\nfn good() -> Result[(), ()] { Ok(()) }\n";
-    let run = |tree: &Tree| gate(&compiler, &state, tree, &AtomicBool::new(false)).unwrap();
 
     for (case, tests, named) in [
         (
@@ -509,9 +560,10 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         ),
         ("an absolute Dir", "dirs = [\"/tmp\"]\n", "/tmp"),
     ] {
-        let answered = run(&tree(tests, green));
+        let answered = admit(&mut rig, &tree(tests, green), true);
         assert!(
-            matches!(&answered, Err(Failure::Denied(text)) if text.contains(named)),
+            matches!(answered.as_slice(), [Event::AdmissionFailed(_, Failure::Denied(text))]
+                if text.contains(named)),
             "{case} was not denied: {answered:?}"
         );
         assert!(
@@ -520,27 +572,51 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         );
     }
 
-    let answered = run(&tree(
+    let failing = tree(
         "grants = [\"Tasks\"]\n",
         "@test\nfn bad() -> Result[(), ()] { Error(()) }\n\n@test\nfn good() -> Result[(), ()] { Ok(()) }\n",
-    ));
+    );
+    let before = recipes();
+    let answered = admit(&mut rig, &failing, true);
     assert!(
-        matches!(&answered, Ok(Verdict::Red(rows)) if rows.len() == 1
-            && rows[0].contains("app@1/tests/bad") && rows[0].contains("status 1")),
+        matches!(answered.as_slice(), [Event::AdmissionFailed(_, Failure::Red(rows))]
+            if rows.len() == 1 && rows[0].contains("app@1/tests/bad") && rows[0].contains("status 1")),
         "a failing test was not red: {answered:?}"
     );
+    assert_eq!(recipes(), before, "a red gate recorded a recipe");
 
     // A test source that does not parse lists no tests; read alone, that run is green.
-    let answered = run(&tree("grants = [\"Tasks\"]\n", "@test\nfn broken( -> {\n"));
+    let answered = admit(
+        &mut rig,
+        &tree("grants = [\"Tasks\"]\n", "@test\nfn broken( -> {\n"),
+        true,
+    );
     assert!(
-        matches!(&answered, Ok(Verdict::Red(rows)) if rows.len() == 1
-            && rows[0].contains("tests.hirsel") && rows[0].contains("do not check")),
+        matches!(answered.as_slice(), [Event::AdmissionFailed(_, Failure::Red(rows))]
+            if rows.len() == 1 && rows[0].contains("tests.hirsel") && rows[0].contains("do not check")),
         "an unparsable test source was not red: {answered:?}"
+    );
+    assert_eq!(recipes(), before, "a red gate recorded a recipe");
+
+    let answered = admit(&mut rig, &failing, false);
+    assert!(
+        matches!(answered.as_slice(), [Event::Admitted(_, _, summary, _)] if summary.gate.is_none()),
+        "an ungated source ran the gate: {answered:?}"
     );
 
     let green_tree = tree("grants = [\"Tasks\"]\ndirs = [\"data\"]\n", green);
+    let digest = sha2::Sha256::digest(&green_tree).to_vec();
     for pass in ["first", "cached"] {
-        assert_eq!(run(&green_tree), Ok(Verdict::Green), "{pass} run");
+        let answered = admit(&mut rig, &green_tree, true);
+        assert!(
+            matches!(answered.as_slice(), [Event::Admitted(_, root, summary, _)]
+            if summary.gate == Some(Green {
+                tree: digest.clone(),
+                root: root.clone(),
+                toolchain: toolchain.0.to_vec(),
+            })),
+            "the {pass} green run did not admit with its gate: {answered:?}"
+        );
     }
     assert!(
         fs::read_dir(state.join("test-results"))

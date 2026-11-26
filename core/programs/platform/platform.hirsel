@@ -96,18 +96,21 @@ pub type DeployRow: codec + send {
 // `approved` the grant diff the operator approved, which its admissions run under. `fates`
 // are the fates an approved decision gave, which replace the Begin's, and `shown` the held
 // groups that decision showed: a repeated admission whose report holds any other group holds
-// again, so an approval never fates a run the operator did not see.
+// again, so an approval never fates a run the operator did not see. `gate` is the green law
+// gate of a gated source's latest admission: its tree digest, H and toolchain (launch.md
+// "The law gate" step 5).
 pub type RequestRow: codec + send {
     begin: Bytes,
     group: launcher.Group,
-    input: launcher.Input,
+    input: operator.Input,
     attempt: launcher.Attempt,
     deadline_ms: u64,
     done: Option[operator.Phase],
     held: Option[operator.Decision],
     approved: launcher.Grants,
     fates: Option[runner.fate.Fates],
-    shown: List[runner.TriggerScanRow]
+    shown: List[runner.TriggerScanRow],
+    gate: Option[launcher.Green]
 }
 
 // One answer for an operator connection; `close` ends that connection's exchange after it.
@@ -1954,7 +1957,7 @@ fn admission_refusal(h: Host, name: String, g: GroupRow, d: Bytes, input: launch
     // Submitted source is checked here, before the launcher compiles it: its grants are
     // part of the recipe it publishes (launch.md "What an untrusted author submits").
     let tree: Option[launcher.Tree] = match input {
-        Source(b) => {
+        Source(b, _) => {
             let Some(t) = launcher.tree_of(b) else {
                 return Some((InvalidClass, "the source is not a tree within its byte limit"))
             }
@@ -2208,9 +2211,13 @@ fn active_holds(mut h: Host, name: String, d: Bytes, now: Now) -> bool waits {
 // A Begin (launch.md "The operator socket"): a known D with the same bytes attaches to its
 // request, with other bytes is a Conflict; a new D is recorded durably, then the group is
 // woken if cold and its admission opened.
-fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group, input: launcher.Input, foreign: List[String], exec: List[String], held: runner.fate.Fates, now: Now, mut out: List[launcher.Request]) waits {
+fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group, requested: operator.Input, foreign: List[String], exec: List[String], held: runner.fate.Fates, gate: bool, now: Now, mut out: List[launcher.Request]) waits {
     if list.len(d) != 16u64 {
         refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
+        return
+    }
+    let Some(input) = launcher_input(requested, gate) else {
+        refuse(mut h, conn, InvalidClass, "the law gate runs only for a source input")
         return
     }
     if !runner.fate.well_formed(held) {
@@ -2255,14 +2262,14 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
     let made = {
         let t = view h.t
         let name = view g.name
-        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(g), store.copy_env(input), store.copy_env(now), store.copy_env(canonical), store.copy_env(t), store.copy_env(name)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(g), store.copy_env(requested), store.copy_env(now), store.copy_env(canonical), store.copy_env(t), store.copy_env(name)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
             if let Some(x) = st(store.fetch(tx, call_env.5 .active, call_env.6))? {
                 if x != call_env.0 {
                     return Error(Busy(0u64))
                 }
             }
             let a = fresh_attempt(mut tx, call_env.5)?
-            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: clone(call_env.1), input: clone(call_env.2), attempt: a, deadline_ms: call_env.3 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants(), fates: None, shown: list.new())))?
+            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: clone(call_env.1), input: clone(call_env.2), attempt: a, deadline_ms: call_env.3 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants(), fates: None, shown: list.new(), gate: None)))?
             st(store.put(mut tx, call_env.5 .active, call_env.6, call_env.0))?
             Ok(a)
         })
@@ -2298,12 +2305,34 @@ fn registering(h: Host, name: String) -> bool waits {
     is_none(wake_row(h, name))
 }
 
-// The input and approvals a recorded Begin or Register admits: input, Foreign and Exec
-// lines.
+// The launcher input that admits an operator input: a source carries whether its Begin asked
+// for the law gate. The gate with any other input is None, which a Begin refuses Invalid.
+fn launcher_input(input: operator.Input, gate: bool) -> Option[launcher.Input] {
+    match input {
+        AttestedInput(r) if !gate => Some(Attested(clone(r))),
+        PublicationInput(r) if !gate => Some(Publication(clone(r))),
+        SourceInput(b) => Some(Source(clone(b), gate)),
+        _ => None,
+    }
+}
+
+// The input and approvals a recorded Begin or Register admits: the launcher input, with a
+// Begin's law gate, and the Foreign and Exec lines. Every repeated admission reads them here,
+// so it is gated exactly as the first.
 fn admission_ask(body: Bytes) -> Option[(launcher.Input, List[String], List[String])] {
     match operator.decode_ask(body) {
-        Some(BeginAsk(_, _, input, foreign, exec, _)) => Some((clone(input), clone(foreign), clone(exec))),
-        Some(RegisterAsk(_, _, input, foreign, exec)) => Some((clone(input), clone(foreign), clone(exec))),
+        Some(BeginAsk(_, _, input, foreign, exec, _, gate)) => {
+            let Some(relayed) = launcher_input(input, gate) else {
+                return None
+            }
+            Some((take relayed, clone(foreign), clone(exec)))
+        },
+        Some(RegisterAsk(_, _, input, foreign, exec)) => {
+            let Some(relayed) = launcher_input(input, false) else {
+                return None
+            }
+            Some((take relayed, clone(foreign), clone(exec)))
+        },
         _ => None,
     }
 }
@@ -2419,8 +2448,8 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
     match ask {
         // A deploy waits for the session's inventory to be reconciled, so it can neither
         // race the adoption of a pending deploy nor bind a group twice.
-        BeginAsk(_, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
-        BeginAsk(d, g, input, foreign, exec, held) => begin(mut h, conn, ask, d, g, input, foreign, exec, held, now, mut out),
+        BeginAsk(_, _, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        BeginAsk(d, g, input, foreign, exec, held, gate) => begin(mut h, conn, ask, d, g, input, foreign, exec, held, gate, now, mut out),
         DecideAsk(_, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         DecideAsk(d, decision, fates, approve) => decide(mut h, conn, d, decision, fates, approve, now, mut out),
         DataAsk(d, a, chunk) => match upload_of(h, conn, d, a) {
@@ -2631,70 +2660,6 @@ fn needed(mut h: Host, a: launcher.Attempt, keys: List[launcher.Wanted], done: b
     }
 }
 
-// The verifier admitted the release: the host checks its overlap memory and grants against
-// OLD's recipe, then assembles at once or sends the operator the approval text to confirm.
-// A refusal fails the request durably.
-fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Summary, display: String, mut out: List[launcher.Request]) waits {
-    let Some(name) = admitting_group(h, a) else {
-        return
-    }
-    let Ok(Some(g)) = group_row(h, name) else {
-        return
-    }
-    let mut v = vol_read(h, name)
-    let Some(take adm) = replace(mut v.admit, None) else {
-        return
-    }
-    let mut d = take adm
-    let request: Bytes = clone(d.request)
-    let mut why = string.new()
-    // OLD and NEW run side by side through the cutover, so the group's memory bounds both.
-    if let Some(m) = g.memory {
-        if summary.root_limit > m || summary.old_root_limit > m - summary.root_limit {
-            why = "Refused(Memory)"
-        }
-    }
-    // Any change of authority, gained or lost, runs only under a person's approval of exactly
-    // that diff (launch.md "Deploy preview"): without one the attempt is released and the
-    // request waits durably for a Decide, so an approval given for another diff approves
-    // nothing.
-    if why == "" && !launcher.grants_empty(summary.grants) && !same_grants(summary.grants, d.approved) {
-        vol_put(mut h, name, take v)
-        list.push(mut out, Release(a))
-        hold(mut h, request, summary.grants)
-        return
-    }
-    let denied = why != ""
-    let confirming = !denied && display != ""
-    let owner = owner_of(h, request)
-    if confirming && is_none(owner) {
-        // Nobody is attached to confirm the text: the attempt is released, and an identical
-        // Begin repeats admission and is shown the display.
-        vol_put(mut h, name, take v)
-        list.push(mut out, Release(a))
-        return
-    }
-    if denied {
-        d.stage = Rejected(string.from(why))
-        list.push(mut out, Release(a))
-    } else if confirming {
-        d.stage = Confirming(string.from(display))
-    } else {
-        d.stage = Assembling
-        list.push(mut out, Assemble(a))
-    }
-    d.summary = Some(clone(summary))
-    v.admit = Some(take d)
-    vol_put(mut h, name, take v)
-    if denied {
-        fail_request(mut h, request, DeniedClass, why)
-    } else if confirming {
-        if let Some(conn) = owner {
-            say(mut h, conn, DisplayAnswer(clone(request), a, clone(root), string.from(display)), false)
-        }
-    }
-}
-
 // NEW is assembled and its reservation held: the deploy goes on to Preparing.
 fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_ns: u64, assemble_ns: u64, now: Now, mut out: List[launcher.Request]) waits {
     let Some(name) = admitting_group(h, a) else {
@@ -2777,9 +2742,13 @@ fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: 
 // usage, the request and its attempt; the host then binds the group's listener and opens the
 // admission of its first release, with no OLD. Nothing wakes the group until that release
 // is assembled. No two groups share a store.
-fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.Registration, input: launcher.Input, foreign: List[String], exec: List[String], now: Now, mut out: List[launcher.Request]) waits {
+fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.Registration, requested: operator.Input, foreign: List[String], exec: List[String], now: Now, mut out: List[launcher.Request]) waits {
     if list.len(d) != 16u64 {
         refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
+        return
+    }
+    let Some(input) = launcher_input(requested, false) else {
+        refuse(mut h, conn, InvalidClass, "a registration's input is not admissible")
         return
     }
     let canonical = operator.ask_bytes(ask)
@@ -2820,7 +2789,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
     }
     let made = {
         let t = view h.t
-        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(input), store.copy_env(now), store.copy_env(spec), store.copy_env(canonical), store.copy_env(t)), fn(mut tx, call_env) -> Result[(GroupRow, launcher.Attempt), Refused] {
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(requested), store.copy_env(now), store.copy_env(spec), store.copy_env(canonical), store.copy_env(t)), fn(mut tx, call_env) -> Result[(GroupRow, launcher.Attempt), Refused] {
             if let Some(_) = st(store.fetch(tx, call_env.5 .groups, call_env.3 .name))? {
                 return Error(Exists)
             }
@@ -2839,7 +2808,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
             u.groups += 1u64
             st(store.put(mut tx, call_env.5 .usage, call_env.3 .tenant, u))?
             let a = fresh_attempt(mut tx, call_env.5)?
-            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: group_of(call_env.3 .name, g.incarnation), input: clone(call_env.1), attempt: a, deadline_ms: call_env.2 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants(), fates: None, shown: list.new())))?
+            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: group_of(call_env.3 .name, g.incarnation), input: clone(call_env.1), attempt: a, deadline_ms: call_env.2 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants(), fates: None, shown: list.new(), gate: None)))?
             st(store.put(mut tx, call_env.5 .active, call_env.3 .name, call_env.0))?
             Ok((g, a))
         })
@@ -2882,37 +2851,6 @@ fn store_owned(h: Host, path: String) -> bool waits {
             Error(_) => return true,
         }
     }
-}
-
-fn failure_class(why: launcher.Failure) -> operator.Class {
-    match why {
-        Denied(_) => DeniedClass,
-        Invalid(_) => InvalidClass,
-        Unassembled(_) => UnassembledClass,
-        Uncompiled(_) => UncompiledClass,
-        Exhausted(_) => ExhaustedClass,
-    }
-}
-
-fn failure_text(why: launcher.Failure) -> String {
-    match why {
-        Denied(w) => string.from(w),
-        Invalid(w) => string.from(w),
-        Unassembled(w) => string.from(w),
-        Uncompiled(w) => string.from(w),
-        Exhausted(w) => string.from(w),
-    }
-}
-
-fn unadmitted(mut h: Host, a: launcher.Attempt, why: launcher.Failure) waits {
-    let Some(name) = admitting_group(h, a) else {
-        return
-    }
-    let Some(d) = vol_read(h, name).admit else {
-        return
-    }
-    set_stage(mut h, name, Unadmitted(clone(why)))
-    fail_request(mut h, d.request, failure_class(why), failure_text(why))
 }
 
 fn refused_text(e: Refused) -> String {

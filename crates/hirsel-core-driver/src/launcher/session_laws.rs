@@ -191,6 +191,18 @@ fn session_vectors() {
             "0c0000000100000067030000000000000008070605040302011817161514131211010000000100000001000000000000000000020000002f7700000000".into(),
         ),
         (
+            Request::Admit(
+                group(),
+                attempt(),
+                Input::Source(vec![1], true),
+                Approvals {
+                    workdir: "/w".into(),
+                    ..Approvals::default()
+                },
+            ),
+            "0c000000010000006703000000000000000807060504030201181716151413121102000000010000000101000000000000000000020000002f7700000000".into(),
+        ),
+        (
             Request::AdmitData(attempt(), vec![1, 2]),
             "0d00000008070605040302011817161514131211020000000102".into(),
         ),
@@ -341,10 +353,34 @@ fn session_vectors() {
                     },
                     target: "t".into(),
                     n_place: 3,
+                    gate: None,
                 },
                 "l".into(),
             ),
-            "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d6101000000740300000000000000010000006c",
+            "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d610100000074030000000000000000000000010000006c",
+        ),
+        (
+            Event::Admitted(
+                attempt(),
+                vec![0xcc; 32],
+                Summary {
+                    root_limit: 1024,
+                    old_root_limit: 2048,
+                    grants: Grants {
+                        added: vec!["Clock".into()],
+                        removed: vec!["Dir=a".into()],
+                    },
+                    target: "t".into(),
+                    n_place: 3,
+                    gate: Some(Green {
+                        tree: vec![0xaa],
+                        root: vec![0xbb],
+                        toolchain: vec![0xcc],
+                    }),
+                },
+                "l".into(),
+            ),
+            "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d61010000007403000000000000000100000001000000aa01000000bb01000000cc010000006c",
         ),
         (
             Event::Assembled(attempt(), (0..32).collect(), vec![0xdd; 32], 5, 6),
@@ -353,6 +389,14 @@ fn session_vectors() {
         (
             Event::AdmissionFailed(attempt(), Failure::Denied("no".into())),
             "100000000807060504030201181716151413121100000000020000006e6f",
+        ),
+        (
+            Event::AdmissionFailed(attempt(), Failure::Red(vec!["a".into(), "b".into()])),
+            "1000000008070605040302011817161514131211050000000200000001000000610100000062",
+        ),
+        (
+            Event::AdmissionFailed(attempt(), Failure::GateLost("x".into())),
+            "1000000008070605040302011817161514131211060000000100000078",
         ),
         (
             Event::CutoverResult(serving(), attempt(), HostReply::Installed(4, true)),

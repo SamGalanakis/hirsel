@@ -16,20 +16,20 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let first: Bytes = clone(r.req)
     expect(is_installed(phase_on(r, r.conn)), "L49: the owner was not sent Installed")
     let mut b = restart(take r, 4u64)
-    let retry = begin_with(mut b, first, Attested(image_two()))
+    let retry = begin_with(mut b, first, AttestedInput(image_two()))
     expect(is_installed(phase_on(b, retry)) && admits(b) == 0u64, "L49: a Begin retried after host loss admitted again or lost its outcome")
-    let other = begin_with(mut b, first, Attested(image()))
+    let other = begin_with(mut b, first, AttestedInput(image()))
     expect(errored(b, other, ConflictClass) && admits(b) == 0u64, "L49: the same request ID with other content was not a Conflict")
     // (v2.71) The fates are part of Begin's canonical bytes.
     let mut release_all = runner.fate.none()
     release_all.all = Some(Release)
-    let refated = begin_held(mut b, first, Attested(image_two()), take release_all)
+    let refated = begin_held(mut b, first, AttestedInput(image_two()), take release_all, false)
     expect(errored(b, refated, ConflictClass) && admits(b) == 0u64, "L49: the same request ID and content with another held value was not a Conflict")
     // Entries out of path order are Invalid before any row is written.
     let mut unsorted = runner.fate.none()
     list.push(mut unsorted.entries, runner.fate.EntryFate(path: bytes_of(1u64, 98u8), fate: Release))
     list.push(mut unsorted.entries, runner.fate.EntryFate(path: bytes_of(1u64, 97u8), fate: Cancel))
-    let disordered = begin_held(mut b, request_id(90u64), Attested(image_two()), take unsorted)
+    let disordered = begin_held(mut b, request_id(90u64), AttestedInput(image_two()), take unsorted, false)
     expect(errored(b, disordered, InvalidClass) && admits(b) == 0u64, "L49: unsorted held entries were not Invalid")
     let cut = begin_new(mut b)
     let a1 = b.a
@@ -37,7 +37,7 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
     hang_up(mut b, cut)
     expect(released(b, a1), "L49: an upload cut off before its end kept its attempt")
     let second: Bytes = clone(b.req)
-    let _ = begin_with(mut b, second, Attested(image_two()))
+    let _ = begin_with(mut b, second, AttestedInput(image_two()))
     expect(admits(b) == 2u64 && !same_attempt(a1, b.a), "L49: the repeated Begin did not admit again under a fresh attempt")
     // The second request reaches its own deploy row; the first's Status is unchanged.
     let mut ev: List[launcher.Event] = list.new()

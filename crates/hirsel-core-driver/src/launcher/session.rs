@@ -159,52 +159,6 @@ pub(crate) enum HostReply {
 
 pub(crate) use super::places::InstallRefusal;
 
-/// What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
-/// publication R already in the launcher's code store; or source, a `launcher.Tree`'s
-/// codec bytes, which the launcher publishes and admits as a publication.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Input {
-    Attested(Vec<u8>),
-    Publication(Vec<u8>),
-    Source(Vec<u8>),
-}
-
-/// The host's policy for one admission: whether the image records, the Foreign and Exec
-/// approvals, the group's working directory, and the assembly the deploy would replace.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Approvals {
-    pub(crate) recording: bool,
-    pub(crate) foreign: Vec<String>,
-    pub(crate) exec: Vec<String>,
-    pub(crate) workdir: String,
-    pub(crate) old: Option<Vec<u8>>,
-}
-
-/// What the host compares before `Assemble`: the new and old root limits, the grant diff
-/// against the old recipe, and the new recipe's target and place allowance, which the host
-/// checks NEW's preview against.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Summary {
-    pub(crate) root_limit: u64,
-    pub(crate) old_root_limit: u64,
-    pub(crate) grants: Grants,
-    pub(crate) target: String,
-    pub(crate) n_place: u64,
-}
-
-/// Why an admission ended: a policy refusal printed as is, an invalid input or release,
-/// or a failed assembly.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Failure {
-    Denied(String),
-    Invalid(String),
-    Unassembled(String),
-    /// The checker refused submitted source; its diagnostics.
-    Uncompiled(String),
-    /// Compiling submitted source reached the toolchain's memory limit.
-    Exhausted(String),
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Request {
     Hello,
@@ -705,25 +659,9 @@ impl Wire for HostReply {
     }
 }
 
-impl Wire for Input {
-    fn put(&self, w: &mut Writer) {
-        let (tag, bytes) = match self {
-            Self::Attested(r) => (0, r),
-            Self::Publication(r) => (1, r),
-            Self::Source(tree) => (2, tree),
-        };
-        w.u32(tag);
-        w.bytes(bytes);
-    }
-    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        Ok(match r.u32()? {
-            0 => Self::Attested(r.bytes()?),
-            1 => Self::Publication(r.bytes()?),
-            2 => Self::Source(r.bytes()?),
-            _ => return Err(malformed("admission input tag")),
-        })
-    }
-}
+#[path = "admission.rs"]
+mod admission;
+pub(crate) use admission::{Approvals, Failure, Green, Input, Summary};
 
 #[path = "wanted.rs"]
 mod wanted;
@@ -974,6 +912,11 @@ session_wire!(Event, "event tag", w, r;
         summary.grants.put(w);
         w.bytes(summary.target.as_bytes());
         w.u64(summary.n_place);
+        w.option(&summary.gate, |w, green| {
+            w.bytes(&green.tree);
+            w.bytes(&green.root);
+            w.bytes(&green.toolchain);
+        });
         w.bytes(display.as_bytes());
     } => Self::Admitted(
         Attempt::get(r)?,
@@ -984,6 +927,13 @@ session_wire!(Event, "event tag", w, r;
             grants: Grants::get(r)?,
             target: r.string()?,
             n_place: r.u64()?,
+            gate: r.option(|r| {
+                Ok(Green {
+                    tree: r.bytes()?,
+                    root: r.bytes()?,
+                    toolchain: r.bytes()?,
+                })
+            })?,
         },
         r.string()?,
     ),
@@ -1002,6 +952,12 @@ session_wire!(Event, "event tag", w, r;
             Failure::Unassembled(why) => (2, why),
             Failure::Uncompiled(why) => (3, why),
             Failure::Exhausted(why) => (4, why),
+            Failure::Red(rows) => {
+                w.u32(5);
+                w.strings(rows);
+                return;
+            }
+            Failure::GateLost(why) => (6, why),
         };
         w.u32(tag);
         w.bytes(why.as_bytes());
@@ -1013,6 +969,8 @@ session_wire!(Event, "event tag", w, r;
             2 => Failure::Unassembled(r.string()?),
             3 => Failure::Uncompiled(r.string()?),
             4 => Failure::Exhausted(r.string()?),
+            5 => Failure::Red(r.strings()?),
+            6 => Failure::GateLost(r.string()?),
             _ => return Err(malformed("admission failure tag")),
         },
     ),

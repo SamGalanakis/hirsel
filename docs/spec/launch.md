@@ -1229,7 +1229,7 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, foreign, exec, held, gate) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest), a source named by content ("Self-editing" below; planned<!-- doc-ref: planned -->, replacing the inline `Source(tree)` on this wire). `gate` (planned<!-- doc-ref: planned -->) asks for the law gate ("Self-editing"); `true` with any input but a source is `Invalid`. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
+| 0 Begin(D, G, input, foreign, exec, held, gate) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(tree), a `launcher.Tree`'s codec bytes; 2 Source(manifest), a source named by content ("Self-editing" below), is planned<!-- doc-ref: planned --> and replaces the inline tree on this wire. `gate` asks for the law gate ("Self-editing"); `true` with any input but a source is `Invalid`. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
 | 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. For a source it is the needed blobs' bytes ("Self-editing"). |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
@@ -1246,7 +1246,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool), or, for a source, of the blobs the group's blob set lacks (`Wanted` gains 4 BlobKey(H)<!-- doc-ref: planned -->). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
-| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red (sent once the law gate is built). Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Red is a gated source whose tests were not all green; its detail names each test that failed, stopped, did not start or had not ended by the admission deadline, with its outcome ("Self-editing"). A trigger report with a held run that has no fate, or with an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers, holds the request for a decision and fails nothing; the former class 13 `Unsettled` is deleted. Failed uses the same classes. An exchange error never changes another request's outcome. |
+| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Red is a gated source whose tests were not all green; its detail names each test that failed, stopped, did not start or had not ended by the admission deadline, with its outcome ("Self-editing"). A trigger report with a held run that has no fate, or with an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers, holds the request for a decision and fails nothing; the former class 13 `Unsettled` is deleted. Failed uses the same classes. An exchange error never changes another request's outcome. |
 | 5 GroupInfo(G) | A group lookup's result. |
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
@@ -1417,7 +1417,7 @@ is separate from publishing.
 after review self-edit-gate-review-2801 (self-edit-build-1c-2808, RUNNER-SPEC v2.82). Not built:
 every socket, ask field, phase, class and law in this section is planned. Only the building
 blocks are to be built now (Sam, 2026-11-26: "not building self editing into lash, just the
-building blocks"): the law gate, operator-decided holds with `hirsel decide`, the migration
+building blocks"): the law gate (built: Begin's `gate`, self-edit-begin-source-2849), operator-decided holds with `hirsel decide`, the migration
 and runs facts from OLD's report of the bound PREPARED with its settlement check, and source
 by content with per-group package roots. The editor principal (its UID, socket, SetEditor and
 revocation), automatic cutover and the editor allow list stay unbuilt.*
@@ -1547,7 +1547,9 @@ request already preparing under a revoked editor never cuts over.
 (otherwise `Invalid`). The operator may set it, and the editor must. A gated source is
 admitted as `Source(tree, gate: true)`. The launcher's step 1 ("Publish and assemble")
 runs these steps after `hirsel publish PACKAGE --frozen` gives H in its scratch, and before
-it admits `Publication(H)`:
+it records H's recipe or admits `Publication(H)`; only the authority check, which reads
+nothing but the tree's manifest, runs before the publish, so a denied tree compiles
+nothing:
 
 1. **The authority check, before any test runs.** Gate tests run as the launcher's OS user.
    The gate first reads every test's run configuration from the tree's `[tests]`
@@ -1588,13 +1590,17 @@ it admits `Publication(H)`:
      each such test and its outcome.
    - **Lost**: the resident compiler's session is lost while the gate runs (cli.md: a
      `test` request "reports the lost answer"). This is never green and never a durable
-     `Red`: the launcher answers `Busy`, the host sends `Release(A)`, and the same D is
-     admitted again.
+     `Red`: the launcher answers `AdmissionFailed(GateLost(detail))`, the host sends
+     `Release(A)` and answers the owner `Busy`, as for a lost launcher session, and the
+     owner's retried Begin of the same D admits it again.
 
    No `--laws` strength row is read: a row is never an input to acceptance (R28,
-   [laws](../laws.md)). The gate runs inside the admission deadline (600 s from D's first
-   Begin; a fresh one for each repeated admission) and holds one of the launcher's four
-   admission slots while it runs.
+   [laws](../laws.md)). The gate runs inside the admission deadline and holds one of the
+   launcher's four admission slots while it runs. The launcher measures the deadline,
+   because only it runs the tests: 600 s from its `Admit` of the attempt, so each
+   admission, a repeated one too, gets a fresh one. A `check` or `test` child still running
+   at the deadline is killed with its process group, and the verdict is `Red` with the one
+   row `the tests had not all ended by the admission deadline`.
 5. **The binding.** `Admitted`'s summary gains `gate: Option[Green(tree, H, toolchain)]`.
    Here `tree` is the SHA-256 of the assembled `launcher.Tree` codec bytes and `toolchain`
    the launcher's toolchain identity, and the host records all three in D's row. H is the
@@ -1931,9 +1937,10 @@ child endpoints, pidfds and cgroup population changes.
      sees only publications. A refused check is `Uncompiled` with the checker's
      diagnostics (at most 64 KiB); a compiler out of memory is `Exhausted`. Neither
      records a recipe. The same tree always gives the same H as `hirsel publish` of the
-     same files. A gated source (`Source(tree, gate: true)`<!-- doc-ref: planned -->) runs the law
-     gate in the same scratch after the publish and before it admits H ("Self-editing"
-     below); a red gate is `AdmissionFailed(Red(rows))` and records no recipe.
+     same files. A gated source (`Source(tree, gate: true)`) runs the law gate in the same
+     scratch after the publish and before it records H's recipe ("Self-editing" below); a
+     red gate is `AdmissionFailed(Red(rows))` and records no recipe, and a lost compiler
+     session is `AdmissionFailed(GateLost(detail))`.
   2. For an attested input the host sends the exchange bytes of "Admission" above (the
      request frame, then object frames) in bounded `AdmitData` chunks and closes them
      with `AdmitEnd`. The launcher feeds them to the verifier unchanged and answers each
@@ -1945,8 +1952,9 @@ child endpoints, pidfds and cgroup population changes.
      requests wait only until the verifier takes that frame.
   3. `Admitted(attempt, root, summary, display)` reports the verified root, its root
      limit beside the approved OLD recipe's, the grant diff against OLD's recipe,
-     the recipe's target and place allowance, and the approval text (foreign archives and
-     `Exec` profiles). The host decides the approvals from it. OLD and NEW serve side by
+     the recipe's target and place allowance, the gate's `Green(tree, H, toolchain)` when
+     the admission ran it, and the approval text (foreign archives and `Exec` profiles).
+     The host records the green verdict in D's row and decides the approvals from it. OLD and NEW serve side by
      side through the cutover, so the two root limits together must fit the group's
      memory limit, or the host answers `Refused(Memory)`, which releases the attempt. A
      nonempty grant diff the operator has not approved releases the attempt and holds the
@@ -1960,8 +1968,8 @@ child endpoints, pidfds and cgroup population changes.
      assembly name, the image digest and the fetch and assembly times in nanoseconds. The
      launcher then holds a reservation of the assembly for the attempt until the host
      releases it, which it does once the deploy's Preparing row is durable.
-  `AdmissionFailed(attempt, failure)` (`Denied`, `Invalid` or `Unassembled`) ends an
-  attempt at any step. `Release(attempt)` or a new session cancels a running attempt.
+  `AdmissionFailed(attempt, failure)` (`Denied`, `Invalid`, `Unassembled`, `Uncompiled`,
+  `Exhausted`, `Red(rows)` or `GateLost`) ends an attempt at any step. `Release(attempt)` or a new session cancels a running attempt.
 - **Launch.** It starts a group's children: install (genesis and standalone install),
   describe, preview, prepare and serving. Each child runs a retained image by digest, from
   the image store, in the group's working directory, with descriptors for its mode

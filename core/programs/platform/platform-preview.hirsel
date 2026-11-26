@@ -7,10 +7,15 @@ fn same_grants(a: launcher.Grants, b: launcher.Grants) -> bool {
 }
 
 // The decision a request awaits: its source tree's digest (empty for an attested or
-// publication input), no H while the gate is unbuilt, and the facts computed so far.
-fn decision_of(input: launcher.Input, stage: operator.DecisionStage, grants: launcher.Grants, triggers: runner.TriggerReport) -> operator.Decision {
+// publication input), the H its law gate ran against (empty when ungated), and the facts
+// computed so far.
+fn decision_of(input: operator.Input, gate: Option[launcher.Green], stage: operator.DecisionStage, grants: launcher.Grants, triggers: runner.TriggerReport) -> operator.Decision {
+    let root: Bytes = match gate {
+        Some(green) => clone(green.root),
+        None => list.new(),
+    }
     let tree: Bytes = match input {
-        Source(b) => {
+        SourceInput(b) => {
             let digest = sha256.hash(b)
             let mut out: Bytes = list.with_capacity(32u64)
             for i in 0u64 .. 32u64 {
@@ -20,7 +25,7 @@ fn decision_of(input: launcher.Input, stage: operator.DecisionStage, grants: lau
         },
         _ => list.new(),
     }
-    operator.Decision(tree: tree, root: list.new(), stage: stage, grants: clone(grants), approvals: None, migration: None, triggers: clone(triggers))
+    operator.Decision(tree: tree, root: root, stage: stage, grants: clone(grants), approvals: None, migration: None, triggers: clone(triggers))
 }
 
 // Request d waits for the operator's decision on grant diff `diff`, durably and with no
@@ -37,7 +42,7 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
             if let Some(_) = row.done {
                 return Ok(())
             }
-            row.held = Some(decision_of(row.input, AdmissionStage, call_env.2, operator.no_triggers()))
+            row.held = Some(decision_of(row.input, row.gate, AdmissionStage, call_env.2, operator.no_triggers()))
             st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
             Ok(())
         })
@@ -58,7 +63,7 @@ fn hold_prepared(mut tx: store.Tx, t: Tables, d: Bytes, preview: operator.Previe
     if let Some(_) = row.done {
         return Ok(())
     }
-    row.held = Some(decision_of(row.input, PreparedStage, preview.grants, preview.triggers))
+    row.held = Some(decision_of(row.input, row.gate, PreparedStage, preview.grants, preview.triggers))
     st(store.put(mut tx, t.requests, d, row))
 }
 
@@ -301,7 +306,7 @@ fn deploy_held(h: Host, d: Bytes) -> Result[runner.fate.Fates, Refused] waits {
     if let Some(f) = row.fates {
         return Ok(clone(f))
     }
-    let Some(BeginAsk(_, _, _, _, _, held)) = operator.decode_ask(row.begin) else {
+    let Some(BeginAsk(_, _, _, _, _, held, _)) = operator.decode_ask(row.begin) else {
         return Error(Missing("deploy Begin"))
     }
     Ok(clone(held))
@@ -312,7 +317,7 @@ fn deploy_required_entries(h: Host, d: Bytes) -> Result[List[launcher.RequiredEn
     let Some(row) = request_row(h, d)? else {
         return Error(Missing("deploy request"))
     }
-    if let Source(b) = row.input {
+    if let SourceInput(b) = row.input {
         let Some(tree) = launcher.tree_of(b) else {
             return Error(Missing("deploy source tree"))
         }

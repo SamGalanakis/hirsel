@@ -4,7 +4,7 @@
 //! both sides check. One connection carries one exchange.
 use crate::code_admission::ObjectKey;
 use crate::launcher::session::{
-    Attempt, Grants, Group, Input, Reader, Wire, Writer, get_wanted, malformed, put_wanted,
+    Attempt, Grants, Group, Reader, Wire, Writer, get_wanted, malformed, put_wanted,
 };
 use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -48,9 +48,39 @@ pub(crate) struct Registration {
     pub(crate) front: Option<Front>,
 }
 
+/// What a Begin or Register deploys (`operator.Input`): an attested recipe R, a publication
+/// R in the launcher's code store, or a `launcher.Tree`'s codec bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Input {
+    Attested(Vec<u8>),
+    Publication(Vec<u8>),
+    Source(Vec<u8>),
+}
+
+impl Wire for Input {
+    fn put(&self, w: &mut Writer) {
+        let (tag, bytes) = match self {
+            Self::Attested(r) => (0, r),
+            Self::Publication(r) => (1, r),
+            Self::Source(tree) => (2, tree),
+        };
+        w.u32(tag);
+        w.bytes(bytes);
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        Ok(match r.u32()? {
+            0 => Self::Attested(r.bytes()?),
+            1 => Self::Publication(r.bytes()?),
+            2 => Self::Source(r.bytes()?),
+            _ => return Err(malformed("operator input tag")),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ask {
-    Begin(Vec<u8>, Group, Input, Vec<String>, Vec<String>, Fates),
+    /// The trailing flag asks for the law gate, which only a source input can run.
+    Begin(Vec<u8>, Group, Input, Vec<String>, Vec<String>, Fates, bool),
     Data(Vec<u8>, Attempt, Vec<u8>),
     End(Vec<u8>, Attempt),
     Confirm(Vec<u8>, Attempt, Vec<u8>),
@@ -517,7 +547,7 @@ impl Wire for Registration {
 impl Wire for Ask {
     fn put(&self, w: &mut Writer) {
         match self {
-            Self::Begin(d, g, input, foreign, exec, held) => {
+            Self::Begin(d, g, input, foreign, exec, held, gate) => {
                 w.u32(0);
                 w.bytes(d);
                 g.put(w);
@@ -525,6 +555,7 @@ impl Wire for Ask {
                 w.strings(foreign);
                 w.strings(exec);
                 held.put(w);
+                w.bool(*gate);
             }
             Self::Data(d, a, bytes) => {
                 w.u32(1);
@@ -572,6 +603,7 @@ impl Wire for Ask {
                 r.strings()?,
                 r.strings()?,
                 Fates::get(r)?,
+                r.bool()?,
             ),
             1 => Self::Data(r.bytes()?, Attempt::get(r)?, r.bytes()?),
             2 => Self::End(r.bytes()?, Attempt::get(r)?),

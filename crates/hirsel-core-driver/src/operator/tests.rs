@@ -78,8 +78,21 @@ fn operator_vectors() {
                     all: Some(HeldFate::Cancel),
                     entries: vec![(vec![0x70], HeldFate::Release)],
                 },
+                false,
             ),
-            "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc010000000100000066010000000100000065010000000100000001000000010000007000000000",
+            "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01000000010000006601000000010000006501000000010000000100000001000000700000000000",
+        ),
+        (
+            Ask::Begin(
+                d(),
+                group(),
+                Input::Source(vec![1]),
+                Vec::new(),
+                Vec::new(),
+                Fates::default(),
+                true,
+            ),
+            "000000001000000021212121212121212121212121212121010000006703000000000000000200000001000000010000000000000000000000000000000001",
         ),
         (
             Ask::Data(d(), attempt(), vec![1, 2]),

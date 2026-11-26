@@ -1,0 +1,144 @@
+// The host's side of an admission's end (launch.md "The launcher", "Publish and assemble"
+// step 3; "The law gate"): the launcher's Admitted summary and its failures, and the law
+// gate's green verdict recorded in the request row.
+// The verifier admitted the release: the host checks its overlap memory and grants against
+// OLD's recipe, then assembles at once or sends the operator the approval text to confirm.
+// A refusal fails the request durably.
+fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Summary, display: String, mut out: List[launcher.Request]) waits {
+    let Some(name) = admitting_group(h, a) else {
+        return
+    }
+    let Ok(Some(g)) = group_row(h, name) else {
+        return
+    }
+    let mut v = vol_read(h, name)
+    let Some(take adm) = replace(mut v.admit, None) else {
+        return
+    }
+    let mut d = take adm
+    let request: Bytes = clone(d.request)
+    if let Some(green) = summary.gate {
+        record_gate(mut h, request, green)
+    }
+    let mut why = string.new()
+    // OLD and NEW run side by side through the cutover, so the group's memory bounds both.
+    if let Some(m) = g.memory {
+        if summary.root_limit > m || summary.old_root_limit > m - summary.root_limit {
+            why = "Refused(Memory)"
+        }
+    }
+    // Any change of authority, gained or lost, runs only under a person's approval of exactly
+    // that diff (launch.md "Deploy preview"): without one the attempt is released and the
+    // request waits durably for a Decide, so an approval given for another diff approves
+    // nothing.
+    if why == "" && !launcher.grants_empty(summary.grants) && !same_grants(summary.grants, d.approved) {
+        vol_put(mut h, name, take v)
+        list.push(mut out, Release(a))
+        hold(mut h, request, summary.grants)
+        return
+    }
+    let denied = why != ""
+    let confirming = !denied && display != ""
+    let owner = owner_of(h, request)
+    if confirming && is_none(owner) {
+        // Nobody is attached to confirm the text: the attempt is released, and an identical
+        // Begin repeats admission and is shown the display.
+        vol_put(mut h, name, take v)
+        list.push(mut out, Release(a))
+        return
+    }
+    if denied {
+        d.stage = Rejected(string.from(why))
+        list.push(mut out, Release(a))
+    } else if confirming {
+        d.stage = Confirming(string.from(display))
+    } else {
+        d.stage = Assembling
+        list.push(mut out, Assemble(a))
+    }
+    d.summary = Some(clone(summary))
+    v.admit = Some(take d)
+    vol_put(mut h, name, take v)
+    if denied {
+        fail_request(mut h, request, DeniedClass, why)
+    } else if confirming {
+        if let Some(conn) = owner {
+            say(mut h, conn, DisplayAnswer(clone(request), a, clone(root), string.from(display)), false)
+        }
+    }
+}
+
+// Request d's gated source admitted green: its row records the tree, H and toolchain the
+// tests ran against (launch.md "The law gate" step 5), before any hold or assembly.
+fn record_gate(mut h: Host, d: Bytes, green: launcher.Green) waits {
+    let made = {
+        let t = view h.t
+        let g = view green
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(t), store.copy_env(g)), fn(mut tx, call_env) -> Result[(), Refused] {
+            let Some(found) = st(store.fetch(tx, call_env.1 .requests, call_env.0))? else {
+                return Ok(())
+            }
+            let mut row = found
+            if let Some(_) = row.done {
+                return Ok(())
+            }
+            row.gate = Some(clone(call_env.2))
+            st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
+            Ok(())
+        })
+    }
+    if let Error(e) = decided(mut h, take made) {
+        fail_request(mut h, d, class_of(e), refused_text(e))
+    }
+}
+
+fn failure_class(why: launcher.Failure) -> operator.Class {
+    match why {
+        Denied(_) => DeniedClass,
+        Invalid(_) => InvalidClass,
+        Unassembled(_) => UnassembledClass,
+        Uncompiled(_) => UncompiledClass,
+        Exhausted(_) => ExhaustedClass,
+        Red(_) => RedClass,
+        GateLost(_) => BusyClass,
+    }
+}
+
+fn failure_text(why: launcher.Failure) -> String {
+    match why {
+        Denied(w) => string.from(w),
+        Invalid(w) => string.from(w),
+        Unassembled(w) => string.from(w),
+        Uncompiled(w) => string.from(w),
+        Exhausted(w) => string.from(w),
+        Red(rows) => {
+            let mut text = string.new()
+            for row in rows {
+                if text != "" {
+                    string.push(mut text, "\n")
+                }
+                string.push(mut text, row)
+            }
+            text
+        },
+        GateLost(w) => string.from(w),
+    }
+}
+
+fn unadmitted(mut h: Host, a: launcher.Attempt, why: launcher.Failure) waits {
+    let Some(name) = admitting_group(h, a) else {
+        return
+    }
+    let Some(d) = vol_read(h, name).admit else {
+        return
+    }
+    // A lost gate session is never a verdict: the admission ends as a new launcher session
+    // ends it, and the same Begin admits D again (launch.md "The law gate" step 4).
+    if let GateLost(_) = why {
+        list.push(mut h.later, Release(a))
+        interrupted(mut h, name)
+        return
+    }
+    set_stage(mut h, name, Unadmitted(clone(why)))
+    fail_request(mut h, d.request, failure_class(why), failure_text(why))
+}

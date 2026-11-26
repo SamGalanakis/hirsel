@@ -6,10 +6,10 @@
 use crate::cli::{Invocation, OptionId as Opt};
 use crate::code_admission::{AdmissionError, ObjectKey, ObjectKind, send_release};
 use crate::code_store::CodeStore;
-use crate::launcher::session::{Attempt, Grants, Group, Input};
+use crate::launcher::session::{Attempt, Grants, Group};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
 use crate::operator::{
-    self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Pause, Phase, Record,
+    self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Input, Pause, Phase, Record,
     Registration, Report,
 };
 use hirsel_core_ids::ContentHash;
@@ -371,6 +371,7 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         approvals.foreign.clone(),
         approvals.exec.clone(),
         held,
+        false,
     );
     let mut exchange = Exchange::new(&state, d, "deploy", Some(upload), approvals);
     exchange.decision = Some(decision);

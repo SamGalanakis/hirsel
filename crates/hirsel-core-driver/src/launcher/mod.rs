@@ -729,8 +729,8 @@ impl<I: Images> Launcher<I> {
         let source = match input {
             Input::Attested(r) => root(&r).map(admit::Source::Attested),
             Input::Publication(r) => root(&r).map(admit::Source::Publication),
-            Input::Source(bytes) => match admit::tree(&bytes) {
-                Ok(tree) => Some(admit::Source::Tree(tree)),
+            Input::Source(bytes, gated) => match admit::source(&bytes, gated) {
+                Ok(source) => Some(source),
                 Err(why) => return self.emit(Event::AdmissionFailed(attempt, why)),
             },
         };

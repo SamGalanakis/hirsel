@@ -188,19 +188,19 @@ fn error_on(r: Rig, conn: u64) -> Option[operator.Class] {
 
 // Begins request `d` deploying `input` to group g on a new connection; the rig's attempt
 // becomes the one the host assigned. Gives the connection.
-fn begin_with(mut r: Rig, d: Bytes, input: launcher.Input) -> u64 waits {
-    begin_held(mut r, d, input, runner.fate.none())
+fn begin_with(mut r: Rig, d: Bytes, input: operator.Input) -> u64 waits {
+    begin_held(mut r, d, input, runner.fate.none(), false)
 }
 
-// begin_with under the deploy fates `held`.
-fn begin_held(mut r: Rig, d: Bytes, input: launcher.Input, take held: runner.fate.Fates) -> u64 waits {
+// begin_with under the deploy fates `held`, asking for the law gate when `gate` is set.
+fn begin_held(mut r: Rig, d: Bytes, input: operator.Input, take held: runner.fate.Fates, gate: bool) -> u64 waits {
     r.conns += 1u64
     let conn = r.conns
     let incarnation = match group_row(r.h, "g") {
         Ok(Some(g)) => g.incarnation,
         _ => 0u64,
     }
-    send(mut r, conn, BeginAsk(clone(d), group_of("g", incarnation), clone(input), list.new(), list.new(), take held))
+    send(mut r, conn, BeginAsk(clone(d), group_of("g", incarnation), clone(input), list.new(), list.new(), take held, gate))
     if let Some(p) = phase_on(r, conn) {
         if let Some(a) = attempt_of(p) {
             r.a = a
@@ -214,7 +214,7 @@ fn begin_held(mut r: Rig, d: Bytes, input: launcher.Input, take held: runner.fat
 // A new request deploying NEW, attested.
 fn begin_new(mut r: Rig) -> u64 waits {
     let d = request_id(r.conns + 1u64)
-    begin_with(mut r, d, Attested(image_two()))
+    begin_with(mut r, d, AttestedInput(image_two()))
 }
 
 // Status(d) on a new connection.
@@ -860,7 +860,7 @@ fn old_says(mut r: Rig, old: launcher.Child, take said: runner.HostReply) waits 
 
 // The verifier's summary of NEW (target "t", one place) beside OLD's recipe.
 fn summary_of(root_limit: u64, old_root_limit: u64, take grants: launcher.Grants) -> launcher.Summary {
-    launcher.Summary(root_limit: root_limit, old_root_limit: old_root_limit, grants: take grants, target: "t", n_place: 1u64)
+    launcher.Summary(root_limit: root_limit, old_root_limit: old_root_limit, grants: take grants, target: "t", n_place: 1u64, gate: None)
 }
 
 // The host opens group g's admission of NEW, attested, and the verifier admits it with
@@ -1547,7 +1547,7 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     // The same Begin again repeats the admission under a fresh attempt.
     let before = r3.a
     let again: Bytes = clone(r3.req)
-    let _ = begin_with(mut r3, again, Attested(image_two()))
+    let _ = begin_with(mut r3, again, AttestedInput(image_two()))
     expect(!same_attempt(before, r3.a) && admits(r3) == 2u64, "confirm: the repeated Begin did not admit again under a fresh attempt")
     let mut events: List[launcher.Event] = list.new()
     list.push(mut events, Admitted(r3.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: lib"))
@@ -1569,7 +1569,7 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     list.push(mut late, Admitted(a6, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: lib"))
     feed(mut r6, take late)
     expect(released(r6, a6), "confirm: an unowned confirmation kept its attempt")
-    let back = begin_with(mut r6, d6, Attested(image_two()))
+    let back = begin_with(mut r6, d6, AttestedInput(image_two()))
     let a7 = r6.a
     let mut again6: List[launcher.Event] = list.new()
     list.push(mut again6, Admitted(a7, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: lib"))
@@ -1665,7 +1665,7 @@ fn registration(name: String, store_dir: String) -> operator.Registration {
 fn register_as(mut r: Rig, d: Bytes, take spec: operator.Registration) -> u64 waits {
     r.conns += 1u64
     let conn = r.conns
-    send(mut r, conn, RegisterAsk(clone(d), take spec, Attested(image_two()), list.new(), list.new()))
+    send(mut r, conn, RegisterAsk(clone(d), take spec, AttestedInput(image_two()), list.new(), list.new()))
     if let Some(p) = phase_on(r, conn) {
         if let Some(a) = attempt_of(p) {
             r.a = a
@@ -1814,7 +1814,7 @@ fn operator_register(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(released(r, a6) && !same_attempt(a6, r.a) && no_old == 2u64 && !serving_at(r, "p", 0u64, image_two()), "L51: a cut-off registration did not admit again under a fresh attempt with no OLD")
     // The listener cannot be bound: the registration fails the same way.
     let failed_id = request_id(5u64)
-    let reqs = asked(mut r.h, r.conns + 1u64, operator.ask_bytes(RegisterAsk(clone(failed_id), registration("m", "s5"), Attested(image_two()), list.new(), list.new())), r.now)
+    let reqs = asked(mut r.h, r.conns + 1u64, operator.ask_bytes(RegisterAsk(clone(failed_id), registration("m", "s5"), AttestedInput(image_two()), list.new(), list.new())), r.now)
     expect(list.len(reqs) > 0u64, "L51: the registration did not ask for a listener")
     let mut failures: List[launcher.Event] = list.new()
     match reqs[0u64] {

@@ -69,8 +69,9 @@ pub type Launch: codec + send {
 // What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
 // publication R already in the launcher's code store; or source, a `Tree`'s codec bytes,
 // which the launcher publishes with the normal checker and then admits as a publication
-// (launch.md "Publish and assemble").
-pub type Input: codec + send = Attested(Bytes) | Publication(Bytes) | Source(Bytes)
+// (launch.md "Publish and assemble"). A source's bool asks for the law gate (launch.md
+// "The law gate"): its tests run in the publish scratch after H and before H is admitted.
+pub type Input: codec + send = Attested(Bytes) | Publication(Bytes) | Source(Bytes, bool)
 
 // Submitted source: the files of a workspace whose root holds its `hirsel.toml` and
 // `hirsel.lock`, the package directory to publish within it, and the `--grant` and `--dir`
@@ -154,13 +155,26 @@ pub type Summary: codec + send {
     old_root_limit: u64,
     grants: Grants,
     target: String,
-    n_place: u64
+    n_place: u64,
+    // A gated source's green verdict (launch.md "The law gate" step 5); None when ungated.
+    gate: Option[Green]
+}
+
+// A green law gate: the SHA-256 of the source tree's codec bytes, the publication H its
+// tests were run against, and the launcher's toolchain identity.
+pub type Green: codec + send {
+    tree: Bytes,
+    root: Bytes,
+    toolchain: Bytes
 }
 
 // Why an admission ended: a policy refusal printed as is, an invalid input or release,
-// a failed assembly, submitted source the checker refused (its diagnostics), or a compile
-// of submitted source that reached the toolchain's memory limit.
-pub type Failure: codec + send = Denied(String) | Invalid(String) | Unassembled(String) | Uncompiled(String) | Exhausted(String)
+// a failed assembly, submitted source the checker refused (its diagnostics), a compile
+// of submitted source that reached the toolchain's memory limit, a gated source whose
+// tests were not all green (one row per such test, with its outcome), or a gate whose
+// resident compiler session was lost: never green and never durable, the request is
+// admitted again (launch.md "The law gate" step 4).
+pub type Failure: codec + send = Denied(String) | Invalid(String) | Unassembled(String) | Uncompiled(String) | Exhausted(String) | Red(List[String]) | GateLost(String)
 
 // A cutover the launcher forwarded to OLD and still holds, by (OLD, attempt).
 pub type CutoverKey: codec + send {

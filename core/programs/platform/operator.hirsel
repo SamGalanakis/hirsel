@@ -46,13 +46,19 @@ pub type Registration: codec + send {
     front: Option[Front]
 }
 
+// What a Begin or Register deploys (launch.md "The operator socket"): an attested recipe R,
+// a publication R in the launcher's code store, or source, a `launcher.Tree`'s codec bytes.
+pub type Input: codec + send = AttestedInput(Bytes) | PublicationInput(Bytes) | SourceInput(Bytes)
+
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,
 // 5 ResolvePin, 6 LookupGroup, 7 Register, 8 Decide (operator.sock only).
 pub type Ask: codec + send =
-// Begin(D, group, input, foreign, exec, held): deploy `input` to the group's current
+// Begin(D, group, input, foreign, exec, held, gate): deploy `input` to the group's current
 // incarnation, approving exactly these sorted Foreign and Exec lines, with `held` the fate of
 // each run the deploy holds (RUNNER-SPEC §14.6). Unsorted or repeated entries are Invalid.
-BeginAsk(Bytes, launcher.Group, launcher.Input, List[String], List[String], runner.fate.Fates)
+// `gate` asks for the law gate (launch.md "The law gate"); with any input but a source it is
+// Invalid.
+BeginAsk(Bytes, launcher.Group, Input, List[String], List[String], runner.fate.Fates, bool)
 // One nonempty chunk of an attested input's admission bytes, on the connection that owns A.
     | DataAsk(Bytes, launcher.Attempt, Bytes)
 // The attested input is complete.
@@ -68,7 +74,7 @@ BeginAsk(Bytes, launcher.Group, launcher.Input, List[String], List[String], runn
 // Register(D, group, input, foreign, exec): add the group under a new incarnation and run
 // `input` as its first release, approving exactly these sorted Foreign and Exec lines. Its
 // upload and confirmation are a Begin's; it ends Installed at activation 0, its genesis.
-    | RegisterAsk(Bytes, Registration, launcher.Input, List[String], List[String])
+    | RegisterAsk(Bytes, Registration, Input, List[String], List[String])
 // Decide(D, decision, fates, approve): the operator's decision on request D, which awaits
 // one on exactly `decision` (launch.md "Self-editing"). When the decision shows a held group
 // or an unmatched path, `fates` replaces D's fates; otherwise it is `fate.none()`. An
@@ -188,7 +194,7 @@ pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(lau
 // One host reply. Tags: 0 State, 1 Need, 2 Display, 3 Pin, 4 Error, 5 GroupInfo, 6 Part.
 pub type Answer: codec + send =
 // State(D, group, input, phase): a committed snapshot.
-StateAnswer(Bytes, launcher.Group, launcher.Input, Phase)
+StateAnswer(Bytes, launcher.Group, Input, Phase)
 // Need(D, A, keys, last): one part of the verifier's missing set.
     | NeedAnswer(Bytes, launcher.Attempt, List[launcher.Wanted], bool)
 // Display(D, A, R, text): the exact Foreign and Exec text to confirm for verified R.

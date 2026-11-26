@@ -286,44 +286,58 @@ fn u4d_helper_streams_replay_as_units() {
         .unwrap();
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let entry = DefPath::from_full("app@1/main/main").unwrap();
-    for backend in [Backend::Cranelift, Backend::Llvm] {
+    // The release LLVM build cuts its program into per-definition parts:
+    // each helper's code descriptor and spawnable marker must survive the cut.
+    // Lowered one body per partition, a helper's descriptor is also referenced
+    // only from its spawner's partition.
+    let builds = [
+        (Backend::Cranelift, "dev"),
+        (Backend::Llvm, "dev"),
+        (Backend::Llvm, "release"),
+        (Backend::Llvm, "partitioned"),
+    ];
+    for (backend, build) in builds {
         let mut options = native_options(backend, dir.path());
         options.runtime = env_record_runtime();
         options.recording = true;
+        options.optimize = build != "dev";
         options.grant_mask = ["Tasks", "Stdout"]
             .iter()
             .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
-        options.cas = dir.path().join(format!("u4d-store-{backend:?}"));
-        options.output = dir.path().join(format!("u4d-{backend:?}"));
+        let backend = format!("{backend:?}-{build}");
+        options.cas = dir.path().join(format!("u4d-store-{backend}"));
+        options.output = dir.path().join(format!("u4d-{backend}"));
+        super::release::RELEASE_PARTITION.set((build == "partitioned").then_some(1));
         let program = product.build(&entry, &options).unwrap().executable;
-        let path = dir.path().join(format!("u4d-{backend:?}.tape"));
+        super::release::RELEASE_PARTITION.set(None);
+        let path = dir.path().join(format!("u4d-{backend}.tape"));
         let (code, out, err) = tape_run(&program, &[], Some(&path));
-        assert_eq!((code, out.as_str()), (Some(0), "units"), "{backend:?}: {err}");
+        assert_eq!((code, out.as_str()), (Some(0), "units"), "{backend}: {err}");
         let tape = std::fs::read(&path).unwrap();
         let file = std::fs::File::open(&path).unwrap();
         let read = |at: u64, b: &mut [u8]| file.read_at(b, at);
         let (mut index, header) = Index::open(read).unwrap();
         let paths: std::collections::BTreeMap<String, u32> = index.paths().map(|(s, n)| (n, s)).collect();
         let names: Vec<_> = paths.keys().map(String::as_str).collect();
-        assert_eq!(names, ["root", "root.0", "root.0.0", "root.1"], "{backend:?}");
+        assert_eq!(names, ["root", "root.0", "root.0.0", "root.1"], "{backend}");
 
         for unit in [None, Some("root"), Some("root.0"), Some("root.0.0"), Some("root.1")] {
             let (code, out, err) = u4_replay(&program, &path, unit);
-            assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "", ""), "{backend:?} {unit:?}");
+            assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "", ""), "{backend} {unit:?}");
         }
 
         // (c) inner's result, 21, taken by root.0 under ordinal 99.
         let wrong = u4_patched(&tape, &header.tape_id, paths["root.0"], u4_take_to_99(&[21]));
-        let corrupt = dir.path().join(format!("u4d-{backend:?}-take.tape"));
+        let corrupt = dir.path().join(format!("u4d-{backend}-take.tape"));
         std::fs::write(&corrupt, &wrong).unwrap();
         for unit in [None, Some("root.0")] {
             let (code, out, err) = u4_replay(&program, &corrupt, unit);
-            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} {unit:?}: {err}");
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend} {unit:?}: {err}");
             let lines: Vec<_> = err.lines().collect();
             assert!(
                 matches!(&lines[..], [l] if l.starts_with("replay: Diverged(Take) at 2 in root.0 ")
                     && l.contains("no helper with ordinal 99")),
-                "{backend:?} {unit:?}: {err}"
+                "{backend} {unit:?}: {err}"
             );
         }
 
@@ -346,14 +360,14 @@ fn u4d_helper_streams_replay_as_units() {
             payload[at + descriptor.len() - 1] ^= 0xff;
             true
         });
-        let unresolved = dir.path().join(format!("u4d-{backend:?}-entry.tape"));
+        let unresolved = dir.path().join(format!("u4d-{backend}-entry.tape"));
         std::fs::write(&unresolved, &unknown).unwrap();
         let (code, out, err) = u4_replay(&program, &unresolved, None);
-        assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?}: {err}");
+        assert_eq!((code, out.as_str()), (Some(1), ""), "{backend}: {err}");
         let lines: Vec<_> = err.lines().collect();
         assert!(
             matches!(&lines[..], [l] if l.starts_with("replay: Diverged(Op) at 0 in root.1 ")),
-            "{backend:?}: {err}"
+            "{backend}: {err}"
         );
     }
 }

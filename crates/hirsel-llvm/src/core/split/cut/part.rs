@@ -6,6 +6,11 @@ impl<'a> Part<'_, 'a> {
     pub(super) fn cut(&mut self) -> Result<(), String> {
         let text = self.input.text;
         self.copy(text, self.atom.0)?;
+        let input = self.input;
+        for &symbol in input.owned.get(&self.atom.0).into_iter().flatten() {
+            let y = &input.symbols[symbol];
+            self.copy(y.section.expect("an owned symbol is defined"), y.value)?;
+        }
         while let Some((source, start, end)) = self.queue.pop_front() {
             let out = self.placed[&source];
             let base = self.atoms[&(source, start)];
@@ -128,7 +133,7 @@ impl<'a> Part<'_, 'a> {
             if y.section_start() {
                 continue;
             }
-            let (kind, desc) = copied(y, text);
+            let (kind, desc) = copied(y, text, input.owned_by(i, self.atom.0));
             self.mapped.insert(i, self.symbols.len());
             self.symbols.push(OutSymbol {
                 name: y.name.to_vec(),
@@ -230,7 +235,7 @@ impl<'a> Part<'_, 'a> {
                 at
             }
         };
-        let (kind, desc) = copied(y, false);
+        let (kind, desc) = copied(y, false, None);
         let name = if y.external() {
             y.name.to_vec()
         } else {

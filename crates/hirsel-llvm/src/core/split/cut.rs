@@ -210,6 +210,11 @@ struct Input<'a> {
     entries: Vec<(u64, usize)>,
     /// DWARF unwind records by function offset.
     fdes: Vec<Fde>,
+    /// The strong data symbols each definition owns, by its text atom's
+    /// start, in symbol order, and the owner of each: as the ELF cut's
+    /// (`super::Input::owned`).
+    owned: HashMap<u64, Vec<usize>>,
+    owner: HashMap<usize, u64>,
 }
 
 impl<'a> Input<'a> {
@@ -230,6 +235,8 @@ impl<'a> Input<'a> {
             names: HashMap::new(),
             entries: Vec::new(),
             fdes: Vec::new(),
+            owned: HashMap::new(),
+            owner: HashMap::new(),
         };
         let mut at = HEADER;
         let mut symtab = None;
@@ -421,7 +428,57 @@ impl<'a> Input<'a> {
         input.hints.sort_by_key(|h| h.low);
         input.compact_entries()?;
         input.unwind_records()?;
+        input.owners();
         Ok(input)
+    }
+
+    /// Each strong external descriptor (`…$static`) whose code word, its
+    /// first, relocates to a text symbol, and each strong external marker
+    /// named after one (`…$spawnable$…`), with the text atom that owns it.
+    fn owners(&mut self) {
+        let strong_data = |y: &Symbol| {
+            y.external()
+                && y.kind & N_PEXT == 0
+                && y.desc & N_WEAK_DEF == 0
+                && y.section.is_some_and(|s| s != self.text)
+        };
+        let mut descriptors = HashMap::new();
+        for (i, y) in self.symbols.iter().enumerate() {
+            if !strong_data(y) || !y.name.ends_with(b"$static") {
+                continue;
+            }
+            let section = &self.sections[y.section.unwrap()];
+            let code = section
+                .relocations_in(y.value, y.value + 1)
+                .iter()
+                .find(|r| r.kind == ARM64_RELOC_UNSIGNED && r.external);
+            let function = code.map(|r| &self.symbols[r.symbol as usize]);
+            if let Some(f) = function.filter(|f| f.section == Some(self.text)) {
+                descriptors.insert(y.name, f.value);
+                self.owner.insert(i, f.value);
+            }
+        }
+        for (i, y) in self.symbols.iter().enumerate() {
+            if !strong_data(y) {
+                continue;
+            }
+            let Some(at) = y.name.windows(11).position(|w| w == b"$spawnable$") else {
+                continue;
+            };
+            if let Some(&start) = descriptors.get(&y.name[..at]) {
+                self.owner.insert(i, start);
+            }
+        }
+        let mut order: Vec<_> = self.owner.iter().map(|(&y, &a)| (y, a)).collect();
+        order.sort_unstable();
+        for (symbol, atom) in order {
+            self.owned.entry(atom).or_default().push(symbol);
+        }
+    }
+
+    /// Whether `symbol` is owned, and then whether by the text atom at `start`.
+    fn owned_by(&self, symbol: usize, start: u64) -> Option<bool> {
+        self.owner.get(&symbol).map(|&owner| owner == start)
     }
 
     /// Each compact unwind entry's function: a section-relative address in
@@ -653,13 +710,16 @@ impl<'i, 'a> Part<'i, 'a> {
 
 /// The type and description of a part's copy of a symbol: an external
 /// constant becomes a weak private-extern definition, so the link keeps one
-/// copy and one address; text, locals and weak constants keep theirs.
-fn copied(y: &Symbol, text: bool) -> (u8, u16) {
+/// copy and one address; text, locals and weak constants keep theirs. What a
+/// definition owns is strong in its own part and weak, with its own
+/// visibility, in another that reaches it (`super::copied`).
+fn copied(y: &Symbol, text: bool, owned: Option<bool>) -> (u8, u16) {
     let kind = y.kind & !N_TYPE;
-    if text || !y.external() || y.desc & N_WEAK_DEF != 0 {
-        (kind, y.desc)
-    } else {
-        (kind | N_PEXT, y.desc | N_WEAK_DEF)
+    match owned {
+        Some(true) => (kind, y.desc),
+        Some(false) => (kind, y.desc | N_WEAK_DEF),
+        None if text || !y.external() || y.desc & N_WEAK_DEF != 0 => (kind, y.desc),
+        None => (kind | N_PEXT, y.desc | N_WEAK_DEF),
     }
 }
 

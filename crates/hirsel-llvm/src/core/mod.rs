@@ -41,7 +41,9 @@ pub use optimized_ir::*;
 use oracle::printed_oracle;
 #[cfg(hirsel_lazy_core)]
 pub(crate) use partition::emit_release_unit;
-use partition::{Analyses, Foreign, ForeignBody, bodies, define_static, foreign_symbols, prepare};
+use partition::{
+    Analyses, Foreign, ForeignBody, bodies, define_static, descriptor_refs, foreign_symbols, prepare,
+};
 mod scalar;
 mod simd;
 mod sink;
@@ -527,87 +529,79 @@ fn emit_prepared(
     // declares it); an intrinsic's holds its revision, weak_odr.
     let mut described = BTreeSet::new();
     let mut revisions = BTreeSet::new();
-    for (_, body) in bodies(module, members) {
-        for inst in &body.insts {
-            let Inst::DescriptorRef {
-                function, identity, ..
-            } = *inst
-            else {
-                continue;
+    for (function, identity, _) in descriptor_refs(module, members) {
+        let function_symbol = items.function_symbol(function);
+        let name = module.descriptor_symbol(function, function_symbol);
+        if !described.insert(name.clone()) {
+            continue;
+        }
+        let root = module.revision_root(function);
+        let revision = hirsel_core_ir::revision_symbol(root.identity().digest());
+        if revisions.insert(revision.clone()) {
+            let (linkage, init) = match &root {
+                hirsel_core_ir::RevisionRoot::Item(_) => (Linkage::Weak, Value::Zero),
+                hirsel_core_ir::RevisionRoot::Intrinsic(identity) => {
+                    let bytes = format!("{revision}.bytes");
+                    sink.global(&Global {
+                        name: bytes.clone().into(),
+                        linkage: Linkage::Private,
+                        constant: true,
+                        externally_initialized: false,
+                        ty: Type::bytes(32),
+                        init: Some(Value::Bytes(
+                            hirsel_core_ir::intrinsic_revision(identity).0.to_vec(),
+                        )),
+                        align: 1,
+                        absolute_symbol: false,
+                        section: None,
+                    });
+                    let fields = vec![
+                        (Type::Ptr, Value::global(bytes)),
+                        (Type::I64, Value::Int(32)),
+                        (Type::I64, Value::Int(0)),
+                    ];
+                    (
+                        Linkage::WeakOdr,
+                        Value::Struct {
+                            packed: false,
+                            fields,
+                        },
+                    )
+                }
             };
-            let function_symbol = items.function_symbol(function);
-            let name = module.descriptor_symbol(function, function_symbol);
-            if !described.insert(name.clone()) {
-                continue;
-            }
-            let root = module.revision_root(function);
-            let revision = hirsel_core_ir::revision_symbol(root.identity().digest());
-            if revisions.insert(revision.clone()) {
-                let (linkage, init) = match &root {
-                    hirsel_core_ir::RevisionRoot::Item(_) => (Linkage::Weak, Value::Zero),
-                    hirsel_core_ir::RevisionRoot::Intrinsic(identity) => {
-                        let bytes = format!("{revision}.bytes");
-                        sink.global(&Global {
-                            name: bytes.clone().into(),
-                            linkage: Linkage::Private,
-                            constant: true,
-                            externally_initialized: false,
-                            ty: Type::bytes(32),
-                            init: Some(Value::Bytes(
-                                hirsel_core_ir::intrinsic_revision(identity).0.to_vec(),
-                            )),
-                            align: 1,
-                            absolute_symbol: false,
-                            section: None,
-                        });
-                        let fields = vec![
-                            (Type::Ptr, Value::global(bytes)),
-                            (Type::I64, Value::Int(32)),
-                            (Type::I64, Value::Int(0)),
-                        ];
-                        (
-                            Linkage::WeakOdr,
-                            Value::Struct {
-                                packed: false,
-                                fields,
-                            },
-                        )
-                    }
-                };
-                sink.global(&Global {
-                    name: revision.clone().into(),
-                    linkage,
-                    constant: true,
-                    externally_initialized: false,
-                    ty: Type::structure([Type::Ptr, Type::I64, Type::I64]),
-                    init: Some(init),
-                    align: 8,
-                    absolute_symbol: false,
-                    section: None,
-                });
-            }
-            let bytes = module.statics[identity.index()].literal_bytes().unwrap();
-            let identity = Type::bytes(bytes.len() as u64);
             sink.global(&Global {
-                name: name.into(),
-                linkage: Linkage::WeakOdr,
+                name: revision.clone().into(),
+                linkage,
                 constant: true,
                 externally_initialized: false,
-                ty: Type::structure([Type::Ptr, Type::I64, Type::Ptr, identity.clone()]),
-                init: Some(Value::Struct {
-                    packed: false,
-                    fields: vec![
-                        (Type::Ptr, Value::global(function_symbol.to_owned())),
-                        (Type::I64, Value::Int(bytes.len() as i128)),
-                        (Type::Ptr, Value::global(revision)),
-                        (identity, Value::Bytes(bytes.to_vec())),
-                    ],
-                }),
+                ty: Type::structure([Type::Ptr, Type::I64, Type::I64]),
+                init: Some(init),
                 align: 8,
                 absolute_symbol: false,
                 section: None,
             });
         }
+        let bytes = module.statics[identity.index()].literal_bytes().unwrap();
+        let identity = Type::bytes(bytes.len() as u64);
+        sink.global(&Global {
+            name: name.into(),
+            linkage: Linkage::WeakOdr,
+            constant: true,
+            externally_initialized: false,
+            ty: Type::structure([Type::Ptr, Type::I64, Type::Ptr, identity.clone()]),
+            init: Some(Value::Struct {
+                packed: false,
+                fields: vec![
+                    (Type::Ptr, Value::global(function_symbol.to_owned())),
+                    (Type::I64, Value::Int(bytes.len() as i128)),
+                    (Type::Ptr, Value::global(revision)),
+                    (identity, Value::Bytes(bytes.to_vec())),
+                ],
+            }),
+            align: 8,
+            absolute_symbol: false,
+            section: None,
+        });
     }
     let mut next_scope = alias::private_steps(sink);
     let failures = &analyses.failures;

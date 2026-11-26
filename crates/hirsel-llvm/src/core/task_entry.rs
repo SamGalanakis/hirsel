@@ -192,7 +192,7 @@ pub(super) fn emit(
         drop(e);
         sink.end_function();
     }
-    spawn_entries(module, target, recipes, failures, facts, sink, items)
+    spawn_entries(module, members, target, recipes, failures, facts, sink, items)
 }
 
 /// Defines, weak, a marker per spawnable function's descriptor
@@ -202,9 +202,13 @@ pub(super) fn emit(
 /// layout, x, r}` as the runtime's `SpawnEntry`. The link indexes them by the
 /// identities of the functions such a helper can start, so a replay starts
 /// one from its entry alone. The adapter is the spawn's own, which starts any
-/// function of the rows' type.
+/// function of the rows' type. A release partition defines the spawn entries
+/// of its members' spawns, beside their glue, and the markers of the
+/// descriptors it defines.
+#[allow(clippy::too_many_arguments)]
 fn spawn_entries(
     module: &Module,
+    members: Option<&[bool]>,
     target: Target,
     recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
@@ -214,23 +218,15 @@ fn spawn_entries(
 ) -> Result<()> {
     let mut units = BTreeMap::new();
     let mut spawnable = BTreeSet::new();
-    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
-        // A function made a plain `fn(take X) -> R` value: the link joins its
-        // descriptor to the spawn entry of its rows by this marker's name.
-        for inst in &body.insts {
-            if let Inst::DescriptorRef {
-                function,
-                spawn: Some(spawn),
-                ..
-            } = *inst
-            {
-                let name = module.descriptor_symbol(function, items.function_symbol(function));
-                spawnable.insert(hirsel_core_ir::spawnable_symbol(
-                    &name,
-                    module.spawn_key(spawn),
-                ));
-            }
+    // A function made a plain `fn(take X) -> R` value: the link joins its
+    // descriptor to the spawn entry of its rows by this marker's name.
+    for (function, _, spawn) in super::descriptor_refs(module, members) {
+        if let Some(spawn) = spawn {
+            let name = module.descriptor_symbol(function, items.function_symbol(function));
+            spawnable.insert(hirsel_core_ir::spawnable_symbol(&name, module.spawn_key(spawn)));
         }
+    }
+    for (_, body) in super::bodies(module, members) {
         for call in &body.calls {
             if let Callee::Runtime(RtOp::SpawnUnit { x, r }) = call.callee
                 && !units.contains_key(&(x, r))

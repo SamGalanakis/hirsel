@@ -127,6 +127,28 @@ pub(super) fn bodies<'m>(
         .filter_map(|(i, f)| Some((i, f.body.as_ref()?)))
 }
 
+/// The descriptor references whose descriptors the unit, or the partition
+/// of its `members`, defines: its bodies' own, and in a partition every
+/// reference to a member's descriptor wherever it is, since the release cut
+/// keeps a descriptor (and its spawnable markers) only in its function's part.
+pub(super) fn descriptor_refs<'m>(
+    module: &'m Module,
+    members: Option<&'m [bool]>,
+) -> impl Iterator<Item = (FuncId, StaticId, Option<SpawnTypes>)> + 'm {
+    let member = move |i: usize| members.is_none_or(|members| members[i]);
+    bodies(module, None).flat_map(move |(i, body)| {
+        body.insts.iter().filter_map(move |inst| match *inst {
+            Inst::DescriptorRef {
+                function,
+                identity,
+                spawn,
+                ..
+            } if member(i) || member(function.index()) => Some((function, identity, spawn)),
+            _ => None,
+        })
+    })
+}
+
 /// A body another partition defines, as [`emit_prepared`] defines it.
 pub(super) struct ForeignBody<'n, P> {
     pub(super) name: &'n str,

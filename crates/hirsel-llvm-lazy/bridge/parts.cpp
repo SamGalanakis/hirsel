@@ -401,6 +401,37 @@ void list_compile_units(Module &p) {
         if (listed.insert(unit).second) units->addOperand(unit);
 }
 
+// The code descriptors (`$static`, PROG-9) and spawnable markers
+// (`$spawnable$`) each defined function owns: a `weak_odr` descriptor whose
+// code word is the function, and each marker named after such a descriptor.
+// The whole-program optimizer folds a load of a descriptor's code word, so
+// no part's code need reach the descriptor any more; its function's part
+// defines it, and the markers that join it to a spawn entry, strong, so the
+// link indexes them however the program's code was cut. Listed in module
+// order. A library that lends its bodies has made its descriptors
+// `linkonce_odr` (`lent_bodies`) and owns none.
+using Owned = DenseMap<const Function *, SmallVector<GlobalVariable *, 2>>;
+Owned owned_descriptors(Module &m) {
+    Owned owned;
+    StringMap<const Function *> owner;
+    for (GlobalVariable &g : m.globals()) {
+        if (!g.hasWeakODRLinkage() || !g.isConstant() || !g.getName().ends_with("$static")) continue;
+        auto *init = dyn_cast_or_null<ConstantStruct>(g.hasInitializer() ? g.getInitializer() : nullptr);
+        if (!init || init->getNumOperands() == 0) continue;
+        auto *f = dyn_cast<Function>(init->getOperand(0)->stripPointerCasts());
+        if (!f || f->isDeclaration()) continue;
+        owner[g.getName()] = f;
+        owned[f].push_back(&g);
+    }
+    for (GlobalVariable &g : m.globals()) {
+        if (g.isDeclaration() || !g.isConstant()) continue;
+        auto [descriptor, key] = g.getName().split("$spawnable$");
+        if (key.empty()) continue;
+        if (auto f = owner.find(descriptor); f != owner.end()) owned[f->second].push_back(&g);
+    }
+    return owned;
+}
+
 // Lends `use` the part of `f`: `f` alone, with what it references, in a
 // module of its own. The part's definition borrows `f`'s body for the call: its blocks move in,
 // its operands and metadata that name a global name the part's declaration
@@ -414,8 +445,10 @@ void list_compile_units(Module &p) {
 // and of each global it names, and whether each is defined, are written to it,
 // and the part defines every variable it names with its initializer (a tail
 // folds a load from a constant): the part is then a release tail's input.
+// With `owned`, the part defines strong what `f` owns of it (`owned_descriptors`).
 void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::string *linkage,
-               SmallVectorImpl<MDNode *> *debug, function_ref<void(std::unique_ptr<Module> &)> use) {
+               SmallVectorImpl<MDNode *> *debug, function_ref<void(std::unique_ptr<Module> &)> use,
+               const Owned *owned = nullptr) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
     p->setSourceFileName("hirsel-part");
@@ -446,6 +479,10 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
             movable = movable && !i.hasDbgRecords();
         }
     }
+    ArrayRef<GlobalVariable *> own_data;
+    if (owned)
+        if (auto at = owned->find(&f); at != owned->end()) own_data = at->second;
+    for (GlobalVariable *g : own_data) refs.value(g);
     refs.settle();
     if (linkage) {
         raw_string_ostream os(*linkage);
@@ -500,6 +537,7 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
         own->setVisibility(GlobalValue::HiddenVisibility);
     }
     map[&f] = own;
+    for (GlobalVariable *g : own_data) cast<GlobalValue>(map[g])->setLinkage(GlobalValue::ExternalLinkage);
     // After `f` is mapped: a constant may point back at it.
     for (auto &[from, to] : constants) to->setInitializer(MapValue(from->getInitializer(), map));
     if (!assembly.empty()) p->appendModuleInlineAsm(Module::GlobalAsmFragment(assembly));
@@ -1017,6 +1055,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
             return 0;
         }
         StringMap<std::string> sets = asm_lines(m);
+        Owned owned = owned_descriptors(m);
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
             with_part(m, f, sets, nullptr, nullptr, [&](auto &part) {
@@ -1026,7 +1065,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
                 bool strong = !p.getFunction(f.getName())->isWeakForLinker();
                 code(context, f.getName().data(), f.getName().size(), strong,
                      (const uint8_t *)bytes.data(), bytes.size());
-            });
+            }, &owned);
         }
         return 0;
     }
@@ -1045,6 +1084,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         // part's object holds a copy of. A missed part's bitcode is the
         // input its worker generates from.
         StringMap<std::string> sets = asm_lines(m);
+        Owned owned = owned_descriptors(m);
         std::vector<Function *> held;
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
@@ -1058,7 +1098,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
                 // keyed: the part itself, with no bitcode between.
                 if (jobs == 1) miss.part = std::move(p);
                 else if (jobs) bitcode(*p, miss.code);
-            });
+            }, &owned);
         }
         if (jobs) {
             if (misses.empty()) return 0;
@@ -1081,6 +1121,12 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
                 g.setLinkage(partition ? GlobalValue::WeakODRLinkage : GlobalValue::ExternalLinkage);
                 g.setVisibility(GlobalValue::HiddenVisibility);
             }
+        // What a generated part owns it defines strong, as its own bitcode
+        // does; a held part's object defines its own.
+        DenseSet<const Function *> kept(held.begin(), held.end());
+        for (auto &[f, data] : owned)
+            if (!kept.contains(f))
+                for (GlobalVariable *g : data) g->setLinkage(GlobalValue::ExternalLinkage);
         for (Function *f : held) f->deleteBody();
     }
     if (misses.empty()) return 0;

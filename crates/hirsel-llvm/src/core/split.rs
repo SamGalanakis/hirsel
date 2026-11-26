@@ -7,6 +7,9 @@
 //!   of their shared mergeable sections;
 //! - every constant it reaches, transitively, as a weak hidden definition,
 //!   so the link keeps one copy and one address per program;
+//! - the code descriptor (PROG-9) of its function and the spawnable markers
+//!   named after it, strong: the definition owns them, whether or not its
+//!   code still reaches them once the optimizer folded their loads;
 //! - its unwind records (the CIE and each FDE of its text);
 //! - with debug lines, its own rows of the program's debug data.
 //!
@@ -16,7 +19,7 @@
 //! keys a module it cannot cut as one whole part instead.
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::coverage::Fragment;
-use hirsel_core_ir::source::{CodeSection, NativeDebug, NativeObject, ScopeKind, debug_symbol};
+use hirsel_core_ir::source::{NativeObject, debug_symbol};
 use hirsel_core_layout::ObjectFormat;
 use object::LittleEndian as LE;
 use object::elf;
@@ -24,7 +27,11 @@ use object::read::elf::{FileHeader as _, Rela as _, SectionHeader as _, Sym as _
 use std::collections::{HashMap, VecDeque};
 
 mod cut;
+mod debug_rows;
 mod macho;
+mod owned;
+
+use debug_rows::restrict;
 
 type Header = elf::FileHeader64<LE>;
 
@@ -182,11 +189,14 @@ struct InputSymbol<'a> {
 
 /// The binding and visibility of a part's copy of a symbol: a global constant becomes a weak
 /// hidden definition; text, locals and weak (shared, carried by every part) constants keep theirs.
-fn copied(y: &InputSymbol, text: bool) -> (u8, u8) {
-    if text || y.bind != raw::STB_GLOBAL {
-        (y.bind, y.other)
-    } else {
-        (raw::STB_WEAK, (y.other & !3) | raw::STV_HIDDEN)
+/// What a definition owns (`Input::owned`) is strong in its own part, and in another part that
+/// reaches it weak with its own visibility, as that part's own generation defines it.
+fn copied(y: &InputSymbol, text: bool, owned: Option<bool>) -> (u8, u8) {
+    match owned {
+        Some(true) => (raw::STB_GLOBAL, y.other),
+        Some(false) => (raw::STB_WEAK, y.other),
+        None if text || y.bind != raw::STB_GLOBAL => (y.bind, y.other),
+        None => (raw::STB_WEAK, (y.other & !3) | raw::STV_HIDDEN),
     }
 }
 
@@ -196,6 +206,13 @@ struct Input<'a> {
     sections: Vec<Section<'a>>,
     symbols: Vec<InputSymbol<'a>>,
     functions: HashMap<&'a [u8], usize>,
+    /// The strong data symbols a definition owns, by its text section: its
+    /// function's code descriptor (`…$static`, whose code word relocates to
+    /// the function) and the spawnable markers named after that descriptor
+    /// (`…$spawnable$…`), in symbol order.
+    owned: HashMap<usize, Vec<usize>>,
+    /// The text section that owns each owned symbol.
+    owner: HashMap<usize, usize>,
     unwind: Option<usize>,
     note: Option<usize>,
 }
@@ -311,15 +328,23 @@ impl<'a> Input<'a> {
                 list.sort_by_key(|r| r.0);
             }
         }
+        let (owned, owner) = owned::owned(&sections, &symbols);
         Ok(Input {
             machine: header.e_machine(LE).0,
             flags: header.e_flags(LE).0,
             sections,
             symbols,
             functions,
+            owned,
+            owner,
             unwind,
             note,
         })
+    }
+
+    /// Whether `symbol` is owned, and then whether by the definition `text`.
+    fn owned_by(&self, symbol: usize, text: usize) -> Option<bool> {
+        self.owner.get(&symbol).map(|&owner| owner == text)
     }
 
     /// The text section that defines `name`, which starts there.
@@ -393,6 +418,12 @@ impl<'i, 'a> Part<'i, 'a> {
 
     fn cut(&mut self) -> Result<(), String> {
         self.copy(self.text)?;
+        for &symbol in self.input.owned.get(&self.text).into_iter().flatten() {
+            let section = self.input.symbols[symbol]
+                .section
+                .expect("an owned symbol is defined");
+            self.copy(section)?;
+        }
         while let Some(source) = self.queue.pop_front() {
             let out = self.copied[&source];
             for &(offset, symbol, kind, addend) in &self.input.sections[source].relocations {
@@ -455,7 +486,7 @@ impl<'i, 'a> Part<'i, 'a> {
         self.queue.push_back(source);
         for &i in &s.symbols {
             let y = &self.input.symbols[i];
-            let (bind, other) = copied(y, s.text);
+            let (bind, other) = copied(y, s.text, self.input.owned_by(i, self.text));
             let index = self.symbols.len();
             self.symbols.push(Symbol {
                 name: y.name.to_vec(),
@@ -596,7 +627,7 @@ impl<'i, 'a> Part<'i, 'a> {
             at
         });
         self.sections[out].size = self.sections[out].data.len() as u64;
-        let (bind, other) = copied(y, false);
+        let (bind, other) = copied(y, false, None);
         let name = if y.bind == raw::STB_LOCAL {
             // Pool labels are numbered per program; a part's are its own.
             self.pool += 1;
@@ -923,109 +954,6 @@ fn uleb(bytes: &[u8], at: usize) -> Result<(u64, usize), String> {
         }
     }
     Err("truncated unwind LEB128".into())
-}
-
-/// The debug rows of one code section, as if its part had been generated
-/// alone: the section is the part's only one, scopes are its own trees then
-/// the abstract scopes they name, and items are numbered by first use. A
-/// physical function scope carries its abstract origin's name and
-/// declaration, so it does not depend on whether another definition inlined
-/// the same function.
-fn restrict(debug: &NativeDebug, id: u32, symbol: String) -> Result<NativeDebug, String> {
-    let mut out = NativeDebug {
-        sections: vec![CodeSection {
-            symbol,
-            size: debug.sections[id as usize].size,
-        }],
-        ..NativeDebug::default()
-    };
-    let mut items: HashMap<u32, u32> = HashMap::new();
-    let mut item = |location: Option<hirsel_core_ir::source::NativeLocation>,
-                    out: &mut NativeDebug| {
-        location.map(|mut l| {
-            l.item = *items.entry(l.item).or_insert_with(|| {
-                out.items.push(debug.items[l.item as usize].clone());
-                out.items.len() as u32 - 1
-            });
-            l
-        })
-    };
-    for sequence in debug.sequences.iter().filter(|s| s.range.section == id) {
-        let mut sequence = sequence.clone();
-        sequence.range.section = 0;
-        for row in &mut sequence.rows {
-            row.source = item(row.source, &mut out);
-        }
-        out.sequences.push(sequence);
-    }
-    // Own scopes in preorder, each after its parent; then named origins.
-    let mut order: Vec<u32> = Vec::new();
-    let mut kept: HashMap<u32, u32> = HashMap::new();
-    fn visit(
-        scopes: &[hirsel_core_ir::source::DebugScope],
-        s: u32,
-        order: &mut Vec<u32>,
-        kept: &mut HashMap<u32, u32>,
-    ) {
-        if kept.contains_key(&s) {
-            return;
-        }
-        if let Some(parent) = scopes[s as usize].parent {
-            visit(scopes, parent, order, kept);
-        }
-        kept.insert(s, order.len() as u32);
-        order.push(s);
-    }
-    for (s, scope) in debug.scopes.iter().enumerate() {
-        if scope.ranges.iter().any(|r| r.section == id) {
-            visit(&debug.scopes, s as u32, &mut order, &mut kept);
-        }
-    }
-    let own = order.len();
-    let folded = |s: u32| {
-        let scope = &debug.scopes[s as usize];
-        matches!(scope.kind, ScopeKind::Function { .. })
-            && !scope.ranges.is_empty()
-            && scope.origin.is_some()
-    };
-    let mut at = 0;
-    while at < order.len() {
-        let s = order[at];
-        if let Some(origin) = debug.scopes[s as usize].origin
-            && !(at < own && folded(s))
-        {
-            visit(&debug.scopes, origin, &mut order, &mut kept);
-        }
-        at += 1;
-    }
-    for (at, &s) in order.iter().enumerate() {
-        let mut scope = debug.scopes[s as usize].clone();
-        if at < own && folded(s) {
-            let origin = &debug.scopes[scope.origin.take().unwrap() as usize];
-            if scope.name.is_empty() {
-                scope.name = origin.name.clone();
-            }
-            if scope.declaration.is_none() {
-                scope.declaration = origin.declaration;
-            }
-            if let (ScopeKind::Function { linkage }, ScopeKind::Function { linkage: from }) =
-                (&mut scope.kind, &origin.kind)
-                && linkage.is_empty()
-            {
-                *linkage = from.clone();
-            }
-        }
-        scope.parent = scope.parent.map(|p| kept[&p]);
-        scope.origin = scope.origin.map(|o| kept[&o]);
-        scope.ranges.retain(|r| r.section == id);
-        for range in &mut scope.ranges {
-            range.section = 0;
-        }
-        scope.declaration = item(scope.declaration, &mut out);
-        scope.call = item(scope.call, &mut out);
-        out.scopes.push(scope);
-    }
-    Ok(out)
 }
 
 /// The symbols `object` defines as strong globals, whatever their

@@ -438,7 +438,7 @@ impl Tapes {
         }
     }
 
-    fn seal_deadlock(&mut self) -> Option<([u8; 16], crate::tape::Fault)> {
+    fn seal_deadlock(&mut self) -> Option<(String, crate::tape::Fault)> {
         self.live
             .drain(..)
             .filter_map(|entry| {
@@ -446,10 +446,10 @@ impl Tapes {
                     .group
                     .seal_deadlock()
                     .err()
-                    .map(|fault| (entry.opened, fault))
+                    .map(|deadlock| (entry.opened, deadlock))
             })
             .min_by_key(|(opened, _)| *opened)
-            .map(|(_, fault)| fault)
+            .map(|(_, deadlock)| deadlock)
     }
 }
 
@@ -1172,8 +1172,8 @@ impl Scheduler {
 
     fn stop_quiescent(&mut self) -> ! {
         #[cfg(feature = "record")]
-        if let Some((_, fault)) = self.tapes.seal_deadlock() {
-            let mut line = crate::tape::format_verdict(fault, 0);
+        if let Some((unit, fault)) = self.tapes.seal_deadlock() {
+            let mut line = crate::tape::format_verdict(fault, 0, &unit);
             line.push('\n');
             // SAFETY: stderr is fd 2 and `line` is valid for its length.
             unsafe {

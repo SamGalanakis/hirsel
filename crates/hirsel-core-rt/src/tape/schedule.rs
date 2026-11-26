@@ -38,11 +38,11 @@ impl Hooks for TapeHooks {
         group.with(|live| live.replay_retirements(group.task, payer));
     }
 
-    fn seal_deadlock(&self, group: Group) -> Result<(), ([u8; 16], Fault)> {
-        let id = group.with(|live| live.tape_id).unwrap();
+    fn seal_deadlock(&self, group: Group) -> Result<(), (String, Fault)> {
+        let unit = group.with(|live| live.unit().to_owned()).unwrap();
         finish(group.cell, group.generation, Seal::Deadlock)
             .map(|_| ())
-            .map_err(|fault| (id, fault))
+            .map_err(|fault| (unit, fault))
     }
 
     fn check(&self, group: Group) -> Result<(), Fault> {

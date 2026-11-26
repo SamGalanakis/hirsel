@@ -291,8 +291,11 @@ position. It always replays and never continues with live effects.
 A verdict other than `Sealed` ends the replay at the position where it is found: the
 divergent issue has no effect and is not delivered, and no further program code, cleanup or
 finalizer runs. The program observes nothing of it. The replay writes one line,
-`replay: VERDICT at N`, where N is the position of the frame it was checked against, counted
-after the header. A divergence appends the scheduler event, recorded frame kind and
+`replay: VERDICT at N in UNIT`, where N is the position of the frame it was checked against,
+counted after the header, and UNIT is the stream's [unit name](#replay-of-a-run-with-helpers):
+`root` for the root stream, whether or not the run had helpers, since the root is stream 0 and
+one replay reads every stream. `Damaged at block B` names the file's block and no unit. A
+divergence appends the scheduler event, recorded frame kind and
 available expected and observed fields. Read capacities and sleep deadlines are shown as
 numbers. Other argument bytes and outcome payloads are redacted. With `--diagnose`, the
 line also includes the source position when one is available. Replay then exits 1. A

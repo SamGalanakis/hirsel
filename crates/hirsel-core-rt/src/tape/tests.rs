@@ -1238,7 +1238,7 @@ fn launcher_reports_the_first_tampered_argument() {
     assert_eq!(
         diagnostic,
         format!(
-            "replay: Diverged(Arg) at 9 [event 9: frame OP; expected task=0 op={STDOUT} object=2 args=redacted; observed task=0 op={STDOUT} object=2 args=redacted]\n"
+            "replay: Diverged(Arg) at 9 in root [event 9: frame OP; expected task=0 op={STDOUT} object=2 args=redacted; observed task=0 op={STDOUT} object=2 args=redacted]\n"
         )
     );
 }

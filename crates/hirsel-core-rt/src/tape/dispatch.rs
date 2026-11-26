@@ -3,7 +3,8 @@ use super::{Cell, Fault, cell_of};
 use crate::provider::{Provider, Request, Step};
 use std::ptr;
 
-type Deadlock = ([u8; 16], Fault);
+/// The unit whose stream deadlocked, by name, and its fault.
+type Deadlock = (String, Fault);
 
 /// Installed by the tape constructor. The scheduler carries the same cell and
 /// generation as the provider, so it needs neither a global mode nor a lookup.

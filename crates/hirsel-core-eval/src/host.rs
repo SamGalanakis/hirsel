@@ -106,6 +106,7 @@ impl Machine<'_> {
             op,
             HostOp::WallMs
                 | HostOp::MonoNs
+                | HostOp::BootNs
                 | HostOp::ExecNarrow
                 | HostOp::NetNarrow
                 | HostOp::NetClass
@@ -197,6 +198,7 @@ impl Machine<'_> {
             | HostOp::ProvideRandomTape
             | HostOp::ProvideProcess
             | HostOp::ClockAdvance
+            | HostOp::ClockAdvanceBoot
             | HostOp::ClockSetWall
             | HostOp::ClockIdle
             | HostOp::ProcessTrigger
@@ -379,7 +381,7 @@ impl Machine<'_> {
                 }
                 ok(0, 0)
             }
-            HostOp::WallMs | HostOp::MonoNs => {
+            HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs => {
                 // The host clock is monotonic (native reads CLOCK_MONOTONIC,
                 // hirsel-core-rt os::monotonic_ns): a read after a sleep to the
                 // maximum deadline stays there instead of wrapping (CONC-7).

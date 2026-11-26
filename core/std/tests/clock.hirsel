@@ -72,3 +72,34 @@ fn alarm_lifecycle(tasks: Tasks) -> bool waits {
     }
     pending && empty && blocked && causes_seen == 1 && waiting && settled && closed
 }
+
+type BootDrive: send {
+    clocks: sim.world.Clocks,
+    tasks: Tasks
+}
+
+fn drive_boot_clocks(take input: BootDrive) waits {
+    let BootDrive(clocks: take clocks, tasks) = take input
+    sim.world.drive(take clocks, tasks)
+}
+
+// The node starts at 1000 ns and gains 1 ns per 4 ns elapsed. At t=150, it
+// has been awake for 100 ns. At t=352 and t=353, it has been awake for 151
+// and 152 ns. Only the boot clock counts the 201 ns pause and its drift.
+// expect: run suspended_node_boot_clock(tasks) = true
+fn suspended_node_boot_clock(tasks: Tasks) -> bool waits {
+    let (take made, base) = sim.world.new(1, 0, 0)
+    let mut world = take made
+    let mut clocks = sim.world.clocks(mut world)
+    let (index, node) = sim.world.drifting(mut clocks, 1000, 0, 250_000)
+    sim.world.pause_at(mut clocks, index, 100, 301)
+    let driver = task.spawn(tasks, bytes 65536, BootDrive(clocks: take clocks, tasks), drive_boot_clocks)
+    host.sleep_until(base, 150)
+    let during = host.mono_ns(node) == 1125 && clock.boot_ns(node) == 1187 && clock.boot_ns(base) == 150
+    host.sleep_until(base, 352)
+    let after = host.mono_ns(node) == 1188 && clock.boot_ns(node) == 1440
+    host.sleep_until(base, 353)
+    let next = host.mono_ns(node) == 1190 && clock.boot_ns(node) == 1441
+    result.unwrap(task.join(take driver))
+    during && after && next
+}

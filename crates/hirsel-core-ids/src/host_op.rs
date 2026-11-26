@@ -176,6 +176,10 @@ host_ops! {
     STDIN_SECRET = 182,
     /// TLS-8: issue an opener for the next QUIC receive key phase.
     SCHEDULE_NEXT_OPENER = 183,
+    /// A suspend-inclusive elapsed clock reading.
+    BOOT_NS = 184,
+    /// Advance a virtual clock's monotonic and suspend-inclusive readings together.
+    CLOCK_ADVANCE_BOOT = 185,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

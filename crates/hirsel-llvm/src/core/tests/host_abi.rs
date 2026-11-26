@@ -71,6 +71,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::PortReply => &["u64"; 9],
         HostOp::PortFill | HostOp::UdpFillPackets => &["u64", "u64", "ptr"],
         HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => &["u64", "u64"],
+        HostOp::ClockAdvanceBoot => &["u64", "u64", "u64"],
         HostOp::StdinRead | HostOp::StdinSecret => &["u64", "ptr", "u8", "u64", "u64"],
         HostOp::EnvName => &["u64", "u64"],
         HostOp::Open => &["u64", "ptr", "u8"],
@@ -79,7 +80,8 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         | HostOp::TryLockShared
         | HostOp::Unlock
         | HostOp::WallMs
-        | HostOp::MonoNs => &["u64"],
+        | HostOp::MonoNs
+        | HostOp::BootNs => &["u64"],
         HostOp::Rename
         | HostOp::SecretHmac
         | HostOp::SecretHmacSha1
@@ -146,7 +148,7 @@ pub(super) fn provider_source(op: HostOp) -> String {
         &["u64", "u8", "u32", "u64", "u64", "u64", "u64"]
     } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
         &["u64", "u8", "u32", "i64", "u8"]
-    } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+    } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs) {
         &["u64", "u8", "u32", "u64"]
     } else {
         &["u64"]

@@ -1,7 +1,10 @@
-// Native oracle: wall clock is past epoch, monotonic clock does not decrease; exit 0.
+// Native oracle: wall clock is past epoch, monotonic and boot clocks do not
+// decrease, and boot counts at least the elapsed time monotonic counts; exit 0.
 pub fn main(clock: Clock) -> Result[(), Exit] {
     let first = host.mono_ns(clock)
+    let boot_first = host.boot_ns(clock)
     let wall = host.wall_ms(clock)
     let second = host.mono_ns(clock)
-    if wall > 0u64 && second >= first { Ok(()) } else { Error(Exit(status: 1)) }
+    let boot_second = host.boot_ns(clock)
+    if wall > 0u64 && second >= first && boot_second >= boot_first && boot_first >= first { Ok(()) } else { Error(Exit(status: 1)) }
 }

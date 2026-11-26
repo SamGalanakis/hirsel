@@ -364,6 +364,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideRandomTape
                     | HostOp::ProvideProcess
                     | HostOp::ClockAdvance
+                    | HostOp::ClockAdvanceBoot
                     | HostOp::ClockSetWall
                     | HostOp::ClockIdle
                     | HostOp::ProcessTrigger
@@ -428,6 +429,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::RemoveTree
                     | HostOp::WallMs
                     | HostOp::MonoNs
+                    | HostOp::BootNs
                     | HostOp::Stdout
                     | HostOp::Stderr
                     | HostOp::Sync

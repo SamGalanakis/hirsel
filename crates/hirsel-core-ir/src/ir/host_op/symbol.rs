@@ -107,6 +107,7 @@ impl HostOp {
             Self::ProvideRandomTape => "hirsel_core_provide_random_tape",
             Self::ProvideProcess => "hirsel_core_provide_process",
             Self::ClockAdvance => "hirsel_core_clock_advance_to",
+            Self::ClockAdvanceBoot => "hirsel_core_clock_advance_to_with_boot",
             Self::ClockSetWall => "hirsel_core_clock_set_wall",
             Self::ClockIdle => "hirsel_core_clock_idle",
             Self::ProcessTrigger => "hirsel_core_process_trigger",

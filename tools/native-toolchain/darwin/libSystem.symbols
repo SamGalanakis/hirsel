@@ -107,8 +107,10 @@ _logf
 _longjmp
 _lseek
 _lstat
+_mach_continuous_time
 _mach_port_deallocate
 _mach_task_self_
+_mach_timebase_info
 _mach_vm_read_overwrite
 _malloc
 _memchr

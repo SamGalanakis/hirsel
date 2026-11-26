@@ -131,7 +131,7 @@ pub unsafe extern "C" fn hirsel_core_stream_size(
 /// Read a clock through the capability's provider.
 ///
 /// # Safety
-/// Context is running, op is WallMs or MonoNs, and handle designates the
+/// Context is running, op is WallMs, MonoNs or BootNs, and handle designates the
 /// checked Clock capability. Operand follows the common host ABI.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_clock(
@@ -215,7 +215,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                     result
                 }
             }
-            WALL_MS | MONO_NS => {
+            WALL_MS | MONO_NS | BOOT_NS => {
                 return hirsel_core_host_clock(context, op, handle, operand, mode, site);
             }
             crate::provider::RANDOM | crate::provider::STDOUT | crate::provider::STDERR => {

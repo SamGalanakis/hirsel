@@ -577,6 +577,8 @@ tags!(HostOp {
     185 => StreamSize,
     186 => StdinSecret,
     187 => ScheduleNextOpener,
+    188 => BootNs,
+    189 => ClockAdvanceBoot,
 });
 
 tags!(RaiseCause {

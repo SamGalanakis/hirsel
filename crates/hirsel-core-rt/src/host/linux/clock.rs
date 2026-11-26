@@ -1,6 +1,7 @@
 //! Hirsel's clocks on Linux. The monotonic clock is `CLOCK_MONOTONIC`, which
-//! stops while the machine sleeps; the wall clock is `CLOCK_REALTIME`. Both
-//! are vDSO reads that never enter the kernel.
+//! stops while the machine sleeps; the boot clock is `CLOCK_BOOTTIME`, which
+//! does not; the wall clock is `CLOCK_REALTIME`. All are vDSO reads that never
+//! enter the kernel.
 use std::io;
 
 fn read(clock: libc::clockid_t) -> Option<libc::timespec> {
@@ -12,10 +13,7 @@ fn read(clock: libc::clockid_t) -> Option<libc::timespec> {
     (unsafe { libc::clock_gettime(clock, &mut now) } == 0).then_some(now)
 }
 
-/// Nanoseconds on the monotonic clock.
-#[inline(always)]
-pub(crate) fn monotonic_ns() -> io::Result<u64> {
-    let now = read(libc::CLOCK_MONOTONIC).ok_or_else(io::Error::last_os_error)?;
+fn nanos(now: libc::timespec) -> io::Result<u64> {
     let overflow = || io::Error::from_raw_os_error(libc::EOVERFLOW);
     let seconds = u64::try_from(now.tv_sec).map_err(|_| overflow())?;
     let nanos = u64::try_from(now.tv_nsec).map_err(|_| overflow())?;
@@ -23,6 +21,18 @@ pub(crate) fn monotonic_ns() -> io::Result<u64> {
         .checked_mul(1_000_000_000)
         .and_then(|value| value.checked_add(nanos))
         .ok_or_else(overflow)
+}
+
+/// Nanoseconds on the monotonic clock.
+#[inline(always)]
+pub(crate) fn monotonic_ns() -> io::Result<u64> {
+    nanos(read(libc::CLOCK_MONOTONIC).ok_or_else(io::Error::last_os_error)?)
+}
+
+/// Nanoseconds on the suspend-inclusive boot clock.
+#[inline(always)]
+pub(crate) fn boot_ns() -> io::Result<u64> {
+    nanos(read(libc::CLOCK_BOOTTIME).ok_or_else(io::Error::last_os_error)?)
 }
 
 /// Milliseconds since the Unix epoch on the wall clock.

@@ -448,7 +448,7 @@ pub(crate) fn owns(provider: &Provider) -> bool {
 /// on the host stack instead.
 const CLOCK_ROOM: usize = 4096;
 
-/// The OS provider's WALL_MS and MONO_NS: one vDSO read, on the caller's stack
+/// The OS provider's WALL_MS, MONO_NS and BOOT_NS: one clock read, on the caller's stack
 /// when the guard leaves `CLOCK_ROOM`, never switching stacks otherwise.
 /// # Safety
 /// State is the run's live OsProvider; request is a pinned clock request.
@@ -474,9 +474,14 @@ unsafe extern "C" fn clock_on_stack(state: *mut u8, request: *mut Request) -> Ou
 unsafe fn read_clock(state: *mut u8, operation: u8) -> Option<Outcome> {
     let value = if operation == WALL_MS {
         clock::wall_ms()?
-    } else {
+    } else if operation == MONO_NS {
         // SAFETY: forwarded.
         clock::monotonic_ns()
+            .ok()?
+            .saturating_sub(unsafe { epoch(state) })
+    } else {
+        // SAFETY: forwarded.
+        clock::boot_ns()
             .ok()?
             .saturating_sub(unsafe { epoch(state) })
     };
@@ -626,7 +631,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
             _ => {}
         }
     }
-    if unsafe { matches!((*request).operation, WALL_MS | MONO_NS) } {
+    if unsafe { matches!((*request).operation, WALL_MS | MONO_NS | BOOT_NS) } {
         let outcome = unsafe { clock(state, request) };
         #[cfg(test)]
         probe::note(probe::ISSUE, request, probe::answer(&outcome));

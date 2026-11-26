@@ -330,9 +330,7 @@ fn jump_time(h: Hand, when: u64) -> u64 {
     at
 }
 
-// Drift uses only unpaused elapsed time.
-fn reading(c: Clocks, index: u64, t: u64) -> u64 {
-    let h = c.hands[index]
+fn awake(h: Hand, t: u64) -> u64 {
     let mut elapsed = t
     for p in h.pauses {
         if t <= p.start {
@@ -340,6 +338,12 @@ fn reading(c: Clocks, index: u64, t: u64) -> u64 {
         }
         elapsed -= order.min(t, p.end) - p.start
     }
+    elapsed
+}
+
+// Monotonic drift uses awake time. Boot drift uses the whole timeline.
+fn reading(c: Clocks, index: u64, t: u64, elapsed: u64) -> u64 {
+    let h = c.hands[index]
     let rate: u64 = int.truncate(int.abs(h.rate_ppm))
     let drift = int.saturating_add(int.saturating_mul(elapsed / ppm, rate), (elapsed % ppm) * rate / ppm)
     let mut at = if h.rate_ppm >= 0 {
@@ -358,17 +362,18 @@ fn reading(c: Clocks, index: u64, t: u64) -> u64 {
 // The first timeline instant, not before the current one, at which clock
 // `index` reads at least `deadline`.
 fn reach(c: Clocks, index: u64, deadline: u64) -> Option[u64] {
-    if reading(c, index, c.base) >= deadline {
+    let h = c.hands[index]
+    if reading(c, index, c.base, awake(h, c.base)) >= deadline {
         return Some(c.base)
     }
     let mut hi = 0xffffffffffffffffu64
-    if reading(c, index, hi) < deadline {
+    if reading(c, index, hi, awake(h, hi)) < deadline {
         return None
     }
     let mut lo = c.base
     while hi - lo > 1 {
         let mid = lo + (hi - lo) / 2
-        if reading(c, index, mid) >= deadline {
+        if reading(c, index, mid, awake(h, mid)) >= deadline {
             hi = mid
         } else {
             lo = mid
@@ -468,9 +473,10 @@ pub fn drive(take c: Clocks, tasks: Tasks) waits {
         quiet = false
         owned.base = t
         for index in 0u64 .. n {
-            let at = reading(owned, index, t)
+            let mono = reading(owned, index, t, awake(owned.hands[index], t))
+            let boot = reading(owned, index, t, t)
             if let Some(mut hand) = owned.hands[index].hand {
-                clock.advance_to(mut hand, at)
+                clock.advance_to_with_boot(mut hand, mono, boot)
             }
         }
     }

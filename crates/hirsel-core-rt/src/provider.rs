@@ -97,6 +97,7 @@ pub(crate) fn cancellation_point(operation: u8) -> bool {
         operation,
         WALL_MS
             | MONO_NS
+            | BOOT_NS
             | SECRET_MAC
             | SECRET_KDF
             | MEDIA_P256_KEY
@@ -181,7 +182,7 @@ pub unsafe extern "C" fn hirsel_core_host(
     }
 }
 
-/// A clock read (WALL_MS or MONO_NS). On the OS provider this call form runs
+/// A clock read (WALL_MS, MONO_NS or BOOT_NS). On the OS provider this call form runs
 /// its `wait`, `issue` and `deliver` bodies directly: a clock read never waits,
 /// parks or is a cancellation point, so it takes no token and no pending state,
 /// and reads on the task's stack (`os::clock`). Every other provider takes

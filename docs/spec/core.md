@@ -572,7 +572,13 @@ operations it names; nothing else about them may be inferred from an implementat
   u64)`, where path length 0 means `None`.
   ([file](../../core/std/api/file.md#replace), [dir](../../core/std/api/dir.md#listing-below-a-path)).
   `host.wall_ms` is milliseconds since 1970 and
-  `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
+  `host.mono_ns` never decreases in a run. `host.boot_ns` reads suspend-inclusive elapsed
+  nanoseconds under the same `Clock` grant. It uses `CLOCK_BOOTTIME` on Linux and
+  `mach_continuous_time` on macOS, offset by the run's monotonic epoch. The reading never
+  decreases and includes time the host spent suspended. It reads once without waiting,
+  allocating, or checking cancellation. `std.clock.boot_ns` exposes the same reading.
+  The recording stores each live reading in a clock frame, and replay delivers that value.
+  `host.sleep_until(c, deadline_ns)` returns once
   `host.mono_ns(c) >= deadline_ns`, at once for a deadline already reached; it is a
   cancellation point at its entry and while it waits
   ([CONC-7](tasks.md#conc-7-cancellation-points)), and its completion passes the replay
@@ -1053,6 +1059,7 @@ pub fn clock(start_mono_ns: u64, start_wall_ms: u64) -> (Clock, ClockHand)
 pub fn random(seed: u64) -> Random
 pub fn process() -> (Process, StopTrigger)
 pub fn advance_to(mut h: ClockHand, mono_ns: u64)
+pub fn advance_to_with_boot(mut h: ClockHand, mono_ns: u64, boot_ns: u64)
 pub fn set_wall(mut h: ClockHand, wall_ms: u64)
 pub fn idle(mut h: ClockHand) -> Option[u64] waits
 pub fn trigger(take t: StopTrigger)
@@ -1123,13 +1130,19 @@ pub fn trigger(take t: StopTrigger)
   ([NET-7](net.md#net-7-owned-connections)). `secret.scram_sha256` on a virtual TLS half
   reaches its server only as `Send` calls, and only for a sealed `Secret`
   ([TLS-6](tls.md#tls-6-scram-sha-256)).
-- **Cells.** `host.mono_ns`, `host.wall_ms`, `host.random` and `host.stopped` on a cell's
+- **Cells.** `host.mono_ns`, `host.boot_ns`, `host.wall_ms`, `host.random` and `host.stopped` on a cell's
   capability answer at issue from the cell, never switch task and never allocate.
-  `provide.clock` starts at the given times. `clock.advance_to(mut h, t)` raises monotonic
-  time to `t` (a smaller `t` changes nothing) and completes every sleep and expires every
+  `provide.clock` starts its monotonic and boot readings at `start_mono_ns` and its wall
+  reading at `start_wall_ms`. `clock.advance_to(mut h, t)` raises monotonic
+  time to `t` (a smaller `t` changes nothing), advances boot time by the same increase,
+  and completes every sleep and expires every
   deadline at or before it, in deadline order and then issue order. `clock.set_wall` sets
   wall time alone and completes every `host.sleep_until_wall` it reaches, in reading order
-  and then issue order. A pending wall wait is no deadline of `clock.idle`'s. `clock.idle(mut h)` waits until every other task in every unit of the run
+  and then issue order. `clock.advance_to_with_boot(mut h, mono, boot)` raises the two
+  elapsed readings to the supplied values without decreasing either, with boot time
+  at least monotonic time. Both readings update before any monotonic wait is readied.
+  This lets a simulated node's boot clock count time during a pause in its monotonic clock.
+  A pending wall wait is no deadline of `clock.idle`'s. `clock.idle(mut h)` waits until every other task in every unit of the run
   waits on something inside the run (another task, a channel, a connection between its units, or a
   virtual provider), then returns the earliest pending deadline on the clock, or `None` when there is none. `provide.random(seed)`
   answers each draw with the next bytes of a SplitMix64 stream from `seed`, eight

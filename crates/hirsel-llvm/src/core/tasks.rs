@@ -260,6 +260,7 @@ impl FunctionEmitter<'_> {
             | HostOp::ProvideRandomTape
             | HostOp::ProvideProcess
             | HostOp::ClockAdvance
+            | HostOp::ClockAdvanceBoot
             | HostOp::ClockSetWall
             | HostOp::ClockIdle
             | HostOp::ProcessTrigger
@@ -375,6 +376,7 @@ impl FunctionEmitter<'_> {
             | HostOp::RemoveTree
             | HostOp::WallMs
             | HostOp::MonoNs
+            | HostOp::BootNs
             | HostOp::Stdout
             | HostOp::Stderr
             | HostOp::Sync
@@ -403,7 +405,7 @@ impl FunctionEmitter<'_> {
         // a tape refuses any of them before issue (CAP-9).
         let status = values.remove(4);
         match op {
-            HostOp::WallMs | HostOp::MonoNs => values.truncate(1),
+            HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs => values.truncate(1),
             HostOp::Random | HostOp::Stopped => values.clear(),
             _ => {}
         }

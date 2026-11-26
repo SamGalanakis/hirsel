@@ -214,6 +214,487 @@ impl Machine<'_> {
         self.store(carrier + 8, 8, len + spare as u64);
         Ok(vec![])
     }
+    /// The `provide` rows, and Clock, Random and Process operations on a cell.
+    pub(super) fn provide(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Option<X<Vec<u64>>> {
+        let ok = |value: u64, written: u64| vec![value, 0, 0, written];
+        if matches!(
+            op,
+            HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
+        ) {
+            // A cell holds PROVIDE_CELL until the run ends, as a narrowed grant
+            // (MEM-24); a refusal answers 0 with the available bytes.
+            let payer = t.limits.last().unwrap();
+            let charge = hirsel_core_layout::charge::PROVIDE_CELL;
+            if let Err(available) = self.admit(payer, charge) {
+                return Some(Ok(ok(0, available)));
+            }
+            self.host.world.grant_charges.push((payer.clone(), charge));
+        }
+        if matches!(
+            op,
+            HostOp::ProvideStdout
+                | HostOp::ProvideStderr
+                | HostOp::ProvideDir
+                | HostOp::ProvideNet
+                | HostOp::ProvideExec
+        ) {
+            // A port's room with its own record, held until the run ends.
+            let payer = t.limits.last().unwrap();
+            let charge = hirsel_core_layout::charge::PROVIDE_CELL.saturating_add(a[0]);
+            if let Err(available) = self.admit(payer, charge) {
+                return Some(Ok(ok(0, available)));
+            }
+            self.host.world.grant_charges.push((payer.clone(), charge));
+        }
+        let new = |w: &mut World, cell| {
+            w.cells.push(cell);
+            CELL_BASE + w.cells.len() as u64 - 1
+        };
+        let reply = match op {
+            HostOp::ProvideClock => {
+                let h = new(
+                    &mut self.host.world,
+                    VirtualCell::Clock {
+                        mono: a[0],
+                        boot: a[0],
+                        wall: a[1],
+                        timers: Vec::new(),
+                        wall_timers: Vec::new(),
+                        idle: Vec::new(),
+                    },
+                );
+                ok(h, h)
+            }
+            HostOp::ProvideRandom => ok(
+                new(
+                    &mut self.host.world,
+                    VirtualCell::Random(RandomStream::Seeded(a[0])),
+                ),
+                0,
+            ),
+            HostOp::ProvideRandomTape => self.provide_random_tape(t, a[0]),
+            HostOp::ProvideProcess => {
+                let process = VirtualCell::Process {
+                    stopped: false,
+                    waiters: Vec::new(),
+                };
+                let h = new(&mut self.host.world, process);
+                ok(h, h)
+            }
+            HostOp::ClockAdvance | HostOp::ClockAdvanceBoot => {
+                let c = self.cell(a[0]).unwrap();
+                let VirtualCell::Clock {
+                    mono, boot, timers, ..
+                } = &mut self.host.world.cells[c]
+                else {
+                    unreachable!()
+                };
+                let before = *mono;
+                *mono = (*mono).max(a[1]);
+                *boot = if op == HostOp::ClockAdvanceBoot {
+                    (*boot).max(a[2]).max(*mono)
+                } else {
+                    boot.saturating_add(*mono - before)
+                };
+                let now = *mono;
+                let mut due: Vec<_> = timers
+                    .iter()
+                    .copied()
+                    .filter(|&(at, _)| at <= now)
+                    .collect();
+                timers.retain(|&(at, _)| at > now);
+                due.sort_by_key(|&(at, _)| at);
+                for (_, k) in due {
+                    self.ready_provider(k);
+                }
+                ok(0, 0)
+            }
+            HostOp::ProvideStdout
+            | HostOp::ProvideStderr
+            | HostOp::ProvideDir
+            | HostOp::ProvideNet
+            | HostOp::ProvideExec => {
+                let vocab = match op {
+                    HostOp::ProvideDir => Vocab::Dir,
+                    HostOp::ProvideNet => Vocab::Net,
+                    HostOp::ProvideExec => Vocab::Exec,
+                    _ => Vocab::Stream,
+                };
+                let port = VirtualCell::Port {
+                    vocab,
+                    size: if vocab == Vocab::Stream { a[1] } else { 0 },
+                    sealed: false,
+                    next: 0,
+                    calls: BTreeMap::new(),
+                    servers: Vec::new(),
+                    handles: if vocab == Vocab::Dir {
+                        BTreeMap::from([(0, PortHandle::new(0))])
+                    } else {
+                        BTreeMap::new()
+                    },
+                    room: a[0],
+                    used: 0,
+                };
+                let h = new(&mut self.host.world, port);
+                let served = h - CELL_BASE + SERVED_BASE;
+                if vocab == Vocab::Exec {
+                    let key = EXEC_GRANT + self.host.world.exec_grants.len() as u64;
+                    self.host.world.exec_grants.push((
+                        (h - CELL_BASE) as usize,
+                        hirsel_core_net::exec::ExecRules::universal(),
+                    ));
+                    return Some(Ok(ok(key, served)));
+                }
+                if vocab != Vocab::Net {
+                    return Some(Ok(ok(h, served)));
+                }
+                // A served Net is an ordinary grant of every address, handshake
+                // and name (native `provide_port`), so `net.narrow`
+                // intersects it as any Net's.
+                let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
+                let resolve =
+                    hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
+                let rules = hirsel_core_net::GrantRule::served_addresses()
+                    .chain([tls, resolve])
+                    .chain(hirsel_core_net::UnixDirection::ALL.into_iter().map(|dir| {
+                        hirsel_core_net::GrantRule::Unix(hirsel_core_net::UnixRule::served(dir))
+                    }))
+                    .collect();
+                let grants = &mut self.host.world.network.grants;
+                let key = grants
+                    .last_key_value()
+                    .map_or(0, |(&key, _)| key)
+                    .checked_add(1)
+                    .expect("run-local handle counter");
+                grants.insert(key, rules);
+                self.host
+                    .world
+                    .net_ports
+                    .insert(key, (h - CELL_BASE) as usize);
+                ok(key, served)
+            }
+            HostOp::StreamTerminal => {
+                let terminal = match self.cell(a[0]) {
+                    Some(c) => match self.host.world.cells[c] {
+                        VirtualCell::Port { size, .. } => size != 0,
+                        _ => unreachable!(),
+                    },
+                    None => self.host.world.terminals[a[1] as usize],
+                };
+                ok(u64::from(terminal), 0)
+            }
+            // A port answers its own size; the model world's host streams give none.
+            HostOp::StreamSize => match self.cell(a[0]) {
+                Some(c) => match self.host.world.cells[c] {
+                    VirtualCell::Port { size, .. } => ok(size, 0),
+                    _ => unreachable!(),
+                },
+                None => ok(0, 0),
+            },
+            HostOp::PortNext => {
+                let c = (a[0] - SERVED_BASE) as usize;
+                return Some(self.port_next(t, c));
+            }
+            HostOp::CallWord => {
+                let (c, id) = Self::call_of(a[0]);
+                let (calls, ..) = self.host.world.cells[c].port();
+                ok(calls[&id].words.get(a[1] as usize).copied().unwrap_or(0), 0)
+            }
+            HostOp::CallSecret => {
+                // A new designation charged as `secret.narrow`; any call but
+                // a SendSecret fails the server (native `call_secret`).
+                let (c, id) = Self::call_of(a[0]);
+                let (calls, ..) = self.host.world.cells[c].port();
+                let Some(secret) = calls[&id]
+                    .secret
+                    .as_ref()
+                    .and_then(|secrets| secrets.get(a[1] as usize).cloned())
+                else {
+                    return Some(Err(Stop::Cause("Fail")));
+                };
+                let size = SecretGrant::logical_size(secret.policy.send(), 0);
+                let charge = size.unwrap_or(u64::MAX);
+                let payer = t.limits.last().unwrap();
+                if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
+                    return Some(Ok(vec![charge, 2, 0, available]));
+                }
+                let key = self.designate(secret, (payer.clone(), charge));
+                ok(key, 0)
+            }
+            HostOp::CallPayload => return Some(self.read_call_payload(a[0], a[1], u64::MAX, a[2])),
+            HostOp::CallPayloadPrefix => {
+                return Some(self.read_call_payload(a[0], a[1], a[2], a[3]));
+            }
+            HostOp::PortFill => {
+                // Stage reply bytes in the room, at most the call's offer; a
+                // room too short refuses with error tag 1 (MEM-21).
+                let (c, id) = Self::call_of(a[1]);
+                let (bytes, ..) = self.carrier(a[2]);
+                if c != (a[0] - SERVED_BASE) as usize {
+                    return Some(Ok(ok(0, 0)));
+                }
+                let VirtualCell::Port {
+                    vocab,
+                    calls,
+                    room,
+                    used,
+                    ..
+                } = &mut self.host.world.cells[c]
+                else {
+                    unreachable!()
+                };
+                let call = calls.get_mut(&id).unwrap();
+                if call.finished || call.answer.is_some() {
+                    return Some(Ok(ok(0, 0)));
+                }
+                let dir = (*vocab == Vocab::Dir)
+                    .then(|| DirOp::from_word(call.words[0]))
+                    .flatten();
+                let offer = match (*vocab, call.words[0]) {
+                    _ if matches!(dir, Some(DirOp::Read | DirOp::NextEntries)) => call.words[2],
+                    _ if matches!(dir, Some(DirOp::Mkdtemp | DirOp::ReadAt | DirOp::Mkstemp)) => {
+                        call.words[3]
+                    }
+                    (Vocab::Net, 1 | 4 | NET_HELLO | NET_DATAGRAM_RECV) => call.words[2],
+                    (Vocab::Exec, exec::RECV) => call.words[2].min(call.words[3]),
+                    _ => 0,
+                };
+                let take = offer
+                    .saturating_sub(call.staged.len() as u64)
+                    .min(bytes.len() as u64);
+                let available = *room - *used;
+                if take > available {
+                    return Some(Ok(vec![take, 1, 0, available]));
+                }
+                *used += take;
+                call.staged.extend_from_slice(&bytes[..take as usize]);
+                ok(take, 0)
+            }
+            HostOp::PortReply => {
+                return Some(self.port_reply(a));
+            }
+            HostOp::ClockSetWall => {
+                let c = self.cell(a[0]).unwrap();
+                let VirtualCell::Clock {
+                    wall, wall_timers, ..
+                } = &mut self.host.world.cells[c]
+                else {
+                    unreachable!()
+                };
+                *wall = a[1];
+                let now = *wall;
+                let mut due: Vec<_> = wall_timers
+                    .iter()
+                    .copied()
+                    .filter(|&(at, _)| at <= now)
+                    .collect();
+                wall_timers.retain(|&(at, _)| at > now);
+                due.sort_by_key(|&(at, _)| at);
+                for (_, k) in due {
+                    self.ready_provider(k);
+                }
+                ok(0, 0)
+            }
+            HostOp::ProcessTrigger => {
+                let c = self.cell(a[0]).unwrap();
+                let VirtualCell::Process { stopped, waiters } = &mut self.host.world.cells[c]
+                else {
+                    unreachable!()
+                };
+                *stopped = true;
+                for k in std::mem::take(waiters) {
+                    self.ready_provider(k);
+                }
+                ok(0, 0)
+            }
+            HostOp::ClockIdle => {
+                let c = self.cell(a[0]).unwrap();
+                if let Err(cancelled) = self.check_cancel(t) {
+                    return Some(Err(cancelled));
+                }
+                let waited = self.cell_wait(
+                    t,
+                    c,
+                    |cell, k| {
+                        if let VirtualCell::Clock { idle, .. } = cell
+                            && !idle.iter().any(|&(j, _)| j == k)
+                        {
+                            idle.push((k, false));
+                        }
+                    },
+                    |cell, k| match cell {
+                        VirtualCell::Clock { idle, .. } => {
+                            idle.iter().any(|&(j, woken)| j == k && woken)
+                        }
+                        _ => unreachable!(),
+                    },
+                );
+                if let VirtualCell::Clock { idle, .. } = &mut self.host.world.cells[c] {
+                    idle.retain(|&(j, _)| j != t.k);
+                }
+                if let Err(cancelled) = waited {
+                    return Some(Err(cancelled));
+                }
+                let VirtualCell::Clock { timers, .. } = &self.host.world.cells[c] else {
+                    unreachable!()
+                };
+                match timers.iter().map(|&(at, _)| at).min() {
+                    Some(at) => ok(at, 1),
+                    None => ok(0, 0),
+                }
+            }
+            HostOp::Stdout | HostOp::Stderr => {
+                let c = self.cell(a[0])?;
+                if let Err(cancelled) = self.check_cancel(t) {
+                    return Some(Err(cancelled));
+                }
+                let (bytes, ..) = self.carrier(a[1]);
+                let mut words = [0; 9];
+                words[1] = bytes.len() as u64;
+                return Some(self.port_call(t, c, words, vec![bytes], None, true));
+            }
+            HostOp::Open
+            | HostOp::OpenDir
+            | HostOp::Mkdtemp
+            | HostOp::Mkstemp
+            | HostOp::Stat
+            | HostOp::Mkdir
+            | HostOp::Remove
+            | HostOp::RemoveTree
+            | HostOp::Rename
+            | HostOp::SyncDir
+            | HostOp::ZeroExtension
+            | HostOp::Entries
+            | HostOp::Read
+            | HostOp::ReadAt
+            | HostOp::Write
+            | HostOp::WriteAt
+            | HostOp::ZeroAt
+            | HostOp::StatFile
+            | HostOp::Sync
+            | HostOp::TryLock
+            | HostOp::TryLockShared
+            | HostOp::Unlock
+            | HostOp::Close
+            | HostOp::NextEntries => {
+                let (c, h) = self.port_handle(a[0] & !DIR_READ_ONLY)?;
+                return Some(self.dir_call(t, op, c, h, a));
+            }
+            HostOp::WallMs
+            | HostOp::MonoNs
+            | HostOp::BootNs
+            | HostOp::SleepUntil
+            | HostOp::SleepUntilWall
+            | HostOp::Random
+            | HostOp::Stopped => {
+                let c = self.cell(a[0])?;
+                if !matches!(op, HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs)
+                    && let Err(cancelled) = self.check_cancel(t)
+                {
+                    return Some(Err(cancelled));
+                }
+                match op {
+                    HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs => {
+                        let VirtualCell::Clock {
+                            mono, boot, wall, ..
+                        } = self.host.world.cells[c]
+                        else {
+                            unreachable!()
+                        };
+                        vec![if op == HostOp::MonoNs {
+                            mono
+                        } else if op == HostOp::BootNs {
+                            boot
+                        } else {
+                            wall
+                        }]
+                    }
+                    HostOp::SleepUntil => {
+                        let at = a[1];
+                        loop {
+                            let VirtualCell::Clock { mono, .. } = self.host.world.cells[c] else {
+                                unreachable!()
+                            };
+                            if at <= mono {
+                                break;
+                            }
+                            self.cell_timer(c, at, t.k);
+                            self.host.sched.tasks[t.k].cancellable =
+                                t.shield == 0 && t.obligations.len() == 1;
+                            self.park(Some(Wait::Network(None)));
+                            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
+                                if let VirtualCell::Clock { timers, .. } =
+                                    &mut self.host.world.cells[c]
+                                {
+                                    timers.retain(|&(_, k)| k != t.k);
+                                }
+                                if let Err(cancelled) = self.check_cancel(t) {
+                                    return Some(Err(cancelled));
+                                }
+                            }
+                        }
+                        ok(0, 0)
+                    }
+                    HostOp::SleepUntilWall => {
+                        let at = a[1];
+                        loop {
+                            let VirtualCell::Clock { wall, .. } = self.host.world.cells[c] else {
+                                unreachable!()
+                            };
+                            if at <= wall {
+                                break;
+                            }
+                            if let VirtualCell::Clock { wall_timers, .. } =
+                                &mut self.host.world.cells[c]
+                                && !wall_timers.iter().any(|&(_, j)| j == t.k)
+                            {
+                                wall_timers.push((at, t.k));
+                            }
+                            self.host.sched.tasks[t.k].cancellable =
+                                t.shield == 0 && t.obligations.len() == 1;
+                            self.park(Some(Wait::Network(None)));
+                            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
+                                if let VirtualCell::Clock { wall_timers, .. } =
+                                    &mut self.host.world.cells[c]
+                                {
+                                    wall_timers.retain(|&(_, k)| k != t.k);
+                                }
+                                if let Err(cancelled) = self.check_cancel(t) {
+                                    return Some(Err(cancelled));
+                                }
+                            }
+                        }
+                        ok(0, 0)
+                    }
+                    HostOp::Random => return Some(self.draw_virtual_random(c, a[1])),
+                    _ => {
+                        let waited = self.cell_wait(
+                            t,
+                            c,
+                            |cell, k| {
+                                if let VirtualCell::Process { waiters, .. } = cell
+                                    && !waiters.contains(&k)
+                                {
+                                    waiters.push(k);
+                                }
+                            },
+                            |cell, _| matches!(cell, VirtualCell::Process { stopped: true, .. }),
+                        );
+                        if let VirtualCell::Process { waiters, .. } = &mut self.host.world.cells[c]
+                        {
+                            waiters.retain(|&k| k != t.k);
+                        }
+                        if let Err(cancelled) = waited {
+                            return Some(Err(cancelled));
+                        }
+                        vec![]
+                    }
+                }
+            }
+            _ => return None,
+        };
+        Some(Ok(reply))
+    }
 }
 
 pub(super) fn zero_at_error(mode: u8, at: u64, len: u64) -> Option<(u64, u64)> {

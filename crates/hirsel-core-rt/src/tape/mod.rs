@@ -742,7 +742,7 @@ unsafe fn socket_args(request: &Request) -> Args {
 /// The canonical argument bytes of an operation (REPLAY-SPEC 4.1; the
 /// per-operation choice is recorded in followups.md for section 5.4).
 fn clock(op: u8) -> bool {
-    matches!(op, WALL_MS | MONO_NS)
+    matches!(op, WALL_MS | MONO_NS | BOOT_NS)
 }
 
 impl Tape {

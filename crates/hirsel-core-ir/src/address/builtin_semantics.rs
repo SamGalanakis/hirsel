@@ -127,6 +127,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "accept", 1),
     ("host", "accept_unix", 1),
     ("host", "bind_datagram", 1),
+    ("host", "boot_ns", 1),
     ("host", "close", 1),
     ("host", "connect", 1),
     ("host", "connect_datagram", 1),

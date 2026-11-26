@@ -59,6 +59,8 @@ pub fn wall_ms(c: Clock) -> u64
 
 pub fn mono_ns(c: Clock) -> u64
 
+pub fn boot_ns(c: Clock) -> u64
+
 pub fn sleep_until(c: Clock, deadline_ns: u64) waits
 
 pub fn sleep_until_wall(c: Clock, at_ms: u64) waits

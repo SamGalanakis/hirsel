@@ -14,6 +14,14 @@ pub fn sleep_ns(c: Clock, ns: u64) waits {
     host.sleep_until(c, host.mono_ns(c) + ns)
 }
 
+/// The clock's suspend-inclusive elapsed nanoseconds. This reading keeps
+/// counting while the host or a simulated node is suspended.
+/// Cost: O(1).
+/// Ex: `clock.boot_ns(c)`
+pub fn boot_ns(c: Clock) -> u64 {
+    host.boot_ns(c)
+}
+
 /// The deadline at plus ms milliseconds, in monotonic nanoseconds. Saturates at
 /// u64's maximum when the conversion or addition overflows. Cost: O(1).
 /// Ex: `clock.deadline_after_ms(2_000_000, 5)` is 7_000_000.

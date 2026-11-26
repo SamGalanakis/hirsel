@@ -36,7 +36,7 @@ impl Function<'_, '_, '_> {
     ) -> usize {
         let n = if matches!(op, HostOp::Random | HostOp::Stopped) {
             0
-        } else if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+        } else if matches!(op, HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs) {
             1
         } else {
             4

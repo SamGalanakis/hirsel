@@ -32,9 +32,10 @@ returns the clock's index. The rate lies strictly between -1000000 and
 `by_ns` when the base timeline reaches `at_ns`, so its reading from then on
 is `by_ns` higher. Wall time stays at its start reading.
 
-`pause_at` freezes one clock during `[start_ns, end_ns)` on the driver's
-timeline. That clock resumes without counting the suspended time, including
-for drift. A step due during a pause takes effect when the clock resumes.
+`pause_at` freezes one clock's monotonic reading during `[start_ns, end_ns)`
+on the driver's timeline. Monotonic time and its drift resume where they left
+off. The boot reading keeps counting the elapsed time and drift during the
+pause. A step due during a pause takes effect on both readings at resume.
 Pauses on the same clock must be disjoint and nonempty. The driver's
 timeline keeps advancing even when clock 0 pauses. `repro` returns the seed
 and pauses on one line before `drive` takes the clocks.

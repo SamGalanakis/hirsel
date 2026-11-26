@@ -26,6 +26,7 @@ impl Cx<'_, '_, '_> {
         let hand = matches!(
             op,
             HostOp::ClockAdvance
+                | HostOp::ClockAdvanceBoot
                 | HostOp::ClockSetWall
                 | HostOp::ClockIdle
                 | HostOp::ProcessTrigger
@@ -176,7 +177,10 @@ impl Cx<'_, '_, '_> {
                 self.consume(vals[0], n);
                 None
             }
-            HostOp::ClockAdvance | HostOp::ClockSetWall | HostOp::CallPayload => None,
+            HostOp::ClockAdvance
+            | HostOp::ClockAdvanceBoot
+            | HostOp::ClockSetWall
+            | HostOp::CallPayload => None,
             _ => unreachable!(),
         }
     }

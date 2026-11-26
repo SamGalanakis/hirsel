@@ -169,6 +169,10 @@ pub enum HostOp {
     StreamSize = hirsel_core_ids::host_op::TERM_SIZE as isize,
     /// `stdin.read_secret`: an echo-off line, sealed by the host.
     StdinSecret = hirsel_core_ids::host_op::STDIN_SECRET as isize,
+    /// A suspend-inclusive elapsed clock reading.
+    BootNs = hirsel_core_ids::host_op::BOOT_NS as isize,
+    /// Advance a virtual clock's suspend-inclusive reading.
+    ClockAdvanceBoot = hirsel_core_ids::host_op::CLOCK_ADVANCE_BOOT as isize,
 }
 
 mod name;
@@ -219,7 +223,7 @@ impl HostOp {
     /// Native entry for rows that use the common operand signature.
     pub fn io_symbol(self) -> &'static str {
         match self {
-            Self::WallMs | Self::MonoNs => "hirsel_core_host_clock",
+            Self::WallMs | Self::MonoNs | Self::BootNs => "hirsel_core_host_clock",
             Self::Stat | Self::StatFile => "hirsel_core_host_stat",
             Self::Random | Self::Stdout | Self::Stderr | Self::Stopped => "hirsel_core_host_io",
             _ => "hirsel_core_host_op",
@@ -240,6 +244,7 @@ impl HostOp {
         HostOp::RemoveTree,
         HostOp::WallMs,
         HostOp::MonoNs,
+        HostOp::BootNs,
         HostOp::Stdout,
         HostOp::Stderr,
         HostOp::Rename,
@@ -358,6 +363,7 @@ impl HostOp {
         HostOp::ProvideRandomTape,
         HostOp::ProvideProcess,
         HostOp::ClockAdvance,
+        HostOp::ClockAdvanceBoot,
         HostOp::ClockSetWall,
         HostOp::ClockIdle,
         HostOp::ProcessTrigger,
@@ -663,6 +669,7 @@ impl HostOp {
             HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
                 (vec![V(u64_), V(u64_)], outcome)
             }
+            HostOp::ClockAdvanceBoot => (vec![V(u64_); 3], outcome),
             HostOp::EnvGet | HostOp::EnvName => {
                 let input = if op == HostOp::EnvGet { p } else { u64_ };
                 (
@@ -714,7 +721,7 @@ impl HostOp {
             HostOp::ZeroAt => (vec![V(u64_), V(u64_), V(u64_)], outcome),
             HostOp::Random => (vec![V(u64_), V(p)], vec![]),
             HostOp::Stopped => (vec![V(u64_)], vec![]),
-            HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
+            HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs => (vec![V(u64_)], vec![u64_]),
             _ => (vec![V(u64_), V(p)], outcome),
         }
     }
@@ -812,6 +819,7 @@ impl HostOp {
                 self,
                 HostOp::WallMs
                     | HostOp::MonoNs
+                    | HostOp::BootNs
                     | HostOp::Random
                     | HostOp::NetNarrow
                     | HostOp::NetClass
@@ -855,6 +863,7 @@ impl HostOp {
                     | HostOp::ProvideRandomTape
                     | HostOp::ProvideProcess
                     | HostOp::ClockAdvance
+                    | HostOp::ClockAdvanceBoot
                     | HostOp::ClockSetWall
                     | HostOp::ProcessTrigger
                     | HostOp::ProvideStdout

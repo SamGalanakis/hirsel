@@ -1967,7 +1967,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.runtime_row(RtOp::Host(op), &args[..len], n)?;
             (value, error, code, written, None)
         };
-        if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+        if matches!(op, HostOp::WallMs | HostOp::MonoNs | HostOp::BootNs) {
             return Some(value);
         }
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;

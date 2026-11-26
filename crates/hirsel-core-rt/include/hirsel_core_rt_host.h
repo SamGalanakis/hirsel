@@ -7,6 +7,7 @@
    Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
    ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
    Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78, Mkstemp 119, ZeroExtension 124.
+   BootNs 184 returns suspend-inclusive elapsed nanoseconds under Clock.
    Entries takes an optional path (path_len 0 means the grant root).
    Positioned requests carry an eight-byte little-endian
    offset in path and the original open mode in mode.
@@ -322,6 +323,7 @@ HirselCoreHostOutcome hirsel_core_provide_random(HirselCoreContext *, uint64_t s
 HirselCoreHostOutcome hirsel_core_provide_random_tape(HirselCoreContext *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_process(HirselCoreContext *, uint64_t);
 HirselCoreHostOutcome hirsel_core_clock_advance_to(HirselCoreContext *, uint64_t hand, uint64_t mono, uint64_t);
+HirselCoreHostOutcome hirsel_core_clock_advance_to_with_boot(HirselCoreContext *, uint64_t hand, uint64_t mono, uint64_t boot, uint64_t);
 HirselCoreHostOutcome hirsel_core_clock_set_wall(HirselCoreContext *, uint64_t hand, uint64_t wall, uint64_t);
 /* Suspends until every other task waits, then Outcome.value is the earliest
    waited deadline and written is 1 when there is one. */

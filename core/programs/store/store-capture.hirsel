@@ -160,7 +160,7 @@ fn capture_measure_pages(mut packs: CapturePacks, manifest: PageManifest) -> Res
 
 fn capture_measure(d: Dir, locked: Option[Clock]) -> Result[CaptureSelection, Error] waits {
     let (take raw, id, take manifest) = read_only_manifest(d)?
-    require_memory_manifest(manifest)?
+    require_unarchived_manifest(manifest)?
     let mut packs = capture_packs(d, id, manifest, false, 0)
     let measured: Result[(CaptureListCount, u64, u64), Error] = if let Some(_) = locked {
         match capture_lists(mut packs, manifest) {

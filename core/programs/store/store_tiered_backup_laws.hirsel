@@ -1,0 +1,629 @@
+// M3b-S4 Tiered export, backup, restore and L100 (c) laws
+// (STORE-SPEC §13.10a, §15.3, L96, L100 (c)).
+fn l96_tiered_options(floor: u64, probe_budget: u64, compact_permille: u64) -> Result[Options, Error] {
+    let mut options = l70_open_options(floor)?
+    options.pack_bytes = 65536
+    options.probe_budget = probe_budget
+    options.compact_permille = compact_permille
+    Ok(take options)
+}
+
+fn l96_put_bytes(mut db: Db, t: Table[u64, Bytes], k: u64, value: Bytes) -> Result[(), Error] waits {
+    let handle: Table[u64, Bytes] = clone(t)
+    let body: Bytes = clone(value)
+    let Committed(_) = run(mut db, Some(10000000), copy_env((handle, k, body)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, Bytes)) -> Result[(), Error] {
+        put(mut tx, env.0, env.1, env.2)
+    })? else {
+        fail("L96: put did not commit")
+    }
+    Ok(())
+}
+
+fn l96_delete_bytes(mut db: Db, t: Table[u64, Bytes], k: u64) -> Result[(), Error] waits {
+    let handle: Table[u64, Bytes] = clone(t)
+    let Committed(_) = run(mut db, Some(10000000), copy_env((handle, k)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {
+        let _ = delete(mut tx, env.0, env.1)?
+        Ok(())
+    })? else {
+        fail("L96: delete did not commit")
+    }
+    Ok(())
+}
+
+fn l96_blob_value(tag: u8, size: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(size)
+    let wide_tag: u64 = int.widen(tag)
+    for i in 0u64 .. size {
+        list.push(mut out, int.truncate((wide_tag * 17u64 + i * 13u64) % 251u64))
+    }
+    take out
+}
+
+fn l96_listed_tiered_packs(db: Db) -> List[(u64, u8)] {
+    let mut found: List[(u64, u8)] = list.new()
+    let mut cursor = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut cursor) {
+        if pack.class >= 3 {
+            list.push(mut found, (seq, pack.class))
+        }
+    }
+    take found
+}
+
+fn l96_same_bytes_table(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, t: Table[u64, Bytes]) -> Result[u64, Error] waits {
+    let left_reader = reader(left, VALUE_LIMIT + 1048576)?
+    let right_reader = reader(right, VALUE_LIMIT + 1048576)?
+    let mut expected = scan(left_reader, at_left, t, Unbounded, Unbounded)?
+    let mut actual = scan(right_reader, at_right, t, Unbounded, Unbounded)?
+    let mut matched = 0u64
+    loop {
+        let want = next(left_reader, mut expected)?
+        let got = next(right_reader, mut actual)?
+        if want != got {
+            fail("L96: restored Tiered table differs from source Snapshot at H")
+        }
+        if want == None {
+            return Ok(matched)
+        }
+        matched += 1
+    }
+}
+
+fn l96_full_scrub_clean(mut db: Db) -> Result[(), Error] waits {
+    let mut tour = begin_scrub(mut db)?
+    loop {
+        let report = scrub_step(mut tour, 1048576)?
+        if list.len(report.faults) != 0 {
+            fail("L96/L100: scrub tour reported a fault on a restored store")
+        }
+        if let None = report.next {
+            return Ok(())
+        }
+    }
+}
+
+// L96 (a): backup + restore (live, offline, deploy open_export, check_capture,
+// describe_capture) of a store with a Tiered table (both class-3 page packs and
+// class-4 BLOB packs) reads equal to Snapshot at H and keeps every leased
+// class-3/4 pack byte-identical.
+@test
+fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let source = disk_test_directory(d)
+    let target = disk_test_directory(d)
+    let restored = disk_test_directory(d)
+    let offline_target = disk_test_directory(d)
+    let offline_restored = disk_test_directory(d)
+    let options = l96_tiered_options(floor, 65536, 500)?
+    let mut db = open(tasks, source, c, r, clone(options))?
+    let mut schema = declare(db, Migrate)?
+    let d_rows = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = finish(mut schema, take d_rows)?
+    let d_meta = declare_table(mut schema, "meta", std.codec.key_u64(), std.codec.of_u64())?
+    let meta = finish(mut schema, take d_meta)?
+    let _ = seal(mut db, take schema)?
+    for k in 0u64 .. 16 {
+        let body = if k % 4 == 0 {
+            l96_blob_value(int.truncate(k + 1), 2400)
+        } else {
+            l96_blob_value(int.truncate(k + 1), 48)
+        }
+        l96_put_bytes(mut db, rows, k, take body)?
+        if !typed_put(mut db, meta, k, k * 11) {
+            fail("L96 (a): meta put failed")
+        }
+    }
+    set_residency(mut db, rows.id, Tiered)?
+    // Write a post-cut journaled update before the lease so the backup also
+    // replays a Tiered journal tail on top of Cold packs.
+    l96_put_bytes(mut db, rows, 3, l96_blob_value(99, 1800))?
+    l96_delete_bytes(mut db, rows, 5)?
+    let tiered_packs = l96_listed_tiered_packs(db)
+    let mut saw_c3 = false
+    let mut saw_c4 = false
+    for (_, class) in tiered_packs {
+        if class == 3 {
+            saw_c3 = true
+        } else if class == 4 {
+            saw_c4 = true
+        }
+    }
+    if !saw_c3 || !saw_c4 {
+        fail("L96 (a): fixture must hold both class-3 and class-4 packs")
+    }
+    let leased = snapshot(db)
+    let attempt = b"l96a-backup-0001"
+    let job = result.unwrap(begin_backup(mut db, target, copied(attempt)?))
+    // Post-lease mutations and cut must not appear in the restored backup.
+    l96_put_bytes(mut db, rows, 0, l96_blob_value(200, 32))?
+    l96_put_bytes(mut db, rows, 42, l96_blob_value(201, 2000))?
+    let _ = checkpoint(mut db)?
+    let exported = result.unwrap(export_copy(take job))
+    release_export(mut db, attempt)
+    if exported.stamp.head != version(leased) {
+        fail("L96 (a): backup stamp head differs from leased snapshot")
+    }
+    for (seq, _) in tiered_packs {
+        let path = paged_pack_path(seq)?
+        let want = disk_read_file(source, path, 1048576)?
+        let got = disk_read_file(target, path, 1048576)?
+        if got != want {
+            fail("L96 (a): copied class-3/4 pack is not byte-identical")
+        }
+    }
+    let stamp = result.unwrap(restore(target, restored, c, clone(options)))
+    if stamp.head != version(leased) {
+        fail("L96 (a): restored stamp head differs from leased snapshot")
+    }
+    for (seq, _) in tiered_packs {
+        let path = paged_pack_path(seq)?
+        let want = disk_read_file(target, path, 1048576)?
+        let got = disk_read_file(restored, path, 1048576)?
+        if got != want {
+            fail("L96 (a): restored class-3/4 pack is not byte-identical")
+        }
+    }
+    let mut twin = open(tasks, restored, c, r, clone(options))?
+    let now = snapshot(twin)
+    if version(now) != version(leased) {
+        fail("L96 (a): twin head differs from leased snapshot")
+    }
+    if l96_same_bytes_table(db, leased, twin, now, rows)? != 15 {
+        fail("L96 (a): restored Tiered table row count mismatch")
+    }
+    let left_r = reader(db, VALUE_LIMIT + 1048576)?
+    let right_r = reader(twin, VALUE_LIMIT + 1048576)?
+    for k in 0u64 .. 16 {
+        if get(left_r, leased, meta, k)? != get(right_r, now, meta, k)? {
+            fail("L96 (a): restored Memory table differs from source")
+        }
+    }
+    l96_full_scrub_clean(mut twin)?
+    drop(take left_r)
+    drop(take right_r)
+    drop(take leased)
+    drop(take now)
+    close(take twin)?
+    // Also exercise offline check_capture, describe_capture and backup_offline
+    // on the closed Tiered store.
+    let closed_head = version(snapshot(db))
+    close(take db)?
+    let checked = capture_test_checked(prepare(source, c, Check)?, 0, true)?
+    if checked.faults != 0 {
+        fail("L96 (a): offline check_capture reported faults on a clean Tiered store")
+    }
+    capture_test_cover(source, c)?
+    let Some((off_stamp, _)) = result.unwrap(offline_law_copy(source, offline_target, c)) else {
+        fail("L96 (a): offline backup routed a clean Tiered store to the writer")
+    }
+    if off_stamp.head != closed_head {
+        fail("L96 (a): offline backup head mismatch")
+    }
+    let _ = result.unwrap(restore(offline_target, offline_restored, c, clone(options)))
+    let reopened = open(tasks, offline_restored, c, r, clone(options))?
+    if version(snapshot(reopened)) != closed_head {
+        fail("L96 (a): offline restored head mismatch")
+    }
+    close(take reopened)
+}
+
+// L96 (b): a leased class-3/4 pack survives a retiring cut (both Tiered-idle
+// and reading-probe retirement) until release_export, then is removed at the
+// next cut.
+@test
+fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    // Path 1: Tiered-idle retirement while export lease holds pack P.
+    let s1 = disk_test_directory(d)
+    let b1 = disk_test_directory(d)
+    let r1 = disk_test_directory(d)
+    let zero_opts = l96_tiered_options(floor, 0, 500)?
+    let run_opts = l96_tiered_options(floor, 65536, 500)?
+    let mut db = open(tasks, s1, c, r, clone(zero_opts))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l96_put_bytes(mut db, rows, 0, l96_blob_value(1, 32))?
+    l96_put_bytes(mut db, rows, 1, l96_blob_value(2, 2000))?
+    set_residency(mut db, rows.id, Tiered)?
+    let leased_packs = l96_listed_tiered_packs(db)
+    if list.len(leased_packs) < 2 {
+        fail("L96 (b): expected both class-3 and class-4 packs")
+    }
+    set_residency(mut db, rows.id, Memory)?
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let mut db2 = open(tasks, s1, c, r, clone(run_opts))?
+    let attempt = b"l96b-lease-00001"
+    let job = result.unwrap(begin_backup(mut db2, b1, copied(attempt)?))
+    // First cut after reopen is Tiered-idle: retires every listed class-3/4 pack
+    // from MANIFEST while the export lease keeps their files on disk.
+    let _ = checkpoint(mut db2)?
+    for (seq, _) in leased_packs {
+        if compact_listed(db2, seq) {
+            fail("L96 (b): Tiered-idle cut did not retire leased pack from MANIFEST")
+        }
+        if !disk_exists(s1, paged_pack_path(seq)?)? {
+            fail("L96 (b): retiring cut deleted a class-3/4 pack still held by an export lease")
+        }
+    }
+    // A second cut while the lease is still held must neither re-list nor unlink them.
+    let _ = checkpoint(mut db2)?
+    for (seq, _) in leased_packs {
+        if compact_listed(db2, seq) {
+            fail("L96 (b): second cut under export lease re-listed a retired Tiered pack")
+        }
+        if !disk_exists(s1, paged_pack_path(seq)?)? {
+            fail("L96 (b): second cut deleted a pack still held by an export lease")
+        }
+    }
+    let _ = result.unwrap(export_copy(take job))
+    release_export(mut db2, attempt)
+    let _ = checkpoint(mut db2)?
+    for (seq, _) in leased_packs {
+        if disk_exists(s1, paged_pack_path(seq)?)? {
+            fail("L96 (b): pack was not removed at the first cut after release_export")
+        }
+    }
+    close(take db2)?
+    let _ = result.unwrap(restore(b1, r1, c, clone(run_opts)))
+    let restored_db = open(tasks, r1, c, r, clone(run_opts))?
+    let rd = reader(restored_db, VALUE_LIMIT + 1048576)?
+    let snap = snapshot(restored_db)
+    if get(rd, snap, rows, 0u64)? != Some(l96_blob_value(1, 32)) || get(rd, snap, rows, 1u64)? != Some(l96_blob_value(2, 2000)) {
+        fail("L96 (b): restored backup lost rows after leased pack retired on source")
+    }
+    drop(take rd)
+    drop(take snap)
+    close(take restored_db)?
+    // Path 2: reading-probe retirement of a live Tiered store's pack under an export lease.
+    let s2 = disk_test_directory(d)
+    let b2 = disk_test_directory(d)
+    let mut db3 = open(tasks, s2, c, r, clone(zero_opts))?
+    let _ = law_table(mut db3, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows2 = table(mut db3, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l96_put_bytes(mut db3, rows2, 0, l96_blob_value(7, 32))?
+    set_residency(mut db3, rows2.id, Tiered)?
+    let old_pack = compact_branch_root(db3, 0, rows2.id)?.pack
+    l96_put_bytes(mut db3, rows2, 0, l96_blob_value(8, 32))?
+    let _ = checkpoint(mut db3)?
+    close(take db3)?
+    let mut db4 = open(tasks, s2, c, r, clone(run_opts))?
+    let attempt2 = b"l96b-lease-00002"
+    let job2 = result.unwrap(begin_backup(mut db4, b2, copied(attempt2)?))
+    let _ = checkpoint(mut db4)?
+    if compact_listed(db4, old_pack) || !disk_exists(s2, paged_pack_path(old_pack)?)? {
+        fail("L96 (b): reading-probe retirement did not defer unlink of leased pack")
+    }
+    let _ = result.unwrap(export_copy(take job2))
+    release_export(mut db4, attempt2)
+    let _ = checkpoint(mut db4)?
+    if disk_exists(s2, paged_pack_path(old_pack)?)? {
+        fail("L96 (b): reading-probe pack was not removed after release_export")
+    }
+    close(take db4)
+}
+
+// L96 (c): every row of DESIGN-v2 §2.5 crash table (E1, E2, E3, R3, R5).
+@test
+fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let source = disk_test_directory(d)
+    let target = disk_test_directory(d)
+    let partial_copy = disk_test_directory(d)
+    let partial_restore = disk_test_directory(d)
+    let full_restore = disk_test_directory(d)
+    let zero_opts = l96_tiered_options(floor, 0, 500)?
+    let run_opts = l96_tiered_options(floor, 65536, 500)?
+    let mut db = open(tasks, source, c, r, clone(zero_opts))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l96_put_bytes(mut db, rows, 0, l96_blob_value(3, 64))?
+    set_residency(mut db, rows.id, Tiered)?
+    let pack_p = compact_branch_root(db, 0, rows.id)?.pack
+    set_residency(mut db, rows.id, Memory)?
+    let _ = checkpoint(mut db)?
+    // E1: crash after begin_backup (drop without close). Reopen has no lease,
+    // and the next cut retires and removes P.
+    let attempt = b"l96c-crash-00001"
+    let _dropped_job = result.unwrap(begin_backup(mut db, target, copied(attempt)?))
+    if !export_leased(db) {
+        fail("L96 (c) E1: lease not active")
+    }
+    drop(take db)
+    let mut after_e1 = open(tasks, source, c, r, clone(run_opts))?
+    if export_leased(after_e1) {
+        fail("L96 (c) E1: lease survived a crash")
+    }
+    let _ = checkpoint(mut after_e1)?
+    if compact_listed(after_e1, pack_p) || disk_exists(source, paged_pack_path(pack_p)?)? {
+        fail("L96 (c) E1: next cut after E1 crash did not erase P")
+    }
+    // Re-Tier for E2/E3/R3/R5.
+    set_residency(mut after_e1, rows.id, Tiered)?
+    let head_h = version(snapshot(after_e1))
+    let job = result.unwrap(begin_backup(mut after_e1, target, copied(attempt)?))
+    let _ = result.unwrap(export_copy(take job))
+    release_export(mut after_e1, attempt)
+    close(take after_e1)?
+    // E2: copy files without EXPORT -> image unusable (restore refuses NotFound).
+    for listed in result.unwrap(std.dir.list(target, None)) {
+        if listed.name != "EXPORT" {
+            copy_export_file(target, partial_copy, listed.name, None)?
+        }
+    }
+    match restore(partial_copy, disk_test_directory(d), c, clone(run_opts)) {
+        Error(Scratch(Io(NotFound))) => (),
+        _ => fail("L96 (c) E2: restore accepted an image without EXPORT"),
+    }
+    // R3: EXPORT present in restore target -> ordinary open refuses ExportDirectory.
+    for listed in result.unwrap(std.dir.list(target, None)) {
+        copy_export_file(target, partial_restore, listed.name, None)?
+    }
+    match open(tasks, partial_restore, c, r, clone(run_opts)) {
+        Error(ExportDirectory) => (),
+        _ => fail("L96 (c) R3: ordinary open accepted a directory holding EXPORT"),
+    }
+    // E3 + R5: complete restore removes EXPORT and opens cleanly at H.
+    let restored_stamp = result.unwrap(restore(target, full_restore, c, clone(run_opts)))
+    if restored_stamp.head != head_h || disk_exists(full_restore, "EXPORT")? {
+        fail("L96 (c) R5: restore head mismatch or EXPORT survived")
+    }
+    let twin = open(tasks, full_restore, c, r, clone(run_opts))?
+    if version(snapshot(twin)) != head_h {
+        fail("L96 (c) R5: reopened store head differs from H")
+    }
+    close(take twin)
+}
+
+fn l96_find_bytes(haystack: Bytes, needle: Bytes) -> Option[u64] {
+    let h = list.len(haystack)
+    let n = list.len(needle)
+    if n == 0 || n > h {
+        return None
+    }
+    for i in 0u64 .. h - n + 1 {
+        let mut matched = true
+        for j in 0u64 .. n {
+            if haystack[i + j] != needle[j] {
+                matched = false
+                break
+            }
+        }
+        if matched {
+            return Some(i)
+        }
+    }
+    None
+}
+
+// Re-seals the class-0 CollectionMap frame and updates MANIFEST so the class-0
+// pack and MANIFEST are completely valid, while the incoming Cold PagePtr
+// mismatches the internally consistent class-3 frame (either checksum or stamp).
+fn l96_corrupt_cold_incoming_ptr(dir: Dir, id: StoreId, target_ptr: std.page.PagePtr, mutate_stamp: bool) -> Result[(), Error] waits {
+    let raw_manifest = read_page_manifest_bytes(dir)?
+    let (_, manifest) = disk_read_page_manifest("MANIFEST", raw_manifest)?
+    let col_ptr = manifest.branches[0].roots.collections
+    let col_path = paged_pack_path(col_ptr.pack)?
+    let mut pack_raw = disk_read_file(dir, col_path, 1048576)?
+    let width: u64 = int.widen(col_ptr.len)
+    let mut page_payload = copied(list.slice(pack_raw, col_ptr.offset + 16, col_ptr.offset + 16 + width))?
+    let needle = std.page.encode_ptr(target_ptr)
+    let Some(at) = l96_find_bytes(page_payload, needle) else {
+        fail("L96 (d): could not locate Cold PagePtr inside CollectionMap page")
+    }
+    let mut broken = target_ptr
+    if mutate_stamp {
+        broken.stamp = target_ptr.stamp - 1
+    } else {
+        broken.checksum = target_ptr.checksum ^ 1u64
+    }
+    let patched = std.page.encode_ptr(broken)
+    list.copy_from_slice(mut page_payload, at, patched)
+    let ctx = DiskContext(store: id, role: 3, seq: col_ptr.pack)
+    let resealed = capacity(disk_seal(ctx, col_ptr.offset, 0x0021, 1, page_payload))?
+    list.copy_from_slice(mut pack_raw, col_ptr.offset, resealed)
+    disk_write_synced(dir, col_path, pack_raw)?
+    let mut updated_col = col_ptr
+    updated_col.checksum = std.check.xxh3(page_payload, 0, list.len(page_payload))
+    let old_col_bytes = std.page.encode_ptr(col_ptr)
+    let new_col_bytes = std.page.encode_ptr(updated_col)
+    let Some(m_at) = l96_find_bytes(raw_manifest, old_col_bytes) else {
+        fail("L96 (d): could not locate CollectionMap pointer in MANIFEST")
+    }
+    let mut next_manifest = copied(raw_manifest)?
+    list.copy_from_slice(mut next_manifest, m_at, new_col_bytes)
+    let m_ctx = DiskContext(store: id, role: 1, seq: manifest.generation)
+    seal_page_manifest_file(mut next_manifest, m_ctx, manifest.fence)?
+    disk_write_synced(dir, "MANIFEST", next_manifest)
+}
+
+// L96 (d): an internally consistent class-3 pack with a mismatched incoming
+// pointer (checksum, then stamp) is Corrupt at R4, and EXPORT survives in `to`.
+@test
+fn test_l96_d_corrupt_incoming_cold_pointer_at_r4(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let source = disk_test_directory(d)
+    let options = l96_tiered_options(floor, 65536, 500)?
+    let mut db = open(tasks, source, c, r, clone(options))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l96_put_bytes(mut db, rows, 0, l96_blob_value(11, 40))?
+    set_residency(mut db, rows.id, Tiered)?
+    let cold_ptr = compact_branch_root(db, 0, rows.id)?
+    let id = db.store
+    for mutate_stamp in[false, true] {
+        let backup_dir = disk_test_directory(d)
+        let restore_dir = disk_test_directory(d)
+        let attempt = b"l96d-corrupt-001"
+        let job = result.unwrap(begin_backup(mut db, backup_dir, copied(attempt)?))
+        let _ = result.unwrap(export_copy(take job))
+        release_export(mut db, attempt)
+        l96_corrupt_cold_incoming_ptr(backup_dir, id, cold_ptr, mutate_stamp)?
+        match restore(backup_dir, restore_dir, c, clone(options)) {
+            Error(Store(Corrupt(_))) => (),
+            _ => fail("L96 (d): R4 did not reject mismatched incoming Cold pointer as Corrupt"),
+        }
+        if !disk_exists(restore_dir, "EXPORT")? {
+            fail("L96 (d): EXPORT did not survive in restore target after R4 Corrupt")
+        }
+    }
+    close(take db)
+}
+
+// L96 (e) Tiered + last-conversion half (DESIGN-v2 §2.1, §2.2, §6, D-ZL-2):
+// - Tiered image R4 requires a funded Tiered plan (unfunded refuses Missing("cache_bytes")).
+// - Last-conversion store (zero-live listed class-3 pack P, no Tiered holder):
+//   lease list is live_pack_sequences + [P] (+1 u64 per listed zero-live pack),
+//   copy includes P, R4 takes no Tiered plan reserve (exact vs exact-1 Capacity),
+//   and restored store holds P and runs a Tiered-idle probe + full scrub clean.
+@test
+fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let source = disk_test_directory(d)
+    let tiered_backup = disk_test_directory(d)
+    let conv_backup = disk_test_directory(d)
+    let conv_restored = disk_test_directory(d)
+    let zero_opts = l96_tiered_options(floor, 0, 500)?
+    let run_opts = l96_tiered_options(floor, 65536, 500)?
+    let mut db = open(tasks, source, c, r, clone(zero_opts))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l96_put_bytes(mut db, rows, 0, l96_blob_value(5, 48))?
+    set_residency(mut db, rows.id, Tiered)?
+    let pack_p = compact_branch_root(db, 0, rows.id)?.pack
+    let attempt = b"l96e-admit-00001"
+    let job = result.unwrap(begin_backup(mut db, tiered_backup, copied(attempt)?))
+    let _ = result.unwrap(export_copy(take job))
+    release_export(mut db, attempt)
+    // Unfunded options on a Tiered image must refuse Missing("cache_bytes") at R4.
+    let mut unfunded = result.unwrap(sized(Directory, 268435456u64))
+    unfunded.cache_bytes = 0
+    unfunded.writer_pin_bytes = 0
+    match restore(tiered_backup, disk_test_directory(d), c, unfunded) {
+        Error(Store(Missing(what))) if what == "cache_bytes" => (),
+        _ => fail("L96 (e): Tiered image R4 did not refuse unfunded plan"),
+    }
+    // Convert to Memory and drain queue with probe_budget 0 -> last-conversion store:
+    // no Tiered holder, P listed with live == 0.
+    set_residency(mut db, rows.id, Memory)?
+    let _ = checkpoint(mut db)?
+    let live_only = live_pack_sequences(disk_state(db).pages.locations)
+    let leased = export_lease_pack_sequences(disk_state(db).pages.locations)
+    if list.len(leased) != list.len(live_only) + 1 || !list.contains(leased, pack_p) || list.contains(live_only, pack_p) {
+        fail("L96 (e) D-ZL-2: last-conversion lease must be positive-live plus the one zero-live class-3 pack")
+    }
+    let resident_exact = db.resident
+    let job2 = result.unwrap(begin_backup(mut db, conv_backup, copied(attempt)?))
+    let _ = result.unwrap(export_copy(take job2))
+    release_export(mut db, attempt)
+    if !disk_exists(conv_backup, paged_pack_path(pack_p)?)? {
+        fail("L96 (e) D-ZL-2: backup of last-conversion store omitted listed zero-live pack P")
+    }
+    // R4 on the last-conversion store takes NO Tiered plan reserve: exact
+    // resident_limit passes, exact - 1 refuses Full(Resident(Capacity)).
+    let mut exact_opts: Options = clone(zero_opts)
+    exact_opts.resident_limit = resident_exact
+    let _ = result.unwrap(restore(conv_backup, conv_restored, c, exact_opts))
+    let mut below_opts: Options = clone(zero_opts)
+    below_opts.resident_limit = resident_exact - 1
+    match restore(conv_backup, disk_test_directory(d), c, below_opts) {
+        Error(Store(Full(Resident(Capacity(requested, available))))) if requested == resident_exact && available == resident_exact - 1 => (),
+        _ => fail("L96 (e): last-conversion R4 did not match exact resident_limit admission"),
+    }
+    close(take db)?
+    let mut twin = open(tasks, conv_restored, c, r, clone(run_opts))?
+    if !compact_listed(twin, pack_p) {
+        fail("L96 (e): restored last-conversion store lost listed pack P before probe")
+    }
+    let _ = checkpoint(mut twin)?
+    if compact_listed(twin, pack_p) || disk_exists(conv_restored, paged_pack_path(pack_p)?)? {
+        fail("L96 (e): restored last-conversion store failed to retire P via Tiered-idle probe")
+    }
+    l96_full_scrub_clean(mut twin)?
+    close(take twin)
+}
+
+// L100 (c): backup + restore of (a) after pin and of (b) before reopen, plus
+// R4 refusal Unsupported(0x0023) when P's file is absent from the image.
+@test
+fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let v1 = compact_value(1, 0)
+    let v2 = compact_value(2, 1)
+    let zero_opts = l96_tiered_options(floor, 0, 500)?
+    let run_opts = l96_tiered_options(floor, 65536, 500)?
+    // Subcase 1: L100 (a) after pin(S), zero-live P still listed.
+    let src_a = disk_test_directory(d)
+    let bak_a = disk_test_directory(d)
+    let res_a = disk_test_directory(d)
+    let (rows_a, leaf_a) = l100_one_row_tiered(src_a, c, r, tasks, floor, clone(v1))?
+    let pack_a = leaf_a.pack
+    let mut db_a = open(tasks, src_a, c, r, clone(zero_opts))?
+    let snap_s = snapshot(db_a)
+    l96_put_bytes(mut db_a, rows_a, 0, clone(v2))?
+    let _ = checkpoint(mut db_a)?
+    let _ = pin(mut db_a, "s", snap_s)?
+    drop(take snap_s)
+    let attempt_a = b"l100c-case-a-001"
+    let job_a = result.unwrap(begin_backup(mut db_a, bak_a, copied(attempt_a)?))
+    let _ = result.unwrap(export_copy(take job_a))
+    release_export(mut db_a, attempt_a)
+    let want_pa = disk_read_file(src_a, paged_pack_path(pack_a)?, 1048576)?
+    if disk_read_file(bak_a, paged_pack_path(pack_a)?, 1048576)? != want_pa {
+        fail("L100 (c) (a): pack P missing or altered in backup")
+    }
+    close(take db_a)?
+    let _ = result.unwrap(restore(bak_a, res_a, c, clone(run_opts)))
+    let mut twin_a = open(tasks, res_a, c, r, clone(run_opts))?
+    l100_pin_check_reads(twin_a, rows_a, clone(v1), clone(v2))?
+    for _ in 0u64 .. 8 {
+        if !compact_listed(twin_a, pack_a) {
+            break
+        }
+        let _ = checkpoint(mut twin_a)?
+    }
+    if compact_listed(twin_a, pack_a) {
+        fail("L100 (c) (a): probe on restored store did not retire P")
+    }
+    l100_pin_check_reads(twin_a, rows_a, clone(v1), clone(v2))?
+    l96_full_scrub_clean(mut twin_a)?
+    close(take twin_a)?
+    // Subcase 2: L100 (b) before reopen, plus Subcase 3 (absent P -> Unsupported(0x0023) at R4).
+    let src_b = disk_test_directory(d)
+    let bak_b = disk_test_directory(d)
+    let res_b = disk_test_directory(d)
+    let missing_p = disk_test_directory(d)
+    let (rows_b, leaf_b) = l100_one_row_tiered(src_b, c, r, tasks, floor, clone(v1))?
+    let pack_b = leaf_b.pack
+    let mut db_b = open(tasks, src_b, c, r, clone(zero_opts))?
+    set_residency(mut db_b, rows_b.id, Memory)?
+    let _ = checkpoint(mut db_b)?
+    let attempt_b = b"l100c-case-b-002"
+    let job_b = result.unwrap(begin_backup(mut db_b, bak_b, copied(attempt_b)?))
+    let _ = result.unwrap(export_copy(take job_b))
+    release_export(mut db_b, attempt_b)
+    let want_pb = disk_read_file(src_b, paged_pack_path(pack_b)?, 1048576)?
+    if disk_read_file(bak_b, paged_pack_path(pack_b)?, 1048576)? != want_pb {
+        fail("L100 (c) (b): pack P missing or altered in backup")
+    }
+    close(take db_b)?
+    let _ = result.unwrap(restore(bak_b, res_b, c, clone(run_opts)))
+    let mut twin_b = open(tasks, res_b, c, r, clone(run_opts))?
+    let _ = checkpoint(mut twin_b)?
+    if compact_listed(twin_b, pack_b) || disk_exists(res_b, paged_pack_path(pack_b)?)? {
+        fail("L100 (c) (b): restored idle store did not retire P")
+    }
+    l96_full_scrub_clean(mut twin_b)?
+    close(take twin_b)?
+    // Subcase 3: image of (b) with P's file removed -> R4 refuses Unsupported(0x0023).
+    let p_name = paged_pack_path(pack_b)?
+    for listed in result.unwrap(std.dir.list(bak_b, None)) {
+        if listed.name != p_name {
+            copy_export_file(bak_b, missing_p, listed.name, None)?
+        }
+    }
+    match open_copied(missing_p, c, copied(attempt_b)?, clone(run_opts), false) {
+        Error(Store(Unsupported(0x0023))) => Ok(()),
+        _ => fail("L100 (c): R4 did not refuse image missing listed class-3 pack P with Unsupported(0x0023)"),
+    }
+}

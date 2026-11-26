@@ -229,6 +229,7 @@ dirs = ["."]
 "store_crash_sim_laws.hirsel" = "store"
 "store_crash_sim_model.hirsel" = "store"
 "store_crash_sim_corpus.hirsel" = "store"
+"store_tiered_backup_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format10_laws.hirsel" = "store"
@@ -795,3 +796,21 @@ limit = 134217728
 
 [tests.runs."store@1/store/test_l68_demote_unique_insert"]
 limit = 134217728
+
+[tests.runs."store@1/store/test_l96_a_tiered_table_backup_restore_and_offline"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l96_b_leased_tiered_pack_survives_retiring_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l96_c_export_restore_crash_table"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l96_d_corrupt_incoming_cold_pointer_at_r4"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l96_e_tiered_and_last_conversion_admission"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_c_backup_restore_zero_live_pin_and_idle"]
+limit = 536870912

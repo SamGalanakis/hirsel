@@ -68,7 +68,7 @@ fn capture_page(mut packs: CapturePacks, ptr: std.page.PagePtr, domain: std.page
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
     capture_with_pack(mut packs, path, ptr.pack, ptr.stamp, ptr.offset, class, scoped fn(mut file: HostFile) -> Result[std.page.Image, Error] waits {
-        capture_read_page(mut file, path, id, ptr, domain, expected_level)
+        capture_read_page_mode(mut file, path, id, ptr, domain, expected_level, domain == CollectionMap)
     })
 }
 
@@ -176,10 +176,7 @@ fn capture_lists(mut packs: CapturePacks, m: PageManifest) -> Result[CaptureList
                 let seq: u64 = list.word_be(key, 0)
                 match kind {
                     PackList => {
-                        let pack = pack_record(path, at, raw)?
-                        if pack.class >= 3 {
-                            return Error(Unsupported(0x0023))
-                        }
+                        let _ = pack_record(path, at, raw)?
                         if seq == 0 || seq >= m.next_pack {
                             return Error(disk_fault(path, at, Malformed))
                         }

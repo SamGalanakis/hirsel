@@ -330,20 +330,8 @@ fn manifest_account(m: PageManifest) -> u64 {
     m.account_memory + m.account_tiered
 }
 
-// The Memory recovery paths cannot retain these roots until AP21-T lands.
-fn require_memory_manifest(m: PageManifest) -> Result[(), Error] {
-    if m.account_tiered != 0 {
-        return Error(Unsupported(0x0031))
-    }
-    if m.deferred_frees.stamp != 0 || m.deferred_next != 0 {
-        return Error(Unsupported(0x0031))
-    }
-    require_unarchived_manifest(m)
-}
-
-// Objects@1 / sim@1 memory manifests allow §13.9 archival fields (`archive_on`,
-// `archive`, `archive_drop`) while still refusing Tiered roots until Tiered
-// lands on object stores.
+// Objects@1 / sim@1 and Memory-only reader manifests refuse Tiered roots until
+// Tiered lands on those paths.
 fn require_object_memory_manifest(m: PageManifest) -> Result[(), Error] {
     if m.account_tiered != 0 {
         return Error(Unsupported(0x0031))

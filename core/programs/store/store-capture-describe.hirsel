@@ -208,7 +208,7 @@ fn describe_collection(mut packs: CapturePacks, names: List[DescribeName], root:
     let desc = describe_descriptor(mut packs, root, cat.id)?
     let (rows, charge, log_first, log_next) = if let Some(record) = view desc {
         let descriptor = std.page_descriptor.collection_descriptor(record) ?=> |_| disk_fault(path, at, Malformed)
-        if descriptor.residency != ResidentMemory || (cat.kind == 4 && descriptor.kind != LogCollection) {
+        if cat.kind == 4 && descriptor.kind != LogCollection {
             return Error(disk_fault(path, at, Malformed))
         }
         let rows: u64 = descriptor.rows

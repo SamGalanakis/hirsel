@@ -200,12 +200,16 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     } else {
         fail("L70(c): expected Tiered(Migrate) for migration")
     }
-    if let Error(Store(Tiered(Export))) = begin_export_copy(mut db, scratch, list.new(), 0) {
-        if !refusal_directory_unchanged(store_dir, before) || !refusal_directory_unchanged(scratch, scratch_before) {
-            fail("L70(c): export changed the store or scratch directory")
-        }
-    } else {
-        fail("L70(c): expected Tiered(Export)")
+    // M3b-S4 (L70 revised): log@1 export is lifted for Tiered stores.
+    let export_attempt = b"l70-export-lift!"
+    let leased_job = match begin_export_copy(mut db, scratch, copied(export_attempt)?, 0) {
+        Ok(take job) => take job,
+        Error(_) => fail("L70(c): expected log@1 Tiered export lease to succeed"),
+    }
+    let _ = take leased_job
+    release_export(mut db, export_attempt)
+    if !refusal_directory_unchanged(scratch, scratch_before) {
+        fail("L70(c): export lease changed scratch before export_copy")
     }
     let digest: Inline[u8, 32] =[0u8; 32]
     if let Error(Store(Tiered(Install))) = reserve_import(mut db, refusal_import(digest)) {

@@ -550,9 +550,8 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
 }
 
 // (c): a backup leased at main's head, with a commit after the lease, then
-// restored and opened, reads exactly main's rows at the lease. A store
-// whose main, fork or pin catalog may hold the table as Tiered refuses the
-// export (store_has_tiered, §13.10); one with none of them refuses nothing.
+// restored and opened, reads exactly main's rows at the lease (Memory or
+// Tiered, M3b-S4).
 fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: Options, rows: Table[u64, Bytes], mut st: CsimState, step: CsimStep) -> Result[CsimNext, String] waits {
     let cur = csim_last(st.history)
     let Some(leased) = map.get(cur.heads, "") else {
@@ -575,14 +574,10 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
     list.fill(mut attempt, 16, int.truncate(st.at % 251))
     let job = match begin_backup(mut db, target, clone(attempt)) {
         Ok(job) => {
-            if st.tiered == 1 {
-                return Error(csim_fail(st, "(c) begin_backup leased a store with a Tiered table"))
+            if st.tiered != 0 || csim_tiered_holder(st, cur) {
+                let _ = std.prop.sometimes("crash sim backup leased on Tiered", true)
             }
             job
-        },
-        Error(Store(Tiered(_))) if st.tiered != 0 || csim_tiered_holder(st, cur) => {
-            let _ = std.prop.sometimes("crash sim backup refused on Tiered", true)
-            return Ok(Go)
         },
         Error(Store(e)) => return csim_error(mut st, "begin_backup", e, None),
         Error(Scratch(e)) => return csim_error(mut st, "begin_backup", e, None),
@@ -858,7 +853,7 @@ fn csim_seed(tasks: Tasks, seed_grant: Env, seed: u64) -> Result[(), ()] waits {
     cfg.cases = 1
     cfg.max_choices = 2048
     cfg.max_shrinks = 200
-    cfg.case_bytes = 201326592
+    cfg.case_bytes = 335544320
     cfg.case_steps = (CSIM_STEPS + 8) * 400000000
     let replayable = match env.get(seed_grant, "HIRSEL_TEST_CSIM_REPLAY") {
         Ok(Some(token)) => std.prop.replay(take cfg, token),

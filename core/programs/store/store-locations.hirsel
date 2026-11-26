@@ -83,6 +83,20 @@ fn live_pack_sequences(known: PageLocations) -> List[u64] {
     take result
 }
 
+// D-ZL-2 (§13.10a): an export lease names every positive-live pack and every
+// listed class-3/4 pack (even when `live == 0`). When no zero-live class-3/4
+// pack is listed this returns the exact same sequence list as `live_pack_sequences`.
+fn export_lease_pack_sequences(known: PageLocations) -> List[u64] {
+    let mut result: List[u64] = list.new()
+    let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut cursor) {
+        if pack.live != 0 || pack.class >= 3 {
+            list.push(mut result, seq)
+        }
+    }
+    take result
+}
+
 fn published_page_pointer(known: PageLocations, root: PageTree) -> std.page.PagePtr {
     published_tree_pointer(known, root.root)
 }

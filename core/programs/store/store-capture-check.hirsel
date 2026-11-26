@@ -13,9 +13,11 @@ const CHECK_RETIRED: u8 = 255
 
 type CheckPack {
     seq: u64,
+    // Holds `payload_bytes` until `check_envelope` finishes, then `index` for `check_reachable`
+    // (keeps CheckPack at CAPTURE_LIST_ROW = 48 bytes).
     payload_bytes: u64,
-    index: u64,
     base: u64,
+    // Holds `index` until `check_envelope` finishes, then the verified pack file size.
     size: u64,
     head: u64,
     frames: u32,
@@ -23,7 +25,7 @@ type CheckPack {
 }
 
 fn check_pack_row(seq: u64, class: u8, frames: u32, size: u64, index_at: u64) -> CheckPack {
-    CheckPack(seq: seq, payload_bytes: size, index: index_at, base: 0, size: 0, head: 72, frames: frames, class: class)
+    CheckPack(seq: seq, payload_bytes: size, base: 0, size: index_at, head: 72, frames: frames, class: class)
 }
 
 fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[List[CheckPack], Error] waits {
@@ -83,7 +85,8 @@ fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], 
         input.copy_to = Some(disk_io(host.open(to, path, Write))?)
     }
     let header = disk_read_header(path, scrub_prefix(mut input, path, 0, 72, mut spent)?, 3, Some(pack.seq), Some(p.id))?
-    let mut scanned = pack_scan_indexed(pack.class, p.manifest.next_stamp, pack.index)
+    let index_at = pack.size
+    let mut scanned = pack_scan_indexed(pack.class, p.manifest.next_stamp, index_at)
     let mut at = 72u64
     while at < input.size {
         let frame = match read_pack_frame(mut input, path, header.context, mut scanned, at, false, mut spent) {
@@ -102,6 +105,7 @@ fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], 
         disk_io(host.sync(mut output))?
         disk_io(host.close(take output))?
     }
+    pack.payload_bytes = index_at
     pack.size = at
     Ok(())
 }
@@ -230,17 +234,18 @@ fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef, class: u8) -> Re
     let slot = check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp)?
     if class == 4 {
         let pack = walk.packs[slot]
+        let index_at = pack.payload_bytes
         let width: u64 = int.widen(ptr.len)
-        if ptr.offset >= pack.index || 16 + width > pack.index - ptr.offset {
+        if ptr.offset >= index_at || 16 + width > index_at - ptr.offset {
             return Error(disk_fault(path, ptr.offset, Malformed))
         }
-        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 4, pack.index, pack.size, walk.next_stamp, tiered_frame_id(TieredBlob(reference)))?
+        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 4, index_at, pack.size, walk.next_stamp, tiered_frame_id(TieredBlob(reference)))?
     }
     let location = 4 * (walk.packs[slot].base + ptr.offset) + 3
     let opened = check_open_pack(walk.dir, path)?
     let mut input = journal_input(take opened, false)?
     check_at_head(mut input, mut walk.packs[slot], path, ptr)?
-    let mut scanned = pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].index)
+    let mut scanned = pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].payload_bytes)
     let mut spent = 0u64
     let ctx = DiskContext(store: walk.id, role: 3, seq: ptr.pack)
     let frame = read_pack_frame(mut input, path, ctx, mut scanned, ptr.offset, true, mut spent)?
@@ -259,11 +264,12 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
     let slot = check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp)?
     if class == 3 {
         let pack = walk.packs[slot]
+        let index_at = pack.payload_bytes
         let width: u64 = int.widen(ptr.len)
-        if ptr.offset >= pack.index || 16 + width > pack.index - ptr.offset {
+        if ptr.offset >= index_at || 16 + width > index_at - ptr.offset {
             return Error(disk_fault(path, ptr.offset, Malformed))
         }
-        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 3, pack.index, pack.size, walk.next_stamp, tiered_frame_id(TieredPage(ptr)))?
+        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 3, index_at, pack.size, walk.next_stamp, tiered_frame_id(TieredPage(ptr)))?
     }
     let tag = match domain {
         Collection => 0u64,

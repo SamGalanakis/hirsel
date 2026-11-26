@@ -1,14 +1,17 @@
 // The cut's retirements: which removed packs leave now, which a lease
 // carries to a later cut, and the generation's new PageDisk.
-
 fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], scrubs: List[Arc[ScrubLease]], compaction: TieredCompaction, first: u64, end: u64) -> Result[(PageDisk, DiskRemovals), Error] {
     let mut locations = share_page_locations(layout.locations)
     let mut packs: List[u64] = list.new()
     let mut carried: List[u64] = list.new()
     for seq in layout.lists.removals {
-        if tiered_leased(compaction.held, seq) {
+        let is_tiered = match disk_index_get(locations.packs, seq) {
+            Some(pack) => pack.class >= 3,
+            None => false,
+        }
+        if tiered_leased(compaction.held, seq) || (is_tiered && (pack_leased(lease, seq) || scrub_leased(scrubs, seq))) {
             // A retired Tiered pack leaves the inventory at once; its file
-            // waits for the last read inventory that lists it.
+            // waits for the last read inventory, export lease or scrub lease.
             let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
             list.push(mut carried, seq)
         } else if pack_leased(lease, seq) || scrub_leased(scrubs, seq) {

@@ -4,4 +4,8 @@
 // in the report and rides as a soak-tier red.
 // Seed 7: empty table Tiered -> Memory panicked "a Cold edge has no pack
 // inventory" (store-cold-edge-panic-3181, R1).
-const CSIM_CORPUS: Inline[u64, 1] =[7]
+// Seeds 96, 145: Tiered -> Memory + reopen cut/unpin returned Io(Closed)
+// (M3b-S1, R3); seeds 31, 113, 124, 127, 150: backup after Tiered -> Memory
+// failed restore Unsupported(0x0023) before the class-3/4 export lease
+// (M3b-S4, R2).
+const CSIM_CORPUS: Inline[u64, 8] =[7, 31, 96, 113, 124, 127, 145, 150]

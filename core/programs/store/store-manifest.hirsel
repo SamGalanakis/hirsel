@@ -662,7 +662,8 @@ type ValidatedPageManifest {
 }
 
 fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
-    require_memory_manifest(manifest)?
+    require_object_memory_manifest(manifest)?
+    require_unarchived_manifest(manifest)?
     validate_directory_graph(d, id, take manifest, false)
 }
 

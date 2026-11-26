@@ -114,21 +114,6 @@ pub struct Config {
 
 pub const NOT_STARTED: u8 = 103;
 
-/// Arm the serving or preparing child's exit before it can acquire store
-/// authority. Check the parent after arming to close the fork-to-arm race.
-pub(crate) fn arm_host_parent() -> std::io::Result<()> {
-    let Some(parent) = std::env::var_os("HIRSEL_HOST_PID") else {
-        return Ok(());
-    };
-    let expected = parent
-        .to_str()
-        .and_then(|pid| pid.parse::<libc::pid_t>().ok())
-        // A contained serving child has the container init as parent.
-        .filter(|pid| *pid > 0)
-        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-    crate::host::sys::exit_with_parent(expected)
-}
-
 /// Take the place control socket once (field 0) or read the scratch grant (1).
 /// # Safety
 /// The context and its configuration are pinned for the current run.

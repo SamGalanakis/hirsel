@@ -208,6 +208,7 @@ _sendmsg
 _sendto
 _setjmp
 _setpriority
+_setrlimit
 _setsockopt
 _shutdown
 _sigaction

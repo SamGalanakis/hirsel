@@ -4,6 +4,21 @@ use hirsel_core_ids::launch::{FIRST_INHERITED_FD, INHERITED_SLOT, XDG_FORMS, xdg
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
+pub(super) fn prepare_host() -> io::Result<()> {
+    // Arm the parent-death notification before acquiring store authority.
+    if let Some(parent) = std::env::var_os("HIRSEL_HOST_PID") {
+        let expected = parent
+            .to_str()
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+            // A contained serving child has the container init as parent.
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        crate::host::sys::exit_with_parent(expected)?;
+    }
+    crate::host::sys::raise_fd_limit();
+    Ok(())
+}
+
 pub(crate) enum StartupError {
     Io(io::Error),
     /// A directory grant that could not be opened: its path as configured,

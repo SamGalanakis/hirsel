@@ -5,6 +5,22 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
+/// Raise the soft descriptor limit at startup if the host permits it.
+pub(crate) fn raise_fd_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: limit is writable storage for one rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == 0
+        && limit.rlim_cur < limit.rlim_max
+    {
+        limit.rlim_cur = limit.rlim_max;
+        // SAFETY: limit is initialized and leaves the hard limit unchanged.
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+    }
+}
+
 /// This thread's errno.
 #[inline(always)]
 pub(crate) fn errno() -> *mut libc::c_int {

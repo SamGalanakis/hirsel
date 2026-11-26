@@ -359,7 +359,7 @@ impl OsProcess {
     ) -> Result<Box<Self>, StartupError> {
         // SAFETY: copy launcher input before acquiring any program grant.
         unsafe {
-            crate::process::arm_host_parent()?;
+            startup::prepare_host()?;
             let argv = (0..input.args_len).map(|index| bytes(*input.args.add(index)));
             // `input.args` starts after the program name, process argv's 0.
             for (index, value) in argv.clone().enumerate() {

@@ -5,6 +5,28 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
+/// Raise the soft descriptor limit at startup if the host permits it.
+pub(crate) fn raise_fd_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: limit is writable storage for one rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+        return;
+    }
+    // The hard limit may be unlimited, but Darwin bounds the soft limit.
+    let Some(max_files) = sysctl_size(c"kern.maxfilesperproc") else {
+        return;
+    };
+    let target = limit.rlim_max.min(max_files);
+    if limit.rlim_cur < target {
+        limit.rlim_cur = target;
+        // SAFETY: limit is initialized and leaves the hard limit unchanged.
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+    }
+}
+
 /// This thread's errno.
 #[inline(always)]
 pub(crate) fn errno() -> *mut libc::c_int {
@@ -419,25 +441,26 @@ pub(crate) fn background_thread() {
 /// either cannot be read. Darwin sizes a UDP socket's receive queue from
 /// `net.inet.udp.recvspace` and its send queue from `net.inet.udp.maxdgram`.
 pub(crate) fn udp_queue_bytes() -> Option<u64> {
-    let size = |name: &std::ffi::CStr| {
-        let mut value: libc::c_int = 0;
-        let mut len = size_of::<libc::c_int>();
-        // SAFETY: the name is NUL-terminated and the kernel writes at most `len` bytes.
-        let rc = unsafe {
-            libc::sysctlbyname(
-                name.as_ptr(),
-                (&raw mut value).cast(),
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if rc != 0 || len != size_of::<libc::c_int>() {
-            return None;
-        }
-        u64::try_from(value).ok()
+    sysctl_size(c"net.inet.udp.recvspace")?.checked_add(sysctl_size(c"net.inet.udp.maxdgram")?)
+}
+
+fn sysctl_size(name: &std::ffi::CStr) -> Option<u64> {
+    let mut value: libc::c_int = 0;
+    let mut len = size_of::<libc::c_int>();
+    // SAFETY: the name is NUL-terminated and the kernel writes at most `len` bytes.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
     };
-    size(c"net.inet.udp.recvspace")?.checked_add(size(c"net.inet.udp.maxdgram")?)
+    if rc != 0 || len != size_of::<libc::c_int>() {
+        return None;
+    }
+    u64::try_from(value).ok()
 }
 
 /// The CPU this thread is running on, for the unit observer's trace lines:

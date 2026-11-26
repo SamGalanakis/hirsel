@@ -128,6 +128,63 @@ unsafe extern "C" fn entered(
     std::fs::write(Path::new(OsStr::from_bytes(path)), b"main").unwrap();
     0
 }
+
+#[test]
+fn startup_raises_the_child_descriptor_limit() {
+    use std::os::unix::process::CommandExt;
+
+    const TEST: &str = "entry::startup_host_tests::startup_raises_the_child_descriptor_limit";
+    const CHILD: &str = "HIRSEL_TEST_FD_LIMIT_CHILD";
+    const SOFT_LIMIT: libc::rlim_t = 256;
+    if std::env::var_os(CHILD).is_some() {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: limit is writable storage for one rlimit.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
+            0
+        );
+        assert_eq!(limit.rlim_cur, SOFT_LIMIT);
+
+        let fixture = Fixture::new();
+        assert_eq!(fixture.run(&[], 0, 4096, |_, _| unreachable!(), entered), 0);
+        let _descriptors: Vec<_> = (0..=SOFT_LIMIT)
+            .map(|_| File::open("/dev/null").expect("startup raised the descriptor limit"))
+            .collect();
+        return;
+    }
+
+    let mut child = crate::test_process::command();
+    child.args(["--exact", TEST]).env(CHILD, "1");
+    // SAFETY: the pre-exec hook only changes this child's descriptor limit
+    // through async-signal-safe calls and returns any OS error.
+    unsafe {
+        child.pre_exec(|| {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            limit.rlim_cur = SOFT_LIMIT;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = child.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn unsupported_openat2_names_first_dir_and_refuses_before_main_without_effects() {
     let fixture = Fixture::new();

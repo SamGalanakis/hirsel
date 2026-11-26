@@ -77,19 +77,8 @@ int main(void) {
         .read_line(&mut ready)
         .unwrap();
     assert_eq!(ready, "ready\n");
-    let maps = std::fs::read_to_string(format!("/proc/{}/maps", child.id())).unwrap();
     let hex = |pc: &str| u64::from_str_radix(pc.trim_start_matches("0x"), 16).unwrap();
-    let executable_mapping = maps
-        .lines()
-        .filter(|line| line.ends_with(executable.to_str().unwrap()))
-        .find_map(|line| {
-            let mut fields = line.split_whitespace();
-            let range = fields.next()?;
-            fields.next()?.contains('x').then_some(range)
-        })
-        .unwrap();
-    let (start, end) = executable_mapping.split_once('-').unwrap();
-    let executable_range = hex(start)..hex(end);
+    let executable_range = crate::host::child_code_range(child.id(), &executable);
     let result = hirsel_prof::attach(
         child.id(),
         Some(Duration::from_millis(250)),

@@ -747,8 +747,7 @@ pub(crate) fn residency() -> Option<Residency> {
     let page = crate::task_heap::page_bytes();
     let samples = live.samples.lock().unwrap();
     let timestamp = prof::now_ns();
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let rss = statm.split_ascii_whitespace().nth(1)?.parse::<u64>().ok()? * page as u64;
+    let rss = crate::host::sys::resident_bytes()?;
     let samples = samples
         .iter()
         .filter_map(|(&address, sample)| {

@@ -17,10 +17,8 @@ fn release_link_holds_no_descriptor_on_its_parts() {
     AFTER_CHECK.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move |paths: &[PathBuf]| {
             let mut open = BTreeMap::<PathBuf, usize>::new();
-            for fd in std::fs::read_dir("/proc/self/fd").unwrap() {
-                if let Ok(target) = std::fs::read_link(fd.unwrap().path()) {
-                    *open.entry(target).or_default() += 1;
-                }
+            for target in crate::host::open_paths() {
+                *open.entry(target).or_default() += 1;
             }
             seen.borrow_mut().extend(
                 paths

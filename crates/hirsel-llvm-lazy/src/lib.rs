@@ -423,25 +423,6 @@ b0(v0: ptr):
     }
 
     #[test]
-    fn llvm_is_unmapped_until_first_object_and_loaded_once() {
-        let maps = || std::fs::read_to_string("/proc/self/maps").unwrap();
-        assert!(!maps().contains("libLLVM"));
-        let module = hirsel_core_ir::Module::default();
-        core::emit_ir(&module).unwrap();
-        assert!(!maps().contains("libLLVM"));
-        core::emit_object(&module, core::Optimization::None).unwrap();
-        let loaded = maps();
-        assert!(loaded.contains("libLLVM"));
-        assert!(loaded.contains("memfd:hirsel-llvm"));
-        core::emit_object(&module, core::Optimization::Speed).unwrap();
-        let component_lines = |s: &str| {
-            s.lines()
-                .filter(|line| line.contains("memfd:hirsel-llvm"))
-                .count()
-        };
-        assert_eq!(component_lines(&loaded), component_lines(&maps()));
-    }
-    #[test]
     fn release_generated_caller_keeps_inlined_source_locations() {
         let module = hirsel_core_ir::text::parse(
             r#"core v1

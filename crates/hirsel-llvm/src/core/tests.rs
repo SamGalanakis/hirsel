@@ -3053,7 +3053,7 @@ extern uint64_t hirsel_core_test_socket_adopt(HirselCoreContext *,int);
 static int peer;
 static size_t before_fds, before_attempts;
 static uint64_t before_available;
-static size_t wire_fds(void) {{ DIR *d=opendir("/proc/self/fd"); assert(d); size_t n=0; while(readdir(d)) n++; closedir(d); return n; }}
+static size_t wire_fds(void) {{ DIR *d=opendir("/dev/fd"); assert(d); size_t n=0; while(readdir(d)) n++; closedir(d); return n; }}
 R3 {prepare}(void *raw,uint64_t site) {{
  HirselCoreContext *ctx=raw;
  (void)site; before_fds=wire_fds(); before_attempts=hirsel_core_test_attempts(ctx); before_available=hirsel_core_test_available(ctx);

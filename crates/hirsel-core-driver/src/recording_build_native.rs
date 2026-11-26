@@ -3106,7 +3106,6 @@ pub fn main(c: Cred, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
 #[test]
 fn cr1_fetched_secret_key_is_only_in_the_sealed_store() {
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::unix::fs::FileExt;
     use std::process::Stdio;
 
     const KEY: &[u8] = b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -3190,29 +3189,7 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
         assert_eq!(line, [key_id, token, b"\n"].concat());
 
         // The program is parked on stdin: scan its readable mappings.
-        let maps = std::fs::read_to_string(format!("/proc/{}/maps", child.id())).unwrap();
-        let mem = std::fs::File::open(format!("/proc/{}/mem", child.id()))
-            .expect("the test must be able to read its child's memory (ptrace)");
-        let mut hits = 0;
-        let mut scanned = 0;
-        for map in maps.lines() {
-            let mut fields = map.split_whitespace();
-            let (range, perms) = (fields.next().unwrap(), fields.next().unwrap());
-            if !perms.starts_with('r') {
-                continue;
-            }
-            let (start, end) = range.split_once('-').unwrap();
-            let start = u64::from_str_radix(start, 16).unwrap();
-            let end = u64::from_str_radix(end, 16).unwrap();
-            let mut region = vec![0; (end - start) as usize];
-            // [vvar] and similar special mappings refuse reads.
-            if mem.read_exact_at(&mut region, start).is_err() {
-                continue;
-            }
-            scanned += region.len();
-            hits += region.windows(KEY.len()).filter(|w| *w == KEY).count();
-        }
-        assert!(scanned > 1 << 20, "scanned only {scanned} bytes");
+        let hits = crate::host::child_memory_hits(child.id(), KEY);
         child.stdin.take().unwrap().write_all(b"g").unwrap();
         let mut mac = Vec::new();
         stdout.read_to_end(&mut mac).unwrap();

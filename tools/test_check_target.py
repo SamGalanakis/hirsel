@@ -103,6 +103,29 @@ class TargetDecisions(unittest.TestCase):
         self.assertEqual(rules(seam, 'crates/hirsel-core-rt/src/host/mod.rs'), [])
         self.assertEqual(rules(seam, next(iter(check_target.HOST_FILES))), [])
 
+    def test_proc_paths_outside_a_seam_are_red(self):
+        red = [
+            'let s = std::fs::read_to_string("/proc/self/statm");',
+            'let gone = !Path::new("/proc").join(pid).exists();',
+            'let maps = format!("/proc/{pid}/maps");',
+            'let status = c"/proc/self/status";',
+            'const C: &str = r#"DIR *d = opendir("/proc/self/fd");"#;',
+            'const SH: &str = "read -r pid name < /proc/$$/stat";',
+        ]
+        for source in red:
+            with self.subTest(source):
+                self.assertEqual(rules(source), [(1, 'host-proc')])
+        green = [
+            '/// Linux reads /proc/self/statm.\nfn f() {}',
+            '// "/proc/self/fd"\nlet d = "/dev/fd";',
+            'let p = "/usr/proc/x"; let q = "a/proc/b"; let r = "/process";',
+        ]
+        for source in green:
+            with self.subTest(source):
+                self.assertEqual(rules(source), [])
+        seam = 'let s = std::fs::read_to_string("/proc/self/statm");'
+        self.assertEqual(rules(seam, 'crates/hirsel-core-driver/src/host/linux/mod.rs'), [])
+
 
 if __name__ == '__main__':
     unittest.main()

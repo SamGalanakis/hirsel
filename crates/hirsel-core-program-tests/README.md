@@ -20,6 +20,6 @@ lowering laws. `hirsel-core-program-tests-test-cranelift_source` and its
 `hirsel-core-program-tests-test-llvm_source`; its ignored AArch64 bodies run in
 `core-program-llvm-aarch64-runtime`. Hand-built IR laws remain in the engines.
 
-The `core_emit` and `core_profile` examples write one object per reached unit,
+The `core_emit` and `core_profile` (Linux only, `examples/linux/`) examples write one object per reached unit,
 as `<output>.<unit>`. `core_lower input.hirsel output-directory` writes separate
 `unit-<n>.core` files for measurements. They use the same checked source route.

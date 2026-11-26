@@ -314,17 +314,8 @@ mod tests {
         // limit. The untouched mapping costs no resident memory. Both large
         // parts need to parse their 8 MiB constant, which cannot fit beside a
         // single 128 MiB worker stack in this remaining headroom.
-        let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        let used_kib: usize = status
-            .lines()
-            .find_map(|line| line.strip_prefix("VmData:"))
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-        let reserve = (4usize << 30) - (used_kib << 10) - (130 << 20);
+        let used = hirsel_guard::data_used().expect("the host counts the data limit's memory");
+        let reserve = (4usize << 30) - used as usize - (130 << 20);
         // SAFETY: a fresh, untouched anonymous mapping, unmapped below.
         let held = unsafe {
             libc::mmap(

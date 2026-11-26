@@ -372,3 +372,26 @@ pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
 
 /// The path that opens the store directory a launcher passed on descriptor 5.
 pub(crate) const INHERITED_STORE: &[u8] = b"/proc/self/fd/5";
+
+/// This process's page map (`/proc/self/pagemap`): one word per virtual page
+/// whose bits 63 (present) and 62 (swapped) tell a page with no page table
+/// entry, which reads as zero in a private anonymous mapping. `None` when it
+/// cannot be opened.
+pub(crate) fn page_map() -> Option<std::fs::File> {
+    std::fs::File::open("/proc/self/pagemap").ok()
+}
+
+/// This process's resident set in bytes (`/proc/self/statm`).
+#[cfg(feature = "prof")]
+pub(crate) fn resident_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let pages = statm.split_ascii_whitespace().nth(1)?.parse::<u64>().ok()?;
+    Some(pages * crate::task_heap::page_bytes() as u64)
+}
+
+/// This process's mappings as `/proc/self/maps` lists them, for a profile's
+/// symbolization.
+#[cfg(feature = "prof")]
+pub(crate) fn mappings() -> Option<Vec<u8>> {
+    std::fs::read("/proc/self/maps").ok()
+}

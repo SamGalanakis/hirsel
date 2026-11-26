@@ -781,7 +781,7 @@ impl CaptureEnvironment {
         Ok(Self {
             variables,
             directory: std::env::current_dir()?,
-            umask: umask()?,
+            umask: crate::host::umask()?,
         })
     }
 
@@ -841,16 +841,6 @@ fn keyed_environment(children: &[(&str, &[u8])]) -> ContentHash {
         part(value.as_bytes());
     }
     ContentHash::of_parts("hirsel.keyed-environment.v1", [&bytes[..]])
-}
-
-/// This process's umask, as the kernel reports it; a child inherits it.
-fn umask() -> io::Result<u32> {
-    let status = std::fs::read_to_string("/proc/self/status")?;
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("Umask:"))
-        .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
-        .ok_or_else(|| io::Error::other("/proc/self/status names no umask"))
 }
 
 /// A child tool: no standard input, an empty environment. A link editor
@@ -1317,10 +1307,10 @@ fn recipe_file(path: &Path) -> io::Result<RecipeFile> {
 /// 4. Stat and bytes come from one opened file. The promoting sighting's time
 ///    is taken before its stat, the first sighting's after, so the window is a
 ///    lower bound on real time between the file's last change and the read.
-/// 5. Durations are measured on CLOCK_BOOTTIME (/proc/uptime), compared only
-///    between sightings of one boot and one time namespace; file times are
-///    never compared with our clock. Without a well-formed boot id and time
-///    namespace there is no clock, and nothing is promoted.
+/// 5. Durations are measured on the host's boot clock (`host::boot_clock`),
+///    compared only between sightings of one boot and, on Linux, one time
+///    namespace; file times are never compared with our clock. Without a
+///    well-formed boot identity there is no clock, and nothing is promoted.
 ///
 /// Rule 5 governs how a record becomes settled, not what settled means:
 /// settled is a fact about the file's stat (unchanged for at least the window,
@@ -1404,32 +1394,27 @@ thread_local! {
     /// Runs between a sighting's read and its classification.
     pub(crate) static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
-    /// A test's raw boot id and time namespace link, in place of /proc's.
+    /// A test's raw Linux boot id and time namespace link, in place of the host's.
     pub(crate) static SOURCE: std::cell::Cell<Option<(Option<&'static str>, Option<&'static str>)>> =
         const { std::cell::Cell::new(None) };
     /// How many files this thread has read for their bytes.
     pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// CLOCK_BOOTTIME through /proc/uptime (10 ms resolution): never stepped,
-/// counts suspend, restarts at boot. `None` when it cannot be read, and then
-/// no record is ever promoted.
+/// The host's boot clock (`host::boot_clock`): never stepped, counts
+/// suspend, restarts at boot. `None` when it cannot be read, and then no
+/// record is ever promoted.
 fn clock() -> Option<Reading> {
     static COUNT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let read = || {
-        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok();
-        let namespace = std::fs::read_link("/proc/self/ns/time")
-            .ok()
-            .and_then(|link| link.into_os_string().into_string().ok());
-        clock_identity(boot.as_deref(), namespace.as_deref())
-    };
     #[cfg(test)]
     let count = match SOURCE.get() {
         Some((boot, namespace)) => clock_identity(boot, namespace),
-        None => COUNT.get_or_init(read).clone(),
+        None => COUNT.get_or_init(crate::host::boot_clock_identity).clone(),
     }?;
     #[cfg(not(test))]
-    let count = COUNT.get_or_init(read).clone()?;
+    let count = COUNT
+        .get_or_init(crate::host::boot_clock_identity)
+        .clone()?;
     #[cfg(test)]
     if let Some(now) = CLOCK.get() {
         return Some(Reading {
@@ -1438,20 +1423,22 @@ fn clock() -> Option<Reading> {
             latest: now,
         });
     }
-    let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
-    let (seconds, hundredths) = uptime.split_whitespace().next()?.split_once('.')?;
-    let at =
-        seconds.parse::<u64>().ok()? * 1_000_000_000 + hundredths.parse::<u64>().ok()? * 10_000_000;
+    let (earliest, latest) = crate::host::boot_clock()?;
     Some(Reading {
         clock: count,
-        earliest: at,
-        latest: at + 10_000_000,
+        earliest,
+        latest,
     })
 }
 
-/// Which count a clock reading belongs to: a boot id (a UUID) and a time
-/// namespace (`time:[inode]`). Anything else is no clock.
-fn clock_identity(boot: Option<&str>, namespace: Option<&str>) -> Option<String> {
+/// Which count a Linux clock reading belongs to: a boot id (a UUID) and a
+/// time namespace (`time:[inode]`). Anything else is no clock. Darwin names
+/// its count without a namespace (`host::boot_clock_identity`).
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "only the Linux host reads a time namespace")
+)]
+pub(crate) fn clock_identity(boot: Option<&str>, namespace: Option<&str>) -> Option<String> {
     let boot = boot?.trim();
     let uuid = boot.len() == 36
         && boot.char_indices().all(|(at, c)| {

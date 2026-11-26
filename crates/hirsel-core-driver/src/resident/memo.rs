@@ -122,12 +122,12 @@ impl WorkingSets {
 
     /// Evict other sets until the resident memory fits `max_memory`.
     pub(super) fn fit(&mut self, max_memory: u64) {
-        if super::resident_bytes() <= max_memory {
+        if crate::host::resident_bytes() <= max_memory {
             return;
         }
         release_unused_pages();
         self.trim(
-            || super::resident_bytes() > max_memory,
+            || crate::host::resident_bytes() > max_memory,
             |id| {
                 release(&|owner, _| owner == id);
                 release_unused_pages();
@@ -462,6 +462,20 @@ fn release(drop: &dyn Fn(SetId, u64) -> bool) {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// Bug law: a memory cap below this process's footprint evicts every set
+    /// but the one just served. Red where the host measure reads 0 (on a Mac,
+    /// a `/proc/self/statm` read: the cap never evicted).
+    #[test]
+    fn a_cap_below_the_process_footprint_keeps_only_the_served_set() {
+        let mut sets = WorkingSets::default();
+        let input = |name: &str| Input::Package(PathBuf::from(name), None);
+        sets.touch(input("A"));
+        let served = sets.touch(input("B"));
+        sets.fit(1);
+        let kept: Vec<SetId> = sets.age.iter().map(|set| set.id).collect();
+        assert_eq!(kept, [served]);
+    }
 
     #[test]
     fn pressure_evicts_whole_working_sets_in_lru_order() {

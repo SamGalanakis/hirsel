@@ -327,11 +327,11 @@ impl Dev {
 
     fn place_pid(&self) -> u32 {
         let pid = self.child.id();
-        fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-            .unwrap()
-            .trim()
-            .parse()
-            .expect("one serving child")
+        let children = crate::host::child_pids(pid as libc::pid_t).unwrap();
+        let [child] = children[..] else {
+            panic!("one serving child, not {children:?}")
+        };
+        child as u32
     }
 
     fn interrupt_at(mut self, marker: &Path) {

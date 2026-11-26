@@ -2,11 +2,12 @@
 //! of list storage that leaves never-backed pages of a dedicated mapping alone.
 //!
 //! A dedicated mapping is private and anonymous, so a page with no page table
-//! entry (neither present nor swapped, per `/proc/self/pagemap`) reads as zero
-//! and stays zero until something writes it. Only the block's owner writes it,
-//! and the owner is in this call. Every other page is written as `memset`
-//! would. Without the pagemap file, or outside a dedicated mapping, the whole
-//! span is written.
+//! entry (neither present nor swapped, per the host's page map,
+//! `host::sys::page_map`) reads as zero and stays zero until something writes
+//! it. Only the block's owner writes it, and the owner is in this call. Every
+//! other page is written as `memset` would. Without a page map (on Darwin, or
+//! when it cannot be opened), or outside a dedicated mapping, the whole span is
+//! written.
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -22,8 +23,7 @@ const BATCH: usize = 512;
 
 fn pagemap() -> Option<&'static File> {
     static FILE: OnceLock<Option<File>> = OnceLock::new();
-    FILE.get_or_init(|| File::open("/proc/self/pagemap").ok())
-        .as_ref()
+    FILE.get_or_init(crate::host::sys::page_map).as_ref()
 }
 
 /// Zero `len` bytes at `at`.

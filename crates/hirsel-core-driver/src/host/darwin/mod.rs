@@ -395,3 +395,178 @@ pub(crate) fn fd_report(fd: RawFd) -> String {
     };
     format!("{kind}:[{}]", status.st_ino)
 }
+
+/// This process's physical footprint in bytes (`proc_pid_rusage`'s
+/// `ri_phys_footprint`), 0 when it cannot be read. The footprint, not the
+/// resident size, is the measure a memory cap needs: on macOS 26.6 the pages
+/// mimalloc returns (`MADV_FREE_REUSABLE`) leave the footprint at once but stay
+/// resident until the kernel wants them, so a resident-size cap never fits.
+pub(crate) fn resident_bytes() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v4>::uninit();
+    // SAFETY: RUSAGE_INFO_V4 writes one rusage_info_v4 into the buffer.
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            usage.as_mut_ptr().cast(),
+        )
+    };
+    if rc != 0 {
+        return 0;
+    }
+    // SAFETY: the call succeeded, so the whole struct is written.
+    unsafe { usage.assume_init() }.ri_phys_footprint
+}
+
+/// This process's umask. Darwin has no call that only reads it, so this sets
+/// the mask and restores it at once; a file another thread creates in between
+/// is created under 0o077.
+pub(crate) fn umask() -> io::Result<u32> {
+    // SAFETY: umask only swaps the process's mask; the old one is restored.
+    let mask = unsafe {
+        let mask = libc::umask(0o077);
+        libc::umask(mask);
+        mask
+    };
+    Ok(u32::from(mask))
+}
+
+/// Which count [`boot_clock`] reads: this boot, named by
+/// `kern.bootsessionuuid`, a UUID the kernel draws at each boot. Darwin has no
+/// time namespace. `None` unless the kernel gives a 36-character UUID.
+pub(crate) fn boot_clock_identity() -> Option<String> {
+    let mut uuid = [0u8; 64];
+    let mut len = uuid.len();
+    // SAFETY: the name is NUL-terminated and the kernel writes at most `len` bytes.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            uuid.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let uuid = CStr::from_bytes_until_nul(&uuid[..len])
+        .ok()?
+        .to_str()
+        .ok()?;
+    let well_formed = uuid.len() == 36
+        && uuid.char_indices().all(|(at, c)| {
+            if matches!(at, 8 | 13 | 18 | 23) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        });
+    well_formed.then(|| format!("darwin-boot:{uuid}"))
+}
+
+/// Darwin's CLOCK_MONOTONIC in nanoseconds (microsecond resolution), as the
+/// interval the true time lies in: it counts from boot, keeps counting while
+/// the machine sleeps and is never stepped (`clock_gettime(3)`).
+pub(crate) fn boot_clock() -> Option<(u64, u64)> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one timespec.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        return None;
+    }
+    let at = u64::try_from(now.tv_sec).ok()? * 1_000_000_000 + u64::try_from(now.tv_nsec).ok()?;
+    Some((at, at + 1_000))
+}
+
+/// Darwin has no cgroups, so no process is a member of one.
+pub(crate) fn cgroup_membership(_pid: Option<libc::pid_t>) -> io::Result<String> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Darwin has no cgroups",
+    ))
+}
+
+/// The live children of process `pid` (`proc_listchildpids`).
+pub(crate) fn child_pids(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
+    let mut children = vec![0 as libc::c_int; 4096];
+    let bytes = (children.len() * size_of::<libc::c_int>()) as libc::c_int;
+    // SAFETY: the buffer is live and writable for `bytes`.
+    let got = unsafe { libc::proc_listchildpids(pid, children.as_mut_ptr().cast(), bytes) };
+    if got < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    children.truncate(got as usize);
+    children.retain(|child| *child > 0);
+    Ok(children)
+}
+
+/// A shell fragment that exits 24 unless the shell running it leads its own
+/// session (launcher laws): `ps` marks a session leader with `s`.
+#[cfg(test)]
+pub(crate) const SESSION_LEADER: &str = "case $(ps -o stat= -p $$) in *s*) ;; *) exit 24 ;; esac";
+
+/// The paths this process holds open, one entry per descriptor that names one.
+#[cfg(test)]
+pub(crate) fn open_paths() -> Vec<PathBuf> {
+    let fds: Vec<RawFd> = std::fs::read_dir("/dev/fd")
+        .unwrap()
+        .filter_map(|fd| fd.unwrap().file_name().to_str()?.parse().ok())
+        .collect();
+    fds.into_iter()
+        // SAFETY: F_GETPATH only reads the descriptor; one closed since the
+        // listing (the listing's own) fails with EBADF.
+        .filter_map(|fd| fd_path(&unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }).ok())
+        .collect()
+}
+
+/// Process `pid`'s open descriptors, each as `<n> <kind>`, sorted; a socket
+/// reads `socket:`, as Linux names it.
+#[cfg(test)]
+pub(crate) fn child_descriptors(pid: u32) -> Vec<String> {
+    let size = size_of::<libc::proc_fdinfo>() as libc::c_int;
+    let mut fds = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0
+        };
+        4096
+    ];
+    // SAFETY: the buffer is live and writable for its whole length.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            size * fds.len() as libc::c_int,
+        )
+    };
+    assert!(got >= 0, "{}", io::Error::last_os_error());
+    fds.truncate((got / size) as usize);
+    let mut open: Vec<String> = fds
+        .iter()
+        .map(|fd| match fd.proc_fdtype as libc::c_int {
+            libc::PROX_FDTYPE_SOCKET => format!("{} socket:", fd.proc_fd),
+            kind => format!("{} kind:{kind}", fd.proc_fd),
+        })
+        .collect();
+    open.sort();
+    open
+}
+
+/// hirsel-prof samples with Linux perf events; a Darwin test that needs a
+/// child's code range has no profiler to compare it with.
+#[cfg(test)]
+pub(crate) fn child_code_range(_pid: u32, _image: &Path) -> std::ops::Range<u64> {
+    panic!("hirsel-prof samples with Linux perf events; macOS has no capture to compare")
+}
+
+/// Reading another process's memory on macOS needs `task_for_pid`, which a
+/// test process is not entitled to.
+#[cfg(test)]
+pub(crate) fn child_memory_hits(_pid: u32, _needle: &[u8]) -> usize {
+    panic!("reading a child's memory on macOS needs task_for_pid, which tests are not entitled to")
+}

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Keep platform decisions target-driven and exhaustive.
 
-Two rules over every first-party Rust source under crates/:
+Three rules over every first-party Rust source under crates/:
 
 * host-cfg: `target_os` in a `cfg`, `cfg!` or `cfg_attr`, or any `cfg!(target_...)`,
   appears only in the host-seam directories (HOST_SEAMS) and the files in HOST_FILES.
   What Hirsel emits is a function of `--target`; only host mechanisms read the host.
+* host-proc: a string literal that names a `/proc` path (Rust, or C and shell held in
+  a literal) appears only there too. `/proc` is a Linux host mechanism, and a read of
+  it compiles on every host, so no cfg shows it; the rule reads the raw literals.
 * target-match: a decision on `hirsel_core_layout::Target` or a fact derived from it
   (`Arch`, `Os`, `ObjectFormat`, `CAbi`), or on a target triple string, is an
   exhaustive `match`. Comparing with `==`/`!=`, `matches!`, `if let`/`let else` on a
@@ -36,6 +39,7 @@ HOST_SEAMS = (
     'crates/hirsel-core-net/src/own_address/',
     'crates/hirsel-prof/src/linux/',
     'crates/hirsel-llvm-lazy/src/host/',
+    'crates/hirsel-core-program-tests/examples/linux/',
 )
 # Host-OS code that predates its seam. Each entry names the ticket that owns moving
 # it behind a seam; remove an entry when it no longer reads the host. A stale entry
@@ -183,16 +187,34 @@ def host_cfgs(source):
             yield found.start()
 
 
+# `/proc` as a path: not inside a longer name, followed by `/`, a quote, a space or
+# the end of the literal.
+PROC = re.compile(r'(?<![\w./-])/proc(?=[/"\s]|$)')
+
+
+def proc_literals(source):
+    """Offsets of each `/proc` path inside a string literal of the raw source."""
+    for match in LEXEME.finditer(source):
+        if match['comment']:
+            continue
+        for found in PROC.finditer(match[0]):
+            yield match.start() + found.start()
+
+
 def source_violations(path, source):
+    host = path.startswith(HOST_SEAMS) or path in HOST_FILES
+    procs = [] if host else list(proc_literals(source))
     source = scrub(source)
     newlines = [match.start() for match in re.finditer('\n', source)]
 
     def line(offset):
         return bisect_right(newlines, offset) + 1
 
-    if not path.startswith(HOST_SEAMS) and path not in HOST_FILES:
+    if not host:
         for offset in host_cfgs(source):
             yield line(offset), 'host-cfg'
+    for offset in procs:
+        yield line(offset), 'host-proc'
     for pattern in (COMPARE, LET_PATTERN):
         for found in pattern.finditer(source):
             yield line(found.start()), 'target-match'
@@ -333,6 +355,8 @@ def darwin_floor_errors(texts):
 MESSAGES = {
     'host-cfg': 'host cfg outside a host seam; decide on the target (hirsel_core_layout::Target) '
                 'or move the code behind a host seam',
+    'host-proc': '/proc path outside a host seam; it exists only on Linux, so read it '
+                 'through the host seam (with a Darwin arm) or name a path every host has',
     'target-match': 'non-exhaustive decision on a target; use an exhaustive match on the '
                     'Target or one of its facts, with no `_` arm',
 }

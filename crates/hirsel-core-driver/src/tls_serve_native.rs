@@ -9,7 +9,6 @@ mod tls_serve_laws {
     use std::{
         io::{BufRead, BufReader, Read, Write},
         net::TcpStream,
-        os::unix::fs::FileExt,
         process::{Child, ChildStdin, Stdio},
         sync::{OnceLock, mpsc},
         time::{Duration, Instant},
@@ -280,16 +279,7 @@ mod tls_serve_laws {
 
         /// The run's open descriptors, each with what it names.
         fn descriptors(&self) -> Vec<String> {
-            let mut open: Vec<String> = std::fs::read_dir(format!("/proc/{}/fd", self.child.id()))
-                .unwrap()
-                .flatten()
-                .map(|fd| {
-                    let target = std::fs::read_link(fd.path()).unwrap_or_default();
-                    format!("{} {}", fd.file_name().to_string_lossy(), target.display())
-                })
-                .collect();
-            open.sort();
-            open
+            crate::host::child_descriptors(self.child.id())
         }
 
         /// Releases the parked run and checks it ends with status 0. The
@@ -800,32 +790,7 @@ mod tls_serve_laws {
 
     /// Every readable mapping of the run, searched for `needle`.
     fn hits(pid: u32, needle: &[u8]) -> usize {
-        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap();
-        let mem = std::fs::File::open(format!("/proc/{pid}/mem"))
-            .expect("the test must be able to read its child's memory (ptrace)");
-        let (mut hits, mut scanned) = (0, 0);
-        for map in maps.lines() {
-            let mut fields = map.split_whitespace();
-            let (range, perms) = (fields.next().unwrap(), fields.next().unwrap());
-            if !perms.starts_with('r') {
-                continue;
-            }
-            let (start, end) = range.split_once('-').unwrap();
-            let start = u64::from_str_radix(start, 16).unwrap();
-            let end = u64::from_str_radix(end, 16).unwrap();
-            let mut region = vec![0; (end - start) as usize];
-            // [vvar] and similar special mappings refuse reads.
-            if mem.read_exact_at(&mut region, start).is_err() {
-                continue;
-            }
-            scanned += region.len();
-            hits += region
-                .windows(needle.len())
-                .filter(|w| *w == needle)
-                .count();
-        }
-        assert!(scanned > 1 << 20, "scanned only {scanned} bytes");
-        hits
+        crate::host::child_memory_hits(pid, needle)
     }
 
     #[test]

@@ -9,6 +9,11 @@ rust-version.workspace = true
 [lib]
 doctest = false
 
+# Linux-only measurement: perf counters and /proc RSS high-water marks.
+[[example]]
+name = "core_profile"
+path = "examples/linux/core_profile.rs"
+
 [dependencies]
 hirsel-core-driver = { path = "../hirsel-core-driver" }
 hirsel-core-front = { path = "../hirsel-core-front" }

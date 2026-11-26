@@ -43,3 +43,28 @@ pub(crate) fn open_component(
     let path = CString::new(format!("/proc/self/fd/{}", image.as_raw_fd())).unwrap();
     Ok((open(&path)?, Component(image)))
 }
+
+#[cfg(test)]
+mod tests {
+    /// The engine component loads from a memfd, so the process maps show
+    /// when it arrives and that it arrives once.
+    #[test]
+    fn llvm_is_unmapped_until_first_object_and_loaded_once() {
+        let maps = || std::fs::read_to_string("/proc/self/maps").unwrap();
+        assert!(!maps().contains("libLLVM"));
+        let module = hirsel_core_ir::Module::default();
+        crate::core::emit_ir(&module).unwrap();
+        assert!(!maps().contains("libLLVM"));
+        crate::core::emit_object(&module, crate::core::Optimization::None).unwrap();
+        let loaded = maps();
+        assert!(loaded.contains("libLLVM"));
+        assert!(loaded.contains("memfd:hirsel-llvm"));
+        crate::core::emit_object(&module, crate::core::Optimization::Speed).unwrap();
+        let component_lines = |s: &str| {
+            s.lines()
+                .filter(|line| line.contains("memfd:hirsel-llvm"))
+                .count()
+        };
+        assert_eq!(component_lines(&loaded), component_lines(&maps()));
+    }
+}

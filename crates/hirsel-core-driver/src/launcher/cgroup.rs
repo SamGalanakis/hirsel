@@ -10,8 +10,9 @@ use super::{hex, wait_pid};
 
 const MOUNT: &str = "/sys/fs/cgroup";
 
-fn membership(path: &Path) -> io::Result<PathBuf> {
-    let text = fs::read_to_string(path)?;
+/// Process `pid`'s cgroup v2 directory; this process's when `pid` is `None`.
+fn membership(pid: Option<libc::pid_t>) -> io::Result<PathBuf> {
+    let text = crate::host::cgroup_membership(pid)?;
     let relative = text
         .lines()
         .find_map(|line| line.strip_prefix("0::/"))
@@ -22,7 +23,7 @@ fn membership(path: &Path) -> io::Result<PathBuf> {
 /// The default uses a launcher-owned directory in the current delegated cgroup.
 /// It has a stable name so a restart in the same delegation can recover it.
 pub(super) fn delegated(state: &Path) -> io::Result<Option<PathBuf>> {
-    let parent = match membership(Path::new("/proc/self/cgroup")) {
+    let parent = match membership(None) {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(None),
         Err(error) => return Err(error),
@@ -177,13 +178,11 @@ impl Group {
     /// descendant is exiting or a zombie. Wait only for our adopted children
     /// of this cgroup, including children reparented by each exit.
     pub(super) fn reap_orphans(&self) -> io::Result<()> {
-        let launcher = std::process::id();
-        let children = format!("/proc/self/task/{launcher}/children");
+        let launcher = std::process::id() as libc::pid_t;
         loop {
             let mut reaped = false;
-            for pid in fs::read_to_string(&children)?.split_whitespace() {
-                let path = format!("/proc/{pid}/cgroup");
-                let membership = match membership(Path::new(&path)) {
+            for pid in crate::host::child_pids(launcher)? {
+                let membership = match membership(Some(pid)) {
                     Ok(path) => path,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
@@ -204,7 +203,6 @@ impl Group {
                     }
                 }
                 if within {
-                    let pid = pid.parse().map_err(io::Error::other)?;
                     wait_pid(pid)?;
                     reaped = true;
                 }

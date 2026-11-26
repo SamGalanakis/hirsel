@@ -342,7 +342,7 @@ impl Run {
     ) -> io::Result<Self> {
         let mut output = BufWriter::new(File::options().write(true).truncate(true).open(path)?);
         output.write_all(MAGIC)?;
-        if let Ok(maps) = std::fs::read("/proc/self/maps") {
+        if let Some(maps) = crate::host::sys::mappings() {
             let stamp = now_ns();
             let pid = std::process::id();
             for line in maps

@@ -389,3 +389,148 @@ pub(crate) fn fd_report(fd: RawFd) -> String {
         .unwrap()
         .to_owned()
 }
+
+/// This process's resident set in bytes (`/proc/self/statm`), 0 when it cannot be read.
+pub(crate) fn resident_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
+        // SAFETY: sysconf reads a constant.
+        .map_or(0, |pages| {
+            pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64
+        })
+}
+
+/// This process's umask, as the kernel reports it in `/proc/self/status`; reading
+/// it changes nothing, so no other thread ever creates a file under another mask.
+pub(crate) fn umask() -> io::Result<u32> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
+        .ok_or_else(|| io::Error::other("/proc/self/status names no umask"))
+}
+
+/// Which count [`boot_clock`] reads: this boot (`/proc/sys/kernel/random/boot_id`)
+/// and this time namespace (`/proc/self/ns/time`), whose offsets move
+/// CLOCK_BOOTTIME. `None` without a well-formed pair.
+pub(crate) fn boot_clock_identity() -> Option<String> {
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok();
+    let namespace = std::fs::read_link("/proc/self/ns/time")
+        .ok()
+        .and_then(|link| link.into_os_string().into_string().ok());
+    crate::tool_inputs::clock_identity(boot.as_deref(), namespace.as_deref())
+}
+
+/// CLOCK_BOOTTIME in nanoseconds through `/proc/uptime` (10 ms resolution), as
+/// the interval the true time lies in: never stepped, counts suspend.
+pub(crate) fn boot_clock() -> Option<(u64, u64)> {
+    let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
+    let (seconds, hundredths) = uptime.split_whitespace().next()?.split_once('.')?;
+    let at =
+        seconds.parse::<u64>().ok()? * 1_000_000_000 + hundredths.parse::<u64>().ok()? * 10_000_000;
+    Some((at, at + 10_000_000))
+}
+
+/// The text of process `pid`'s cgroup membership (`/proc/<pid>/cgroup`); this
+/// process's own when `pid` is `None`.
+pub(crate) fn cgroup_membership(pid: Option<libc::pid_t>) -> io::Result<String> {
+    match pid {
+        Some(pid) => std::fs::read_to_string(format!("/proc/{pid}/cgroup")),
+        None => std::fs::read_to_string("/proc/self/cgroup"),
+    }
+}
+
+/// The live children of process `pid` (its main thread's, which is every child
+/// a single-threaded launcher or a test's child has).
+pub(crate) fn child_pids(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))?;
+    text.split_whitespace()
+        .map(|child| {
+            child
+                .parse()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a child pid"))
+        })
+        .collect()
+}
+
+/// A shell fragment that exits 24 unless the shell running it leads its own
+/// session (launcher laws).
+#[cfg(test)]
+pub(crate) const SESSION_LEADER: &str = "read -r pid name state parent pgrp sid rest < /proc/$$/stat; test \"$sid\" = \"$$\" || exit 24";
+
+/// The paths this process holds open, one entry per descriptor that names one.
+#[cfg(test)]
+pub(crate) fn open_paths() -> Vec<PathBuf> {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|fd| std::fs::read_link(fd.unwrap().path()).ok())
+        .collect()
+}
+
+/// Process `pid`'s open descriptors, each as `<n> <what it names>`, sorted.
+#[cfg(test)]
+pub(crate) fn child_descriptors(pid: u32) -> Vec<String> {
+    let mut open: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .flatten()
+        .map(|fd| {
+            let target = std::fs::read_link(fd.path()).unwrap_or_default();
+            format!("{} {}", fd.file_name().to_string_lossy(), target.display())
+        })
+        .collect();
+    open.sort();
+    open
+}
+
+/// The executable address range of process `pid`'s mapping of `image`.
+#[cfg(test)]
+pub(crate) fn child_code_range(pid: u32, image: &Path) -> std::ops::Range<u64> {
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap();
+    let hex = |at: &str| u64::from_str_radix(at, 16).unwrap();
+    let range = maps
+        .lines()
+        .filter(|line| line.ends_with(image.to_str().unwrap()))
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let range = fields.next()?;
+            fields.next()?.contains('x').then_some(range)
+        })
+        .unwrap();
+    let (start, end) = range.split_once('-').unwrap();
+    hex(start)..hex(end)
+}
+
+/// How many times `needle` appears in process `pid`'s readable memory. The
+/// scan must cover more than 1 MiB, or it proves nothing.
+#[cfg(test)]
+pub(crate) fn child_memory_hits(pid: u32, needle: &[u8]) -> usize {
+    use std::os::unix::fs::FileExt;
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap();
+    let mem = File::open(format!("/proc/{pid}/mem"))
+        .expect("the test must be able to read its child's memory (ptrace)");
+    let (mut hits, mut scanned) = (0, 0);
+    for map in maps.lines() {
+        let mut fields = map.split_whitespace();
+        let (range, perms) = (fields.next().unwrap(), fields.next().unwrap());
+        if !perms.starts_with('r') {
+            continue;
+        }
+        let (start, end) = range.split_once('-').unwrap();
+        let start = u64::from_str_radix(start, 16).unwrap();
+        let end = u64::from_str_radix(end, 16).unwrap();
+        let mut region = vec![0; (end - start) as usize];
+        // [vvar] and similar special mappings refuse reads.
+        if mem.read_exact_at(&mut region, start).is_err() {
+            continue;
+        }
+        scanned += region.len();
+        hits += region
+            .windows(needle.len())
+            .filter(|w| *w == needle)
+            .count();
+    }
+    assert!(scanned > 1 << 20, "scanned only {scanned} bytes");
+    hits
+}

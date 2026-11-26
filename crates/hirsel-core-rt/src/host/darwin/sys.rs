@@ -580,3 +580,33 @@ pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
 /// The path that opens the store directory a launcher passed on descriptor 5;
 /// Darwin's /dev/fd opens a duplicate of it.
 pub(crate) const INHERITED_STORE: &[u8] = b"/dev/fd/5";
+
+/// No page map: Darwin has no query that tells a never-backed page from one
+/// the kernel compressed (`mincore` reports both as not resident), so a zero
+/// fill writes every page.
+pub(crate) fn page_map() -> Option<std::fs::File> {
+    None
+}
+
+/// This process's resident set in bytes (`proc_pid_rusage`'s `ri_resident_size`).
+#[cfg(feature = "prof")]
+pub(crate) fn resident_bytes() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v4>::uninit();
+    // SAFETY: RUSAGE_INFO_V4 writes one rusage_info_v4 into the buffer.
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            usage.as_mut_ptr().cast(),
+        )
+    };
+    // SAFETY: the call succeeded, so the whole struct is written.
+    (rc == 0).then(|| unsafe { usage.assume_init() }.ri_resident_size)
+}
+
+/// No mappings: hirsel-prof does not capture on macOS (its `unsupported`
+/// provider), so a profile records none.
+#[cfg(feature = "prof")]
+pub(crate) fn mappings() -> Option<Vec<u8>> {
+    None
+}

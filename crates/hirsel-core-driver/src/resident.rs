@@ -178,16 +178,6 @@ fn startup_digest(env: &[(Vec<u8>, Vec<u8>)]) -> ContentHash {
     ContentHash::of_parts("hirsel.resident-startup.v1", parts)
 }
 
-/// This process's umask.
-fn umask() -> u32 {
-    // SAFETY: umask only swaps the process's mask; the old one is restored.
-    unsafe {
-        let mask = libc::umask(0o022);
-        libc::umask(mask);
-        mask as u32
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 struct Request {
     protocol: u32,
@@ -398,7 +388,7 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
         toolchain,
         env: environment(),
         cwd: std::env::current_dir()?.into_os_string().into_vec(),
-        umask: umask(),
+        umask: crate::host::umask()?,
         args: args.to_vec(),
         stop: false,
     };
@@ -706,7 +696,7 @@ impl Own {
             }),
             directory: std::env::current_dir()?,
             env: environment(),
-            umask: umask(),
+            umask: crate::host::umask()?,
         })
     }
 
@@ -958,15 +948,4 @@ fn accept(
             return listener.accept().map(|(stream, _)| Some(stream));
         }
     }
-}
-
-/// This process's resident set, in bytes.
-fn resident_bytes() -> u64 {
-    std::fs::read_to_string("/proc/self/statm")
-        .ok()
-        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
-        // SAFETY: sysconf reads a constant.
-        .map_or(0, |pages| {
-            pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64
-        })
 }

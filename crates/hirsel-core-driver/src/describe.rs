@@ -236,7 +236,7 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(1));
         let pid = std::fs::read_to_string(root.path().join("describe-child.pid")).unwrap();
         assert!(
-            !Path::new("/proc").join(pid.trim()).exists(),
+            crate::host::zombie(pid.trim().parse().unwrap()).is_none(),
             "child was not reaped"
         );
     }

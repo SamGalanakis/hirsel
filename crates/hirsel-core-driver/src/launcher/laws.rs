@@ -760,11 +760,10 @@ fn cgroup_lifecycle() {
                 work,
                 &[
                     "sleep 30 & printf '%s' \"$!\" > orphan; wait",
-                    r#"
-read -r pid name state parent pgrp sid rest < /proc/$$/stat
-test "$sid" = "$$" && test "$LISTEN_PID" -eq "$$" || exit 24
-sleep 30 & printf '%s' "$!" > orphan; exit 0
-"#,
+                    &format!(
+                        "{}\ntest \"$LISTEN_PID\" -eq \"$$\" || exit 24\nsleep 30 & printf '%s' \"$!\" > orphan; exit 0\n",
+                        crate::host::SESSION_LEADER
+                    ),
                 ],
             ))
         })
@@ -868,7 +867,7 @@ sleep 30 & printf '%s' "$!" > orphan; exit 0
     drop(queue);
     let pid = fs::read_to_string(work.join("orphan")).unwrap();
     assert!(
-        !Path::new("/proc").join(pid.trim()).exists(),
+        crate::host::zombie(pid.trim().parse().unwrap()).is_none(),
         "grandchild {pid} still exists"
     );
     assert!(directories().is_empty());

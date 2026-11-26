@@ -2,7 +2,7 @@ use crate as eval;
 use hirsel_core_ir::{FuncId, text, wf};
 use std::os::{fd::OwnedFd, unix::net::UnixStream};
 fn fds() -> usize {
-    std::fs::read_dir("/proc/self/fd").unwrap().count()
+    std::fs::read_dir("/dev/fd").unwrap().count()
 }
 const SOURCE: &str = include_str!("../../hirsel-core-ir/samples/net.core");
 fn isolate(law: &str) {

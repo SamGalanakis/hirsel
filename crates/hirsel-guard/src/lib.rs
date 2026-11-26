@@ -429,6 +429,13 @@ impl Line {
     }
 }
 
+/// The private writable memory the data limit counts, in bytes; `None` where
+/// the host counts none (Darwin keeps thread stacks outside the arena) or it
+/// cannot be read.
+pub fn data_used() -> Option<u64> {
+    host::data_used()
+}
+
 /// A thread that could not start: when its `stack` would not fit under the
 /// data limit beside what the process already holds (pthread reports that as
 /// `EAGAIN`, like a process-count limit), the process ends as the allocator

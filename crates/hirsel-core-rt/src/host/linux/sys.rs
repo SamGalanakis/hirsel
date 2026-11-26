@@ -319,3 +319,20 @@ pub(crate) fn file_helper_expected() -> bool {
 #[cfg(test)]
 /// The directory listing this process's open descriptors.
 pub(crate) const FD_DIR: &str = "/proc/self/fd";
+
+/// The PID an inherited listener's `LISTEN_PID` names: this process, which
+/// the launcher's clone made before it wrote the environment.
+pub(crate) fn activation_pid() -> u32 {
+    std::process::id()
+}
+
+/// Whether the open descriptor `fd` is the running executable's file.
+pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let image = std::fs::metadata(format!("/proc/self/fd/{fd}"))?;
+    let running = std::fs::metadata("/proc/self/exe")?;
+    Ok((image.dev(), image.ino()) == (running.dev(), running.ino()))
+}
+
+/// The path that opens the store directory a launcher passed on descriptor 5.
+pub(crate) const INHERITED_STORE: &[u8] = b"/proc/self/fd/5";

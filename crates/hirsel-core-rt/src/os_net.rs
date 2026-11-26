@@ -68,7 +68,7 @@ unsafe fn receive_listener() -> io::Result<Option<OwnedFd>> {
         .to_str()
         .and_then(|s| s.parse().ok())
         .ok_or_else(invalid)?;
-    if pid != std::process::id() {
+    if pid != crate::host::sys::activation_pid() {
         return Ok(None);
     }
     let count = env::var_os("LISTEN_FDS")

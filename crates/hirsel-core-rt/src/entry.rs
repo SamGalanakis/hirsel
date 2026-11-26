@@ -318,8 +318,6 @@ pub(crate) use launch_options::prepare_hex;
 /// The platform launcher pins the image across exec, including the serving shell's
 /// exec. Consume its descriptor before any grants or process metadata are opened.
 fn receive_launch_image() -> io::Result<Option<[u8; 32]>> {
-    use std::os::unix::fs::MetadataExt;
-
     let Some(value) = std::env::var_os(hirsel_core_ids::launch::LAUNCH_IMAGE_ENV) else {
         return Ok(None);
     };
@@ -338,9 +336,7 @@ fn receive_launch_image() -> io::Result<Option<[u8; 32]>> {
         .filter(|fd| *fd >= 6)
         .ok_or_else(invalid)?;
     let digest = prepare_hex(digest.as_bytes())?;
-    let image = std::fs::metadata(format!("/proc/self/fd/{fd}"))?;
-    let running = std::fs::metadata("/proc/self/exe")?;
-    if (image.dev(), image.ino()) != (running.dev(), running.ino()) {
+    if !crate::host::sys::running_image(fd)? {
         return Err(invalid());
     }
     // SAFETY: the launch transferred this descriptor for the running image.
@@ -561,7 +557,7 @@ impl OsProcess {
             } else if !describe_mode && let Some(operations) = directory_ops {
                 for index in 0..input.directories_len {
                     let slot = if index == 0 && inherited_store.is_some() {
-                        &b"/proc/self/fd/5"[..]
+                        crate::host::sys::INHERITED_STORE
                     } else {
                         bytes(*input.directories.add(index))
                     };

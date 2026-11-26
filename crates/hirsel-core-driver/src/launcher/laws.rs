@@ -413,8 +413,9 @@ fn group_one_head() {
 /// watch is level-triggered and reports a readable listener once; each inventory repeats it.
 #[test]
 fn end_samples_listener_before_watch() {
-    // At SIGTERM, write the clean report Stopped(Some(2000)) on descriptor 5 and exit 0.
-    let clean = "trap 'printf \"\\001\\000\\000\\000\\320\\007\\000\\000\\000\\000\\000\\000\" >&5; exit 0' TERM\nwhile :; do sleep 0.02; done";
+    // At SIGTERM, write the clean report Stopped(Some(2000)) on descriptor 5 and exit 0;
+    // `armed` says the trap is set (a first exec on macOS takes over 100 ms).
+    let clean = "trap 'printf \"\\001\\000\\000\\000\\320\\007\\000\\000\\000\\000\\000\\000\" >&5; exit 0' TERM\n: > armed\nwhile :; do sleep 0.02; done";
 
     // An arrival during the drain is in the end's sample, so no Arrived follows it.
     let mut rig = rig(&[clean]);
@@ -422,7 +423,10 @@ fn end_samples_listener_before_watch() {
     let address = rig.bind();
     rig.ask(launch(0, &work, Mode::Serving(1, serve(1, None))));
     let waiting = TcpStream::connect(address).unwrap();
-    assert!(rig.idle(Duration::from_millis(100)).is_empty());
+    let armed = Instant::now() + Duration::from_secs(10);
+    while !work.join("armed").exists() {
+        assert!(Instant::now() < armed && rig.idle(Duration::from_millis(20)).is_empty());
+    }
     rig.ask(Request::Stop(serving(1)));
     let end = End {
         status: Status::Code(0),
@@ -639,7 +643,8 @@ fn child_mode_authority() {
     // arguments, to fds-<name>.
     let report = |name: &str| {
         format!(
-            "out=\"$PWD/fds-{name}\"; : > \"$out\"\nfor n in 3 4 5 6 7 8 9; do [ -e /proc/$$/fd/$n ] && echo \"$n $(readlink /proc/$$/fd/$n)\" >> \"$out\"; done\necho \"args $*\" >> \"$out\""
+            "out=\"$PWD/fds-{name}\"; : > \"$out\"\nfor n in 3 4 5 6 7 8 9; do {}; done\necho \"args $*\" >> \"$out\"",
+            crate::host::FD_REPORT
         )
     };
     let scripts = [
@@ -657,12 +662,7 @@ fn child_mode_authority() {
         .listen(UnixListener::bind(work.join("control")).unwrap())
         .unwrap();
     let control = {
-        let fd = rig.launcher.control.as_ref().unwrap().as_raw_fd();
-        fs::read_link(format!("/proc/self/fd/{fd}"))
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned()
+        crate::host::fd_report(rig.launcher.control.as_ref().unwrap().as_raw_fd())
     };
     let held = |name: &str| -> Vec<String> {
         fs::read_to_string(work.join(format!("fds-{name}")))

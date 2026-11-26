@@ -328,3 +328,19 @@ pub(crate) fn reopen(_parent: &File, _name: &CStr, opened: &File) -> io::Result<
         }
     })
 }
+
+/// A shell fragment that appends `<n> <kind>:[<id>]` to `$out` for each open
+/// descriptor `$n` (launcher laws).
+#[cfg(test)]
+pub(crate) const FD_REPORT: &str =
+    "[ -e /proc/$$/fd/$n ] && echo \"$n $(readlink /proc/$$/fd/$n)\" >> \"$out\"";
+
+/// `<kind>:[<id>]` of this process's descriptor `fd`, as FD_REPORT writes it.
+#[cfg(test)]
+pub(crate) fn fd_report(fd: RawFd) -> String {
+    std::fs::read_link(format!("/proc/self/fd/{fd}"))
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned()
+}

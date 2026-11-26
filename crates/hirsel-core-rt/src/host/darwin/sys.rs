@@ -498,3 +498,27 @@ pub(crate) fn file_helper_expected() -> bool {
 #[cfg(test)]
 /// The directory listing this process's open descriptors.
 pub(crate) const FD_DIR: &str = "/dev/fd";
+
+/// The PID an inherited listener's `LISTEN_PID` names: the launcher, this
+/// process's parent, since posix_spawn fixes the environment before the child
+/// has a PID (launch.md, "macOS").
+pub(crate) fn activation_pid() -> u32 {
+    // SAFETY: getppid takes no arguments.
+    unsafe { libc::getppid() as u32 }
+}
+
+/// Whether the open descriptor `fd` is the running executable's file.
+pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: an all-zero stat is a valid output record; fstat writes one.
+    let mut image: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut image) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let running = std::fs::metadata(std::env::current_exe()?)?;
+    Ok((image.st_dev as u64, image.st_ino) == (running.dev(), running.ino()))
+}
+
+/// The path that opens the store directory a launcher passed on descriptor 5;
+/// Darwin's /dev/fd opens a duplicate of it.
+pub(crate) const INHERITED_STORE: &[u8] = b"/dev/fd/5";

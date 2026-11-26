@@ -335,3 +335,22 @@ pub(crate) fn reopen(parent: &File, name: &CStr, _opened: &File) -> io::Result<F
         )
     })
 }
+
+/// A shell fragment that appends `<n> <kind>:[<inode>]` to `$out` for each
+/// open descriptor `$n` (launcher laws); a pipe is a FIFO here.
+#[cfg(test)]
+pub(crate) const FD_REPORT: &str = "[ -e /dev/fd/$n ] && stat -L -f '%HT %i' /dev/fd/$n | { read k i; k=$(echo \"$k\" | tr A-Z a-z); [ \"$k\" = fifo ] && k=pipe; echo \"$n $k:[$i]\" >> \"$out\"; }";
+
+/// `<kind>:[<inode>]` of this process's descriptor `fd`, as FD_REPORT writes it.
+#[cfg(test)]
+pub(crate) fn fd_report(fd: RawFd) -> String {
+    // SAFETY: an all-zero stat is a valid output record; fstat writes one.
+    let mut status: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstat(fd, &mut status) }, 0);
+    let kind = match status.st_mode & libc::S_IFMT {
+        libc::S_IFSOCK => "socket",
+        libc::S_IFIFO => "pipe",
+        _ => "file",
+    };
+    format!("{kind}:[{}]", status.st_ino)
+}

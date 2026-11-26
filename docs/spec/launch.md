@@ -2045,10 +2045,17 @@ descendants and removing the cgroup. An explicit kill targets the whole cgroup.
 On a host without a delegated subtree, the pidfd tracks and reaps the direct child.
 Its descendants can outlive it and can keep inherited descriptors open. Neither path uses a pidfile.
 
-**macOS** (not yet built; macOS slices S7 and S12). macOS has no cgroups, so the macOS
+**macOS** (macOS slice S12). macOS has no cgroups, so the macOS
 launcher is always the case without a delegated subtree. It starts each child with
 `posix_spawn` in a new session (`POSIX_SPAWN_SETSID`), never with `fork`, tracks it with
 `EVFILT_PROC` registered in its kqueue before it can be reaped, and kills its process group.
+A child that exits before its watch is registered is reported at the next turn.
+Darwin executes by path only, so a verified image runs from a private clone of exactly the
+file the launcher verified (`fclonefileat`, else a copy, mode 0500 in a 0700 directory),
+which is also the child's image descriptor; the clone lives as long as the child. Each
+clone is a new file, and macOS charges about 130 ms on the first exec of a file.
+`posix_spawn` fixes the environment before the child has a PID, so a serving child's
+`LISTEN_PID` names the launcher, its parent (net.md, inherited listener).
 A descendant that starts its own session escapes the group kill and can outlive `Ended`.
 That is the same limit as a Linux host without delegation, stated here for operators. The
 cgroup inventory a successor recovers, `cgroup.kill` and the `cgroup_lifecycle` law do not

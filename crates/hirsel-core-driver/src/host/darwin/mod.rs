@@ -84,6 +84,16 @@ pub(crate) fn die_with_parent(_command: &mut Command, _signal: i32) {}
 const SOL_LOCAL: libc::c_int = 0;
 const LOCAL_PEERPID: libc::c_int = 0x002;
 
+/// The result of setting a socket option. Darwin refuses every option on a socket whose
+/// peer has closed, with EINVAL. The read or write the option was to bound then ends at
+/// once, with the end of input or EPIPE, so that refusal is no failure.
+pub(crate) fn socket_option(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        set => set,
+    }
+}
+
 /// The PID of the process at the other end of `stream`.
 pub(crate) fn peer_pid(stream: &UnixStream) -> Option<libc::pid_t> {
     let mut pid: libc::pid_t = 0;

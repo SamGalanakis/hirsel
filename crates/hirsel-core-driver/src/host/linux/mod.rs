@@ -149,6 +149,12 @@ fn peer_credentials(stream: &UnixStream) -> io::Result<libc::ucred> {
     }
 }
 
+/// The result of setting a socket option. Linux sets one on a socket whose peer has
+/// closed.
+pub(crate) fn socket_option(set: io::Result<()>) -> io::Result<()> {
+    set
+}
+
 /// The PID of the process at the other end of `stream`.
 pub(crate) fn peer_pid(stream: &UnixStream) -> Option<libc::pid_t> {
     peer_credentials(stream).ok().map(|cred| cred.pid)

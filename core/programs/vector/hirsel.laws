@@ -1,5 +1,5 @@
 hirsel.laws 1
-vector@1/tests/exact_top_k src=0d876763c8b576b1 sig=fdd4c9748034be8d run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=- rows=pending
-vector@1/tests/extremes src=843eda9597a72c6c sig=7ba98e4d2ca4868d run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=- rows=pending
-vector@1/tests/ivf_recall src=bf559cf0ff554cd5 sig=a8adf2fe53be5b56 run=b1818af2b24835d3 bug=af7d673187ab27c8 oracle=- rows=pending
-vector@1/tests/prefilter src=ffe7b600b08afb17 sig=ffee001584c5291e run=b1818af2b24835d3 bug=b67c20d33c1394f8 oracle=- rows=pending
+vector@1/tests/exact_top_k src=0d876763c8b576b1 sig=02d992520be2fe3a run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=- rows=pending
+vector@1/tests/extremes src=843eda9597a72c6c sig=caf6207aa88e7fe6 run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=- rows=pending
+vector@1/tests/ivf_recall src=bf559cf0ff554cd5 sig=2d9160019002df1a run=b1818af2b24835d3 bug=af7d673187ab27c8 oracle=- rows=pending
+vector@1/tests/prefilter src=ffe7b600b08afb17 sig=913a70d410841068 run=b1818af2b24835d3 bug=b67c20d33c1394f8 oracle=- rows=pending

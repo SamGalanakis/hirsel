@@ -1,5 +1,5 @@
 hirsel.laws 1
-search@1/example/find_document src=c270a58b90ac4420 sig=d12321b7eccc5ed4 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-search@1/tests/bm25_histories src=d3859edb0f273d72 sig=ce9a437d04742b1b run=b1818af2b24835d3 bug=0c5220c1d57d6b6f oracle=- rows=pending
-search@1/tests/filtered_top_k src=823eea8ebaae5fbf sig=986ed06dd8d5e198 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-search@1/tests/snapshot_bm25 src=fa5c7f2e019bd260 sig=d80ffb3403bf0e20 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/example/find_document src=c270a58b90ac4420 sig=52677b55bcf4ac6c run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/tests/bm25_histories src=d3859edb0f273d72 sig=0a3a0967be502acf run=b1818af2b24835d3 bug=0c5220c1d57d6b6f oracle=- rows=pending
+search@1/tests/filtered_top_k src=823eea8ebaae5fbf sig=8cfd4040481020ff run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/tests/snapshot_bm25 src=fa5c7f2e019bd260 sig=a1c8f1da81bc470c run=b1818af2b24835d3 bug=- oracle=- rows=pending

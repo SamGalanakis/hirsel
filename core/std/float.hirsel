@@ -1692,13 +1692,6 @@ fn place(q: u64, whole: u64) -> u64 {
     }
 }
 
-fn push_ascii(mut s: String, take o: Bytes) {
-    match string.from_utf8(take o) {
-        Ok(take t) => string.push(mut s, t),
-        Error(_) => fail("float: formatted digits are ASCII"),
-    }
-}
-
 // Arm optimized-routines exp (Szabolcs Nagy, 2018; MIT; musl's and glibc's exp carry the
 // same code and data): N = 128, x = k ln2/N + r, Shift = 1.5 x 2^52 rounds k into kd's
 // low bits, and C2..C5 approximate e^r - 1 - r on |r| <= ln2/256.

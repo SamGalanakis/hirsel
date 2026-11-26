@@ -8,9 +8,9 @@ The decimal parser uses an exact fast path, Eisel-Lemire multiplication and a
 bounded stack decimal fallback, with no allocation. The source gives the grammar,
 range errors and formatting rules for each operation.
 
-float's push_fixed64 and its push_ascii helper build their digits as Bytes
-and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that
-they wrote themselves. That revalidation stays in std (no core entry point) until it shows in a
+float's push_fixed64 builds its digits as Bytes
+and passes them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that
+it wrote itself. That revalidation stays in std (no core entry point) until it shows in a
 profile.
 
 `push_json_f64` uses the same shortest round-trip digits as `push_f64`.

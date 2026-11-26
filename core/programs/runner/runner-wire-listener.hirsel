@@ -272,7 +272,9 @@ fn supervise_serve[G: send, H: shareable + inert + send](take seed: ServePlace[G
 fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[ServeDrain], make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[u64, std.wsock.Error] waits {
     let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: time, limit: limit, room_owner_bytes, bind_owner_bytes: bind_term, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
     let pool = std.wsock.pending(config.socket)?
-    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, time, config.n_pool, 1024u64, take allocate)
+    // Room for every session's requests at once; past it (owners being
+    // reaped) a request is refused with 1013, never dropped.
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, time, config.n_pool, int.saturating_mul(limit, WIRE_SESSION_SLOTS), take allocate)
     let (allocation, allocation_task) = match take allocated {
         Ok(take pair) => take pair,
         Error(cap) => return Error(Allocation(cap)),

@@ -149,7 +149,7 @@ pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded
     let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
     let allowance = if wire_configuration(c) {
         let pool = option.unwrap(charge.task(bytes[()], wire_connection_pool_bytes(c)))
-        let inbox = option.unwrap(charge.channel(bytes[WireAllocation[C]], WIRE_STANDALONE_SLOTS))
+        let inbox = option.unwrap(charge.channel(bytes[WireAllocation[C]], WIRE_SESSION_SLOTS))
         WIRE_OWNER_FLOOR - wire_owner_task_bytes() + c.n_granted + bind_term + pool + inbox
     } else {
         0u64
@@ -174,7 +174,7 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
         Some(take a) => take a,
         None => return Error(Configuration)
     }
-    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(owner.tasks, c, owner.clock, wire_connection_pool_bytes(c), WIRE_STANDALONE_SLOTS, take allocate)
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(owner.tasks, c, owner.clock, wire_connection_pool_bytes(c), WIRE_SESSION_SLOTS, take allocate)
     let (take to, take holding) = match take allocated {
         Ok(take pair) => take pair,
         Error(cap) => return Error(Allocation(cap)),

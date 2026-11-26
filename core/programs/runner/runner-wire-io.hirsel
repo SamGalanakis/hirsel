@@ -8,7 +8,9 @@ const WIRE_SESSION_CEILING: u64 = 16777216u64
 
 pub const WIRE_POOL_BYTES: u64 = 384u64 * 1024u64 * 1024u64
 
-const WIRE_STANDALONE_SLOTS: u64 = 2u64
+// A session waits on at most two allocation requests at once: its reader's
+// Decode and its owner's Encode or AllocateService, each until its reply.
+const WIRE_SESSION_SLOTS: u64 = 2u64
 
 pub type WireConfig: send {
     n_pool: u64,

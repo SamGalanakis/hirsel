@@ -13,8 +13,10 @@ for package in runner store; do
         cp -L "$file" "$workspace/$package/"
     done
 done
-mkdir -p "$workspace/runner/tests"
+# The runner manifest's test sources outside its root: a build checks they exist.
+mkdir -p "$workspace/runner/tests" "$workspace/runner/observe"
 cp -L "$libraries/programs/runner/tests/b9-vectors.hirsel" "$workspace/runner/tests/"
+cp -L "$libraries/programs/runner/observe"/*.hirsel "$workspace/runner/observe/"
 cp -L "$testdata/dev_place.hirsel" "$workspace/runner/"
 printf '[workspace]\nmembers = ["runner", "store"]\n' > "$workspace/hirsel.toml"
 # The library root the dev child is given: core and std from LIBRARIES, and

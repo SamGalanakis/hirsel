@@ -637,6 +637,7 @@ def hirsel_dev_fixture_cache(name, hirsel, runtime):
     for package in ["runner", "store"]:
         libraries += native.glob(["core/programs/{}/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.toml".format(package)]
     libraries.append("core/programs/runner/tests/b9-vectors.hirsel")
+    libraries += native.glob(["core/programs/runner/observe/*.hirsel"])
     testdata = ["crates/hirsel-core-driver/src/testdata/" + file for file in ["dev_fixture.sh", "dev_place.hirsel"]]
     _dev_fixture_cache(name = name, hirsel = hirsel, runtime = runtime, libraries = libraries, testdata = testdata, visibility = ["PUBLIC"])
 

@@ -1,0 +1,16 @@
+[package]
+name = "hirsel-code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-core-ids = { path = "../hirsel-core-ids" }
+hirsel-core-layout = { path = "../hirsel-core-layout" }
+hirsel-mod = { path = "../hirsel-mod" }
+libc = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

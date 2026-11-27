@@ -1,0 +1,545 @@
+//! The loader's laws. Expected values come from PACK-2's fixup table, PACK-4's publish
+//! and recycle steps and PACK-6's counts, worked by hand.
+
+use super::*;
+use hirsel_core_layout::{Arch, Target};
+use hirsel_mod::{Backend, Class, Entry, Fixup, Header, Kind, NO_DESCRIPTOR, Span};
+
+type Leaf = unsafe extern "C" fn(u64) -> u64;
+// SAFETY: the law modules' one entry takes and returns a word.
+unsafe impl Signature for Leaf {
+    const DIGEST: ContentHash = ContentHash([9; 32]);
+}
+type Other = unsafe extern "C" fn();
+// SAFETY: no entry has this signature.
+unsafe impl Signature for Other {
+    const DIGEST: ContentHash = ContentHash([8; 32]);
+}
+
+const IDENTITY: ContentHash = ContentHash([0xaa; 32]);
+const ABI: ContentHash = ContentHash([1; 32]);
+
+extern "C" fn double(x: u64) -> u64 {
+    2 * x
+}
+
+fn fixup(site: u32, kind: Kind, bias: u8, addend: i64) -> Fixup {
+    Fixup {
+        site,
+        kind,
+        bias,
+        addend,
+    }
+}
+
+/// `leaf(x) = row(x) + k`, where the row is import 0 and `k` is the word at `data[8]`.
+#[cfg(target_arch = "x86_64")]
+fn leaf() -> (Vec<u8>, Vec<Fixup>) {
+    #[rustfmt::skip]
+    let text = vec![
+        0x48, 0x8b, 0x05, 0, 0, 0, 0, // 0: mov rax, [rip + slot 0]
+        0x48, 0x83, 0xec, 0x08,       // 7: sub rsp, 8
+        0xff, 0xd0,                   // 11: call rax
+        0x48, 0x83, 0xc4, 0x08,       // 13: add rsp, 8
+        0x48, 0x03, 0x05, 0, 0, 0, 0, // 17: add rax, [rip + k]
+        0xc3,                         // 24: ret
+    ];
+    let fixups = vec![
+        fixup(3, Kind::Rel32Data, 4, 0),
+        fixup(20, Kind::Rel32Data, 4, 8),
+    ];
+    (text, fixups)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn leaf() -> (Vec<u8>, Vec<Fixup>) {
+    let words: [u32; 9] = [
+        0xa9bf_7bfd, // 0: stp x29, x30, [sp, #-16]!
+        0x9000_0010, // 4: adrp x16, slot 0
+        0xf940_0210, // 8: ldr x16, [x16, low 12]
+        0xd63f_0200, // 12: blr x16
+        0x9000_0010, // 16: adrp x16, k
+        0xf940_0210, // 20: ldr x16, [x16, low 12]
+        0x8b10_0000, // 24: add x0, x0, x16
+        0xa8c1_7bfd, // 28: ldp x29, x30, [sp], #16
+        0xd65f_03c0, // 32: ret
+    ];
+    let fixups = vec![
+        fixup(4, Kind::PageData, 0, 0),
+        fixup(8, Kind::Low12LoadData, 0, 0),
+        fixup(16, Kind::PageData, 0, 8),
+        fixup(20, Kind::Low12LoadData, 0, 8),
+    ];
+    (
+        words.iter().flat_map(|word| word.to_le_bytes()).collect(),
+        fixups,
+    )
+}
+
+fn image(k: u64) -> hirsel_mod::Image {
+    let (text, text_fixups) = leaf();
+    // An image's data follows its import slots, which the writer lays down.
+    let data = k.to_le_bytes().to_vec();
+    hirsel_mod::Image {
+        header: Header {
+            target: TARGET,
+            backend: Backend::Cranelift,
+            policy: 0,
+            abi: ABI,
+            compiler: ContentHash([2; 32]),
+            coreir: ContentHash([k as u8; 32]),
+            text_align: 64,
+            data_align: 64,
+        },
+        spans: vec![Span {
+            start: 0,
+            length: text.len() as u32,
+        }],
+        names: vec!["leaf".into()],
+        text,
+        data,
+        imports: vec![Import::Row(hirsel_mod::row("hirsel_core_alloc").unwrap())],
+        text_fixups,
+        data_fixups: vec![],
+        entries: vec![Entry {
+            identity: IDENTITY,
+            signature: Leaf::DIGEST,
+            text: 0,
+            descriptor: NO_DESCRIPTOR,
+            waits: false,
+        }],
+        cfi: vec![],
+        sites: vec![],
+    }
+}
+
+fn config() -> Config {
+    Config {
+        abi: ABI,
+        policy: 0,
+        mask: Mask::PURE,
+        band_bytes: 16 << 20,
+        installed_bytes: 1 << 20,
+        retired_bytes: Config::RETIRED_BYTES,
+        batch: Config::BATCH,
+        row: Box::new(|_| Some(double as *const () as usize)),
+        instance: Box::new(|_| None),
+    }
+}
+
+/// Admit and load `bytes`, publishing at once.
+fn load(loader: &Loader, bytes: &[u8]) -> Result<Code<Leaf>, Refusal> {
+    if let Ok(module) = Module::parse(bytes) {
+        loader.admit(module.header.key(), hirsel_mod::digest(bytes));
+    }
+    loader.load(bytes, &IDENTITY, true)
+}
+
+fn call(code: &Code<Leaf>, x: u64) -> u64 {
+    // SAFETY: the law module's entry is `leaf`.
+    unsafe { (code.entry())(x) }
+}
+
+/// The bytes of one law image: its text and its two data words.
+fn size() -> u64 {
+    leaf().0.len() as u64 + 16
+}
+
+/// Each kind's field holds the value its row of the PACK-2 table gives, and each way a
+/// fixup can be wrong is refused by its index with the text table's records first.
+#[test]
+fn a_fixup_patches_the_field_its_kind_names_or_is_refused() {
+    let (t, d) = (0x1000_0000u64, 0x5000_0000u64);
+    let load = [0x48, 0x8b, 0x05, 0, 0, 0, 0, 0x90];
+    let patch = |text: &[u8], data: usize, in_text: &[Fixup], in_data: &[Fixup], arch, d| {
+        let (mut text, mut data) = (text.to_vec(), vec![0; data]);
+        let done = fixup::apply(
+            arch,
+            (&mut text, t),
+            (&mut data, d),
+            in_text.iter().copied(),
+            in_data.iter().copied(),
+        );
+        done.map(|()| (text, data))
+    };
+    let x86 =
+        |in_text: &[Fixup], in_data: &[Fixup]| patch(&load, 16, in_text, in_data, Arch::X86_64, d);
+
+    let rel = fixup(3, Kind::Rel32Data, 4, 8);
+    let (text, data) = x86(
+        &[rel],
+        &[
+            fixup(0, Kind::Abs64Text, 0, 8),
+            fixup(8, Kind::Abs64Data, 0, 16),
+        ],
+    )
+    .unwrap();
+    // D + 8 - (T + 3 + 4) = 0x4000_0001.
+    assert_eq!(text[3..7], 0x4000_0001u32.to_le_bytes());
+    // One past the end of each section is a target.
+    assert_eq!(data[..8], (t + 8).to_le_bytes());
+    assert_eq!(data[8..], (d + 16).to_le_bytes());
+
+    for (wrong, why) in [
+        (
+            fixup(3, Kind::Rel32Data, 4, 17),
+            "a target past the data's end",
+        ),
+        (fixup(3, Kind::Rel32Data, 4, -1), "a target before the data"),
+        (fixup(3, Kind::Rel32Data, 3, 8), "a bias below 4"),
+        (
+            fixup(3, Kind::Rel32Data, 6, 8),
+            "a bias past the text's end",
+        ),
+        (
+            fixup(4, Kind::Rel32Data, 4, 8),
+            "a field that follows no rip-relative ModRM",
+        ),
+        (
+            fixup(0, Kind::Rel32Data, 4, 8),
+            "a field at the text's start",
+        ),
+        (fixup(3, Kind::PageData, 0, 8), "an aarch64 kind"),
+        (
+            fixup(3, Kind::Abs64Data, 0, 8),
+            "a data kind in the text table",
+        ),
+    ] {
+        assert_eq!(x86(&[wrong], &[]), Err(0), "{why}");
+    }
+    assert_eq!(x86(&[rel, rel], &[fixup(0, Kind::Abs64Text, 0, 9)]), Err(2));
+    assert_eq!(x86(&[], &[fixup(9, Kind::Abs64Data, 0, 0)]), Err(0));
+    assert_eq!(x86(&[], &[fixup(0, Kind::Rel32Data, 4, 0)]), Err(0));
+    // A text 2 GiB below its data cannot hold the distance.
+    assert_eq!(
+        patch(&load, 16, &[rel], &[], Arch::X86_64, t + (1 << 31)),
+        Err(0)
+    );
+
+    let words: [u32; 5] = [
+        0x9000_0010, // 0: adrp x16
+        0xf940_0210, // 4: ldr x16, [x16]
+        0x9100_0021, // 8: add x1, x1, #0
+        0xb940_0042, // 12: ldr w2, [x2]
+        0x3dc0_0020, // 16: ldr q0, [x1]
+    ];
+    let code: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let arm = |in_text: &[Fixup]| patch(&code, 0x1000, in_text, &[], Arch::Aarch64, 0x1234_5000);
+    let (text, _) = arm(&[
+        fixup(0, Kind::PageData, 0, 0x678),
+        fixup(4, Kind::Low12LoadData, 0, 0x678),
+        fixup(8, Kind::Low12AddData, 0, 0x678),
+        fixup(12, Kind::Low12LoadData, 0, 0x67c),
+        fixup(16, Kind::Low12LoadData, 0, 0x670),
+    ])
+    .unwrap();
+    let word = |at: usize| u32::from_le_bytes(text[at..at + 4].try_into().unwrap());
+    // Page 0x12345 less page 0x10000 is 0x2345: low two bits 1, the rest 0x8d1.
+    assert_eq!(word(0), 0x9000_0010 | 1 << 29 | 0x8d1 << 5);
+    // 0x678 in 8-byte units is 0xcf; 0x67c in 4-byte units is 0x19f; 0x670 in 16-byte
+    // units is 0x67.
+    assert_eq!(word(4), 0xf940_0210 | 0xcf << 10);
+    assert_eq!(word(8), 0x9100_0021 | 0x678 << 10);
+    assert_eq!(word(12), 0xb940_0042 | 0x19f << 10);
+    assert_eq!(word(16), 0x3dc0_0020 | 0x67 << 10);
+    for (wrong, why) in [
+        (fixup(4, Kind::PageData, 0, 0), "a page fixup on a load"),
+        (
+            fixup(0, Kind::Low12LoadData, 0, 0),
+            "a load fixup on an adrp",
+        ),
+        (fixup(4, Kind::Low12AddData, 0, 0), "an add fixup on a load"),
+        (
+            fixup(4, Kind::Low12LoadData, 0, 0x67c),
+            "an 8-byte load of an address that is not a multiple of 8",
+        ),
+        (
+            fixup(16, Kind::Low12LoadData, 0, 0x678),
+            "a 16-byte load of an address that is not a multiple of 16",
+        ),
+        (
+            fixup(2, Kind::PageData, 0, 0),
+            "a site inside an instruction",
+        ),
+        (fixup(0, Kind::PageData, 4, 0), "a bias"),
+        (fixup(0, Kind::Rel32Data, 4, 0), "an x86-64 kind"),
+        (fixup(20, Kind::PageData, 0, 0), "a site past the text"),
+        (
+            fixup(0, Kind::PageData, 0, 0x1001),
+            "a target past the data's end",
+        ),
+    ] {
+        assert_eq!(arm(&[wrong]), Err(0), "{why}");
+    }
+}
+
+/// A loaded entry runs with its import bound and its data fixed up; the published
+/// pages are never writable; a refusal installs nothing.
+#[test]
+fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
+    if !host::SLAB {
+        return;
+    }
+    let loader = Loader::new(config()).unwrap();
+    let bytes = image(1000).encode();
+    assert_eq!(
+        loader.load::<Leaf>(&bytes, &IDENTITY, true).err(),
+        Some(Refusal::NotAdmitted)
+    );
+    let code = load(&loader, &bytes).unwrap();
+    assert_eq!(call(&code, 21), 1042);
+    assert_eq!(loader.installed(), size());
+    assert_eq!(host::protection(code.text()), "r-xp");
+    assert_eq!(host::protection(loader.0.data(0)), "r--p");
+    // The text run's bytes outside the image are the trap pattern.
+    let page = loader.0.page;
+    let pattern: [u8; 4] = match TARGET.arch() {
+        Arch::X86_64 => [0xcc; 4],
+        Arch::Aarch64 => 0xd420_0000u32.to_le_bytes(),
+    };
+    for offset in leaf().0.len()..page {
+        // SAFETY: the page is mapped readable.
+        let byte = unsafe { *((code.text() + offset) as *const u8) };
+        assert_eq!(byte, pattern[offset % 4], "{offset}");
+    }
+
+    // The same digest is the same image.
+    let again = load(&loader, &bytes).unwrap();
+    assert_eq!((again.text(), loader.installed()), (code.text(), size()));
+    assert_eq!(call(&again, 1), 1002);
+
+    assert_eq!(
+        loader.load::<Other>(&bytes, &IDENTITY, true).err(),
+        Some(Refusal::NoEntry)
+    );
+    let absent = ContentHash([0xab; 32]);
+    assert_eq!(
+        loader.load::<Leaf>(&bytes, &absent, true).err(),
+        Some(Refusal::NoEntry)
+    );
+
+    let refused = |change: &dyn Fn(&mut hirsel_mod::Image), loader: &Loader| {
+        let mut image = image(2000);
+        change(&mut image);
+        let before = loader.installed();
+        let refusal = load(loader, &image.encode()).err();
+        assert_eq!(loader.installed(), before);
+        refusal
+    };
+    assert_eq!(
+        refused(&|image| image.header.abi = ContentHash([7; 32]), &loader),
+        Some(Refusal::Mismatch("abi"))
+    );
+    assert_eq!(
+        refused(&|image| image.header.policy = 1, &loader),
+        Some(Refusal::Mismatch("policy"))
+    );
+    let elsewhere = |image: &mut hirsel_mod::Image| {
+        image.header.target = Target::Aarch64Darwin;
+        (image.text_fixups, image.imports) = (vec![], vec![]);
+    };
+    assert_eq!(
+        refused(&elsewhere, &loader),
+        Some(Refusal::Mismatch("target"))
+    );
+    // A field that follows no instruction of its kind's form.
+    let misplaced = |image: &mut hirsel_mod::Image| match TARGET.arch() {
+        Arch::X86_64 => image.text_fixups[0].site += 4,
+        Arch::Aarch64 => image.text_fixups[0].site = 0,
+    };
+    assert_eq!(refused(&misplaced, &loader), Some(Refusal::Fixup(0)));
+    assert!(matches!(
+        load(&loader, &bytes[..bytes.len() - 1]),
+        Err(Refusal::Malformed(_))
+    ));
+    let instance = ContentHash([5; 32]);
+    assert_eq!(
+        refused(
+            &|image| image.imports[0] = Import::Instance(instance),
+            &loader
+        ),
+        Some(Refusal::Unbound(instance))
+    );
+
+    let row = hirsel_mod::row("hirsel_core_alloc").unwrap();
+    let pure = Loader::new(Config {
+        mask: Mask::of(&[Class::Pure]),
+        ..config()
+    })
+    .unwrap();
+    assert_eq!(refused(&|_| {}, &pure), Some(Refusal::Import(row)));
+    let full = Loader::new(Config {
+        installed_bytes: size(),
+        ..config()
+    })
+    .unwrap();
+    let _held = load(&full, &bytes).unwrap();
+    assert_eq!(refused(&|_| {}, &full), Some(Refusal::Capacity));
+
+    // After the refusals the next module still gets a cohort of its own and runs.
+    let next = load(&loader, &image(3000).encode()).unwrap();
+    assert_eq!((call(&next, 1), next.text() % page), (3002, 0));
+    loader.quarantine(next.digest());
+    assert_eq!(
+        load(&loader, &image(3000).encode()).err(),
+        Some(Refusal::Quarantined)
+    );
+}
+
+/// What a call to `entry` ends with in a child process: its exit status or its signal.
+fn outcome(entry: Leaf) -> Result<i32, i32> {
+    // SAFETY: the child only calls the entry and exits; the parent only waits for it.
+    unsafe {
+        let child = libc::fork();
+        assert!(child >= 0);
+        if child == 0 {
+            libc::_exit((entry(1) & 0x7f) as i32);
+        }
+        let mut status = 0;
+        assert_eq!(libc::waitpid(child, &mut status, 0), child);
+        if libc::WIFSIGNALED(status) {
+            Err(libc::WTERMSIG(status))
+        } else {
+            Ok(libc::WEXITSTATUS(status))
+        }
+    }
+}
+
+/// G11: a jump into a dead cohort faults, its pages are returned, and the range runs
+/// new code after it is published again (PACK-4 step 5).
+#[test]
+fn a_dead_cohort_faults_and_its_range_is_published_again() {
+    if !host::SLAB {
+        return;
+    }
+    let loader = Loader::new(config()).unwrap();
+    let first = load(&loader, &image(100).encode()).unwrap();
+    let (entry, text) = (first.entry(), first.text());
+    // 2 + 100 while the code is alive.
+    assert_eq!(outcome(entry), Ok(102));
+    drop(first);
+    assert_eq!(loader.installed(), 0);
+    assert_eq!(host::protection(text), "---p");
+    assert_eq!(host::protection(loader.0.data(0)), "---p");
+    assert_eq!(outcome(entry), Err(libc::SIGSEGV));
+
+    // Each later cohort takes the next pages of the writable window; when the window
+    // is used up the lowest free run, the dead cohort's, opens again.
+    let again = (1..=1 + WINDOW as u64 / loader.0.page as u64)
+        .map(|k| (k, load(&loader, &image(k).encode()).unwrap()))
+        .find(|(_, code)| code.text() == text);
+    let (k, code) = again.expect("the dead cohort's range opens again");
+    assert_eq!(
+        (call(&code, 1), host::protection(text)),
+        (2 + k, "r-xp".into())
+    );
+}
+
+/// Installs of one batch share a cohort, none is reachable before the batch is
+/// published, and the cohort lives until its last image dies (PACK-4 steps 3 and 5).
+#[test]
+fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
+    if !host::SLAB {
+        return;
+    }
+    let loader = Loader::new(Config {
+        batch: Duration::from_secs(60),
+        ..config()
+    })
+    .unwrap();
+    let (early, late) = (image(1).encode(), image(2).encode());
+    for bytes in [&early, &late] {
+        loader.admit(
+            Module::parse(bytes).unwrap().header.key(),
+            hirsel_mod::digest(bytes),
+        );
+    }
+    let started = Instant::now();
+    let (waiting, flushed) = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| loader.load::<Leaf>(&early, &IDENTITY, false).unwrap());
+        while loader.installed() == 0 {
+            std::thread::yield_now();
+        }
+        // The first install is in an open cohort: writable, not executable.
+        assert_eq!(host::protection(loader.0.text(0)), "rw-p");
+        let flushed = loader.load::<Leaf>(&late, &IDENTITY, true).unwrap();
+        (waiting.join().unwrap(), flushed)
+    });
+    // The flush published both; the first did not wait out its minute.
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert_eq!(waiting.text(), loader.0.text(0));
+    // The second image starts at the next 64-byte line after the first.
+    assert_eq!(
+        flushed.text(),
+        waiting.text() + leaf().0.len().next_multiple_of(64)
+    );
+    assert_eq!((call(&waiting, 1), call(&flushed, 1)), (3, 4));
+
+    drop(waiting);
+    // A dead image in a live cohort: its page is never written, so it stays as it was
+    // and still counts as installed.
+    assert_eq!(host::protection(loader.0.text(0)), "r-xp");
+    assert_eq!((call(&flushed, 1), loader.installed()), (4, 2 * size()));
+    drop(flushed);
+    assert_eq!(
+        (host::protection(loader.0.text(0)), loader.installed()),
+        ("---p".into(), 0)
+    );
+}
+
+/// `activate` is a compare-and-swap on the version, the retired budget refuses without
+/// changing anything, and a worker keeps old code alive only while its row holds it
+/// (PACK-6 steps 3 to 5).
+#[test]
+fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
+    if !host::SLAB {
+        return;
+    }
+    let loader = Loader::new(Config {
+        retired_bytes: size(),
+        ..config()
+    })
+    .unwrap();
+    let code = |k| load(&loader, &image(k).encode()).unwrap();
+    let slot = loader.slot::<Leaf>();
+    let mut worker = loader.worker();
+    // SAFETY: the law module's entry is `leaf`.
+    let mut run = |slot: &Slot<Leaf>| worker.dispatch(slot, |leaf| unsafe { leaf(1) });
+    assert_eq!(run(&slot), None);
+
+    let first = code(10);
+    let old = first.text();
+    assert_eq!(slot.activate(0, first), Ok(1));
+    assert_eq!(slot.activate(0, code(20)), Err(Stop::Stale(1)));
+    assert_eq!((run(&slot), loader.retired()), (Some(12), 0));
+
+    // The worker's row is now the only owner of the first image, which is retired.
+    assert_eq!(slot.activate(1, code(20)), Ok(2));
+    assert_eq!(
+        (loader.retired(), host::protection(old)),
+        (size(), "r-xp".into())
+    );
+    // Retiring a second image would pass the budget of one.
+    assert_eq!(slot.activate(2, code(30)), Err(Stop::Capacity));
+    assert_eq!((slot.version(), loader.retired()), (2, size()));
+
+    // The worker moves on, the first image dies and its cohort is recycled.
+    assert_eq!(run(&slot), Some(22));
+    assert_eq!(
+        (loader.retired(), host::protection(old)),
+        (0, "---p".into())
+    );
+    assert_eq!(slot.activate(2, code(30)), Ok(3));
+    assert_eq!(loader.retired(), size());
+    worker.park();
+    assert_eq!(loader.retired(), 0);
+
+    // Returning to code that is still installed takes it out of the retired bytes.
+    let kept = code(30);
+    assert_eq!(slot.activate(3, code(40)), Ok(4));
+    assert_eq!(loader.retired(), size());
+    assert_eq!(slot.activate(4, kept), Ok(5));
+    assert_eq!((loader.retired(), loader.installed()), (0, size()));
+    drop(slot);
+    assert_eq!((loader.retired(), loader.installed()), (0, 0));
+}

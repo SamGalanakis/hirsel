@@ -262,7 +262,9 @@ alias can write live code.
    table (PACK-9), then maps both runs `PROT_NONE` and returns their pages
    (`MADV_DONTNEED`). A stale jump into a dead cohort faults. The range may later open as
    a new cohort; step 2 above runs before it is published again. Only whole dead cohorts
-   are recycled: a live page is never written.
+   are recycled: a live page is never written. So an image whose count is zero stays
+   mapped and executable while another image of its cohort is alive, and a stale jump
+   into it runs its old code instead of faulting.
 6. **`mseal`** is never applied to a slab.
 
 ## PACK-5: The code slab on Apple targets
@@ -382,12 +384,12 @@ ends the host.
 | `Mismatch(field)` | `target`, `abi` or `policy` differs from the loader's |
 | `Import(row)` | an import's class is outside the mask |
 | `Unbound(instance)` | the host image lacks a kind 1 import |
-| `Fixup(index)` | a fixup is refused by PACK-2 |
+| `Fixup(index)` | a fixup is refused by PACK-2; the text table's records count first |
 | `NoEntry` | the module has no entry with the requested identity and signature |
 | `Capacity` | the installed-code budget or the band is exhausted |
 | `Quarantined` | the digest faulted on this host |
 | `NotPrelinked` | the host has no slab and its image lacks the key |
-| `Unsupported` | the host cannot publish code (PACK-4) |
+| `Unsupported` | the host cannot publish code (PACK-4), or a module's alignment is above a page |
 
 ## Gates
 

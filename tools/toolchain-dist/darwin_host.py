@@ -450,7 +450,10 @@ def preserve(path_text):
     if path_text in copied:
         return copied[path_text]
     candidate = Path(path_text)
-    if candidate.suffix == '.o' and candidate.is_file():
+    if candidate.is_file() and (
+        candidate.suffix in ('.o', '.a', '.rlib')
+        or any(part.startswith('rustc') for part in candidate.parts)
+    ):
         target = saved_objs / f'{{len(copied)}}-' / candidate.name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(candidate, target)

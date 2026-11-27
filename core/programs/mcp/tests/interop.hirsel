@@ -14,7 +14,7 @@ fn input_schema[T: codec](format: std.json.Format[T]) -> server.InputSchema {
     result.unwrap(server.schema(format, list.new()))
 }
 
-fn echo(mut call: server.Call, clock: Clock) -> server.Step {
+fn echo(mut call: server.Call, clock: Clock, mut ctx: ()) -> server.Step {
     let values = result.unwrap(rpc.object(call.arguments))
     match rpc.field_text(values, "text") {
         Some(take value) => Text(take value),
@@ -22,7 +22,7 @@ fn echo(mut call: server.Call, clock: Clock) -> server.Step {
     }
 }
 
-fn progress(mut call: server.Call, clock: Clock) -> server.Step waits {
+fn progress(mut call: server.Call, clock: Clock, mut ctx: ()) -> server.Step waits {
     if list.len(call.scratch) == 0 {
         list.push(mut call.scratch, 1u8)
         return Progress(1, Some(2), Some(string.from("started")))
@@ -33,8 +33,8 @@ fn progress(mut call: server.Call, clock: Clock) -> server.Step waits {
     Text(string.from("complete"))
 }
 
-fn loader(directory: Dir, marker: String) -> List[server.Tool] waits {
-    let mut tools: List[server.Tool] = list.new()
+fn loader(directory: Dir, marker: String) -> List[server.Tool[()]] waits {
+    let mut tools: List[server.Tool[()]] = list.new()
     list.push(mut tools, server.Tool(name: string.from("echo"), description: string.from("Echo text"), input_schema: input_schema((result.unwrap(std.json.interop()) : std.json.Format[EchoInput])), call: echo))
     list.push(mut tools, server.Tool(name: string.from("progress"), description: string.from("Report progress"), input_schema: input_schema((result.unwrap(std.json.interop()) : std.json.Format[ProgressInput])), call: progress))
     if let Ok(_) = std.file.read_string(directory, marker) {
@@ -61,17 +61,13 @@ fn serve(n: Net, c: Clock, tasks: Tasks, random: Random, dir: Dir, out: Stdout) 
     list.push(mut resources, server.ResourceHandler(info: server.Resource(uri: string.from("fixture://notes/readme"), name: string.from("Readme"), mimeType: string.from("text/plain")), read: note))
     let state = server.Server(identity: rpc.Identity(name: string.from("hirsel-mcp"), version: string.from("1")), origins: take origins, tools: Dynamic(dir, string.from("catalog.changed"), 100u64, loader), resources: take resources, event_max: 65536, producer_bytes: MEMORY, producer_steps: 10000000)
     let (take registry, _owner) = result.unwrap(sessions.start(tasks, c, random, 256, 3600000))
-    let endpoint = server.endpoint(take state, take registry)
-    let mut routes: std.router.Builder[server.Endpoint] = std.router.builder()
+    let mut routes: std.router.Builder[server.Endpoint[()]] = std.router.builder()
     result.unwrap(server.mount(mut routes, "/mcp", MEMORY, 2 * MEMORY))
     let mut ready = string.new()
     string.push_u64(mut ready, int.widen(addr.port))
     string.push(mut ready, "\n")
     result.unwrap(stdout.write(out, ready))
-    let make: scoped[view] fn() -> server.Endpoint = fn() -> server.Endpoint {
-        server.connection(endpoint)
-    }
-    result.unwrap(std.http.serve_with_factory(take listeners, c, tasks, config(), result.unwrap(std.router.build(take routes)), 4096, make, None))
+    result.unwrap(server.serve(take listeners, c, tasks, config(), result.unwrap(std.router.build(take routes)), take state, take registry, 4096, 0, fn() {}, None))
 }
 
 fn invoke(n: Net, c: Clock, peer: client.Endpoint, session: client.Session, method: String, input: String, notice: scoped fn(client.Notice) -> bool) -> Result[String, client.Error] waits {

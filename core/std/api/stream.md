@@ -30,6 +30,16 @@ the same credit, byte and step bounds as `produce`, and a disconnected peer
 cancels the producer. The callback may capture plain functions selected by
 the route configuration.
 
+`spec_contextual(request, status, bounds)` reserves a regular producer stream
+whose state comes from `http.serve_with_stream_context`. Its stream factory
+receives the originating connection's supervisor state after a slot is
+available. It can return `None` to refuse promotion. Pass the typed result to
+`drive_contextual(take work, take state, producer)` in that server's driver.
+The producer `fn(take Seed, Clock, take P) waits` can call `produce_owned`
+with a `send` state that holds capabilities or resources. The normal stream
+credit, byte, step, lease and cancellation rules apply. Use `needs_context`
+to detect offers that require a supervisor factory, including managed streams.
+
 `spec_relay(request, status, bounds, take fields, take upstream, idle_ms)`
 relays an upstream response whose head the handler has read with
 [`http_client`](http_client.md): it moves the live `Connection` into the

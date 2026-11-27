@@ -1,0 +1,66 @@
+type Monitor[E: send]: send {
+    half: ReadHalf,
+    remaining: u64,
+    inbox: Sender[E],
+    notify: fn(take stream.Delivery) -> E
+}
+
+type Alarm[E: send]: send {
+    clock: Clock,
+    from: u64,
+    interval: u64,
+    pre_head: u64,
+    inbox: Sender[E],
+    notify: fn(take stream.Delivery) -> E
+}
+
+fn monitor[E: send](take job: Monitor[E]) -> ReadHalf waits {
+    let Monitor(half: take half, remaining: limit, inbox: take inbox, notify) = take job
+    let mut reader = take half
+    let mut buffer: Bytes = list.with_capacity(64)
+    let mut remaining = limit
+    loop {
+        list.clear(mut buffer)
+        match host.recv_bounded(mut reader, mut buffer, 64, Never) {
+            Ok(n) => {
+                if n == 0 || n > remaining {
+                    break
+                }
+                remaining -= n
+            },
+            Error(_) => break,
+        }
+    }
+    let _ = channel.send(inbox, notify(ReadEnd))
+    take reader
+}
+
+fn alarm[E: send](take job: Alarm[E]) waits {
+    let Alarm(clock: c, from: start, interval: period, pre_head, inbox: take inbox, notify) = take job
+    let mut next = clock.deadline_after_ms(start, period)
+    let mut pending = pre_head
+    loop {
+        let at = order.min(next, pending)
+        host.sleep_until(c, at)
+        let _ = channel.try_send(inbox, notify(Tick))
+        if at == 18446744073709551615 {
+            return
+        }
+        if next == at {
+            next = clock.deadline_after_ms(at, period)
+        }
+        if pending == at {
+            pending = 18446744073709551615
+        }
+    }
+}
+
+pub fn spawn_monitor[E: send](tasks: Tasks, take half: ReadHalf, remaining: u64, take inbox: Sender[E], notify: fn(take stream.Delivery) -> E) -> Task[ReadHalf] {
+    let run: fn(take Monitor[E]) -> ReadHalf waits = monitor
+    task.spawn(tasks, bytes 64u64, Monitor(half: take half, remaining, inbox: take inbox, notify), run)
+}
+
+pub fn spawn_alarm[E: send](tasks: Tasks, c: Clock, start: u64, period: u64, pre_head: u64, take inbox: Sender[E], notify: fn(take stream.Delivery) -> E) -> Task[()] {
+    let run: fn(take Alarm[E]) waits = alarm
+    task.spawn(tasks, bytes 4096u64, Alarm(clock: c, from: start, interval: period, pre_head, inbox: take inbox, notify), run)
+}

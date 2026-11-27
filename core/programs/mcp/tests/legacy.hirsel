@@ -284,7 +284,7 @@ type WeatherInput: codec {
     location: String
 }
 
-fn weather(mut call: server.Call, c: Clock) -> server.Step {
+fn weather(mut call: server.Call, c: Clock, mut ctx: ()) -> server.Step {
     let args = result.unwrap(rpc.object(call.arguments))
     if rpc.field_text(args, "location") != Some("New York") {
         return ToolError(string.from("expected New York"))
@@ -300,19 +300,48 @@ type LiveServer: send {
     stop: Receiver[u64]
 }
 
-fn serve_weather(take job: LiveServer) waits {
-    let LiveServer(listener: take listener, clock, tasks, registry: take registry, stop: take stop) = take job
-    let mut listeners: List[Listener] = list.new()
-    list.push(mut listeners, take listener)
-    let format: std.json.Format[WeatherInput] = result.unwrap(std.json.interop())
-    let schema = result.unwrap(server.schema(format, list.new()))
-    let mut tools: List[server.Tool] = list.new()
-    list.push(mut tools, server.Tool(name: string.from("get_weather"), description: string.from("Get current weather"), input_schema: take schema, call: weather))
-    let identity = rpc.Identity(name: string.from("ExampleServer"), version: string.from("1.0.0"))
-    let state = server.Server(identity: take identity, origins: list.new(), tools: Fixed(take tools), resources: list.new(), event_max: 4096, producer_bytes: 65536, producer_steps: 1000000)
-    let endpoint = server.endpoint(take state, take registry)
-    let mut routes: std.router.Builder[server.Endpoint] = std.router.builder()
-    result.unwrap(server.mount(mut routes, "/mcp", 8192, 262144))
+type FixtureContext: send {
+    directory: Dir,
+    path: String,
+    ready: bool
+}
+
+fn read_fixture(ctx: FixtureContext) -> Result[String, ()] waits {
+    let mut input = std.file.open(ctx.directory, ctx.path, Read) ?=> |_| ()
+    let mut buffer: Bytes = list.with_capacity(128)
+    loop {
+        let read = std.file.read_into(mut input, mut buffer) ?=> |_| ()
+        if read == 0 {
+            break
+        }
+        if list.len(buffer) == list.capacity(buffer) {
+            return Error(())
+        }
+    }
+    std.file.close(take input) ?=> |_| ()
+    Ok(string.from_utf8(take buffer) ?=> |_| ())
+}
+
+fn fixture_weather(mut call: server.Call, c: Clock, mut ctx: FixtureContext) -> server.Step waits {
+    if !ctx.ready {
+        ctx.ready = true
+        return Progress(1, Some(2), None)
+    }
+    match read_fixture(ctx) {
+        Ok(take text) => Text(take text),
+        Error(_) => ToolError(string.from("fixture read failed")),
+    }
+}
+
+fn serve_fixture(take job: (LiveServer, Dir)) waits {
+    let (take live, directory) = take job
+    let make: scoped[view] fn() -> FixtureContext = fn() -> FixtureContext {
+        FixtureContext(directory, path: string.from("weather.txt"), ready: false)
+    }
+    serve_weather_with(take live, fixture_weather, 4096, make)
+}
+
+fn live_config() -> std.http.Config {
     let mut cfg = std.http.defaults()
     cfg.sockets_max = 4
     cfg.http_max = 4
@@ -321,10 +350,26 @@ fn serve_weather(take job: LiveServer) waits {
     cfg.streams_max = 1
     cfg.heartbeat_ms = 1000
     cfg.lease_ms = 5000
-    let make: scoped[view] fn() -> server.Endpoint = fn() -> server.Endpoint {
-        server.connection(endpoint)
-    }
-    result.unwrap(std.http.serve_with_factory(take listeners, clock, tasks, take cfg, result.unwrap(std.router.build(take routes)), 4096, make, Some(take stop)))
+    take cfg
+}
+
+fn serve_weather(take job: LiveServer) waits {
+    serve_weather_with(take job, weather, 0, fn() {})
+}
+
+fn serve_weather_with[Ctx: send](take job: LiveServer, handler: fn(mut server.Call, Clock, mut Ctx) -> server.Step waits, context_bytes: u64, make: scoped[view] fn() -> Ctx) waits {
+    let LiveServer(listener: take listener, clock, tasks, registry: take registry, stop: take stop) = take job
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    let format: std.json.Format[WeatherInput] = result.unwrap(std.json.interop())
+    let schema = result.unwrap(server.schema(format, list.new()))
+    let mut tools: List[server.Tool[Ctx]] = list.new()
+    list.push(mut tools, server.Tool(name: string.from("get_weather"), description: string.from("Get current weather"), input_schema: take schema, call: handler))
+    let identity = rpc.Identity(name: string.from("ExampleServer"), version: string.from("1.0.0"))
+    let state = server.Server(identity: take identity, origins: list.new(), tools: Fixed(take tools), resources: list.new(), event_max: 4096, producer_bytes: 65536, producer_steps: 1000000)
+    let mut routes: std.router.Builder[server.Endpoint[Ctx]] = std.router.builder()
+    result.unwrap(server.mount(mut routes, "/mcp", 8192, 262144))
+    result.unwrap(server.serve(take listeners, clock, tasks, live_config(), result.unwrap(std.router.build(take routes)), take state, take registry, 4096, context_bytes, make, Some(take stop)))
 }
 
 type WirePeer {
@@ -428,7 +473,7 @@ fn open_weather_session(peer: WirePeer, request: String, expected_version: Strin
     take session
 }
 
-fn expect_weather(reply: WireReply, modern: bool) {
+fn expect_weather(reply: WireReply, modern: bool, expected: String, progress: bool) {
     if reply.status != 200 || reply.media != Some("text/event-stream") || reply.session != None {
         fail("tools/call did not return HTTP 200 and SSE without a session header")
     }
@@ -440,10 +485,24 @@ fn expect_weather(reply: WireReply, modern: bool) {
         }
         Continue
     }))
-    if list.len(events) != 1 {
-        fail("expected one tool result")
+    let result_at = if progress {
+        if list.len(events) != 2 {
+            fail("expected one progress notification and one tool result")
+        }
+        let Notification(method, params) = result.unwrap(rpc.incoming(events[0])) else {
+            fail("expected a progress notification before the tool result")
+        }
+        if method != "notifications/progress" || rpc.field_text(params, "progressToken") != Some("fixture") || map.get(params, "progress") != Some("1") || map.get(params, "total") != Some("2") {
+            fail("tools/call returned the wrong progress")
+        }
+        1u64
+    } else {
+        if list.len(events) != 1 {
+            fail("expected one tool result")
+        }
+        0u64
     }
-    let Reply(id, take value) = result.unwrap(rpc.incoming(events[0])) else {
+    let Reply(id, take value) = result.unwrap(rpc.incoming(events[result_at])) else {
         fail("tools/call did not return a JSON-RPC result")
     }
     let fields = result.unwrap(rpc.object(value))
@@ -460,8 +519,8 @@ fn expect_weather(reply: WireReply, modern: bool) {
     }
     let format: std.json.Format[List[Map[String, String]]] = result.unwrap(std.json.interop())
     let items = result.unwrap(std.json.decode_typed(format, std.http.copy_bytes(string.as_bytes(raw)), 4096))
-    if list.len(items) != 1 || map.get(items[0], "type") != Some("text") || map.get(items[0], "text") != Some(WEATHER_TEXT) {
-        fail("tools/call did not return the specification's weather content")
+    if list.len(items) != 1 || map.get(items[0], "type") != Some("text") || option.unwrap(map.get(items[0], "text")) != expected {
+        fail("tools/call did not return the expected weather content")
     }
 }
 
@@ -491,8 +550,8 @@ fn server_session_and_per_request(n: Net, c: Clock, tasks: Tasks) -> Result[(), 
     if ready.status != 202 || ready.body != "" {
         fail("notifications/initialized did not return an empty HTTP 202")
     }
-    expect_weather(wire_request(peer, "POST", LEGACY_WEATHER, legacy, session, false), false)
-    expect_weather(wire_request(peer, "POST", MODERN_WEATHER, Some("2026-07-28"), None, true), true)
+    expect_weather(wire_request(peer, "POST", LEGACY_WEATHER, legacy, session, false), false, WEATHER_TEXT, false)
+    expect_weather(wire_request(peer, "POST", MODERN_WEATHER, Some("2026-07-28"), None, true), true, WEATHER_TEXT, false)
     let wrong = wire_request(peer, "POST", LEGACY_WEATHER, legacy, Some("unknown-session"), false)
     if wrong.status != 404 {
         fail("unknown session did not get HTTP 404")
@@ -512,6 +571,29 @@ fn server_session_and_per_request(n: Net, c: Clock, tasks: Tasks) -> Result[(), 
     if wire_request(peer, "POST", LEGACY_WEATHER, legacy, Some(next), false).status != 404 {
         fail("the expired session was accepted")
     }
+    result.unwrap(channel.send(stop, end))
+    result.unwrap(task.join(take running))
+    result.unwrap(task.join(take owner))
+    Ok(())
+}
+
+@test
+fn tool_context_reads_fixture(n: Net, c: Clock, tasks: Tasks, directory: Dir) -> Result[(), ()] waits {
+    let expected = "Weather from the test directory\n"
+    let mut file = result.unwrap(std.file.open(directory, "weather.txt", CreateNew))
+    result.unwrap(std.file.write_all(mut file, string.as_bytes(expected)))
+    result.unwrap(std.file.close(take file))
+    let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 4))
+    let end = std.clock.deadline_after_ms(host.mono_ns(c), 5000)
+    let mut authority = string.from("127.0.0.1:")
+    string.push_u64(mut authority, int.widen(address.port))
+    let peer = WirePeer(net: n, clock: c, address, authority: take authority, deadline: end)
+    let (take registry, owner) = result.unwrap(sessions.start(tasks, c, provide.random(17), 1, 1000))
+    let (stop, stopping): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let live = LiveServer(listener: take listener, clock: c, tasks, registry: take registry, stop: take stopping)
+    let running = task.spawn(tasks, bytes 16777216, (take live, directory), serve_fixture)
+    let request = std.string.replace(MODERN_WEATHER, "\"_meta\":{", "\"_meta\":{\"progressToken\":\"fixture\",")
+    expect_weather(wire_request(peer, "POST", request, Some("2026-07-28"), None, true), true, expected, true)
     result.unwrap(channel.send(stop, end))
     result.unwrap(task.join(take running))
     result.unwrap(task.join(take owner))

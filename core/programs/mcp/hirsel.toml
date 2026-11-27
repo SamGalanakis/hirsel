@@ -22,3 +22,6 @@ grants = ["Clock", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 
 "tests/rpc.hirsel" = "laws"
 "tests/legacy.hirsel" = "laws"
 "example.hirsel" = "example"
+
+[tests.runs."mcp@1/laws/tool_context_reads_fixture"]
+dirs = ["."]

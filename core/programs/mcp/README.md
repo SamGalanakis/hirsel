@@ -36,18 +36,26 @@ resume with `Last-Event-ID` or use the HTTP+SSE transport.
 Start the bounded session registry with `sessions.start`, giving it Clock and
 Random capabilities, a session limit and a lifetime in milliseconds. Keep its
 task alive while serving. Combine the registry and the server configuration
-with `server.endpoint`, mount `server.mount` on a `std.router`, and use
-`server.connection` in the `std.http.serve_with_factory` connection factory.
+with `server.serve`. Add the MCP routes with `server.mount` on a
+`std.router.Builder[server.Endpoint[Ctx]]` and pass the built router to `serve`.
 The server checks each supplied Origin against its configured allowlist.
 Bind loopback for local use. A server exposed to a network needs authentication
 at its deployment boundary. The client can pass a `Secret` bearer credential
 over verified HTTPS. The HTTP library refuses protected headers on plain TCP.
 
-The server takes plain Hirsel tool handlers. Create tool input schemas from
-external-API `std.json.Format` values using `server.schema`. Handlers may
-yield progress steps before a final text result or tool error. Resource handlers return text. SSE keeps a
-call alive until it completes or the client closes the stream. A dynamic
-catalog reloads through a caller-provided function and directory grant.
+Declare tools as `server.Tool[Ctx]` with a plain handler of type
+`fn(mut server.Call, Clock, mut Ctx) -> server.Step waits`. `server.serve`
+constructs a fresh `Ctx: send` through the supplied scoped factory for each
+admitted tool stream. The producer passes that same mutable context to each
+step until the call completes or the client closes the stream. The context can
+hold explicit authority such as `Dir` or `Foreign[Sqlite]`. Use `()` and
+`fn() {}` for tools that need no application state. The connection and context
+factory allocations have separate `connection_bytes` and `context_bytes` bounds.
+
+Create tool input schemas from external-API `std.json.Format` values using
+`server.schema`. Handlers may yield progress steps before a final text result
+or tool error. Resource handlers return text. A dynamic catalog reloads through
+a caller-provided function and directory grant.
 A `subscriptions/listen` client can opt into changes to that catalog.
 
 Use `client.call` for discovery, listing and resource reads. Read tool

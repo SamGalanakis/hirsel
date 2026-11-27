@@ -1,8 +1,8 @@
-pub type Tool: shareable + send {
+pub type Tool[Ctx: send]: shareable + send {
     name: String,
     description: String,
     input_schema: InputSchema,
-    call: fn(mut Call, Clock) -> Step waits
+    call: fn(mut Call, Clock, mut Ctx) -> Step waits
 }
 
 pub opaque type InputSchema: shareable + send {
@@ -45,31 +45,52 @@ pub type ResourceHandler: shareable + send {
     read: fn() -> Result[String, String] waits
 }
 
-pub type Catalog: shareable + send = Fixed(List[Tool]) | Dynamic(Dir, String, u64, fn(Dir, String) -> List[Tool] waits)
+pub type Catalog[Ctx: send]: shareable + send = Fixed(List[Tool[Ctx]]) | Dynamic(Dir, String, u64, fn(Dir, String) -> List[Tool[Ctx]] waits)
 
-pub type Server: shareable + send {
+pub type Server[Ctx: send]: shareable + send {
     identity: rpc.Identity,
     origins: List[String],
-    tools: Catalog,
+    tools: Catalog[Ctx],
     resources: List[ResourceHandler],
     event_max: u64,
     producer_bytes: u64,
     producer_steps: u64
 }
 
-pub opaque type Endpoint: send {
-    state: Arc[Server],
-    sessions: sessions.Registry
+pub opaque type Endpoint[Ctx: send]: send {
+    state: Arc[Server[Ctx]],
+    sessions: sessions.Registry,
+    handoff: Sender[Invocation[Ctx]]
 }
 
-pub fn endpoint(take state: Server, take registry: sessions.Registry) -> Endpoint {
-    Endpoint(state: arc.new(take state), sessions: take registry)
+/// Serves MCP routes and constructs a fresh context for each admitted tool call.
+pub fn serve[Ctx: send](take listeners: List[Listener], clock: Clock, tasks: Tasks, take cfg: std.http.Config, take routes: std.router.Router[Endpoint[Ctx]], take state: Server[Ctx], take registry: sessions.Registry, connection_bytes: u64, context_bytes: u64, make_context: scoped[view] fn() -> Ctx, take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
+    let shared = arc.new(take state)
+    let connection: scoped[view] fn() -> std.http.ConnectionPlan[Endpoint[Ctx], Receiver[Invocation[Ctx]]] = fn() -> std.http.ConnectionPlan[Endpoint[Ctx], Receiver[Invocation[Ctx]]] {
+        let (to, from): (Sender[Invocation[Ctx]], Receiver[Invocation[Ctx]]) = channel.new(1)
+        let endpoint = Endpoint(state: arc.share(shared), sessions: sessions.handle(registry), handoff: take to)
+        std.http.ConnectionPlan(state: take endpoint, retire: Some(take from))
+    }
+    let stream: scoped[view] fn(Option[Receiver[Invocation[Ctx]]]) -> Option[(Invocation[Ctx], Ctx)] = fn(handoff: Option[Receiver[Invocation[Ctx]]]) -> Option[(Invocation[Ctx], Ctx)] {
+        let Some(from) = view handoff else {
+            return None
+        }
+        let Ok(take invocation) = channel.try_receive(from) else {
+            return None
+        }
+        Some((take invocation, make_context()))
+    }
+    let retired: scoped[view] fn() = fn() {}
+    std.http.serve_with_stream_context(take listeners, clock, tasks, take cfg, take routes, connection_bytes, connection, request_done, no_retirement, drop_handoff, context_bytes, stream, drive_tool, retired, take stop)
 }
 
-/// Use in the HTTP connection factory to share the config and session registry.
-pub fn connection(site: Endpoint) -> Endpoint {
-    Endpoint(state: arc.share(site.state), sessions: sessions.handle(site.sessions))
+fn request_done[Ctx: send](_endpoint: Endpoint[Ctx]) {}
+
+fn no_retirement[Ctx: send](_handoff: Receiver[Invocation[Ctx]]) -> bool {
+    false
 }
+
+fn drop_handoff[Ctx: send](take _handoff: Receiver[Invocation[Ctx]]) {}
 
 type ResourceText: codec {
     uri: String,
@@ -77,7 +98,7 @@ type ResourceText: codec {
     text: String
 }
 
-fn ok_headers(req: std.http.Request, state: Server) -> bool {
+fn ok_headers[Ctx: send](req: std.http.Request, state: Server[Ctx]) -> bool {
     let Some(origin) = std.http.field(req, b"origin") else {
         return true
     }
@@ -214,13 +235,13 @@ fn metadata_check(req: std.http.Request, id: rpc.Id, method: String, params: rpc
     Ok(())
 }
 
-fn server_info(state: Server) -> String {
+fn server_info[Ctx: send](state: Server[Ctx]) -> String {
     let mut fields: rpc.Fields = map.new()
     rpc.put(mut fields, metadata.SERVER_INFO, rpc.typed_json(state.identity))
     rpc.encode_object(fields)
 }
 
-fn tools_json(tools: List[Tool]) -> String {
+fn tools_json[Ctx: send](tools: List[Tool[Ctx]]) -> String {
     let mut encoded = string.new()
     std.json.write(mut encoded, false, fn(w) {
         std.json.array(w, 0, fn(array_writer, mut rows) {
@@ -240,8 +261,11 @@ fn tools_json(tools: List[Tool]) -> String {
     take encoded
 }
 
-fn frames(req: std.http.Request, state: Server, directory: Option[Dir], take source: own[send] fn(take std.stream.Seed, Clock, Option[Dir]) waits) -> Result[std.http.Outcome, std.http.HandlerError] {
-    let room = std.stream.Bounds(event_max: state.event_max, producer_bytes: state.producer_bytes, producer_steps: state.producer_steps)
+fn stream_bounds[Ctx: send](state: Server[Ctx]) -> std.stream.Bounds {
+    std.stream.Bounds(event_max: state.event_max, producer_bytes: state.producer_bytes, producer_steps: state.producer_steps)
+}
+
+fn frames(req: std.http.Request, room: std.stream.Bounds, directory: Option[Dir], take source: own[send] fn(take std.stream.Seed, Clock, Option[Dir]) waits) -> Result[std.http.Outcome, std.http.HandlerError] {
     let mut spec = std.stream.spec_owned(req, 200, room, directory, take source)?
     std.stream.header(mut spec, b"Content-Type", b"text/event-stream")?
     Ok(Stream(take spec))
@@ -267,26 +291,31 @@ fn tool_result(text: String, failed: bool) -> rpc.Fields {
     take body
 }
 
-type ToolRun: send {
+type Invocation[Ctx: send]: send {
     call: Call,
-    handler: fn(mut Call, Clock) -> Step waits,
-    clock: Clock,
+    handler: fn(mut Call, Clock, mut Ctx) -> Step waits,
     id: rpc.Id,
     token: String,
-    info: String,
+    info: String
+}
+
+type ToolRun[Ctx: send]: send {
+    invocation: Invocation[Ctx],
+    ctx: Ctx,
+    clock: Clock,
     done: bool,
     last: Option[u64]
 }
 
-fn next_tool(mut job: ToolRun) -> Result[Option[Bytes], std.sse.SseError] waits {
+fn next_tool[Ctx: send](mut job: ToolRun[Ctx]) -> Result[Option[Bytes], std.sse.SseError] waits {
     if job.done {
         return Ok(None)
     }
-    let handler = job.handler
+    let handler = job.invocation.handler
     loop {
-        match handler(mut job.call, job.clock) {
+        match handler(mut job.invocation.call, job.clock, mut job.ctx) {
             Progress(progress, total, take message) => {
-                if job.token == "" {
+                if job.invocation.token == "" {
                     continue
                 }
                 if let Some(previous) = job.last {
@@ -296,7 +325,7 @@ fn next_tool(mut job: ToolRun) -> Result[Option[Bytes], std.sse.SseError] waits 
                 }
                 job.last = Some(progress)
                 let mut fields: rpc.Fields = map.new()
-                rpc.put(mut fields, "progressToken", string.from(job.token))
+                rpc.put(mut fields, "progressToken", string.from(job.invocation.token))
                 rpc.put(mut fields, "progress", rpc.typed_json(progress))
                 if let Some(limit) = total {
                     rpc.put(mut fields, "total", rpc.typed_json(limit))
@@ -312,20 +341,24 @@ fn next_tool(mut job: ToolRun) -> Result[Option[Bytes], std.sse.SseError] waits 
     }
 }
 
-fn finish_tool(mut job: ToolRun, text: String, failed: bool) -> Result[Option[Bytes], std.sse.SseError] {
+fn finish_tool[Ctx: send](mut job: ToolRun[Ctx], text: String, failed: bool) -> Result[Option[Bytes], std.sse.SseError] {
     job.done = true
     let mut fields = tool_result(text, failed)
-    rpc.put(mut fields, "_meta", string.from(job.info))
-    event(rpc.encode_result(job.id, fields))
+    rpc.put(mut fields, "_meta", string.from(job.invocation.info))
+    event(rpc.encode_result(job.invocation.id, fields))
 }
 
-fn tool_source(take seed: std.stream.Seed, clock: Clock, handler: fn(mut Call, Clock) -> Step waits, args: String, id: rpc.Id, token: String, info: String) waits {
-    let call = Call(arguments: string.from(args), scratch: list.new())
-    let run = ToolRun(call: take call, handler, clock, id: option.unwrap(rpc.id_value(id_json(id))), token: string.from(token), info: string.from(info), done: false, last: None)
+fn tool_source[Ctx: send](take seed: std.stream.Seed, clock: Clock, take context: (Invocation[Ctx], Ctx)) waits {
+    let (take invocation, take ctx) = take context
+    let run = ToolRun(invocation: take invocation, ctx: take ctx, clock, done: false, last: None)
     std.stream.produce_owned(take seed, take run, next_tool)
 }
 
-fn with_tools[R](catalog: Catalog, handle: scoped fn(List[Tool]) -> R) -> R waits {
+fn drive_tool[Ctx: send](take work: std.stream.Work, take context: (Invocation[Ctx], Ctx)) waits {
+    std.stream.drive_contextual(take work, take context, tool_source)
+}
+
+fn with_tools[Ctx: send, R](catalog: Catalog[Ctx], handle: scoped fn(List[Tool[Ctx]]) -> R) -> R waits {
     match catalog {
         Fixed(tools) => handle(tools),
         Dynamic(dir, path, _, loader) => {
@@ -335,7 +368,7 @@ fn with_tools[R](catalog: Catalog, handle: scoped fn(List[Tool]) -> R) -> R wait
     }
 }
 
-fn call_tool(req: std.http.Request, state: Server, id: rpc.Id, params: rpc.Fields, tools: List[Tool]) -> Result[std.http.Outcome, std.http.HandlerError] {
+fn call_tool[Ctx: send](req: std.http.Request, state: Server[Ctx], id: rpc.Id, params: rpc.Fields, tools: List[Tool[Ctx]], handoff: Sender[Invocation[Ctx]]) -> Result[std.http.Outcome, std.http.HandlerError] {
     let Some(take name) = rpc.field_text(params, "name") else {
         return failure(400, id, -32602, "Invalid tool name")
     }
@@ -348,14 +381,15 @@ fn call_tool(req: std.http.Request, state: Server, id: rpc.Id, params: rpc.Field
     }
     for tool in tools {
         if tool.name == name {
-            let token = progress_token(params)
-            let handler = tool.call
-            let copied_id = option.unwrap(rpc.id_value(id_json(id)))
-            let info = server_info(state)
-            let source: own[send] fn(take std.stream.Seed, Clock, Option[Dir]) waits = fn(take seed: std.stream.Seed, clock: Clock, directory: Option[Dir]) waits {
-                tool_source(take seed, clock, handler, arguments, copied_id, token, info)
+            let room = stream_bounds(state)
+            let mut spec = std.stream.spec_contextual(req, 200, room)?
+            std.stream.header(mut spec, b"Content-Type", b"text/event-stream")?
+            let call = Call(arguments: take arguments, scratch: list.new())
+            let invocation = Invocation(call: take call, handler: tool.call, id: option.unwrap(rpc.id_value(id_json(id))), token: progress_token(params), info: server_info(state))
+            if let Error(_) = channel.try_send(handoff, take invocation) {
+                return Error(InvalidStream)
             }
-            return frames(req, state, None, take source)
+            return Ok(Stream(take spec))
         }
     }
     failure(400, id, -32602, "Unknown tool")
@@ -382,12 +416,12 @@ fn subscription_params(id: rpc.Id) -> rpc.Fields {
     take params
 }
 
-type Watch: send {
+type Watch[Ctx: send]: send {
     clock: Clock,
     directory: Option[Dir],
     path: String,
     poll_ms: u64,
-    loader: fn(Dir, String) -> List[Tool] waits,
+    loader: fn(Dir, String) -> List[Tool[Ctx]] waits,
     id: rpc.Id,
     enabled: bool,
     last: Option[String],
@@ -401,7 +435,7 @@ fn changed(previous: Option[String], now: String) -> bool {
     }
 }
 
-fn next_change(mut cursor: Watch) -> Result[Option[Bytes], std.sse.SseError] waits {
+fn next_change[Ctx: send](mut cursor: Watch[Ctx]) -> Result[Option[Bytes], std.sse.SseError] waits {
     let loader = cursor.loader
     if cursor.pending {
         cursor.pending = false
@@ -434,32 +468,32 @@ fn next_change(mut cursor: Watch) -> Result[Option[Bytes], std.sse.SseError] wai
     Ok(None)
 }
 
-fn listen_source(take seed: std.stream.Seed, clock: Clock, directory: Option[Dir], path: String, poll_ms: u64, loader: fn(Dir, String) -> List[Tool] waits, id: rpc.Id, enabled: bool) waits {
+fn listen_source[Ctx: send](take seed: std.stream.Seed, clock: Clock, directory: Option[Dir], path: String, poll_ms: u64, loader: fn(Dir, String) -> List[Tool[Ctx]] waits, id: rpc.Id, enabled: bool) waits {
     let watch = Watch(clock, directory, path: string.from(path), poll_ms, loader, id: option.unwrap(rpc.id_value(id_json(id))), enabled, last: None, pending: true)
     std.stream.produce_owned(take seed, take watch, next_change)
 }
 
-fn empty_catalog(directory: Dir, path: String) -> List[Tool] {
+fn empty_catalog[Ctx: send](directory: Dir, path: String) -> List[Tool[Ctx]] {
     list.new()
 }
 
-type WatchSpec: send {
+type WatchSpec[Ctx: send]: send {
     path: String,
     poll_ms: u64,
-    load: fn(Dir, String) -> List[Tool] waits,
+    load: fn(Dir, String) -> List[Tool[Ctx]] waits,
     id: rpc.Id,
     enabled: bool
 }
 
-fn open_subscription(req: std.http.Request, state: Server, dir: Option[Dir], take spec: WatchSpec) -> Result[std.http.Outcome, std.http.HandlerError] {
+fn open_subscription[Ctx: send](req: std.http.Request, state: Server[Ctx], dir: Option[Dir], take spec: WatchSpec[Ctx]) -> Result[std.http.Outcome, std.http.HandlerError] {
     let watch = take spec
     let source: own[send] fn(take std.stream.Seed, Clock, Option[Dir]) waits = fn(take seed: std.stream.Seed, clock: Clock, grant: Option[Dir]) waits {
         listen_source(take seed, clock, grant, watch.path, watch.poll_ms, watch.load, watch.id, watch.enabled)
     }
-    frames(req, state, dir, take source)
+    frames(req, stream_bounds(state), dir, take source)
 }
 
-fn subscription(req: std.http.Request, state: Server, id: rpc.Id, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] {
+fn subscription[Ctx: send](req: std.http.Request, state: Server[Ctx], id: rpc.Id, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] {
     let Some(filter) = map.get(params, "notifications") else {
         return failure(400, id, -32602, "Missing subscription filter")
     }
@@ -478,7 +512,8 @@ fn subscription(req: std.http.Request, state: Server, id: rpc.Id, params: rpc.Fi
     let request_id = option.unwrap(rpc.id_value(id_json(id)))
     match state.tools {
         Fixed(_) => {
-            let spec = WatchSpec(path: string.new(), poll_ms: 0, load: empty_catalog, id: take request_id, enabled: false)
+            let loader: fn(Dir, String) -> List[Tool[Ctx]] waits = empty_catalog
+            let spec = WatchSpec(path: string.new(), poll_ms: 0, load: loader, id: take request_id, enabled: false)
             open_subscription(req, state, None, take spec)
         },
         Dynamic(dir, locator, delay, loader) => {
@@ -488,7 +523,7 @@ fn subscription(req: std.http.Request, state: Server, id: rpc.Id, params: rpc.Fi
     }
 }
 
-fn dispatch(req: std.http.Request, state: Server, id: rpc.Id, method: String, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+fn dispatch[Ctx: send](req: std.http.Request, state: Server[Ctx], id: rpc.Id, method: String, params: rpc.Fields, handoff: Sender[Invocation[Ctx]]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let mut body: rpc.Fields = map.new()
     rpc.put(mut body, "_meta", server_info(state))
     if method == "server/discover" || method == "tools/list" || method == "resources/list" || method == "resources/read" {
@@ -505,8 +540,8 @@ fn dispatch(req: std.http.Request, state: Server, id: rpc.Id, method: String, pa
     } else if method == "ping" {} else if method == "tools/list" {
         rpc.put(mut body, "tools", with_tools(state.tools, tools_json))
     } else if method == "tools/call" {
-        return with_tools(state.tools, fn(tools: List[Tool]) -> Result[std.http.Outcome, std.http.HandlerError] {
-            call_tool(req, state, id, params, tools)
+        return with_tools(state.tools, fn(tools: List[Tool[Ctx]]) -> Result[std.http.Outcome, std.http.HandlerError] {
+            call_tool(req, state, id, params, tools, handoff)
         })
     } else if method == "subscriptions/listen" {
         return subscription(req, state, id, params)
@@ -540,7 +575,7 @@ fn dispatch(req: std.http.Request, state: Server, id: rpc.Id, method: String, pa
     response(200, rpc.encode_result(id, body))
 }
 
-fn initialize(registry: sessions.Registry, state: Server, id: rpc.Id, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+fn initialize[Ctx: send](registry: sessions.Registry, state: Server[Ctx], id: rpc.Id, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let Some(take requested) = rpc.field_text(params, "protocolVersion") else {
         return failure(400, id, -32602, "Missing protocol version")
     }
@@ -608,7 +643,7 @@ fn has_request_version(params: rpc.Fields) -> bool {
     false
 }
 
-pub fn post(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, site: Endpoint) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+pub fn post[Ctx: send](req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, site: Endpoint[Ctx]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     if !ok_headers(req, site.state) {
         return empty(403)
     }
@@ -672,10 +707,10 @@ pub fn post(req: std.http.Request, scratch_region: Region, mut responder: std.ht
     } else if let Error(take fault) = metadata_check(req, id, method, params) {
         return response(400, rpc.encode_fault(fault))
     }
-    dispatch(req, site.state, id, method, params)
+    dispatch(req, site.state, id, method, params, site.handoff)
 }
 
-fn other_method(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, site: Endpoint) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+fn other_method[Ctx: send](req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, site: Endpoint[Ctx]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     if !ok_headers(req, site.state) {
         return empty(403)
     }
@@ -700,8 +735,8 @@ fn other_method(req: std.http.Request, scratch_region: Region, mut responder: st
     Ok(Reply(take reply))
 }
 
-pub fn mount(mut routes: std.router.Builder[Endpoint], path: String, body_max: u64, stream_bytes: u64) -> Result[(), std.router.AddError] {
-    let route = std.router.Route(handler: post, body_max: Some(body_max), upgrade_bytes: None, stream_bytes: Some(stream_bytes), steps: None)
+pub fn mount[Ctx: send](mut routes: std.router.Builder[Endpoint[Ctx]], path: String, body_max: u64, stream_bytes: u64) -> Result[(), std.router.AddError] {
+    let route: std.router.Route[Endpoint[Ctx]] = std.router.Route(handler: post, body_max: Some(body_max), upgrade_bytes: None, stream_bytes: Some(stream_bytes), steps: None)
     std.router.add(mut routes, "POST", path, take route)?
     std.router.add(mut routes, "GET", path, std.router.raw(other_method))?
     std.router.add(mut routes, "DELETE", path, std.router.raw(other_method))

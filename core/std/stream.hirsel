@@ -14,7 +14,7 @@ pub opaque type Spec: send {
     expires_at_ms: Option[u64],
 }
 
-type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Relayed(Box[http_client.Connection], u64) | Managed
+type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Relayed(Box[http_client.Connection], u64) | Managed | Contextual
 
 pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Bounds, state: P, driver: fn(take Seed) waits) -> Result[Spec, http.HandlerError] {
     if response_status < 200 || response_status > 599 || response_status == 204 || response_status == 304 || room.event_max == 0 {
@@ -71,6 +71,19 @@ pub fn managed(offer: Offer) -> bool {
     } else {
         false
     }
+}
+
+pub fn needs_context(offer: Offer) -> bool {
+    match offer.source {
+        Managed => true,
+        Contextual => true,
+        _ => false,
+    }
+}
+
+/// Uses the server's typed producer handoff after stream admission.
+pub fn spec_contextual(req: http.Request, response_status: u16, room: Bounds) -> Result[Spec, http.HandlerError] {
+    held_spec(req, response_status, room, list.new(), Contextual)
 }
 
 /// Hands an owning producer to the admitted stream task without serialization.
@@ -267,6 +280,11 @@ fn run_owned(take job: OwnedJob) waits {
     driver(take seed, clock, directory)
 }
 
+fn run_contextual[P: send](take job: (Seed, Clock, P, fn(take Seed, Clock, take P) waits)) waits {
+    let (take seed, clock, take state, run) = take job
+    run(take seed, clock, take state)
+}
+
 pub type Transfer: send {
     reader: ReadHalf,
     writer: WriteHalf,
@@ -303,63 +321,6 @@ type Writer[E: send]: send {
     inbox: Sender[E],
     units: Receiver[Unit],
     notify: fn(take Delivery) -> E
-}
-
-type Monitor[E: send]: send {
-    half: ReadHalf,
-    remaining: u64,
-    inbox: Sender[E],
-    notify: fn(take Delivery) -> E
-}
-
-type Alarm[E: send]: send {
-    clock: Clock,
-    from: u64,
-    interval: u64,
-    pre_head: u64,
-    inbox: Sender[E],
-    notify: fn(take Delivery) -> E
-}
-
-fn monitor[E: send](take job: Monitor[E]) -> ReadHalf waits {
-    let Monitor(half: take half, remaining: limit, inbox: take inbox, notify) = take job
-    let mut reader = take half
-    let mut buffer: Bytes = list.with_capacity(64)
-    let mut remaining = limit
-    loop {
-        list.clear(mut buffer)
-        match host.recv_bounded(mut reader, mut buffer, 64, Never) {
-            Ok(n) => {
-                if n == 0 || n > remaining {
-                    break
-                }
-                remaining -= n
-            },
-            Error(_) => break,
-        }
-    }
-    let _ = channel.send(inbox, notify(ReadEnd))
-    take reader
-}
-
-fn alarm[E: send](take job: Alarm[E]) waits {
-    let Alarm(clock: c, from: start, interval: period, pre_head, inbox: take inbox, notify) = take job
-    let mut next = clock.deadline_after_ms(start, period)
-    let mut pending = pre_head
-    loop {
-        let at = order.min(next, pending)
-        host.sleep_until(c, at)
-        let _ = channel.try_send(inbox, notify(Tick))
-        if at == 18446744073709551615 {
-            return
-        }
-        if next == at {
-            next = clock.deadline_after_ms(at, period)
-        }
-        if pending == at {
-            pending = 18446744073709551615
-        }
-    }
 }
 
 fn chunk_prefix(mut out: Bytes, length: u64) {
@@ -670,13 +631,9 @@ pub fn start_managed[E: send](take work: Work, to: Sender[E], notify: fn(take De
     let signal = http.stream_signal(control)
     let (units, writes): (Sender[Unit], Receiver[Unit]) = channel.new(1u64)
     let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: http.stream_signal(control), inbox: channel.sender(to), units: take writes, notify)
-    let watching = Monitor(half: take input, remaining: allowance - buffered, inbox: channel.sender(to), notify)
-    let waking = Alarm(clock: c, from: at, interval: period, pre_head, inbox: channel.sender(to), notify)
     let write: fn(take Writer[E]) -> WriteHalf waits = writer
-    let read: fn(take Monitor[E]) -> ReadHalf waits = monitor
-    let tick: fn(take Alarm[E]) waits = alarm
     let expiry = stream_expiry(tasks, c, expires_at_ms, to, notify)
-    Some(ManagedWriter(units: take units, writer: task.spawn(tasks, bytes ((capacity + 7u64) / 8u64 * 8u64 + 1024u64), take writing, write), reader: task.spawn(tasks, bytes 64u64, take watching, read), timer: task.spawn(tasks, bytes 4096u64, take waking, tick), expiry: take expiry, signal: take signal, clock: c, linger: linger))
+    Some(ManagedWriter(units: take units, writer: task.spawn(tasks, bytes ((capacity + 7u64) / 8u64 * 8u64 + 1024u64), take writing, write), reader: stream_watch.spawn_monitor(tasks, take input, allowance - buffered, channel.sender(to), notify), timer: stream_watch.spawn_alarm(tasks, c, at, period, pre_head, channel.sender(to), notify), expiry: take expiry, signal: take signal, clock: c, linger: linger))
 }
 
 pub fn managed_offer(active: ManagedWriter, take event: MeasuredEvent, until: u64, initial: bool) -> bool {
@@ -784,6 +741,17 @@ fn same_delivery(take event: Delivery) -> Delivery {
 }
 
 pub fn drive(take job: Work) waits {
+    drive_stream(take job, (None : Option[()]), unused_context)
+}
+
+fn unused_context(take seed: Seed, clock: Clock, take state: ()) {}
+
+/// Runs a contextual producer with the same admission, credits and cancellation as `drive`.
+pub fn drive_contextual[P: send](take job: Work, take state: P, run: fn(take Seed, Clock, take P) waits) waits {
+    drive_stream(take job, Some(take state), run)
+}
+
+fn drive_stream[P: send](take job: Work, take initial: Option[P], run: fn(take Seed, Clock, take P) waits) waits {
     let Work(transport: take transport, tasks, control: take control) = take job
     let Transfer(reader: take input, writer: take output, offer: take offer, buffered, clock: c, out_cap: capacity, pipeline_max: allowance, write_ms: ms, linger_ms: linger, heartbeat_ms: period, lease_ms: lease) = take transport
     if buffered > allowance {
@@ -793,6 +761,7 @@ pub fn drive(take job: Work) waits {
     // A relayed body is whole only when upstream ends it (§2 Ending).
     let relay = relayed(offered_source)
     let mut source = Some(take offered_source)
+    let mut context = take initial
     let (tx, rx): (Sender[Delivery], Receiver[Delivery]) = channel.new(6)
     if let Some(owner) = control {
         if !http.register_stream(owner, StopHandle(inbox: channel.sender(tx))) {
@@ -806,11 +775,9 @@ pub fn drive(take job: Work) waits {
     let _ = channel.try_send(give, ())
     let mut queue: List[Bytes] = list.with_capacity(2)
     let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes, notify: same_delivery)
-    let watching = Monitor(half: take input, remaining: allowance - buffered, inbox: channel.sender(tx), notify: same_delivery)
-    let waking = Alarm(clock: c, from: at, interval: period, pre_head, inbox: channel.sender(tx), notify: same_delivery)
     let mut write_task = task.spawn(tasks, bytes ((capacity + 7) / 8 * 8), take writing, writer)
-    let mut read_task = task.spawn(tasks, bytes 64, take watching, monitor)
-    let mut alarm_task = task.spawn(tasks, bytes 4096, take waking, alarm)
+    let mut read_task = stream_watch.spawn_monitor(tasks, take input, allowance - buffered, channel.sender(tx), same_delivery)
+    let mut alarm_task = stream_watch.spawn_alarm(tasks, c, at, period, pre_head, channel.sender(tx), same_delivery)
     let mut expiry = stream_expiry(tasks, c, expires_at_ms, tx, same_delivery)
     let mut producer: Option[Task[()]] = None
     let mut credit: Option[Receiver[()]] = Some(take take_credit)
@@ -884,6 +851,11 @@ pub fn drive(take job: Work) waits {
                                 Relayed(take upstream, idle_ms) => {
                                     let body = http_client.BodyRelay(seed: take seed, upstream: box.unbox(take upstream), idle_ms, size: room.event_max / 8 * 8)
                                     Some(task.spawn(tasks, bytes room.producer_bytes, take body, http_client.relay_body))
+                                },
+                                Contextual => {
+                                    let state = option.unwrap(replace(mut context, None))
+                                    let producer_run: fn(take (Seed, Clock, P, fn(take Seed, Clock, take P) waits)) waits = run_contextual
+                                    Some(task.spawn(tasks, bytes room.producer_bytes, (take seed, c, take state, run), producer_run))
                                 },
                                 Managed => fail("managed offer uses the subscription owner"),
                             }

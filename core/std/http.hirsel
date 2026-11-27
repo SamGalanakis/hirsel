@@ -1686,9 +1686,8 @@ type StreamJob[Q: send]: send {
     drive_managed: fn(take stream.Work, take Q) waits,
 }
 
-scoped type StreamHooks[Q: send] {
-    enabled: bool,
-    make: scoped[view] fn() -> Result[Q, Capacity],
+scoped type StreamHooks[Q: send, R: send] {
+    make: scoped[view] fn(Option[R]) -> Result[Option[Q], Capacity],
     drive: fn(take stream.Work, take Q) waits,
     retired: scoped[view] fn(),
 }
@@ -2213,7 +2212,7 @@ fn promote_upgrade(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSi
     group.connections[slot] = Some(take source)
 }
 
-fn promote_stream[Q: send](mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSignal], done: Sender[ChildSlot], from: u64, mut in_first_phase: u64, mut generation: u64, signal: Option[DrainSignal], hooks: StreamHooks[Q], take request: StreamRequest) {
+fn promote_stream[Q: send, R: send](mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSignal], done: Sender[ChildSlot], from: u64, mut in_first_phase: u64, mut generation: u64, signal: Option[DrainSignal], hooks: StreamHooks[Q, R], states: List[Option[R]], take request: StreamRequest) {
     let StreamRequest(source_slot: slot, transfer: take transfer, reply: take reply) = take request
     let end = list.len(group.promoted)
     let vacant = promotion_slot(group.promoted, from, end)
@@ -2236,16 +2235,16 @@ fn promote_stream[Q: send](mut group: ServerTasks, tasks: Tasks, tx: Sender[Conn
             return
         },
     }
-    let is_managed = stream.managed(transfer.offer)
-    let context: Option[Q] = if is_managed {
-        if !hooks.enabled {
-            group.connections[slot] = Some(take source)
-            let _ = channel.try_send(reply, Some(take transfer))
-            return
+    let needs_context = stream.needs_context(transfer.offer)
+    let context: Option[Q] = if needs_context {
+        let offered = if slot < list.len(states) {
+            (hooks.make)(states[slot])
+        } else {
+            (hooks.make)(None)
         }
-        match (hooks.make)() {
-            Ok(take state) => Some(take state),
-            Error(_) => {
+        match take offered {
+            Ok(Some(take state)) => Some(take state),
+            _ => {
                 group.connections[slot] = Some(take source)
                 let _ = channel.try_send(reply, Some(take transfer))
                 return
@@ -2264,7 +2263,7 @@ fn promote_stream[Q: send](mut group: ServerTasks, tasks: Tasks, tx: Sender[Conn
     let run: fn(take StreamJob[Q]) waits = streaming
     match task.try_spawn(tasks, bytes reserve, take job, run) {
         Ok(take child) => {
-            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: false, ip: source.ip, generation, stop: None, managed: is_managed))
+            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: false, ip: source.ip, generation, stop: None, managed: needs_context))
             generation = int.wrapping_add(generation, 1)
             if source.first {
                 in_first_phase -= 1
@@ -2401,11 +2400,11 @@ fn unused_managed(take job: stream.Work, take _context: ()) waits {
 }
 
 fn serve_without_managed[S: send, E: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make: scoped[view] fn() -> Result[E, Capacity], run: fn(take ConnectionStart[S], E) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
-    let make_unused: scoped[view] fn() -> Result[(), Capacity] = fn() -> Result[(), Capacity] {
-        Ok(())
+    let make_unused: scoped[view] fn(Option[()]) -> Result[Option[()], Capacity] = fn(_retirement: Option[()]) -> Result[Option[()], Capacity] {
+        Ok(None)
     }
     let no_retirement: scoped[view] fn() = fn() {}
-    let hooks = StreamHooks(enabled: false, make: make_unused, drive: unused_managed, retired: no_retirement)
+    let hooks = StreamHooks(make: make_unused, drive: unused_managed, retired: no_retirement)
     let factory: scoped[view] fn() -> Result[ConnectionPlan[E, ()], Capacity] = fn() -> Result[ConnectionPlan[E, ()], Capacity] {
         let state = make()?
         Ok(ConnectionPlan(state: take state, retire: None))
@@ -2420,42 +2419,42 @@ pub type ConnectionPlan[S: send, R: send]: send {
 }
 
 pub fn serve_with_connection_plan[S: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, plan: scoped[view] fn() -> ConnectionPlan[S, R], request_done: fn(S) waits, needs_retirement: fn(R) -> bool, retire: fn(take R) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
-    let make: scoped[view] fn() -> Result[ConnectionPlan[S, R], Capacity] = fn() -> Result[ConnectionPlan[S, R], Capacity] {
-        bound bytes state_bytes {
-            plan()
-        }
+    let unused: scoped[view] fn(Option[R]) -> Option[()] = fn(_retirement: Option[R]) -> Option[()] {
+        None
     }
-    let make_unused: scoped[view] fn() -> Result[(), Capacity] = fn() -> Result[(), Capacity] {
-        Ok(())
-    }
-    let never: scoped[view] fn() = fn() {}
-    let hooks = StreamHooks(enabled: false, make: make_unused, drive: unused_managed, retired: never)
-    let run: fn(take ConnectionStart[S], S) waits = owned_connection
-    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, Some(request_done), needs_retirement, retire, take incoming)
+    serve_with_stream_context(take listeners, c, tasks, take cfg, take routes, state_bytes, plan, request_done, needs_retirement, retire, 0, unused, unused_managed, fn() {}, take incoming)
 }
 
 /// Uses the same HTTP connection loop and starts application subscription
 /// owners only after the supervisor has reserved a stream slot.
 pub fn serve_with_stream_factory[S: send, Q: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, make_state: scoped[view] fn() -> ConnectionPlan[S, R], request_done: fn(S) waits, needs_retirement: fn(R) -> bool, retire: fn(take R) waits, stream_bytes: u64, make_stream: scoped[view] fn() -> Q, drive: fn(take stream.Work, take Q) waits, retired: scoped[view] fn(), take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    let contextual: scoped[view] fn(Option[R]) -> Option[Q] = fn(_retirement: Option[R]) -> Option[Q] {
+        Some(make_stream())
+    }
+    serve_with_stream_context(take listeners, c, tasks, take cfg, take routes, state_bytes, make_state, request_done, needs_retirement, retire, stream_bytes, contextual, drive, retired, take incoming)
+}
+
+/// Supplies a promoted stream's context using the originating connection's supervisor state.
+pub fn serve_with_stream_context[S: send, Q: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, make_state: scoped[view] fn() -> ConnectionPlan[S, R], request_done: fn(S) waits, needs_retirement: fn(R) -> bool, retire: fn(take R) waits, stream_bytes: u64, make_stream: scoped[view] fn(Option[R]) -> Option[Q], drive: fn(take stream.Work, take Q) waits, retired: scoped[view] fn(), take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
     let make: scoped[view] fn() -> Result[ConnectionPlan[S, R], Capacity] = fn() -> Result[ConnectionPlan[S, R], Capacity] {
         bound bytes state_bytes {
             make_state()
         }
     }
-    let subscription: scoped[view] fn() -> Result[Q, Capacity] = fn() -> Result[Q, Capacity] {
+    let subscription: scoped[view] fn(Option[R]) -> Result[Option[Q], Capacity] = fn(retirement: Option[R]) -> Result[Option[Q], Capacity] {
         bound bytes stream_bytes {
-            make_stream()
+            make_stream(retirement)
         }
     }
     let cleanup: scoped[view] fn() = fn() {
         retired()
     }
-    let hooks = StreamHooks(enabled: true, make: subscription, drive: drive, retired: cleanup)
+    let hooks = StreamHooks(make: subscription, drive: drive, retired: cleanup)
     let run: fn(take ConnectionStart[S], S) waits = owned_connection
     serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, Some(request_done), needs_retirement, retire, take incoming)
 }
 
-fn serve_internal[S: send, E: send, Q: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make_state: scoped[view] fn() -> Result[ConnectionPlan[E, R], Capacity], run: fn(take ConnectionStart[S], E) waits, hooks: StreamHooks[Q], request_done: Option[fn(S) waits], needs_retirement: fn(R) -> bool, retire: fn(take R) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+fn serve_internal[S: send, E: send, Q: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make_state: scoped[view] fn() -> Result[ConnectionPlan[E, R], Capacity], run: fn(take ConnectionStart[S], E) waits, hooks: StreamHooks[Q, R], request_done: Option[fn(S) waits], needs_retirement: fn(R) -> bool, retire: fn(take R) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
     if !valid_config(cfg) {
         return Error(Configuration)
     }
@@ -2734,7 +2733,7 @@ fn serve_internal[S: send, E: send, Q: send, R: send](take listeners: List[Liste
                     let StreamRequest(source_slot: _, transfer: take transfer, reply: take reply) = take request
                     let _ = channel.try_send(reply, Some(take transfer))
                 } else {
-                    promote_stream(mut group, tasks, tx, done_tx, upgrade_slots, mut in_first_phase, mut generation, signal, hooks, take request)
+                    promote_stream(mut group, tasks, tx, done_tx, upgrade_slots, mut in_first_phase, mut generation, signal, hooks, retiring, take request)
                 }
             },
             Established(slot, ticket) => {

@@ -1,0 +1,355 @@
+// The listener runs behind the deployment's TLS terminator on loopback. The
+// sequencer owns its object client. Each HTTP request gets a private reply port.
+type Query: send = Get(String) | Submit(submit.Submission)
+
+type Call: send {
+    query: Query,
+    deadline: u64,
+    reply: Sender[static.StaticResponse]
+}
+
+type Front: send {
+    tx: Sender[Call]
+}
+
+const MAX_BODY: u64 = 537935876
+
+fn json(code: u16, take body: Bytes) -> static.StaticResponse {
+    static.StaticResponse(status: code, content_type: "application/json", cache_control: "no-store", etag: None, body: take body)
+}
+
+fn refusal(e: submit.Error) -> static.StaticResponse {
+    match e {
+        Invalid => json(422, b"[\"invalid-input\"]"),
+        Forbidden => json(403, b"[\"unauthorized\"]"),
+        Size => json(413, b"[\"too-large\"]"),
+        Conflict => json(409, b"[\"conflict\"]"),
+        _ => json(503, b"[\"unavailable\"]"),
+    }
+}
+
+fn forward(req: std.http.Request, front: Front, take q: Query) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let (tx, rx): (Sender[static.StaticResponse], Receiver[static.StaticResponse]) = channel.new(1)
+    let response = match channel.try_send(front.tx, Call(query: take q, deadline: std.http.handler_deadline(req), reply: take tx)) {
+        Ok(()) => match channel.receive(rx) {
+            Ok(r) => take r,
+            Error(_) => refusal(Unavailable),
+        },
+        Error(_) => refusal(Unavailable),
+    }
+    Ok(Reply(static.to_http_response(take response)?))
+}
+
+fn read_route(req: std.http.Request, r: Region, mut body: std.http.Responder, front: Front) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let Ok(path) = string.from_utf8(clone(std.http.path(req))) else {
+        return Ok(Reply(static.to_http_response(refusal(Invalid))?))
+    }
+    forward(req, front, Get(take path))
+}
+
+type Buffer {
+    data: Bytes,
+    at: u64
+}
+
+fn refill(mut body: std.http.Responder, mut buf: Buffer) -> Result[bool, submit.Error] waits {
+    if buf.at < list.len(buf.data) {
+        return Ok(true)
+    }
+    list.clear(mut buf.data)
+    buf.at = 0
+    let Ok(n) = std.http.read(mut body, mut buf.data) else {
+        return Error(Invalid)
+    }
+    Ok(n != 0)
+}
+
+fn exact(mut body: std.http.Responder, mut buf: Buffer, n: u64) -> Result[Bytes, submit.Error] waits {
+    let mut out: Bytes = list.new()
+    while list.len(out) < n {
+        if !refill(mut body, mut buf)? {
+            return Error(Invalid)
+        }
+        let count = order.min(n - list.len(out), list.len(buf.data) - buf.at)
+        list.append(mut out, list.slice(buf.data, buf.at, buf.at + count))
+        buf.at += count
+    }
+    Ok(take out)
+}
+
+fn streamed(mut body: std.http.Responder) -> Result[submit.Submission, submit.Error] waits {
+    let mut buf = Buffer(data: list.with_capacity(65536), at: 0)
+    let s = submit.read_submission(scoped fn(max: u64) -> Result[Bytes, submit.Error] waits {
+        let prefix = exact(mut body, mut buf, 4)?
+        let count: u32 = list.word_be(prefix, 0)
+        let n: u64 = int.widen(count)
+        if n > max {
+            return Error(Size)
+        }
+        exact(mut body, mut buf, n)
+    })?
+    if refill(mut body, mut buf)? {
+        return Error(Invalid)
+    }
+    Ok(take s)
+}
+
+fn upload(req: std.http.Request, r: Region, mut body: std.http.Responder, front: Front) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let decoded = match std.http.inline_body(req) {
+        Some(inline) => submit.decode(inline),
+        None => streamed(mut body),
+    }
+    match take decoded {
+        Ok(s) => forward(req, front, Submit(take s)),
+        Error(e) => Ok(Reply(static.to_http_response(refusal(e))?)),
+    }
+}
+
+type Server: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    tx: Sender[Call],
+    handler_bytes: u64
+}
+
+fn http_server(take job: Server) -> Result[(), std.http.ServeError] waits {
+    let Server(listener: take site, clock, tasks, tx: take tx, handler_bytes) = take job
+    let mut sites: List[Listener] = list.new()
+    list.push(mut sites, take site)
+    let mut routes: std.router.Builder[Front] = std.router.builder()
+    result.unwrap(std.router.add(mut routes, "GET", "/{path...}", std.router.raw(read_route)))
+    result.unwrap(std.router.add(mut routes, "POST", "/v1/submit", std.router.raw(upload)))
+    let mut cfg = std.http.defaults()
+    cfg.body_max = MAX_BODY
+    cfg.handler_bytes = handler_bytes
+    cfg.conns_max = 2
+    cfg.http_max = 2
+    std.http.serve_with_factory(take sites, clock, tasks, take cfg, result.unwrap(std.router.build(take routes)), 256, scoped fn() -> Front {
+        Front(tx: channel.sender(tx))
+    }, None)
+}
+
+pub fn restart(mut seq: commit.Sequencer, mut client: std.object.Client, random: Random, deadline: u64, now: scoped fn() -> u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[(), commit.Error] waits {
+    commit.init_genesis(mut seq, mut client, random, deadline, now, post)?
+    let _ = commit.recover_pending(mut seq, mut client, Release, random, deadline, now, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        post(Release, i, p, b)
+    })?
+    let _ = commit.recover_pending(mut seq, mut client, Status, random, deadline, now, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        post(Status, i, p, b)
+    })?
+    let _ = commit.reconcile_takedowns(mut seq, mut client, deadline)?
+    version_hints.rebuild(mut seq, mut client, deadline)
+}
+
+type Settings {
+    admission: submit.Config,
+    bucket: std.object.Bucket,
+    seq: commit.Sequencer,
+    urls: List[String],
+    port: u16,
+}
+
+fn log_config(kind: checkpoint.LogKind, host: String, key: String, signer: Secret, witnesses: List[checkpoint.WitnessConfig]) -> Result[checkpoint.LogConfig, submit.Error] {
+    let mut origin = string.from(host)
+    string.push(mut origin, "/")
+    string.push(mut origin, checkpoint.log_prefix(kind))
+    let Ok(vkey) = tlog.note.verifier_key(key) else {
+        return Error(Invalid)
+    }
+    Ok(checkpoint.LogConfig(kind: kind, origin: take origin, log_key: take vkey, signing_key: secret.share(signer), witnesses: clone(witnesses), quorum: list.len(witnesses)))
+}
+
+fn settings(raw: String, release: Secret, status_key: Secret) -> Result[Settings, submit.Error] {
+    let fs = submit.parts(raw)?
+    if list.len(fs) != 10 {
+        return Error(Invalid)
+    }
+    let origin = submit.text(fs[0u64])?
+    let Some(host) = std.string.strip_prefix(origin, "https://") else {
+        return Error(Invalid)
+    }
+    let Some(legal) = std.base64.decode(string.as_bytes(submit.text(fs[1u64])?)) else {
+        return Error(Invalid)
+    }
+    if list.len(legal) != 32 {
+        return Error(Invalid)
+    }
+    let mode = submit.text(fs[4u64])?
+    let mut witnesses: List[checkpoint.WitnessConfig] = list.new()
+    let mut urls: List[String] = list.new()
+    for w in submit.parts(fs[5u64])? {
+        let row = submit.parts(w)?
+        if list.len(row) != 2 {
+            return Error(Invalid)
+        }
+        let pin = submit.text(row[0u64])?
+        let Ok(key) = tlog.note.verifier_key(pin) else {
+            return Error(Invalid)
+        }
+        let Some((name, _)) = std.string.split_once(pin, "+") else {
+            return Error(Invalid)
+        }
+        let url = submit.text(row[1u64])?
+        if !std.string.starts_with(url, "https://") {
+            return Error(Invalid)
+        }
+        list.push(mut urls, take url)
+        list.push(mut witnesses, checkpoint.WitnessConfig(name: string.from(name), key: take key))
+    }
+    if !((mode == "preview" && list.len(witnesses) == 0) || (mode == "witnessed" && list.len(witnesses) == 2 && urls[0u64] != urls[1u64])) {
+        return Error(Invalid)
+    }
+    let rc = log_config(Release, host, submit.text(fs[2u64])?, release, witnesses)?
+    let sc = log_config(Status, host, submit.text(fs[3u64])?, status_key, witnesses)?
+    let b = submit.parts(fs[6u64])?
+    if list.len(b) != 4 {
+        return Error(Invalid)
+    }
+    let bucket = std.object.Bucket(endpoint: submit.text(b[0u64])?, aws_region: submit.text(b[1u64])?, bucket: submit.text(b[2u64])?, prefix: submit.text(b[3u64])?, style: Virtual)
+    let mut forges: List[registry_auth.Forge] = list.new()
+    for f in submit.parts(fs[7u64])? {
+        let row = submit.parts(f)?
+        if list.len(row) != 5 {
+            return Error(Invalid)
+        }
+        let algorithm = submit.text(row[4u64])?
+        let alg = if algorithm == "RS256" {
+            std.jwt.allow(Rs256)
+        } else if algorithm == "EdDSA" {
+            std.jwt.allow(EdDsa)
+        } else {
+            return Error(Invalid)
+        }
+        list.push(mut forges, registry_auth.Forge(issuer: submit.text(row[0u64])?, jwks_url: submit.text(row[1u64])?, allow: take alg, host: submit.text(row[2u64])?, org_api: submit.text(row[3u64])?, org_credential: None))
+    }
+    let Ok(port) = (int.parse(submit.text(fs[8u64])?) : Result[u16, ParseError]) else {
+        return Error(Invalid)
+    }
+    let mut namespaces: List[String] = list.new()
+    for pattern in submit.parts(fs[9u64])? {
+        let value = submit.text(pattern)?
+        if value != "*" && !std.string.ends_with(value, "/*") {
+            return Error(Invalid)
+        }
+        list.push(mut namespaces, take value)
+    }
+    if list.len(namespaces) == 0 {
+        return Error(Invalid)
+    }
+    Ok(Settings(admission: submit.Config(forges: take forges, namespaces: take namespaces), bucket: take bucket, seq: commit.new(take rc, take sc, clone(origin), take legal), urls: take urls, port: port))
+}
+
+fn witness(cl: std.http_client.Client, base: String, p: String, b: String, deadline: u64) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+    let mut url = string.from(base)
+    string.push(mut url, p)
+    let mut payload: List[std.http_client.Segment] = list.new()
+    list.push(mut payload, Plain(string.into_bytes(string.from(b))))
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, std.http_client.Header(name: "Content-Type", value: Public(b"text/plain")))
+    let req = std.http_client.Fetch(method: "POST", url: take url, headers: take headers, body: take payload)
+    let mut data: Bytes = list.new()
+    let Ok(h) = std.http_client.fetch_all(cl, req, mut data, deadline) else {
+        return Error(Transport)
+    }
+    let mut ct = string.new()
+    for i in 0u64 .. std.http_client.field_count(h) {
+        if let Some((name, value)) = std.http_client.field_at(h, i) {
+            if std.http1.equal_ascii(name, b"content-type") {
+                let Ok(text) = string.from_utf8(clone(value)) else {
+                    return Error(Transport)
+                }
+                ct = take text
+            }
+        }
+    }
+    Ok(tlog.witness.HttpResponse(status: std.http_client.status(h), content_type: take ct, body: take data))
+}
+
+pub fn main(c: Compiler, n: Net, clock: Clock, random: Random, tasks: Tasks, config: Dir, aws: Cred, release_signer: Secret, status_signer: Secret) -> Result[(), Exit] waits {
+    let fail_config = Exit(status: 2)
+    let down = Exit(status: 1)
+    let Ok(raw) = std.file.read_string_bounded(config, "registry.json", 1048576) else {
+        return Error(fail_config)
+    }
+    let Ok(Settings(admission: take cfg, bucket: take bucket, seq: take empty, urls: take urls, port)) = settings(raw, release_signer, status_signer) else {
+        return Error(fail_config)
+    }
+    let mut seq = take empty
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 30000)
+    let Ok(credentials) = std.cred.credentials(aws, At(clock, deadline)) else {
+        return Error(down)
+    }
+    let Ok(started) = std.object.start(n, tasks, take bucket, take credentials, Some(aws), System, clock, random, std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080), deadline) else {
+        return Error(down)
+    }
+    let mut client = take started
+    let Ok(take lookup) = registry_auth.lookup(n, clock, tasks) else {
+        return Error(down)
+    }
+    let mut limits = std.http_client.limits(tlog.witness.MAX_RESPONSE_BYTES)
+    limits.redirects = Return
+    let Ok(pool) = std.http_client.pool(n, clock, tasks, System, limits) else {
+        return Error(down)
+    }
+    let post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits = fn(kind: checkpoint.LogKind, i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        witness(std.http_client.handle(pool), urls[i], p, b, std.clock.deadline_after_ms(host.mono_ns(clock), 30000))
+    }
+    if let Error(_) = restart(mut seq, mut client, random, deadline, scoped fn() -> u64 {
+        host.wall_ms(clock) / 1000
+    }, post) {
+        return Error(down)
+    }
+    let Ok((site, _)) = host.listen(n, Addr(ip: V4(2130706433), port: port), 32) else {
+        return Error(down)
+    }
+    serve(take site, mut seq, mut client, cfg, take lookup, c, clock, random, tasks, 1073741824, post)
+}
+
+pub fn serve(take site: Listener, mut seq: commit.Sequencer, mut client: std.object.Client, cfg: submit.Config, take initial_lookup: registry_auth.Lookup, c: Compiler, clock: Clock, random: Random, tasks: Tasks, handler_bytes: u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[(), Exit] waits {
+    let down = Exit(status: 1)
+    let mut lookup = take initial_lookup
+    let (tx, rx): (Sender[Call], Receiver[Call]) = channel.new(2)
+    let http = task.spawn(tasks, bytes (2 * handler_bytes + 16777216), Server(listener: take site, clock: clock, tasks: tasks, tx: take tx, handler_bytes: handler_bytes), http_server)
+    let mut next_refresh = host.mono_ns(clock)
+    loop {
+        if host.mono_ns(clock) >= next_refresh {
+            let until = std.clock.deadline_after_ms(host.mono_ns(clock), 30000)
+            let mut refreshed = true
+            let kinds: Inline[checkpoint.LogKind, 2] =[Release, Status]
+            for kind in kinds {
+                let result = commit.heartbeat(mut seq, mut client, kind, random, until, scoped fn() -> u64 {
+                    host.wall_ms(clock) / 1000
+                }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+                    post(kind, i, p, b)
+                })
+                if let Error(_) = result {
+                    refreshed = false
+                }
+            }
+            next_refresh = std.clock.deadline_after_ms(host.mono_ns(clock), if refreshed {
+                43200000u64
+            } else {
+                60000u64
+            })
+        }
+        let msg = match channel.receive_until(rx, At(clock, next_refresh)) {
+            Ok(m) => take m,
+            Error(Closed) => break,
+            Error(Empty) => continue,
+        }
+        let Call(query: take query, deadline: end, reply: take reply) = take msg
+        let response = match take query {
+            Get(path) => static.serve_get(mut seq, mut client, path, end),
+            Submit(s) => match submit.apply(c, mut seq, mut client, cfg, s, mut lookup, clock, random, end, post) {
+                Ok(r) => json(200, submit.locator(r)),
+                Error(e) => refusal(e),
+            },
+        }
+        let _ = channel.try_send(reply, take response)
+    }
+    match task.join(take http) {
+        Ok(Ok(())) => Ok(()),
+        _ => Error(down),
+    }
+}

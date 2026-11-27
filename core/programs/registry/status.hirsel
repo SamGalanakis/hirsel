@@ -1,0 +1,39 @@
+pub fn advisory(data: Bytes, id: String, digest: String, release: pending.ReleaseRecord) -> Result[bool, submit.Error] {
+    if list.len(data) > 1048576 {
+        return Error(Size)
+    }
+    match registry_auth.advisory(data, id, digest, release.identity, release.version) {
+        Ok(withdrawn) => Ok(withdrawn),
+        Error(_) => Error(Invalid),
+    }
+}
+
+/// The sequencer indexes the last document per ID, including a withdrawal.
+/// Resolve those committed digests to return the effective advisory state.
+pub fn current(mut seq: commit.Sequencer, mut client: std.object.Client, root: String, deadline: u64) -> Result[Option[pending.RootStatus], submit.Error] waits {
+    let Ok(Some(_)) = commit.sync_status(mut seq, mut client, deadline) else {
+        return Error(Unavailable)
+    }
+    let Ok(Some(_)) = commit.sync_release(mut seq, mut client, deadline) else {
+        return Error(Unavailable)
+    }
+    let Some(release) = commit.release_for_root(seq, root) else {
+        return Error(Invalid)
+    }
+    let Some(folded) = commit.root_status(seq, root) else {
+        return Ok(None)
+    }
+    let pending.RootStatus(last_leaf_hash: take last, state: take disposition, advisories: take documents) = take folded
+    let mut active: Map[String, String] = map.new()
+    for (id, digest) in documents {
+        let mut key = string.from("e/")
+        string.push(mut key, digest)
+        let Ok((_, data)) = checkpoint.fetch_object(mut client, key, 4096, 1048576, deadline) else {
+            return Error(Unavailable)
+        }
+        if !advisory(data, id, digest, release)? {
+            map.insert(mut active, clone(id), clone(digest))
+        }
+    }
+    Ok(Some(pending.RootStatus(last_leaf_hash: take last, state: take disposition, advisories: take active)))
+}

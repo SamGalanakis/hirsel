@@ -1,0 +1,98 @@
+// The sequencer ends each publication batch with exactly one release. Its first
+// covering head therefore has size leaf_index + 1, even after a cold replay.
+fn hints(log: tlog.Log, only: Option[String]) -> Result[Map[String, String], commit.Error] {
+    let mut result: Map[String, String] = map.new()
+    for index in 0u64 .. tlog.size(log) {
+        let Some(raw) = tlog.entry_at(log, index) else {
+            return Error(IntegrityFailure)
+        }
+        let Ok(entry) = pending.decode_release_entry(raw) else {
+            return Error(IntegrityFailure)
+        }
+        if let Release(release) = take entry {
+            let Some((name, _)) = std.string.split_once(release.identity, "@") else {
+                return Error(IntegrityFailure)
+            }
+            if let Some(requested) = view only {
+                if requested != name {
+                    continue
+                }
+            }
+            let mut rows = match map.remove(mut result, name) {
+                None => string.from("["),
+                Some(take prior) => {
+                    let mut out = take prior
+                    string.push(mut out, ",")
+                    take out
+                },
+            }
+            string.push(mut rows, "[")
+            string.push(mut rows, pending.quoted(release.version))
+            string.push(mut rows, ",")
+            string.push(mut rows, pending.quoted(pending.decimal(index)))
+            string.push(mut rows, ",")
+            string.push(mut rows, pending.quoted(pending.decimal(index + 1)))
+            string.push(mut rows, "]")
+            map.insert(mut result, string.from(name), take rows)
+        }
+    }
+    Ok(take result)
+}
+
+fn refresh(mut seq: commit.Sequencer, mut client: std.object.Client, only: Option[String], deadline: u64) -> Result[(), commit.Error] waits {
+    loop {
+        let Some(head) = commit.sync_release(mut seq, mut client, deadline)? else {
+            return Error(IntegrityFailure)
+        }
+        let size = tlog.note.tree_size(head.head)
+        let rows = hints(seq.logs[commit.log_index(Release)].log, only)?
+        let mut raced = false
+        for (name, prefix) in rows {
+            let mut key = string.from("versions/")
+            string.push(mut key, name)
+            let mut body = string.from(prefix)
+            string.push(mut body, "]")
+            let pre: std.object.Precondition = match checkpoint.fetch_object(mut client, key, 16384, 16777216, deadline) {
+                Ok((meta, current)) => {
+                    if current == string.as_bytes(body) {
+                        continue
+                    }
+                    Match(meta.etag)
+                },
+                Error(NotFound) => Absent,
+                Error(e) => return Error(Storage(e)),
+            }
+            // A competing writer may have installed a newer prefix before this read.
+            let Ok(Some(current)) = checkpoint.read_checkpoint(mut client, seq.logs[commit.log_index(Release)].cfg, deadline) else {
+                return Error(Uncertain)
+            }
+            if tlog.note.tree_size(current.head) != size {
+                raced = true
+                break
+            }
+            let (written, _) = std.object.store_if(mut client, key, pre, string.into_bytes(take body), deadline)
+            match take written {
+                Ok(Applied(_)) => (),
+                Ok(Mismatch) => {
+                    raced = true
+                    break
+                },
+                Error(e) => return Error(Storage(e)),
+            }
+        }
+        if !raced {
+            return Ok(())
+        }
+    }
+}
+
+pub fn rebuild(mut seq: commit.Sequencer, mut client: std.object.Client, deadline: u64) -> Result[(), commit.Error] waits {
+    refresh(mut seq, mut client, None, deadline)
+}
+
+pub fn update(mut seq: commit.Sequencer, mut client: std.object.Client, identity: String, deadline: u64) -> Result[(), commit.Error] waits {
+    let Some((name, _)) = std.string.split_once(identity, "@") else {
+        return Error(InvalidInput)
+    }
+    refresh(mut seq, mut client, Some(string.from(name)), deadline)
+}

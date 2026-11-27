@@ -1,0 +1,642 @@
+// The live proof is held only by the decoded submission. All durable rows are
+// assembled from the public evidence returned by registry_auth.authorize.
+pub type Error = Invalid | Size | Forbidden | Conflict | Unavailable | Readmit
+
+pub type Submission: send {
+    intent: registry_auth.Intent,
+    subject: registry_auth.Subject,
+    proof: String,
+    frames: List[commit.FrameInput],
+    children: List[admit.Child],
+    osv: Option[Bytes],
+}
+
+pub fn parts(raw: String) -> Result[List[String], Error] {
+    let Ok(items) = std.json.decode(raw, fn(s: String, mut c: std.json.Cursor) -> Result[List[String], std.json.Error] {
+        std.json.list_of(s, mut c, fn(t: String, mut cursor: std.json.Cursor) -> Result[String, std.json.Error] {
+            let element = std.json.read_raw(t, mut cursor)?
+            Ok(string.from(element))
+        })
+    }) else {
+        return Error(Invalid)
+    }
+    if admit.array(items) != raw {
+        return Error(Invalid)
+    }
+    Ok(take items)
+}
+
+pub fn text(raw: String) -> Result[String, Error] {
+    let Ok(s) = std.json.decode(raw, std.json.read_string) else {
+        return Error(Invalid)
+    }
+    if pending.quoted(s) != raw {
+        return Error(Invalid)
+    }
+    Ok(take s)
+}
+
+pub fn optional(raw: String) -> Result[Option[String], Error] {
+    if raw == "null" {
+        return Ok(None)
+    }
+    Ok(Some(text(raw)?))
+}
+
+fn decimal(raw: String) -> Result[u64, Error] {
+    let Some(n) = tlog.note.parse_size(text(raw)?) else {
+        return Error(Invalid)
+    }
+    Ok(n)
+}
+
+fn binary(s: String) -> Result[Bytes, Error] {
+    let Some(raw) = std.base64.decode(string.as_bytes(s)) else {
+        return Error(Invalid)
+    }
+    if std.base64.encode_string(raw) != s {
+        return Error(Invalid)
+    }
+    Ok(take raw)
+}
+
+fn subject(raw: String) -> Result[registry_auth.Subject, Error] {
+    let row = parts(raw)?
+    if list.len(row) == 2 && row[0u64] == "\"ed25519\"" {
+        let key = binary(text(row[1u64])?)?
+        if list.len(key) != 32 {
+            return Error(Invalid)
+        }
+        return Ok(SigningKey(take key))
+    }
+    if list.len(row) == 4 && row[0u64] == "\"oidc\"" {
+        return Ok(Workload(text(row[1u64])?, text(row[2u64])?, text(row[3u64])?))
+    }
+    Error(Invalid)
+}
+
+fn subjects(raw: String) -> Result[List[registry_auth.Subject], Error] {
+    let mut set: List[registry_auth.Subject] = list.new()
+    for item in parts(raw)? {
+        list.push(mut set, subject(item)?)
+    }
+    let Ok(wire) = registry_auth.subject_set(set) else {
+        return Error(Invalid)
+    }
+    if wire != raw {
+        return Error(Invalid)
+    }
+    Ok(take set)
+}
+
+fn parse_intent(raw: String) -> Result[registry_auth.Intent, Error] {
+    let row = parts(raw)?
+    if list.len(row) != 7 || row[0u64] != "\"hirsel-intent-v1\"" {
+        return Error(Invalid)
+    }
+    let tag = text(row[2u64])?
+    let body = parts(row[6u64])?
+    let action: registry_auth.Action = if tag == "publish" {
+        if list.len(body) != 5 {
+            return Error(Invalid)
+        }
+        let enrollment: Option[List[registry_auth.Subject]] = if body[4u64] == "null" {
+            None
+        } else {
+            Some(subjects(body[4u64])?)
+        }
+        Publish(registry_auth.Publication(root: text(row[5u64])?, identity: text(body[0u64])?, version: text(body[1u64])?, description: text(body[2u64])?, source_commit: optional(body[3u64])?, enrollment: take enrollment))
+    } else if tag == "scope-rebind" {
+        Rebind(subjects(row[6u64])?)
+    } else {
+        if list.len(body) != 2 {
+            return Error(Invalid)
+        }
+        let payload = parts(body[1u64])?
+        let change: registry_auth.Status = if tag == "reinstate" && list.len(payload) == 1 {
+            Reinstate(text(payload[0u64])?)
+        } else if list.len(payload) == 2 {
+            let a = text(payload[0u64])?
+            let b = text(payload[1u64])?
+            if tag == "retire" {
+                Retire(take a, take b)
+            } else if tag == "advise" {
+                Advise(take a, take b)
+            } else if tag == "takedown" {
+                Takedown(take a, take b)
+            } else {
+                return Error(Invalid)
+            }
+        } else {
+            return Error(Invalid)
+        }
+        ChangeStatus(text(row[5u64])?, optional(body[0u64])?, take change)
+    }
+    let i = registry_auth.Intent(origin: text(row[1u64])?, scope: text(row[3u64])?, generation: decimal(row[4u64])?, action: take action)
+    let Ok(wire) = registry_auth.intent_wire(i) else {
+        return Error(Invalid)
+    }
+    if wire != raw {
+        return Error(Invalid)
+    }
+    Ok(take i)
+}
+
+fn chunk(body: Bytes, mut at: u64, limit: u64) -> Result[Bytes, Error] {
+    if list.len(body) - at < 4 {
+        return Error(Invalid)
+    }
+    let mut n = 0u64
+    for i in at .. at + 4 {
+        n = n * 256 + int.widen(body[i])
+    }
+    at += 4
+    if n > limit {
+        return Error(Size)
+    }
+    if n > list.len(body) - at {
+        return Error(Invalid)
+    }
+    let raw: Bytes = clone(list.slice(body, at, at + n))
+    at += n
+    Ok(take raw)
+}
+
+pub fn metadata(take data: Bytes) -> Result[(Submission, List[String]), Error] {
+    let Ok(meta) = string.from_utf8(take data) else {
+        return Error(Invalid)
+    }
+    let row = parts(meta)?
+    if list.len(row) != 5 {
+        return Error(Invalid)
+    }
+    let i = parse_intent(row[0u64])?
+    let signer = subject(row[1u64])?
+    let roots = parts(row[3u64])?
+    let locators = parts(row[4u64])?
+    if list.len(roots) > 4096 || list.len(locators) >= 4096 {
+        return Error(Size)
+    }
+    if let Publish(p) = view i.action {
+        if list.len(roots) == 0 || text(roots[0u64])? != p.root {
+            return Error(Invalid)
+        }
+    } else if list.len(roots) + list.len(locators) != 0 {
+        return Error(Invalid)
+    }
+    let mut names: List[String] = list.new()
+    for iroot in 0u64 .. list.len(roots) {
+        let root = text(roots[iroot])?
+        if !pending.lower_hex(root, 64) {
+            return Error(Invalid)
+        }
+        if iroot > 0 && (names[0u64] == root || (iroot > 1 && names[iroot - 1] >= root)) {
+            return Error(Invalid)
+        }
+        list.push(mut names, take root)
+    }
+    let mut children: List[admit.Child] = list.new()
+    for raw in locators {
+        let child = parts(raw)?
+        if list.len(child) != 4 {
+            return Error(Invalid)
+        }
+        list.push(mut children, admit.Child(identity: text(child[0u64])?, version: text(child[1u64])?, root: text(child[2u64])?, index: decimal(child[3u64])?))
+    }
+    Ok((Submission(intent: take i, subject: take signer, proof: text(row[2u64])?, frames: list.new(), children: take children, osv: None), take names))
+}
+
+pub fn read_submission(read_chunk: scoped fn(u64) -> Result[Bytes, Error] waits) -> Result[Submission, Error] waits {
+    let (base, roots) = metadata(read_chunk(1048576)?)?
+    let mut s = take base
+    let mut total = 0u64
+    for root in roots {
+        let frame = read_chunk(order.min(pending.MAX_COMPRESSED_FRAME, 536870912 - total))?
+        total += list.len(frame)
+        list.push(mut s.frames, commit.FrameInput(root: clone(root), compressed: take frame))
+    }
+    if let ChangeStatus(_, _, Advise(_, _)) = s.intent.action {
+        s.osv = Some(read_chunk(1048576)?)
+    }
+    Ok(take s)
+}
+
+pub fn decode(body: Bytes) -> Result[Submission, Error] waits {
+    let mut at = 0u64
+    let s = read_submission(scoped fn(max: u64) -> Result[Bytes, Error] {
+        chunk(body, mut at, max)
+    })?
+    if at != list.len(body) {
+        return Error(Invalid)
+    }
+    Ok(take s)
+}
+
+pub type Config: send {
+    forges: List[registry_auth.Forge],
+    namespaces: List[String],
+}
+
+fn auth_error(e: registry_auth.Refusal) -> Error {
+    match e {
+        InvalidIntent => Invalid,
+        InvalidSubjects => Invalid,
+        RateLimited => Unavailable,
+        Unavailable => Unavailable,
+        _ => Forbidden,
+    }
+}
+
+fn verify(s: Submission, cfg: Config, lookup: registry_auth.Lookup, now: u64, deadline: u64) -> Result[registry_auth.Verified, Error] waits {
+    let checked = match s.subject {
+        SigningKey(key) => registry_auth.verify_key(s.intent, key, binary(s.proof)?),
+        Workload(issuer, _, _) => {
+            let mut selected: Option[u64] = None
+            for i in 0u64 .. list.len(cfg.forges) {
+                if cfg.forges[i].issuer == issuer {
+                    if let Some(_) = selected {
+                        return Error(Unavailable)
+                    }
+                    selected = Some(i)
+                }
+            }
+            let Some(index) = selected else {
+                return Error(Forbidden)
+            }
+            let profile = match registry_auth.fetch_profile(lookup, cfg.forges[index], deadline) {
+                Ok(p) => take p,
+                Error(e) => return Error(auth_error(e)),
+            }
+            registry_auth.verify_workload(s.intent, s.subject, s.proof, profile, now)
+        },
+    }
+    match take checked {
+        Ok(v) => Ok(take v),
+        Error(e) => Error(auth_error(e)),
+    }
+}
+
+fn scope_state(seq: commit.Sequencer, mut client: std.object.Client, i: registry_auth.Intent, deadline: u64) -> Result[(registry_auth.ScopeState, Option[Bytes]), Error] waits {
+    if let Some(r) = commit.scope_state(seq, i.scope) {
+        return Ok((Committed(registry_auth.Authority(scope: clone(i.scope), generation: r.generation, subjects: subjects(r.subjects_json)?)), None))
+    }
+    let mut key = string.from("s/")
+    string.push(mut key, i.scope)
+    match checkpoint.fetch_object(mut client, key, 4096, pending.MAX_ENTRY_BYTES, deadline) {
+        Error(NotFound) => Ok((Unclaimed, None)),
+        Ok((_, data)) => {
+            let Ok(ScopeBind(scope, set, _, _, _, _)) = pending.decode_release_entry(data) else {
+                return Error(Unavailable)
+            }
+            if scope != i.scope {
+                return Error(Unavailable)
+            }
+            Ok((Reserved(registry_auth.Authority(scope: clone(i.scope), generation: 0, subjects: subjects(set)?)), Some(take data)))
+        },
+        Error(_) => Error(Unavailable),
+    }
+}
+
+fn public_sidecar(mut list_out: List[commit.EvidenceInput], take data: Bytes) -> String {
+    let hash = pending.sha256_hex(data)
+    list.push(mut list_out, commit.EvidenceInput(digest: clone(hash), data: take data))
+    take hash
+}
+
+fn encode_row(fields: List[String]) -> Bytes {
+    string.into_bytes(admit.array(fields))
+}
+
+fn log_entry(fields: List[String]) -> Result[Bytes, Error] {
+    let data = encode_row(fields)
+    if list.len(data) > pending.MAX_ENTRY_BYTES {
+        return Error(Size)
+    }
+    Ok(take data)
+}
+
+fn auth_subject(a: registry_auth.Admission) -> Result[String, Error] {
+    let cols = parts(a.auth)?
+    if list.len(cols) != 4 {
+        return Error(Unavailable)
+    }
+    Ok(clone(cols[0u64]))
+}
+
+fn parent_check(parent: u64, captured: u64) -> Result[(), commit.Error] {
+    if parent != captured {
+        return Error(NeedsReadmission)
+    }
+    Ok(())
+}
+
+fn publish(c: Compiler, mut seq: commit.Sequencer, mut client: std.object.Client, cfg: Config, s: Submission, p: registry_auth.Publication, a: registry_auth.Admission, saved: Option[Bytes], authorize_now: scoped fn() -> Result[(), commit.Error], captured: u64, random: Random, deadline: u64, now_seconds: scoped fn() -> u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[commit.Receipt, Error] waits {
+    for frame in s.frames {
+        if let Some(_) = commit.lookup_takedown(seq, frame.root) {
+            return Error(Conflict)
+        }
+    }
+    let mut label = string.from("l/")
+    string.push(mut label, pending.label_key_str(p.identity, p.version))
+    match checkpoint.fetch_object(mut client, label, 4096, 128, deadline) {
+        Ok((_, root)) => {
+            if root != string.as_bytes(p.root) {
+                return Error(Conflict)
+            }
+        },
+        Error(NotFound) => (),
+        Error(_) => return Error(Unavailable),
+    }
+    let checked = match admit.check(c, mut seq, mut client, p, s.frames, s.children, cfg.namespaces, now_seconds(), deadline) {
+        Ok(value) => take value,
+        Error(TooLarge) => return Error(Size),
+        Error(Worker(Limit(Input))) => return Error(Size),
+        Error(Worker(Rejected(_))) => return Error(Invalid),
+        Error(Worker(Unsupported(_))) => return Error(Invalid),
+        Error(Invalid) => return Error(Invalid),
+        Error(_) => return Error(Unavailable),
+    }
+    let mut evidence: List[commit.EvidenceInput] = list.new()
+    let digest = public_sidecar(mut evidence, string.into_bytes(clone(a.intent)))
+    list.push(mut evidence, commit.EvidenceInput(digest: clone(checked.facts_digest), data: clone(checked.facts_bytes)))
+    let when = pending.quoted(pending.decimal(now_seconds()))
+    let mut scope_evidence: List[commit.EvidenceInput] = list.new()
+    let bind: Option[Bytes] = if let Some(doc) = view a.enrollment_evidence {
+        let Some(next) = view a.next_authority else {
+            return Error(Unavailable)
+        }
+        let _ = public_sidecar(mut scope_evidence, string.into_bytes(clone(a.intent)))
+        let enrol = public_sidecar(mut scope_evidence, string.into_bytes(clone(doc)))
+        let Ok(set) = registry_auth.subject_set(next.subjects) else {
+            return Error(Invalid)
+        }
+        let mut b: List[String] = list.new()
+        list.push(mut b, pending.quoted("scope-bind"))
+        list.push(mut b, pending.quoted(s.intent.scope))
+        list.push(mut b, take set)
+        list.push(mut b, pending.quoted(enrol))
+        list.push(mut b, clone(when))
+        list.push(mut b, clone(a.auth))
+        Some(log_entry(b)?)
+    } else {
+        clone(saved)
+    }
+    let mut fields: List[String] = list.new()
+    list.push(mut fields, pending.quoted("release"))
+    list.push(mut fields, pending.quoted(p.identity))
+    list.push(mut fields, pending.quoted(p.version))
+    list.push(mut fields, pending.quoted(p.root))
+    list.push(mut fields, pending.quoted(p.description))
+    list.push(mut fields, match p.source_commit {
+        Some(hash) => pending.quoted(hash),
+        None => string.from("null"),
+    })
+    list.push(mut fields, clone(when))
+    list.push(mut fields, pending.quoted(pending.decimal(order.max(s.intent.generation, 1u64))))
+    list.push(mut fields, pending.quoted(checked.compiler_id))
+    list.push(mut fields, pending.quoted(checked.facts_digest))
+    list.push(mut fields, clone(a.auth))
+    let req = commit.PublishRequest(scope: clone(s.intent.scope), identity: clone(p.identity), version: clone(p.version), root: clone(p.root), generation: s.intent.generation, signer: auth_subject(a)?, intent_digest: take digest, scope_bind_entry: take bind, scope_bind_evidence: take scope_evidence, release_entry: log_entry(fields)?, frames: clone(s.frames), evidence: take evidence)
+    if let Error(_) = authorize_now() {
+        return Error(Forbidden)
+    }
+    outcome(commit.commit_publish_with_hook(mut seq, mut client, req, random, deadline, now_seconds, scoped fn(i: u64, path: String, body: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        post(Release, i, path, body)
+    }, scoped fn(n: u64) -> Result[(), commit.Error] {
+        parent_check(n, captured)?
+        authorize_now()
+    }, no_hook))
+}
+
+fn no_hook(point: commit.StepPoint) -> Result[(), commit.Error] {
+    Ok(())
+}
+
+fn outcome(take r: Result[commit.Receipt, commit.Error]) -> Result[commit.Receipt, Error] {
+    match take r {
+        Ok(rec) => Ok(take rec),
+        Error(NeedsReadmission) => Error(Readmit),
+        Error(Unauthorized) => Error(Forbidden),
+        Error(StaleGeneration) => Error(Forbidden),
+        Error(LabelConflict) => Error(Conflict),
+        Error(PredecessorConflict) => Error(Conflict),
+        Error(EnrollmentConflict) => Error(Conflict),
+        Error(TerminalStatus) => Error(Conflict),
+        Error(TakenDown) => Error(Conflict),
+        Error(InvalidInput) => Error(Invalid),
+        Error(UnknownRoot) => Error(Invalid),
+        Error(_) => Error(Unavailable),
+    }
+}
+
+fn rebind(mut seq: commit.Sequencer, mut client: std.object.Client, i: registry_auth.Intent, a: registry_auth.Admission, captured: u64, random: Random, deadline: u64, now_seconds: scoped fn() -> u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[commit.Receipt, Error] waits {
+    let Some(next) = view a.next_authority else {
+        return Error(Unavailable)
+    }
+    let Ok(set) = registry_auth.subject_set(next.subjects) else {
+        return Error(Invalid)
+    }
+    let mut fields: List[String] = list.new()
+    list.push(mut fields, pending.quoted("scope-rebind"))
+    list.push(mut fields, pending.quoted(i.scope))
+    list.push(mut fields, pending.quoted(pending.decimal(i.generation)))
+    list.push(mut fields, take set)
+    list.push(mut fields, pending.quoted(pending.decimal(now_seconds())))
+    list.push(mut fields, clone(a.auth))
+    let mut evidence: List[commit.EvidenceInput] = list.new()
+    let digest = public_sidecar(mut evidence, string.into_bytes(clone(a.intent)))
+    let req = commit.RebindRequest(scope: clone(i.scope), old_generation: i.generation, signer: auth_subject(a)?, intent_digest: take digest, rebind_entry: log_entry(fields)?, evidence: take evidence)
+    outcome(commit.commit_rebind_with_hook(mut seq, mut client, req, random, deadline, now_seconds, scoped fn(index: u64, path: String, body: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        post(Release, index, path, body)
+    }, scoped fn(n: u64) -> Result[(), commit.Error] {
+        parent_check(n, captured)
+    }, no_hook))
+}
+
+fn change_status(mut seq: commit.Sequencer, mut client: std.object.Client, i: registry_auth.Intent, osv: Option[Bytes], a: registry_auth.Admission, parent: checkpoint.CurrentCheckpoint, release: pending.ReleaseRecord, random: Random, deadline: u64, now_seconds: scoped fn() -> u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[commit.Receipt, Error] waits {
+    let ChangeStatus(root, prev, op) = view i.action else {
+        return Error(Invalid)
+    }
+    let wire = parts(a.intent)?
+    let body = parts(wire[6u64])?
+    let payload = parts(body[1u64])?
+    let mut fields: List[String] = list.new()
+    list.push(mut fields, clone(wire[2u64]))
+    list.push(mut fields, clone(wire[5u64]))
+    list.push(mut fields, clone(body[0u64]))
+    for field in payload {
+        list.push(mut fields, clone(field))
+    }
+    list.push(mut fields, pending.quoted(pending.decimal(now_seconds())))
+    list.push(mut fields, clone(a.auth))
+    let mut evidence: List[commit.EvidenceInput] = list.new()
+    let digest = public_sidecar(mut evidence, string.into_bytes(clone(a.intent)))
+    if let Advise(id, hash) = op {
+        let Some(data) = view osv else {
+            return Error(Invalid)
+        }
+        let _ = status.advisory(data, id, hash, release)?
+        let _ = public_sidecar(mut evidence, clone(data))
+    }
+    let Some(authority) = view a.status_authority else {
+        return Error(Forbidden)
+    }
+    let req = commit.StatusRequest(scope: clone(i.scope), root: clone(root), previous_event: clone(prev), authority: clone(authority), intent_digest: take digest, captured_status_parent: tlog.note.tree_size(parent.head), captured_status_root: tlog.note.tree_root(parent.head), status_entry: log_entry(fields)?, evidence: take evidence)
+    outcome(commit.commit_status_with_hook(mut seq, mut client, req, random, deadline, now_seconds, scoped fn(index: u64, path: String, data: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        post(Status, index, path, data)
+    }, no_hook))
+}
+
+fn repeat(seq: commit.Sequencer, i: registry_auth.Intent, signer: registry_auth.Subject, digest: String, release_wire: String, status_wire: String) -> Option[commit.Receipt] {
+    let mut singleton: List[registry_auth.Subject] = list.new()
+    list.push(mut singleton, clone(signer))
+    let Ok(set) = registry_auth.subject_set(singleton) else {
+        return None
+    }
+    let signer_json = string.slice(set, 1, string.byte_len(set) - 1)
+    let (index, first_head, root, origin, wire, raw): (u64, u64, Option[String], String, String, Bytes) = match i.action {
+        ChangeStatus(r, prev, _) => {
+            let Some((idx, size, _)) = map.get(seq.status_by_intent, pending.status_intent_key(digest, prev)) else {
+                return None
+            }
+            let Some(entry) = tlog.entry_at(seq.logs[commit.log_index(Status)].log, idx) else {
+                return None
+            }
+            (idx, size, Some(clone(r)), clone(seq.logs[commit.log_index(Status)].cfg.origin), clone(status_wire), clone(entry))
+        },
+        _ => {
+            let Some((idx, size, r)) = map.get(seq.release_by_intent, digest) else {
+                return None
+            }
+            let Some(entry) = tlog.entry_at(seq.logs[commit.log_index(Release)].log, idx) else {
+                return None
+            }
+            (idx, size, clone(r), clone(seq.logs[commit.log_index(Release)].cfg.origin), clone(release_wire), clone(entry))
+        },
+    }
+    let Ok(entry) = string.from_utf8(take raw) else {
+        return None
+    }
+    let Ok(fields) = parts(entry) else {
+        return None
+    }
+    let Ok(auth) = parts(fields[list.len(fields) - 1]) else {
+        return None
+    }
+    if list.len(auth) != 4 || auth[0u64] != signer_json || auth[1u64] != pending.quoted(digest) {
+        return None
+    }
+    Some(commit.Receipt(origin: take origin, leaf_index: index, head_size: first_head, root: take root, checkpoint_wire: take wire))
+}
+
+pub fn apply(c: Compiler, mut seq: commit.Sequencer, mut client: std.object.Client, cfg: Config, s: Submission, mut lookup: registry_auth.Lookup, clock: Clock, random: Random, deadline: u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[commit.Receipt, Error] waits {
+    if !admit.owns(cfg.namespaces, s.intent.scope) || seq.registry_origin != s.intent.origin {
+        return Error(Forbidden)
+    }
+    let now_seconds: scoped fn() -> u64 = fn() -> u64 {
+        host.wall_ms(clock) / 1000
+    }
+    loop {
+        if host.mono_ns(clock) >= deadline {
+            return Error(Unavailable)
+        }
+        // Status admission captures its parent before reading release authority.
+        let Ok(Some(sp)) = commit.sync_status(mut seq, mut client, deadline) else {
+            return Error(Unavailable)
+        }
+        let Ok(Some(rp)) = commit.sync_release(mut seq, mut client, deadline) else {
+            return Error(Unavailable)
+        }
+        let captured = tlog.note.tree_size(rp.head)
+        let now = now_seconds()
+        let v = verify(s, cfg, lookup, now, deadline)?
+        let Ok(intent_wire) = registry_auth.intent_wire(s.intent) else {
+            return Error(Invalid)
+        }
+        let digest = registry_auth.digest(intent_wire)
+        if let Some(receipt) = repeat(seq, s.intent, s.subject, digest, rp.wire, sp.wire) {
+            if let ChangeStatus(root, _, Takedown(_, _)) = view s.intent.action {
+                if let Error(_) = commit.install_deletion_marker(mut client, root, deadline) {
+                    return Error(Unavailable)
+                }
+            }
+            return Ok(take receipt)
+        }
+        let (state, saved) = scope_state(seq, mut client, s.intent, deadline)?
+        let mut doc: Option[registry_auth.Enrollment] = None
+        if let Unclaimed = state {
+            doc = match registry_auth.fetch_enrollment(mut lookup, s.intent, v, deadline) {
+                Ok(enrollment) => Some(take enrollment),
+                Error(e) => return Error(auth_error(e)),
+            }
+        }
+        let mut head: Option[registry_auth.StatusHead] = None
+        let mut rel: Option[pending.ReleaseRecord] = None
+        let mut legal = false
+        if let ChangeStatus(root, prev, op) = view s.intent.action {
+            let Some(record) = commit.release_for_root(seq, root) else {
+                return Error(Invalid)
+            }
+            let last: Option[String] = match commit.root_status(seq, root) {
+                Some(st) => Some(clone(st.last_leaf_hash)),
+                None => None,
+            }
+            if prev != last {
+                return Error(Conflict)
+            }
+            head = Some(registry_auth.StatusHead(scope: clone(record.scope), root: clone(root), previous_event: take last))
+            rel = Some(take record)
+            legal = match op {
+                Takedown(_, _) => true,
+                _ => false,
+            }
+        }
+        let checked = if legal {
+            let SigningKey(key) = view s.subject else {
+                return Error(Forbidden)
+            }
+            if key != seq.legal_key {
+                return Error(Forbidden)
+            }
+            registry_auth.authorize_legal(s.intent.origin, s.intent, seq.legal_key, binary(s.proof)?, option.unwrap(take head))
+        } else {
+            registry_auth.authorize(s.intent.origin, s.intent, state, v, doc, head, now_seconds())
+        }
+        let a = match take checked {
+            Ok(value) => take value,
+            Error(e) => return Error(auth_error(e)),
+        }
+        let result = match s.intent.action {
+            Publish(p) => publish(c, mut seq, mut client, cfg, s, p, a, saved, scoped fn() -> Result[(), commit.Error] {
+                match registry_auth.authorize(s.intent.origin, s.intent, state, v, doc, None, now_seconds()) {
+                    Ok(_) => Ok(()),
+                    Error(_) => Error(Unauthorized),
+                }
+            }, captured, random, deadline, now_seconds, post),
+            Rebind(_) => rebind(mut seq, mut client, s.intent, a, captured, random, deadline, now_seconds, post),
+            ChangeStatus(_, _, _) => change_status(mut seq, mut client, s.intent, s.osv, a, sp, option.unwrap(take rel), random, deadline, now_seconds, post),
+        }
+        match take result {
+            Ok(receipt) => {
+                if let Publish(p) = s.intent.action {
+                    let _ = version_hints.update(mut seq, mut client, p.identity, deadline)
+                }
+                return Ok(take receipt)
+            },
+            Error(Readmit) => (),
+            Error(e) => return Error(e),
+        }
+    }
+}
+
+pub fn locator(r: commit.Receipt) -> Bytes {
+    let mut fields: List[String] = list.new()
+    list.push(mut fields, pending.quoted(r.origin))
+    list.push(mut fields, pending.quoted(pending.decimal(r.leaf_index)))
+    list.push(mut fields, pending.quoted(pending.decimal(r.head_size)))
+    list.push(mut fields, match r.root {
+        Some(root) => pending.quoted(root),
+        None => string.from("null"),
+    })
+    encode_row(fields)
+}

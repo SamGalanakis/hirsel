@@ -1,0 +1,455 @@
+// A later checkpoint must not change the first covering batch of an earlier release.
+@test
+fn cold_version_hints(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 3362, list.new())
+    let mut w = new_witness_pair(1730000000)
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 3363)
+    let mut seq = new_sequencer()
+    do_init_pair(mut seq, mut c, mut w, random)
+    let _ = result.unwrap(do_pub(mut seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/item@1", "1.0.0", "v1", 0, Some(subjects_one(SUB_A)), SUB_A, false), None, random))
+    let _ = result.unwrap(do_pub(mut seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/item@1", "1.0.1", "v2", 1, None, SUB_A, false), None, random))
+    let _ = take seq
+    let mut cold = new_sequencer()
+    result.unwrap(version_hints.rebuild(mut cold, mut c, DEADLINE))
+    let reply = static.serve_get(mut cold, mut c, "/versions/acme.dev/item", DEADLINE)
+    let _ = take c
+    let _ = finish_bucket(take bucket)
+    require(reply.status == 200 && reply.body == b"[[\"1.0.0\",\"1\",\"2\"],[\"1.0.1\",\"2\",\"3\"]]", "cold /versions must preserve first covering heads 2 and 3")
+}
+
+fn namespaces() -> List[String] {
+    let mut values: List[String] = list.new()
+    list.push(mut values, "acme.dev/*")
+    list.push(mut values, "github.com/example/*")
+    take values
+}
+
+fn service_sequencer() -> commit.Sequencer {
+    commit.new(make_log_config(Release), make_log_config(Status), "https://pkg.example", option.unwrap(std.hex.decode(string.as_bytes(LEGAL_PK))))
+}
+
+fn leaf_content() -> Bytes {
+    b"\x03\x17github.com/example/leaf\x01\x00\x00\x00\x09charge-v1\x00\x01\x0bleaf.hirsel\x01\x04leaf\x1apub fn one() -> u64 { 1 }\x0a\x00"
+}
+
+const LEAF_ROOT: String = "76ae24ce4d9a71210574fcf579054da206f4f2d70b109aa4908233a7e4bb3126"
+
+@test
+fn library_admission(c: Compiler, tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 3364, list.new())
+    let mut w = new_witness_pair(1730000000)
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 3365)
+    let mut seq = new_sequencer()
+    do_init_pair(mut seq, mut client, mut w, random)
+    let _ = static.serve_get(mut seq, mut client, "/versions/before-admission", DEADLINE)
+    let p = registry_auth.Publication(root: string.from(LEAF_ROOT), identity: "github.com/example/leaf@1", version: "1.0.0", description: "leaf", source_commit: None, enrollment: None)
+    let mut frames: List[commit.FrameInput] = list.new()
+    list.push(mut frames, commit.FrameInput(root: string.from(LEAF_ROOT), compressed: make_zstd_raw_alt(leaf_content())))
+    let checked = match admit.check(c, mut seq, mut client, p, frames, list.new(), namespaces(), 1730000000, DEADLINE) {
+        Ok(value) => take value,
+        Error(Worker(Unavailable(msg))) => return Error(take msg),
+        Error(Worker(Rejected(msg))) => return Error(take msg),
+        Error(_) => return Error("valid C refused"),
+    }
+    let expected = b"{\"authority\":{\"carried\":{},\"reached\":{\"leaf/one\":{\"contained\":[],\"kinds\":[],\"provided\":[],\"unresolved\":null}},\"verdict\":\"pure\"},\"bindings\":[],\"header\":{\"charge\":\"charge-v1\",\"identity\":\"github.com/example/leaf@1\",\"version\":\"1.0.0\"},\"interface\":{\"modules\":[{\"extends_core\":false,\"items\":[{\"definition\":\"github.com/example/leaf@1/leaf/one\",\"kind\":\"function\",\"name\":\"one\",\"signature\":\"pub fn one() -> u64\"}],\"path\":[\"leaf\"]}],\"package\":{\"name\":\"github.com/example/leaf\",\"version\":\"1\"},\"version\":1},\"root\":\"76ae24ce4d9a71210574fcf579054da206f4f2d70b109aa4908233a7e4bb3126\"}"
+    require(checked.facts_bytes == expected && checked.facts_digest == pending.sha256_hex(expected) && pending.lower_hex(checked.compiler_id, 64), "complete canonical compiler facts and build identity")?
+    frames[0u64].compressed = make_zstd_raw_alt(b"wrong")
+    let refused = admit.check(c, mut seq, mut client, p, frames, list.new(), namespaces(), 1730000000, DEADLINE)
+    let _ = take client
+    let report = finish_bucket(take bucket)
+    let Error(Invalid) = refused else {
+        return Error("wrong library root accepted")
+    }
+    let mut started = false
+    for request in report.requests {
+        if request.key == "versions/before-admission" {
+            started = true
+        }
+        if started && request.method == "PUT" {
+            return Error("admission wrote an object")
+        }
+    }
+    require(started, "admission boundary missing from bucket trace")
+}
+
+type Documents: send {
+    site: Listener,
+    clock: Clock
+}
+
+type DocumentNetwork: send {
+    network: std.sim.net.Network,
+    port: Served[NetOp],
+    clock: Clock
+}
+
+fn drive_documents(take link: DocumentNetwork) waits {
+    let DocumentNetwork(network: take network, port: take port, clock) = take link
+    let mut plan = std.sim.world.plan(3366)
+    let _ = std.sim.net.serve(network, mut plan, clock, take port)
+}
+
+fn serve_documents(take docs: Documents) waits {
+    let Documents(site: take site, clock) = take docs
+    let mut listener = take site
+    loop {
+        let Ok((sock, _)) = host.accept(mut listener, At(clock, DEADLINE)) else {
+            return
+        }
+        let (rx, tx) = net.split(take sock)
+        let mut reader = take rx
+        let mut writer = take tx
+        let mut input: Bytes = list.with_capacity(16384)
+        let mut path = string.new()
+        loop {
+            let Ok(n) = host.recv_bounded(mut reader, mut input, 16384 - list.len(input), At(clock, DEADLINE)) else {
+                return
+            }
+            if n == 0 {
+                return
+            }
+            let Ok(text) = string.from_utf8(clone(input)) else {
+                return
+            }
+            if std.string.find(text, 0, "\r\n\r\n") != None {
+                path = take text
+                break
+            }
+        }
+        let data = if std.string.starts_with(path, "GET /jwks ") {
+            string.from(SERVICE_JWKS)
+        } else if std.string.starts_with(path, "GET /.well-known/hirsel-registry.json ") {
+            string.from(SERVICE_ENROLLMENT)
+        } else {
+            string.from("{}")
+        }
+        let mut msg = string.from("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ")
+        string.push_u64(mut msg, string.byte_len(data))
+        string.push(mut msg, "\r\n\r\n")
+        string.push(mut msg, data)
+        let _ = std.http.write_wire(mut writer, string.as_bytes(msg), b"", clock, DEADLINE)
+    }
+}
+
+fn document_network(tasks: Tasks, clock: Clock) -> (Net, Task[()], Task[()]) waits {
+    let (root, port) = provide.net(bytes 65536)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let ip = V4(134744072)
+    let mut ips: List[Ip] = list.new()
+    list.push(mut ips, ip)
+    std.sim.net.resolve_as(mut network, "acme.dev", clone(ips))
+    std.sim.net.resolve_as(mut network, "issuer.example", take ips)
+    std.sim.net.handshake_as(mut network, "acme.dev", Ok(Handshake(protocol: Some(0), peer: (0, 0, 0, 0))))
+    std.sim.net.handshake_as(mut network, "issuer.example", Ok(Handshake(protocol: Some(0), peer: (0, 0, 0, 0))))
+    let driver = task.spawn(tasks, bytes 8388608, DocumentNetwork(network: take network, port: take port, clock: clock), drive_documents)
+    let (listener, _) = result.unwrap(host.listen(root, Addr(ip: ip, port: 443), 8))
+    let server = task.spawn(tasks, bytes 1048576, Documents(site: take listener, clock: clock), serve_documents)
+    (root, take driver, take server)
+}
+
+fn packet(meta: String, frames: List[Bytes]) -> Bytes {
+    let mut data: Bytes = list.new()
+    list.put_word_be(mut data, (int.narrow(string.byte_len(meta)) : u32))
+    list.append(mut data, string.as_bytes(meta))
+    for frame in frames {
+        list.put_word_be(mut data, (int.narrow(list.len(frame)) : u32))
+        list.append(mut data, frame)
+    }
+    take data
+}
+
+fn blob(hex: String) -> List[Bytes] {
+    let mut frames: List[Bytes] = list.new()
+    list.push(mut frames, make_zstd_raw_alt(option.unwrap(std.hex.decode(string.as_bytes(hex)))))
+    take frames
+}
+
+fn run_submit(c: Compiler, mut seq: commit.Sequencer, mut client: std.object.Client, cfg: submit.Config, data: Bytes, mut lookup: registry_auth.Lookup, clock: Clock, random: Random, mut w: WitnessPair) -> Result[commit.Receipt, submit.Error] waits {
+    let s = submit.decode(data)?
+    submit.apply(c, mut seq, mut client, cfg, s, mut lookup, clock, random, DEADLINE, scoped fn(kind: checkpoint.LogKind, i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut w, kind, i, p, b, random)
+    })
+}
+
+fn applied(take r: Result[commit.Receipt, submit.Error], action: String) -> Result[commit.Receipt, String] {
+    match take r {
+        Ok(receipt) => Ok(take receipt),
+        Error(e) => Error(cat3(action, " ", match e {
+            Invalid => "invalid",
+            Size => "size",
+            Forbidden => "forbidden",
+            Conflict => "conflict",
+            _ => "unavailable",
+        })),
+    }
+}
+
+fn contains_raw(data: Bytes, needle: Bytes) -> bool {
+    if list.len(data) < list.len(needle) {
+        return false
+    }
+    for i in 0u64 .. list.len(data) - list.len(needle) + 1 {
+        if data[i] == needle[0u64] && list.slice(data, i, i + list.len(needle)) == needle {
+            return true
+        }
+    }
+    false
+}
+
+// Independently encoded C v3, intents, Ed25519 signatures and expected status leaves.
+const SERVICE_JWKS: String = "{\"keys\":[{\"alg\":\"EdDSA\",\"crv\":\"Ed25519\",\"kid\":\"ci\",\"kty\":\"OKP\",\"x\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"}]}"
+
+const SERVICE_ENROLLMENT: String = "[\"hirsel-enroll-v1\",\"https://pkg.example\",\"acme.dev\",[[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],[\"oidc\",\"https://issuer.example\",\"repo/123\",\"123/.github/workflows/p.yml@refs/heads/main\"]]]"
+
+const SERVICE_TOKEN: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJhdWQiOiJodHRwczovL3BrZy5leGFtcGxlL2ludGVudC9wdWJsaXNoLzExYzQ4MmQ5ZjM2NTBmYTY1OWM3MjFmNzU3OWM3OGM0MTNjM2I5ZGU5NDE3NmE0ODRjNDBhNDU2ZGUwYTRjNTIvMzkwMjI5MDYzZDk3MzgyMjU1NGFhY2U4ZGNjMzA5M2E1ZmY5ZGQ5ZTYxMDE1MzdiOTliMzkxYWZmMzU3ZjAzMSIsImV4cCI6MTM2OTM1NzIwMCwiaWF0IjoxMzY5MzUzNTAwLCJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwicmVwb3NpdG9yeSI6ImFjbWUvYnVpbGQiLCJyZXBvc2l0b3J5X2lkIjoiMTIzIiwicmVwb3NpdG9yeV9vd25lciI6ImFjbWUiLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNDIiLCJ3b3JrZmxvd19yZWYiOiJhY21lL2J1aWxkLy5naXRodWIvd29ya2Zsb3dzL3AueW1sQHJlZnMvaGVhZHMvbWFpbiJ9.h_4hSV1JcseZ48_PIUtu02hM088TyUqZL8F5sSPFtn-Wi2SX_b2K1l6C4EOwFCEAs1v1aL_7TbpETjQWaBWLCA"
+
+const FIRST_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"publish\",\"acme.dev\",\"0\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",[\"acme.dev/leaf@1\",\"1.0.0\",\"leaf\",null,[[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],[\"oidc\",\"https://issuer.example\",\"repo/123\",\"123/.github/workflows/p.yml@refs/heads/main\"]]]],[\"oidc\",\"https://issuer.example\",\"repo/123\",\"123/.github/workflows/p.yml@refs/heads/main\"],\"eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJhdWQiOiJodHRwczovL3BrZy5leGFtcGxlL2ludGVudC9wdWJsaXNoLzExYzQ4MmQ5ZjM2NTBmYTY1OWM3MjFmNzU3OWM3OGM0MTNjM2I5ZGU5NDE3NmE0ODRjNDBhNDU2ZGUwYTRjNTIvMzkwMjI5MDYzZDk3MzgyMjU1NGFhY2U4ZGNjMzA5M2E1ZmY5ZGQ5ZTYxMDE1MzdiOTliMzkxYWZmMzU3ZjAzMSIsImV4cCI6MTM2OTM1NzIwMCwiaWF0IjoxMzY5MzUzNTAwLCJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwicmVwb3NpdG9yeSI6ImFjbWUvYnVpbGQiLCJyZXBvc2l0b3J5X2lkIjoiMTIzIiwicmVwb3NpdG9yeV9vd25lciI6ImFjbWUiLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNDIiLCJ3b3JrZmxvd19yZWYiOiJhY21lL2J1aWxkLy5naXRodWIvd29ya2Zsb3dzL3AueW1sQHJlZnMvaGVhZHMvbWFpbiJ9.h_4hSV1JcseZ48_PIUtu02hM088TyUqZL8F5sSPFtn-Wi2SX_b2K1l6C4EOwFCEAs1v1aL_7TbpETjQWaBWLCA\",[\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\"],[]]"
+
+const CHILD_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"publish\",\"acme.dev\",\"1\",\"9da6d22bee3c4999d2db8b5e92b793162649940b15e1fe84eb2a0d48bbc60664\",[\"acme.dev/consumer@1\",\"1.0.0\",\"consumer\",null,null]],[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],\"taVMERjgKB7JZvU4UhfUo7any8dItyTwuCadVLeIFd47vqD/ykEE7Sa4om3zB+nNUl/U956fWFVYaRSdSkIUDA==\",[\"9da6d22bee3c4999d2db8b5e92b793162649940b15e1fe84eb2a0d48bbc60664\"],[[\"acme.dev/leaf@1\",\"1.0.0\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",\"1\"]]]"
+
+const FIRST_C: String = "030d61636d652e6465762f6c65616601000000096368617267652d763100010b6c6561662e68697273656c01046c6561661a70756220666e206f6e652829202d3e20753634207b2031207d0a00"
+
+const CHILD_C: String = "031161636d652e6465762f636f6e73756d657201000000096368617267652d763101036465700d61636d652e6465762f6c656166010211c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c520000010f636f6e73756d65722e68697273656c0108636f6e73756d65722470756220666e2076616c75652829202d3e20753634207b206465702e6f6e652829207d0a00"
+
+const CHILD_ROOT: String = "9da6d22bee3c4999d2db8b5e92b793162649940b15e1fe84eb2a0d48bbc60664"
+
+const FIRST_ROOT: String = "11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52"
+
+const LEGAL_PK: String = "2543b92ff1095511476adc8369db6ddc933665a11978dda1404ee1066ca9559d"
+
+const REBIND_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"scope-rebind\",\"acme.dev\",\"1\",null,[[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"]]],[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],\"6sBXZYJPjbUa96H6dn5eYsxEMu+VmIv+f8ufZ1i774APjR/8NJhqaHFqcCFbgdbYQogSBIxjSLGWf61az6AfAg==\",[],[]]"
+
+const RETIRE_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"retire\",\"acme.dev\",\"2\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",[null,[\"deprecated\",\"retired\"]]],[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],\"uf6mCH7zKkTmRLnNzRrBRkkStSKRSV57XDKXAuQ95DFi05jfOQi6RKZ6BHEDXcJ+KcnwqgiylY10WL9+0LG2Bg==\",[],[]]"
+
+const RETIRE_HASH: String = "52df4672ebf4bf38f61abece6c3a31df5fb9506006852022819bc5dceff293f0"
+
+const REINSTATE_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"reinstate\",\"acme.dev\",\"2\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",[\"52df4672ebf4bf38f61abece6c3a31df5fb9506006852022819bc5dceff293f0\",[\"active\"]]],[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],\"8GmECqtrxCn+GSUStMj96UXl2tpTq/RagQrrY3la9m3VdyHRKK6KCyaD2Q3S3gmOneN7M/ewfGaZA/brUXARBw==\",[],[]]"
+
+const REINSTATE_HASH: String = "507a14399822e3aa1f95258e527dd9d738299a587f4d1ffcb8e777ab4f44a0ce"
+
+const ADVISE_DOC: String = "{\"affected\":[{\"package\":{\"ecosystem\":\"Hirsel\",\"name\":\"acme.dev/leaf\"},\"versions\":[\"1.0.0\"]}],\"aliases\":[\"CVE-fixture\"],\"id\":\"OSV-1\",\"modified\":\"2013-05-24T00:00:00Z\"}"
+
+const ADVISE_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"advise\",\"acme.dev\",\"2\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",[\"507a14399822e3aa1f95258e527dd9d738299a587f4d1ffcb8e777ab4f44a0ce\",[\"OSV-1\",\"cd4d825d32291bef06676d096bf32b9999cdded50c961cc3812b2d64479ab5bc\"]]],[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],\"HMdnm9RxRVrIwPgV3/ylV4Mme+Pl4NZVio0WSa4PKQmkOujtrWMlfzsVTCxVdpQcvLzqQMtMVG65Pd4RREksBg==\",[],[]]"
+
+const ADVISE_HASH: String = "3911df8f0ec728095591c2d6a693c15f26316f2a088c3c040acbb8833673bd6f"
+
+const WITHDRAW_DOC: String = "{\"affected\":[{\"package\":{\"ecosystem\":\"Hirsel\",\"name\":\"acme.dev/leaf\"},\"versions\":[\"1.0.0\"]}],\"aliases\":[\"CVE-fixture\"],\"id\":\"OSV-1\",\"modified\":\"2013-05-24T00:00:00Z\",\"withdrawn\":\"2013-05-24T00:00:00Z\"}"
+
+const WITHDRAW_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"advise\",\"acme.dev\",\"2\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",[\"3911df8f0ec728095591c2d6a693c15f26316f2a088c3c040acbb8833673bd6f\",[\"OSV-1\",\"46d86a7e37c266b37fe9ba5ae4c1b17da8bbdac65a38184327aec8d693a94027\"]]],[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],\"IT5lliagEsNvBXbELfxdOZmwJulOufcOlwf3GA8VLItKiE2YrGjr0o9buF9QCVQq+Fj7j+goH/doyMrDT02rCg==\",[],[]]"
+
+const WITHDRAW_HASH: String = "b79a9a31f9e934fc85ddb86c64566b364b5820a2a5e3c46a8e81d0bb76d69169"
+
+const TAKEDOWN_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"takedown\",\"acme.dev\",\"0\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",[\"b79a9a31f9e934fc85ddb86c64566b364b5820a2a5e3c46a8e81d0bb76d69169\",[\"legal\",\"removed\"]]],[\"ed25519\",\"JUO5L/EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0=\"],\"E1ybtg6XMANluEbIcDZHu2IbtunX4Jt+V4XvH5Z7+HaX310MT2bv0FD1rq6kU/Sl2xCdxfofzxbqEIb9CSG6Ag==\",[],[]]"
+
+const TAKEDOWN_HASH: String = "6e212c0fee7ad22229f4b2cdb517223eccaad116ff8989e86e396b0c881e1f7a"
+
+@test
+fn publish_lifecycle(c: Compiler, tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 3368, list.new())
+    let (network, link, server) = document_network(tasks, bucket.clock)
+    let mut lookup = result.unwrap(registry_auth.lookup(network, bucket.clock, tasks))
+    let mut forges: List[registry_auth.Forge] = list.new()
+    list.push(mut forges, registry_auth.Forge(issuer: "https://issuer.example", jwks_url: "https://issuer.example/jwks", allow: std.jwt.allow(EdDsa), host: "github.com", org_api: "https://api.github.com", org_credential: None))
+    let cfg = submit.Config(forges: take forges, namespaces: namespaces())
+    let mut seq = service_sequencer()
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 3369)
+    let mut w = new_witness_pair(1369353600)
+    do_init_pair(mut seq, mut client, mut w, random)
+    let first = applied(run_submit(c, mut seq, mut client, cfg, packet(FIRST_META, blob(FIRST_C)), mut lookup, bucket.clock, random, mut w), "first OIDC publication")?
+    require(first.leaf_index == 1 && first.head_size == 2, "initial batch locator")?
+    let unlogged = std.string.replace(CHILD_META, "\"1\"]]]", "\"9\"]]]")
+    let _ = static.serve_get(mut seq, mut client, "/versions/begin-refusal", DEADLINE)
+    let Error(Invalid) = run_submit(c, mut seq, mut client, cfg, packet(unlogged, blob(CHILD_C)), mut lookup, bucket.clock, random, mut w) else {
+        return Error("unlogged floor")
+    }
+    let Error(Invalid) = run_submit(c, mut seq, mut client, cfg, packet(CHILD_META, blob(FIRST_C)), mut lookup, bucket.clock, random, mut w) else {
+        return Error("wrong-root frame")
+    }
+    let mut full = blob(CHILD_C)
+    list.push(mut full, make_zstd_raw_alt(option.unwrap(std.hex.decode(string.as_bytes(FIRST_C)))))
+    let metadata_fields = result.unwrap(submit.parts(CHILD_META))
+    let roots = cat3("[", pending.quoted(CHILD_ROOT), cat3(",", pending.quoted(FIRST_ROOT), "]"))
+    let mut missing: List[String] = clone(metadata_fields)
+    missing[3u64] = take roots
+    missing[4u64] = "[]"
+    let Error(Invalid) = run_submit(c, mut seq, mut client, cfg, packet(admit.array(missing), full), mut lookup, bucket.clock, random, mut w) else {
+        return Error("worker accepted a floor without history")
+    }
+    let mut malformed: List[Bytes] = list.new()
+    list.push(mut malformed, b"not a frame")
+    let Error(Invalid) = run_submit(c, mut seq, mut client, cfg, packet(CHILD_META, malformed), mut lookup, bucket.clock, random, mut w) else {
+        return Error("malformed frame")
+    }
+    let mut wrong_route: List[String] = clone(metadata_fields)
+    wrong_route[4u64] = std.string.replace(metadata_fields[4u64], "acme.dev/leaf@1", "other.dev/leaf@1")
+    let Error(Invalid) = run_submit(c, mut seq, mut client, cfg, packet(admit.array(wrong_route), blob(CHILD_C)), mut lookup, bucket.clock, random, mut w) else {
+        return Error("unconfigured remote floor")
+    }
+    let _ = static.serve_get(mut seq, mut client, "/versions/end-refusal", DEADLINE)
+    let child = applied(run_submit(c, mut seq, mut client, cfg, packet(CHILD_META, blob(CHILD_C)), mut lookup, bucket.clock, random, mut w), "Ed25519 floor consumer")?
+    require(child.leaf_index == 2 && child.head_size == 3, "consumer receipt")?
+    let moved = applied(run_submit(c, mut seq, mut client, cfg, packet(REBIND_META, list.new()), mut lookup, bucket.clock, random, mut w), "scope rebind")?
+    require(moved.leaf_index == 3 && moved.root == None, "rebind receipt")?
+    let _ = take seq
+    let mut fresh = service_sequencer()
+    result.unwrap(main.restart(mut fresh, mut client, random, DEADLINE, scoped fn() -> u64 {
+        1369353600
+    }, scoped fn(k: checkpoint.LogKind, i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut w, k, i, p, b, random)
+    }))
+    let again = applied(run_submit(c, mut fresh, mut client, cfg, packet(FIRST_META, blob(FIRST_C)), mut lookup, bucket.clock, random, mut w), "cold receipt")?
+    require(submit.locator(first) == submit.locator(again), "cold receipt changed")?
+    let replayed = static.serve_get(mut fresh, mut client, cat3("/c/", CHILD_ROOT, ".zst"), DEADLINE)
+    require(replayed.status == 200 && replayed.body == blob(CHILD_C)[0u64], "cold replayed consumer bytes")?
+    let hints = static.serve_get(mut fresh, mut client, "/versions/acme.dev/consumer", DEADLINE)
+    require(hints.status == 200 && hints.body == b"[[\"1.0.0\",\"2\",\"3\"]]", "cold consumer locator")?
+    let fields = {
+        let raw = option.unwrap(tlog.entry_at(fresh.logs[commit.log_index(Release)].log, 2))
+        let Release(f) = result.unwrap(pending.decode_release_entry(raw)) else {
+            return Error("missing release row")
+        }
+        take f
+    }
+    let side = static.serve_get(mut fresh, mut client, cat2("/e/", fields.facts_digest), DEADLINE)
+    require(side.status == 200 && pending.sha256_hex(side.body) == fields.facts_digest && contains_raw(side.body, string.as_bytes(FIRST_ROOT)), "cold verified floor facts")?
+    let ops: Inline[String, 5] =[RETIRE_META, REINSTATE_META, ADVISE_META, WITHDRAW_META, TAKEDOWN_META]
+    let hashes: Inline[String, 5] =[RETIRE_HASH, REINSTATE_HASH, ADVISE_HASH, WITHDRAW_HASH, TAKEDOWN_HASH]
+    for i in 0u64 .. 5 {
+        let mut trailers: List[Bytes] = list.new()
+        if i == 2 {
+            list.push(mut trailers, string.into_bytes(string.from(ADVISE_DOC)))
+        }
+        if i == 3 {
+            list.push(mut trailers, string.into_bytes(string.from(WITHDRAW_DOC)))
+        }
+        let rec = applied(run_submit(c, mut fresh, mut client, cfg, packet(ops[i], trailers), mut lookup, bucket.clock, random, mut w), cat2("status ", pending.decimal(i)))?
+        require(rec.leaf_index == i && rec.head_size == i + 1, "status receipt")?
+        let Some(current) = result.unwrap(status.current(mut fresh, mut client, FIRST_ROOT, DEADLINE)) else {
+            return Error("missing status")
+        }
+        require(current.last_leaf_hash == hashes[i], "exact status leaf mismatch")?
+        let n = map.len(current.advisories)
+        require((i == 2 && n == 1) || (i != 2 && n == 0), "withdrawal must clear exactly its OSV ID")?
+        let correct = match current.state {
+            Retired(reason, _) => i == 0 && reason == "deprecated",
+            Active => i > 0 && i < 4,
+            TakenDown(reason, _) => i == 4 && reason == "legal",
+        }
+        require(correct, "folded lifecycle")?
+    }
+    let removed = static.serve_get(mut fresh, mut client, cat3("/c/", FIRST_ROOT, ".zst"), DEADLINE)
+    require(removed.status == 410 && removed.body == b"[\"takedown\",\"legal\",\"removed\"]", "terminal removal")?
+    let _ = take client
+    let _ = take lookup
+    let mut docs = take server
+    task.cancel(mut docs)
+    let _ = task.join(take docs)
+    let _ = take network
+    let _ = task.join(take link)
+    let report = finish_bucket(take bucket)
+    let mut refusal_window = false
+    let mut boundaries = 0u64
+    for req in report.requests {
+        if req.key == "versions/begin-refusal" {
+            refusal_window = true
+            boundaries += 1
+        }
+        if req.key == "versions/end-refusal" {
+            refusal_window = false
+            boundaries += 1
+        }
+        if refusal_window && req.method == "PUT" {
+            return Error("admission attempted a bucket write")
+        }
+    }
+    require(boundaries == 2, "both admission boundaries observed")?
+    for (k, obj) in report.objects {
+        require(!contains_raw(obj.data, string.as_bytes(SERVICE_TOKEN)) && !contains_raw(string.as_bytes(k), string.as_bytes(SERVICE_TOKEN)), "live bearer persisted")?
+    }
+    let Some(marker) = map.get(report.objects, cat3("c/", FIRST_ROOT, ".zst")) else {
+        return Error("missing marker")
+    }
+    require(list.len(marker.data) == 0 && tlog.size(fresh.logs[commit.log_index(Status)].log) == 5 && tlog.size(fresh.logs[commit.log_index(Release)].log) == 4, "history or marker missing")
+}
+
+const FIRST_KEY_META: String = "[[\"hirsel-intent-v1\",\"https://pkg.example\",\"publish\",\"acme.dev\",\"0\",\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\",[\"acme.dev/leaf@1\",\"1.0.0\",\"leaf\",null,[[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],[\"oidc\",\"https://issuer.example\",\"repo/123\",\"123/.github/workflows/p.yml@refs/heads/main\"]]]],[\"ed25519\",\"Kay64UG8yvCyLhqU000LxzYeUm0L/hLIl5S8kyKWbdc=\"],\"DmhTNroeowEEhGVX3BcZnf4I5ux8iWBI8rGLdL9x4jh8vj/gYadoFvi6FcnI7SwhViCIy/Ru1WqfiPa/4wZ4Cw==\",[\"11c482d9f3650fa659c721f7579c78c413c3b9de94176a484c40a456de0a4c52\"],[]]"
+
+type Origin: send {
+    site: Listener,
+    endpoint: std.sim.s3.Endpoint,
+    net: Net,
+    clock: Clock,
+    c: Compiler,
+    tasks: Tasks,
+    random: Random
+}
+
+fn test_origin(take job: Origin) waits {
+    let Origin(site: take site, endpoint: take endpoint, net: network, clock, c, tasks, random) = take job
+    let mut client = connect_client(endpoint, tasks, clock, 3370)
+    let mut seq = service_sequencer()
+    let mut w = new_witness_pair(1369353600)
+    do_init_pair(mut seq, mut client, mut w, random)
+    let mut lookup = result.unwrap(registry_auth.lookup(network, clock, tasks))
+    let cfg = submit.Config(forges: list.new(), namespaces: namespaces())
+    let _ = main.serve(take site, mut seq, mut client, cfg, take lookup, c, clock, random, tasks, 4194304, scoped fn(k: checkpoint.LogKind, i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut w, k, i, p, b, random)
+    })
+}
+
+fn exchange(cl: std.http_client.Client, method: String, path: String, take data: Bytes) -> Result[(u16, Bytes), String] waits {
+    let mut payload: List[std.http_client.Segment] = list.new()
+    if method == "POST" {
+        list.push(mut payload, Plain(take data))
+    }
+    let req = std.http_client.Fetch(method: clone(method), url: cat2("http://127.0.0.1:3370", path), headers: list.new(), body: take payload)
+    let mut out: Bytes = list.new()
+    let Ok(response) = std.http_client.fetch_all(cl, req, mut out, DEADLINE) else {
+        return Error("HTTP exchange failed")
+    }
+    Ok((std.http_client.status(response), take out))
+}
+
+@test
+fn http_first_key(c: Compiler, tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 3370, list.new())
+    let (network, link, docs) = document_network(tasks, bucket.clock)
+    let (site, _) = result.unwrap(host.listen(network, Addr(ip: V4(2130706433), port: 3370), 8))
+    let mut serving = task.spawn(tasks, bytes 100663296, Origin(site: take site, endpoint: clone(bucket.endpoint), net: network, clock: bucket.clock, c: c, tasks: tasks, random: random), test_origin)
+    let pool = result.unwrap(std.http_client.pool(network, bucket.clock, tasks, System, std.http_client.limits(1048576)))
+    let client = std.http_client.handle(pool)
+    // Empty raw blocks keep the content and signature fixed while making the
+    // HTTP request exceed the inline-body threshold.
+    let raw = blob(FIRST_C)
+    let small = view raw[0u64]
+    let mut frame: Bytes = list.with_capacity(19000)
+    list.append(mut frame, list.slice(small, 0, 6))
+    for _ in 0u64 .. 6000 {
+        list.append(mut frame, b"\x00\x00\x00")
+    }
+    list.append(mut frame, list.slice(small, 6, list.len(small)))
+    let mut frames: List[Bytes] = list.new()
+    list.push(mut frames, clone(frame))
+    let (code, reply) = exchange(client, "POST", "/v1/submit", packet(FIRST_KEY_META, frames))?
+    let wanted = cat3("[\"pkg.example/log\",\"1\",\"2\",", pending.quoted(FIRST_ROOT), "]")
+    require(code == 200 && reply == string.as_bytes(wanted), "HTTP key enrollment and publish receipt")?
+    let (get, data) = exchange(client, "GET", cat3("/c/", FIRST_ROOT, ".zst"), list.new())?
+    require(get == 200 && data == frame, "HTTP static package bytes")?
+    let (bad, _) = exchange(client, "POST", "/v1/submit", b"\x00\x10\x00\x01")?
+    require(bad == 413, "oversized metadata length must return 413")?
+    let (invalid, _) = exchange(client, "POST", "/v1/submit", b"\x00\x00\x00\x02[]")?
+    require(invalid == 422, "invalid metadata must return 422")?
+    let (private_code, _) = exchange(client, "GET", "/log/pending/0", list.new())?
+    require(private_code == 403, "private key was served")?
+    task.cancel(mut serving)
+    let _ = task.join(take serving)
+    let _ = take client
+    let _ = take pool
+    let mut documents = take docs
+    task.cancel(mut documents)
+    let _ = task.join(take documents)
+    let _ = take network
+    let _ = task.join(take link)
+    let _ = finish_bucket(take bucket)
+    Ok(())
+}

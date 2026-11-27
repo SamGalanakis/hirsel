@@ -1,0 +1,137 @@
+// A locator is untrusted until it matches a leaf in the replayed release tree.
+pub type Child: send {
+    identity: String,
+    version: String,
+    root: String,
+    index: u64
+}
+
+pub type Error = Invalid | TooLarge | NotReady | Worker(compiler.Refusal)
+
+fn expand(frame: commit.FrameInput, mut total: u64, mut compressed: u64) -> Result[Bytes, Error] {
+    if list.len(frame.compressed) > 536870912 - compressed {
+        return Error(TooLarge)
+    }
+    compressed += list.len(frame.compressed)
+    let length = match pending.verify_zstd_frame(frame.compressed, frame.root, pending.MAX_COMPRESSED_FRAME, order.min(pending.MAX_EXPANDED_FRAME, 536870912 - total)) {
+        Ok(n) => n,
+        Error(FrameTooLarge) => return Error(TooLarge),
+        Error(_) => return Error(Invalid),
+    }
+    total += length
+    let Ok(content) = std.zstd.decode(frame.compressed, length, pending.MAX_ZSTD_WINDOW) else {
+        return Error(Invalid)
+    }
+    Ok(take content)
+}
+
+pub fn owns(namespaces: List[String], scope: String) -> bool {
+    for pattern in namespaces {
+        if pattern == "*" {
+            return true
+        }
+        if let Some(prefix) = std.string.strip_suffix(pattern, "/*") {
+            if prefix == scope {
+                return true
+            }
+            if let Some((host, _)) = std.string.split_once(scope, "/") {
+                if host == prefix {
+                    return true
+                }
+            }
+        }
+    }
+    false
+}
+
+// Only a leaf in this namespace's authenticated tree may supply a history row.
+// A future upstream verifier can provide the same tuple after checking its route.
+fn logged_child(log: tlog.Log, origin: String, namespaces: List[String], hint: Child) -> Result[compiler.HistoryRow, Error] {
+    let Some(scope) = pending.scope_of_identity(hint.identity) else {
+        return Error(Invalid)
+    }
+    if !owns(namespaces, scope) {
+        return Error(Invalid)
+    }
+    let Some(raw) = tlog.entry_at(log, hint.index) else {
+        return Error(Invalid)
+    }
+    let Ok(Release(row)) = pending.decode_release_entry(raw) else {
+        return Error(Invalid)
+    }
+    if row.root != hint.root || row.identity != hint.identity || row.version != hint.version {
+        return Error(Invalid)
+    }
+    Ok(compiler.HistoryRow(origin: clone(origin), identity: clone(row.identity), version: clone(row.version), root: clone(row.root)))
+}
+
+pub fn check(c: Compiler, mut seq: commit.Sequencer, mut client: std.object.Client, publication: registry_auth.Publication, frames: List[commit.FrameInput], hints: List[Child], namespaces: List[String], now: u64, deadline: u64) -> Result[compiler.CheckedLibrary, Error] waits {
+    if list.len(frames) == 0 || frames[0u64].root != publication.root {
+        return Error(Invalid)
+    }
+    if list.len(frames) > 4096 || list.len(hints) >= 4096 {
+        return Error(TooLarge)
+    }
+    let Ok(Some(current)) = commit.sync_release(mut seq, mut client, deadline) else {
+        return Error(NotReady)
+    }
+    if !checkpoint.cosignatures_fresh(seq.logs[commit.log_index(Release)].cfg, current.head, now) {
+        return Error(NotReady)
+    }
+    let mut total = 0u64
+    let mut compressed = 0u64
+    let content = expand(frames[0u64], mut total, mut compressed)?
+    let mut closure: List[compiler.LibraryEntry] = list.new()
+    let mut history: List[compiler.HistoryRow] = list.new()
+    let mut supplied: Map[String, bool] = map.new()
+    for i in 1u64 .. list.len(frames) {
+        let frame = view frames[i]
+        if frame.root == publication.root || (i > 1 && frames[i - 1].root >= frame.root) {
+            return Error(Invalid)
+        }
+        list.push(mut closure, compiler.LibraryEntry(root: clone(frame.root), content: expand(frame, mut total, mut compressed)?))
+        map.insert(mut supplied, clone(frame.root), true)
+    }
+    for i in 0u64 .. list.len(hints) {
+        let hint = view hints[i]
+        if hint.root == publication.root || (i > 0 && hints[i - 1].root >= hint.root) {
+            return Error(Invalid)
+        }
+        list.push(mut history, logged_child(seq.logs[commit.log_index(Release)].log, seq.registry_origin, namespaces, hint)?)
+        if !map.contains(supplied, hint.root) {
+            if list.len(closure) >= 4095 {
+                return Error(TooLarge)
+            }
+            let mut path = string.from("/c/")
+            string.push(mut path, hint.root)
+            string.push(mut path, ".zst")
+            let reply = static.serve_get(mut seq, mut client, path, deadline)
+            if reply.status == 404 || reply.status == 410 {
+                return Error(Invalid)
+            }
+            if reply.status != 200 {
+                return Error(NotReady)
+            }
+            let static.StaticResponse(body: take body, ..) = take reply
+            let frame = commit.FrameInput(root: clone(hint.root), compressed: take body)
+            list.push(mut closure, compiler.LibraryEntry(root: clone(hint.root), content: expand(frame, mut total, mut compressed)?))
+        }
+    }
+    let request = compiler.CheckLibrary(root: clone(publication.root), content: take content, closure: take closure, history: take history)
+    match compiler.check_library(c, request) {
+        Ok(value) => {
+            if value.header.identity != publication.identity || value.header.version != publication.version || value.root != publication.root {
+                return Error(Invalid)
+            }
+            Ok(take value)
+        },
+        Error(e) => Error(Worker(take e)),
+    }
+}
+
+pub fn array(parts: List[String]) -> String {
+    let mut s = string.from("[")
+    string.push(mut s, std.string.join(parts, ","))
+    string.push(mut s, "]")
+    take s
+}

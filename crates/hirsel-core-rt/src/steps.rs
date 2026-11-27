@@ -52,18 +52,23 @@ pub(crate) struct Ids {
 impl Ids {
     fn take(&mut self) -> u64 {
         if self.next == self.end {
-            self.next = NEXT
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-                    id.checked_add(ID_RANGE)
-                })
-                .unwrap_or_else(|_| {
-                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"StepIds"))
-                });
-            self.end = self.next + ID_RANGE;
+            self.refill();
         }
         let id = self.next;
         self.next += 1;
         id
+    }
+
+    #[cold]
+    fn refill(&mut self) {
+        self.next = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                id.checked_add(ID_RANGE)
+            })
+            .unwrap_or_else(|_| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"StepIds"))
+            });
+        self.end = self.next + ID_RANGE;
     }
 }
 
@@ -373,6 +378,7 @@ fn fund_nested(context: &mut Context, steps: u64, _site: u64) -> bool {
 }
 
 /// Install the first window directly. Only a published account needs a lock.
+#[inline]
 fn open_inline(context: &mut Context, steps: u64) {
     let window = steps.min(context.step_slice_tail);
     rewindow(context, |context| {

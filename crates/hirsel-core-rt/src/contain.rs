@@ -56,7 +56,20 @@ pub unsafe extern "C" fn hirsel_core_contain_enter(
 /// The current task owns context exclusively and has entered each named scope,
 /// the first innermost; its native counter is flushed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_contain_leave(context: *mut Context, mut layers: u64) {
+pub unsafe extern "C" fn hirsel_core_contain_leave(context: *mut Context, layers: u64) {
+    // The two complete contained calls have statically known cleanup orders.
+    // Specialize the same decoder so each runs straight through its three rows.
+    unsafe {
+        match layers {
+            0x123 => leave_layers(context, 0x123),
+            0x213 => leave_layers(context, 0x213),
+            _ => leave_layers(context, layers),
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn leave_layers(context: *mut Context, mut layers: u64) {
     while layers != 0 {
         // SAFETY: each entry is called under the contract of its own row.
         unsafe {

@@ -933,7 +933,6 @@ fn closed_task_heaps_unmap_their_emptied_pages() {
         assert_eq!(unsafe { survivor.pointer().as_ptr().read() }, 17);
         drop(survivor);
     }
-
     let mapped_kib = || {
         std::fs::read_to_string("/proc/self/status")
             .unwrap()
@@ -952,7 +951,8 @@ fn closed_task_heaps_unmap_their_emptied_pages() {
         drop(Block::new(&context, Some(24), 200, 8).unwrap());
         assert_eq!(context.available(), 64);
     };
-    task();
+    // Heaps take shards in turn; one task each reserves every shard's first range.
+    (0..crate::task_heap::slabs::SHARD_COUNT).for_each(|_| task());
     let before = mapped_kib();
     for _ in 0..1000 {
         task();

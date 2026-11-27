@@ -55,6 +55,7 @@ mod sha512;
 mod signature;
 mod simd;
 mod step_accounts;
+mod work_tally;
 mod world_ops;
 
 pub use map::run_map_hash;
@@ -1405,6 +1406,7 @@ fn run_world(
     let recipes = compute(&m.types).expect("layouts");
     let native = hirsel_core_ir::native_layout::resolve(std::borrow::Cow::Borrowed(m), &recipes);
     let m = native.as_ref();
+    work_tally::module(m);
     let mut mach = Machine::new(m, recipes, limit, &input);
     mach.install_statics();
     launch::install(&mut mach, f, input.revisions);
@@ -3746,16 +3748,6 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         assert!(self.mem[b].live, "use of a freed block");
         &self.mem[b].bytes[o..o + n]
     }
-    fn load_map_hash(&self, p: u64) -> hirsel_core_layout::map_hash::State {
-        hirsel_core_layout::map_hash::State(std::array::from_fn(|i| self.load(p + i as u64 * 8, 8)))
-    }
-
-    fn store_map_hash(&mut self, p: u64, state: hirsel_core_layout::map_hash::State) {
-        for (i, word) in state.0.into_iter().enumerate() {
-            self.store(p + i as u64 * 8, 8, word);
-        }
-    }
-
     fn load(&self, p: u64, n: usize) -> u64 {
         let bytes = self.get(p, n);
         if n == 8 {
@@ -4419,85 +4411,21 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     0 => Vec::new(),
                     n => self.get(p, n as usize).to_vec(),
                 };
+                work_tally::bytes(2 * a[1].min(a[3]));
                 let order = range(a[0], a[1]).cmp(&range(a[2], a[3]));
                 vec![order as i8 as u8 as u64]
             }
-            RtOp::MapHashBytes => {
-                let bytes = if a[1] == 0 {
-                    &[]
-                } else {
-                    self.get(a[0], a[1] as usize)
-                };
-                vec![hirsel_core_layout::map_hash::bytes(
-                    &self.maps.hash_key,
-                    bytes,
-                )]
-            }
-            RtOp::MapHashWord => vec![hirsel_core_layout::map_hash::word(
-                &self.maps.hash_key,
-                a[0],
-            )],
-            RtOp::MapHashStart => {
-                let state = hirsel_core_layout::map_hash::State::new(&self.maps.hash_key);
-                self.store_map_hash(a[0], state);
-                vec![]
-            }
-            RtOp::MapPlaceWord => {
-                #[cfg(feature = "map-observation")]
-                if let Some(stats) = &mut self.maps.observed {
-                    stats.last_word_strong = false;
-                }
-                vec![hirsel_core_layout::map_index::fast_word(
-                    a[0],
-                    self.maps.fast_salt[0],
-                )]
-            }
-            RtOp::MapPlaceBytes | RtOp::MapStrongBytes => {
-                let bytes = if a[1] == 0 {
-                    &[]
-                } else {
-                    self.get(a[0], a[1] as usize)
-                };
-                let [s0, s1] = self.maps.fast_salt;
-                vec![if op == RtOp::MapPlaceBytes {
-                    hirsel_core_layout::map_index::fast_bytes(bytes, s0, s1)
-                } else {
-                    hirsel_core_layout::map_hash::bytes(&self.maps.strong_key, bytes)
-                }]
-            }
-            RtOp::MapStrongWord => {
-                #[cfg(feature = "map-observation")]
-                if let Some(stats) = &mut self.maps.observed {
-                    stats.last_word_strong = true;
-                }
-                vec![hirsel_core_layout::map_hash::word(
-                    &self.maps.strong_key,
-                    a[0],
-                )]
-            }
-            RtOp::MapStrongStart => {
-                let state = hirsel_core_layout::map_hash::State::new(&self.maps.strong_key);
-                self.store_map_hash(a[0], state);
-                vec![]
-            }
-            RtOp::MapHashAddWord => {
-                let mut state = self.load_map_hash(a[0]);
-                state.word(a[1]);
-                self.store_map_hash(a[0], state);
-                vec![]
-            }
-            RtOp::MapHashAddBytes => {
-                let mut state = self.load_map_hash(a[0]);
-                let bytes = if a[2] == 0 {
-                    &[]
-                } else {
-                    self.get(a[1], a[2] as usize)
-                };
-                state.bytes(bytes);
-                self.store_map_hash(a[0], state);
-                vec![]
-            }
-            RtOp::MapHashFinish => vec![self.load_map_hash(a[0]).finish()],
+            RtOp::MapHashBytes
+            | RtOp::MapHashWord
+            | RtOp::MapHashStart
+            | RtOp::MapPlaceWord
+            | RtOp::MapPlaceBytes
+            | RtOp::MapStrongBytes
+            | RtOp::MapStrongWord
+            | RtOp::MapStrongStart
+            | RtOp::MapHashAddWord
+            | RtOp::MapHashAddBytes
+            | RtOp::MapHashFinish => self.map_op(op, a),
             RtOp::Xxh3Short => {
                 let data = if a[1] == 0 {
                     &[]
@@ -5493,6 +5421,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 }
                 self.touch(from, places[from.index()].0, n, false);
                 self.touch(to, places[to.index()].0, n, true);
+                work_tally::bytes(n as u64);
                 let (f, t) = (places[from.index()].0, places[to.index()].0);
                 assert!(
                     f == t || split(f).0 != split(t).0 || f + n as u64 <= t || t + n as u64 <= f,
@@ -5516,6 +5445,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 self.touch(from, places[from.index()].0, n, false);
                 self.touch(to, places[to.index()].0, n, true);
                 let f = places[from.index()].0;
+                work_tally::bytes(n as u64);
                 self.read_marked(f, n);
                 // Read the whole source first, so an overlapping target sees the old bytes.
                 let src = self.get(f, n).to_vec();

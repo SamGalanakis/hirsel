@@ -43,6 +43,7 @@ class Stream:
         self.state = seed & MASK
         self.replay = None if draws is None else list(draws)
         self.drawn = []
+        self.bounds = []   # per draw, the bound `below` reduced it by (None for a raw draw)
 
     def raw(self):
         if self.replay is not None:
@@ -54,10 +55,13 @@ class Stream:
             z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & MASK
             value = z ^ (z >> 31)
         self.drawn.append(value)
+        self.bounds.append(None)
         return value
 
     def below(self, bound):
-        return self.raw() % max(bound, 1)
+        value = self.raw() % max(bound, 1)
+        self.bounds[-1] = max(bound, 1)
+        return value
 
     def log_uniform(self, low_exp, high_exp):
         """A value in [2^low_exp, 2^high_exp], log-uniform; the simplest is 2^low_exp."""
@@ -197,6 +201,7 @@ class Entry:
     small_size: int
     large_size: int
     scopes: list
+    span: tuple = (0, 0)   # the entry's draws: stream positions [start, end)
 
 
 @dataclass
@@ -207,6 +212,7 @@ class Program:
     scopes: dict
     source: str = ''
     draws: list = field(default_factory=list)
+    bounds: list = field(default_factory=list)
 
     def predictions(self):
         """Per scope: its bound, floor terms, recursion and nesting, for the driver's oracles."""
@@ -275,6 +281,7 @@ class Generator:
         policy = self.policy()
         entries = []
         for index in range(ENTRIES):
+            start = len(self.stream.drawn)
             large = index >= ENTRIES - LARGE_ENTRIES
             small_size = self.stream.log_uniform(*SMALL)
             large_size = self.stream.log_uniform(*LARGE) if large else small_size
@@ -282,10 +289,10 @@ class Generator:
                 large_size = self.stream.log_uniform(*LARGE_DEPTH)
             size = large_size if large else small_size
             scopes = [self.scope(policy, 0, size) for _ in range(1 + self.stream.below(2))]
-            entries.append(Entry(index, large, small_size, large_size, scopes))
+            entries.append(Entry(index, large, small_size, large_size, scopes, (start, len(self.stream.drawn))))
         program = Program(seed, policy, entries, self.scopes)
         program.source = render(program)
-        program.draws = list(self.stream.drawn)
+        program.draws, program.bounds = list(self.stream.drawn), list(self.stream.bounds)
         return program
 
 

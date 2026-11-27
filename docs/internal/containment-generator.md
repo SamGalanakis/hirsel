@@ -331,6 +331,42 @@ Four checks, from the most independent to the least.
 - **Effect.** A glue loop or recursion without a step makes `S` infinite. This flags E1 and
   E2 statically, with no run at all.
 
+**O3b and O3c as built (slice C3).** The evaluator writes raw counts
+(`crates/hirsel-core-eval/src/work_tally.rs`). The rule lives in `core/tools/containment_gaps.py`.
+
+- **Bytes.** The tally counts the bytes `Copy`, `Move` and `compare_bytes` touch (both operands
+  of a comparison), at the copy row's quantum of 4096. That is the table's largest per-byte
+  quantum, so a red is real excess, not a quantum choice. Map hashing (`MapHashBytes`,
+  `MapHashAddBytes`, `MapPlaceBytes`, `MapStrongBytes`) is tallied apart as a named gap:
+  reported, never red. Element-wise loops that read words, such as derived `==` glue over a
+  `List[u64]`, are not in the byte tally. They are charged by the derived row at the call
+  site, and O3c checks that charge.
+- **The instruction rule is skipped.** `S` is unbounded while any step-free cycle exists.
+  Core-source loops (`int/decimal_digits`, `string/push_u64`, the map's probe and rebuild
+  loops) are in every program, so every run reports the rule as skipped.
+- **Prepaid loops.** A step-free block cycle is prepaid when its body takes work steps outside
+  the cycle, or when every direct call of the body follows a `work_steps` call in its block.
+  The derived `==` glue's element loop is charged the second way. A body reached only through
+  a function value is not seen as called.
+- **Recursion edges.** A call-graph edge counts when the callee is reachable from the caller's
+  entry along a path with no step point. Clone glue takes its box step in the block that
+  dominates the recursive call, so it passes.
+- **O3c reds.** Core-source loops are a named gap. Any other step-free cycle (generated code,
+  user code, glue) is red under `containment:o3c:<function>`.
+- **Gap controls.** `containment_gaps.CONTROLS` holds one fixed program per gap the tally
+  can see, run once per invocation. Each must show its excess, or the summary prints
+  `GAP SILENT`. A calibration control clones 65536 `u64` and must tally at least 8 bytes per
+  element and stay within its charged steps. Two gaps have no control:
+  - `==` on `Deque` and `Map` does not check (LANG-21: not key);
+  - key derivation has no operation apart from the derived key's hashing, which the
+    derived-key control covers.
+- **A finding.** The controls also report step-free cycles outside core. The
+  `[0u64; 32768]` repeat literal lowers to a fill loop with no step. Its length is fixed by
+  the type, but MEM-30 does not name it.
+- **Measured** over seeds 0..200 with every build, metering and the tally on: 15709 bounds
+  judged, no O3b or O3c red, every control shown. The 200 batches took 5994 CPU-s against
+  C2's 5044, so the tally adds about 19%, and 45 CPU-minutes cover about 90 batches.
+
 **O3d: the native ceiling.** The natives run with `HIRSEL_TEST_WORK_CEILING` set, so the 3226
 assertion fires in the testing runtime. It is cheap, but it is relative to the helper, so it
 is not counted as an independent oracle.

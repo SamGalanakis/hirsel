@@ -150,12 +150,19 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         }
         let id = self.open_steps(None, n, parent);
         t.step_bounds.push(StepBound { id });
+        if super::work_tally::enabled() {
+            super::work_tally::open(id, n, self.instructions);
+        }
         true
     }
 
     /// The lexical exit of the innermost bound: the entering task's interest.
     pub(super) fn step_leave(&mut self, t: &mut Task) -> u64 {
         let StepBound { id } = t.step_bounds.pop().expect("an open step scope");
+        if super::work_tally::enabled() {
+            let left = self.account(id).left;
+            super::work_tally::close(id, left, self.instructions);
+        }
         self.release_steps(id);
         id
     }

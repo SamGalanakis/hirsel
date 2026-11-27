@@ -3,15 +3,19 @@
 
 Design: docs/internal/containment-generator.md. Oracles: O1 (no run stop inside a contained
 scope), O2 (outcomes agree across engines, up to the spec's tolerances) and O3a (the
-predicted step floor forces OutOfTime), O4a (a predicted byte fit admits no capacity), and with
+predicted step floor forces OutOfTime), O3b and O3c on the evaluator's work tally, with the gap
+controls (containment_gaps.py), O4a (a predicted byte fit admits no capacity), and with
 --meter-runtime O5 through check_metering, O4b (native bytes ≤ evaluator's) and O4c (0 bytes
 left admitted).
 Example: containment_fuzz.py once --seed 7 --builds evaluator,cranelift-dev \\
     --compiler hirsel --runtime libhirsel_core_rt.a --evaluator hirsel-core-contract-eval --out /tmp/c
          containment_fuzz.py range --seeds 0..200 --jobs 8 ... --out /tmp/c
+         containment_fuzz.py nightly --cpu-seconds 3600 --alert alert.txt ... --out /tmp/c
+nightly runs batches from --base-seed until 3/4 of the CPU budget is spent, minimises one red
+per key in the rest (containment_shrink.py), and writes one alert line per red key.
 """
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import os
 from pathlib import Path
@@ -22,6 +26,7 @@ import sys
 import time
 from types import SimpleNamespace
 
+import containment_gaps as gaps
 import containment_gen as gen
 from contract_exec import Evaluator, library_sources, native_build
 from std_contracts import evaluator_meter, native_meter
@@ -88,7 +93,7 @@ def fits(scope, size):
 
 def refused(record):
     kind, payload = record
-    return kind == gen.CAPACITY or (kind == gen.CAUSED and payload & gen.CAPACITY_BIT)
+    return kind == gen.CAPACITY or (kind == gen.CAUSED and bool(payload & gen.CAPACITY_BIT))
 
 
 def accepted_forced(scope, record):
@@ -100,7 +105,7 @@ def red(key, build, entry, size, detail):
     return dict(key=key, build=build, entry=entry, size=size, detail=detail)
 
 
-def judge_run(program, build, entry, size, outcome, reds):
+def judge_run(program, build, entry, size, outcome, reds, tally):
     """O1 and O3a on one run. `outcome` is (status, stdout, stderr), status None for a timeout."""
     status, stdout, stderr = outcome
     found = records(stdout)
@@ -121,6 +126,9 @@ def judge_run(program, build, entry, size, outcome, reds):
         if record[0] == gen.O3A_FAIL or (forced(scope, size) and not accepted_forced(scope, record)):
             reds.append(red(f'containment:work-floor:{form(program, scope_id)}', build, entry, size,
                             f'scope {scope_id}: n {scope["bound"]}, record {gen.KIND_NAMES.get(record[0])} {record[1]}'))
+        if scope['form'] == 'isolate_bytes':   # O4a's reach: fits judged, and refusals seen beyond b
+            tally['o4a_fits' if fits(scope, size) else 'o4a_over'] += 1
+            tally['o4a_refused'] += not fits(scope, size) and refused(record)
         if fits(scope, size) and refused(record):
             reds.append(red(f'containment:o4a:{form(program, scope_id)}', build, entry, size,
                             f'scope {scope_id}: charge {scope["charge"] * size} ≤ b {scope["bound"]}, '
@@ -131,7 +139,7 @@ def judge_run(program, build, entry, size, outcome, reds):
 
 
 def entry_scopes(program, entry):
-    return program['entries'][entry]['scopes']
+    return next(e for e in program['entries'] if e['index'] == entry)['scopes']
 
 
 def ancestors(program):
@@ -268,18 +276,23 @@ def once(args, seed):
     program = json.loads((package / 'program.json').read_text())
     inputs = work / 'inputs.json'
     inputs.write_text(json.dumps(manifest(args.root, (package / 'main.hirsel').resolve())))
-    reds, tally, costs = [], dict(compared=0, exact=0), {}
+    reds, costs, core_loops = [], {}, set()
+    tally = dict(compared=0, exact=0, o4a_fits=0, o4a_over=0, o4a_refused=0, o3b_bounds=0, o3b_hashing=0,
+                 o3_instructions_skipped=0)
     small, references = {}, {}
     if 'evaluator' in args.builds:
         clock = time.monotonic()
-        with Evaluator(args.evaluator) as resident:
+        work_tally, offset = work / 'tally.jsonl', 0
+        with Evaluator(args.evaluator, env=gaps.tally_env(work_tally)) as resident:
             for entry in program['entries']:
                 outcome = run_evaluator(resident, inputs, entry['index'])
+                lines, offset = gaps.lines_since(work_tally, offset)
+                gaps.judge(program, entry['index'], entry['small_size'], lines, reds, tally, core_loops, red, form)
                 if outcome[0] == 'harness':
                     reds.append(red('containment:generator:evaluator', 'evaluator', entry['index'],
                                     entry['small_size'], outcome[2].decode(errors='replace')[:600]))
                     break
-                small[entry['index']] = judge_run(program, 'evaluator', entry['index'], entry['small_size'], outcome, reds)
+                small[entry['index']] = judge_run(program, 'evaluator', entry['index'], entry['small_size'], outcome, reds, tally)
             for entry in program['entries'] if args.meter_runtime else ():
                 if entry['metered']:
                     try:
@@ -306,7 +319,7 @@ def once(args, seed):
         with ThreadPoolExecutor(max_workers=args.run_jobs) as pool:
             outcomes = list(pool.map(lambda job: run_native(binary, *job), jobs))
         for (entry, size), outcome in zip(jobs, outcomes):
-            found = judge_run(program, build, entry, size, outcome, reds)
+            found = judge_run(program, build, entry, size, outcome, reds, tally)
             if entry in small and size == program['entries'][entry]['small_size']:
                 agree(program, entry, size, small[entry], found, build, reds, tally)
         costs[f'{build}-runs'] = round(time.monotonic() - clock, 2)
@@ -331,6 +344,7 @@ def once(args, seed):
             meter_binary.unlink(missing_ok=True)
     shutil.rmtree(work / 'store', ignore_errors=True)
     result = dict(seed=seed, version=gen.VERSION, builds=args.builds, reds=reds, records=tally, costs=costs,
+                  core_loops=sorted(core_loops),
                   seconds=round(time.monotonic() - started, 2),
                   package=str(package))
     (work / 'result.json').write_text(json.dumps(result, indent=1) + '\n')
@@ -339,7 +353,7 @@ def once(args, seed):
     return result
 
 
-def summarize(results, out, cpu_seconds):
+def summarize(results, out, cpu_seconds, controls=()):
     compared = sum(r['records']['compared'] for r in results)
     exact = sum(r['records']['exact'] for r in results)
     keys = {}
@@ -349,13 +363,23 @@ def summarize(results, out, cpu_seconds):
     print(f"seeds {len(results)}; records compared {compared}, exact {exact}"
           f" ({exact / compared:.1%})" if compared else f'seeds {len(results)}; no records compared')
     print(f'CPU {cpu_seconds} s over child processes')
+    o4a = {k: sum(r['records'].get(k, 0) for r in results) for k in ('o4a_fits', 'o4a_over', 'o4a_refused')}
+    print(f"O4a: {o4a['o4a_fits']} predicted fits judged; {o4a['o4a_refused']} of {o4a['o4a_over']} runs past b refused")
+    o3 = {k: sum(r['records'].get(k, 0) for r in results) for k in ('o3b_bounds', 'o3b_hashing', 'o3_instructions_skipped')}
+    loops = sorted({f for r in results for f in r.get('core_loops', ())})
+    print(f"O3b: {o3['o3b_bounds']} bounds judged; {o3['o3b_hashing']} exceed only with map hashing (sanctioned)."
+          f" Instruction rule skipped on {o3['o3_instructions_skipped']} runs: S is unbounded while a step-free loop exists")
+    print(f"O3c sanctioned (core-source loops outside the table): {', '.join(loops) or 'none'}")
+    for control in controls:
+        label = {True: 'sanctioned', False: 'GAP SILENT', None: 'finding'}[control['shown']]
+        print(f"{label}: {control['gap']}: {control['detail']}")
     for key, hits in sorted(keys.items()):
         seed, first = hits[0]
         print(f"RED {key}: {len(hits)} runs, first seed {seed} entry {first['entry']} size {first['size']}"
               f" on {first['build']}: {first['detail'][:200]}")
     summary = dict(seeds=[r['seed'] for r in results], compared=compared, exact=exact,
                    reds={k: [dict(seed=s, **f) for s, f in v] for k, v in keys.items()},
-                   cpu_seconds=cpu_seconds)
+                   cpu_seconds=cpu_seconds, core_loops=loops, controls=list(controls))
     (out / 'summary.json').write_text(json.dumps(summary, indent=1) + '\n')
     vacuous = compared and exact / compared < VACUOUS
     if vacuous:
@@ -363,9 +387,55 @@ def summarize(results, out, cpu_seconds):
     return int(bool(keys) or bool(vacuous))
 
 
+def batches(args, budget):
+    """Batches from args.base_seed until the next would pass `budget` child CPU-seconds at the
+    running mean cost; a started batch always finishes (design, "Nightly budget and hook")."""
+    results, running, seed, start = [], set(), args.base_seed, gen_cpu()
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        while True:
+            spent = gen_cpu() - start
+            mean = spent / len(results) if results else 0
+            while len(running) < args.jobs and spent + mean * (len(running) + 1) < budget:
+                running.add(pool.submit(once, args, seed))
+                seed += 1
+                if not results:
+                    break   # one batch first, to learn the cost
+            if not running:
+                return results
+            done, running = wait(running, return_when=FIRST_COMPLETED)
+            results += [future.result() for future in done]
+
+
+def gen_cpu():
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
+
+
+def alert_lines(args, results, controls, budget_end):
+    """One line per red key, with the first seed and the minimised package, then silent gaps."""
+    import containment_shrink as shrink
+    keys = {}
+    for r in results:
+        for found in r['reds']:
+            keys.setdefault(found['key'], []).append((r, found))
+    lines = []
+    for key, hits in sorted(keys.items()):
+        r, found = hits[0]
+        where = f"seed {r['seed']} entry {found['entry']} size {found['size']} on {found['build']}"
+        if gen_cpu() < budget_end:
+            fields = shrink.minimise(sys.modules[__name__], args, r['seed'], found, args.out / 'minimised')
+        else:
+            fields = dict(minimised=False, reason='CPU budget spent')
+        tail = (f"minimised {fields['path']} (size {fields['size']} on {fields['build']}, {fields['runs']} runs)"
+                if fields['minimised'] else f"not minimised ({fields['reason']}); package {r['package']}")
+        lines.append(f'containment {key}: {len(hits)} runs; {where}; {tail}')
+    lines += [f"containment gap-silent: {c['gap']}: {c['detail']}" for c in controls if c['shown'] is False]
+    return lines
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('mode', choices=['once', 'range'])
+    parser.add_argument('mode', choices=['once', 'range', 'nightly'])
     parser.add_argument('--seed', type=int)
     parser.add_argument('--seeds', help='A..B, end exclusive')
     parser.add_argument('--builds', default='evaluator,cranelift-dev')
@@ -380,6 +450,9 @@ def main():
     parser.add_argument('--jobs', type=int, default=4, help='seeds run at once (range)')
     parser.add_argument('--run-jobs', type=int, default=2, help='native runs at once within a seed')
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--cpu-seconds', type=float, default=3600, help='nightly: child CPU budget')
+    parser.add_argument('--base-seed', type=int, default=int(time.time()), help='nightly: first seed')
+    parser.add_argument('--alert', type=Path, help='nightly: append one line per red key here')
     args = parser.parse_args()
     args.builds = [b.strip() for b in args.builds.split(',') if b.strip()]
     unknown = [b for b in args.builds if b not in BUILDS]
@@ -393,6 +466,19 @@ def main():
         parser.error('--meter-runtime needs the evaluator build, the reference for O4b and the floor')
     args.out.mkdir(parents=True, exist_ok=True)
     args.root = args.root.resolve()
+    if args.mode == 'nightly':
+        start = gen_cpu()
+        results = batches(args, 0.75 * args.cpu_seconds)
+        controls = (gaps.controls(args.evaluator, args.root, args.out / 'gaps', manifest, gen.ROOT_LIMIT, Quiet())
+                    if 'evaluator' in args.builds else ())
+        status = summarize(results, args.out, round(gen_cpu() - start, 1), controls)
+        lines = alert_lines(args, results, controls, start + args.cpu_seconds)
+        for line in lines:
+            print(line)
+        if lines and args.alert:
+            with args.alert.open('a') as alert:
+                alert.write(''.join(line + '\n' for line in lines))
+        return status
     if args.mode == 'once':
         if args.seed is None:
             parser.error('once needs --seed')
@@ -406,9 +492,11 @@ def main():
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         results = list(pool.map(lambda s: once(args, s), seeds))
+    controls = (gaps.controls(args.evaluator, args.root, args.out / 'gaps', manifest, gen.ROOT_LIMIT, Quiet())
+                if 'evaluator' in args.builds else ())
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu = after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
-    return summarize(results, args.out, round(cpu, 1))
+    return summarize(results, args.out, round(cpu, 1), controls)
 
 
 if __name__ == '__main__':

@@ -17,12 +17,12 @@ from case_progress import Case
 
 class Evaluator:
     """One checked-product store per gate, one fresh evaluator world per request."""
-    def __init__(self, binary):
+    def __init__(self, binary, env=None):
         self.binary = binary
         self.errors = tempfile.TemporaryFile()
         self.active_case = None
         self.process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE)
+                                        stderr=subprocess.PIPE, env=env)
         self.stderr_reader = threading.Thread(target=self.read_errors)
         self.stderr_reader.start()
 

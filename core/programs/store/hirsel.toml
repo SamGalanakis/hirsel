@@ -963,6 +963,9 @@ limit = 536870912
 [tests.runs."store@1/store/test_l102_hot_chain"]
 limit = 536870912
 
+[tests.runs."store@1/store/test_l102_hot_build_two_orphans"]
+limit = 536870912
+
 [tests.runs."store@1/store/tiered_l70_refusals"]
 limit = 536870912
 

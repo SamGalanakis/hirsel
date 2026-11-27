@@ -311,12 +311,17 @@ fn test_l102_hot_migrate_untouched(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
 }
 
 // L102 (c): the "hot-migrate" W2 crash scenario (store_crash_tests.py). The
-// write phase runs `hot_reverse` over 3000 Tiered rows at dirty 65536, so
-// cuts land while runs stream, at the turn to the merge, in the merge, and at
-// the publish.
+// write phase runs `hot_reverse` over `L102_CRASH_ROWS` Tiered rows at dirty
+// 65536, so cuts land while runs stream, at the turn to the merge, in the
+// merge, and at the publish. A completed write that ran fewer than two cuts
+// refuses, so the scenario cannot pass with no cut inside the build.
 // The crash binary runs under a 64 MiB process limit, so its cache is the
 // smallest the Tiered floor admits: the writer's pins plus one reader
 // (`VALUE_LIMIT` + 1 MiB).
+// The crash fixtures' row count: enough that each build crosses
+// `dirty_bytes` (65536) and cuts at least twice, so W2 cuts land inside it.
+const L102_CRASH_ROWS: u64 = 6000
+
 fn l102_crash_options() -> Result[Options, Error] {
     let mut overrides = derived_sizes()
     overrides.resident_limit = Some(268435456u64)
@@ -328,13 +333,17 @@ fn l102_crash_options() -> Result[Options, Error] {
 
 fn l102_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l102_crash_options()?)?
-    let _ = hot_seed(mut db, 3000)?
+    let _ = hot_seed(mut db, L102_CRASH_ROWS)?
     close(take db)
 }
 
 fn l102_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l102_crash_options()?)?
+    let before = db.checkpointed
     run_migration(mut db, tasks, code.describe(hot_reverse))?
+    if db.checkpointed - before < 2 {
+        return Error(Missing("build cut"))
+    }
     close(take db)
 }
 
@@ -348,7 +357,7 @@ fn l102_crash_state(d: Dir, mut db: Db, old: bool) -> Result[bool, Error] waits 
         return Ok(false)
     }
     if old {
-        hot_rows(mut db, string.from("rows"), 3000)?
+        hot_rows(mut db, string.from("rows"), L102_CRASH_ROWS)?
         if let Ok(_) = table(mut db, "moved", std.codec.key_u64(), std.codec.of_u64()) {
             return Ok(false)
         }
@@ -359,7 +368,7 @@ fn l102_crash_state(d: Dir, mut db: Db, old: bool) -> Result[bool, Error] waits 
     if let Ok(_) = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()) {
         return Ok(false)
     }
-    l102_reversed(d, mut db, 3000)?
+    l102_reversed(d, mut db, L102_CRASH_ROWS)?
     Ok(true)
 }
 
@@ -597,6 +606,66 @@ fn l102_lists(db: Db, name: String) -> Result[bool, Error] {
     }))
 }
 
+// L102 (e): a Migrate declaration adding `by_u` is refused `Conflict("by_u")`.
+fn l102_unique_refused(mut db: Db) -> Result[(), Error] waits {
+    let mut decl = declare(db, Migrate)?
+    let mut rows_decl = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = index(mut decl, mut rows_decl, "by_u", Unique, code.describe(l102_unique_key), std.codec.key_u64())?
+    let _ = finish(mut decl, take rows_decl)?
+    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other_decl)?
+    match seal(mut db, take decl) {
+        Error(Conflict(name)) if name == "by_u" => Ok(()),
+        _ => fail("L102 (e): the duplicate past the first build cut was not Conflict(by_u)"),
+    }
+}
+
+// The names of the listed owner-3 pins, in slot order.
+fn l102_owner3_names(db: Db) -> List[String] {
+    let mut names: List[String] = list.new()
+    for held in pages.holder_pins(db.holders) {
+        if held.owner == ImportPin {
+            list.push(mut names, clone(held.name))
+        }
+    }
+    take names
+}
+
+// L102 (c), second row (F6): an `import` pin no kept import holds, as a
+// crashed deploy leaves it, then a hot build refused past its build cuts,
+// which leaves its `build` pin listed. `close` runs no cut, so the reopen
+// lists both owner-3 pins; the first holder-free cut drops both at once, and
+// `rows` keeps its model rows through it and a further reopen. Red on main:
+// `Tiered(Migrate)` at `index`; with one orphan per cut (`one_orphan_per_cut`)
+// the import pin outlives the cut.
+@test
+fn test_l102_hot_build_two_orphans(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, hot_options(65536)?)?
+    let _ = hot_seed(mut db, 6000)?
+    let held = snapshot(db)
+    let change = change_pin(mut db, ImportPin, "import", held)?
+    durable(mut db, change)?
+    l102_unique_refused(mut db)?
+    close(take db)?
+    let mut again = open(tasks, d, c, r, hot_options(65536)?)?
+    let listed = l102_owner3_names(again)
+    if list.len(listed) != 2 || !list.contains(listed, string.from("build")) || !list.contains(listed, string.from("import")) {
+        fail("L102 (c): the reopen does not list both owner-3 pins")
+    }
+    let _ = checkpoint(mut again)?
+    if list.len(l102_owner3_names(again)) != 0 {
+        fail("L102 (c): one holder-free cut left an owner-3 pin")
+    }
+    hot_rows(mut again, string.from("rows"), 6000)?
+    close(take again)?
+    let mut third = open(tasks, d, c, r, hot_options(65536)?)?
+    if list.len(l102_owner3_names(third)) != 0 {
+        fail("L102 (c): an owner-3 pin is listed after the reopen")
+    }
+    hot_rows(mut third, string.from("rows"), 6000)?
+    close(take third)
+}
+
 // L102 (e): a Migrate declaration adds the `Unique` index `by_u` on the
 // Tiered table, whose duplicate key is met past the first build cut. Seal
 // refuses `Conflict("by_u")` with main's head and catalog unchanged: `by_u`
@@ -609,16 +678,7 @@ fn test_l102_hot_unique_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let rows = hot_seed(mut db, 6000)?
     let head = pages.holder_heads(db.holders)[0u64].head
     let before = db.checkpointed
-    let mut decl = declare(db, Migrate)?
-    let mut rows_decl = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let _ = index(mut decl, mut rows_decl, "by_u", Unique, code.describe(l102_unique_key), std.codec.key_u64())?
-    let _ = finish(mut decl, take rows_decl)?
-    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
-    let _ = finish(mut decl, take other_decl)?
-    match seal(mut db, take decl) {
-        Error(Conflict(name)) if name == "by_u" => (),
-        _ => fail("L102 (e): the duplicate past the first build cut was not Conflict(by_u)"),
-    }
+    l102_unique_refused(mut db)?
     // Fixture guard: the build cut before it met the duplicate.
     if db.checkpointed == before || !l102_owner3_pin(db) {
         fail("L102 (e): the fixture refused before any build cut")
@@ -712,10 +772,15 @@ fn test_l102_hot_chain(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 }
 
 // L102 (c) for the index build: crash scenario `hot-index-build` cuts W2 at
-// every boundary of (b)'s declaration on 3000 rows at the crash sizing.
+// every boundary of (b)'s declaration on `L102_CRASH_ROWS` rows at the crash
+// sizing; a completed write that ran fewer than two cuts refuses.
 fn l102_index_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l102_crash_options()?)?
+    let before = db.checkpointed
     let _ = l102_declare(mut db, Migrate)?
+    if db.checkpointed - before < 2 {
+        return Error(Missing("build cut"))
+    }
     close(take db)
 }
 
@@ -725,16 +790,22 @@ fn l102_index_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
 // pin is listed and the stamps are published (F2); a further write and cut
 // reopen to the same state.
 fn l102_index_crash_state(d: Dir, mut db: Db, old: bool, n: u64) -> Result[bool, Error] waits {
+    // NEW binds both extractors before the trust walk reads the indexes.
+    let handles: Option[(Index[u64, u64, u64, ()], Aggregate[u64])] = if old {
+        None
+    } else {
+        Some(l102_declare(mut db, Open)?)
+    }
+    trust_store(mut db)?
     if l102_owner3_pin(db) {
         return Ok(false)
     }
     hot_rows(mut db, string.from("rows"), n)?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     l102_stamps(d, db, rows.id)?
-    if old {
+    let Some((ix, bands)) = handles else {
         return Ok(!l102_lists(db, string.from("by_v"))? && !l102_lists(db, string.from("by_band"))?)
     }
-    let (ix, bands) = l102_declare(mut db, Open)?
     l102_by_v(db, ix, n)?
     l102_bands(db, bands, n)?
     l102_stamps(d, db, ix.id)?
@@ -743,25 +814,24 @@ fn l102_index_crash_state(d: Dir, mut db: Db, old: bool, n: u64) -> Result[bool,
 
 fn l102_index_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
     let mut db = open(tasks, d, c, r, l102_crash_options()?)?
-    trust_store(mut db)?
     let old = !l102_lists(db, string.from("by_v"))?
     if old && required_new {
         return Ok(false)
     }
     let _ = checkpoint(mut db)?
-    if !l102_index_crash_state(d, mut db, old, 3000)? {
+    if !l102_index_crash_state(d, mut db, old, L102_CRASH_ROWS)? {
         return Ok(false)
     }
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let Committed(_) = run(mut db, Some(100000000u64), copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
-        put(mut tx, t, 3000u64, 3000u64 % 97u64)
+        put(mut tx, t, L102_CRASH_ROWS, L102_CRASH_ROWS % 97u64)
     })? else {
         return Ok(false)
     }
     let _ = checkpoint(mut db)?
     close(take db)?
     let mut again = open(tasks, d, c, r, l102_crash_options()?)?
-    let good = l102_index_crash_state(d, mut again, old, 3001)?
+    let good = l102_index_crash_state(d, mut again, old, L102_CRASH_ROWS + 1u64)?
     close(take again)?
     Ok(good)
 }

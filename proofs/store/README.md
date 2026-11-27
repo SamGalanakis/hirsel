@@ -23,7 +23,7 @@ implementation lane starts.
 
 | File | What it checks |
 |---|---|
-| `StoreRetention.tla` | Tiered pack retention: commits, cuts and their publication, pins and forks, Snapshots and their leases, the candidate queue, Tiered-idle cuts, the compaction probe, promotion of a historical Snapshot, demotion Tiered → Memory, anchors (archival retention), AP16 Remove, the export lease and its copy, crash and reopen between any two steps. |
+| `StoreRetention.tla` | Tiered pack retention: commits, cuts and their publication, pins and forks, Snapshots and their leases, the candidate queue, Tiered-idle cuts, the compaction probe, promotion of a historical Snapshot, demotion Tiered → Memory, anchors (archival retention), AP16 Remove, the export lease and its copy, a projector image carried as a Snapshot's tail base (`WithTail`), crash and reopen between any two steps. |
 | `StoreCatchUp.tla` | Export catch-up and install over a Tiered index across a demotion and a rebuild (§3.5a, §13.10a, §13.7 D-D7-5), the holder's own replay and fold, and recovery of a commit prefix at or past the last acknowledged ticket. |
 | `StoreJanitor.tla` | Host-stream retirement: the §12.11.8 release rule that lets `low` pass a batch. |
 | `TraceStoreRetention.tla` | Trace validation: each row of a crash-sim retention trace is one `StoreRetention` action whose result equals what the sim observed (below). |
@@ -50,7 +50,7 @@ Each TLA+ module takes a `Rules` constant naming the reading of the spec it chec
 | Name | STORE-SPEC section | Claim |
 |---|---|---|
 | `RetainReachable` | §13.6 "The probe"; §13.5 step 2 "Resolution frees nothing"; §1.9 | Every frame a durable holder names (a head, a pin or fork, an anchor, a queue row) is in a listed pack whose file exists, at the PACK_INDEX row that holds its stamp. Nothing reachable is retired or reused. |
-| `SnapReadable` | §13.5 holder leases; AP16 Remove | An open Snapshot's frames stay on disk, and promotion never reads a removed frame. |
+| `SnapReadable` | §13.5 holder leases, "Tail bases are protected too" (v2.177); AP16 Remove | An open, unexpired Snapshot's frames stay on disk, through its primary and its tail base alike, and promotion never reads a removed frame. |
 | `ImageComplete` | §13.10a (v2.157 D-ZL-2) | Every pack the copied MANIFEST lists is in the export image. |
 | `AckedDurable` | §1.9; §3.5 step 6 | An acknowledged pin survives every crash. |
 | `IdleReachesNoFrame` | §13.6 "Tiered-idle cuts", I-TI | A Tiered-idle generation reaches no class-3/4 frame. |
@@ -78,16 +78,17 @@ Counts are from one run with 8 workers. `check_proofs.py` prints them and never 
 | `StoreRetention` v2164, export lease on (`--deep`) | not rerun since the v2.164 fold (1,403,440 distinct states under the v2161 model) |
 | `StoreRetention` v2164, anchors on, one key (`--deep`) | not rerun since the v2.164 fold (944,626 distinct states under the v2161 model) |
 | `StoreRetention` v2164, build pin on (`retention_build`) | no error; 302,662 distinct states, depth 23, about 4 min |
+| `StoreRetention` v2164, tail base on (`retention_tail`) | no error; 304,456 distinct states, depth 23, about 90 s |
 | `StoreRetention` count3157 (3157's rejected rule) | no error; 633,996 distinct states, depth 23, about 10 min |
 | `StoreRetention` v2157 | `RetainReachable` violated: the 3160 hole (`traces/tiered-idle-v2157.txt`) |
 | `StoreRetention` v2157_restart | `Progress` violated (`traces/tiered-idle-v2157-restart.txt`) |
 | `StoreCatchUp` v2161 | no error; 577,192 distinct states, depth 15, about 7 s |
 | `StoreCatchUp` v2157 | `SupersedePremise`, `NoFalseCorrupt` and `BackfillNoneEmpty` violated: 3150 F1 (`traces/catchup-f1-*.txt`) |
 | `StoreJanitor` | no error; 229,799 distinct states, depth 19, 2 s |
-| Mutants | 19 of 19 caught under the current rules, each in under 3 s; `idle_predicts_drain` is review 3177 F1's broken reading (`traces/idle-predicts-drain-f1.txt`) |
-| Reachability witnesses | 14 of 14 reached with `Track = TRUE`, each in under 3 s: 11 on `retention_fork`, and 3 on `retention_build` (a build cut's probe moves U, the graft leaves a pin frame out, a holder-free cut drops an orphan pin) |
+| Mutants | 20 of 20 caught under the current rules, each in under 3 s; `idle_predicts_drain` is review 3177 F1's broken reading (`traces/idle-predicts-drain-f1.txt`) |
+| Reachability witnesses | 16 of 16 reached with `Track = TRUE`, each in under 3 s: 11 on `retention_fork`, 3 on `retention_build` (a build cut's probe moves U, the graft leaves a pin frame out, a holder-free cut drops an orphan pin), and 2 on `retention_tail` (an image-only pack retires under a live capture, and its file goes after expiry) |
 | Python models (§3.9) | 7 of 7 pass; `model_v221_scope.py` takes about 28 s |
-| Whole default run | 1,030 s (shared host; the two retention baselines are most of it) |
+| Whole default run | 1,197 s (shared host; the two retention baselines are most of it) |
 
 **The Tiered-idle hole (v2157).** A plain cut writes pack P1 with two frames. Overwrite the second row, then capture Snapshot S.
 A Tiered → Memory cut hands the head's Cold root to the queue. A cut pins S (promotion copies S's
@@ -124,6 +125,19 @@ run.
 - **`StoreCatchUp.tla` is unchanged.** The build pin exists only inside a hot `Migrate`, and the publish's lease step is `Drift`, so no catch-up round replays a hot build.
 - **Outside the model.** Hot pages and stamp counters are not modelled. So review 3228's F1 (a graft that drops the Hot tail) and F2 (split stamp counters) are L102 cases (`graft_installed_pin`, `plan_counter_rollback`), not mutants.
 - **Not a model case: liveness.** An orphan rule keyed on `import` alone would keep a crashed build's pin listed forever. That is a liveness failure, and the models check only safety, so L102 (c) catches it instead.
+
+## The tail base (STORE-SPEC v2.177, text only, not yet built)
+
+§13.3 "The captured read roots" lets a Snapshot whose primary is Memory read a Tiered projector image as a tail base, and §13.5 "Tail bases are protected too" extends the Snapshot's lease to it. `StoreRetention` models it under `WithTail` (bound `retention_tail`: one key, three stamps, two packs, one crash; three packs did not finish in 25 minutes):
+- **Ops.**
+  - `image`: a cut that publishes main's live head as the projector's image pin `img`, a Tiered holder like a pin (§13.5 "Pinning the live head").
+  - `unimage`: a cut that replaces or releases the image. Its frames lose their durable holder, so the probe may retire the image-only pack.
+  - `Capture` also runs with a Memory head (after `toMemory`) while the image is held, and carries the image as the Snapshot's tail base. The lease covers the listed packs whenever the captured set reaches a Cold slot.
+  - `Expire` ends the lease while the Snapshot is held. Its Cold reads then answer `Reclaimed(floor)`, and it cannot be promoted. `pin` promotes only a Tiered-primary, unexpired Snapshot.
+- **Invariants.** `SnapReadable` covers the tail base as it covers the primary, for an unexpired Snapshot. A listed image is a Tiered holder, so no generation that lists one is Tiered-idle.
+- **Witnesses.** `NoTailRetire` (an image-only pack leaves the list while a live Memory-primary capture still reaches it) and `NoTailReclaim` (its file is removed after the capture expires) must both be violated with `Track = TRUE`, so the case is not vacuous.
+- **Mutant.** `tail_lease_ignored`: the lease is taken only when the primary reaches Cold slots (v2.176's reading). `SnapReadable` catches it at depth 9. The shortest trace needs no release: write, publish the image, demote, capture (Memory primary, image as tail base), a probe that relocates the image's frame and retires its pack, then open's removal of the file. The capture still holds its original shares, as §13.5 says.
+- **Outside the model.** One branch, so the tail base is main's own image; other projectors and other branches' tails are not modelled. Re-execution, the pin map and the miss source (§13.3) are attempt state, not retention, and are law rows (§13.12 L106–L110), not model cases.
 
 ## What is abstracted
 

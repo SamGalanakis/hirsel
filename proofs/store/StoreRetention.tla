@@ -37,12 +37,17 @@
  * replaces the main collection. The build writes into a working map under the
  * owner-3 `build` pin through its own build cuts, and one graft cut publishes the
  * working map, drops the pin and queues the source's old Cold base.
+ * WithTail adds STORE-SPEC v2.177's capture protection (§13.3 "The captured read
+ * roots", §13.5 "Holder leases"): a local projector's image pin `img` (a live-head
+ * pin of main), a Snapshot whose primary may be Memory while it carries the image
+ * as a tail base, lease expiry, and the projector releasing the image while the
+ * capture can still read it.
  * Mutant names one seeded one-rule bug, or "none". README.md lists them.
  *)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS NKeys, MaxStamp, MaxPack, MaxCrash, Rules, Mutant, WithAnchors, WithExport, WithFork,
-          WithBuild, Track
+          WithBuild, WithTail, Track
 
 ASSUME Rules \in {"v2157", "v2157_restart", "count3157", "v2164"}
 
@@ -65,6 +70,8 @@ NoCursor == [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE]
 \* Writer memory of a hot build: its working map of the target, and the staging
 \* head's root of the untouched collection U.
 NoBuild == [on |-> FALSE, work |-> MemRefs, stage |-> Mem]
+NoSnap == [on |-> FALSE, refs |-> MemRefs, leased |-> {}, w |-> 0, prim |-> "T", base |-> MemRefs,
+           expired |-> FALSE]
 
 MinOf(S) == CHOOSE x \in S : \A y \in S : x <= y
 Max(S) == CHOOSE x \in S : \A y \in S : x >= y
@@ -82,7 +89,8 @@ VARIABLES
     nextPack,
     nextStamp,
     cursor,     \* writer memory: probe cursor per pack (rows probed; known = rows whose offset is known)
-    snap,       \* writer memory: one process-local Snapshot with its lease
+    snap,       \* writer memory: one process-local Snapshot with its lease; prim is its
+                \* primary's residency, base the tail base it carries (WithTail)
     export,     \* writer memory: the export lease and the image it copied
     bld,        \* writer memory: a hot Tiered build in progress (WithBuild)
     acked,      \* pin names whose pin the caller saw acknowledged (caller knowledge, survives crashes)
@@ -103,7 +111,7 @@ RootRefs(root) == IF root.on THEN {root.refs[x] : x \in Keys} ELSE {}
 
 DurableRefs(g) ==
     {g.hrefs[x] : x \in Keys} \cup {g.hu} \cup RootRefs(g.pin) \cup RootRefs(g.anchor)
-    \cup RootRefs(g.fork) \cup RootRefs(g.build) \cup g.queue
+    \cup RootRefs(g.fork) \cup RootRefs(g.build) \cup RootRefs(g.img) \cup g.queue
 
 DurableColdRefs(g) == {r \in DurableRefs(g) : r.k = "C"}
 
@@ -119,21 +127,21 @@ Watermarks(pinOn, pinW, forkOn, forkW) ==
 \* and the build pin always holds Tiered collections; the fork's child is a branch
 \* head with its own residency.
 IsIdleGen(g) == g.hres # "T" /\ ~g.pin.on /\ ~(g.fork.on /\ g.fork.res = "T")
-                /\ g.queue = {} /\ ~g.anchor.on /\ ~g.build.on
+                /\ g.queue = {} /\ ~g.anchor.on /\ ~g.build.on /\ ~g.img.on
 
 -----------------------------------------------------------------------------
 Init ==
     /\ head = [res |-> "T", refs |-> [x \in Keys |-> Hot(x)],
                u |-> IF WithBuild THEN Hot(NKeys + 1) ELSE Mem]
     /\ gen = [hres |-> "T", hrefs |-> MemRefs, hu |-> Mem, pin |-> NoRoot, queue |-> {},
-              anchor |-> NoRoot, fork |-> NoFork, build |-> NoRoot, cells |-> {},
+              anchor |-> NoRoot, fork |-> NoFork, build |-> NoRoot, img |-> NoRoot, cells |-> {},
               listed |-> {}, live |-> [p \in Packs |-> {}]]
     /\ packRows = [p \in Packs |-> <<>>]
     /\ files = {}
     /\ nextPack = 1
     /\ nextStamp = IF WithBuild THEN NKeys + 2 ELSE NKeys + 1
     /\ cursor = [p \in Packs |-> NoCursor]
-    /\ snap = [on |-> FALSE, refs |-> MemRefs, leased |-> {}, w |-> 0]
+    /\ snap = NoSnap
     /\ export = [on |-> FALSE, lease |-> {}, listed |-> {}, copied |-> FALSE, image |-> {}]
     /\ bld = NoBuild
     /\ acked = {}
@@ -160,16 +168,32 @@ Write(x) ==
 \* AP16's Remove defers a pack while a lease names a generation that lists it.
 \* The build pin shares no page with main and is never promoted, so the build
 \* bound (WithBuild) leaves Snapshots out; the other bounds check them.
+\* WithTail (v2.177): the capture also carries main's projector image as a tail base,
+\* and its primary may be a Memory head. Protection covers every Cold slot the
+\* captured set reaches. Mutant tail_lease_ignored is v2.176's wording: a lease only
+\* when the primary root reaches Cold slots.
 Capture ==
-    /\ head.res = "T" /\ ~bld.on /\ ~WithBuild
+    /\ (head.res = "T" \/ (WithTail /\ gen.img.on)) /\ ~bld.on /\ ~WithBuild
     /\ ~snap.on
-    /\ snap' = [on |-> TRUE, refs |-> head.refs, leased |-> gen.listed, w |-> nextStamp]
+    /\ LET base == IF WithTail /\ gen.img.on THEN gen.img.refs ELSE MemRefs
+           protect == head.res = "T" \/ (Mutant # "tail_lease_ignored" /\ \E x \in Keys : base[x].k = "C")
+       IN snap' = [on |-> TRUE, refs |-> head.refs, leased |-> IF protect THEN gen.listed ELSE {},
+                   w |-> nextStamp, prim |-> head.res, base |-> base, expired |-> FALSE]
     /\ rewind' = "none" /\ ev' = {}
     /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, export, bld, acked, pending, fault, crashes>>
 
 DropSnap ==
     /\ snap.on
     /\ snap' = [snap EXCEPT !.on = FALSE, !.leased = {}]
+    /\ rewind' = "none" /\ ev' = {}
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, export, bld, acked, pending, fault, crashes>>
+
+\* §13.5 "Expiry is not a cache event": after lease_ms the lease ends while the
+\* Snapshot is still held. Its Cold reads are Reclaimed(floor), through the
+\* primary and a tail base alike, and it can no longer be promoted (step 1).
+Expire ==
+    /\ WithTail /\ snap.on /\ ~snap.expired
+    /\ snap' = [snap EXCEPT !.leased = {}, !.expired = TRUE]
     /\ rewind' = "none" /\ ev' = {}
     /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, export, bld, acked, pending, fault, crashes>>
 
@@ -215,7 +239,7 @@ RequestPin ==
 \* build runs, its cuts are the only cuts.
 
 Ops == {"plain", "pin", "unpin", "toMemory", "toTiered", "archive", "unarchive",
-        "fork", "unfork", "build", "graft"}
+        "fork", "unfork", "build", "graft", "image", "unimage"}
 
 \* v2.164: the packs a Tiered-idle cut retires with probe_budget = 1. It takes
 \* listed class-3/4 packs in sequence order and finishes one it starts, so one
@@ -228,7 +252,13 @@ IdleTake(listed, cur) ==
     IN IF cand = {} THEN {} ELSE {MinOf(cand)}
 
 Cut(op, sel, dr, pg) ==
-    /\ (op = "pin") => (snap.on /\ ~gen.pin.on /\ (Mutant = "ack_before_publish" => pending))
+    /\ (op = "pin") => (snap.on /\ ~gen.pin.on /\ (Mutant = "ack_before_publish" => pending)
+                       /\ snap.prim = "T" /\ ~snap.expired)
+    \* op "image": a local projector publishes its image, a live-head pin of main
+    \* (§13.5 "Pinning the live head"). op "unimage": the projector replaces or
+    \* releases it, so the image's frames lose their durable holder.
+    /\ (op = "image") => (WithTail /\ ~gen.img.on /\ head.res = "T")
+    /\ (op = "unimage") => gen.img.on
     /\ (op = "unpin") => gen.pin.on
     /\ (op = "toMemory") => head.res = "T"
     /\ (op = "toTiered") => (head.res = "M" /\ nextStamp + NKeys - 1 <= MaxStamp)
@@ -268,6 +298,8 @@ Cut(op, sel, dr, pg) ==
         forkRes == IF op = "fork" THEN head.res ELSE gen.fork.res
         forkRefs0 == IF op = "fork" THEN head.refs ELSE gen.fork.refs
         forkW == IF op = "fork" THEN nextStamp ELSE gen.fork.w
+        imgOn == CASE op = "image" -> TRUE [] op = "unimage" -> FALSE [] OTHER -> gen.img.on
+        imgRefs0 == IF op = "image" THEN head.refs ELSE gen.img.refs
         \* ---- the candidate queue's added rows (T8 step 3) ----
         \* §13.8: Tiered -> Memory hands the old Cold root to the queue.
         addMem == IF op = "toMemory" THEN {r \in {head.refs[x] : x \in Keys} \cup {head.u} : r.k = "C"} ELSE {}
@@ -278,6 +310,7 @@ Cut(op, sel, dr, pg) ==
                     \cup (IF buildOn THEN {buildRefs0[x] : x \in Keys} ELSE {})
                     \cup (IF pinOn THEN {gen.pin.refs[x] : x \in Keys} ELSE {})
                     \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
+                    \cup (IF imgOn THEN {imgRefs0[x] : x \in Keys} ELSE {})
         addFork == IF op = "unfork"
                    THEN {r \in {gen.fork.refs[x] : x \in Keys} : r.k = "C" /\ r \notin keepRefs}
                    ELSE {}
@@ -299,6 +332,7 @@ Cut(op, sel, dr, pg) ==
                    /\ queueEmpty
                    /\ ~anchorOn
                    /\ ~buildOn
+                   /\ ~imgOn
         v2164Idle == Rules = "v2164" /\ idleGen
         \* count3157 (and the restart reading) drop an idle-advanced cursor at a non-idle cut.
         resetIdle == Rules \in {"count3157", "v2157_restart"} /\ ~idleGen
@@ -310,6 +344,7 @@ Cut(op, sel, dr, pg) ==
         lookup == {hRefs0[x] : x \in Keys} \cup qPart
                   \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF forkOn THEN {forkRefs0[x] : x \in Keys} ELSE {})
+                  \cup (IF imgOn THEN {imgRefs0[x] : x \in Keys} ELSE {})
         Found(s) == {r \in lookup : r.k \in {"C", "H"} /\ r.s = s}
         \* A PagePtr carries (pack, offset, len, checksum, stamp), never a PACK_INDEX row
         \* (§11 "Pages", AP20). So "behind the cursor" is decided by the cursor's offset,
@@ -331,6 +366,7 @@ Cut(op, sel, dr, pg) ==
                   \cup (IF pinOn THEN {pinRefs1[x] : x \in Keys} ELSE {})
                   \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF forkOn THEN {forkRefs0[x] : x \in Keys} ELSE {})
+                  \cup (IF imgOn THEN {imgRefs0[x] : x \in Keys} ELSE {})
         emitStamps == {r.s : r \in {y \in roots1 : y.k = "H"}}
         emitSeq == Sorted(emitStamps)
         fresh == nextPack
@@ -342,12 +378,14 @@ Cut(op, sel, dr, pg) ==
         forkRefs2 == [x \in Keys |-> Seal(forkRefs0[x])]
         uRef2 == Seal(uRef0)
         buildRefs2 == [x \in Keys |-> Seal(buildRefs0[x])]
+        imgRefs2 == [x \in Keys |-> Seal(imgRefs0[x])]
         \* ---- AP16 item 3: one probe step (probe_budget = 1, shared in pack order) ----
         named == {hRefs2[x] : x \in Keys} \cup {uRef2}
                  \cup (IF buildOn THEN {buildRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF pinOn THEN {pinRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF anchorOn THEN {anchorRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF forkOn THEN {forkRefs2[x] : x \in Keys} ELSE {})
+                 \cup (IF imgOn THEN {imgRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF Mutant = "probe_ignores_queue" THEN {} ELSE qPart)
         \* v2.164: an idle cut never installs a cursor (§13.6 "No cursor ever covers
         \* an unread prefix").
@@ -367,6 +405,7 @@ Cut(op, sel, dr, pg) ==
         forkRefs3 == [x \in Keys |-> Move(forkRefs2[x])]
         uRef3 == Move(uRef2)
         buildRefs3 == [x \in Keys |-> Move(buildRefs2[x])]
+        imgRefs3 == [x \in Keys |-> Move(imgRefs2[x])]
         finishes == tp # 0 /\ row = Len(packRows[tp])
         idleRetired == IF pg /\ v2164Idle THEN IdleTake(gen.listed, cur0) ELSE {}
         \* ---- §13.6 "Deferred frees": drain one installed row this cut did not move ----
@@ -379,6 +418,7 @@ Cut(op, sel, dr, pg) ==
                      \cup (IF pinOn THEN {pinRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF anchorOn THEN {anchorRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF forkOn THEN {forkRefs3[x] : x \in Keys} ELSE {})
+                     \cup (IF imgOn THEN {imgRefs3[x] : x \in Keys} ELSE {})
         replaced == {r \in {gen.hrefs[x] : x \in Keys} \cup {gen.hu} :
                         r.k = "C" /\ r \notin holderOut /\ r \notin added}
         killed == {r \in drained \cup replaced : r \notin holderOut}
@@ -445,6 +485,11 @@ Cut(op, sel, dr, pg) ==
                 \cup (IF op = "graft" /\ \E r \in RootRefs(gen.build) : r.k = "C" /\ r \notin holderOut
                       THEN {"graftLeavesPinFrame"} ELSE {})
                 \cup (IF op = "plain" /\ gen.build.on THEN {"orphanDropped"} ELSE {})
+                \* v2.177: a pack that only a held capture's tail base still reaches
+                \* (its primary Memory, the image released) leaves the list.
+                \cup (IF snap.on /\ ~snap.expired /\ snap.prim = "M" /\ ~imgOn
+                         /\ \E x \in Keys : snap.base[x].k = "C" /\ snap.base[x].p \in retired
+                      THEN {"tailRetire"} ELSE {})
        IN
         /\ (needFresh => nextPack <= MaxPack)
         /\ (v2164Idle => sel = 0)
@@ -455,6 +500,7 @@ Cut(op, sel, dr, pg) ==
                    fork |-> IF forkOn THEN [on |-> TRUE, w |-> forkW, res |-> forkRes, refs |-> forkRefs3]
                             ELSE NoFork,
                    build |-> IF buildOn THEN [on |-> TRUE, refs |-> buildRefs3, w |-> 0] ELSE NoRoot,
+                   img |-> IF imgOn THEN [on |-> TRUE, refs |-> imgRefs3, w |-> 0] ELSE NoRoot,
                    cells |-> cellsOut,
                    \* Mutant build_unlisted: a build step's frames go into a pack outside the
                    \* cut's list (lane 3220's live child_cut_tiered).
@@ -522,7 +568,11 @@ RemoveFile(p) ==
        \/ /\ ~(snap.on /\ p \in snap.leased)
           /\ ~(export.on /\ p \in export.lease)
     /\ files' = files \ {p}
-    /\ rewind' = "none" /\ ev' = {}
+    /\ rewind' = "none"
+    \* v2.177: the file of an image-only pack goes once its capture has expired.
+    /\ ev' = IF Track /\ snap.on /\ snap.expired /\ snap.prim = "M" /\ ~gen.img.on
+                /\ \E x \in Keys : snap.base[x].k = "C" /\ snap.base[x].p = p
+             THEN {"tailReclaim"} ELSE {}
     /\ UNCHANGED <<head, gen, packRows, nextPack, nextStamp, cursor, snap, export, bld, acked, pending, fault, crashes>>
 
 \* §13.10a (v2.157, D-ZL-2): the export lease names every listed class-3/4 pack.
@@ -556,7 +606,7 @@ Crash ==
     /\ crashes < MaxCrash
     /\ crashes' = crashes + 1
     /\ cursor' = [p \in Packs |-> NoCursor]
-    /\ snap' = [on |-> FALSE, refs |-> MemRefs, leased |-> {}, w |-> 0]
+    /\ snap' = NoSnap
     /\ export' = [on |-> FALSE, lease |-> {}, listed |-> {}, copied |-> FALSE, image |-> {}]
     /\ bld' = NoBuild
     /\ pending' = FALSE
@@ -568,6 +618,7 @@ Next ==
     \/ \E x \in Keys : Write(x)
     \/ Capture
     \/ DropSnap
+    \/ Expire
     \/ BeginBuild
     \/ \E x \in Keys : BuildWrite(x) \/ BuildDrop(x)
     \/ BuildAbort
@@ -596,9 +647,13 @@ RetainReachable ==
 
 \* R2 (§13.5 holder leases, AP16 Remove): an open reader's frames stay readable,
 \* and a promotion never reads a removed frame.
+\* v2.177: a live capture's tail base is covered exactly as its primary; an expired
+\* capture answers Reclaimed(floor) and is owed nothing.
 SnapReadable ==
     /\ ~fault
-    /\ snap.on => \A x \in Keys : snap.refs[x].k = "C" => snap.refs[x].p \in files
+    /\ (snap.on /\ ~snap.expired) =>
+          \A x \in Keys : /\ snap.refs[x].k = "C" => snap.refs[x].p \in files
+                         /\ snap.base[x].k = "C" => snap.base[x].p \in files
 
 \* R3 (§13.10a v2.157): every pack the copied MANIFEST lists is in the image.
 ImageComplete == export.copied => export.listed \subseteq export.image
@@ -646,5 +701,7 @@ NoCellMoved         == "cellMoved" \notin ev         \* a dropped boundary moves
 NoBuildMovesU       == "buildMovesU" \notin ev       \* a build cut's probe relocates untouched U
 NoGraftLeavesPinFrame == "graftLeavesPinFrame" \notin ev \* the graft leaves a pin frame unnamed
 NoOrphanDropped     == "orphanDropped" \notin ev     \* a holder-free cut drops an orphan build pin
+NoTailRetire        == "tailRetire" \notin ev        \* an image-only pack a live capture reaches retires
+NoTailReclaim       == "tailReclaim" \notin ev       \* ... and its file goes after the capture expires
 
 =============================================================================

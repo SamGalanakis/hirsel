@@ -154,7 +154,7 @@ def run_package(args, member, env, commit, compiler_scratch):
 
     logs = args.logs / member
     logs.mkdir(parents=True, exist_ok=True)
-    command = [str(args.compiler), "test", str(package),
+    command = [str(args.compiler), "test", *inputs,
                "--laws", "--json", "--test-timeout", "300"]
     if compiler_scratch is not None:
         command.extend(["--store", str(compiler_scratch / member)])

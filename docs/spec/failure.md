@@ -403,8 +403,9 @@ On the main branch at this proposal, each of these ends the run with status 102 
   `isolate`, in `main` and in a spawned task;
 - `clone` of a 1,000,000-node `Box` chain inside `isolate`.
 
-On the evaluator, the first case stops the run too, or, when the host thread's stack is
-smaller than the evaluator assumes, aborts the host process.
+On the evaluator, the first case aborted the host process in the program-test harness.
+The evaluator's room check measures the stack already used against a fixed headroom, not
+the next frame's need.
 
 ### Proposed FAIL-17: Stack exhaustion
 
@@ -532,7 +533,7 @@ No law compares a depth across engines.
 
 | slice | contents | laws |
 |---|---|---|
-| **K1** cause and evaluator | `Stack` in `CauseKind`, in the PROG-3 cause line and in `isolate`'s catch list. The evaluator's activation check raises the failure `Stack` where it now stops the run, before the activation is made, and keeps its host-stack reserve for cleanup. | S1, S3, S6 on the evaluator |
+| **K1** cause and evaluator | `Stack` in `CauseKind`, in the PROG-3 cause line and in `isolate`'s catch list. The evaluator's activation check raises the failure `Stack` where it now stops the run, before the activation is made, and keeps its host-stack reserve for cleanup. The check counts the next activation's need, whatever its frame size, so the evaluator never reaches the host thread's guard. | S1, S3, S6 on the evaluator |
 | **K2** native check | Add a stack-limit word per task to the native Context, set when the fiber is made to the guard end plus the engine reserve. Add an IR `stack_check` instruction, fallible like `step`, at the call. It compares the stack pointer, less the callee's need, with the word, and branches cold to the failure successor. A callee's need is its frame plus the need of the unchecked calls it makes. The emitter publishes it as a link-time constant per function, and a function value carries its own. Calls are checked where they enter a recursive component, where they are indirect, and where a subtree's need exceeds a fixed threshold. A call inside a checked subtree is not checked. The runtime checks `fiber::room` before it enters a finalizer, task entry or core callback. Then frames never reach the guard page, and the guard stays as the backstop for engine code. Cranelift first, then LLVM. | S1 to S3 and S6 on both engines |
 | **K3** iterative glue | Rewrite `clone`, `clone_in`, equality, ordering and hashing glue for recursive types to use constant stack, as drop glue already does. | S4 |
 | **K4** core recursion | Audit the core functions whose stack depth the input chooses. Each gets `fiber::room` and raises `Stack`. | a case per function in its existing harness |

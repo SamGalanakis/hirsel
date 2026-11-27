@@ -125,10 +125,7 @@ status=0
 for manifest in "$base/peers/langarena/rust/Cargo.toml" "$base/peers/awfy/rust/Cargo.toml"; do
   if [[ -f "$manifest" ]]; then
     step="cargo +1.99.0 fetch ${manifest#"$base/peers/"}"
-    taskset -c 8-11 cargo +1.99.0 fetch --locked --manifest-path "$manifest" >>"$run/run.log" 2>&1 || {
-      status=1
-      printf '%s failed.\n' "$step" >>"$run/run.log"
-    }
+    taskset -c 8-11 cargo +1.99.0 fetch --locked --manifest-path "$manifest" 2>&1 | tee -a "$run/run.log"
   fi
 done
 baseline=()

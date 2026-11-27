@@ -788,8 +788,10 @@ ordinary run-time test. A guard stays a run-time test. `target.Os` and `target.A
 on every run and every replay, so it passes no replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)) and is not an authority
 ([CAP-1](capabilities.md#cap-1-authority-is-explicit)). A run-time description of the host
-is not provided. A value of `target.Os` is not a claim that Hirsel supports that target:
-macOS stays in [reserved](reserved.md) until its native gate is green.
+is not provided. The shipped targets are `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu` and `aarch64-apple-darwin`. A value of `target.Os` is not by
+itself a claim that Hirsel ships that target: the iOS targets stay in
+[reserved](reserved.md) until their device gate is green.
 
 Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.5 and decision 11;
 not yet built): LANG-20 admits calls, so the definition of a constant expression above now

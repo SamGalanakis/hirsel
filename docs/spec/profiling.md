@@ -50,7 +50,7 @@ AWFY with embedded DWARF took 123.00 s before and 119.18 s after. LangArena
 with default flags took 145.18 s before and 151.32 s after.
 
 **Image identity per object format.** The rule above is written for ELF. A Mach-O
-image (`aarch64-apple-darwin`; not yet built) follows the same rule with the platform's
+image (`aarch64-apple-darwin`) follows the same rule with the platform's
 equivalents:
 
 | | ELF | Mach-O |

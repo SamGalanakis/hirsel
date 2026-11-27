@@ -16,9 +16,13 @@ capabilities. The driver's internals are in
 
 ## The installation
 
-Install a Linux x86_64 release with `curl -fsSL https://hirsel.ai/install.sh | sh`
-(requires glibc 2.28+; Apple Silicon macOS support is in progress). Re-run the installer
+Install the toolchain on Linux x86_64 (glibc 2.28+) or macOS arm64 (Apple Silicon,
+macOS 26+) with `curl -fsSL https://hirsel.ai/install.sh | sh`. The installed toolchain
+ships the Linux x86_64/aarch64 and macOS arm64 targets. Re-run the installer
 to upgrade, or set `HIRSEL_VERSION` to pin a specific release tag.
+The supported install channel is `curl | sh`. macOS binaries are ad-hoc signed, not
+notarized. A browser-downloaded tarball keeps the browser's quarantine attribute, so run
+`xattr -dr com.apple.quarantine <dir>` after unpacking it.
 An installation is a relocatable prefix containing `hirsel`, the published `core` and `std` images
 (including prebuilt release standard-library objects), the toolchain packages, target runtime archives,
 the bundled native link kit (`link/kit/`), `bin/ld.lld`, `libexec/hirsel/`, and the LLVM libraries

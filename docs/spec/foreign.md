@@ -1831,7 +1831,7 @@ manifests.
 - **W1.** FFI-10 to FFI-16 on `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, with
   laws FW1 to FW18 and FW20 to FW28. W1 is done only when every one passes on both native
   backends.
-- **W2.** `aarch64-apple-darwin` and FW19. W2 waits on the macOS native gate (R5) and on O3.
+- **W2.** `aarch64-apple-darwin` and FW19.
 
 A red law whose cause is containment (FW3, FW5, FW6, FW12, FW14, FW16, FW25, FW26, FW28),
 determinism or the step bound (FW7, FW8, FW11, FW17, FW21, FW22, FW23, FW27) or a release

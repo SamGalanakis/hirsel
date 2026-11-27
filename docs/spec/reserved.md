@@ -59,10 +59,8 @@ admits any foreign package that has not been audited under FFI-1. Moving only th
 process is not such a boundary, because one package may use a handle from both kinds of
 call, and neither process could use the other's C pointers or byte loans; a provider contract that records a foreign call so that replay admits it; native time
 and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a typed reading
-of a refused handle; varargs, arbitrary pointers, dynamic loading and
-macOS. The macOS (`aarch64-apple-darwin`) rules are written but not built: FFI-3's Mach-O rows and import check, and the macOS host text in net,
-launch, profiling and the Store spec. macOS leaves this list when its native Mac gate is
-green. iOS (`aarch64-apple-ios`, `aarch64-apple-ios-sim`): the [embedding](embed.md) rules
+of a refused handle; varargs, arbitrary pointers and dynamic loading.
+iOS (`aarch64-apple-ios`, `aarch64-apple-ios-sim`): the [embedding](embed.md) rules
 are written but not built. The targets are named, every request for them is refused until
 the static-library slices land. Once the simulator gate (EMB-9) is green, iOS is
 supported **simulator only**; it leaves this list when a signed device run passes its device

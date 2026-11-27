@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <sub>Pre-release · Linux x86_64 (glibc 2.28+) · Apple Silicon macOS in progress</sub>
+  <sub>Pre-release · Linux x86_64/aarch64 · macOS arm64 (Apple Silicon)</sub>
 </p>
 
 <picture>
@@ -66,8 +66,12 @@ lifetime annotations.
 curl -fsSL https://hirsel.ai/install.sh | sh
 ```
 
-Requires **Linux x86_64** with **glibc 2.28+** (Apple Silicon macOS support is in
-progress). Re-run the installer to upgrade, or set `HIRSEL_VERSION` to pin a release.
+The installer runs on **Linux x86_64** with **glibc 2.28+** and on **macOS arm64
+(Apple Silicon)** with **macOS 26+**. The installed toolchain ships Linux x86_64/aarch64
+and macOS arm64 targets. Re-run the installer to upgrade, or set `HIRSEL_VERSION` to pin
+a release. The supported channel is `curl | sh`: macOS binaries are ad-hoc signed, not
+notarized, so a browser-downloaded tarball needs `xattr -dr com.apple.quarantine <dir>`
+after unpacking.
 
 Start a project with the installed binary:
 

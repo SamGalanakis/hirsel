@@ -17,7 +17,9 @@ pub fn unsupported(why: String) -> Never
 [compile-time constants](../../../docs/spec/language.md#lang-20-constants) whose values
 the toolchain supplies from `--target`. They have no
 initialiser in source and are the only constants that do not. Every target triple the
-module names maps to one pair, whether or not Hirsel supports that target yet:
+module names maps to one pair. The shipped targets are `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu` and `aarch64-apple-darwin`; the iOS triples are named but
+not shipped:
 
 | target | `target.os` | `target.arch` |
 |---|---|---|
@@ -28,8 +30,7 @@ module names maps to one pair, whether or not Hirsel supports that target yet:
 | `aarch64-apple-ios-sim` | `Ios` | `Aarch64` |
 
 `Macos` and `Ios` name target values. The
-[reserved list](../../../docs/spec/reserved.md) tracks macOS until its native gate
-passes and iOS until its device gate passes.
+[reserved list](../../../docs/spec/reserved.md) tracks iOS until its device gate passes.
 
 **Branching.** A `match` on `target.os` or `target.arch`, or an `if` on a constant
 expression built from them, keeps only its taken arm in retained code, and every arm is

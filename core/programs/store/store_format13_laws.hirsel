@@ -467,8 +467,16 @@ fn format13_manifest_law() -> Result[(), Error] {
         return Error(Foreign)
     }
     let mut bound_payload = failure_result_from_rep(types.copied(payload))?
-    list.set_word_le(mut bound_payload, 160, 1u64)
-    if let Error(Unsupported(0x0031)) = failure_result_from_rep(manifest.decode_page_manifest(path, bound_payload, 1)) {} else {
+    list.set_word_le(mut bound_payload, 160, 0x0123456789abcdefu64)
+    let bound_parsed = failure_result_from_rep(manifest.decode_page_manifest(path, bound_payload, 1))?
+    if bound_parsed.binding_id != 0x0123456789abcdefu64 {
+        return Error(Foreign)
+    }
+    let mut bound_manifest: manifest.PageManifest = clone(m)
+    bound_manifest.binding_id = 0x0123456789abcdefu64
+    let bound_raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), bound_manifest))?
+    let (_, take bound_roundtrip) = disk_read_page_manifest(path, bound_raw)?
+    if bound_roundtrip.binding_id != 0x0123456789abcdefu64 {
         return Error(Foreign)
     }
     let mut overflow = failure_result_from_rep(types.copied(payload))?

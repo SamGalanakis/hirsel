@@ -1529,83 +1529,11 @@ fn db_target(db: Db) -> Option[manifest.TargetLimits] {
 }
 
 fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[journal.DiskStartup, Error] waits {
-    let selected = read_page_manifest_file(d)
-    let mut loaded = match take selected {
-        Ok((id, take page_record)) => {
-            failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
-            failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
-            let validated = select_page_manifest(d, id, take page_record)?
-            let loaded = failure_result_from_rep(history.disk_loaded(store_key_to_rep(id), take validated))?
-            // §13.8: a catalog with a Tiered collection opens only on a funded
-            // plan, refused before the journal is read or a task is started.
-            if !tiered_open_funded(options) && pages.holders_tiered(loaded.all) {
-                return Error(Missing("cache_bytes"))
-            }
-            take loaded
-        },
-        Error(Io(NotFound)) => {
-            if let Some(_) = options.expect {
-                return Error(NotFound)
-            }
-            if !options.create {
-                return Error(NotFound)
-            }
-            let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
-            let page_record = manifest.page_manifest_empty(types.named_limits(optional_limits_to_rep(options.limits)))
-            let mut creation = failure_result_from_rep(journal.disk_creation_block())?
-            let (take segment, take end_file, take header) = failure_result_from_rep(journal.disk_new_segment(d, c, id, 1, 0, mut creation))?
-            failure_result_from_rep(manifest.disk_publish_manifest(d, id, page_record))?
-            let genesis = failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), 0, 0)))?
-            let page_disk = manifest.genesis_pack_disk()
-            return Ok(journal.DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: types.named_limits(optional_limits_to_rep(options.limits))))
-        },
-        Error(take problem) => return Error(take problem),
-    }
-    let manifested = disk_allocation(scoped fn() -> Result[pages.State, Error] {
-        failure_result_from_rep(types.capacity(manifest.manifest_state(loaded.manifest, loaded.all)))
-    })?
-    list.clear(mut loaded.all)
-    let owners = disk_allocation(scoped fn() -> Result[Map[manifest.IncomingEdge, u64], Error] {
-        Ok(manifest.located_owners(loaded.manifest))
-    })?
-    let recorded_after = manifested.tips[0u64].head
-    let initial = failure_result_from_rep(pager.journal_replay_manifest(take manifested, loaded.manifest))?
-    let recovered = journal_recover(d, store_key_from_rep(loaded.store), loaded.manifest.first_live, c, take initial)?
-    let journal.JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
-    let live_bytes = failure_result_from_rep(journal.journal_account(replay))?
-    let pager.JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
-    failure_result_from_rep(txn.check_stream_quota(state.tips[0u64].roots.streams, options.streams_max))?
-    failure_result_from_rep(catalog.over_ceiling(live_bytes, options.resident_limit))?
-    let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
-        let roots = failure_result_from_rep(types.capacity(pages.state_roots(state)))?
-        Ok(int.saturating_add(manifest.resident_images(roots, Some(view loaded.lists)), manifest.location_storage_charge(loaded.locations)))
-    })?
-    let Some(seq) = int.checked_add(last_seq, 1) else {
-        return Error(Limit(Ids))
-    }
-    // Fence the removal of an orphan END before making its successor HEADER.
-    let orphan_end = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ".end")))?
-    let _ = failure_result_from_rep(manifest.disk_remove_optional(d, orphan_end))?
-    failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
-    let mut creation = failure_result_from_rep(journal.disk_creation_block())?
-    let (take segment, take end_file, take header) = failure_result_from_rep(journal.disk_new_segment(d, c, loaded.store, seq, last_end, mut creation))?
-    let manifest.DiskLoaded(store: id, manifest: take page_record, lists: take lists, locations: take locations, ..) = take loaded
-    let page_disk = manifest.recovered_pack_disk(page_record, take locations, take lists, take owners, take forked)
-    Ok(journal.DiskStartup(store: id, fence: page_record.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: page_record.next_table, generation: page_record.generation, cut_first: page_record.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: page_record.limits))
+    disk_start_with_mode(d, c, r, options, ServingDefault)
 }
 
 fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[journal.DiskSession, Error] waits {
-    if failure_result_from_rep(journal.disk_exists(d, "MANIFEST"))? {
-        let mut manifest_file = failure_result_from_rep(manifest.disk_io(host.open(d, "MANIFEST", Read)))?
-        failure_result_from_rep(manifest.check_page_manifest_header(mut manifest_file))?
-        failure_result_from_rep(manifest.disk_io(host.close(take manifest_file)))?
-    }
-    let lock = failure_result_from_rep(journal.disk_lock(d, clock, options.lock_wait_ms))?
-    if failure_result_from_rep(journal.disk_exists(d, "EXPORT"))? {
-        return Error(ExportDirectory)
-    }
-    let startup = disk_start(d, clock, r, options)?
-    Ok(journal.DiskSession(lock: take lock, startup: take startup))
+    disk_session_with_mode(d, clock, r, options, ServingDefault)
 }
 
 type DiskState {
@@ -1616,6 +1544,8 @@ type DiskState {
     // (§3.5a "Catch-up"): they reach the child as the round's STEPS.
     retention: journal.RecordRetention,
     packs: manifest.PackDiskState,
+    archive_hold: manifest.DirArchiveHold,
+    pending_binding: Option[u64],
     backend: Backend,
     tasks: Tasks,
     tiered: pager.DiskPagerState
@@ -1714,7 +1644,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
 fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: journal.JournalCadence, take session: journal.DiskSession) -> Result[Db, Error] waits {
     let journal.DiskSession(lock: take lock, startup: take startup) = take session
     let zero_extension = failure_result_from_rep(manifest.disk_io(host.zero_extension(d)))?
-    let journal.DiskStartup(store: store, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: limits) = take startup
+    let journal.DiskStartup(store: store, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, archive_prev_first: archive_prev_first, binding_id: binding_id, held_receipts: take held_receipts, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: limits) = take startup
     let id = store_key_from_rep(store)
     let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
         Ok(empty_db(c, id, options))
@@ -1740,7 +1670,8 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     db.accounting.checkpointed = generation
     let start = journal.DirJournalStart(lock: take lock, seq: seq, uncovered: uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header)
     let directory = failure_result_from_rep(journal.start_directory(tasks, d, c, store, options.group_commits, options.group_bytes, cadence_spec, zero_extension, take start))?
-    db.disk = Some(DiskState(open: seq, options: clone(options), transfer: transfer.new_state(), retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
+    let archive_hold = manifest.recovered_archive_hold(binding_id, None, archive_prev_first, take held_receipts)
+    db.disk = Some(DiskState(open: seq, options: clone(options), transfer: transfer.new_state(), retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, archive_hold: take archive_hold, pending_binding: None, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
     Ok(take db)
 }
 
@@ -1885,33 +1816,32 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         let layout = failure_result_from_rep(manifest.write_page_cut(d, store_key_to_rep(id), take cut_plan, mut buffers))?
         let manifest.PackBuffers(out: take out, ..) = take buffers
         let mut page_record = take out
-        let (take pages, take compaction, take removals) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
-            failure_result_from_rep(journal.cut_retirement(layout, holders, transfer.active_lease(disk_state(db).transfer), manifest.pack_scrubs(disk_state(db).packs), staged.compaction, cut_input(db, delta).lease_span, prev_first, seq))
-        })?
-        fill_cut_manifest(mut page_record, db, delta, staged.roots, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
-        Ok(PreparedDiskCut(pages: take pages, compaction: take compaction, removals: take removals, manifest: take page_record))
+        let archive_plan = plan_dir_cut_archive(d, db, layout, seq, prev_first, manifest_bytes)?
+        let (take pages, take compaction, take removals) = retire_dir_cut_with_holds(db, delta, layout, holders, staged.compaction, archive_plan, prev_first, seq)?
+        fill_cut_manifest(mut page_record, db, delta, staged.roots, generation, seq, archive_plan.new_prev_first, layout, stamp, base.account, write_seal)?
+        Ok(PreparedDiskCut(pages: take pages, compaction: take compaction, removals: take removals, manifest: take page_record, archive_plan: take archive_plan))
     })
     pages.set_next_node(mut db.holders, next_stamp - 1)
     let prepared = match take attempt {
         Ok(take cut) => take cut,
         Error(take problem) => return Error(cut_io_error(mut db, take problem)),
     }
-    let PreparedDiskCut(pages: take prepared_pages, compaction: take compaction, removals: take removals, manifest: take page_record) = take prepared
+    let PreparedDiskCut(pages: take prepared_pages, compaction: take compaction, removals: take removals, manifest: take page_record, archive_plan: take archive_plan) = take prepared
     let settled_tiered = failure_result_from_rep(history.prepare_tiered_install(mut staged, manifest.pack_locations(prepared_pages), generation, next_stamp))?
     let tail_bases = prepare_sealed_tail_bases(db, delta, staged, heads)?
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = manifest.resident_location_charge(manifest.pack_locations(prepared_pages))
     validate_cut_pages(d, id, page_record, target, transfer.active_lease(disk_state(db).transfer), disk_state(db).packs)?
-    if let Error(take problem) = failure_result_from_rep(manifest.publish_page_manifest_bytes(d, page_record)) {
+    if let Error(take problem) = failure_result_from_rep(manifest.publish_directory_cut_manifest(d, page_record, archive_plan)) {
         return Error(cut_io_error(mut db, take problem))
     }
     let recorded_after = match delta {
         ReplaceMain(main, _) => main.head,
         _ => pages.holder_heads(db.holders)[0u64].head
     }
-    write_disk(mut db.disk, (take prepared_pages, take compaction), scoped fn(mut state: DiskState, take installation: (manifest.PackDiskState, pager.TieredCompaction)) {
-        let (take installed, take candidate) = take installation
+    let unlink_after = write_disk(mut db.disk, (take prepared_pages, take compaction, take archive_plan), scoped fn(mut state: DiskState, take installation: (manifest.PackDiskState, pager.TieredCompaction, manifest.DirArchiveCutPlan)) -> List[u64] {
+        let (take installed, take candidate, take installed_archive) = take installation
         manifest.install_pack_cut(mut state.packs, take installed)
         state.retention = journal.record_retention(seq, recorded_after)
         edit_accounting(mut state, scoped fn(mut queue: journal.QueueAccounting) {
@@ -1919,6 +1849,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         })
         // Step 5: the lists' rows are now queue rows of the published generation.
         pager.install_disk_cut(mut state.tiered, take candidate)
+        install_dir_archive_plan(mut state, take installed_archive)
     })
     db.accounting.checkpointed = generation
     db.accounting.resident = base.account
@@ -1950,6 +1881,9 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         0
     }
     if let Error(take problem) = failure_result_from_rep(journal.remove_cut_files(d, take removals)) {
+        return Error(cut_io_error(mut db, take problem))
+    }
+    if let Error(take problem) = failure_result_from_rep(manifest.remove_archive_receipts(d, unlink_after)) {
         return Error(cut_io_error(mut db, take problem))
     }
     if observe {

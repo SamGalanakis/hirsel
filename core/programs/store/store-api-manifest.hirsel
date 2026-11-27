@@ -82,10 +82,15 @@ fn validate_store_manifest(d: Dir, id: StoreId, take page_record: manifest.PageM
     validate_directory_graph(d, id, take page_record, true)
 }
 
-fn select_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
+fn select_page_manifest_holds(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[(manifest.ValidatedPageManifest, List[manifest.HeldReceipt]), Error] waits {
     failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
     let validated = validate_store_manifest(d, id, take page_record)?
-    failure_result_from_rep(manifest.cleanup_page_manifest(d, validated))?
+    let kept = failure_result_from_rep(manifest.cleanup_page_manifest_with_holds(d, store_key_to_rep(id), validated))?
+    Ok((take validated, take kept))
+}
+
+fn select_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    let (take validated, _) = select_page_manifest_holds(d, id, take page_record)?
     Ok(take validated)
 }
 

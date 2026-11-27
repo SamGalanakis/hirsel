@@ -284,5 +284,6 @@ type PreparedDiskCut {
     pages: manifest.PackDiskState,
     compaction: pager.TieredCompaction,
     removals: journal.DiskRemovals,
-    manifest: Bytes
+    manifest: Bytes,
+    archive_plan: manifest.DirArchiveCutPlan
 }

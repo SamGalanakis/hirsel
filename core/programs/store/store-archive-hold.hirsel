@@ -1,0 +1,311 @@
+// Directory source-side durable archive holds, unified cleanup & bind/detach cuts (§15.7).
+type ArchiveOpenMode = ServingDefault | ServingBound(u64, Option[u64]) | ServingDetach
+
+fn disk_live_pack_seqs(packs: manifest.PackDiskState) -> Result[List[u64], Error] {
+    let carried = manifest.pack_carried(packs)
+    let mut out: List[u64] = list.new()
+    let mut cursor = std.omap.range(manifest.pack_locations(packs).packs.values, Unbounded, Unbounded)
+    while let Some((seq, _)) = std.omap.next(mut cursor) {
+        if !list.contains(carried, seq) {
+            failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
+            list.push(mut out, seq)
+        }
+    }
+    Ok(take out)
+}
+
+fn layout_live_packs(layout: manifest.PagedCutLayout) -> Result[Map[u64, ()], Error] {
+    let mut live_packs: Map[u64, ()] = map.new()
+    let mut cursor = std.omap.range(layout.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, _)) = std.omap.next(mut cursor) {
+        if !list.contains(layout.lists.removals, seq) {
+            failure_result_from_rep(types.capacity(map.try_reserve(mut live_packs, 1)))?
+            map.insert(mut live_packs, seq, ())
+        }
+    }
+    Ok(take live_packs)
+}
+
+fn combine_segment_lease(export_span: Option[(u64, u64)], archive_seg_first: Option[u64]) -> Option[(u64, u64)] {
+    match archive_seg_first {
+        Some(from_seg) => match export_span {
+            Some((export_from, _)) => Some((order.min(export_from, from_seg), 18446744073709551615u64)),
+            None => Some((from_seg, 18446744073709551615u64)),
+        },
+        None => export_span,
+    }
+}
+
+fn plan_dir_cut_archive(d: Dir, db: Db, layout: manifest.PagedCutLayout, seq: u64, ordinary_prev_first: u64, manifest_estimate: u64) -> Result[manifest.DirArchiveCutPlan, Error] waits {
+    let state = disk_state(db)
+    let old_packs = disk_live_pack_seqs(state.packs)?
+    let next_packs = layout_live_packs(layout)?
+    let export_first: Option[u64] = match transfer.active_lease(state.transfer) {
+        Some(held) => Some(held.first),
+        None => None,
+    }
+    failure_result_from_rep(manifest.plan_directory_archive_cut(d, state.archive_hold, state.pending_binding, db.accounting.checkpointed, journal.first_live(state.retention), seq, ordinary_prev_first, export_first, old_packs, next_packs, manifest_estimate))
+}
+
+fn retire_dir_cut_with_holds(db: Db, delta: HolderDelta, layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], compaction: pager.TieredCompaction, archive_plan: manifest.DirArchiveCutPlan, ordinary_prev_first: u64, seq: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
+    let span = combine_segment_lease(cut_input(db, delta).lease_span, archive_plan.archive_seg_first)
+    let old_hold_prev = disk_state(db).archive_hold.prev_first
+    let first_check = order.min(ordinary_prev_first, order.min(old_hold_prev, archive_plan.new_prev_first))
+    disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
+        failure_result_from_rep(journal.cut_retirement_with_holds(layout, holders, transfer.active_lease(disk_state(db).transfer), manifest.pack_scrubs(disk_state(db).packs), compaction, span, Some(view archive_plan.protected_packs), first_check, seq))
+    })
+}
+
+fn install_dir_archive_plan(mut state: DiskState, take plan: manifest.DirArchiveCutPlan) -> List[u64] {
+    let manifest.DirArchiveCutPlan(new_binding, new_prev_first, kept_receipts: take kept_receipts, unlink_after_sync: take unlink_after, released_unarchived, effective_hold_bytes, hold_bytes_explicit, ..) = take plan
+    state.pending_binding = None
+    state.archive_hold.binding_id = new_binding
+    state.archive_hold.hold_bytes = effective_hold_bytes
+    state.archive_hold.hold_bytes_explicit = hold_bytes_explicit
+    state.archive_hold.receipts = take kept_receipts
+    state.archive_hold.prev_first = new_prev_first
+    if new_binding == 0 {
+        state.archive_hold.acked_gen = 0
+        state.archive_hold.acked_digest = 0
+        state.archive_hold.acked_seg = 0
+        state.archive_hold.released_gap = false
+    } else if released_unarchived {
+        state.archive_hold.released_gap = true
+    }
+    take unlink_after
+}
+
+fn disk_start_with_mode(d: Dir, c: Clock, r: Random, options: Options, mode: ArchiveOpenMode) -> Result[journal.DiskStartup, Error] waits {
+    let selected = read_page_manifest_file(d)
+    let mut loaded_pair = match take selected {
+        Ok((id, take page_record)) => {
+            failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
+            failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
+            let (take validated, take kept_receipts) = select_page_manifest_holds(d, id, take page_record)?
+            let bound_id = validated.manifest.binding_id
+            if bound_id != 0 {
+                match mode {
+                    ServingDefault => return Error(Missing("archive")),
+                    ServingBound(want_binding, _) => if want_binding != bound_id {
+                        return Error(Conflict("archive binding"))
+                    },
+                    ServingDetach => (),
+                }
+            }
+            let loaded = failure_result_from_rep(history.disk_loaded(store_key_to_rep(id), take validated))?
+            // §13.8: a catalog with a Tiered collection opens only on a funded
+            // plan, refused before the journal is read or a task is started.
+            if !tiered_open_funded(options) && pages.holders_tiered(loaded.all) {
+                return Error(Missing("cache_bytes"))
+            }
+            (take loaded, take kept_receipts)
+        },
+        Error(Io(NotFound)) => {
+            if let Some(_) = options.expect {
+                return Error(NotFound)
+            }
+            if !options.create {
+                return Error(NotFound)
+            }
+            let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+            let page_record = manifest.page_manifest_empty(types.named_limits(optional_limits_to_rep(options.limits)))
+            let mut creation = failure_result_from_rep(journal.disk_creation_block())?
+            let (take segment, take end_file, take header) = failure_result_from_rep(journal.disk_new_segment(d, c, id, 1, 0, mut creation))?
+            failure_result_from_rep(manifest.disk_publish_manifest(d, id, page_record))?
+            let genesis = failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), 0, 0)))?
+            let page_disk = manifest.genesis_pack_disk()
+            return Ok(journal.DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, archive_prev_first: 1, binding_id: 0, held_receipts: list.new(), recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: types.named_limits(optional_limits_to_rep(options.limits))))
+        },
+        Error(take problem) => return Error(take problem),
+    }
+    let (take loaded_init, take kept_receipts) = take loaded_pair
+    let mut loaded = take loaded_init
+    let manifested = disk_allocation(scoped fn() -> Result[pages.State, Error] {
+        failure_result_from_rep(types.capacity(manifest.manifest_state(loaded.manifest, loaded.all)))
+    })?
+    list.clear(mut loaded.all)
+    let owners = disk_allocation(scoped fn() -> Result[Map[manifest.IncomingEdge, u64], Error] {
+        Ok(manifest.located_owners(loaded.manifest))
+    })?
+    let recorded_after = manifested.tips[0u64].head
+    let initial = failure_result_from_rep(pager.journal_replay_manifest(take manifested, loaded.manifest))?
+    let recovered = journal_recover(d, store_key_from_rep(loaded.store), loaded.manifest.first_live, c, take initial)?
+    let journal.JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
+    let live_bytes = failure_result_from_rep(journal.journal_account(replay))?
+    let pager.JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
+    failure_result_from_rep(txn.check_stream_quota(state.tips[0u64].roots.streams, options.streams_max))?
+    failure_result_from_rep(catalog.over_ceiling(live_bytes, options.resident_limit))?
+    let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
+        let roots = failure_result_from_rep(types.capacity(pages.state_roots(state)))?
+        Ok(int.saturating_add(manifest.resident_images(roots, Some(view loaded.lists)), manifest.location_storage_charge(loaded.locations)))
+    })?
+    let Some(seq) = int.checked_add(last_seq, 1) else {
+        return Error(Limit(Ids))
+    }
+    // Fence the removal of an orphan END before making its successor HEADER.
+    let orphan_end = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ".end")))?
+    let _ = failure_result_from_rep(manifest.disk_remove_optional(d, orphan_end))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
+    let mut creation = failure_result_from_rep(journal.disk_creation_block())?
+    let (take segment, take end_file, take header) = failure_result_from_rep(journal.disk_new_segment(d, c, loaded.store, seq, last_end, mut creation))?
+    let manifest.DiskLoaded(store: id, manifest: take page_record, lists: take lists, locations: take locations, ..) = take loaded
+    let page_disk = manifest.recovered_pack_disk(page_record, take locations, take lists, take owners, take forked)
+    Ok(journal.DiskStartup(store: id, fence: page_record.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: page_record.next_table, generation: page_record.generation, cut_first: page_record.first_live, archive_prev_first: page_record.prev_first, binding_id: page_record.binding_id, held_receipts: take kept_receipts, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: page_record.limits))
+}
+
+fn disk_session_with_mode(d: Dir, clock: Clock, r: Random, options: Options, mode: ArchiveOpenMode) -> Result[journal.DiskSession, Error] waits {
+    if failure_result_from_rep(journal.disk_exists(d, "MANIFEST"))? {
+        let mut manifest_file = failure_result_from_rep(manifest.disk_io(host.open(d, "MANIFEST", Read)))?
+        failure_result_from_rep(manifest.check_page_manifest_header(mut manifest_file))?
+        failure_result_from_rep(manifest.disk_io(host.close(take manifest_file)))?
+    }
+    let lock = failure_result_from_rep(journal.disk_lock(d, clock, options.lock_wait_ms))?
+    if failure_result_from_rep(journal.disk_exists(d, "EXPORT"))? {
+        return Error(ExportDirectory)
+    }
+    let startup = disk_start_with_mode(d, clock, r, options, mode)?
+    Ok(journal.DiskSession(lock: take lock, startup: take startup))
+}
+
+fn open_directory_with_mode(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, cadence_spec: journal.JournalCadence, mode: ArchiveOpenMode) -> Result[Db, Error] waits {
+    if let Bucket(_) = options.authority {
+        return Error(Unsupported(1))
+    }
+    failure_result_from_rep(object_writer.open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit))?
+    let session = disk_session_with_mode(d, c, r, options, mode)?
+    let mut db = open_started(tasks, d, c, options, cadence_spec, take session)?
+    if let ServingBound(_, hold_bytes) = mode {
+        edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+            if let Some(limit) = hold_bytes {
+                state.archive_hold.hold_bytes = limit
+                state.archive_hold.hold_bytes_explicit = true
+            }
+        })
+    }
+    Ok(take db)
+}
+
+/// Operator-tool cleanup for a Directory store (STORE-SPEC §15.7): takes LOCK,
+/// durably selects MANIFEST (O1), validates MANIFEST + all matching older `m-<g>`
+/// receipts, removes stale/future receipts, dead packs and obsolete segments,
+/// and stops cleanly without releasing archive holds or opening a writer.
+pub fn cleanup_directory(d: Dir, c: Clock, options: Options) -> Result[(), Error] waits {
+    if failure_result_from_rep(journal.disk_exists(d, "MANIFEST"))? {
+        let mut manifest_file = failure_result_from_rep(manifest.disk_io(host.open(d, "MANIFEST", Read)))?
+        failure_result_from_rep(manifest.check_page_manifest_header(mut manifest_file))?
+        failure_result_from_rep(manifest.disk_io(host.close(take manifest_file)))?
+    }
+    let lock = failure_result_from_rep(journal.disk_lock(d, c, options.lock_wait_ms))?
+    if failure_result_from_rep(journal.disk_exists(d, "EXPORT"))? {
+        drop(take lock)
+        return Error(ExportDirectory)
+    }
+    let (id, take page_record) = read_page_manifest_file(d)?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
+    failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
+    let _ = select_page_manifest_holds(d, id, take page_record)?
+    drop(take lock)
+    Ok(())
+}
+
+/// Explicit `--detach` open for a bound Directory store (STORE-SPEC §15.7):
+/// runs unified cleanup, cuts to `binding_id = 0` releasing all archive holds,
+/// and returns the serving unbound `Db`.
+pub fn detach_directory_archive(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
+    let mut db = open_directory_with_mode(tasks, d, c, r, options, journal.DIRECTORY_JOURNAL_CADENCE, ServingDetach)?
+    if archive_binding_id(db) != 0 {
+        let _ = detach_archive(mut db)?
+    }
+    Ok(take db)
+}
+
+/// Opens a Directory store configured for an archive binding (used when sink is
+/// configured, including while unreachable within `hold_bytes`, §15.7).
+pub fn open_directory_bound(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, binding_id: u64, hold_bytes: Option[u64]) -> Result[Db, Error] waits {
+    if binding_id == 0 {
+        return Error(Missing("binding_id"))
+    }
+    open_directory_with_mode(tasks, d, c, r, options, journal.DIRECTORY_JOURNAL_CADENCE, ServingBound(binding_id, hold_bytes))
+}
+
+/// Returns the installed `binding_id` (`0` = unbound).
+pub fn archive_binding_id(db: Db) -> u64 {
+    match view db.disk {
+        Some(state) => state.archive_hold.binding_id,
+        None => 0u64,
+    }
+}
+
+/// Installs a nonzero `binding_id` and optional `hold_bytes` via an explicit cut.
+pub fn bind_archive_hold(mut db: Db, binding_id: u64, hold_bytes: Option[u64]) -> Result[Ticket, Error] waits {
+    healthy(db)?
+    if !is_disk(db) {
+        return Error(Unsupported(1))
+    }
+    if binding_id == 0 {
+        return Error(Missing("binding_id"))
+    }
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.pending_binding = Some(binding_id)
+        if let Some(limit) = hold_bytes {
+            state.archive_hold.hold_bytes = limit
+            state.archive_hold.hold_bytes_explicit = true
+        }
+    })
+    let result = cut_install(mut db, NoHolderChange)
+    if let Error(_) = result {
+        edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+            state.pending_binding = None
+        })
+    }
+    take result
+}
+
+/// Explicit detach cut: publishes `binding_id = 0` and releases all archive holds.
+pub fn detach_archive(mut db: Db) -> Result[Ticket, Error] waits {
+    healthy(db)?
+    if !is_disk(db) {
+        return Error(Unsupported(1))
+    }
+    if archive_binding_id(db) == 0 {
+        return Error(Missing("archive"))
+    }
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.pending_binding = Some(0u64)
+    })
+    let result = cut_install(mut db, NoHolderChange)
+    if let Error(_) = result {
+        edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+            state.pending_binding = None
+        })
+    }
+    take result
+}
+
+// Updates the Directory hold tracker when archive-head commits up to `gen` / `seg`.
+fn note_directory_archive_ack(mut db: Db, acked_gen: u64, acked_digest: u64, acked_seg: u64) -> Result[(), Error] waits {
+    if !is_disk(db) || object_writer_open(db) {
+        return Ok(())
+    }
+    let d = log_directory(db)?
+    let mut unlink_gens: List[u64] = list.new()
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        if acked_gen > state.archive_hold.acked_gen {
+            state.archive_hold.acked_gen = acked_gen
+            state.archive_hold.acked_digest = acked_digest
+        }
+        if acked_seg > state.archive_hold.acked_seg {
+            state.archive_hold.acked_seg = acked_seg
+        }
+        let mut kept: List[manifest.HeldReceipt] = list.new()
+        for r in state.archive_hold.receipts {
+            if r.generation <= state.archive_hold.acked_gen {
+                list.push(mut unlink_gens, r.generation)
+            } else {
+                list.push(mut kept, clone(r))
+            }
+        }
+        state.archive_hold.receipts = take kept
+    })
+    failure_result_from_rep(manifest.remove_archive_receipts(d, unlink_gens))
+}

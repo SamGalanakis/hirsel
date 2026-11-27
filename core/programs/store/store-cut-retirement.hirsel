@@ -1,20 +1,28 @@
 // The cut's retirements: which removed packs leave now, which a lease
 // carries to a later cut, and the generation's new pack state.
 pub fn cut_retirement(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], lease: Option[Arc[manifest.ExportLease]], scrubs: List[Arc[manifest.ScrubLease]], compaction: pager.TieredCompaction, range_lease: Option[(u64, u64)], first: u64, end: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), types.Failure] {
+    cut_retirement_with_holds(layout, holders, lease, scrubs, compaction, range_lease, None, first, end)
+}
+
+pub fn cut_retirement_with_holds(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], lease: Option[Arc[manifest.ExportLease]], scrubs: List[Arc[manifest.ScrubLease]], compaction: pager.TieredCompaction, range_lease: Option[(u64, u64)], archive_packs: Option[View[Map[u64, ()]]], first: u64, end: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), types.Failure] {
     let mut locations = manifest.share_page_locations(layout.locations)
     let mut packs: List[u64] = list.new()
     let mut carried: List[u64] = list.new()
     for seq in layout.lists.removals {
+        let archive_held = match archive_packs {
+            Some(held) => map.contains(held, seq),
+            None => false,
+        }
         let is_tiered = match manifest.disk_index_get(locations.packs, seq) {
             Some(pack) => pack.class >= 3,
             None => false,
         }
-        if manifest.tiered_leased(compaction.held, seq) || (is_tiered && (manifest.pack_leased(lease, seq) || manifest.scrub_leased(scrubs, seq))) {
+        if manifest.tiered_leased(compaction.held, seq) || (is_tiered && (manifest.pack_leased(lease, seq) || manifest.scrub_leased(scrubs, seq) || archive_held)) {
             // A retired Tiered pack leaves the inventory at once; its file
-            // waits for the last read inventory, export lease or scrub lease.
+            // waits for the last read inventory, export lease, scrub lease or archive hold.
             let _ = types.capacity(manifest.disk_index_remove(mut locations.packs, seq, manifest.pack_edge_charge))?
             list.push(mut carried, seq)
-        } else if manifest.pack_leased(lease, seq) || manifest.scrub_leased(scrubs, seq) {
+        } else if manifest.pack_leased(lease, seq) || manifest.scrub_leased(scrubs, seq) || archive_held {
             list.push(mut carried, seq)
         } else {
             let _ = types.capacity(manifest.disk_index_remove(mut locations.packs, seq, manifest.pack_edge_charge))?

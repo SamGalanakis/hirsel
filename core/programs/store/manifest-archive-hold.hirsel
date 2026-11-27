@@ -1,0 +1,564 @@
+// Directory source-side durable archive holds and unified cleanup (STORE-SPEC §15.7).
+pub type HeldReceipt: shareable + send {
+    generation: u64,
+    binding_id: u64,
+    first_live: u64,
+    prev_first: u64,
+    manifest_bytes: u64,
+    digest: u64,
+    packs: List[u64]
+}
+
+pub type DirArchiveHold: send {
+    binding_id: u64,
+    hold_bytes: u64,
+    hold_bytes_explicit: bool,
+    receipts: List[HeldReceipt],
+    prev_first: u64,
+    acked_gen: u64,
+    acked_digest: u64,
+    acked_seg: u64,
+    released_gap: bool
+}
+
+pub fn unbound_archive_hold() -> DirArchiveHold {
+    DirArchiveHold(binding_id: 0, hold_bytes: 0, hold_bytes_explicit: false, receipts: list.new(), prev_first: 1, acked_gen: 0, acked_digest: 0, acked_seg: 0, released_gap: false)
+}
+
+pub fn recovered_archive_hold(binding_id: u64, hold_bytes: Option[u64], prev_first: u64, take receipts: List[HeldReceipt]) -> DirArchiveHold {
+    let (budget, explicit) = match hold_bytes {
+        Some(limit) => (limit, true),
+        None => (0u64, false),
+    }
+    DirArchiveHold(binding_id, hold_bytes: budget, hold_bytes_explicit: explicit, receipts: take receipts, prev_first, acked_gen: 0, acked_digest: 0, acked_seg: 0, released_gap: false)
+}
+
+pub type DirArchiveCutPlan {
+    new_binding: u64,
+    new_prev_first: u64,
+    archive_seg_first: Option[u64],
+    save_current_receipt: Option[(u64, Bytes)],
+    unlink_before_sync: List[u64],
+    unlink_after_sync: List[u64],
+    kept_receipts: List[HeldReceipt],
+    protected_packs: Map[u64, ()],
+    released_unarchived: bool,
+    effective_hold_bytes: u64,
+    hold_bytes_explicit: bool
+}
+
+pub fn empty_archive_cut_plan(binding_id: u64, prev_first: u64, hold_bytes: u64, hold_bytes_explicit: bool) -> DirArchiveCutPlan {
+    DirArchiveCutPlan(new_binding: binding_id, new_prev_first: prev_first, archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: list.new(), kept_receipts: list.new(), protected_packs: map.new(), released_unarchived: false, effective_hold_bytes: hold_bytes, hold_bytes_explicit)
+}
+
+fn parse_canonical_u64(raw: Bytes, from: u64, end: u64) -> Option[u64] {
+    if end <= from || end - from > 20 {
+        return None
+    }
+    let first = raw[from]
+    if first < 49u8 || first > 57u8 {
+        return None
+    }
+    let mut value = 0u64
+    for at in from .. end {
+        let byte = raw[at]
+        if byte < 48u8 || byte > 57u8 {
+            return None
+        }
+        let Some(shifted) = int.checked_mul(value, 10) else {
+            return None
+        }
+        let digit: u64 = int.widen(byte - 48u8)
+        let Some(advanced) = int.checked_add(shifted, digit) else {
+            return None
+        }
+        value = advanced
+    }
+    Some(value)
+}
+
+pub fn parse_archive_manifest_filename(raw: Bytes, from: u64, end: u64) -> Option[(u64, bool)] {
+    let total = end - from
+    if total < 3 || raw[from] != b'm' || raw[from + 1] != b'-' {
+        return None
+    }
+    let temporary = total >= 7 && raw[end - 4] == b'.' && raw[end - 3] == b't' && raw[end - 2] == b'm' && raw[end - 1] == b'p'
+    let digits_end = if temporary {
+        end - 4
+    } else {
+        end
+    }
+    let gen = parse_canonical_u64(raw, from + 2, digits_end)?
+    Some((gen, temporary))
+}
+
+pub fn parse_journal_filename(raw: Bytes, from: u64, end: u64) -> Option[(u64, bool)] {
+    let total = end - from
+    if total < 3 || raw[from] != b'j' || raw[from + 1] != b'-' {
+        return None
+    }
+    let is_end = total >= 7 && raw[end - 4] == b'.' && raw[end - 3] == b'e' && raw[end - 2] == b'n' && raw[end - 1] == b'd'
+    let digits_end = if is_end {
+        end - 4
+    } else {
+        end
+    }
+    let seq = parse_canonical_u64(raw, from + 2, digits_end)?
+    Some((seq, is_end))
+}
+
+pub fn archive_manifest_path(gen: u64, suffix: String) -> Result[String, types.Failure] {
+    disk_allocation(scoped fn() -> Result[String, types.Failure] {
+        types.capacity(disk_path("m-", gen, suffix))
+    })
+}
+
+fn check_pack_header_present(d: Dir, id: types.StoreKey, seq: u64) -> Result[(), types.Failure] waits {
+    let path = paged_pack_path(seq)?
+    let mut file = match host.open(d, path, Read) {
+        Ok(take opened) => take opened,
+        Error(NotFound) => return Error(format.disk_fault(path, 0, Absent)),
+        Error(e) => return Error(Io(e)),
+    }
+    let size = disk_io(host.stat_file(mut file))?.size
+    if size < 72 {
+        let _ = host.close(take file)
+        return Error(format.disk_fault(path, 0, Truncated))
+    }
+    let head = read_disk_bytes(mut file, path, 0, 72)?
+    disk_io(host.close(take file))?
+    let _ = disk_read_header(path, head, 3, Some(seq), Some(id))?
+    Ok(())
+}
+
+// Walks the three class-2 list roots of a matching `m-<g>` receipt, checks
+// disjointness and presence/header validity of every pack in its closure L ∪ C.
+pub fn validate_receipt_packs(d: Dir, id: types.StoreKey, path: String, page_record: PageManifest) -> Result[List[u64], types.Failure] waits {
+    let graph = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
+    let mut lists = empty_listed_pages(true, take graph)
+    let mut final_item: Option[u64] = None
+    let mut directory = d
+    read_page_list(mut directory, id, page_record, page_record.pack_root, None, PackList, mut final_item, mut lists, read_list_page)?
+    final_item = None
+    read_page_list(mut directory, id, page_record, page_record.deferred_frees, None, DeferredList, mut final_item, mut lists, read_list_page)?
+    final_item = None
+    read_page_list(mut directory, id, page_record, page_record.lineage, None, LineageList, mut final_item, mut lists, read_list_page)?
+    validate_lineage_forks(path, page_record, lists.lineage.forks)?
+    for (seq, _) in lists.class_two {
+        if map.contains(lists.packs, seq) {
+            return Error(format.disk_fault(path, 72, Malformed))
+        }
+    }
+    let mut packs: List[u64] = list.new()
+    types.capacity(list.try_reserve(mut packs, map.len(lists.packs) + map.len(lists.class_two)))?
+    for (seq, _) in lists.packs {
+        list.push(mut packs, seq)
+    }
+    for (seq, _) in lists.class_two {
+        list.push(mut packs, seq)
+    }
+    list.sort(mut packs, order.compare)
+    for seq in packs {
+        check_pack_header_present(d, id, seq)?
+    }
+    Ok(take packs)
+}
+
+fn scan_archive_manifest_entries(d: Dir) -> Result[List[(u64, bool)], types.Failure] waits {
+    let (take buf_init, take out_init) = disk_allocation(fn() -> Result[(Bytes, List[(u64, bool)]), types.Failure] {
+        Ok((list.with_capacity(1024), list.new()))
+    })?
+    let mut buf = take buf_init
+    let mut out = take out_init
+    let mut listing = disk_io(host.entries(d, None))?
+    loop {
+        list.clear(mut buf)
+        let read_entries = disk_io(host.next_entries(mut listing, mut buf))?
+        if read_entries == 0 {
+            break
+        }
+        let mut offset = 0u64
+        while offset < list.len(buf) {
+            let kind = buf[offset]
+            let size: u16 = list.word_le(buf, offset + 1)
+            let from = offset + 3
+            offset = from + int.widen(size)
+            if kind == 1u8 || kind == 2u8 {
+                continue
+            }
+            if let Some((gen, temporary)) = parse_archive_manifest_filename(buf, from, offset) {
+                types.capacity(list.try_reserve(mut out, 1))?
+                list.push(mut out, (gen, temporary))
+            }
+        }
+    }
+    drop(take listing)
+    list.sort(mut out, fn(a: (u64, bool), b: (u64, bool)) -> Order {
+        match order.compare(a.0, b.0) {
+            Equal => order.compare(a.1, b.1),
+            other => other,
+        }
+    })
+    Ok(take out)
+}
+
+type CollectedArchiveHolds {
+    kept_receipts: List[HeldReceipt],
+    protected_packs: Map[u64, ()],
+    stale_files: List[(u64, bool)]
+}
+
+fn collect_directory_archive_holds(d: Dir, id: types.StoreKey, current: PageManifest) -> Result[CollectedArchiveHolds, types.Failure] waits {
+    let found = scan_archive_manifest_entries(d)?
+    let mut kept_receipts: List[HeldReceipt] = list.new()
+    let mut protected_packs: Map[u64, ()] = map.new()
+    let mut stale_files: List[(u64, bool)] = list.new()
+    for (gen, temporary) in found {
+        if temporary || current.binding_id == 0 || gen >= current.generation {
+            types.capacity(list.try_reserve(mut stale_files, 1))?
+            list.push(mut stale_files, (gen, temporary))
+            continue
+        }
+        let path = archive_manifest_path(gen, "")?
+        let raw = disk_read_file(d, path, PAGE_MANIFEST_FILE_LIMIT)?
+        let (owner, take parsed) = disk_allocation(scoped fn() -> Result[(types.StoreKey, PageManifest), types.Failure] {
+            disk_read_page_manifest(path, raw)
+        })?
+        if !types.same(owner.hi, owner.lo, id.hi, id.lo) || parsed.generation != gen {
+            return Error(format.disk_fault(path, 0, Header))
+        }
+        if parsed.binding_id != current.binding_id {
+            types.capacity(list.try_reserve(mut stale_files, 1))?
+            list.push(mut stale_files, (gen, false))
+            continue
+        }
+        let packs = validate_receipt_packs(d, id, path, parsed)?
+        types.capacity(map.try_reserve(mut protected_packs, list.len(packs)))?
+        for seq in packs {
+            map.insert(mut protected_packs, seq, ())
+        }
+        let digest = std.check.xxh3(raw, 0, list.len(raw))
+        types.capacity(list.try_reserve(mut kept_receipts, 1))?
+        list.push(mut kept_receipts, HeldReceipt(generation: gen, binding_id: parsed.binding_id, first_live: parsed.first_live, prev_first: parsed.prev_first, manifest_bytes: list.len(raw), digest, packs: take packs))
+    }
+    Ok(CollectedArchiveHolds(kept_receipts: take kept_receipts, protected_packs: take protected_packs, stale_files: take stale_files))
+}
+
+// Removes canonical `j-<seq>` and `j-<seq>.end` with `seq < prev_first` in O(1) memory.
+fn cleanup_segments_below(d: Dir, prev_first: u64, mut name: String) -> Result[(), types.Failure] waits {
+    if prev_first <= 1 {
+        return Ok(())
+    }
+    let (take buf_init, take batch_init) = disk_allocation(fn() -> Result[(Bytes, List[(u64, bool)]), types.Failure] {
+        Ok((list.with_capacity(1024), list.with_capacity(64)))
+    })?
+    let mut buf = take buf_init
+    let mut batch = take batch_init
+    loop {
+        list.clear(mut batch)
+        let mut listing = disk_io(host.entries(d, None))?
+        let mut full = false
+        loop {
+            list.clear(mut buf)
+            let read_entries = disk_io(host.next_entries(mut listing, mut buf))?
+            if read_entries == 0 {
+                break
+            }
+            let mut offset = 0u64
+            while offset < list.len(buf) {
+                let kind = buf[offset]
+                let size: u16 = list.word_le(buf, offset + 1)
+                let from = offset + 3
+                offset = from + int.widen(size)
+                if kind == 1u8 || kind == 2u8 {
+                    continue
+                }
+                if let Some((seq, is_end)) = parse_journal_filename(buf, from, offset) {
+                    if seq < prev_first {
+                        list.push(mut batch, (seq, is_end))
+                        if list.len(batch) == 64 {
+                            full = true
+                            break
+                        }
+                    }
+                }
+            }
+            if full {
+                break
+            }
+        }
+        drop(take listing)
+        if list.len(batch) == 0 {
+            break
+        }
+        list.sort(mut batch, fn(a: (u64, bool), b: (u64, bool)) -> Order {
+            match order.compare(a.0, b.0) {
+                Equal => order.compare(a.1, b.1),
+                other => other,
+            }
+        })
+        let mut removed_any = false
+        for (seq, is_end) in batch {
+            string.truncate(mut name, 0)
+            string.push(mut name, "j-")
+            string.push_u64(mut name, seq)
+            if is_end {
+                string.push(mut name, ".end")
+            }
+            if disk_remove_optional(d, name)? {
+                removed_any = true
+            }
+        }
+        if !full || !removed_any {
+            break
+        }
+    }
+    Ok(())
+}
+
+// Unified cleanup rule (STORE-SPEC §15.7): validate current MANIFEST plus all
+// matching older `m-<g>` receipts BEFORE any erasure, protect their union of
+// pack closures and `[prev_first, first_live)` segments when bound, and remove
+// stale/future receipts, dead packs and obsolete segments.
+pub fn cleanup_page_manifest_with_holds(d: Dir, id: types.StoreKey, validated: ValidatedPageManifest) -> Result[List[HeldReceipt], types.Failure] waits {
+    let CollectedArchiveHolds(kept_receipts: take kept_receipts, protected_packs: take protected_packs, stale_files: take stale_files) = collect_directory_archive_holds(d, id, validated.manifest)?
+    let mut name = disk_allocation(scoped fn() -> Result[String, types.Failure] {
+        Ok(string.with_capacity(32))
+    })?
+    let _ = disk_remove_optional(d, "MANIFEST.tmp")?
+    for (gen, temporary) in stale_files {
+        string.truncate(mut name, 0)
+        string.push(mut name, "m-")
+        string.push_u64(mut name, gen)
+        if temporary {
+            string.push(mut name, ".tmp")
+        }
+        let _ = disk_remove_optional(d, name)?
+    }
+    cleanup_dead_packs_keeping(d, validated.inventory, Some(view protected_packs), mut name)?
+    if validated.manifest.binding_id == 0 {
+        for old in validated.manifest.prev_first .. validated.manifest.first_live {
+            remove_numbered(d, "j-", old, true, mut name)?
+        }
+    } else {
+        cleanup_segments_below(d, validated.manifest.prev_first, mut name)?
+    }
+    Ok(take kept_receipts)
+}
+
+fn optional_file_size(d: Dir, path: String) -> Result[u64, types.Failure] waits {
+    match host.open(d, path, Read) {
+        Ok(take file) => {
+            let mut opened = take file
+            let size = disk_io(host.stat_file(mut opened))?.size
+            disk_io(host.close(take opened))?
+            Ok(size)
+        },
+        Error(NotFound) => Ok(0u64),
+        Error(e) => Error(Io(e)),
+    }
+}
+
+fn segment_files_size(d: Dir, seq: u64) -> Result[u64, types.Failure] waits {
+    let seg_size = optional_file_size(d, journal_path(seq, "")?)?
+    let end_size = optional_file_size(d, journal_path(seq, ".end")?)?
+    Ok(int.saturating_add(seg_size, end_size))
+}
+
+fn compute_extra_hold_bytes(d: Dir, candidates: List[HeldReceipt], start_idx: u64, live_packs_next: Map[u64, ()], seg_from: u64, seg_end: u64, ordinary_prev_first: u64) -> Result[u64, types.Failure] waits {
+    let mut total = 0u64
+    let mut seen_packs: Map[u64, ()] = map.new()
+    for i in start_idx .. list.len(candidates) {
+        let receipt = view candidates[i]
+        total = int.saturating_add(total, receipt.manifest_bytes)
+        for seq in receipt.packs {
+            if map.contains(live_packs_next, seq) || map.contains(seen_packs, seq) {
+                continue
+            }
+            types.capacity(map.try_reserve(mut seen_packs, 1))?
+            map.insert(mut seen_packs, seq, ())
+            total = int.saturating_add(total, optional_file_size(d, paged_pack_path(seq)?)?)
+        }
+    }
+    let archive_only_end = order.min(seg_end, ordinary_prev_first)
+    if seg_from < archive_only_end {
+        for seq in seg_from .. archive_only_end {
+            total = int.saturating_add(total, segment_files_size(d, seq)?)
+        }
+    }
+    Ok(total)
+}
+
+fn live_generation_bytes(d: Dir, live_packs_next: Map[u64, ()], manifest_len: u64) -> Result[u64, types.Failure] waits {
+    let mut total = manifest_len
+    for (seq, _) in live_packs_next {
+        total = int.saturating_add(total, optional_file_size(d, paged_pack_path(seq)?)?)
+    }
+    Ok(order.max(total, 1u64))
+}
+
+pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: Option[u64], current_gen: u64, old_first_live: u64, new_first_live: u64, ordinary_prev_first: u64, export_lease_first: Option[u64], live_packs_old: List[u64], live_packs_next: Map[u64, ()], next_manifest_estimate: u64) -> Result[DirArchiveCutPlan, types.Failure] waits {
+    let new_binding = match target_binding {
+        Some(b) => b,
+        None => hold.binding_id,
+    }
+    let bound_lease_floor = match export_lease_first {
+        Some(ef) => order.min(ef, new_first_live),
+        None => new_first_live,
+    }
+    // Unbound -> Unbound
+    if hold.binding_id == 0 && new_binding == 0 {
+        return Ok(empty_archive_cut_plan(0, ordinary_prev_first, 0, false))
+    }
+    // Detach cut (Bound -> Unbound): release all holds after MANIFEST rename.
+    if new_binding == 0 {
+        let mut after: List[u64] = list.new()
+        types.capacity(list.try_reserve(mut after, list.len(hold.receipts)))?
+        for r in hold.receipts {
+            list.push(mut after, r.generation)
+        }
+        return Ok(DirArchiveCutPlan(new_binding: 0, new_prev_first: order.min(ordinary_prev_first, hold.prev_first), archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: take after, kept_receipts: list.new(), protected_packs: map.new(), released_unarchived: false, effective_hold_bytes: 0, hold_bytes_explicit: false))
+    }
+    let effective_budget = if hold.hold_bytes_explicit || hold.hold_bytes > 0 {
+        hold.hold_bytes
+    } else {
+        live_generation_bytes(d, live_packs_next, next_manifest_estimate)?
+    }
+    // Bind cut (Unbound -> Bound, or rebind to a new binding_id): fresh start at generation g+1.
+    if hold.binding_id == 0 || new_binding != hold.binding_id {
+        let mut after: List[u64] = list.new()
+        types.capacity(list.try_reserve(mut after, list.len(hold.receipts)))?
+        for r in hold.receipts {
+            list.push(mut after, r.generation)
+        }
+        return Ok(DirArchiveCutPlan(new_binding, new_prev_first: bound_lease_floor, archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: take after, kept_receipts: list.new(), protected_packs: map.new(), released_unarchived: false, effective_hold_bytes: effective_budget, hold_bytes_explicit: hold.hold_bytes_explicit))
+    }
+    // Bound -> Bound cut: preserve unarchived receipts and segments within `hold_bytes`.
+    let current_raw = read_page_manifest_bytes(d)?
+    let current_digest = std.check.xxh3(current_raw, 0, list.len(current_raw))
+    let need_current = !(hold.acked_gen > current_gen || (hold.acked_gen == current_gen && hold.acked_digest == current_digest))
+    let mut candidates: List[HeldReceipt] = list.new()
+    let mut unlink_after: List[u64] = list.new()
+    for r in hold.receipts {
+        if r.generation <= hold.acked_gen {
+            types.capacity(list.try_reserve(mut unlink_after, 1))?
+            list.push(mut unlink_after, r.generation)
+        } else {
+            types.capacity(list.try_reserve(mut candidates, 1))?
+            list.push(mut candidates, clone(r))
+        }
+    }
+    if need_current {
+        types.capacity(list.try_reserve(mut candidates, 1))?
+        list.push(mut candidates, HeldReceipt(generation: current_gen, binding_id: new_binding, first_live: old_first_live, prev_first: hold.prev_first, manifest_bytes: list.len(current_raw), digest: current_digest, packs: clone(live_packs_old)))
+    }
+    let n = list.len(candidates)
+    let mut chosen = n
+    let mut chosen_seg_from = new_first_live
+    let mut released_unarchived = false
+    for start_idx in 0u64 .. n {
+        let seg_from = if start_idx == 0 {
+            let unacked_floor = if hold.acked_seg > 0 {
+                order.max(hold.prev_first, hold.acked_seg + 1)
+            } else {
+                hold.prev_first
+            }
+            order.min(candidates[0u64].first_live, unacked_floor)
+        } else {
+            candidates[start_idx].first_live
+        }
+        let extra = compute_extra_hold_bytes(d, candidates, start_idx, live_packs_next, seg_from, new_first_live, bound_lease_floor)?
+        if extra <= effective_budget {
+            chosen = start_idx
+            chosen_seg_from = seg_from
+            break
+        }
+    }
+    if chosen == n {
+        if n > 0 {
+            released_unarchived = true
+            chosen_seg_from = new_first_live
+        } else {
+            // Current base g is already committed; check if post-g journal segments fit budget.
+            let unacked_seg = if hold.acked_seg >= old_first_live {
+                order.min(hold.acked_seg + 1, new_first_live)
+            } else {
+                old_first_live
+            }
+            if unacked_seg < new_first_live {
+                let extra = compute_extra_hold_bytes(d, candidates, n, live_packs_next, unacked_seg, new_first_live, bound_lease_floor)?
+                if extra <= effective_budget {
+                    chosen_seg_from = unacked_seg
+                } else {
+                    chosen_seg_from = new_first_live
+                    released_unarchived = true
+                }
+            }
+        }
+    } else if chosen > 0 {
+        released_unarchived = true
+    }
+    let mut unlink_before: List[u64] = list.new()
+    for i in 0u64 .. chosen {
+        let dropped_gen = candidates[i].generation
+        if dropped_gen < current_gen {
+            types.capacity(list.try_reserve(mut unlink_before, 1))?
+            list.push(mut unlink_before, dropped_gen)
+        }
+    }
+    let mut kept_receipts: List[HeldReceipt] = list.new()
+    let mut protected_packs: Map[u64, ()] = map.new()
+    let mut keep_current = false
+    for i in chosen .. n {
+        let r = candidates[i]
+        if r.generation == current_gen {
+            keep_current = true
+        }
+        types.capacity(map.try_reserve(mut protected_packs, list.len(r.packs)))?
+        for seq in r.packs {
+            map.insert(mut protected_packs, seq, ())
+        }
+        types.capacity(list.try_reserve(mut kept_receipts, 1))?
+        list.push(mut kept_receipts, clone(r))
+    }
+    let save_current_receipt: Option[(u64, Bytes)] = if keep_current {
+        Some((current_gen, take current_raw))
+    } else {
+        None
+    }
+    let archive_seg_first: Option[u64] = if chosen_seg_from < new_first_live {
+        Some(chosen_seg_from)
+    } else {
+        None
+    }
+    let new_prev_first = order.min(bound_lease_floor, chosen_seg_from)
+    Ok(DirArchiveCutPlan(new_binding, new_prev_first, archive_seg_first, save_current_receipt: take save_current_receipt, unlink_before_sync: take unlink_before, unlink_after_sync: take unlink_after, kept_receipts: take kept_receipts, protected_packs: take protected_packs, released_unarchived, effective_hold_bytes: effective_budget, hold_bytes_explicit: hold.hold_bytes_explicit))
+}
+
+// Publishes a Directory cut MANIFEST with §15.7 exact crash ordering:
+// 1. Unlink budget-released `m-<r>` files BEFORE the first dir sync.
+// 2. Write, sync, and rename `m-<g>.tmp` -> `m-<g>` (when needed and in budget).
+// 3. First `sync_dir` (barriers new packs, released unlinks, and `m-<g>` rename).
+// 4. Write, sync, and rename `MANIFEST.tmp` -> `MANIFEST`.
+// 5. Second `sync_dir`.
+pub fn publish_directory_cut_manifest(d: Dir, raw: Bytes, plan: DirArchiveCutPlan) -> Result[(), types.Failure] waits {
+    for gen in plan.unlink_before_sync {
+        let path = archive_manifest_path(gen, "")?
+        let _ = disk_remove_optional(d, path)?
+    }
+    if let Some((gen, old_raw)) = view plan.save_current_receipt {
+        let tmp_path = archive_manifest_path(gen, ".tmp")?
+        let final_path = archive_manifest_path(gen, "")?
+        disk_write_synced(d, tmp_path, old_raw)?
+        disk_io(host.rename(d, tmp_path, final_path))?
+    }
+    publish_page_manifest_bytes(d, raw)
+}
+
+pub fn remove_archive_receipts(d: Dir, gens: List[u64]) -> Result[(), types.Failure] waits {
+    for gen in gens {
+        let path = archive_manifest_path(gen, "")?
+        let _ = disk_remove_optional(d, path)?
+    }
+    Ok(())
+}

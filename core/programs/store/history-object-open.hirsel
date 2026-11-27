@@ -2,16 +2,17 @@ pub opaque type HistoryOpenBase: send {
     generation: u64,
     fence: u32,
     recorded_after: u64,
+    binding_id: u64,
     sweep: manifest.SweepCursor,
     pages: manifest.PackDiskState
 }
 
 pub fn genesis_open_base() -> HistoryOpenBase {
-    HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep: manifest.SweepCursor(position: 0, epoch: 0, digest: 0), pages: manifest.genesis_pack_disk())
+    HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, binding_id: 0, sweep: manifest.SweepCursor(position: 0, epoch: 0, digest: 0), pages: manifest.genesis_pack_disk())
 }
 
 pub fn recovered_open_base(loaded: manifest.PageManifest, take packs: manifest.PackDiskState) -> HistoryOpenBase {
-    HistoryOpenBase(generation: loaded.generation, fence: loaded.fence, recorded_after: loaded.branches[0].version, sweep: loaded.sweep, pages: take packs)
+    HistoryOpenBase(generation: loaded.generation, fence: loaded.fence, recorded_after: loaded.branches[0].version, binding_id: loaded.binding_id, sweep: loaded.sweep, pages: take packs)
 }
 
 pub fn set_open_base_forks(mut base: HistoryOpenBase, take forks: List[manifest.LineageFork]) {
@@ -19,6 +20,10 @@ pub fn set_open_base_forks(mut base: HistoryOpenBase, take forks: List[manifest.
 }
 
 pub fn open_base_parts(take base: HistoryOpenBase) -> (u64, u32, u64, manifest.SweepCursor, manifest.PackDiskState) {
-    let HistoryOpenBase(generation, fence, recorded_after, sweep, pages: take packs) = take base
+    let HistoryOpenBase(generation, fence, recorded_after, sweep, pages: take packs, ..) = take base
     (generation, fence, recorded_after, sweep, take packs)
+}
+
+pub fn open_base_binding_id(base: HistoryOpenBase) -> u64 {
+    base.binding_id
 }

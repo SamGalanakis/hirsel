@@ -52,6 +52,7 @@ pub type PageManifest: shareable + send {
     lineage: std.page.PagePtr,
     deferred_frees: std.page.PagePtr,
     deferred_next: u64,
+    binding_id: u64,
     sweep: SweepCursor,
     pack_root: std.page.PagePtr,
     branches: List[LocatedBranch],
@@ -63,7 +64,7 @@ pub fn page_manifest_empty(limits: types.LimitsRep) -> PageManifest {
     let roots = pages.LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
     let mut branches: List[LocatedBranch] = list.with_capacity(1)
     list.push(mut branches, LocatedBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: roots))
-    PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
+    PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, binding_id: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
 }
 
 pub fn page_manifest_size(m: PageManifest) -> u64 {
@@ -116,8 +117,7 @@ pub fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[()
     put_page_ptr(mut raw, m.lineage)
     put_page_ptr(mut raw, m.deferred_frees)
     types.capacity(format.le(mut raw, m.deferred_next, 8))?
-    // The format-13 archive binding is zero until source holds are implemented.
-    types.capacity(format.le(mut raw, 0, 8))?
+    types.capacity(format.le(mut raw, m.binding_id, 8))?
     types.capacity(format.le(mut raw, m.sweep.position, 8))?
     types.capacity(format.le(mut raw, m.sweep.epoch, 8))?
     types.capacity(format.le(mut raw, m.sweep.digest, 8))?
@@ -251,9 +251,7 @@ pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[Pag
     let lineage = read_page_ptr(file, raw, mut at)?
     let deferred_frees = read_page_ptr(file, raw, mut at)?
     let deferred_next = format.disk_number(file, raw, mut at, 8)?
-    if format.disk_number(file, raw, mut at, 8)? != 0 {
-        return Error(Unsupported(0x0031))
-    }
+    let binding_id = format.disk_number(file, raw, mut at, 8)?
     let sweep_position = format.disk_number(file, raw, mut at, 8)?
     let epoch = format.disk_number(file, raw, mut at, 8)?
     let digest = format.disk_number(file, raw, mut at, 8)?
@@ -309,7 +307,7 @@ pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[Pag
         list.push(mut pins, LocatedPin(owner: owner, name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
     }
     read_keyed_roots(file, raw, mut at, mut branches, mut pins)?
-    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, sweep: sweep, pack_root: pack_root, branches: take branches, pins: take pins))
+    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, binding_id: binding_id, sweep: sweep, pack_root: pack_root, branches: take branches, pins: take pins))
 }
 
 pub fn manifest_account(m: PageManifest) -> u64 {

@@ -174,6 +174,8 @@ std = { major = 1 }
 "store-tiered-lineage.hirsel" = "manifest"
 "store-tiered-residency.hirsel" = "pager"
 "store-manifest.hirsel" = "manifest"
+"manifest-archive-hold.hirsel" = "manifest"
+"store-archive-hold.hirsel" = "store"
 "store-cold-walk.hirsel" = "store"
 "store-list-read.hirsel" = "manifest"
 "store-manifest-wire.hirsel" = "manifest"
@@ -397,6 +399,7 @@ dirs = ["."]
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format13_laws.hirsel" = "store"
+"store_archive_hold_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
 "store_prior_laws.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "manifest"
@@ -1072,3 +1075,9 @@ limit = 268435456
 
 [tests.runs."store@1/store/bucket_stream_claim_reuses_grant_after_conflict"]
 limit = 402653184
+
+[tests.runs."store@1/store/test_la2_directory_durable_hold_and_budget"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_la10_directory_thirteen_handoff_cuts"]
+limit = 268435456

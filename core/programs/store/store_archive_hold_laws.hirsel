@@ -1,0 +1,489 @@
+// Phase 3 laws L-A2 (byte-bounded durable holds, unified cleanup, shared pack
+// deduplication, unconfigured/tool reopen) and L-A10 (all 13 Directory handoff
+// cut crash interleavings). STORE-SPEC §15.7–§15.8.
+fn archive_hold_options(create: bool) -> Options {
+    let mut ov = derived_sizes()
+    ov.limits = Some(small_place_limits())
+    ov.pack_bytes = Some(4096u64)
+    ov.checkpoint_bytes = Some(65536u64)
+    ov.resident_limit = Some(4194304u64)
+    let mut o = result.unwrap(sized_with(Directory, 67108864u64, ov))
+    o.create = create
+    o
+}
+
+fn archive_hold_table(mut db: Db) -> Result[Table[u64, Bytes], Error] waits {
+    let mut decl = declare(db, Migrate)?
+    let mut built = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let t = finish(mut decl, take built)?
+    let sealed_ticket = seal(mut db, take decl)?
+    durable(mut db, sealed_ticket)?
+    Ok(take t)
+}
+
+fn archive_hold_put(mut db: Db, t: Table[u64, Bytes], key: u64, fill: u8, width: u64) -> Result[Ticket, Error] waits {
+    let mut payload: Bytes = list.with_capacity(width)
+    list.fill(mut payload, width, fill)
+    let tbl: Table[u64, Bytes] = clone(t)
+    match run(mut db, None, (take tbl, key, take payload), fn(mut tx: Tx, args: (Table[u64, Bytes], u64, Bytes)) -> Result[(), ()] {
+        let _ = put(mut tx, args.0, args.1, args.2)
+        Ok(())
+    })? {
+        Committed(done) => {
+            durable(mut db, done.ticket)?
+            Ok(done.ticket)
+        },
+        _ => fail("archive_hold_put: commit failed"),
+    }
+}
+
+fn archive_hold_copy_dir(src: Dir, dst: Dir) -> Result[(), Error] waits {
+    let items = match std.dir.list(src, None) {
+        Ok(take xs) => take xs,
+        Error(_) => fail("archive_hold_copy_dir: list failed"),
+    }
+    for e in items {
+        if e.name == "LOCK" {
+            continue
+        }
+        let mut rf = host.open(src, e.name, Read) ?=> Io
+        let size = (host.stat_file(mut rf) ?=> Io).size
+        let raw = failure_result_from_rep(manifest.read_disk_bytes(mut rf, e.name, 0, size))?
+        host.close(take rf) ?=> Io
+        failure_result_from_rep(manifest.disk_write_synced(dst, e.name, raw))?
+    }
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(dst)))
+}
+
+fn archive_hold_file_size(d: Dir, path: String) -> Result[u64, Error] waits {
+    match host.open(d, path, Read) {
+        Ok(take f) => {
+            let mut opened = take f
+            let size = (host.stat_file(mut opened) ?=> Io).size
+            host.close(take opened) ?=> Io
+            Ok(size)
+        },
+        Error(NotFound) => Ok(0u64),
+        Error(e) => Error(Io(e)),
+    }
+}
+
+fn archive_hold_exists(d: Dir, path: String) -> Result[bool, Error] waits {
+    failure_result_from_rep(journal.disk_exists(d, path))
+}
+
+fn archive_hold_receipt_packs(d: Dir, id: StoreId, path: String) -> Result[(manifest.PageManifest, List[u64]), Error] waits {
+    let raw = failure_result_from_rep(manifest.disk_read_file(d, path, manifest.PAGE_MANIFEST_FILE_LIMIT))?
+    let (_, take parsed) = disk_read_page_manifest(path, raw)?
+    let packs = failure_result_from_rep(manifest.validate_receipt_packs(d, store_key_to_rep(id), path, parsed))?
+    Ok((take parsed, take packs))
+}
+
+fn archive_hold_check_all_present(d: Dir, id: StoreId) -> Result[(manifest.PageManifest, List[u64]), Error] waits {
+    let (manifest_id, take cur) = read_page_manifest_file(d)?
+    if !types.same(manifest_id.hi, manifest_id.lo, id.hi, id.lo) {
+        fail("store id mismatch")
+    }
+    let cur_packs = failure_result_from_rep(manifest.validate_receipt_packs(d, store_key_to_rep(id), "MANIFEST", cur))?
+    let items = match std.dir.list(d, None) {
+        Ok(take xs) => take xs,
+        Error(_) => fail("archive_hold_check_all_present: list failed"),
+    }
+    for e in items {
+        if let Some(rest) = string.strip_prefix(e.name, "m-") {
+            if let Ok(gen) = int.parse_uint(string.from(rest), 10) {
+                let (take rec, take rec_packs) = archive_hold_receipt_packs(d, id, e.name)?
+                if rec.generation != gen || rec.binding_id != cur.binding_id || gen >= cur.generation {
+                    fail("unexpected receipt survived unified cleanup")
+                }
+                for seq in rec_packs {
+                    let p = failure_result_from_rep(manifest.paged_pack_path(seq))?
+                    if !archive_hold_exists(d, p)? {
+                        fail("held receipt pack missing")
+                    }
+                }
+            }
+        }
+    }
+    for seq in cur.prev_first .. cur.first_live {
+        let j = failure_result_from_rep(manifest.journal_path(seq, ""))?
+        if !archive_hold_exists(d, j)? {
+            fail("held journal segment missing")
+        }
+    }
+    Ok((take cur, take cur_packs))
+}
+
+// L-A2: Disconnected sink durable holds.
+// - Holds survive configured, unconfigured and operator-tool reopens.
+// - Malformed matching `m-<g>` fails closed before any erasure.
+// - At exact equality `extra_bytes == hold_bytes`, all held dependencies survive.
+// - At 1 byte over (`hold_bytes == exact - 1`), oldest additional hold is
+//   released, shared packs stay intact, and primary writes + backups continue.
+@test
+fn test_la2_directory_durable_hold_and_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut db = open(tasks, dir, c, r, archive_hold_options(true))?
+    let id = db.store
+    let t = archive_hold_table(mut db)?
+    // Row 1 stays untouched across cuts (shared pack candidate); rows 2..5 rotate.
+    let _ = archive_hold_put(mut db, t, 1u64, 0x11u8, 64)?
+    let _ = archive_hold_put(mut db, t, 2u64, 0x22u8, 3000)?
+    let _ = bind_archive_hold(mut db, 42u64, Some(1048576u64))?
+    let gen_bound = db.accounting.checkpointed
+    if archive_binding_id(db) != 42u64 {
+        fail("L-A2: bind cut did not install binding_id")
+    }
+    // Write a new version overwriting row 2 and cut -> creates receipt `m-<gen_bound>`.
+    let _ = archive_hold_put(mut db, t, 2u64, 0x33u8, 3000)?
+    let _ = checkpoint(mut db)?
+    let gen_after = db.accounting.checkpointed
+    let receipt_name = failure_result_from_rep(manifest.archive_manifest_path(gen_bound, ""))?
+    if !archive_hold_exists(dir, receipt_name)? {
+        fail("L-A2: cut while disconnected did not write m-<g> receipt")
+    }
+    close(take db)?
+    // 1. Seed stray debris (`MANIFEST.tmp`, `m-<gen_after>`, `m-999.tmp`, stale binding `m-1`, dead pack `p-999`).
+    let mut stale = manifest.page_manifest_empty(limits_to_rep(default_limits()))
+    stale.binding_id = 77u64
+    let stale_raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), stale))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, "m-1", stale_raw))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, "m-999.tmp", b"tmp"))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, "MANIFEST.tmp", b"tmp"))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, "p-999", b"dead"))?
+    // 2. Unconfigured serving reopen MUST run unified cleanup, then refuse without releasing holds.
+    match open(tasks, dir, c, r, archive_hold_options(false)) {
+        Error(Missing(_)) => (),
+        Ok(_) => fail("L-A2: unconfigured serving open succeeded on bound store"),
+        Error(_) => fail("L-A2: unexpected error on unconfigured serving open"),
+    }
+    if archive_hold_exists(dir, "m-1")? || archive_hold_exists(dir, "m-999.tmp")? || archive_hold_exists(dir, "p-999")? || archive_hold_exists(dir, "MANIFEST.tmp")? {
+        fail("L-A2: unconfigured reopen failed to run unified cleanup")
+    }
+    if !archive_hold_exists(dir, receipt_name)? {
+        fail("L-A2: unconfigured reopen released valid archive receipt")
+    }
+    // 3. Wrong binding serving reopen MUST refuse with Conflict without releasing holds.
+    match open_directory_bound(tasks, dir, c, r, archive_hold_options(false), 99u64, Some(1048576u64)) {
+        Error(Conflict(_)) => (),
+        Ok(_) => fail("L-A2: wrong binding open succeeded"),
+        Error(_) => fail("L-A2: unexpected error on wrong binding open"),
+    }
+    if !archive_hold_exists(dir, receipt_name)? {
+        fail("L-A2: wrong binding open released valid archive receipt")
+    }
+    // 4. Operator tool cleanup stops cleanly after cleanup without releasing holds.
+    failure_result_from_rep(manifest.disk_write_synced(dir, "p-998", b"dead"))?
+    cleanup_directory(dir, c, archive_hold_options(false))?
+    if archive_hold_exists(dir, "p-998")? || !archive_hold_exists(dir, receipt_name)? {
+        fail("L-A2: operator cleanup failed or released valid receipt")
+    }
+    let _ = archive_hold_check_all_present(dir, id)?
+    // 5. Corrupt matching `m-<g>` MUST fail closed BEFORE removing any dead pack.
+    let bad_copy = disk_test_directory(d)
+    archive_hold_copy_dir(dir, bad_copy)?
+    failure_result_from_rep(manifest.disk_write_synced(bad_copy, "p-997", b"keep-until-valid"))?
+    failure_result_from_rep(manifest.disk_write_synced(bad_copy, receipt_name, b"corrupt-receipt"))?
+    match cleanup_directory(bad_copy, c, archive_hold_options(false)) {
+        Error(Corrupt(_)) => (),
+        _ => fail("L-A2: corrupt matching receipt did not fail closed"),
+    }
+    if !archive_hold_exists(bad_copy, "p-997")? {
+        fail("L-A2: corrupt receipt erased files before failing closed")
+    }
+    // 6. Exact byte-boundary test: measure exact extra bytes of holding `m-<gen_bound>`
+    //    across the next cut, then test exact equality (retain) vs exact - 1 (release).
+    let (take m_cur, take cur_packs) = archive_hold_check_all_present(dir, id)?
+    let (take m_rec, take rec_packs) = archive_hold_receipt_packs(dir, id, receipt_name)?
+    let mut cur_pack_set: Map[u64, ()] = map.new()
+    for seq in cur_packs {
+        map.insert(mut cur_pack_set, seq, ())
+    }
+    let mut exact_extra = archive_hold_file_size(dir, receipt_name)?
+    let mut seen_extra: Map[u64, ()] = map.new()
+    for seq in rec_packs {
+        if !map.contains(cur_pack_set, seq) && !map.contains(seen_extra, seq) {
+            map.insert(mut seen_extra, seq, ())
+            exact_extra += archive_hold_file_size(dir, failure_result_from_rep(manifest.paged_pack_path(seq))?)?
+        }
+    }
+    for seq in m_cur.prev_first .. m_cur.first_live {
+        exact_extra += archive_hold_file_size(dir, failure_result_from_rep(manifest.journal_path(seq, ""))?)?
+        exact_extra += archive_hold_file_size(dir, failure_result_from_rep(manifest.journal_path(seq, ".end"))?)?
+    }
+    // Add the exact bytes of gen_after's own MANIFEST + active segment that the next cut will hold.
+    let copy_eq = disk_test_directory(d)
+    let copy_over = disk_test_directory(d)
+    archive_hold_copy_dir(dir, copy_eq)?
+    archive_hold_copy_dir(dir, copy_over)?
+    // First run a probe cut on a scratch copy with huge budget to measure exact extra bytes after cut!
+    let copy_probe = disk_test_directory(d)
+    archive_hold_copy_dir(dir, copy_probe)?
+    let mut probe_db = open_directory_bound(tasks, copy_probe, c, r, archive_hold_options(false), 42u64, Some(1048576u64))?
+    let pt = table(mut probe_db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = archive_hold_put(mut probe_db, pt, 3u64, 0x44u8, 256)?
+    let _ = checkpoint(mut probe_db)?
+    let (take m_probe, take probe_live) = archive_hold_check_all_present(copy_probe, id)?
+    let mut probe_live_set: Map[u64, ()] = map.new()
+    for seq in probe_live {
+        map.insert(mut probe_live_set, seq, ())
+    }
+    let receipt_after_name = failure_result_from_rep(manifest.archive_manifest_path(gen_after, ""))?
+    let (_, take r1_packs) = archive_hold_receipt_packs(copy_probe, id, receipt_name)?
+    let (_, take r2_packs) = archive_hold_receipt_packs(copy_probe, id, receipt_after_name)?
+    let mut need_both = archive_hold_file_size(copy_probe, receipt_name)? + archive_hold_file_size(copy_probe, receipt_after_name)?
+    let mut dedup: Map[u64, ()] = map.new()
+    for seq in r1_packs {
+        if !map.contains(probe_live_set, seq) && !map.contains(dedup, seq) {
+            map.insert(mut dedup, seq, ())
+            need_both += archive_hold_file_size(copy_probe, failure_result_from_rep(manifest.paged_pack_path(seq))?)?
+        }
+    }
+    for seq in r2_packs {
+        if !map.contains(probe_live_set, seq) && !map.contains(dedup, seq) {
+            map.insert(mut dedup, seq, ())
+            need_both += archive_hold_file_size(copy_probe, failure_result_from_rep(manifest.paged_pack_path(seq))?)?
+        }
+    }
+    for seq in m_probe.prev_first .. m_probe.first_live {
+        need_both += archive_hold_file_size(copy_probe, failure_result_from_rep(manifest.journal_path(seq, ""))?)?
+        need_both += archive_hold_file_size(copy_probe, failure_result_from_rep(manifest.journal_path(seq, ".end"))?)?
+    }
+    close(take probe_db)?
+    // At exact equality (`hold_bytes == need_both`): BOTH receipts MUST survive!
+    let mut eq_db = open_directory_bound(tasks, copy_eq, c, r, archive_hold_options(false), 42u64, Some(need_both))?
+    let eqt = table(mut eq_db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = archive_hold_put(mut eq_db, eqt, 3u64, 0x44u8, 256)?
+    let _ = checkpoint(mut eq_db)?
+    if !archive_hold_exists(copy_eq, receipt_name)? || !archive_hold_exists(copy_eq, receipt_after_name)? {
+        fail("L-A2: exact equality dropped a held receipt")
+    }
+    close(take eq_db)?
+    // At 1 byte over (`hold_bytes == need_both - 1`): oldest receipt `m-<gen_bound>` MUST be released,
+    // newer receipt `m-<gen_after>` retained, and primary writes + backup MUST continue!
+    let mut over_db = open_directory_bound(tasks, copy_over, c, r, archive_hold_options(false), 42u64, Some(need_both - 1))?
+    let overt = table(mut over_db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = archive_hold_put(mut over_db, overt, 3u64, 0x44u8, 256)?
+    let _ = checkpoint(mut over_db)?
+    if archive_hold_exists(copy_over, receipt_name)? {
+        fail("L-A2: 1 byte over budget failed to release oldest receipt")
+    }
+    if !archive_hold_exists(copy_over, receipt_after_name)? {
+        fail("L-A2: 1 byte over budget unnecessarily dropped newer receipt")
+    }
+    // Primary writes and online backup/deploy continue unimpeded!
+    let _ = archive_hold_put(mut over_db, overt, 4u64, 0x55u8, 128)?
+    let backup_dir = disk_test_directory(d)
+    let mut att: Bytes = list.with_capacity(16)
+    list.fill(mut att, 16, 7u8)
+    let kept_att = failure_result_from_rep(types.copied(att))?
+    let job = match begin_backup(mut over_db, backup_dir, take att) {
+        Ok(take j) => take j,
+        Error(_) => fail("L-A2: online backup stalled on bound store"),
+    }
+    match export_copy(take job) {
+        Ok(_) => (),
+        Error(_) => fail("L-A2: export_copy failed on bound store"),
+    }
+    release_export(mut over_db, kept_att)
+    close(take over_db)?
+    let _ = archive_hold_check_all_present(copy_over, id)?
+    let _ = (m_rec, exact_extra)
+    Ok(())
+}
+
+// L-A10: All 13 Directory handoff cut crash interleavings.
+@test
+fn test_la10_directory_thirteen_handoff_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // Prepare a bound Directory store with generation g = 2 (after bind cut) and
+    // run two cuts while disconnected to capture exact real files for interleavings.
+    let base_dir = disk_test_directory(d)
+    let mut db = open(tasks, base_dir, c, r, archive_hold_options(true))?
+    let id = db.store
+    let t = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, t, 1u64, 0x10u8, 2500)?
+    let _ = bind_archive_hold(mut db, 7u64, Some(1048576u64))?
+    let gen_g = db.accounting.checkpointed
+    let _ = archive_hold_put(mut db, t, 1u64, 0x20u8, 2500)?
+    close(take db)?
+    // Snapshot before cut g -> g+1.
+    let pre_cut = disk_test_directory(d)
+    archive_hold_copy_dir(base_dir, pre_cut)?
+    let g_manifest_raw = failure_result_from_rep(manifest.read_page_manifest_bytes(pre_cut))?
+    let m_g_name = failure_result_from_rep(manifest.archive_manifest_path(gen_g, ""))?
+    let m_g_tmp = failure_result_from_rep(manifest.archive_manifest_path(gen_g, ".tmp"))?
+    // Run cut g -> g+1 on a copy to capture exact post-cut files.
+    let post_cut = disk_test_directory(d)
+    archive_hold_copy_dir(pre_cut, post_cut)?
+    let mut db1 = open_directory_bound(tasks, post_cut, c, r, archive_hold_options(false), 7u64, Some(1048576u64))?
+    let _ = checkpoint(mut db1)?
+    let gen_g1 = db1.accounting.checkpointed
+    close(take db1)?
+    let g1_manifest_raw = failure_result_from_rep(manifest.read_page_manifest_bytes(post_cut))?
+    // --- Interleaving (1): staged packs before m-g / MANIFEST rename ---
+    let c1 = disk_test_directory(d)
+    archive_hold_copy_dir(pre_cut, c1)?
+    failure_result_from_rep(manifest.disk_write_synced(c1, "p-888.tmp", b"staged"))?
+    failure_result_from_rep(manifest.disk_write_synced(c1, "p-889", b"staged-pack"))?
+    cleanup_directory(c1, c, archive_hold_options(false))?
+    if archive_hold_exists(c1, "p-888.tmp")? || archive_hold_exists(c1, "p-889")? {
+        fail("L-A10(1): staged packs survived reopen")
+    }
+    let (take m1, _) = archive_hold_check_all_present(c1, id)?
+    if m1.generation != gen_g {
+        fail("L-A10(1): wrong generation recovered")
+    }
+    // --- Interleaving (2): crash after m-g.tmp / m-g rename, before MANIFEST rename ---
+    let c2 = disk_test_directory(d)
+    archive_hold_copy_dir(pre_cut, c2)?
+    failure_result_from_rep(manifest.disk_write_synced(c2, m_g_tmp, g_manifest_raw))?
+    failure_result_from_rep(manifest.disk_write_synced(c2, m_g_name, g_manifest_raw))?
+    cleanup_directory(c2, c, archive_hold_options(false))?
+    if archive_hold_exists(c2, m_g_tmp)? || archive_hold_exists(c2, m_g_name)? {
+        fail("L-A10(2): staged m-g >= current survived reopen")
+    }
+    let _ = archive_hold_check_all_present(c2, id)?
+    // --- Interleaving (3): first dir sync done (new packs + m-g durable), before MANIFEST rename ---
+    let c3 = disk_test_directory(d)
+    archive_hold_copy_dir(post_cut, c3)?
+    failure_result_from_rep(manifest.disk_write_synced(c3, "MANIFEST.tmp", g1_manifest_raw))?
+    failure_result_from_rep(manifest.disk_write_synced(c3, "MANIFEST", g_manifest_raw))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(c3)))?
+    cleanup_directory(c3, c, archive_hold_options(false))?
+    if archive_hold_exists(c3, "MANIFEST.tmp")? || archive_hold_exists(c3, m_g_name)? {
+        fail("L-A10(3): future MANIFEST.tmp or m-g survived pre-rename crash")
+    }
+    let (take m3, _) = archive_hold_check_all_present(c3, id)?
+    if m3.generation != gen_g {
+        fail("L-A10(3): expected gen g")
+    }
+    // --- Interleaving (4): rename before second sync, BOTH old g and new g+1 outcomes ---
+    let c4_old = disk_test_directory(d)
+    archive_hold_copy_dir(post_cut, c4_old)?
+    failure_result_from_rep(manifest.disk_write_synced(c4_old, "MANIFEST", g_manifest_raw))?
+    cleanup_directory(c4_old, c, archive_hold_options(false))?
+    let (take m4o, _) = archive_hold_check_all_present(c4_old, id)?
+    if m4o.generation != gen_g {
+        fail("L-A10(4-old): expected gen g")
+    }
+    let c4_new = disk_test_directory(d)
+    archive_hold_copy_dir(post_cut, c4_new)?
+    cleanup_directory(c4_new, c, archive_hold_options(false))?
+    let (take m4n, _) = archive_hold_check_all_present(c4_new, id)?
+    if m4n.generation != gen_g1 || !archive_hold_exists(c4_new, m_g_name)? {
+        fail("L-A10(4-new): expected gen g+1 with m-g preserved")
+    }
+    // --- Interleaving (5) & (6): after second sync before removal, and during partial removal ---
+    let c5 = disk_test_directory(d)
+    archive_hold_copy_dir(post_cut, c5)?
+    failure_result_from_rep(manifest.disk_write_synced(c5, "p-777", b"dead1"))?
+    failure_result_from_rep(manifest.disk_write_synced(c5, "p-778", b"dead2"))?
+    cleanup_directory(c5, c, archive_hold_options(false))?
+    if archive_hold_exists(c5, "p-777")? || archive_hold_exists(c5, "p-778")? || !archive_hold_exists(c5, m_g_name)? {
+        fail("L-A10(5): post-sync cleanup mismatch")
+    }
+    let c6 = disk_test_directory(d)
+    archive_hold_copy_dir(post_cut, c6)?
+    failure_result_from_rep(manifest.disk_write_synced(c6, "p-778", b"dead2"))?
+    cleanup_directory(c6, c, archive_hold_options(false))?
+    if archive_hold_exists(c6, "p-778")? || !archive_hold_exists(c6, m_g_name)? {
+        fail("L-A10(6): partial removal recovery mismatch")
+    }
+    // --- Interleaving (7), (8), (9): upload before CAS, applied CAS with lost reply, ack before unlink ---
+    let c789 = disk_test_directory(d)
+    archive_hold_copy_dir(post_cut, c789)?
+    let mut db9 = open_directory_bound(tasks, c789, c, r, archive_hold_options(false), 7u64, Some(1048576u64))?
+    // (7) & (8): no ack recorded yet -> receipt stays on disk across reopen.
+    close(take db9)?
+    if !archive_hold_exists(c789, m_g_name)? {
+        fail("L-A10(7/8): unacked receipt dropped prematurely")
+    }
+    // (9): ack witnessed -> receipt unlinked and next cut advances prev_first!
+    let mut db9b = open_directory_bound(tasks, c789, c, r, archive_hold_options(false), 7u64, Some(1048576u64))?
+    let g_digest = std.check.xxh3(g_manifest_raw, 0, list.len(g_manifest_raw))
+    note_directory_archive_ack(mut db9b, gen_g, g_digest, 100u64)?
+    if archive_hold_exists(c789, m_g_name)? {
+        fail("L-A10(9): acked receipt was not unlinked")
+    }
+    close(take db9b)?
+    // --- Interleaving (10): two cuts while disconnected ---
+    let c10 = disk_test_directory(d)
+    archive_hold_copy_dir(post_cut, c10)?
+    let mut db10 = open_directory_bound(tasks, c10, c, r, archive_hold_options(false), 7u64, Some(1048576u64))?
+    let t10 = table(mut db10, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = archive_hold_put(mut db10, t10, 1u64, 0x30u8, 2500)?
+    let _ = checkpoint(mut db10)?
+    let m_g1_name = failure_result_from_rep(manifest.archive_manifest_path(gen_g1, ""))?
+    close(take db10)?
+    cleanup_directory(c10, c, archive_hold_options(false))?
+    if !archive_hold_exists(c10, m_g_name)? || !archive_hold_exists(c10, m_g1_name)? {
+        fail("L-A10(10): two disconnected cuts lost one of the receipts")
+    }
+    let _ = archive_hold_check_all_present(c10, id)?
+    // --- Interleaving (11) & (12): budget unlink before MANIFEST rename, and release after rename ---
+    let c11 = disk_test_directory(d)
+    archive_hold_copy_dir(c10, c11)?
+    // (11): simulate crash right after budget unlink of oldest receipt `m-<gen_g>` before MANIFEST rename.
+    let _ = failure_result_from_rep(manifest.disk_remove_optional(c11, m_g_name))?
+    cleanup_directory(c11, c, archive_hold_options(false))?
+    let _ = archive_hold_check_all_present(c11, id)?
+    if !archive_hold_exists(c11, m_g1_name)? {
+        fail("L-A10(11): newer receipt lost after oldest budget unlink crash")
+    }
+    // (12): cut with tiny budget (1 byte) publishes advanced prev_first and releases all old receipts.
+    let c12 = disk_test_directory(d)
+    archive_hold_copy_dir(c10, c12)?
+    let mut db12 = open_directory_bound(tasks, c12, c, r, archive_hold_options(false), 7u64, Some(1u64))?
+    let _ = checkpoint(mut db12)?
+    close(take db12)?
+    cleanup_directory(c12, c, archive_hold_options(false))?
+    if archive_hold_exists(c12, m_g_name)? || archive_hold_exists(c12, m_g1_name)? {
+        fail("L-A10(12): budget-released receipts survived after rename")
+    }
+    let (take m12, _) = archive_hold_check_all_present(c12, id)?
+    if m12.prev_first != m12.first_live {
+        fail("L-A10(12): prev_first did not advance on budget release")
+    }
+    // --- Interleaving (13): explicit detach and rebind ---
+    let c13 = disk_test_directory(d)
+    archive_hold_copy_dir(c10, c13)?
+    let mut db13 = detach_directory_archive(tasks, c13, c, r, archive_hold_options(false))?
+    if archive_binding_id(db13) != 0 {
+        fail("L-A10(13): detach did not clear binding_id")
+    }
+    if archive_hold_exists(c13, m_g_name)? || archive_hold_exists(c13, m_g1_name)? {
+        fail("L-A10(13): detach did not remove old receipts")
+    }
+    // Rebind to fresh binding_id = 88 and verify ordinary serving reopen works with 88 and refuses unbound!
+    let _ = bind_archive_hold(mut db13, 88u64, Some(1048576u64))?
+    close(take db13)?
+    match open(tasks, c13, c, r, archive_hold_options(false)) {
+        Error(Missing(_)) => (),
+        _ => fail("L-A10(13): rebound store did not require archive config"),
+    }
+    let mut db13b = open_directory_bound(tasks, c13, c, r, archive_hold_options(false), 88u64, Some(1048576u64))?
+    if archive_binding_id(db13b) != 88u64 {
+        fail("L-A10(13): rebind binding_id lost on reopen")
+    }
+    close(take db13b)?
+    // Also exercise real `std.sim.fs` power cuts across a bound cut!
+    let (sim_dir, sim_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1013), 1048576)
+    let mut sim_db = open(tasks, sim_dir, c, r, archive_hold_options(true))?
+    let sim_id = sim_db.store
+    let sim_t = archive_hold_table(mut sim_db)?
+    let _ = archive_hold_put(mut sim_db, sim_t, 1u64, 0xaa, 512)?
+    let _ = bind_archive_hold(mut sim_db, 55u64, Some(1048576u64))?
+    let _ = archive_hold_put(mut sim_db, sim_t, 2u64, 0xbb, 512)?
+    let _ = checkpoint(mut sim_db)?
+    close(take sim_db)?
+    let mut sim_img = sim_disk_unmount(take sim_dir, take sim_server)
+    let mut crash_rng = std.sim.world.plan(4242)
+    std.sim.fs.crash(mut sim_img, mut crash_rng)
+    let (re_dir, re_server) = sim_disk_mount(tasks, c, take sim_img, std.sim.world.plan(1014), 1048576)
+    cleanup_directory(re_dir, c, archive_hold_options(false))?
+    let _ = archive_hold_check_all_present(re_dir, sim_id)?
+    let mut re_db = open_directory_bound(tasks, re_dir, c, r, archive_hold_options(false), 55u64, Some(1048576u64))?
+    close(take re_db)?
+    let _ = sim_disk_unmount(take re_dir, take re_server)
+    Ok(())
+}

@@ -182,10 +182,12 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     let head = history.register_head(register)
     let history.ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
     let (take requests, take workers) = std.object.split(take owned_client)
-    let (generation, fence, recorded_after, sweep, take pages) = history.open_base_parts(match take base {
+    let chosen_base = match take base {
         Some(take admitted) => take admitted,
         None => take blank,
-    })
+    }
+    let binding_id = history.open_base_binding_id(chosen_base)
+    let (generation, fence, recorded_after, sweep, take pages) = history.open_base_parts(take chosen_base)
     let activation = object_writer.activate_worker(take journal_worker, take requests, take workers, take register, take metadata, take workspace, op_ms, sweep, generation, manifest.pack_next(pages), take names_in_order, take locator, cache, take link)
     let (take object, force_open_cut) = match take activation {
         Ok(take active) => take active,
@@ -197,7 +199,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.accounting.checkpointed = generation
     catalog.restore_fence(mut db.schema, fence)
     db.accounting.page_resident = manifest.resident_location_charge(manifest.pack_locations(pages))
-    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, transfer: transfer.new_state(), retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(None)))
+    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, transfer: transfer.new_state(), retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, archive_hold: manifest.recovered_archive_hold(binding_id, None, head.checkpoint.seq, list.new()), pending_binding: None, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(None)))
     // Forced open-time cut (§12.11.5 step 7, AP16): a refused cut does not fail open.
     if force_open_cut {
         if let Ok(cut_ticket) = checkpoint(mut db) {
@@ -382,6 +384,9 @@ fn object_cut_work(mut db: Db, mut lane: object_writer.ObjectJournalSession, tak
         let (take installed, take installed_cut) = take installation
         manifest.install_pack_cut(mut state.packs, take installed)
         state.retention = journal.record_retention(seq, recorded_after)
+        if let Some(next_binding) = replace(mut state.pending_binding, None) {
+            state.archive_hold.binding_id = next_binding
+        }
         if let ObjectBackend(mut writer) = state.backend {
             object_writer.install_cut(mut writer, take installed_cut)
         }

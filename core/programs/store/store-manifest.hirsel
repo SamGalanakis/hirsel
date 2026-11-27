@@ -645,6 +645,10 @@ fn parse_pack_filename(raw: Bytes, from: u64, end: u64) -> Option[(u64, bool)] {
 // the validated positive inventory (L ∪ C) in O(1) memory, closing the
 // directory stream before unlinking each sorted batch (v2.145, AP21 step 5).
 fn cleanup_dead_packs(d: Dir, inventory: Map[u64, pages.PagePack], mut name: String) -> Result[(), types.Failure] waits {
+    cleanup_dead_packs_keeping(d, inventory, None, mut name)
+}
+
+pub fn cleanup_dead_packs_keeping(d: Dir, inventory: Map[u64, pages.PagePack], extra_protected: Option[View[Map[u64, ()]]], mut name: String) -> Result[(), types.Failure] waits {
     let (take buf_init, take batch_init) = disk_allocation(fn() -> Result[(Bytes, List[(u64, bool)]), types.Failure] {
         Ok((list.with_capacity(1024), list.with_capacity(64)))
     })?
@@ -671,7 +675,11 @@ fn cleanup_dead_packs(d: Dir, inventory: Map[u64, pages.PagePack], mut name: Str
                     continue
                 }
                 if let Some((seq, temporary)) = parse_pack_filename(buf, from, offset) {
-                    if temporary || !map.contains(inventory, seq) {
+                    let protected = !temporary && (map.contains(inventory, seq) || match extra_protected {
+                        Some(held) => map.contains(held, seq),
+                        None => false,
+                    })
+                    if !protected {
                         list.push(mut batch, (seq, temporary))
                         if list.len(batch) == 64 {
                             full = true

@@ -566,9 +566,8 @@ enum StdBuild {
     Prebuilt,
 }
 
-/// Assemble `product`'s entry as `build` takes the std, and run it with a
-/// fresh charge report and tape.
-fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir: &Path) -> Shown {
+/// Assemble the entry with the selected std parts and imports.
+fn std_executable(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir: &Path) -> PathBuf {
     use crate::native::recipe_build::Publication;
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let code = crate::code_store::CodeStore::new(dir.join("code"));
@@ -600,22 +599,26 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
             );
             assert_eq!(
                 std.as_ref().is_some_and(|std| std.roots.contains(&unreached)),
-                options.logical_charge_report.is_none(),
+                options.logical_charge_report.is_none() && !options.recording,
                 "the prebuilt side serves exactly the shipping generator"
             );
             std
         }
     };
-    let built = Publication::open(&code, publication.root, &crate::request::local_admission_limits())
+    Publication::open(&code, publication.root, &crate::request::local_admission_limits())
         .unwrap()
         .assemble_over(options, reached.counters, std, None)
-        .unwrap();
+        .unwrap().executable
+}
+
+fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir: &Path) -> Shown {
+    let executable = std_executable(product, options, build, dir);
     if let Some(report) = &options.logical_charge_report {
         let _ = std::fs::remove_file(report);
     }
     let tape = dir.join("run.tape");
     let _ = std::fs::remove_file(&tape);
-    let mut command = Command::new(&built.executable);
+    let mut command = Command::new(executable);
     command.current_dir(dir).env_remove("HIRSEL_RECORD");
     if options.recording && options.replay.is_none() {
         // A fixed tape id, so the two builds' tapes differ only by build.
@@ -894,7 +897,6 @@ fn std_differential(modes: &[&str]) -> usize {
                     String::from_utf8_lossy(&parts.2)
                 );
             }
-            let builds = [StdBuild::Dev, StdBuild::Parts, StdBuild::Imported, StdBuild::Prebuilt];
             let mut tapes = vec![(StdBuild::Dev, parts.4.clone())];
             for build in [StdBuild::Parts, StdBuild::Imported, StdBuild::Prebuilt] {
                 let shown = std_run(&product, &options, build, &project);
@@ -907,37 +909,8 @@ fn std_differential(modes: &[&str]) -> usize {
                 assert_eq!(parts.4.is_some(), shown.4.is_some(), "{name} {mode} {build:?}: a tape");
                 tapes.push((build, shown.4));
             }
-            // A tape names its executable's launch image, so two builds' tapes
-            // differ there; each must replay on every build as on its own.
-            for (label, tape) in &tapes {
-                let Some(tape) = tape else { continue };
-                taped += 1;
-                let path = project.join(format!("{label:?}.tape"));
-                std::fs::write(&path, tape).unwrap();
-                let replay = NativeOptions {
-                    replay: Some(crate::ReplayPlan {
-                        path: path.to_str().unwrap().into(),
-                        diagnose: false,
-                    }),
-                    grant_mask: 0,
-                    ..options.clone()
-                };
-                let on_parts = std_run(&product, &replay, StdBuild::Dev, &project);
-                for build in builds {
-                    let on = std_run(&product, &replay, build, &project);
-                    assert_eq!(
-                        (on_parts.0, &on_parts.1, &on_parts.2),
-                        (on.0, &on.1, &on.2),
-                        "{name}: the {label:?} build's tape replayed on {build:?}"
-                    );
-                }
-                // A faithful replay ends 0 and repeats no live write, even of
-                // a failed run (RL1).
-                assert_eq!(
-                    (on_parts.0, on_parts.1.is_empty()),
-                    (Some(0), true),
-                    "{name}: the {label:?} build's tape replays"
-                );
+            if options.recording {
+                taped += std_replay_matrix(&product, &options, &project, &tapes);
             }
         }
     }
@@ -949,6 +922,8 @@ fn std_differential(modes: &[&str]) -> usize {
 fn a_program_over_a_separate_std_does_what_it_does_whole() {
     std_differential(&["plain", "release", "charges", "limited"]);
 }
+
+include!("std_replay_native.rs");
 
 /// Recording opens the tape's directory through the OS Dir provider (openat2),
 /// so this body runs on the host.

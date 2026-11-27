@@ -9,18 +9,51 @@
 type HotBuild {
     map: pages.PageTree,
     built: List[u32],
+    // F5: the admitted resident figure, live plus 126 per built descriptor,
+    // and the run workspace admitted on top of it.
+    base: u64,
+    workspace: u64,
+}
+
+// F5: admits W₀ = 126 × (built descriptors) + min(`dirty_bytes`, Σ over the
+// sources of (`row_bytes` + 8 × `rows`)) on top of the plan's live bytes,
+// against the writer's resident admission, before any build draw.
+fn hot_admit(db: Db, plan: SchemaPlan) -> Result[(u64, u64), Error] {
+    let head = pages.holder_heads(db.holders)[0u64].roots.collections.root
+    let mut sources = 0u64
+    for job in plan.pending_migrates {
+        if let Some(raw) = std.page.lookup(head, failure_result_from_rep(catalog.prefix(job.from_id))?) {
+            let fields = pages.collection_descriptor(raw)
+            sources = int.saturating_add(sources, int.saturating_add(fields.row_bytes, int.saturating_mul(8u64, fields.rows)))
+        }
+    }
+    let base = int.saturating_add(plan.schema.live, int.saturating_mul(126u64, list.len(plan.pending_migrates)))
+    let workspace = order.min(disk_state(db).options.dirty_bytes, sources)
+    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(base, workspace), available_resident(db)))?
+    Ok((base, workspace))
+}
+
+// A run whose charge passes the admitted workspace grows it, with W₀'s refusal.
+fn hot_grow(db: Db, mut work: HotBuild, charge: u64) -> Result[(), Error] {
+    if charge <= work.workspace {
+        return Ok(())
+    }
+    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(work.base, charge), available_resident(db)))?
+    work.workspace = charge
+    Ok(())
 }
 
 // Runs the plan's hot Tiered builds and grafts them into the plan. Returns the
 // listed build pin's slot, which the publish cut drops.
 fn run_hot_builds(mut db: Db, mut plan: SchemaPlan) -> Result[Option[u64], Error] waits {
+    let (base, workspace) = hot_admit(db, plan)?
     // F2: the writer takes the plan's stamp counter before the first build
     // draw. No writer draw runs during staging, so the plan's is the larger.
     if plan.schema.next_node > pages.holder_next_node(db.holders) {
         pages.set_next_node(mut db.holders, plan.schema.next_node)
     }
     let inline = pages.holder_heads(db.holders)[0u64].roots.collections.inline
-    let mut work = HotBuild(map: pages.new_page_tree(CollectionMap, inline), built: list.new())
+    let mut work = HotBuild(map: pages.new_page_tree(CollectionMap, inline), built: list.new(), base: base, workspace: workspace)
     let pending = replace(mut plan.pending_migrates, list.new())
     for take job in take pending {
         hot_build_migrate(mut db, mut work, mut plan, take job)?
@@ -341,6 +374,7 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
                 list.append(mut full, key)
                 let row_charge = entry(full, value)
                 charge = int.saturating_add(charge, row_charge + 8u64)
+                hot_grow(db, mut work, charge)?
                 list.push(mut kept, std.page.Row(key: take key, value: take value, charge: row_charge))
                 if charge >= dirty {
                     hot_run(mut db, mut work.map, mut target, mut kept)?

@@ -845,19 +845,18 @@ mod tests {
             .unwrap();
         assert!(
             custom.accepted(),
-            "{}",
-            serde_json::to_string(&(
-                custom.machine_diagnostics().unwrap(),
-                custom.machine_incomplete().unwrap()
-            ))
-            .unwrap()
+            "{:?} {:?}",
+            custom.diagnostics,
+            custom.incomplete
         );
-        assert!(
-            custom
-                .rechecked
-                .iter()
-                .any(|p| p.0.package == package("std")),
-            "custom source library must not be replaced by the bundled std"
+        let answer = DefPath::from_full("std@1/std_only/answer").unwrap();
+        let body = custom.demand_body(&answer).unwrap();
+        let function = body.check.function.unwrap();
+        let report = hirsel_core_eval::run(body.ir().unwrap(), function, &[], 1_000_000);
+        assert_eq!(
+            report.outcome,
+            hirsel_core_eval::Outcome::Returned(vec![42]),
+            "custom source library must supply its own answer"
         );
     }
 }

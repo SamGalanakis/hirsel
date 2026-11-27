@@ -24,7 +24,7 @@ impl Checked {
 
 /// A check that refused after producing ordinary source diagnostics.
 pub(crate) struct RejectedCheck {
-    pub(crate) product: CheckProduct,
+    pub(crate) product: Arc<CheckProduct>,
     error: io::Error,
 }
 
@@ -33,7 +33,13 @@ impl RejectedCheck {
         if product.accepted() {
             error
         } else {
-            io::Error::new(error.kind(), Self { product, error })
+            io::Error::new(
+                error.kind(),
+                Self {
+                    product: Arc::new(product),
+                    error,
+                },
+            )
         }
     }
 }

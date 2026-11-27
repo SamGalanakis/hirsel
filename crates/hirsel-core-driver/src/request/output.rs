@@ -46,14 +46,19 @@ pub(super) fn render_check_diagnostics(
 pub(super) fn check_result(
     checked: std::io::Result<crate::Checked>,
     sources: &crate::SourceFiles,
-    render: bool,
+    command: &str,
+    json: bool,
 ) -> std::io::Result<crate::Checked> {
-    if render
+    if command == "check"
         && let Err(error) = &checked
         && let Some(refusal) = error
             .get_ref()
             .and_then(|cause| cause.downcast_ref::<crate::RejectedCheck>())
     {
+        if json {
+            super::launch::report_request_error(error);
+            return Ok(crate::Checked::Product(refusal.product.clone(), None));
+        }
         render_check_diagnostics(&refusal.product, sources)?;
     }
     checked

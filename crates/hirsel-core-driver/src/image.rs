@@ -132,12 +132,16 @@ fn stamp(
         ));
     }
     let owner = entry.filter(|entry| entry.0.package == package.package);
+    let mut namespace = package.namespace.clone();
+    if let Some(namespace) = &mut namespace {
+        namespace.authority.clear();
+    }
     let hash = ContentHash::of_parts(
         "hirsel.package-image-stamp.v2",
         [&encode(&(
             &package.package,
             &package.dependencies,
-            &package.namespace,
+            &namespace,
             package.toolchain,
             files,
             owner,
@@ -145,7 +149,7 @@ fn stamp(
     );
     Ok(PackageStamp {
         hash,
-        namespace: package.namespace.clone(),
+        namespace,
         canonical_names,
     })
 }
@@ -209,6 +213,13 @@ pub(crate) fn closure_image(
         .all(|package| package.namespace.is_none())
     {
         return Ok(None);
+    }
+    // The member can instantiate generics in its dependencies. Apply its
+    // ceilings to the whole request, after the image supplies their bodies.
+    for package in &mut input.inputs.packages {
+        if let Some(namespace) = &mut package.namespace {
+            namespace.authority.clear();
+        }
     }
     input.entry = None;
     let mut input = ImageInput::prepare(input, false)?;

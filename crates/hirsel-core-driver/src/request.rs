@@ -924,7 +924,7 @@ fn run_compiler_request(
         } else {
             driver.check_recorded(request, &mut meter, record.as_ref())
         };
-        let checked = output::check_result(checked, &sources, command == "check" && !json)?;
+        let checked = output::check_result(checked, &sources, command, json)?;
         (checked, None)
     };
     let (product, key) = match checked {

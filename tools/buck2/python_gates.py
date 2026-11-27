@@ -32,6 +32,9 @@ def python_gates(out, call, Raw):
         ("test-std-native", "core/tools/test_std_native.py",
          ["core/std/tests/io.hirsel", "core/tools/std_native_owners.json"] + std_inputs),
         ("test-boat-dispatch", "tools/test_boat_dispatch.py", ["tools/boat-dispatch", "tools/sim-campaign"]),
+        ("test-store-chaos", "tools/store-chaos/test_harness.py",
+         ["tools/store-chaos/history.py", "tools/store-chaos/log_writes.py",
+          "tools/store-chaos/recover.py", "tools/store-chaos/relay.py"]),
     ]
     for target, script, inputs in python_units:
         out.append("\n" + call("hirsel_script_test", name=target, script=script, data=inputs))

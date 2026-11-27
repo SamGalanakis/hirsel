@@ -1,0 +1,188 @@
+// Native Bucket Store and std.object qualification fixture for Law N2.
+type BucketChaosRead: send + codec { op: u64, left: u64, right: u64 }
+
+type BucketChaosTx {
+    data: Table[u64, u64],
+    ledger: Table[u64, BucketChaosRead],
+    version: u64,
+    op: u64
+}
+
+fn bucket_chaos_value(value: Option[u64]) -> u64 {
+    match value {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+fn bucket_chaos_body(mut tx: Tx, job: BucketChaosTx) -> Result[BucketChaosRead, Error] {
+    let a = job.op % 7
+    let b = (a + 3) % 7
+    let left = bucket_chaos_value(fetch(tx, job.data, a)?)
+    let right = bucket_chaos_value(fetch(tx, job.data, b)?)
+    let record = BucketChaosRead(op: job.op, left, right)
+    put(mut tx, job.data, a, right + job.op)?
+    put(mut tx, job.data, b, left + job.op + 1)?
+    put(mut tx, job.ledger, job.version, record)?
+    Ok(record)
+}
+
+fn bucket_chaos_row(out: Stdout, kind: String, width: u64, fields: Inline[u64, 4]) waits {
+    let mut line: String = clone(kind)
+    for i in 0u64 .. width {
+        string.push(mut line, " ")
+        string.push_u64(mut line, fields[i])
+    }
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+fn bucket_adopt_auth(r: Random) -> ClaimAuth {
+    let mut attempt: Bytes = list.with_capacity(16)
+    list.fill(mut attempt, 16, 0u8)
+    host.random(r, mut attempt)
+    ClaimAuth(expect: None, attempt: take attempt, class: Adopt)
+}
+
+pub fn chaos_bucket_main(n: Net, c: Clock, r: Random, tasks: Tasks, root: Secret, argv: Args, input: Stdin, out: Stdout) -> Result[(), Exit] waits {
+    let Some(mode) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let Some(endpoint) = args.get(argv, 1) else { return Error(Exit(status: 2)) }
+    let Some(region_name) = args.get(argv, 2) else { return Error(Exit(status: 2)) }
+    let Some(bucket_name) = args.get(argv, 3) else { return Error(Exit(status: 2)) }
+    let Some(prefix) = args.get(argv, 4) else { return Error(Exit(status: 2)) }
+    let Some(access_id) = args.get(argv, 5) else { return Error(Exit(status: 2)) }
+    let cfg = std.object.Bucket(endpoint: string.from(endpoint), aws_region: string.from(region_name), bucket: string.from(bucket_name), prefix: string.from(prefix), style: Path)
+    let creds = std.cred.from_secret(string.from(access_id), secret.share(root), string.new())
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(c), 12000)
+    let mut client = match std.object.start(n, tasks, take cfg, take creds, None, System, c, r, lanes, deadline) {
+        Ok(take opened) => take opened,
+        Error(_) => {
+            let _ = stdout.write(out, "START_ERR\n")
+            return Error(Exit(status: 3))
+        },
+    }
+    if mode == "multipart" {
+        let Some(key) = args.get(argv, 6) else { return Error(Exit(status: 2)) }
+        let mp_deadline = std.clock.deadline_after_ms(host.mono_ns(c), 12000)
+        let mut up = match std.object.upload(mut client, string.from(key), Overwrite, mp_deadline) {
+            Ok(take u) => take u,
+            Error(_) => {
+                let _ = stdout.write(out, "MP_UPLOAD_ERR\n")
+                return Error(Exit(status: 6))
+            },
+        }
+        let mut bodies: List[Bytes] = list.with_capacity(1)
+        let mut part: Bytes = list.with_capacity(65536)
+        list.fill(mut part, 65536, 65u8)
+        list.push(mut bodies, take part)
+        let (written, _) = std.object.parts(mut client, mut up, take bodies, mp_deadline)
+        if let Error(_) = written {
+            let _ = std.object.abort(mut client, take up, mp_deadline)
+            let _ = stdout.write(out, "MP_PART_ERR\n")
+            return Error(Exit(status: 6))
+        }
+        match std.object.complete(mut client, take up, mp_deadline) {
+            Ok(Created(_)) => {
+                let _ = stdout.write(out, "MP_OK\n")
+                return Ok(())
+            },
+            Ok(Exists) => {
+                let _ = stdout.write(out, "MP_EXISTS\n")
+                return Error(Exit(status: 7))
+            },
+            Error(_) => {
+                let _ = stdout.write(out, "MP_COMPLETE_ERR\n")
+                return Error(Exit(status: 8))
+            },
+        }
+    }
+    let mut o = result.unwrap(sized(Bucket(std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)), 2147483648u64))
+    o.create = mode == "init"
+    o.claim_auth = Some(bucket_adopt_auth(r))
+    let authority = object_authority(take client, "bucket", 6000u64)
+    let mut db = match open_authority(tasks, take authority, c, r, o) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take err, ..)) => {
+            match take err {
+                Remote(Fatal(Net(_))) => { let _ = stdout.write(out, "OPEN_ERR RemoteFatalNet\n") },
+                Remote(Fatal(Http(_))) => { let _ = stdout.write(out, "OPEN_ERR RemoteFatalHttp\n") },
+                Remote(Fatal(Status(code, _))) => {
+                    bucket_chaos_row(out, "OPEN_ERR_STATUS", 1, [int.widen(code), 0, 0, 0])
+                },
+                Remote(Retriable(Net(_))) => { let _ = stdout.write(out, "OPEN_ERR RemoteRetriableNet\n") },
+                Remote(Retriable(_)) => { let _ = stdout.write(out, "OPEN_ERR RemoteRetriable\n") },
+                Remote(Uncertain(_)) => { let _ = stdout.write(out, "OPEN_ERR RemoteUncertain\n") },
+                Remote(_) => { let _ = stdout.write(out, "OPEN_ERR RemoteOther\n") },
+                Endpoint(_) => { let _ = stdout.write(out, "OPEN_ERR Endpoint\n") },
+                Corrupt(_) => { let _ = stdout.write(out, "OPEN_ERR Corrupt\n") },
+                _ => { let _ = stdout.write(out, "OPEN_ERR Other\n") },
+            }
+            return Error(Exit(status: 4))
+        },
+    }
+    let mut decl = result.unwrap(declare(db, if mode == "init" { Migrate } else { Open }))
+    let td = result.unwrap(declare_table(mut decl, "data", std.codec.key_u64(), std.codec.of_u64()))
+    let data = result.unwrap(finish(mut decl, take td))
+    let rec_codec: std.codec.Codec[BucketChaosRead] = std.codec.of()
+    let tl = result.unwrap(declare_table(mut decl, "ledger", std.codec.key_u64(), rec_codec))
+    let ledger = result.unwrap(finish(mut decl, take tl))
+    if mode == "init" {
+        let sealed = result.unwrap(seal(mut db, take decl))
+        result.unwrap(durable(mut db, sealed))
+        bucket_chaos_row(out, "BASE", 1, [snapshot(db).head, 0, 0, 0])
+    } else if mode == "dump" {
+        let snap = snapshot(db)
+        let rd = result.unwrap(reader(db, 0))
+        let mut tx_rows = result.unwrap(scan(rd, snap, ledger, Unbounded, Unbounded))
+        while let Some((v, rec)) = result.unwrap(next(rd, mut tx_rows)) {
+            bucket_chaos_row(out, "TX", 4, [v, rec.op, rec.left, rec.right])
+        }
+        let mut rows = result.unwrap(scan(rd, snap, data, Unbounded, Unbounded))
+        while let Some((k, val)) = result.unwrap(next(rd, mut rows)) {
+            bucket_chaos_row(out, "KEY", 2, [k, val, 0, 0])
+        }
+        bucket_chaos_row(out, "HEAD", 1, [snap.head, 0, 0, 0])
+    } else if mode == "serve" {
+        result.unwrap(stdout.write(out, "READY\n"))
+        let mut buf: Bytes = list.with_capacity(1)
+        loop {
+            list.clear(mut buf)
+            if result.unwrap(stdin.read(input, mut buf, Never)) == 0 { break }
+            let op: u64 = int.widen(buf[0])
+            if op == 0 {
+                match checkpoint(mut db) {
+                    Ok(cut) => match durable(mut db, cut) {
+                        Ok(()) => result.unwrap(stdout.write(out, "CUT\n")),
+                        Error(_) => {
+                            let _ = stdout.write(out, "ERR cut\n")
+                            return Error(Exit(status: 5))
+                        },
+                    },
+                    Error(_) => {
+                        let _ = stdout.write(out, "ERR cut\n")
+                        return Error(Exit(status: 5))
+                    },
+                }
+            } else {
+                let next_v = snapshot(db).head + 1
+                let job = BucketChaosTx(data: clone(data), ledger: clone(ledger), version: next_v, op)
+                match run(mut db, None, copy_env(job), bucket_chaos_body) {
+                    Ok(Committed(done)) => match durable(mut db, done.ticket) {
+                        Ok(()) => bucket_chaos_row(out, "ACK", 4, [snapshot(db).head, op, done.value.left, done.value.right]),
+                        Error(_) => {
+                            let _ = stdout.write(out, "ERR durable\n")
+                            return Error(Exit(status: 5))
+                        },
+                    },
+                    _ => {
+                        let _ = stdout.write(out, "ERR run\n")
+                        return Error(Exit(status: 5))
+                    },
+                }
+            }
+        }
+    } else { return Error(Exit(status: 2)) }
+    let _ = close(take db)
+    Ok(())
+}

@@ -163,6 +163,7 @@ class Job:
     command: str
     seconds: int
     fetch: tuple
+    controller: Path | None = None
 
     def __post_init__(self):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", self.lane):
@@ -275,7 +276,7 @@ class LocalBudget:
         return self.db.execute("SELECT COUNT(*) FROM attempts WHERE at >= ?", (since,)).fetchone()[0]
 
     def reserve(self, limits, job_class):
-        unavailable = StartUnavailable if job_class == "vopr" else ValueError
+        unavailable = StartUnavailable if job_class in ("vopr", "chaos") else ValueError
         now = int(time.time())
         with self.db:
             self.db.execute("DELETE FROM attempts WHERE at < ?", (now - self.DAY_SECONDS,))
@@ -310,7 +311,7 @@ class LocalBudget:
         active += ambiguous["day"]
         if active >= active_limit:
             raise unavailable("local Boat ledger is conserving ambiguous active starts; run locally")
-        if job_class == "vopr" and (
+        if job_class in ("vopr", "chaos") and (
             day_remaining <= LAW_DAY_RESERVE
             or hour_remaining <= 1
             or minute_remaining <= 1
@@ -332,7 +333,7 @@ class LocalBudget:
 
     @contextmanager
     def vopr_turn(self, job_class):
-        if job_class == "vopr":
+        if job_class in ("vopr", "chaos"):
             with (self.state / "laws.lock").open("a") as lock:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -408,7 +409,13 @@ def execute(invoke, vm, jobs, archives, log):
                    f"exec bash -c {shlex.quote(job.command)}")
         run_log = log / f"{index}-{job.lane}.log"
         print(f"Boat {vm}: {job.lane} -> {run_log}", file=sys.stderr, flush=True)
-        ran = write_log(invoke, run_log, "ssh", vm, command, stdin=subprocess.DEVNULL)
+        if job.controller:
+            # The controller owns invocation/ack records outside the faulted guest.
+            with run_log.open("wb") as out:
+                ran = subprocess.run([job.controller, "boat", "--no-update", "ssh", vm, command],
+                                     stdout=out, stderr=subprocess.STDOUT).returncode
+        else:
+            ran = write_log(invoke, run_log, "ssh", vm, command, stdin=subprocess.DEVNULL)
         with run_log.open("rb") as saved:
             shutil.copyfileobj(saved, sys.stdout.buffer)
         sys.stdout.buffer.flush()
@@ -540,8 +547,9 @@ def main():
     parser.add_argument("--worktree", action="store_true", help="stage a built Buck2 worktree")
     parser.add_argument("--fetch", action="append", default=[], metavar="REMOTE:LOCAL")
     parser.add_argument("--manifest", type=Path, help="JSON array of timed jobs")
-    parser.add_argument("--job-class", choices=("law", "vopr"), default="law",
-                        help="VOPR yields to law dispatches and uses spare starts only")
+    parser.add_argument("--controller", type=Path, help="local driver for a single guest job over stdin/stdout")
+    parser.add_argument("--job-class", choices=("law", "vopr", "chaos"), default="law",
+                        help="VOPR and chaos yield to law dispatches and uses spare starts only")
     parser.add_argument("--batch-seconds", type=positive, default=900, help="estimated runtime per VM")
     parser.add_argument("--ttl", type=positive, default=os.environ.get("HIRSEL_BOAT_TTL", "3600"))
     parser.add_argument("--log-dir", type=Path,
@@ -550,7 +558,7 @@ def main():
                         help="archive cache directory (default: the shared Boat bundle cache)")
     parser.add_argument("--dry-run", action="store_true", help="simulate VM starts without contacting Boat")
     args = parser.parse_args()
-    if args.manifest and (args.lane or args.worktree or args.fetch):
+    if args.manifest and (args.lane or args.worktree or args.fetch or args.controller):
         parser.error("--manifest supplies its own lanes, inputs, commands and fetch paths")
     if args.manifest and args.batch_seconds >= args.ttl:
         parser.error("--ttl must leave room beyond --batch-seconds for setup and upload")
@@ -572,7 +580,8 @@ def run(args, parser):
         if not all((args.lane, args.directory, args.command)):
             parser.error("supply LANE DIRECTORY COMMAND or --manifest")
         jobs = [Job(args.lane, Input(args.directory.resolve(), args.worktree), args.command, 0,
-                    tuple(fetch_spec(value, Path.cwd()) for value in args.fetch))]
+                    tuple(fetch_spec(value, Path.cwd()) for value in args.fetch),
+                    args.controller.resolve() if args.controller else None)]
     groups = batches(jobs, args.batch_seconds)
     log_root = prepare_log_root(args.log_dir)
     if args.dry_run:

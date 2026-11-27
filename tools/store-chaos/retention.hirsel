@@ -1,0 +1,27 @@
+// Use the existing retention plan and recorder on an empty native Directory.
+pub fn chaos_retention(root: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let plan = rt_plan()
+    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults: false, scripted: false, damage_seen: false, tiered_names: map.new(), damage: string.new(), faulted: false, stats:[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), trace: Some(rt_new()))
+    list.push(mut st.history, csim_empty())
+    result.unwrap(host.mkdir(root, "s"))
+    let d = result.unwrap(host.open_dir(root, "s"))
+    let mut db = result.unwrap(open(tasks, d, c, r, clone(plan.options)))
+    let rows = result.unwrap(csim_schema(mut db))
+    for step in plan.steps {
+        if step.op == CS_CRASH {
+            result.unwrap(close(take db))
+            db = result.unwrap(open(tasks, d, c, r, clone(plan.options)))
+            result.unwrap(rt_reopen(db, root, mut st))
+        } else {
+            let action = result.unwrap(csim_step(mut db, tasks, c, r, root, plan.options, rows, mut st, step))
+            if !csim_go(action) { fail("native retention step failed") }
+            result.unwrap(rt_cut(db, root, mut st))
+        }
+        st.at += 1
+    }
+    let CsimState(trace: take chaos_trace, ..) = take st
+    let trace = option.unwrap(take chaos_trace)
+    result.unwrap(stdout.write(out, trace.out))
+    result.unwrap(close(take db))
+    Ok(())
+}

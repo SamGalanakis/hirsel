@@ -1,0 +1,102 @@
+// Each commit changes two data keys and records the values it read under its version.
+type ChaosRead: send + codec { op: u64, left: u64, right: u64 }
+
+type ChaosTx {
+    data: Table[u64, u64],
+    ledger: Table[u64, ChaosRead],
+    version: u64,
+    op: u64
+}
+
+fn chaos_value(value: Option[u64]) -> u64 {
+    match value {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+fn chaos_body(mut tx: Tx, job: ChaosTx) -> Result[ChaosRead, Error] {
+    let a = job.op % 7
+    let b = (a + 3) % 7
+    let left = chaos_value(fetch(tx, job.data, a)?)
+    let right = chaos_value(fetch(tx, job.data, b)?)
+    let record = ChaosRead(op: job.op, left, right)
+    put(mut tx, job.data, a, right + job.op)?
+    put(mut tx, job.data, b, left + job.op + 1)?
+    put(mut tx, job.ledger, job.version, record)?
+    Ok(record)
+}
+
+fn chaos_row(out: Stdout, kind: String, width: u64, fields: Inline[u64, 4]) waits {
+    let mut line: String = clone(kind)
+    for i in 0u64 .. width {
+        string.push(mut line, " ")
+        string.push_u64(mut line, fields[i])
+    }
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+pub fn chaos_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, input: Stdin, out: Stdout) -> Result[(), Exit] waits {
+    let mode = option.unwrap(args.get(argv, 0))
+    let mut o = result.unwrap(sized(Directory, 2147483648))
+    o.create = mode == "init"
+    let mut db = match open(tasks, d, c, r, o) {
+        Ok(take opened) => take opened,
+        Error(Io(_)) => {
+            result.unwrap(stdout.write(out, "OPEN Io\n"))
+            return Error(Exit(status: 4))
+        },
+        Error(Corrupt(_)) => {
+            result.unwrap(stdout.write(out, "OPEN Corrupt\n"))
+            return Error(Exit(status: 4))
+        },
+        Error(_) => return Error(Exit(status: 3)),
+    }
+    let mut decl = result.unwrap(declare(db, if mode == "init" { Migrate } else { Open }))
+    let td = result.unwrap(declare_table(mut decl, "data", std.codec.key_u64(), std.codec.of_u64()))
+    let data = result.unwrap(finish(mut decl, take td))
+    let rec_codec: std.codec.Codec[ChaosRead] = std.codec.of()
+    let tl = result.unwrap(declare_table(mut decl, "ledger", std.codec.key_u64(), rec_codec))
+    let ledger = result.unwrap(finish(mut decl, take tl))
+    if mode == "init" {
+        let sealed = result.unwrap(seal(mut db, take decl))
+        result.unwrap(durable(mut db, sealed))
+        chaos_row(out, "BASE", 1, [snapshot(db).head, 0, 0, 0])
+    } else if mode == "dump" {
+        let snap = snapshot(db)
+        let rd = result.unwrap(reader(db, 0))
+        let mut tx_rows = result.unwrap(scan(rd, snap, ledger, Unbounded, Unbounded))
+        while let Some((v, rec)) = result.unwrap(next(rd, mut tx_rows)) {
+            chaos_row(out, "TX", 4, [v, rec.op, rec.left, rec.right])
+        }
+        let mut rows = result.unwrap(scan(rd, snap, data, Unbounded, Unbounded))
+        while let Some((k, n)) = result.unwrap(next(rd, mut rows)) {
+            chaos_row(out, "KEY", 2, [k, n, 0, 0])
+        }
+        chaos_row(out, "HEAD", 1, [snap.head, 0, 0, 0])
+    } else if mode == "serve" {
+        result.unwrap(stdout.write(out, "READY\n"))
+        let mut buf: Bytes = list.with_capacity(1)
+        loop {
+            list.clear(mut buf)
+            if result.unwrap(stdin.read(input, mut buf, Never)) == 0 { break }
+            let op: u64 = int.widen(buf[0])
+            if op == 0 {
+                result.unwrap(checkpoint(mut db))
+                result.unwrap(stdout.write(out, "CUT\n"))
+            } else {
+                let next_v = snapshot(db).head + 1
+                let job = ChaosTx(data: clone(data), ledger: clone(ledger), version: next_v, op)
+                let Committed(done) = result.unwrap(run(mut db, None, copy_env(job), chaos_body)) else {
+                    fail("chaos transaction failed")
+                }
+                result.unwrap(durable(mut db, done.ticket))
+                chaos_row(out, "FRAME", 2, [file_seq(db), file_end(db), 0, 0])
+                chaos_row(out, "ACK", 4, [snapshot(db).head, op, done.value.left, done.value.right])
+            }
+        }
+    } else { return Error(Exit(status: 2)) }
+    result.unwrap(close(take db))
+    Ok(())
+}

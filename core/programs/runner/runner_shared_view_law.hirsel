@@ -22,7 +22,7 @@ fn shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
     let (refund, _returned): (Sender[u64], Receiver[u64]) = channel.new(8u64)
     let mut registered = result.unwrap(placed(code.describe(shared_law_place), 1048576u64))
     result.unwrap(bind_query_slots(mut registered, h))
-    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     let first = at_base_generation(mut b, 1u64, 10u32, 1u64, shared_input(key, 136u64, 1u8, refund))
     let joined = at_base_generation(mut b, 2u64, 20u32, 1u64, shared_input(key, 65536u64, 2u8, refund))
     if list.len(owe_content_view(first).complete) != 1u64 || list.len(owe_content_view(joined).complete) != 1u64 {

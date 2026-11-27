@@ -147,7 +147,7 @@ fn trigger_law_head(take db: store.Db, c: Clock, tasks: Tasks, take to: Sender[H
     let drive = result.unwrap(make_trigger_drive(clone(h.triggers), c, tasks, take to, revision, take config, trigger_law_attempts(running)))
     let reg = result.unwrap(placed(code.describe(trigger_law_places), 1048576u64))
     let (out, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(32u64)
-    let head = Head(db: take db, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None, upkeep: upkeep())
+    let head = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None, upkeep: upkeep())
     (take head, take from, take running)
 }
 

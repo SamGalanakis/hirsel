@@ -151,7 +151,7 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
         let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
-    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     let first = at_base(mut b, 1u64, 10u32, clone(key), no_arg())
     let joined = at_base(mut b, 2u64, 20u32, take key, no_arg())
     let Some(initial) = group_payload(first) else {
@@ -243,7 +243,7 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     if !view_images_match(images, key1, model) {
         return Error("a skipped delta left a client image wrong")
     }
-    let at = store.version(b.base)
+    let at = published_version(b.base)
     let full = repair_entry(mut b, 1u64, 10u32, at)
     let Some(repaired) = group_payload(full) else {
         return Error("repair needs a full group")

@@ -85,7 +85,7 @@ fn settle_served[G: send, H: shareable + inert + send](mut hd: Head[G, H], take 
 
 fn answered[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take receipt: store.Receipt) -> Result[(), store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
-    let version = store.version(store.snapshot(hd.db))
+    let version = store.main_commit_version(hd.db)
     match std.codec.decode(co, receipt.reply) {
         Ok(take outcome) => worker(mut hd, take q, take outcome, receipt.ticket, version),
         _ => fail("runner: stored reply did not decode"),
@@ -180,11 +180,26 @@ fn publish_reply_with_expiry[G: send, H: shareable + inert + send](mut hd: Head[
     let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
     let mut answers: List[CallAnswer] = list.new()
     list.push(mut answers, call_answer_with_expiry(CallWaiter(owner: owner, target: take to), stream, p, take o, replayed, expires))
-    let release = Release(version: 0u64, snapshot: None, answers: take answers)
+    let release = Release(version: None, snapshot: None, answers: take answers)
     if list.len(hd.held) != 0u64 {
         list.push(mut hd.held, Loose(take release))
     } else {
         publish_release(mut hd, take release)
     }
     Ok(())
+}
+
+// H3: the open group closes behind the held ones with the version and snapshot it
+// committed; later commits never reach its Release.
+fn close_group[G: send, H: shareable + inert + send](mut hd: Head[G, H]) {
+    if let Some(t) = replace(mut hd.last, None) {
+        let at = publisher_base(hd.db, hd.publish_images)
+        let group = replace(mut hd.group, list.new())
+        if store.is_disk(hd.db) {
+            if let RowsAt(image) = at {
+                let _ = channel.try_send(hd.out, PubIn(e: Staged(clone(image))))
+            }
+        }
+        list.push(mut hd.held, Sealed(t, take at, take group))
+    }
 }

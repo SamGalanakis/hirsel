@@ -6,7 +6,7 @@ pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_loss)), no_arg())
     let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q1)), no_arg())
@@ -91,10 +91,10 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let (told_to, told_from): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
     let mut queue: List[ToPub] = list.new()
     list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None, http_credit: None)))
-    list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new())))
+    list.push(mut queue, Released(Release(version: Some(v1), snapshot: Some(take c1), answers: list.new())))
     list.push(mut queue, Subscribed(1u64, 1u32, law_caller(1u64), query_key(code.describe(q1)), no_arg()))
-    list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new())))
-    list.push(mut queue, Released(Release(version: store.version(outside), snapshot: Some(take outside), answers: list.new())))
+    list.push(mut queue, Released(Release(version: Some(v2), snapshot: Some(take c2), answers: list.new())))
+    list.push(mut queue, Released(Release(version: Some(store.version(outside)), snapshot: Some(take outside), answers: list.new())))
     list.push(mut queue, Halt)
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -103,7 +103,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     }
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    publisher(take bound_registry, arc.new(take h), result.unwrap(store.reader(db, 0u64)), take base, take from, take rounds, 1048576u64)
+    publisher(take bound_registry, arc.new(take h), result.unwrap(store.reader(db, 0u64)), RowsAt(take base), take from, take rounds, 1048576u64)
     match channel.try_receive(told_from) {
         Ok(a) => if a.who != 1u64 {
             return false
@@ -194,7 +194,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let v2 = store.version(c2)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(take base), from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -214,7 +214,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let mut queue: List[ToPub] = list.new()
     list.push(mut queue, Subscribed(l, 1u32, law_caller(l), clone(k1), no_arg()))
     list.push(mut queue, Subscribed(m, 1u32, law_caller(m), clone(k1), no_arg()))
-    list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new())))
+    list.push(mut queue, Released(Release(version: Some(v1), snapshot: Some(take c1), answers: list.new())))
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
             return false
@@ -244,7 +244,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     if !m_closed || m2 || list.len(mv) != 2u64 || mv[0] != v0 || mv[1] != v1 {
         return false
     }
-    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: v2, snapshot: Some(take c2), answers: list.new())))) {
+    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: Some(v2), snapshot: Some(take c2), answers: list.new())))) {
         return false
     }
     let (k_to, k_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
@@ -284,7 +284,7 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     }
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(take base), newest: None, subs: subscriptions())
     let k1 = query_key(code.describe(q1))
     let _ = at_base(mut b, 1u64, 1u32, clone(k1), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, clone(k1), no_arg())
@@ -562,7 +562,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q_fault)), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_loss)), no_arg())
     let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q_late)), no_arg())
@@ -640,7 +640,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let _ = channel.try_send(progressed, ())
     let mut fixed: List[Owe] = list.new()
     repair(mut b, mut joined, mut fixed)
-    let image = list.len(fixed) == 1u64 && fixed[0].session == 4u64 && fixed[0].version == store.version(b.base) && list.len(owe_content_view(fixed[0]).complete) == 1u64 && owe_content_view(fixed[0]).complete[0] == 1u32 && list.len(owe_content_view(fixed[0]).ended) == 0u64 && !owe_is_reset(fixed[0]) && list.len(owe_content_view(fixed[0]).rows) == 2u64 && owe_content_view(fixed[0]).rows[0].sub == 1u32 && owe_content_view(fixed[0]).rows[1].sub == 1u32 && !joined[0].due
+    let image = list.len(fixed) == 1u64 && fixed[0].session == 4u64 && fixed[0].version == published_version(b.base) && list.len(owe_content_view(fixed[0]).complete) == 1u64 && owe_content_view(fixed[0]).complete[0] == 1u32 && list.len(owe_content_view(fixed[0]).ended) == 0u64 && !owe_is_reset(fixed[0]) && list.len(owe_content_view(fixed[0]).rows) == 2u64 && owe_content_view(fixed[0]).rows[0].sub == 1u32 && owe_content_view(fixed[0]).rows[1].sub == 1u32 && !joined[0].due
     bounced == 1u64 && marked && ended == 3u64 && c_fences && b_fences && list.len(owes_b) == 0u64 && kept && list.len(idle) == 0u64 && image
 }
 
@@ -657,7 +657,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let v0 = store.version(base)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(placing: placing_at(code.describe(subs_place), 131072u64), n_place: 131072u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(placing: placing_at(code.describe(subs_place), 131072u64), n_place: 131072u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(take base), from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 524288u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -678,7 +678,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
         let row = KeyedDone(stream: list.new(), p: i, outcome: Abandoned)
         list.push(mut answers, CallAnswer(Recipient(owner: 999u64, to: channel.sender(s_to)), take row))
     }
-    let _ = channel.send(to, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))
+    let _ = channel.send(to, PubIn(e: Released(Release(version: None, snapshot: None, answers: take answers))))
     let trapped = match task.join(take publishing) {
         Ok(_) => false,
         Error(_) => true,
@@ -709,7 +709,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let vb = store.version(bs)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(take base), from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -728,7 +728,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     let mut queue: List[ToPub] = list.new()
     list.push(mut queue, Subscribed(s, 1u32, law_caller(s), query_key(code.describe(q1)), no_arg()))
-    list.push(mut queue, Released(Release(version: vc, snapshot: Some(take cs), answers: list.new())))
+    list.push(mut queue, Released(Release(version: Some(vc), snapshot: Some(take cs), answers: list.new())))
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
             return false
@@ -738,7 +738,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let x = join_as(to, take x_to, None)
     // Round c named only q1's cover: no fence moved.
     let at_c = latest.read(register).at == vc && latest.read(root).latest == 0u64 && release_load(register, root, v0) && release_load(register, root, vc)
-    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: vb, snapshot: Some(take bs), answers: list.new())))) {
+    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: Some(vb), snapshot: Some(take bs), answers: list.new())))) {
         return false
     }
     let (y_to, y_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
@@ -800,4 +800,48 @@ fn queued_versions(updates: List[Update], n: u64) -> bool {
         }
     }
     true
+}
+
+@test
+fn test_query_free_durable_round(c: Clock, r: Random) -> Result[(), String] waits {
+    let db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let reg: Registry[(), ()] = registry()
+    let base = publisher_base(db, false)
+    let initial = match base {
+        VersionAt(n) => n,
+        RowsAt(_) => return Error("query-free publisher retained an image")
+    }
+    let Mailbox(to: take outbox, from: take inbox, rounds: take rounds) = result.unwrap(mailbox(8))
+    let visible = latest.handle(rounds.round)
+    let (deliver, updates): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(2)
+    let (admit_to, joined): (Sender[Admit], Receiver[Admit]) = channel.new(1)
+    for i in 1u64 .. 3 {
+        let release = durable_release(VersionAt(initial + i), list.new())
+        result.unwrap(channel.try_send(outbox, PubIn(e: Released(take release))))
+    }
+    result.unwrap(channel.try_send(outbox, PubIn(e: Released(Release(version: None, snapshot: None, answers: list.new())))))
+    let first = JoinSubscribe(sub: 7u32, generation: 1, input: failed_read_sub())
+    result.unwrap(channel.try_send(outbox, PubIn(e: Joined(Join(to: take deliver, told: take admit_to, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: Some(take first), http_credit: None)))))
+    result.unwrap(channel.try_send(outbox, PubIn(e: Released(durable_release(VersionAt(initial + 3), list.new())))))
+    result.unwrap(channel.try_send(outbox, PubIn(e: Halt)))
+    publisher(take reg, arc.new(()), result.unwrap(store.reader(db, 0)), take base, take inbox, take rounds, 0)
+    let Ok(Admit(who: 1, ..)) = channel.try_receive(joined) else {
+        return Error("missing join")
+    }
+    let Ok(WireEvent(e: FromRunner(Notice(e: Updated(notice))))) = channel.try_receive(updates) else {
+        return Error("missing subscription response")
+    }
+    let Some(owed) = view notice.content else {
+        return Error("missing terminal")
+    }
+    let content = owe_content_view(owed)
+    let ended = view content.ended
+    if list.len(ended) != 1 || ended[0].sub != 7 || ended[0].version != initial + 2 || latest.read(visible).at != initial + 3 {
+        return Error("wrong subscription or durable version")
+    }
+    if let Refused(NoEntry) = ended[0].outcome {
+        Ok(())
+    } else {
+        Error("unregistered subscription")
+    }
 }

@@ -57,7 +57,7 @@ fn test_head_builds_demoted_index(random: Random, tasks: Tasks) -> Result[(), st
     let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
     let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8u64))
     let entries: Registry[(), ()] = registry()
-    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let driving = task.spawn(tasks, bytes 65536u64, (take clock_handle, take to_head), upkeep_law_finish)
     let mut no_triggers: Option[triggers.Tables] = None
     let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?
@@ -102,7 +102,7 @@ fn test_head_sweeps_log_retention(random: Random, tasks: Tasks) -> Result[(), st
     let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
     let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8u64))
     let entries: Registry[(), ()] = registry()
-    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let driving = task.spawn(tasks, bytes 65536u64, (take clock_handle, take to_head), upkeep_law_finish)
     let mut no_triggers: Option[triggers.Tables] = None
     let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?
@@ -140,7 +140,7 @@ fn test_upkeep_rest_at_max_store_time(d: Dir, random: Random, tasks: Tasks) -> R
     let db = store.open(tasks, dir, time, random, options)?
     let (out, _from): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let entries: Registry[(), ()] = registry()
-    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     for count in 1u64 .. 3u64 {
         let _ = upkeep_scrub(mut hd)?
         let _ = upkeep_walk(mut hd)?
@@ -166,7 +166,7 @@ fn upkeep_law_serve(take db: store.Db, take clock_handle: ClockHand, tasks: Task
     let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
     let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8u64))
     let entries: Registry[(), ()] = registry()
-    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let driving = task.spawn(tasks, bytes 65536u64, (take clock_handle, take to_head), upkeep_law_finish)
     let mut no_triggers: Option[triggers.Tables] = None
     let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?
@@ -304,7 +304,7 @@ fn head_interleaves_projector_under_load(random: Random) -> Result[(), store.Err
     }
     result.unwrap(channel.send(to_head, HeadFinish))
     let (out, published): (Sender[PubIn], Receiver[PubIn]) = channel.new(128)
-    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(store.copy_env(rows)), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut head = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(store.copy_env(rows)), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let mut no_triggers: Option[triggers.Tables] = None
     let _ = serve_head(mut head, take from_head, None, mut no_triggers)?
     let Head(db: take kept, ..) = take head

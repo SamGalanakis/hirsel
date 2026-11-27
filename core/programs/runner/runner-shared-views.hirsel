@@ -188,7 +188,7 @@ fn view_image_rows[G: send, H: shareable + inert + send](b: Board[G, H], key: By
     let bindings = option.unwrap(map.get(b.r.bound_slots, key))
     let projected = bound bytes allowance {
         bound steps steps {
-            cover_rows(b.reads, b.read_handle, b.base, image.covers, bindings, rows)
+            cover_rows(b.reads, b.read_handle, published_rows(b.base), image.covers, bindings, rows)
         }
     }
     match take projected {

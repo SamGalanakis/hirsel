@@ -266,7 +266,7 @@ fn sse_law_update(mut db: store.Db, tables: SseLawTables, removing: bool) waits 
 fn sse_law_publish(to: Sender[PubIn], db: store.Db) waits {
     let snap = store.snapshot(db)
     let version = store.version(snap)
-    result.unwrap(channel.send(to, PubIn(e: Released(Release(version: version, snapshot: Some(take snap), answers: list.new())))))
+    result.unwrap(channel.send(to, PubIn(e: Released(Release(version: Some(version), snapshot: Some(take snap), answers: list.new())))))
 }
 
 type SseLawVectors {
@@ -314,7 +314,7 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     let first_version = store.version(store.snapshot(db))
     let Mailbox(to: take pub_in, from: take waiting, rounds: take rounds) = result.unwrap(mailbox(16u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let job = Publish(placing: placing_at(code.describe(sse_law_place), HTTP_LAW_PLACE_BYTES), n_place: HTTP_LAW_PLACE_BYTES, staging: 1048576u64, h: arc.new(clone(tables)), read_handle: result.unwrap(store.reader(db, 0u64)), base: store.snapshot(db), from: take waiting, rounds: take rounds, ready: take ready_to)
+    let job = Publish(placing: placing_at(code.describe(sse_law_place), HTTP_LAW_PLACE_BYTES), n_place: HTTP_LAW_PLACE_BYTES, staging: 1048576u64, h: arc.new(clone(tables)), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(store.snapshot(db)), from: take waiting, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else {
         fail("L16 publisher did not start")
@@ -436,14 +436,14 @@ fn sse_law_retire_state(c: Clock, r: Random) waits {
     let mut reg = result.unwrap(placed(code.describe(sse_law_place), HTTP_LAW_PLACE_BYTES))
     let key = http_law_key(reg.t.exported[0u64])
     result.unwrap(bind_query_slots(mut reg, tables))
-    let mut board = Board(r: take reg, h: arc.new(take tables), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut board = Board(r: take reg, h: arc.new(take tables), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     let _ = at_base(mut board, 1u64, 7u32, clone(key), no_arg())
     let (live, _live_rx): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.with_capacity(2u64)
     list.push(mut joined, Joiner(grants: None, who: 1u64, to: take live, closed: None, ended: list.new(), reset: None, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let baseline = map.len(board.subs.indexed)
     let (out, inbox): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
-    let version = store.version(board.base)
+    let version = published_version(board.base)
     for i in 0u64 .. 10000u64 {
         let id = i + 2u64
         let (take owner, take ports) = result.unwrap(http_owner(out, 5u64))

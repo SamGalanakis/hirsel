@@ -28,7 +28,7 @@ fn staged_round_checks(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Re
     let read_handle = result.unwrap(store.reader(db, 0u64))
     let mut registered = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     result.unwrap(bind_query_slots(mut registered, handles))
-    let mut b = Board(r: take registered, h: arc.new(take handles), read_handle: take read_handle, reads: publisher_reads(), base: take at, newest: None, subs: subscriptions())
+    let mut b = Board(r: take registered, h: arc.new(take handles), read_handle: take read_handle, reads: publisher_reads(), base: RowsAt(take at), newest: None, subs: subscriptions())
     let Mailbox(to: take out, from: take inbox, rounds: take reserved) = result.unwrap(mailbox(8u64))
     let mut rounds = take reserved
     let mut joined: List[Joiner] = list.new()
@@ -48,7 +48,7 @@ fn staged_round_checks(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Re
         return Error("group did not commit")
     }
     let empty_registry: Registry[(), ()] = registry()
-    let mut hd: Head[(), ()] = Head(db: take db, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd: Head[(), ()] = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     close_group(mut hd)
     let Ok(PubIn(e: Staged(take next))) = channel.try_receive(inbox) else {
         return Error("head did not stage the sealed group")
@@ -57,7 +57,7 @@ fn staged_round_checks(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Re
     let Some(take prepared) = stage_round(b, next, 1048576u64) else {
         return Error("publisher did not stage the update")
     }
-    if store.version(b.base) != a || latest.read(visible).at != a || !release_load(visible, owner.fence, a) || option.unwrap(sub_at(b.subs, 1u64, 1u32)).charge != before {
+    if published_version(b.base) != a || latest.read(visible).at != a || !release_load(visible, owner.fence, a) || option.unwrap(sub_at(b.subs, 1u64, 1u32)).charge != before {
         return Error("staging changed visible publication state")
     }
     if let Error(Empty) = channel.try_receive(owner.from) {} else {
@@ -76,7 +76,7 @@ fn staged_round_checks(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Re
     }
     b.reads = publisher_reads()
     result.unwrap(release_held(mut hd, true))
-    let Ok(PubIn(e: Released(Release(version: released, snapshot: Some(take snapshot), answers: take answers)))) = channel.try_receive(inbox) else {
+    let Ok(PubIn(e: Released(Release(version: Some(released), snapshot: Some(take snapshot), answers: take answers)))) = channel.try_receive(inbox) else {
         return Error("durable group did not release")
     }
     if released != v {
@@ -287,7 +287,7 @@ fn staged_socket_trial(take opened: store.Db, random: Random, tasks: Tasks, tria
     let Mailbox(to: take out, from: take inbox, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let to = channel.sender(out)
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take inbox, rounds: take rounds, ready: take ready_to)
+    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(take base), from: take inbox, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else {
         return Error("L61 publisher did not start")
@@ -323,12 +323,12 @@ fn staged_socket_trial(take opened: store.Db, random: Random, tasks: Tasks, tria
         return Error("L61 group did not commit")
     }
     let empty_registry: Registry[(), ()] = registry()
-    let mut hd: Head[(), ()] = Head(db: take db, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd: Head[(), ()] = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let next = store.snapshot(hd.db)
     let v = store.version(next)
     if let Serial(_) = trial {
         hd.last = None
-        list.push(mut hd.held, Sealed(ticket, v, take next, list.new()))
+        list.push(mut hd.held, Sealed(ticket, RowsAt(take next), list.new()))
     } else {
         close_group(mut hd)
     }
@@ -546,7 +546,7 @@ fn test_zero_mutation_behind_latch(d: Dir, real: Clock, random: Random, tasks: T
     let Mailbox(to: take out, from: take inbox, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let to = channel.sender(out)
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take inbox, rounds: take rounds, ready: take ready_to)
+    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(take base), from: take inbox, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else {
         return Error("L91 E1: publisher did not start")
@@ -574,7 +574,7 @@ fn test_zero_mutation_behind_latch(d: Dir, real: Clock, random: Random, tasks: T
         return Error("L91 E1: Commit A did not commit")
     }
     let empty_registry: Registry[(), ()] = registry()
-    let mut hd: Head[(), ()] = Head(db: take db, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket_a), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd: Head[(), ()] = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket_a), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let v = store.version(store.snapshot(hd.db))
     close_group(mut hd)
     result.unwrap(std.sim.s3.requested(endpoint, "PUT", "head", 7u64))

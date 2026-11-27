@@ -80,7 +80,7 @@ fn retired_quota_checked_before_idle_keyed_recovery(d: Dir, random: Random, task
     }
     let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2)
     let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8))
-    let mut hd = Head(db: take reopened, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0, cut: false, trigger_drive: None, parked: list.new(), recovery: take recovery, upkeep: upkeep())
+    let mut hd = Head(db: take reopened, publish_images: true, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0, cut: false, trigger_drive: None, parked: list.new(), recovery: take recovery, upkeep: upkeep())
     let (take woken, take helpers, setup) = head_wakes(mut hd, take from_head, None, tasks)
     setup?
     let driving = task.spawn(tasks, bytes 65536, (take clock_handle, take to_head), recovery_law_tick)

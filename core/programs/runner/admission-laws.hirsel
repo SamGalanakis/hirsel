@@ -363,7 +363,7 @@ fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random
     wire_know(mut owner, entries, w3c_key(code.identity(code.describe(w3c_large)), std.codec.of_u32(), large_codec))
     wire_know(mut owner, entries, w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), big_codec))
     wire_know(mut owner, entries, w3c_retired())
-    let head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(W3cHandles(data: data)), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let head = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(W3cHandles(data: data)), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox, t: t)
 }
 
@@ -646,7 +646,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let base = store.snapshot(db)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let pub_job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let pub_job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(take base), from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take pub_job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else {
         return false
@@ -689,7 +689,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     set(mut db, t, 2u64, 2u64)
     let snapshot = store.snapshot(db)
     let version = store.version(snapshot)
-    result.unwrap(channel.send(to, PubIn(e: Released(Release(version: version, snapshot: Some(take snapshot), answers: list.new())))))
+    result.unwrap(channel.send(to, PubIn(e: Released(Release(version: Some(version), snapshot: Some(take snapshot), answers: list.new())))))
     let stale = result.unwrap(channel.receive(inbox))
     let _ = wire_step(mut owner, mut work, WClient(Unsubscribe(9u32), 0u64))
     wire_flush_subscriptions(mut owner, mut work)

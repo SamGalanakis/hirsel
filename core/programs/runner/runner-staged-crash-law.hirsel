@@ -137,7 +137,7 @@ pub fn staged_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     }
     let Mailbox(to: take to, from: take inbox, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take inbox, rounds: take rounds, ready: take ready_to)
+    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: RowsAt(take base), from: take inbox, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else {
         fail("L61: publisher did not start")
@@ -165,7 +165,7 @@ pub fn staged_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
         fail("L61: effect did not commit")
     }
     let Mailbox(to: take held_to, from: take held, ..) = result.unwrap(mailbox(8u64))
-    let mut hd: Head[(), ()] = Head(db: take db, anonymous: anonymous_streams(), r: registry(), replay_identity: list.new(), h: arc.new(()), out: take held_to, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd: Head[(), ()] = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: registry(), replay_identity: list.new(), h: arc.new(()), out: take held_to, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     close_group(mut hd)
     let Ok(PubIn(e: Staged(take next))) = channel.try_receive(held) else {
         fail("L61: effect did not stage")
@@ -197,7 +197,7 @@ pub fn staged_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let Ok(PubIn(e: Released(take released))) = channel.try_receive(held) else {
         fail("L61: durable effect did not release")
     }
-    if released.version != version {
+    if released.version != Some(version) {
         fail("L61: Release changed the staged version")
     }
     result.unwrap(channel.send(to, PubIn(e: Released(take released))))

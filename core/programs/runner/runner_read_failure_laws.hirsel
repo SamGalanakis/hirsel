@@ -85,7 +85,7 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
     let reader = result.unwrap(store.reader(db, 0u64))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(store.copy_env(h)), read_handle: take reader, reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(store.copy_env(h)), read_handle: take reader, reads: publisher_reads(), base: RowsAt(take base), newest: None, subs: subscriptions())
     let Mailbox(rounds: take reserved, ..) = result.unwrap(mailbox(8u64))
     let mut rounds = take reserved
     let mut joined: List[Joiner] = list.new()

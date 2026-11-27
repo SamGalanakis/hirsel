@@ -485,7 +485,7 @@ type Board[G: send, H: shareable + inert + send] {
     h: Arc[H],
     read_handle: store.Reader,
     reads: PublisherReads,
-    base: store.Snapshot,
+    base: PublisherBase,
     newest: Option[store.Snapshot],
     subs: Subscriptions
 }
@@ -539,7 +539,7 @@ fn projection_error(take e: store.Error, take dependencies: List[store.Read]) ->
 }
 
 fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) -> Owe waits {
-    let version = store.version(b.base)
+    let version = published_version(b.base)
     let mut o = empty_owe(who, version)
     let rows = match row_log() {
         Ok(take x) => take x,
@@ -631,7 +631,7 @@ fn initial_view[G: send, H: shareable + inert + send](b: Board[G, H], key: ViewK
         view_image_rows(b, input.key, image, rows)?
         return Ok(arc.share(image))
     }
-    match run_query(b.r, b.h, b.reads, b.read_handle, b.base, input, b.base, None, rows) {
+    match run_query(b.r, b.h, b.reads, b.read_handle, published_rows(b.base), input, published_rows(b.base), None, rows) {
         Covered(take image) => Ok(arc.new(take image)),
         take problem => Error(take problem),
     }
@@ -670,7 +670,7 @@ fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: By
             let bindings = option.unwrap(map.get(b.r.bound_slots, key))
             let projected = bound bytes allowance {
                 bound steps steps {
-                    covered_all_pages(b.reads, b.read_handle, b.base, newest, c, bindings, rows)
+                    covered_all_pages(b.reads, b.read_handle, published_rows(b.base), newest, c, bindings, rows)
                 }
             }
             match take projected {
@@ -715,7 +715,7 @@ fn publication_page_limits() -> store.Limits {
 }
 
 fn affected_routes[G: send, H: shareable + inert + send](b: Board[G, H], newest: store.Snapshot) -> Result[List[(u64, bool)], store.Error] waits {
-    let base: Option[store.Snapshot] = Some(clone(b.base))
+    let base: Option[store.Snapshot] = Some(clone(published_rows(b.base)))
     let mut high: Bytes = list.with_capacity(4u64)
     list.fill(mut high, 4u64, 255u8)
     let mut low: Bytes = list.new()
@@ -818,7 +818,7 @@ fn advance_view[G: send, H: shareable + inert + send](b: Board[G, H], newest: st
     }
     if read {
         let previous_spans = view image.covers
-        return match run_query(b.r, b.h, b.reads, b.read_handle, newest, entry.input, b.base, Some(previous_spans), rows) {
+        return match run_query(b.r, b.h, b.reads, b.read_handle, newest, entry.input, published_rows(b.base), Some(previous_spans), rows) {
             Covered(take v) => {
                 let changed = v.value != image.value
                 let group = project_group(take rows, v.value, changed)
@@ -859,7 +859,7 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
                 }
                 i += 1u64
             }
-            b.base = take newest
+            b.base = RowsAt(take newest)
             return take owes
         },
     }
@@ -870,7 +870,7 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
             apply_view_round(mut b.subs, mut owes, mut fenced, take key, members, version, take progress)
         }
     }
-    b.base = take newest
+    b.base = RowsAt(take newest)
     take owes
 }
 

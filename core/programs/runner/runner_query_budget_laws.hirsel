@@ -39,7 +39,7 @@ fn budget_board(db: store.Db, h: Qh, base: store.Snapshot, bytes_limit: u64, ste
         let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
-    let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: clone(base), newest: None, subs: subscriptions())
+    let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(clone(base)), newest: None, subs: subscriptions())
     (take b, take key)
 }
 
@@ -176,8 +176,8 @@ fn budget_projection_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u6
         return false
     }
     b.reads = publisher_reads()
-    let prior_member = option.unwrap(result.unwrap(store.get(b.read_handle, b.base, h.t, 0)))
-    let prior_other = option.unwrap(result.unwrap(store.get(b.read_handle, b.base, h.t, other.first)))
+    let prior_member = option.unwrap(result.unwrap(store.get(b.read_handle, published_rows(b.base), h.t, 0)))
+    let prior_other = option.unwrap(result.unwrap(store.get(b.read_handle, published_rows(b.base), h.t, other.first)))
     set(mut db, h.t, 0, prior_member + 1)
     b.newest = Some(store.snapshot(db))
     let mut fenced = Fenced(sessions: map.new())

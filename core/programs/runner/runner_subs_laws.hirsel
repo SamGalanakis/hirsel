@@ -62,7 +62,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     }
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(take base), newest: None, subs: subscriptions())
     let mut cl = Client(caches: list.new(), last: list.new())
     let k1 = query_key(code.describe(q1))
     let kf = query_key(code.describe(qf))
@@ -167,7 +167,7 @@ pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1, 1, query_key(code.describe(q_range_prefix)), range_limit(1))
     let _ = at_base(mut b, 2, 1, query_key(code.describe(q_range_prefix)), range_limit(8))
     set(mut db, t, 8, 80)

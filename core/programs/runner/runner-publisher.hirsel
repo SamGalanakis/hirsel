@@ -1,5 +1,5 @@
-fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take h: Arc[H], take read_handle: store.Reader, take base: store.Snapshot, take from: Receiver[PubIn], take register: RoundRegister, staging: u64) -> () waits {
-    let mut at = store.version(base)
+fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take h: Arc[H], take read_handle: store.Reader, take base: PublisherBase, take from: Receiver[PubIn], take register: RoundRegister, staging: u64) -> () waits {
+    let mut at = published_version(base)
     let mut b = Board(r: take r, h: take h, read_handle: take read_handle, reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
     let mut joined: List[Joiner] = list.new()
     let mut waiting: List[Replies] = list.new()
@@ -64,8 +64,8 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                         Ok(PubIn(e: Released(take more))) => {
                             let Release(version: mv, snapshot: take ms, answers: take ma) = take more
                             collect_answers(mut waiting, mut relay, take ma)
-                            if let Some(take s) = take ms {
-                                newest = Some(take s)
+                            if let Some(_) = mv {
+                                newest = take ms
                                 newest_at = mv
                             }
                         },
@@ -77,19 +77,23 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                         Error(_) => break,
                     }
                 }
-                if let Some(take s) = take newest {
-                    at = newest_at
+                if let Some(version) = newest_at {
+                    at = version
                     let mut fenced = Fenced(sessions: map.new())
-                    owes = match take previous {
-                        Some(take planned) if planned.version == newest_at && planned.base == store.version(b.base) => install_staged(mut b, mut fenced, take s, take planned),
-                        _ => {
-                            b.newest = Some(take s)
-                            round(mut b, mut fenced)
-                        },
+                    if let Some(take s) = take newest {
+                        owes = match take previous {
+                            Some(take planned) if planned.version == version && planned.base == published_version(b.base) => install_staged(mut b, mut fenced, take s, take planned),
+                            _ => {
+                                b.newest = Some(take s)
+                                round(mut b, mut fenced)
+                            },
+                        }
+                    } else {
+                        b.base = VersionAt(version)
                     }
                     // G2 step 3: every fence of the round, then R, before anything is offered.
-                    stage_room_grants(b.subs, mut joined, newest_at)
-                    fence_round(mut joined, take fenced, newest_at, mut rounds)
+                    stage_room_grants(b.subs, mut joined, version)
+                    fence_round(mut joined, take fenced, version, mut rounds)
                     wake_room_grants(mut joined)
                 }
             },
@@ -176,4 +180,39 @@ fn tell_relay(mut relay: List[Option[RelayTell]]) {
         }
     }
     list.clear(mut relay)
+}
+
+// A query-free registry cannot admit a subscription during this activation.
+// Its publisher still advances the durable round and answers at that version.
+type PublisherBase: send = RowsAt(store.Snapshot) | VersionAt(u64)
+
+fn publisher_base(db: store.Db, images: bool) -> PublisherBase {
+    if images {
+        RowsAt(store.snapshot(db))
+    } else {
+        VersionAt(store.main_commit_version(db))
+    }
+}
+
+fn published_version(base: PublisherBase) -> u64 {
+    match base {
+        RowsAt(image) => store.version(image),
+        VersionAt(version) => version
+    }
+}
+
+fn published_rows(base: PublisherBase) -> View[store.Snapshot] in base {
+    match view base {
+        RowsAt(image) => image,
+        VersionAt(_) => fail("runner: query needs a published image")
+    }
+}
+
+fn durable_release(take base: PublisherBase, take answers: List[CallAnswer]) -> Release {
+    let version = published_version(base)
+    let snapshot = match take base {
+        RowsAt(take image) => Some(take image),
+        VersionAt(_) => None
+    }
+    Release(version: Some(version), snapshot: take snapshot, answers: take answers)
 }

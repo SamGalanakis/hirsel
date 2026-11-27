@@ -121,7 +121,7 @@ fn image_law_board(db: store.Db, h: ImageLawHandles) -> (Board[(), ImageLawHandl
         let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
-    let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     (take b, take key)
 }
 
@@ -247,7 +247,7 @@ fn image_law_cover_only(clock: Clock, random: Random) -> Result[(), String] wait
     if !mark_due(mut board.subs, 2u64, 1u32) {
         return Error("mixed subscriber did not become due")
     }
-    let initial_version = store.version(board.base)
+    let initial_version = published_version(board.base)
     image_law_expect(repair_entry(mut board, 2u64, 1u32, initial_version), want, Some(0u64), true, "mixed repair image")?
     let _ = remove_sub(mut board.subs, 2u64, 1u32)
     image_law_write(mut db, h, Trim(92u64))
@@ -351,13 +351,13 @@ fn image_law_bounds_and_cell(clock: Clock, random: Random) -> Result[(), String]
     let point = failed_read_owner(mut joined, mut rounds, 1u64)
     let span = failed_read_owner(mut joined, mut rounds, 2u64)
     let cover_only = failed_read_owner(mut joined, mut rounds, 3u64)
-    let base = store.version(board.base)
+    let base = published_version(board.base)
     fence_round(mut joined, Fenced(sessions: map.new()), base, mut rounds)
     image_law_write(mut db, h, AdvanceEmpty)
     board.newest = Some(store.snapshot(db))
     let mut marks = Fenced(sessions: map.new())
     let delta = round(mut board, mut marks)
-    let version = store.version(board.base)
+    let version = published_version(board.base)
     fence_round(mut joined, take marks, version, mut rounds)
     if version <= base || latest.read(rounds.round).at != version || latest.read(point.fence).latest != version || latest.read(span.fence).latest != version || latest.read(cover_only.fence).latest != 0u64 || list.len(delta) != 0u64 {
         return Error("bounds-only commit must fence just the Point and Span readers and sends no group")

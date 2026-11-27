@@ -1158,10 +1158,10 @@ type Replies: send {
     rows: List[KeyedDone]
 }
 
-// With a snapshot, a Release carries its group's durable version (V4). Without one it
-// carries commitless answers, which the publisher sends at its base (V3).
+// A durable release advances the round (V4). A commitless release carries
+// answers at the current round (V3). A registry with queries needs its image.
 pub opaque type Release: send {
-    version: u64,
+    version: Option[u64],
     snapshot: Option[store.Snapshot],
     answers: List[CallAnswer]
 }
@@ -1396,6 +1396,7 @@ type Waiting: send {
 
 type Head[G: send, H: shareable + inert + send] {
     db: store.Db,
+    publish_images: bool,
     anonymous: AnonymousStreams,
     r: Registry[G, H],
     replay_identity: Bytes,
@@ -1429,7 +1430,7 @@ type Publish[G: send, H: shareable + inert + send]: send {
     staging: u64,
     h: Arc[H],
     read_handle: store.Reader,
-    base: store.Snapshot,
+    base: PublisherBase,
     from: Receiver[PubIn],
     rounds: RoundRegister,
     ready: Sender[Option[RegisterError]]
@@ -1487,7 +1488,14 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
         },
     }
     let shared = arc.new(take h)
-    let publishing = start_publisher(owned, placing, n_place, arc.share(shared), take mail, tasks, n_publisher)
+    let mut images = false
+    for (_, registered) in r.slots {
+        if let Query(..) = registered {
+            images = true;
+            break
+        }
+    }
+    let publishing = start_publisher(owned, images, placing, n_place, arc.share(shared), take mail, tasks, n_publisher)
     let (out, publisher_task) = match take publishing {
         Ok(take started) => take started,
         Error(take problem) => {
@@ -1504,7 +1512,7 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
             return Ok(None)
         }
     }
-    let mut hd = Head(db: take owned, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new(), recovery: take recovery, upkeep: upkeep())
+    let mut hd = Head(db: take owned, publish_images: images, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new(), recovery: take recovery, upkeep: upkeep())
     let mut tables: Option[triggers.Tables] = None
     let (take woken, take helpers, take health_setup) = head_wakes(mut hd, take inbox, drain, tasks)
     let served = match take health_setup {
@@ -1558,10 +1566,10 @@ fn next_trigger_due(db: store.Db, tables: triggers.Tables) -> Result[Option[u64]
     })
 }
 
-fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, placing: Placing[G, H], n_place: u64, take shared: Arc[H], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
+fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, images: bool, placing: Placing[G, H], n_place: u64, take shared: Arc[H], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
     let Mailbox(to: take out, from: take from, rounds: take rounds) = take mail
     let (ready, readied): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(placing: share_placing(placing), n_place: n_place, staging: n_publisher / 2u64, h: take shared, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
+    let p = Publish(placing: share_placing(placing), n_place: n_place, staging: n_publisher / 2u64, h: take shared, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: publisher_base(owned, images), from: take from, rounds: take rounds, ready: take ready)
     let funded = publisher_bytes(n_place, n_publisher) ?=> |e| Place(Full(e))
     let publishing = task.spawn(tasks, bytes funded, take p, publish)
     match channel.receive(readied) {
@@ -2322,7 +2330,7 @@ fn reply_only[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: 
     let settled = store.conclude(mut hd.db, take pending_run, take wire_bytes, Resident)
     match take settled {
         Ok(Committed(receipt)) => {
-            let version = store.version(store.snapshot(hd.db))
+            let version = store.main_commit_version(hd.db)
             worker(mut hd, take q, take outcome, receipt.ticket, version)
         },
         Ok(NoRoom(_, _)) => refuse_admitted(mut hd, take q, Overloaded),
@@ -2343,7 +2351,7 @@ fn duplicate_reply[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
     publish_commitless(mut hd, take q, take outcome, true)
 }
 
-type Held = Sealed(store.Ticket, u64, store.Snapshot, List[Bytes]) | Loose(Release)
+type Held = Sealed(store.Ticket, PublisherBase, List[Bytes]) | Loose(Release)
 
 fn publish_release[G: send, H: shareable + inert + send](mut hd: Head[G, H], take release: Release) waits {
     if let Error(_) = channel.send(hd.out, PubIn(e: Released(take release))) {
@@ -2353,20 +2361,6 @@ fn publish_release[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
 
 fn unreleased[G: send, H: shareable + inert + send](hd: Head[G, H]) -> bool {
     !none(hd.last) || list.len(hd.held) != 0u64
-}
-
-// H3: the open group closes behind the held ones with the version and snapshot it
-// committed; later commits never reach its Release.
-fn close_group[G: send, H: shareable + inert + send](mut hd: Head[G, H]) {
-    if let Some(t) = replace(mut hd.last, None) {
-        let at = store.snapshot(hd.db)
-        let d = store.version(at)
-        let group = replace(mut hd.group, list.new())
-        if store.is_disk(hd.db) {
-            let _ = channel.try_send(hd.out, PubIn(e: Staged(clone(at))))
-        }
-        list.push(mut hd.held, Sealed(t, d, take at, take group))
-    }
 }
 
 // V4: held entries leave in order, each group only once its own sync covers its last
@@ -2387,7 +2381,7 @@ fn release_held[G: send, H: shareable + inert + send](mut hd: Head[G, H], wait: 
         }
         match list.remove(mut hd.held, 0u64) {
             Loose(take release) => publish_release(mut hd, take release),
-            Sealed(_, d, take at, take group) => {
+            Sealed(_, take at, take group) => {
                 let mut answers: List[CallAnswer] = list.new()
                 for stream in group {
                     let w = match map.remove(mut hd.busy, stream) {
@@ -2399,7 +2393,7 @@ fn release_held[G: send, H: shareable + inert + send](mut hd: Head[G, H], wait: 
                         list.push(mut answers, call_answer(take recipient, stream, p, clone(o), false))
                     }
                 }
-                publish_release(mut hd, Release(version: d, snapshot: Some(take at), answers: take answers))
+                publish_release(mut hd, durable_release(take at, take answers))
                 match sweep_head_streams(mut hd.db, hd.busy, hd.waiting) {
                     Ok(()) => (),
                     Error(Full(_)) => (),
@@ -2983,7 +2977,7 @@ fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trig
 // database and reads the volatile head separately from the answer.
 pub fn journal_attempt_gate[H: shareable + inert + send](take db: store.Db, take registered: Registry[(), H], take handles: H, t: triggers.Tables, a: triggers.Attempt, key: Bytes, arg: Bytes) -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
-    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut head = Head(db: take db, publish_images: true, anonymous: anonymous_streams(), r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
     let Head(db: take kept, ..) = take head
@@ -3102,7 +3096,7 @@ fn publish_wire_subscription[G: send, H: shareable + inert + send](mut b: Board[
     if let Some(i) = joiner(joined, who) {
         unend(mut joined[i].ended, sub)
         if !reserve_sub_room_grants(mut joined[i], input) {
-            let at = store.version(b.base)
+            let at = published_version(b.base)
             let k = owe(mut owes, who, at)
             append_terminal(mut owes[k], sub, generation, Refused(Overloaded))
             return
@@ -3301,7 +3295,7 @@ fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
 // complete. Removing the sub drops its old read set: any commit since that read set's run
 // that hit it has fenced the session, and if none did the rerun reads the same keys.
 fn repair[G: send, H: shareable + inert + send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe]) waits {
-    let at = store.version(b.base)
+    let at = published_version(b.base)
     let mut i = 0u64
     while i < list.len(joined) {
         let took = match joined[i].progress {

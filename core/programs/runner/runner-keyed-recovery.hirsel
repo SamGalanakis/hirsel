@@ -166,9 +166,8 @@ fn claim_run_record(activation: KeyedEntryRecord, arguments: Bytes, revision: Op
 
 fn finish_recovered[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut queue: ClaimQueue, claim: Bytes, settled: store.Receipt) {
     recovery_replied(mut queue, claim)
-    let at = store.snapshot(hd.db)
-    let ver = store.version(at)
-    list.push(mut hd.held, Sealed(settled.ticket, ver, take at, list.new()))
+    let at = publisher_base(hd.db, hd.publish_images)
+    list.push(mut hd.held, Sealed(settled.ticket, take at, list.new()))
 }
 
 fn answer_claim_waiters[G: send, H: shareable + inert + send](mut hd: Head[G, H], take waiters: List[Request], outcome: Outcome, expires: Option[u64]) -> Result[(), store.Error] waits {

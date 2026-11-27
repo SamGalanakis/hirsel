@@ -92,7 +92,7 @@ fn plan_staged[G: send, H: shareable + inert + send](b: Board[G, H], newest: sto
             list.push(mut views, take next)
         }
     }
-    Some(StagedRound(base: store.version(b.base), version: store.version(newest), fenced: take fenced, views: take views))
+    Some(StagedRound(base: published_version(b.base), version: store.version(newest), fenced: take fenced, views: take views))
 }
 
 fn install_staged[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: Fenced, take released: store.Snapshot, take prepared: StagedRound) -> List[Owe] {
@@ -103,6 +103,6 @@ fn install_staged[G: send, H: shareable + inert + send](mut b: Board[G, H], mut 
         let ViewRound(key: take key, members: take members, update: take progress) = take planned
         apply_view_round(mut b.subs, mut owes, mut fenced, take key, members, version, take progress)
     }
-    b.base = take released
+    b.base = RowsAt(take released)
     take owes
 }

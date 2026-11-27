@@ -139,7 +139,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
     let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
     if list.len(owe_content_view(initial).complete) != 1u64 || list.len(owe_content_view(initial).rows) != 1u64 || !row_is(owe_content_view(initial).rows[0], account_key(1u8), account_value(10u8, 7u8)) {
@@ -188,7 +188,7 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: RowsAt(store.snapshot(db)), newest: None, subs: subscriptions())
     let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
     !owe_is_reset(o) && list.len(owe_content_view(o).rows) == 0u64 && list.len(owe_content_view(o).complete) == 0u64 && list.len(owe_content_view(o).ended) == 1u64 && owe_content_view(o).ended[0].sub == 7u32 && ended_entry(b.subs, SubId(who: 1u64, sub: 7u32, serial: 0u64)) && match owe_content_view(o).ended[0].outcome {
         Failed(Raised(5u32)) => balance == 10u64,

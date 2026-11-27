@@ -313,7 +313,7 @@ fn head_sweeps_expired_rows(random: Random, tasks: Tasks) -> Result[(), store.Er
     let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
     let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8u64))
     let entries: Registry[(), ()] = registry()
-    let mut hd = Head(db: take made, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut hd = Head(db: take made, publish_images: true, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let driving = task.spawn(tasks, bytes 65536u64, (take control, take to_head), expiry_law_drive)
     let mut no_triggers: Option[triggers.Tables] = None
     let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?

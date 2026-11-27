@@ -120,8 +120,7 @@ fn upkeep_built[G: send, H: shareable + inert + send](mut hd: Head[G, H]) waits 
 }
 
 fn upkeep_release[G: send, H: shareable + inert + send](mut hd: Head[G, H]) waits {
-    let at = store.snapshot(hd.db)
-    let release = Release(version: store.version(at), snapshot: Some(take at), answers: list.new())
+    let release = durable_release(publisher_base(hd.db, hd.publish_images), list.new())
     if list.len(hd.held) != 0u64 {
         list.push(mut hd.held, Loose(take release))
     } else {
@@ -136,7 +135,7 @@ fn upkeep_sweep[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
     if !hd.upkeep.sweeping {
         return Ok(false)
     }
-    let before = store.version(store.snapshot(hd.db))
+    let before = store.main_commit_version(hd.db)
     match store.sweep_expired(mut hd.db, store.Limits(rows: UPKEEP_ROWS, byte_limit: UPKEEP_SWEEP_BYTES)) {
         Ok(store.Swept(rows: rows, ticket: Some(ticket))) => {
             hd.upkeep.swept = int.saturating_add(hd.upkeep.swept, rows)
@@ -145,7 +144,7 @@ fn upkeep_sweep[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
             Ok(true)
         },
         Ok(_) => {
-            if store.version(store.snapshot(hd.db)) == before {
+            if store.main_commit_version(hd.db) == before {
                 return Ok(false)
             }
             upkeep_release(mut hd)
@@ -258,7 +257,7 @@ fn upkeep_scrub[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
             }
             match store.begin_scrub(mut hd.db) {
                 Ok(take tour) => {
-                    hd.upkeep.tour_start_version = store.version(store.snapshot(hd.db))
+                    hd.upkeep.tour_start_version = store.main_commit_version(hd.db)
                     hd.upkeep.tour_started_ms = store.keyed_time(hd.db)
                     hd.upkeep.tour_faults = 0u64
                     take tour
@@ -283,7 +282,7 @@ fn upkeep_scrub[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
                 let _ = take tour
                 hd.upkeep.tours += 1u64
                 let now_ms = store.keyed_time(hd.db)
-                let _ = store.record_scrub_round(hd.db, report.generation, hd.upkeep.tour_start_version, store.version(store.snapshot(hd.db)), hd.upkeep.tour_started_ms, now_ms, report.checked, hd.upkeep.tour_faults, true)
+                let _ = store.record_scrub_round(hd.db, report.generation, hd.upkeep.tour_start_version, store.main_commit_version(hd.db), hd.upkeep.tour_started_ms, now_ms, report.checked, hd.upkeep.tour_faults, true)
                 if let Some(next) = int.checked_add(now_ms, UPKEEP_REST_MS) {
                     hd.upkeep.tour_from = next
                 } else {
@@ -304,7 +303,7 @@ fn upkeep_walk[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Resu
     if !hd.upkeep.walking || store.keyed_time(hd.db) < hd.upkeep.walk_from {
         return Ok(false)
     }
-    let before = store.version(store.snapshot(hd.db))
+    let before = store.main_commit_version(hd.db)
     match store.verify_step(mut hd.db, mut hd.upkeep.walk, UPKEEP_ROWS) {
         Ok(report) => {
             if report.done {
@@ -318,7 +317,7 @@ fn upkeep_walk[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Resu
             }
             hd.upkeep.walk_findings = int.saturating_add(hd.upkeep.walk_findings, list.len(report.findings))
             // A demotion: readers must stop serving the index it proved wrong.
-            if store.version(store.snapshot(hd.db)) != before {
+            if store.main_commit_version(hd.db) != before {
                 upkeep_release(mut hd)
             }
             Ok(true)

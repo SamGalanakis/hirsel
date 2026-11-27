@@ -437,8 +437,13 @@ functions.
   amount of stack set by the type alone, never by the value it visits. That covers drop,
   `clone`, `clone_in`, equality, ordering and hashing. So glue never raises `Stack`, and
   it works on a recursive type of any depth: a `Box` chain, a tree, a nested `List`.
-  - Drop and `clone` need no worklist: a drop walks and frees the value, and a `clone`
-    links each copied node through the copy it is building.
+  - Drop needs no worklist: it walks and frees the value.
+  - A `clone` of a type that owns itself walks the same worklist, with one entry for each
+    owned part still to replace on the path to the current node: a node and its field, or
+    a sequence and its item. A clone refused part-way, by `Capacity` or a step bound,
+    pops each entry and releases what it has copied so far: the finished parts of every
+    node on the path, and every block it allocated. It then fails holding nothing, and
+    the original is unchanged (MEM-17, MEM-21).
   - Equality, ordering and hashing walk with a worklist that holds one entry of four words
     for each field still to visit on the path to the current node; a node's last field is
     visited without an entry. The nodes on that path are already charged, so the worklist

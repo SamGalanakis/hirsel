@@ -3,8 +3,8 @@
 // passes through them to the enclosing isolate. A refusal releases the cleanup margin, so
 // finalizers of the unwinding frames run without a second `Stack`. A frame larger than
 // the allowance is refused when the function is built. Equality, ordering and hashing of
-// a recursive value walk it on the glue worklist, so a deep value never runs out of
-// stack in them. Oracle: FAIL-17's text; each law
+// a recursive value, and its clone, walk it on the glue worklist, so a deep value
+// never runs out of stack in them. Oracle: FAIL-17's text; each law
 // answers 1 when it holds. These are reference runs: the native source runners call from
 // a C thread with no task stack, so Cranelift and LLVM run every law here on task stacks
 // through test_run_native.rs (`fail17_stack_laws`).
@@ -18,7 +18,13 @@
 // expect: reference run head_walks(2000) = 1 used 0
 // expect: reference run kids_walk(2000) = 1 used 0
 // expect: reference run grid_walk(2000) = 1 used 0
-// expect: refuse FAIL-17 at 518:1
+// expect: reference run tail_clones(2000) = 1 used 32
+// expect: reference run head_clones(2000) = 1 used 32
+// expect: reference run kids_clones(2000) = 1 used 32
+// expect: reference run grid_clones(2000) = 1 used 32
+// expect: reference run fork_clones(2000) = 1 used 32
+// expect: reference run brood_clones(2000) = 1 used 32
+// expect: refuse FAIL-17 at 651:1
 
 // A 4 KiB frame per level: a million levels are far past the 7.5 MiB allowance.
 fn deep(n: u64) -> u64 {
@@ -513,6 +519,133 @@ fn kids_walk(n: u64) -> u64 {
 fn grid_walk(n: u64) -> u64 {
     answer(isolate(fn() -> u64 { holds(grid_equal(n) && grid_differs(n)) }))
 }
+
+// A clone refused part-way, by a byte bound (Capacity, MEM-21) or a step bound
+// (OutOfTime, MEM-30), holds nothing afterwards and leaves the original as it was
+// (MEM-17): the run ends holding only the caught cause's 32-byte cell (FAIL-16, as in
+// MEM-21's refused law), and the original equals a fresh build. A full clone equals it.
+fn caught_capacity(take r: Result[Result[Result[u64, Capacity], Causes], Capacity]) -> bool {
+    match take r {
+        Ok(Error(_)) => true,
+        _ => false,
+    }
+}
+
+fn stopped(take r: Result[u64, OutOfTime]) -> bool {
+    match take r {
+        Error(_) => true,
+        Ok(_) => false,
+    }
+}
+
+fn tail_copy(n: u64) -> bool {
+    let a = tail(n, 7u64)
+    let capped = caught_capacity(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 4096 { let _c: Tail = clone(a); 1u64 }
+    }))
+    let steps = stopped(bound steps 50 { let _c: Tail = clone(a); 1u64 })
+    let intact = a == tail(n, 7u64)
+    let c: Tail = clone(a)
+    capped && steps && intact && c == a
+}
+
+fn head_copy(n: u64) -> bool {
+    let a = head(n, 1u64, 9u64)
+    let capped = caught_capacity(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 4096 { let _c: Head = clone(a); 1u64 }
+    }))
+    let steps = stopped(bound steps 50 { let _c: Head = clone(a); 1u64 })
+    let intact = a == head(n, 1u64, 9u64)
+    let c: Head = clone(a)
+    capped && steps && intact && c == a
+}
+
+fn kids_copy(n: u64) -> bool {
+    let a = kids(n, 7u64)
+    let capped = caught_capacity(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 4096 { let _c: Kids = clone(a); 1u64 }
+    }))
+    let steps = stopped(bound steps 50 { let _c: Kids = clone(a); 1u64 })
+    let intact = a == kids(n, 7u64)
+    let c: Kids = clone(a)
+    capped && steps && intact && c == a
+}
+
+fn grid_copy(n: u64) -> bool {
+    let a = grid(n, 7u64)
+    let capped = caught_capacity(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 4096 { let _c: Grid = clone(a); 1u64 }
+    }))
+    let steps = stopped(bound steps 50 { let _c: Grid = clone(a); 1u64 })
+    let intact = a == grid(n, 7u64)
+    let c: Grid = clone(a)
+    capped && steps && intact && c == a
+}
+
+// Each level's shallow part is copied before the deep one, so a refusal part-way has a
+// finished part to release at every level on the path: the left box of a Fork, the
+// first item of a Brood.
+type Fork: key = Tip(u64) | Fork(Box[Fork], Box[Fork])
+type Brood: key = Bud(u64) | Brood(List[Box[Brood]])
+
+fn fork(n: u64, bottom: u64) -> Fork {
+    let mut c: Fork = Tip(bottom)
+    let mut i = 0u64
+    while i < n {
+        let prev = take c
+        c = Fork(box.new(Tip(i)), box.new(take prev))
+        i += 1u64
+    }
+    c
+}
+
+fn brood(n: u64, bottom: u64) -> Brood {
+    let mut c: Brood = Bud(bottom)
+    let mut i = 0u64
+    while i < n {
+        let prev = take c
+        let mut xs: List[Box[Brood]] = list.new()
+        list.push(mut xs, box.new(Bud(i)))
+        list.push(mut xs, box.new(take prev))
+        c = Brood(take xs)
+        i += 1u64
+    }
+    c
+}
+
+fn fork_copy(n: u64) -> bool {
+    let a = fork(n, 7u64)
+    let capped = caught_capacity(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 4096 { let _c: Fork = clone(a); 1u64 }
+    }))
+    let steps = stopped(bound steps 50 { let _c: Fork = clone(a); 1u64 })
+    let intact = a == fork(n, 7u64)
+    let c: Fork = clone(a)
+    capped && steps && intact && c == a
+}
+
+fn brood_copy(n: u64) -> bool {
+    let a = brood(n, 7u64)
+    let capped = caught_capacity(isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 4096 { let _c: Brood = clone(a); 1u64 }
+    }))
+    let steps = stopped(bound steps 50 { let _c: Brood = clone(a); 1u64 })
+    let intact = a == brood(n, 7u64)
+    let c: Brood = clone(a)
+    capped && steps && intact && c == a
+}
+
+fn fork_clones(n: u64) -> u64 { answer(isolate(fn() -> u64 { holds(fork_copy(n)) })) }
+
+fn brood_clones(n: u64) -> u64 { answer(isolate(fn() -> u64 { holds(brood_copy(n)) })) }
+
+fn tail_clones(n: u64) -> u64 { answer(isolate(fn() -> u64 { holds(tail_copy(n)) })) }
+
+fn head_clones(n: u64) -> u64 { answer(isolate(fn() -> u64 { holds(head_copy(n)) })) }
+
+fn kids_clones(n: u64) -> u64 { answer(isolate(fn() -> u64 { holds(kids_copy(n)) })) }
+
+fn grid_clones(n: u64) -> u64 { answer(isolate(fn() -> u64 { holds(grid_copy(n)) })) }
 
 // An 8 MiB frame is past the single-frame ceiling (the allowance).
 fn oversized(n: u64) -> u64 {

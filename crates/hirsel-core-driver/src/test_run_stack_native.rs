@@ -3,8 +3,8 @@
 // law holds in main on a task stack, and a 10 MiB
 // chain of non-recursive frames fails a spawned task with `Stack` (its join is an
 // error) or is caught by an isolate inside it, and an uncaught `Stack` in main ends
-// the run with status 101 and a `Stack at` cause line (PROG-3). The walk laws compare
-// and hash values a million levels deep. Oracle: FAIL-17.
+// the run with status 101 and a `Stack at` cause line (PROG-3). The walk laws compare,
+// hash and clone values a million levels deep. Oracle: FAIL-17.
 const FAIL17_TESTS: &str = r#"
 @test
 fn fiber_caught(tasks: Tasks) -> Result[(), Exit] waits {
@@ -30,6 +30,12 @@ fn walk_laws() -> Result[(), Exit] {
     if head_walks(1000000u64) != 1u64 { return Error(Exit(status: 21)) }
     if kids_walk(300000u64) != 1u64 { return Error(Exit(status: 22)) }
     if grid_walk(150000u64) != 1u64 { return Error(Exit(status: 23)) }
+    if tail_clones(1000000u64) != 1u64 { return Error(Exit(status: 24)) }
+    if head_clones(1000000u64) != 1u64 { return Error(Exit(status: 25)) }
+    if kids_clones(300000u64) != 1u64 { return Error(Exit(status: 26)) }
+    if grid_clones(150000u64) != 1u64 { return Error(Exit(status: 27)) }
+    if fork_clones(1000000u64) != 1u64 { return Error(Exit(status: 28)) }
+    if brood_clones(300000u64) != 1u64 { return Error(Exit(status: 29)) }
     Ok(())
 }
 @test
@@ -50,9 +56,17 @@ fn fail17_stack_laws(backend: Backend) {
     // The corpus's refused frame is the build-time law; these runs exclude it.
     let laws = &laws[..laws.find("// An 8 MiB frame").unwrap()];
     let product = Driver::default()
-        .check(prog4_request(&format!("{laws}{FAIL17_TESTS}"), dir.path()), &mut Meter::new(false))
+        .check(
+            prog4_request(&format!("{laws}{FAIL17_TESTS}"), dir.path()),
+            &mut Meter::new(false),
+        )
         .unwrap();
-    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
     let test = |name: &str| DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
     let mut options = native_options(backend, dir.path());
     options.grant_mask = 1 << grant_kind("Tasks").unwrap();
@@ -70,10 +84,17 @@ fn fail17_stack_laws(backend: Backend) {
             options.output = dir.path().join(format!("{name}-{optimize}"));
             let outcome = product.run_test(&test(name), &options).unwrap();
             let stderr = String::from_utf8_lossy(&outcome.output.stderr);
-            assert_eq!(outcome.output.status.code(), Some(code), "{name} optimize {optimize}: {stderr}");
+            assert_eq!(
+                outcome.output.status.code(),
+                Some(code),
+                "{name} optimize {optimize}: {stderr}"
+            );
             if code == 101 {
                 assert_eq!(stderr.lines().count(), 1, "{name}: {stderr}");
-                assert!(stderr.starts_with("Stack at app@1/main.hirsel:"), "{name}: {stderr}");
+                assert!(
+                    stderr.starts_with("Stack at app@1/main.hirsel:"),
+                    "{name}: {stderr}"
+                );
             }
         }
     }

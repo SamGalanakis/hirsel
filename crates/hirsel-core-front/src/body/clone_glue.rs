@@ -17,6 +17,8 @@ use super::*;
 use hirsel_core_ids::work_steps::table;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
+mod walk;
+
 impl Derive<'_> {
     // Slot kernels describe their live set outside the structural fields. The
     // core clone hook must own that walk, including inside a containing value.
@@ -111,6 +113,10 @@ impl Derive<'_> {
             copy(c, to, from, hirsel_core_layout::POINTER);
             ret(c, &[]);
             return Ok(());
+        }
+        if !walk::owned_component(self.module, ty).is_empty() {
+            // A type that owns itself is copied in constant stack (FAIL-17).
+            return self.clone_walk(c, ty, from, to);
         }
         let size = c.field_size(&FieldTy::Inline(TypeRef(ty.0)));
         copy_value(c, to, from, size);

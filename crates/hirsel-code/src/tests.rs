@@ -543,3 +543,126 @@ fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
     drop(slot);
     assert_eq!((loader.retired(), loader.installed()), (0, 0));
 }
+
+static FAULTING: std::sync::atomic::AtomicPtr<Loader> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static SAYS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Write what the PC table gives for the faulting address, and end the process.
+extern "C" fn report(_: libc::c_int, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    // SAFETY: the law set the loader before it raised the fault, and the kernel gave
+    // the record.
+    let (loader, pc) = unsafe {
+        (
+            &*FAULTING.load(Ordering::Relaxed),
+            (*info).si_addr() as usize,
+        )
+    };
+    let mut said = [0xff; 20];
+    if let Some(hit) = loader.resolve(pc) {
+        said[..16].copy_from_slice(&hit.digest);
+        said[16..].copy_from_slice(&hit.offset.to_le_bytes());
+    }
+    // SAFETY: write and _exit take integers and a live buffer.
+    unsafe {
+        libc::write(
+            SAYS.load(Ordering::Relaxed),
+            said.as_ptr().cast(),
+            said.len(),
+        );
+        libc::_exit(0);
+    }
+}
+
+/// PACK-9: a code address resolves to the image that owns it and its text offset,
+/// across a chunk boundary and from the handler of a fault in loaded code; the fault
+/// quarantines the digest; a recycled cohort resolves to nothing.
+#[test]
+fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
+    if !host::SLAB {
+        return;
+    }
+    let loader = Loader::new(Config {
+        installed_bytes: 8 << 20,
+        ..config()
+    })
+    .unwrap();
+    // The first image's text runs past the end of the first 2 MiB chunk.
+    const WIDE: usize = (2 << 20) + 4096;
+    let mut wide = image(1);
+    wide.text.resize(WIDE, 0);
+    wide.spans[0].length = WIDE as u32;
+    let wide = load(&loader, &wide.encode()).unwrap();
+    // Two instructions, the second undefined.
+    let (text, at): (Vec<u8>, u32) = match TARGET.arch() {
+        Arch::X86_64 => (vec![0x90, 0x90, 0x0f, 0x0b], 2),
+        Arch::Aarch64 => (
+            [0xd503_201fu32, 0]
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect(),
+            4,
+        ),
+    };
+    let mut faulty = image(2);
+    let length = text.len();
+    faulty.spans[0].length = length as u32;
+    (faulty.text, faulty.text_fixups, faulty.imports) = (text, vec![], vec![]);
+    let bytes = faulty.encode();
+    let code = load(&loader, &bytes).unwrap();
+
+    let short = |code: &Code<Leaf>| -> [u8; 16] { code.digest().0[..16].try_into().unwrap() };
+    let hit = |code: &Code<Leaf>, offset: u32| {
+        Some(Hit {
+            digest: short(code),
+            offset,
+        })
+    };
+    assert_eq!(loader.resolve(wide.text()), hit(&wide, 0));
+    assert_eq!(
+        loader.resolve(wide.text() + WIDE - 1),
+        hit(&wide, WIDE as u32 - 1)
+    );
+    assert_eq!(loader.resolve(code.text() + at as usize), hit(&code, at));
+    // The trap fill after an image belongs to no image, and neither does the stack.
+    assert_eq!(loader.resolve(code.text() + length), None);
+    assert_eq!(loader.resolve(wide.text() - 1), None);
+    assert_eq!(loader.resolve(&loader as *const Loader as usize), None);
+
+    let mut said = [0u8; 20];
+    // SAFETY: the child installs a handler and calls the entry; the parent reads what
+    // the handler wrote and waits.
+    unsafe {
+        let mut ends = [0; 2];
+        assert_eq!(libc::pipe(ends.as_mut_ptr()), 0);
+        let child = libc::fork();
+        assert!(child >= 0);
+        if child == 0 {
+            FAULTING.store(&loader as *const Loader as *mut Loader, Ordering::Relaxed);
+            SAYS.store(ends[1], Ordering::Relaxed);
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = report as *const () as usize;
+            action.sa_flags = libc::SA_SIGINFO;
+            libc::sigaction(libc::SIGILL, &action, std::ptr::null_mut());
+            (code.entry())(1);
+            libc::_exit(1);
+        }
+        libc::close(ends[1]);
+        assert_eq!(libc::read(ends[0], said.as_mut_ptr().cast(), 20), 20);
+        libc::close(ends[0]);
+        let mut status = 0;
+        assert_eq!(libc::waitpid(child, &mut status, 0), child);
+    }
+    assert_eq!(
+        (&said[..16], &said[16..]),
+        (&short(&code)[..], &at.to_le_bytes()[..])
+    );
+
+    let pc = code.text() + at as usize;
+    assert_eq!(loader.fault(pc), Some((code.digest(), at)));
+    assert_eq!(load(&loader, &bytes).err(), Some(Refusal::Quarantined));
+    assert_eq!(loader.fault(&loader as *const Loader as usize), None);
+    drop(code);
+    assert_eq!(loader.resolve(pc), None);
+    assert_eq!(loader.resolve(wide.text() + (2 << 20)), hit(&wide, 2 << 20));
+}

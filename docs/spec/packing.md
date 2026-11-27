@@ -358,9 +358,12 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
    directory indexed by chunk. A publish or a recycle builds new arrays for the chunks it
    touches and swaps their directory entries.
 4. **Readers** are signal handlers: the profile sampler and the fault reporter. A reader
-   stores the array pointer in its thread's **hazard slot**, re-reads the directory entry
-   to confirm it, searches, and clears the slot. It allocates nothing and takes no lock. A
-   replaced array is freed when no hazard slot holds it.
+   claims a free **hazard slot** of the table's 64 by storing the array pointer in it,
+   re-reads the directory entry to confirm it, searches, and clears the slot. It allocates
+   nothing, takes no lock and reads no thread-local state, so a handler that interrupts
+   another reader on its own thread claims a second slot. A replaced array is freed when
+   no hazard slot holds it. An image has one row from its publish until its cohort is
+   recycled.
 5. **Samples.** The sampler records, for the interrupted PC, each frame-pointer return
    address and the return-address candidate (the word at the stack pointer on x86-64, the
    link register on aarch64), the pair `(digest, text offset)` the table gives at capture.
@@ -368,7 +371,9 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
    decide whether the PC was in a prologue or epilogue, where the candidate is the caller.
 6. **Faults.** A hardware fault whose PC the table resolves is a fault in loaded code. The
    pool stops, the report names the module digest, text offset and span name, and the
-   digest is **quarantined**: this host refuses to load it again (`Quarantined`).
+   digest is **quarantined**: this host refuses to load it again (`Quarantined`). The
+   handler resolves the PC; the quarantine and the span name, which is read from the
+   module by digest, are the reporter's work outside the handler.
 7. **Causes** never point into text. A cause that outlives its image keeps the image's
    site and literal data alive, not its code (slice P2 defines the owner word).
 

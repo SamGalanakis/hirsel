@@ -15,9 +15,12 @@ use std::time::{Duration, Instant};
 mod fixup;
 mod host;
 mod runs;
+mod table;
 
 use host::Access;
 use runs::Runs;
+pub use table::Hit;
+use table::{Owner, Table};
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -101,6 +104,8 @@ struct Cohort {
     bytes: u64,
     /// Bytes of images that were retired when their count reached zero.
     retired: u64,
+    /// Every image installed in it: its PC table row and its module digest.
+    images: Vec<(Owner, ContentHash)>,
 }
 
 /// The writable pages ahead of the open cohort: `(next free offset, end)` per band.
@@ -132,6 +137,7 @@ struct Shared {
     /// The pool's retired bytes. Lock order: a slot, then the slab, then this.
     retired: Mutex<u64>,
     updates: AtomicU64,
+    table: Table,
 }
 
 impl Drop for Shared {
@@ -207,6 +213,8 @@ impl Shared {
     /// Unmap a dead cohort and return its runs (PACK-4 step 5).
     fn recycle(&self, slab: &mut Slab, id: u64) {
         let cohort = slab.cohorts.remove(&id).unwrap();
+        // No reader of the PC table names the cohort once this returns.
+        self.table.change(cohort.text, &[]);
         // A run that cannot be unmapped stays as it is and is never used again.
         let gone = |at: usize, (start, end): (usize, usize)| {
             let gone = end == start || host::protect(at, end - start, Access::None).is_ok();
@@ -245,7 +253,11 @@ impl Shared {
             host::publish(self.text(text.0), text.1 - text.0)
         };
         cohort.state = match publish() {
-            Ok(()) => State::Published,
+            Ok(()) => {
+                let rows: Vec<Owner> = cohort.images.iter().map(|(row, _)| *row).collect();
+                self.table.change(text, &rows);
+                State::Published
+            }
             Err(_) => State::Failed,
         };
         let dead = cohort.live == 0;
@@ -308,6 +320,7 @@ impl Shared {
                                     live: 0,
                                     bytes: 0,
                                     retired: 0,
+                                    images: Vec::new(),
                                 },
                             );
                             id
@@ -379,6 +392,7 @@ impl Loader {
         assert!(config.band_bytes <= 1 << 30 && config.band_bytes.is_multiple_of(page.max(WINDOW)));
         host::register().map_err(|_| Refusal::Unsupported)?;
         let base = host::reserve(2 * config.band_bytes).map_err(|_| Refusal::Unsupported)?;
+        let table = Table::new(base, config.band_bytes);
         let slab = Slab {
             text: Runs::new(config.band_bytes),
             data: Runs::new(config.band_bytes),
@@ -399,6 +413,7 @@ impl Loader {
             published: Condvar::new(),
             retired: Mutex::new(0),
             updates: AtomicU64::new(0),
+            table,
         })))
     }
 
@@ -410,6 +425,29 @@ impl Loader {
     /// Refuse every later load of `digest` (PACK-9).
     pub fn quarantine(&self, digest: ContentHash) {
         self.0.slab.lock().unwrap().quarantined.insert(digest);
+    }
+
+    /// The image whose text holds the code address `pc` and the address's offset in
+    /// that text (PACK-9). Async-signal-safe: a fault or a sampling handler calls it.
+    pub fn resolve(&self, pc: usize) -> Option<Hit> {
+        self.0.table.resolve(pc)
+    }
+
+    /// Record a hardware fault at `pc`: when it is in loaded code, its image's digest
+    /// is quarantined, so this host loads it no more (PACK-9). The fault reporter calls
+    /// this outside its signal handler, after the pool has stopped.
+    pub fn fault(&self, pc: usize) -> Option<(ContentHash, u32)> {
+        let hit = self.resolve(pc)?;
+        let mut slab = self.0.slab.lock().unwrap();
+        let at = pc - self.0.base - hit.offset as usize;
+        let digest = slab
+            .cohorts
+            .values()
+            .flat_map(|cohort| &cohort.images)
+            .find(|(row, _)| row.start as usize == at)
+            .map(|(_, digest)| *digest)?;
+        slab.quarantined.insert(digest);
+        Some((digest, hit.offset))
     }
 
     /// The bytes of every image in a cohort that is not yet recycled.
@@ -554,6 +592,16 @@ impl Loader {
             std::ptr::copy_nonoverlapping(text.as_ptr(), t as *mut u8, text.len());
             std::ptr::copy_nonoverlapping(data.as_ptr(), d as *mut u8, data.len());
         }
+        let row = Owner {
+            start: at as u32,
+            length: text.len() as u32,
+            digest: digest.0[..16].try_into().unwrap(),
+        };
+        slab.cohorts
+            .get_mut(&cohort)
+            .unwrap()
+            .images
+            .push((row, digest));
         let image = Arc::new(Image {
             shared: self.0.clone(),
             digest,

@@ -141,12 +141,12 @@ final class RuntimeTests: XCTestCase {
         let clock = ContinuousClock()
         let start = clock.now
         try await withRuntime { runtime in
-            let memoryAtStart = memory()
-            let workerCount = hirsel_gate_workers()
-            let workers = workerCount == UInt32.max ? "unavailable" : String(workerCount)
             let session = try runtime.open()
             let first = try await session.api.call.main.answer(0, deadline: 0)
             let firstTime = start.duration(to: clock.now)
+            let memoryAtStart = memory()
+            let workerCount = hirsel_gate_workers()
+            let workers = workerCount == UInt32.max ? "unavailable" : String(workerCount)
             XCTAssertEqual(first, .returned(7))
             var calls: [Duration] = []
             for index in 0..<1000 {

@@ -80,8 +80,9 @@ struct CounterHost: App {
             }
         }
         precondition(status == KERN_SUCCESS)
-        let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("comparison-sample.txt")
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        try! FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+        let output = documents.appendingPathComponent("comparison-sample.txt")
         try! "\(value) \(tick) \(info.resident_size)\n".write(to: output, atomically: true, encoding: .utf8)
     }
 }

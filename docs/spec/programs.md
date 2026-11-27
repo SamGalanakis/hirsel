@@ -2,11 +2,18 @@
 
 ### PROG-1: Packages
 
-A **package** has a name and a major version and consists of modules; each source file is
-one module, with the module path its package manifest assigns. A definition's identity is
-its package, version, module path and name. Two versions of a package are two packages,
-and their types are distinct. A package names each dependency at one exact version; the
-manifest format is outside the language, and the `hirsel` tool's is
+A **package** has a name and a version and consists of modules; each source file is
+one module, with the module path its package manifest assigns. A package name is scoped by a
+DNS host (`acme.dev/json`, `github.com/acme/json`), local to a workspace (`local/app`), or bare
+for a package the toolchain supplies (`std`); it never contains `@`, and every path that starts
+with an identity `name@major` splits at the first `@`. A definition's identity is its package
+name, major version, module path and name. Two majors of a package are two packages, and
+their types are distinct; the minor and patch never enter an identity. Sources name a
+dependency by its **alias**, which the package chooses, and the alias never enters a
+definition's identity, so two aliases of one package name one set of types. A package
+records, for each dependency, the root it was checked against (an exact binding) or a floor
+version that the root workspace may raise ([packages §1](packages.md#1-canonical-library-content));
+the manifest format is outside the language, and the `hirsel` tool's is
 [`hirsel.toml`](packages.md). A package states the charge policy it was
 written for ([MEM-24](budgets.md#mem-24-logical-charges)); in v1 that is `charge-v1`.
 
@@ -246,9 +253,11 @@ the checked declarations, and are the same on every engine and build
 this encoding and nothing else, followed by the UTF-8 text `D A S`:
 
 - `D` is the definition identity (PROG-1): `package@major/module/../name`, the package's
-  name, its major version in decimal without leading zeros, each component of the module
-  path, and the function's name, joined by `/`. In each component, every byte other than
-  an ASCII letter, digit or `_` is written `%` and two upper-case hex digits.
+  name as one component, its major version in decimal without leading zeros, each component
+  of the module path, and the function's name, joined by `/`. In each component, every byte
+  other than an ASCII letter, digit or `_` is written `%` and two upper-case hex digits, so
+  the package `acme.dev/json` is written `acme%2Edev%2Fjson@1` and the `/` that ends it is
+  the only unescaped one before the module path.
 - `A` is empty for a function without type parameters. For an instance of a generic
   function it is `[`, the closed type arguments, each written as `S` writes a type and
   separated by `,`, then `]`, followed, when any type parameter declares a bound, by `{`,
@@ -290,12 +299,12 @@ this encoding and nothing else, followed by the UTF-8 text `D A S`:
   `(D, arguments, dictionaries, header)`, and two descriptors have equal bytes exactly
   when those four are equal.
 
-So `fn double(b: Bytes) -> Bytes` in module `main` of package `app`
+So `fn double(b: Bytes) -> Bytes` in module `main` of package `local/app`
 version 1 has the identity bytes `0x01` followed by
-`app@1/main/double(core@1/core/List[u8])->core@1/core/List[u8]`.
+`local%2Fapp@1/main/double(core@1/core/List[u8])->core@1/core/List[u8]`.
 And `fn edges[in b, in a](s: Region, r: Region, t: Text in a, u: Text in b) -> u64 where
 a: r, r: s` there, or the same header with `[in a, in b]`, has `0x01` followed by
-`app@1/main/edges(core@1/core/Region,core@1/core/Region,core@1/core/Text in ^0,core@1/core/Text in ^1)->u64 where ^0:#0,^0:#1,#1:#0`.
+`local%2Fapp@1/main/edges(core@1/core/Region,core@1/core/Region,core@1/core/Text in ^0,core@1/core/Text in ^1)->u64 where ^0:#0,^0:#1,#1:#0`.
 A change to a function's package, version, module path, name, parameter modes or types,
 result, anchors, `waits` or outlives clauses changes its identity; a change to its
 parameter names, to the order of its region generics or to its body does not. A rename or a move to another module is a new
@@ -308,12 +317,12 @@ the call site, the enclosing instance or the package that describes it does not.
 hold no closure hash, layout name, source position, ordinal or build product, so the same
 source gives the same bytes in every build. So `fn pick[T: plain](a: T, b: T) -> T` in module
 `main` of package `app` version 1, described at `u64` and at `u32`, has `0x01` followed by
-`app@1/main/pick[u64]{plain[u64]}($0,$0)->$0` and by
-`app@1/main/pick[u32]{plain[u32]}($0,$0)->$0`: two instances, two descriptors, each calling
+`local%2Fapp@1/main/pick[u64]{plain[u64]}($0,$0)->$0` and by
+`local%2Fapp@1/main/pick[u32]{plain[u32]}($0,$0)->$0`: two instances, two descriptors, each calling
 its own instance. `fn swap[B, A: send](take p: (A, B)) -> (B, A)` at `A` = `u64` and `B` =
 `Text` writes `A` as `$0`, since the parameters name it first, whatever the declared order:
 it has `0x01` followed by
-`app@1/main/swap[u64,core@1/core/Text]{send[u64]}(take($0,$1))->($1,$0)`. A
+`local%2Fapp@1/main/swap[u64,core@1/core/Text]{send[u64]}(take($0,$1))->($1,$0)`. A
 function without type parameters has an empty `A` and no `$i`, so its bytes are the ones
 this section gave before generic descriptors.
 

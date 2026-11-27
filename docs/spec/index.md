@@ -145,9 +145,11 @@ archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sq
 
 | term | defined in |
 |---|---|
+| alias, scoped name, local name, package version | [packages §1](packages.md#1-canonical-library-content) |
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
 | ascription | [LANG-5](syntax.md#lang-5-grammar), [LANG-11](language.md#lang-11-typing-is-local) |
 | as if, observables | [SEM-8](semantics.md#sem-8-determinism) |
+| authority ceiling, reached kinds, authority card | [packages §11](packages.md#11-dependency-authority) |
 | authentication: none in Hirsel or the runner; application code binds the Caller | [HTTP §4](http.md#4-keyed-operations), RUNNER-SPEC rule 13 |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
 | codec | [SEM-10](semantics.md#sem-10-codecs) |
@@ -161,6 +163,7 @@ archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sq
 | constant budget, package comptime budget | [MEM-34](budgets.md#mem-34-constant-budgets) |
 | copyable | [OWN-3](ownership.md#own-3-kinds) |
 | current limit, limit | [MEM-19](budgets.md#mem-19-limits) |
+| exact binding, floor binding, tested root, selection, effective binding | [packages §1, §5](packages.md#5-resolution) |
 | event | [CONC-10](tasks.md#conc-10-event-order) |
 | extent, view | [OWN-8](ownership.md#own-8-views) |
 | failure, error, run stop | [FAIL-1](failure.md#fail-1-errors-failures-and-run-stops) |

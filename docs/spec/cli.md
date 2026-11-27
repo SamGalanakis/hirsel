@@ -110,6 +110,11 @@ register these archives with `--observed-runtime ARCHIVE` and
 `--observed-recording-runtime ARCHIVE`. An explicit `--runtime` must name a
 charge observation archive.
 
+A `--frozen` request reads, offers and uploads nothing remote: its transport permission
+([packages §8](packages.md#8-hirsellock)) is absent, so the remote cache is skipped for that
+request as if none were configured, with no connection attempt, no name lookup and no
+endpoint marked down.
+
 ## Resident compiler
 
 `hirsel serve` keeps one compiler process per user and toolchain. That
@@ -200,6 +205,11 @@ process, which keeps its socket, its lock and its launched clients and
 drops every remembered derivation, as after a panic. Clients still waiting
 to be accepted are served by the restarted server. A one-shot compile has
 no CPU budget: it runs in the client's own process, under its terminal.
+
+A resident compiler takes each request's transport permission from that request
+([packages §8](packages.md#8-hirsellock)). While it serves a `--frozen` request it makes no
+connection and no name lookup on that request's behalf, even while it serves an ordinary
+request at the same time; there is no process-wide offline switch.
 
 ## Dev loop
 
@@ -301,16 +311,39 @@ no coverage option. Coverage never enters a law row or `hirsel.laws`.
 
 ## Adding a dependency
 
-`hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`
-binds one dependency in the nearest package manifest and updates `hirsel.lock`. `SOURCE` is an
+`hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+binds one dependency in the nearest package manifest and updates `hirsel.lock`. The row's key
+is the alias, the last component of the package name unless `--as`<!-- doc-ref: planned --> gives another; the row
+holds the package's scoped name, major, root and source. `SOURCE` is an
 `https://` URL (one archive), a git source `git+https://HOST/PATH[?dir=DIR][#REF]` or its
 shorthand `github:OWNER/REPO[/DIR][@REF]` (a commit, bound by `git` and `rev`; untagged, the
 default branch's tip), a `.hpkg` path, a `sha256:` root already in the package store, a toolchain
-`NAME@MAJOR`, or a listed member's directory. `--workspace` declares it in the root's
+`NAME@MAJOR` (a bare name), or a listed member's directory. `add` never moves a root already
+bound to the same source; that is `hirsel update`<!-- doc-ref: planned -->. `--workspace` declares it in the root's
 `[workspace.dependencies]` and binds the member with `{ workspace = true }`, one manifest at a
 time. It verifies any archive and resolves the workspace before publishing the manifest. It
 exits 0 for added, updated, unchanged or a dry run, 2 for a refusal before publication, and 1
 for a failure after publication begins. [Packages](packages.md#adding-a-dependency)
+
+## Updating dependencies
+
+`hirsel update [ALIAS|ID[@VERSION]] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+re-reads the named dependency rows' sources (a git row's `ref`, a URL or archive's bytes),
+rebinds rows whose source now yields another root, and, for every identity whose edges do not
+agree on one root, selects the highest root every edge accepts and writes it to the root
+manifest's `[selections]`. It checks the edited workspace on an overlay first and writes
+nothing when the check fails. It prints each changed package's versions and roots, each
+library now built against another version than it was published with, and each package's
+per-export authority diff. It refuses `--locked` and `--frozen`, and its exit statuses are
+`add`'s. [Packages](packages.md#updating-dependencies)
+
+## Auditing dependencies
+
+`hirsel audit [DIR] [--json]`<!-- doc-ref: planned --> prints, for every package of the
+workspace's closure but the toolchain's, its version, root, source and binding row, every edge
+whose effective root differs from the one its publisher tested, and its authority card:
+carried authority, reached kinds and verdict. It exits 2 when a row's `authority` does not
+cover what its package reaches, as `check` does. [Packages](packages.md#auditing-dependencies)
 
 ## CPU profiles
 

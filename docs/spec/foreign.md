@@ -174,7 +174,7 @@ identity, and refuses the build at the first failed check:
 | its members hold, in all, exactly one section named `.hirsel_abi`, of type `SHT_PROGBITS`, and for every reached foreign function of `M` that section holds exactly one line for its symbol S, equal to the line of S in `M`'s ABI text (below) | `FFI-3: archive F of P for T has no ABI text` (none or more than one section), or `FFI-3: archive F of P for T: the ABI of S is L, but its header declares A, declared at SITE` (`L` the archive's line or `missing`) |
 | no global or weak symbol it defines is also defined by another admitted archive, by the runtime, by the program's generated objects or by another link input of the image (the libc and the system libraries the toolchain links, read from their symbol tables and dynamic symbol tables) | `FFI-3: symbol S is defined by archive F1 of P1 and by G` (`G` an archive, `the runtime`, `the generated code` or `link input L`) |
 
-`P` is the module's definition path (`sqlite@1/native`), `T` the target triple, `F` the
+`P` is the module's definition path (`hirsel.ai/sqlite@1/native`), `T` the target triple, `F` the
 row's `file` and `N` the member's name. The digest is checked first. So a file that is not an
 archive but carries a wrong pin is reported as a wrong pin, and the driver parses no bytes that
 do not match the pin. The member and symbol checks read the members' own ELF headers and symbol
@@ -247,7 +247,7 @@ parameters are those after the `Foreign` one, in order: a scalar as its type nam
 handle in use, `take K` for a release, and `dir` for slice 2's `Dir`, where `K` is the handle
 kind's definition identity (FFI-6). With no parameters the list is `()`. `RESULT` is `()`, a
 scalar's type name, or `new K` for `Option[foreign.Ptr[K]]`. So `sqlite`'s close is the line
-`hsq_close waits (take sqlite@1/sqlite/DbHandle) -> i32`. `hirsel inspect --foreign-header P`
+`hsq_close waits (take hirsel.ai/sqlite@1/sqlite/DbHandle) -> i32`. `hirsel inspect --foreign-header P`
 prints, for the foreign module `P`, a C header with each function's prototype as FFI-5's
 table gives it, and a macro `HIRSEL_ABI_TEXT` whose expansion is one `static`, `__attribute__((used))`
 definition, placed in section `.hirsel_abi` (`__TEXT,__hirsel_abi` on Mach-O), of a `const char` array holding the module's ABI text with no
@@ -309,9 +309,12 @@ here, at the second module's first function, with the first module as the causal
 A `Foreign[I]` value is made only by an entry grant ([CAP-4](capabilities.md#cap-4-entry-grants)).
 It is not made by attenuation or by virtual construction, and it narrows to nothing. A
 parameter of `main` or of a test takes the grant `Foreign=D`, where `D` is the interface's
-definition identity ([PROG-9](programs.md#prog-9-code-descriptors)'s `package@major/module/../name`).
-On the command line it is written `--grant Foreign=sqlite@1/sqlite/Sqlite`, and in a package's
-test configuration it is the grant string `"Foreign=sqlite@1/sqlite/Sqlite"`. A run whose
+definition identity ([PROG-9](programs.md#prog-9-code-descriptors)'s `package@major/module/../name`,
+with the package name written as it is spelled, not escaped). `D` splits at its first `@`: the
+package name before it may hold `.` and `/` ([packages §1](packages.md#1-canonical-library-content)),
+and the major, module path and name follow.
+On the command line it is written `--grant Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite`, and in a package's
+test configuration it is the grant string `"Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite"`. A run whose
 `Foreign[I]` parameter has no grant naming `I` does not start, and it reports
 `not granted: Foreign[D]`, one line for each such interface in parameter order ([PROG-3](programs.md#prog-3-entry)). A `Foreign` grant whose `D`
 names no interface of the program is refused before the run as an unknown grant. In the
@@ -675,7 +678,7 @@ is FFI-16's.
 
 ## The `sqlite` package
 
-The acceptance consumer is the package `sqlite@1`, at `core/programs/sqlite`. Its foreign
+The acceptance consumer is the package `hirsel.ai/sqlite@1`, at `core/programs/sqlite`. Its foreign
 module `native` binds an **adapter**. This is the C file `hirsel_sqlite.c`, with its OS layer
 (the mutexes and the memory VFS) in `hirsel_sqlite_os.c` and `hirsel_sqlite_os.h`, compiled
 together with the SQLite amalgamation into one static archive per target. The adapter is the audited
@@ -719,7 +722,7 @@ steps, and the pinned archive:
   `fcntl(F_FULLFSYNC)`, never `fsync`, and opens beneath its directory with `openat` and
   `O_RESOLVE_BENEATH | O_NOFOLLOW_ANY`. The build is byte-reproducible: two runs give one SHA-256, and the pin is that
   digest. The adapter includes the header that `hirsel inspect --foreign-header
-  sqlite@1/native` prints, and expands `HIRSEL_ABI_TEXT` once (FFI-3).
+  hirsel.ai/sqlite@1/native` prints, and expands `HIRSEL_ABI_TEXT` once (FFI-3).
 - **Native laws.** `build.sh --test DIR` builds no archive: it links `native_laws.c` against
   the checked-in archive, with the SQLite symbols the laws call made global again and `fcntl`
   wrapped to time a peer's release, and runs it in a fresh directory under `DIR`. Its cases
@@ -1081,7 +1084,7 @@ fences of this chapter stay documentation.
 | **FL5** byte loans preserve length, storage and range | capacity passed as the length, storage that moves while a helper writes it, or a read beyond an immutable slice | `let mut b: Bytes = list.with_capacity(16)`, then `list.fill(mut b, 4, 0)`. `native.mark(f, mut b)` returns 4. Afterwards `list.len(b)` is 4 and every byte of `b` is `0xAB`. Then `list.push(mut b, 0)` admits nothing, because the capacity is still 16. An empty `b` gives `mark` 0, and the adapter checks that `ptr` is not `NULL`. In a separate test, fill an owned `Bytes` list `d` with four zero bytes. `native.mark_w(f, mut d)` returns 4 while another task runs 10⁴ allocations. Afterwards every byte of `d` is `0xAB`. For the immutable range test, fill `c: Bytes` with the twelve values 0 through 11 and pass `list.slice(c, 4, 8)` to `native.loan_length` and `native.loan_sum`. They return 4 and 22, the length and sum of bytes 4 through 7. |
 | **FL6** an FFI-reaching test refused a cached pass | a pass key made for a test whose reach holds C | A parameterless test calls `probe(None)`, where `fn probe(f: Option[Foreign[Laws]]) -> u64 { match f { Some(f) => native.freed(f), None => 0 } }`, and passes. Run `hirsel test` twice with one cache: both runs report it executed, and neither reports it reused. A parameterless test beside it that does not call `probe` is reported reused on the second run. The same holds when the only path to `native` is a resource's finalizer, on a fresh and on a warm reach record. |
 | **FL7** recording and replay refused before C runs | a live recording half, a recording host or a stored replay that enters native code | `hirsel test --replay` of a test that calls `native.touch` fails with a line ending `refused: FFI-8: a recording build cannot reach foreign code: ffi_laws@1/tests/touches reaches ffi_laws@1/native/touch`. Its stderr holds no `touched`, and no recording file exists. `hirsel replay` of an entry that reaches `touch`, given any tape path, exits 2 with `replay: refused: FFI-8: …` and does not open the tape. `hirsel build --recording` is refused the same way. A deploy of that entry's recipe to a group registered with `--record DIR` exits 2 with `deploy: denied: FFI-8: a recording build cannot reach foreign code: …`, the group keeps serving its old image, and the host's code store gains no copy of the recipe; `hirsel register --record DIR` of it exits 2 with `register: refused: FFI-8: …` and creates neither DIR nor any host state. `hirsel replay --state` given a host state whose assembly record holds that recipe, and a tape whose routing header names it and whose records after the header are not valid records, exits 2 with `replay: refused: FFI-8: …`, not a tape error. |
-| **FL8** SQLite round trip | a loan, `SQLITE_TRANSIENT` or `NULL`/empty mistake | In `sqlite`'s own tests, with grant `Foreign=sqlite@1/sqlite/Sqlite`: create `t(b blob)`, insert `x''`, `NULL` and `x'00ff'` with `bind_bytes` and `bind_null`, after which the bound list is cleared and refilled. Selecting in insertion order gives `Blob` with 0 bytes, `Null`, and `Blob` with `00 ff`. |
+| **FL8** SQLite round trip | a loan, `SQLITE_TRANSIENT` or `NULL`/empty mistake | In `sqlite`'s own tests, with grant `Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite`: create `t(b blob)`, insert `x''`, `NULL` and `x'00ff'` with `bind_bytes` and `bind_null`, after which the bound list is cleared and refilled. Selecting in insertion order gives `Blob` with 0 bytes, `Null`, and `Blob` with `00 ff`. |
 | **FL9** SQLite release paths | a finalizer that runs after an explicit release, a busy close, or a last release that frees the mutex it reports through | Four tests, each preparing `s` from `select 1` on a fresh connection `db`: (a) `finalize(take s)` then `close(take db)`; (b) `close(take db)` then `finalize(take s)`; (c) `close(take db)` with `s` dropped at scope end; (d) both dropped at scope end, in either order. Every explicit call returns `Ok(())`. In (b), `step(mut s)` between the two calls still returns `Row`, because the connection stays open until its count is zero. With `s` from `select abs(-9223372036854775808)` stepped once, so its last result is an error, `close(take db)` returns `Ok(())` and `finalize(take s)` then returns `Error(SqliteError(code: 1, message: "SQL logic error"))`, `sqlite3_errstr(1)`'s text; each test passes with no cause, so no finalizer met a consumed handle. |
 | **FL10** no ambient input | the OS layer, libc or a pragma reading or changing process state | `select random()` returns the same value in two runs of a fresh process. `select date('now')`, `select datetime(0, 'localtime')` and `select datetime(0, 'utc')` each return `NULL`. `attach ':memory:' as x` fails at `prepare` with code 23, and `vacuum` and `vacuum into 'x.db'` fail at `step` with code 23 (`SQLITE_AUTH`). `pragma temp_store_directory = '/tmp'` and `pragma soft_heap_limit = 1` fail with code 23. |
 | **FL11** directory confinement (slice 2) | a sidecar, temp file, super-journal or attach outside the grant | In a granted scratch `Dir` whose parent holds a sentinel directory: open `a.db`, run a WAL transaction from two connections, then a rollback-journal transaction. The files created are exactly `a.db`, `a.db-wal` and `a.db-shm` (WAL), and `a.db-journal` only while the journal transaction runs. The parent and the sentinel are unchanged. `open(f, d, "../x")` and `open(f, d, "file:a.db?vfs=unix")` give code 14 before C runs. A hot journal whose super-journal name is `/tmp/evil` fails recovery with `SQLITE_CANTOPEN` and opens no file outside. A `sort` over 10⁶ rows creates no file. Two connections to one leaf under two grants of different directories each see only their own rows. |

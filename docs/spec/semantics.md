@@ -437,6 +437,14 @@ numbers, a **text** written as its UTF-8 byte count in a `u32` and then its byte
 fingerprint as its 32 bytes. Each **node** names one codec. It starts with its **family**,
 a text, and the family's **rule version**, a `u32`, then gives the family's inputs:
 
+A **definition path** in a schema is the text the codec derive writes: the package's name as
+written, then each module path component and the type's name, joined by `.`, with no major:
+`std.codec.Desc`, `hirsel.ai/sqlite.sqlite.Row`. A scoped name keeps its `.` and `/`, and the
+text still reads back one way: a bare name or a scoped name's `NAME` holds no `.`, so the name
+ends at the first `.` after its last `/` (or at the first `.` when it has no `/`). Two majors
+of one package write the same path; a schema that must tell them apart names a type the
+newer major declares.
+
 | family | inputs after the family and version |
 |---|---|
 | `unit`, `never`, `bool`, `char`, `u8` … `u64`, `i8` … `i64`, `f32`, `f64`, `string` | none |

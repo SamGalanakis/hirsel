@@ -1,0 +1,32 @@
+// The successor HEADER proves the previous segment's sealed end, including
+// when the newly advertised cursor is still at offset zero in the successor.
+pub fn archive_stage_successor(d: Dir, mut sink: std.object.Client, store: types.StoreKey, seq: u64, previous_end: u64, deadline: u64) -> Result[(), types.Failure] waits {
+    let path = manifest.journal_path(seq, "")?
+    let mut f = manifest.disk_io(host.open(d, path, Read))?
+    let header = manifest.read_disk_bytes(mut f, path, 0, 72)?
+    manifest.disk_io(host.close(take f))?
+    let h = manifest.disk_read_header(path, header, 2, Some(seq), Some(store))?
+    if h.prev_end != previous_end {
+        return Error(format.disk_fault(path, 0, Order))
+    }
+    let key = format.archive_key(store, format.archive_log_journal_rel(seq, 0))
+    let (take issued, take expected) = std.object.store_if_retry(mut sink, key, Absent, take header, deadline)
+    match take issued {
+        Ok(Applied(_)) => Ok(()),
+        Error(take err) => match take err {
+            Uncertain(_) => archive_compare_successor(mut sink, key, expected, deadline),
+            other => Error(Remote(other)),
+        },
+        Ok(Mismatch) => archive_compare_successor(mut sink, key, expected, deadline),
+    }
+}
+
+fn archive_compare_successor(mut sink: std.object.Client, key: String, expected: Bytes, deadline: u64) -> Result[(), types.Failure] waits {
+    let buf = manifest.disk_read_buffer(72)?
+    let (take outcome, take observed) = std.object.fetch_range(mut sink, key, 0, 72, take buf, deadline)
+    let _ = (take outcome) ?=> Remote
+    if observed != expected {
+        return Error(Diverged(0))
+    }
+    Ok(())
+}

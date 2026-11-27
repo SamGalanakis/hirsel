@@ -1,0 +1,104 @@
+// Read the linked pages in reverse publication order. Consumers retain the
+// compact references and fetch individual pages in source order as needed.
+pub fn archive_index_page(mut sink: std.object.Client, store: types.StoreKey, kind: u8, ref: format.ArchiveIndexRefRep, deadline: u64) -> Result[format.ArchiveIndexSegmentRep, types.Failure] waits {
+    let key = format.archive_key(store, format.archive_index_rel(ref.ordinal, ref.digest))
+    if ref.len > format.ARCHIVE_INDEX_LIMIT || ref.len < 88 || ref.ordinal == 0 {
+        return Error(format.disk_fault(key, 0, Malformed))
+    }
+    let mut raw = manifest.disk_read_buffer(ref.len)?
+    let _ = history_fetch(mut sink, key, mut raw, deadline)?
+    let page = format.decode_archive_index(key, store, ref, raw)?
+    if raw[29] != kind {
+        return Error(format.disk_fault(key, 29, Header))
+    }
+    match page.prev {
+        Some(prev) if prev.ordinal != ref.ordinal - 1 => return Error(format.disk_fault(key, 72, Order)),
+        None if ref.ordinal != 1 => return Error(format.disk_fault(key, 72, Order)),
+        _ => (),
+    }
+    Ok(take page)
+}
+
+pub type RestoreIndex: send {
+    // Tail first. The last reference is the floor's first required page.
+    pages: List[format.ArchiveIndexRefRep],
+    // Newest first, including intervals spilled out of the head.
+    intervals: List[format.ArchiveIntervalRep]
+}
+
+fn restore_append_intervals(mut out: List[format.ArchiveIntervalRep], incoming: List[format.ArchiveIntervalRep], floor: format.ArchiveBaseRowRep, kind: u8) -> Result[(), types.Failure] {
+    let mut i = list.len(incoming)
+    while i > 0 {
+        i -= 1
+        let iv = view incoming[i]
+        if iv.through.gen < floor.base_ordinal {
+            continue
+        }
+        if iv.through.source_kind != kind || iv.through.gen < iv.first_base.base_ordinal {
+            return Error(format.disk_fault("archive-head", 72, Order))
+        }
+        if list.len(out) > 0 {
+            let later = view out[list.len(out) - 1]
+            if later.first_base.base_ordinal <= iv.through.gen || !iv.closed_by_gap {
+                return Error(format.disk_fault("archive-head", 72, Order))
+            }
+        }
+        let first = if iv.first_base.base_ordinal <= floor.base_ordinal {
+            format.archive_base_summary(floor)
+        } else {
+            format.archive_base_summary(iv.first_base)
+        }
+        types.capacity(list.try_reserve(mut out, 1))?
+        list.push(mut out, format.ArchiveIntervalRep(first_base: take first, through: iv.through, closed_by_gap: iv.closed_by_gap))
+    }
+    Ok(())
+}
+
+pub fn archive_restore_index(mut sink: std.object.Client, head: format.ArchiveHeadRep, deadline: u64) -> Result[RestoreIndex, types.Failure] waits {
+    let mut result_pages: List[format.ArchiveIndexRefRep] = list.new()
+    let mut intervals: List[format.ArchiveIntervalRep] = list.new()
+    let Some(floor) = view head.floor_base else {
+        if let Some(_) = head.index_tail {
+            return Error(format.disk_fault("archive-head", 72, Malformed))
+        }
+        if head.through != None || list.len(head.intervals) != 0 {
+            return Error(format.disk_fault("archive-head", 72, Malformed))
+        }
+        return Ok(RestoreIndex(pages: take result_pages, intervals: take intervals))
+    }
+    let Some(tail) = head.index_tail else {
+        return Error(format.disk_fault("archive-head", 72, Malformed))
+    }
+    let stop = floor.frontier.first_index_ordinal
+    if stop == 0 || stop > tail.ordinal {
+        return Error(format.disk_fault("archive-head", 72, Order))
+    }
+    restore_append_intervals(mut intervals, head.intervals, floor, head.source_kind)?
+    let mut cursor = tail
+    loop {
+        let page = archive_index_page(mut sink, head.store, head.source_kind, cursor, deadline)?
+        restore_append_intervals(mut intervals, page.spilled_intervals, floor, head.source_kind)?
+        types.capacity(list.try_reserve(mut result_pages, 1))?
+        list.push(mut result_pages, cursor)
+        if cursor.ordinal == stop {
+            let mut found = false
+            for row in page.bases {
+                if row.base_ordinal == floor.base_ordinal && !row.pack_continuation && row.digest == floor.digest && row.frontier.first_index_ordinal == stop {
+                    found = true
+                }
+            }
+            if !found {
+                return Error(format.disk_fault("archive-index", cursor.ordinal, Order))
+            }
+            break
+        }
+        let Some(prev) = page.prev else {
+            return Error(format.disk_fault("archive-index", cursor.ordinal, Order))
+        }
+        cursor = prev
+    }
+    if list.len(intervals) == 0 || intervals[list.len(intervals) - 1].first_base.base_ordinal != floor.base_ordinal || Some(intervals[0u64].through) != head.through || intervals[0u64].closed_by_gap != head.open_gap {
+        return Error(format.disk_fault("archive-head", 72, Order))
+    }
+    Ok(RestoreIndex(pages: take result_pages, intervals: take intervals))
+}

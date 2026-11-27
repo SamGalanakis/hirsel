@@ -400,6 +400,7 @@ pub fn archive_step_directory(d: Dir, store: types.StoreKey, binding_id: u64, al
     // If sealed (successor segment exists), advance to the next cut base or next segment.
     if let Some(_) = sealed_bound {
         let next_seg = cur.ordinal + 1
+        archive_stage_successor(d, mut sink, store, next_seg, cur.sub, deadline)?
         if cur_manifest.generation > cur.gen {
             let want_gen = cur.gen + 1
             let next_base: Option[(Bytes, manifest.PageManifest, String)] = if want_gen == cur_manifest.generation {

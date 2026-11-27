@@ -1,0 +1,87 @@
+@test
+fn test_la4_archive_target_resolution(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 33471)
+    let outcome = restore_law_archived(d, sim, tasks, r)
+    let report = bucket_law_report(take sim)
+    outcome?
+    for entry in report.requests {
+        if entry.method == "LIST" && string.starts_with(entry.key, "restore-archive/") {
+            fail("planner listed the archive")
+        }
+    }
+    Ok(())
+}
+
+fn restore_law_archived(d: Dir, sim: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let dir1 = disk_test_directory(d)
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.archive_ms = 60000
+    let mut probe_sink = arch_law_sink_client(sim, tasks, 100, "restore-archive/dir/")?
+    let writer = arch_law_sink_client(sim, tasks, 101, "restore-archive/dir/")?
+    let auth = archived(log_authority(dir1), take writer, a_opts)?
+    let mut db = match open_authority(tasks, take auth, sim.time, r, archive_hold_options(true)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let store_id = db.store
+    let t = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, t, 1, 0x11, 200)?
+    let first_write = version(snapshot(db))
+    let _ = archive_hold_put(mut db, t, 2, 0x22, 200)?
+    let _ = archive_step(mut db)?
+    std.clock.sleep_ns(sim.time, 25000000)
+    let _ = archive_drain(mut db, 8)?
+    let RestorePresent(interior) = plan_archive_restore(mut probe_sink, store_id, Version(0, first_write), DF_OP_MS)? else {
+        fail("L-A4: missing first commit")
+    }
+    let RestorePresent(tip) = plan_archive_restore(mut probe_sink, store_id, Latest, DF_OP_MS)? else {
+        fail("L-A4: missing Directory terminal")
+    }
+    if interior.version != first_write || interior.token.boundary.frame_end >= tip.token.boundary.frame_end || tip.version != version(snapshot(db)) {
+        fail("L-A4: wrong interior or latest Directory boundary")
+    }
+    let RestorePresent(fixed) = plan_archive_restore(mut probe_sink, store_id, Boundary(interior.token), DF_OP_MS)? else {
+        fail("L-A4: exact token was lost")
+    }
+    if fixed.version != first_write || fixed.token != interior.token {
+        fail("L-A4: token changed")
+    }
+    let Future(final_point) = resolve_at(mut probe_sink, store_id, 0, tip.at + 1, DF_OP_MS)? else {
+        fail("L-A4: selected past the archive end")
+    }
+    if final_point.version != tip.version {
+        fail("L-A4: wrong Future witness")
+    }
+    let missing = resolve_at(mut probe_sink, store_id, 77, tip.at, DF_OP_MS)?
+    if let NoData = missing {
+        ()
+    } else {
+        fail("L-A4: never allocated branch")
+    }
+    close(take db)?
+    let place = arch_law_sink_client(sim, tasks, 105, "restore-place/")?
+    let dst = arch_law_sink_client(sim, tasks, 106, "restore-archive/obj/")?
+    let mut obj_probe = arch_law_sink_client(sim, tasks, 107, "restore-archive/obj/")?
+    let authority = archived(object_authority(take place, "bucket", DF_OP_MS), take dst, a_opts)?
+    let mut obj_db = match open_authority(tasks, take authority, sim.time, r, exit_open_opts(true, 4)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let obj_id = obj_db.store
+    let _ = bucket_law_rows_table(mut obj_db)?
+    bucket_law_commit(mut obj_db, 1)?
+    let _ = archive_step(mut obj_db)?
+    bucket_law_commit(mut obj_db, 2)?
+    let _ = archive_drain(mut obj_db, 8)?
+    let head = archive_verify_closure(mut obj_probe, obj_id, DF_OP_MS)?
+    let Some(ocur) = head.through else {
+        fail("missing Bucket through")
+    }
+    let RestorePresent(obj_tip) = plan_archive_restore(mut obj_probe, obj_id, Latest, DF_OP_MS)? else {
+        fail("L-A4: missing Bucket terminal")
+    }
+    if obj_tip.version != version(snapshot(obj_db)) || obj_tip.token.boundary.unit != ocur.ordinal {
+        fail("L-A4: wrong Bucket physical boundary")
+    }
+    close(take obj_db)
+}

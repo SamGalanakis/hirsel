@@ -1,0 +1,107 @@
+fn restore_segment_key(parent: StoreId, seq: u64, from: u64) -> String {
+    format.archive_key(store_key_to_rep(parent), format.archive_log_journal_rel(seq, from))
+}
+
+fn restore_sealed_end(mut sink: std.object.Client, parent: StoreId, seq: u64, deadline: u64) -> Result[u64, Error] waits {
+    let key = restore_segment_key(parent, seq, 0)
+    let (_, take raw) = restore_range(mut sink, key, 0, 72, deadline)?
+    let hdr = failure_result_from_rep(manifest.disk_read_header(key, raw, 2, Some(seq), Some(store_key_to_rep(parent))))?
+    Ok(hdr.prev_end)
+}
+
+// The Directory key names the first byte of a published chunk. Hash the
+// complete unit before selecting an interior frame. All reads have bounded width.
+fn restore_archive_chunk(mut sink: std.object.Client, parent: StoreId, seq: u64, from: u64, limit: u64, mut walk: RestoreScan, deadline: u64) -> Result[u64, Error] waits {
+    let key = restore_segment_key(parent, seq, from)
+    let (meta, _) = restore_range(mut sink, key, 0, 1, deadline)?
+    if meta.size > limit - from || (from == 0 && meta.size < 72) {
+        return Error(failure_from_rep(format.disk_fault(key, from, Truncated)))
+    }
+    let mut state = std.check.start()
+    let mut pos = 0u64
+    while pos < meta.size {
+        let end = pos + order.min(meta.size - pos, 65536u64)
+        let (part, take raw) = restore_range(mut sink, key, pos, end, deadline)?
+        if part.etag != meta.etag || part.size != meta.size {
+            return Error(Lost)
+        }
+        std.check.add(mut state, raw, 0, list.len(raw))
+        pos = end
+    }
+    let mut token = walk.base
+    token.boundary.unit = seq
+    token.boundary.unit_digest = std.check.finish(state)
+    let ctx = format.DiskContext(store: store_key_to_rep(parent), role: 2, seq)
+    pos = 0
+    if from == 0 {
+        let (part, take raw) = restore_range(mut sink, key, 0, 72, deadline)?
+        if part.etag != meta.etag {
+            return Error(Lost)
+        }
+        let _ = failure_result_from_rep(manifest.disk_read_header(key, raw, 2, Some(seq), Some(ctx.store)))?
+        pos = 72
+        token.boundary.frame_end = pos
+        restore_note(mut walk, token, 0, false)
+    }
+    while pos < meta.size {
+        if meta.size - pos < 16 {
+            return Error(failure_from_rep(format.disk_fault(key, from + pos, Truncated)))
+        }
+        let (part, take hdr) = restore_range(mut sink, key, pos, pos + 16, deadline)?
+        if part.etag != meta.etag {
+            return Error(Lost)
+        }
+        let fh = failure_result_from_rep(manifest.disk_read_frame_head(key, hdr, from + pos))?
+        if fh.size > meta.size - pos - 16 {
+            return Error(failure_from_rep(format.disk_fault(key, from + pos, Truncated)))
+        }
+        failure_result_from_rep(manifest.disk_check_frame_kind(key, ctx, fh.kind, fh.flags, from + pos))?
+        let end = pos + 16 + fh.size
+        let raw: Bytes = if fh.size == 0 {
+            list.new()
+        } else {
+            let (body_meta, take body) = restore_range(mut sink, key, pos + 16, end, deadline)?
+            if body_meta.etag != meta.etag {
+                return Error(Lost)
+            }
+            take body
+        }
+        if fh.checksum != failure_result_from_rep(types.capacity(format.disk_check(ctx, from + pos, hdr, raw)))? {
+            return Error(failure_from_rep(format.disk_fault(key, from + pos, Checksum)))
+        }
+        token.boundary.frame_end = from + end
+        if format.journal_event_kind(fh.kind) {
+            let ev = journal_decode(key, fh.kind, raw)?
+            restore_scan_event(mut walk, token, key, take ev)?
+        } else if manifest.disk_kind_limit(fh.kind) != None {
+            return Error(failure_from_rep(format.disk_fault(key, from + pos, Malformed)))
+        } else {
+            restore_note(mut walk, token, 0, false)
+        }
+        pos = end
+    }
+    Ok(from + meta.size)
+}
+
+fn restore_archive_log(mut sink: std.object.Client, parent: StoreId, first: u64, terminal: u64, bound_end: u64, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
+    if terminal < first {
+        return Error(failure_from_rep(format.disk_fault("archive-head", 72, Order)))
+    }
+    let mut seq = first
+    loop {
+        let limit = if seq == terminal {
+            bound_end
+        } else {
+            restore_sealed_end(mut sink, parent, seq + 1, deadline)?
+        }
+        let mut from = 0u64
+        while from < limit {
+            from = restore_archive_chunk(mut sink, parent, seq, from, limit, mut walk, deadline)?
+        }
+        if seq == terminal {
+            break
+        }
+        seq += 1
+    }
+    Ok(())
+}

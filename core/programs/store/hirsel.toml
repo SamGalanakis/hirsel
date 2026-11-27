@@ -111,6 +111,14 @@ std = { major = 1 }
 "store-format.hirsel" = "format"
 "archive-format.hirsel" = "format"
 "archive-restore-origin.hirsel" = "manifest"
+"archive-restore-pack.hirsel" = "manifest"
+"archive-restore-index.hirsel" = "history"
+"archive-restore-log.hirsel" = "history"
+"archive-restore-plan.hirsel" = "store"
+"archive-restore.hirsel" = "store"
+"archive-restore-backup.hirsel" = "store"
+"archive-restore-read.hirsel" = "store"
+"archive-restore-segments.hirsel" = "store"
 "store.hirsel" = "store"
 "capture-manifest.hirsel" = "capture"
 "history-directory.hirsel" = "history"
@@ -408,6 +416,7 @@ dirs = ["."]
 "store_format14_laws.hirsel" = "store"
 "store_archive_hold_laws.hirsel" = "store"
 "store_archive_laws.hirsel" = "store"
+"archive-restore-laws.hirsel" = "store"
 "store_archive_stream_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
 "store_prior_laws.hirsel" = "store"
@@ -1106,3 +1115,6 @@ grants = ["Clock", "Random", "Tasks", "Stdout"]
 
 [tests.runs."store@1/store/test_la10_directory_thirteen_handoff_cuts"]
 limit = 268435456
+
+[tests.runs."store@1/store/test_la4_archive_target_resolution"]
+limit = 536870912

@@ -1,0 +1,183 @@
+pub type RestoreToken: key + send {
+    parent: StoreId,
+    binding_id: u64,
+    capture_attempt: Inline[u8, 16],
+    boundary: manifest.RestoreBoundary
+}
+
+pub type RestoreTarget: send = Latest | Version(u32, u64) | At(u32, u64) | Boundary(RestoreToken)
+
+pub type RestorePoint: send {
+    token: RestoreToken,
+    branch: u32,
+    version: u64,
+    at: u64,
+    main_version: u64,
+    main_at: u64,
+    activation: u64,
+    binding: Inline[u8, 32]
+}
+
+pub type RestoreResolution: send = RestorePresent(RestorePoint) | Past(RestorePoint) | Future(RestorePoint) | NoData | InGap(RestoreToken, Option[RestoreToken]) | BelowFloor(RestoreToken) | VersionAbsent
+
+type RestoreScan {
+    target: RestoreTarget,
+    tips: Map[u32, (u64, u64)],
+    next_branch: u32,
+    physical: RestoreToken,
+    floor: RestoreToken,
+    birth_covered: bool,
+    first: Option[RestorePoint],
+    latest_point: Option[RestorePoint],
+    selected: Option[RestorePoint],
+    gap: Option[(RestoreToken, Option[RestoreToken])],
+    base: RestoreToken,
+    activation: history.HistoryActivation,
+    limits: types.LimitsRep
+}
+
+fn restore_tip(tips: Map[u32, (u64, u64)], branch_id: u32) -> Option[(u64, u64)] {
+    match map.get(tips, branch_id) {
+        Some(tip) => Some((tip.0, tip.1)),
+        None => None,
+    }
+}
+
+fn restore_wanted(target: RestoreTarget) -> u32 {
+    match target {
+        Version(id, _) => id,
+        At(id, _) => id,
+        _ => 0,
+    }
+}
+
+fn restore_note(mut walk: RestoreScan, token: RestoreToken, branch_id: u32, transition: bool) {
+    walk.physical = token
+    let b = restore_wanted(walk.target)
+    let Some(tip) = restore_tip(walk.tips, b) else {
+        return
+    }
+    let main = option.unwrap(restore_tip(walk.tips, 0u32))
+    let point = RestorePoint(token, branch: b, version: tip.0, at: tip.1, main_version: main.0, main_at: main.1, activation: walk.activation.number, binding: walk.activation.binding)
+    match walk.target {
+        Latest => {
+            walk.selected = Some(point)
+        },
+        Boundary(exact) => if exact == token {
+            walk.selected = Some(point)
+        },
+        _ => {
+            if !transition || b != branch_id {
+                return
+            }
+            if let None = walk.first {
+                walk.first = Some(point)
+            }
+            walk.latest_point = Some(point)
+            let qualifies = match walk.target {
+                At(_, t) => tip.1 <= t,
+                Version(_, v) => tip.0 == v,
+                _ => false,
+            }
+            if qualifies {
+                walk.selected = Some(point)
+                walk.gap = None
+            }
+        },
+    }
+}
+
+fn restore_scan_base(mut walk: RestoreScan, token: RestoreToken, m: manifest.PageManifest, activation: history.HistoryActivation, independent: bool) -> Result[(), Error] {
+    let wanted = restore_wanted(walk.target)
+    let added = !map.contains(walk.tips, wanted)
+    walk.base = token
+    walk.activation = activation
+    walk.limits = m.limits
+    let mut tips: Map[u32, (u64, u64)] = map.new()
+    failure_result_from_rep(types.capacity(map.try_reserve(mut tips, list.len(m.branches))))?
+    for row in m.branches {
+        map.insert(mut tips, row.id, (row.version, row.at))
+    }
+    walk.tips = take tips
+    walk.next_branch = m.next_branch
+    let changed = token == walk.floor || (!independent && added) || (wanted == 0 && m.main_transition)
+    restore_note(mut walk, token, wanted, changed)
+    Ok(())
+}
+
+fn restore_scan_event(mut walk: RestoreScan, token: RestoreToken, file: String, take ev: format.JournalEvent) -> Result[(), Error] {
+    let id = match take ev {
+        Commit(take commit) => {
+            failure_result_from_rep(format.replay_within_limits(file, walk.limits, commit))?
+            let Some(tip) = restore_tip(walk.tips, commit.branch) else {
+                return Error(failure_from_rep(format.disk_fault(file, token.boundary.frame_end, Malformed)))
+            }
+            if int.checked_add(tip.0, 1u64) != Some(commit.version) || commit.at < tip.1 {
+                return Error(failure_from_rep(format.disk_fault(file, token.boundary.frame_end, Order)))
+            }
+            map.insert(mut walk.tips, commit.branch, (commit.version, commit.at))
+            commit.branch
+        },
+        Fork(take f) => {
+            let Some(parent) = restore_tip(walk.tips, f.parent) else {
+                return Error(failure_from_rep(format.disk_fault(file, token.boundary.frame_end, Malformed)))
+            }
+            if f.id < walk.next_branch || f.id == 4294967295 || f.forked_at != parent.0 {
+                return Error(failure_from_rep(format.disk_fault(file, token.boundary.frame_end, Order)))
+            }
+            failure_result_from_rep(types.capacity(map.try_reserve(mut walk.tips, 1)))?
+            map.insert(mut walk.tips, f.id, parent)
+            walk.next_branch = f.id + 1
+            f.id
+        },
+    }
+    restore_note(mut walk, token, id, true)
+    Ok(())
+}
+
+fn restore_finish(take walk: RestoreScan) -> RestoreResolution {
+    if let Some((low, high)) = walk.gap {
+        return InGap(low, high)
+    }
+    if let Some(latest_point) = walk.latest_point {
+        match walk.target {
+            At(_, t) if t > latest_point.at => return Future(latest_point),
+            Version(_, v) if v > latest_point.version => return Future(latest_point),
+            _ => (),
+        }
+    }
+    if let Some(point) = walk.selected {
+        return RestorePresent(point)
+    }
+    if let Boundary(exact) = walk.target {
+        if exact.boundary.base_ordinal < walk.floor.boundary.base_ordinal {
+            return BelowFloor(walk.floor)
+        }
+        return NoData
+    }
+    if let Some(first) = walk.first {
+        match walk.target {
+            Version(_, v) if v >= first.version => return VersionAbsent,
+            _ => (),
+        }
+        if walk.birth_covered {
+            return Past(first)
+        }
+    } else if walk.birth_covered {
+        return NoData
+    }
+    BelowFloor(walk.floor)
+}
+
+fn restore_scan_start(target: RestoreTarget, token: RestoreToken, m: manifest.PageManifest, activation: history.HistoryActivation) -> Result[RestoreScan, Error] {
+    if let Boundary(exact) = target {
+        if exact.parent != token.parent || exact.binding_id != token.binding_id || exact.capture_attempt != token.capture_attempt {
+            return Error(Foreign)
+        }
+    }
+    let wanted = restore_wanted(target)
+    let genesis = m.generation == 1 && m.branches[0u64].version == 0 && m.next_branch == 1
+    let mut walk = RestoreScan(target, tips: map.new(), next_branch: m.next_branch, physical: token, floor: token, birth_covered: genesis || wanted >= m.next_branch, first: None, latest_point: None, selected: None, gap: None, base: token, activation, limits: m.limits)
+    restore_scan_base(mut walk, token, m, activation, true)?
+    Ok(take walk)
+}

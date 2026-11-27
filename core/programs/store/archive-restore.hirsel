@@ -1,0 +1,197 @@
+fn restore_same_base(a: format.ArchiveBaseRowRep, b: format.ArchiveBaseRowRep) -> bool {
+    a.base_ordinal == b.base_ordinal && a.epoch == b.epoch && a.digest == b.digest && a.len == b.len && a.first_unit == b.first_unit && a.main_version == b.main_version && a.main_at == b.main_at && a.frontier.first_index_ordinal == b.frontier.first_index_ordinal && a.frontier.next_pack == b.frontier.next_pack && a.frontier.next_gen == b.frontier.next_gen && a.frontier.next_unit == b.frontier.next_unit && a.frontier.next_offset == b.frontier.next_offset
+}
+
+fn restore_base_rows(mut sink: std.object.Client, head: format.ArchiveHeadRep, idx: history.RestoreIndex, deadline: u64) -> Result[List[format.ArchiveBaseRowRep], Error] waits {
+    let mut rows: List[format.ArchiveBaseRowRep] = list.new()
+    let mut p = list.len(idx.pages)
+    while p > 0 {
+        p -= 1
+        let page = failure_result_from_rep(history.archive_index_page(mut sink, head.store, head.source_kind, idx.pages[p], deadline))?
+        for row in page.bases {
+            if row.pack_continuation {
+                if list.len(rows) == 0 || !restore_same_base(row, rows[list.len(rows) - 1]) {
+                    return Error(failure_from_rep(format.disk_fault("archive-index", page.ordinal, Order)))
+                }
+            } else {
+                if row.frontier.first_index_ordinal != page.ordinal || (list.len(rows) > 0 && row.base_ordinal <= rows[list.len(rows) - 1].base_ordinal) {
+                    return Error(failure_from_rep(format.disk_fault("archive-index", page.ordinal, Order)))
+                }
+                failure_result_from_rep(types.capacity(list.try_reserve(mut rows, 1)))?
+                list.push(mut rows, format.archive_base_summary(row))
+            }
+        }
+    }
+    Ok(take rows)
+}
+
+fn restore_log_prefix(mut sink: std.object.Client, parent: StoreId, row: format.ArchiveBaseRowRep, following: Option[format.ArchiveBaseRowRep], through: format.ArchiveCursorRep, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
+    let (seq, end) = match following {
+        Some(next_row) => {
+            if next_row.first_unit <= row.first_unit {
+                return Error(failure_from_rep(format.disk_fault("archive-index", 72, Order)))
+            }
+            (next_row.first_unit - 1, restore_sealed_end(mut sink, parent, next_row.first_unit, deadline)?)
+        },
+        None => {
+            if through.digest != row.digest || through.len != row.len {
+                return Error(failure_from_rep(format.disk_fault("archive-head", 72, Malformed)))
+            }
+            (through.ordinal, through.sub)
+        },
+    }
+    restore_archive_log(mut sink, parent, row.first_unit, seq, end, mut walk, deadline)
+}
+
+fn restore_object_prefix(mut sink: std.object.Client, parent: StoreId, row: format.ArchiveBaseRowRep, following: Option[format.ArchiveBaseRowRep], through: format.ArchiveCursorRep, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
+    let end = match following {
+        Some(next_row) => {
+            let next_ref = restore_base_ref(next_row)
+            let key = restore_object_key(parent, "e-", next_ref)?
+            let (meta, take hdr) = restore_range(mut sink, key, 0, 112, deadline)?
+            if meta.size != next_ref.len {
+                return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
+            }
+            let (_, pred) = failure_result_from_rep(history.history_entry_context(key, store_key_to_rep(parent), next_ref, hdr))?
+            history.history_length(pred, next_ref.seq - 1)
+        },
+        None => pages.HistoryRef(seq: through.ordinal, epoch: through.sub, len: through.len, digest: through.digest),
+    }
+    restore_archive_entries(mut sink, parent, row, end, mut walk, deadline)
+}
+
+fn restore_gap(mut walk: RestoreScan, high: Option[RestoreToken], next_branch: Option[u32]) {
+    let low = walk.physical
+    let wanted = restore_wanted(walk.target)
+    let eligible = match walk.target {
+        Latest => false,
+        Boundary(exact) => {
+            exact.boundary.base_ordinal >= low.boundary.base_ordinal && (if let Some(upper) = high {
+                exact.boundary.base_ordinal < upper.boundary.base_ordinal
+            } else {
+                true
+            }) && (if let None = walk.selected {
+                true
+            } else {
+                false
+            })
+        },
+        _ => {
+            let could_live = map.contains(walk.tips, wanted) || wanted >= walk.next_branch
+            let could_be_born = if let Some(n) = next_branch {
+                wanted < n
+            } else {
+                true
+            }
+            let reached = match walk.latest_point {
+                Some(pt) => match walk.target {
+                    At(_, t) => pt.at <= t,
+                    Version(_, v) => pt.version <= v,
+                    _ => false,
+                },
+                None => true,
+            }
+            could_live && could_be_born && reached
+        },
+    }
+    if eligible {
+        walk.gap = Some((low, high))
+    }
+}
+
+fn restore_archive_scan(mut sink: std.object.Client, head: format.ArchiveHeadRep, target: RestoreTarget, deadline: u64) -> Result[RestoreResolution, Error] waits {
+    let idx = failure_result_from_rep(history.archive_restore_index(mut sink, head, deadline))?
+    let rows = restore_base_rows(mut sink, head, idx, deadline)?
+    if list.len(rows) == 0 {
+        return Ok(NoData)
+    }
+    let parent = store_key_from_rep(head.store)
+    let kind = head.source_kind
+    let floor = restore_base_token(parent, kind, rows[0u64], head.binding_id)
+    let (take first_manifest, init) = restore_archive_manifest(mut sink, parent, kind, rows[0u64], deadline)?
+    let mut walk = restore_scan_start(target, floor, first_manifest, init)?
+    let mut cursor = 0u64
+    let mut interval_number = list.len(idx.intervals)
+    while interval_number > 0 {
+        interval_number -= 1
+        let iv = view idx.intervals[interval_number]
+        if cursor >= list.len(rows) || !restore_same_base(rows[cursor], iv.first_base) {
+            return Error(failure_from_rep(format.disk_fault("archive-index", 72, Order)))
+        }
+        let begin = cursor
+        loop {
+            let row = view rows[cursor]
+            if cursor != 0 {
+                let token = restore_base_token(parent, kind, row, head.binding_id)
+                let (take m, release) = restore_archive_manifest(mut sink, parent, kind, row, deadline)?
+                if cursor == begin {
+                    restore_gap(mut walk, Some(token), Some(m.next_branch))
+                }
+                restore_scan_base(mut walk, token, m, release, cursor == begin)?
+            }
+            cursor += 1
+            let following: Option[format.ArchiveBaseRowRep] = if row.base_ordinal == iv.through.gen {
+                None
+            } else {
+                if cursor >= list.len(rows) || rows[cursor].base_ordinal > iv.through.gen {
+                    return Error(failure_from_rep(format.disk_fault("archive-index", 72, Order)))
+                }
+                Some(format.archive_base_summary(rows[cursor]))
+            }
+            if kind == format.ARCHIVE_SOURCE_LOG {
+                restore_log_prefix(mut sink, parent, row, following, iv.through, mut walk, deadline)?
+            } else {
+                restore_object_prefix(mut sink, parent, row, following, iv.through, mut walk, deadline)?
+            }
+            if row.base_ordinal == iv.through.gen {
+                break
+            }
+        }
+        let main = option.unwrap(restore_tip(walk.tips, 0u32))
+        if main.0 != iv.through.main_version || main.1 != iv.through.main_at {
+            return Error(failure_from_rep(format.disk_fault("archive-head", 72, Order)))
+        }
+        if iv.closed_by_gap && interval_number == 0 {
+            restore_gap(mut walk, None, None)
+        }
+    }
+    if cursor != list.len(rows) {
+        return Error(failure_from_rep(format.disk_fault("archive-index", 72, Order)))
+    }
+    Ok(restore_finish(take walk))
+}
+
+pub fn plan_archive_restore(mut sink: std.object.Client, parent: StoreId, target: RestoreTarget, op_ms: u64) -> Result[RestoreResolution, Error] waits {
+    let deadline = std.object.deadline_after_ms(sink, op_ms)
+    let mut captured = failure_result_from_rep(history.archive_head_fetch(mut sink, store_key_to_rep(parent), deadline))?
+    loop {
+        let Some((take head, _)) = replace(mut captured, None) else {
+            return Error(NotFound)
+        }
+        let result = restore_archive_scan(mut sink, head, target, deadline)
+        match take result {
+            Error(Remote(NotFound)) => {
+                let Some((take now, tag)) = failure_result_from_rep(history.archive_head_fetch(mut sink, store_key_to_rep(parent), deadline))? else {
+                    return Error(Lost)
+                }
+                if now.binding_id != head.binding_id {
+                    return Error(Foreign)
+                }
+                let advanced = match (view now.floor_base, view head.floor_base) {
+                    (Some(floor), Some(old)) => floor.base_ordinal > old.base_ordinal,
+                    _ => false,
+                }
+                if advanced {
+                    captured = Some((take now, tag))
+                    continue
+                }
+                return Error(Lost)
+            },
+            other => return take other,
+        }
+    }
+}
+
+pub fn resolve_at(mut sink: std.object.Client, parent: StoreId, branch_id: u32, time_ms: u64, op_ms: u64) -> Result[RestoreResolution, Error] waits {
+    plan_archive_restore(mut sink, parent, At(branch_id, time_ms), op_ms)
+}

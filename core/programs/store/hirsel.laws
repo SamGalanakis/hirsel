@@ -465,6 +465,7 @@ store@1/store/test_la10_directory_thirteen_handoff_cuts src=a169e47b7d91fc9a sig
 store@1/store/test_la1_named_after_stored_and_no_relisting src=2701b847215406c1 sig=9192ece05be763b4 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_la2_directory_durable_hold_and_budget src=21bf186ba9dd8a6e sig=92959ad43d1e8765 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_la3_typed_gap_mandatory_and_attention src=3bd97062db3a743a sig=a3e7d31e8070c027 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/test_la4_archive_target_resolution src=d19d2129f426ced6 sig=95259f23442a5fb4 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_la4_idle_adoption_cut src=8107164a06861bf0 sig=8a9c0f1f75823720 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_la6_stale_archiver_fenced src=e694ae79181b4933 sig=a8b7b3072e0a67f9 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_la8_attached_place_settle_then_archive src=77aa6ce6852ba0ce sig=9317823491181368 run=aa75ab2775f5e821 bug=- oracle=- rows=pending

@@ -1,0 +1,54 @@
+// Preserve pack, offset, stamp and payload digest. PagePtr and BlobRef bind
+// those coordinates, while the outer frame checksum also binds the StoreId.
+fn restore_pack_write(mut file: HostFile, raw: Bytes) -> Result[(), types.Failure] waits {
+    match host.write(mut file, raw) {
+        Ok(()) => Ok(()),
+        Error(err) => Error(Io(err.error)),
+    }
+}
+
+pub fn reseal_restore_pack(from: Dir, to: Dir, parent: types.StoreKey, child: types.StoreKey, seq: u64) -> Result[(), types.Failure] waits {
+    let path = paged_pack_path(seq)?
+    let mut input = disk_io(host.open(from, path, Read))?
+    let size = disk_io(host.stat_file(mut input))?.size
+    let header = read_disk_bytes(mut input, path, 0, 72)?
+    let old = disk_read_header(path, header, 3, Some(seq), Some(parent))?.context
+    let fresh = format.DiskContext(store: child, role: 3, seq)
+    let mut output = disk_io(host.open(to, path, Write))?
+    restore_pack_write(mut output, types.capacity(format.disk_header_bytes(fresh, 0, 0))?)?
+    let mut at = 72u64
+    while at < size {
+        let mut raw_head = read_disk_bytes(mut input, path, at, 16)?
+        let fh = disk_read_frame_head(path, raw_head, at)?
+        disk_check_frame_kind(path, old, fh.kind, fh.flags, at)?
+        let start = at + 16
+        if start > size || fh.size > size - start {
+            return Error(format.disk_fault(path, at, Truncated))
+        }
+        let mut source_hash = types.capacity(format.disk_check_start(old, at, raw_head))?
+        let mut child_hash = types.capacity(format.disk_check_start(fresh, at, raw_head))?
+        restore_pack_write(mut output, raw_head)?
+        let end = start + fh.size
+        let mut pos = start
+        while pos < end {
+            let raw = read_disk_bytes(mut input, path, pos, order.min(65536u64, end - pos))?
+            let n = list.len(raw)
+            std.check.add(mut source_hash, raw, 0, n)
+            std.check.add(mut child_hash, raw, 0, n)
+            restore_pack_write(mut output, raw)?
+            pos += n
+        }
+        if std.check.finish(source_hash) != fh.checksum {
+            return Error(format.disk_fault(path, at, Checksum))
+        }
+        list.set_word_le(mut raw_head, 8, std.check.finish(child_hash))
+        match host.write_at(mut output, at, raw_head) {
+            Ok(()) => (),
+            Error(err) => return Error(Io(err.error)),
+        }
+        at = end
+    }
+    disk_io(host.sync(mut output))?
+    disk_io(host.close(take output))?
+    disk_io(host.close(take input))
+}

@@ -1,0 +1,96 @@
+// A stamped backup owns one verified MANIFEST and exact journal bounds. Hash
+// and parse only the named bytes, including the complete containing segment.
+fn restore_segment_hash(mut f: HostFile, path: String, end: u64) -> Result[u64, Error] waits {
+    let mut h = std.check.start()
+    let mut pos = 0u64
+    while pos < end {
+        let raw = failure_result_from_rep(manifest.read_disk_bytes(mut f, path, pos, order.min(65536u64, end - pos)))?
+        std.check.add(mut h, raw, 0, list.len(raw))
+        pos += list.len(raw)
+    }
+    Ok(std.check.finish(h))
+}
+
+fn restore_scan_backup_segment(d: Dir, parent: StoreId, seq: u64, end: u64, terminal: bool, mut walk: RestoreScan) -> Result[(), Error] waits {
+    let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+    let mut file = failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?
+    let size = failure_result_from_rep(manifest.disk_io(host.stat_file(mut file)))?.size
+    if end < 72 || end > size || (terminal && end != size) {
+        return Error(failure_from_rep(format.disk_fault(path, end, Truncated)))
+    }
+    let hdr = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, 0, 72))?
+    let context = failure_result_from_rep(manifest.disk_read_header(path, hdr, 2, Some(seq), Some(store_key_to_rep(parent))))?.context
+    let mut token = walk.base
+    token.boundary.unit = seq
+    token.boundary.unit_digest = restore_segment_hash(mut file, path, end)?
+    token.boundary.frame_end = 72
+    restore_note(mut walk, token, 0, false)
+    let mut pos = 72u64
+    while pos < end {
+        let raw_head = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, pos, 16))?
+        let fh = failure_result_from_rep(manifest.disk_read_frame_head(path, raw_head, pos))?
+        if end - pos < 16 || fh.size > end - pos - 16 {
+            return Error(failure_from_rep(format.disk_fault(path, pos, Truncated)))
+        }
+        failure_result_from_rep(manifest.disk_check_frame_kind(path, context, fh.kind, fh.flags, pos))?
+        let payload = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, pos + 16, fh.size))?
+        if failure_result_from_rep(types.capacity(format.disk_check(context, pos, raw_head, payload)))? != fh.checksum {
+            return Error(failure_from_rep(format.disk_fault(path, pos, Checksum)))
+        }
+        token.boundary.frame_end = pos + 16 + fh.size
+        if format.journal_event_kind(fh.kind) {
+            let ev = journal_decode(path, fh.kind, payload)?
+            restore_scan_event(mut walk, token, path, take ev)?
+        } else if manifest.disk_kind_limit(fh.kind) != None {
+            return Error(failure_from_rep(format.disk_fault(path, pos, Malformed)))
+        } else {
+            restore_note(mut walk, token, 0, false)
+        }
+        pos = token.boundary.frame_end
+    }
+    failure_result_from_rep(manifest.disk_io(host.close(take file)))
+}
+
+pub fn plan_backup_restore(d: Dir, target: RestoreTarget) -> Result[RestoreResolution, DeployError] waits {
+    let stamp = read_export_stamp(d)?
+    let raw = deploy_result(failure_result_from_rep(manifest.read_page_manifest_bytes(d)))?
+    let (owner, take m) = deploy_result(failure_result_from_rep(manifest.disk_read_page_manifest("MANIFEST", raw)))?
+    if owner.hi != stamp.store_hi || owner.lo != stamp.store_lo || m.first_live > stamp.terminal || m.next_table > stamp.next_table {
+        return Error(ExportMismatch)
+    }
+    let parent = store_key_from_rep(owner)
+    let digest = std.check.xxh3(raw, 0, list.len(raw))
+    let b = manifest.RestoreBoundary(source_kind: format.ARCHIVE_SOURCE_LOG, base_ordinal: m.generation, base_digest: digest, unit: m.first_live, epoch: 0, unit_digest: digest, frame_end: 0)
+    let mut captured: Inline[u8, 16] =[0; 16]
+    let mut release: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 16 {
+        captured[i] = stamp.attempt[i]
+    }
+    for i in 0u64 .. 32 {
+        release[i] = stamp.binding[i]
+    }
+    let token = RestoreToken(parent, binding_id: 0, capture_attempt: captured, boundary: b)
+    let mut walk = deploy_result(restore_scan_start(target, token, m, history.HistoryActivation(number: stamp.activation, binding: release)))?
+    let mut seq = m.first_live
+    loop {
+        let terminal = seq == stamp.terminal
+        let end = if terminal {
+            stamp.end
+        } else {
+            let Some(next_header) = deploy_result(failure_result_from_rep(manifest.journal_header(d, owner, seq + 1, None)))? else {
+                return Error(ExportMismatch)
+            }
+            next_header.prev_end
+        }
+        deploy_result(restore_scan_backup_segment(d, parent, seq, end, terminal, mut walk))?
+        if terminal {
+            break
+        }
+        seq += 1
+    }
+    let main = option.unwrap(restore_tip(walk.tips, 0u32))
+    if main.0 != stamp.head {
+        return Error(ExportMismatch)
+    }
+    Ok(restore_finish(take walk))
+}

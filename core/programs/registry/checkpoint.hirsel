@@ -119,14 +119,21 @@ pub fn put_no_clobber_readback(mut client: std.object.Client, key: String, body:
     Error(Uncertain)
 }
 
-pub fn clone_log(log: tlog.Log) -> tlog.Log {
-    let mut out = tlog.empty()
-    let n = tlog.size(log)
-    for i in 0u64 .. n {
-        let entry = option.unwrap(tlog.entry_at(log, i))
-        let _ = result.unwrap(tlog.append(mut out, clone(entry)))
+/// Reads the immutable winner bound to this exact parent.
+pub fn read_pending(mut client: std.object.Client, cfg: LogConfig, n: u64, root: tlog.Hash, deadline_ns: u64) -> Result[Option[pending.Proposal], CheckpointError] waits {
+    let key = pending_key(cfg.kind, n)
+    let raw = match fetch_object(mut client, key, 65536, 1048576, deadline_ns) {
+        Ok((_, take data)) => take data,
+        Error(NotFound) => return Ok(None),
+        Error(e) => return Error(Storage(e)),
     }
-    take out
+    let Ok(take proposal) = pending.decode_proposal(raw) else {
+        return Error(IntegrityFailure)
+    }
+    if proposal.origin != cfg.origin || proposal.parent_size != n || proposal.parent_hash != pending.hash_to_hex(root) {
+        return Error(IntegrityFailure)
+    }
+    Ok(Some(take proposal))
 }
 
 pub fn fetch_missing_entries(mut client: std.object.Client, kind: LogKind, from_size: u64, target_size: u64, deadline_ns: u64) -> Result[List[Bytes], CheckpointError] waits {
@@ -217,42 +224,16 @@ pub fn valid_config(cfg: LogConfig) -> bool {
         return false
     }
     for i in 0u64 .. list.len(cfg.witnesses) {
+        if tlog.note.same_public_key(cfg.witnesses[i].key, cfg.log_key) {
+            return false
+        }
         for j in (i + 1) .. list.len(cfg.witnesses) {
-            if cfg.witnesses[i].name == cfg.witnesses[j].name {
+            if cfg.witnesses[i].name == cfg.witnesses[j].name || tlog.note.same_public_key(cfg.witnesses[i].key, cfg.witnesses[j].key) {
                 return false
             }
         }
     }
     true
-}
-
-fn witness_signature_timestamp(wire: String, witness_name: String) -> Option[u64] {
-    let Some((_, lines)) = std.string.split_once(wire, "\n\n") else {
-        return None
-    }
-    let mut at: u64 = 0
-    let end = string.byte_len(lines)
-    while at < end {
-        let Some(nl) = std.string.find(lines, at, "\n") else {
-            return None
-        }
-        let line = string.slice(lines, at, nl)
-        if let Some(rest) = std.string.strip_prefix(line, "— ") {
-            if let Some((name, encoded)) = std.string.split_once(rest, " ") {
-                if name == witness_name {
-                    let Some(body) = std.base64.decode(string.as_bytes(encoded)) else {
-                        return None
-                    }
-                    if list.len(body) == 76 {
-                        let ts: u64 = list.word_be(body, 4)
-                        return Some(ts)
-                    }
-                }
-            }
-        }
-        at = nl + 1
-    }
-    None
 }
 
 /// Verifies log signature and witness quorum. If `now_opt` is Some(now), enforces
@@ -267,16 +248,11 @@ pub fn verify_envelope(cfg: LogConfig, wire: String, now_opt: Option[u64]) -> Re
         Error(_) => return Error(NoteFailed),
     }
     for w in cfg.witnesses {
-        let check_now = match now_opt {
-            Some(now) => now,
-            None => {
-                let Some(ts) = witness_signature_timestamp(wire, w.name) else {
-                    return Error(NoteFailed)
-                }
-                ts
-            },
+        let cosig = match now_opt {
+            Some(now) => tlog.note.attached_cosignature(head, w.key, now),
+            None => tlog.note.historical_cosignature(head, w.key),
         }
-        if let Error(_) = tlog.note.attached_cosignature(head, w.key, check_now) {
+        if let Error(_) = cosig {
             return Error(NoteFailed)
         }
     }

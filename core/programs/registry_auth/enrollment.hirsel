@@ -1,7 +1,9 @@
 // One pool for pinned JWKS, authenticated organization records and domain enrollment.
 // DNS and each connection are subject to the same public-address grant.
 pub opaque type Lookup {
-    pool: std.http_client.Pool
+    pool: std.http_client.Pool,
+    clock: Clock,
+    orgs: List[OrgDocument]
 }
 
 pub fn lookup(n: Net, clock: Clock, tasks: Tasks) -> Result[Lookup, Refusal] {
@@ -18,23 +20,81 @@ pub fn lookup(n: Net, clock: Clock, tasks: Tasks) -> Result[Lookup, Refusal] {
     let Ok(pool) = std.http_client.pool(public_net, clock, tasks, System, limits) else {
         return Error(Unavailable)
     }
-    Ok(Lookup(pool: take pool))
+    Ok(Lookup(pool: take pool, clock: clock, orgs: list.new()))
 }
 
-fn fetch_document(client: Lookup, url: String, deadline_ns: u64) -> Result[String, Refusal] waits {
+const ORG_TTL_NS: u64 = 60000000000
+
+const ORG_CACHE_SIZE: u64 = 64
+
+type OrgDocument {
+    api: String,
+    tenant: String,
+    body: String,
+    fetched: u64,
+}
+
+fn cached_org(rows: List[OrgDocument], api: String, tenant: String, now: u64) -> Option[String] {
+    for row in rows {
+        if row.api == api && row.tenant == tenant && now >= row.fetched && now - row.fetched < ORG_TTL_NS {
+            return Some(clone(row.body))
+        }
+    }
+    None
+}
+
+fn remember_org(mut rows: List[OrgDocument], api: String, tenant: String, body: String, now: u64) {
+    for i in 0u64 .. list.len(rows) {
+        if rows[i].api == api && rows[i].tenant == tenant {
+            let _ = list.remove(mut rows, i)
+            break
+        }
+    }
+    if list.len(rows) == ORG_CACHE_SIZE {
+        let _ = list.remove(mut rows, 0)
+    }
+    list.push(mut rows, OrgDocument(api: clone(api), tenant: clone(tenant), body: clone(body), fetched: now))
+}
+
+fn rate_limited(status: u16, exhausted: bool, retry_after: bool) -> bool {
+    status == 429 || (status == 403 && (exhausted || retry_after))
+}
+
+fn request_headers(credential: Option[Secret]) -> List[std.http_client.Header] {
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, std.http_client.Header(name: "User-Agent", value: Public(b"Hirsel-registry")))
+    if let Some(token) = credential {
+        list.push(mut headers, std.http_client.Header(name: "Authorization", value: Protected(b"Bearer ", secret.share(token))))
+    }
+    take headers
+}
+
+fn fetch_document(client: Lookup, url: String, credential: Option[Secret], deadline_ns: u64) -> Result[String, Refusal] waits {
     if !https_url(url) {
         return Error(EnrollmentRefused)
     }
     let mut body: Bytes = list.new()
-    let mut headers: List[std.http_client.Header] = list.new()
-    list.push(mut headers, std.http_client.Header(name: "User-Agent", value: Public(b"Hirsel-registry")))
-    let req = std.http_client.Fetch(method: "GET", url: clone(url), headers: take headers, body: list.new())
+    let req = std.http_client.Fetch(method: "GET", url: clone(url), headers: request_headers(credential), body: list.new())
     match std.http_client.fetch_all(std.http_client.handle(client.pool), req, mut body, deadline_ns) {
         Ok(h) if std.http_client.status(h) == 200 => match string.from_utf8(take body) {
             Ok(take text) => Ok(take text),
             Error(_) => Error(EnrollmentRefused),
         },
-        _ => Error(Unavailable),
+        Ok(h) => {
+            let mut exhausted = false
+            let mut retry_after = false
+            for i in 0u64 .. std.http_client.field_count(h) {
+                let (name, value) = option.unwrap(std.http_client.field_at(h, i))
+                exhausted = exhausted || (std.http1.equal_ascii(name, b"x-ratelimit-remaining") && value == b"0")
+                retry_after = retry_after || std.http1.equal_ascii(name, b"retry-after")
+            }
+            if rate_limited(std.http_client.status(h), exhausted, retry_after) {
+                Error(RateLimited)
+            } else {
+                Error(Unavailable)
+            }
+        },
+        Error(_) => Error(Unavailable),
     }
 }
 
@@ -53,7 +113,27 @@ pub opaque type Enrollment {
     evidence: String
 }
 
+pub type StatusPrincipal: send = Scope(u64, String) | Legal(Bytes)
+
+pub opaque type StatusAuthority: send {
+    principal: StatusPrincipal,
+    intent_digest: String,
+    auth: String,
+}
+
+pub fn principal(a: StatusAuthority) -> View[StatusPrincipal] in a {
+    view a.principal
+}
+
+pub fn status_authorized(a: StatusAuthority, intent: Intent, row: String) -> bool {
+    if let Ok(wire) = intent_wire(intent) {
+        return digest(wire) == a.intent_digest && row == a.auth
+    }
+    false
+}
+
 pub type Admission {
+    status_authority: Option[StatusAuthority],
     intent: String,
     auth: String,
     enrollment_evidence: Option[String],
@@ -171,12 +251,23 @@ fn confirm_document(i: Intent, v: Verified, document: String) -> Result[Enrollme
     Ok(Enrollment(intent_digest: clone(v.intent_digest), signer: subject_wire(v.subject), evidence: cat(evidence, "]")))
 }
 
-pub fn fetch_enrollment(client: Lookup, i: Intent, v: Verified, deadline_ns: u64) -> Result[Enrollment, Refusal] waits {
+pub fn fetch_enrollment(mut client: Lookup, i: Intent, v: Verified, deadline_ns: u64) -> Result[Enrollment, Refusal] waits {
     if digest(intent_wire(i)?) != v.intent_digest || !member(initial(i)?, v.subject) {
         return Error(EnrollmentRefused)
     }
     let (_, url) = source(i, v)?
-    let document = fetch_document(client, url, deadline_ns)?
+    if let Some((_, tenant)) = std.string.split_once(i.scope, "/") {
+        let Some(org) = view v.organization else {
+            return Error(EnrollmentRefused)
+        }
+        if let Some(body) = cached_org(client.orgs, org.org_api, tenant, host.mono_ns(client.clock)) {
+            return confirm_document(i, v, body)
+        }
+        let body = fetch_document(client, url, org.org_credential, deadline_ns)?
+        remember_org(mut client.orgs, org.org_api, tenant, body, host.mono_ns(client.clock))
+        return confirm_document(i, v, body)
+    }
+    let document = fetch_document(client, url, None, deadline_ns)?
     confirm_document(i, v, document)
 }
 
@@ -266,7 +357,11 @@ pub fn authorize(origin: String, i: Intent, state: ScopeState, v: Verified, enro
             }
         },
     }
-    Ok(Admission(intent: take wire, auth: auth_row(v), enrollment_evidence: take evidence, next_authority: take next))
+    let status_authority = match i.action {
+        ChangeStatus(_, _, _) => Some(StatusAuthority(principal: Scope(i.generation, subject_wire(v.subject)), intent_digest: clone(v.intent_digest), auth: auth_row(v))),
+        _ => None,
+    }
+    Ok(Admission(status_authority: take status_authority, intent: take wire, auth: auth_row(v), enrollment_evidence: take evidence, next_authority: take next))
 }
 
 pub fn authorize_legal(origin: String, i: Intent, legal_key: Bytes, signature: Bytes, head: StatusHead) -> Result[Admission, Refusal] {
@@ -278,5 +373,5 @@ pub fn authorize_legal(origin: String, i: Intent, legal_key: Bytes, signature: B
     }
     check_head(i, Some(clone(head)))?
     let v = verify_key(i, legal_key, signature)?
-    Ok(Admission(intent: intent_wire(i)?, auth: auth_row(v), enrollment_evidence: None, next_authority: None))
+    Ok(Admission(status_authority: Some(StatusAuthority(principal: Legal(clone(legal_key)), intent_digest: clone(v.intent_digest), auth: auth_row(v))), intent: intent_wire(i)?, auth: auth_row(v), enrollment_evidence: None, next_authority: None))
 }

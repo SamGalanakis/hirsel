@@ -1,2 +1,4 @@
 hirsel.laws 1
-hirsel.ai/registry_auth@1/registry_auth/publisher_authority src=ce0429262d5eef6e sig=39dc311be5d7a383 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+hirsel.ai/registry_auth@1/registry_auth/advisory_evidence src=47fe9846e7ae14fa sig=34643c1f6ac9cac4 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+hirsel.ai/registry_auth@1/registry_auth/organization_cache src=5bde4e99d7b5bcf0 sig=11f68b7081a477d6 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+hirsel.ai/registry_auth@1/registry_auth/publisher_authority src=d55064001bb6733f sig=3636e715169105ae run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

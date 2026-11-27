@@ -121,7 +121,7 @@ fn simulated_witness(mut state: WitnessState, path: String, request: String) -> 
         } else {
             b"257\n"
         }
-        return Ok(witness.HttpResponse(status: 409, content_type: "text/x.tlog.size", body: clone(body)))
+        return Ok(witness.HttpResponse(status: 409, content_type: "text/x.tlog.size; charset=utf-8", body: clone(body)))
     }
     let mut required = if state.size == 255 {
         string.from(PROOF_255)
@@ -227,4 +227,35 @@ fn c2sp_interop(random: Random) -> Result[(), String] waits {
     }
     tree_laws(log)?
     witness_laws(log, random)
+}
+
+@test
+fn checkpoint_name_controls() -> Result[(), String] {
+    for value in 127u32 .. 160u32 {
+        let mut name = string.from("witness")
+        string.push_char(mut name, option.unwrap(char.from_u32(value)))
+        if let Ok(_) = note.checkpoint_text(name, 0, tlog.empty_root()) {
+            return Error("checkpoint name contains a control scalar")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn rollback_completed_subtrees() -> Result[(), String] {
+    let mut log = tlog.empty()
+    for i in 0u64 .. 257 {
+        let _ = result.unwrap(tlog.append(mut log, clone(string.as_bytes("entry"))))
+    }
+    let prefix = tlog.root_at(log, 255)
+    let proof = tlog.consistency(log, 127, 255)
+    tlog.truncate(mut log, 255)
+    if tlog.size(log) != 255 || tlog.root_at(log, 255) != prefix || tlog.consistency(log, 127, 255) != proof || tlog.hash_at(log, 8, 0) != None {
+        return Error("rollback must remove only the staged entries and their completed subtrees")
+    }
+    let _ = result.unwrap(tlog.append(mut log, clone(b"replacement")))
+    if tlog.hash_at(log, 8, 0) != tlog.root_at(log, 256) {
+        return Error("replacement append must rebuild the crossed subtree")
+    }
+    Ok(())
 }

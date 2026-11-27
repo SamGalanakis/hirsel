@@ -90,6 +90,17 @@ pub fn append(mut log: Log, take entry: Bytes) -> Result[u64, AppendError] {
     Ok(index)
 }
 
+/// Discards a staged suffix, including every complete subtree that crossed the cut.
+pub fn truncate(mut log: Log, keep: u64) {
+    if keep >= size(log) {
+        return
+    }
+    list.truncate(mut log.entries, keep)
+    for height in 0u64 .. list.len(log.levels) {
+        list.truncate(mut log.levels[height], keep >> height)
+    }
+}
+
 fn split(n: u64) -> u64 {
     1u64 << int.widen(63u32 - int.leading_zeros(n - 1))
 }

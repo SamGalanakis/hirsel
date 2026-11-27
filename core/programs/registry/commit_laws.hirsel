@@ -53,13 +53,13 @@ fn make_log_config(kind: checkpoint.LogKind) -> checkpoint.LogConfig {
         Status => (STATUS_ORIGIN, STATUS_VKEY, STATUS_PKCS8),
     }
     let mut ws: List[checkpoint.WitnessConfig] = list.new()
-    list.push(mut ws, checkpoint.WitnessConfig(name: string.from("witness.example/a"), key: result.unwrap(tlog.note.verifier_key(WITNESS_A_VKEY))))
+    list.push(mut ws, checkpoint.WitnessConfig(name: string.from("Operator A"), key: result.unwrap(tlog.note.verifier_key(WITNESS_A_VKEY))))
     list.push(mut ws, checkpoint.WitnessConfig(name: string.from("witness.example/b"), key: result.unwrap(tlog.note.verifier_key(WITNESS_B_VKEY))))
     checkpoint.LogConfig(kind: kind, origin: string.from(origin), log_key: result.unwrap(tlog.note.verifier_key(vkey)), signing_key: ed25519_secret(pkcs8), witnesses: take ws, quorum: 2)
 }
 
 fn new_sequencer() -> commit.Sequencer {
-    commit.new(make_log_config(Release), make_log_config(Status))
+    commit.new(make_log_config(Release), make_log_config(Status), "https://pkg.example", fixture_key(true))
 }
 
 fn oracle_leaf(entry: Bytes) -> tlog.Hash {
@@ -360,20 +360,6 @@ fn make_release_entry(identity: String, version: String, root: String, gen: u64,
     string.into_bytes(cat3(p1, p2, cat3(",", make_auth_json(signer, intent_digest), "]")))
 }
 
-fn make_status_entry(tag: String, root: String, prev: Option[String], field1: String, field2: Option[String], time: u64, signer: String, intent_digest: String) -> Bytes {
-    let prev_j = match prev {
-        Some(p) => pending.quoted(p),
-        None => string.from("null"),
-    }
-    let f2_j = match field2 {
-        Some(f2) => cat2(",", pending.quoted(f2)),
-        None => string.new(),
-    }
-    let p1 = cat3("[", pending.quoted(tag), cat3(",", pending.quoted(root), cat3(",", prev_j, ",")))
-    let p2 = cat3(pending.quoted(field1), f2_j, cat3(",", pending.quoted(pending.decimal(time)), ","))
-    string.into_bytes(cat3(p1, p2, cat2(make_auth_json(signer, intent_digest), "]")))
-}
-
 fn build_publish_req(scope: String, identity: String, version: String, payload_text: String, gen: u64, subjects_opt: Option[String], signer: String, alt_zstd: bool) -> commit.PublishRequest {
     let raw = string.into_bytes(string.from(payload_text))
     let root = pending.library_root(raw)
@@ -496,6 +482,7 @@ fn err_tag(r: Result[commit.Receipt, commit.Error]) -> u64 {
         Error(TakenDown) => 6,
         Error(TerminalStatus) => 7,
         Error(Interrupted) => 8,
+        Error(InvalidInput) => 9,
         Error(_) => 99,
     }
 }
@@ -553,6 +540,11 @@ fn verify_oracle_log(objects: Map[String, std.sim.s3.Object], cfg: checkpoint.Lo
     }
     for r in acked {
         require(r.origin == cfg.origin && r.leaf_index < size, "oracle: ack out of range")?
+        let mut first = r.leaf_index + 1
+        while first < size && !map.contains(objects, checkpoint.head_key(cfg.kind, first)) {
+            first += 1
+        }
+        require(first == r.head_size, "receipt uses first historical head covering leaf")?
         if let Some(root_hex) = view r.root {
             let Ok(text) = string.from_utf8(clone(entries[r.leaf_index])) else {
                 return Error("oracle: ack entry utf8")
@@ -577,6 +569,18 @@ fn case_step_deaths_and_helpers(tasks: Tasks, random: Random) -> Result[(), Stri
     require(err_tag(do_pub(mut seq, mut c, mut w, clone(req0), Some(AfterAdmit), random)) == 8, "step 0 death")?
     require(err_tag(do_pub(mut seq, mut c, mut w, clone(req0), Some(AfterScopeEvidence), random)) == 8, "step 1a death")?
     require(err_tag(do_pub(mut seq, mut c, mut w, clone(req0), Some(AfterScopeReserve), random)) == 8, "step 1b death")?
+    let mut missing: commit.PublishRequest = clone(req0)
+    missing.frames = list.new()
+    if err_tag(do_pub(mut seq, mut c, mut w, take missing, Some(AfterAdmit), random)) != 9 {
+        return Error("the submitted frames must contain the release root")
+    }
+    let mut wrong: commit.PublishRequest = clone(req0)
+    wrong.release_entry = make_release_entry(wrong.identity, wrong.version, wrong.root, 0, wrong.evidence[0].digest, 1730000000, SUB_A, wrong.intent_digest)
+    if let Error(InvalidInput) = do_pub(mut seq, mut c, mut w, take wrong, Some(AfterAdmit), random) {
+        ()
+    } else {
+        return Error("admission requires the post-bind release generation")
+    }
     let losing = build_publish_req("acme.dev", "acme.dev/other@1", "1.0.0", "other", 0, Some(subjects_one(SUB_C)), SUB_C, false)
     require(err_tag(do_pub(mut seq, mut c, mut w, take losing, None, random)) == 1, "losing enrollment must refuse")?
     let mut seq2 = new_sequencer()
@@ -597,6 +601,17 @@ fn case_step_deaths_and_helpers(tasks: Tasks, random: Random) -> Result[(), Stri
         require(err_tag(do_pub(mut dead_seq, mut c, mut w, clone(dead_req), Some(pts[idx]), random)) == 8, "step 3-6a death")?
         w.a.clock_s += 1
         w.b.clock_s += 1
+        if pts[idx] == AfterWitnessReply(0) {
+            let now = w.a.clock_s
+            let refreshed = commit.heartbeat(mut dead_seq, mut c, Release, random, DEADLINE, scoped fn() -> u64 {
+                now
+            }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+                post_pair(mut w, Release, i, p, b, random)
+            })
+            if let Error(_) = refreshed {
+                return Error("heartbeat finishes pending witnessed batch")
+            }
+        }
         let mut helper_seq = new_sequencer()
         list.push(mut acked_rel, result.unwrap(do_pub(mut helper_seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/h@1", ver, cat2("helper-", pending.decimal(idx)), 1, None, SUB_A, false), None, random)))
         let mut retry_seq = new_sequencer()
@@ -609,9 +624,7 @@ fn case_step_deaths_and_helpers(tasks: Tasks, random: Random) -> Result[(), Stri
     let root_e: String = option.unwrap(clone(rec_e.root))
     list.push(mut acked_rel, take rec_e)
     let st_cp0 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
-    let ret_id = pending.sha256_hex(string.into_bytes(string.from("retire-e-1")))
-    let ret_entry = make_status_entry("retire", root_e, None, "deprecated", Some(string.from("use v2")), 1730000100, SUB_A, ret_id)
-    let ret_req = commit.StatusRequest(scope: string.from("acme.dev"), root: string.from(root_e), previous_event: None, generation: 1, is_legal_takedown: false, signer: string.from(SUB_A), intent_digest: take ret_id, captured_status_parent: tlog.note.tree_size(st_cp0.head), captured_status_root: tlog.note.tree_root(st_cp0.head), status_entry: clone(ret_entry), evidence: list.new())
+    let ret_req = signed_status(root_e, None, Retire("deprecated", "use v2"), st_cp0, 1730000100, random)
     require(err_tag(do_status(mut seq, mut c, mut w, clone(ret_req), Some(AfterPending), random)) == 8, "status pending death")?
     let mut rec_seq = new_sequencer()
     let now_rec = w.a.clock_s
@@ -621,15 +634,14 @@ fn case_step_deaths_and_helpers(tasks: Tasks, random: Random) -> Result[(), Stri
         post_pair(mut w, Status, i, p, b, random)
     })), "status recover_pending")?
     let st_cp1 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
-    let ret_leaf = pending.hash_to_hex(tlog.leaf_hash(ret_entry))
-    let rein_id = pending.sha256_hex(string.into_bytes(string.from("reinstate-e-1")))
-    let rein_entry = make_status_entry("reinstate", root_e, Some(string.from(ret_leaf)), "fixed", None, 1730000101, SUB_A, rein_id)
-    let rein_req = commit.StatusRequest(scope: string.from("acme.dev"), root: string.from(root_e), previous_event: Some(take ret_leaf), generation: 1, is_legal_takedown: false, signer: string.from(SUB_A), intent_digest: take rein_id, captured_status_parent: tlog.note.tree_size(st_cp1.head), captured_status_root: tlog.note.tree_root(st_cp1.head), status_entry: take rein_entry, evidence: list.new())
+    let ret_leaf = pending.hash_to_hex(tlog.leaf_hash(ret_req.status_entry))
+    let rein_req = signed_status(root_e, Some(take ret_leaf), Reinstate("fixed"), st_cp1, 1730000101, random)
     let rein_rec = result.unwrap(do_status(mut seq, mut c, mut w, take rein_req, None, random))
     require(rein_rec.leaf_index == 1, "reinstate at leaf 1")?
     list.push(mut acked_st, take rein_rec)
-    let ret_replay = result.unwrap(do_status(mut seq, mut c, mut w, take ret_req, None, random))
-    require(ret_replay.leaf_index == 0, "status idempotence after intervening transition")?
+    let mut restarted = new_sequencer()
+    let ret_replay = result.unwrap(do_status(mut restarted, mut c, mut w, take ret_req, None, random))
+    require(ret_replay.leaf_index == 0 && ret_replay.head_size == 1, "status idempotence after intervening transition")?
     list.push(mut acked_st, take ret_replay)
     let _ = take c
     let report = finish_bucket(take bucket)
@@ -894,7 +906,7 @@ fn case_takedown_and_static_plane(tasks: Tasks, random: Random) -> Result[(), St
     let frame_url = cat3("/c/", root_td, ".zst")
     let mut reader = new_sequencer()
     let before_td = static.serve_get(mut reader, mut c, frame_url, DEADLINE)
-    require(before_td.status == 200 && before_td.content_type == static.CT_FRAME && list.len(before_td.body) > 0, "static frame before takedown")?
+    require(before_td.status == 200 && before_td.content_type == static.CT_FRAME && before_td.cache_control == "public, max-age=0, must-revalidate" && list.len(before_td.body) > 0, "static frame before takedown")?
     require(static.serve_get(mut reader, mut c, "/log/checkpoint", DEADLINE).content_type == static.CT_CHECKPOINT, "static checkpoint CT")?
     let t_resp = static.serve_get(mut reader, mut c, "/log/tile/0/000.p/2", DEADLINE)
     require(t_resp.status == 200 && t_resp.content_type == static.CT_TILE && list.len(t_resp.body) == 64, "static hash tile")?
@@ -925,8 +937,7 @@ fn case_takedown_and_static_plane(tasks: Tasks, random: Random) -> Result[(), St
     let pf_b = static.serve_get(mut reader, mut c, "/log/tile/entries/001.p/3", DEADLINE)
     require(pf_b.status == 200 && pf_b.body == list.slice(full_bundle, 0, option.unwrap(pending.entry_bundle_prefix_len(full_bundle, 3))), "full entry bundle supplies partial")?
     let st_cp = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
-    let td_id = pending.sha256_hex(string.into_bytes(string.from("takedown-td-1")))
-    let td_req = commit.StatusRequest(scope: string.from(""), root: string.from(root_td), previous_event: None, generation: 0, is_legal_takedown: true, signer: string.from(SUB_C), intent_digest: string.from(td_id), captured_status_parent: tlog.note.tree_size(st_cp.head), captured_status_root: tlog.note.tree_root(st_cp.head), status_entry: make_status_entry("takedown", root_td, None, "dmca", Some(string.from("court order 42")), 1730004010, SUB_C, td_id), evidence: list.new())
+    let td_req = signed_status(root_td, None, Takedown("dmca", "court order 42"), st_cp, 1730004010, random)
     require(err_tag(do_status(mut seq, mut c, mut w, clone(td_req), Some(AfterTakedownStatusBeforeMarker), random)) == 8, "crash before takedown cleanup")?
     let during = static.serve_get(mut reader, mut c, frame_url, DEADLINE)
     let during_body = result.unwrap(string.from_utf8(clone(during.body)))
@@ -944,8 +955,11 @@ fn case_takedown_and_static_plane(tasks: Tasks, random: Random) -> Result[(), St
     require(after.status == 410 && std.string.find(after_body, 0, "dmca") != None, "static 410 after cleanup")?
     let st_cp2 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
     let st_cur = option.unwrap(commit.root_status(seq, root_td))
-    let aft_id = pending.sha256_hex(string.into_bytes(string.from("retire-after-td")))
-    let aft_req = commit.StatusRequest(scope: string.from("acme.dev"), root: string.from(root_td), previous_event: Some(string.from(st_cur.last_leaf_hash)), generation: 1, is_legal_takedown: false, signer: string.from(SUB_A), intent_digest: string.from(aft_id), captured_status_parent: tlog.note.tree_size(st_cp2.head), captured_status_root: tlog.note.tree_root(st_cp2.head), status_entry: make_status_entry("retire", root_td, Some(string.from(st_cur.last_leaf_hash)), "other", Some(string.from("nope")), 1730004020, SUB_A, aft_id), evidence: list.new())
+    let aft_req = signed_status(root_td, Some(clone(st_cur.last_leaf_hash)), Retire("other", "nope"), st_cp2, 1730004020, random)
+    let mut delta = pending.empty_fold()
+    if let Ok(_) = pending.fold_status(mut delta, seq.statuses, 1, 2, aft_req.status_entry) {
+        return Error("replay allowed a transition after terminal takedown")
+    }
     require(err_tag(do_status(mut seq, mut c, mut w, take aft_req, None, random)) == 7, "takedown terminal")?
     let absent_root = pending.sha256_hex(string.into_bytes(string.from("never-uploaded")))
     result.unwrap(commit.install_deletion_marker(mut c, absent_root, DEADLINE))

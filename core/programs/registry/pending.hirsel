@@ -66,27 +66,15 @@ pub type RootStatus: send {
 }
 
 pub fn decimal(n: u64) -> String {
-    let mut out = string.new()
-    string.push_u64(mut out, n)
-    take out
+    registry_auth.decimal(n)
 }
 
 pub fn quoted(s: String) -> String {
-    let mut out = string.new()
-    std.json.push_quoted(mut out, s)
-    take out
+    registry_auth.quoted(s)
 }
 
 pub fn lower_hex(s: String, n: u64) -> bool {
-    if string.byte_len(s) != n {
-        return false
-    }
-    for b in string.as_bytes(s) {
-        if !int.is_ascii_digit(b) && !(b >= b'a' && b <= b'f') {
-            return false
-        }
-    }
-    true
+    registry_auth.lower_hex(s, n)
 }
 
 pub fn hash_to_hex(hash: tlog.Hash) -> String {
@@ -210,6 +198,10 @@ fn declared_zstd_size(compressed: Bytes) -> Result[u64, PendingError] {
     Ok(v3)
 }
 
+pub fn initial_frame_capacity(declared: u64) -> u64 {
+    order.min(declared, 65536u64)
+}
+
 /// Validates one Zstd frame against registry §2 limits (single frame, declared size,
 /// 8 MiB window, no dictionary, checksum if present) and checks expanded Root::of(C) == expected_root.
 pub fn verify_zstd_frame(compressed: Bytes, expected_root: String, max_compressed: u64, max_expanded: u64) -> Result[u64, PendingError] {
@@ -228,7 +220,7 @@ pub fn verify_zstd_frame(compressed: Bytes, expected_root: String, max_compresse
         return Error(FrameTooLarge)
     }
     let mut dec = std.zstd.decoder_bounded(MAX_ZSTD_WINDOW, declared)
-    let mut out: Bytes = list.with_capacity(declared)
+    let mut out: Bytes = list.with_capacity(initial_frame_capacity(declared))
     let mut at: u64 = 0
     let mut ended = false
     while !ended {
@@ -358,6 +350,23 @@ fn decode_auth(raw: String) -> Result[AuthFields, PendingError] {
     Ok(AuthFields(subject: take subject, intent_digest: take intent_digest, token_sha256: take token_sha256, signature: take signature))
 }
 
+pub fn auth_wire(auth: AuthFields) -> String {
+    let mut out = string.from("[")
+    string.push(mut out, auth.subject)
+    string.push(mut out, ",")
+    string.push(mut out, quoted(auth.intent_digest))
+    let fields: Inline[Option[String], 2] =[clone(auth.token_sha256), clone(auth.signature)]
+    for value in fields {
+        string.push(mut out, ",")
+        match value {
+            Some(s) => string.push(mut out, quoted(s)),
+            None => string.push(mut out, "null"),
+        }
+    }
+    string.push(mut out, "]")
+    take out
+}
+
 fn decode_subject_list(raw: String) -> Result[List[String], PendingError] {
     let items = read_raw_array(raw)?
     if list.len(items) == 0 {
@@ -419,6 +428,11 @@ pub fn decode_release_entry(raw: Bytes) -> Result[ReleaseEntry, PendingError] {
     }
     let Ok(text) = string.from_utf8(clone(raw)) else {
         return Error(Malformed)
+    }
+    if let Ok(true) = registry_auth.canonical_json(text) {
+        ()
+    } else {
+        return Error(NonCanonical)
     }
     let items = read_raw_array(text)?
     if list.len(items) == 0 {
@@ -482,6 +496,11 @@ pub fn decode_status_entry(raw: Bytes) -> Result[StatusEntry, PendingError] {
     let Ok(text) = string.from_utf8(clone(raw)) else {
         return Error(Malformed)
     }
+    if let Ok(true) = registry_auth.canonical_json(text) {
+        ()
+    } else {
+        return Error(NonCanonical)
+    }
     let items = read_raw_array(text)?
     if list.len(items) == 0 {
         return Error(Malformed)
@@ -505,7 +524,7 @@ pub fn decode_status_entry(raw: Bytes) -> Result[StatusEntry, PendingError] {
                 return Error(InvalidHash)
             }
         }
-        if reason != "security" && reason != "deprecated" && reason != "invalid" && reason != "renamed" && reason != "other" {
+        if !registry_auth.retire_reason(reason) {
             return Error(Malformed)
         }
         return Ok(Retire(take root, take prev, take reason, take message, time, take auth))
@@ -631,29 +650,47 @@ pub fn status_intent_key(intent_digest: String, prev: Option[String]) -> String 
     take out
 }
 
-pub fn fold_release(mut scopes: Map[String, ScopeRecord], mut labels: Map[String, ReleaseRecord], mut releases_by_root: Map[String, ReleaseRecord], mut release_by_intent: Map[String, (u64, u64, Option[String])], index: u64, head_size: u64, raw: Bytes) -> Result[(), PendingError] {
+/// Only rows affected by the staged suffix. Advisory maps contain its new values.
+pub type Fold: send {
+    scopes: Map[String, ScopeRecord],
+    labels: Map[String, ReleaseRecord],
+    roots: Map[String, ReleaseRecord],
+    release_intents: Map[String, (u64, u64, Option[String])],
+    statuses: Map[String, RootStatus],
+    status_intents: Map[String, (u64, u64, String)],
+}
+
+pub fn empty_fold() -> Fold {
+    Fold(scopes: map.new(), labels: map.new(), roots: map.new(), release_intents: map.new(), statuses: map.new(), status_intents: map.new())
+}
+
+fn scope_generation(delta: Fold, scopes: Map[String, ScopeRecord], scope: String) -> u64 {
+    if let Some(rec) = map.get(delta.scopes, scope) {
+        return rec.generation
+    }
+    if let Some(rec) = map.get(scopes, scope) {
+        return rec.generation
+    }
+    0
+}
+
+pub fn fold_release(mut delta: Fold, scopes: Map[String, ScopeRecord], labels: Map[String, ReleaseRecord], index: u64, head_size: u64, raw: Bytes) -> Result[(), PendingError] {
     let entry = decode_release_entry(raw)?
     match take entry {
         ScopeBind(scope, subjects_json, subjects, _, _, auth) => {
-            if map.contains(scopes, scope) {
+            if scope_generation(delta, scopes, scope) != 0 {
                 return Error(Malformed)
             }
-            map.insert(mut scopes, string.from(scope), ScopeRecord(generation: 1, subjects_json: take subjects_json, subjects: take subjects))
-            map.insert(mut release_by_intent, string.from(auth.intent_digest), (index, head_size, None))
+            map.insert(mut delta.scopes, string.from(scope), ScopeRecord(generation: 1, subjects_json: take subjects_json, subjects: take subjects))
+            map.insert(mut delta.release_intents, string.from(auth.intent_digest), (index, head_size, None))
             Ok(())
         },
         ScopeRebind(scope, old_gen, subjects_json, subjects, _, auth) => {
-            let cur_gen = {
-                let Some(current) = map.get(scopes, scope) else {
-                    return Error(Malformed)
-                }
-                current.generation
-            }
-            if cur_gen != old_gen {
+            if old_gen == 0 || old_gen == 18446744073709551615u64 || scope_generation(delta, scopes, scope) != old_gen {
                 return Error(Malformed)
             }
-            map.insert(mut scopes, string.from(scope), ScopeRecord(generation: old_gen + 1, subjects_json: take subjects_json, subjects: take subjects))
-            map.insert(mut release_by_intent, string.from(auth.intent_digest), (index, head_size, None))
+            map.insert(mut delta.scopes, string.from(scope), ScopeRecord(generation: old_gen + 1, subjects_json: take subjects_json, subjects: take subjects))
+            map.insert(mut delta.release_intents, string.from(auth.intent_digest), (index, head_size, None))
             Ok(())
         },
         Release(f) => {
@@ -661,67 +698,105 @@ pub fn fold_release(mut scopes: Map[String, ScopeRecord], mut labels: Map[String
                 return Error(Malformed)
             }
             let lkey = label_key_str(f.identity, f.version)
-            if map.contains(labels, lkey) {
+            if f.generation == 0 || scope_generation(delta, scopes, scope) != f.generation || map.contains(labels, lkey) || map.contains(delta.labels, lkey) {
                 return Error(Malformed)
             }
             let rec = ReleaseRecord(identity: string.from(f.identity), version: string.from(f.version), root: string.from(f.root), scope: take scope, leaf_index: index, head_size: head_size)
-            map.insert(mut labels, take lkey, clone(rec))
-            if !map.contains(releases_by_root, f.root) {
-                map.insert(mut releases_by_root, string.from(f.root), take rec)
+            map.insert(mut delta.labels, take lkey, clone(rec))
+            if !map.contains(delta.roots, f.root) {
+                map.insert(mut delta.roots, string.from(f.root), take rec)
             }
-            map.insert(mut release_by_intent, string.from(f.auth.intent_digest), (index, head_size, Some(string.from(f.root))))
+            map.insert(mut delta.release_intents, string.from(f.auth.intent_digest), (index, head_size, Some(string.from(f.root))))
             Ok(())
         },
     }
 }
 
-pub fn fold_status(mut statuses: Map[String, RootStatus], mut status_by_intent: Map[String, (u64, u64, String)], index: u64, head_size: u64, raw: Bytes) -> Result[(), PendingError] {
-    let leaf_hex = hash_to_hex(tlog.leaf_hash(raw))
+pub fn fold_status(mut delta: Fold, statuses: Map[String, RootStatus], index: u64, head_size: u64, raw: Bytes) -> Result[(), PendingError] {
     let entry = decode_status_entry(raw)?
-    match take entry {
-        Retire(root, prev, reason, message, _, auth) => {
-            let mut st = match map.remove(mut statuses, root) {
-                Some(take s) => take s,
-                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
-            }
-            st.last_leaf_hash = string.from(leaf_hex)
-            st.state = Retired(take reason, take message)
-            map.insert(mut statuses, string.from(root), take st)
-            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
-            Ok(())
+    let (root, prev, auth): (String, Option[String], String) = match view entry {
+        Retire(r, p, _, _, _, a) => (string.from(r), clone(p), string.from(a.intent_digest)),
+        Reinstate(r, p, _, _, a) => (string.from(r), clone(p), string.from(a.intent_digest)),
+        Advise(r, p, _, _, _, a) => (string.from(r), clone(p), string.from(a.intent_digest)),
+        Takedown(r, p, _, _, _, a) => (string.from(r), clone(p), string.from(a.intent_digest)),
+    }
+    let state: LifecycleState = {
+        let current = match map.get(delta.statuses, root) {
+            Some(st) => Some(st),
+            None => map.get(statuses, root),
+        }
+        match current {
+            Some(st) => {
+                if prev != Some(string.from(st.last_leaf_hash)) {
+                    return Error(Malformed)
+                }
+                clone(st.state)
+            },
+            None => {
+                if prev != None {
+                    return Error(Malformed)
+                }
+                Active
+            },
+        }
+    }
+    if let TakenDown(_, _) = state {
+        return Error(Malformed)
+    }
+    let next = match view entry {
+        Retire(_, _, reason, message, _, _) if state == Active => Retired(string.from(reason), string.from(message)),
+        Reinstate(_, _, _, _, _) => match state {
+            Retired(_, _) => Active,
+            _ => return Error(Malformed),
         },
-        Reinstate(root, prev, _, _, auth) => {
-            let mut st = match map.remove(mut statuses, root) {
-                Some(take s) => take s,
-                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
-            }
-            st.last_leaf_hash = string.from(leaf_hex)
-            st.state = Active
-            map.insert(mut statuses, string.from(root), take st)
-            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
-            Ok(())
-        },
-        Advise(root, prev, osv_id, osv_digest, _, auth) => {
-            let mut st = match map.remove(mut statuses, root) {
-                Some(take s) => take s,
-                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
-            }
-            st.last_leaf_hash = string.from(leaf_hex)
-            map.insert(mut st.advisories, take osv_id, take osv_digest)
-            map.insert(mut statuses, string.from(root), take st)
-            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
-            Ok(())
-        },
-        Takedown(root, prev, reason, message, _, auth) => {
-            let mut st = match map.remove(mut statuses, root) {
-                Some(take s) => take s,
-                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
-            }
-            st.last_leaf_hash = string.from(leaf_hex)
-            st.state = TakenDown(take reason, take message)
-            map.insert(mut statuses, string.from(root), take st)
-            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
-            Ok(())
-        },
+        Advise(_, _, _, _, _, _) => clone(state),
+        Takedown(_, _, reason, message, _, _) => TakenDown(string.from(reason), string.from(message)),
+        _ => return Error(Malformed),
+    }
+    let mut record = match map.remove(mut delta.statuses, root) {
+        Some(take st) => take st,
+        None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
+    }
+    record.last_leaf_hash = hash_to_hex(tlog.leaf_hash(raw))
+    record.state = take next
+    if let Advise(_, _, id, digest, _, _) = take entry {
+        map.insert(mut record.advisories, take id, take digest)
+    }
+    map.insert(mut delta.statuses, string.from(root), take record)
+    map.insert(mut delta.status_intents, status_intent_key(auth, prev), (index, head_size, take root))
+    Ok(())
+}
+
+pub fn apply_fold(mut seq: commit.Sequencer, take delta: Fold) {
+    let Fold(scopes: take scopes, labels: take labels, roots: take roots, release_intents: take releases, statuses: take statuses, status_intents: take events) = take delta
+    for take (k, v) in take scopes {
+        map.insert(mut seq.scopes, take k, take v)
+    }
+    for take (k, v) in take labels {
+        map.insert(mut seq.labels, take k, take v)
+    }
+    for take (k, v) in take roots {
+        if !map.contains(seq.releases_by_root, k) {
+            map.insert(mut seq.releases_by_root, take k, take v)
+        }
+    }
+    for take (k, v) in take releases {
+        map.insert(mut seq.release_by_intent, take k, take v)
+    }
+    for take (k, changed) in take statuses {
+        let mut merged = match map.remove(mut seq.statuses, k) {
+            Some(take prior) => take prior,
+            None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
+        }
+        let RootStatus(last_leaf_hash: take hash, state: take state, advisories: take advisories) = take changed
+        merged.last_leaf_hash = take hash
+        merged.state = take state
+        for take (id, digest) in take advisories {
+            map.insert(mut merged.advisories, take id, take digest)
+        }
+        map.insert(mut seq.statuses, take k, take merged)
+    }
+    for take (k, v) in take events {
+        map.insert(mut seq.status_by_intent, take k, take v)
     }
 }

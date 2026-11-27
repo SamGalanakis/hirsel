@@ -41,7 +41,8 @@ fn valid_name(name: String) -> bool {
     }
     let mut at: u64 = 0
     while let Some((scalar, next)) = string.next_scalar(name, at) {
-        if scalar == '+' || char.to_u32(scalar) < 32 || std.char.is_whitespace(scalar) {
+        let code = char.to_u32(scalar)
+        if scalar == '+' || code < 32 || (code >= 127 && code <= 159) || std.char.is_whitespace(scalar) {
             return false
         }
         at = next
@@ -75,6 +76,10 @@ pub fn verifier_key(vkey: String) -> Result[VerifierKey, NoteError] {
         return Error(InvalidKey)
     }
     Ok(VerifierKey(name: string.from(name), id: list.word_be(digest, 0), kind: raw[0], public_key: clone(list.slice(raw, 1, 33))))
+}
+
+pub fn same_public_key(a: VerifierKey, b: VerifierKey) -> bool {
+    a.public_key == b.public_key
 }
 
 pub fn envelope(head: SignedHead) -> View[String] in head {
@@ -264,7 +269,7 @@ pub fn verify(origin: String, key: VerifierKey, wire: String) -> Result[SignedHe
     Ok(SignedHead(size: size, root: root, text: take text, wire: string.from(wire), signatures: take signatures))
 }
 
-fn verified_cosignature(head: SignedHead, key: VerifierKey, now: u64, signatures: List[Signature]) -> Result[Cosignature, NoteError] {
+fn verified_cosignature(head: SignedHead, key: VerifierKey, now: Option[u64], signatures: List[Signature]) -> Result[Cosignature, NoteError] {
     if key.kind != WITNESS_ED25519 {
         return Error(InvalidKey)
     }
@@ -274,8 +279,10 @@ fn verified_cosignature(head: SignedHead, key: VerifierKey, now: u64, signatures
                 return Error(BadSignature)
             }
             let time: u64 = list.word_be(sig.body, 4)
-            if time > now || now - time > 86400 {
-                return Error(StaleCosignature)
+            if let Some(current) = now {
+                if time > current || current - time > 86400 {
+                    return Error(StaleCosignature)
+                }
             }
             let mut message = string.from("cosignature/v1\ntime ")
             string.push_u64(mut message, time)
@@ -293,12 +300,16 @@ fn verified_cosignature(head: SignedHead, key: VerifierKey, now: u64, signatures
 /// Verifies response signature lines against the pinned key and fixed head.
 pub fn verify_cosignatures(head: SignedHead, key: VerifierKey, now: u64, lines: String) -> Result[Cosignature, NoteError] {
     let signatures = parse_signatures(lines)?
-    verified_cosignature(head, key, now, signatures)
+    verified_cosignature(head, key, Some(now), signatures)
 }
 
 /// Verifies a pinned witness already attached to a parsed checkpoint.
 pub fn attached_cosignature(head: SignedHead, key: VerifierKey, now: u64) -> Result[Cosignature, NoteError] {
-    verified_cosignature(head, key, now, head.signatures)
+    verified_cosignature(head, key, Some(now), head.signatures)
+}
+
+pub fn historical_cosignature(head: SignedHead, key: VerifierKey) -> Result[Cosignature, NoteError] {
+    verified_cosignature(head, key, None, head.signatures)
 }
 
 pub fn attach(head: SignedHead, cosignature: Cosignature) -> Result[SignedHead, NoteError] {

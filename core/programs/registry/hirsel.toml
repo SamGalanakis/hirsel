@@ -5,6 +5,7 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
+registry_auth = { package = "hirsel.ai/registry_auth", major = 1, path = "../registry_auth", authority = ["Net", "Clock", "Tasks", "Secret"] }
 tlog = { package = "hirsel.ai/tlog", major = 1, path = "../tlog", authority = ["Random", "Secret"] }
 
 [sources]
@@ -19,3 +20,4 @@ grants = ["Clock", "Random", "Tasks"]
 
 [tests.sources]
 "commit_laws.hirsel" = "commit_laws"
+"sequencer_laws.hirsel" = "commit_laws"

@@ -1,2 +1,4 @@
 hirsel.laws 1
-hirsel.ai/tlog@1/interop_laws/c2sp_interop src=284994567b7e42c8 sig=807b8dc556f4788d run=0d24389cbe40867e bug=- oracle=- rows=pending
+hirsel.ai/tlog@1/interop_laws/c2sp_interop src=0fa696746175908c sig=807b8dc556f4788d run=0d24389cbe40867e bug=- oracle=- rows=pending
+hirsel.ai/tlog@1/interop_laws/checkpoint_name_controls src=0e69a7a149be3379 sig=815d003548d59115 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+hirsel.ai/tlog@1/interop_laws/rollback_completed_subtrees src=6f29fcdc713e8912 sig=0da2f69ac64dd5c0 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

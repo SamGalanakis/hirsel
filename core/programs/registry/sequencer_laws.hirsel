@@ -1,0 +1,239 @@
+@test
+fn witness_configuration() -> Result[(), String] {
+    let mut cfg = make_log_config(Release)
+    cfg.witnesses[1].key = result.unwrap(tlog.note.verifier_key(WITNESS_A_VKEY))
+    require(!checkpoint.valid_config(cfg), "operators must have distinct signing keys")?
+    cfg.witnesses[1].key = result.unwrap(tlog.note.verifier_key(RELEASE_VKEY))
+    require(!checkpoint.valid_config(cfg), "a witness cannot share the log signing key")
+}
+
+fn fixture_key(legal: bool) -> Bytes {
+    let encoded = if legal {
+        "/FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU="
+    } else {
+        "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
+    }
+    option.unwrap(std.base64.decode(string.as_bytes(encoded)))
+}
+
+fn signed_status(root: String, prev: Option[String], change: registry_auth.Status, cp: checkpoint.CurrentCheckpoint, time: u64, random: Random) -> commit.StatusRequest {
+    let (tag, first, second): (String, String, Option[String]) = match change {
+        Takedown(r, m) => ("takedown", clone(r), Some(clone(m))),
+        Retire(r, m) => ("retire", clone(r), Some(clone(m))),
+        Reinstate(m) => ("reinstate", clone(m), None),
+        Advise(id, hash) => ("advise", clone(id), Some(clone(hash))),
+    }
+    let legal = tag == "takedown"
+    let key = fixture_key(legal)
+    let secret_key = ed25519_secret(if legal {
+        WITNESS_A_PKCS8
+    } else {
+        RELEASE_PKCS8
+    })
+    let i = registry_auth.Intent(origin: "https://pkg.example", scope: "acme.dev", generation: if legal {
+        0u64
+    } else {
+        1u64
+    }, action: ChangeStatus(clone(root), clone(prev), clone(change)))
+    let wire = result.unwrap(registry_auth.intent_wire(i))
+    let mut sig: Bytes = list.with_capacity(64)
+    result.unwrap(secret.sign(secret_key, Ed25519, random, string.as_bytes(wire), mut sig))
+    let head = registry_auth.StatusHead(scope: clone(i.scope), root: clone(root), previous_event: clone(prev))
+    let admission = if legal {
+        result.unwrap(registry_auth.authorize_legal(i.origin, i, key, sig, head))
+    } else {
+        let proof = result.unwrap(registry_auth.verify_key(i, key, sig))
+        let mut subjects: List[registry_auth.Subject] = list.new()
+        list.push(mut subjects, SigningKey(clone(key)))
+        let scope = registry_auth.Authority(scope: clone(i.scope), generation: i.generation, subjects: take subjects)
+        result.unwrap(registry_auth.authorize(i.origin, i, Committed(take scope), proof, None, Some(clone(head)), time))
+    }
+    let mut fields: List[String] = list.new()
+    list.push(mut fields, pending.quoted(tag))
+    list.push(mut fields, pending.quoted(root))
+    list.push(mut fields, match prev {
+        Some(p) => pending.quoted(p),
+        None => string.from("null")
+    })
+    list.push(mut fields, pending.quoted(first))
+    if let Some(text) = second {
+        list.push(mut fields, pending.quoted(text))
+    }
+    list.push(mut fields, pending.quoted(pending.decimal(time)))
+    list.push(mut fields, clone(admission.auth))
+    let mut ev: List[commit.EvidenceInput] = list.new()
+    let digest = registry_auth.digest(wire)
+    list.push(mut ev, commit.EvidenceInput(digest: clone(digest), data: clone(string.as_bytes(wire))))
+    commit.StatusRequest(scope: clone(i.scope), root: clone(root), previous_event: clone(prev), authority: option.unwrap(clone(admission.status_authority)), intent_digest: take digest, captured_status_parent: tlog.note.tree_size(cp.head), captured_status_root: tlog.note.tree_root(cp.head), status_entry: string.into_bytes(cat3("[", std.string.join(fields, ","), "]")), evidence: take ev)
+}
+
+@test
+fn heartbeat_uses_committed_tree(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let mut cfg = make_log_config(Release)
+    cfg.witnesses = list.new()
+    cfg.quorum = 0
+    let mut seq = commit.new(take cfg, make_log_config(Status), "https://pkg.example", fixture_key(true))
+    let mut row: Bytes = list.with_capacity(4096)
+    for i in 0u64 .. 4096 {
+        list.push(mut row, int.truncate(i))
+    }
+    for _ in 0u64 .. 512 {
+        let _ = result.unwrap(tlog.append(mut seq.logs[0u64].log, clone(row)))
+    }
+    let root = option.unwrap(tlog.root_at(seq.logs[0u64].log, 512))
+    let cp = result.unwrap(tlog.note.sign(RELEASE_ORIGIN, 512, root, seq.logs[0u64].cfg.log_key, seq.logs[0u64].cfg.signing_key, random))
+    let bucket = start_bucket(tasks, 971, list.new())
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 972)
+    let wire = string.into_bytes(string.from(tlog.note.envelope(cp)))
+    let (stored, _) = std.object.store_no_clobber(mut client, "log/checkpoint", take wire, DEADLINE)
+    let _ = result.unwrap(take stored)
+    // The unchanged entries alone occupy 2 MiB. Refreshing the envelope fits in 1 MiB.
+    let limited = bound bytes 1048576 {
+        commit.heartbeat(mut seq, mut client, Release, random, DEADLINE, scoped fn() -> u64 {
+            1730000000
+        }, scoped fn(_i: u64, _p: String, _b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+            Error(Transport)
+        })
+    }
+    let _ = take client
+    let _ = finish_bucket(take bucket)
+    match take limited {
+        Ok(Ok(head)) => require(tlog.note.tree_root(head.head) == root && tlog.note.tree_size(head.head) == 512, "unchanged heartbeat checkpoint"),
+        _ => Error("heartbeat exceeded its envelope budget or failed"),
+    }
+}
+
+@test
+fn rejected_proposal_is_atomic(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 981, list.new())
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 982)
+    let mut seq = new_sequencer()
+    let mut pair = new_witness_pair(1730000000)
+    do_init_pair(mut seq, mut client, mut pair, random)
+    let req = build_publish_req("acme.dev", "acme.dev/sample@1", "1.0.0", "data", 0, Some(subjects_one(SUB_A)), SUB_A, false)
+    let mut entries: List[Bytes] = list.new()
+    let bind: Bytes = option.unwrap(clone(req.scope_bind_entry))
+    list.push(mut entries, clone(bind))
+    list.push(mut entries, take bind)
+    let proposal = result.unwrap(pending.encode_proposal(RELEASE_ORIGIN, 0, pending.hash_to_hex(tlog.empty_root()), entries))
+    let (stored, _) = std.object.store_no_clobber(mut client, "log/pending/0", take proposal, DEADLINE)
+    let _ = result.unwrap(take stored)
+    let recovered = commit.recover_pending(mut seq, mut client, Release, random, DEADLINE, scoped fn() -> u64 {
+        1730000000
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut pair, Release, i, p, b, random)
+    })
+    let _ = take client
+    let report = finish_bucket(take bucket)
+    if let Error(IntegrityFailure) = recovered {
+        require(tlog.size(seq.logs[0u64].log) == 0 && map.len(seq.scopes) == 0, "partial fold became visible")?
+        require(pair.a.release_state.size == 0 && pair.b.release_state.size == 0 && !map.contains(report.objects, "log/heads/2"), "invalid batch reached witnesses or historical head")?
+        verify_oracle_log(report.objects, make_log_config(Release), pair.a.release_state, pair.b.release_state, list.new())
+    } else {
+        Error("duplicate enrollment in winning batch")
+    }
+}
+
+@test
+fn stale_rebind_writes_nothing(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 991, list.new())
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 992)
+    let mut seq = new_sequencer()
+    let mut pair = new_witness_pair(1730000000)
+    do_init_pair(mut seq, mut client, mut pair, random)
+    let digest = pending.sha256_hex(b"absent scope")
+    let mut items: List[commit.EvidenceInput] = list.new()
+    list.push(mut items, commit.EvidenceInput(digest: clone(digest), data: clone(b"absent scope")))
+    let req = commit.RebindRequest(scope: "acme.dev", old_generation: 1, signer: SUB_A, intent_digest: clone(digest), rebind_entry: make_rebind_entry("acme.dev", 1, subjects_one(SUB_A), 1730000000, SUB_A, digest), evidence: take items)
+    let outcome = commit.commit_rebind(mut seq, mut client, req, random, DEADLINE, scoped fn() -> u64 {
+        1730000000
+    }, scoped fn(_i: u64, _p: String, _b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        Error(Transport)
+    })
+    let _ = take client
+    let report = finish_bucket(take bucket)
+    require(err_tag(outcome) == 4 && !map.contains(report.objects, cat2("e/", digest)), "stale rebind left public evidence")
+}
+
+@test
+fn status_admission_binds_evidence_and_key(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 993, list.new())
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 994)
+    let mut seq = new_sequencer()
+    let mut pair = new_witness_pair(1730000000)
+    do_init_pair(mut seq, mut client, mut pair, random)
+    let publish = build_publish_req("acme.dev", "acme.dev/sample@1", "1.0.0", "data", 0, Some(subjects_one(SUB_A)), SUB_A, false)
+    let _ = result.unwrap(do_pub(mut seq, mut client, mut pair, publish, None, random))
+    let parent = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut client, DEADLINE)))
+    let removal = signed_status(publish.root, None, Takedown("dmca", "order"), parent, 1730000000, random)
+    seq.legal_key = fixture_key(false)
+    require(err_tag(do_status(mut seq, mut client, mut pair, removal, None, random)) == 5, "a different legal pin refused before storage")?
+    seq.legal_key = fixture_key(true)
+    let document = "{\"affected\":[{\"package\":{\"ecosystem\":\"Hirsel\",\"name\":\"acme.dev/sample\"},\"versions\":[\"2.0.0\"]}],\"id\":\"OSV-1\",\"modified\":\"2024-02-29T00:00:00Z\"}"
+    let digest = registry_auth.digest(document)
+    let mut advise = signed_status(publish.root, None, Advise("OSV-1", clone(digest)), parent, 1730000000, random)
+    list.push(mut advise.evidence, commit.EvidenceInput(digest: clone(digest), data: clone(string.as_bytes(document))))
+    require(err_tag(do_status(mut seq, mut client, mut pair, advise, None, random)) == 9, "OSV does not cover this release")?
+    let _ = take client
+    let report = finish_bucket(take bucket)
+    require(!map.contains(report.objects, cat2("e/", digest)) && !map.contains(report.objects, "status/pending/0") && pair.a.status_state.size == 0, "invalid status requests wrote evidence or advanced a witness")
+}
+
+@test
+fn original_release_receipt_after_restart(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 995, list.new())
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 996)
+    let mut seq = new_sequencer()
+    let mut pair = new_witness_pair(1730000000)
+    do_init_pair(mut seq, mut client, mut pair, random)
+    let first = build_publish_req("acme.dev", "acme.dev/sample@1", "1.0.0", "first", 0, Some(subjects_one(SUB_A)), SUB_A, false)
+    let original = result.unwrap(do_pub(mut seq, mut client, mut pair, first, None, random))
+    let later = build_publish_req("acme.dev", "acme.dev/sample@1", "1.1.0", "second", 1, None, SUB_A, false)
+    let _ = result.unwrap(do_pub(mut seq, mut client, mut pair, later, None, random))
+    let mut restarted = new_sequencer()
+    let retry = result.unwrap(do_pub(mut restarted, mut client, mut pair, first, None, random))
+    let _ = take client
+    let _ = finish_bucket(take bucket)
+    require(original.leaf_index == 1 && original.head_size == 2 && retry.origin == original.origin && retry.leaf_index == original.leaf_index && retry.head_size == original.head_size && retry.root == original.root, "restart changed the release locator")
+}
+
+@test
+fn frame_reservation() -> Result[(), String] {
+    if pending.initial_frame_capacity(pending.MAX_EXPANDED_FRAME) > 65536 || pending.initial_frame_capacity(32) != 32 {
+        return Error("reserve only the first output chunk")
+    }
+    Ok(())
+}
+
+@test
+fn canonical_entry_bytes() -> Result[(), String] {
+    let root = pending.sha256_hex(b"canonical-entry")
+    let mut row = string.from("[\"reinstate\", ")
+    string.push(mut row, pending.quoted(root))
+    string.push(mut row, ",null,\"ok\",\"1\",[[\"oidc\",\"issuer\",\"subject\",\"workflow\"],")
+    string.push(mut row, pending.quoted(root))
+    string.push(mut row, ",")
+    string.push(mut row, pending.quoted(root))
+    string.push(mut row, ",null]]")
+    if let Error(NonCanonical) = pending.decode_status_entry(string.as_bytes(row)) {
+        return Ok(())
+    }
+    Error("status row spelling changed")
+}
+
+@test
+fn grouped_index_limit() -> Result[(), String] {
+    let path = option.unwrap(tlog.tiles.path(Entries, 18446744073709551615u64, 256))
+    let Some(groups) = std.string.strip_prefix(path, "tile/entries/") else {
+        return Error("invalid tile path")
+    }
+    if static.parse_grouped_index(groups) != Some(18446744073709551615u64) {
+        return Error("maximum index did not round trip")
+    }
+    let mut successor = string.from(string.slice(groups, 0, string.byte_len(groups) - 1))
+    string.push(mut successor, "6")
+    if static.parse_grouped_index(successor) != None {
+        return Error("index beyond u64 limit")
+    }
+    Ok(())
+}

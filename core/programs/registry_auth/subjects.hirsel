@@ -1,14 +1,15 @@
 // Administrator configuration. This profile uses GitHub Actions claim semantics,
 // including on a configured enterprise forge. No URL comes from a token.
-pub type Forge: shareable + send {
+pub type Forge: send {
     issuer: String,
     jwks_url: String,
     allow: std.jwt.Allow,
     host: String,
-    org_api: String
+    org_api: String,
+    org_credential: Option[Secret]
 }
 
-pub opaque type Profile: shareable + send {
+pub opaque type Profile: send {
     forge: Forge,
     keys: std.jwt.PublicKeys
 }
@@ -26,7 +27,8 @@ type Organization {
     login: String,
     id: String,
     host: String,
-    org_api: String
+    org_api: String,
+    org_credential: Option[Secret]
 }
 
 fn positive(s: String) -> bool {
@@ -82,6 +84,13 @@ fn asymmetric(a: std.jwt.Alg) -> bool {
     }
 }
 
+fn shared_credential(credential: Option[Secret]) -> Option[Secret] {
+    match credential {
+        Some(token) => Some(secret.share(token)),
+        None => None,
+    }
+}
+
 fn load_keys(f: Forge, document: String) -> Result[Profile, Refusal] {
     if !https_url(f.issuer) || !https_url(f.jwks_url) || !https_url(f.org_api) || !dns_name(f.host) || !asymmetric(f.allow.first) {
         return Error(Unauthorized)
@@ -97,11 +106,11 @@ fn load_keys(f: Forge, document: String) -> Result[Profile, Refusal] {
     if std.jwt.public_len(keys) == 0 {
         return Error(Unauthorized)
     }
-    Ok(Profile(forge: clone(f), keys: take keys))
+    Ok(Profile(forge: Forge(issuer: clone(f.issuer), jwks_url: clone(f.jwks_url), allow: clone(f.allow), host: clone(f.host), org_api: clone(f.org_api), org_credential: shared_credential(f.org_credential)), keys: take keys))
 }
 
 pub fn fetch_profile(client: Lookup, f: Forge, deadline_ns: u64) -> Result[Profile, Refusal] waits {
-    let document = fetch_document(client, f.jwks_url, deadline_ns)?
+    let document = fetch_document(client, f.jwks_url, None, deadline_ns)?
     load_keys(f, document)
 }
 
@@ -162,7 +171,7 @@ pub fn verify_workload(i: Intent, requested: Subject, token: String, p: Profile,
     if cat(cat(c.repo_id, "/"), path) != selector || (id != cat("owner/", c.owner_id) && id != cat("repo/", c.repo_id)) {
         return Error(Unauthorized)
     }
-    let org = Organization(login: clone(c.owner), id: clone(c.owner_id), host: clone(p.forge.host), org_api: clone(p.forge.org_api))
+    let org = Organization(login: clone(c.owner), id: clone(c.owner_id), host: clone(p.forge.host), org_api: clone(p.forge.org_api), org_credential: shared_credential(p.forge.org_credential))
     Ok(Verified(intent_digest: digest(intent_wire(i)?), subject: clone(requested), expires: jwt.claims.exp, token_sha256: Some(digest(token)), signature: None, organization: Some(take org)))
 }
 

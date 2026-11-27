@@ -107,7 +107,13 @@ edges = ["std@1"]
 id = "hirsel.ai/registry@1"
 version = "1.0.0"
 source = "member:registry"
-edges = ["hirsel.ai/tlog@1", "std@1"]
+edges = ["hirsel.ai/registry_auth@1", "hirsel.ai/tlog@1", "std@1"]
+
+[[package]]
+id = "hirsel.ai/registry_auth@1"
+version = "1.0.0"
+source = "member:registry_auth"
+edges = ["std@1"]
 
 [[package]]
 id = "hirsel.ai/replay_receive_laws@1"

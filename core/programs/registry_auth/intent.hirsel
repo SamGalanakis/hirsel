@@ -21,7 +21,7 @@ pub type Intent: shareable + send {
     action: Action
 }
 
-pub type Refusal: key = InvalidIntent | InvalidSubjects | Unauthorized | StaleGeneration | EnrollmentRefused | Unavailable
+pub type Refusal: key = InvalidIntent | InvalidSubjects | Unauthorized | StaleGeneration | EnrollmentRefused | RateLimited | Unavailable
 
 fn cat(a: String, b: String) -> String {
     let mut out = string.from(a)
@@ -29,13 +29,13 @@ fn cat(a: String, b: String) -> String {
     take out
 }
 
-fn decimal(n: u64) -> String {
+pub fn decimal(n: u64) -> String {
     let mut out = string.new()
     string.push_u64(mut out, n)
     take out
 }
 
-fn quoted(s: String) -> String {
+pub fn quoted(s: String) -> String {
     let mut out = string.new()
     std.json.push_quoted(mut out, s)
     take out
@@ -61,7 +61,7 @@ pub fn digest(s: String) -> String {
     std.hex.encode(raw)
 }
 
-fn lower_hex(s: String, n: u64) -> bool {
+pub fn lower_hex(s: String, n: u64) -> bool {
     if string.byte_len(s) != n {
         return false
     }
@@ -181,17 +181,21 @@ fn status_tag(s: Status) -> String {
     }
 }
 
+pub fn retire_reason(reason: String) -> bool {
+    reason == "security" || reason == "deprecated" || reason == "invalid" || reason == "renamed" || reason == "other"
+}
+
 fn status_payload(s: Status) -> Result[String, Refusal] {
     match s {
         Retire(reason, message) => {
-            if reason != "security" && reason != "deprecated" && reason != "invalid" && reason != "renamed" && reason != "other" {
+            if !retire_reason(reason) {
                 return Error(InvalidIntent)
             }
             Ok(pair(quoted(reason), quoted(message)))
         },
         Reinstate(message) => Ok(cat(cat("[", quoted(message)), "]")),
         Advise(id, hash) => {
-            if !lower_hex(hash, 64) {
+            if id == "" || !lower_hex(hash, 64) {
                 return Error(InvalidIntent)
             }
             Ok(pair(quoted(id), quoted(hash)))
@@ -290,4 +294,320 @@ pub fn audience(i: Intent) -> Result[String, Refusal] {
     string.push(mut out, "/")
     string.push(mut out, digest(intent_wire(i)?))
     Ok(take out)
+}
+
+fn array_items(raw: String) -> Result[List[String], Refusal] {
+    let Ok(items) = std.json.decode(raw, fn(s: String, mut c: std.json.Cursor) -> Result[List[String], std.json.Error] {
+        std.json.list_of(s, mut c, fn(t: String, mut cursor: std.json.Cursor) -> Result[String, std.json.Error] {
+            let element = std.json.read_raw(t, mut cursor)?
+            Ok(string.from(element))
+        })
+    }) else {
+        return Error(InvalidIntent)
+    }
+    if tuple(items) != raw {
+        return Error(InvalidIntent)
+    }
+    Ok(take items)
+}
+
+fn text_value(raw: String) -> Result[String, Refusal] {
+    let Ok(s) = std.json.decode(raw, std.json.read_string) else {
+        return Error(InvalidIntent)
+    }
+    if quoted(s) != raw {
+        return Error(InvalidIntent)
+    }
+    Ok(take s)
+}
+
+fn key_rank(ch: char) -> u32 {
+    let n = char.to_u32(ch)
+    if n >= 0xe000 && n <= 0xffff {
+        n + 0x110000
+    } else {
+        n
+    }
+}
+
+fn utf16_order(a: String, b: String) -> Order {
+    let mut i = 0u64
+    let mut j = 0u64
+    while let Some((x, next)) = string.next_scalar(a, i) {
+        let Some((y, end)) = string.next_scalar(b, j) else {
+            return Greater
+        }
+        if x != y {
+            return order.compare(key_rank(x), key_rank(y))
+        }
+        i = next
+        j = end
+    }
+    if j == string.byte_len(b) {
+        Equal
+    } else {
+        Less
+    }
+}
+
+fn jcs_number(raw: String) -> String {
+    let Ok(n) = std.float.parse64(raw) else {
+        return string.new()
+    }
+    if !std.float.is_finite(n) {
+        return string.new()
+    }
+    let (coefficient, power) = std.float.shortest64(n)
+    if coefficient == 0 {
+        return string.from("0")
+    }
+    let digits = decimal(coefficient)
+    let width: i64 = int.narrow(string.byte_len(digits))
+    let point = width + power
+    let mut out = if (float.to_bits64(n) >> 63) != 0 {
+        string.from("-")
+    } else {
+        string.new()
+    }
+    if point <= -6 || point > 21 {
+        string.push(mut out, string.slice(digits, 0, 1))
+        if width > 1 {
+            string.push(mut out, ".")
+            string.push(mut out, string.slice(digits, 1, string.byte_len(digits)))
+        }
+        string.push(mut out, if point < 0 {
+            "e-"
+        } else {
+            "e+"
+        })
+        let exp: u64 = int.narrow(if point < 0 {
+            1 - point
+        } else {
+            point - 1
+        })
+        string.push_u64(mut out, exp)
+    } else if point <= 0 {
+        string.push(mut out, "0.")
+        let zeros: u64 = int.narrow(-point)
+        for _ in 0u64 .. zeros {
+            string.push(mut out, "0")
+        }
+        string.push(mut out, digits)
+    } else if point >= width {
+        string.push(mut out, digits)
+        let zeros: u64 = int.narrow(point - width)
+        for _ in 0u64 .. zeros {
+            string.push(mut out, "0")
+        }
+    } else {
+        let split: u64 = int.narrow(point)
+        string.push(mut out, string.slice(digits, 0, split))
+        string.push(mut out, ".")
+        string.push(mut out, string.slice(digits, split, string.byte_len(digits)))
+    }
+    take out
+}
+
+fn jcs(take value: std.json.TreeValue[String]) -> String {
+    match take value {
+        Null => string.from("null"),
+        True => string.from("true"),
+        False => string.from("false"),
+        Num(s) => jcs_number(s),
+        Str(s) => quoted(s),
+        Arr(xs) => tuple(xs),
+        Obj(fields) => {
+            let mut keys: List[String] = list.new()
+            for (k, _) in fields {
+                list.push(mut keys, clone(k))
+            }
+            std.list.sort(mut keys, utf16_order)
+            let mut out = string.from("{")
+            for i in 0u64 .. list.len(keys) {
+                if i != 0 {
+                    string.push(mut out, ",")
+                }
+                std.json.push_quoted(mut out, keys[i])
+                string.push(mut out, ":")
+                if let Some(v) = map.get(fields, keys[i]) {
+                    string.push(mut out, v)
+                }
+            }
+            string.push(mut out, "}")
+            take out
+        },
+    }
+}
+
+fn record(raw: String) -> Result[Map[String, String], Refusal] {
+    let Ok(fields) = std.json.decode(raw, fn(s: String, mut c: std.json.Cursor) -> Result[Map[String, String], std.json.Error] {
+        let seed: Map[String, String] = map.new()
+        std.json.record_of(s, mut c, take seed, fn(key: String, t: String, mut cursor: std.json.Cursor, mut fs: Map[String, String]) -> Result[(), std.json.Error] {
+            let value = std.json.read_raw(t, mut cursor)?
+            map.insert(mut fs, clone(key), string.from(value))
+            Ok(())
+        })
+    }) else {
+        return Error(InvalidIntent)
+    }
+    Ok(take fields)
+}
+
+fn json_member(fields: Map[String, String], k: String) -> Result[String, Refusal] {
+    let Some(v) = map.get(fields, k) else {
+        return Error(InvalidIntent)
+    }
+    Ok(clone(v))
+}
+
+fn covered(raw: String, version: std.semver.Version) -> Result[bool, Refusal] {
+    let mut introduced = false
+    let mut fixed = false
+    let mut last = false
+    let mut has_limit = false
+    let mut before_limit = false
+    let mut affected = false
+    let mut latest: Option[std.semver.Version] = None
+    let mut last_rank = 0u64
+    for e in array_items(raw)? {
+        let fields = record(e)?
+        if map.len(fields) != 1 {
+            return Error(InvalidIntent)
+        }
+        for (kind, v) in fields {
+            let s = text_value(v)?
+            if kind == "limit" {
+                has_limit = true
+                if s == "*" {
+                    before_limit = true
+                } else {
+                    let Ok(limit) = std.semver.parse(s) else {
+                        return Error(InvalidIntent)
+                    }
+                    if std.semver.ordered(version, limit) == Less {
+                        before_limit = true
+                    }
+                }
+                continue
+            }
+            let rank: u64 = if kind == "introduced" {
+                introduced = true
+                2u64
+            } else if kind == "fixed" {
+                fixed = true
+                0u64
+            } else if kind == "last_affected" {
+                last = true
+                1u64
+            } else {
+                return Error(InvalidIntent)
+            }
+            if kind == "introduced" && s == "0" {
+                if let None = latest {
+                    affected = true
+                }
+                continue
+            }
+            let Ok(boundary) = std.semver.parse(s) else {
+                return Error(InvalidIntent)
+            }
+            let cmp = std.semver.ordered(version, boundary)
+            if cmp == Less || (kind == "last_affected" && cmp == Equal) {
+                continue
+            }
+            if let Some(previous) = view latest {
+                let order_by_version = std.semver.ordered(boundary, previous)
+                if order_by_version == Less || (order_by_version == Equal && rank < last_rank) {
+                    continue
+                }
+            }
+            latest = Some(take boundary)
+            last_rank = rank
+            affected = kind == "introduced"
+        }
+    }
+    if !introduced || (fixed && last) {
+        return Error(InvalidIntent)
+    }
+    Ok(affected && (!has_limit || before_limit))
+}
+
+fn timestamp(raw: String) -> Result[bool, Refusal] {
+    match std.time.parse_rfc3339(text_value(raw)?) {
+        Ok(_) => Ok(true),
+        Error(_) => Ok(false),
+    }
+}
+
+pub fn advisory(data: Bytes, id: String, expected_digest: String, identity: String, version_text: String) -> Result[bool, Refusal] {
+    if list.len(data) > 1048576 {
+        return Error(InvalidIntent)
+    }
+    if id == "" {
+        return Error(InvalidIntent)
+    }
+    let Ok(raw) = string.from_utf8(clone(data)) else {
+        return Error(InvalidIntent)
+    }
+    if digest(raw) != expected_digest || !canonical_json(raw)? {
+        return Error(InvalidIntent)
+    }
+    let doc = record(raw)?
+    if text_value(json_member(doc, "id")?)? != id || !timestamp(json_member(doc, "modified")?)? {
+        return Error(InvalidIntent)
+    }
+    let Some((name, _)) = std.string.split_once(identity, "@") else {
+        return Error(InvalidIntent)
+    }
+    let Ok(version) = std.semver.parse(version_text) else {
+        return Error(InvalidIntent)
+    }
+    let mut applies = false
+    for entry in array_items(json_member(doc, "affected")?)? {
+        let item = record(entry)?
+        let Some(pkg) = map.get(item, "package") else {
+            continue
+        }
+        let p = record(pkg)?
+        if text_value(json_member(p, "ecosystem")?)? != "Hirsel" || text_value(json_member(p, "name")?)? != name {
+            continue
+        }
+        if let Some(values) = map.get(item, "versions") {
+            for v in array_items(values)? {
+                if text_value(v)? == version_text {
+                    applies = true
+                }
+            }
+        }
+        if let Some(ranges) = map.get(item, "ranges") {
+            for r in array_items(ranges)? {
+                let fields = record(r)?
+                if text_value(json_member(fields, "type")?)? == "SEMVER" && covered(json_member(fields, "events")?, version)? {
+                    applies = true
+                }
+            }
+        }
+    }
+    if !applies {
+        return Error(InvalidIntent)
+    }
+    if let Some(v) = map.get(doc, "withdrawn") {
+        if !timestamp(v)? {
+            return Error(InvalidIntent)
+        }
+        return Ok(true)
+    }
+    Ok(false)
+}
+
+pub fn canonical_json(raw: String) -> Result[bool, Refusal] {
+    let encoded = std.json.parse_tree(raw, fn() -> Result[(), Refusal] {
+        Ok(())
+    }, jcs, fn(take e: std.json.Error) -> Refusal {
+        InvalidIntent
+    })
+    let Ok(canon) = take encoded else {
+        return Error(InvalidIntent)
+    }
+    Ok(canon == raw)
 }

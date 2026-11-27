@@ -67,7 +67,7 @@ fn moved_subject() -> Subject {
 }
 
 fn fixture_profile(issuer: String, document: String) -> Profile {
-    let f = Forge(issuer: clone(issuer), jwks_url: cat(issuer, "/keys"), allow: std.jwt.allow(EdDsa), host: "github.com", org_api: "https://api.github.com")
+    let f = Forge(issuer: clone(issuer), jwks_url: cat(issuer, "/keys"), allow: std.jwt.allow(EdDsa), host: "github.com", org_api: "https://api.github.com", org_credential: None)
     result.unwrap(load_keys(f, document))
 }
 
@@ -170,7 +170,42 @@ fn key_authority() {
 
 @test
 fn publisher_authority() -> Result[(), ()] {
+    let empty_id = Intent(origin: string.from(ORIGIN), scope: string.from(DOMAIN), generation: 1, action: ChangeStatus(string.from(ROOT_A), None, Advise(string.new(), string.from(ROOT_B))))
+    require(denied(intent_wire(empty_id)), "an advisory needs an OSV ID")
     oidc_authority()
     key_authority()
+    Ok(())
+}
+
+@test
+fn advisory_evidence() -> Result[(), ()] {
+    let doc = "{\"affected\":[{\"package\":{\"ecosystem\":\"Hirsel\",\"name\":\"acme.dev/pkg\"},\"versions\":[\"1.2.3\"]}],\"id\":\"OSV-1\",\"modified\":\"2024-01-01T00:00:00Z\"}"
+    require(result.unwrap(advisory(string.as_bytes(doc), "OSV-1", digest(doc), "acme.dev/pkg@1", "1.2.3")) == false, "listed release is covered")
+    require(denied(advisory(string.as_bytes(doc), "OSV-1", digest(doc), "acme.dev/pkg@1", "1.2.4")), "unlisted release is outside the advisory")
+    Ok(())
+}
+
+@test
+fn organization_cache() -> Result[(), ()] {
+    let public_headers = request_headers(None)
+    require(list.len(public_headers) == 1 && public_headers[0].name == "User-Agent", "no credential on anonymous enrollment")
+    let token = result.unwrap(secret.seal(clone(b"fixture-token"), "tls_send(api.github.com)"))
+    let headers = request_headers(Some(take token))
+    require(list.len(headers) == 2 && headers[1].name == "Authorization", "configured credential supplied to org API")
+    if let Protected(prefix, _) = view headers[1].value {
+        require(prefix == b"Bearer ", "protected credential uses bearer scheme")
+    } else {
+        fail("org credential must use protected HTTP serialization")
+    }
+    let mut rows: List[OrgDocument] = list.new()
+    remember_org(mut rows, "forge-a", "acme", "doc-a", 100)
+    require(cached_org(rows, "forge-a", "acme", 101) == Some(string.from("doc-a")), "reuse fresh org document")
+    require(cached_org(rows, "forge-b", "acme", 101) == None && cached_org(rows, "forge-a", "other", 101) == None, "cache keys separate forges and tenants")
+    require(cached_org(rows, "forge-a", "acme", 100 + ORG_TTL_NS) == None, "expired enrollment must be fetched again")
+    for i in 0u64 .. ORG_CACHE_SIZE + 2 {
+        remember_org(mut rows, "forge-a", decimal(i), "doc", 102)
+    }
+    require(list.len(rows) == ORG_CACHE_SIZE && cached_org(rows, "forge-a", "acme", 103) == None, "oldest entry evicted")
+    require(rate_limited(429, false, false) && rate_limited(403, true, false) && rate_limited(403, false, true) && !rate_limited(403, false, false), "classify rate limits independently of access refusals")
     Ok(())
 }

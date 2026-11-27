@@ -42,9 +42,7 @@ pub type StatusRequest: send {
     scope: String,
     root: String,
     previous_event: Option[String],
-    generation: u64,
-    is_legal_takedown: bool,
-    signer: String,
+    authority: registry_auth.StatusAuthority,
     intent_digest: String,
     captured_status_parent: u64,
     captured_status_root: tlog.Hash,
@@ -60,13 +58,23 @@ pub type Receipt: send {
     checkpoint_wire: String,
 }
 
+pub type LogState: send {
+    cfg: checkpoint.LogConfig,
+    log: tlog.Log,
+    witness_sizes: List[u64],
+}
+
+pub fn log_index(kind: checkpoint.LogKind) -> u64 {
+    match kind {
+        Release => 0,
+        Status => 1,
+    }
+}
+
 pub type Sequencer: send {
-    release_cfg: checkpoint.LogConfig,
-    status_cfg: checkpoint.LogConfig,
-    release_log: tlog.Log,
-    status_log: tlog.Log,
-    release_witness_sizes: List[u64],
-    status_witness_sizes: List[u64],
+    logs: List[LogState],
+    registry_origin: String,
+    legal_key: Bytes,
     scopes: Map[String, pending.ScopeRecord],
     labels: Map[String, pending.ReleaseRecord],
     releases_by_root: Map[String, pending.ReleaseRecord],
@@ -75,16 +83,11 @@ pub type Sequencer: send {
     status_by_intent: Map[String, (u64, u64, String)],
 }
 
-pub fn new(take release_cfg: checkpoint.LogConfig, take status_cfg: checkpoint.LogConfig) -> Sequencer {
-    let mut rw: List[u64] = list.new()
-    for _ in 0u64 .. list.len(release_cfg.witnesses) {
-        list.push(mut rw, 0)
-    }
-    let mut sw: List[u64] = list.new()
-    for _ in 0u64 .. list.len(status_cfg.witnesses) {
-        list.push(mut sw, 0)
-    }
-    Sequencer(release_cfg: take release_cfg, status_cfg: take status_cfg, release_log: tlog.empty(), status_log: tlog.empty(), release_witness_sizes: take rw, status_witness_sizes: take sw, scopes: map.new(), labels: map.new(), releases_by_root: map.new(), release_by_intent: map.new(), statuses: map.new(), status_by_intent: map.new())
+pub fn new(take release_cfg: checkpoint.LogConfig, take status_cfg: checkpoint.LogConfig, take registry_origin: String, take legal_key: Bytes) -> Sequencer {
+    let mut logs: List[LogState] = list.with_capacity(2)
+    list.push(mut logs, LogState(cfg: take release_cfg, log: tlog.empty(), witness_sizes: list.new()))
+    list.push(mut logs, LogState(cfg: take status_cfg, log: tlog.empty(), witness_sizes: list.new()))
+    Sequencer(logs: take logs, registry_origin: take registry_origin, legal_key: take legal_key, scopes: map.new(), labels: map.new(), releases_by_root: map.new(), release_by_intent: map.new(), statuses: map.new(), status_by_intent: map.new())
 }
 
 pub fn scope_state(seq: Sequencer, scope: String) -> Option[pending.ScopeRecord] {
@@ -150,25 +153,27 @@ fn map_cp_err(take e: checkpoint.CheckpointError) -> Error {
     }
 }
 
-fn fold_release_entry(mut seq: Sequencer, index: u64, head_size: u64, raw: Bytes) -> Result[(), Error] {
-    match pending.fold_release(mut seq.scopes, mut seq.labels, mut seq.releases_by_root, mut seq.release_by_intent, index, head_size, raw) {
+fn stage_entry(mut delta: pending.Fold, seq: Sequencer, kind: checkpoint.LogKind, index: u64, head_size: u64, raw: Bytes) -> Result[(), Error] {
+    let folded = match kind {
+        Release => pending.fold_release(mut delta, seq.scopes, seq.labels, index, head_size, raw),
+        Status => pending.fold_status(mut delta, seq.statuses, index, head_size, raw),
+    }
+    match folded {
         Ok(()) => Ok(()),
         Error(_) => Error(IntegrityFailure),
     }
 }
 
-fn fold_status_entry(mut seq: Sequencer, index: u64, head_size: u64, raw: Bytes) -> Result[(), Error] {
-    match pending.fold_status(mut seq.statuses, mut seq.status_by_intent, index, head_size, raw) {
-        Ok(()) => Ok(()),
-        Error(_) => Error(IntegrityFailure),
-    }
+fn take_log(mut seq: Sequencer, kind: checkpoint.LogKind) -> tlog.Log {
+    replace(mut seq.logs[log_index(kind)].log, tlog.empty())
+}
+
+fn restore_log(mut seq: Sequencer, kind: checkpoint.LogKind, take log: tlog.Log) {
+    seq.logs[log_index(kind)].log = take log
 }
 
 fn sync_one_log(mut seq: Sequencer, mut client: std.object.Client, kind: checkpoint.LogKind, deadline_ns: u64) -> Result[Option[checkpoint.CurrentCheckpoint], Error] waits {
-    let current_opt = match kind {
-        Release => checkpoint.read_checkpoint(mut client, seq.release_cfg, deadline_ns),
-        Status => checkpoint.read_checkpoint(mut client, seq.status_cfg, deadline_ns),
-    }
+    let current_opt = checkpoint.read_checkpoint(mut client, seq.logs[log_index(kind)].cfg, deadline_ns)
     let current = match take current_opt {
         Ok(Some(take c)) => take c,
         Ok(None) => return Ok(None),
@@ -176,18 +181,12 @@ fn sync_one_log(mut seq: Sequencer, mut client: std.object.Client, kind: checkpo
     }
     let target_size = tlog.note.tree_size(current.head)
     let target_root = tlog.note.tree_root(current.head)
-    let local_size = match kind {
-        Release => tlog.size(seq.release_log),
-        Status => tlog.size(seq.status_log),
-    }
+    let local_size = tlog.size(seq.logs[log_index(kind)].log)
     if target_size < local_size {
         return Error(IntegrityFailure)
     }
     if target_size == local_size {
-        let local_root = match kind {
-            Release => option.unwrap(tlog.root_at(seq.release_log, local_size)),
-            Status => option.unwrap(tlog.root_at(seq.status_log, local_size)),
-        }
+        let local_root = option.unwrap(tlog.root_at(seq.logs[log_index(kind)].log, local_size))
         if local_root != target_root {
             return Error(IntegrityFailure)
         }
@@ -197,33 +196,51 @@ fn sync_one_log(mut seq: Sequencer, mut client: std.object.Client, kind: checkpo
         Ok(take list_e) => take list_e,
         Error(take e) => return Error(map_cp_err(take e)),
     }
-    let mut cand = match kind {
-        Release => checkpoint.clone_log(seq.release_log),
-        Status => checkpoint.clone_log(seq.status_log),
+    let mut cand = take_log(mut seq, kind)
+    let staged = stage_replay(seq, mut client, kind, mut cand, added, target_size, target_root, deadline_ns)
+    match take staged {
+        Ok(take delta) => pending.apply_fold(mut seq, take delta),
+        Error(take e) => {
+            tlog.truncate(mut cand, local_size)
+            restore_log(mut seq, kind, take cand)
+            return Error(take e)
+        },
     }
-    for e in added {
-        if let Error(_) = tlog.append(mut cand, clone(e)) {
+    restore_log(mut seq, kind, take cand)
+    Ok(Some(take current))
+}
+
+fn stage_replay(seq: Sequencer, mut client: std.object.Client, kind: checkpoint.LogKind, mut cand: tlog.Log, added: List[Bytes], target: u64, root: tlog.Hash, deadline_ns: u64) -> Result[pending.Fold, Error] waits {
+    let start = tlog.size(cand)
+    let mut delta = pending.empty_fold()
+    let cfg = view seq.logs[log_index(kind)].cfg
+    while tlog.size(cand) < target {
+        let n = tlog.size(cand)
+        let proposal = match checkpoint.read_pending(mut client, cfg, n, option.unwrap(tlog.root_at(cand, n)), deadline_ns) {
+            Ok(Some(take p)) => take p,
+            Ok(None) => return Error(IntegrityFailure),
+            Error(take e) => return Error(map_cp_err(take e)),
+        }
+        let count = list.len(proposal.entries)
+        if count == 0 || count > target - n {
             return Error(IntegrityFailure)
         }
+        let end = n + count
+        for e in proposal.entries {
+            let index = tlog.size(cand)
+            if e != added[index - start] {
+                return Error(IntegrityFailure)
+            }
+            stage_entry(mut delta, seq, kind, index, end, e)?
+            if let Error(_) = tlog.append(mut cand, clone(e)) {
+                return Error(IntegrityFailure)
+            }
+        }
     }
-    if tlog.root_at(cand, target_size) != Some(target_root) {
+    if tlog.root_at(cand, target) != Some(root) {
         return Error(IntegrityFailure)
     }
-    match kind {
-        Release => {
-            seq.release_log = take cand
-            for i in 0u64 .. list.len(added) {
-                fold_release_entry(mut seq, local_size + i, target_size, clone(added[i]))?
-            }
-        },
-        Status => {
-            seq.status_log = take cand
-            for i in 0u64 .. list.len(added) {
-                fold_status_entry(mut seq, local_size + i, target_size, clone(added[i]))?
-            }
-        },
-    }
-    Ok(Some(take current))
+    Ok(take delta)
 }
 
 pub fn sync_release(mut seq: Sequencer, mut client: std.object.Client, deadline_ns: u64) -> Result[Option[checkpoint.CurrentCheckpoint], Error] waits {
@@ -234,30 +251,34 @@ pub fn sync_status(mut seq: Sequencer, mut client: std.object.Client, deadline_n
     sync_one_log(mut seq, mut client, Status, deadline_ns)
 }
 
+fn genesis_for_log(mut client: std.object.Client, mut state: LogState, random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[checkpoint.CurrentCheckpoint, checkpoint.CheckpointError] waits {
+    checkpoint.init_genesis(mut client, state.cfg, mut state.witness_sizes, random, deadline_ns, now_seconds, post)
+}
+
 /// Initializes genesis checkpoints for both release and status logs.
 pub fn init_genesis(mut seq: Sequencer, mut client: std.object.Client, random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[(), Error] waits {
-    match checkpoint.init_genesis(mut client, seq.release_cfg, mut seq.release_witness_sizes, random, deadline_ns, now_seconds, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
-        post_witness(Release, i, p, b)
-    }) {
-        Ok(_) => (),
-        Error(take e) => return Error(map_cp_err(take e)),
-    }
-    match checkpoint.init_genesis(mut client, seq.status_cfg, mut seq.status_witness_sizes, random, deadline_ns, now_seconds, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
-        post_witness(Status, i, p, b)
-    }) {
-        Ok(_) => (),
-        Error(take e) => return Error(map_cp_err(take e)),
+    for idx in 0u64 .. list.len(seq.logs) {
+        let kind = seq.logs[idx].cfg.kind
+        let _ = result.map_err(genesis_for_log(mut client, mut seq.logs[idx], random, deadline_ns, now_seconds, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+            post_witness(kind, i, p, b)
+        }), map_cp_err)?
     }
     let _ = sync_release(mut seq, mut client, deadline_ns)?
     let _ = sync_status(mut seq, mut client, deadline_ns)?
     Ok(())
 }
 
-fn store_evidence_list(mut client: std.object.Client, items: List[EvidenceInput], deadline_ns: u64) -> Result[(), Error] waits {
+fn validate_evidence(items: List[EvidenceInput]) -> Result[(), Error] {
     for ev in items {
         if !pending.lower_hex(ev.digest, 64) || pending.sha256_hex(ev.data) != ev.digest {
             return Error(InvalidInput)
         }
+    }
+    Ok(())
+}
+
+fn store_evidence_list(mut client: std.object.Client, items: List[EvidenceInput], deadline_ns: u64) -> Result[(), Error] waits {
+    for ev in items {
         let key = prefix_key("e/", ev.digest)
         match checkpoint.put_no_clobber_readback(mut client, key, ev.data, order.max(list.len(ev.data), 1048576u64), deadline_ns) {
             Ok(CreatedNew) => (),
@@ -274,40 +295,62 @@ fn store_evidence_list(mut client: std.object.Client, items: List[EvidenceInput]
 
 type FinishOutcome = CommittedBatch(checkpoint.CurrentCheckpoint) | AdvancedElsewhere
 
-fn witness_for_log(mut seq: Sequencer, kind: checkpoint.LogKind, cand: tlog.Log, new_size: u64, new_root: tlog.Hash, random: Random, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, on_step: scoped fn(StepPoint) -> Result[(), Error]) -> Result[tlog.note.SignedHead, checkpoint.CheckpointError] waits {
-    match kind {
-        Release => checkpoint.witness_candidate(seq.release_cfg, cand, new_size, new_root, mut seq.release_witness_sizes, random, now_seconds, post_witness, scoped fn(idx: u64) -> Result[(), checkpoint.CheckpointError] {
-            match on_step(AfterWitnessReply(idx)) {
-                Ok(()) => Ok(()),
-                Error(_) => Error(Interrupted),
+fn finish_winning_batch(mut seq: Sequencer, mut client: std.object.Client, kind: checkpoint.LogKind, take parent_in: checkpoint.CurrentCheckpoint, entries: List[Bytes], random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, on_step: scoped fn(StepPoint) -> Result[(), Error]) -> Result[FinishOutcome, Error] waits {
+    let old_size = tlog.note.tree_size(parent_in.head)
+    let new_size = old_size + list.len(entries)
+    let mut delta = pending.empty_fold()
+    for i in 0u64 .. list.len(entries) {
+        stage_entry(mut delta, seq, kind, old_size + i, new_size, entries[i])?
+    }
+    let published = publish_staged(mut client, mut seq.logs[log_index(kind)], take parent_in, entries, random, deadline_ns, now_seconds, post_witness, on_step)
+    if let Ok(CommittedBatch(_)) = view published {
+        pending.apply_fold(mut seq, take delta)
+    } else {
+        tlog.truncate(mut seq.logs[log_index(kind)].log, old_size)
+    }
+    if let Ok(CommittedBatch(_)) = view published {
+        on_step(AfterCheckpointCasBeforeReply)?
+    }
+    if let Ok(AdvancedElsewhere) = view published {
+        let _ = sync_one_log(mut seq, mut client, kind, deadline_ns)?
+    }
+    take published
+}
+
+fn witness_for_log(mut state: LogState, size: u64, root: tlog.Hash, random: Random, now_seconds: scoped fn() -> u64, post: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, reply: scoped fn(u64) -> Result[(), checkpoint.CheckpointError]) -> Result[tlog.note.SignedHead, checkpoint.CheckpointError] waits {
+    checkpoint.witness_candidate(state.cfg, state.log, size, root, mut state.witness_sizes, random, now_seconds, post, reply)
+}
+
+fn witnessed_batch(mut client: std.object.Client, mut state: LogState, old_size: u64, new_size: u64, new_root: tlog.Hash, random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, reply: scoped fn(u64) -> Result[(), checkpoint.CheckpointError]) -> Result[Option[tlog.note.SignedHead], Error] waits {
+    match witness_for_log(mut state, new_size, new_root, random, now_seconds, post, reply) {
+        Ok(take h) => Ok(Some(take h)),
+        Error(WitnessAhead(_)) => {
+            let Some(cur) = result.map_err(checkpoint.read_checkpoint(mut client, state.cfg, deadline_ns), map_cp_err)? else {
+                return Error(WitnessFork)
             }
-        }),
-        Status => checkpoint.witness_candidate(seq.status_cfg, cand, new_size, new_root, mut seq.status_witness_sizes, random, now_seconds, post_witness, scoped fn(idx: u64) -> Result[(), checkpoint.CheckpointError] {
-            match on_step(AfterWitnessReply(idx)) {
-                Ok(()) => Ok(()),
-                Error(_) => Error(Interrupted),
+            if tlog.note.tree_size(cur.head) > old_size {
+                return Ok(None)
             }
-        }),
+            // This caller is already helping the immutable winner at old_size.
+            Error(WitnessFork)
+        },
+        Error(take e) => Error(map_cp_err(take e)),
     }
 }
 
-fn finish_winning_batch(mut seq: Sequencer, mut client: std.object.Client, kind: checkpoint.LogKind, take parent_in: checkpoint.CurrentCheckpoint, entries: List[Bytes], random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, on_step: scoped fn(StepPoint) -> Result[(), Error]) -> Result[FinishOutcome, Error] waits {
+fn publish_staged(mut client: std.object.Client, mut state: LogState, take parent_in: checkpoint.CurrentCheckpoint, entries: List[Bytes], random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, on_step: scoped fn(StepPoint) -> Result[(), Error]) -> Result[FinishOutcome, Error] waits {
     let mut parent = take parent_in
     let old_size = tlog.note.tree_size(parent.head)
-    let mut cand = match kind {
-        Release => checkpoint.clone_log(seq.release_log),
-        Status => checkpoint.clone_log(seq.status_log),
-    }
     for e in entries {
-        if let Error(_) = tlog.append(mut cand, clone(e)) {
+        if let Error(_) = tlog.append(mut state.log, clone(e)) {
             return Error(IntegrityFailure)
         }
     }
-    let new_size = tlog.size(cand)
-    let Some(new_root) = tlog.root_at(cand, new_size) else {
+    let new_size = tlog.size(state.log)
+    let Some(new_root) = tlog.root_at(state.log, new_size) else {
         return Error(IntegrityFailure)
     }
-    match checkpoint.materialize_tiles(mut client, kind, cand, old_size, new_size, deadline_ns, scoped fn() -> Result[(), checkpoint.CheckpointError] {
+    match checkpoint.materialize_tiles(mut client, state.cfg.kind, state.log, old_size, new_size, deadline_ns, scoped fn() -> Result[(), checkpoint.CheckpointError] {
         match on_step(AfterTilePut) {
             Ok(()) => Ok(()),
             Error(_) => Error(Interrupted),
@@ -316,29 +359,19 @@ fn finish_winning_batch(mut seq: Sequencer, mut client: std.object.Client, kind:
         Ok(()) => (),
         Error(take e) => return Error(map_cp_err(take e)),
     }
-    let mut witnessed = match witness_for_log(mut seq, kind, cand, new_size, new_root, random, now_seconds, post_witness, on_step) {
-        Ok(take h) => take h,
-        Error(WitnessAhead(disclosed)) => {
-            let Some(cur) = sync_one_log(mut seq, mut client, kind, deadline_ns)? else {
-                return Error(WitnessFork)
-            }
-            if tlog.note.tree_size(cur.head) >= disclosed {
-                return Ok(AdvancedElsewhere)
-            }
-            return Error(WitnessFork)
-        },
-        Error(take e) => return Error(map_cp_err(take e)),
+    let observed = witnessed_batch(mut client, mut state, old_size, new_size, new_root, random, deadline_ns, now_seconds, post_witness, scoped fn(idx: u64) -> Result[(), checkpoint.CheckpointError] {
+        match on_step(AfterWitnessReply(idx)) {
+            Ok(()) => Ok(()),
+            Error(_) => Error(Interrupted),
+        }
+    })?
+    let mut witnessed = match take observed {
+        Some(take h) => take h,
+        None => return Ok(AdvancedElsewhere),
     }
-    let head_res = match kind {
-        Release => checkpoint.write_historical_head(mut client, seq.release_cfg, witnessed, deadline_ns),
-        Status => checkpoint.write_historical_head(mut client, seq.status_cfg, witnessed, deadline_ns),
-    }
-    match take head_res {
-        Ok(()) => (),
-        Error(take e) => return Error(map_cp_err(take e)),
-    }
+    result.map_err(checkpoint.write_historical_head(mut client, state.cfg, witnessed, deadline_ns), map_cp_err)?
     on_step(AfterHistoricalHead)?
-    let cp_key = checkpoint.checkpoint_key(kind)
+    let cp_key = checkpoint.checkpoint_key(state.cfg.kind)
     let mut cas_tries: u64 = 0
     while cas_tries < 16 {
         cas_tries += 1
@@ -347,21 +380,6 @@ fn finish_winning_batch(mut seq: Sequencer, mut client: std.object.Client, kind:
         let (res, _) = std.object.store_if(mut client, cp_key, Match(parent.etag), string.into_bytes(clone(wire)), deadline_ns)
         let need_reconcile = match take res {
             Ok(Applied(meta)) => {
-                match kind {
-                    Release => {
-                        seq.release_log = take cand
-                        for i in 0u64 .. list.len(entries) {
-                            fold_release_entry(mut seq, old_size + i, new_size, clone(entries[i]))?
-                        }
-                    },
-                    Status => {
-                        seq.status_log = take cand
-                        for i in 0u64 .. list.len(entries) {
-                            fold_status_entry(mut seq, old_size + i, new_size, clone(entries[i]))?
-                        }
-                    },
-                }
-                on_step(AfterCheckpointCasBeforeReply)?
                 return Ok(CommittedBatch(checkpoint.CurrentCheckpoint(head: take witnessed, etag: meta.etag, wire: take wire)))
             },
             Ok(Mismatch) => true,
@@ -374,10 +392,7 @@ fn finish_winning_batch(mut seq: Sequencer, mut client: std.object.Client, kind:
             },
         }
         if need_reconcile {
-            let cur_opt = match kind {
-                Release => checkpoint.read_checkpoint(mut client, seq.release_cfg, deadline_ns),
-                Status => checkpoint.read_checkpoint(mut client, seq.status_cfg, deadline_ns),
-            }
+            let cur_opt = checkpoint.read_checkpoint(mut client, state.cfg, deadline_ns)
             let cur = match take cur_opt {
                 Ok(Some(take c)) => take c,
                 _ => return Error(Uncertain),
@@ -391,21 +406,16 @@ fn finish_winning_batch(mut seq: Sequencer, mut client: std.object.Client, kind:
                 if cur_root != tlog.note.tree_root(parent.head) {
                     return Error(IntegrityFailure)
                 }
-                let is_fresh = match kind {
-                    Release => checkpoint.cosignatures_fresh(seq.release_cfg, witnessed, now_seconds()),
-                    Status => checkpoint.cosignatures_fresh(seq.status_cfg, witnessed, now_seconds()),
-                }
-                if !is_fresh {
-                    witnessed = match witness_for_log(mut seq, kind, cand, new_size, new_root, random, now_seconds, post_witness, scoped fn(_pt: StepPoint) -> Result[(), Error] {
+                if !checkpoint.cosignatures_fresh(state.cfg, witnessed, now_seconds()) {
+                    witnessed = match witnessed_batch(mut client, mut state, old_size, new_size, new_root, random, deadline_ns, now_seconds, post_witness, scoped fn(_idx: u64) -> Result[(), checkpoint.CheckpointError] {
                         Ok(())
-                    }) {
-                        Ok(take h) => take h,
-                        Error(take e) => return Error(map_cp_err(take e)),
+                    })? {
+                        Some(take h) => take h,
+                        None => return Ok(AdvancedElsewhere),
                     }
                 }
                 parent = take cur
             } else {
-                let _ = sync_one_log(mut seq, mut client, kind, deadline_ns)?
                 return Ok(AdvancedElsewhere)
             }
         }
@@ -416,10 +426,7 @@ fn finish_winning_batch(mut seq: Sequencer, mut client: std.object.Client, kind:
 fn propose_and_finish(mut seq: Sequencer, mut client: std.object.Client, kind: checkpoint.LogKind, take parent: checkpoint.CurrentCheckpoint, take my_batch: List[Bytes], random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, on_step: scoped fn(StepPoint) -> Result[(), Error]) -> Result[FinishOutcome, Error] waits {
     let n = tlog.note.tree_size(parent.head)
     let parent_hash_hex = pending.hash_to_hex(tlog.note.tree_root(parent.head))
-    let origin = match kind {
-        Release => string.from(seq.release_cfg.origin),
-        Status => string.from(seq.status_cfg.origin),
-    }
+    let origin = string.from(seq.logs[log_index(kind)].cfg.origin)
     let Ok(proposal_bytes) = pending.encode_proposal(origin, n, parent_hash_hex, my_batch) else {
         return Error(InvalidInput)
     }
@@ -450,14 +457,14 @@ fn check_release_included(seq: Sequencer, identity: String, version: String, roo
         if rec.root != root {
             return Error(LabelConflict)
         }
-        return Ok(Some(Receipt(origin: string.from(seq.release_cfg.origin), leaf_index: rec.leaf_index, head_size: rec.head_size, root: Some(string.from(rec.root)), checkpoint_wire: string.from(checkpoint_wire))))
+        return Ok(Some(Receipt(origin: string.from(seq.logs[0u64].cfg.origin), leaf_index: rec.leaf_index, head_size: rec.head_size, root: Some(string.from(rec.root)), checkpoint_wire: string.from(checkpoint_wire))))
     }
     Ok(None)
 }
 
 fn check_intent_included(seq: Sequencer, intent_digest: String, checkpoint_wire: String) -> Option[Receipt] {
     if let Some((leaf_index, head_size, root_opt)) = map.get(seq.release_by_intent, intent_digest) {
-        return Some(Receipt(origin: string.from(seq.release_cfg.origin), leaf_index: leaf_index, head_size: head_size, root: clone(root_opt), checkpoint_wire: string.from(checkpoint_wire)))
+        return Some(Receipt(origin: string.from(seq.logs[0u64].cfg.origin), leaf_index: leaf_index, head_size: head_size, root: clone(root_opt), checkpoint_wire: string.from(checkpoint_wire)))
     }
     None
 }
@@ -465,7 +472,7 @@ fn check_intent_included(seq: Sequencer, intent_digest: String, checkpoint_wire:
 fn check_status_included(seq: Sequencer, intent_digest: String, prev: Option[String], checkpoint_wire: String) -> Option[Receipt] {
     let skey = pending.status_intent_key(intent_digest, prev)
     if let Some((leaf_index, head_size, root)) = map.get(seq.status_by_intent, skey) {
-        return Some(Receipt(origin: string.from(seq.status_cfg.origin), leaf_index: leaf_index, head_size: head_size, root: Some(string.from(root)), checkpoint_wire: string.from(checkpoint_wire)))
+        return Some(Receipt(origin: string.from(seq.logs[1u64].cfg.origin), leaf_index: leaf_index, head_size: head_size, root: Some(string.from(root)), checkpoint_wire: string.from(checkpoint_wire)))
     }
     None
 }
@@ -475,27 +482,25 @@ pub fn commit_publish_with_hook(mut seq: Sequencer, mut client: std.object.Clien
     let Ok(Release(rel_fields)) = pending.decode_release_entry(req.release_entry) else {
         return Error(InvalidInput)
     }
-    if rel_fields.identity != req.identity || rel_fields.version != req.version || rel_fields.root != req.root || rel_fields.auth.subject != req.signer || rel_fields.auth.intent_digest != req.intent_digest {
+    let expected_gen = order.max(req.generation, 1u64)
+    if rel_fields.generation != expected_gen || rel_fields.identity != req.identity || rel_fields.version != req.version || rel_fields.root != req.root || rel_fields.auth.subject != req.signer || rel_fields.auth.intent_digest != req.intent_digest {
         return Error(InvalidInput)
     }
     if pending.scope_of_identity(req.identity) != Some(string.from(req.scope)) {
         return Error(InvalidInput)
     }
+    let mut has_head = false
     for f in req.frames {
+        has_head = has_head || f.root == req.root
         if let Error(_) = pending.verify_zstd_frame(f.compressed, f.root, pending.MAX_COMPRESSED_FRAME, pending.MAX_EXPANDED_FRAME) {
             return Error(InvalidInput)
         }
     }
-    for ev in req.scope_bind_evidence {
-        if !pending.lower_hex(ev.digest, 64) || pending.sha256_hex(ev.data) != ev.digest {
-            return Error(InvalidInput)
-        }
+    if !has_head {
+        return Error(InvalidInput)
     }
-    for ev in req.evidence {
-        if !pending.lower_hex(ev.digest, 64) || pending.sha256_hex(ev.data) != ev.digest {
-            return Error(InvalidInput)
-        }
-    }
+    validate_evidence(req.scope_bind_evidence)?
+    validate_evidence(req.evidence)?
     let Some(initial_parent) = sync_release(mut seq, mut client, deadline_ns)? else {
         return Error(IntegrityFailure)
     }
@@ -651,6 +656,19 @@ pub fn commit_publish(mut seq: Sequencer, mut client: std.object.Client, req: Pu
     })
 }
 
+fn rebind_authority(seq: Sequencer, req: RebindRequest) -> Result[(), Error] {
+    let Some(rec) = map.get(seq.scopes, req.scope) else {
+        return Error(StaleGeneration)
+    }
+    if rec.generation != req.old_generation || rec.generation == 18446744073709551615u64 {
+        return Error(StaleGeneration)
+    }
+    if !has_subject(rec.subjects, req.signer) {
+        return Error(Unauthorized)
+    }
+    Ok(())
+}
+
 /// Full commit for a scope-rebind entry on the release log (never mutates s/<scope>).
 pub fn commit_rebind_with_hook(mut seq: Sequencer, mut client: std.object.Client, req: RebindRequest, random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, recheck: scoped fn(u64) -> Result[(), Error], on_step: scoped fn(StepPoint) -> Result[(), Error]) -> Result[Receipt, Error] waits {
     let Ok(ScopeRebind(scope, old_gen, _, _, _, auth)) = pending.decode_release_entry(req.rebind_entry) else {
@@ -665,6 +683,9 @@ pub fn commit_rebind_with_hook(mut seq: Sequencer, mut client: std.object.Client
     if let Some(take receipt) = check_intent_included(seq, req.intent_digest, initial_parent.wire) {
         return Ok(take receipt)
     }
+    rebind_authority(seq, req)?
+    validate_evidence(req.evidence)?
+    recheck(tlog.note.tree_size(initial_parent.head))?
     on_step(AfterAdmit)?
     store_evidence_list(mut client, req.evidence, deadline_ns)?
     on_step(AfterBlobPut)?
@@ -678,17 +699,7 @@ pub fn commit_rebind_with_hook(mut seq: Sequencer, mut client: std.object.Client
             return Ok(take receipt)
         }
         recheck(tlog.note.tree_size(parent.head))?
-        {
-            let Some(scope_rec) = map.get(seq.scopes, req.scope) else {
-                return Error(StaleGeneration)
-            }
-            if scope_rec.generation != req.old_generation {
-                return Error(StaleGeneration)
-            }
-            if !has_subject(scope_rec.subjects, req.signer) {
-                return Error(Unauthorized)
-            }
-        }
+        rebind_authority(seq, req)?
         let mut my_batch: List[Bytes] = list.with_capacity(1)
         list.push(mut my_batch, clone(req.rebind_entry))
         if let CommittedBatch(cp) = propose_and_finish(mut seq, mut client, Release, take parent, take my_batch, random, deadline_ns, now_seconds, post_witness, on_step)? {
@@ -712,20 +723,26 @@ fn validate_status_transition(seq: Sequencer, entry: pending.StatusEntry, req: S
     let Some(rel) = map.get(seq.releases_by_root, req.root) else {
         return Error(UnknownRoot)
     }
-    if req.is_legal_takedown {
-        if req.generation != 0 {
-            return Error(Unauthorized)
-        }
-    } else {
-        let Some(scope_rec) = map.get(seq.scopes, rel.scope) else {
-            return Error(StaleGeneration)
-        }
-        if scope_rec.generation != req.generation {
-            return Error(StaleGeneration)
-        }
-        if !has_subject(scope_rec.subjects, req.signer) {
-            return Error(Unauthorized)
-        }
+    if rel.scope != req.scope {
+        return Error(Unauthorized)
+    }
+    match registry_auth.principal(req.authority) {
+        Legal(key) => {
+            if key != seq.legal_key {
+                return Error(Unauthorized)
+            }
+        },
+        Scope(generation, signer) => {
+            let Some(rec) = map.get(seq.scopes, rel.scope) else {
+                return Error(StaleGeneration)
+            }
+            if rec.generation != generation {
+                return Error(StaleGeneration)
+            }
+            if !has_subject(rec.subjects, signer) {
+                return Error(Unauthorized)
+            }
+        },
     }
     let current_state: pending.LifecycleState = match map.get(seq.statuses, req.root) {
         Some(st) => {
@@ -745,36 +762,23 @@ fn validate_status_transition(seq: Sequencer, entry: pending.StatusEntry, req: S
         return Error(TerminalStatus)
     }
     match entry {
-        Retire(_, _, _, _, _, _) => {
-            if req.is_legal_takedown {
-                return Error(InvalidInput)
-            }
-            match current_state {
-                Active => Ok(()),
-                _ => Error(PredecessorConflict),
-            }
+        Retire(_, _, _, _, _, _) if current_state != Active => Error(PredecessorConflict),
+        Reinstate(_, _, _, _, _) => match current_state {
+            Retired(_, _) => Ok(()),
+            _ => Error(PredecessorConflict),
         },
-        Reinstate(_, _, _, _, _) => {
-            if req.is_legal_takedown {
-                return Error(InvalidInput)
+        Advise(_, _, id, digest, _, _) => {
+            for ev in req.evidence {
+                if ev.digest == digest {
+                    return match registry_auth.advisory(ev.data, id, digest, rel.identity, rel.version) {
+                        Ok(_) => Ok(()),
+                        Error(_) => Error(InvalidInput),
+                    }
+                }
             }
-            match current_state {
-                Retired(_, _) => Ok(()),
-                _ => Error(PredecessorConflict),
-            }
+            Error(InvalidInput)
         },
-        Advise(_, _, _, _, _, _) => {
-            if req.is_legal_takedown {
-                return Error(InvalidInput)
-            }
-            Ok(())
-        },
-        Takedown(_, _, _, _, _, _) => {
-            if !req.is_legal_takedown {
-                return Error(Unauthorized)
-            }
-            Ok(())
-        },
+        _ => Ok(()),
     }
 }
 
@@ -809,21 +813,38 @@ pub fn commit_status_with_hook(mut seq: Sequencer, mut client: std.object.Client
     let Ok(parsed) = pending.decode_status_entry(req.status_entry) else {
         return Error(InvalidInput)
     }
-    let (e_root, e_prev, e_auth): (String, Option[String], pending.AuthFields) = match view parsed {
-        Retire(r, p, _, _, _, a) => (string.from(r), clone(p), clone(a)),
-        Reinstate(r, p, _, _, a) => (string.from(r), clone(p), clone(a)),
-        Advise(r, p, _, _, _, a) => (string.from(r), clone(p), clone(a)),
-        Takedown(r, p, _, _, _, a) => (string.from(r), clone(p), clone(a)),
+    let (root, prev, status, auth): (String, Option[String], registry_auth.Status, pending.AuthFields) = match view parsed {
+        Retire(r, p, reason, msg, _, a) => (clone(r), clone(p), Retire(clone(reason), clone(msg)), clone(a)),
+        Reinstate(r, p, msg, _, a) => (clone(r), clone(p), Reinstate(clone(msg)), clone(a)),
+        Advise(r, p, id, hash, _, a) => (clone(r), clone(p), Advise(clone(id), clone(hash)), clone(a)),
+        Takedown(r, p, reason, msg, _, a) => (clone(r), clone(p), Takedown(clone(reason), clone(msg)), clone(a)),
     }
-    if e_root != req.root || e_prev != req.previous_event || e_auth.subject != req.signer || e_auth.intent_digest != req.intent_digest {
+    if root != req.root || prev != req.previous_event || auth.intent_digest != req.intent_digest {
         return Error(InvalidInput)
+    }
+    let generation = match registry_auth.principal(req.authority) {
+        Scope(gen, _) => gen,
+        Legal(key) => {
+            if key != seq.legal_key {
+                return Error(Unauthorized)
+            }
+            0u64
+        },
+    }
+    let intent = registry_auth.Intent(origin: clone(seq.registry_origin), scope: clone(req.scope), generation: generation, action: ChangeStatus(take root, take prev, take status))
+    if !registry_auth.status_authorized(req.authority, intent, pending.auth_wire(auth)) {
+        return Error(Unauthorized)
+    }
+    let takedown = match view parsed {
+        Takedown(_, _, _, _, _, _) => true,
+        _ => false,
     }
     let _ = sync_release(mut seq, mut client, deadline_ns)?
     let Some(initial_parent) = sync_status(mut seq, mut client, deadline_ns)? else {
         return Error(IntegrityFailure)
     }
     if let Some(take receipt) = check_status_included(seq, req.intent_digest, req.previous_event, initial_parent.wire) {
-        if req.is_legal_takedown {
+        if takedown {
             install_deletion_marker(mut client, req.root, deadline_ns)?
         }
         return Ok(take receipt)
@@ -831,6 +852,7 @@ pub fn commit_status_with_hook(mut seq: Sequencer, mut client: std.object.Client
     if tlog.note.tree_size(initial_parent.head) != req.captured_status_parent || tlog.note.tree_root(initial_parent.head) != req.captured_status_root {
         return Error(NeedsReadmission)
     }
+    validate_evidence(req.evidence)?
     validate_status_transition(seq, parsed, req)?
     on_step(AfterAdmit)?
     store_evidence_list(mut client, req.evidence, deadline_ns)?
@@ -842,7 +864,7 @@ pub fn commit_status_with_hook(mut seq: Sequencer, mut client: std.object.Client
             return Error(IntegrityFailure)
         }
         if let Some(take receipt) = check_status_included(seq, req.intent_digest, req.previous_event, parent.wire) {
-            if req.is_legal_takedown {
+            if takedown {
                 on_step(AfterTakedownStatusBeforeMarker)?
                 install_deletion_marker(mut client, req.root, deadline_ns)?
             }
@@ -855,7 +877,7 @@ pub fn commit_status_with_hook(mut seq: Sequencer, mut client: std.object.Client
         list.push(mut my_batch, clone(req.status_entry))
         if let CommittedBatch(cp) = propose_and_finish(mut seq, mut client, Status, take parent, take my_batch, random, deadline_ns, now_seconds, post_witness, on_step)? {
             if let Some(take receipt) = check_status_included(seq, req.intent_digest, req.previous_event, cp.wire) {
-                if req.is_legal_takedown {
+                if takedown {
                     on_step(AfterTakedownStatusBeforeMarker)?
                     install_deletion_marker(mut client, req.root, deadline_ns)?
                 }
@@ -877,26 +899,19 @@ pub fn recover_pending(mut seq: Sequencer, mut client: std.object.Client, kind: 
     let Some(parent) = sync_one_log(mut seq, mut client, kind, deadline_ns)? else {
         return Ok(false)
     }
+    help_pending_at(mut seq, mut client, kind, take parent, random, deadline_ns, now_seconds, post_witness)
+}
+
+fn help_pending_at(mut seq: Sequencer, mut client: std.object.Client, kind: checkpoint.LogKind, take parent: checkpoint.CurrentCheckpoint, random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[bool, Error] waits {
     let n = tlog.note.tree_size(parent.head)
-    let parent_hash_hex = pending.hash_to_hex(tlog.note.tree_root(parent.head))
-    let pkey = checkpoint.pending_key(kind, n)
-    let existing_raw = match checkpoint.fetch_object(mut client, pkey, 65536, 1048576, deadline_ns) {
-        Ok((_, take data)) => take data,
-        Error(NotFound) => return Ok(false),
-        Error(e) => return Error(Storage(e)),
+    let winner = {
+        let cfg = view seq.logs[log_index(kind)].cfg
+        result.map_err(checkpoint.read_pending(mut client, cfg, n, tlog.note.tree_root(parent.head), deadline_ns), map_cp_err)?
     }
-    let Ok(take prop) = pending.decode_proposal(existing_raw) else {
-        return Error(IntegrityFailure)
+    let Some(take proposal) = take winner else {
+        return Ok(false)
     }
-    let pending.Proposal(origin: p_orig, parent_size: p_size, parent_hash: p_hash, entries: take p_entries) = take prop
-    let expected_origin = match kind {
-        Release => string.from(seq.release_cfg.origin),
-        Status => string.from(seq.status_cfg.origin),
-    }
-    if p_orig != expected_origin || p_size != n || p_hash != parent_hash_hex {
-        return Error(IntegrityFailure)
-    }
-    let _ = finish_winning_batch(mut seq, mut client, kind, take parent, p_entries, random, deadline_ns, now_seconds, post_witness, scoped fn(_pt: StepPoint) -> Result[(), Error] {
+    let _ = finish_winning_batch(mut seq, mut client, kind, take parent, proposal.entries, random, deadline_ns, now_seconds, post_witness, scoped fn(_pt: StepPoint) -> Result[(), Error] {
         Ok(())
     })?
     Ok(true)
@@ -913,13 +928,10 @@ pub fn heartbeat(mut seq: Sequencer, mut client: std.object.Client, kind: checkp
         }
         let size = tlog.note.tree_size(current.head)
         let root = tlog.note.tree_root(current.head)
-        let log_copy = match kind {
-            Release => checkpoint.clone_log(seq.release_log),
-            Status => checkpoint.clone_log(seq.status_log),
-        }
-        let witnessed = match witness_for_log(mut seq, kind, log_copy, size, root, random, now_seconds, post_witness, scoped fn(_pt: StepPoint) -> Result[(), Error] {
+        let observed = witness_for_log(mut seq.logs[log_index(kind)], size, root, random, now_seconds, post_witness, scoped fn(_i: u64) -> Result[(), checkpoint.CheckpointError] {
             Ok(())
-        }) {
+        })
+        let witnessed = match take observed {
             Ok(take h) => take h,
             Error(WitnessAhead(_)) => {
                 let Some(latest) = sync_one_log(mut seq, mut client, kind, deadline_ns)? else {
@@ -927,6 +939,9 @@ pub fn heartbeat(mut seq: Sequencer, mut client: std.object.Client, kind: checkp
                 }
                 if tlog.note.tree_size(latest.head) > size {
                     return Ok(take latest)
+                }
+                if help_pending_at(mut seq, mut client, kind, take latest, random, deadline_ns, now_seconds, post_witness)? {
+                    continue
                 }
                 return Error(WitnessFork)
             },
@@ -958,10 +973,7 @@ pub fn heartbeat(mut seq: Sequencer, mut client: std.object.Client, kind: checkp
                 return Error(IntegrityFailure)
             }
             if latest.etag != current.etag {
-                let is_fresh = match kind {
-                    Release => checkpoint.cosignatures_fresh(seq.release_cfg, latest.head, now_seconds()),
-                    Status => checkpoint.cosignatures_fresh(seq.status_cfg, latest.head, now_seconds()),
-                }
+                let is_fresh = checkpoint.cosignatures_fresh(seq.logs[log_index(kind)].cfg, latest.head, now_seconds())
                 if is_fresh {
                     return Ok(take latest)
                 }

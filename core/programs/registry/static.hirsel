@@ -29,7 +29,7 @@ pub type StaticResponse: send {
     body: Bytes,
 }
 
-fn parse_grouped_index(raw: String) -> Option[u64] {
+pub fn parse_grouped_index(raw: String) -> Option[u64] {
     if raw == "" {
         return None
     }
@@ -68,7 +68,7 @@ fn parse_grouped_index(raw: String) -> Option[u64] {
         if groups == 0 && !is_last && val == 0 {
             return None
         }
-        if acc > 18446744073709551u64 {
+        if acc > 18446744073709551u64 || (acc == 18446744073709551u64 && val > 615) {
             return None
         }
         acc = acc * 1000 + val
@@ -314,7 +314,7 @@ pub fn serve_get(mut seq: commit.Sequencer, mut client: std.object.Client, path:
                         }
                         return takedown_response(string.from("removed"), string.from("content removed"))
                     }
-                    StaticResponse(status: 200, content_type: string.from(CT_FRAME), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: take body)
+                    StaticResponse(status: 200, content_type: string.from(CT_FRAME), cache_control: string.from("public, max-age=0, must-revalidate"), etag: etag_option(meta.etag), body: take body)
                 },
                 Error(e) => storage_error_status(e),
             }

@@ -24,3 +24,7 @@ StoreCatchUp   v2161 ack_before_sync       catchup          RecoveredPrefix    a
 StoreJanitor   -     release_ignores_sealed janitor         HeadBatchesKept    the release rule reads `live` and not the `sealed` entries (§12.11.8)
 StoreJanitor   -     stale_summary         janitor          HeadBatchesKept    the release rule uses a head observed before the INDEX row was written (§12.11.8)
 StoreRetention v2164 tail_lease_ignored    retention_tail   SnapReadable       a Snapshot takes its lease only when its primary root reaches Cold slots, so a Memory primary carrying a Tiered image as a tail base is unprotected once the projector releases the image (STORE-SPEC v2.177 §13.5 "Tail bases are protected too")
+StoreRetention v2164 archive_publish_early   archive ArchiveComplete       head CAS before exact base or unit closure is stored
+StoreRetention v2164 archive_unbounded       archive ArchiveBounded        source keeps every pending generation regardless of extra bytes
+StoreRetention v2164 archive_unfenced_expire archive ArchiveStagedSafe     expired floor erases an already uploaded future object
+StoreRetention v2164 archive_ignore_hold     archive ArchiveSourceReadable cleanup deletes a file still named by an unarchived source receipt

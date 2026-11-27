@@ -2,9 +2,9 @@
 (*
  * Bounded model of Hirsel Store Tiered pack retention (STORE-SPEC §1.9, §3.5,
  * §13.5 "Promoting a historical Snapshot", §13.6 deadlists, the probe and
- * Tiered-idle cuts, §13.9 anchors, §13.10a the export lease).
+ * Tiered-idle cuts, §13.10a the export lease).
  *
- * Holders are a pin, an optional anchor and an optional live-head fork of main
+ * Holders are a pin and an optional live-head fork of main
  * (WithFork), whose row files kills into lineage holder cells (§13.6 "Deadlist
  * cells"), so cells can exist in a Tiered-idle generation (review 3177 F3).
  * The drain is optional, and a cut can drop its probe progress (review 3177 F2).
@@ -46,7 +46,7 @@
  *)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
-CONSTANTS NKeys, MaxStamp, MaxPack, MaxCrash, Rules, Mutant, WithAnchors, WithExport, WithFork,
+CONSTANTS NKeys, MaxStamp, MaxPack, MaxCrash, Rules, Mutant, WithExport, WithFork,
           WithBuild, WithTail, Track
 
 ASSUME Rules \in {"v2157", "v2157_restart", "count3157", "v2164"}
@@ -110,31 +110,148 @@ vars == <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export,
 RootRefs(root) == IF root.on THEN {root.refs[x] : x \in Keys} ELSE {}
 
 DurableRefs(g) ==
-    {g.hrefs[x] : x \in Keys} \cup {g.hu} \cup RootRefs(g.pin) \cup RootRefs(g.anchor)
+    {g.hrefs[x] : x \in Keys} \cup {g.hu} \cup RootRefs(g.pin)
     \cup RootRefs(g.fork) \cup RootRefs(g.build) \cup RootRefs(g.img) \cup g.queue
 
 DurableColdRefs(g) == {r \in DurableRefs(g) : r.k = "C"}
 
 \* §13.6 "Holders": the holder watermarks of main's chain in a generation. The pin
 \* holds at its Snapshot's capture watermark; the fork row's parent side at the
-\* row's watermark. Anchors are not cell holders here (cells are filed for pins and
-\* forks only).
+\* row's watermark.
 Watermarks(pinOn, pinW, forkOn, forkW) ==
     (IF pinOn THEN {pinW} ELSE {}) \cup (IF forkOn THEN {forkW} ELSE {})
 
 \* §13.6 "Tiered-idle cuts": no holder root has a Tiered descriptor, the candidate
-\* queue is empty and there is no anchor. A pin is always of a Tiered Snapshot here,
+\* queue is empty. A pin is always of a Tiered Snapshot here,
 \* and the build pin always holds Tiered collections; the fork's child is a branch
 \* head with its own residency.
 IsIdleGen(g) == g.hres # "T" /\ ~g.pin.on /\ ~(g.fork.on /\ g.fork.res = "T")
-                /\ g.queue = {} /\ ~g.anchor.on /\ ~g.build.on /\ ~g.img.on
+                /\ g.queue = {} /\ ~g.build.on /\ ~g.img.on
 
 -----------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+\* §15.7. Project a bound source onto stable cuts and durable GROUPs. Odd
+\* cursors are independent bases, even cursors the journal unit between cuts.
+\* Each base allocates a fresh pack and may share the preceding base's packs.
+\* history is the immutable oracle, independent of source and sink file sets.
+VARIABLE archive
+Base(q) == q % 2 = 1
+Unit(q) == <<"unit", q>>
+Pack(g) == <<"pack", g>>
+Closure(hist, q) == {Unit(q)} \cup
+    (IF Base(q) THEN {Pack(g) : g \in hist[(q+1) \div 2]} ELSE {})
+Objects(hist, qs) == UNION {Closure(hist, q) : q \in qs}
+\* Packs cost two byte quanta, manifests and journal chunks one. Shared files
+\* are charged once and only for bytes additional to the current generation.
+HoldBytes(extra) == Cardinality(extra) + Cardinality({k \in extra : k[1] = "pack"})
+HoldBudget == 4
+
+ArchiveInitial ==
+    [history |-> <<{1}>>, source |-> {Unit(1), Pack(1)}, hold |-> {},
+     sink |-> {}, uploaded |-> {}, through |-> 0, intervals |-> {},
+     gap |-> FALSE, breaks |-> {}, floor |-> 0, expiredFloors |-> {}]
+Current(a) == 2 * Len(a.history) - 1
+Live(hist) == Closure(hist, 2 * Len(hist) - 1)
+SourceNeeded(a) == Live(a.history) \cup Objects(a.history, a.hold)
+Named(a) == UNION {i[1]..i[2] : i \in a.intervals}
+
+ArchiveCut(shared) ==
+    LET a == archive
+        g == Len(a.history) + 1
+        h == Append(a.history, shared \cup {g})
+        old == Current(a)
+        candidates == a.hold \cup ((old..(old+1)) \ (1..a.through))
+        Fits(q) == HoldBytes(Objects(h, {x \in candidates : x >= q}) \ Live(h)) <= HoldBudget
+        first == MinOf({q \in 1..(old+2) : Fits(q)})
+        kept == IF Mutant = "archive_unbounded" THEN candidates
+                ELSE {q \in candidates : q >= first}
+    IN /\ g <= MaxPack
+       /\ shared \subseteq a.history[g-1]
+       /\ archive' = [a EXCEPT !.history = h, !.hold = kept,
+                        !.source = @ \cup {Unit(old+1), Unit(old+2), Pack(g)}]
+
+ArchiveReclaim(k) ==
+    /\ k \in archive.source \ (IF Mutant = "archive_ignore_hold" /\ k[1] = "pack"
+                               THEN Live(archive.history) ELSE SourceNeeded(archive))
+    /\ archive' = [archive EXCEPT !.source = @ \ {k}]
+
+\* All openers use the same durable receipt, including after process loss.
+ArchiveReopen == archive' = [archive EXCEPT !.source = @ \cap SourceNeeded(archive)]
+
+TargetUnit(a, q) ==
+    /\ q \in (a.through+1)..Current(a)
+    /\ IF a.gap \/ a.through = 0 THEN Base(q) ELSE q = a.through+1
+
+ArchiveStage(q, k) ==
+    /\ TargetUnit(archive, q)
+    /\ k \in (Closure(archive.history, q) \cap archive.source) \ archive.sink
+    /\ archive' = [archive EXCEPT !.sink = @ \cup {k}, !.uploaded = @ \cup {k}]
+
+ArchivePublish(q) ==
+    LET a == archive
+        fresh == a.gap \/ a.through = 0
+        start == IF fresh THEN q ELSE Max({i[1] : i \in a.intervals})
+    IN /\ TargetUnit(a, q)
+       /\ Mutant = "archive_publish_early" \/ Closure(a.history, q) \subseteq a.sink
+       /\ archive' = [a EXCEPT !.through = q, !.gap = FALSE,
+                        !.intervals = (@ \ {<<start, a.through>>}) \cup {<<start,q>>},
+                        !.floor = IF @ = 0 THEN q ELSE @, !.hold = @ \ (1..q)]
+
+ArchiveGap ==
+    LET a == archive
+        successor == a.through+1
+    IN /\ a.through > 0 /\ ~a.gap /\ successor <= Current(a)
+       /\ ~(Closure(a.history, successor) \subseteq (a.source \cup a.sink))
+       /\ archive' = [a EXCEPT !.gap = TRUE, !.breaks = @ \cup {a.through}]
+
+\* Floor CAS and each erase are separate. A paused deleter still carries the
+\* frontier and base refs it read at its CAS. A2 means every older pack a
+\* subsequent base can share already belongs to that floor base's closure.
+ArchiveExpire(f) ==
+    /\ f \in Named(archive) /\ Base(f) /\ f > archive.floor
+    /\ archive' = [archive EXCEPT !.floor = f, !.expiredFloors = @ \cup {f},
+           !.intervals = {<<IF i[1] < f THEN f ELSE i[1], i[2]>> :
+                          i \in {j \in @ : j[2] >= f}}]
+
+ArchiveErase(f, k) ==
+    /\ f \in archive.expiredFloors
+    /\ k \in archive.sink \ Closure(archive.history, f)
+    /\ Mutant = "archive_unfenced_expire" \/
+         (IF k[1] = "pack" THEN k[2] < (f+1) \div 2 + 1 ELSE k[2] < f)
+    /\ archive' = [archive EXCEPT !.sink = @ \ {k}]
+
+ArchiveNext ==
+    \/ \E shared \in SUBSET archive.history[Len(archive.history)] : ArchiveCut(shared)
+    \/ \E k \in archive.source : ArchiveReclaim(k)
+    \/ ArchiveReopen
+    \/ \E q \in 1..Current(archive) :
+          ArchivePublish(q) \/ (\E k \in archive.source : ArchiveStage(q, k))
+    \/ ArchiveGap
+    \/ \E f \in 1..Current(archive) :
+          ArchiveExpire(f) \/ (\E k \in archive.sink : ArchiveErase(f, k))
+
+ArchiveComplete ==
+    /\ \A i \in archive.intervals : Base(i[1]) /\ i[1] >= archive.floor /\ i[1] <= i[2]
+    /\ Objects(archive.history, Named(archive)) \subseteq archive.sink
+\* breaks records observed Gap CAS endpoints, independent of interval grouping.
+ArchiveIntervals ==
+    /\ archive.intervals = {} <=> archive.through = 0
+    /\ archive.intervals # {} =>
+        /\ archive.floor = MinOf({i[1] : i \in archive.intervals})
+        /\ archive.through = Max({i[2] : i \in archive.intervals})
+        /\ \A i \in archive.intervals : i[2] < archive.through => i[2] \in archive.breaks
+        /\ \A i, j \in archive.intervals : i[1] < j[1] => i[2] < j[1]
+ArchiveBounded == HoldBytes(SourceNeeded(archive) \ Live(archive.history)) <= HoldBudget
+ArchiveSourceReadable == SourceNeeded(archive) \subseteq archive.source
+ArchiveStagedSafe ==
+    (archive.uploaded \cap Objects(archive.history, (archive.through+1)..Current(archive)))
+        \subseteq archive.sink
+
 Init ==
     /\ head = [res |-> "T", refs |-> [x \in Keys |-> Hot(x)],
                u |-> IF WithBuild THEN Hot(NKeys + 1) ELSE Mem]
     /\ gen = [hres |-> "T", hrefs |-> MemRefs, hu |-> Mem, pin |-> NoRoot, queue |-> {},
-              anchor |-> NoRoot, fork |-> NoFork, build |-> NoRoot, img |-> NoRoot, cells |-> {},
+              fork |-> NoFork, build |-> NoRoot, img |-> NoRoot, cells |-> {},
               listed |-> {}, live |-> [p \in Packs |-> {}]]
     /\ packRows = [p \in Packs |-> <<>>]
     /\ files = {}
@@ -238,7 +355,7 @@ RequestPin ==
 \* no holder ("plain") drops an orphan build pin (§3.5a "Orphans", v2.171). While a
 \* build runs, its cuts are the only cuts.
 
-Ops == {"plain", "pin", "unpin", "toMemory", "toTiered", "archive", "unarchive",
+Ops == {"plain", "pin", "unpin", "toMemory", "toTiered",
         "fork", "unfork", "build", "graft", "image", "unimage"}
 
 \* v2.164: the packs a Tiered-idle cut retires with probe_budget = 1. It takes
@@ -262,8 +379,6 @@ Cut(op, sel, dr, pg) ==
     /\ (op = "unpin") => gen.pin.on
     /\ (op = "toMemory") => head.res = "T"
     /\ (op = "toTiered") => (head.res = "M" /\ nextStamp + NKeys - 1 <= MaxStamp)
-    /\ (op = "archive") => (WithAnchors /\ ~gen.anchor.on /\ head.res = "T")
-    /\ (op = "unarchive") => gen.anchor.on
     /\ (op = "fork") => (WithFork /\ ~gen.fork.on)
     /\ (op = "unfork") => gen.fork.on
     /\ (op \in {"build", "graft"}) <=> bld.on
@@ -291,8 +406,6 @@ Cut(op, sel, dr, pg) ==
         stampOut == IF op = "toTiered" THEN nextStamp + NKeys ELSE nextStamp
         pinOn == CASE op = "pin" -> TRUE [] op = "unpin" -> FALSE [] OTHER -> gen.pin.on
         pinW == IF op = "pin" THEN snap.w ELSE gen.pin.w
-        anchorOn == CASE op = "archive" -> TRUE [] op = "unarchive" -> FALSE [] OTHER -> gen.anchor.on
-        anchorRefs0 == IF op = "archive" THEN head.refs ELSE gen.anchor.refs
         \* A live-head fork shares main's head (before H, which changes nothing else here).
         forkOn == CASE op = "fork" -> TRUE [] op = "unfork" -> FALSE [] OTHER -> gen.fork.on
         forkRes == IF op = "fork" THEN head.res ELSE gen.fork.res
@@ -309,7 +422,6 @@ Cut(op, sel, dr, pg) ==
         keepRefs == {hRefs0[x] : x \in Keys} \cup {uRef0}
                     \cup (IF buildOn THEN {buildRefs0[x] : x \in Keys} ELSE {})
                     \cup (IF pinOn THEN {gen.pin.refs[x] : x \in Keys} ELSE {})
-                    \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
                     \cup (IF imgOn THEN {imgRefs0[x] : x \in Keys} ELSE {})
         addFork == IF op = "unfork"
                    THEN {r \in {gen.fork.refs[x] : x \in Keys} : r.k = "C" /\ r \notin keepRefs}
@@ -319,7 +431,7 @@ Cut(op, sel, dr, pg) ==
         \* ---- Tiered-idle: a property of the generation this cut publishes ----
         \* §13.6 "Tiered-idle cuts": no holder root (branch head, pin, import pin)
         \* has a Tiered descriptor, the candidate queue (installed rows and this cut's
-        \* added rows) is empty, and there is no anchor. Mutant idle_predicts_drain is
+        \* added rows) is empty. Mutant idle_predicts_drain is
         \* review 3177 F1's unsound reading: idle when the drain is predicted to empty
         \* the queue (no added row and at most one installed row, free_budget 1),
         \* decided before the drain runs. Mutant idle_ignores_forks drops the child.
@@ -330,7 +442,6 @@ Cut(op, sel, dr, pg) ==
                    /\ (Mutant # "idle_ignores_pins" => ~pinOn)
                    /\ (Mutant # "idle_ignores_forks" => ~(forkOn /\ forkRes = "T"))
                    /\ queueEmpty
-                   /\ ~anchorOn
                    /\ ~buildOn
                    /\ ~imgOn
         v2164Idle == Rules = "v2164" /\ idleGen
@@ -342,7 +453,6 @@ Cut(op, sel, dr, pg) ==
                     ELSE cursor[p]]
         \* ---- promotion (§13.5 steps 2-3) ----
         lookup == {hRefs0[x] : x \in Keys} \cup qPart
-                  \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF forkOn THEN {forkRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF imgOn THEN {imgRefs0[x] : x \in Keys} ELSE {})
         Found(s) == {r \in lookup : r.k \in {"C", "H"} /\ r.s = s}
@@ -364,7 +474,6 @@ Cut(op, sel, dr, pg) ==
         roots1 == {hRefs0[x] : x \in Keys} \cup {uRef0}
                   \cup (IF buildOn THEN {buildRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF pinOn THEN {pinRefs1[x] : x \in Keys} ELSE {})
-                  \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF forkOn THEN {forkRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF imgOn THEN {imgRefs0[x] : x \in Keys} ELSE {})
         emitStamps == {r.s : r \in {y \in roots1 : y.k = "H"}}
@@ -374,7 +483,6 @@ Cut(op, sel, dr, pg) ==
         Seal(r) == IF r.k = "H" THEN Cold(fresh, EmitIdx(r.s), r.s) ELSE r
         hRefs2 == [x \in Keys |-> Seal(hRefs0[x])]
         pinRefs2 == [x \in Keys |-> Seal(pinRefs1[x])]
-        anchorRefs2 == [x \in Keys |-> Seal(anchorRefs0[x])]
         forkRefs2 == [x \in Keys |-> Seal(forkRefs0[x])]
         uRef2 == Seal(uRef0)
         buildRefs2 == [x \in Keys |-> Seal(buildRefs0[x])]
@@ -383,7 +491,6 @@ Cut(op, sel, dr, pg) ==
         named == {hRefs2[x] : x \in Keys} \cup {uRef2}
                  \cup (IF buildOn THEN {buildRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF pinOn THEN {pinRefs2[x] : x \in Keys} ELSE {})
-                 \cup (IF anchorOn THEN {anchorRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF forkOn THEN {forkRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF imgOn THEN {imgRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF Mutant = "probe_ignores_queue" THEN {} ELSE qPart)
@@ -401,7 +508,6 @@ Cut(op, sel, dr, pg) ==
         Move(r) == IF matched /\ r = loc THEN Cold(fresh, copyRow, loc.s) ELSE r
         hRefs3 == [x \in Keys |-> Move(hRefs2[x])]
         pinRefs3 == [x \in Keys |-> Move(pinRefs2[x])]
-        anchorRefs3 == [x \in Keys |-> Move(anchorRefs2[x])]
         forkRefs3 == [x \in Keys |-> Move(forkRefs2[x])]
         uRef3 == Move(uRef2)
         buildRefs3 == [x \in Keys |-> Move(buildRefs2[x])]
@@ -416,7 +522,6 @@ Cut(op, sel, dr, pg) ==
         holderOut == {hRefs3[x] : x \in Keys} \cup {uRef3}
                      \cup (IF buildOn THEN {buildRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF pinOn THEN {pinRefs3[x] : x \in Keys} ELSE {})
-                     \cup (IF anchorOn THEN {anchorRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF forkOn THEN {forkRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF imgOn THEN {imgRefs3[x] : x \in Keys} ELSE {})
         replaced == {r \in {gen.hrefs[x] : x \in Keys} \cup {gen.hu} :
@@ -496,7 +601,6 @@ Cut(op, sel, dr, pg) ==
         /\ gen' = [hres |-> hRes, hrefs |-> hRefs3, hu |-> uRef3,
                    pin |-> IF pinOn THEN [on |-> TRUE, refs |-> pinRefs3, w |-> pinW] ELSE NoRoot,
                    queue |-> queueOut,
-                   anchor |-> IF anchorOn THEN [on |-> TRUE, refs |-> anchorRefs3, w |-> 0] ELSE NoRoot,
                    fork |-> IF forkOn THEN [on |-> TRUE, w |-> forkW, res |-> forkRes, refs |-> forkRefs3]
                             ELSE NoFork,
                    build |-> IF buildOn THEN [on |-> TRUE, refs |-> buildRefs3, w |-> 0] ELSE NoRoot,
@@ -630,13 +734,14 @@ Next ==
     \/ ReleaseExport
     \/ Crash
 
-Spec == Init /\ [][Next]_vars
+Spec == (Init /\ archive = ArchiveInitial) /\ [][Next /\ UNCHANGED archive]_<<vars, archive>>
+ArchiveSpec == (Init /\ archive = ArchiveInitial) /\ [][ArchiveNext /\ UNCHANGED vars]_<<vars, archive>>
 
 -----------------------------------------------------------------------------
 \* Safety invariants. README.md maps each to its STORE-SPEC section.
 
 \* R1 (§13.6 "The probe", §13.5 step 2 "Resolution frees nothing", §1.9): every
-\* frame a durable holder names (head, pin or fork, anchor, queue row) is in a
+\* frame a durable holder names (head, pin or fork, queue row) is in a
 \* listed pack whose file exists, at the row that holds its stamp.
 RetainReachable ==
     \A r \in DurableColdRefs(gen) :

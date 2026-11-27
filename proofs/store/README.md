@@ -6,16 +6,16 @@ the Python crash and stream models STORE-SPEC §3.9 cites. They are opt-in, not 
 ```sh
 python3 proofs/store/check_proofs.py                # everything, about 17 minutes on 8 workers
 python3 proofs/store/check_proofs.py --save-traces  # also rewrite traces/ from the known holes
-python3 proofs/store/check_proofs.py --deep         # also the fork, export-lease and anchor baselines (the fork bound runs about 25 min)
+python3 proofs/store/check_proofs.py --deep         # also the fork and export-lease baselines (the fork bound runs about 25 min)
 python3 proofs/store/check_proofs.py --skip-python  # TLC only
-python3 proofs/store/check_proofs.py --trace-only   # the retention trace checks alone, about 3 s
+python3 proofs/store/check_proofs.py --trace-only   # retention and archive traces alone
 ```
 
 TLC is the nightly `tla2tools-nightly.jar` plus `CommunityModules-deps.jar` under
 `~/.local/opt/fleet-formal` (or `$FORMAL_TOOLS`), as for `proofs/fleet`; nothing is vendored here.
 
 **Standing rule (STORE-SPEC §3.9).** A STORE-SPEC revision that touches retention (the probe,
-deadlists and Tiered-idle cuts, promotion, leases, export and catch-up, anchors, retirement or the
+deadlists and Tiered-idle cuts, promotion, leases, export and catch-up, archive holds, retirement or the
 janitor) updates these models to the new text and passes `check_proofs.py` before an
 implementation lane starts.
 
@@ -23,7 +23,7 @@ implementation lane starts.
 
 | File | What it checks |
 |---|---|
-| `StoreRetention.tla` | Tiered pack retention: commits, cuts and their publication, pins and forks, Snapshots and their leases, the candidate queue, Tiered-idle cuts, the compaction probe, promotion of a historical Snapshot, demotion Tiered → Memory, anchors (archival retention), AP16 Remove, the export lease and its copy, a projector image carried as a Snapshot's tail base (`WithTail`), crash and reopen between any two steps. |
+| `StoreRetention.tla` | Tiered pack retention: commits, cuts and their publication, pins and forks, Snapshots and their leases, the candidate queue, Tiered-idle cuts, the compaction probe, promotion of a historical Snapshot, demotion Tiered → Memory, AP16 Remove, the export lease and its copy, a projector image carried as a Snapshot's tail base (`WithTail`), crash and reopen between any two steps. |
 | `StoreCatchUp.tla` | Export catch-up and install over a Tiered index across a demotion and a rebuild (§3.5a, §13.10a, §13.7 D-D7-5), the holder's own replay and fold, and recovery of a commit prefix at or past the last acknowledged ticket. |
 | `StoreJanitor.tla` | Host-stream retirement: the §12.11.8 release rule that lets `low` pass a batch. |
 | `TraceStoreRetention.tla` | Trace validation: each row of a crash-sim retention trace is one `StoreRetention` action whose result equals what the sim observed (below). |
@@ -49,7 +49,7 @@ Each TLA+ module takes a `Rules` constant naming the reading of the spec it chec
 
 | Name | STORE-SPEC section | Claim |
 |---|---|---|
-| `RetainReachable` | §13.6 "The probe"; §13.5 step 2 "Resolution frees nothing"; §1.9 | Every frame a durable holder names (a head, a pin or fork, an anchor, a queue row) is in a listed pack whose file exists, at the PACK_INDEX row that holds its stamp. Nothing reachable is retired or reused. |
+| `RetainReachable` | §13.6 "The probe"; §13.5 step 2 "Resolution frees nothing"; §1.9 | Every frame a durable holder names (a head, a pin or fork, a queue row) is in a listed pack whose file exists, at the PACK_INDEX row that holds its stamp. Nothing reachable is retired or reused. |
 | `SnapReadable` | §13.5 holder leases, "Tail bases are protected too" (v2.177); AP16 Remove | An open, unexpired Snapshot's frames stay on disk, through its primary and its tail base alike, and promotion never reads a removed frame. |
 | `ImageComplete` | §13.10a (v2.157 D-ZL-2) | Every pack the copied MANIFEST lists is in the export image. |
 | `AckedDurable` | §1.9; §3.5 step 6 | An acknowledged pin survives every crash. |
@@ -76,7 +76,6 @@ Counts are from one run with 8 workers. `check_proofs.py` prints them and never 
 | `StoreRetention` v2164, fork row on, one key, no crash (`--deep`, `retention_fork`) | no error; 1,634,153 distinct states, depth 26, about 25 min |
 | `StoreRetention` v2164, fork row on, one key, one crash (run once by hand, not in the runner) | no error; 3,662,469 distinct states, depth 26, about 60 min |
 | `StoreRetention` v2164, export lease on (`--deep`) | not rerun since the v2.164 fold (1,403,440 distinct states under the v2161 model) |
-| `StoreRetention` v2164, anchors on, one key (`--deep`) | not rerun since the v2.164 fold (944,626 distinct states under the v2161 model) |
 | `StoreRetention` v2164, build pin on (`retention_build`) | no error; 302,662 distinct states, depth 23, about 4 min |
 | `StoreRetention` v2164, tail base on (`retention_tail`) | no error; 304,456 distinct states, depth 23, about 90 s |
 | `StoreRetention` count3157 (3157's rejected rule) | no error; 633,996 distinct states, depth 23, about 10 min |
@@ -85,7 +84,7 @@ Counts are from one run with 8 workers. `check_proofs.py` prints them and never 
 | `StoreCatchUp` v2161 | no error; 577,192 distinct states, depth 15, about 7 s |
 | `StoreCatchUp` v2157 | `SupersedePremise`, `NoFalseCorrupt` and `BackfillNoneEmpty` violated: 3150 F1 (`traces/catchup-f1-*.txt`) |
 | `StoreJanitor` | no error; 229,799 distinct states, depth 19, 2 s |
-| Mutants | 20 of 20 caught under the current rules, each in under 3 s; `idle_predicts_drain` is review 3177 F1's broken reading (`traces/idle-predicts-drain-f1.txt`) |
+| Mutants | 20 pre-archive controls caught in this recorded run, each in under 3 s; `idle_predicts_drain` is review 3177 F1's broken reading (`traces/idle-predicts-drain-f1.txt`) |
 | Reachability witnesses | 16 of 16 reached with `Track = TRUE`, each in under 3 s: 11 on `retention_fork`, 3 on `retention_build` (a build cut's probe moves U, the graft leaves a pin frame out, a holder-free cut drops an orphan pin), and 2 on `retention_tail` (an image-only pack retires under a live capture, and its file goes after expiry) |
 | Python models (§3.9) | 7 of 7 pass; `model_v221_scope.py` takes about 28 s |
 | Whole default run | 1,197 s (shared host; the two retention baselines are most of it) |
@@ -93,7 +92,7 @@ Counts are from one run with 8 workers. `check_proofs.py` prints them and never 
 **The Tiered-idle hole (v2157).** A plain cut writes pack P1 with two frames. Overwrite the second row, then capture Snapshot S.
 A Tiered → Memory cut hands the head's Cold root to the queue. A cut pins S (promotion copies S's
 unflushed row into pack P2) and drains the queue. Unpin S, selecting P1 for a probe: the published generation has no Tiered holder, no
-queue row and no anchor, so it is Tiered-idle, and the probe step advances P1's cursor one row
+queue row, so it is Tiered-idle, and the probe step advances P1's cursor one row
 without reading it. Pin S again. Promotion keeps frame (P1, row 1) in place: a PagePtr carries an
 offset and no PACK_INDEX row, and an idle step never learns the cursor's offset. The probe then
 resumes at row 2 and finishes P1 at that same cut, which retires P1 while the new pin still names row 1. This is the
@@ -143,7 +142,7 @@ run.
 
 - **One collection, small bounds.** `StoreRetention` has one Tiered collection of `NKeys` rows, one frame per row, a few stamps and packs, one crash. Pages, offsets, BLOB frames and the class-3/4 split are not modelled: a frame is a stamp at a PACK_INDEX row.
 - **Budgets of 1.** `probe_budget` and `FreeBudget` are 1 row per cut, so a probe spans cuts, which is where both holes live. Larger budgets change only the step count.
-- **Holders.** One pin name stands for every pin of a Snapshot (the import pin and `ImportPin` follow the same promotion and probe rules), and one live-head fork of main stands for the fork rows (its child's head is frozen at the fork). One Snapshot at a time. Anchors are optional (`WithAnchors`), and so are the export lease (`WithExport`) and the hot build's owner-3 `build` pin (`WithBuild`, above).
+- **Holders.** One pin name stands for every pin of a Snapshot (the import pin and `ImportPin` follow the same promotion and probe rules), and one live-head fork of main stands for the fork rows (its child's head is frozen at the fork). One Snapshot at a time. Optional holders include the export lease (`WithExport`) and the hot build's owner-3 `build` pin (`WithBuild`, above).
 - **Accounting.** `live` and the deadlists are advisory (D-ZL-1). The model keeps `live` and retires only by a finished probe or a Tiered-idle cut, so the mutant that retires on zero live shows why. Lineage cells are holder cells of main's chain, one per frame (`k` the holder watermark, the pack, the stamp), filed, dropped and relocated as §13.6 says; origin cells, `m` keys and byte counts are abstracted (a frame's stamp stands for its `m`). Fork ghost rows are abstracted: `unfork` removes the row with the child's head. Recount probes, `repair_cuts` and `compact_ratio` arithmetic are abstracted: any listed pack without a cursor may be selected at any cut.
 - **Reachability witnesses.** `ev` records what the last cut did. Baselines keep only the tag `IdleProgress` reads, so it adds no states. `check_proofs.py` reruns with `Track = TRUE` and requires TLC to violate each `No…` witness in the module, so each new behaviour (an idle retirement, of an unselected pack, of a pack with a cursor, of a pack with cells; an idle generation with a holder and cells; a dropped idle step; the drain emptying the queue at a non-idle cut; a skipped drain; `unfork` queueing roots; a filed and a moved cell) occurs.
 - **Cuts are atomic.** A cut is one action in §13.6a's order. A crash inside a cut is the state before the MANIFEST rename (§3.6), which equals no cut. The pre-rename durability steps are `python/model_v2.py`'s and `model_v29_refusal.py`'s job.
@@ -192,3 +191,19 @@ The nightly board's laws stage (`tools/nightly-board.sh`) runs the law once, fre
 `check_proofs.py --trace-only --trace-from-tests` on its report; a red law or a refused trace
 is a Store law red (about 10 s). Removal is observed by listing the directory after each call,
 so it is ordered against the call's publication only by the cut row that precedes it.
+
+## Point-in-time archive (§15.7)
+
+`ArchiveSpec` in StoreRetention projects a bound writer onto three stable cuts, with one journal unit between cuts. Each cut allocates a new pack and can share any subset of its predecessor's packs. This is the A2 allocation premise. The source, sink and committed head are separate. Source files match the selected base plus any durable hold after reopen. A pack costs two byte quanta and a manifest or journal chunk one. The additional-byte budget is four. History and the set of previously uploaded keys are model oracles. A source cut may release a receipt while the sink is unavailable.
+
+| Invariant | Bad transition it detects |
+|---|---|
+| `ArchiveComplete` | An interval lacks its independent base, a complete successor unit or a referenced pack. |
+| `ArchiveIntervals` | A new interval silently follows an unclosed interval, intervals overlap, or floor/through disagree with the advertised endpoints. |
+| `ArchiveBounded` | Additional source bytes exceed the hold budget, counting shared packs once. |
+| `ArchiveSourceReadable` | Retirement or cleanup erases a still-held source file. |
+| `ArchiveStagedSafe` | An erase using a current or older published floor deletes a staged object needed by a future unit. |
+
+`traces/archive.ndjson` is a design fixture starting at the first unpublished base. Each `archive` row records a cut, one key upload/removal, reopen inventory or publish CAS. A `gap` row closes the interval at the stated cursor. An `expire` row records either the floor CAS or one erase under an observed floor. The actions run separately, so TLC interleaves a publisher with delayed erases. The fixture loses a successor past budget, reopens, closes with Gap, publishes a fresh base and expires the old interval. Omit the pack upload before the first publication and the correct model rejects that CAS. The publish-early mutant admits it. Run a supplied archive trace with `--trace-only --trace FILE`.
+
+This projection checks stable retention decisions. The thirteen Directory barrier interleavings, S3 response ambiguity, resolver and restored-child adoption are product law obligations in STORE §15.8.

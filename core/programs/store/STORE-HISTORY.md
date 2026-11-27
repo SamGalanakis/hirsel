@@ -2,7 +2,10 @@
 
 The [Store spec](STORE-SPEC.md) defines the contract. This document records version changes, review decisions, and the original Store summary. Status labels describe the versions in which they were written.
 
+v2.180 (store-pitr-phase1-spec-tla-3314, D1–D4): specified. §15.3 and §§15.7–15.8 define independently stored point-in-time archives, byte-bounded durable source holds, explicit gaps, single-floor expiry and laws L-A1–L-A11. Every writable restore, including a stamped backup at Latest, publishes a fresh StoreId and immutable RESTORE_ORIGIN. RUNNER §14.5 adopts it as a new incarnation. Format 13 is the specified cutover from the §13.9 in-prefix archive and §14.10 historical Log reader. The bounded sweep moves to §12.6 and ordered stream settlement stays in §12.11.11. §3.3c scopes macOS durability to the APFS qualification available. The retention model checks the archive protocol. The production archive, identity cutover and adoption remain implementation work.
+
 v2.179 (metal-tps-phase4-inplace-3313): §11.7 AP10 specifies as-if-alone metering for page edits. Each call has the same byte and step charge at its commit position across batch and snapshot choices.
+
 
 v2.178 (store-d7-s6-resident-3295, D7-S6): built. **Tiered lookup resident gate and IVF attempt counts** (§13.10a). Lane 3279's public IVF `look` took 2 / 1, 2 / 1, and 5 / 4 attempts / deliveries on a Tiered source and 2 / 1 and 2 / 1 on a Memory source with Tiered blocks. Both cases checked the exact hits and scores. The Tiered table and Tiered `Many` index had `account_memory` of 784 B at 1,000, 10,000, and 100,000 rows. Lane 3295 built both collections to 100,000,000 durable rows in 6,630.9 s. The reopen and three exact lookups used 8,912 KiB peak RSS by GNU `time -v`, passing the 1 GiB gate.
 

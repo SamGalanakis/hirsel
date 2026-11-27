@@ -34,7 +34,7 @@ TraceLog == ndJsonDeserialize(TraceFile)
 
 VARIABLE l
 
-traceVars == <<vars, l>>
+traceVars == <<vars, archive, l>>
 
 Row == TraceLog[l]
 
@@ -45,6 +45,7 @@ QueuePacks(g) == {r.p : r \in {q \in g.queue : q.k = "C"}}
 
 TraceInit ==
     /\ Init
+    /\ archive = ArchiveInitial
     /\ l = 1
 
 MatchCut ==
@@ -81,13 +82,29 @@ MatchReopen ==
     /\ files' = Set(Row.files)
     /\ l' = l + 1
 
+\* Archive rows expose the observed source cut, file operation or head CAS.
+\* An upload row is evidence for just that one exact key.
+MatchArchive ==
+    \/ /\ Row.kind = "archive"
+       /\ CASE Row.op = "cut" -> ArchiveCut(Set(Row.shared))
+            [] Row.op = "stage" -> ArchiveStage(Row.cursor, Row.key)
+            [] Row.op = "publish" -> ArchivePublish(Row.cursor)
+            [] Row.op = "reopen" -> ArchiveReopen /\ archive'.source = Set(Row.files)
+            [] Row.op = "remove" -> ArchiveReclaim(Row.key)
+            [] OTHER -> FALSE
+    \/ /\ Row.kind = "gap" /\ ArchiveGap /\ archive.through = Row.after
+    \/ /\ Row.kind = "expire"
+       /\ CASE Row.op = "floor" -> ArchiveExpire(Row.floor)
+            [] Row.op = "erase" -> ArchiveErase(Row.floor, Row.key)
+            [] OTHER -> FALSE
+
 TraceNext ==
     /\ l <= Len(TraceLog)
-    /\ \/ MatchCut
-       \/ MatchRemove
-       \/ MatchCapture
-       \/ MatchDrop
-       \/ MatchReopen
+    /\ \/ /\ MatchCut \/ MatchRemove \/ MatchCapture \/ MatchDrop \/ MatchReopen
+          /\ UNCHANGED archive
+       \/ /\ MatchArchive
+          /\ UNCHANGED vars
+          /\ l' = l + 1
 
 TraceSpec == TraceInit /\ [][TraceNext]_traceVars
 

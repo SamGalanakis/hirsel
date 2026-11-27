@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.91: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.92: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.92 (adopting a restored child)
+
+§14.5 specifies the first launch of a fresh group incarnation from a verified restore. STORE §15.8 L-A11 is its implementation gate.
 
 ## CHANGES-v2.91 (a parked head asks for its sync; lane runner-http-retry-hang-3266)
 
@@ -2678,6 +2682,12 @@ prepares the activation, opens application handles, or serves. On objects@1 it p
 `PlaceStoreMismatch(expected_hi, expected_lo, actual_hi, actual_lo)` and exits. The
 launcher logs the group and both IDs. The host rejects a `PlaceOpened` with a different
 store ID as recovery evidence.
+
+**Adopting a restored child (specified).** A writable restore creates a child StoreId even for a backup at Latest (STORE §15.3). The operator adds a fresh group incarnation targeting the verified child Directory or standalone Bucket prefix. Record the expected child ID from the verified restore, its destination, and the selected activation and matching release assembly in the launch intent. Keep the previous incarnation pinned to its own store. Reuse of its name or listener waits for its retirement to reach Retired.
+
+1. Wake the new row from Clean, committing the selection and Dirty generation before Start. Pass the expected child ID on the first open as well as subsequent opens. For an activated child select its restored activation, including when an older release is needed. Compare its release binding/Describe to the selected assembly. Only a genuinely unactivated child uses genesis. The restore receipt grants no claim authority.
+2. For a streamed Bucket, start from the child's verified standalone head. Check identity, namespace, activation, release and the authorized current epoch/holder pair before writing. Use the ordinary slot for this child StoreId and next epoch, conditional ATTACH with an empty sealed list, and slot CLAIM acknowledgement (STORE §12.11). Managed starts use their authorized ClaimAuth. An initial operator adoption uses the existing authorization path. The parent's slot, claim and stream tail cannot be reused.
+3. Apply PlaceOpened only to the intended live incarnation and generation. Check the observed ID against the restore intent. In one host transaction record the fresh StoreId and matching activation/release and applicable claim, then send HostStoreAccepted. On mismatch refuse before opening service. A host lost before the transaction rechecks the repeated report; after commit it can acknowledge that same child from inventory. Later starts require the recorded ID. Service, routing, follower and client rebinding wait for acceptance. Old Positions belong to the parent.
 
 **The control session (v2.27).** The host talks to the launcher over one control session at a time, on the launcher's control socket (launch.md "One control socket").
 - A session starts with the host's `Hello`. The launcher first ends any earlier session: it stops reading the old connection, and each request of it that it had not acted on is discarded, never acted on later. Only then does it answer.

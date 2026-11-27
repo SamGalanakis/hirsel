@@ -1,0 +1,12 @@
+{"kind":"archive","op":"stage","cursor":1,"key":["unit",1]}
+{"kind":"archive","op":"stage","cursor":1,"key":["pack",1]}
+{"kind":"archive","op":"publish","cursor":1}
+{"kind":"archive","op":"cut","shared":[]}
+{"kind":"archive","op":"cut","shared":[]}
+{"kind":"archive","op":"reopen","files":[["unit",3],["pack",2],["unit",4],["unit",5],["pack",3]]}
+{"kind":"gap","after":1}
+{"kind":"archive","op":"stage","cursor":5,"key":["pack",3]}
+{"kind":"archive","op":"stage","cursor":5,"key":["unit",5]}
+{"kind":"archive","op":"publish","cursor":5}
+{"kind":"expire","op":"floor","floor":5}
+{"kind":"expire","op":"erase","floor":5,"key":["unit",1]}

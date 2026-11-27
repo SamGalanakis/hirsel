@@ -5,7 +5,7 @@ Checks, in order:
   1. TLC baselines: each module under the current STORE-SPEC (retention v2.164,
      catch-up v2.161 as amended by v2.167; and the retention model
      under 3157's rejected count+restart rule), every invariant, no error
-     (`--deep` adds the fork, export-lease and anchor baselines, 5-25 minutes each).
+     (`--deep` adds the fork and export-lease baselines, 5-25 minutes each).
   2. Known holes: STORE-SPEC v2.157 as written must produce each listed
      counterexample (the Tiered-idle partial-probe hole, export catch-up F1).
   3. Mutants: every line of mutants.txt must be caught by its named invariant.
@@ -13,7 +13,8 @@ Checks, in order:
   4. Reachability witnesses: each behaviour the v2.164 fold adds (the idle
      step, lineage cells under a fork row, the optional drain) must occur.
   5. The Python crash and stream models STORE-SPEC §3.9 cites (python/).
-  6. Retention traces (TraceStoreRetention.tla, seconds): the crash sim's
+  6. Retention traces (TraceStoreRetention.tla, seconds): an archive/gap/expire
+     fixture conforms and publishing before a pack upload is refused. The crash sim's
      trace (traces/retention-trace-green.ndjson, or --trace FILE) conforms to
      StoreRetention; the hand-edited F1 trace (a cut that retires P while its
      queue still names P) is refused at its offending cut, and the
@@ -44,34 +45,30 @@ WORKERS = str(min(8, os.cpu_count() or 1))
 BOUNDS = {
     "retention": {
         "NKeys": "2", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
+        "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
     },
     # The fork row and its lineage cells (review 3177 F3). One key and no crash
     # keep it tractable; the crash interleavings are the retention bound's.
     "retention_fork": {
         "NKeys": "1", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "0",
-        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "TRUE", "WithBuild": "FALSE", "WithTail": "FALSE",
+        "WithExport": "FALSE", "WithFork": "TRUE", "WithBuild": "FALSE", "WithTail": "FALSE",
     },
     "retention_export": {
         "NKeys": "2", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "TRUE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
-    },
-    "retention_anchor": {
-        "NKeys": "1", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "TRUE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
+        "WithExport": "TRUE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
     },
     # The hot Tiered build pin (STORE-SPEC v2.169 as amended by v2.171): one key of
     # the built collection plus the untouched collection U.
     "retention_build": {
         "NKeys": "1", "MaxStamp": "4", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "TRUE", "WithTail": "FALSE",
+        "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "TRUE", "WithTail": "FALSE",
     },
     # A projector image as a capture's tail base (STORE-SPEC v2.177): a Memory
     # primary reading the image after demotion, the image released, expiry, reclaim
     # and reopen. One key and one crash.
     "retention_tail": {
         "NKeys": "1", "MaxStamp": "3", "MaxPack": "2", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE",
+        "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE",
         "WithTail": "TRUE",
     },
     "catchup": {
@@ -79,6 +76,9 @@ BOUNDS = {
     },
     "janitor": {"MaxBatch": "5"},
 }
+
+BOUNDS["archive"] = {**BOUNDS["retention"], "NKeys": "1", "MaxPack": "3"}
+ARCHIVE_INVARIANTS = ["ArchiveComplete", "ArchiveIntervals", "ArchiveBounded", "ArchiveSourceReadable", "ArchiveStagedSafe"]
 
 INVARIANTS = {
     "StoreRetention": ["RetainReachable", "SnapReadable", "ImageComplete", "AckedDurable",
@@ -91,6 +91,7 @@ INVARIANTS = {
 # (name, module, rules, bounds, deep). Every invariant must hold. Deep baselines
 # (about 5 minutes each on 8 workers) run only with --deep.
 BASELINES = [
+    ("archive", "StoreRetention", "v2164", "archive", False),
     ("retention-v2164", "StoreRetention", "v2164", "retention", False),
     ("retention-v2164-fork", "StoreRetention", "v2164", "retention_fork", True),
     ("retention-count3157", "StoreRetention", "count3157", "retention", False),
@@ -99,7 +100,6 @@ BASELINES = [
     ("catchup-v2161", "StoreCatchUp", "v2161", "catchup", False),
     ("janitor", "StoreJanitor", None, "janitor", False),
     ("retention-v2164-export", "StoreRetention", "v2164", "retention_export", True),
-    ("retention-v2164-anchor", "StoreRetention", "v2164", "retention_anchor", True),
 ]
 
 # (trace name, module, rules, bounds, invariant): v2.157 as written must violate it.
@@ -140,7 +140,8 @@ def classpath():
 
 
 def write_cfg(path, module, rules, mutant, bounds, invariants, track):
-    lines = ["SPECIFICATION Spec", "CONSTANTS"]
+    spec = "ArchiveSpec" if bounds == "archive" else "Spec"
+    lines = [f"SPECIFICATION {spec}", "CONSTANTS"]
     lines += [f"    {k} = {v}" for k, v in BOUNDS[bounds].items()]
     if module == "StoreRetention":
         lines.append(f"    Track = {'TRUE' if track else 'FALSE'}")
@@ -194,6 +195,8 @@ def normalize(rows):
     """Renumber pack sequence numbers 1..n in sequence order (the model's nextPack order)."""
     seqs = set()
     for r in rows:
+        if r["kind"] == "archive":
+            continue
         for k in PACK_FIELDS:
             seqs.update(r.get(k, []))
         if "pack" in r:
@@ -201,6 +204,9 @@ def normalize(rows):
     rank = {s: i + 1 for i, s in enumerate(sorted(seqs))}
     out = []
     for r in rows:
+        if r["kind"] == "archive":
+            out.append(r)
+            continue
         n = dict(r)
         for k in PACK_FIELDS:
             if k in n:
@@ -262,12 +268,13 @@ def early_removal(rows):
 def trace_tlc(path, mutant, tmp, rows=None):
     """(conforms, stuck row index or None, rows, stats) for one raw trace under Mutant."""
     rows, packs = normalize(rows if rows is not None else load_trace(path))
+    packs = max(packs, 1 + sum(r["kind"] == "archive" and r.get("op") == "cut" for r in rows))
     tag = f"trace-{Path(path).stem}-{mutant}"
     norm = Path(tmp) / f"{tag}.ndjson"
     norm.write_text("".join(json.dumps(r) + "\n" for r in rows))
     consts = {"NKeys": "1", "MaxStamp": "2", "MaxPack": str(max(1, packs)),
               "MaxCrash": str(sum(r["kind"] == "reopen" for r in rows)),
-              "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE",
+              "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE",
               "WithTail": "FALSE", "Track": "FALSE",
               "Rules": '"v2164"', "Mutant": f'"{mutant}"'}
     cfg = Path(tmp) / f"{tag}.cfg"
@@ -293,7 +300,9 @@ def trace_tlc(path, mutant, tmp, rows=None):
 
 def row_name(rows, stuck):
     r = rows[stuck - 1]
-    name = f"row {stuck} ({r['kind']} at sim step {r['step']}"
+    name = f"row {stuck} ({r['kind']}"
+    if "step" in r:
+        name += f" at sim step {r['step']}"
     if "generation" in r:
         name += f", generation {r['generation']}"
     return name + f"): {json.dumps({k: r[k] for k in r if k not in ('kind', 'step', 'generation')})}"
@@ -325,7 +334,31 @@ def green_trace(args, tmp):
     return trace_from_tests(args.trace_from_tests, tmp) if args.trace_from_tests else args.trace
 
 
-def check_traces(green, tmp, failures):
+def check_archive_trace(path, tmp, failures):
+    ok, stuck, rows, stats = trace_tlc(path, "none", tmp)
+    print(f"  {'PASS' if ok else 'FAIL'}  archive/gap/expire trace: {stats}", flush=True)
+    if not ok:
+        failures.append("trace/archive")
+        if stuck:
+            print(f"        no archive action admits {row_name(rows, stuck)}", flush=True)
+    # From clean Init only the MANIFEST has been uploaded; publishing needs its pack too.
+    broken = [{"kind": "archive", "op": "stage", "cursor": 1, "key": ["unit", 1]},
+              {"kind": "archive", "op": "publish", "cursor": 1}]
+    expected = len(broken)
+    for mutant, admits in (("none", False), ("archive_publish_early", True)):
+        ok, stuck, _, stats = trace_tlc("archive-before-pack", mutant, tmp, broken)
+        hit = ok if admits else not ok and stuck == expected
+        print(f"  {'PASS' if hit else 'FAIL'}  archive-before-pack ({mutant}): "
+              f"{'admitted' if ok else f'refused at row {stuck}'}; {stats}", flush=True)
+        if not hit:
+            failures.append(f"trace/archive-before-pack/{mutant}")
+
+
+def check_traces(green, tmp, failures, from_test=False):
+    archive_path = HERE / "traces" / "archive.ndjson"
+    if not from_test and all(r["kind"] in {"archive", "gap", "expire"} for r in load_trace(green)):
+        archive_path, green = green, TRACE_GREEN
+    check_archive_trace(archive_path, tmp, failures)
     print("== retention traces (TraceStoreRetention: the crash sim against StoreRetention)", flush=True)
     ok, stuck, rows, stats = trace_tlc(green, "none", tmp)
     gaps = trace_shape(rows)
@@ -378,9 +411,9 @@ def trace_text(out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--save-traces", action="store_true", help="write known-hole counterexamples to traces/")
-    ap.add_argument("--deep", action="store_true", help="also run the export-lease and anchor baselines")
+    ap.add_argument("--deep", action="store_true", help="also run the fork and export-lease baselines")
     ap.add_argument("--skip-python", action="store_true", help="skip the §3.9 Python models")
-    ap.add_argument("--trace", default=str(TRACE_GREEN), help="crash-sim retention trace that must conform")
+    ap.add_argument("--trace", default=str(TRACE_GREEN), help="retention or archive NDJSON trace that must conform")
     ap.add_argument("--trace-from-tests", metavar="JSON",
                     help=f"take the trace from a `hirsel test --json` report of {TRACE_TEST}")
     ap.add_argument("--trace-only", action="store_true", help="run only the retention trace checks")
@@ -390,20 +423,21 @@ def main():
 
     if args.trace_only:
         with tempfile.TemporaryDirectory(prefix="tlc-store-trace-") as tmp:
-            check_traces(green_trace(args, tmp), tmp, failures)
+            check_traces(green_trace(args, tmp), tmp, failures, from_test=bool(args.trace_from_tests))
         print(f"== {'FAILED: ' + ', '.join(failures) if failures else 'all checks passed'} "
               f"({time.monotonic() - started:.0f}s)", flush=True)
         return 1 if failures else 0
 
     with tempfile.TemporaryDirectory(prefix="tlc-store-") as tmp:
-        check_traces(green_trace(args, tmp), tmp, failures)
+        check_traces(green_trace(args, tmp), tmp, failures, from_test=bool(args.trace_from_tests))
 
         print("== baselines (every invariant holds)", flush=True)
         for name, module, rules, bounds, deep in BASELINES:
             if deep and not args.deep:
                 print(f"  skip  {name} (--deep)", flush=True)
                 continue
-            ok, violated, stats, out = tlc(module, rules, "none", bounds, INVARIANTS[module], tmp)
+            invariants = ARCHIVE_INVARIANTS if bounds == "archive" else INVARIANTS[module]
+            ok, violated, stats, out = tlc(module, rules, "none", bounds, invariants, tmp)
             print(f"  {'PASS' if ok else 'FAIL'}  {name}: {stats}", flush=True)
             if not ok:
                 failures.append(name)

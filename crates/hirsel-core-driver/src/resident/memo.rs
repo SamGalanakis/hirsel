@@ -428,7 +428,7 @@ pub(crate) static OBJECT_RECORDS: Memo<ContentHash, crate::native_object::Shared
 
 #[derive(Clone)]
 struct SourceHash {
-    bytes: Arc<[u8]>,
+    bytes: bytes::Bytes,
     hash: ContentHash,
 }
 
@@ -436,7 +436,7 @@ static SOURCE_HASHES: Memo<PathBuf, SourceHash> = Memo::new();
 
 /// Hash a captured file once per content change. The path selects the
 /// previous capture; an exact byte comparison confirms the hit.
-pub(crate) fn source_hash(path: &Path, bytes: &Arc<[u8]>) -> ContentHash {
+pub(crate) fn source_hash(path: &Path, bytes: &bytes::Bytes) -> ContentHash {
     if !serving() {
         return ContentHash::of_bytes(bytes);
     }
@@ -453,7 +453,7 @@ pub(crate) fn source_hash(path: &Path, bytes: &Arc<[u8]>) -> ContentHash {
         path.to_owned(),
         Value::new(
             SourceHash {
-                bytes: Arc::clone(bytes),
+                bytes: bytes.clone(),
                 hash,
             },
             owner,

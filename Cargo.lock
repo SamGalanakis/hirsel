@@ -990,6 +990,7 @@ dependencies = [
  "mimalloc",
  "miniz_oxide",
  "object 0.40.0",
+ "ring",
  "rustc-hash",
  "rustix",
  "rustls",
@@ -1141,6 +1142,7 @@ dependencies = [
 name = "hirsel-core-resolve"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "hirsel-core-ids",
  "hirsel-core-syntax",
  "hirsel-guard",

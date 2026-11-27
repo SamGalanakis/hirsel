@@ -532,7 +532,7 @@ impl Graph<'_> {
                     file.clone(),
                     Source {
                         module: module.clone(),
-                        bytes: read(file, "sources:")?,
+                        bytes: bytes::Bytes::from_owner(read(file, "sources:")?),
                     },
                 );
             }

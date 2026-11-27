@@ -8,7 +8,6 @@ const WINDOW_LIMIT: u64 = 1 << WINDOW_LOG;
 const COMPRESSION_LEVEL: i32 = 3;
 const FRAME_HEADER_MAX: usize = 18;
 const NOT_ONE_FRAME: &str = "not one Zstandard frame";
-const ENTRY_DOMAIN: &str = "hirsel.library-root.v1";
 
 impl PackageArchive {
     /// Opens the package archive at `path`; `toolchain` admits a toolchain package's own
@@ -187,57 +186,49 @@ fn entry(
     let mut compressed = BufReader::new(io::Cursor::new(normalized).chain(frame));
     let mut consumed = 0;
     let mut chunk = vec![0; DCtx::out_size()];
-    let root = ContentHash::of_stream(ENTRY_DOMAIN, size as u64, |hash| {
-        loop {
-            let data = compressed
-                .fill_buf()
-                .map_err(|e| io::Error::other(frame_read_error(e)))?;
-            if data.is_empty() {
-                return Err(io::Error::other(NOT_ONE_FRAME));
+    let mut hash = Root::hasher(size);
+    loop {
+        let data = compressed.fill_buf().map_err(frame_read_error)?;
+        if data.is_empty() {
+            return Err(NOT_ONE_FRAME.into());
+        }
+        let mut input = InBuffer { src: data, pos: 0 };
+        let available = chunk.len().min(size - encoded.len() + 1);
+        let mut output = OutBuffer::around(&mut chunk[..available]);
+        let status = decoder.decompress_stream(&mut output, &mut input);
+        let produced = output.pos();
+        let inflated = encoded.len() + produced;
+        if inflated > size {
+            return Err(format!("inflates to {inflated} bytes, not {size}"));
+        }
+        match status {
+            Err(code) => {
+                let reason = match zstd_safe::get_error_name(code) {
+                    "Restored data doesn't match checksum" => "checksum mismatch".to_owned(),
+                    _ => NOT_ONE_FRAME.to_owned(),
+                };
+                return Err(reason);
             }
-            let mut input = InBuffer { src: data, pos: 0 };
-            let available = chunk.len().min(size - encoded.len() + 1);
-            let mut output = OutBuffer::around(&mut chunk[..available]);
-            let status = decoder.decompress_stream(&mut output, &mut input);
-            let produced = output.pos();
-            let inflated = encoded.len() + produced;
-            if inflated > size {
-                return Err(io::Error::other(format!(
-                    "inflates to {inflated} bytes, not {size}"
-                )));
-            }
-            match status {
-                Err(code) => {
-                    let reason = match zstd_safe::get_error_name(code) {
-                        "Restored data doesn't match checksum" => "checksum mismatch".to_owned(),
-                        _ => NOT_ONE_FRAME.to_owned(),
-                    };
-                    return Err(io::Error::other(reason));
-                }
-                Ok(remaining) => {
-                    let read = input.pos;
-                    consumed += read;
-                    compressed.consume(read);
-                    let bytes = &chunk[..produced];
-                    hash.write_all(bytes)?;
-                    encoded.extend_from_slice(bytes);
-                    if remaining == 0 {
-                        if consumed != frame_len {
-                            return Err(io::Error::other(NOT_ONE_FRAME));
-                        }
-                        if inflated != size {
-                            return Err(io::Error::other(format!(
-                                "inflates to {inflated} bytes, not {size}"
-                            )));
-                        }
-                        return Ok(());
+            Ok(remaining) => {
+                let read = input.pos;
+                consumed += read;
+                compressed.consume(read);
+                let bytes = &chunk[..produced];
+                hash.update(bytes);
+                encoded.extend_from_slice(bytes);
+                if remaining == 0 {
+                    if consumed != frame_len {
+                        return Err(NOT_ONE_FRAME.into());
                     }
+                    if inflated != size {
+                        return Err(format!("inflates to {inflated} bytes, not {size}"));
+                    }
+                    break;
                 }
             }
         }
-    })
-    .map_err(|e| e.to_string())?;
-    Ok((Root(root.0), encoded.into()))
+    }
+    Ok((Root::finish(hash), encoded.into()))
 }
 
 fn frame_read_error(error: io::Error) -> String {

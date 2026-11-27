@@ -573,7 +573,7 @@ pub(crate) fn resolve_method_edits(program: &hirsel_core_front::Program<'_>, row
 /// The terminal form of PROG-7 sites: `path:line:column`, from the request's
 /// own source files. A site whose file the request did not read (an image's
 /// library source) keeps its module and byte span.
-pub struct SourceFiles(Vec<(String, PathBuf, Arc<[u8]>)>);
+pub struct SourceFiles(Vec<(String, PathBuf, bytes::Bytes)>);
 
 impl SourceFiles {
     pub fn of(request: &CheckRequest) -> Self {
@@ -591,7 +591,7 @@ impl SourceFiles {
                         source.modules.join("/")
                     )
                 });
-                files.push((name, source.file.clone(), Arc::clone(&captured.bytes)));
+                files.push((name, source.file.clone(), captured.bytes.clone()));
             }
         }
         Self(files)

@@ -546,7 +546,7 @@ impl Workspace {
                             file.clone(),
                             Source {
                                 module: module.clone(),
-                                bytes: read(file, field)?,
+                                bytes: bytes::Bytes::from_owner(read(file, field)?),
                             },
                         ))
                     })

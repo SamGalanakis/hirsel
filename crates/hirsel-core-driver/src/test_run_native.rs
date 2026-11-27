@@ -1660,7 +1660,7 @@ fn package_member_root_enforces_content_file_limit() {
     let id = workspace.member.clone().unwrap();
     let content = &mut workspace.members.get_mut(&id).unwrap().content;
     content.files.clear();
-    let source = Source { module: vec!["m".into()], bytes: std::sync::Arc::from([]) };
+    let source = Source { module: vec!["m".into()], bytes: bytes::Bytes::new() };
     // C v3, fixture.test/demo 1.0.0, charge-v1, no bindings, and a 65,537-file count.
     let mut wire = b"\x03\x11fixture.test/demo\x01\x00\x00\x00\x09charge-v1\x00\x81\x80\x04".to_vec();
     for index in 0..65_537 {

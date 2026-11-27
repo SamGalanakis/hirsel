@@ -48,29 +48,32 @@ impl PackageStore {
         let path = entry_path(root);
         let shard = path.parent().unwrap();
         let name = path.file_name().unwrap();
-        let mut bytes = Vec::new();
-        match open_shard(&directory, shard).and_then(|shard| open_entry(&shard, name)) {
-            Ok(file) if file.metadata()?.is_file() => {
-                if file
-                    .take(CONTENT_LIMIT as u64 + 1)
-                    .read_to_end(&mut bytes)
-                    .is_err()
-                    || bytes.len() > CONTENT_LIMIT
-                {
-                    return Ok(Entry::Damaged);
-                }
-            }
+        let file = match open_shard(&directory, shard).and_then(|shard| open_entry(&shard, name)) {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
-            _ => return Ok(Entry::Damaged),
+            Err(_) => return Ok(Entry::Damaged),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > CONTENT_LIMIT as u64 {
+            return Ok(Entry::Damaged);
+        }
+        let length = metadata.len() as usize;
+        // Reserve the EOF probe too, so a complete read cannot trigger another allocation.
+        let mut bytes = Vec::with_capacity(length + 1);
+        if file
+            .take(length as u64 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() != length
+        {
+            return Ok(Entry::Damaged);
         }
         if Root::of(&bytes) != root {
             return Ok(Entry::Damaged);
         }
-        match Content::decode(&bytes) {
-            Ok(content) => Ok(Entry::Present(Library {
-                content,
-                encoded: bytes.into(),
-            })),
+        let encoded = bytes.into();
+        match Content::decode_as(&encoded, false) {
+            Ok(content) => Ok(Entry::Present(Library { content, encoded })),
             Err(_) => Ok(Entry::Damaged),
         }
     }

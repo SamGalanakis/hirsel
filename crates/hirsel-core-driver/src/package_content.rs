@@ -6,7 +6,6 @@ use hirsel_core_ids::{ContentHash, PackageId};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
 
 pub(crate) const CONTENT_LIMIT: usize = 64 << 20;
 pub(crate) const ARCHIVE_LIMIT_MIB: usize = 512;
@@ -87,7 +86,22 @@ pub(crate) struct Root(pub(crate) [u8; 32]);
 
 impl Root {
     pub(crate) fn of(bytes: &[u8]) -> Self {
-        Self(ContentHash::of_parts("hirsel.library-root.v1", [bytes]).0)
+        let mut hash = Self::hasher(bytes.len());
+        hash.update(bytes);
+        Self::finish(hash)
+    }
+
+    fn hasher(length: usize) -> ring::digest::Context {
+        const DOMAIN: &[u8] = b"hirsel.library-root.v1";
+        let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+        hash.update(&(DOMAIN.len() as u64).to_le_bytes());
+        hash.update(DOMAIN);
+        hash.update(&(length as u64).to_le_bytes());
+        hash
+    }
+
+    fn finish(hash: ring::digest::Context) -> Self {
+        Self(hash.finish().as_ref().try_into().expect("SHA-256 digest"))
     }
 
     pub(crate) fn parse(text: &str) -> Option<Self> {
@@ -140,7 +154,7 @@ impl Binding {
 #[derive(Clone)]
 pub(crate) struct Source {
     pub(crate) module: Vec<String>,
-    pub(crate) bytes: Arc<[u8]>,
+    pub(crate) bytes: Bytes,
 }
 
 pub(crate) use hirsel_core_resolve::{
@@ -237,14 +251,15 @@ impl Content {
     }
 
     /// Decodes a published `C` (packages section 1), whose own name is scoped.
+    #[cfg(test)]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
-        Self::decode_as(bytes, false)
+        Self::decode_as(&Bytes::copy_from_slice(bytes), false)
     }
 
     /// Decodes `C`, admitting a toolchain package's own bare name when `toolchain` is set:
     /// the toolchain's installed archives and `hirsel pack` of a toolchain package's
     /// manifest, which section 2 lets carry a bare name.
-    pub(crate) fn decode_as(bytes: &[u8], toolchain: bool) -> Result<Self, String> {
+    pub(crate) fn decode_as(bytes: &Bytes, toolchain: bool) -> Result<Self, String> {
         let mut input = Reader::new(bytes, CONTENT_LIMIT)?;
         let version = input.number(u64::MAX)?;
         if version != CONTENT_VERSION {
@@ -331,7 +346,7 @@ impl Content {
             admit_path(&mut paths, &path, ".hirsel")?;
             let module = input.module()?;
             *modules.entry(module.clone()).or_insert(0usize) += 1;
-            let bytes = input.frame()?.into();
+            let bytes = bytes.slice_ref(input.frame()?);
             files.insert(path, Source { module, bytes });
         }
         let mut foreign = BTreeMap::new();

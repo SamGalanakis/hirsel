@@ -12,6 +12,7 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
+bytes = "1"
 hirsel-guard = { path = "../hirsel-guard" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }

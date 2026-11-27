@@ -17,7 +17,7 @@ pub struct ModuleSource {
 
 #[derive(Clone, Debug)]
 pub struct CapturedSource {
-    pub bytes: std::sync::Arc<[u8]>,
+    pub bytes: bytes::Bytes,
     pub name: Option<String>,
     pub test: bool,
 }
@@ -33,10 +33,10 @@ impl ModuleSource {
         }
     }
 
-    pub fn read(&self) -> std::io::Result<std::sync::Arc<[u8]>> {
+    pub fn read(&self) -> std::io::Result<bytes::Bytes> {
         match &self.captured {
             Some(captured) => Ok(captured.bytes.clone()),
-            None => std::fs::read(&self.file).map(std::sync::Arc::from),
+            None => std::fs::read(&self.file).map(bytes::Bytes::from),
         }
     }
     pub fn name(&self, manifest: Option<&Path>) -> std::io::Result<Option<String>> {

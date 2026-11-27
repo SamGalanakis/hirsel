@@ -40,7 +40,7 @@ impl PackageProduct {
                 .map(|(module, text)| ModuleSource {
                     foreign: None,
                     captured: Some(hirsel_core_resolve::CapturedSource {
-                        bytes: text.as_bytes().into(),
+                        bytes: bytes::Bytes::copy_from_slice(text.as_bytes()),
                         name: None,
                         test: false,
                     }),

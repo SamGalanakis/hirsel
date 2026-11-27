@@ -273,7 +273,7 @@ pub struct CheckProduct {
     authority_refusal: Option<String>,
     pub index: Arc<NameIndex>,
     pub files: Vec<Arc<FileProduct>>,
-    unparsed_sources: Vec<(SourceId, Arc<[u8]>)>,
+    unparsed_sources: Vec<(SourceId, bytes::Bytes)>,
     pub definitions: BTreeMap<DefPath, Arc<DefinitionProduct>>,
     pub diagnostics: Vec<Refusal>,
     pub incomplete: Vec<Incomplete>,

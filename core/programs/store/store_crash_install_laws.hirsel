@@ -79,3 +79,78 @@ fn test_crash_install_expired_cutover(d: Dir, c: Clock, r: Random, tasks: Tasks)
     }
     deploy_result(close(take db))
 }
+
+// installed_schema, keeping rows' by_v handle.
+fn l97_schema(mut d: Declare) -> Result[Index[u64, u64, u64, ()], Error] {
+    let mut rows = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let by_v = index(mut d, mut rows, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let _ = finish(mut d, take rows)?
+    let added = declare_table(mut d, "added", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut d, take added)?
+    let mut other = declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = index(mut d, mut other, "empty", Many, code.describe(crash_value), std.codec.key_u64())?
+    let _ = finish(mut d, take other)?
+    Ok(by_v)
+}
+
+fn l97_residency(db: Db, id: u32) -> Result[std.page_descriptor.Residency, DeployError] {
+    let Some(mode) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, deploy_result(prefix(id))?) else {
+        fail("L97: a collection is missing from main's map")
+    }
+    Ok(mode.residency)
+}
+
+// L97 (a) and #3 on the install fixture (§13.10a "Residency of a shipped
+// range"): with `rows` Tiered on OLD, the prepare child migrates rows ->
+// rows (+1000) and other -> other and builds by_v on the Tiered target.
+// NEW's rows and by_v are Tiered (the source map names rows; a new index
+// takes its table's residency), other stays Memory, and by_v's entries
+// equal an extraction of the model rows k -> k + 1001, after a reopen.
+// Red on main: Tiered(Migrate) at the child's declaration.
+@test
+fn test_l97_tiered_install(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let options = deploy_result(f4_tiered_options())?
+    deploy_result(crash_install_init_with(d, c, r, tasks, options))?
+    let mut db = deploy_result(open(tasks, d, c, r, options))?
+    let seeded = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    deploy_result(set_residency(mut db, seeded.id, Tiered))?
+    let _ = deploy_result(checkpoint(mut db))?
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let (scratch, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let digest = crash_import_with(mut db, scratch, c, tasks, attempt, 66u8, 16781392u64, options)?
+    let _ = crash_apply(mut db, attempt, digest)?
+    deploy_result(close(take db))?
+    let mut again = deploy_result(open(tasks, d, c, r, options))?
+    let mut decl = deploy_result(declare(again, Open))?
+    let by_v = deploy_result(l97_schema(mut decl))?
+    let _ = deploy_result(seal(mut again, take decl))?
+    let rows = deploy_result(system_table(again, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let other = deploy_result(system_table(again, "other", std.codec.key_u64(), std.codec.of_u64()))?
+    if let ResidentTiered = l97_residency(again, rows.id)? {} else {
+        fail("L97: the migrate target of a Tiered source is not Tiered")
+    }
+    if let ResidentTiered = l97_residency(again, by_v.id)? {} else {
+        fail("L97 (a): a new index on a Tiered table did not install Tiered")
+    }
+    if let ResidentTiered = l97_residency(again, other.id)? {
+        fail("L97: the migrate target of a Memory source is not Memory")
+    }
+    let Committed(Done(value: ok, ..)) = deploy_result(run(mut again, Some(100000000u64), copy_env((rows, by_v)), fn(mut tx: Tx, env: (Table[u64, u64], Index[u64, u64, u64, ()])) -> Result[bool, Error] {
+        let mut found = lookup(tx, env.1, Unbounded, Unbounded)?
+        let mut k = 0u64
+        while let Some((key, value)) = next_indexed(mut found)? {
+            if key != k || value != k + 1001u64 {
+                return Ok(false)
+            }
+            k += 1
+        }
+        Ok(k == 96u64 && count(tx, env.0, Unbounded, Unbounded)? == 96u64)
+    }))? else {
+        fail("L97: the read did not commit")
+    }
+    if !ok {
+        fail("L97 (a): NEW's by_v differs from an extraction of the model rows")
+    }
+    deploy_result(trust_store(mut again))?
+    deploy_result(close(take again))
+}

@@ -213,6 +213,7 @@ dirs = ["."]
 "store_index_crash_laws.hirsel" = "store"
 "store_catchup_laws.hirsel" = "store"
 "store_catchup_f4_laws.hirsel" = "store"
+"tiered_hot_migrate_laws.hirsel" = "store"
 "store_crash_install_laws.hirsel" = "store"
 "store_law_schema.hirsel" = "store"
 "store_claim_crash_laws.hirsel" = "store"
@@ -875,4 +876,16 @@ limit = 134217728
 limit = 402653184
 
 [tests.runs."store@1/store/test_f4_superseded_redefinition_and_tiered_catchup_diff"]
+limit = 536870912
+
+[tests.runs."store@1/store/tiered_hot_migrate_table_refused"]
+limit = 536870912
+
+[tests.runs."store@1/store/tiered_hot_index_build_refused"]
+limit = 536870912
+
+[tests.runs."store@1/store/tiered_l70_refusals"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l97_tiered_install"]
 limit = 536870912

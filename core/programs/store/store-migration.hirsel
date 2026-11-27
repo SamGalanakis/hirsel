@@ -1,6 +1,5 @@
 pub opaque type Migration {
-    plan: SchemaPlan,
-    tiered: bool
+    plan: SchemaPlan
 }
 
 pub type CollectionKind: send = Table() | Cell() | Log()
@@ -11,7 +10,6 @@ pub type CollectionInfo: send {
 }
 
 pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error] {
-    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     let mut rows = top_level_catalog(m.plan.roots.catalog)?
     let mut collections: List[CollectionInfo] = list.new()
     while let Some((take key, take raw)) = next_bytes(mut rows)? {
@@ -58,6 +56,10 @@ type SchemaPlan: send {
     migrate_sources: List[MigrateSource],
     pending_migrates: List[DeferredMigrate],
     pending_indexes: List[DeferredIndexBuild],
+    // Whether a Tiered build may be queued: only in the prepare child, whose
+    // write_prepared and run_deferred_migrates cut it (§13.10a). A hot
+    // Migrate has no Tiered build (lane 3224) and refuses Tiered(Migrate).
+    defer_tiered: bool,
     // Each declared Log's retention, in declaration order (§14.4a). Only a
     // whole declaration's install (`seal`, an activation) binds it.
     retention: List[LogRetention],
@@ -67,7 +69,7 @@ type SchemaPlan: send {
 }
 
 fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(store: db.store, roots: pages.share_roots(pages.holder_heads(db.holders)[0].roots), next_node: pages.holder_next_node(db.holders), next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: db.limits.value)
+    SchemaPlan(store: db.store, roots: pages.share_roots(pages.holder_heads(db.holders)[0].roots), next_node: pages.holder_next_node(db.holders), next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), defer_tiered: false, retention: list.new(), preview: None, value_limit: db.limits.value)
 }
 
 fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
@@ -81,7 +83,6 @@ fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, n
 
 type MigrationJob: send {
     plan: SchemaPlan,
-    tiered: bool,
     child_cut: Option[ChildCutContext],
     opened: u64,
     configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits],
@@ -89,8 +90,8 @@ type MigrationJob: send {
 }
 
 fn prepare_migration(take job: MigrationJob) -> () waits {
-    let MigrationJob(plan: take plan, tiered: tiered, child_cut: take child_cut, opened: opened, configure: configure, answer: take answer) = take job
-    let mut working = Migration(plan: take plan, tiered: tiered)
+    let MigrationJob(plan: take plan, child_cut: take child_cut, opened: opened, configure: configure, answer: take answer) = take job
+    let mut working = Migration(plan: take plan)
     let result = (code.callable(configure))(mut working)
     let completed: Result[(SchemaPlan, Option[ChildCutContext]), Error] = match take result {
         Ok(()) => {
@@ -114,7 +115,6 @@ fn prepare_migration(take job: MigrationJob) -> () waits {
 
 pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
     healthy(db)?
-    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
     let plan = stage_migration_plan(db, tasks, configure, schema_plan(db))?
     Ok(staged_migration(db, take plan, false, list.new()))
 }
@@ -126,7 +126,7 @@ fn stage_migration_plan(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migrati
 
 fn stage_migration_plan_with(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits], take plan: SchemaPlan, take child_cut: Option[ChildCutContext], opened: u64) -> Result[(SchemaPlan, Option[ChildCutContext]), Error] waits {
     let (answer, from): (Sender[Result[(SchemaPlan, Option[ChildCutContext]), Error]], Receiver[Result[(SchemaPlan, Option[ChildCutContext]), Error]]) = channel.new(1)
-    let job = MigrationJob(plan: take plan, tiered: store_has_tiered(db), child_cut: take child_cut, opened: opened, configure: configure, answer: take answer)
+    let job = MigrationJob(plan: take plan, child_cut: take child_cut, opened: opened, configure: configure, answer: take answer)
     // The callback can wait, so its fault boundary is a task (FAIL-14).
     // An empty task result costs 288 B (MEM-24). Use the parent's remaining
     // grant for this phase and release the unused portion before the cut.
@@ -194,7 +194,6 @@ pub type MigrationPreview {
 // diagnostics leave this function. No staged roots can be installed.
 pub fn preview_migration[H](db: Db, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]], schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[MigrationPreview, Error] waits {
     healthy(db)?
-    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
     let mut plan = schema_plan(db)
     plan.preview = Some(list.new())
     let ready = match configure {

@@ -155,7 +155,6 @@ pub fn perform_bound_cutover[V](mut db: Db, request: Cutover, current_activation
 }
 
 fn perform_cutover_with[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], target_binding: Option[Inline[u8, 32]], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
-    deploy_result(activation_install_allowed(db))?
     let outcome = install_prepared(mut db, request, current_activation, old_describe, release_codec, release_from, target_binding, before_cut)
     if is_disk(db) {
         forget_import(mut db)

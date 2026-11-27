@@ -1807,8 +1807,12 @@ fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32)
     }
     let mut roots = pages.share_roots(plan.roots)
     let mut live_bytes = plan.live
+    failure_result_from_rep(types.capacity(list.try_reserve(mut plan.superseded, list.len(ids))))?
     for id in ids {
         let charge = remove_store_collection(mut roots.collections, id, mut plan.next_node)?
+        // 3150 F2: a dropped table and its indexes supersede their ids.
+        discard_replayed_collection(mut roots.collections, id)?
+        list.push(mut plan.superseded, id)
         if !plan.retained {
             live_bytes = int.saturating_sub(live_bytes, charge)
         }
@@ -1972,106 +1976,6 @@ fn catalog_insert(mut ids: u64, roots: pages.Roots, k: Bytes, v: Bytes) -> Resul
     failure_result_from_rep(pages.canonical_tree(mut edited.catalog))?
     ids = next_stamp - 1
     Ok(take edited)
-}
-
-fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
-    if !types.same(plan.store.hi, plan.store.lo, from.store.hi, from.store.lo) {
-        return Error(Foreign)
-    }
-    let meta = catalog_entry_in(plan.roots.catalog, from.catalog_key)?
-    if meta.id != from.id {
-        return Error(Stale(from.id))
-    }
-    let target = table_key(to_name)?
-    if !same_bytes(target, from.catalog_key) {
-        if let Some(_) = pages.get_page_row(plan.roots.catalog, target) {
-            return Error(Exists(named(to_name)?))
-        }
-    }
-    if meta.next == 65535 {
-        return Error(Limit(Value))
-    }
-    let olds = index_catalog_in(plan.roots.catalog, from.id)?
-    let id = plan.next_table
-    plan.step_drift = true
-    if table_is_tiered(plan.roots.collections, from.id)? {
-        let mut roots = pages.share_roots(plan.roots)
-        let mut ids = plan.next_node
-        let schema = std.codec.schema(to_value) ?=> |_| Schema(0)
-        let fp = std.codec.fingerprint_of(schema)
-        let mut schemas: List[ValueSchema] = list.new()
-        list.push(mut schemas, ValueSchema(number: meta.next, fingerprint: fp, schema: take schema))
-        let table_raw = encode_catalog(Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: meta.next + 1, by: list.new(), revision: list.new()))?
-        let mut live_bytes = int.saturating_add(plan.live, 126 + entry(target, table_raw))
-        define_empty_tiered_collection(mut roots.collections, id, 1, mut ids)?
-        let mut old_ids: List[u32] = list.with_capacity(list.len(olds))
-        for old in olds {
-            list.push(mut old_ids, old.id)
-        }
-        let low = index_prefix(from.id)?
-        let high = index_prefix(from.id + 1)?
-        let mut catalog_rows = byte_cursor(roots.catalog, Included(take low), high)?
-        while let Some((k, v)) = next_bytes(mut catalog_rows)? {
-            if !plan.retained {
-                live_bytes = int.saturating_sub(live_bytes, entry(k, v))
-            }
-            remove_store_row(mut roots.catalog, k, mut ids)?
-        }
-        if let Some(raw) = pages.get_page_row(roots.catalog, from.catalog_key) {
-            if !plan.retained {
-                live_bytes = int.saturating_sub(live_bytes, entry(from.catalog_key, raw))
-            }
-        }
-        remove_store_row(mut roots.catalog, from.catalog_key, mut ids)?
-        roots = catalog_insert(mut ids, roots, target, table_raw)?
-        plan.next_node = ids
-        keep_schema(mut plan, take roots, live_bytes, id + 1)?
-        record_migrate_source(mut plan, from.id, id)?
-        let preview_slot: Option[u64] = if let Some(mut backfills) = plan.preview {
-            let slot = list.len(backfills)
-            list.push(mut backfills, MigrationBackfill(table: named(to_name)?, index: None, cause: None, read: 0, written: 0, outcome: Filled))
-            Some(slot)
-        } else {
-            None
-        }
-        let from_id = from.id
-        let number = meta.next
-        let value_limit = plan.value_limit
-        let convert_row: own[send] fn(Bytes, Bytes) -> Result[Option[(Bytes, Bytes)], Error] = fn(key_bytes: Bytes, raw_val: Bytes) -> Result[Option[(Bytes, Bytes)], Error] {
-            let decoded_key = decoded(std.codec.decode_key(from.key, key_bytes))?
-            let decoded_val = row_value(from.readers, from_id, raw_val)?
-            match failure_result_from_rep(types.capacity(f(decoded_key, decoded_val)))? {
-                Some((k2, v2)) => {
-                    let encoded = encode_key(to_key, k2)?
-                    if list.len(encoded) > 4092 {
-                        return Error(Limit(Key))
-                    }
-                    let mut out_val: Bytes = list.new()
-                    failure_result_from_rep(types.capacity(format.le(mut out_val, int.widen(number), 2)))?
-                    std.codec.encode(to_value, v2, mut out_val) ?=> |_| Limit(Value)
-                    if list.len(out_val) > value_limit {
-                        return Error(Limit(Value))
-                    }
-                    Ok(Some((take encoded, take out_val)))
-                },
-                None => Ok(None),
-            }
-        }
-        failure_result_from_rep(types.capacity(list.try_reserve(mut plan.pending_migrates, 1)))?
-        list.push(mut plan.pending_migrates, DeferredMigrate(from_id: from_id, to_id: id, to_name: named(to_name)?, olds: take old_ids, convert: take convert_row, preview_slot: preview_slot))
-        return Ok(())
-    }
-    let base = pages.share_roots(plan.roots)
-    let mut ids = plan.next_node
-    let built = migrate_build(plan.roots.collections, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to_name, to_key, to_value, f, id, meta.next, target, plan.value_limit)
-    plan.next_node = ids
-    let Built(roots: take roots, live: live_bytes, read, written) = built?
-    keep_schema(mut plan, take roots, live_bytes, id + 1)?
-    record_migrate_source(mut plan, from.id, id)?
-    if let Some(mut backfills) = plan.preview {
-        list.push(mut backfills, MigrationBackfill(table: named(to_name)?, index: None, cause: None, read: read, written: written, outcome: Filled))
-    }
-    Ok(())
 }
 
 fn bucket(_k: u64, v: u64) -> Result[List[u64], Capacity] {

@@ -189,12 +189,7 @@ pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previou
     stage_system_put(mut staged.plan, releases, release_at, release)
 }
 
-pub fn activation_install_allowed(db: Db) -> Result[(), Error] {
-    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Install)))
-}
-
 pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[(), Error] waits {
-    activation_install_allowed(db)?
     if object_writer_open(db) {
         return Error(Missing("binding"))
     }
@@ -202,7 +197,6 @@ pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[()
 }
 
 pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activation: u64, schema_binding: Bytes) -> Result[(), Error] waits {
-    activation_install_allowed(db)?
     let update = if object_writer_open(db) {
         if list.len(schema_binding) != 32 {
             return Error(Missing("binding"))

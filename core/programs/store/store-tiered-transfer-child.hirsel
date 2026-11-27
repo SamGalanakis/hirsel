@@ -681,11 +681,13 @@ fn run_deferred_migrates(mut ctx: ChildCutContext, opened: u64, mut plan: Schema
         }
         // Drop source table and its old indexes from collections.
         let former = remove_store_collection(mut plan.roots.collections, job.from_id, mut plan.next_node)?
+        discard_replayed_collection(mut plan.roots.collections, job.from_id)?
         if !plan.retained {
             plan.live = int.saturating_sub(plan.live, former)
         }
         for old_id in job.olds {
             let charge = remove_store_collection(mut plan.roots.collections, old_id, mut plan.next_node)?
+            discard_replayed_collection(mut plan.roots.collections, old_id)?
             if !plan.retained {
                 plan.live = int.saturating_sub(plan.live, charge)
             }
@@ -759,7 +761,7 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
                 break
             }
             if !target_tiered {
-                let mut tmp = SchemaPlan(store: ctx.store, roots: pages.share_roots(roots), next_node: next_node, next_table: 0u32, live: live_bytes, ceiling: ceiling, retained: retained, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+                let mut tmp = SchemaPlan(store: ctx.store, roots: pages.share_roots(roots), next_node: next_node, next_table: 0u32, live: live_bytes, ceiling: ceiling, retained: retained, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), defer_tiered: false, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
                 let dup = index_chunk(mut tmp, job.catalog_key, copied_record(record)?, bindings[bind_idx].index, batch, false, false, false)?
                 if let Some(_) = dup {
                     return Error(Conflict(named(job.name)?))
@@ -820,16 +822,6 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
         let raw_cat = encode_catalog(published)?
         roots = catalog_insert(mut next_node, roots, job.catalog_key, raw_cat)?
     }
-    Ok(())
-}
-
-fn run_deferred_index_builds(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPlan) -> Result[(), Error] waits {
-    if list.len(plan.pending_indexes) == 0 {
-        return Ok(())
-    }
-    let pending = replace(mut plan.pending_indexes, list.new())
-    run_deferred_index_builds_roots(mut ctx, opened, pending, plan.bindings, mut plan.roots, mut plan.next_node, plan.live, plan.ceiling, plan.retained)?
-    plan.changed = true
     Ok(())
 }
 

@@ -185,7 +185,11 @@ fn install_fixture_bytes(n: u64, b: u8) -> Bytes {
 }
 
 fn crash_install_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
+    crash_install_init_with(d, c, r, tasks, disk_crash_options("install"))
+}
+
+fn crash_install_init_with(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, options)?
     let mut staging = install_old(db)?
     let description = install_fixture_bytes(32u64, 65u8)
     stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description)?
@@ -210,9 +214,16 @@ fn crash_install_prepared(mut db: Db, d: Dir, c: Clock, tasks: Tasks, attempt: B
 }
 
 fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, image: u8, journal_cap: u64) -> Result[Inline[u8, 32], DeployError] waits {
-    let mut source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    crash_import_with(mut db, scratch, c, tasks, attempt, image, journal_cap, disk_crash_options("install"))
+}
+
+// crash_import with the child opened under `options`, whose resident limit
+// the prepared header carries to NEW.
+fn crash_import_with(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, image: u8, journal_cap: u64, options: Options) -> Result[Inline[u8, 32], DeployError] waits {
+    let resident = options.resident_limit
+    let mut source = open_export(scratch, c, attempt, options)?
     let staged = deploy_result(stage_next(source, tasks))?
-    let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: journal_cap, limits: None)
+    let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: resident, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: journal_cap, limits: None)
     write_prepared(mut source, staged, scratch, take header)?
     let checked = validate_prepared(scratch)?
     let work = reserve_import(mut db, take checked)?

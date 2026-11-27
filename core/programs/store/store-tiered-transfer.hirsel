@@ -377,8 +377,12 @@ fn put_collection_with_residency(mut tree: pages.PageTree, key: Bytes, take slot
             failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(take page), tree.inline, private_from, mut ids)))
         },
         Some(ColdPage(ptr)) => {
+            // A map entry's pointer names its child's stamp, so the entry goes
+            // in over an empty stand-in with the Cold root's stamp, which
+            // install_tiered_root then replaces with the Cold root.
+            let stand_in = std.page.empty(0, ptr.stamp, Collection)
             let record = failure_result_from_rep(pages.collection_header(ptr.stamp, rows, charge, kind, ResidentTiered))?
-            failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids)))?
+            failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(take stand_in), tree.inline, private_from, mut ids)))?
             failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, key, ColdPage(ptr), mut ids)))
         },
     }

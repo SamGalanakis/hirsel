@@ -46,15 +46,6 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         let release = http_release_digest(local_registry.t.exported, local_registry.t.bindings) ?=> |_| Place(Bounds)
         return Ok((take local_registry, take h, take release, take identity))
     }
-    let explicit_install = match selection {
-        Install(_) => true,
-        InstallAt(_, _) => true,
-        InstallFrom(_) => true,
-        _ => false,
-    }
-    if explicit_install {
-        activation_result(store.activation_install_allowed(db))?
-    }
     if persistent && launch_env().revision.size == 0u64 {
         return Error(IdentityUnknown)
     }
@@ -131,9 +122,6 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         let ReleaseRecord(release: take release, ..) = take record
         return Ok((take reg, take h, take release, take identity))
     }
-    if !explicit_install {
-        activation_result(store.activation_install_allowed(db))?
-    }
     let identity = activation_identity(code.identity(placing.place), on_migrate, code.identity(schema))?
     let mut declaration = migration_declaration(db, tasks, on_migrate) ?=> Migrate
     let h = (code.callable(schema))(mut declaration) ?=> Migrate
@@ -143,9 +131,6 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
     let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
     if let Error(take problem) = store.install_bound_activation(mut db, take stage, version, record.binding) {
-        if let Tiered(Install) = problem {
-            return Error(Store(take problem))
-        }
         if let InstallAt(_, _) = selection {
             return Error(InstallUncertain(take problem))
         }

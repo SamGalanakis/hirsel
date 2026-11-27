@@ -318,7 +318,6 @@ pub opaque type ImportWork: send {
 }
 
 pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[ImportWork, DeployError] {
-    deploy_result(activation_install_allowed(db))?
     deploy_result(healthy(db))?
     if !is_disk(db) || validated.meta.base.opened != open_number(db) || validated.meta.base.store_hi != db.store.hi || validated.meta.base.store_lo != db.store.lo || !matches_export(db, validated.meta.base) {
         return Error(ExportMismatch)

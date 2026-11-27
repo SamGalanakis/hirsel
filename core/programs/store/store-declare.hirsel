@@ -116,10 +116,7 @@ pub fn declare(db: Db, mode: Mode) -> Result[Declare, Error] {
     healthy(db)?
     match mode {
         Follower => Error(Foreign),
-        Migrate => {
-            failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
-            Ok(new_declaration(mode, declaration_base(db), schema_plan(db), is_disk(db)))
-        },
+        Migrate => Ok(new_declaration(mode, declaration_base(db), schema_plan(db), is_disk(db))),
         Open => Ok(new_declaration(mode, declaration_base(db), schema_plan(db), is_disk(db))),
     }
 }
@@ -146,7 +143,7 @@ fn read_only_base(source: ReadOnly) -> DeclarationBase {
 
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
-    let plan = SchemaPlan(store: snap.store, roots: pages.share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: snap.store, roots: pages.share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), defer_tiered: false, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, read_only_base(source), take plan, true)
 }
 
@@ -184,12 +181,11 @@ pub fn describe_declarations[H](clock: Clock, schema: StaticFn[fn(mut Declare) -
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(store: capture.store, roots: pages.share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: capture.store, roots: pages.share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), defer_tiered: false, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, follower_base(f), take plan, true)
 }
 
 pub fn declare_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[Declare, Error] waits {
-    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
     let staged = stage_migration(db, tasks, configure)?
     let StagedMigration(base, plan: take plan, ..) = take staged
     Ok(new_declaration(Migrate, base, take plan, is_disk(db)))
@@ -215,9 +211,10 @@ pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[Stati
     let mut d = match configure {
         Some(callback) => {
             healthy(source.db)?
-            failure_result_from_rep(types.require_memory_collections(store_has_tiered(source.db), tiered_refusal_to_rep(Migrate)))?
             let ctx = child_cut_context(source)
-            let (take plan, take updated_ctx) = stage_migration_plan_with(source.db, tasks, callback, schema_plan(source.db), Some(take ctx), source.stamp.opened)?
+            let mut staged = schema_plan(source.db)
+            staged.defer_tiered = true
+            let (take plan, take updated_ctx) = stage_migration_plan_with(source.db, tasks, callback, take staged, Some(take ctx), source.stamp.opened)?
             if let Some(done_ctx) = updated_ctx {
                 save_child_cut_pack(source, done_ctx.next_pack)
             }
@@ -225,6 +222,7 @@ pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[Stati
         },
         None => declare(source.db, Migrate)?,
     }
+    d.plan.defer_tiered = true
     d.versioned = true
     Ok(take d)
 }
@@ -330,6 +328,10 @@ fn declaration_index_name(key: Bytes) -> Result[String, Error] {
 fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result[(), Error] {
     let mut roots = pages.share_roots(plan.roots)
     let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
+    // 3150 F2: a removed index supersedes its id (§13.7, D-D7-5).
+    discard_replayed_collection(mut roots.collections, record.id)?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut plan.superseded, 1)))?
+    list.push(mut plan.superseded, record.id)
     let mut live_bytes = plan.live
     if !plan.retained {
         let Some(raw) = pages.get_page_row(roots.catalog, key) else {
@@ -524,6 +526,7 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
     match take existing {
         None => {
             if let Migrate = d.mode {
+                refuse_hot_tiered_build(d.plan, table_is_tiered(d.plan.roots.collections, proposed.owner)?)?
                 Ok(Some(string.from("new index")))
             } else {
                 Error(Missing(named(name)?))
@@ -539,6 +542,7 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
             }
             if schemas_changed || code_changed {
                 if let Migrate = d.mode {
+                    refuse_hot_tiered_build(d.plan, table_is_tiered(d.plan.roots.collections, old.owner)? || table_is_tiered(d.plan.roots.collections, old.id)?)?
                     let cause = rebuild_cause(old, proposed, ends)?
                     remove_declared_index(mut d.plan, lookup_key, old)?
                     Ok(Some(take cause))
@@ -682,10 +686,6 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
     complete_declaration(d)?
     let Declare(plan: take candidate, projectors: take registered, ..) = take d
     let mut proposal = take candidate
-    if list.len(proposal.pending_indexes) != 0 && is_disk(db) {
-        let mut ctx = ChildCutContext(dir: log_directory(db)?, store: db.store, next_pack: disk_state(db).pages.next_pack, pack_bytes: disk_state(db).options.pack_bytes, dirty_bytes: disk_state(db).options.dirty_bytes, writer_pin_bytes: db.writer_pin_bytes)
-        run_deferred_index_builds(mut ctx, open_number(db), mut proposal)?
-    }
     let registry = declared_index_registry(replace(mut proposal.bindings, list.new()))
     let retained = replace(mut proposal.retention, list.new())
     if proposal.changed {
@@ -712,7 +712,6 @@ pub fn seal_follower(f: Follower, take d: Declare) -> Result[(), Error] {
 }
 
 pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key: std.codec.Key[K], take from_value: std.codec.Codec[V], to: String, take to_key: std.codec.Key[K2], take to_value: std.codec.Codec[V2], convert: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
-    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     declaration_name(from)?
     declaration_name(to)?
     let prior = catalog_handle(m.plan.store, m.plan.roots.catalog, named(from)?, from_key, from_value)?
@@ -720,7 +719,6 @@ pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key
 }
 
 pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error] {
-    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     declaration_name(name)?
     let key = table_key(name)?
     let table_id = match pages.get_page_row(m.plan.roots.catalog, key) {
@@ -731,7 +729,6 @@ pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error] {
 }
 
 pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Error] {
-    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     declaration_name(from)?
     declaration_name(to)?
     let old_key = table_key(from)?

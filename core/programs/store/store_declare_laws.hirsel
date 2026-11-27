@@ -89,12 +89,10 @@ fn test_migration_list_collections(c: Clock, tasks: Tasks) -> Result[(), Error] 
     }
     let _ = stage_migration(db, tasks, code.describe(migration_list_staged))?
     migration_list_retirement(mut db, tasks)?
+    // L70 revised: listing lifts on Tiered descriptors (v2.170).
     refusal_attach_descriptors(mut db, log_id, cell_id)?
-    if let Error(Tiered(Migrate)) = stage_migration(db, tasks, code.describe(migration_list_baseline)) {
-        Ok(())
-    } else {
-        fail("migration listing: expected Tiered(Migrate)")
-    }
+    let _ = stage_migration(db, tasks, code.describe(migration_list_baseline))?
+    Ok(())
 }
 
 @test

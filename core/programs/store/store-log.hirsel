@@ -274,32 +274,6 @@ pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[
     open_snapshot_rows(s, id, take low, take high, false, log_decoder(l))
 }
 
-type LogRangeTail {
-    id: u32,
-    seq: u64,
-    end: u64
-}
-
-fn log_endpoint(limit: Bound[u64], high: bool) -> u64 {
-    match limit {
-        Unbounded => if high {
-            18446744073709551615u64
-        } else {
-            0u64
-        },
-        Included(n) => if high {
-            int.saturating_add(n, 1)
-        } else {
-            n
-        },
-        Excluded(n) => if high {
-            n
-        } else {
-            int.saturating_add(n, 1)
-        },
-    }
-}
-
 pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[TxRows[u64, V], Error] in tx {
     readable_value(tx.store, tx.roots, l.binding)?
     let id = l.binding.id
@@ -316,14 +290,14 @@ pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result
     } else {
         failure_result_from_rep(catalog.collection_cursor(tx.roots.collections, id, committed_low, committed_high, false))?
     }
-    let tail = LogRangeTail(id: id, seq: order.max(head.next, lower), end: upper)
+    let tail = txn.LogRangeTail(id: id, seq: order.max(head.next, lower), end: upper)
     let codec = std.codec.key_u64()
     let low = lower_bytes(id, typed_bound(codec, lo)?, false)?
     let high = lower_bytes(id, typed_bound(codec, hi)?, true)?
     Ok(TxRows(cursor: take cursor, decoder: log_decoder(l), owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: false, log_tail: Some(tail), tiered: take tiered))
 }
 
-fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn next_log_range_tail(tx: Tx, mut tail: txn.LogRangeTail) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     if tail.seq >= tail.end {
         return Ok(None)
     }
@@ -387,63 +361,6 @@ fn trim_log_floor(mut tx: Tx, id: u32, seq: u64) -> Result[(), Error] {
     Ok(())
 }
 
-fn trim_log_page(mut tree: pages.PageTree, key: Bytes, floor: u64, expected: Option[u64], first: u64, mut ids: u64) -> Result[u64, Error] {
-    let (take kept, next_seq, dropped) = {
-        let Some((old, descriptor)) = std.page.collection_entry(tree.root, key) else {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-        let fields = pages.collection_descriptor(descriptor)
-        if fields.kind != LogCollection || fields.residency != ResidentMemory {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-        let limits = pager.descriptor_bounds(descriptor)
-        let previous = fields.row_bytes
-        if floor < limits.first {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-        if let Some(amount) = expected {
-            if amount > previous {
-                return Error(failure_from_rep(pages.malformed(0)))
-            }
-        }
-        let candidate = if floor >= limits.next {
-            let Some(empty) = view tree.empty_collection else {
-                fail("store: missing empty collection page")
-            }
-            arc.share(empty)
-        } else {
-            let suffix = types.key_word(floor)
-            failure_result_from_rep(pages.page_result(std.page.cut_before(old, suffix, mut ids)))?
-        }
-        let (rows, charge) = std.page.totals(candidate)
-        let removed = order.min(floor, limits.next) - limits.first
-        if rows != limits.next - limits.first - removed || charge > previous {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-        (take candidate, order.max(floor, limits.next), previous - charge)
-    }
-    if let Some(amount) = expected {
-        if dropped != amount {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-    }
-    let descriptor = failure_result_from_rep(pages.log_record(kept, floor, next_seq, ResidentMemory))?
-    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, descriptor, Some(take kept), tree.inline, first, mut ids)))?
-    Ok(dropped)
-}
-
-fn masked_log_append(states: Map[u32, pages.LogState], key: Bytes) -> bool {
-    if list.len(key) != 12 {
-        return false
-    }
-    let id: u32 = list.word_be(key, 0)
-    let Some(state) = map.get(states, id) else {
-        return false
-    }
-    let seq: u64 = list.word_be(key, 4)
-    seq < state.limits.first
-}
-
 fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
     let mut operations = pages.new_data_rows()
     let first = draw
@@ -458,7 +375,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
         let dropped = if pager.tiered_data_key(tx.roots.collections, key) {
             0u64
         } else {
-            let removed = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
+            let removed = failure_result_from_rep(txn.trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw))?
             if !tx.retain_old {
                 tx.resident = int.saturating_sub(tx.resident, removed)
             }
@@ -472,7 +389,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
     tx.frame_tail = pages.NO_FRAME_TAIL
     for slot in 0u64 .. pages.data_row_count(tx.ops.rows) {
         let op = pages.data_row(tx.ops.rows, slot)
-        if !masked_log_append(states, op.key) {
+        if !txn.masked_log_append(states, op.key) {
             pages.push_data_row(mut operations, clone(op))
         }
     }
@@ -607,4 +524,13 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
     window_insertions(r, mut out, b, id, order.max(new.first, old.next), new.next)?
     let read.ChangeOutput(rows: take items, ..) = take out
     Ok(take items)
+}
+
+fn log_endpoint(limit: Bound[u64], high: bool) -> u64 {
+    let endpoint: std.omap.Bound[u64] = match limit {
+        Unbounded => Unbounded,
+        Included(n) => Included(n),
+        Excluded(n) => Excluded(n),
+    }
+    txn.log_endpoint(endpoint, high)
 }

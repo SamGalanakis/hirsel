@@ -111,7 +111,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
     let mut revoked = false
     loop {
         let ci = call_info(db.store, 0, pages.holder_heads(db.holders)[0].head + 1, at, pages.holder_heads(db.holders)[0].at)
-        refresh_call_pins(mut call.pins, mut call.pending, call_pin_root(db, 0))
+        txn.refresh_call_pins(mut call.pins, mut call.pending, call_pin_root(db, 0))
         call.attempts += 1
         let attempt = pager.call_attempt(call_captures_tiered(db, 0), pager.pin_partition(db.pager), pager.tiered_window(call.pins))
         let metered = metered_draft(db, complete, ci, plan, grant, rec, attempt, call.pins.frames, body)

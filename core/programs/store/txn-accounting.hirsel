@@ -60,3 +60,21 @@ pub fn draft_credit(current: format.KeyedCredit, keyed: Option[format.KeyedDraft
         None => current
     }
 }
+
+pub fn entry(key: Bytes, val: Bytes) -> u64 {
+    capture.stored_row_charge(list.len(key), list.len(val))
+}
+
+pub const KEY_LIMIT: u64 = 4096
+
+pub fn catalog_recharge(live_bytes: u64, roots: pages.Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
+    let old_charge = if retained {
+        0u64
+    } else {
+        match pages.get_page_row(roots.catalog, key) {
+            Some(old) => entry(key, old),
+            None => 0
+        }
+    }
+    int.saturating_add(int.saturating_sub(live_bytes, old_charge), entry(key, value))
+}

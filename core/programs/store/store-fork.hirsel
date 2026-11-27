@@ -55,7 +55,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let size = 42 + string.byte_len(name)
     let disk = is_disk(db)
     if disk {
-        if let Some(over) = journal_refusal(queue_accounting(disk_state(db)).uncovered, size, txn.available_journal(disk_state(db).options.journal_limit, db.call_streams.keyed_credit)) {
+        if let Some(over) = txn.journal_refusal(queue_accounting(disk_state(db)).uncovered, size, txn.available_journal(disk_state(db).options.journal_limit, db.call_streams.keyed_credit)) {
             return Error(Full(Journal(over)))
         }
     }

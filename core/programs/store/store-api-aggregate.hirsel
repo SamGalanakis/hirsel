@@ -224,7 +224,7 @@ fn add_chunk_totals(mut collections: pages.PageTree, mut live_bytes: u64, retain
         let (members, sum) = match pages.get_page_row(collections, group) {
             Some(prior) => {
                 if !retained {
-                    live_bytes = int.saturating_sub(live_bytes, entry(group, prior))
+                    live_bytes = int.saturating_sub(live_bytes, txn.entry(group, prior))
                 }
                 group_totals(prior)?
             },
@@ -234,7 +234,7 @@ fn add_chunk_totals(mut collections: pages.PageTree, mut live_bytes: u64, retain
             return Error(Limit(Value))
         }
         let value = totals_bytes(members + added, next_sum)?
-        live_bytes = int.saturating_add(live_bytes, entry(group, value))
+        live_bytes = int.saturating_add(live_bytes, txn.entry(group, value))
         failure_result_from_rep(catalog.over_ceiling(live_bytes, ceiling))?
         failure_result_from_rep(pages.put_page_row(mut collections, group, value, first, mut next_stamp))?
         if let Some(mut step_rows) = written_ops {

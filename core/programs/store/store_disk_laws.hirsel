@@ -804,22 +804,22 @@ fn journal_test_floor() -> Result[(), ()] {
 
 @test
 fn journal_test_cap_arithmetic() -> Result[(), ()] {
-    if let Some(_) = journal_refusal(4096, FRAME_LIMIT, 16781392) {
+    if let Some(_) = txn.journal_refusal(4096, FRAME_LIMIT, 16781392) {
         return Error(())
     }
-    let Some(full) = journal_refusal(16781392, 59, 16781392) else {
+    let Some(full) = txn.journal_refusal(16781392, 59, 16781392) else {
         return Error(())
     }
     if full.requested != 16781451 || full.available != 16781392 {
         return Error(())
     }
-    let Some(lowered) = journal_refusal(16781392, 59, 16781391) else {
+    let Some(lowered) = txn.journal_refusal(16781392, 59, 16781391) else {
         return Error(())
     }
     if lowered.requested != 16781451 || lowered.available != 16781391 {
         return Error(())
     }
-    let Some(overflow) = journal_refusal(18446744073709551605, 59, 18446744073709551615) else {
+    let Some(overflow) = txn.journal_refusal(18446744073709551605, 59, 18446744073709551615) else {
         return Error(())
     }
     if overflow.requested != 18446744073709551615 || overflow.available != 18446744073709551615 {

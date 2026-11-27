@@ -114,12 +114,12 @@ fn advance_tx_view(mut v: TxView, rows: pages.DataRows, memory_only: bool) -> Re
     // Log. Table and index edits on different keys commute in this view.
     if let Some(take dirty) = replace(mut v.dirty, None) {
         for (slot, _) in dirty.slots {
-            materialize_row(mut v.tree, pages.data_row(rows, slot), memory_only, v.first, mut v.draw)?
+            failure_result_from_rep(txn.materialize_row(mut v.tree, pages.data_row(rows, slot), memory_only, v.first, mut v.draw))?
         }
     }
     for slot in v.row .. pages.data_row_count(rows) {
         if v.popped != Some(slot) {
-            materialize_row(mut v.tree, pages.data_row(rows, slot), memory_only, v.first, mut v.draw)?
+            failure_result_from_rep(txn.materialize_row(mut v.tree, pages.data_row(rows, slot), memory_only, v.first, mut v.draw))?
         }
     }
     v.popped = None
@@ -236,7 +236,7 @@ fn fold_own(mut tx: Tx) {
 // Stages `newer`'s rows over `ops` in their first-write order.
 fn fold_ops(mut ops: pages.DataOps, below: List[Arc[pages.Staged]], streams: bool, cache: Option[View[core.Cell[Option[TxView]]]], take newer: pages.DataOps) {
     let pages.DataOps(rows: take rows, cells: take cells, logs: take logs, ..) = take newer
-    fold_cell_edits(mut ops.cells, below, cells)
+    txn.fold_cell_edits(mut ops.cells, below, cells)
     for (id, state) in logs {
         map.insert(mut ops.logs, id, state)
     }
@@ -391,7 +391,7 @@ fn save_data_op(mut ops: pages.DataOps, below: List[Arc[pages.Staged]], streams:
 }
 
 fn put_frame(tx: Tx, key: Bytes, value: Bytes, frame: Option[u64]) -> Result[Option[u64], Error] {
-    if list.len(key) > KEY_LIMIT {
+    if list.len(key) > txn.KEY_LIMIT {
         return Error(Limit(Key))
     }
     let size = list.len(value)
@@ -469,13 +469,13 @@ fn put_charge(mut tx: Tx, key: Bytes) -> Result[(u64, u64, Option[u32]), Error] 
     // the selection takes none.
     let (previous, prior) = match staged_op(tx, key) {
         Some(op) => (match op.value {
-            Some(value) => entry(key, format.staged_bytes(value)),
+            Some(value) => txn.entry(key, format.staged_bytes(value)),
             None => 0u64,
         }, op.prior),
         None => {
             let base = std.page.lookup(held.root, list.slice(key, 4, list.len(key)))
             let charge = match base {
-                Some(value) => entry(key, value),
+                Some(value) => txn.entry(key, value),
                 None => 0u64,
             }
             (charge, if held.kind == CellCollection || held.kind == LogCollection {
@@ -680,7 +680,7 @@ fn staged_op(tx: Tx, key: Bytes) -> Option[View[format.DataOp]] in tx {
     if let Some(slot) = pages.op_slot(tx.ops, key) {
         return Some(pages.data_row(tx.ops.rows, slot))
     }
-    if let Some(at) = newest_layer(tx.below, false, key) {
+    if let Some(at) = txn.newest_layer(tx.below, false, key) {
         let layer = view tx.below[at]
         if let Some(slot) = pages.op_slot(layer.ops, key) {
             return Some(pages.data_row(layer.ops.rows, slot))
@@ -704,5 +704,5 @@ fn memory_data_charge(tx: Tx, key: Bytes, raw: Bytes) -> u64 {
             return 0
         }
     }
-    entry(key, raw)
+    txn.entry(key, raw)
 }

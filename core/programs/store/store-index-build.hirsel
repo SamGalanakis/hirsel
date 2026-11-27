@@ -176,10 +176,10 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: indexes.Cata
                         }
                     }
                     if !plan.schema.retained {
-                        live_bytes = int.saturating_sub(live_bytes, entry(row, prior))
+                        live_bytes = int.saturating_sub(live_bytes, txn.entry(row, prior))
                     }
                 }
-                live_bytes = int.saturating_add(live_bytes, entry(row, values.payload))
+                live_bytes = int.saturating_add(live_bytes, txn.entry(row, values.payload))
                 failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
                 failure_result_from_rep(pages.put_page_row(mut roots.collections, row, values.payload, first, mut next_stamp))?
                 if let Some(mut step_rows) = chunk_steps {
@@ -198,7 +198,7 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: indexes.Cata
         failure_result_from_rep(indexes.set_index_state(mut record, Backfilling(Some(take final_key))))?
     }
     let raw = encode_catalog(record)?
-    live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.schema.retained)
+    live_bytes = txn.catalog_recharge(live_bytes, roots, key, raw, plan.schema.retained)
     roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, roots, key, raw))?
     let next_table = plan.schema.next_table
     keep_schema(mut plan, take roots, live_bytes, next_table)?
@@ -252,7 +252,7 @@ fn extract_entries(mut extracted: List[std.page.Row], mut workspace: u64, ceilin
         if list.len(row) > 4096 {
             return Error(Limit(Key))
         }
-        let charge = entry(row, values.payload)
+        let charge = txn.entry(row, values.payload)
         workspace = int.saturating_add(workspace, charge + 8)
         failure_result_from_rep(catalog.over_ceiling(workspace, ceiling))?
         failure_result_from_rep(types.capacity(list.try_reserve(mut extracted, 1)))?
@@ -316,7 +316,7 @@ fn bulk_declared_index(mut plan: SchemaPlan, key: Bytes, record: indexes.Catalog
     list.push(mut plan.schema.superseded, current.id)
     failure_result_from_rep(indexes.set_index_state(mut current, Public))?
     let raw = encode_catalog(current)?
-    live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.schema.retained)
+    live_bytes = txn.catalog_recharge(live_bytes, roots, key, raw, plan.schema.retained)
     roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, roots, key, raw))?
     let next_table = plan.schema.next_table
     keep_schema(mut plan, take roots, live_bytes, next_table)?
@@ -472,7 +472,7 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
 
 fn put_index_record(mut plan: SchemaPlan, key: Bytes, record: indexes.Catalog) -> Result[(), Error] {
     let raw = encode_catalog(record)?
-    let live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, key, raw, plan.schema.retained)
+    let live_bytes = txn.catalog_recharge(plan.schema.live, plan.schema.roots, key, raw, plan.schema.retained)
     let roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, plan.schema.roots, key, raw))?
     let next_table = plan.schema.next_table
     keep_schema(mut plan, take roots, live_bytes, next_table)
@@ -581,10 +581,10 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         scratch = proposed.id + 1u32
         failure_result_from_rep(indexes.set_index_state(mut proposed, Backfilling(None)))?
         let raw = encode_catalog(proposed)?
-        let mut live_bytes = int.saturating_add(126, catalog_recharge(plan.schema.live, plan.schema.roots, key, raw, plan.schema.retained))
+        let mut live_bytes = int.saturating_add(126, txn.catalog_recharge(plan.schema.live, plan.schema.roots, key, raw, plan.schema.retained))
         meta.epoch += 1
         let changed = encode_catalog(meta)?
-        live_bytes = catalog_recharge(live_bytes, plan.schema.roots, t.catalog_key, changed, plan.schema.retained)
+        live_bytes = txn.catalog_recharge(live_bytes, plan.schema.roots, t.catalog_key, changed, plan.schema.retained)
         failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
         let mut roots = pages.share_roots(plan.schema.roots)
         if owner_tiered {
@@ -774,7 +774,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         let mut schemas: List[catalog.ValueSchema] = list.new()
         list.push(mut schemas, catalog.ValueSchema(number: meta.next, fingerprint: fp, schema: take schema))
         let table_raw = encode_catalog(indexes.Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: meta.next + 1, by: list.new(), revision: list.new()))?
-        let mut live_bytes = int.saturating_add(plan.schema.live, 126 + entry(target, table_raw))
+        let mut live_bytes = int.saturating_add(plan.schema.live, 126 + txn.entry(target, table_raw))
         define_empty_tiered_collection(mut roots.collections, id, 1, mut ids)?
         let mut old_ids: List[u32] = list.with_capacity(list.len(olds))
         for old in olds {
@@ -785,13 +785,13 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         let mut catalog_rows = byte_cursor(roots.catalog, Included(take low), high)?
         while let Some((k, v)) = failure_result_from_rep(catalog.next_bytes(mut catalog_rows))? {
             if !plan.schema.retained {
-                live_bytes = int.saturating_sub(live_bytes, entry(k, v))
+                live_bytes = int.saturating_sub(live_bytes, txn.entry(k, v))
             }
             failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, k, mut ids))?
         }
         if let Some(raw) = pages.get_page_row(roots.catalog, from.catalog_key) {
             if !plan.schema.retained {
-                live_bytes = int.saturating_sub(live_bytes, entry(from.catalog_key, raw))
+                live_bytes = int.saturating_sub(live_bytes, txn.entry(from.catalog_key, raw))
             }
         }
         failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, from.catalog_key, mut ids))?

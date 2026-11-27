@@ -1,0 +1,187 @@
+pub fn keyed_credit_equal(a: format.KeyedCredit, b: format.KeyedCredit) -> bool {
+    a.resident == b.resident && a.padding == b.padding && a.journal == b.journal
+}
+
+pub fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {
+    if uncovered > limit || frame > limit - uncovered {
+        Some(Capacity(requested: int.saturating_add(uncovered, frame), available: limit))
+    } else {
+        None
+    }
+}
+
+pub fn direct_collection_edits(mut tree: pages.PageTree, edits: pages.DataRows, first_stamp: u64) -> Result[bool, Capacity] {
+    let inline = tree.inline
+    // put_inline_unique takes no stamp above this bound; each path is far shorter than 512.
+    let rows = pages.data_row_count(edits)
+    if first_stamp == 0 || rows > 1024 || first_stamp > 18446744073709551103u64 - 512 * rows {
+        return Ok(false)
+    }
+    for e in 0u64 .. rows {
+        let op = pages.data_row(edits, e)
+        let Some(raw) = view op.value else {
+            return Ok(false)
+        }
+        let collection = list.slice(op.key, 0, 4)
+        if pages.collection_kind(tree, collection) == Some(CellCollection) {
+            return Ok(false)
+        }
+        for prior in 0u64 .. e {
+            if list.compare_bytes(list.slice(pages.data_row(edits, prior).key, 0, 4), collection) == Equal {
+                return Ok(false)
+            }
+        }
+        if !std.page.inline_unique_ready(mut tree.root, collection, list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline)? {
+            return Ok(false)
+        }
+    }
+    let mut stamps = first_stamp
+    for slot in 0u64 .. pages.data_row_count(edits) {
+        let op = pages.data_row(edits, slot)
+        let Some(raw) = view op.value else {
+            fail("store: a checked direct edit lost its value")
+        }
+        match std.page.put_inline_unique(mut tree.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline, mut stamps) {
+            Ok(true) => (),
+            _ => fail("store: a checked direct edit did not apply"),
+        }
+    }
+    Ok(true)
+}
+
+pub fn settled_tiered_bytes(total: u64, retained: bool, base: pages.PageTree, proposed: pages.PageTree, operations: pages.DataRows) -> Result[u64, types.Failure] {
+    let order = types.capacity(pages.data_order(operations))?
+    let mut prior_collection: Option[u32] = None
+    let mut charged = total
+    for slot in 0u64 .. pages.data_row_count(operations) {
+        let op = pager.ordered_row(operations, order, slot)
+        let id = list.slice(op.key, 0, 4)
+        let Some(before) = std.page.lookup(base.root, id) else {
+            continue
+        }
+        let fields = pages.collection_descriptor(before)
+        if fields.residency != ResidentTiered {
+            continue
+        }
+        if retained {
+            if let Some(raw) = view op.value {
+                charged = pager.replay_charge("MANIFEST", charged, 0, entry(op.key, format.staged_bytes(raw)))?
+            }
+        } else {
+            let collection: u32 = list.word_be(id, 0)
+            if prior_collection != Some(collection) {
+                prior_collection = Some(collection)
+                let after = option.unwrap(std.page.lookup(proposed.root, id))
+                charged = pager.replay_charge("MANIFEST", charged, fields.row_bytes, pages.collection_descriptor(after).row_bytes)?
+            }
+        }
+    }
+    Ok(charged)
+}
+
+// With `memory_only`, rows of Tiered collections are left to the Tiered
+// write plan, which stages them through the attempt's resolver.
+pub fn materialize_rows(mut tree: pages.PageTree, operations: pages.DataRows, memory_only: bool, first: u64, mut draw: u64) -> Result[(), types.Failure] {
+    let order = types.capacity(pages.data_order(operations))?
+    materialize_ordered_rows(mut tree, operations, order, memory_only, first, mut draw)
+}
+
+pub fn materialize_ordered_rows(mut tree: pages.PageTree, operations: pages.DataRows, order: format.DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), types.Failure] {
+    let collection_map = pages.tree_domain(tree) == CollectionMap
+    let mut processed = 0u64
+    for slot_order in 0u64 .. pages.data_row_count(operations) {
+        if slot_order < processed {
+            continue
+        }
+        let op = pager.ordered_row(operations, order, slot_order)
+        if collection_map {
+            let collection = list.slice(op.key, 0, 4)
+            if let Some(descriptor) = pages.collection_by_key(tree, collection) {
+                if descriptor.kind == TableCollection || descriptor.kind == IndexCollection {
+                    processed = slot_order + 1
+                    while processed < pages.data_row_count(operations) {
+                        let following = pager.ordered_row(operations, order, processed)
+                        if list.slice(following.key, 0, 4) != collection {
+                            break
+                        }
+                        processed += 1
+                    }
+                    if memory_only && descriptor.residency == ResidentTiered {
+                        continue
+                    }
+                    if processed > slot_order + 1 {
+                        materialize_collection_batch(mut tree, operations, order, slot_order, processed, first, mut draw)?
+                        continue
+                    }
+                }
+            }
+        }
+        materialize_row(mut tree, op, memory_only, first, mut draw)?
+    }
+    Ok(())
+}
+
+pub fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: bool, first: u64, mut draw: u64) -> Result[(), types.Failure] {
+    if let Some(_) = op.trim {
+        return Ok(())
+    }
+    if memory_only && pager.tiered_data_key(tree, op.key) {
+        return Ok(())
+    }
+    if pages.tree_domain(tree) == CollectionMap {
+        let kind = pages.collection_kind(tree, list.slice(op.key, 0, 4))
+        if kind == Some(CellCollection) {
+            return match op.value {
+                Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw),
+                Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw),
+                None => apply_cell(mut tree, op.key, None, None, first, mut draw),
+            }
+        }
+        if kind == Some(LogCollection) {
+            return match op.value {
+                Some(PageValue(raw)) => journal.apply_log_append(mut tree, op.key, raw, None, first, mut draw),
+                Some(BlobBody(raw)) => journal.apply_log_append(mut tree, op.key, raw, Some(view raw), first, mut draw),
+                None => fail("store: Log append has no value"),
+            }
+        }
+    }
+    match op.value {
+        Some(PageValue(raw)) => pages.put_page_row(mut tree, op.key, raw, first, mut draw),
+        Some(BlobBody(raw)) => pages.put_shared_page_row(mut tree, op.key, raw, first, mut draw),
+        None => {
+            let _ = pages.remove_page_row(mut tree, op.key, first, mut draw)?
+            Ok(())
+        },
+    }
+}
+
+pub fn materialize_collection_batch(mut tree: pages.PageTree, operations: pages.DataRows, order: format.DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), types.Failure] {
+    let collection = list.slice(pager.ordered_row(operations, order, start).key, 0, 4)
+    let edit_at = scoped fn(_unused: (), slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+        visit_materialized_edit(operations, order, slot, visit)
+    }
+    pages.page_result(pages.apply_collection_batch(mut tree, collection, (), edit_at, start, end, first, mut draw))
+}
+
+fn visit_materialized_edit(operations: pages.DataRows, order: format.DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+    let op = pager.ordered_row(operations, order, slot)
+    let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
+        Some(PageValue(raw)) => Some((raw, None)),
+        Some(BlobBody(raw)) => Some((view raw, Some(raw))),
+        None => None,
+    }
+    visit(std.page.SourceEdit(key: list.slice(op.key, 4, list.len(op.key)), value: value, prior: None))
+}
+
+pub type CutDecision = NoCut | PreCut | Reseal
+
+pub fn settlement_cut(accounting: AccountingState, tiered: Option[u64], has_frame: bool) -> CutDecision {
+    if accounting.settled == accounting.changes || tiered != None {
+        return NoCut
+    }
+    if has_frame {
+        Reseal
+    } else {
+        PreCut
+    }
+}

@@ -104,7 +104,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
     let (_, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
     let id = store_key_from_rep(store)
     let validated = validate_store_manifest(d, id, take page_record)?
-    let (take selected, take state) = replay_base_state(take validated)?
+    let (take selected, take state) = failure_result_from_rep(txn.replay_base_state(take validated))?
     let replay = failure_result_from_rep(pager.journal_replay_manifest(take state, selected))?
     for tip in replay.state.tips {
         if tip.id == b.id && tip.head > base {
@@ -158,34 +158,6 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
         }
     }
     Ok(None)
-}
-
-fn replay_base_state(take validated: manifest.ValidatedPageManifest) -> Result[(manifest.PageManifest, pages.State), Error] {
-    let mut has_cold = false
-    for (_, pack) in validated.inventory {
-        if pack.class >= 3 {
-            has_cold = true
-            break
-        }
-    }
-    if has_cold {
-        let manifest.LoadedPageStore(manifest: take selected, holders: take holders, ..) = failure_result_from_rep(history.rebuild_page_store(take validated, None))?
-        let state = disk_allocation(scoped fn() -> Result[pages.State, Error] {
-            failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))
-        })?
-        return Ok((take selected, take state))
-    }
-    let manifest.ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
-    let mut graph = take resolved
-    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
-        Ok(std.page.empty(0, 0, Collection))
-    })?
-    let page_nodes = failure_result_from_rep(manifest.attach_page_graph(mut graph, empty_collection))?
-    let state = disk_allocation(scoped fn() -> Result[pages.State, Error] {
-        let holders = manifest.attach_manifest_holders(selected, page_nodes, empty_collection)
-        failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))
-    })?
-    Ok((take selected, take state))
 }
 
 fn stop_kind(stop: Stop) -> StopKind {
@@ -302,41 +274,6 @@ fn recorded_reply(commit: format.JournalCommit, stream: StreamKey) -> Option[Vie
     None
 }
 
-// The frame records data rows in key order; the re-run's rows are sorted the same way.
-fn same_writes(rows: pages.DataRows, committed: List[format.JournalOp]) -> Result[bool, Error] {
-    if pages.data_row_count(rows) != list.len(committed) {
-        return Ok(false)
-    }
-    let order = failure_result_from_rep(types.capacity(pages.data_order(rows)))?
-    for slot_order in 0u64 .. pages.data_row_count(rows) {
-        let op = pager.ordered_row(rows, order, slot_order)
-        let other = view committed[slot_order]
-        if op.key != other.key {
-            return Ok(false)
-        }
-        if let Some(trim) = op.trim {
-            let Some(expected) = other.trim else {
-                return Ok(false)
-            }
-            if trim.floor != expected.floor {
-                return Ok(false)
-            }
-            continue
-        } else if let Some(_) = other.trim {
-            return Ok(false)
-        }
-        let equal = match (view op.value, view other.value) {
-            (Some(staged), Some(raw)) => format.staged_bytes(staged) == raw,
-            (None, None) => true,
-            _ => false,
-        }
-        if !equal {
-            return Ok(false)
-        }
-    }
-    Ok(true)
-}
-
 pub opaque type ReplaySource {
     store: StoreId,
     open: u64,
@@ -404,7 +341,7 @@ fn replay_run(db: Db, registry: indexes.IndexRegistry, source: ReplaySource, pla
     if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {
         return Ok(Different(Reply))
     }
-    if !same_writes(writes, source.commit.data)? {
+    if !failure_result_from_rep(txn.same_writes(writes, source.commit.data))? {
         return Ok(Different(Writes))
     }
     Ok(Same)

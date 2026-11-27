@@ -36,3 +36,32 @@ pub fn decode_stream_control(raw: Bytes) -> Result[StreamControl, types.Failure]
     }
     Ok(StreamControl(max: saved_max, count: saved_count, expiry_floor: floor))
 }
+
+pub fn age_floor(at: u64, retention_ms: u64) -> Option[u64] {
+    int.checked_sub(at, retention_ms)
+}
+
+pub fn stream_at_or_below(t: u64, floor: Option[u64]) -> bool {
+    match floor {
+        Some(end) => t <= end,
+        None => false
+    }
+}
+
+pub fn raise_expiry(mut control: txn.StreamControl, t: u64) {
+    control.expiry_floor = Some(match control.expiry_floor {
+        Some(old) => order.max(t, old),
+        None => t
+    })
+}
+
+pub fn stream_prefix_end(caller_prefix: Bytes) -> Option[Bytes] {
+    let mut end: Bytes = clone(caller_prefix)
+    while let Some(byte) = list.pop(mut end) {
+        if byte != 255u8 {
+            list.push(mut end, byte + 1u8)
+            return Some(take end)
+        }
+    }
+    None
+}

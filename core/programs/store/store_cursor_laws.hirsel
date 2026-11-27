@@ -5,7 +5,7 @@ fn cursor_law_rows(mut db: Db, t: Table[u64, u64], row_count: u64) -> Result[(),
         let mut raw: Bytes = list.with_capacity(10)
         list.put_word_le(mut raw, t.readers.current)
         list.put_word_le(mut raw, 2 * i + 1)
-        let charge = entry(key, raw)
+        let charge = txn.entry(key, raw)
         list.push(mut rows, std.page.Row(key: take key, value: take raw, charge: charge))
     }
     let first = pages.holder_next_node(db.holders) + 1

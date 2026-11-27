@@ -370,7 +370,7 @@ pub opaque scoped type TxRows[K, V] {
     low: Bytes,
     high: Bytes,
     reverse: bool,
-    log_tail: Option[LogRangeTail],
+    log_tail: Option[txn.LogRangeTail],
     tiered: Option[TxTieredRows]
 }
 

@@ -1,0 +1,99 @@
+pub fn cell_page_row(tree: pages.PageTree, key: Bytes) -> Option[View[Bytes]] in tree {
+    let (root, descriptor) = std.page.collection_entry(tree.root, key)?
+    if let Some(raw) = pages.inline_cell(descriptor) {
+        return Some(raw)
+    }
+    // A spilled Cell stores its only row at the empty key.
+    std.page.lookup(root, list.new())
+}
+
+pub fn cell_wire_size(edit: Option[View[pages.CellEdit]]) -> u64 {
+    match edit {
+        Some(CellPut(value)) => 17 + list.len(format.staged_bytes(value)),
+        Some(CellDelete) => 13,
+        _ => 0,
+    }
+}
+
+pub fn cell_charge(raw: Option[View[Bytes]]) -> u64 {
+    match raw {
+        Some(value) => 70 + format.round8(list.len(value)),
+        None => 0,
+    }
+}
+
+pub fn cell_matches(before: Option[View[Bytes]], after: Option[Bytes]) -> bool {
+    match after {
+        Some(right) => match before {
+            Some(left) => left == right,
+            None => false,
+        },
+        None => before == None,
+    }
+}
+
+pub fn lower_cell_edit(layers: List[Arc[pages.Staged]], id: u32) -> Option[View[pages.CellEdit]] in layers {
+    let mut layer = list.len(layers)
+    while layer > 0 {
+        layer -= 1
+        if let Some(edit) = map.get(layers[layer].ops.cells, id) {
+            return Some(edit)
+        }
+    }
+    None
+}
+
+pub fn remove_cell_edit(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pages.Staged]], id: u32) {
+    match lower_cell_edit(layers, id) {
+        Some(CellPut(_)) => map.insert(mut cells, id, CellRevert),
+        Some(CellDelete) => map.insert(mut cells, id, CellRevert),
+        _ => {
+            let _ = map.remove(mut cells, id)
+        },
+    }
+}
+
+pub fn fold_cell_edits(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pages.Staged]], newer: Map[u32, pages.CellEdit]) {
+    for (id, edit) in newer {
+        match edit {
+            CellRevert => remove_cell_edit(mut cells, layers, id),
+            _ => map.insert(mut cells, id, clone(edit)),
+        }
+    }
+}
+
+pub fn seal_cell_edits(mut rows: pages.DataRows, cells: Map[u32, pages.CellEdit]) {
+    for (id, edit) in cells {
+        let key = result.unwrap(catalog.prefix(id))
+        match edit {
+            CellPut(value) => pages.push_data_row(mut rows, format.DataOp(key: take key, value: Some(clone(value)), trim: None, prior: None)),
+            CellDelete => pages.push_data_row(mut rows, format.DataOp(key: take key, value: None, trim: None, prior: None)),
+            CellRevert => (),
+        }
+    }
+}
+
+pub const CELL_INLINE: u64 = 256
+
+pub fn apply_cell(mut tree: pages.PageTree, key: Bytes, raw: Option[View[Bytes]], shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), types.Failure] {
+    let mut root = {
+        let Some(empty) = view tree.empty_collection else {
+            fail("store: missing empty collection page")
+        }
+        arc.share(empty)
+    }
+    let inline = match raw {
+        Some(value) if list.len(value) <= CELL_INLINE => Some(value),
+        Some(value) => {
+            if let Some(contents) = shared {
+                pages.page_result(std.page.insert_shared(mut root, list.new(), contents, tree.inline, first, mut ids))?
+            } else {
+                pages.page_result(std.page.insert(mut root, list.new(), value, None, tree.inline, first, mut ids))?
+            }
+            None
+        },
+        None => None,
+    }
+    let descriptor = pages.cell_record(root, inline)?
+    pages.page_result(std.page.insert(mut tree.root, key, descriptor, Some(take root), tree.inline, first, mut ids))
+}

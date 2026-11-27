@@ -1,0 +1,82 @@
+pub fn masked_log_append(states: Map[u32, pages.LogState], key: Bytes) -> bool {
+    if list.len(key) != 12 {
+        return false
+    }
+    let id: u32 = list.word_be(key, 0)
+    let Some(state) = map.get(states, id) else {
+        return false
+    }
+    let seq: u64 = list.word_be(key, 4)
+    seq < state.limits.first
+}
+
+pub type LogRangeTail {
+    id: u32,
+    seq: u64,
+    end: u64
+}
+
+pub fn log_endpoint(limit: std.omap.Bound[u64], high: bool) -> u64 {
+    match limit {
+        Unbounded => if high {
+            18446744073709551615u64
+        } else {
+            0u64
+        },
+        Included(n) => if high {
+            int.saturating_add(n, 1)
+        } else {
+            n
+        },
+        Excluded(n) => if high {
+            n
+        } else {
+            int.saturating_add(n, 1)
+        },
+    }
+}
+
+pub fn trim_log_page(mut tree: pages.PageTree, key: Bytes, floor: u64, expected: Option[u64], first: u64, mut ids: u64) -> Result[u64, types.Failure] {
+    let (take kept, next_seq, dropped) = {
+        let Some((old, descriptor)) = std.page.collection_entry(tree.root, key) else {
+            return Error(pages.malformed(0))
+        }
+        let fields = pages.collection_descriptor(descriptor)
+        if fields.kind != LogCollection || fields.residency != ResidentMemory {
+            return Error(pages.malformed(0))
+        }
+        let limits = pager.descriptor_bounds(descriptor)
+        let previous = fields.row_bytes
+        if floor < limits.first {
+            return Error(pages.malformed(0))
+        }
+        if let Some(amount) = expected {
+            if amount > previous {
+                return Error(pages.malformed(0))
+            }
+        }
+        let candidate = if floor >= limits.next {
+            let Some(empty) = view tree.empty_collection else {
+                fail("store: missing empty collection page")
+            }
+            arc.share(empty)
+        } else {
+            let suffix = types.key_word(floor)
+            pages.page_result(std.page.cut_before(old, suffix, mut ids))?
+        }
+        let (rows, charge) = std.page.totals(candidate)
+        let removed = order.min(floor, limits.next) - limits.first
+        if rows != limits.next - limits.first - removed || charge > previous {
+            return Error(pages.malformed(0))
+        }
+        (take candidate, order.max(floor, limits.next), previous - charge)
+    }
+    if let Some(amount) = expected {
+        if dropped != amount {
+            return Error(pages.malformed(0))
+        }
+    }
+    let descriptor = pages.log_record(kept, floor, next_seq, ResidentMemory)?
+    pages.page_result(std.page.insert(mut tree.root, key, descriptor, Some(take kept), tree.inline, first, mut ids))?
+    Ok(dropped)
+}

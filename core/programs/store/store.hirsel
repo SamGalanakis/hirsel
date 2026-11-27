@@ -752,7 +752,7 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
 }
 
 fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, ServeReply], retry: bool) -> Result[Served, ServeError] waits {
-    let ready = serve_before(settle_draft(mut db, 0, take staged))?
+    let ready = serve_before(settle_and_wait(mut db, 0, take staged))?
     match take ready {
         OverLimit(_, Journal(problem)) => {
             if let Some(_) = pending_run.completion.keyed {
@@ -1090,12 +1090,12 @@ fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, 
         Error(_) => fail("store: invalid staged Log trim"),
     }
     if let Some(keyed) = tx.keyed {
-        tx.resident = keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
+        tx.resident = txn.keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
     }
     let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
     let saw_info = cell.replace(observed_info, false)
     let pages.DataOps(cells: take cells, ..) = take ops
-    seal_cell_edits(mut rows, cells)
+    txn.seal_cell_edits(mut rows, cells)
     let order = match pages.data_order(rows) {
         Ok(take sorted) => take sorted,
         Error(problem) => return RolledBack(Refused(Allocation(problem))),
@@ -1263,17 +1263,9 @@ pub fn request_digest(key: Bytes, args: Bytes) -> RequestDigest {
     let tag = string.as_bytes("hirsel.request.v1")
     std.sha256.add_byte(mut h, int.truncate(list.len(tag)))
     std.sha256.add(mut h, tag, 0, list.len(tag))
-    digest_part(mut h, key)
-    digest_part(mut h, args)
+    txn.digest_part(mut h, key)
+    txn.digest_part(mut h, args)
     RequestDigest(b: std.sha256.finish(h))
-}
-
-fn digest_part(mut h: std.sha256.Sha256, part: Bytes) {
-    let n = list.len(part)
-    for i in 0u64 .. 4 {
-        std.sha256.add_byte(mut h, int.truncate(n >> int.truncate(i * 8)))
-    }
-    std.sha256.add(mut h, part, 0, n)
 }
 
 // STORE AL2/AN2. An admit is 41 B, and a reply is followed by the exact
@@ -1295,7 +1287,7 @@ fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
             None => None,
         }
     }
-    if let Some(at) = newest_layer(tx.below, true, key) {
+    if let Some(at) = txn.newest_layer(tx.below, true, key) {
         let layer = view tx.below[at]
         if let Some(slot) = pages.op_slot(layer.stream_ops, key) {
             return match pages.data_row(layer.stream_ops.rows, slot).value {
@@ -1305,24 +1297,6 @@ fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
         }
     }
     pages.get_page_row(tx.roots.streams, key)
-}
-
-// The newest layer that staged `key`, a deletion included.
-fn newest_layer(below: List[Arc[pages.Staged]], streams: bool, key: Bytes) -> Option[u64] {
-    let mut newest: Option[u64] = None
-    let mut at = 0u64
-    for layer in below {
-        let found = if streams {
-            pages.op_slot(layer.stream_ops, key)
-        } else {
-            pages.op_slot(layer.ops, key)
-        }
-        if let Some(_) = found {
-            newest = Some(at)
-        }
-        at += 1
-    }
-    newest
 }
 
 pub type RowSchemas: codec + shareable + send {
@@ -1508,7 +1482,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.K
     let id = plan.schema.next_table
     let c = indexes.Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
-    let live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, k, raw, plan.schema.retained)
+    let live_bytes = txn.catalog_recharge(plan.schema.live, plan.schema.roots, k, raw, plan.schema.retained)
     let base = pages.share_roots(plan.schema.roots)
     let mut roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, base, k, raw))?
     failure_result_from_rep(catalog.define_store_collection(mut roots.collections, id, 1, mut plan.schema.next_node))?
@@ -1577,7 +1551,7 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         list.push(mut c.schemas, catalog.ValueSchema(number: number, fingerprint: fp, schema: take schema))
         c.next += 1
         let raw = encode_catalog(c)?
-        let live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, key_handle, raw, plan.schema.retained)
+        let live_bytes = txn.catalog_recharge(plan.schema.live, plan.schema.roots, key_handle, raw, plan.schema.retained)
         let base = pages.share_roots(plan.schema.roots)
         let roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, base, key_handle, raw))?
         let next_id = plan.schema.next_table
@@ -1644,13 +1618,13 @@ fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32)
     let mut cursor = byte_cursor(roots.catalog, Included(take low), high)?
     while let Some((k, v)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         if !plan.schema.retained {
-            live_bytes = int.saturating_sub(live_bytes, entry(k, v))
+            live_bytes = int.saturating_sub(live_bytes, txn.entry(k, v))
         }
         failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, k, mut plan.schema.next_node))?
     }
     if let Some(raw) = pages.get_page_row(plan.schema.roots.catalog, catalog_key) {
         if !plan.schema.retained {
-            live_bytes = int.saturating_sub(live_bytes, entry(catalog_key, raw))
+            live_bytes = int.saturating_sub(live_bytes, txn.entry(catalog_key, raw))
         }
     }
     failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, catalog_key, mut plan.schema.next_node))?
@@ -1669,7 +1643,7 @@ fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, m
     let mut schemas: List[catalog.ValueSchema] = list.new()
     list.push(mut schemas, catalog.ValueSchema(number: number, fingerprint: fp, schema: take schema))
     let table_raw = encode_catalog(indexes.Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
-    let mut live_bytes = int.saturating_add(start, 126 + entry(target, table_raw))
+    let mut live_bytes = int.saturating_add(start, 126 + txn.entry(target, table_raw))
     let mut workspace = live_bytes
     failure_result_from_rep(catalog.over_ceiling(workspace, ceiling))?
     let Some(source_root) = std.page.collection_child(source.root, failure_result_from_rep(catalog.prefix(from.id))?) else {
@@ -1732,13 +1706,13 @@ fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, m
     let mut catalog_rows = byte_cursor(roots.catalog, Included(take low), high)?
     while let Some((k, v)) = failure_result_from_rep(catalog.next_bytes(mut catalog_rows))? {
         if !retained {
-            live_bytes = int.saturating_sub(live_bytes, entry(k, v))
+            live_bytes = int.saturating_sub(live_bytes, txn.entry(k, v))
         }
         failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, k, mut ids))?
     }
     if let Some(raw) = pages.get_page_row(roots.catalog, from.catalog_key) {
         if !retained {
-            live_bytes = int.saturating_sub(live_bytes, entry(from.catalog_key, raw))
+            live_bytes = int.saturating_sub(live_bytes, txn.entry(from.catalog_key, raw))
         }
     }
     failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, from.catalog_key, mut ids))?
@@ -1821,18 +1795,6 @@ pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] wa
         return Error(Foreign)
     }
     snapshot_changes(r, a, b)
-}
-
-fn catalog_recharge(live_bytes: u64, roots: pages.Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
-    let old_charge = if retained {
-        0u64
-    } else {
-        match pages.get_page_row(roots.catalog, key) {
-            Some(old) => entry(key, old),
-            None => 0
-        }
-    }
-    int.saturating_add(int.saturating_sub(live_bytes, old_charge), entry(key, value))
 }
 
 pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {

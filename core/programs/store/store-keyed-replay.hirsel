@@ -58,35 +58,3 @@ fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[form
     }
     Ok(take edits)
 }
-
-fn keyed_drafted_charge(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
-    let mut edit_index = list.len(edits)
-    while edit_index != 0 {
-        edit_index -= 1
-        let edit = view edits[edit_index]
-        if edit.tree == tree && edit.key == key {
-            return match edit.value {
-                Some(raw) => entry(key, raw),
-                None => 0u64,
-            }
-        }
-    }
-    match pages.keyed_lookup(roots.keyed, tree, key) {
-        Some(raw) => entry(key, raw),
-        None => 0u64,
-    }
-}
-
-fn keyed_draft_live(base: pages.Roots, edits: List[format.KeyedEdit], retained: bool, current: u64) -> u64 {
-    let mut total = current
-    for slot in 0u64 .. list.len(edits) {
-        let edit = view edits[slot]
-        if !retained {
-            total = int.saturating_sub(total, keyed_drafted_charge(base, list.slice(edits, 0, slot), edit.tree, edit.key))
-        }
-        if let Some(raw) = edit.value {
-            total = int.saturating_add(total, entry(edit.key, raw))
-        }
-    }
-    total
-}

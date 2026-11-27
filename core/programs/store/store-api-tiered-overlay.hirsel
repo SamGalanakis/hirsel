@@ -18,7 +18,7 @@ fn replay_overlay_trim(mut overlay: Arc[pages.ReplayOverlay], path: String, at: 
                 let ReplayPut(value) = view row.now else {
                     return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
-                suffix_charge += entry(key, value)
+                suffix_charge += txn.entry(key, value)
                 removed += 24 + list.len(key) + list.len(value)
                 n += 1
             }

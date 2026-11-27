@@ -530,7 +530,7 @@ fn source_layout_witness(outlined: bool) -> Result[(), Error] {
     let expected = option.unwrap(std.page.collection_child(expected_tree.root, id_key))
     let mut live_tree = pages.share_page_tree(base)
     let mut live_next = first
-    materialize_ordered_rows(mut live_tree, staged, InOrder, false, first, mut live_next)?
+    failure_result_from_rep(txn.materialize_ordered_rows(mut live_tree, staged, InOrder, false, first, mut live_next))?
     failure_result_from_rep(pages.canonical_tree(mut live_tree))?
     let materialized = option.unwrap(std.page.collection_child(live_tree.root, id_key))
     if live_next != expected_next || !source_layout_equal(expected, materialized) || !failure_result_from_rep(pages.page_result(std.page.canonical(materialized)))? {
@@ -736,7 +736,7 @@ fn batch_law_3152() -> Result[(), Error] {
     let order = failure_result_from_rep(types.capacity(pages.data_order(ops)))?
     let first = ids + 1
     let mut draw = first
-    materialize_ordered_rows(mut inserted, ops, order, false, first, mut draw)?
+    failure_result_from_rep(txn.materialize_ordered_rows(mut inserted, ops, order, false, first, mut draw))?
     failure_result_from_rep(pages.canonical_tree(mut inserted))?
     let collection = option.unwrap(std.page.collection_child(inserted.root, failure_result_from_rep(catalog.prefix(1))?))
     let (_, descriptor) = option.unwrap(std.page.collection_entry(inserted.root, failure_result_from_rep(catalog.prefix(1))?))
@@ -813,7 +813,7 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
             }
         }
         let first = live_ids
-        materialize_ordered_rows(mut live_tree, ops, order, false, first, mut live_ids)?
+        failure_result_from_rep(txn.materialize_ordered_rows(mut live_tree, ops, order, false, first, mut live_ids))?
         failure_result_from_rep(pages.canonical_tree(mut live_tree))?
         journal_apply_ops("batch", mut replay_ids, mut replay, frame.data, mut account, false)?
         if !failure_result_from_rep(pages.page_result(std.page.canonical(live_tree.root)))? || !failure_result_from_rep(pages.page_result(std.page.canonical(replay.root)))? {

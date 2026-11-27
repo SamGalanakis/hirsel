@@ -564,11 +564,11 @@ fn test_l62_root_scoped_pins() -> Result[(), Error] {
     }
     let lost = std.page.BlobRef(stamp: 4, len: 1025, checksum: 0, pack: 7, offset: 8264, body: 0)
     let mut pending: Option[(format.TieredTarget, types.Failure)] = Some((TieredBlob(lost), Io(Closed)))
-    refresh_call_pins(mut pins, mut pending, old_root)
+    txn.refresh_call_pins(mut pins, mut pending, old_root)
     if let None = pending {
         fail("L62: the same head keeps its pending delivery result")
     }
-    refresh_call_pins(mut pins, mut pending, new_root)
+    txn.refresh_call_pins(mut pins, mut pending, new_root)
     if let Some(_) = pending {
         fail("L62: a moved head must discard the previous root's delivery error")
     }

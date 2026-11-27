@@ -399,7 +399,7 @@ fn resident_rounding_points() -> bool {
         for j in 0u64 .. 8 {
             let mut value: Bytes = list.with_capacity(sizes[j])
             list.fill(mut value, sizes[j], 0u8)
-            if entry(key, value) != 62 + rounded[i] + rounded[j] {
+            if txn.entry(key, value) != 62 + rounded[i] + rounded[j] {
                 return false
             }
         }
@@ -515,14 +515,14 @@ fn cell_and_table_frame() -> bool {
     for offset in 0u64 .. 2 {
         let mut ops = pages.new_data_rows()
         if offset == 0 {
-            seal_cell_edits(mut ops, cells)
+            txn.seal_cell_edits(mut ops, cells)
         }
         for k in 1u64 .. 3 {
             let key = result.unwrap(failure_result_from_rep(catalog.logical_key(2, types.key_word(k))))
             pages.push_data_row(mut ops, format.DataOp(key: take key, value: None, trim: None, prior: None))
         }
         if offset == 1 {
-            seal_cell_edits(mut ops, cells)
+            txn.seal_cell_edits(mut ops, cells)
         }
         let raw = result.unwrap(encode_commit(ci, mut ops, 1, 72))
         if list.len(raw) != 97 {

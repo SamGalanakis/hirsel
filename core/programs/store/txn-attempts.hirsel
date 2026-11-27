@@ -1,0 +1,25 @@
+pub fn tiered_pin_root(opened: u64, branch_id: u32, tree: pages.PageTree) -> pager.TieredPinRoot {
+    pager.TieredPinRoot(domain: opened, branch: branch_id, generation: tree_generation(tree), root_stamp: pages.tree_stamp(tree), tails: list.new())
+}
+
+pub fn refresh_call_pins(mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)], root: pager.TieredPinRoot) {
+    if pins.root != root {
+        pager.tiered_reset_pins(mut pins, root)
+        pending = None
+    }
+}
+
+pub fn tree_generation(tree: pages.PageTree) -> u64 {
+    match tree.paging {
+        Some(inventory) => inventory.generation,
+        None => 0,
+    }
+}
+
+pub fn digest_part(mut h: std.sha256.Sha256, part: Bytes) {
+    let n = list.len(part)
+    for i in 0u64 .. 4 {
+        std.sha256.add_byte(mut h, int.truncate(n >> int.truncate(i * 8)))
+    }
+    std.sha256.add(mut h, part, 0, n)
+}

@@ -8,7 +8,7 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
     let mut pins = pager.empty_tiered_pins(call_pin_root(db, i), pager.pin_partition(db.pager))
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
-        refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
+        txn.refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
         let attempt = pager.call_attempt(call_captures_tiered(db, i), pager.pin_partition(db.pager), pager.tiered_window(pins))
         let staged = stage_with(mut db, i, wall, steps, keep_reply, force_frame, attempt, pins.frames, body)
         let Some(state) = pager.call_attempt_finish(take attempt) else {
@@ -66,34 +66,16 @@ fn captured_tiered(primary: pages.PageTree, bases: pages.TailBases, branch_id: u
 // A capture's identity (§13.3 "A capture change starts an empty map"): its
 // primary and each tail base of its branch, with their generations.
 fn capture_pin_root(opened: u64, branch_id: u32, primary: pages.PageTree, bases: pages.TailBases) -> pager.TieredPinRoot {
-    let mut root = tiered_pin_root(opened, branch_id, primary)
+    let mut root = txn.tiered_pin_root(opened, branch_id, primary)
     if let Some(held) = view bases {
         for k in 0u64 .. list.len(held) {
             if held[k].branch == branch_id {
                 let tree = view held[k].roots.collections
-                list.push(mut root.tails, pager.TieredTailRoot(version: held[k].version, generation: tree_generation(tree), root_stamp: pages.tree_stamp(tree)))
+                list.push(mut root.tails, pager.TieredTailRoot(version: held[k].version, generation: txn.tree_generation(tree), root_stamp: pages.tree_stamp(tree)))
             }
         }
     }
     root
-}
-
-fn tree_generation(tree: pages.PageTree) -> u64 {
-    match tree.paging {
-        Some(inventory) => inventory.generation,
-        None => 0,
-    }
-}
-
-fn tiered_pin_root(opened: u64, branch_id: u32, tree: pages.PageTree) -> pager.TieredPinRoot {
-    pager.TieredPinRoot(domain: opened, branch: branch_id, generation: tree_generation(tree), root_stamp: pages.tree_stamp(tree), tails: list.new())
-}
-
-fn refresh_call_pins(mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)], root: pager.TieredPinRoot) {
-    if pins.root != root {
-        pager.tiered_reset_pins(mut pins, root)
-        pending = None
-    }
 }
 
 // The inventory a latched miss resolves through (§13.3 "A miss names its

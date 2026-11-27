@@ -800,7 +800,7 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
                 return Error(ImportMalformed)
             }
             deploy_result(checksum_row(mut digest, key, encoded))?
-            let row_charge = entry(key, encoded)
+            let row_charge = txn.entry(key, encoded)
             let suffix = deploy_result(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key)))))?
             deploy_result(stream_push_row(mut db, mut builder, mut collections, std.page.Row(key: take suffix, value: take encoded, charge: row_charge)))?
         }

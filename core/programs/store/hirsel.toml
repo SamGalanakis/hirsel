@@ -7,6 +7,13 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"txn-reexec.hirsel" = "txn"
+"txn-state.hirsel" = "txn"
+"txn-log.hirsel" = "txn"
+"txn-cell.hirsel" = "txn"
+"txn-commit.hirsel" = "txn"
+"txn-attempts.hirsel" = "txn"
+"txn-claims.hirsel" = "txn"
 "txn-accounting.hirsel" = "txn"
 "txn-streams.hirsel" = "txn"
 "object-writer-tiered-point-read.hirsel" = "object_writer"

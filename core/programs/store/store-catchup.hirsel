@@ -115,7 +115,7 @@ fn follow_moves(mut plan: SchemaPlan, moved: List[CatalogChange], ranges: List[K
             None => false,
         }
         if untouched {
-            let live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, change.key, now, plan.schema.retained)
+            let live_bytes = txn.catalog_recharge(plan.schema.live, plan.schema.roots, change.key, now, plan.schema.retained)
             let roots = deploy_result(failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, plan.schema.roots, change.key, now)))?
             let next_table = plan.schema.next_table
             deploy_result(keep_schema(mut plan, take roots, live_bytes, next_table))?
@@ -274,11 +274,11 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
                 }
             }
             if !target_tiered && !plan.schema.retained {
-                live_bytes = int.saturating_sub(live_bytes, entry(key, prior))
+                live_bytes = int.saturating_sub(live_bytes, txn.entry(key, prior))
             }
         }
         if !target_tiered {
-            live_bytes = int.saturating_add(live_bytes, entry(key, payload))
+            live_bytes = int.saturating_add(live_bytes, txn.entry(key, payload))
             failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
         }
         note_touch_direct(mut touched, ctx, opened, roots.collections, key)?
@@ -309,7 +309,7 @@ fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: pages.PageTree, k
             return Ok(None)
         }
     }
-    Ok(Some(entry(key, prior)))
+    Ok(Some(txn.entry(key, prior)))
 }
 
 fn note_touch_direct(mut touched: List[Touch], ctx: ChildCutContext, opened: u64, tree: pages.PageTree, key: Bytes) -> Result[(), Error] waits {

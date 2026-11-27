@@ -1,0 +1,221 @@
+pub fn keyed_drafted_charge(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
+    let mut edit_index = list.len(edits)
+    while edit_index != 0 {
+        edit_index -= 1
+        let edit = view edits[edit_index]
+        if edit.tree == tree && edit.key == key {
+            return match edit.value {
+                Some(raw) => entry(key, raw),
+                None => 0u64,
+            }
+        }
+    }
+    match pages.keyed_lookup(roots.keyed, tree, key) {
+        Some(raw) => entry(key, raw),
+        None => 0u64,
+    }
+}
+
+pub fn keyed_draft_live(base: pages.Roots, edits: List[format.KeyedEdit], retained: bool, current: u64) -> u64 {
+    let mut total = current
+    for slot in 0u64 .. list.len(edits) {
+        let edit = view edits[slot]
+        if !retained {
+            total = int.saturating_sub(total, keyed_drafted_charge(base, list.slice(edits, 0, slot), edit.tree, edit.key))
+        }
+        if let Some(raw) = edit.value {
+            total = int.saturating_add(total, entry(edit.key, raw))
+        }
+    }
+    total
+}
+
+pub fn claim_expired(expires: u64, at: u64) -> bool {
+    expires != CLAIM_NEVER && expires <= at
+}
+
+pub fn claim_expiry(at: u64, retention_ms: u64) -> u64 {
+    int.saturating_add(at, retention_ms)
+}
+
+pub fn claim_deletion_planned(edits: List[format.KeyedEdit], key: Bytes) -> bool {
+    for edit in edits {
+        if edit.tree == format.CLAIMS && edit.key == key {
+            return true
+        }
+    }
+    false
+}
+
+pub fn claim_count_after(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
+    let mut edit_index = list.len(edits)
+    while edit_index != 0 {
+        edit_index -= 1
+        let edit = view edits[edit_index]
+        if edit.tree == tree && edit.key == key {
+            return match edit.value {
+                Some(raw) => list.word_le(raw, 0),
+                None => 0u64
+            }
+        }
+    }
+    match pages.keyed_lookup(roots.keyed, tree, key) {
+        Some(raw) => list.word_le(raw, 0),
+        None => 0u64
+    }
+}
+
+pub type ClaimAddress {
+    op: Bytes,
+    principal: Bytes,
+    full: Bytes
+}
+
+pub fn add_keyed_credit(total: format.KeyedCredit, own_credit: format.KeyedCredit) -> format.KeyedCredit {
+    format.KeyedCredit(resident: int.saturating_add(total.resident, own_credit.resident), padding: int.saturating_add(total.padding, own_credit.padding), journal: int.saturating_add(total.journal, own_credit.journal))
+}
+
+pub fn remove_keyed_credit(total: format.KeyedCredit, own_credit: format.KeyedCredit) -> format.KeyedCredit {
+    format.KeyedCredit(resident: total.resident - own_credit.resident, padding: total.padding - own_credit.padding, journal: total.journal - own_credit.journal)
+}
+
+pub const KEYED_OPS: u8 = 0
+
+pub const CLAIM_EXP: u8 = 2
+
+pub const CLAIM_PEXP: u8 = 3
+
+pub const CLAIM_COUNT: u8 = 4
+
+pub const CLAIM_PCOUNT: u8 = 5
+
+pub const CLAIM_OPEN: u8 = 6
+
+pub const CLAIM_NEVER: u64 = 18446744073709551615
+
+pub fn keyed_page_height(ceiling: u64) -> u64 {
+    let mut rows = int.saturating_add(ceiling / 70, 1)
+    let mut height = 1u64
+    while rows > 1 {
+        rows = (rows >> 1) + (rows & 1)
+        height += 1
+    }
+    height
+}
+
+pub fn op_claim_key(op: Bytes) -> Result[Bytes, types.Failure] {
+    let len = list.len(op)
+    if len == 0 || len > 64 {
+        return Error(Limit(Key))
+    }
+    let mut raw: Bytes = list.with_capacity(1 + len)
+    list.push(mut raw, int.narrow(len))
+    list.append(mut raw, op)
+    Ok(take raw)
+}
+
+pub fn claim_op_end(raw: Bytes) -> Result[u64, types.Failure] {
+    if list.len(raw) == 0 || raw[0u64] == 0 || raw[0u64] > 64 {
+        return Error(pages.malformed(0))
+    }
+    let op: u64 = int.widen(raw[0u64])
+    if op >= list.len(raw) {
+        return Error(pages.malformed(0))
+    }
+    Ok(op + 1)
+}
+
+pub fn claim_principal_end(raw: Bytes, op_end: u64) -> Result[u64, types.Failure] {
+    if list.len(raw) < op_end + 2 {
+        return Error(pages.malformed(0))
+    }
+    let subject: u64 = int.widen(raw[op_end + 1])
+    if subject > format.SUBJECT_MAX || list.len(raw) <= op_end + 2 + subject {
+        return Error(pages.malformed(0))
+    }
+    let principal_end = op_end + 2 + subject
+    let width: u64 = int.widen(raw[principal_end])
+    if width == 0 || list.len(raw) != principal_end + 1 + width {
+        return Error(pages.malformed(0))
+    }
+    Ok(principal_end)
+}
+
+pub fn append_claim_edit(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, take value: Option[Bytes]) -> Result[(), types.Failure] {
+    list.push(mut edits, format.KeyedEdit(tree: tree, key: types.copied(key)?, value: take value, call: None))
+    Ok(())
+}
+
+pub fn claim_index_key(prefix_bytes: Bytes, expiry: u64, key: Bytes) -> Result[Bytes, types.Failure] {
+    let mut raw = types.copied(prefix_bytes)?
+    list.put_word_be(mut raw, expiry)
+    list.append(mut raw, key)
+    Ok(take raw)
+}
+
+pub fn set_claim_count(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, cardinality: u64) -> Result[(), types.Failure] {
+    let value: Option[Bytes] = if cardinality == 0 {
+        None
+    } else {
+        let mut raw: Bytes = list.with_capacity(8)
+        list.put_word_le(mut raw, cardinality)
+        Some(take raw)
+    }
+    append_claim_edit(mut edits, tree, key, take value)
+}
+
+pub fn forget_claim(roots: pages.Roots, mut edits: List[format.KeyedEdit], key: Bytes, expiry: u64) -> Result[(), types.Failure] {
+    let op_end = claim_op_end(key)?
+    let principal_end = claim_principal_end(key, op_end)?
+    let op = list.slice(key, 0, op_end)
+    let principal = list.slice(key, 0, principal_end)
+    append_claim_edit(mut edits, format.CLAIMS, key, None)?
+    append_claim_edit(mut edits, CLAIM_EXP, claim_index_key(op, expiry, key)?, None)?
+    append_claim_edit(mut edits, CLAIM_PEXP, claim_index_key(principal, expiry, key)?, None)?
+    let cardinality = claim_count_after(roots, edits, CLAIM_COUNT, op)
+    let pcount = claim_count_after(roots, edits, CLAIM_PCOUNT, principal)
+    set_claim_count(mut edits, CLAIM_COUNT, op, cardinality - 1)?
+    set_claim_count(mut edits, CLAIM_PCOUNT, principal, pcount - 1)
+}
+
+pub fn reclaim_claim_scope(roots: pages.Roots, mut edits: List[format.KeyedEdit], tree: u8, prefix_bytes: Bytes, at: u64) -> Result[(), types.Failure] {
+    if list.len(roots.keyed) == 0 {
+        return Ok(())
+    }
+    let slot: u64 = int.widen(tree)
+    let mut cursor = std.page.cursor_open(roots.keyed[slot].root, Some(types.copied(prefix_bytes)?), true, false)
+    let mut reclaimed = 0u64
+    let width = list.len(prefix_bytes)
+    let leading: Bytes = list.new()
+    while reclaimed < 2 {
+        let Some((take indexed, _)) = std.page.cursor_next_key(mut cursor, leading) else {
+            break
+        }
+        if !list.starts_with_at(indexed, 0, prefix_bytes) {
+            break
+        }
+        if list.len(indexed) <= width + 8 {
+            return Error(pages.malformed(0))
+        }
+        let expiry: u64 = list.word_be(indexed, width)
+        if !claim_expired(expiry, at) {
+            break
+        }
+        let key = list.slice(indexed, width + 8, list.len(indexed))
+        if claim_deletion_planned(edits, key) {
+            continue
+        }
+        forget_claim(roots, mut edits, key, expiry)?
+        reclaimed += 1
+    }
+    Ok(())
+}
+
+pub fn claim_op_high(encoded_op: Bytes) -> Result[Bytes, types.Failure] {
+    let Some(take high) = stream_prefix_end(encoded_op) else {
+        return Error(pages.malformed(0))
+    }
+    Ok(take high)
+}
+
+pub const KEYED_OP_RECORD_MAX: u64 = 16384

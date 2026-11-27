@@ -308,7 +308,7 @@ fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: indexes.Catal
         let Some(raw) = pages.get_page_row(roots.catalog, key) else {
             return Error(Stale(record.id))
         }
-        live_bytes = int.saturating_sub(live_bytes, charge + entry(key, raw))
+        live_bytes = int.saturating_sub(live_bytes, charge + txn.entry(key, raw))
     }
     failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, key, mut plan.schema.next_node))?
     let next_table = plan.schema.next_table
@@ -625,7 +625,7 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
             return Error(Exists(failure_result_from_rep(catalog.named(to))?))
         }
         if !m.plan.schema.retained {
-            live_bytes -= entry(old_key, raw)
+            live_bytes -= txn.entry(old_key, raw)
         }
         failure_result_from_rep(types.copied(raw))?
     }
@@ -633,5 +633,5 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
     let mut roots = failure_result_from_rep(catalog.catalog_insert(mut m.plan.schema.next_node, base, new_key, value))?
     failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, old_key, mut m.plan.schema.next_node))?
     let next_table = m.plan.schema.next_table
-    keep_schema(mut m.plan, take roots, live_bytes + entry(new_key, value), next_table)
+    keep_schema(mut m.plan, take roots, live_bytes + txn.entry(new_key, value), next_table)
 }

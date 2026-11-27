@@ -314,7 +314,7 @@ fn hot_advance(db: Db, map: pages.PageTree, mut source: HotSource) -> Result[(),
 fn hot_emit(mut db: Db, mut map: pages.PageTree, id: u32, mut out: StreamBuilder, number: Option[u32], take key: Bytes, take value: Bytes) -> Result[(), Error] waits {
     let mut full = failure_result_from_rep(catalog.prefix(id))?
     list.append(mut full, key)
-    let charge = entry(full, value)
+    let charge = txn.entry(full, value)
     let keyed = match number {
         Some(n) => {
             let mut run_key: Bytes = list.with_capacity(4 + list.len(key))
@@ -463,7 +463,7 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
             if let Some((take key, take value)) = (job.convert)(suffix, raw)? {
                 let mut full = failure_result_from_rep(types.copied(target_prefix))?
                 list.append(mut full, key)
-                let row_charge = entry(full, value)
+                let row_charge = txn.entry(full, value)
                 charge = int.saturating_add(charge, row_charge + 8u64)
                 hot_grow(db, mut work, charge)?
                 list.push(mut kept, std.page.Row(key: take key, value: take value, charge: row_charge))
@@ -553,7 +553,7 @@ fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take jo
                     failure_result_from_rep(types.copied(payload))?
                 }
                 part += 1
-                let row_charge = entry(entry_key, value)
+                let row_charge = txn.entry(entry_key, value)
                 charge = int.saturating_add(charge, row_charge + 8u64)
                 hot_grow(db, mut work, charge)?
                 list.push(mut kept, std.page.Row(key: failure_result_from_rep(types.copied(list.slice(entry_key, 4, list.len(entry_key))))?, value: take value, charge: row_charge))

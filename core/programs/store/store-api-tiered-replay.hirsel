@@ -13,7 +13,7 @@ fn replay_row_edit(file: String, mut overlay: Arc[pages.ReplayOverlay], before: 
         seq_bounds = Some(pages.LogBoundsRep(first: window.first, next: following))
     }
     let (now, added, added_rows): (pages.ReplayValue, u64, u64) = match op.value {
-        Some(value) => (ReplayPut(arc.new(failure_result_from_rep(types.copied(value))?)), entry(op.key, value), 1),
+        Some(value) => (ReplayPut(arc.new(failure_result_from_rep(types.copied(value))?)), txn.entry(op.key, value), 1),
         None => (ReplayAbsent, 0, 0),
     }
     let removed = pager.prior_row_charge(op.key, op.prior)

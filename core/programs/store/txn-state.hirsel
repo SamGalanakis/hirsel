@@ -1,0 +1,17 @@
+// The newest layer that staged `key`, a deletion included.
+pub fn newest_layer(below: List[Arc[pages.Staged]], streams: bool, key: Bytes) -> Option[u64] {
+    let mut newest: Option[u64] = None
+    let mut at = 0u64
+    for layer in below {
+        let found = if streams {
+            pages.op_slot(layer.stream_ops, key)
+        } else {
+            pages.op_slot(layer.ops, key)
+        }
+        if let Some(_) = found {
+            newest = Some(at)
+        }
+        at += 1
+    }
+    newest
+}

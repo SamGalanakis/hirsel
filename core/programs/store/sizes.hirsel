@@ -77,11 +77,9 @@ const DEFAULT_STREAM_RESIDENT_BYTES: u64 = 4096
 
 const CUT_FIXED_BYTES: u64 = 65536
 
-const KEY_LIMIT: u64 = 4096
-
 // The longest encoded key a table row may have: KEY_LIMIT less the 4-byte table id the
 // store puts before it (§1.3).
-pub const ROW_KEY_LIMIT: u64 = KEY_LIMIT - 4
+pub const ROW_KEY_LIMIT: u64 = txn.KEY_LIMIT - 4
 
 // A small Place holds a default WebSocket message as a value, with the
 // format's frame allowance and 64 KiB of MANIFEST metadata (§11.1 AP4a).
@@ -92,7 +90,7 @@ pub fn small_place_limits() -> StoreLimits {
 
 // One cut step holds a full key and a full value of the store.
 fn cut_step_bytes(l: StoreLimits) -> u64 {
-    KEY_LIMIT + l.value
+    txn.KEY_LIMIT + l.value
 }
 
 pub opaque type WriterPlan: send {
@@ -581,10 +579,6 @@ pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
         return 0
     }
     object_writer.sim_level_bytes(declaration.weak)
-}
-
-fn entry(key: Bytes, val: Bytes) -> u64 {
-    capture.stored_row_charge(list.len(key), list.len(val))
 }
 
 // What one table row adds to the resident account (§1.11), for a key that encodes to `key`

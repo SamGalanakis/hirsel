@@ -1,20 +1,6 @@
-const KEYED_OPS: u8 = 0
-
-const CLAIM_EXP: u8 = 2
-
-const CLAIM_PEXP: u8 = 3
-
-const CLAIM_COUNT: u8 = 4
-
-const CLAIM_PCOUNT: u8 = 5
-
-const CLAIM_OPEN: u8 = 6
-
-const CLAIM_NEVER: u64 = 18446744073709551615
+pub const KEYED_OP_RECORD_MAX: u64 = txn.KEYED_OP_RECORD_MAX
 
 pub const CLAIM_DONE_MAX: u64 = format.CLAIM_DONE_MAX
-
-pub const KEYED_OP_RECORD_MAX: u64 = 16384
 
 pub type ClaimKey: shareable + send {
     op: Bytes,
@@ -29,12 +15,6 @@ pub type KeyedPolicy: codec + shareable + send {
     arg_max: u64,
     call_record_max: u64,
     record: Bytes
-}
-
-type ClaimAddress {
-    op: Bytes,
-    principal: Bytes,
-    full: Bytes
 }
 
 type ClaimRow {
@@ -59,7 +39,7 @@ pub fn claim_ticket(completion: ClaimCompletion) -> Ticket {
 
 pub fn claim_key_bytes(key: ClaimKey) -> Result[Bytes, Error] {
     let address = claim_address(key)?
-    let ClaimAddress(full: take full, ..) = take address
+    let txn.ClaimAddress(full: take full, ..) = take address
     Ok(take full)
 }
 
@@ -76,18 +56,7 @@ pub fn claim_reply_expiry(db: Db, address: Bytes) -> Result[Option[u64], Error] 
     })
 }
 
-fn op_claim_key(op: Bytes) -> Result[Bytes, Error] {
-    let len = list.len(op)
-    if len == 0 || len > 64 {
-        return Error(Limit(Key))
-    }
-    let mut raw: Bytes = list.with_capacity(1 + len)
-    list.push(mut raw, int.narrow(len))
-    list.append(mut raw, op)
-    Ok(take raw)
-}
-
-fn claim_address(key: ClaimKey) -> Result[ClaimAddress, Error] {
+fn claim_address(key: ClaimKey) -> Result[txn.ClaimAddress, Error] {
     let len = list.len(key.key)
     if len == 0 || len > 255 {
         return Error(Limit(Key))
@@ -97,48 +66,13 @@ fn claim_address(key: ClaimKey) -> Result[ClaimAddress, Error] {
             return Error(Limit(Key))
         }
     }
-    let op = op_claim_key(key.op)?
+    let op = failure_result_from_rep(txn.op_claim_key(key.op))?
     let mut principal = failure_result_from_rep(types.copied(op))?
     failure_result_from_rep(types.capacity(caller_key(key.caller, mut principal)))?
     let mut full = failure_result_from_rep(types.copied(principal))?
     list.push(mut full, int.narrow(len))
     list.append(mut full, key.key)
-    Ok(ClaimAddress(op: take op, principal: take principal, full: take full))
-}
-
-fn claim_op_end(raw: Bytes) -> Result[u64, Error] {
-    if list.len(raw) == 0 || raw[0u64] == 0 || raw[0u64] > 64 {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    let op: u64 = int.widen(raw[0u64])
-    if op >= list.len(raw) {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    Ok(op + 1)
-}
-
-fn claim_principal_end(raw: Bytes, op_end: u64) -> Result[u64, Error] {
-    if list.len(raw) < op_end + 2 {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    let subject: u64 = int.widen(raw[op_end + 1])
-    if subject > SUBJECT_MAX || list.len(raw) <= op_end + 2 + subject {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    let principal_end = op_end + 2 + subject
-    let width: u64 = int.widen(raw[principal_end])
-    if width == 0 || list.len(raw) != principal_end + 1 + width {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    Ok(principal_end)
-}
-
-fn claim_expired(expires: u64, at: u64) -> bool {
-    expires != CLAIM_NEVER && expires <= at
-}
-
-fn claim_expiry(at: u64, retention_ms: u64) -> u64 {
-    int.saturating_add(at, retention_ms)
+    Ok(txn.ClaimAddress(op: take op, principal: take principal, full: take full))
 }
 
 fn claim_parse(raw: Bytes) -> Result[ClaimRow, Error] {
@@ -198,8 +132,8 @@ fn read_keyed_policy(raw: Bytes) -> Result[KeyedPolicy, Error] {
 }
 
 pub fn keyed_policy(db: Db, op: Bytes) -> Result[Option[KeyedPolicy], Error] {
-    let name = op_claim_key(op)?
-    match pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, KEYED_OPS, name) {
+    let name = failure_result_from_rep(txn.op_claim_key(op))?
+    match pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, txn.KEYED_OPS, name) {
         Some(raw) => Ok(Some(read_keyed_policy(raw)?)),
         None => Ok(None),
     }
@@ -210,156 +144,41 @@ fn terminal_frame_credit(policy: KeyedPolicy) -> u64 {
     37 + 5 + (10 + 387 + 41 + CLAIM_DONE_MAX) + (10 + 460) + (10 + 526) + (6 + 387) + policy.call_record_max
 }
 
-fn keyed_page_height(ceiling: u64) -> u64 {
-    let mut rows = int.saturating_add(ceiling / 70, 1)
-    let mut height = 1u64
-    while rows > 1 {
-        rows = (rows >> 1) + (rows & 1)
-        height += 1
-    }
-    height
-}
-
 fn claim_terminal_credit(ceiling: u64, policy: KeyedPolicy, admitted_width: u64) -> format.KeyedCredit {
     let frame = terminal_frame_credit(policy)
     let maximum_row = order.max(41 + policy.arg_max, 41 + CLAIM_DONE_MAX)
     let padding = format.round8(maximum_row) - format.round8(admitted_width)
-    let retained = 4 * (6 * keyed_page_height(ceiling) + 2) * 32768
+    let retained = 4 * (6 * txn.keyed_page_height(ceiling) + 2) * 32768
     format.KeyedCredit(resident: 526 + 590 + frame + retained, padding: padding, journal: frame)
 }
 
-fn add_keyed_credit(total: format.KeyedCredit, own_credit: format.KeyedCredit) -> format.KeyedCredit {
-    format.KeyedCredit(resident: int.saturating_add(total.resident, own_credit.resident), padding: int.saturating_add(total.padding, own_credit.padding), journal: int.saturating_add(total.journal, own_credit.journal))
-}
-
-fn remove_keyed_credit(total: format.KeyedCredit, own_credit: format.KeyedCredit) -> format.KeyedCredit {
-    format.KeyedCredit(resident: total.resident - own_credit.resident, padding: total.padding - own_credit.padding, journal: total.journal - own_credit.journal)
-}
-
-fn append_claim_edit(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, take value: Option[Bytes]) -> Result[(), Error] {
-    list.push(mut edits, format.KeyedEdit(tree: tree, key: failure_result_from_rep(types.copied(key))?, value: take value, call: None))
-    Ok(())
-}
-
-fn claim_index_key(prefix_bytes: Bytes, expiry: u64, key: Bytes) -> Result[Bytes, Error] {
-    let mut raw = failure_result_from_rep(types.copied(prefix_bytes))?
-    list.put_word_be(mut raw, expiry)
-    list.append(mut raw, key)
-    Ok(take raw)
-}
-
-fn claim_count_after(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
-    let mut edit_index = list.len(edits)
-    while edit_index != 0 {
-        edit_index -= 1
-        let edit = view edits[edit_index]
-        if edit.tree == tree && edit.key == key {
-            return match edit.value {
-                Some(raw) => list.word_le(raw, 0),
-                None => 0u64
-            }
-        }
-    }
-    match pages.keyed_lookup(roots.keyed, tree, key) {
-        Some(raw) => list.word_le(raw, 0),
-        None => 0u64
-    }
-}
-
-fn set_claim_count(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, cardinality: u64) -> Result[(), Error] {
-    let value: Option[Bytes] = if cardinality == 0 {
-        None
-    } else {
-        let mut raw: Bytes = list.with_capacity(8)
-        list.put_word_le(mut raw, cardinality)
-        Some(take raw)
-    }
-    append_claim_edit(mut edits, tree, key, take value)
-}
-
-fn forget_claim(roots: pages.Roots, mut edits: List[format.KeyedEdit], key: Bytes, expiry: u64) -> Result[(), Error] {
-    let op_end = claim_op_end(key)?
-    let principal_end = claim_principal_end(key, op_end)?
-    let op = list.slice(key, 0, op_end)
-    let principal = list.slice(key, 0, principal_end)
-    append_claim_edit(mut edits, format.CLAIMS, key, None)?
-    append_claim_edit(mut edits, CLAIM_EXP, claim_index_key(op, expiry, key)?, None)?
-    append_claim_edit(mut edits, CLAIM_PEXP, claim_index_key(principal, expiry, key)?, None)?
-    let cardinality = claim_count_after(roots, edits, CLAIM_COUNT, op)
-    let pcount = claim_count_after(roots, edits, CLAIM_PCOUNT, principal)
-    set_claim_count(mut edits, CLAIM_COUNT, op, cardinality - 1)?
-    set_claim_count(mut edits, CLAIM_PCOUNT, principal, pcount - 1)
-}
-
-fn claim_deletion_planned(edits: List[format.KeyedEdit], key: Bytes) -> bool {
-    for edit in edits {
-        if edit.tree == format.CLAIMS && edit.key == key {
-            return true
-        }
-    }
-    false
-}
-
-fn reclaim_claim_scope(roots: pages.Roots, mut edits: List[format.KeyedEdit], tree: u8, prefix_bytes: Bytes, at: u64) -> Result[(), Error] {
-    if list.len(roots.keyed) == 0 {
-        return Ok(())
-    }
-    let slot: u64 = int.widen(tree)
-    let mut cursor = std.page.cursor_open(roots.keyed[slot].root, Some(failure_result_from_rep(types.copied(prefix_bytes))?), true, false)
-    let mut reclaimed = 0u64
-    let width = list.len(prefix_bytes)
-    let leading: Bytes = list.new()
-    while reclaimed < 2 {
-        let Some((take indexed, _)) = std.page.cursor_next_key(mut cursor, leading) else {
-            break
-        }
-        if !list.starts_with_at(indexed, 0, prefix_bytes) {
-            break
-        }
-        if list.len(indexed) <= width + 8 {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-        let expiry: u64 = list.word_be(indexed, width)
-        if !claim_expired(expiry, at) {
-            break
-        }
-        let key = list.slice(indexed, width + 8, list.len(indexed))
-        if claim_deletion_planned(edits, key) {
-            continue
-        }
-        forget_claim(roots, mut edits, key, expiry)?
-        reclaimed += 1
-    }
-    Ok(())
-}
-
-fn stage_claim_admit(mut tx: Tx, address: ClaimAddress, d: RequestDigest, args: Bytes, policy: KeyedPolicy, credit: format.KeyedCredit) -> Result[(), Error] {
+fn stage_claim_admit(mut tx: Tx, address: txn.ClaimAddress, d: RequestDigest, args: Bytes, policy: KeyedPolicy, credit: format.KeyedCredit) -> Result[(), Error] {
     let mut edits: List[format.KeyedEdit] = list.new()
     if let Some(raw) = pages.keyed_lookup(tx.roots.keyed, format.CLAIMS, address.full) {
         let row = claim_parse(raw)?
-        forget_claim(tx.roots, mut edits, address.full, row.expiry)?
+        failure_result_from_rep(txn.forget_claim(tx.roots, mut edits, address.full, row.expiry))?
     }
-    if claim_count_after(tx.roots, edits, CLAIM_PCOUNT, address.principal) >= policy.principal_keys_max {
-        reclaim_claim_scope(tx.roots, mut edits, CLAIM_PEXP, address.principal, tx.info.at)?
+    if txn.claim_count_after(tx.roots, edits, txn.CLAIM_PCOUNT, address.principal) >= policy.principal_keys_max {
+        failure_result_from_rep(txn.reclaim_claim_scope(tx.roots, mut edits, txn.CLAIM_PEXP, address.principal, tx.info.at))?
     }
-    if claim_count_after(tx.roots, edits, CLAIM_COUNT, address.op) >= policy.keys_max {
-        reclaim_claim_scope(tx.roots, mut edits, CLAIM_EXP, address.op, tx.info.at)?
+    if txn.claim_count_after(tx.roots, edits, txn.CLAIM_COUNT, address.op) >= policy.keys_max {
+        failure_result_from_rep(txn.reclaim_claim_scope(tx.roots, mut edits, txn.CLAIM_EXP, address.op, tx.info.at))?
     }
-    let op_count = claim_count_after(tx.roots, edits, CLAIM_COUNT, address.op)
-    let principal_count = claim_count_after(tx.roots, edits, CLAIM_PCOUNT, address.principal)
+    let op_count = txn.claim_count_after(tx.roots, edits, txn.CLAIM_COUNT, address.op)
+    let principal_count = txn.claim_count_after(tx.roots, edits, txn.CLAIM_PCOUNT, address.principal)
     if principal_count >= policy.principal_keys_max {
         return Error(Full(Resident(Capacity(requested: principal_count + 1, available: policy.principal_keys_max))))
     }
     if op_count >= policy.keys_max {
         return Error(Full(Resident(Capacity(requested: op_count + 1, available: policy.keys_max))))
     }
-    if let None = pages.keyed_lookup(tx.roots.keyed, KEYED_OPS, address.op) {
-        append_claim_edit(mut edits, KEYED_OPS, address.op, Some(keyed_policy_bytes(policy)?))?
+    if let None = pages.keyed_lookup(tx.roots.keyed, txn.KEYED_OPS, address.op) {
+        failure_result_from_rep(txn.append_claim_edit(mut edits, txn.KEYED_OPS, address.op, Some(keyed_policy_bytes(policy)?)))?
     }
-    append_claim_edit(mut edits, format.CLAIMS, address.full, Some(claim_value(d, 0, args)))?
-    append_claim_edit(mut edits, CLAIM_OPEN, address.full, Some(list.new()))?
-    set_claim_count(mut edits, CLAIM_COUNT, address.op, op_count + 1)?
-    set_claim_count(mut edits, CLAIM_PCOUNT, address.principal, principal_count + 1)?
+    failure_result_from_rep(txn.append_claim_edit(mut edits, format.CLAIMS, address.full, Some(claim_value(d, 0, args))))?
+    failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_OPEN, address.full, Some(list.new())))?
+    failure_result_from_rep(txn.set_claim_count(mut edits, txn.CLAIM_COUNT, address.op, op_count + 1))?
+    failure_result_from_rep(txn.set_claim_count(mut edits, txn.CLAIM_PCOUNT, address.principal, principal_count + 1))?
     tx.keyed = Some(format.KeyedDraft(edits: take edits, after: credit))
     Ok(())
 }
@@ -375,7 +194,7 @@ pub fn admit_claim(mut db: Db, key: ClaimKey, d: RequestDigest, args: Bytes, tak
     let stored = keyed_policy(db, key.op)?
     if let Some(raw) = pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, format.CLAIMS, address.full) {
         let row = claim_parse(raw)?
-        if !row.replied || !claim_expired(row.expiry, at) {
+        if !row.replied || !txn.claim_expired(row.expiry, at) {
             if row.digest != d {
                 return Ok(Mismatch)
             }
@@ -405,7 +224,7 @@ pub fn admit_claim(mut db: Db, key: ClaimKey, d: RequestDigest, args: Bytes, tak
     if exclusive_credit.journal > FRAME_LIMIT {
         return Error(Limit(Transaction))
     }
-    let after = add_keyed_credit(db.call_streams.keyed_credit, exclusive_credit)
+    let after = txn.add_keyed_credit(db.call_streams.keyed_credit, exclusive_credit)
     let keep: Option[fn(Error) -> bool] = None
     let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         stage_claim_admit(mut tx, address, d, args, policy, after)
@@ -417,7 +236,7 @@ pub fn admit_claim(mut db: Db, key: ClaimKey, d: RequestDigest, args: Bytes, tak
         _ => return Error(Missing("claim admission")),
     }
     durable(mut db, committed_ticket)?
-    let ClaimAddress(full: take full, ..) = take address
+    let txn.ClaimAddress(full: take full, ..) = take address
     Ok(Accepted(ClaimCompletion(ticket: committed_ticket, key: take full, request: d, policy: take policy, admitted_width: width)))
 }
 
@@ -425,14 +244,14 @@ fn stage_claim_reply(mut tx: Tx, key: Bytes, digest: RequestDigest, retention_ms
     if list.len(reply_bytes) > CLAIM_DONE_MAX {
         return Error(Limit(Value))
     }
-    let op_end = claim_op_end(key)?
-    let principal_end = claim_principal_end(key, op_end)?
-    let expiry = claim_expiry(tx.info.at, retention_ms)
+    let op_end = failure_result_from_rep(txn.claim_op_end(key))?
+    let principal_end = failure_result_from_rep(txn.claim_principal_end(key, op_end))?
+    let expiry = txn.claim_expiry(tx.info.at, retention_ms)
     let mut edits: List[format.KeyedEdit] = list.with_capacity(4)
     list.push(mut edits, format.KeyedEdit(tree: format.CLAIMS, key: failure_result_from_rep(types.copied(key))?, value: Some(claim_value(digest, expiry, reply_bytes)), call: take call))
-    append_claim_edit(mut edits, CLAIM_EXP, claim_index_key(list.slice(key, 0, op_end), expiry, key)?, Some(list.new()))?
-    append_claim_edit(mut edits, CLAIM_PEXP, claim_index_key(list.slice(key, 0, principal_end), expiry, key)?, Some(list.new()))?
-    append_claim_edit(mut edits, CLAIM_OPEN, key, None)?
+    failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_EXP, failure_result_from_rep(txn.claim_index_key(list.slice(key, 0, op_end), expiry, key))?, Some(list.new())))?
+    failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_PEXP, failure_result_from_rep(txn.claim_index_key(list.slice(key, 0, principal_end), expiry, key))?, Some(list.new())))?
+    failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_OPEN, key, None))?
     tx.keyed = Some(format.KeyedDraft(edits: take edits, after: credit))
     Ok(())
 }
@@ -457,7 +276,7 @@ pub fn conclude_claim(mut db: Db, take completion: ClaimCompletion, reply_bytes:
     healthy(db)?
     validate_claim_completion(db, completion)?
     let own_credit = claim_terminal_credit(db.accounting.ceiling, completion.policy, completion.admitted_width)
-    let after = remove_keyed_credit(db.call_streams.keyed_credit, own_credit)
+    let after = txn.remove_keyed_credit(db.call_streams.keyed_credit, own_credit)
     let keep: Option[fn(Error) -> bool] = None
     let outcome = store_body_on(mut db, 0, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         stage_claim_reply(mut tx, completion.key, completion.request, completion.policy.retention_ms, reply_bytes, after, None)
@@ -478,23 +297,23 @@ fn rebuild_keyed_credit(mut db: Db, uncovered: u64, journal_limit: u64) -> Resul
     if list.len(roots.keyed) == 0 {
         return Ok(())
     }
-    let open_slot: u64 = int.widen(CLAIM_OPEN)
+    let open_slot: u64 = int.widen(txn.CLAIM_OPEN)
     let mut cursor = std.page.cursor_open(roots.keyed[open_slot].root, None, true, false)
     let prefix_bytes: Bytes = list.new()
     let mut credit = format.no_keyed_credit()
     while let Some((take key, _)) = std.page.cursor_next_key(mut cursor, prefix_bytes) {
-        let op_end = claim_op_end(key)?
-        let Some(raw_policy) = pages.keyed_lookup(roots.keyed, KEYED_OPS, list.slice(key, 0, op_end)) else {
+        let op_end = failure_result_from_rep(txn.claim_op_end(key))?
+        let Some(raw_policy) = pages.keyed_lookup(roots.keyed, txn.KEYED_OPS, list.slice(key, 0, op_end)) else {
             return Error(failure_from_rep(pages.malformed(0)))
         }
         let Some(raw_claim) = pages.keyed_lookup(roots.keyed, format.CLAIMS, key) else {
             return Error(failure_from_rep(pages.malformed(0)))
         }
         let policy = read_keyed_policy(raw_policy)?
-        credit = add_keyed_credit(credit, claim_terminal_credit(db.accounting.ceiling, policy, list.len(raw_claim)))
+        credit = txn.add_keyed_credit(credit, claim_terminal_credit(db.accounting.ceiling, policy, list.len(raw_claim)))
     }
     failure_result_from_rep(catalog.over_ceiling(int.saturating_add(db.accounting.resident, int.saturating_add(credit.resident, credit.padding)), db.accounting.ceiling))?
-    if let Some(room) = journal_refusal(uncovered, credit.journal, journal_limit) {
+    if let Some(room) = txn.journal_refusal(uncovered, credit.journal, journal_limit) {
         return Error(Full(Journal(room)))
     }
     db.call_streams.keyed_credit = credit
@@ -524,7 +343,7 @@ fn keyed_completion_credit(db: Db, completion: Completion) -> Option[format.Keye
         return None
     }
     let held = claim_terminal_credit(db.accounting.ceiling, keyed.policy, keyed.admitted_width)
-    Some(remove_keyed_credit(db.call_streams.keyed_credit, held))
+    Some(txn.remove_keyed_credit(db.call_streams.keyed_credit, held))
 }
 
 fn check_keyed_completion(db: Db, completion: Completion, call_run: KeyedRun) -> Result[(), Error] {

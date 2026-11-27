@@ -227,7 +227,7 @@ fn catch_up_next_row(d: Dir, id: StoreId, writer_pin_bytes: u64, snap: Snapshot,
 fn apply_one_tiered_round_op(mut db: Db, mut tree: pages.PageTree, key: Bytes, take value: Option[Bytes], prior: bool, private_from: u64, mut next_stamp: u64) -> Result[(), DeployError] waits {
     let collection_bytes = deploy_result(failure_result_from_rep(types.copied(list.slice(key, 0, 4))))?
     let suffix = deploy_result(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key)))))?
-    let mut pins = pager.empty_tiered_pins(tiered_pin_root(open_number(db), 0u32, tree), pager.pin_partition(db.pager))
+    let mut pins = pager.empty_tiered_pins(txn.tiered_pin_root(open_number(db), 0u32, tree), pager.pin_partition(db.pager))
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     let replay_val: pages.ReplayValue = match take value {
         Some(take raw) => ReplayPut(arc.new(take raw)),
@@ -305,7 +305,7 @@ fn child_apply_tiered_op(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64
     let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
         Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(id), opened: opened, pin_bytes: writer_pin_bytes)))
     })?
-    let root = tiered_pin_root(opened, 0u32, tree)
+    let root = txn.tiered_pin_root(opened, 0u32, tree)
     let (take updated, draw) = retry_tiered_read_with(PagerDirect(d, store_key_to_rep(id)), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, suffix, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(pages.PageTree, u64), Error] {
         let mut staged = pages.share_page_tree(tree)
         let staged_inline = staged.inline
@@ -485,7 +485,7 @@ fn apply_tiered_rewrite_backend(take backend: pager.TieredPageBackend, id: Store
     let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
         Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(id), opened: opened, pin_bytes: writer_pin_bytes)))
     })?
-    let root = tiered_pin_root(opened, 0u32, tree)
+    let root = txn.tiered_pin_root(opened, 0u32, tree)
     let value: pages.ReplayValue = ReplayPut(arc.new(take raw))
     let (take updated, draw) = retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, suffix, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(pages.PageTree, u64), Error] {
         let mut staged = pages.share_page_tree(tree)
@@ -564,7 +564,7 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[ActivationRewrite], base_
     let grant = deploy_result(disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
         Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(db.store), opened: open_number(db), pin_bytes: pager.pin_partition(db.pager))))
     }))?
-    let root = tiered_pin_root(open_number(db), 0u32, tree)
+    let root = txn.tiered_pin_root(open_number(db), 0u32, tree)
     let empty_hint: Bytes = list.new()
     let checked = retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, empty_hint, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[bool, Error] {
         for (cid, key, logical) in cold_rows {

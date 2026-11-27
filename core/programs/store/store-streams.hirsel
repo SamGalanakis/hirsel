@@ -60,26 +60,8 @@ fn write_caller_streams(mut tx: Tx, take caller_prefix: Bytes, streams: CallerSt
     stream_write(mut tx, take caller_prefix, take raw, 0u64)
 }
 
-fn age_floor(at: u64, retention_ms: u64) -> Option[u64] {
-    int.checked_sub(at, retention_ms)
-}
-
-fn stream_at_or_below(t: u64, floor: Option[u64]) -> bool {
-    match floor {
-        Some(end) => t <= end,
-        None => false
-    }
-}
-
 fn stream_before(a: StreamId, b: StreamId) -> bool {
     a.t < b.t || (a.t == b.t && a.n < b.n)
-}
-
-fn raise_expiry(mut control: txn.StreamControl, t: u64) {
-    control.expiry_floor = Some(match control.expiry_floor {
-        Some(old) => order.max(t, old),
-        None => t
-    })
 }
 
 type StreamChanges {
@@ -102,14 +84,14 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
         return Ok(StreamFuture(at))
     }
     let mut control = stream_control(db)?
-    if stream_at_or_below(name.id.t, control.expiry_floor) {
+    if txn.stream_at_or_below(name.id.t, control.expiry_floor) {
         return Ok(HistoryUnavailable)
     }
-    let aged = age_floor(at, db.call_streams.stream_retention_ms)
-    if stream_at_or_below(name.id.t, aged) {
+    let aged = txn.age_floor(at, db.call_streams.stream_retention_ms)
+    if txn.stream_at_or_below(name.id.t, aged) {
         // Record the established age cutoff even if the row stays until the
         // sweep. A wider retention on reopen cannot recover a refused reply.
-        raise_expiry(mut control, option.unwrap(aged))
+        txn.raise_expiry(mut control, option.unwrap(aged))
         let no_reply: Option[fn(Error) -> bool] = None
         let outcome = store_body_at(mut db, 0u64, at, None, no_reply, scoped fn(mut tx: Tx) -> Result[(), Error] {
             write_stream_control(mut tx, control)
@@ -179,7 +161,7 @@ fn remove_front(mut edits: StreamChanges, take key: Bytes) {
 // possible quota victim and can be examined without extending the reclaim.
 fn reclaim_front(db: Db, mut edits: StreamChanges, age: Option[u64], protected: scoped[view] fn(StreamKey) -> bool) -> Result[Option[(Bytes, StreamId, bool)], Error] {
     let caller_prefix = failure_result_from_rep(types.copied(edits.caller_prefix))?
-    let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix)))?
+    let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, txn.stream_prefix_end(caller_prefix)))?
     for reclaimed in 0u64 .. 3u64 {
         let Some((take key, _)) = failure_result_from_rep(catalog.next_page_range(mut rows))? else {
             break
@@ -188,24 +170,13 @@ fn reclaim_front(db: Db, mut edits: StreamChanges, age: Option[u64], protected: 
             return Error(failure_from_rep(pages.malformed(0)))
         }
         let busy = stream_admit_held(db, key) || protected(name)
-        if reclaimed == 2u64 || !stream_at_or_below(name.id.t, age) || busy {
+        if reclaimed == 2u64 || !txn.stream_at_or_below(name.id.t, age) || busy {
             return Ok(Some((take key, name.id, busy)))
         }
-        raise_expiry(mut edits.control, name.id.t)
+        txn.raise_expiry(mut edits.control, name.id.t)
         remove_front(mut edits, take key)
     }
     Ok(None)
-}
-
-fn stream_prefix_end(caller_prefix: Bytes) -> Option[Bytes] {
-    let mut end: Bytes = clone(caller_prefix)
-    while let Some(byte) = list.pop(mut end) {
-        if byte != 255u8 {
-            list.push(mut end, byte + 1u8)
-            return Some(take end)
-        }
-    }
-    None
 }
 
 pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
@@ -222,7 +193,7 @@ pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
         return Ok(0u64)
     }
     let mut control = stream_control(db)?
-    let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix)))?
+    let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, txn.stream_prefix_end(caller_prefix)))?
     let mut deletes: List[Bytes] = list.with_capacity(metadata.count)
     for _ in 0u64 .. metadata.count {
         let Some((take key, _)) = failure_result_from_rep(catalog.next_page_range(mut rows))? else {
@@ -275,7 +246,7 @@ pub fn reclaim_startup_streams(mut db: Db, cursor: AnonymousCursor, current: sco
                 return Error(failure_from_rep(pages.malformed(0)))
             }
             let caller_key_bytes = list.slice(key, 0u64, end)
-            let Some(take after) = stream_prefix_end(caller_key_bytes) else {
+            let Some(take after) = txn.stream_prefix_end(caller_key_bytes) else {
                 return Error(failure_from_rep(pages.malformed(0)))
             }
             next_key = take after
@@ -298,7 +269,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     journal_poll(mut db)?
     healthy(db)?
     let at = keyed_time(db)
-    let age = age_floor(at, db.call_streams.stream_retention_ms)
+    let age = txn.age_floor(at, db.call_streams.stream_retention_ms)
     let mut control = stream_control(db)?
     let (take start, inclusive): (Option[Bytes], bool) = match db.call_streams.stream_sweep_after {
         Some(cursor) => (Some(clone(cursor.key)), cursor.inclusive),
@@ -326,7 +297,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
         let caller_prefix = failure_result_from_rep(types.copied(list.slice(key, 0u64, caller_end)))?
         after = Some(txn.StreamSweepCursor(key: clone(key), inclusive: false))
         if key[0u64] == 1u8 {
-            let Some(take next_caller) = stream_prefix_end(caller_prefix) else {
+            let Some(take next_caller) = txn.stream_prefix_end(caller_prefix) else {
                 break
             }
             rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_caller)), true, false, None))?
@@ -336,12 +307,12 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
         if list.len(key) == caller_end {
             let metadata = caller_streams(pages.holder_heads(db.holders)[0].roots.streams, key)?
             let old_floor = match metadata.floor {
-                Some(id) => stream_at_or_below(id.t, age),
+                Some(id) => txn.stream_at_or_below(id.t, age),
                 None => true
             }
             if metadata.count == 0u64 && old_floor {
                 if let Some(id) = metadata.floor {
-                    raise_expiry(mut control, id.t)
+                    txn.raise_expiry(mut control, id.t)
                 }
                 list.push(mut edits, StreamSweepEdit(caller_prefix: take caller_prefix, metadata: None))
             }
@@ -350,8 +321,8 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
         let Some(name) = optional_stream_key_from_rep(format.parse_stream_key(key)) else {
             return Error(failure_from_rep(pages.malformed(0)))
         }
-        if !stream_at_or_below(name.id.t, age) || stream_admit_held(db, key) || protected(name) {
-            let Some(take next_caller) = stream_prefix_end(caller_prefix) else {
+        if !txn.stream_at_or_below(name.id.t, age) || stream_admit_held(db, key) || protected(name) {
+            let Some(take next_caller) = txn.stream_prefix_end(caller_prefix) else {
                 break
             }
             rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_caller)), true, false, None))?
@@ -359,7 +330,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
             continue
         }
         control.count -= 1u64
-        raise_expiry(mut control, name.id.t)
+        txn.raise_expiry(mut control, name.id.t)
         list.push(mut deletes, take key)
         let slot = list.len(edits)
         let mut metadata = if slot > 0u64 && edits[slot - 1u64].caller_prefix == caller_prefix {
@@ -456,7 +427,7 @@ fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size
             if list.len(raw) > 1048576 {
                 return Error(Limit(Value))
             }
-            (entry(key, raw), 4u64 + list.len(raw))
+            (txn.entry(key, raw), 4u64 + list.len(raw))
         },
         None => (0u64, 0u64),
     }
@@ -485,7 +456,7 @@ fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size
     }
     // As in apply_put: both retention modes take the same steps.
     let previous = match transaction_stream(tx, key) {
-        Some(old) => entry(key, old),
+        Some(old) => txn.entry(key, old),
         None => 0
     }
     let old_charge = if tx.retain_old {
@@ -681,10 +652,10 @@ fn stream_live(db: Db, streams: pages.PageTree, ops: pages.DataOps) -> Result[u6
         if let Some(raw) = operation.value {
             if !retained {
                 if let Some(old) = pages.get_page_row(streams, k) {
-                    live_bytes = int.saturating_sub(live_bytes, entry(k, old))
+                    live_bytes = int.saturating_sub(live_bytes, txn.entry(k, old))
                 }
             }
-            live_bytes = int.saturating_add(live_bytes, entry(k, format.staged_bytes(raw)))
+            live_bytes = int.saturating_add(live_bytes, txn.entry(k, format.staged_bytes(raw)))
         }
     }
     Ok(live_bytes)

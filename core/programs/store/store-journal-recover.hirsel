@@ -159,7 +159,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: 
                 continue
             }
             if let Some(trim) = op.trim {
-                match trim_log_page(mut tree, op.key, trim.floor, Some(trim.dropped), 0, mut next_stamp) {
+                match failure_result_from_rep(txn.trim_log_page(mut tree, op.key, trim.floor, Some(trim.dropped), 0, mut next_stamp)) {
                     Ok(_) => (),
                     Error(Corrupt(_)) => return Error(failure_from_rep(format.disk_fault(file, 0, Malformed))),
                     Error(take problem) => return Error(take problem),
@@ -209,7 +209,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: 
                         return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                     }
                 }
-                apply_cell(mut tree, op.key, raw, None, 0, mut next_stamp)?
+                failure_result_from_rep(txn.apply_cell(mut tree, op.key, raw, None, 0, mut next_stamp))?
                 continue
             }
         } else if let Some(_) = op.trim {

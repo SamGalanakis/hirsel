@@ -109,10 +109,10 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
         let mut kept = plan.schema.live
         if staged_range || !plan.schema.retained {
             if let Some(previous) = pages.get_page_row(plan.schema.roots.collections, logical) {
-                kept -= entry(logical, previous)
+                kept -= txn.entry(logical, previous)
             }
         }
-        let live_bytes = int.saturating_add(kept, entry(logical, raw))
+        let live_bytes = int.saturating_add(kept, txn.entry(logical, raw))
         failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
         live_bytes
     }
@@ -157,10 +157,10 @@ fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> R
     let mut live_bytes = plan.schema.live
     if !plan.schema.retained {
         if let Some(old) = pages.get_page_row(plan.schema.roots.collections, p) {
-            live_bytes -= entry(p, old)
+            live_bytes -= txn.entry(p, old)
         }
     }
-    live_bytes = int.saturating_add(live_bytes, entry(p, raw))
+    live_bytes = int.saturating_add(live_bytes, txn.entry(p, raw))
     failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
     let _ = failure_result_from_rep(catalog.insert_row(mut plan.schema.next_node, mut plan.schema.roots, take p, take raw))?
     plan.schema.live = live_bytes
@@ -494,7 +494,7 @@ fn leased_table_rows(db: Db, tree: pages.PageTree, id: u32) -> Result[List[(Byte
     let grant = deploy_result(disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
         Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(db.store), opened: open_number(db), pin_bytes: pager.pin_partition(db.pager))))
     }))?
-    let root = tiered_pin_root(open_number(db), 0u32, tree)
+    let root = txn.tiered_pin_root(open_number(db), 0u32, tree)
     let mut from = low
     loop {
         let backend: pager.TieredPageBackend = match pager.pager_requests(db.pager) {

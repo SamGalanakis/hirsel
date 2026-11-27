@@ -594,7 +594,7 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     cell_law_require(format.word_be(suffix_wire, offset + 55) == 110 + (floor - 2) * 1078, "trim dropped wire charge")?
     let mut bad = pages.share_page_tree(held.roots.collections)
     let mut draw = pages.holder_next_node(db.holders) + 1
-    match trim_log_page(mut bad, id_key, floor, Some(1), 0, mut draw) {
+    match failure_result_from_rep(txn.trim_log_page(mut bad, id_key, floor, Some(1), 0, mut draw)) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => return Error(Missing("wrong dropped charge refused")),
     }

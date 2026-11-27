@@ -179,7 +179,7 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
             return Error(ImportMalformed)
         }
         deploy_result(checksum_row(mut digest, key, encoded))?
-        let row_charge = entry(key, encoded)
+        let row_charge = txn.entry(key, encoded)
         range_row_bytes = int.saturating_add(range_row_bytes, row_charge)
         if list.len(encoded) > inline_threshold {
             over_inline += 1

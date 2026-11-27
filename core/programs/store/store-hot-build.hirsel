@@ -30,11 +30,15 @@ fn run_hot_builds(mut db: Db, mut plan: SchemaPlan) -> Result[Option[u64], Error
     Ok(build_pin_slot(db))
 }
 
-// Reserves `count` stamps from the writer's counter for the builder's next
-// pages. Unused reserved stamps stay consumed (§11.4).
-fn hot_reserve(mut db: Db, mut builder: StreamBuilder, stamps: u64) -> Result[(), Error] {
+// Keeps the builder's reserved stamps ahead of its next draws. A push draws
+// at most one leaf, its BLOBs and a branch per level; reserved stamps left
+// unused stay consumed (§11.4).
+fn hot_reserve(mut db: Db, mut builder: StreamBuilder) -> Result[(), Error] {
+    if builder.stamp_high > builder.next_stamp && builder.stamp_high - builder.next_stamp >= 256u64 {
+        return Ok(())
+    }
     let low = pages.holder_next_node(db.holders)
-    let Some(high) = int.checked_add(low, stamps) else {
+    let Some(high) = int.checked_add(low, 4096u64) else {
         return Error(Limit(Ids))
     }
     if high == 18446744073709551615u64 {
@@ -46,9 +50,56 @@ fn hot_reserve(mut db: Db, mut builder: StreamBuilder, stamps: u64) -> Result[()
     Ok(())
 }
 
-// Sorts one run and streams it into the target's builder. A key equal to its
-// neighbour, or to the last key streamed, is a duplicate target key.
-fn hot_stream_run(mut db: Db, mut builder: StreamBuilder, mut map: pages.PageTree, mut pending: List[std.page.Row], mut last_key: Option[Bytes], name: String) -> Result[(), Error] waits {
+fn hot_push(mut db: Db, mut builder: StreamBuilder, mut map: pages.PageTree, take row: std.page.Row) -> Result[(), Error] waits {
+    hot_reserve(mut db, mut builder)?
+    stream_push_row(mut db, mut builder, mut map, take row)
+}
+
+// Ends `builder` and puts its tree into the working map at `id`.
+fn hot_put(mut db: Db, mut builder: StreamBuilder, mut map: pages.PageTree, id: u32) -> Result[(), Error] {
+    hot_reserve(mut db, mut builder)?
+    let finished = stream_finish_range(mut builder)?
+    let key = failure_result_from_rep(catalog.prefix(id))?
+    let private_from = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
+    let mut draw = private_from
+    match take finished {
+        Some(take node) => {
+            let StreamNode(slot: take node_slot, rows: node_rows, charge: node_charge, ..) = take node
+            put_collection_with_residency(mut map, key, Some(take node_slot), node_rows, node_charge, builder.kind, ResidentTiered, private_from, mut draw)?
+        },
+        None => put_collection_with_residency(mut map, key, None, 0, 0, builder.kind, ResidentTiered, private_from, mut draw)?,
+    }
+    failure_result_from_rep(pages.canonical_tree(mut map))?
+    pages.set_next_node(mut db.holders, draw - 1)
+    Ok(())
+}
+
+// One Tiered target under build (§13.10a "sorted runs, then bottom up").
+// While each run's first key is above the last key streamed, runs stream
+// straight into `builder`. The first run that is not turns the build to the
+// merge: the tree built so far moves to the second scratch id as run 0, and
+// every later run is appended to the first scratch id, keyed by run number
+// (u32 big-endian) then key, through `scratch`.
+type HotTarget {
+    id: u32,
+    name: String,
+    builder: StreamBuilder,
+    last_key: Option[Bytes],
+    scratch: Option[StreamBuilder],
+    runs: u32,
+}
+
+fn hot_target(db: Db, map: pages.PageTree, id: u32, kind: u8, name: String) -> HotTarget {
+    HotTarget(id: id, name: clone(name), builder: new_stream_builder(id, kind, map.inline, disk_state(db).options.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN)), last_key: None, scratch: None, runs: 0u32)
+}
+
+fn hot_duplicate(name: String) -> Result[(), Error] {
+    Error(Exists(failure_result_from_rep(catalog.named(name))?))
+}
+
+// Sorts one run and streams it into the target, or appends it to the
+// scratch runs once the build has turned to the merge.
+fn hot_run(mut db: Db, mut map: pages.PageTree, mut target: HotTarget, mut pending: List[std.page.Row]) -> Result[(), Error] waits {
     if list.len(pending) == 0 {
         return Ok(())
     }
@@ -56,50 +107,242 @@ fn hot_stream_run(mut db: Db, mut builder: StreamBuilder, mut map: pages.PageTre
     sort_bulk_rows(mut rows)?
     for i in 1u64 .. list.len(rows) {
         if rows[i - 1u64].key == rows[i].key {
-            return Error(Exists(failure_result_from_rep(catalog.named(name))?))
+            return hot_duplicate(target.name)
         }
     }
-    if let Some(previous) = last_key {
-        if rows[0u64].key <= previous {
-            if rows[0u64].key == previous {
-                return Error(Exists(failure_result_from_rep(catalog.named(name))?))
+    let ordered = match target.last_key {
+        Some(previous) => rows[0u64].key > previous,
+        None => true,
+    }
+    if let None = target.scratch {
+        if ordered {
+            target.last_key = Some(failure_result_from_rep(types.copied(rows[list.len(rows) - 1u64].key))?)
+            for take row in take rows {
+                hot_push(mut db, mut target.builder, mut map, take row)?
             }
-            return Error(MigrationFault)
+            return Ok(())
         }
+        // The turn to the merge: the tree so far becomes run 0.
+        let reset = new_stream_builder(target.id, target.builder.kind, map.inline, target.builder.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN))
+        let mut prefix_run = replace(mut target.builder, take reset)
+        prefix_run.id = target.id + 2u32
+        hot_put(mut db, mut prefix_run, mut map, target.id + 2u32)?
+        failure_result_from_rep(pages.canonical_tree(mut map))?
+        target.scratch = Some(new_stream_builder(target.id + 1u32, 1u8, map.inline, target.builder.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN)))
+        target.runs = 1u32
     }
-    // A leaf holds at least one row and a BLOB takes one stamp; branches
-    // number fewer than the leaves under them.
-    hot_reserve(mut db, mut builder, int.saturating_add(int.saturating_mul(3u64, list.len(rows)), 64u64))?
-    last_key = Some(failure_result_from_rep(types.copied(rows[list.len(rows) - 1u64].key))?)
+    let Some(scratch0) = replace(mut target.scratch, None) else {
+        return Ok(())
+    }
+    let mut scratch = scratch0
+    let number = target.runs
     for take row in take rows {
-        stream_push_row(mut db, mut builder, mut map, take row)?
+        let std.page.Row(key: take key, value: take value, charge: charge) = take row
+        let mut keyed: Bytes = list.with_capacity(4 + list.len(key))
+        list.put_word_be(mut keyed, number)
+        list.append(mut keyed, key)
+        hot_push(mut db, mut scratch, mut map, std.page.Row(key: take keyed, value: take value, charge: charge))?
     }
+    target.scratch = Some(take scratch)
+    target.runs = number + 1u32
+    Ok(())
+}
+
+// One source of the merge: a run's key range in the working map, the next
+// row it holds, and how many leading key bytes name the run.
+type HotSource {
+    low: Bytes,
+    high: Bytes,
+    strip: u64,
+    previous: Option[Bytes],
+    head: Option[(Bytes, Bytes)],
+}
+
+fn hot_source(take low: Bytes, take high: Bytes, strip: u64) -> HotSource {
+    HotSource(low: take low, high: take high, strip: strip, previous: None, head: None)
+}
+
+fn run_bounds(scratch: u32, number: u32) -> Result[(Bytes, Bytes), Error] {
+    let mut low = failure_result_from_rep(catalog.prefix(scratch))?
+    list.put_word_be(mut low, number)
+    let mut high = failure_result_from_rep(catalog.prefix(scratch))?
+    if number == 4294967295u32 {
+        high = failure_result_from_rep(catalog.prefix(scratch + 1u32))?
+    } else {
+        list.put_word_be(mut high, number + 1u32)
+    }
+    Ok((take low, take high))
+}
+
+// Up to `limit` rows of [`low`, `high`) after `previous` in the working map:
+// through the writer's pager once a build cut has packed it, else resident.
+fn work_rows(db: Db, map: pages.PageTree, low: Bytes, high: Bytes, take previous: Option[Bytes], limit: u64) -> Result[(List[(Bytes, Bytes)], bool), Error] waits {
+    if let Some(inventory) = view map.paging {
+        let mut roots = pages.empty_roots()
+        roots.collections = pages.share_page_tree(map)
+        let s = snapshot_from(db, 0u64, pages.holder_heads(db.holders)[0u64].head, roots, int.saturating_add(pages.holder_next_node(db.holders), 1))
+        return snapshot_rows_after(db, s, inventory, low, high, take previous, limit, false)
+    }
+    let start = match take previous {
+        Some(take key) => Excluded(take key),
+        None => Included(failure_result_from_rep(types.copied(low))?),
+    }
+    let mut rows = byte_cursor(map, take start, high)?
+    let mut out: List[(Bytes, Bytes)] = list.new()
+    while list.len(out) < limit {
+        let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut rows))? else {
+            return Ok((take out, true))
+        }
+        list.push(mut out, (take key, failure_result_from_rep(types.copied(raw))?))
+    }
+    Ok((take out, false))
+}
+
+fn hot_advance(db: Db, map: pages.PageTree, mut source: HotSource) -> Result[(), Error] waits {
+    let (take rows, _) = work_rows(db, map, source.low, source.high, clone(source.previous), 1u64)?
+    source.head = None
+    for (key, value) in rows {
+        source.previous = Some(failure_result_from_rep(types.copied(key))?)
+        source.head = Some((failure_result_from_rep(types.copied(list.slice(key, source.strip, list.len(key))))?, failure_result_from_rep(types.copied(value))?))
+    }
+    Ok(())
+}
+
+// Merges `sources` in key order into `out`, each key prefixed by `number`
+// when `out` is the scratch builder. Equal keys are a duplicate.
+fn hot_merge(mut db: Db, mut map: pages.PageTree, id: u32, name: String, mut sources: List[HotSource], mut out: StreamBuilder, number: Option[u32]) -> Result[(), Error] waits {
+    for i in 0u64 .. list.len(sources) {
+        hot_advance(db, map, mut sources[i])?
+    }
+    let mut merged_last: Option[Bytes] = None
+    loop {
+        let mut least: Option[u64] = None
+        for i in 0u64 .. list.len(sources) {
+            if let Some((key, _)) = sources[i].head {
+                let lower = match least {
+                    Some(j) => match sources[j].head {
+                        Some((other, _)) => key < other,
+                        None => true,
+                    },
+                    None => true,
+                }
+                if lower {
+                    least = Some(i)
+                }
+            }
+        }
+        let Some(i) = least else {
+            return Ok(())
+        }
+        let Some((take key, take value)) = replace(mut sources[i].head, None) else {
+            return Ok(())
+        }
+        if let Some(previous) = merged_last {
+            if previous == key {
+                return hot_duplicate(name)
+            }
+        }
+        merged_last = Some(failure_result_from_rep(types.copied(key))?)
+        let mut full = failure_result_from_rep(catalog.prefix(id))?
+        list.append(mut full, key)
+        let charge = entry(full, value)
+        let keyed = match number {
+            Some(n) => {
+                let mut run_key: Bytes = list.with_capacity(4 + list.len(key))
+                list.put_word_be(mut run_key, n)
+                list.append(mut run_key, key)
+                take run_key
+            },
+            None => take key,
+        }
+        hot_push(mut db, mut out, mut map, std.page.Row(key: take keyed, value: take value, charge: charge))?
+        hot_advance(db, map, mut sources[i])?
+    }
+}
+
+// Ends the target: puts its streamed tree, or merges its runs into it. When
+// there are more runs than the fan-in F, merge passes of F runs each append
+// their output runs to the scratch collection first. The scratch ids then
+// leave the working map, so the next cut drops their frames from the pin.
+fn hot_finish(mut db: Db, mut work: HotBuild, take target0: HotTarget) -> Result[(), Error] waits {
+    let mut target = target0
+    let Some(scratch0) = replace(mut target.scratch, None) else {
+        hot_put(mut db, mut target.builder, mut work.map, target.id)?
+        list.push(mut work.built, target.id)
+        return Ok(())
+    }
+    let mut scratch = scratch0
+    hot_put(mut db, mut scratch, mut work.map, target.id + 1u32)?
+    let height = list.len(scratch.levels) + 1u64
+    let fan_in = order.max(2u64, int.saturating_sub(disk_state(db).options.writer_pin_bytes, VALUE_LIMIT) / (height * 16384u64))
+    let mut queue: List[HotSource] = list.new()
+    list.push(mut queue, hot_source(failure_result_from_rep(catalog.prefix(target.id + 2u32))?, failure_result_from_rep(catalog.prefix(target.id + 3u32))?, 4u64))
+    for number in 1u32 .. target.runs {
+        let (take low, take high) = run_bounds(target.id + 1u32, number)?
+        list.push(mut queue, hot_source(take low, take high, 8u64))
+    }
+    // A pass merges every group of F runs into one output run of a fresh
+    // scratch builder; the old scratch tree stays in the working map, and
+    // pinned, until the pass puts the new one in its place.
+    while list.len(queue) > fan_in {
+        let mut out = new_stream_builder(target.id + 1u32, 1u8, work.map.inline, scratch.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN))
+        let mut rest: List[HotSource] = list.new()
+        let mut group: List[HotSource] = list.new()
+        let total = list.len(queue)
+        let mut seen = 0u64
+        for take source in take queue {
+            list.push(mut group, take source)
+            seen = seen + 1u64
+            if list.len(group) == fan_in || seen == total {
+                let number = target.runs
+                hot_merge(mut db, mut work.map, target.id, target.name, mut group, mut out, Some(number))?
+                group = list.new()
+                target.runs = number + 1u32
+                let (take low, take high) = run_bounds(target.id + 1u32, number)?
+                list.push(mut rest, hot_source(take low, take high, 8u64))
+            }
+        }
+        hot_put(mut db, mut out, mut work.map, target.id + 1u32)?
+        queue = take rest
+    }
+    let mut last_builder = replace(mut target.builder, new_stream_builder(target.id, 1u8, work.map.inline, 0u64, 1u64, 0u64, string.from(BUILD_PIN)))
+    hot_merge(mut db, mut work.map, target.id, target.name, mut queue, mut last_builder, None)?
+    hot_put(mut db, mut last_builder, mut work.map, target.id)?
+    let mut draw = pages.holder_next_node(db.holders)
+    for gone in 1u32 .. 3u32 {
+        let private_from = failure_result_from_rep(catalog.stamp_after(draw))?
+        let mut drawn = private_from
+        let _ = failure_result_from_rep(catalog.drop_collection(mut work.map, target.id + gone, private_from, mut drawn))?
+        draw = drawn - 1
+    }
+    failure_result_from_rep(pages.canonical_tree(mut work.map))?
+    pages.set_next_node(mut db.holders, draw)
+    list.push(mut work.built, target.id)
     Ok(())
 }
 
 // One Tiered `migrate_table` target: the source is read from main's head as
 // the last cut published it, one chunk at a time, converted into runs of at
-// most `dirty_bytes`, and built bottom up into the working map.
+// most `dirty_bytes` of charge, and built into the working map.
 fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take job: DeferredMigrate) -> Result[(), Error] waits {
     let dirty = disk_state(db).options.dirty_bytes
-    let target = failure_result_from_rep(catalog.prefix(job.to_id))?
-    let mut builder = new_stream_builder(job.to_id, 1u8, work.map.inline, dirty, 1u64, 0u64, string.from(BUILD_PIN))
+    let target_prefix = failure_result_from_rep(catalog.prefix(job.to_id))?
+    let mut target = hot_target(db, work.map, job.to_id, 1u8, job.to_name)
     let mut kept: List[std.page.Row] = list.new()
     let mut charge = 0u64
-    let mut last_key: Option[Bytes] = None
     let mut cursor: Option[Bytes] = None
     loop {
         let (take rows, done) = tiered_rows_after(db, job.from_id, cursor, INDEX_CHUNK)?
         for (logical, raw) in rows {
             let suffix = failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?
             if let Some((take key, take value)) = (job.convert)(suffix, raw)? {
-                let mut full = failure_result_from_rep(types.copied(target))?
+                let mut full = failure_result_from_rep(types.copied(target_prefix))?
                 list.append(mut full, key)
                 let row_charge = entry(full, value)
                 charge = int.saturating_add(charge, row_charge + 8u64)
                 list.push(mut kept, std.page.Row(key: take key, value: take value, charge: row_charge))
                 if charge >= dirty {
-                    hot_stream_run(mut db, mut builder, mut work.map, mut kept, mut last_key, job.to_name)?
+                    hot_run(mut db, mut work.map, mut target, mut kept)?
                     charge = 0
                 }
             }
@@ -109,25 +352,8 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
             break
         }
     }
-    hot_stream_run(mut db, mut builder, mut work.map, mut kept, mut last_key, job.to_name)?
-    let mut pending_nodes = 64u64
-    for nodes in builder.levels {
-        pending_nodes = int.saturating_add(pending_nodes, list.len(nodes))
-    }
-    hot_reserve(mut db, mut builder, pending_nodes)?
-    let finished = stream_finish_range(mut builder)?
-    let private_from = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
-    let mut draw = private_from
-    match take finished {
-        Some(take node) => {
-            let StreamNode(slot: take node_slot, rows: node_rows, charge: node_charge, ..) = take node
-            put_collection_with_residency(mut work.map, target, Some(take node_slot), node_rows, node_charge, 1u8, ResidentTiered, private_from, mut draw)?
-        },
-        None => put_collection_with_residency(mut work.map, target, None, 0, 0, 1u8, ResidentTiered, private_from, mut draw)?,
-    }
-    failure_result_from_rep(pages.canonical_tree(mut work.map))?
-    pages.set_next_node(mut db.holders, draw - 1)
-    list.push(mut work.built, job.to_id)
+    hot_run(mut db, mut work.map, mut target, mut kept)?
+    hot_finish(mut db, mut work, take target)?
     // The source and its retired indexes leave the plan's map; the graft
     // supersedes them.
     let mut ids = pages.holder_next_node(db.holders)

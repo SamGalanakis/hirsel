@@ -919,6 +919,9 @@ limit = 536870912
 [tests.runs."store@1/store/test_l102_hot_migrate_identity"]
 limit = 536870912
 
+[tests.runs."store@1/store/test_l102_hot_migrate_merge"]
+limit = 536870912
+
 [tests.runs."store@1/store/tiered_hot_index_build_refused"]
 limit = 536870912
 

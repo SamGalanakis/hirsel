@@ -132,6 +132,53 @@ fn test_l102_hot_migrate_identity(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     close(take reopened)
 }
 
+fn hot_reverse(mut phase: Migration) -> Result[(), Error] {
+    migrate_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64(), "moved", std.codec.key_u64(), std.codec.of_u64(), fn(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+        Ok(Some((1000000u64 - k, v)))
+    })
+}
+
+// `moved` holds exactly key 1,000,000 - k with value k % 97 for k in 0..n.
+fn l102_reversed(d: Dir, mut db: Db, n: u64) -> Result[(), Error] waits {
+    let t = table(mut db, "moved", std.codec.key_u64(), std.codec.of_u64())?
+    let target_id = t.id
+    let Committed(Done(value: ok, ..)) = run(mut db, Some(100000000u64), copy_env((t, n)), fn(mut tx: Tx, env: (Table[u64, u64], u64)) -> Result[bool, Error] {
+        for k in 0u64 .. env.1 {
+            if fetch(tx, env.0, 1000000u64 - k)? != Some(k % 97) {
+                return Ok(false)
+            }
+        }
+        Ok(count(tx, env.0, Unbounded, Unbounded)? == env.1)
+    })? else {
+        fail("L102 merge: read did not commit")
+    }
+    if !ok {
+        fail("L102 merge: the reversed rows are not the model's")
+    }
+    if l102_owner3_pin(db) {
+        fail("L102 merge: an owner-3 pin is listed after the publish")
+    }
+    l102_stamps(d, db, target_id)
+}
+
+// L102 (a), merge: a `migrate_table` that reverses key order. Each run past
+// the first is below its predecessor, so the build turns to the merge (run 0
+// in the second scratch id, later runs in the first), and the merged target
+// must hold exactly the model rows with no scratch frame reachable. Red
+// before the merge: `MigrationFault` on the first out-of-order run.
+@test
+fn test_l102_hot_migrate_merge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, hot_options(65536)?)?
+    let _ = hot_seed(mut db, 6000)?
+    run_migration(mut db, tasks, code.describe(hot_reverse))?
+    l102_reversed(d, mut db, 6000)?
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let mut again = open(tasks, d, c, r, hot_options(65536)?)?
+    l102_reversed(d, mut again, 6000)?
+    close(take again)
+}
+
 // A new index on a Tiered table would build through seal's child cut on the
 // live directory. Red on a663f742: past `dirty_bytes` the build's packs
 // collided with the publishing cut's, and reopen was `Corrupt` p-6.

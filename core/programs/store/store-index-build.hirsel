@@ -60,7 +60,7 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
     }
     let low = failure_result_from_rep(catalog.prefix(table_id))?
     let high = failure_result_from_rep(catalog.prefix(table_id + 1))?
-    let mut previous: Option[Bytes] = match cursor {
+    let previous: Option[Bytes] = match cursor {
         Some(final_key) => {
             let mut k = failure_result_from_rep(catalog.prefix(table_id))?
             list.append(mut k, final_key)
@@ -68,6 +68,13 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
         },
         None => None,
     }
+    snapshot_rows_after(db, s, inventory, low, high, take previous, limit, direct)
+}
+
+// Up to `limit` rows of [`low`, `high`) after `previous` in `s`, each read
+// through the pager (or directly, on a store with no pager task).
+fn snapshot_rows_after(db: Db, s: Snapshot, inventory: pages.TieredReadInventory, low: Bytes, high: Bytes, take after: Option[Bytes], limit: u64, direct: bool) -> Result[(List[(Bytes, Bytes)], bool), Error] waits {
+    let mut previous = take after
     let direct_dir: Option[Dir] = if direct {
         match view db.disk {
             Some(state) => state.d,

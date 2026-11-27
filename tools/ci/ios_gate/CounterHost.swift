@@ -59,7 +59,7 @@ struct CounterHost: App {
         #else
         Task.detached {
             let runtime = try Runtime.start(grants: "Clock\nRandom\nTasks\nStderr\nNet=Connect 127.0.0.1/32 1-1")
-            let session = try runtime.open()
+            let session = try runtime.open(credential: Data(repeating: 0x42, count: 16))
             let result = try await session.api.call.main.counter_step(read ? 0 : 1, deadline: 0)
             if case .returned(let value) = result {
                 await record(value)

@@ -4,6 +4,7 @@ import XCTest
 import SimGateCore
 @testable import SimGate
 
+let fixtureCredential = Data(repeating: 0x42, count: 16)
 let baseGrants = "Clock\nRandom\nTasks\nStderr\nNet=Connect 127.0.0.1/32 1-1"
 
 func withRuntime<Value>(_ grants: String = baseGrants,
@@ -51,7 +52,7 @@ final class RuntimeTests: XCTestCase {
 
     func testCallAndTwoSubscriptionChanges() async throws {
         try await withRuntime { runtime in
-            let session = try runtime.open()
+            let session = try runtime.open(credential: fixtureCredential)
             let answer = try await session.api.call.main.answer(35, deadline: 0)
             XCTAssertEqual(answer, .returned(42))
 
@@ -76,8 +77,8 @@ final class RuntimeTests: XCTestCase {
 
     func testRoomSetSendAndLeave() async throws {
         try await withRuntime { runtime in
-            let a = try runtime.open()
-            let b = try runtime.open()
+            let a = try runtime.open(credential: fixtureCredential)
+            let b = try runtime.open(credential: fixtureCredential)
             let roomA = try a.api.room.main.room(HirselUnit())
             var aEvents = roomA.events.makeAsyncIterator()
             guard case .peers(let selfA)? = try await aEvents.next() else {
@@ -93,7 +94,7 @@ final class RuntimeTests: XCTestCase {
             guard case .peers(let join)? = joined else { return XCTFail("Expected B to join A") }
             XCTAssertEqual(join.joined.map(\.peer), [try XCTUnwrap(selfB.me)])
 
-            let c = try runtime.open()
+            let c = try runtime.open(credential: fixtureCredential)
             let fullRoom = try c.api.room.main.room(HirselUnit())
             var fullEvents = fullRoom.events.makeAsyncIterator()
             let first = try await fullEvents.next()
@@ -126,14 +127,14 @@ final class RuntimeTests: XCTestCase {
 
     func testStopThenStart() async throws {
         let old = try await withRuntime { runtime in
-            let session = try runtime.open()
+            let session = try runtime.open(credential: fixtureCredential)
             let result = try await session.api.call.main.answer(0, deadline: 0)
             XCTAssertEqual(result, .returned(7))
             return session
         }
         try await withRuntime { runtime in
             XCTAssertEqual(hirsel_embed_v1_call(old.handle, 99, 0, hirsel_bytes(), 0), HIRSEL_STOPPED)
-            let fresh = try runtime.open()
+            let fresh = try runtime.open(credential: fixtureCredential)
             let result = try await fresh.api.call.main.answer(1, deadline: 0)
             XCTAssertEqual(result, .returned(8))
             try await fresh.close()
@@ -144,7 +145,7 @@ final class RuntimeTests: XCTestCase {
         let clock = ContinuousClock()
         let start = clock.now
         try await withRuntime { runtime in
-            let session = try runtime.open()
+            let session = try runtime.open(credential: fixtureCredential)
             let first = try await session.api.call.main.answer(0, deadline: 0)
             let firstTime = start.duration(to: clock.now)
             let memoryAtStart = memory()

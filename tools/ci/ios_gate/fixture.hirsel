@@ -95,7 +95,7 @@ pub fn main(store_dir: Dir, args: Args, process: Process, errors: Stderr, clock:
         let mut entries = runner.triggers.empty_entries()
         result.unwrap(runner.triggers.allow(mut entries, result.unwrap(runner.triggers.granted(code.describe(handshake)))))
         let calls = runner.CallMint(mint: runner.Mint(seed: net, mint: mint_network, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS), entries: take entries)
-        let grants = runner.Grants(attempt: None, call: Some(take calls), claim: None, bind: Some(runner.Mint(seed: net, mint: mint_network, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+        let grants: runner.Grants[Net, Handles, Net] = runner.Grants(attempt: None, call: Some(take calls), claim: None, bind: Some(runner.Mint(seed: net, mint: mint_network, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
         let mut session = runner.wire_defaults(131072u64)
         session.n_relay = 262144u64
         session.n_granted = 2097152u64

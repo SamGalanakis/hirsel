@@ -38,7 +38,7 @@ final class TLSTests: XCTestCase {
     private func probe(_ runtime: Runtime, _ name: String, _ port: UInt16, _ roots: Data? = nil,
                        lookup: Bool = false, expected: UInt32, _ row: String) async {
         do {
-            let session = try runtime.open()
+            let session = try runtime.open(credential: fixtureCredential)
             let result = try await session.api.call.main.handshake(
                 .init(item0: name, item1: port, item2: roots, item3: lookup), deadline: 10_000)
             XCTAssertEqual(result, .returned(expected), row)

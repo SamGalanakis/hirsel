@@ -6,7 +6,7 @@ import XCTest
 final class AbiTests: XCTestCase {
     func testWelcomeTarget() async throws {
         try await withRuntime { runtime in
-            let session = try runtime.open()
+            let session = try runtime.open(credential: fixtureCredential)
             let reply = try await session.api.call.main.answer(0, deadline: 0)
             XCTAssertEqual(reply, .returned(7))
             var target = [UInt8](repeating: 0, count: 128)
@@ -134,7 +134,11 @@ final class AbiTests: XCTestCase {
                 observer.ended.signal()
             }
             var session = hirsel_session()
-            let status = hirsel_embed_v1_open(runtime.handle, &callbacks, hirsel_bytes(), &session)
+            let status = fixtureCredential.withUnsafeBytes { credential in
+                let bytes = credential.bindMemory(to: UInt8.self)
+                return hirsel_embed_v1_open(runtime.handle, &callbacks,
+                                            hirsel_bytes(ptr: bytes.baseAddress, len: bytes.count), &session)
+            }
             if status != HIRSEL_OK {
                 Unmanaged<Observer>.fromOpaque(callbacks.context!).release()
                 throw EmbedError.status(status.rawValue)

@@ -1227,7 +1227,7 @@ fn exec_supervisor_law(image: &std::path::Path) {
         OwnedFd::from_raw_fd(fd)
     };
 
-    let check = |input| {
+    fn check(supervisor: &Supervisor, input: SpawnInput) {
         let mut started = supervisor.spawn(input).unwrap();
         let mut stdin = File::from(started.stdin.take().unwrap());
         stdin.write_all(b"x").unwrap();
@@ -1242,8 +1242,9 @@ fn exec_supervisor_law(image: &std::path::Path) {
             Some(Termination::Exited(37))
         );
         started.process.signal(Signal::Kill).unwrap();
-    };
-    check(make("literal *", [true; 3]));
+    }
+    check(&supervisor, make("literal *", [true; 3]));
+    drop(supervisor);
     let original = [0, 1, 2].map(|fd| crate::entry::duplicate(fd).unwrap());
     let close_standard = || {
         // SAFETY: this isolated run owns all three standard fd slots.
@@ -1260,17 +1261,16 @@ fn exec_supervisor_law(image: &std::path::Path) {
             );
         }
     };
+    let supervisor = Supervisor::start(crate::exec::probe).unwrap();
+    let low_report_stdio = make("literal *", [true; 3]);
     close_standard();
     let low_cwd = make("literal *", [true; 3]);
     assert!(low_cwd.cwd.as_raw_fd() <= 2);
-    check(low_cwd);
+    check(&supervisor, low_cwd);
+    check(&supervisor, low_report_stdio);
+    drop(supervisor);
     restore_standard();
-
-    let low_report_stdio = make("literal *", [true; 3]);
-    close_standard();
-    check(low_report_stdio);
-    restore_standard();
-
+    let supervisor = Supervisor::start(crate::exec::probe).unwrap();
     for step in [
         SetupStep::Stdio,
         SetupStep::Cwd,

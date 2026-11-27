@@ -520,3 +520,15 @@ core@1/conn/try_send
 core@1/conn/receive
 core@1/conn/try_receive
 core@1/task/spawn_unit
+# DECISIONS.md 2026-11-27 (main-driver-reds-3308): Store's transaction view
+# cache (c0fb0e90) and Bucket service inbox results (4546352a).
+core@1/cell/set
+core@1/core/InboxError
+core@1/core/InboxPoll
+# STORE-SPEC §3.3: journal gather and END deadlines (8b88b0d6).
+core@1/channel/receive_until
+# STORE-SPEC §3.3: segment fences, durable zeroes and aligned journal buffers
+# (645e545c, 838951d1).
+core@1/host/try_lock_shared
+core@1/host/zero_at
+core@1/list/with_capacity_aligned

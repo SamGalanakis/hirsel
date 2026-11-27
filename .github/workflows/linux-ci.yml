@@ -1,0 +1,101 @@
+name: Linux CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core build and laws
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set the base for change-aware linters
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -n "$BASE" && "$BASE" != 0000000000000000000000000000000000000000 ]]; then
+            git update-ref refs/remotes/origin/main "$BASE"
+          fi
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap lld python3-venv zstd
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: linux-ci-cargo-v1-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: linux-ci-cargo-v1-${{ runner.arch }}-
+      - name: Prepare pinned build tools
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
+          python3 tools/buck2/prepare.py --local
+      - name: Build the compiler and runtime
+        run: .buck2/bin/buck2 build -j4 //:hirsel-core-driver-bin-hirsel //:core-driver-runtime-pic
+      - name: Run compiler, runtime, driver and standard library laws
+        run: |
+          .buck2/bin/buck2 test -j4 \
+            //:hirsel-core-ir-unittest //:hirsel-core-rt-unittest-openat2 \
+            //:core-driver-comptime-native //:core-m1-cranelift
+      - name: Check formatting and source metadata
+        run: python3 tools/buck2/fmt.py --check
+
+  cargo:
+    name: Cargo release build and laws
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      LD_LIBRARY_PATH: ${{ github.workspace }}/tools/buck2/toolchains/llvm-files/lib
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: linux-ci-cargo-v1-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: linux-ci-cargo-v1-${{ runner.arch }}-
+      - name: Prepare pinned Rust and LLVM
+        run: |
+          rustup toolchain install --no-self-update
+          python3 tools/buck2/bootstrap_llvm.py
+      - name: Build the release compiler with Cargo
+        run: cargo build --release -p hirsel-core-driver --locked
+      - name: Run CoreIR laws with Cargo
+        run: cargo test --release -p hirsel-core-ir --features wf --lib --locked
+      - name: Check a package with the Cargo-built compiler and std
+        run: |
+          target/release/hirsel new "$RUNNER_TEMP/cargo-smoke"
+          target/release/hirsel check "$RUNNER_TEMP/cargo-smoke" --libraries core

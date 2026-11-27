@@ -12,4 +12,6 @@ pub use resolve::*;
 #[cfg(test)]
 hirsel_guard::install!();
 #[cfg(test)]
+mod discovery_tests;
+#[cfg(test)]
 mod tests;

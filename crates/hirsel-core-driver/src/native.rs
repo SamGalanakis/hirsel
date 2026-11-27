@@ -1250,7 +1250,7 @@ pub(crate) fn bind_entry(p: &mut Program<'_>, entry: &DefPath) -> EntryBinding {
                         return Err("Foreign requires its interface");
                     };
                     ty.push('[');
-                    ty.push_str(&p.decls[interface.index()].path.definition_identity());
+                    ty.push_str(&p.decls[interface.index()].path.to_string());
                     ty.push(']');
                 }
                 Ok(EntryParameter {

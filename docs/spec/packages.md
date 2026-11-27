@@ -2573,7 +2573,7 @@ of `p1.T` is a `p2.T`. The lock has one row for each of `a.test/json@1`, `b.test
   `--grant Foreign=fixture.test/demo@1/api/A` (on a workspace binding `fixture.test/demo` at D)
   are read back as the identity, module and item they name, each split at the first `@`;
 - a run's failure site in `a.test/json` is named `a.test/json@1/json.hirsel`, and PROG-9's
-  path component for the package is `a.test%2Fjson@1`;
+  path component for the package is `a%2Etest%2Fjson@1`;
 - `hirsel add` of `b.test/json`'s archive without `--as`<!-- doc-ref: planned --> in a fresh `app` that already binds
   `json` to `a.test/json` refuses with `add, alias taken`, and with `--as bjson`<!-- doc-ref: planned --> writes
   `bjson = { package = "b.test/json", major = 1, root = "<R b>", archive = "…" }`.

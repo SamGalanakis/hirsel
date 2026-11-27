@@ -591,7 +591,7 @@ impl CheckProduct {
             if !self
                 .foreign_headers
                 .values()
-                .any(|(path, _)| path.definition_identity() == *interface)
+                .any(|(path, _)| path.to_string() == *interface)
             {
                 return Err(NativeStop::Entry(format!(
                     "unknown grant Foreign={interface}"
@@ -615,7 +615,7 @@ impl CheckProduct {
             let mut functions = self
                 .foreign_headers
                 .iter()
-                .filter(|(_, (path, _))| path.definition_identity() == interface);
+                .filter(|(_, (path, _))| path.to_string() == interface);
             let (function, _) = functions
                 .next()
                 .ok_or_else(|| NativeStop::Entry(format!("unknown grant Foreign={interface}")))?;

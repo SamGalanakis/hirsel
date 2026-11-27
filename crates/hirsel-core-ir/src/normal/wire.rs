@@ -618,11 +618,12 @@ impl Wire for DefPath {
 
     fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
         let text = String::read(input)?;
-        let mut parts = text.split('/');
-        let (package, version) = parts
-            .next()
-            .and_then(|p| p.split_once('@'))
+        // The package name splits at the first `@` (PROG-1); escaped, it holds no `/`.
+        let (package, rest) = text
+            .split_once('@')
             .ok_or_else(|| invalid("missing package version"))?;
+        let mut parts = rest.split('/');
+        let version = parts.next().unwrap_or_default();
         fn component(text: &str, budget: &Debit<'_>) -> DecodeResult<String> {
             budget.charge_bytes(text.len())?;
             let mut input = text.as_bytes().iter().copied();

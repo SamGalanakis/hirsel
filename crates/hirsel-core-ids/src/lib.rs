@@ -270,10 +270,12 @@ impl DefPath {
         Ok(())
     }
     /// The path a full versioned spelling `package@version/module/.../name` names: the
-    /// inverse of `Display`.
+    /// inverse of `Display`. A package name never contains `@` but may contain `/`
+    /// (`acme.dev/json`), so the spelling splits at its first `@` (PROG-1).
     pub fn from_full(path: &str) -> Option<Self> {
-        let mut parts = path.split('/');
-        let (name, version) = parts.next()?.split_once('@')?;
+        let (name, rest) = path.split_once('@')?;
+        let mut parts = rest.split('/');
+        let version = parts.next()?;
         let mut modules: Vec<String> = parts.map(str::to_owned).collect();
         let item = modules.pop()?;
         Some(Self(ItemPath {
@@ -353,6 +355,60 @@ mod tests {
         }
         assert!(path.write_to(&mut Refuse).is_err());
         assert!(write!(&mut Refuse, "{path}").is_err());
+    }
+
+    /// PROG-1 and PROG-9 for scoped names: the spelling splits at the first `@`, two
+    /// scopes with one `NAME` stay two identities, and PROG-9 escapes the whole name
+    /// as one component (the spec's `acme%2Edev%2Fjson@1`).
+    #[test]
+    fn scoped_names_round_trip_and_escape_as_one_component() {
+        let path = |name: &str| {
+            DefPath(ItemPath {
+                package: PackageId {
+                    name: name.into(),
+                    version: "1".into(),
+                },
+                modules: vec!["api".into()],
+                name: "A".into(),
+            })
+        };
+        for (name, full, identity) in [
+            (
+                "acme.dev/json",
+                "acme.dev/json@1/api/A",
+                "acme%2Edev%2Fjson@1/api/A",
+            ),
+            (
+                "a.test/json",
+                "a.test/json@1/api/A",
+                "a%2Etest%2Fjson@1/api/A",
+            ),
+            (
+                "b.test/json",
+                "b.test/json@1/api/A",
+                "b%2Etest%2Fjson@1/api/A",
+            ),
+            (
+                "github.com/acme/json",
+                "github.com/acme/json@1/api/A",
+                "github%2Ecom%2Facme%2Fjson@1/api/A",
+            ),
+            ("local/app", "local/app@1/api/A", "local%2Fapp@1/api/A"),
+            ("std", "std@1/api/A", "std@1/api/A"),
+        ] {
+            let p = path(name);
+            assert_eq!(p.to_string(), full);
+            assert_eq!(DefPath::from_full(full), Some(p.clone()), "{full}");
+            assert_eq!(p.definition_identity(), identity);
+        }
+        assert_ne!(
+            path("a.test/json").definition_identity(),
+            path("b.test/json").definition_identity()
+        );
+        assert_ne!(
+            path("a.test/json").fingerprint(),
+            path("b.test/json").fingerprint()
+        );
     }
 
     #[test]

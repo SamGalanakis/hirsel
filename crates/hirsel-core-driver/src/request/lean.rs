@@ -637,11 +637,13 @@ fn extract(product: &CheckProduct, prefix: &str, names: &[String]) -> R<Extracti
     })
 }
 
-/// `runner@1/triggers` -> `runner.triggers`.
+/// `runner@1/triggers` -> `runner.triggers`; `acme.dev/json@1/api` -> `«acme.dev/json».api`.
+/// The package name, which may hold `/` and `.`, is one component (PROG-1).
 fn lean_namespace(prefix: &str) -> String {
-    prefix
-        .split('/')
-        .map(|seg| mangle(seg.split('@').next().unwrap()))
+    let (package, modules) = prefix.split_once('@').unwrap_or((prefix, ""));
+    std::iter::once(package)
+        .chain(modules.split('/').skip(1))
+        .map(mangle)
         .collect::<Vec<_>>()
         .join(".")
 }

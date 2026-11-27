@@ -230,7 +230,7 @@ fn handle_kind(text: &str) -> Option<&str> {
 fn definition_path(text: &str) -> Option<&str> {
     (text
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"_@/%".contains(&b))
+        .all(|b| b.is_ascii_alphanumeric() || b"_@/%.-".contains(&b))
         && DefPath::from_full(text).is_some())
     .then_some(text)
 }

@@ -119,6 +119,14 @@ fn resident() -> u64 {
     usage.ru_maxrss as u64
 }
 
+fn check_code_mappings(loader: &Loader) {
+    use hirsel_core_layout::Os;
+    match TARGET.os() {
+        Os::Linux => assert_eq!(loader.mappings(), Some((2, 0))),
+        Os::Macos | Os::Ios => {}
+    }
+}
+
 /// 50,000 distinct small images loaded in batches, then a mixed-lifetime die-off.
 fn density(loader: &Loader, align: u32) {
     const IMAGES: u32 = 50_000;
@@ -151,7 +159,7 @@ fn density(loader: &Loader, align: u32) {
     let mut sum = 0;
     for code in codes.iter().flatten() {
         // SAFETY: the entry is `leaf`.
-        sum += unsafe { (code.entry().0)() };
+        sum += code.with_entry(|leaf| unsafe { (leaf.0)() });
     }
     assert_eq!(sum, u64::from(IMAGES) * u64::from(IMAGES - 1) / 2);
     let grown = (resident() - before) as usize;
@@ -161,6 +169,7 @@ fn density(loader: &Loader, align: u32) {
         loader.installed(),
         grown * 1024 / IMAGES as usize,
     );
+    check_code_mappings(loader);
     println!("  all live: code mappings {:?}", loader.mappings());
     // Each image dies with the same chance, whatever its neighbours do.
     let mut state = 0x9e37_79b9_7f4a_7c15u64;
@@ -177,7 +186,8 @@ fn density(loader: &Loader, align: u32) {
             }
         }
         let started = Instant::now();
-        loader.reclaim();
+        loader.reclaim().expect("complete trap fill");
+        check_code_mappings(loader);
         println!(
             "  {dead}% dead: code mappings (all, closed) {:?}; installed {} bytes; reclaim \
              took {:?}; unrevoked {}",
@@ -260,7 +270,7 @@ fn releases(loader: &Loader) {
 
 fn main() {
     let mode = std::env::args().nth(1);
-    let loader = Loader::new(Config {
+    let config = Config {
         abi: hirsel_mod::abi(),
         policy: 0,
         mask: Mask::of(&[
@@ -279,8 +289,9 @@ fn main() {
         row: Box::new(|_| Some(stub as *const () as usize)),
         instance: Box::new(|_| None),
         prelinked: &[],
-    })
-    .expect("a loader");
+    };
+    // SAFETY: direct calls and dispatches run within the executor gate on their invoking thread.
+    let loader = unsafe { Loader::with_gated_executors(config) }.expect("a gated loader");
     match mode.as_deref() {
         Some("density") => {
             let align = std::env::args().nth(2).expect("a text alignment");
@@ -305,7 +316,10 @@ fn main() {
         let code: Code<Leaf> = loader.load(bytes, &IDENTITY, true).expect("a load");
         loads.push(started.elapsed());
         // SAFETY: the entry is `leaf`.
-        assert_eq!(unsafe { (code.entry().0)() }, u64::from(n % 256));
+        assert_eq!(
+            code.with_entry(|leaf| unsafe { (leaf.0)() }),
+            u64::from(n % 256)
+        );
     }
     report("G3 load 8 KiB, 200 fixups, flushed", loads);
     println!(

@@ -128,6 +128,11 @@ fn config() -> Config {
     }
 }
 
+fn loader_for_law(config: Config) -> Result<Loader, Refusal> {
+    // SAFETY: slab calls in these laws run on the invoking thread inside the executor gate.
+    unsafe { Loader::with_gated_executors(config) }
+}
+
 /// Admit and load `bytes`, publishing at once.
 fn load(loader: &Loader, bytes: &[u8]) -> Result<Code<Leaf>, Refusal> {
     if let Ok(module) = Module::parse(bytes) {
@@ -138,7 +143,7 @@ fn load(loader: &Loader, bytes: &[u8]) -> Result<Code<Leaf>, Refusal> {
 
 fn call(code: &Code<Leaf>, x: u64) -> u64 {
     // SAFETY: the law module's entry is `leaf`.
-    unsafe { (code.entry())(x) }
+    code.with_entry(|entry| unsafe { entry(x) })
 }
 
 /// The bytes of one law image: its text and its two data words.
@@ -281,7 +286,7 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     if !host::slab() {
         return;
     }
-    let loader = Loader::new(config()).unwrap();
+    let loader = loader_for_law(config()).unwrap();
     let bytes = image(1000).encode();
     assert_eq!(
         loader.load::<Leaf>(&bytes, &IDENTITY, true).err(),
@@ -296,7 +301,7 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     let page = loader.0.page;
     let pattern: [u8; 4] = match TARGET.arch() {
         Arch::X86_64 => [0xcc; 4],
-        Arch::Aarch64 => 0xd420_0000u32.to_le_bytes(),
+        Arch::Aarch64 => [0; 4],
     };
     for offset in leaf().0.len()..page {
         // SAFETY: the page is mapped readable.
@@ -336,7 +341,10 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
         Some(Refusal::Mismatch("policy"))
     );
     let elsewhere = |image: &mut hirsel_mod::Image| {
-        image.header.target = Target::Aarch64Darwin;
+        image.header.target = match TARGET.arch() {
+            Arch::Aarch64 => Target::X86_64Linux,
+            Arch::X86_64 => Target::Aarch64Darwin,
+        };
         (image.text_fixups, image.imports) = (vec![], vec![]);
     };
     assert_eq!(
@@ -363,13 +371,13 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     );
 
     let row = hirsel_mod::row("hirsel_core_alloc").unwrap();
-    let pure = Loader::new(Config {
+    let pure = loader_for_law(Config {
         mask: Mask::of(&[Class::Pure]),
         ..config()
     })
     .unwrap();
     assert_eq!(refused(&|_| {}, &pure), Some(Refusal::Import(row)));
-    let full = Loader::new(Config {
+    let full = loader_for_law(Config {
         installed_bytes: size(),
         ..config()
     })
@@ -408,20 +416,20 @@ fn a_dead_cohort_faults_and_its_range_is_published_again() {
     if !host::slab() {
         return;
     }
-    let loader = Loader::new(config()).unwrap();
+    let loader = loader_for_law(config()).unwrap();
     let first = load(&loader, &image(100).encode()).unwrap();
     let (entry, text) = (first.entry(), first.text());
     assert_eq!(call(&first, 1), 102);
     drop(first);
-    loader.reclaim();
+    loader.reclaim().unwrap();
     if std::env::var_os(CHILD).is_some() {
         // The child jumps into the dead cohort, which ends it.
         // SAFETY: none; the law is that this call faults.
-        unsafe { entry(1) };
+        Loader::on_executor(|| unsafe { entry(1) });
         std::process::exit(0);
     }
     assert_eq!(loader.installed(), 0);
-    assert_eq!(host::protection(text), "---p");
+    assert_eq!(host::protection(text), host::LIVE);
     assert_eq!(host::protection(loader.0.data(0)), "---p");
     let name = "tests::a_dead_cohort_faults_and_its_range_is_published_again";
     let ended = child(name, "jump".as_ref());
@@ -449,7 +457,7 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
     if !host::slab() {
         return;
     }
-    let loader = Loader::new(Config {
+    let loader = loader_for_law(Config {
         batch: Duration::from_secs(60),
         ..config()
     })
@@ -467,7 +475,8 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
         while loader.installed() == 0 {
             std::thread::yield_now();
         }
-        // The first install is in an open cohort: writable, not executable.
+        // The executable view exists already; the open cohort has no published rows.
+        assert_eq!(loader.resolve(loader.0.text(0)), None);
         assert_eq!(host::protection(loader.0.text(0)), host::OPEN);
         let flushed = loader.load::<Leaf>(&late, &IDENTITY, true).unwrap();
         (waiting.join().unwrap(), flushed)
@@ -483,94 +492,20 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
     assert_eq!((call(&waiting, 1), call(&flushed, 1)), (3, 4));
 
     drop(waiting);
-    loader.reclaim();
+    loader.reclaim().unwrap();
     // A dead image in a live cohort: a live image shares its page, so the page stays
     // executable, and its bytes still count as installed.
     assert_eq!(host::protection(loader.0.text(0)), host::LIVE);
     assert_eq!((call(&flushed, 1), loader.installed()), (4, 2 * size()));
     drop(flushed);
-    loader.reclaim();
+    loader.reclaim().unwrap();
     assert_eq!(
         (host::protection(loader.0.text(0)), loader.installed()),
-        ("---p".into(), 0)
+        (host::LIVE.into(), 0)
     );
 }
 
-/// PACK-4 step 5 and PACK-9: when an image dies in a cohort that lives on, its address
-/// stops resolving in every chunk it spanned and each page that held only its text is
-/// closed, while a batch neighbour on its last page still runs and resolves. Dropping
-/// the last handle does not wait for the loader.
-#[test]
-fn a_dead_image_in_a_live_cohort_stops_resolving_and_its_own_pages_are_closed() {
-    if !host::slab() {
-        return;
-    }
-    let loader = Loader::new(Config {
-        installed_bytes: 8 << 20,
-        batch: Duration::from_secs(60),
-        ..config()
-    })
-    .unwrap();
-    // The first image's text runs past the first 2 MiB chunk and ends inside a page.
-    const WIDE: usize = (2 << 20) + 4096 + 100;
-    let mut wide = image(1);
-    wide.text.resize(WIDE, 0);
-    wide.spans[0].length = WIDE as u32;
-    let (wide, small) = (wide.encode(), image(2).encode());
-    for bytes in [&wide, &small] {
-        loader.admit(
-            Module::parse(bytes).unwrap().header.key(),
-            hirsel_mod::digest(bytes),
-        );
-    }
-    let (wide, small) = std::thread::scope(|scope| {
-        let waiting = scope.spawn(|| loader.load::<Leaf>(&wide, &IDENTITY, false).unwrap());
-        while loader.installed() == 0 {
-            std::thread::yield_now();
-        }
-        let flushed = loader.load::<Leaf>(&small, &IDENTITY, true).unwrap();
-        (waiting.join().unwrap(), flushed)
-    });
-    let (text, page) = (wide.text(), loader.0.page);
-    let shared = text + WIDE / page * page;
-    assert_eq!(small.text(), text + WIDE.next_multiple_of(64));
-    assert_eq!((call(&wide, 1), call(&small, 1)), (3, 4));
-    let installed = loader.installed();
-
-    // The last handle is dropped while another thread holds the loader's lock.
-    let (sent, dropped) = std::sync::mpsc::channel();
-    let held = loader.0.slab.lock().unwrap();
-    let dropping = std::thread::spawn(move || {
-        drop(wide);
-        sent.send(()).unwrap();
-    });
-    dropped
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the drop waited for the loader");
-    drop(held);
-    dropping.join().unwrap();
-    loader.reclaim();
-
-    for pc in [text, text + (2 << 20), text + WIDE - 1] {
-        assert_eq!(loader.resolve(pc), None);
-    }
-    assert_eq!(
-        loader.resolve(small.text()),
-        Some(Hit {
-            digest: small.digest().0[..16].try_into().unwrap(),
-            offset: 0,
-        })
-    );
-    assert_eq!(
-        [text, shared - page, shared].map(host::protection),
-        ["---p".to_string(), "---p".to_string(), host::LIVE.into()]
-    );
-    // The neighbour runs, and the dead image's bytes stay installed until the cohort goes.
-    assert_eq!((call(&small, 1), loader.installed()), (4, installed));
-    assert_eq!(loader.unrevoked(), 0);
-    drop(small);
-    assert_eq!(loader.installed(), 0);
-}
+mod g11;
 
 /// `activate` is a compare-and-swap on the version, the retired budget refuses without
 /// changing anything, and a worker keeps old code alive only while its row holds it
@@ -580,7 +515,7 @@ fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
     if !host::slab() {
         return;
     }
-    let loader = Loader::new(Config {
+    let loader = loader_for_law(Config {
         retired_bytes: size(),
         ..config()
     })
@@ -612,7 +547,7 @@ fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
     assert_eq!(run(&slot), Some(22));
     assert_eq!(
         (loader.retired(), host::protection(old)),
-        (0, "---p".into())
+        (0, host::LIVE.into())
     );
     assert_eq!(slot.activate(2, code(30)), Ok(3));
     assert_eq!(loader.retired(), size());
@@ -634,10 +569,10 @@ static FAULTING: std::sync::atomic::AtomicPtr<Loader> =
 static SAYS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 /// Write what the PC table gives for the faulting address, and end the process.
-extern "C" fn report(_: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+extern "C" fn report(signal: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     // SAFETY: the law set the loader before it raised the fault.
     let loader = unsafe { &*FAULTING.load(Ordering::Relaxed) };
-    let pc = host::pc(info, context);
+    let pc = host::pc(signal, info, context);
     let mut said = [0xff; 20];
     if let Some(hit) = loader.resolve(pc) {
         said[..16].copy_from_slice(&hit.digest);
@@ -663,7 +598,7 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
     if !host::slab() {
         return;
     }
-    let loader = Loader::new(Config {
+    let loader = loader_for_law(Config {
         installed_bytes: 8 << 20,
         ..config()
     })
@@ -722,7 +657,7 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
             action.sa_sigaction = report as *const () as usize;
             action.sa_flags = libc::SA_SIGINFO;
             libc::sigaction(libc::SIGILL, &action, std::ptr::null_mut());
-            (code.entry())(1);
+            code.with_entry(|entry| entry(1));
         }
         std::process::exit(1);
     }
@@ -742,7 +677,7 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
     let (digest, recorded) = (code.digest(), loader.resolve(pc).unwrap());
     drop(code);
     assert_eq!(loader.resolve(pc), Some(recorded));
-    loader.reclaim();
+    loader.reclaim().unwrap();
     assert_eq!(loader.resolve(pc), None);
     assert_eq!(loader.fault(recorded), Some(digest));
     assert_eq!(load(&loader, &bytes).err(), Some(Refusal::Quarantined));
@@ -767,7 +702,7 @@ fn a_loader_without_a_slab_gives_prelinked_code_and_refuses_every_other_key() {
         text: double as *const () as usize,
         entries: entries.leak(),
     }];
-    let loader = Loader::new(Config {
+    let loader = loader_for_law(Config {
         band_bytes: 0,
         installed_bytes: 0,
         prelinked: prelinked.leak(),

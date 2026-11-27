@@ -24,7 +24,7 @@ pub(crate) fn register() -> io::Result<()> {
     none()
 }
 
-pub(crate) fn reserve(_bytes: usize) -> io::Result<usize> {
+pub(crate) fn reserve(_bytes: usize) -> io::Result<(usize, usize)> {
     none()
 }
 
@@ -36,23 +36,17 @@ pub(crate) fn protect(_at: usize, _bytes: usize, _access: Access) -> io::Result<
 
 pub(crate) fn discard(_at: usize, _bytes: usize) {}
 
-pub(crate) const KEEPS: bool = false;
-
 /// How many mappings `[low, high)` is in, and how many of them allow no access. This
 /// host does not count them.
-pub(crate) fn mappings(_low: usize, _high: usize) -> Option<(usize, usize)> {
+pub(crate) fn mappings(_rx: usize, _rw: usize, _bytes: usize) -> Option<(usize, usize)> {
     None
 }
-
-/// Whether `write` can write a published text run, so a dead image's instructions on a
-/// page a live image shares are filled with traps.
-pub(crate) const FILLS: bool = false;
 
 pub(crate) fn write(work: &mut dyn FnMut()) {
     work()
 }
 
-pub(crate) fn publish(_at: usize, _bytes: usize) -> io::Result<()> {
+pub(crate) fn publish(_writer: usize, _at: usize, _bytes: usize) -> io::Result<()> {
     none()
 }
 
@@ -75,6 +69,10 @@ pub(crate) fn protection(_at: usize) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn pc(_info: *mut libc::siginfo_t, _context: *mut libc::c_void) -> usize {
+pub(crate) fn pc(
+    _signal: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    _context: *mut libc::c_void,
+) -> usize {
     0
 }

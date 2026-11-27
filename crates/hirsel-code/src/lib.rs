@@ -2,7 +2,9 @@
 //!
 //! A [`Loader`] installs `.hirsel-mod` images into its slab and gives counted [`Code`]
 //! handles to their entries. It holds no compiler and calls no linker: an image is
-//! copied, fixed up and published by changing page protection.
+//! copied and fixed up at RX-relative addresses. Linux keeps two whole memfd views.
+//! Only the trusted loader knows the RW address. Loaded code receives RX addresses
+//! and admitted runtime rows. Native FFI, exec and launch belong in other processes.
 
 use hirsel_core_ids::ContentHash;
 use hirsel_mod::{Import, Malformed, Mask, Module};
@@ -63,7 +65,9 @@ pub enum Stop {
 ///
 /// # Safety
 /// `Self` is a function pointer type or a transparent wrapper of one, and every entry
-/// whose signature is `DIGEST` can be called through it.
+/// whose signature is `DIGEST` can be called through it. Invoking a copied pointer
+/// must require unsafe code: it may run only under a live image count and the
+/// host's executor gate.
 pub unsafe trait Signature: Copy {
     const DIGEST: ContentHash;
 }
@@ -123,8 +127,8 @@ struct Cohort {
     retired: u64,
     /// Every live image installed in it: its PC table row and its module digest.
     images: Vec<(Owner, ContentHash)>,
-    /// How many live images have text on each page of the text run.
-    pages: Vec<u32>,
+    /// A failed retirement permanently withholds both runs.
+    withheld: bool,
 }
 
 /// The writable pages ahead of the open cohort: `(next free offset, end)` per band.
@@ -152,6 +156,8 @@ struct Shared {
     config: Config,
     /// The text band's address; the data band follows it.
     base: usize,
+    /// Loader-private writable text base. Only RX addresses escape in handles and fixups.
+    writer: usize,
     page: usize,
     slab: Mutex<Slab>,
     published: Condvar,
@@ -161,21 +167,8 @@ struct Shared {
     table: Table,
     /// The dead images whose retirement the loader has not done yet.
     pending: AtomicPtr<Retire>,
-    /// Bytes of dead text pages the host refused to close.
+    /// Retired instruction bytes whose post-write synchronization failed.
     unrevoked: AtomicU64,
-}
-
-impl Drop for Shared {
-    fn drop(&mut self) {
-        let mut next = *self.pending.get_mut();
-        while !next.is_null() {
-            // SAFETY: the list owns each record on it and nothing else reaches the list.
-            next = unsafe { Box::from_raw(next) }.next;
-        }
-        if self.config.band_bytes > 0 {
-            host::release(self.base, 2 * self.config.band_bytes);
-        }
-    }
 }
 
 /// One installed module.
@@ -208,22 +201,6 @@ impl Shared {
         bytes.next_multiple_of(self.page)
     }
 
-    /// Fill `[from, to)` of the text band with the trap pattern.
-    fn trap(&self, from: usize, to: usize) {
-        let pattern: [u8; 4] = match TARGET.arch() {
-            hirsel_core_layout::Arch::X86_64 => [0xcc; 4],
-            hirsel_core_layout::Arch::Aarch64 => 0xd420_0000u32.to_le_bytes(),
-        };
-        if to > from {
-            host::write(&mut || {
-                for offset in from..to {
-                    // SAFETY: the range is in the writable window, which no image occupies.
-                    unsafe { (self.text(offset) as *mut u8).write(pattern[offset % 4]) };
-                }
-            });
-        }
-    }
-
     /// Close the open cohort and publish it (PACK-4 step 4).
     fn publish(&self, slab: &mut Slab) {
         let Some(id) = slab.open.take() else { return };
@@ -235,25 +212,23 @@ impl Shared {
         (cohort.text.1, cohort.data.1) = ends;
         let (text, data) = (cohort.text, cohort.data);
         let publish = || -> std::io::Result<()> {
-            if text.1 > text.0 {
-                host::protect(self.text(text.0), text.1 - text.0, Access::Execute)?;
+            if cohort.withheld {
+                return Err(std::io::ErrorKind::Unsupported.into());
             }
             if data.1 > data.0 {
                 host::protect(self.data(data.0), data.1 - data.0, Access::Read)?;
             }
-            host::publish(self.text(text.0), text.1 - text.0)
+            self.synchronize(text.0, text.1)
         };
         cohort.state = match publish() {
             Ok(()) => {
                 let rows: Vec<Owner> = cohort.images.iter().map(|(row, _)| *row).collect();
                 self.table.change(text, &rows);
-                // Close the pages whose every image died before the batch closed.
-                self.revoke(cohort, (0, cohort.pages.len()), (0, 0));
                 State::Published
             }
             Err(_) => State::Failed,
         };
-        let dead = cohort.live == 0;
+        let dead = cohort.live == 0 && !cohort.withheld;
         if dead {
             self.recycle(slab, id);
         }
@@ -265,11 +240,7 @@ impl Shared {
         self.publish(slab);
         if let Some(window) = slab.window.take() {
             let (text, data) = (window.text, window.data);
-            if text.1 > text.0
-                && host::protect(self.text(text.0), text.1 - text.0, Access::None).is_ok()
-            {
-                slab.text.give(text.0, text.1 - text.0);
-            }
+            slab.text.give(text.0, text.1 - text.0);
             if data.1 > data.0
                 && host::protect(self.data(data.0), data.1 - data.0, Access::None).is_ok()
             {
@@ -314,7 +285,7 @@ impl Shared {
                                     bytes: 0,
                                     retired: 0,
                                     images: Vec::new(),
-                                    pages: Vec::new(),
+                                    withheld: false,
                                 },
                             );
                             id
@@ -333,15 +304,9 @@ impl Shared {
                 slab.text.give(code.0, code.1);
                 return None;
             };
-            let mapped = host::protect(self.text(code.0), code.1, Access::Patch)
-                .and_then(|()| host::protect(self.data(words.0), words.1, Access::Write));
-            if mapped.is_err() {
-                // Whatever became writable is left out of the free runs.
+            if host::protect(self.data(words.0), words.1, Access::Write).is_err() {
+                slab.text.give(code.0, code.1);
                 return None;
-            }
-            if host::KEEPS {
-                // The range may hold a recycled cohort's code.
-                self.trap(code.0, code.0 + code.1);
             }
             slab.window = Some(Window {
                 text: (code.0, code.0 + code.1),
@@ -388,12 +353,36 @@ pub struct Loader(Arc<Shared>);
 impl Loader {
     /// A loader with an empty slab, or `Unsupported` on a host that cannot publish code.
     pub fn new(config: Config) -> Result<Self, Refusal> {
+        if host::NEEDS_GATED_EXECUTORS && config.band_bytes != 0 {
+            return Err(Refusal::Unsupported);
+        }
+        Self::reserve(config)
+    }
+
+    /// Create a slab for a host wired to the executor gate, including Darwin MAP_JIT.
+    ///
+    /// # Safety
+    /// Every OS thread must enter [`Loader::on_executor`] around actual slab execution,
+    /// including every fiber resume, callback and cleanup. It must leave the gate before
+    /// parking or taking loader locks. A parked return address must retain its image.
+    /// New threads have the same obligations. Darwin’s default constructor stays prelinked-only.
+    pub unsafe fn with_gated_executors(config: Config) -> Result<Self, Refusal> {
+        Self::reserve(config)
+    }
+
+    /// Run one uninterrupted execution interval on this OS thread. A scheduler calls
+    /// this around the switch into a fiber, including switches that resume slab code.
+    pub fn on_executor<R>(work: impl FnOnce() -> R) -> R {
+        host::execute(work)
+    }
+
+    fn reserve(config: Config) -> Result<Self, Refusal> {
         let page = host::page();
         assert!(config.band_bytes <= 1 << 30 && config.band_bytes.is_multiple_of(page.max(WINDOW)));
-        let mut base = 0;
+        let (mut base, mut writer) = (0, 0);
         if config.band_bytes > 0 {
             host::register().map_err(|_| Refusal::Unsupported)?;
-            base = host::reserve(2 * config.band_bytes).map_err(|_| Refusal::Unsupported)?;
+            (base, writer) = host::reserve(config.band_bytes).map_err(|_| Refusal::Unsupported)?;
         }
         let table = Table::new(base, config.band_bytes);
         let slab = Slab {
@@ -412,6 +401,7 @@ impl Loader {
         Ok(Self(Arc::new(Shared {
             config,
             base,
+            writer,
             page,
             slab: Mutex::new(slab),
             published: Condvar::new(),
@@ -463,28 +453,28 @@ impl Loader {
 
     /// The bytes of every image in a cohort that is not yet recycled.
     pub fn installed(&self) -> u64 {
-        self.reclaim();
+        let _ = self.reclaim();
         self.0.slab.lock().unwrap().installed
     }
 
     /// The bytes that count against the retired-code budget.
     pub fn retired(&self) -> u64 {
-        self.reclaim();
+        let _ = self.reclaim();
         *self.0.retired.lock().unwrap()
     }
 
     /// Retire every image whose last handle was dropped (PACK-4 step 5). A load does
     /// this too; a pack host also calls it from a thread that dispatches nothing, so
     /// dead code stops being reachable without waiting for the next load.
-    pub fn reclaim(&self) {
-        self.0.reclaim(&mut self.0.slab.lock().unwrap());
+    pub fn reclaim(&self) -> Result<(), Refusal> {
+        self.0.reclaim(&mut self.0.slab.lock().unwrap())
     }
 
     /// How many mappings the text band is in and how many of them are closed, where the
     /// host counts them.
     pub fn mappings(&self) -> Option<(usize, usize)> {
         let text = self.0.text(0);
-        host::mappings(text, text + self.0.config.band_bytes)
+        host::mappings(text, self.0.writer, self.0.config.band_bytes)
     }
 
     /// Bytes of dead text the host refused to close or fill. They stay out of use.
@@ -527,7 +517,7 @@ impl Loader {
         let published;
         {
             let mut slab = shared.slab.lock().unwrap();
-            shared.reclaim(&mut slab);
+            shared.reclaim(&mut slab)?;
             if slab.admitted.get(&header.key()) != Some(&digest) {
                 return Err(Refusal::NotAdmitted);
             }
@@ -556,7 +546,7 @@ impl Loader {
         let held = config.prelinked.iter().find(|held| held.key == *key);
         let held = held.ok_or(Refusal::NotPrelinked)?;
         let mut slab = self.0.slab.lock().unwrap();
-        self.0.reclaim(&mut slab);
+        self.0.reclaim(&mut slab)?;
         if slab.quarantined.contains(&held.digest) {
             return Err(Refusal::Quarantined);
         }
@@ -582,6 +572,7 @@ impl Loader {
                         digest: held.digest,
                         cohort: None,
                         text: (0, 0),
+                        owned: 0,
                         bytes: 0,
                         retired: false,
                     })),
@@ -635,13 +626,18 @@ impl Loader {
         if slab.installed + bytes > config.installed_bytes {
             return Err(Refusal::Capacity);
         }
+        let logical = text.len();
+        #[cfg(target_arch = "aarch64")]
+        let owned = logical.next_multiple_of(4);
+        #[cfg(target_arch = "x86_64")]
+        let owned = logical;
         let before = slab
             .window
             .as_ref()
             .map(|window| (window.text.0, window.data.0));
         let opened = slab.open;
         let (at, words, cohort) = shared
-            .place(slab, (text.len(), aligns.0), (data.len(), aligns.1))
+            .place(slab, (owned, aligns.0), (data.len(), aligns.1))
             .ok_or(Refusal::Capacity)?;
         let leads = slab.open != opened;
         let (t, d) = (shared.text(at), shared.data(words));
@@ -670,14 +666,19 @@ impl Loader {
             }
             return Err(Refusal::Fixup(index));
         }
+        text.resize(owned, 0);
         // SAFETY: `place` gave this image these writable ranges and nothing else holds them.
         host::write(&mut || unsafe {
-            std::ptr::copy_nonoverlapping(text.as_ptr(), t as *mut u8, text.len());
+            std::ptr::copy_nonoverlapping(
+                text.as_ptr(),
+                (shared.writer + at) as *mut u8,
+                text.len(),
+            );
             std::ptr::copy_nonoverlapping(data.as_ptr(), d as *mut u8, data.len());
         });
         let row = Owner {
             start: at as u32,
-            length: text.len() as u32,
+            length: logical as u32,
             digest: digest.0[..16].try_into().unwrap(),
         };
         slab.cohorts
@@ -702,7 +703,8 @@ impl Loader {
                 serial: slab.installs,
                 digest,
                 cohort: Some(cohort),
-                text: (at, text.len()),
+                text: (at, logical),
+                owned: text.len(),
                 bytes,
                 retired: false,
             })),
@@ -714,19 +716,6 @@ impl Loader {
         let record = slab.cohorts.get_mut(&cohort).unwrap();
         record.live += 1;
         record.bytes += bytes;
-        if !text.is_empty() {
-            let first = record.text.0 / shared.page;
-            let pages = (
-                at / shared.page - first,
-                (at + text.len() - 1) / shared.page - first,
-            );
-            if record.pages.len() <= pages.1 {
-                record.pages.resize(pages.1 + 1, 0);
-            }
-            for page in pages.0..=pages.1 {
-                record.pages[page] += 1;
-            }
-        }
         Ok((leads, image))
     }
 
@@ -797,7 +786,14 @@ impl<F> Clone for Code<F> {
 }
 
 impl<F: Signature> Code<F> {
-    /// The entry, callable while this handle or a clone of it is alive.
+    /// Borrow the image count through the call and synchronize the executing thread.
+    /// A copied raw entry may only be invoked under a live count on a gated executor.
+    pub fn with_entry<R>(&self, call: impl FnOnce(F) -> R) -> R {
+        host::execute(|| call(self.entry()))
+    }
+
+    /// The host ABI entry. The caller must retain this image through its last use,
+    /// including suspended returns, and invoke it inside `Loader::on_executor`.
     pub fn entry(&self) -> F {
         // SAFETY: `F` is a function pointer type (`Signature`) and the entry has its
         // signature.
@@ -977,7 +973,9 @@ impl Worker {
             }
         };
         // SAFETY: as `Code::entry`; this worker's row owns a count while `with` runs.
-        Some(with(unsafe { std::mem::transmute_copy(&entry) }))
+        Some(host::execute(|| {
+            with(unsafe { std::mem::transmute_copy(&entry) })
+        }))
     }
 
     /// Drop every row whose slot has moved on. A worker calls this before it parks.

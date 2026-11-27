@@ -1,7 +1,7 @@
 //! What the loader does with dead code (PACK-4 step 5): retiring a dead image and
 //! recycling a dead cohort.
 
-use super::{Cohort, ContentHash, Image, Shared, Slab, State, host};
+use super::{ContentHash, Image, Refusal, Shared, Slab, State, host};
 use host::Access;
 use std::ptr::null_mut;
 use std::sync::Weak;
@@ -17,6 +17,8 @@ pub(super) struct Retire {
     pub(super) cohort: Option<u64>,
     /// Its text's offset in the band and its length.
     pub(super) text: (usize, usize),
+    /// Includes the private tail of a partial final AArch64 instruction.
+    pub(super) owned: usize,
     pub(super) bytes: u64,
     /// Whether its bytes counted against the retired-code budget when it died.
     pub(super) retired: bool,
@@ -26,6 +28,22 @@ pub(super) struct Retire {
 unsafe impl Send for Retire {}
 // SAFETY: as above.
 unsafe impl Sync for Retire {}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        let mut next = *self.pending.get_mut();
+        while !next.is_null() {
+            // SAFETY: the list owns each record on it and nothing else reaches the list.
+            next = unsafe { Box::from_raw(next) }.next;
+        }
+        if self.config.band_bytes > 0 {
+            host::release(self.base, 2 * self.config.band_bytes);
+            if self.writer != self.base {
+                host::release(self.writer, self.config.band_bytes);
+            }
+        }
+    }
+}
 
 impl Drop for Image {
     /// Hand the image to the loader (PACK-4 step 5). This is on the path of whoever
@@ -50,10 +68,36 @@ impl Drop for Image {
 }
 
 impl Shared {
+    /// Fill `[from, to)` of the text band with the trap pattern.
+    pub(super) fn trap(&self, from: usize, to: usize) {
+        debug_assert!(from <= to && to <= self.config.band_bytes);
+        if from == to {
+            return;
+        }
+        host::write(&mut || {
+            let at = self.writer + from;
+            // SAFETY: the slab lock owns this disjoint extent; the last call has returned.
+            unsafe {
+                #[cfg(target_arch = "x86_64")]
+                std::ptr::write_bytes(at as *mut u8, 0xcc, to - from);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    debug_assert!((at | to).is_multiple_of(4));
+                    for offset in (0..to - from).step_by(4) {
+                        ((at + offset) as *mut u32).write_volatile(0); // one aligned UDF #0
+                    }
+                }
+            }
+        });
+    }
+
+    pub(super) fn synchronize(&self, start: usize, end: usize) -> std::io::Result<()> {
+        host::publish(self.writer + start, self.text(start), end - start)
+    }
+
     /// Retire every image that died since the last call (PACK-4 step 5): its interning
-    /// entry and PC table row go, each text page it was the last live image on is
-    /// closed, and a cohort with no live image is recycled.
-    pub(super) fn reclaim(&self, slab: &mut Slab) {
+    /// entry and PC table row go before its instructions are overwritten.
+    pub(super) fn reclaim(&self, slab: &mut Slab) -> Result<(), Refusal> {
         let mut next = self.pending.swap(null_mut(), Ordering::Acquire);
         while !next.is_null() {
             // SAFETY: the list owns each record on it, and the swap took the whole list.
@@ -74,84 +118,39 @@ impl Shared {
                 (row.start as usize, row.length as usize, *digest) == (at, length, record.digest)
             });
             cohort.images.swap_remove(row.unwrap());
-            let published = cohort.state == State::Published;
-            if cohort.state == State::Open {
-                // The batch is still writable: the dead image's text never runs.
-                self.trap(at, at + length);
+            if cohort.state == State::Published {
+                self.table.change((at, at + length), &[]);
             }
-            if length > 0 {
-                if published {
-                    // No fresh lookup names the image once this returns.
-                    self.table.change((at, at + length), &[]);
-                }
-                let first = cohort.text.0 / self.page;
-                let pages = (
-                    at / self.page - first,
-                    (at + length - 1) / self.page - first + 1,
-                );
-                for page in pages.0..pages.1 {
-                    cohort.pages[page] -= 1;
-                }
-                if published {
-                    self.revoke(cohort, pages, (at, at + length));
+            if record.owned != 0 {
+                self.trap(at, at + record.owned);
+                if self.synchronize(at, at + record.owned).is_err() {
+                    cohort.withheld = true;
+                    self.unrevoked
+                        .fetch_add(record.owned as u64, Ordering::Relaxed);
                 }
             }
-            if cohort.live == 0 && cohort.state != State::Open {
+            if cohort.live == 0 && cohort.state != State::Open && !cohort.withheld {
                 self.recycle(slab, id);
             }
         }
-    }
-
-    /// Close each page of `pages` (indices in the cohort's text run) that holds no live
-    /// image. Where the host can write published text, fill the part of `dead` that lies
-    /// on pages a live image still shares with the trap pattern.
-    pub(super) fn revoke(&self, cohort: &Cohort, pages: (usize, usize), dead: (usize, usize)) {
-        let first = cohort.text.0 / self.page;
-        let mut page = pages.0;
-        while page < pages.1 {
-            let start = page;
-            let live = cohort.pages[page] != 0;
-            while page < pages.1 && (cohort.pages[page] != 0) == live {
-                page += 1;
-            }
-            let run = ((first + start) * self.page, (first + page) * self.page);
-            if !live {
-                let (at, bytes) = (self.text(run.0), run.1 - run.0);
-                match host::protect(at, bytes, Access::None) {
-                    Ok(()) => host::discard(at, bytes),
-                    Err(_) => {
-                        self.unrevoked.fetch_add(bytes as u64, Ordering::Relaxed);
-                    }
-                }
-            } else if host::FILLS {
-                let (from, to) = (dead.0.max(run.0), dead.1.min(run.1));
-                self.trap(from, to);
-                if to > from && host::publish(self.text(from), to - from).is_err() {
-                    self.unrevoked
-                        .fetch_add((to - from) as u64, Ordering::Relaxed);
-                }
-            }
+        if self.unrevoked.load(Ordering::Relaxed) != 0 {
+            return Err(Refusal::Unsupported);
         }
+        Ok(())
     }
 
-    /// Unmap a dead cohort and return its runs (PACK-4 step 5).
+    /// Return a dead cohort’s runs after the last successful trap fill (PACK-4 step 5).
     pub(super) fn recycle(&self, slab: &mut Slab, id: u64) {
         let cohort = slab.cohorts.remove(&id).unwrap();
         // No reader of the PC table names the cohort once this returns.
         self.table.change(cohort.text, &[]);
-        // A run that cannot be unmapped stays as it is and is never used again.
-        let gone = |at: usize, (start, end): (usize, usize)| {
-            let gone = end == start || host::protect(at, end - start, Access::None).is_ok();
-            if gone && end > start {
-                host::discard(at, end - start);
-            }
-            gone
-        };
-        if gone(self.text(cohort.text.0), cohort.text) {
-            slab.text.give(cohort.text.0, cohort.text.1 - cohort.text.0);
-        }
-        if gone(self.data(cohort.data.0), cohort.data) {
-            slab.data.give(cohort.data.0, cohort.data.1 - cohort.data.0);
+        // Keep the file-backed trap bytes intact until the first overwrite for reuse.
+        slab.text.give(cohort.text.0, cohort.text.1 - cohort.text.0);
+        let (start, end) = cohort.data;
+        let bytes = end - start;
+        if bytes > 0 && host::protect(self.data(start), bytes, Access::None).is_ok() {
+            host::discard(self.data(start), bytes);
+            slab.data.give(start, bytes);
         }
         slab.installed -= cohort.bytes;
         *self.retired.lock().unwrap() -= cohort.retired;

@@ -5,7 +5,7 @@ OnFailure=hirsel-board-alert.service
 [Service]
 Type=oneshot
 CPUAffinity=8-11
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=HIRSEL_BOARD_BASE=%h/.local/share/hirsel-board
 ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-board/main fetch --quiet origin main
 # Select the script from the fetched revision under the same lock as manual runs.

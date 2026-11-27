@@ -14,6 +14,17 @@ TOOLS = Path(__file__).resolve().parents[1]
 
 
 class BoardFreshnessTest(unittest.TestCase):
+    def test_nightly_service_path_includes_cargo_and_mise_shims(self):
+        environment = next(
+            line.removeprefix("Environment=PATH=")
+            for line in (TOOLS / "hirsel-board.service").read_text().splitlines()
+            if line.startswith("Environment=PATH=")
+        )
+        path = environment.split(":")
+        self.assertIn("%h/.cargo/bin", path)
+        self.assertIn("%h/.local/share/mise/shims", path)
+        self.assertLess(path.index("%h/.local/bin"), path.index("%h/.cargo/bin"))
+
     def test_pruning_keeps_referenced_and_in_progress_runs(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

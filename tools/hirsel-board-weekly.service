@@ -6,7 +6,7 @@ OnFailure=hirsel-board-weekly-failure.service
 Type=oneshot
 CPUAffinity=0-11 16-27
 WorkingDirectory=%h/.local/share/hirsel-board/weekly-main
-Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=HIRSEL_BOARD_GO=%h/.local/share/hirsel-board/peers/go1.26.4/bin/go
 Environment=TZ=UTC
 TimeoutStartSec=4h 45min

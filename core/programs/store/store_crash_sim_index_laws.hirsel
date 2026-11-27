@@ -1,0 +1,127 @@
+// Index residency conversion crashes for store_crash_sim_laws.hirsel.
+// The table scan is the independent oracle for every reopened index.
+// The indexed schema used only by the conversion scenario below. The random
+// sim keeps csim_schema's table-only plan, so its frozen seeds still draw the
+// same steps.
+fn csim_index_schema(mut db: Db) -> Result[(Table[u64, Bytes], Index[u64, u64, Bytes, ()]), Error] waits {
+    let mut d = declare(db, Migrate)?
+    let mut declared = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let ix = index(mut d, mut declared, "by_edit", Many, code.describe(csim_index_key), std.codec.key_u64())?
+    let t = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok((t, take ix))
+}
+
+fn csim_index_options() -> Options {
+    let mut overrides = derived_sizes()
+    overrides.group_commits = Some(1)
+    overrides.pack_bytes = Some(8192)
+    overrides.checkpoint_bytes = Some(32768)
+    overrides.resident_limit = Some(182375272)
+    overrides.writer_pin_bytes = Some(34471936)
+    overrides.cache_bytes = Some(52232192)
+    let mut options = result.unwrap(sized_with(Directory, 2147483648, overrides))
+    options.probe_budget = 65536
+    options.compact_permille = 500
+    options
+}
+
+fn csim_index_edit(k: u64) -> u8 {
+    int.truncate((k * 17 + 5) % 256)
+}
+
+fn csim_index_rows_expected() -> Map[u64, u8] {
+    let mut expected: Map[u64, u8] = map.new()
+    for k in 0u64 .. CSIM_KEYS {
+        map.insert(mut expected, k, csim_index_edit(k))
+    }
+    take expected
+}
+
+fn csim_index_write_rows(mut db: Db, rows: Table[u64, Bytes]) -> Result[(), Error] waits {
+    let mut edits: List[(u64, Option[u8])] = list.new()
+    for k in 0u64 .. CSIM_KEYS {
+        list.push(mut edits, (k, Some(csim_index_edit(k))))
+    }
+    let head = main_branch(db)
+    let Some(mark) = csim_commit(mut db, head, rows, edits)? else {
+        return Error(Io(Closed))
+    }
+    durable(mut db, mark)?;
+    let _ = checkpoint(mut db)?
+    Ok(())
+}
+
+fn csim_check_index_entries(db: Db, rows: Table[u64, Bytes], ix: Index[u64, u64, Bytes, ()]) -> Result[(), String] waits {
+    let rd = reader(db, READER_PIN_MIN) ?=> |_| "crash sim index conversion: reader refused"
+    let answer = look(rd, snapshot(db), Some(100000), (copy_env(rows), copy_env(ix)), csim_index_entries_match) ?=> |_| "crash sim index conversion: look refused"
+    match answer {
+        Seen(Seen(value: take matches, ..)) => {
+            if !(matches ?=> |_| "crash sim index conversion: comparison refused") {
+                return Error("crash sim index conversion: index entries differ from a table fold")
+            }
+            Ok(())
+        },
+        _ => Error("crash sim index conversion: index look did not complete"),
+    }
+}
+
+fn csim_check_indexed_rows(db: Db, rows: Table[u64, Bytes], ix: Index[u64, u64, Bytes, ()], expected: Map[u64, u8]) -> Result[(), String] waits {
+    let got = csim_read(db, rows, snapshot(db)) ?=> |_| "crash sim index conversion: table read failed"
+    if !csim_rows_equal(got, clone(expected)) {
+        return Error("crash sim index conversion: table rows differ from the acknowledged writes")
+    }
+    csim_check_index_entries(db, rows, ix)
+}
+
+// Crash and power-cut every index residency conversion. Each round opens the
+// cleanly closed store, converts the index through the public set_residency,
+// drops the Db without close, and for half the rounds then takes a power cut
+// that keeps only synced bytes. The reopened index must exact-match a scan of
+// the table rows, never the index extractor or the index's own contents.
+fn csim_index_conversion_scenario(tasks: Tasks) -> Result[(), String] waits {
+    let world_seed = 9191u64
+    let (c, _hand) = provide.clock(0, 0)
+    let r = provide.random(world_seed)
+    let options = csim_index_options()
+    let (clean, clean_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(world_seed), CSIM_ROOM)
+    host.mkdir(clean, "s") ?=> |_| "crash sim index conversion: setup mkdir failed"
+    host.sync_dir(clean) ?=> |_| "crash sim index conversion: setup sync_dir failed"
+    let setup_dir = host.open_dir(clean, "s") ?=> |_| "crash sim index conversion: setup open_dir failed"
+    let mut setup_db = open(tasks, setup_dir, c, r, clone(options)) ?=> |_| "crash sim index conversion: setup open failed"
+    let (rows, ix) = csim_index_schema(mut setup_db) ?=> |_| "crash sim index conversion: setup schema failed"
+    csim_index_write_rows(mut setup_db, rows) ?=> |_| "crash sim index conversion: setup rows failed"
+    close(take setup_db) ?=> |_| "crash sim index conversion: setup close failed"
+    let expected = csim_index_rows_expected()
+    let mut image = sim_disk_unmount(take clean, take clean_server)
+    let mut round = 0u64
+    while round < 4 {
+        round += 1
+        let (root, server) = sim_disk_mount(tasks, c, take image, std.sim.world.plan(world_seed + round), CSIM_ROOM)
+        let dir = host.open_dir(root, "s") ?=> |_| "crash sim index conversion: open_dir failed"
+        let mut db = open(tasks, dir, c, r, clone(options)) ?=> |_| "crash sim index conversion: open failed"
+        let to_tiered = round % 2 == 1
+        match set_residency(mut db, ix.id, if to_tiered {
+            Tiered
+        } else {
+            Memory
+        }) {
+            Ok(()) => (),
+            Error(_) => return Error("crash sim index conversion: set_residency refused"),
+        }
+        drop(take db)
+        image = sim_disk_unmount(take root, take server)
+        let process_crash = round == 1 || round == 4
+        if !process_crash {
+            let mut cut = std.sim.world.plan(world_seed + 100 + round)
+            std.sim.fs.crash(mut image, mut cut)
+        }
+        let (after, after_server) = sim_disk_mount(tasks, c, take image, std.sim.world.plan(world_seed + 200 + round), CSIM_ROOM)
+        let after_dir = host.open_dir(after, "s") ?=> |_| "crash sim index conversion: reopen open_dir failed"
+        let mut reopened = open(tasks, after_dir, c, r, clone(options)) ?=> |_| "crash sim index conversion: reopen failed"
+        csim_check_indexed_rows(reopened, rows, ix, expected)?
+        close(take reopened) ?=> |_| "crash sim index conversion: close after reopen failed"
+        image = sim_disk_unmount(take after, take after_server)
+    }
+    Ok(())
+}

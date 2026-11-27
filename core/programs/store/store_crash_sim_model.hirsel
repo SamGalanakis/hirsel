@@ -330,6 +330,38 @@ fn csim_read(db: Db, rows: Table[u64, Bytes], s: Snapshot) -> Result[Map[u64, u8
     Ok(take found)
 }
 
+// The crash sim's index key: the edit byte every row carries. The law below
+// folds the table rows itself, so this extractor is never the oracle.
+fn csim_index_key(_k: u64, v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    let tag: u64 = int.widen(v[0u64])
+    list.push(mut keys, tag)
+    Ok(take keys)
+}
+
+// Compare the index against an independent fold of the table rows in the same
+// transaction: scan the table, extract the expected (index key, primary) pairs
+// by hand, sort them, then exact-match the index cursor including its end.
+fn csim_index_entries_match(tx: Tx, input: (Table[u64, Bytes], Index[u64, u64, Bytes, ()])) -> Result[bool, Error] {
+    let mut rows = range(tx, input.0, Unbounded, Unbounded)?
+    let mut expected: List[(u64, u64)] = list.new()
+    while let Some((key, value)) = next_in(tx, mut rows)? {
+        if list.len(value) == 0 {
+            return Ok(false)
+        }
+        let tag: u64 = int.widen(value[0u64])
+        list.push(mut expected, (tag, key))
+    }
+    list.sort(mut expected, order.compare)
+    let mut actual = entries(tx, input.1, Unbounded, Unbounded)?
+    for (key, primary) in expected {
+        if next_entry(mut actual)? != Some((key, primary, ())) {
+            return Ok(false)
+        }
+    }
+    Ok(next_entry(mut actual)? == None)
+}
+
 fn csim_branch(db: Db, name: String) -> Option[Branch] {
     if name == "" {
         Some(main_branch(db))

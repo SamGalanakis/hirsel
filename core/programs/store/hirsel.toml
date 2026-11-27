@@ -236,6 +236,7 @@ dirs = ["."]
 "store_swarm_laws.hirsel" = "store"
 "store_crash_sim_laws.hirsel" = "store"
 "store_crash_sim_model.hirsel" = "store"
+"store_crash_sim_index_laws.hirsel" = "store"
 "store_crash_sim_corpus.hirsel" = "store"
 "store_retention_trace_laws.hirsel" = "store"
 "store_tiered_backup_laws.hirsel" = "store"

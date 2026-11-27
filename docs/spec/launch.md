@@ -1688,7 +1688,8 @@ it needs no person. Each fact is read from bytes that the cutover names or is bo
   - no table is created, gets a new schema, or is migrated, renamed or dropped;
   - no index is created, rebuilt or dropped.
 
-  An index rebuilt because its extractor's composite revision changed is a migration, and
+  An index rebuilt because its composite identity (an extractor revision or a codec
+  fingerprint) changed is a migration, and
   so is a `migrate_table` that keeps the name and codecs but rewrites rows: either one
   ships a replaced range. A release whose code changes but whose staged catalog is OLD's
   ships nothing, and its activation writes only the activation pair and release row.

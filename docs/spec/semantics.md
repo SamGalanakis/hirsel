@@ -403,7 +403,99 @@ None when the program was assembled without revisions. A part's code address
 ([PROG-10](programs.md#prog-10-code-addresses)) covers every default literal, every `via`
 `to` and `from` body and the codec of every field type the part reaches, so a change to any of
 them changes the revision even where the schema, which holds no default and no body, stays
-equal. A store keys an index on the revisions of the codecs it reads through for this reason.
+equal. The revision names the code a codec runs, so a change in how std is lowered, or in
+what its parts charge ([MEM-30](budgets.md#mem-30-step-bounds)), changes it although no byte
+does. Stored data is keyed on the storage fingerprint below instead.
+
+**Storage fingerprint.** `codec.fingerprint(c)` (and `codec.key_fingerprint(k)`) returns 32
+bytes that name what `c` stores: the bytes it encodes each value to, the value it decodes
+each accepted byte string to under every writer schema it resolves, which bytes it refuses,
+and, for a key codec, the order of its key bytes. Two codecs with equal fingerprints agree on
+all of that. A codec has one of two forms, and its fingerprint says which:
+
+- **Structural.** The built-in codecs that `of` and `key_of` resolve to, the std codecs of
+  `List`, `Bytes`, `Option`, `Map`, `Result`, tuples, `Desc` and the scalars, and every
+  codec the checker generates from a declaration without `via`. Their fingerprint is a hash of
+  a **canonical descriptor** (below), which holds no code revision. So a conforming change to
+  how a rule is lowered, or to what it charges, leaves every structural fingerprint equal.
+- **Opaque.** Every codec whose bytes come from code that no std rule describes: a codec
+  returned by the public `codec.make`, `codec.make_derived` or `codec.key_make`, whatever its
+  parts are, and the part of a `via` codec that `to` and `from` decide. Its fingerprint is a
+  separately tagged hash, or for `via` a separately tagged node, over the exact code
+  revisions (PROG-9) of that code, so any edit that changes their checked IR, or anything
+  they reach, changes it, as the revision does.
+
+Only std's own structural makers and the codecs the checker generates assign a structural
+descriptor. A program cannot hand one to a codec it builds from parts: the public makers
+always give the opaque form, and generated codecs reach the structural form through a maker
+of std's own, not through `make_derived`. So no handwritten encoder or decoder can claim the
+descriptor of a structural codec, and a changed opaque body always changes the fingerprint.
+
+The descriptor is a byte string built from these items: `u8` and `u32` little-endian
+numbers, a **text** written as its UTF-8 byte count in a `u32` and then its bytes, and a
+fingerprint as its 32 bytes. Each **node** names one codec. It starts with its **family**,
+a text, and the family's **rule version**, a `u32`, then gives the family's inputs:
+
+| family | inputs after the family and version |
+|---|---|
+| `unit`, `never`, `bool`, `char`, `u8` … `u64`, `i8` … `i64`, `f32`, `f64`, `string` | none |
+| `list` (`Bytes` is `list` over `u8`), `option` | the element's reference |
+| `map` | the key's reference, then the value's |
+| `result` | the `Ok` type's reference, then the `Error` type's |
+| `tuple` | the component count `n`, then `n` references in order |
+| `record` | the definition path (PROG-1) as a text, the entry count, then each entry in declared order, tombstones included: `0` for a field or `1` for a tombstone, its name as a text, its type's reference, then `0`, or `1` and the default's bytes as a text: the literal encoded by the field type's codec |
+| `sum` | the definition path, the variant count, then each variant in declared order, so its tag is its position: `0` or `1` for removed, its name, the payload count and the payload references |
+| `via` | the definition path, then the reference of `R`, then the code revisions of `to` and of `from`, 32 bytes each |
+
+A key codec's node uses the same items under key families, which name the key byte rules:
+`key.unit`, `key.bool`, `key.u8` … `key.i64`, `key.bytes`, `key.string`, `key.desc` with its
+element's reference, `key.tuple` with its count and references, and the `key.record` and
+`key.sum` nodes of a generated key codec, laid out as `record` and `sum` are. A family's
+inputs are exactly what changes its stored behaviour beyond its rule: its children, its
+declaration and every parameter a value depends on. Nothing else enters. The `least` hint,
+the `empty` flag, the order in which parts are called, steps, charges and allocation do not.
+
+A **reference** is `0` and the child's fingerprint, or `1` and a `u32` `k` for member `k` of
+the node's own group. A group is how a recursive declaration gets a canonical form. The closed
+nominal instances (PROG-5) that one fingerprint reaches through their fields, variants and
+`via` representations are partitioned into the strongly connected components of that graph,
+as PROG-10 partitions functions. Each component is a group, so a type that refers to itself,
+directly or through others, is in a group with them, and every other type is a group of one.
+A group lists its members in ascending order of their type text, the definition path and
+type arguments as PROG-9's identity text writes them, which never ties. A member's node refers
+to a member of its own group by `1` and `k`, and to anything else by `0` and its fingerprint,
+so groups are hashed dependency-first. With `H` as in PROG-10, a built-in node's fingerprint is
+`H("hirsel.codec-storage.v1", 0 ‖ node)`. A group's hash is `H("hirsel.codec-group.v1", n ‖
+nodes)` with `n` its member count, and member `k`'s fingerprint is
+`H("hirsel.codec-storage.v1", 1 ‖ group hash ‖ k)`. A key codec's are the same under
+`hirsel.key-storage.v1` and `hirsel.key-group.v1`. Neither order nor the numbering depends on
+how the instances were found, so the same declarations give the same fingerprints in every
+program, on every engine and at every optimisation level.
+
+An opaque codec's fingerprint is `H("hirsel.codec-opaque.v1", e ‖ d ‖ w ‖ least ‖ empty)`:
+its three parts' code revisions, `least` as a `u64` and `empty` as a `u8`. An opaque key
+codec's is `H("hirsel.key-opaque.v1", e ‖ d ‖ w)`. A `via` node holds the revisions of `to` and
+`from`, so the `via` part of a fingerprint is never structural: an edit to `from`, or to a
+helper that `from` reaches, changes it, and the reference to `R` gives `R`'s own form. A
+fingerprint is None exactly when the program was assembled without revisions and the codec
+reaches an opaque part or a `via` node; a purely structural fingerprint is always available.
+
+**Rule versions.** Std owns one rule version per family, each starting at 1 and recorded
+beside the rule in `std.codec`. A family's rule is its byte format, its framing, its order of
+key bytes, its schema resolution (defaults, tombstones, appended variants, tags) and the set
+of byte strings it refuses. A change to any of these, for any value or any writer schema,
+increments that family's version in the same change, and a version is never reused; no other
+change does, so a lowering, a charge, a step count or an allocation pattern never does. A
+version only ever adds an input to a hash. It never replaces a revision, so it can make a
+fingerprint change but can never keep an opaque fingerprint equal across a changed body.
+Programs declare no storage version of their own. Store's frozen format corpus
+(`test_frozen_format_corpus`) opens and decodes every stored value and key after an upgrade,
+so a rule change without its version increment shows up there.
+
+Version note (2026-11-27, storage fingerprint; not yet built): stores keyed indexes on
+`codec.revision` and `codec.key_revision`, so every toolchain change to a reached std body
+forced a rebuild although no stored byte changed (STORE-SPEC v2.172). The revisions stay, with
+their 96 bytes, for consumers that name code; `fingerprint` and `key_fingerprint` are added.
 
 **Old data.** Bytes are decoded against the **writer's schema**, the schema of the
 declaration that encoded them, which the library keeps with them. Decoding resolves the

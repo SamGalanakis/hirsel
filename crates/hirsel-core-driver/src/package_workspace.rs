@@ -33,6 +33,7 @@ pub(crate) struct Workspace {
     pub(crate) directory: PathBuf,
     pub(crate) member: Option<Id>,
     pub(crate) members: BTreeMap<Id, Member>,
+    pub(crate) selections: crate::package_manifest::Selections,
     inputs: BTreeSet<FileId>,
     manifests: Manifests,
 }
@@ -147,6 +148,7 @@ fn discover(
                 dir: member.dir.try_clone()?,
                 path: member.path.clone(),
                 manifest: Ok(Manifest {
+                    selections: None,
                     package: None,
                     workspace: None,
                 }),
@@ -162,6 +164,7 @@ fn discover(
             dir: first.dir.try_clone()?,
             path: first.path.clone(),
             manifest: Ok(Manifest {
+                selections: None,
                 package: None,
                 workspace: None,
             }),
@@ -217,6 +220,7 @@ impl Workspace {
         let mut selected_config = Some(selected.manifest);
         if root_id == selected_id {
             let same = selected_config.take().unwrap()?;
+            root_config.selections = root_config.selections.or(same.selections);
             root_config.package = root_config.package.or(same.package);
         }
         if needs_package && root_id == selected_id && root_config.package.is_none() {
@@ -292,6 +296,13 @@ impl Workspace {
                             })?;
                         Manifest::parse(&captured.bytes, &manifest_path)?
                     };
+                    if manifest.selections.is_some() {
+                        return Err(format!(
+                            "{}: selections: only the workspace root's manifest selects",
+                            manifest_path.display()
+                        )
+                        .into());
+                    }
                     if manifest.workspace.is_some() {
                         return Err(format!(
                             "{}: workspace.members: {listed:?} belongs to the workspace at {}",
@@ -371,6 +382,14 @@ impl Workspace {
             return Err(format!(
                 "{} is inside the workspace at {} but is not one of its members",
                 selected_manifest.display(),
+                root_manifest.display()
+            )
+            .into());
+        }
+        let selections = root_config.selections.unwrap_or_default();
+        if let Some(id) = selections.keys().find(|id| drafts.contains_key(*id)) {
+            return Err(format!(
+                "{}: selections: {id} is a member of this workspace",
                 root_manifest.display()
             )
             .into());
@@ -541,6 +560,7 @@ impl Workspace {
             directory: root.path,
             member,
             members,
+            selections,
             inputs,
             manifests,
         }))

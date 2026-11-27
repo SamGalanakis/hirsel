@@ -10,6 +10,7 @@ include!("test_run_coverage_native.rs");
 include!("test_run_coverage_tool.rs");
 mod package_add_laws {
     include!("package_add/laws.rs");
+    include!("package_add/laws_selection.rs");
     include!("package_add/laws_workspace.rs");
     include!("package_add/laws_git.rs");
     include!("package_add/laws_git_fetch.rs");

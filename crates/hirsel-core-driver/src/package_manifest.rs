@@ -12,6 +12,7 @@ type Table = toml::Table;
 #[derive(Deserialize)]
 struct Document {
     package: Option<PackageTable>,
+    selections: Option<BTreeMap<String, DependencyTable>>,
     #[serde(default)]
     sources: BTreeMap<String, String>,
     #[serde(default)]
@@ -236,7 +237,10 @@ pub(crate) struct Workspace {
     pub(crate) dependencies: BTreeMap<String, Dependency>,
 }
 
+pub(crate) type Selections = BTreeMap<Id, (Root, Option<SourceLocation>)>;
+
 pub(crate) struct Manifest {
+    pub(crate) selections: Option<Selections>,
     pub(crate) package: Option<Package>,
     pub(crate) workspace: Option<Workspace>,
 }
@@ -288,6 +292,7 @@ impl Manifest {
     }
 
     fn validate(document: Document) -> Result<Self, String> {
+        let selections = document.selections.map(selections).transpose()?;
         let workspace = document
             .workspace
             .map(|workspace| {
@@ -327,6 +332,7 @@ impl Manifest {
             }
             return Ok(Self {
                 package: None,
+                selections,
                 workspace,
             });
         };
@@ -467,6 +473,7 @@ impl Manifest {
                 .map_err(|error| format!("{field}: {error}"))?;
         }
         Ok(Self {
+            selections,
             package: Some(Package {
                 id,
                 version,
@@ -532,6 +539,91 @@ fn source_paths(
             Ok((path, parts))
         })
         .collect()
+}
+
+fn selections(rows: BTreeMap<String, DependencyTable>) -> Result<Selections, String> {
+    rows.into_iter()
+        .map(|(key, binding)| {
+            let id = key
+                .split_once('@')
+                .and_then(|(name, major)| {
+                    let id = Id {
+                        name: name.into(),
+                        major: major.parse().ok()?,
+                    };
+                    (names::scoped(name) && id.to_string() == key).then_some(id)
+                })
+                .ok_or_else(|| format!("selections: {key:?} is not a scoped identity"))?;
+            let (root, mut source) = published(binding, "selections")?;
+            if let Some(SourceLocation::Archive(path)) = &mut source {
+                *path = crate::package_workspace::archive_path(Path::new(""), path).ok_or_else(
+                    || format!("selections: archive {path:?} is not inside the workspace root"),
+                )?;
+            }
+            Ok((id, (root, source)))
+        })
+        .collect()
+}
+
+fn published(
+    binding: DependencyTable,
+    field: &str,
+) -> Result<(Root, Option<SourceLocation>), String> {
+    let root = Root::parse(binding.root.as_deref().unwrap_or(""))
+        .ok_or_else(|| format!("{field}.root: expected sha256: and 64 lower-case hex digits"))?;
+    let sources = [&binding.url, &binding.archive, &binding.git];
+    if sources.iter().filter(|source| source.is_some()).count() > 1 {
+        return Err(format!("{field}: give at most one of url, archive or git"));
+    }
+    if binding.git.is_none() {
+        for (key, value) in [
+            ("rev", &binding.rev),
+            ("ref", &binding.reference),
+            ("dir", &binding.dir),
+        ] {
+            if value.is_some() {
+                return Err(format!("{field}: {key} needs git"));
+            }
+        }
+    }
+    let source = match (binding.url, binding.archive, binding.git) {
+        (Some(url), _, _) if !url.starts_with("https://") => {
+            return Err(format!("{field}.url: expected an HTTPS URL"));
+        }
+        (Some(url), _, _) => Some(SourceLocation::Url(url)),
+        (None, Some(path), _) => Some(SourceLocation::Archive(path)),
+        (None, None, Some(url)) => {
+            git_url_rule(&url).map_err(|rule| format!("{field}.git: {rule}"))?;
+            let rev = binding
+                .rev
+                .ok_or_else(|| format!("{field}: git needs rev"))?;
+            if !git_rev_rule(&rev) {
+                return Err(format!(
+                    "{field}.rev: {rev:?} is not a full commit id of 40 or 64 lower-case hex digits"
+                ));
+            }
+            if let Some(reference) = &binding.reference
+                && !git_ref_rule(reference)
+            {
+                return Err(format!(
+                    "{field}.ref: {reference:?} is not refs/heads/<name> or refs/tags/<name>"
+                ));
+            }
+            if let Some(dir) = &binding.dir {
+                git_dir_rule(dir).map_err(|rule| {
+                    format!("{field}.dir: {dir:?} breaks the path rules: {rule}")
+                })?;
+            }
+            Some(SourceLocation::Git(GitSource {
+                url,
+                rev,
+                dir: binding.dir,
+                reference: binding.reference,
+            }))
+        }
+        (None, None, None) => None,
+    };
+    Ok((root, source))
 }
 
 fn dependencies(
@@ -622,7 +714,7 @@ fn dependencies(
                     }
                     Dependency::Member(Id { name, major }, path.clone())
                 }
-                (Some(major), None, Some(root), None, _) => {
+                (Some(major), None, Some(_), None, _) => {
                     let name = package(&binding)?;
                     if names::local(&name) {
                         return Err(format!(
@@ -632,57 +724,7 @@ fn dependencies(
                     if !names::scoped(&name) {
                         return Err(format!("{field}.package: {name:?} is not a scoped name"));
                     }
-                    let root = Root::parse(root).ok_or_else(|| {
-                        format!("{field}.root: expected sha256: and 64 lower-case hex digits")
-                    })?;
-                    let sources = [&binding.url, &binding.archive, &binding.git];
-                    if sources.iter().filter(|source| source.is_some()).count() > 1 {
-                        return Err(format!("{field}: give at most one of url, archive or git"));
-                    }
-                    if binding.git.is_none() {
-                        for (key, value) in [
-                            ("rev", &binding.rev),
-                            ("ref", &binding.reference),
-                            ("dir", &binding.dir),
-                        ] {
-                            if value.is_some() {
-                                return Err(format!("{field}: {key} needs git"));
-                            }
-                        }
-                    }
-                    let source = match (binding.url, binding.archive, binding.git) {
-                        (Some(url), _, _) if !url.starts_with("https://") => {
-                            return Err(format!("{field}.url: expected an HTTPS URL"));
-                        }
-                        (Some(url), _, _) => Some(SourceLocation::Url(url)),
-                        (None, Some(path), _) => Some(SourceLocation::Archive(path)),
-                        (None, None, Some(url)) => {
-                            git_url_rule(&url).map_err(|rule| format!("{field}.git: {rule}"))?;
-                            let rev = binding
-                                .rev
-                                .ok_or_else(|| format!("{field}: git needs rev"))?;
-                            if !git_rev_rule(&rev) {
-                                return Err(format!("{field}.rev: {rev:?} is not a full commit id of 40 or 64 lower-case hex digits"));
-                            }
-                            if let Some(reference) = &binding.reference
-                                && !git_ref_rule(reference)
-                            {
-                                return Err(format!("{field}.ref: {reference:?} is not refs/heads/<name> or refs/tags/<name>"));
-                            }
-                            if let Some(dir) = &binding.dir {
-                                git_dir_rule(dir).map_err(|rule| {
-                                    format!("{field}.dir: {dir:?} breaks the path rules: {rule}")
-                                })?;
-                            }
-                            Some(SourceLocation::Git(GitSource {
-                                url,
-                                rev,
-                                dir: binding.dir,
-                                reference: binding.reference,
-                            }))
-                        }
-                        (None, None, None) => None,
-                    };
+                    let (root, source) = published(binding, &field)?;
                     Dependency::Published(Id { name, major }, root, source)
                 }
                 _ => return Err(bad_form()),
@@ -697,6 +739,8 @@ enum Shape {
     Manifest,
     Package,
     Charge,
+    Selections,
+    Selection,
     Dependencies,
     Dependency,
     Program,
@@ -722,6 +766,8 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
         let nested = match (shape, key.as_str()) {
             (Manifest, "package") => Package,
             (Manifest, "dependencies") | (Workspace, "dependencies") => Dependencies,
+            (Manifest, "selections") => Selections,
+            (Selections, _) => Selection,
             (Manifest, "program") => Program,
             (Manifest, "tests") => Tests,
             (Manifest, "foreign") => Foreign,
@@ -742,6 +788,7 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
                 "package" | "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref"
                 | "dir" | "workspace",
             )
+            | (Selection, "root" | "url" | "archive" | "git" | "rev" | "dir")
             | (Program, "module" | "function" | "limit" | "grants" | "dirs")
             | (Tests, "sources" | "limit" | "grants" | "dirs")
             | (Run, "limit" | "grants" | "dirs")

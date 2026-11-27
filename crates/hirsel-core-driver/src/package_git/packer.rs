@@ -10,7 +10,9 @@ use crate::package_content::{
     Source,
 };
 use crate::package_dir::MANIFEST;
-use crate::package_manifest::{Dependency, GitSource, Manifest, Package, SourceLocation};
+use crate::package_manifest::{
+    Dependency, GitSource, Manifest, Package, Selections, SourceLocation,
+};
 use crate::package_resolve::{Libraries, Members, pack_members};
 use crate::package_store::{PackageStore, decode, fetch_https};
 use crate::package_workspace::{Edge, Member, archive_path, cycles};
@@ -96,7 +98,7 @@ pub(crate) fn pack_listed(
         who: &who,
         spelling: &spelling,
     };
-    let (root_dir, members, id) = graph.read(git.dir.as_deref())?;
+    let (root_dir, members, selections, id) = graph.read(git.dir.as_deref())?;
     let id = &id;
     if budget.outer.is_empty() {
         budget.outer = format!("{id}: {spelling}");
@@ -140,15 +142,22 @@ pub(crate) fn pack_listed(
         };
         Ok(libraries)
     };
-    let (_, archive) =
-        pack_members(&members, store, BTreeMap::new(), &mut fetch, id).map_err(|error| {
-            let text = error.to_string();
-            if text.starts_with("over the limit of") && text.ends_with("bytes") {
-                format!("{id}: {spelling}: over the limit of {ARCHIVE_LIMIT_MIB} MiB")
-            } else {
-                text
-            }
-        })?;
+    let (_, archive) = pack_members(
+        &members,
+        store,
+        &selections,
+        &graph.manifest_path(&root_dir),
+        &mut fetch,
+        id,
+    )
+    .map_err(|error| {
+        let text = error.to_string();
+        if text.starts_with("over the limit of") && text.ends_with("bytes") {
+            format!("{id}: {spelling}: over the limit of {ARCHIVE_LIMIT_MIB} MiB")
+        } else {
+            text
+        }
+    })?;
     let pin = pin.unwrap_or(archive.head);
     archive.verify(id, pin, &spelling)?;
     Ok((pin, Acquired { archive, fetched }))
@@ -214,7 +223,7 @@ impl Graph<'_> {
 
     /// GIT-2 steps 3 and 4: the package, its workspace root and the members it reaches.
     /// Returns the workspace root and the reached members, each read as section 4 reads one.
-    fn read(&self, dir: Option<&str>) -> Result<(Dir, Members, Id), String> {
+    fn read(&self, dir: Option<&str>) -> Result<(Dir, Members, Selections, Id), String> {
         let (who, spelling) = (self.who, self.spelling);
         let top = self.snapshot.top();
         let no_manifest = || format!("{who}{spelling} has no hirsel.toml");
@@ -365,6 +374,12 @@ impl Graph<'_> {
                     .manifest_bytes(&dir)?
                     .ok_or_else(|| format!("{}: does not exist", manifest_path.display()))?;
                 let manifest = Manifest::parse(&bytes, &manifest_path)?;
+                if manifest.selections.is_some() {
+                    return Err(format!(
+                        "{}: selections: only the workspace root's manifest selects",
+                        manifest_path.display()
+                    ));
+                }
                 if manifest.workspace.is_some() {
                     return Err(format!(
                         "{}: workspace.members: {entry:?} belongs to the workspace at {}",
@@ -567,7 +582,14 @@ impl Graph<'_> {
                 },
             );
         }
-        Ok((root, members, id))
+        let selections = root_manifest.selections.unwrap_or_default();
+        if let Some(id) = selections.keys().find(|id| members.contains_key(*id)) {
+            return Err(format!(
+                "{}: selections: {id} is a member of this workspace",
+                root_path.display()
+            ));
+        }
+        Ok((root, members, selections, id))
     }
 
     /// The package id the manifest in member directory `dir` declares.

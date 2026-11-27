@@ -181,6 +181,7 @@ impl Request {
 /// reference that now names another commit refuses without `--update`; another reference or a
 /// commit id is a named update.
 pub(super) fn check_moved(
+    alias: &str,
     bound: &GitSource,
     bound_root: Root,
     fetched: &GitSource,
@@ -203,7 +204,7 @@ pub(super) fn check_moved(
         "now names another commit"
     };
     Err(format!(
-        "{} {reference} {what}:\n  bound: {} {bound_root}\n  fetched: {} {fetched_root}\npass --update to accept it",
+        "{} {reference} {what}:\n  bound: {} {bound_root}\n  fetched: {} {fetched_root}\nto take it, run: hirsel update {alias}",
         fetched.url, bound.rev, fetched.rev
     )
     .into())

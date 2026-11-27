@@ -69,6 +69,8 @@ pub struct PackageManifest {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PackageNamespace {
+    #[serde(default)]
+    pub version: Option<String>,
     pub root: Option<hirsel_core_ids::ContentHash>,
     pub foreign: hirsel_core_ids::ContentHash,
     pub published_bindings: std::collections::BTreeMap<PackageId, hirsel_core_ids::ContentHash>,

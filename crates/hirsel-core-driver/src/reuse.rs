@@ -453,17 +453,17 @@ pub(crate) fn environment(
     inputs: &CorpusManifest,
     compiler: ContentHash,
 ) -> io::Result<ContentHash> {
-    let no_foreign = ContentHash::of_parts("hirsel.foreign-stamp.v1", [&0u64.to_le_bytes()[..]]);
     let mut namespaces: Vec<_> = inputs
         .packages
         .iter()
         .map(|package| {
-            let namespace = package.namespace.as_ref();
             (
                 &package.package,
                 &package.dependencies,
-                namespace.and_then(|namespace| namespace.root),
-                namespace.map_or(no_foreign, |namespace| namespace.foreign),
+                package
+                    .namespace
+                    .as_ref()
+                    .map(|ns| (&ns.version, &ns.aliases, ns.root, ns.foreign)),
                 package.toolchain,
             )
         })

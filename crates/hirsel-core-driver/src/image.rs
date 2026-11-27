@@ -520,6 +520,7 @@ fn source_package_image_uses_the_captured_text_and_name() {
         9,
         "renamed.hirsel",
         Some(hirsel_core_resolve::PackageNamespace {
+            version: None,
             root: None,
             foreign: ContentHash::of_bytes(b"changed foreign stamp"),
             published_bindings: BTreeMap::new(),

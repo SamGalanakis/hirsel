@@ -480,41 +480,41 @@ fn s6_add_memory_child() {
     assert!(peak_kib < 2 * 1024 * 1024, "peak RSS {peak_kib} KiB");
 }
 
+fn number(mut number: usize, output: &mut Vec<u8>) {
+    while number >= 128 {
+        output.push(((number % 128) | 128) as u8);
+        number /= 128;
+    }
+    output.push(number as u8);
+}
+
+fn wire_text(field: &str, output: &mut Vec<u8>) {
+    number(field.len(), output);
+    output.extend_from_slice(field.as_bytes());
+}
+
 fn archive_memory_limits() {
     use sha2::{Digest, Sha256};
-
-    fn number(mut number: usize, output: &mut Vec<u8>) {
-        while number >= 128 {
-            output.push(((number % 128) | 128) as u8);
-            number /= 128;
-        }
-        output.push(number as u8);
-    }
-
-    fn text(field: &str, output: &mut Vec<u8>) {
-        number(field.len(), output);
-        output.extend_from_slice(field.as_bytes());
-    }
 
     /// `C` v3 (packages.md section 1) up to the one file's bytes: version 1.0.0, each child
     /// bound exactly (tag 1) under its short name, one file `source.hirsel` of module `source`.
     fn prefix(name: &str, bindings: &[(String, [u8; 32], Vec<u8>)], len: usize) -> Vec<u8> {
         let mut bytes = vec![3];
-        text(&format!("fixture.test/{name}"), &mut bytes);
+        wire_text(&format!("fixture.test/{name}"), &mut bytes);
         bytes.extend_from_slice(&[1, 0, 0]);
-        text("", &mut bytes);
-        text("charge-v1", &mut bytes);
+        wire_text("", &mut bytes);
+        wire_text("charge-v1", &mut bytes);
         number(bindings.len(), &mut bytes);
         for (child, root, _) in bindings {
-            text(child, &mut bytes);
-            text(&format!("fixture.test/{child}"), &mut bytes);
+            wire_text(child, &mut bytes);
+            wire_text(&format!("fixture.test/{child}"), &mut bytes);
             bytes.extend_from_slice(&[1, 1]);
             bytes.extend_from_slice(root);
         }
         bytes.push(1);
-        text("source.hirsel", &mut bytes);
+        wire_text("source.hirsel", &mut bytes);
         bytes.push(1);
-        text("source", &mut bytes);
+        wire_text("source", &mut bytes);
         number(len, &mut bytes);
         bytes
     }
@@ -541,7 +541,7 @@ fn archive_memory_limits() {
         children.sort_by_key(|(_, root, _)| *root);
         let mut archive = fs::File::create(law.path("app/memory.hpkg")).unwrap();
         let mut header = Vec::new();
-        text("hirsel.package-archive.v1", &mut header);
+        wire_text("hirsel.package-archive.v1", &mut header);
         number(packages, &mut header);
         archive.write_all(&header).unwrap();
         for part in std::iter::once(&head).chain(children.iter().map(|(_, _, part)| part)) {

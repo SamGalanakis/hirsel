@@ -1789,7 +1789,7 @@ fn package_l1_diamond_and_major_identity() {
         law.write(&format!("work/vendor/{archive}.hpkg"), std::fs::read(law.path(&format!("vendor/{archive}.hpkg"))).unwrap());
     }
     PackageLaw::refuse(law.run(&["check", "work/app"]),
-        &format!("fixture.test/json@1 is bound to more than one root:\n  local/app@1 -> local/a@1 -> fixture.test/json@1 = {PACKAGE_X}\n  local/app@1 -> local/b@1 -> fixture.test/json@1 = {PACKAGE_Y}"));
+        &format!("fixture.test/json@1 is bound to more than one root:\n  local/app@1 -> local/a@1 -> fixture.test/json@1 = {PACKAGE_X} exact\n  local/app@1 -> local/b@1 -> fixture.test/json@1 = {PACKAGE_Y} exact\nno single root satisfies every edge; the exact edges of local/a@1, local/b@1 must name one root"));
     assert!(!law.path("work/hirsel.lock").exists());
 
     law.library("work/b", "local/b", "1.0.0", "pub fn one() -> u64 { 1u64 }\n",

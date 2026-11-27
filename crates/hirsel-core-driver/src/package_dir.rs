@@ -405,7 +405,6 @@ impl PackageDir {
         selected: &Id,
         include_tests: bool,
     ) -> io::Result<Self> {
-        use crate::package_workspace::Edge;
         use std::collections::BTreeSet;
 
         let selected_member = resolution.workspace.members.get(selected);
@@ -431,13 +430,7 @@ impl PackageDir {
                 let bindings = member
                     .aliases
                     .iter()
-                    .map(|(alias, id)| {
-                        let pin = match &member.edges[id] {
-                            Edge::Published(root, _) => Some(*root),
-                            _ => None,
-                        };
-                        (alias.as_str(), id, pin)
-                    })
+                    .map(|(alias, id)| (alias.as_str(), id, resolution.published.get(id).copied()))
                     .collect::<Vec<_>>();
                 (&member.content, bindings)
             } else {
@@ -448,7 +441,16 @@ impl PackageDir {
                 } else {
                     &resolution.libraries[&root.unwrap()].content
                 };
-                (content, content_bindings(content))
+                (
+                    content,
+                    content
+                        .bindings
+                        .iter()
+                        .map(|(alias, (id, _))| {
+                            (alias.as_str(), id, resolution.published.get(id).copied())
+                        })
+                        .collect(),
+                )
             };
             pending.extend(bindings.iter().map(|(_, id, _)| (**id).clone()));
             let tests = if include_tests && &id == selected {
@@ -629,6 +631,7 @@ impl PackageDir {
         }
         PackageManifest {
             namespace: Some(PackageNamespace {
+                version: Some(content.version.to_string()),
                 root: root.map(|root| ContentHash(root.0)),
                 foreign: content.foreign_stamp(),
                 foreign_inputs: content.foreign.clone(),

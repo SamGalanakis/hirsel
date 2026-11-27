@@ -128,7 +128,7 @@ fn l35_moved_tag_is_reported() {
         "https://alpha.test/r1 refs/tags/v1 moved:
   bound: 77cbe52623fcc3479739eb37e89ddbe5c4626077 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
   fetched: 0944e001a1bd66c618ca9bb9770617490946b4bc sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
-pass --update to accept it",
+to take it, run: hirsel update wrap",
     );
     assert_eq!(manifest_text(&law, "app"), manifest);
     assert_eq!(fs::read(law.path("app/hirsel.lock")).unwrap(), lock);
@@ -151,7 +151,7 @@ pass --update to accept it",
         "https://alpha.test/r1 refs/heads/main now names another commit:
   bound: 77cbe52623fcc3479739eb37e89ddbe5c4626077 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
   fetched: 0944e001a1bd66c618ca9bb9770617490946b4bc sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
-pass --update to accept it",
+to take it, run: hirsel update wrap",
     );
     point(&server, "alpha.test/r1", "refs/heads/main", C1);
 

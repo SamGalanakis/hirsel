@@ -1,9 +1,10 @@
 use crate::package_content::{Binding, Id, Library, PackageArchive, Root, check_identity};
-use crate::package_manifest::SourceLocation;
+use crate::package_manifest::{Selections, SourceLocation, name::Version};
 use crate::package_store::{Entry, PackageStore};
 use crate::package_workspace::{Edge, Member, Workspace};
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::Path;
 
 type Failure = Box<dyn std::error::Error>;
 pub(crate) type Libraries = BTreeMap<Root, Library>;
@@ -54,7 +55,25 @@ fn path_text(path: &[Id]) -> String {
         .join(" -> ")
 }
 
-fn best_paths(members: &Members, libraries: &Libraries) -> Paths {
+struct Graph<'a> {
+    members: &'a Members,
+    selections: &'a Selections,
+    manifest: &'a Path,
+}
+
+impl Graph<'_> {
+    fn destination(&self, id: &Id, recorded: Root) -> Node {
+        if self.members.contains_key(id) {
+            Node::Member(id.clone())
+        } else {
+            let root = self.selections.get(id).map_or(recorded, |(root, _)| *root);
+            Node::Published(id.clone(), root)
+        }
+    }
+}
+
+fn best_paths(graph: &Graph, libraries: &Libraries) -> Paths {
+    let members = graph.members;
     let bound: BTreeSet<_> = members
         .values()
         .flat_map(|member| {
@@ -81,7 +100,7 @@ fn best_paths(members: &Members, libraries: &Libraries) -> Paths {
                 .filter_map(|(id, edge)| match edge {
                     Edge::Toolchain => None,
                     Edge::Member => Some(Node::Member(id.clone())),
-                    Edge::Published(root, _) => Some(Node::Published(id.clone(), *root)),
+                    Edge::Published(root, _) => Some(graph.destination(id, *root)),
                 })
                 .collect(),
             Node::Published(_, root) => libraries
@@ -92,7 +111,7 @@ fn best_paths(members: &Members, libraries: &Libraries) -> Paths {
                         .content
                         .edges()
                         .into_iter()
-                        .filter_map(|(id, root)| root.map(|root| Node::Published(id, root)))
+                        .filter_map(|(id, root)| root.map(|root| graph.destination(&id, root)))
                 })
                 .collect(),
         };
@@ -192,17 +211,23 @@ fn carrier(
 
 /// Resolution step 3 over a member graph: every published root the members reach, from
 /// `cached`, then the store, then its declared source, then its nearest carrier's.
-pub(crate) fn acquire(
-    members: &Members,
+fn acquire(
+    graph: &Graph,
     store: &PackageStore,
     frozen: bool,
     mut cached: Libraries,
     fetch: &mut Fetch<'_>,
 ) -> Result<(Libraries, Declarations), Failure> {
     let mut declared = BTreeMap::new();
-    for member in members.values() {
+    for member in graph.members.values() {
         for (id, edge) in &member.edges {
-            if let Edge::Published(root, Some(source)) = edge {
+            if let Edge::Published(root, Some(source)) = edge
+                && !graph.members.contains_key(id)
+                && graph
+                    .selections
+                    .get(id)
+                    .is_none_or(|(selected, _)| selected == root)
+            {
                 declared
                     .entry(*root)
                     .or_insert_with(|| (id.clone(), source.clone()));
@@ -214,7 +239,19 @@ pub(crate) fn acquire(
         let mut pending = Vec::new();
         let mut seen = BTreeSet::new();
         let mut opened = false;
-        for (id, root) in incoming(members, &libraries) {
+        let reached: BTreeSet<_> = incoming(graph.members, &libraries)
+            .into_iter()
+            .map(|(id, root)| graph.destination(&id, root))
+            .collect();
+        for node in reached {
+            let Node::Published(id, root) = node else {
+                continue;
+            };
+            if let Some((_, Some(source))) = graph.selections.get(&id) {
+                declared
+                    .entry(root)
+                    .or_insert_with(|| (id.clone(), source.clone()));
+            }
             if let Some(library) = libraries.get(&root) {
                 check_identity(&id, root, &library.content.id)?;
                 continue;
@@ -266,7 +303,7 @@ pub(crate) fn acquire(
         let Some((missing, root, _)) = pending.first() else {
             break;
         };
-        let paths = best_paths(members, &libraries);
+        let paths = best_paths(graph, &libraries);
         let mut found_carrier = false;
         for (_, root, _) in &pending {
             if !cached.contains_key(root)
@@ -290,11 +327,12 @@ pub(crate) fn acquire(
 /// What a resolved member graph binds: the toolchain closure and one root per published id,
 /// refusing a toolchain clash, a diamond and a member bound to a root that is not its own.
 fn settle(
-    members: &Members,
+    graph: &Graph,
     libraries: &Libraries,
     encoded: &mut Encoded,
 ) -> Result<(BTreeSet<Id>, BTreeMap<Id, Root>), Failure> {
-    let paths = best_paths(members, libraries);
+    let members = graph.members;
+    let paths = best_paths(graph, libraries);
     let bound: Vec<Id> = members
         .values()
         .flat_map(|member| {
@@ -322,39 +360,223 @@ fn settle(
         )
         .into());
     }
-    let mut all = BTreeMap::<Id, BTreeSet<Root>>::new();
-    for (id, root) in incoming {
-        all.entry(id).or_default().insert(root);
+    let mut edges = BTreeMap::<Id, Vec<Requirement>>::new();
+    for (node, path) in &paths {
+        let bindings: BTreeMap<_, _> = match node {
+            Node::Member(id) => members[id]
+                .edges
+                .iter()
+                .filter_map(|(id, edge)| match edge {
+                    Edge::Published(root, _) => Some((id, Binding::Exact(*root))),
+                    _ => None,
+                })
+                .collect(),
+            Node::Published(_, root) => libraries[root]
+                .content
+                .bindings
+                .values()
+                .map(|(id, binding)| (id, *binding))
+                .collect(),
+        };
+        for (id, binding) in bindings {
+            if let Some(root) = binding.root() {
+                let mut path = path.clone();
+                path.push(id.clone());
+                edges.entry(id.clone()).or_default().push(Requirement {
+                    path,
+                    binding,
+                    root,
+                });
+            }
+        }
     }
     let mut published = BTreeMap::new();
-    for (id, roots) in all {
-        if roots.len() > 1 {
-            let mut found: Vec<_> = roots
-                .iter()
-                .map(|root| (&paths[&Node::Published(id.clone(), *root)], root))
-                .collect();
-            found.sort_by(|(a, _), (b, _)| path_order(a, b));
-            let mut refusal = format!("{id} is bound to more than one root:");
-            for (path, root) in found {
-                refusal.push_str(&format!("\n  {} = {root}", path_text(path)));
-            }
-            return Err(refusal.into());
-        }
-        let root = *roots.first().unwrap();
-        if members.contains_key(&id) && member_root(members, encoded, &id)? != root {
-            let member_path = &paths[&Node::Member(id.clone())];
-            let root_path = &paths[&Node::Published(id.clone(), root)];
-            let mut rows = [
-                (member_path, "member".into()),
-                (root_path, root.to_string()),
-            ];
-            rows.sort_by(|(a, _), (b, _)| path_order(a, b));
-            return Err(format!("{id} is a member and is also bound to {root}, which is not the member's root:\n  {} = {}\n  {} = {}",
-                path_text(rows[0].0), rows[0].1, path_text(rows[1].0), rows[1].1).into());
-        }
+    for (id, mut requirements) in edges {
+        requirements.sort_by(|a, b| path_order(&a.path, &b.path));
+        let chosen = if let Some(member) = members.get(&id) {
+            let dir = member.directory.to_str().unwrap();
+            Some(Choice {
+                root: member_root(members, encoded, &id)?,
+                version: &member.content.version,
+                by: format!("the member {}", if dir.is_empty() { "." } else { dir }),
+                path: &paths[&Node::Member(id.clone())],
+            })
+        } else {
+            graph.selections.get(&id).map(|(root, _)| Choice {
+                root: *root,
+                version: &libraries[root].content.version,
+                by: format!("selected in {}", graph.manifest.display()),
+                path: &requirements
+                    .iter()
+                    .find(|e| e.root == *root)
+                    .unwrap_or(&requirements[0])
+                    .path,
+            })
+        };
+        let root = bind(&id, &requirements, libraries, chosen)?;
         published.insert(id, root);
     }
+    for (id, (root, _)) in graph.selections {
+        if !published.contains_key(id) {
+            eprintln!(
+                "hirsel: {}: selections.{id} selects {root}, which no edge of the closure names; hirsel update removes it",
+                graph.manifest.display()
+            );
+        }
+    }
     Ok((toolchain, published))
+}
+
+struct Requirement {
+    path: Vec<Id>,
+    binding: Binding,
+    root: Root,
+}
+
+impl Requirement {
+    fn floor(&self, major: u32) -> Option<Version> {
+        match self.binding {
+            Binding::Floor { minor, patch, .. } => Some(Version {
+                major,
+                minor,
+                patch,
+                pre: String::new(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn accepts(&self, root: Root, version: &Version) -> bool {
+        root == self.root
+            || self.floor(version.major).is_some_and(|bound| {
+                version.pre.is_empty()
+                    && version >= &bound
+                    && (version.major != 0 || version.minor == bound.minor)
+            })
+    }
+}
+
+struct Choice<'a> {
+    root: Root,
+    version: &'a Version,
+    by: String,
+    path: &'a [Id],
+}
+
+fn check_versions(
+    id: &Id,
+    edges: &[Requirement],
+    libraries: &Libraries,
+    choice: Option<&Choice>,
+) -> Result<(), Failure> {
+    let mut claims = Vec::new();
+    if let Some(choice) = choice {
+        claims.push((choice.path, choice.root, choice.version.clone()));
+    }
+    for edge in edges {
+        if let Some(bound) = edge.floor(id.major) {
+            claims.push((edge.path.as_slice(), edge.root, bound));
+        }
+        if let Some(library) = libraries.get(&edge.root)
+            && library.content.id == *id
+        {
+            claims.push((
+                edge.path.as_slice(),
+                edge.root,
+                library.content.version.clone(),
+            ));
+        }
+    }
+    claims.sort_by(|a, b| path_order(a.0, b.0));
+    let mut versions = BTreeMap::new();
+    for (path, root, version) in claims {
+        let (first_path, first_root) = *versions.entry(version.clone()).or_insert((path, root));
+        if first_root != root {
+            return Err(format!(
+                "{id} {version} is two roots:\n  {} = {first_root}\n  {} = {root}",
+                path_text(first_path),
+                path_text(path)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Requirements arrive in refusal path order. A displaced exact pin has no known version.
+fn bind(
+    id: &Id,
+    edges: &[Requirement],
+    libraries: &Libraries,
+    chosen: Option<Choice>,
+) -> Result<Root, Failure> {
+    check_versions(id, edges, libraries, chosen.as_ref())?;
+    if let Some(Choice {
+        root, version, by, ..
+    }) = chosen
+    {
+        for edge in edges {
+            if edge.accepts(root, version) {
+                continue;
+            }
+            let path = path_text(&edge.path);
+            if let Some(bound) = edge.floor(id.major) {
+                let requires = if id.major == 0 {
+                    format!("{bound} or a later 0.{}.x", bound.minor)
+                } else {
+                    format!("at least {bound}")
+                };
+                return Err(format!(
+                    "{id} is bound to {version} {root} ({by}), but {path} requires {requires}"
+                )
+                .into());
+            }
+            return Err(format!(
+                "{id} is bound to {root} ({by}), but {path} pins {} exactly",
+                edge.root
+            )
+            .into());
+        }
+        return Ok(root);
+    }
+    let roots: BTreeSet<_> = edges.iter().map(|edge| edge.root).collect();
+    if roots.len() == 1 {
+        return Ok(edges[0].root);
+    }
+    let mut refusal = format!("{id} is bound to more than one root:");
+    for edge in edges {
+        let kind = edge
+            .floor(id.major)
+            .map_or_else(|| "exact".into(), |v| format!("floor {v}"));
+        refusal.push_str(&format!(
+            "\n  {} = {} {kind}",
+            path_text(&edge.path),
+            edge.root
+        ));
+    }
+    if roots.iter().any(|root| {
+        edges
+            .iter()
+            .all(|edge| edge.accepts(*root, &libraries[root].content.version))
+    }) {
+        refusal.push_str(&format!(
+            "\nto choose one root for every edge, run: hirsel update {id}"
+        ));
+    } else {
+        let mut seen = BTreeSet::new();
+        let exact: Vec<_> = edges
+            .iter()
+            .filter(|e| matches!(e.binding, Binding::Exact(_)))
+            .map(|e| &e.path[e.path.len() - 2])
+            .filter(|id| seen.insert(*id))
+            .map(ToString::to_string)
+            .collect();
+        refusal.push_str(&format!(
+            "\nno single root satisfies every edge; the exact edges of {} must name one root",
+            exact.join(", ")
+        ));
+    }
+    Err(refusal.into())
 }
 
 /// A member's root by section 6: its member bindings encoded as their roots, after them.
@@ -411,6 +633,7 @@ fn member_root(members: &Members, encoded: &mut Encoded, id: &Id) -> Result<Root
 /// The archive `hirsel pack` writes for member `id`: its content and every package it
 /// reaches, decoded again so the decoder checks the packer.
 fn assemble(
+    published: &BTreeMap<Id, Root>,
     members: &Members,
     encoded: &mut Encoded,
     libraries: &Libraries,
@@ -431,7 +654,19 @@ fn assemble(
             .get(&root)
             .copied()
             .unwrap_or_else(|| &libraries[&root]);
-        pending.extend(content.content.edges().into_values().flatten());
+        for (id, recorded) in content.content.edges() {
+            if let Some(recorded) = recorded {
+                if let Some(effective) = published.get(&id)
+                    && *effective != recorded
+                {
+                    let binder = &content.content.id;
+                    return Err(format!(
+                        "pack: {binder} binds {id} {recorded} exactly, but this workspace builds it with {effective}; republish {binder} against {effective} or select {recorded}"
+                    ));
+                }
+                pending.push_back(recorded);
+            }
+        }
         reached.insert(
             root,
             Library {
@@ -454,14 +689,20 @@ fn assemble(
 pub(crate) fn pack_members(
     members: &Members,
     store: &PackageStore,
-    cached: Libraries,
+    selections: &Selections,
+    manifest: &Path,
     fetch: &mut Fetch<'_>,
     id: &Id,
 ) -> Result<(Bytes, PackageArchive), Failure> {
-    let (libraries, _) = acquire(members, store, false, cached, fetch)?;
+    let graph = Graph {
+        members,
+        selections,
+        manifest,
+    };
+    let (libraries, _) = acquire(&graph, store, false, BTreeMap::new(), fetch)?;
     let mut encoded = BTreeMap::new();
-    settle(members, &libraries, &mut encoded)?;
-    Ok(assemble(members, &mut encoded, &libraries, id)?)
+    let (_, published) = settle(&graph, &libraries, &mut encoded)?;
+    Ok(assemble(&published, members, &mut encoded, &libraries, id)?)
 }
 
 impl Resolution {
@@ -486,6 +727,12 @@ impl Resolution {
         cached: Libraries,
         fetched: &mut BTreeSet<String>,
     ) -> Result<Self, Failure> {
+        let manifest = workspace.directory.join(crate::package_dir::MANIFEST);
+        let graph = Graph {
+            manifest: &manifest,
+            members: &workspace.members,
+            selections: &workspace.selections,
+        };
         let mut inputs = Vec::new();
         let (libraries, declarations) = {
             let directory = &workspace.root;
@@ -494,13 +741,13 @@ impl Resolution {
                 inputs.extend(identity);
                 Ok(archive.entries)
             };
-            acquire(&workspace.members, &store, frozen, cached, &mut fetch)?
+            acquire(&graph, &store, frozen, cached, &mut fetch)?
         };
+        let mut encoded = BTreeMap::new();
+        let (toolchain, published) = settle(&graph, &libraries, &mut encoded)?;
         for identity in inputs {
             workspace.record_input(identity);
         }
-        let mut encoded = BTreeMap::new();
-        let (toolchain, published) = settle(&workspace.members, &libraries, &mut encoded)?;
         Ok(Self {
             workspace,
             libraries,
@@ -523,6 +770,7 @@ impl Resolution {
 
     pub(crate) fn make_archive(&mut self, id: &Id) -> Result<(Bytes, PackageArchive), String> {
         let (bytes, decoded) = assemble(
+            &self.published,
             &self.workspace.members,
             &mut self.encoded,
             &self.libraries,

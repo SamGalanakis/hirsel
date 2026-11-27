@@ -70,6 +70,25 @@ fn std_row(rows: &mut Rows) {
 
 fn make_rows(resolution: &Resolution) -> Rows {
     let mut rows = BTreeMap::new();
+    let exact: BTreeSet<_> = resolution
+        .workspace
+        .members
+        .values()
+        .flat_map(|member| {
+            member.edges.iter().filter_map(|(id, edge)| {
+                matches!(edge, crate::package_workspace::Edge::Published(_, _)).then_some(id)
+            })
+        })
+        .chain(resolution.libraries.values().flat_map(|library| {
+            library
+                .content
+                .bindings
+                .values()
+                .filter_map(|(id, binding)| {
+                    matches!(binding, crate::package_content::Binding::Exact(_)).then_some(id)
+                })
+        }))
+        .collect();
     for (id, member) in &resolution.workspace.members {
         let dir = if member.directory.as_os_str().is_empty() {
             "."
@@ -80,7 +99,11 @@ fn make_rows(resolution: &Resolution) -> Rows {
             id.clone(),
             Row {
                 version: Some(member.package.version.to_string()),
-                root: resolution.published.get(id).copied(),
+                root: resolution
+                    .published
+                    .get(id)
+                    .copied()
+                    .filter(|_| exact.contains(id)),
                 source: format!("member:{dir}"),
                 edges: member.edges.keys().cloned().collect(),
                 tested: Vec::new(),

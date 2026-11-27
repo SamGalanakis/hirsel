@@ -276,14 +276,14 @@ fn check_source(
     source: &SourceLocation,
     fetched: Root,
 ) -> Result<(), Failure> {
-    let check = |root: Root, locator: &SourceLocation| -> Result<(), Failure> {
+    let check = |alias: &str, root: Root, locator: &SourceLocation| -> Result<(), Failure> {
         if let (SourceLocation::Git(bound), SourceLocation::Git(new)) = (locator, source) {
-            return git::check_moved(bound, root, new, fetched);
+            return git::check_moved(alias, bound, root, new, fetched);
         }
         if root != fetched && locator == source {
             let spelling = source.to_string();
             Err(format!(
-                "{} is already bound to another root\n  bound: {root}\n  fetched: {fetched}\n  pass --update to accept the fetched root",
+                "{} is already bound to another root\n  bound: {root}\n  fetched: {fetched}\nto take the fetched root, run: hirsel update {alias}",
                 spelling.split_once(':').unwrap().1
             )
             .into())
@@ -292,20 +292,20 @@ fn check_source(
         }
     };
     for member in workspace.members.values() {
-        for edge in member.edges.values() {
-            if let Edge::Published(root, Some(locator)) = edge {
-                check(*root, locator)?;
+        for (alias, id) in &member.aliases {
+            if let Edge::Published(root, Some(locator)) = &member.edges[id] {
+                check(alias, *root, locator)?;
             }
         }
     }
     if let Some(root) = workspace.captured_manifest(&workspace.root)? {
         let manifest = Manifest::parse(&root.bytes, &workspace.directory.join(MANIFEST))?;
         if let Some(shared) = manifest.workspace {
-            for dependency in shared.dependencies.values() {
+            for (alias, dependency) in &shared.dependencies {
                 if let Dependency::Published(_, root, Some(locator)) = dependency
                     && let Some(locator) = root_relative(locator)
                 {
-                    check(*root, &locator)?;
+                    check(alias, *root, &locator)?;
                 }
             }
         }

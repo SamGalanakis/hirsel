@@ -107,13 +107,13 @@ final class RuntimeTests: XCTestCase {
             XCTAssertEqual(set.states, [PeerState(peer: try XCTUnwrap(selfB.me),
                                                  state: Data([1, 2, 0, 0, 0, 0, 0, 0]))])
             try roomB.send(514, to: selfA.me)
+            try roomB.leave()
             guard case .message(let message)? = try await aEvents.next() else {
                 return XCTFail("Expected B's direct message on A")
             }
             XCTAssertEqual(message.from, selfB.me)
             XCTAssertEqual(message.message, Data([2, 2, 0, 0, 0, 0, 0, 0]))
             XCTAssertTrue(message.direct)
-            try roomB.leave()
             guard case .peers(let left)? = try await aEvents.next() else {
                 return XCTFail("Expected B to leave A")
             }

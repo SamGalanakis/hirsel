@@ -1053,6 +1053,7 @@ def hirsel_driver_archive_test(name, data, selection, ios = False):
         files_env = {
             "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
             "HIRSEL_DEV_TEST_DRIVER": "//:hirsel-core-driver-bin-hirsel",
+            "HIRSEL_EXEC_HELPER": "//:hirsel-exec-helper-bin-hirsel-exec-helper",
             "HIRSEL_ARCHIVE_RUST": "toolchains//:test-rustc",
             "HIRSEL_LINK_KIT": "//tools/buck2/native-toolchain:kit",
             "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu",

@@ -96,6 +96,45 @@ pub struct ImagePin {
 }
 
 impl ImagePin {
+    pub const ENCODED: usize = 7 * 8 + 32;
+
+    /// The pin's bytes, for the embedded supervisor helper that checks it
+    /// before each spawn in its own process.
+    pub fn encode(&self) -> [u8; Self::ENCODED] {
+        let s = &self.stamp;
+        let mut out = [0; Self::ENCODED];
+        let fields = [
+            s.dev as u64,
+            s.ino as u64,
+            s.size as u64,
+            s.mtime_sec as u64,
+            s.mtime_nsec as u64,
+            s.ctime_sec as u64,
+            s.ctime_nsec as u64,
+        ];
+        for (at, field) in fields.into_iter().enumerate() {
+            out[at * 8..at * 8 + 8].copy_from_slice(&field.to_le_bytes());
+        }
+        out[56..].copy_from_slice(&self.pin);
+        out
+    }
+
+    pub fn decode(bytes: &[u8; Self::ENCODED]) -> Self {
+        let field = |at: usize| u64::from_le_bytes(bytes[at * 8..at * 8 + 8].try_into().unwrap());
+        Self {
+            stamp: Stamp {
+                dev: field(0) as libc::dev_t,
+                ino: field(1) as libc::ino_t,
+                size: field(2) as libc::off_t,
+                mtime_sec: field(3) as libc::time_t,
+                mtime_nsec: field(4) as libc::c_long,
+                ctime_sec: field(5) as libc::time_t,
+                ctime_nsec: field(6) as libc::c_long,
+            },
+            pin: bytes[56..].try_into().unwrap(),
+        }
+    }
+
     /// Re-check `(dev, ino, size, mtime, ctime)` at `path`. Refuses a symlink
     /// or non-regular file; when any stamp field changed, re-hashes the
     /// regular file (without following links) and refuses if its digest

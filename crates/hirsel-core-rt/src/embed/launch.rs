@@ -6,8 +6,8 @@ use super::{
 };
 use crate::{
     entry::{
-        ARGS, CLOCK, DIR, FOREIGN, Grant, NET, PROCESS, RANDOM, SECRET, STDERR, STDIN, STDOUT,
-        TASKS,
+        ARGS, CLOCK, DIR, EXEC, FOREIGN, Grant, NET, PROCESS, RANDOM, SECRET, STDERR, STDIN,
+        STDOUT, TASKS,
     },
     os::{OsProvider, hirsel_core_os_directory_ops},
     process::{Config, View},
@@ -248,6 +248,9 @@ struct EmbedProcessState {
     _metadata: Box<[Grant]>,
     _net_rules: Option<crate::net::RulesStorage>,
     secrets: Vec<crate::secret::Granted>,
+    /// The Exec grants, whose children the embedder's helper holds. Closing
+    /// them ends the helper, which kills and reaps every child first.
+    exec: Box<[crate::exec::Grant]>,
     grants: Vec<u64>,
     _launch: Box<Metadata>,
     diagnostic_buf: Vec<u8>,
@@ -263,6 +266,7 @@ unsafe extern "C" fn embed_close_grants(state: *mut u8) {
     unsafe {
         let proc = &mut *state.cast::<EmbedProcessState>();
         proc.secrets.clear();
+        drop(std::mem::take(&mut proc.exec));
         drop(proc.os.take());
     }
 }
@@ -311,6 +315,7 @@ fn build_embed_process(
     digest: Option<[u8; 32]>,
     n_place: u64,
     resolved: ResolvedGrants,
+    exec: Box<[crate::exec::Grant]>,
     bridge: Arc<LifecycleBridge>,
 ) -> Result<Box<EmbedProcessState>, String> {
     let mut os = Box::new(OsProvider::from_streams(None, None));
@@ -410,6 +415,12 @@ fn build_embed_process(
             });
         }
     }
+    metadata.extend(exec.iter().map(|grant| Grant {
+        kind: EXEC,
+        provider: provider_ptr,
+        handle: std::ptr::from_ref(grant) as u64,
+        terminal: false,
+    }));
     if resolved.has_foreign {
         for r in program.parameters.iter().filter(|r| r.kind == FOREIGN) {
             metadata.push(Grant {
@@ -455,6 +466,7 @@ fn build_embed_process(
         _metadata: metadata,
         _net_rules: net_rules,
         secrets,
+        exec,
         grants: Vec::with_capacity(program.parameters.len()),
         _launch: launch,
         diagnostic_buf: Vec::new(),
@@ -501,6 +513,7 @@ impl LaunchedPlace {
         grants: &[u8],
         dir_bases: &[u8],
         store_dir: &[u8],
+        exec_helper: &[u8],
     ) -> Result<(Self, crate::units::ledger::conn::Client), String> {
         // 1. Baseline-safe ISA check (EMB-3: never reads env, never calls exit).
         crate::isa::init_embedded().map_err(|s| s.to_owned())?;
@@ -514,9 +527,13 @@ impl LaunchedPlace {
             program.parameters,
             parameter_names,
         )?;
-        if !resolved.exec_grants.is_empty() {
-            return Err("embedded Exec provider not built".into());
-        }
+        let generation_end = Arc::new(GenerationEnd::contained());
+        let exec = crate::host::embed_exec(
+            &resolved.exec_grants,
+            exec_helper,
+            start_timeout_ms,
+            &generation_end,
+        )?;
 
         // 3. Arm embedded fault handler (EMB-3: verifies no replacement).
         crate::fiber::arm_embedded().map_err(|e| match e {
@@ -525,9 +542,9 @@ impl LaunchedPlace {
         })?;
 
         let bridge = LifecycleBridge::new();
-        let proc_state = build_embed_process(program, digest, n_place, resolved, bridge.clone())?;
+        let proc_state =
+            build_embed_process(program, digest, n_place, resolved, exec, bridge.clone())?;
         let stop_trigger = proc_state._stop.state.clone();
-        let generation_end = Arc::new(GenerationEnd::contained());
         let gen_for_worker = generation_end.clone();
         let bridge_for_worker = bridge.clone();
         let entry = program.entry;

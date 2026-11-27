@@ -141,6 +141,7 @@ fn law_m13_validation_guard_page_zero_tail_and_reentrant_refusal() {
             grants: HirselBytes::default(),
             dir_bases: HirselBytes::default(),
             store_dir: HirselBytes::from_slice(b"/tmp"),
+            exec_helper: HirselBytes::default(),
             context: ptr::null_mut(),
             ended: Some(record_ended),
         };

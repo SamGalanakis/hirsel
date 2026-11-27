@@ -1,7 +1,9 @@
 //! Native Exec provider adapters. The logical launch is checked before issue;
 //! opening the working directory and creating the child are delivered effects.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::host::exec::{Process, Signal, SpawnInput, Termination};
+use crate::host::exec::{Signal, SpawnInput, Termination};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::host::exec_helper::Child as Process;
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
@@ -125,9 +127,7 @@ unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome 
         let grant = &*(r.handle as *const Grant);
         let launch = &call.launch;
         let Grant::Native {
-            supervisor,
-            profiles,
-            ..
+            custody, profiles, ..
         } = grant
         else {
             unreachable!("native spawn requires a native grant");
@@ -163,7 +163,7 @@ unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome 
         {
             return other(error);
         }
-        let result = supervisor.spawn(SpawnInput {
+        let result = custody.spawn(SpawnInput {
             image: profile.image.path.clone(),
             pin: Some(profile.image.pin),
             cwd,
@@ -181,7 +181,7 @@ unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome 
                         call.pipes[i] = sockets.insert_pipe(fd, i == 0).unwrap();
                     }
                 }
-                call.process = Some(child.process);
+                call.process = Some(child.child);
                 Outcome {
                     value: 1,
                     ..Outcome::default()

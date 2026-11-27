@@ -125,6 +125,7 @@ pub struct HirselEmbedConfig {
     pub grants: HirselBytes,
     pub dir_bases: HirselBytes,
     pub store_dir: HirselBytes,
+    pub exec_helper: HirselBytes,
     pub context: *mut c_void,
     pub ended: Option<EndedFn>,
 }
@@ -264,7 +265,7 @@ unsafe fn start(
         return HIRSEL_ABI_MISMATCH;
     };
     // SAFETY: validated `HirselBytes` borrow host memory for this call.
-    let (fp_slice, digest_slice, grants_slice, dir_bases_slice, store_dir_slice) = unsafe {
+    let (fp_slice, digest_slice, grants_slice, dir_bases_slice, store_dir_slice, helper_slice) = unsafe {
         let Ok(fp) = cfg.manifest_fp.as_slice() else {
             return HIRSEL_ABI_MISMATCH;
         };
@@ -280,7 +281,10 @@ unsafe fn start(
         let Ok(sd) = cfg.store_dir.as_slice() else {
             return HIRSEL_ABI_MISMATCH;
         };
-        (fp, dig, gr, db, sd)
+        let Ok(eh) = cfg.exec_helper.as_slice() else {
+            return HIRSEL_ABI_MISMATCH;
+        };
+        (fp, dig, gr, db, sd, eh)
     };
     if fp_slice.len() != 32 || fp_slice != parsed_manifest.fingerprint.as_slice() {
         return HIRSEL_ABI_MISMATCH;
@@ -301,6 +305,10 @@ unsafe fn start(
         Err(_) => return HIRSEL_HOST_MEMORY,
     };
     let store_dir_owned = match try_copy_slice(store_dir_slice) {
+        Ok(v) => v,
+        Err(_) => return HIRSEL_HOST_MEMORY,
+    };
+    let exec_helper_owned = match try_copy_slice(helper_slice) {
         Ok(v) => v,
         Err(_) => return HIRSEL_HOST_MEMORY,
     };
@@ -345,6 +353,7 @@ unsafe fn start(
             &grants_owned,
             &dir_bases_owned,
             &store_dir_owned,
+            &exec_helper_owned,
         )?;
         let engine_slot: Arc<Mutex<Option<Arc<ClientEngine>>>> = Arc::new(Mutex::new(None));
         let acc_refund = account.clone();

@@ -319,7 +319,7 @@ fn exec_provider_law(image: &std::path::Path) {
     std::fs::create_dir(root.join("here")).unwrap();
     std::os::unix::fs::symlink("here", root.join("link")).unwrap();
     let grant = Grant::Native {
-        supervisor,
+        custody: crate::host::exec_helper::Custody::Local(supervisor),
         profiles: Arc::new(profiles),
         rules,
     };
@@ -468,7 +468,7 @@ fn exec_provider_refuses_post_launch_modification_replacement_and_symlink_swap()
     let rules = policy.rules();
     let (profiles, _) = policy.pin_images().unwrap();
     let grant = Grant::Native {
-        supervisor,
+        custody: crate::host::exec_helper::Custody::Local(supervisor),
         profiles: Arc::new(profiles),
         rules,
     };
@@ -691,7 +691,7 @@ fn exec_provider_runs_system_shells_and_origin_tools() {
     let rules = policy.rules();
     let (profiles, _) = policy.pin_images().unwrap();
     let grant = Grant::Native {
-        supervisor,
+        custody: crate::host::exec_helper::Custody::Local(supervisor),
         profiles: Arc::new(profiles),
         rules,
     };

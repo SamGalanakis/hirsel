@@ -788,6 +788,7 @@ fn make_config(
         grants: HirselBytes::from_slice(grants),
         dir_bases: HirselBytes::default(),
         store_dir: HirselBytes::from_slice(store_dir.as_bytes()),
+        exec_helper: HirselBytes::default(),
         context: (rec as *const RuntimeRecorder).cast_mut().cast(),
         ended: Some(record_ended),
     }

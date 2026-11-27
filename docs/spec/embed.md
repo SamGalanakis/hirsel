@@ -241,6 +241,117 @@ slot**. It is built from the same runtime crates without the `standalone` featur
   startup.
 - Its Rust code is built with `panic = "abort"`, so no unwind ever crosses the C boundary.
 
+**Exec in an embedded launch.** On Linux and macOS an embedded launch may hold `Exec` grants
+([exec](exec.md)); on iOS EMB-7 refuses them. A standalone run supervises its children in its
+own process (EXEC-6, EXEC-7), and to do so it changes that process's state: it becomes a child
+subreaper, makes itself non-dumpable, resets an ignored `SIGCHLD`, and kills and reaps
+unregistered children its scans find. None of that is admissible in a process the program
+does not own. So an embedded launch runs the same Supervisor in a **helper process**, one per
+launch, and talks to it over a socket. The host's process state is never changed. There is
+one Supervisor implementation; no in-process embedded variant exists.
+
+- **The helper image.** The helper is `hirsel-exec-helper`, an executable the toolchain
+  builds from the same sources and release as the runtime archive and ships beside it. It
+  carries no set-ID bit, file capability or entitlement of its own.
+  Its `main` runs the Supervisor and nothing else; it never runs the host's code, so no
+  initializer, lock or startup work of the host's runs in it. A static library has no
+  location of its own, so the host names the image: `exec_helper` in `hirsel_embed_config`
+  is the helper's absolute path. It is read only when the grant text holds an `Exec` grant.
+  On macOS a sandboxed application embeds the helper as nested code, signed with the App
+  Sandbox `inherit` entitlement, so it runs inside the host's sandbox.
+- **Start.** When the grant text holds an `Exec` grant, `start` loads each grant's policy
+  file and pins its images (EXEC-4). It then starts the helper with `posix_spawn`, before the
+  place worker exists:
+  - the argument vector is the image path alone, and the environment is empty;
+  - descriptors 0, 1 and 2 are `/dev/null`, and descriptor 3 is one end of a close-on-exec
+    `AF_UNIX` stream socket pair whose other end the runtime keeps. On macOS
+    `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every other descriptor at spawn. On Linux the
+    helper's `main` closes every descriptor from 4 up with `close_range` before it does
+    anything else, and exits with status 2 if it cannot, or if descriptor 3 is not a
+    Unix-domain stream socket;
+  - every signal is at its default action, the signal mask is empty, and the helper leads
+    its own process group, so job-control signals sent to the host's group never reach it.
+- **The startup verdict.** The helper starts the Supervisor, which runs EXEC-7's startup
+  checks, and answers `READY` with its identity: the release version and a digest of the
+  protocol's sources. `start` waits for the answer for at most `start_timeout_ms`. Each of
+  the following is a start refusal (`HIRSEL_REFUSED`), with this reason in `ended`, and the
+  helper has been killed if need be and reaped before `start` returns:
+
+  | Case | Reason |
+  |---|---|
+  | an `Exec` grant and an empty `exec_helper` | `ExecHelper(not supplied)` |
+  | `exec_helper` is not an absolute path | `ExecHelper(not an absolute path: P)` |
+  | no file at the path | `ExecHelper(missing: P)` |
+  | the image may not be executed | `ExecHelper(denied: P)` |
+  | an identity other than the runtime's own | `ExecHelper(version: got X, want Y)` |
+  | no answer within `start_timeout_ms` | `ExecHelper(no answer)` |
+  | the helper ends before it answers | `ExecHelper(ended during startup)` |
+  | the Supervisor's startup refusal, such as EXEC-7's | its text, e.g. `Exec requires an unprivileged run` |
+
+- **The protocol.** A frame is a little-endian `u32` length, a tag byte and its fields; a
+  string or byte field is a little-endian `u32` length and its bytes. Descriptors travel as
+  `SCM_RIGHTS` on the `sendmsg` that carries the frame's first byte, and both ends receive
+  them close-on-exec. Neither end's sends raise `SIGPIPE` (`MSG_NOSIGNAL` on Linux,
+  `SO_NOSIGPIPE` on Darwin).
+
+  | From | Tag | Fields | Descriptors |
+  |---|---|---|---|
+  | runtime | `SPAWN` | child id, piped streams, image pin, verified image path, argv, envp | the working directory |
+  | runtime | `SIGNAL` | child id, `SIGINT`, `SIGTERM` or `SIGKILL` | |
+  | runtime | `RELEASE` | child id | |
+  | helper | `READY` | the helper's identity | |
+  | helper | `REFUSED` | the refusal's text | |
+  | helper | `SPAWNED` / `SPAWN_FAILED` | child id; the errno on failure | the child's pipe ends |
+  | helper | `EXITED` / `WAIT_FAILED` | child id; exit code or signal, or the errno | |
+
+  The helper checks the pin again before each spawn (EXEC-4), so a child starts exactly as a
+  standalone run's would (EXEC-3).
+- **Children.** Every child is the helper's child, never the host's. A piped stream's end
+  reaches the runtime by `SCM_RIGHTS`; a stream that is not piped is the helper's
+  `/dev/null`, since an embedded launch has no standard streams of its own. A wait parks
+  until `EXITED` arrives. A signal is a `SIGNAL` frame. Dropping a `Proc` sends `RELEASE`, and
+  the helper kills and reaps the child as EXEC-6 says.
+- **The launch's end.** When the launch's grants close, at `stop` or at a spontaneous end,
+  the runtime shuts down its end of the socket. The helper answers with EXEC-6's orderly
+  end: it kills and reaps every child, then exits. The runtime reaps the helper before
+  `stop` returns: on Linux through a pidfd opened at spawn, so it can never reap a host
+  child that reused the helper's pid, and on Darwin with `waitpid` on its pid. A host that
+  reaps every child itself, or ignores `SIGCHLD`, may take that status first; the helper is
+  gone either way. The helper's exit raises one `SIGCHLD` in the host; that signal is the
+  only trace of the helper in the host's process state.
+- **Helper death.** If the helper ends unexpectedly, its socket closes. The launch ends with
+  the run stop `ExecSupervisor` (`HIRSEL_END_RUN_STOP`), every pending wait returns, and the
+  host goes on. On Linux every direct child dies with the helper, by the parent-death signal
+  that EXEC-6 arms against the helper's supervisor thread; deeper descendants may keep
+  running, as EXEC-6 says of a killed run. On macOS a child has no parent-death signal, so a
+  child of a killed helper keeps running until it exits by itself. If the host process dies,
+  the helper's socket closes, and the helper performs the orderly end above.
+- **Host state.** The runtime never makes the host a child subreaper. It never changes the
+  host's dumpable setting, its `SIGCHLD` action or any host thread's signal mask, and it
+  never waits for, signals or reaps any process but the helper. A child the host started
+  stays the host's to wait for.
+- **No build binding.** An embedded `Exec` grant has no build-binding digest (EMB-4 seals no
+  launch policy). The grant text `Exec=FILE NAME[,NAME]` and the policy file it names, by an
+  absolute path read at `start`, are the authority.
+- **What the helper cannot prevent.** A host that forks without exec while a launch runs
+  gives the fork a copy of the runtime's socket end, since close-on-exec acts only at exec.
+  The helper then sees no close until that fork has also exited or exec'd.
+
+Laws (Linux; the C host links with `-Wl,--wrap=exit,--wrap=_exit`, and a constructor of the
+host holds an exclusive file lock for the whole run, so a helper that ran the host's
+initializers would never answer):
+
+- a send to the stdin of an exited child under `SIGPIPE = SIG_DFL` returns an error, and the
+  host process goes on;
+- across a launch that spawns, waits for and releases children, the host's subreaper flag,
+  dumpable flag and `SIGCHLD` action are unchanged, a child the host started is neither
+  reaped nor signalled, and after `stop` that child is the host's only child and the host
+  reaps it;
+- `SIGKILL` of the helper kills its running child, ends the launch with `ExecSupervisor`,
+  and leaves the host with no child;
+- a missing helper refuses `start` with `ExecHelper(missing: P)`, and a helper answering
+  another identity refuses it with `ExecHelper(version: ...)`.
+
 **What still ends the host process.** Four cases end the process. Each is stated here with
 the reason it cannot be contained, and no other Hirsel outcome may end the host:
 
@@ -445,6 +556,7 @@ target is not among them.
 | `n_place` | The place size, as for every launch. Registration runs under it at `start`: a place that does not fit refuses `start` with `PlaceCapacity(Room)`, with [launch](launch.md#describe-launch)'s registration semantics. |
 | `grants` | The grant text, in the grammar `hirsel run` takes, subject to the embedded grant-source restrictions below (no environment, working directory or inherited descriptor for any grant). A grant the target cannot honour was refused at build (EMB-7, EMB-8). A grant outside the program's declared wants is refused at `start`. |
 | `dir_bases` | The bases of the launcher-resolved directory forms (below). |
+| `exec_helper` | The absolute path of `hirsel-exec-helper`, or empty. Read only when the grant text holds an `Exec` grant ("Exec in an embedded launch" below). |
 | `store_dir` | An absolute path to the place's store directory. The host creates it, and it must persist across launches (on iOS, under Application Support, never under Caches). The runtime opens it once, as the launcher does. |
 | `client_bytes` | The bound on the runtime's host-client storage (EMB-4 "Host-client storage"). Must be at least the read/control progress floor, or `start` refuses with `ClientBytesTooSmall`. |
 | `start_timeout_ms` | Positive millisecond bound on `start` reaching Ready (`0` is `HIRSEL_ABI_MISMATCH`). If registration does not reach Ready before expiry, `start` signals generation end (interrupting provider waits and pure Hirsel loops via the embed step check), joins workers, releases resources and refuses with `PlaceTimedOut` (subject only to the native foreign-code liveness boundary above). |
@@ -593,6 +705,7 @@ typedef struct {
   hirsel_bytes grants;        /* UTF-8 grant text */
   hirsel_bytes dir_bases;     /* UTF-8 base lines (EMB-3) */
   hirsel_bytes store_dir;     /* UTF-8 absolute path */
+  hirsel_bytes exec_helper;   /* absolute path of hirsel-exec-helper, or empty (EMB-3) */
   void *context;              /* passed back unread; retained until ended returns */
   void (*ended)(void *context, uint32_t code, hirsel_bytes reason);
 } hirsel_embed_config;
@@ -758,7 +871,7 @@ returns `HIRSEL_ABI_MISMATCH` with no callback and no effect.
 |---|---|---|
 | a struct shorter than its v1 minimum, a nonzero tail, a NULL required pointer or `out`, a bad `hirsel_bytes`, a wrong `abi` or `manifest_fp`, or `start_timeout_ms == 0` | `HIRSEL_ABI_MISMATCH` | none |
 | `start` while the registry is not `Stopped` | `HIRSEL_ALREADY_RUNNING` | none |
-| `start` refused for `UnsupportedCpu`, grants, `Dir*`, `SecretSource`, `StoreOverlapsDir`, unrecoverable store, `PlaceCapacity(Room)`, `PlaceTimedOut`, `ClientBytesTooSmall`, target capability (EMB-7) or `FaultHandlerReplaced`, or a start that fails after reservation | `HIRSEL_REFUSED` | `config.ended` once, synchronously |
+| `start` refused for `UnsupportedCpu`, grants, `Dir*`, `SecretSource`, `StoreOverlapsDir`, unrecoverable store, `PlaceCapacity(Room)`, `PlaceTimedOut`, `ClientBytesTooSmall`, target capability (EMB-7), `FaultHandlerReplaced` or `ExecHelper(..)`, or a start that fails after reservation | `HIRSEL_REFUSED` | `config.ended` once, synchronously |
 | `open` on a stale or not-`Running` handle | `HIRSEL_STOPPED` | none |
 | `open` whose session record or credential copy exceeds host-client storage, or is refused by the C allocator | `HIRSEL_FULL` or `HIRSEL_HOST_MEMORY` | none |
 | `open` whose dial is refused by the place (HTTP 503: full or draining) or whose Hello or credential fails | `HIRSEL_OK`, then the session ends | `session_ended` once (below) |
@@ -1429,7 +1542,7 @@ waste:
 | import that no link-kit stub exports | the import audit (EMB-1), before the archive is written | `UnlistedImport(name, member)` |
 | bindings whose manifests differ between Apple targets | `hirsel sdk swift` <!-- doc-ref: planned -->, before output | `TargetDependentEntries(a, b)` |
 | arguments that break ABI v1 (EMB-4 "Validating arguments", including `start_timeout_ms == 0`) | the embed ABI, before any read past `size` or registry reservation | `HIRSEL_ABI_MISMATCH` |
-| `UnsupportedCpu`, grant outside the program's wants, a grant for a capability EMB-7 refuses on the target, `DirBase`, `DirSource`, `DirUnavailable`, `SecretSource`, `StoreOverlapsDir`, an unopenable or unrecoverable store, `ClientBytesTooSmall`, `PlaceCapacity(Room)`, `PlaceTimedOut`, `FaultHandlerReplaced` | the embedded launch's `start` | `HIRSEL_REFUSED`, with the reason in `ended` |
+| `UnsupportedCpu`, grant outside the program's wants, a grant for a capability EMB-7 refuses on the target, `DirBase`, `DirSource`, `DirUnavailable`, `SecretSource`, `StoreOverlapsDir`, an unopenable or unrecoverable store, `ClientBytesTooSmall`, `PlaceCapacity(Room)`, `PlaceTimedOut`, `FaultHandlerReplaced`, `ExecHelper(..)` | the embedded launch's `start` | `HIRSEL_REFUSED`, with the reason in `ended` |
 | refused stack-growth `mprotect` (in `fiber::room` pre-commit or the fault handler) or refused stack/payload mapping (EMB-3) | the embedded runtime | `HIRSEL_END_RUN_STOP` (`"HostMemory"`); the unit and generation abort fail-closed, the host survives, and any failed-growth stack is retired and unmapped whole (`munmap`) |
 
 The last three rows are the only ones after the build. They concern the host's inputs (its

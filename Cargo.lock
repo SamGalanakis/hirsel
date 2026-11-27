@@ -1180,6 +1180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-exec-helper"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-rt",
+]
+
+[[package]]
 name = "hirsel-guard"
 version = "0.1.0"
 dependencies = [

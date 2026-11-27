@@ -20,3 +20,16 @@ pub(crate) fn check_ready_scratch() {
     release_ready_scratch(&mut arms, ready_scratch_bytes());
     assert!(arms.capacity() * 16 <= 4096);
 }
+
+/// Discard the readies this thread's scheduler-less waiter holds. The Exec
+/// helper's serving thread waits on it and rescans every child on each wake.
+/// iOS builds no Exec helper.
+#[allow(dead_code)]
+pub(crate) fn clear_alone() {
+    super::ALONE.with(|(readies, _)| {
+        readies.lock().clear();
+        readies
+            .pending
+            .store(false, std::sync::atomic::Ordering::Release);
+    });
+}

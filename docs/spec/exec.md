@@ -499,6 +499,13 @@ remote shell) are not descendants at all.
 The supervisor uses direct-child death and reaping. Programs that start other
 processes retain responsibility for their teardown.
 
+**In an embedded launch** the supervisor runs, unchanged, in the launch's helper process
+([EMB-3](embed.md#emb-3-embedded-launch), "Exec in an embedded launch"). In this section
+"the run" is then the helper. The helper is the child subreaper, its scans list its own
+children, its orderly end comes when the launch's grants close, and its death is the host
+killing the run. On macOS no parent-death signal exists, so a child of a killed helper keeps
+running. The host process is never a subreaper, and no scan lists the host's children.
+
 Laws:
 
 - after a drop, in an orderly run, the direct child is reaped before the run exits;
@@ -532,6 +539,14 @@ through `/proc` or `process_vm` calls, read its descriptor links, or take a desc
 `pidfd_getfd`. So no child gains any of these, whatever the host's tracing policy. With
 EXEC-3's descriptor rule, this keeps `Secret` bytes held in the run's private memory and
 every run descriptor out of the children's reach.
+
+**In an embedded launch** the check, the non-dumpable setting and the supervisor thread
+belong to the launch's helper process ([EMB-3](embed.md#emb-3-embedded-launch)). Every child
+is created from the helper, starts from the helper's checked credentials, and cannot attach
+to the helper. The host's dumpable setting is never changed. So the promise of the previous
+paragraph covers the helper's memory and descriptors, not the host's. `Secret` bytes live in
+the host, and a child can reach them only where the host's kernel policy lets a process of
+the same user attach to an ancestor that is dumpable (on Linux, Yama `ptrace_scope` 0).
 
 That is all the promise covers. The run's command line, status and other public process
 metadata stay readable by every process of the user. Memory the run shares with a file the

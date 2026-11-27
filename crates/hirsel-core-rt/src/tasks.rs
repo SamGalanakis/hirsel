@@ -247,7 +247,7 @@ pub(crate) struct ReadyArm {
 }
 
 #[path = "tasks_ready.rs"]
-mod ready;
+pub(crate) mod ready;
 #[cfg(test)]
 pub(crate) use ready::check_ready_scratch;
 use ready::{ready_scratch_bytes, release_ready_scratch};

@@ -2,7 +2,7 @@ use super::Grant;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::probe;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::host::exec::Supervisor;
+use crate::host::{exec::Supervisor, exec_helper::Custody};
 use crate::{
     entry::{OsConfig, StartupError},
     process::View,
@@ -112,8 +112,8 @@ unsafe fn load(
     let mut grants = Vec::with_capacity(requests.len());
     let mut lines = Vec::new();
     for policy in requests {
-        let (grant, approval) =
-            Grant::prepare(policy, supervisor.clone()).map_err(StartupError::Exec)?;
+        let (grant, approval) = Grant::prepare(policy, Custody::Local(supervisor.clone()))
+            .map_err(StartupError::Exec)?;
         grants.push(grant);
         lines.extend(approval);
     }

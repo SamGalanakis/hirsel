@@ -20,7 +20,7 @@ pub(crate) use narrow::NarrowedGrant;
 pub(crate) enum Grant {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Native {
-        supervisor: Arc<crate::host::exec::Supervisor>,
+        custody: crate::host::exec_helper::Custody,
         profiles: Arc<BTreeMap<String, PinnedProfile>>,
         rules: ExecRules,
     },
@@ -42,11 +42,9 @@ impl Grant {
         match self {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::Native {
-                supervisor,
-                profiles,
-                ..
+                custody, profiles, ..
             } => Self::Native {
-                supervisor: supervisor.clone(),
+                custody: custody.clone(),
                 profiles: profiles.clone(),
                 rules,
             },
@@ -70,16 +68,17 @@ impl Grant {
         Ok(policy)
     }
 
+    /// A native grant whose children `custody` holds, and its approval lines.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn prepare(
+    pub(crate) fn prepare(
         policy: Policy,
-        supervisor: Arc<crate::host::exec::Supervisor>,
+        custody: crate::host::exec_helper::Custody,
     ) -> Result<(Self, Vec<String>), String> {
         let rules = policy.rules();
         let (profiles, lines) = policy.pin_images()?;
         Ok((
             Self::Native {
-                supervisor,
+                custody,
                 profiles: Arc::new(profiles),
                 rules,
             },

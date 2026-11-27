@@ -1,0 +1,149 @@
+// Runner place fixture for the embedded Exec laws (EMB-3 "Exec in an
+// embedded launch"): one granted entry whose mode picks the law.
+
+type PlaceTables: shareable + send {
+    items: store.Table[u64, Bytes],
+}
+
+type PlaceSeed: send {
+    exec: Exec,
+}
+
+type PlaceGrant: send = Call(Exec) | Bound
+
+fn place_schema(mut d: store.Declare) -> Result[PlaceTables, store.Error] {
+    let tbl = store.declare_table(mut d, "items", std.codec.key_u64(), std.codec.of_bytes())?
+    Ok(PlaceTables(items: store.finish(mut d, take tbl)?))
+}
+
+fn close_child(take child: Proc) {}
+
+fn launch(take program: String, take args: List[Bytes], stdin: Stdio) -> Launch {
+    Launch(program: program, args: args, env: list.new(), dir: "work", path: "", stdin: stdin, stdout: Discard, stderr: Discard)
+}
+
+fn sleeper() -> List[Bytes] {
+    let mut args: List[Bytes] = list.new()
+    list.push(mut args, string.into_bytes("1000"))
+    take args
+}
+
+// Mode 0: a send to the stdin of a child that has exited fails (1).
+// Mode 1: one child exits and is waited, one is released while it runs (2).
+// Mode 2: a child that never exits is waited for ever.
+fn exec_law(g: PlaceGrant, _caller: store.Caller, take mode: u64) -> Result[u64, Capacity] waits {
+    let Call(e) = view g else {
+        return Ok(0u64)
+    }
+    if mode == 2u64 {
+        let Spawned(proc, _, _, _) = match exec.spawn(e, launch("sleep", sleeper(), Discard)) {
+            Ok(take s) => take s,
+            Error(_) => return Ok(20u64),
+        }
+        let mut child = take proc
+        let _ = exec.wait(mut child, Never)
+        close_child(take child)
+        return Ok(21u64)
+    }
+    let stdin = if mode == 0u64 { Piped } else { Discard }
+    let Spawned(proc, input, _, _) = match exec.spawn(e, launch("true", list.new(), stdin)) {
+        Ok(take s) => take s,
+        Error(_) => return Ok(10u64),
+    }
+    let mut child = take proc
+    match exec.wait(mut child, Never) {
+        Ok(Exited(0)) => {},
+        _ => return Ok(11u64),
+    }
+    close_child(take child)
+    if mode == 0u64 {
+        let mut pipe = option.unwrap(take input)
+        return match host.send_pair(mut pipe, string.into_bytes("x"), string.into_bytes(""), Never) {
+            Error(_) => Ok(1u64),
+            Ok(_) => Ok(12u64),
+        }
+    }
+    let Spawned(running, _, _, _) = match exec.spawn(e, launch("sleep", sleeper(), Discard)) {
+        Ok(take s) => take s,
+        Error(_) => return Ok(13u64),
+    }
+    close_child(take running)
+    Ok(2u64)
+}
+
+fn mint_call(seed: PlaceSeed, _h: PlaceTables, _i: ()) -> Result[PlaceGrant, Capacity] {
+    Ok(Call(seed.exec))
+}
+
+fn mint_bind(_seed: PlaceSeed, _h: PlaceTables, _i: ()) -> Result[PlaceGrant, Capacity] {
+    Ok(Bound)
+}
+
+fn bind_caller(_g: PlaceGrant, supplied: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    runner.ingress.caller((), supplied)
+}
+
+fn call_entries() -> runner.triggers.Entries {
+    let mut listed = runner.triggers.empty_entries()
+    result.unwrap(runner.triggers.allow(mut listed, result.unwrap(runner.triggers.granted(code.describe(exec_law)))))
+    take listed
+}
+
+fn place_registration(mut r: runner.Registry[PlaceGrant, PlaceTables]) -> Result[(), runner.RegisterError] {
+    runner.granted(mut r, code.describe(exec_law), 131072u64, runner.DEFAULT_STEPS)
+}
+
+pub fn main(
+    store_dir: Dir,
+    e: Exec,
+    n: Net,
+    c: Clock,
+    random: Random,
+    tasks: Tasks,
+    a: Args,
+    process: Process,
+    errors: Stderr,
+) -> Result[(), Exit] waits {
+    let reg = code.describe(place_registration)
+    let schema = code.describe(place_schema)
+    runner.main(a, process, errors, tasks, c, reg, schema, scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let call_mint = runner.CallMint(
+            mint: runner.Mint(seed: PlaceSeed(exec: e), mint: mint_call, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS),
+            entries: call_entries(),
+        )
+        let grants: runner.Grants[PlaceGrant, PlaceTables, PlaceSeed] = runner.Grants(
+            attempt: None,
+            call: Some(take call_mint),
+            claim: None,
+            bind: Some(runner.Mint(seed: PlaceSeed(exec: e), mint: mint_bind, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)),
+        )
+        let mut sess = runner.wire_defaults(131072u64)
+        sess.n_relay = 262144u64
+        // Each granted call runs in its session owner, within n_granted.
+        sess.n_granted = 131072u64
+        let cfg: runner.PlaceConfig[PlaceGrant, PlaceTables, PlaceSeed] = runner.PlaceConfig(
+            backing: Disk(store_dir),
+            sizes: store.derived_sizes(),
+            selection: runner.launch_selection(a) ?=> Usage,
+            place: reg,
+            n_place: 16777216u64,
+            on_migrate: None,
+            schema: schema,
+            session: sess,
+            max_sessions: 4u64,
+            proxies: list.new(),
+            n_publisher: 8388608u64,
+            listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)),
+            net: n,
+            tasks: tasks,
+            clock: c,
+            random: random,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64),
+            wire: Some(runner.wire(code.describe(bind_caller), 4096u64, 65536u64)),
+            grants: Some(take grants),
+            triggers: None,
+            idle: None,
+        )
+        Ok(runner.operate_report(take cfg, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start)
+    })
+}

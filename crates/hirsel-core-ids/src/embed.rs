@@ -88,6 +88,7 @@ typedef struct {
   hirsel_bytes grants;        /* UTF-8 grant text */
   hirsel_bytes dir_bases;     /* UTF-8 base lines (EMB-3) */
   hirsel_bytes store_dir;     /* UTF-8 absolute path */
+  hirsel_bytes exec_helper;   /* absolute path of hirsel-exec-helper, or empty (EMB-3) */
   void *context;              /* passed back unread; retained until ended returns */
   void (*ended)(void *context, uint32_t code, hirsel_bytes reason);
 } hirsel_embed_config;

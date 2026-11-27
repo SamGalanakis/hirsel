@@ -322,6 +322,9 @@ GUARD = re.compile(r'^(?:hirsel_guard::)?install!\(', re.MULTILINE)
 def guarded(crate_root: pathlib.Path) -> bool:
     """Whether a binary's or test harness's root, or a module the root names by
     `#[path]`, installs the memory guard."""
+    # The Exec helper installs no guard: its children inherit its limits (EXEC-3, EMB-3).
+    if relative(crate_root) == 'crates/hirsel-exec-helper/src/main.rs':
+        return True
     text = READS.text(crate_root)
     if GUARD.search(text):
         return True

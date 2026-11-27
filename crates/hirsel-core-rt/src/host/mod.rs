@@ -5,6 +5,23 @@
 #[cfg(target_vendor = "apple")]
 mod darwin;
 pub(crate) mod envelope;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod exec_helper;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use exec_helper::embed_grants as embed_exec;
+/// The `main` of the shipped `hirsel-exec-helper` executable (EMB-3).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use exec_helper::main as exec_helper_main;
+/// EMB-7: an iOS launch refuses every Exec grant before this.
+#[cfg(target_os = "ios")]
+pub(crate) fn embed_exec(
+    _: &[hirsel_core_net::exec::Request],
+    _: &[u8],
+    _: u32,
+    _: &std::sync::Arc<crate::run_stop::GenerationEnd>,
+) -> Result<Box<[crate::exec::Grant]>, String> {
+    Ok(Box::default())
+}
 pub(crate) mod inherited;
 #[cfg(target_os = "linux")]
 mod linux;

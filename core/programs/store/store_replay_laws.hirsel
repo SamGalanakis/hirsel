@@ -75,6 +75,7 @@ fn replay_law_capture(db: Db, d: Dir, c: Clock, floor: u64, wanted: u64) -> Resu
     if db.checkpointed != floor || tip.head != wanted {
         replay_law_mismatch(tip, "journal coverage")
     }
+    journal_law_await_end(db)?;
     let mut progress = LogCaptureProgress(next_id: 1, last: None)
     let due = clock.deadline_after_ms(host.mono_ns(c), 1000)
     let Some(take replayed) = log_follow_capture(d, c, due, mut progress, Some(db.store), db.ceiling, None)? else {
@@ -95,7 +96,7 @@ fn journal_test_live_replay_versions(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let dir = disk_test_directory(d)
     let mut options = journal_crash_options()
     options.pack_bytes = 65536
-    let mut db = open(tasks, dir, c, r, options)?
+    let mut db = open_directory(tasks, dir, c, r, options, JOURNAL_LAW_NAMED_END_CADENCE)?
     let mut declaring = declare(db, Migrate)?
     let mut declared_rows = declare_table(mut declaring, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let _ = index(mut declaring, mut declared_rows, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?

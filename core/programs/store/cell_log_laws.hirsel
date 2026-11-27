@@ -320,7 +320,7 @@ fn cell_law_nested(mut db: Db, target: Cell[Bytes], head_value: Bytes, outer_val
 fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let dir = disk_test_directory(d)
     let options = journal_crash_options()
-    let mut db = open(tasks, dir, c, r, options)?
+    let mut db = open_directory(tasks, dir, c, r, options, JOURNAL_LAW_NAMED_END_CADENCE)?
     let mut declaring = declare(db, Migrate)?
     let cell = declare_cell(mut declaring, "one", std.codec.of_bytes())?
     let _ = seal(mut db, take declaring)?
@@ -365,6 +365,7 @@ fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -
         cell_law_require(list.len((changes(cell_reader, old, current)?).rows) == 1, "cell diff after transition")?
         durable(mut db, receipt)?
     }
+    journal_law_await_end(db)?;
     let mut family = followers()
     let plan = follower_law_plan(Directory, options)
     let service = follower_law_service(tasks, plan, 1)?

@@ -517,7 +517,7 @@ fn log_follower_dropped_candidate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
 fn log_follower_unreadable_end(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
-    let mut writer = open(tasks, directory, c, r, options)?
+    let mut writer = open_directory(tasks, directory, c, r, options, JOURNAL_LAW_NAMED_END_CADENCE)?
     let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if !typed_put(mut writer, rows, 1, 10) {
@@ -535,6 +535,7 @@ fn log_follower_unreadable_end(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         fail("G3: the side write was not committed")
     }
     durable(mut writer, done.ticket)?
+    journal_law_await_end(writer)?;
     let side_tip = version(snapshot_of(writer, side)?)
     if side_tip != held + 1 || version(snapshot(writer)) != main_tip {
         fail("G3: the side write did not move side alone")

@@ -827,7 +827,7 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
 
 fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir, Db, u64), Error] waits {
     let directory = disk_test_directory(d)
-    let mut db = open_directory(tasks, directory, c, r, journal_crash_options(), JournalCadence(group_delay_us: 0, end_groups: 1, end_interval_ms: 10))?
+    let mut db = open_directory(tasks, directory, c, r, journal_crash_options(), JOURNAL_LAW_NAMED_END_CADENCE)?
     let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let Committed(written) = run(mut db, None, copy_env(rows), fn(mut tx, target) -> Result[(), Error] {
@@ -840,16 +840,7 @@ fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir
         return Error(Missing("10,000-row journal commit"))
     }
     durable(mut db, written.ticket)?
-    // The live capture reads the named END. Its update follows the ack and
-    // precedes the worker's handling of the following barrier.
-    {
-        let journal = disk_state(db)
-        result.unwrap(channel.send(journal.journal, Barrier))
-        match result.unwrap(channel.receive(journal.written)) {
-            Written => (),
-            WriteFailed(problem) => return Error(Poisoned(problem)),
-        }
-    }
+    journal_law_await_end(db)?;
     Ok((directory, take db, option.unwrap(written.info).id.version))
 }
 

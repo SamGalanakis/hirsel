@@ -23,6 +23,16 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
+/// The compiler a test's request children run: this test binary on Linux, its
+/// installed copy on Darwin, whose default link is the installation's recipe.
+#[cfg(test)]
+pub(crate) fn test_request_compiler() -> PathBuf {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive"));
+    test_compiler(&runtime)
+}
+
 fn check_runtime_directory(path: &Path, uid: libc::uid_t) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0 {

@@ -2108,7 +2108,7 @@ fn request_child() {
     crate::request::main(args)
 }
 pub(super) fn tape_request_command(args: &[String], directory: &Path) -> std::process::Command {
-    request_command_at(&std::env::current_exe().unwrap(), args, directory)
+    request_command_at(&crate::host::test_request_compiler(), args, directory)
 }
 
 pub(crate) fn request_command_at(

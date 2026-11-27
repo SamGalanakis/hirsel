@@ -1058,13 +1058,12 @@ impl PackageLaw {
         if matches!(arguments[0], "build" | "publish") {
             args.extend(["--code-store".into(), self.path("code-store").to_str().unwrap().into()]);
         }
+        let plain = native_options(Backend::Cranelift, self.dir.path()).runtime;
         if matches!(arguments[0], "run" | "test" | "build") {
-            let options = native_options(Backend::Cranelift, self.dir.path());
-            let Link::Driver(cc) = options.link else { unreachable!() };
-            let runtime = if arguments.iter().any(|arg| matches!(*arg, "--laws" | "--write-laws" | "--laws-baseline")) { env_record_runtime() } else { options.runtime };
+            let runtime = if arguments.iter().any(|arg| matches!(*arg, "--laws" | "--write-laws" | "--laws-baseline")) { env_record_runtime() } else { plain.clone() };
             args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
-            args.extend(["--cc".into(), cc.canonicalize().unwrap().to_str().unwrap().into()]);
         }
+        // No --cc: the child links as the host's compiler does by default.
         let mut command = process::tape_request_command(&args, self.dir.path());
         command.env("XDG_CACHE_HOME", self.path("cache"));
         command

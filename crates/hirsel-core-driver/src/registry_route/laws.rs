@@ -764,6 +764,7 @@ fn handle(
     configs: &BTreeMap<&str, Arc<rustls::ServerConfig>>,
     state: &Mutex<Wire>,
 ) {
+    socket.set_nonblocking(false).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();

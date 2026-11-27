@@ -742,6 +742,8 @@ impl Proxy {
             while !stopped() {
                 match public.accept() {
                     Ok((stream, _)) => {
+                        // Darwin inherits O_NONBLOCK from the listener onto accepted sockets.
+                        stream.set_nonblocking(false)?;
                         let current = Arc::clone(&current);
                         let codec = Arc::clone(&codec);
                         connections.0.push(thread::Builder::new().spawn(move || {

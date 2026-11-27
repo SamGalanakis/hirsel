@@ -167,15 +167,24 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let short = string.as_bytes("s")
     // AP3: 24-byte header, 7 common key bytes, and 8 bytes per slot
     // including its one-byte key suffix. A typed value adds six bytes.
-    // Five 920-byte values force a split, with the leftmost minimax cut 2/3.
+    // Four 920-byte values fit one leaf: 31 + 4*8 + 4*920 = 3743 bytes.
+    // Inserting key 2 between them makes a five-entry leaf over 4096, which
+    // N6 cuts at the leftmost minimax cut 2/3: 1887 and 2815 bytes. (A five-row
+    // commit on the empty table would pack greedily instead, AP13 by v2.163.)
     let filled = run(mut db, None, (copy_env(rows), copy_env(wide)), fn(mut tx, call_env) -> Result[(), Error] {
-        for key in 0u64 .. 5 {
+        for key in[0u64, 1u64, 3u64, 4u64] {
             put(mut tx, call_env.0, key, call_env.1)?
         }
         Ok(())
     })?
     if let Committed(_) = take filled {} else {
         return Error(Missing("initial commit"))
+    }
+    let inserted = run(mut db, None, (copy_env(rows), copy_env(wide)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 2u64, call_env.1)
+    })?
+    if let Committed(_) = take inserted {} else {
+        return Error(Missing("middle insert"))
     }
     {
         let Some(root) = std.page.collection_child(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(rows.id)?) else {

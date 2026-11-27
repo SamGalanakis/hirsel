@@ -448,7 +448,7 @@ store@1/store/test_node_ids src=99fe7d33b3912d48 sig=717725f33efbd1ed run=aff7b6
 store@1/store/test_overwrite_account src=8a6d3cd5dc9b835b sig=91c7e67b7d893d44 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_paged_collection_paths src=de13affe8cdc4c7f sig=0b45892489d696a7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_paged_row_account src=fb3e835b476a9949 sig=86a278a074f0ab17 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/test_paged_shrinking_overwrite src=b174c6b6d3ce4806 sig=f7e69053cf473ad2 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/test_paged_shrinking_overwrite src=6edb6bd0c7fde634 sig=f7e69053cf473ad2 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_pin_settle src=df8e2231d042308f sig=805433a0ac60fa47 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_pinned_delete src=20032ee06996a999 sig=ed4ee298a3026c4a run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_pinned_draft_at_bound src=d131cb3ecedab126 sig=d55c7256ef73faed run=ea720f3846592392 bug=- oracle=- rows=pending

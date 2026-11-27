@@ -2753,10 +2753,10 @@ fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {
     Ok(types.key_word(7))
 }
 
-// L33: AM5 and MEM-24 give 4096 + 32 bytes. MEM-30 gives 8192 + 6 steps.
+// L33: AM5 and MEM-24 give 4096 + 32 bytes. MEM-30 gives 8192 + 7 steps.
 pub fn law_call_reserve(c: Clock) -> bool waits {
     let byte_total = 4128u64
-    let step_total = 8198u64
+    let step_total = 8199u64
     let plan = Plan(n_e: 4096, s_e: 8192, reply_max: 4096)
     let Some(grant) = call_reserves(plan) else {
         return false

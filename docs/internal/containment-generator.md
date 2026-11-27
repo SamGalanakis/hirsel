@@ -37,7 +37,7 @@ seed ─► generator (choice stream) ─► package + predictions ─► hirsel
                 └────── tag streams, step and byte reports ──► oracles O1–O5
                                                              │ red
                                                              ▼
-                                minimise ─► dedup key ─► alert line + issue + repro package
+                                minimise ─► dedup key ─► alert line + repro package
 ```
 
 The generator, the reducer and the campaign driver are Python modules beside the std
@@ -425,49 +425,54 @@ Two hazards, handled by exclusion rather than by an argument about the runtime:
 ## Minimising
 
 Determinism (SEM-8) means a red reproduces in one run on the build that showed it. The
-**predicate** is "the same oracle fails, with the same signature, on the cheapest build that
-reproduced it" (Cranelift dev before the LLVM builds, and natives at a small size before
-large). The reduction runs in three stages.
+**predicate** (`core/tools/containment_shrink.py`) is "the red's key appears again for the
+red's entry, alone in its package, on the cheapest build that reproduces it": Cranelift dev
+before the LLVM builds, then the build that showed it. An evaluator red, and every O2
+disagreement, also runs the resident evaluator with the work tally on, so O3b and O3c reds
+minimise too. The reduction runs in three stages.
 
-1. **Choice-stream shrinking** (Hypothesis-style internal reduction). The reducer works on
-   the choice stream:
-   - it deletes blocks of draws;
-   - it lowers draws toward 0, which always selects the simplest production;
-   - it re-runs the generator.
+1. **Choice-stream shrinking** (Hypothesis-style internal reduction) on the red entry's own
+   span of draws (the generator records each entry's span and each draw's bound). It deletes
+   blocks of 8, 4, 2 and 1 draws, lowers each draw toward 0 (to 0, half, and one less), and
+   re-runs the generator. Every candidate comes out of the generator, so it is well-typed and
+   its O3a floors stay exact.
+2. **AST deletion**: a top-level scope of the entry, then each statement of each scope (a
+   nested scope goes with its statement). An edited scope's O3a floor drops to 0, never
+   guessed, so O3a cannot fire on a hand-edited scope; work-floor reds skip this stage. A
+   candidate that fails to build is simply not a reproduction, so no separate `check` filter.
+3. **Size bisection** for the smallest size that still reproduces. For an E1- or E2-shaped
+   red this is the threshold directly: the seed 1 `clone_chain` red minimises in 92 runs and
+   16 CPU-s to one scope, `let dc0: Chain = clone(c)` under `bound steps 131072`, at chain
+   size 131059, the native stack's depth.
 
-   Every candidate comes out of the generator, so every candidate is well-typed and needs no
-   `check` filter.
-2. **AST passes**, each candidate filtered by `hirsel check`:
-   - delete a statement, a scope or an entry;
-   - replace an expression with a literal of its type;
-   - unwrap a nested scope;
-   - inline a function used once.
-3. **Size bisection.** Binary search finds the smallest size and the largest `n` that still
-   reproduce. For an E1-shaped red, this gives the threshold `L > n` directly.
+A red that shows only beside the package's other entries is minimised in its whole package:
+stage 1 still shrinks the entry's own draws, and stage 2 deletes the other entries one at a
+time. The seed 198 `signal:clone_chain` red (SIGSEGV on LLVM dev) is one: alone, its entry
+stops cleanly with `Stack`; in the package it goes from 39 draws and 32 entries to 18 and
+22, at size 640129, in 295 runs.
 
-Each red gets at most 300 predicate runs, or 10 CPU-minutes, whichever comes first, taken from
-the night's reserve. When the cap stops an unfinished red, it resumes first the next night.
+Each red gets at most 300 predicate runs or 10 CPU-minutes of child CPU, whichever comes
+first. Keys one entry cannot re-judge are reported with their seed and package and not
+minimised: O5, O4b, O4c and metering (they need the full metering pass), build and
+generator reds (no entry) and timeouts (300 s a try). An unfinished red is not resumed the
+next night; the next night that shows its key minimises it again from that night's seed.
 
 ## Filing
 
-The **dedup key** is `containment:<oracle>:<form>:<builds>`, for example
-`containment:run-stop:clone-glue:cranelift-dev,llvm-dev,llvm-release` or
-`containment:work-floor:structural-eq:all`. `<form>` is the production of the smallest
-statement still present after minimisation. For each new key, the driver:
+The **dedup key** is the red's oracle key, for example `containment:run-stop:clone_chain` or
+`containment:o3b:<form>`, where `<form>` is the production of the scope the bound belongs to.
+For each key a night shows, the driver:
 
-1. writes the minimised package, its argv, the oracle text and every build's output to
-   `$run/containment/reds/<key>/`;
-2. appends one line to the board's alert file (`$base/alerts/<date>.txt`), which
-   `tools/nightly-board.sh` already routes;
-3. files or updates one GitHub issue through `tools/ci/report_failure.py`. Today that script
-   only works inside Actions: it requires the `GITHUB_*` variables and matches only issues
-   opened by `github-actions[bot]`. The build adds a `--local` mode that matches the marker on
-   issues opened by the `gh`-authenticated user and takes the run link from an argument. The
-   existing marker format (`<!-- hirsel-ci-check: <key> -->`) stays, so a key that is already
-   open gets a comment instead of a second issue.
+1. writes the minimised package and `repro.json` (key, seed, entry, size, build, runs, CPU
+   and the per-stage reduction) to `$run/containment/minimised/<key>/`;
+2. appends one line to `$run/containment/alert.txt`: the key, how many runs showed it, the
+   first seed, entry, size and build, and the minimised package path (or why there is none,
+   with the unminimised batch package). `finish()` in `tools/nightly-board.sh` appends that
+   file to the board's alert file (`$base/alerts/<date>.txt`), as it does the bisect alert.
 
-Generator reds use the key `containment:generator:<refusal rule>`. The gap controls and the
-O2 vacuity floor report in the run summary, not as issues. A lane that fixes a red adds the
+There is no GitHub issue filing and no local mode in `tools/ci/report_failure.py`: a red is
+one alert line. A gap control that stops showing its excess adds a `containment gap-silent`
+line. The O2 vacuity floor stays in the run summary. A lane that fixes a red adds the
 minimised program to the containment law corpus (R6) as a law that is red on the parent.
 
 ## Nightly budget and hook
@@ -509,20 +514,21 @@ part, mean over the 200 batches):
 The 200 batches took 5044 CPU-s, and 33156 of 33156 compared records agreed exactly, so
 45 CPU-minutes cover about 107 batches, about 3400 programs.
 
-**Hook.** In `tools/nightly-board.sh`, a `run_containment` step follows the
-`core/tools/law_board.py nightly` call in the laws stage. It runs only when the toolchain
-built, as the steps around it do. It:
+**Hook.** In `tools/nightly-board.sh`, a `run_containment` step follows the laws stage and
+runs only when the toolchain built, as the steps around it do. It:
 
-- builds `//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval` and the testing and
-  charge-observation runtime archives that `std_native.py`'s metering already uses;
-- runs `taskset -c 8-11 python3 core/tools/containment_fuzz.py nightly`, passing the compiler,
-  the runtimes, `--cpu-seconds 3600`, the VOPR ledger and `--out "$run/containment"`;
-- records `containment_status` through a new `--containment-status` auxiliary in
-  `tools/board-freshness.py`, next to `--law-status`.
+- builds the driver, the driver and testing runtime archives and
+  `//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval` with `--show-json-output`;
+- runs `taskset -c 8-11 python3 core/tools/containment_fuzz.py nightly` on every build with
+  metering, `--cpu-seconds 3600`, `--base-seed` the board's start time, `--jobs 4
+  --run-jobs 1`, `--out "$run/containment"` and `--alert "$run/containment/alert.txt"`.
+  Batches stop at 45 CPU-minutes; then the gap controls run, then each red key is minimised
+  while the hour lasts (a red started inside the hour may run up to its 10-minute cap past it).
 
-A containment red never changes the board's own exit status. The hook is described here
-only: the edits to the script and to `board-freshness.py` belong to slice C4, and the systemd
-units (`tools/hirsel-board*.service`, `.timer`) stay as they are.
+Its exit status goes to `run.log` only. A containment red never changes the board's own exit
+status, `tools/board-freshness.py` is unchanged, and so are the systemd units
+(`tools/hirsel-board*.service`, `.timer`). Seeds come from the start time, not the
+`tools/sim-campaign` ledger, and O4d is not built.
 
 ## Reuse, not parallel machinery
 
@@ -534,7 +540,6 @@ units (`tools/hirsel-board*.service`, `.timer`) stay as they are.
 | the evaluator's report and meter | `Report.steps`, `step_floor` and `step_refusal`, and `StepMeter`, in `crates/hirsel-core-eval` | add the O3b tally beside `take_work` in `metering.rs`, behind `HIRSEL_TEST_WORK_TALLY` |
 | native step report and ceiling | `hirsel_core_test_step_report` and `HIRSEL_TEST_WORK_CEILING` in `crates/hirsel-core-rt/src/steps.rs` | none |
 | seed ledger, replaying earlier reds first, the timeout cap | `tools/sim-campaign` | allocate under the campaign name `containment-gen` |
-| issue dedup | `tools/ci/report_failure.py` | add a `--local` mode |
 | real memory against charge | `crates/hirsel-core-rt/src/peak.rs` | none |
 
 The Core IR differential in `crates/hirsel-cranelift/tests/support/providers.rs` is **not**
@@ -564,7 +569,7 @@ the new check working on real programs. There are no seeded bugs and no mutants.
 | **C1, vertical thread** | `containment_gen.py`: SplitMix64 stream, typed environment, the template with `clone`, `==`, loops, recursion and nested `isolate` / `bound steps` at both size classes, O3a self-checks, tag stream. `containment_fuzz.py`: one batch through the factored `std_native` path on evaluator and Cranelift dev, with O1, O2 and O3a. Measure the real batch cost and replace the estimates above | `containment_fuzz.py once --seed <s> --builds evaluator,cranelift-dev` at the large size class finds the expected O1 red: a deep `Box` chain cloned with `n` above depth/4 and depth past the stack (E2, while 3227 is open). If 3227 has landed, the gate is the measured cost table plus a green batch with ≥ 80% of records compared exactly | O2 differences in the tolerated rows; any E2-class O1 red still open after 3227 |
 | **C2, all builds and metering** | LLVM dev and LLVM release; O5 through `check_metering`; O4a, O4b and O4c; the Map and task exclusions | `containment_fuzz.py once` over the three native builds and 32 seeds: green, or a red filed under its key, with ≥ 80% of records compared exactly | none of the compile, schema or policy reds |
 | **C3, independent work tally** | the O3b evaluator tally behind `HIRSEL_TEST_WORK_TALLY`; the O3c static cycle check; gap controls | one batch with the tally on: every gap control shows its sanctioned O3b excess (the named MEM-30 gaps are open on main), and any step-free non-drop glue cycle O3c finds is filed under its key | gap controls are reported, not red |
-| **C4, minimise, file, nightly** | choice-stream and AST reduction, size bisection; dedup keys; `report_failure.py --local`; ledger allocation; O4d on the charge-observation runtime; the `run_containment` step in `tools/nightly-board.sh` and `--containment-status` in `tools/board-freshness.py` | one `containment_fuzz.py nightly --cpu-seconds 300` run minimises the open C1 red to at most 20 lines and writes exactly one alert line and one issue marker for its key; run twice, it adds one comment, not a second issue | the night's containment reds are findings and never fail the land |
+| **C4, minimise, alert, nightly** | choice-stream and AST reduction, size bisection; dedup keys; one alert line per key; the `run_containment` step in `tools/nightly-board.sh`. Ruled out: issue filing, `report_failure.py --local`, `--containment-status`. Not built: ledger allocation, O4d | the open run-stop reds minimise to one scope each, the signal red in its package, and a short `nightly` run writes one alert line per key | the night's containment reds are findings and never fail the land |
 
 C1 to C3 touch only `core/tools/` and `crates/hirsel-core-eval` (behind `HIRSEL_TEST_WORK_TALLY`). C4 is the
 first slice to touch the board script. The board's units are not edited.

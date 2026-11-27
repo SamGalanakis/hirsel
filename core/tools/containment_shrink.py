@@ -10,6 +10,10 @@ cheapest build that reproduces it (Cranelift dev before the LLVM builds). Three 
    force on it; work-floor reds skip this stage;
 3. size bisection: the smallest size that still reproduces.
 
+A red that shows only beside the package's other entries (a stack-depth signal, say) is
+minimised in its whole package: stage 1 still shrinks the entry's own draws, and stage 2
+deletes the other entries instead.
+
 Each red gets at most RUNS predicate runs or CPU_SECONDS of child CPU, whichever comes first.
 """
 from collections import Counter
@@ -37,14 +41,19 @@ def child_cpu():
 
 def isolate(program, index):
     """A copy of `program` holding only entry `index` and the scopes it reaches."""
+    return keeping(program, {index})
+
+
+def keeping(program, indices):
+    """A copy of `program` holding only the entries in `indices` and the scopes they reach."""
     program = copy.deepcopy(program)
-    entry = next(e for e in program.entries if e.index == index)
-    keep, todo = {}, list(entry.scopes)
+    entries = [e for e in program.entries if e.index in indices]
+    keep, todo = {}, [s for e in entries for s in e.scopes]
     while todo:
         scope = todo.pop()
         keep[scope.id] = scope
         todo.extend(scope.children)
-    program.entries, program.scopes = [entry], {i: keep[i] for i in sorted(keep)}
+    program.entries, program.scopes = entries, {i: keep[i] for i in sorted(keep)}
     return program
 
 
@@ -73,8 +82,9 @@ def without_statement(program, scope_id, at):
 class Predicate:
     """Does the key reproduce for the program's one entry at `size` on `build`?"""
 
-    def __init__(self, fz, args, key, build, work):
+    def __init__(self, fz, args, key, build, index, work):
         self.fz, self.args, self.key, self.build, self.work = fz, args, key, build, work
+        self.index = index
         self.runs, self.start = 0, child_cpu()
         self.with_evaluator = build == 'evaluator' or key.startswith('containment:disagree')
         self.resident, self.offset = None, 0
@@ -91,7 +101,7 @@ class Predicate:
         from contract_exec import Evaluator, native_build
         fz, args = self.fz, self.args
         self.runs += 1
-        entry = program.entries[0]
+        entry = next(e for e in program.entries if e.index == self.index)
         if self.with_evaluator:   # the evaluator's entry runs its size as written
             entry.small_size = size
         program.source = gen.render(program)
@@ -128,16 +138,16 @@ class Predicate:
         return any(r['key'] == self.key for r in reds)
 
 
-def shrink_draws(program, index, large, test, log):
+def shrink_draws(program, index, large, whole, test, log):
     """Stage 1 on the entry's span of the choice stream; returns the smallest reproducing program."""
     start, end = next(e for e in program.entries if e.index == index).span
     prefix, span = program.draws[:start], list(program.draws[start:end])
 
     def attempt(candidate):
         regenerated = gen.generate(program.seed, prefix + candidate)
-        found = isolate(regenerated, index)
+        found = regenerated if whole else isolate(regenerated, index)
         found.draws, found.bounds = regenerated.draws, regenerated.bounds
-        entry = found.entries[0]
+        entry = next(e for e in found.entries if e.index == index)
         return found if test(found, entry.large_size if large else entry.small_size) else None
 
     best = None
@@ -187,6 +197,19 @@ def shrink_ast(program, size, test, log):
     return program
 
 
+def shrink_entries(program, index, size, test, log):
+    """Stage 2 for a whole package: drop the other entries, one at a time."""
+    before = len(program.entries)
+    for other in [e.index for e in program.entries if e.index != index]:
+        if test.spent():
+            break
+        candidate = keeping(program, {e.index for e in program.entries} - {other})
+        if test(candidate, size):
+            program = candidate
+    log['entries'] = [before, len(program.entries)]
+    return program
+
+
 def shrink_size(program, size, test, log):
     low, high = -1, size   # high reproduces; find the least size that does
     if size and test(program, 0):
@@ -212,38 +235,48 @@ def cheapest(builds, build, key):
 
 def minimise(fz, args, seed, found, out):
     """Minimise one red; returns its alert fields: the package path, or why there is none."""
-    key, entry_index, size = found['key'], found['entry'], found['size']
-    if key.startswith(UNMINIMISED) or entry_index is None:
+    key = found['key']
+    if key.startswith(UNMINIMISED) or found['entry'] is None:
         return dict(minimised=False, reason='not re-judged on one entry')
-    program = gen.generate(seed)
-    large = size != program.entries[entry_index].small_size
     slug = re.sub(r'[^A-Za-z0-9_.-]+', '-', key.removeprefix('containment:'))
-    work = out / f'{slug}.work'
     for build in cheapest(args.builds, found['build'], key):
+        for whole in (False, True):
+            if done := attempt(fz, args, seed, found, build, whole, out, slug):
+                return done
+    return dict(minimised=False, reason='did not reproduce')
+
+
+def attempt(fz, args, seed, found, build, whole, out, slug):
+    """Minimise on one build, the entry alone or in its whole package; None if it does not reproduce."""
+    key, entry_index, size = found['key'], found['entry'], found['size']
+    program = gen.generate(seed)
+    large = size != next(e for e in program.entries if e.index == entry_index).small_size
+    work = out / f'{slug}.work'
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    test = Predicate(fz, args, key, build, entry_index, work)
+    log = {'whole package': whole}
+    try:
+        base = program if whole else isolate(program, entry_index)
+        if not test(base, size):
+            return None
+        if smaller := shrink_draws(program, entry_index, large, whole, test, log):
+            base = smaller
+            entry = next(e for e in base.entries if e.index == entry_index)
+            size = entry.large_size if large else entry.small_size
+        if whole:
+            base = shrink_entries(base, entry_index, size, test, log)
+        elif not key.startswith('containment:work-floor') and not test.spent():
+            base = shrink_ast(base, size, test, log)
+        size = shrink_size(base, size, test, log)
+        entry = next(e for e in base.entries if e.index == entry_index)
+        entry.small_size = entry.large_size = size
+        base.source = gen.render(base)
+        package = gen.write_package(base, out / slug)
+        repro = dict(key=key, seed=seed, entry=entry_index, size=size, build=build, runs=test.runs,
+                     cpu_seconds=round(child_cpu() - test.start, 1), capped=test.spent(), stages=log)
+        (package / 'repro.json').write_text(json.dumps(repro, indent=1) + '\n')
+        return dict(minimised=True, path=str(package), build=build, size=size, runs=test.runs)
+    finally:
+        test.close()
         shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True)
-        test = Predicate(fz, args, key, build, work)
-        log = {}
-        try:
-            base = isolate(program, entry_index)
-            if not test(base, size):
-                continue
-            if smaller := shrink_draws(program, entry_index, large, test, log):
-                base = smaller
-                entry = base.entries[0]
-                size = entry.large_size if large else entry.small_size
-            if not key.startswith('containment:work-floor') and not test.spent():
-                base = shrink_ast(base, size, test, log)
-            size = shrink_size(base, size, test, log)
-            entry = base.entries[0]
-            entry.small_size = entry.large_size = size
-            base.source = gen.render(base)
-            package = gen.write_package(base, out / slug)
-            repro = dict(key=key, seed=seed, entry=entry_index, size=size, build=build, runs=test.runs,
-                         cpu_seconds=round(child_cpu() - test.start, 1), capped=test.spent(), stages=log)
-            (package / 'repro.json').write_text(json.dumps(repro, indent=1) + '\n')
-            return dict(minimised=True, path=str(package), build=build, size=size, runs=test.runs)
-        finally:
-            test.close()
-            shutil.rmtree(work, ignore_errors=True)
-    return dict(minimised=False, reason='did not reproduce alone')

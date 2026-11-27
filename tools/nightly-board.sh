@@ -47,6 +47,10 @@ finish() {
     { mkdir -p "$base/alerts" && cat "$run/bisect/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
       printf 'Board bisect alert could not be copied from %s/bisect/alert.txt.\n' "$run" >&2
   fi
+  if [[ -s "$run/containment/alert.txt" ]]; then
+    { mkdir -p "$base/alerts" && cat "$run/containment/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
+      printf 'Containment alert could not be copied from %s/containment/alert.txt.\n' "$run" >&2
+  fi
   if python3 "$tools/board-history.py" append --base "$base" "$run" >>"$run/run.log" 2>&1; then
     if (( recorded == 0 )); then
       flock --close "$base/baseline.lock" python3 "$tools/board-freshness.py" \
@@ -248,6 +252,29 @@ fi
 law_status=${law_status:-0}
 if (( law_status != 0 )); then
   printf 'Law board exited %s. See %s/run.log.\n' "$law_status" "$run" >>"$run/run.log"
+fi
+# Containment generator (docs/internal/containment-generator.md, "Hook"): random programs on
+# the evaluator and every native build for one CPU-hour of child CPU. A red adds one line to
+# the day's alert file (seed and minimised package); it never changes the board's exit.
+run_containment() (
+  local output compiler runtime meter evaluator
+  output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-core-driver-bin-hirsel \
+    //:core-driver-runtime-pic //:core-scripted-runtime-pic //:hirsel-core-contract-eval-bin-hirsel-core-contract-eval) || return
+  read -r compiler runtime meter evaluator < <(python3 -c 'import json, sys; j = json.load(sys.stdin); print(*(j["root//:" + target] for target in ("hirsel-core-driver-bin-hirsel", "core-driver-runtime-pic", "core-scripted-runtime-pic", "hirsel-core-contract-eval-bin-hirsel-core-contract-eval")))' <<<"$output") || return
+  export LLVM_SYS_231_PREFIX="$checkout/tools/buck2/toolchains/llvm-files"
+  export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  exec taskset -c 8-11 python3 core/tools/containment_fuzz.py nightly --cpu-seconds 3600 --base-seed "$started" \
+    --jobs 4 --run-jobs 1 --builds evaluator,cranelift-dev,llvm-dev,llvm-release --compiler "$compiler" \
+    --runtime "$runtime" --meter-runtime "$meter" --evaluator "$evaluator" \
+    --out "$run/containment" --alert "$run/containment/alert.txt"
+)
+
+containment_status=$toolchain_status
+if (( containment_status == 0 )); then
+  run_containment >>"$run/containment.log" 2>&1 || containment_status=$?
+fi
+if (( containment_status != 0 )); then
+  printf 'Containment generator exited %s. See %s/containment.log.\n' "$containment_status" "$run" >>"$run/run.log"
 fi
 vopr_status=$toolchain_status
 if (( vopr_status == 0 )); then

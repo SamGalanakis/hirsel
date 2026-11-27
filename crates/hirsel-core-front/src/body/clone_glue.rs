@@ -13,7 +13,9 @@
 //! declares its own copy, `clone[..](x: T) { .. }` (`Shape::clone`): the row's `$clone` is its
 //! byte copy and then that body, at any depth, never a walk of its fields.
 use super::key_glue::{Code, Derive, KeyOp};
+use super::lists::work_steps::take_work;
 use super::*;
+use hirsel_core_ids::work_steps::table;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
 impl Derive<'_> {
@@ -277,6 +279,9 @@ impl Derive<'_> {
             }
             FieldTy::Box(t) => {
                 let t = TypeId(t.0);
+                // MEM-30 work steps: a node is one clone item, charged alone.
+                let one = c.constant(1);
+                take_work(c, table::CLONE_ITEM, one, fail);
                 let charge = self.box_charge(t);
                 let charged = c.constant(charge);
                 let size = c.field_size(&FieldTy::Inline(TypeRef(t.0)));
@@ -359,6 +364,16 @@ impl Derive<'_> {
                 c.start(some);
                 // The block holds `len` native strides and is charged `len` logical
                 // sizes (MEM-24), as a List's own growth charges it.
+                // MEM-30 work steps, before the block is admitted: its logical
+                // bytes, and one unit per element that owns a part of its own.
+                let logical =
+                    hirsel_core_layout::field_size(&self.module.types, &self.recipes, item).2;
+                let logical = c.constant(logical);
+                let units = c.mul(len, logical);
+                take_work(c, table::COPY, units, fail);
+                if self.owns(item, &mut vec![]) {
+                    take_work(c, table::CLONE_ITEM, len, fail);
+                }
                 let k = c.field_size(item);
                 let bytes = c.mul(len, k);
                 let charge = self.seq_charge(c, item, len);
@@ -419,6 +434,11 @@ impl Derive<'_> {
                     let column = round8_value(c, column);
                     bytes = c.binary(BinaryOp::Add, bytes, column);
                 }
+                let logical =
+                    hirsel_core_layout::field_size(&self.module.types, &self.recipes, row).2;
+                let logical = c.constant(logical);
+                let units = c.mul(len, logical);
+                take_work(c, table::COPY, units, fail);
                 let charge = self.seq_charge(c, row, len);
                 let kind = AllocKind::own(field.clone());
                 let block = alloc_kind(c, kind, charge, bytes, fail);
@@ -796,6 +816,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
+        // MEM-30 work steps for the copy's own bytes; its parts charge in `$clone`.
+        let size = self.layout_size(u, true, n)?;
+        self.charge_work(table::COPY, size, n)?;
         // The target is lent as the glue's `mut` parameter is (#88): a value place
         // at a scalar-carried row, such as a field-less enum's tag.
         let to = self.new_slot(scalar_abi::mut_place(&self.e.module.types, rid), n);

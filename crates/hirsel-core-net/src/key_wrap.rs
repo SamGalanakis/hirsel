@@ -46,6 +46,16 @@ impl SignAlg {
         self as u8
     }
 
+    /// MEM-30's work row for signing with this algorithm.
+    pub fn work(self) -> hirsel_core_ids::work_steps::Work {
+        use hirsel_core_ids::work_steps::table;
+        match self {
+            Self::Ed25519 => table::ED25519_SIGN,
+            Self::P256 => table::P256_SIGN,
+            Self::Rs256 => table::RS256_SIGN,
+        }
+    }
+
     /// The use that permits signing with this algorithm.
     pub fn needed(self) -> crate::SecretUse {
         match self {

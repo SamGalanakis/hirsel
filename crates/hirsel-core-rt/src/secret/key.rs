@@ -1,6 +1,7 @@
 //! Synchronous Secret key operations.
 
 use super::*;
+use hirsel_core_ids::work_steps::table;
 use hirsel_core_net::key_wrap::{SignAlg, SigningRandom};
 use hirsel_core_net::secret_aead::{self, AeadAlg, AeadInput, AeadMode, AeadRefusal};
 
@@ -219,6 +220,10 @@ pub unsafe extern "C" fn hirsel_core_secret_wrap(
         {
             return key_error(KEY_DENIED);
         }
+        let len = secret.bytes.as_deref().map_or(0, |bytes| bytes.len()) as u64;
+        if !crate::steps::take_many(context, table::AEAD.steps(len), site) {
+            return crate::provider::CANCELLED;
+        }
         let args = KeyRequest {
             key: &kek,
             op: KeyOp::Wrap(&secret),
@@ -249,6 +254,9 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
             return key_error(KEY_INVALID);
         };
         let blob = crate::tls::bytes(&*blob);
+        if !crate::steps::take_many(context, table::AEAD.steps(blob.len() as u64), site) {
+            return crate::provider::CANCELLED;
+        }
         let len = hirsel_core_net::key_wrap::unwrapped_len(blob).unwrap_or(0);
         let charge = match admit((*context).payer(), requested.send(), len as u64) {
             Ok(charge) => charge,
@@ -304,6 +312,7 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
     }
 }
 
+/// MEM-30's fixed weight of one signature with `alg`.
 /// `secret.sign`: `msg` signed with `alg`, which the key's uses must name.
 /// # Safety
 /// The key is live, `msg` is pinned and `out` is a pinned exclusive carrier.
@@ -334,6 +343,10 @@ pub unsafe extern "C" fn hirsel_core_secret_sign(
         };
         if alg == SignAlg::P256 && source == SigningRandom::Virtual && key.origin.opaque() {
             return key_error(KEY_DENIED);
+        }
+        let msg_len = (*msg).len as u64;
+        if !crate::steps::take_many(context, alg.work().steps(msg_len), site) {
+            return crate::provider::CANCELLED;
         }
         #[cfg(feature = "record")]
         let random_id = if crate::tape::owns(&*provider) {
@@ -390,6 +403,10 @@ unsafe fn secret_aead(
                 available,
             }) => return key_capacity(requested, available),
         };
+        let steps = table::AEAD.steps_sum(&[(*aad).len as u64, (*bytes).len as u64]);
+        if !crate::steps::take_many(context, steps, site) {
+            return crate::provider::CANCELLED;
+        }
         let input = AeadInput {
             alg,
             mode,

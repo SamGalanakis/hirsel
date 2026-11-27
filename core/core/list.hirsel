@@ -107,6 +107,7 @@ pub fn copy_within[T: plain](mut xs: List[T], src: u64, dst: u64, count: u64)
 pub fn prefetch[T](xs: List[T], i: u64)
 
 pub fn sum[T: integer](xs: List[T]) -> T {
+    work_steps(0, list.len(xs))
     let mut t: T = int.narrow(0u8)
     for x in xs {
         let next: Option[T] = int.checked_add(t, x)
@@ -972,3 +973,8 @@ fn slots_list_view[T](xs: View[List[T]], i: u64) -> View[T] in xs
 fn slots_list_move[T](src: View[List[T]], i: u64, dst: View[List[T]], j: u64, n: u64)
 
 fn slots_finish_list[T](xs: View[List[T]])
+
+// MEM-30's work charge for a loop in this module: `code` names a row of the
+// work table (hirsel-core-ids work_steps::code: 0 walk, 1 parse, 2 UTF-8,
+// 3 base64, 4 ASCII case, 6 UTF-8 ASCII prefix) and `units` its units.
+fn work_steps(code: u64, units: u64)

@@ -36,13 +36,13 @@ fn castagnoli_steps(input: Bytes) -> bool {
     let unchanged = bound steps 1 {
         crc32c.update(0x7d25f6a8u32, empty)
     }
-    let within = bound steps 2 {
+    let within = bound steps 5 {
         crc32c.update(0x7d25f6a8u32, one_chunk)
     }
-    let exhausted = bound steps 2 {
+    let exhausted = bound steps 5 {
         crc32c.update(0x7d25f6a8u32, two_chunks)
     }
-    let exact = bound steps 3 {
+    let exact = bound steps 6 {
         crc32c.update(0x7d25f6a8u32, two_chunks)
     }
     let Ok(0x7d25f6a8u32) = unchanged else {
@@ -51,7 +51,7 @@ fn castagnoli_steps(input: Bytes) -> bool {
     let Ok(0x3b6bf928u32) = within else {
         return false
     }
-    let Error(OutOfTime(steps: 2)) = exhausted else {
+    let Error(OutOfTime(steps: 5)) = exhausted else {
         return false
     }
     let Ok(0x90cef21au32) = exact else {
@@ -187,13 +187,13 @@ fn nvme_steps(input: Bytes) -> bool {
     let unchanged = bound steps 1 {
         crc64nvme.update(0x7d25f6a8324c05efu64, empty)
     }
-    let within = bound steps 2 {
+    let within = bound steps 9 {
         crc64nvme.update(0x7d25f6a8324c05efu64, one_chunk)
     }
-    let exhausted = bound steps 2 {
+    let exhausted = bound steps 9 {
         crc64nvme.update(0x7d25f6a8324c05efu64, two_chunks)
     }
-    let exact = bound steps 3 {
+    let exact = bound steps 10 {
         crc64nvme.update(0x7d25f6a8324c05efu64, two_chunks)
     }
     let Ok(0x7d25f6a8324c05efu64) = unchanged else {
@@ -202,7 +202,7 @@ fn nvme_steps(input: Bytes) -> bool {
     let Ok(0xe68402c8169cd272u64) = within else {
         return false
     }
-    let Error(OutOfTime(steps: 2)) = exhausted else {
+    let Error(OutOfTime(steps: 9)) = exhausted else {
         return false
     }
     let Ok(0xd4080d6374a28c69u64) = exact else {

@@ -108,6 +108,7 @@ fn append_base64_blocks(b: Bytes, mut out: Bytes, n: u64, dst_start: u64) -> u64
 /// A refusal leaves out unchanged. Ex: `string.append_base64_bytes(b, mut out)`.
 pub fn append_base64_bytes(b: Bytes, mut out: Bytes) {
     let n = list.len(b)
+    work_steps(3, n)
     let tail = n % 3
     let full = n - tail
     let size = (n / 3 + if tail == 0 {
@@ -188,11 +189,12 @@ fn utf8_back_up(b: Bytes, at: u64) -> u64 {
     at
 }
 
-// Validate a prefix ending at a scalar boundary. Pure ASCII runs scan 128 bytes
-// per step; multibyte text validates 64 bytes per step in vectors and returns
-// the last known-good scalar boundary on error so the scalar loop recovers the
-// exact valid_up_to and error_len.
-fn utf8_block_prefix(b: Bytes) -> u64 {
+// Validate a prefix ending at a scalar boundary in two stages. Pure ASCII runs
+// scan 128 bytes per step (`utf8_ascii_prefix`); multibyte text then validates 64
+// bytes per step in vectors (`utf8_block_prefix`) and returns the last known-good
+// scalar boundary on error so the scalar loop recovers the exact valid_up_to and
+// error_len.
+fn utf8_ascii_prefix(b: Bytes) -> u64 {
     let n = list.len(b)
     let mut i: u64 = 0
     // Fast ASCII prefix: 128 bytes per step.
@@ -221,6 +223,13 @@ fn utf8_block_prefix(b: Bytes) -> u64 {
             i = int.wrapping_add(i, 32)
         }
     }
+    i
+}
+
+// The vector stage, from the ASCII prefix's end `start`.
+fn utf8_block_prefix(b: Bytes, start: u64) -> u64 {
+    let n = list.len(b)
+    let mut i = start
     if n - i < 64 {
         return i
     }
@@ -355,9 +364,18 @@ pub fn utf8_tail(head: Utf8Head, available: u64, read: scoped fn(u64) -> u8) -> 
 
 pub fn validate_utf8(b: Bytes) -> Result[(), Utf8Error] {
     let n = list.len(b)
-    // Below the SIMD crossover, start with the scalar ASCII word scan.
+    // Below the SIMD crossover, start with the scalar ASCII word scan. The ASCII
+    // prefix takes the cheap row; every byte past it, multibyte vectors included,
+    // the UTF-8 row.
+    let ascii: u64 = if n >= 128 {
+        utf8_ascii_prefix(b)
+    } else {
+        0
+    }
+    work_steps(6, ascii)
+    work_steps(2, n - ascii)
     let mut i: u64 = if n >= 128 {
-        utf8_block_prefix(b)
+        utf8_block_prefix(b, ascii)
     } else {
         0
     }
@@ -548,6 +566,7 @@ pub fn make_ascii_upper(mut s: String) {
     // s owns its storage or is empty: the carrier moves to Bytes with no call.
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
+    work_steps(4, list.len(b))
     for i in 0 .. list.len(b) {
         let x = b[i]
         // One comparison: below b'a' wraps past 25. Every byte is stored, changed or not, so
@@ -570,6 +589,7 @@ pub fn make_ascii_lower(mut s: String) {
     // s owns its storage or is empty: the carrier moves to Bytes with no call.
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
+    work_steps(4, list.len(b))
     for i in 0 .. list.len(b) {
         let x = b[i]
         // As make_ascii_upper: only A-Z change, so b stays UTF-8.
@@ -597,3 +617,8 @@ fn view_string(b: Bytes) -> View[String] in b
 
 // n <= byte_len(s), at a scalar boundary. Only the length changes: data and capacity stay.
 fn shorten(mut s: String, n: u64)
+
+// MEM-30's work charge for a loop in this module: `code` names a row of the
+// work table (hirsel-core-ids work_steps::code: 0 walk, 1 parse, 2 UTF-8,
+// 3 base64, 4 ASCII case, 6 UTF-8 ASCII prefix) and `units` its units.
+fn work_steps(code: u64, units: u64)

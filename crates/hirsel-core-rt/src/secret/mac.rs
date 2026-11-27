@@ -120,10 +120,10 @@ unsafe fn mac(
             return crate::net::DENIED;
         }
         let data = crate::tls::bytes(&*data);
-        if !crate::steps::take_many(context, data.len() as u64, site) {
+        let algorithm = profile.algorithm();
+        if !crate::steps::take_many(context, algorithm.work().steps(data.len() as u64), site) {
             return crate::provider::CANCELLED;
         }
-        let algorithm = profile.algorithm();
         let args = MacRequest {
             algorithm,
             secret: &secret,

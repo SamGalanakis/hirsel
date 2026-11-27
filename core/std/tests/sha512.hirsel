@@ -181,7 +181,9 @@ fn try_add(take st: sha512.Sha512, input: Bytes, cap: u64) -> bool {
     }
 }
 
-// H4. Measure the least budget for 256 bytes and reuse that exact budget.
+// H4. Measure the least budget for 256 bytes (2 blocks, 8 work steps at MEM-30's
+// SHA-512 quantum of 32 bytes). A 1 MiB input (8192 blocks) takes 32768 work steps,
+// so exactly 32760 more.
 // expect: run bulk_step_bound() = true
 fn bulk_step_bound() -> bool {
     let small = sample(256)
@@ -191,7 +193,5 @@ fn bulk_step_bound() -> bool {
     }
     let mut large: Bytes = list.with_capacity(1048576)
     list.fill(mut large, 1048576, 0u8)
-    let mut pending = sha512.start()
-    sha512.add(mut pending, small, 0, 5)
-    try_add(sha512.start(), large, cap) && try_add(take pending, large, cap)
+    !try_add(sha512.start(), large, cap + 32759) && try_add(sha512.start(), large, cap + 32760)
 }

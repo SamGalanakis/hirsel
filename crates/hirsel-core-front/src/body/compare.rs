@@ -5,6 +5,7 @@
 //! comparison walks both places once, leaving at the first component that differs, with
 //! the ordering -1, 0 or 1 as the join's parameter; `l op r` is then `ordering op 0`.
 use super::*;
+use hirsel_core_ir::{ArithMode, ArithOp};
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// `l op r` for two values of type `t`, each a pointer to its place (or, for a view,
@@ -25,6 +26,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // The inline closed walk handles common native records and strings.
         // All other shapes share the same published recipe helpers as rigid types.
         let derived = has_param(&self.t, t) || self.comparable(t, 0).is_err();
+        if derived {
+            self.charge_derived(t, l, r, n);
+        }
         if derived && matches!(op, CompareOp::Eq | CompareOp::Ne) {
             let value = self.key_operation(key_glue::KeyOp::Equal, t, &[l, r], n);
             return Ok(if op == CompareOp::Ne {
@@ -128,6 +132,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let word = t == UNIT || value_ty(&self.t, t).ok().flatten().is_some() || self.word_like(t);
         let derived = !word && (has_param(&self.t, t) || self.comparable(t, 0).is_err());
         let (left, right) = if derived {
+            self.charge_derived(t, l, r, n);
             let ordering = self.key_operation(key_glue::KeyOp::Order, t, &[l, r], n)?;
             (ordering, self.konst(ord, 0, n)?)
         } else if t == UNIT {
@@ -415,6 +420,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Two byte runs: `rt.compare_bytes` over their data and lengths; a nonzero
     /// ordering jumps to `join` with it.
     fn bytes(&mut self, a: [ValueId; 2], b: [ValueId; 2], join: BlockId, n: NodeId) {
+        if self.steps_in_source {
+            // MEM-30 work steps: both runs' bytes, before they are compared.
+            let (both, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, a[1], b[1], n);
+            if self
+                .charge_work(hirsel_core_ids::work_steps::table::COPY, both, n)
+                .is_none()
+            {
+                return;
+            }
+        }
         let args: Vec<Arg> = a.into_iter().chain(b).map(Arg::Value).collect();
         let op = hirsel_core_ir::RtOp::CompareBytes;
         let signature = self.e.sig(op.signature());
@@ -510,5 +525,56 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             self.start(next);
         }
+    }
+
+    /// MEM-30 work steps of a comparison by derived glue, taken in user code
+    /// before it: the logical size of `t` plus one, and, when `t` is a `List`,
+    /// the shorter length times its element's logical size plus one, at the
+    /// walk quantum. Core source takes none: a Map's probes compare keys a
+    /// number of times its hash key decides (CAP-8).
+    fn charge_derived(&mut self, t: TyId, l: Option<ValueId>, r: Option<ValueId>, n: NodeId) {
+        if !self.steps_in_source || !self.live() {
+            return;
+        }
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let walk = hirsel_core_ids::work_steps::table::WALK;
+        let Some(one) = self.konst(u64_, 1, n) else {
+            return;
+        };
+        let Some(size) = self.layout_size(t, true, n) else {
+            return;
+        };
+        let (mut units, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, size, one, n);
+        let item = match self.t.kind(self.bare(t)) {
+            TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
+                Some(args[0])
+            }
+            _ => None,
+        };
+        if let (Some(item), Some(l), Some(r)) = (item, l, r)
+            && let Some(carrier) = self.list_carrier(item, n)
+            && let Some(each) = self.layout_size(item, true, n)
+        {
+            let a = self.carrier_word(l, carrier, SeqWord::Len, n);
+            let b = self.carrier_word(r, carrier, SeqWord::Len, n);
+            let shorter = self.value(u64_);
+            self.inst(
+                Inst::Binary {
+                    result: shorter,
+                    op: BinaryOp::Min,
+                    left: a,
+                    right: b,
+                    fail: None,
+                },
+                n,
+            );
+            let (each, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, each, one, n);
+            let (elements, _) =
+                self.list_arith(ArithOp::Mul, ArithMode::Wrapping, shorter, each, n);
+            units = self
+                .list_arith(ArithOp::Add, ArithMode::Wrapping, units, elements, n)
+                .0;
+        }
+        let _ = self.charge_work(walk, units, n);
     }
 }

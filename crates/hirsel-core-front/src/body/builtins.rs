@@ -51,6 +51,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             };
         }
+        if name == "work_steps"
+            && matches!(module, [m] if matches!(m.as_str(), "int" | "string" | "list" | "deque"))
+        {
+            // MEM-30's work charge for a loop written in core source: the
+            // table row is named by a constant code (hirsel_core_ids
+            // work_steps::code), the units by the body.
+            let code = vals[0]?;
+            let code = self.open.iter().rev().find_map(|inst| match *inst {
+                Inst::Const { result, bits } if result == code => Some(bits),
+                _ => None,
+            });
+            let Some(work) = code.and_then(hirsel_core_ids::work_steps::code::work) else {
+                self.gap(n, "core.work_steps needs a constant table code");
+                return Some(None);
+            };
+            self.charge_work(work, vals[1]?, n)?;
+            return Some(None);
+        }
         if module == ["map"] {
             return self.map_value(name, types, vals, result, n);
         }
@@ -199,6 +217,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         carriers: [ValueId; N],
         n: NodeId,
     ) -> Option<ValueId> {
+        use hirsel_core_ids::work_steps::table;
         let u64_ = Ty::Scalar(Scalar::U64);
         let args = carriers.map(|carrier| {
             [
@@ -206,6 +225,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Arg::Value(self.read_sequence_word(carrier, 8, u64_, n)),
             ]
         });
+        // The message is the carrier before the signature.
+        let Arg::Value(msg_len) = args[N - 2][1] else {
+            unreachable!()
+        };
+        let work = match op {
+            RtOp::Ed25519Verify => table::ED25519_VERIFY,
+            RtOp::P256Verify | RtOp::P256VerifyDer => table::P256_VERIFY,
+            RtOp::P384Verify | RtOp::P384VerifyDer => table::P384_VERIFY,
+            RtOp::RsaVerifyPkcs1Sha256 | RtOp::RsaVerifyPssSha256 => table::RSA_VERIFY,
+            _ => unreachable!(),
+        };
+        self.charge_work(work, msg_len, n)?;
         let word = self.runtime_row(op, args.as_flattened(), n)?[0];
         self.runtime_nonzero(u64_, word, n)
     }

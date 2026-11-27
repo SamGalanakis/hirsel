@@ -1,0 +1,560 @@
+// MEM-30 work steps (docs/spec/budgets.md, "Work steps"). Each law runs one operation
+// over input built outside the scope. The oracle is the spec formula: one step for a
+// call of a core function (none for an operator), plus the row's weight, plus
+// ceil(units / quantum), from MEM-30's work table. Under that bound the operation
+// finishes; under one step fewer the scope gives OutOfTime with the smaller bound.
+// 58,368 bytes (57 KiB, the Brownout repro's input) is 228 × 256 bytes.
+fn input(len: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(len)
+    list.fill(mut b, len, 0x61u8)
+    b
+}
+
+// sha256.blocks over 912 blocks, quantum 256 bytes: 1 + 228 steps.
+// expect: run sha256_blocks_steps() = true
+fn sha256_blocks_steps() -> bool {
+    let b = input(58368)
+    let done = bound steps 229 {
+        let mut h: Inline[u32, 8] =[0; 8]
+        sha256.blocks(mut h, b, 0, 912)
+        h[0]
+    }
+    let short = bound steps 228 {
+        let mut h: Inline[u32, 8] =[0; 8]
+        sha256.blocks(mut h, b, 0, 912)
+        h[0]
+    }
+    match (done, short) {
+        (Ok(_), Error(OutOfTime(steps: 228))) => true,
+        _ => false,
+    }
+}
+
+// The Brownout repro: 3,990 calls over 57 KiB under 8,000 steps. Each call takes 229
+// steps, so the bound runs out long before the last call.
+// expect: run sha256_repro_refused() = true
+fn sha256_repro_refused() -> bool {
+    let b = input(58368)
+    let run = bound steps 8000 {
+        let mut h: Inline[u32, 8] =[0; 8]
+        for _ in 0u64 .. 3990 {
+            sha256.blocks(mut h, b, 0, 912)
+        }
+        h[0]
+    }
+    match run {
+        Error(OutOfTime(steps: 8000)) => true,
+        _ => false,
+    }
+}
+
+// sha1.blocks over 58,368 bytes, quantum 256: 1 + 228 steps.
+// expect: run sha1_blocks_steps() = true
+fn sha1_blocks_steps() -> bool {
+    let b = input(58368)
+    let done = bound steps 229 {
+        let mut h: Inline[u32, 5] =[0; 5]
+        sha1.blocks(mut h, b)
+        h[0]
+    }
+    let short = bound steps 228 {
+        let mut h: Inline[u32, 5] =[0; 5]
+        sha1.blocks(mut h, b)
+        h[0]
+    }
+    match (done, short) {
+        (Ok(_), Error(OutOfTime(steps: 228))) => true,
+        _ => false,
+    }
+}
+
+// sha512.blocks over 456 blocks of 128 bytes, quantum 32: 1 + 1824 steps.
+// expect: run sha512_blocks_steps() = true
+fn sha512_blocks_steps() -> bool {
+    let b = input(58368)
+    let done = bound steps 1825 {
+        let mut h: Inline[u64, 8] =[0; 8]
+        sha512.blocks(mut h, b, 0, 456)
+        h[0]
+    }
+    let short = bound steps 1824 {
+        let mut h: Inline[u64, 8] =[0; 8]
+        sha512.blocks(mut h, b, 0, 456)
+        h[0]
+    }
+    match (done, short) {
+        (Ok(_), Error(OutOfTime(steps: 1824))) => true,
+        _ => false,
+    }
+}
+
+// ed25519.verify of a 57 KiB message, quantum 64: 1 + weight 256 + 912 steps. The all-zero key and
+// signature fail verification; the charge comes before it.
+// expect: run ed25519_verify_steps() = true
+fn ed25519_verify_steps() -> bool {
+    let msg = input(58368)
+    let key = input(32)
+    let sig = input(64)
+    let done = bound steps 1169 {
+        ed25519.verify(key, msg, sig)
+    }
+    let short = bound steps 1168 {
+        ed25519.verify(key, msg, sig)
+    }
+    match (done, short) {
+        (Ok(false), Error(OutOfTime(steps: 1168))) => true,
+        _ => false,
+    }
+}
+
+// p256.verify and p256.verify_der of a 57 KiB message, quantum 256: 1 + weight 512 +
+// 228 steps each.
+// expect: run p256_verify_steps() = true
+fn p256_verify_steps() -> bool {
+    let msg = input(58368)
+    let key = input(65)
+    let sig = input(64)
+    let done = bound steps 741 {
+        p256.verify(key, msg, sig)
+    }
+    let short = bound steps 740 {
+        p256.verify(key, msg, sig)
+    }
+    let der_done = bound steps 741 {
+        p256.verify_der(key, msg, sig)
+    }
+    let der_short = bound steps 740 {
+        p256.verify_der(key, msg, sig)
+    }
+    match (done, short, der_done, der_short) {
+        (Ok(false), Error(OutOfTime(steps: 740)), Ok(false), Error(OutOfTime(steps: 740))) => true,
+        _ => false,
+    }
+}
+
+// p384.verify of a 57 KiB message, quantum 64: 1 + weight 8192 + 912 steps.
+// expect: run p384_verify_steps() = true
+fn p384_verify_steps() -> bool {
+    let msg = input(58368)
+    let key = input(97)
+    let sig = input(96)
+    let done = bound steps 9105 {
+        p384.verify(key, msg, sig)
+    }
+    let short = bound steps 9104 {
+        p384.verify(key, msg, sig)
+    }
+    match (done, short) {
+        (Ok(false), Error(OutOfTime(steps: 9104))) => true,
+        _ => false,
+    }
+}
+
+// rsa.verify_pkcs1_sha256 and rsa.verify_pss_sha256 of a 57 KiB message:
+// quantum 256, 1 + weight 2048 + 228 steps each.
+// expect: run rsa_verify_steps() = true
+fn rsa_verify_steps() -> bool {
+    let msg = input(58368)
+    let n = input(256)
+    let e = b"\x01\x00\x01"
+    let sig = input(256)
+    let done = bound steps 2277 {
+        rsa.verify_pkcs1_sha256(n, e, msg, sig)
+    }
+    let short = bound steps 2276 {
+        rsa.verify_pkcs1_sha256(n, e, msg, sig)
+    }
+    let pss_done = bound steps 2277 {
+        rsa.verify_pss_sha256(n, e, msg, sig)
+    }
+    let pss_short = bound steps 2276 {
+        rsa.verify_pss_sha256(n, e, msg, sig)
+    }
+    match (done, short, pss_done, pss_short) {
+        (Ok(false), Error(OutOfTime(steps: 2276)), Ok(false), Error(OutOfTime(steps: 2276))) => true,
+        _ => false,
+    }
+}
+
+// secret.aead_seal counts aad and plain together: 8,200 + 57,336 bytes is exactly
+// 256 × 256, so 1 + weight 1 + 256 steps, where rounding each range alone would give
+// 1 + 1 + 33 + 224.
+// expect: run aead_seal_steps() = true
+fn aead_seal_steps() -> bool {
+    let mut raw = input(32)
+    let key = result.unwrap(secret.seal(take raw, "aead(chacha20-poly1305)"))
+    let nonce = input(12)
+    let aad = input(8200)
+    let plain = input(57336)
+    let out: Bytes = list.with_capacity(57352)
+    let spare: Bytes = list.with_capacity(57352)
+    let done = bound steps 258 {
+        let mut dst = take out
+        secret.aead_seal(key, ChaCha20Poly1305, nonce, aad, plain, mut dst)
+    }
+    let short = bound steps 257 {
+        let mut dst = take spare
+        secret.aead_seal(key, ChaCha20Poly1305, nonce, aad, plain, mut dst)
+    }
+    match (done, short) {
+        (Ok(Ok(57352)), Error(OutOfTime(steps: 257))) => true,
+        _ => false,
+    }
+}
+
+// secret.hmac_sha256 and verify_hmac_sha256 over 57 KiB of data, quantum 256:
+// 1 + weight 1 + 228 steps each.
+// expect: run hmac_steps() = true
+fn hmac_steps() -> bool {
+    let mut raw = input(32)
+    let key = result.unwrap(secret.seal(take raw, "mac"))
+    let data = input(58368)
+    let tag = input(32)
+    let done = bound steps 230 {
+        secret.hmac_sha256(key, data)
+    }
+    let short = bound steps 229 {
+        secret.hmac_sha256(key, data)
+    }
+    let verify_done = bound steps 230 {
+        secret.verify_hmac_sha256(key, data, tag)
+    }
+    let verify_short = bound steps 229 {
+        secret.verify_hmac_sha256(key, data, tag)
+    }
+    match (done, short, verify_done, verify_short) {
+        (Ok(Ok(_)), Error(OutOfTime(steps: 229)), Ok(Ok(false)), Error(OutOfTime(steps: 229))) => true,
+        _ => false,
+    }
+}
+
+// secret.sign with P256 over 57 KiB, quantum 256: 1 + weight 128 + 228 steps. RFC 6979 A.2.5's key.
+// expect: run sign_steps() = true
+fn sign_steps() -> bool {
+    let mut pkcs8 = option.unwrap(hex.decode(string.as_bytes("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721a1440342000460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299")))
+    let key = result.unwrap(secret.seal(take pkcs8, "sign(p256)"))
+    let random = provide.random(7)
+    let msg = input(58368)
+    let out: Bytes = list.with_capacity(64)
+    let spare: Bytes = list.with_capacity(64)
+    let done = bound steps 357 {
+        let mut sig = take out
+        secret.sign(key, P256, random, msg, mut sig)
+    }
+    let short = bound steps 356 {
+        let mut sig = take spare
+        secret.sign(key, P256, random, msg, mut sig)
+    }
+    match (done, short) {
+        (Ok(Ok(64)), Error(OutOfTime(steps: 356))) => true,
+        _ => false,
+    }
+}
+
+// secret.wrap of a 58,240-byte secret, then secret.unwrap of its blob, quantum 256:
+// 1 + weight 1 + 228 steps each, since the blob's 56 bytes of framing (version, policy
+// length, the policy "mac", salt and tag) stay within the 228th quantum's last 128 bytes.
+// expect: run wrap_unwrap_steps() = true
+fn wrap_unwrap_steps() -> bool {
+    let mut raw = input(32)
+    let kek = result.unwrap(secret.seal(take raw, "wrap"))
+    let mut long = input(58240)
+    let s = result.unwrap(secret.seal(take long, "mac"))
+    let out: Bytes = list.with_capacity(65536)
+    let spare: Bytes = list.with_capacity(65536)
+    let done = bound steps 230 {
+        let mut blob = take out
+        let n = secret.wrap(kek, s, mut blob)
+        (n, take blob)
+    }
+    let short = bound steps 229 {
+        let mut blob = take spare
+        secret.wrap(kek, s, mut blob)
+    }
+    let Ok((Ok(_), take blob)) = take done else {
+        return false
+    }
+    let Error(OutOfTime(steps: 229)) = short else {
+        return false
+    }
+    let opened = bound steps 230 {
+        secret.unwrap(kek, blob, "mac")
+    }
+    let refused = bound steps 229 {
+        secret.unwrap(kek, blob, "mac")
+    }
+    match (opened, refused) {
+        (Ok(Ok(_)), Error(OutOfTime(steps: 229))) => true,
+        _ => false,
+    }
+}
+
+fn text(len: u64, byte: u8) -> String {
+    let mut b: Bytes = list.with_capacity(len)
+    list.fill(mut b, len, byte)
+    result.unwrap(string.from_utf8(take b))
+}
+
+// int.parse over 1 MiB of '0' digits, quantum 16: 1 + 65,536 steps. The count is
+// large enough that an engine taking its steps in batches must still be exact.
+// expect: run int_parse_steps() = true
+fn int_parse_steps() -> bool {
+    let s = text(1048576, b'0')
+    let done = bound steps 65537 {
+        let r: Result[u64, ParseError] = int.parse(s)
+        r
+    }
+    let short = bound steps 65536 {
+        let r: Result[u64, ParseError] = int.parse(s)
+        r
+    }
+    match (done, short) {
+        (Ok(Ok(0)), Error(OutOfTime(steps: 65536))) => true,
+        _ => false,
+    }
+}
+
+// string.from_utf8 over 58,368 ASCII bytes takes the prefix row, quantum 256:
+// 1 + 228 steps. Text whose first 128-byte block holds a two-byte character has no
+// ASCII prefix, so all 58,368 bytes take the UTF-8 row, quantum 8: 1 + 7,296 steps.
+// The ASCII lead-in and tail keep the input on the validator's vector path.
+// expect: run from_utf8_steps() = true
+fn from_utf8_steps() -> bool {
+    let ascii = input(58368)
+    let ascii_short = input(58368)
+    let mut wide: Bytes = list.with_capacity(58368)
+    list.fill(mut wide, 4, 0x61u8)
+    for _ in 0u64 .. 29118 {
+        list.push(mut wide, 0xc3u8)
+        list.push(mut wide, 0xa9u8)
+    }
+    list.fill(mut wide, 128, 0x61u8)
+    let wide_short: Bytes = clone(wide)
+    let done = bound steps 229 {
+        string.from_utf8(take ascii)
+    }
+    let short = bound steps 228 {
+        string.from_utf8(take ascii_short)
+    }
+    let wide_done = bound steps 7297 {
+        string.from_utf8(take wide)
+    }
+    let wide_refused = bound steps 7296 {
+        string.from_utf8(take wide_short)
+    }
+    match (done, short, wide_done, wide_refused) {
+        (Ok(Ok(_)), Error(OutOfTime(steps: 228)), Ok(Ok(_)), Error(OutOfTime(steps: 7296))) => true,
+        _ => false,
+    }
+}
+
+// string.encode_base64 of 58,368 bytes: the base64 row, quantum 8, over its input
+// (7,296), and the copy row over the 77,824 bytes it appends (ceil(77,824 / 4,096) = 19):
+// 1 + 7,296 + 19 steps.
+// expect: run base64_steps() = true
+fn base64_steps() -> bool {
+    let b = input(58368)
+    let done = bound steps 7316 {
+        string.encode_base64(b)
+    }
+    let short = bound steps 7315 {
+        string.encode_base64(b)
+    }
+    match (done, short) {
+        (Ok(_), Error(OutOfTime(steps: 7315))) => true,
+        _ => false,
+    }
+}
+
+// The byte operations, quantum 4,096 bytes. Each scope takes its buffer in, so the
+// scope mutates no outer place. copy_within and fill_slice over 1,048,575 and 1,048,576
+// bytes: 1 + 256 steps each. compare_bytes of two 58,368-byte lists counts both:
+// ceil(116,736 / 4,096) = 29, so 1 + 29. append of 1 MiB: 1 + 256.
+// expect: run byte_ops_steps() = true
+fn byte_ops_steps() -> bool {
+    let w1 = input(1048576)
+    let w2 = input(1048576)
+    let within = bound steps 257 {
+        let mut b = take w1
+        list.copy_within(mut b, 0, 1, 1048575)
+    }
+    let within_short = bound steps 256 {
+        let mut b = take w2
+        list.copy_within(mut b, 0, 1, 1048575)
+    }
+    let f1 = input(1048576)
+    let f2 = input(1048576)
+    let filled = bound steps 257 {
+        let mut b = take f1
+        list.fill_slice(mut b, 0, 1048576, 7u8)
+    }
+    let filled_short = bound steps 256 {
+        let mut b = take f2
+        list.fill_slice(mut b, 0, 1048576, 7u8)
+    }
+    let x = input(58368)
+    let y = input(58368)
+    let compared = bound steps 30 {
+        list.compare_bytes(x, y)
+    }
+    let compared_short = bound steps 29 {
+        list.compare_bytes(x, y)
+    }
+    let src = input(1048576)
+    let d1: Bytes = list.with_capacity(1048576)
+    let d2: Bytes = list.with_capacity(1048576)
+    let appended = bound steps 257 {
+        let mut dst = take d1
+        list.append(mut dst, src)
+    }
+    let appended_short = bound steps 256 {
+        let mut dst = take d2
+        list.append(mut dst, src)
+    }
+    match (within, within_short, filled, filled_short) {
+        (Ok(_), Error(OutOfTime(steps: 256)), Ok(_), Error(OutOfTime(steps: 256))) => {}
+        _ => return false,
+    }
+    match (compared, compared_short, appended, appended_short) {
+        (Ok(Equal), Error(OutOfTime(steps: 29)), Ok(_), Error(OutOfTime(steps: 256))) => true,
+        _ => false,
+    }
+}
+
+// == on two 58,368-byte Strings is an operator, no call step: ceil(116,736 / 4,096) = 29.
+// expect: run string_eq_steps() = true
+fn string_eq_steps() -> bool {
+    let a = text(58368, b'a')
+    let b = text(58368, b'a')
+    let done = bound steps 29 {
+        a == b
+    }
+    let short = bound steps 28 {
+        a == b
+    }
+    match (done, short) {
+        (Ok(true), Error(OutOfTime(steps: 28))) => true,
+        _ => false,
+    }
+}
+
+// Structural ==, quantum 32: the value's bytes plus one, and for a list the shorter
+// length times (element bytes plus one). A zero-sized element counts one: two
+// 1,048,576-element List[()] take ceil((s + 1 + 1,048,576) / 32) = 32,769 for a list
+// value of s < 32 bytes. Two 4,096-element List[u64]: 4,096 × 9 = 1,152 × 32, so 1,153.
+// Two Inline[u8, 65536]: ceil(65,537 / 32) = 2,049.
+// expect: run structural_eq_steps() = true
+fn structural_eq_steps() -> bool {
+    let mut zs: List[()] = list.new()
+    list.fill(mut zs, 1048576, ())
+    let ys: List[()] = clone(zs)
+    let zst = bound steps 32769 {
+        zs == ys
+    }
+    let zst_short = bound steps 32768 {
+        zs == ys
+    }
+    let mut ws: List[u64] = list.with_capacity(4096)
+    list.fill(mut ws, 4096, 9)
+    let vs: List[u64] = clone(ws)
+    let words = bound steps 1153 {
+        ws == vs
+    }
+    let words_short = bound steps 1152 {
+        ws == vs
+    }
+    let p: Inline[u8, 65536] =[1; 65536]
+    let q: Inline[u8, 65536] =[1; 65536]
+    let inl = bound steps 2049 {
+        p == q
+    }
+    let inl_short = bound steps 2048 {
+        p == q
+    }
+    match (zst, zst_short, words, words_short) {
+        (Ok(true), Error(OutOfTime(steps: 32768)), Ok(true), Error(OutOfTime(steps: 1152))) => {}
+        _ => return false,
+    }
+    match (inl, inl_short) {
+        (Ok(true), Error(OutOfTime(steps: 2048))) => true,
+        _ => false,
+    }
+}
+
+// inline.copy_within over 65,535 bytes, quantum 4,096: 1 + 16. columns.fill of 65,536
+// u8 rows, quantum 64 over rows × (row bytes + 1): 1 + 2,048. Each scope takes its
+// value in.
+// expect: run inline_columns_steps() = true
+fn inline_columns_steps() -> bool {
+    let a1: Inline[u8, 65536] =[1; 65536]
+    let a2: Inline[u8, 65536] =[1; 65536]
+    let moved = bound steps 17 {
+        let mut a = a1
+        inline.copy_within(mut a, 0, 1, 65535)
+    }
+    let moved_short = bound steps 16 {
+        let mut a = a2
+        inline.copy_within(mut a, 0, 1, 65535)
+    }
+    let c1: Columns[u8] = columns.with_capacity(65536)
+    let c2: Columns[u8] = columns.with_capacity(65536)
+    let filled = bound steps 2049 {
+        let mut c = take c1
+        columns.fill(mut c, 65536, 3u8)
+    }
+    let filled_short = bound steps 2048 {
+        let mut c = take c2
+        columns.fill(mut c, 65536, 3u8)
+    }
+    match (moved, moved_short, filled, filled_short) {
+        (Ok(_), Error(OutOfTime(steps: 16)), Ok(_), Error(OutOfTime(steps: 2048))) => true,
+        _ => false,
+    }
+}
+
+// clone of 1 MiB of Bytes: 1 for the call, ceil(s / 4,096) = 1 for the list value
+// itself (s < 4,096), and 256 for its bytes, separately rounded; list.len's call takes
+// 1 more: 259.
+// expect: run clone_steps() = true
+fn clone_steps() -> bool {
+    let a = input(1048576)
+    let done = bound steps 259 {
+        let b: Bytes = clone(a)
+        list.len(b)
+    }
+    let short = bound steps 258 {
+        let b: Bytes = clone(a)
+        list.len(b)
+    }
+    match (done, short) {
+        (Ok(1048576), Error(OutOfTime(steps: 258))) => true,
+        _ => false,
+    }
+}
+
+// The quanta are set so a step stands for a bounded time whatever the operation. The
+// bound, not a count, is the oracle: int.parse, the slowest per byte, may take at most
+// 8 times as long per step as memmove does. Parsing 4 × 1 MiB takes 262,144 steps;
+// 256 copy_within calls over 1 MiB take 65,536.
+// test-native-only: a timing ratio means nothing on the reference evaluator.
+// expect: run parse_step_time_bound(clock) = true
+fn parse_step_time_bound(c: Clock) -> bool {
+    let s = text(1048576, b'0')
+    let mut b = input(1048576)
+    let p0 = host.mono_ns(c)
+    let mut zeros: u64 = 0
+    for _ in 0u64 .. 4 {
+        let r: Result[u64, ParseError] = int.parse(s)
+        if let Ok(0) = r {
+            zeros += 1
+        }
+    }
+    let p1 = host.mono_ns(c)
+    for _ in 0u64 .. 256 {
+        list.copy_within(mut b, 0, 1, 1048575)
+    }
+    let p2 = host.mono_ns(c)
+    let parse_ns = p1 - p0
+    let copy_ns = p2 - p1 + 1
+    zeros == 4 && parse_ns * 65536 <= 8 * copy_ns * 262144
+}

@@ -1,6 +1,8 @@
 //! Fixed-layout List storage, with portable charges independent of native stride.
 mod allocation;
+pub(super) mod work_steps;
 use super::*;
+use hirsel_core_ids::work_steps::table;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
 /// What asks a list for room: it decides the room test and whether growth is cold.
@@ -318,6 +320,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             )));
         }
+        let (Arg::Value(left), Arg::Value(right)) = (args[1], args[3]) else {
+            unreachable!()
+        };
+        let (both, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, left, right, n);
+        self.charge_work(table::COPY, both, n)?;
         let order = self.runtime_row(hirsel_core_ir::RtOp::CompareBytes, &args, n)?[0];
         let zero = self.konst(Ty::Scalar(Scalar::I8), 0, n)?;
         self.order_of(order, zero, id, result, n)
@@ -1226,6 +1233,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let count = self.carrier_word(source, carrier, SeqWord::Len, n);
         self.list_reserve_shared(item, header, count, Ask::Bounded, n)?;
+        self.charge_elements(table::COPY, item, count, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let copying = self.list_compare(CompareOp::Ne, count, zero, n);
         let copy = self.new_block(&[]);
@@ -1319,6 +1327,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let u64_ = Ty::Scalar(Scalar::U64);
         let stride = self.layout_size(item, false, n)?;
+        self.charge_elements(table::COPY, item, count, n)?;
         let zero = self.konst(u64_, 0, n)?;
         let one = self.konst(u64_, 1, n)?;
         let empty = self.list_compare(CompareOp::Eq, stride, zero, n);
@@ -1450,6 +1459,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let key_end = self.konst(u64_, 128, n)?;
         let offset_in_range = self.list_compare(CompareOp::Le, offset, key_end, n);
         self.list_require_element(offset_in_range, n);
+        self.charge_work(table::XXH3, len, n)?;
         let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
         let stripes = self.new_block(&[]);
         let done = self.new_block(&[]);
@@ -1523,7 +1533,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
-    /// Extend over one chunk per step so a budget can stop large checksums.
     pub(super) fn crc_update(
         &mut self,
         op: hirsel_core_ir::RtOp,
@@ -1532,54 +1541,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         header: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let checksum = Ty::Scalar(width);
         let u64_ = Ty::Scalar(Scalar::U64);
-        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let len = self.read_sequence_word(header, 8, u64_, n);
+        let work = match width {
+            Scalar::U32 => table::CRC32C,
+            _ => table::CRC64,
+        };
+        self.charge_work(work, len, n)?;
         let zero = self.konst(u64_, 0, n)?;
-        let limit = self.konst(u64_, 16 * 1024, n)?;
-        let head = self.new_block(&[u64_, checksum]);
-        let chunk = self.new_block(&[]);
-        let update = self.new_block(&[u64_]);
-        let done = self.new_block(&[]);
-        self.jump(head, &[zero, crc], n);
-
-        self.start(head);
-        let params = self.block_params(head);
-        let (offset, crc) = (params[0], params[1]);
-        let more = self.list_compare(CompareOp::Lt, offset, len, n);
-        self.list_branch(more, chunk, done, n);
-
-        self.start(chunk);
-        let fail = self.fail_to(n);
-        self.inst(Inst::Step { fail }, n);
-        let (left, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, len, offset, n);
-        let full = self.list_compare(CompareOp::Ge, left, limit, n);
-        let yes = self.edge(update, &[limit]);
-        let no = self.edge(update, &[left]);
+        let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
+        let update = self.new_block(&[]);
+        let done = self.new_block(&[Ty::Scalar(width)]);
+        let yes = self.edge(update, &[]);
+        let no = self.edge(done, &[crc]);
         self.end(
             Terminator::Branch {
-                condition: full,
+                condition: nonempty,
                 yes,
                 no,
             },
             Some(n),
         );
-
         self.start(update);
-        let count = self.block_params(update)[0];
-        let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
-        let from = self.address(AddressBase::Value(data), &[Step::Byte(offset)], byte, n);
-        let from = self.pointer(from, n);
-        let next = self.runtime_row(
-            op,
-            &[Arg::Value(crc), Arg::Value(from), Arg::Value(count)],
-            n,
-        )?[0];
-        let (after, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, offset, count, n);
-        self.jump(head, &[after, next], n);
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let next =
+            self.runtime_row(op, &[Arg::Value(crc), Arg::Value(data), Arg::Value(len)], n)?[0];
+        self.jump(done, &[next], n);
         self.start(done);
-        Some(crc)
+        Some(self.block_params(done)[0])
     }
 
     pub(super) fn sha1_blocks(
@@ -1591,6 +1580,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
         let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        self.charge_work(table::SHA1, len, n)?;
         self.runtime_row(
             hirsel_core_ir::RtOp::Sha1Blocks,
             &[Arg::Value(state), Arg::Value(data), Arg::Value(len)],
@@ -1627,6 +1617,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let valid = self.list_bool(BinaryOp::BitAnd, within, fits, n);
         let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, valid, n);
         self.list_require_element(valid, n);
+        let work = match op {
+            hirsel_core_ir::RtOp::Sha1Compress => table::SHA1,
+            hirsel_core_ir::RtOp::Sha256Blocks => table::SHA256,
+            _ => table::SHA512,
+        };
+        self.charge_work(work, bytes, n)?;
         let zero = self.konst(u64_, 0, n)?;
         let compressing = self.list_compare(CompareOp::Ne, count, zero, n);
         let compress = self.new_block(&[]);
@@ -1688,6 +1684,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<()> {
         let stride = self.layout_size(item, false, n)?;
         let (bytes, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, count, stride, n);
+        self.charge_elements(table::COPY, item, count, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let copying = self.list_compare(CompareOp::Ne, bytes, zero, n);
         let copy = self.new_block(&[]);
@@ -1725,6 +1722,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         self.list_reserve_shared(item, header, count, Ask::Fill, n)?;
+        self.charge_elements(table::COPY, item, count, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let filling = self.list_compare(CompareOp::Ne, count, zero, n);
         let fill = self.new_block(&[]);

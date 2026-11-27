@@ -379,7 +379,8 @@ is core's plain record `{ steps: u64 }`.
   User code entered without a call expression takes one step on entry: a finalizer when
   cleanup runs it, and a callable a core function calls back (a callable argument, a codec's
   `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
-  `?`, patterns and `match` run no user code and take none. A call of `list.prefetch` or
+  `?`, patterns and `match` run no user code and take none, beyond the work steps of `==`
+  and ordering (below). A call of `list.prefetch` or
   `inline.prefetch` takes none either, since a hint must not fail
   ([core](core.md#contracts-the-signatures-do-not-state)). Any other core function's call, and a
   foreign function's ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), is one
@@ -393,16 +394,74 @@ is core's plain record `{ steps: u64 }`.
   `argon2.id` and `secret.derive_argon2id` take one further step for each Argon2 block
   compression their parameters choose, at the call and before any work, because a stored
   hash or a caller names a cost that no limit bounds ([core](core.md#argon2id)).
-  `crc32c.update` and `crc64nvme.update` take one further step before each nonempty
-  16 KiB chunk, including a final partial chunk. `host.udp_recv` takes one further step for each 64 entries, or part of 64, of
+  The operations in the work-step table (below) take their work steps. `host.udp_recv` takes one further step for each 64 entries, or part of 64, of
   its `out` spare capacity, and one for each 16 KiB, or part, of the most it can deliver
   (`min(r, e × (slot_bytes − 256))`). `host.udp_send` takes one for each 64 packets, or part
   of 64, of its `pkts`, and after validating them one for each 16 KiB, or part, of the sum of
   their lengths. The product and the sum are exact (128-bit) before rounding, so neither
   wraps. All are taken at the call and before issue
-  ([NET-16](net.md#net-16-udp-sockets-and-batches)). Code an engine adds for drop, clone and growth
-  takes no steps. This is the **reference count**, the count the reference evaluator takes;
-  a build may count otherwise (Determinism, below).
+  ([NET-16](net.md#net-16-udp-sockets-and-batches)). Drop and growth take no steps: a drop
+  frees what a construction or a clone already paid for, and a growth is amortized into the
+  appends that cause it (each appended byte is counted once, under Work steps). A clone takes
+  work steps (below). This is the **reference count**, the count the reference evaluator
+  takes; a build may count otherwise (Determinism, below).
+- **Work steps.** An operation whose work grows with its input takes further steps, its
+  **work steps**, from one table: each row names the operation's **units**, its **quantum**
+  (a power of two) and its **weight**. The operation takes `ceil(u / quantum) + weight`
+  steps, `u` the exact (128-bit) sum of its units (a clone charges each row it names
+  separately), before any of its work and after the
+  refusals it decides before issue (`Bounds`, `Denied`, `Invalid`, a spare or a reserve too
+  small). The formula serves every row; no operation has its own. A quantum is chosen so
+  that one step stands for at most a fixed time on the slowest input the row admits (for
+  UTF-8, the multi-byte encodings; for structural `==`, one-byte leaves), the same target
+  for every row, and a weight is that time's multiple for the operation's fixed work, both
+  rounded to a power of two. The table is part of the language, the same on every target
+  and engine; units count logical sizes ([MEM-24](#mem-24-logical-charges)), never a build's layout.
+
+  | operation | units | quantum | weight |
+  |---|---|---|---|
+  | `list.append`, `copy_from_slice`, `copy_within`, `fill`, `fill_slice`, `compare_bytes`; `inline.copy_from_slice`, `copy_within`; `string.push`; `==` and ordering on `List[u8]`, `String` and `Bytes` | bytes moved, filled or compared (both operands for a comparison) | 4096 | 0 |
+  | a clone, at the call | the value's own bytes | 4096 | 0 |
+  | a clone, for each sequence, `Bytes` or column set it copies | its element (row) bytes | 4096 | 0 |
+  | a clone, for each such sequence whose elements own storage | its length | 4 | 0 |
+  | a clone, for each box it copies | 1 | 4 | 0 |
+  | structural `==` and ordering (derived) | the value's bytes plus one, and for a list, `min` of the lengths times (element bytes plus one); a zero-sized element counts one | 32 | 0 |
+  | `list.sum`, the elements `deque.remove` shifts | elements | 32 | 0 |
+  | `columns.fill` | elements times (row bytes plus one) | 64 | 0 |
+  | `int.parse` | input bytes | 16 | 0 |
+  | `string.from_utf8`, its ASCII prefix | bytes | 256 | 0 |
+  | `string.from_utf8`, past the prefix | bytes | 8 | 0 |
+  | base64 encoding | input bytes | 8 | 0 |
+  | ASCII case mapping | bytes | 64 | 0 |
+  | `crc32c.update` | `input` | 4096 | 0 |
+  | `crc64nvme.update`, `check.xxh3_stripes` | `input`, `b` | 2048 | 0 |
+  | `sha1.blocks`, `sha1.compress`, `sha256.blocks` | bytes (`64 × count` for blocks) | 256 | 0 |
+  | `sha512.blocks` | `128 × count` | 32 | 0 |
+  | `secret.aead_seal`, `aead_open`, `wrap`, `unwrap` | `aad` plus `plain` or `sealed`; the bytes of `s`; `blob` | 256 | 1 |
+  | `secret.hmac_sha1`, its verify and JWS forms | `data` | 64 | 2 |
+  | `secret.hmac_sha256`, its verify and JWS forms | `data` | 256 | 1 |
+  | `secret.hmac_sha384`, `hmac_sha512`, their verify and JWS forms | `data` | 64 | 4 |
+  | `ed25519.verify`; `secret.sign` with `Ed25519` | `msg` | 64 | 256 |
+  | `p256.verify`, `verify_der` | `msg` | 256 | 512 |
+  | `secret.sign` with `P256` | `msg` | 256 | 128 |
+  | `p384.verify`, `verify_der` | `msg` | 64 | 8192 |
+  | `rsa.verify_pkcs1_sha256`, `verify_pss_sha256` (to an 8192-bit modulus) | `msg` | 256 | 2048 |
+  | `secret.sign` with `Rs256` (to a 4096-bit modulus) | `msg` | 256 | 32768 |
+
+  Empty input takes only the weight. A core function whose body performs operations of the
+  table takes their work steps as well as its own row's: `string.encode_base64` takes the
+  base64 row over its input and the copy row over the bytes it appends. `string.from_utf8`
+  takes the prefix row over the pure ASCII bytes it starts with and the UTF-8 row over every
+  byte after them. A call on a fixed-size `Inline` (`sha1.block`,
+  `sha256.block`, `sha512.block`, `check.xxh3_stripe`, `check.xxh3_short_inline`) and
+  `check.xxh3_short`, whose input is at most 240 bytes, does work its types bound and takes
+  none. Not yet counted, each a named gap: `==` at a type parameter counts only its fixed
+  part; a sequence nested in a derived `==` (the bytes of a `List[String]`'s elements, a list
+  in a record) counts its element only; map key hashing and equality; key derivation; the
+  copy of a large `Inline` by assignment; `==` on `Deque` and `Map`; and core-source loops
+  outside the table (`string.find` and its kin). A closure written in core source takes a
+  step at each entry, as any closure does, so `from_utf8`'s scalar tail over multibyte text
+  takes those steps besides its row.
 - **The current bound.** At each point exactly one step bound is current, or none: the
   innermost enclosing `bound steps` scope's, else the task's root step bound, else none.
   Every step taken while a bound is current uses one of it. Entering `bound steps n`
@@ -440,8 +499,8 @@ is core's plain record `{ steps: u64 }`.
   time, and a body that waits forever is ended by a deadline or a cancellation
   ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits
   are independent and nest in either order; a step bound admits nothing and charges
-  nothing. Because a core call is one step, a step bound bounds time only together with the
-  limits that bound the sizes core calls work on.
+  nothing. A core call outside the work-step table is one step, so a step bound bounds its
+  time only together with the limits that bound the sizes it works on.
   A task spawned while a bound is current runs under its own root bound of what that bound has left at the
   spawn; the spawner's bound is not reduced, and no steps return. No two tasks share a bound, so where a
   bound stops a task follows from that task's build, source and values alone. The steps a run takes under a bound
@@ -464,8 +523,8 @@ is core's plain record `{ steps: u64 }`.
   across engines or optimisation levels. Every build takes at least one step for each
   iteration of a loop in user code and each call into user code that recursion reaches, and
   the extra steps of
-  `secret.scram_sha256`, `argon2.id`, `secret.derive_argon2id`, `crc32c.update` and
-  `crc64nvme.update`, `host.udp_recv` and `host.udp_send` as the reference count does, so code that computes without end exhausts every bound and work an untrusted input
+  `secret.scram_sha256`, `argon2.id`, `secret.derive_argon2id`, the work steps,
+  `host.udp_recv` and `host.udp_send` as the reference count does, so code that computes without end exhausts every bound and work an untrusted input
   chooses is bounded by it. A step taken while no bound is current uses nothing and
   ends no slice, so an engine need not count it, even in code that also runs under a bound.
 

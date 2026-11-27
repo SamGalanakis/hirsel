@@ -79,17 +79,20 @@ fn sv16_key_and_signature_bounds() -> bool {
     !rsa.verify_pkcs1_sha256(n, b"\x01\x00\x00", msg, sig) && !rsa.verify_pkcs1_sha256(n, b"\x01", msg, sig) && !rsa.verify_pkcs1_sha256(n, b"\x01\x00\x00\x00\x00\x00\x00\x00\x01", msg, sig) && !rsa.verify_pkcs1_sha256(n, e, msg, list.slice(sig, 0, 255)) && !rsa.verify_pkcs1_sha256(even, e, msg, sig) && !rsa.verify_pkcs1_sha256(oversized, e, msg, sig)
 }
 
-// SV17. One step and zero bytes suffice for tcId 1 of each RSA corpus.
+// SV17. Weight 2048 and no bulk step for the empty message of tcId 1 of each RSA corpus.
 // expect: reference run sv17_pkcs1_charge() = true
 fn sv17_pkcs1_charge() -> bool {
     let (n, e, msg, sig) = pkcs1_tc1()
     let work = bound bytes 0 {
-        bound steps 1 {
+        bound steps 2048 {
             rsa.verify_pkcs1_sha256(n, e, msg, sig)
         }
     }
-    match work {
-        Ok(Ok(true)) => true,
+    let short = bound steps 2047 {
+        rsa.verify_pkcs1_sha256(n, e, msg, sig)
+    }
+    match (work, short) {
+        (Ok(Ok(true)), Error(OutOfTime(steps: 2047))) => true,
         _ => false,
     }
 }
@@ -98,12 +101,15 @@ fn sv17_pkcs1_charge() -> bool {
 fn sv17_pss_charge() -> bool {
     let (n, e, msg, sig) = pss_tc1()
     let work = bound bytes 0 {
-        bound steps 1 {
+        bound steps 2048 {
             rsa.verify_pss_sha256(n, e, msg, sig)
         }
     }
-    match work {
-        Ok(Ok(true)) => true,
+    let short = bound steps 2047 {
+        rsa.verify_pss_sha256(n, e, msg, sig)
+    }
+    match (work, short) {
+        (Ok(Ok(true)), Error(OutOfTime(steps: 2047))) => true,
         _ => false,
     }
 }

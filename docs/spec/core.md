@@ -311,11 +311,13 @@ operations it names; nothing else about them may be inferred from an implementat
   stripe reads 64 bytes of `key`, starting at `offset` and advancing eight bytes
   per stripe. An incomplete stripe or a secret window outside the 192-byte key
   raises `Bounds` before any write. `check.xxh3_stripe` reads one inline stripe.
-  These calls each take one step and admit no bytes. Vector and portable
+  These calls admit no bytes. Each takes one step, and `xxh3_stripes` also takes the
+  work steps of `b` ([MEM-30](budgets.md#mem-30-step-bounds)). Vector and portable
   kernels compute the same words ([SEM-8](semantics.md#sem-8-determinism)).
 - **SHA-1 blocks.** `sha1.blocks(mut h, b)` applies RFC 3174 compression to the
   64-byte blocks of `b` and its RFC 3174 padding, updating the five state words
-  `h`. This call takes one step and admits no bytes. The engine can use the CPU's
+  `h`. This call admits no bytes and takes one step plus the work steps of `b`
+  ([MEM-30](budgets.md#mem-30-step-bounds)). The engine can use the CPU's
   SHA-1 instructions with identical state words and accounting on every CPU
   ([SEM-8](semantics.md#sem-8-determinism), [MEM-30](budgets.md#mem-30-step-bounds)).
   `std.sha1.hash` supplies the RFC initial state and returns the twenty digest bytes.
@@ -323,8 +325,9 @@ operations it names; nothing else about them may be inferred from an implementat
   SHA-256 compression function to each of the `count` 64-byte blocks of `b` from `at`,
   in order, updating the eight state words `h`. A range outside `b`, including an end
   past `u64`, raises `Bounds` before `h` changes. `sha256.block(mut h, b)` compresses
-  the one block of an `Inline[u8, 64]`. Each call admits no bytes and takes one Step
-  whatever `count` is ([MEM-30](budgets.md#mem-30-step-bounds)), as a bulk copy does. An
+  the one block of an `Inline[u8, 64]`. Each call admits no bytes and takes one Step;
+  `blocks` also takes the work steps of its `64 × count` bytes
+  ([MEM-30](budgets.md#mem-30-step-bounds)). An
   engine may use the CPU's SHA-256 instructions; the state words are the same on every
   CPU, so by [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU.
   `std.sha256` extends this module with the streaming hash.
@@ -333,8 +336,8 @@ operations it names; nothing else about them may be inferred from an implementat
   in order, updating the eight `u64` state words `h` (an `Inline[u64, 8]`). A range outside
   `b`, including an end past `u64`, raises `Bounds` before `h` changes.
   `sha512.block(mut h, b)` compresses the one block of an `Inline[u8, 128]`. The charge is
-  `sha256.blocks`' charge, unchanged: each call admits no bytes and takes one Step whatever
-  `count` is ([MEM-30](budgets.md#mem-30-step-bounds)). SHA-384 uses the same compression
+  `sha256.blocks`' charge over `128 × count` bytes: each call admits no bytes and takes one
+  Step, and `blocks` also its work steps ([MEM-30](budgets.md#mem-30-step-bounds)). SHA-384 uses the same compression
   from its own initial words, so there is one kernel for both. The kernel is Hirsel's own
   compression in `hirsel-core-rt`, beside the SHA-256 and SHA-1 ones, and not ring's:
   ring 0.17.14 offers SHA-384 and SHA-512 only as whole digests (`ring::digest::Context`),
@@ -678,7 +681,7 @@ copied byte for byte.
 | **H1** CAVP | a wrong round constant, rotation or initial word, or SHA-384 returning the wrong 48 bytes | Every record of the four files: `sha512.hash` or `sha384.hash` of `Msg` (the first `Len / 8` bytes) equals `MD`. Also check the published NIST `abc` and 896-bit two-block examples for both hashes. |
 | **H2** padding and streaming | a wrong pad at the 112-byte boundary, a 64-bit length field in the 128-bit slot, or a pending block lost between `add` calls | For every length 0 to 300 of the bytes `i mod 251`, and every split of the input into two `add` calls, `sha512.hash` and `sha384.hash` equal Python `hashlib`'s `sha512` and `sha384` digests, which the test reads from a checked-in table that `hashlib` generated, not from this build. A million `a` bytes streamed 1000 bytes per `add` give the million-`a` digests published with FIPS 180-2's SHA-384 and SHA-512 examples. |
 | **H3** `finish` keeps the state | `finish` mutating the state it was given | After `finish` on the first 100 bytes, adding the remaining 200 and finishing equals the one-shot digest of all 300, for both hashes. |
-| **H4** steps do not grow with the input | a per-block charge, or `add` compressing block by block in user code | On the reference evaluator, let `k` be the least bound under which `bound steps k { let mut s = take st; sha512.add(mut s, b, 0, list.len(b)); s }` succeeds for a 256-byte `b`, with `st` from `start()` and `b` bound outside the scope. The same scope under `k` also succeeds for a 1 MiB `b`, and for a 1 MiB `b` after a 5-byte `add` (so the pending path runs). The invariant is MEM-30's: a core call is one step whatever `count` is, and `add` has no loop over blocks. |
+| **H4** steps grow by the work-step formula only | a charge per block, no charge for bulk bytes, or `add` compressing block by block in user code | On the reference evaluator, let `k` be the least bound under which `bound steps k { let mut s = take st; sha512.add(mut s, b, 0, list.len(b)); s }` succeeds for a 256-byte `b`, with `st` from `start()` and `b` bound outside the scope. For a 1 MiB `b` (8192 blocks, 32768 work steps where the 256-byte `b` takes 8) the same scope fails under `k + 32759` with `OutOfTime` and succeeds under `k + 32760`. The invariant is MEM-30's: `add` makes one `blocks` call over all its whole blocks, whose work steps are `ceil(bytes / 32)` by the SHA-512 row of the work table, and has no loop over blocks. |
 
 The laws are cases in [sha512.hirsel](../../core/std/tests/sha512.hirsel), run by the shared walker with
 `--backend all`.
@@ -795,12 +798,11 @@ agreed value never leaves the schedule.
   the fixed 32-byte salt this rule and `PS256` require, so the rule needs no salt argument
   and no check of the wrapper's own. MGF1 uses the same hash. Verification uses only public
   values.
-- **Charges.** Each call takes one step ([MEM-30](budgets.md#mem-30-step-bounds)) and admits
-  no bytes, whatever the lengths of its arguments. The charge is 1 step per call plus
-  0 steps per message byte in the reference count, as `sha256.blocks` charges. The work is bounded
-  by the length of `msg`, which a limit bounds, and by the key size, which the rules above
-  bound: 8192 bits for RSA. MEM-30's per-unit exceptions, `secret.scram_sha256` and
-  Argon2id, cover work that a peer or a stored cost chooses.
+- **Charges.** Each call admits no bytes and takes one step plus its work steps
+  ([MEM-30](budgets.md#mem-30-step-bounds)): the fixed weight of its algorithm and one step
+  for each quantum, or part, of `msg`, both from MEM-30's work table. A weight
+  covers the largest key the rules above accept, 8192 bits for RSA, so the steps bound the
+  work whatever the key.
 - **Determinism.** The answer is a function of the input byte strings alone. Verification
   is not a host or provider operation, and nothing about it is recorded: replay computes it
   again ([recording](../recording.md#what-a-recording-holds)). An engine may use ring's
@@ -830,14 +832,14 @@ with key `0x04 || Qx || Qy` and signature `R || S`.
 | **SV7** high S | low-S normalisation that rejects a valid signature | `p256.verify` gives `true` for `ecdsa_secp256r1_sha256_p1363_test.json` tcId 64, which is valid with `s > n/2`. `p256.verify_der` gives `true` for `ecdsa_secp256r1_sha256_test.json` tcId 7, the high-S twin of tcId 5. |
 | **SV8** strict DER | a BER-lenient parser, or a sign bit read as magnitude | In `ecdsa_secp256r1_sha256_test.json`, `p256.verify_der` gives `true` for tcId 5. It gives `false` for tcId 8 (the sequence length in long form) and for tcId 6 (`s` without its leading zero, so negative). |
 | **SV9** P-256 forms and lengths | a compressed or bare key decoded on one engine only, or a wrong length that fails the call | Each of these gives `false` and the call does not fail. With NIST record 4's message and signature: the key compressed (`0x02` or `0x03` by `Qy`'s parity, then `Qx`) and the bare 64-byte `Qx \|\| Qy`. With record 4's key and message: the signature cut to 63 bytes. And `ecdsa_secp256r1_sha256_p1363_test.json` tcId 121, a 2-byte signature. |
-| **SV10** reference charge | a kernel lowered as library code that loops, or a charge per byte or per block | On the reference evaluator, `bound bytes 0 { bound steps 1 { ed25519.verify(k, m, s) } }` gives `Ok(Ok(true))` for TEST 1. The same scope over `p256.verify` gives `Ok(Ok(true))` for NIST record 4, whose message is 128 bytes, and over `p256.verify_der` gives `Ok(Ok(true))` for tcId 5. The arguments are locals bound outside the scopes. The expected value follows by hand from MEM-30: a core call is one step and admits nothing. |
+| **SV10** reference charge | a kernel lowered as library code that loops, a charge per byte or per block, or a weight missing | In a core test body, whose calls of core functions take no call step, on the reference evaluator `bound bytes 0 { bound steps 256 { ed25519.verify(k, m, s) } }` gives `Ok(Ok(true))` for TEST 1, whose message is empty, and `bound steps 255` gives `Error(OutOfTime(steps: 255))`. Under `bound steps 513` and `512`, `p256.verify` gives the same for NIST record 4, whose message is 128 bytes, and `p256.verify_der` for tcId 5. The arguments are locals bound outside the scopes. The expected value follows by hand from MEM-30's table: Ed25519's weight 256 and P-256's 512, one step for a nonempty message under the quantum (64 and 256 bytes) and none for an empty one, and nothing admitted. |
 | **SV11** P-384 accepts and rejects | a wrong curve or hash, a P-256 routine reused, or a Wycheproof case read the other way | Over all of `ecdsa_secp384r1_sha384_p1363_test.json` with `p384.verify` and all of `ecdsa_secp384r1_sha384_test.json` with `p384.verify_der`: each `valid` case gives `true` and each `invalid` case gives `false`. Neither file has an `acceptable` case. With NIST records counted within `[P-384,SHA-384]` of the same `SigVer.rsp`, each record gives `true` exactly when its `Result` is `P`. |
 | **SV12** P-384 forms, DER and high S | a compressed key decoded, a BER-lenient parser, or low-S normalisation | In `ecdsa_secp384r1_sha384_test.json`, `p384.verify_der` gives `true` for tcIds 5 and 7 (its high-S twin), and `false` for tcIds 6 (`s` without its leading zero), 8 and 9 (BER sequence lengths). In the P1363 file, tcIds 1 and 147 (high `s`) give `true`, and tcIds 164 (`r > n`) and 165 (`s > n`) give `false`. With tcId 1's message and signature, the key compressed by `Qy`'s parity, and the bare 96-byte `Qx \|\| Qy`, give `false`; tcId 1's signature cut to 95 bytes gives `false`. None of them fails the call. |
 | **SV13** RS256 accepts | a wrong DigestInfo, a hash over the wrong bytes, or a big-endian/little-endian slip in `n` or `e` | `rsa_signature_2048_sha256_test.json` tcIds 1 to 7, with `n` and `e` from the group's `publicKey.modulus` and `publicKey.publicExponent`, give `true`. The JWS of [RFC 7515 Appendix A.2](https://www.rfc-editor.org/rfc/rfc7515#appendix-A.2), with `msg` its ASCII JWS Signing Input and `n` and `e` from its JWK, gives `true`, and with the last byte of the signing input changed gives `false`. tcId 1 with one leading zero byte added to `n` gives `true`. |
 | **SV14** PKCS#1 v1.5 is encode-and-compare | a padding parser that accepts BER, trailing garbage or a missing NULL (Bleichenbacher 2006 forgeries against `e = 3`) | Over all of `rsa_signature_2048_sha256_test.json`, each `invalid` case gives `false`, among them tcIds 236 and 237 (the message not hashed), 244 and 245 (`sig ≥ n`) and 246 (two bytes too long). tcId 8, which Wycheproof marks `acceptable` (`MissingNull`), gives `false`: the expected value follows from §9.2's encoding, which the rule compares byte for byte. |
 | **SV15** PS256 with a fixed salt | salt-length auto-detection, a wrong MGF hash, or a wrong `emBits` mask | Over all of `rsa_pss_2048_sha256_mgf1_32_test.json` with `rsa.verify_pss_sha256`, each `valid` case gives `true` (tcIds 73 and 74 among them: salts of all zero and all one bits) and each `invalid` case gives `false`. Each `valid` case of `rsa_pss_2048_sha256_mgf1_0_test.json` gives `false`, since its salt is empty and the rule fixes 32 bytes. |
 | **SV16** RSA key bounds | a small or even key accepted, or a bad key that fails the call | Each gives `false` and none fails the call: the nine SHA-256 cases of `rsa_pkcs1_1024_sig_gen_test.json` (marked `acceptable` with `SmallModulus`), SV13's tcId 1 with `e` replaced by `01 00 00` (even) and by `01` (below 3), with `e` given as nine bytes `01 00 00 00 00 00 00 00 01` (≥ 2^33), with its signature cut to 255 bytes, and with the modulus replaced by either an even 256-byte integer or the 8201-bit odd integer encoded as `01`, 1023 zero bytes, then `01`. |
-| **SV17** reference charge | a per-byte charge, or RSA's modular exponentiation lowered as a loop | On the reference evaluator, `bound bytes 0 { bound steps 1 { rsa.verify_pkcs1_sha256(n, e, m, s) } }` gives `Ok(Ok(true))` for SV13's tcId 1, the same scope over `rsa.verify_pss_sha256` gives `Ok(Ok(true))` for `rsa_pss_2048_sha256_mgf1_32_test.json` tcId 1, and over `p384.verify` for its P1363 tcId 1. The arguments are locals bound outside the scopes. By hand from MEM-30, a core call is one step and admits nothing. |
+| **SV17** reference charge | a per-byte charge, a missing weight, or RSA's modular exponentiation lowered as a loop | In a core test body, on the reference evaluator, `bound bytes 0 { bound steps 2048 { rsa.verify_pkcs1_sha256(n, e, m, s) } }` gives `Ok(Ok(true))` for SV13's tcId 1 and `bound steps 2047` gives `Error(OutOfTime(steps: 2047))`; the same two scopes over `rsa.verify_pss_sha256` give the same for `rsa_pss_2048_sha256_mgf1_32_test.json` tcId 1. Both messages are empty. `p384.verify` for its P1363 tcId 1, whose message is 6 bytes, gives `Ok(Ok(true))` under 8193 and refuses under 8192. The arguments are locals bound outside the scopes. By hand from MEM-30's table: the weight (RSA 2048, P-384 8192), one step for a nonempty message under the quantum, and nothing admitted. |
 | **SV18** Ed25519 edge vectors | a verifier change that switches between cofactorless, cofactored (ZIP-215) or strict-point-decoding acceptance sets, or checks `S <= L` instead of `S < L` | All 12 vectors of "Taming the many EdDSAs" (`novifinancial/ed25519-speccheck` commit `65519336fda78a3d016e947df6d82848aca0c9da`, `cases.json` 0–11), selected ZIP-215 vectors (`hdevalence/ed25519consensus` commit `15731de461e4d21d6a79d5b7aaf473454f9d2009`, `zip215_test.go` cases 0, 8, 12, 14, 112, 168, 182), ZIP-215 case 0 with `S = L` (`[L]B = [0]B`), and Wycheproof `ed25519_test.json` tcIds 18 and 151. Expected verdicts follow the cofactorless rule above (matching ring 0.17.14): `true` for speccheck cases 0–3 and 11 and ZIP-215 cases 0, 112, 168, 182; `false` for `S = L`, `S > L`, `S >> L` (cases 6–7, tcId 18), cofactored-only cases (cases 4–5, ZIP-215 case 14), non-canonical `R` (cases 8–9, ZIP-215 cases 8, 12, tcId 151) and canonicalized-key hash case 10. |
 
 The laws are cases in the core contract harness, in `core/core/tests/ed25519.hirsel`,

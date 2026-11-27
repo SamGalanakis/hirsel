@@ -440,6 +440,16 @@ pub enum HmacAlgorithm {
 }
 
 impl HmacAlgorithm {
+    /// MEM-30's work row for one MAC with this algorithm.
+    pub fn work(self) -> hirsel_core_ids::work_steps::Work {
+        use hirsel_core_ids::work_steps::table;
+        match self {
+            Self::Sha1 => table::HMAC_SHA1,
+            Self::Sha256 => table::HMAC_SHA256,
+            Self::Sha384 | Self::Sha512 => table::HMAC_SHA512,
+        }
+    }
+
     /// The case of the guest's JwsMacAlg.
     pub fn from_jws_case(case: u64) -> Self {
         match case {

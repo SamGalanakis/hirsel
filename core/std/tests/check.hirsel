@@ -85,24 +85,25 @@ fn streaming_block_boundaries() -> bool {
 }
 
 // Every lane gets its neighboring word plus the product of the low and high
-// halves of its keyed word. Here both stripes repeat 01 and the key is zero.
+// halves of its keyed word. Here both stripes repeat 01 and the key is zero. The
+// call and one work step for the 128 bytes take two steps.
 // expect: run stripes_step_bound() = true
 fn stripes_step_bound() -> bool {
     let mut b: Bytes = list.new()
     list.fill(mut b, 128, 1)
     let key: Inline[u8, 192] =[0; 192]
-    let work = bound steps 1 {
+    let work = bound steps 2 {
         let mut acc: Inline[u64, 8] =[0; 8]
         check.xxh3_stripes(mut acc, b, key, 0)
         acc[0] == 0x020406080a080604 && acc[7] == 0x020406080a080604
     }
-    let denied = bound steps 0 {
+    let denied = bound steps 1 {
         let mut acc: Inline[u64, 8] =[0; 8]
         check.xxh3_stripes(mut acc, b, key, 0)
         acc[0]
     }
     match (work, denied) {
-        (Ok(true), Error(out)) => out.steps == 0,
+        (Ok(true), Error(out)) => out.steps == 1,
         _ => false,
     }
 }

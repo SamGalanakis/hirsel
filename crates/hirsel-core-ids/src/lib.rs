@@ -13,6 +13,7 @@ pub mod hex;
 pub mod host_op;
 pub mod launch;
 pub mod published;
+pub mod work_steps;
 
 #[cfg(test)]
 hirsel_guard::install!();

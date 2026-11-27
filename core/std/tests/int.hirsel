@@ -340,14 +340,15 @@ fn radix_parser_decimal_lengths() -> bool {
     fast_u == 9999999999999999999 && long_u == fast_u && zeros_u == 42 && fast_i == -999999999999999999 && long_i == fast_i && zeros_i == -42
 }
 
-// The core parse call takes one step, including its digit loop.
+// The core parse call takes one step and its MEM-30 work steps, one per 16 input
+// bytes or part: two digits take two steps.
 // expect: run parse_decimal_step_boundary() = true
 fn parse_decimal_step_boundary() -> bool {
-    let short = bound steps 0 {
+    let short = bound steps 1 {
         let parsed: Result[u64, ParseError] = int.parse("42")
         parsed
     }
-    let exact = bound steps 1 {
+    let exact = bound steps 2 {
         let parsed: Result[u64, ParseError] = int.parse("42")
         parsed
     }
@@ -355,7 +356,7 @@ fn parse_decimal_step_boundary() -> bool {
         return false
     }
     match short {
-        Error(e) => e.steps == 0 && value == 42,
+        Error(e) => e.steps == 1 && value == 42,
         Ok(_) => false,
     }
 }

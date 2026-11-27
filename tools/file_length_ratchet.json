@@ -223,9 +223,9 @@
     "reason": "cli-s2-prims-2712"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2588,
-    "raise_revision": 6,
-    "reason": "comptime-phase2-2693"
+    "lines": 2590,
+    "raise_revision": 7,
+    "reason": "brownout-mem30-metering-3197"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2853
@@ -244,7 +244,7 @@
     "reason": "comptime-eval-split-2612"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
-    "lines": 2297,
+    "lines": 2295,
     "raise_revision": 1,
     "reason": "crypto-sha512-2121"
   },

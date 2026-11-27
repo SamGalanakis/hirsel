@@ -51,17 +51,20 @@ fn sv12_fixed_forms() -> bool {
     p384.verify(key, msg, sig) && !p384.verify(compressed, msg, sig) && !p384.verify(bare, msg, sig) && !p384.verify(key, msg, short_sig)
 }
 
-// SV17. One step and zero bytes suffice for Wycheproof P1363 tcId 1.
+// SV17. Weight 8192 and one bulk step for the 6-byte message of P1363 tcId 1.
 // expect: reference run sv17_fixed_charge() = true
 fn sv17_fixed_charge() -> bool {
     let (key, msg, sig) = fixed_tc1()
     let work = bound bytes 0 {
-        bound steps 1 {
+        bound steps 8193 {
             p384.verify(key, msg, sig)
         }
     }
-    match work {
-        Ok(Ok(true)) => true,
+    let short = bound steps 8192 {
+        p384.verify(key, msg, sig)
+    }
+    match (work, short) {
+        (Ok(Ok(true)), Error(OutOfTime(steps: 8192))) => true,
         _ => false,
     }
 }

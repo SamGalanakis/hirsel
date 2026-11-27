@@ -89,6 +89,7 @@ pub fn accumulate_digit(value: u64, radix: u32, digit: u8, limit: u64) -> Option
 pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
     let b = string.as_bytes(s)
     let n = list.len(b)
+    work_steps(1, n)
     if n == 0 {
         return Error(Empty)
     }
@@ -258,3 +259,8 @@ fn decimal_digits(n: u64, mut digits: Inline[u8, 64]) -> u64 {
         }
     }
 }
+
+// MEM-30's work charge for a loop in this module: `code` names a row of the
+// work table (hirsel-core-ids work_steps::code: 0 walk, 1 parse, 2 UTF-8,
+// 3 base64, 4 ASCII case, 6 UTF-8 ASCII prefix) and `units` its units.
+fn work_steps(code: u64, units: u64)

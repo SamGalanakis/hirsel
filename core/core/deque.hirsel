@@ -97,7 +97,9 @@ pub fn remove[T](mut d: Deque[T], i: u64) -> T {
     let head = d.head
     let mask = int.wrapping_sub(list.capacity(d.ring.raw), 1)
     let x = slots_take(mut d.ring, int.wrapping_add(head, i) & mask)
-    if i < int.wrapping_sub(int.wrapping_sub(count, 1), i) {
+    let after = int.wrapping_sub(int.wrapping_sub(count, 1), i)
+    if i < after {
+        work_steps(0, i)
         let mut j = i
         while j > 0 {
             let to = int.wrapping_add(head, j) & mask
@@ -106,6 +108,7 @@ pub fn remove[T](mut d: Deque[T], i: u64) -> T {
         }
         d.head = int.wrapping_add(head, 1) & mask
     } else {
+        work_steps(0, after)
         let mut j = i
         while int.wrapping_add(j, 1) < count {
             let to = int.wrapping_add(head, j) & mask
@@ -284,3 +287,8 @@ fn slots_view[T](s: Slots[T], i: u64) -> View[T] in s
 fn slots_needs_drop[T](s: Slots[T]) -> bool
 
 fn slots_forget_ring[T](mut s: Slots[T], head: u64)
+
+// MEM-30's work charge for a loop in this module: `code` names a row of the
+// work table (hirsel-core-ids work_steps::code: 0 walk, 1 parse, 2 UTF-8,
+// 3 base64, 4 ASCII case, 6 UTF-8 ASCII prefix) and `units` its units.
+fn work_steps(code: u64, units: u64)

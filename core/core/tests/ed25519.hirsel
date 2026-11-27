@@ -66,17 +66,20 @@ fn sv5_wycheproof_lengths() -> bool {
     !ed25519.verify(key, msg, empty) && !ed25519.verify(key, msg, b"\x7c\x38\xe0\x26\xf2\x9e\x14\xaa\xbd\x05\x9a\x0f\x2d\xb8\xb0\xcd\x78\x30\x40\x60\x9a\x8b\xe6\x84\xdb\x12\xf8\x2a\x27\x77\x4a\xb0\x7a\x91\x55\x71\x1e\xcf\xaf\x7f\x99\xf2\x77\xba\xd0\xc6\xae\x7e\x39\xd4\xee\xf6\x76\x57\x33\x36\xa5\xc5\x1e\xb6\xf9\x46\xb3\x0d\x20\x20")
 }
 
-// SV10. One step and zero bytes suffice with TEST 1's local arguments.
+// SV10. Weight 256 and no bulk step for the empty message: 256 steps, zero bytes.
 // expect: reference run sv10_ed25519_charge() = true
 fn sv10_ed25519_charge() -> bool {
     let (key, msg, sig) = rfc_test_1()
     let work = bound bytes 0 {
-        bound steps 1 {
+        bound steps 256 {
             ed25519.verify(key, msg, sig)
         }
     }
-    match work {
-        Ok(Ok(true)) => true,
+    let short = bound steps 255 {
+        ed25519.verify(key, msg, sig)
+    }
+    match (work, short) {
+        (Ok(Ok(true)), Error(OutOfTime(steps: 255))) => true,
         _ => false,
     }
 }

@@ -61,32 +61,38 @@ fn sv9_wycheproof_short_signature() -> bool {
     p256.verify(key, msg, b"\x05\x01")
 }
 
-// SV10. One step and zero bytes suffice for NIST record 4's 128-byte message.
+// SV10. Weight 512 and one bulk step for NIST record 4's 128-byte message.
 // expect: reference run sv10_fixed_charge() = true
 fn sv10_fixed_charge() -> bool {
     let (key, msg, sig) = nist_record_4()
     let work = bound bytes 0 {
-        bound steps 1 {
+        bound steps 513 {
             p256.verify(key, msg, sig)
         }
     }
-    match work {
-        Ok(Ok(true)) => true,
+    let short = bound steps 512 {
+        p256.verify(key, msg, sig)
+    }
+    match (work, short) {
+        (Ok(Ok(true)), Error(OutOfTime(steps: 512))) => true,
         _ => false,
     }
 }
 
-// SV10. The same bound suffices for DER tcId 5.
+// SV10. The same 513 steps for DER tcId 5, whose message is 6 bytes.
 // expect: reference run sv10_der_charge() = true
 fn sv10_der_charge() -> bool {
     let (key, msg, sig) = wycheproof_der_tc5()
     let work = bound bytes 0 {
-        bound steps 1 {
+        bound steps 513 {
             p256.verify_der(key, msg, sig)
         }
     }
-    match work {
-        Ok(Ok(true)) => true,
+    let short = bound steps 512 {
+        p256.verify_der(key, msg, sig)
+    }
+    match (work, short) {
+        (Ok(Ok(true)), Error(OutOfTime(steps: 512))) => true,
         _ => false,
     }
 }

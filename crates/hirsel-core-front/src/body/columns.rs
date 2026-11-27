@@ -843,6 +843,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<()> {
         self.columns_room(cols, c, count, Refusal::Raise, n)?;
+        // One unit per element and one per logical byte, so a zero-sized row
+        // still pays for its stores' loop (MEM-30, "Work steps").
+        let size = self.layout_size(cols.item, true, n)?;
+        let one = self.konst(U64, 1, n)?;
+        let (per, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, size, one, n);
+        let (units, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, count, per, n);
+        self.charge_work(hirsel_core_ids::work_steps::table::COLUMNS_FILL, units, n)?;
         let len = self.read_sequence_word(c, 8, U64, n);
         let (end, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, count, n);
         let head = self.new_block(&[U64]);

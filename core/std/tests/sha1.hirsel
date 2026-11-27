@@ -117,22 +117,23 @@ fn span_boundaries() -> bool {
     true
 }
 
-// Twenty bytes of RFC 3174 TEST1, split into its five network-order words.
+// Twenty bytes of RFC 3174 TEST1, split into its five network-order words. The call
+// and one work step for the 3 bytes take two steps.
 // expect: run blocks_step_bound() = true
 fn blocks_step_bound() -> bool {
     let b = string.as_bytes("abc")
-    let work = bound steps 1 {
+    let work = bound steps 2 {
         let mut h: Inline[u32, 5] =[0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
         sha1.blocks(mut h, b)
         h[0] == 0xa9993e36 && h[1] == 0x4706816a && h[2] == 0xba3e2571 && h[3] == 0x7850c26c && h[4] == 0x9cd0d89d
     }
-    let denied = bound steps 0 {
+    let denied = bound steps 1 {
         let mut h: Inline[u32, 5] =[0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
         sha1.blocks(mut h, b)
         h[0]
     }
     match (work, denied) {
-        (Ok(true), Error(out)) => out.steps == 0,
+        (Ok(true), Error(out)) => out.steps == 1,
         _ => false,
     }
 }

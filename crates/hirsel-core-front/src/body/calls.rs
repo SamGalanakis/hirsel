@@ -746,8 +746,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse("MEM-17", n, why);
             return (result, None);
         }
+        // `int.work_steps` is MEM-30's work charge, lowered with the core values.
         let builtin = g.path.package_is("core", "1")
             && g.body.is_none()
+            && g.path.0.name != "work_steps"
             && (g.path.0.modules == ["int"]
                 || g.path.0.modules == ["char"]
                 || g.path.0.modules == ["float"]

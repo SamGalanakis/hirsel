@@ -76,9 +76,9 @@ impl Machine<'_> {
             HostOp::SecretP256Key => return self.secret_p256_key(t, a),
             HostOp::SecretKeyShare => return self.key_share(t, a),
             HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign => {
-                return Ok(self.secret_key(t, op, a));
+                return self.secret_key(t, op, a);
             }
-            HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => return Ok(self.secret_aead(op, a)),
+            HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => return self.secret_aead(t, op, a),
             HostOp::EnvGet | HostOp::EnvLen | HostOp::EnvName | HostOp::EnvNarrow => {
                 return Ok(self.env(t, op, a));
             }

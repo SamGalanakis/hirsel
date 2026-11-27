@@ -1,4 +1,5 @@
 use super::*;
+use hirsel_core_ids::work_steps::table;
 
 impl Machine<'_> {
     /// `stdin.read_secret`: the policy, then seal's charge at 1024 bytes, both
@@ -185,7 +186,7 @@ impl Machine<'_> {
     /// `secret.wrap`, `unwrap` and `sign` (native `secret.rs` key
     /// operations): error tag 1 Denied, 2 Invalid, 3 Tampered, 4 Capacity.
     /// Host-generated signing keys are opaque even to the evaluator.
-    pub(super) fn secret_key(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
+    pub(super) fn secret_key(&mut self, t: &mut Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::key_wrap::{self, KeyFailure, SignAlg, SigningRandom};
         let fail = |f: KeyFailure| {
             let tag = match f {
@@ -204,14 +205,17 @@ impl Machine<'_> {
             _ => SecretUse::WRAP,
         };
         if !key.policy.uses().permits(needed) {
-            return fail(KeyFailure::Denied);
+            return Ok(fail(KeyFailure::Denied));
         }
         let (produced, out) = match op {
             HostOp::SecretWrap => {
                 let s = self.secret(a[1]).unwrap();
                 if s.policy.import().is_some() || (s.opaque && !key.opaque) {
-                    return fail(KeyFailure::Denied);
+                    return Ok(fail(KeyFailure::Denied));
                 }
+                let len = s.bytes.len() as u64;
+                self.take_steps(t, table::AEAD.steps(len))?;
+                let s = self.secret(a[1]).unwrap();
                 let blob = key_wrap::wrap_with_salt(
                     &key.bytes,
                     &s.policy.text(),
@@ -228,8 +232,9 @@ impl Machine<'_> {
                     SigningRandom::Host
                 };
                 if alg == SignAlg::P256 && source == SigningRandom::Virtual && key.opaque {
-                    return fail(KeyFailure::Denied);
+                    return Ok(fail(KeyFailure::Denied));
                 }
+                self.take_steps(t, alg.work().steps(self.load(a[3] + 8, 8)))?;
                 (
                     key_wrap::sign(alg, &key.bytes, self.carrier_bytes(a[3]), source),
                     a[4],
@@ -241,22 +246,23 @@ impl Machine<'_> {
                     .and_then(SecretPolicy::parse)
                     .filter(|policy| policy.import().is_none())
                 else {
-                    return fail(KeyFailure::Invalid);
+                    return Ok(fail(KeyFailure::Invalid));
                 };
+                self.take_steps(t, table::AEAD.steps(self.load(a[1] + 8, 8)))?;
                 let blob = self.carrier_bytes(a[1]).to_vec();
                 let len = key_wrap::unwrapped_len(&blob).unwrap_or(0) as u64;
                 let size = SecretGrant::logical_size(requested.send(), len);
                 let charge = size.unwrap_or(u64::MAX);
                 let payer = t.limits.last().unwrap().clone();
                 if let Err(available) = self.admit_charge(&payer, charge, size.is_none()) {
-                    return vec![charge, 4, 0, available];
+                    return Ok(vec![charge, 4, 0, available]);
                 }
                 let mut plain = Zeroizing::new(Vec::new());
                 if let Err(f) = key_wrap::unwrap_into(&key.bytes, &blob, &mut plain)
                     .and_then(|bound| key_wrap::within(&requested, bound))
                 {
                     self.refund(payer, charge);
-                    return fail(f);
+                    return Ok(fail(f));
                 }
                 let seal = Arc::new(());
                 self.host
@@ -273,25 +279,25 @@ impl Machine<'_> {
                     },
                     (payer, 0),
                 );
-                return vec![key, 0, 0, 0];
+                return Ok(vec![key, 0, 0, 0]);
             }
         };
         let bytes = match produced {
             Ok(bytes) => bytes,
-            Err(f) => return fail(f),
+            Err(f) => return Ok(fail(f)),
         };
         let (_, data, len, cap) = self.carrier(out);
         let spare = cap.saturating_sub(len);
         let n = bytes.len() as u64;
         if n > spare {
-            return vec![n, 4, 0, spare];
+            return Ok(vec![n, 4, 0, spare]);
         }
         self.put(data + len, &bytes);
         self.store(out + 8, 8, len + n);
-        vec![n, 0, 0, 0]
+        Ok(vec![n, 0, 0, 0])
     }
 
-    pub(super) fn secret_aead(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
+    pub(super) fn secret_aead(&mut self, t: &mut Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::key_wrap::KeyFailure;
         use hirsel_core_net::secret_aead::{self, AeadAlg, AeadInput, AeadMode, AeadRefusal};
 
@@ -314,15 +320,17 @@ impl Machine<'_> {
             spare as usize,
         ) {
             Ok(size) => size,
-            Err(AeadRefusal::Denied) => return vec![0, 1, 0, 0],
-            Err(AeadRefusal::Invalid) => return vec![0, 2, 0, 0],
+            Err(AeadRefusal::Denied) => return Ok(vec![0, 1, 0, 0]),
+            Err(AeadRefusal::Invalid) => return Ok(vec![0, 2, 0, 0]),
             Err(AeadRefusal::Capacity {
                 requested,
                 available,
             }) => {
-                return vec![requested as u64, 4, 0, available as u64];
+                return Ok(vec![requested as u64, 4, 0, available as u64]);
             }
         };
+        let steps = table::AEAD.steps_sum(&[self.load(a[3] + 8, 8), self.load(a[4] + 8, 8)]);
+        self.take_steps(t, steps)?;
         let apply = |machine: &Self, spare| {
             let input = AeadInput {
                 alg,
@@ -351,10 +359,10 @@ impl Machine<'_> {
         match result {
             Ok(()) => {
                 self.store(out + 8, 8, len + size as u64);
-                vec![size as u64, 0, 0, 0]
+                Ok(vec![size as u64, 0, 0, 0])
             }
-            Err(KeyFailure::Invalid) => vec![0, 2, 0, 0],
-            Err(KeyFailure::Tampered) => vec![0, 3, 0, 0],
+            Err(KeyFailure::Invalid) => Ok(vec![0, 2, 0, 0]),
+            Err(KeyFailure::Tampered) => Ok(vec![0, 3, 0, 0]),
             Err(KeyFailure::Denied | KeyFailure::Provider(_)) => unreachable!(),
         }
     }
@@ -370,9 +378,6 @@ impl Machine<'_> {
         if !secret.policy.uses().permits(needed) {
             return Ok(vec![0, 1, 0, 0]);
         }
-        self.take_steps(t, self.load(a[1] + 8, 8))?;
-        let secret = self.secret(a[0]).unwrap();
-        let data = self.carrier_bytes(a[1]);
         use hirsel_core_net::HmacAlgorithm;
         let alg = match op {
             HostOp::SecretHmacSha1 | HostOp::SecretVerifyHmacSha1 => HmacAlgorithm::Sha1,
@@ -384,6 +389,9 @@ impl Machine<'_> {
             }
             _ => unreachable!(),
         };
+        self.take_steps(t, alg.work().steps(self.load(a[1] + 8, 8)))?;
+        let secret = self.secret(a[0]).unwrap();
+        let data = self.carrier_bytes(a[1]);
         let jws = matches!(op, HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify);
         if jws && secret.bytes.len() < alg.tag_len() {
             return Ok(vec![0, 2, 0, 0]);

@@ -4,14 +4,15 @@
 Run from the repository with the release compiler and runtime archive:
   python3 crates/hirsel-core-rt/measure-isolate-call.py --hirsel <hirsel> --runtime <libhirsel_core_rt.a>
 
-Select the remaining items with --items metering parked layout codebytes.
+Select the remaining items with --items metering parked layout codebytes loader.
 The script builds selected Hirsel fixtures on Cranelift and LLVM (LLVM with --release),
 then reports JSON and human-readable rows for:
 1. codec and typed no-codec contained calls (instructions and ns per call);
 2. metered/unmetered tight loops copied from core/langarena and bench/awfy;
 3. parked-unit RSS and VMA cost at 0, 1k, 10k and, when the 2 GiB cap allows, 50k;
 4. runtime record sizes and Context field offsets;
-5. incremental executable text/data bytes of minimal Places.
+5. incremental executable text/data bytes of minimal Places;
+6. the code loader's cached load (G3) and `activate` under 16 dispatching workers (G1c).
 
 Time and instruction rows are slopes: the difference between 2n and n, divided
 by n. Wall medians use 60 interleaved pairs. Measurements wait for one-minute
@@ -51,7 +52,7 @@ PARKED_50K = 50_000
 SECTION_TEXT = ('.text', '.plt')
 SECTION_DATA = ('.rodata', '.data', '.got', '.init_array', '.fini_array')
 CAPPED = str(ROOT / 'tools/capped')
-ITEMS = ('calls', 'metering', 'parked', 'layout', 'codebytes')
+ITEMS = ('calls', 'metering', 'parked', 'layout', 'codebytes', 'loader')
 CAP_BYTES = 2 << 30
 TIMING_PAIRS = 60
 
@@ -402,6 +403,23 @@ def measure_code_bytes(hirsel, runtime, engine, tmp, env):
             'data_bytes_per_place': data, 'total_bytes_per_place': text + data}
 
 
+def measure_loader():
+    """The rows `crates/hirsel-code/examples/gates.rs` prints, in microseconds."""
+    wait_for_load()
+    said = subprocess.check_output(
+        ['cargo', 'run', '--offline', '--release', '-q', '-p', 'hirsel-code', '--example', 'gates'],
+        cwd=ROOT, text=True)
+    units = {'ns': 1e-3, 'µs': 1.0, 'ms': 1e3, 's': 1e6}
+    rows = {}
+    for line in said.splitlines():
+        print(line, flush=True)
+        name, _, rest = line.partition(': ')
+        found = re.findall(r'(p50|p99|p99\.9|max) ([0-9.]+)(ns|µs|ms|s)\b', rest)
+        if found:
+            rows[name] = {key: float(value) * units[unit] for key, value, unit in found}
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hirsel', required=True, type=Path)
@@ -432,6 +450,10 @@ def main():
         for item in dict.fromkeys(args.items):
             if item == 'layout':
                 result[item] = copy_workspace_for_layout(tmp)
+                save()
+                continue
+            if item == 'loader':
+                result[item] = measure_loader()
                 save()
                 continue
             result[item] = {}

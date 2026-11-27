@@ -1958,27 +1958,6 @@ fn head_next(inbox: Receiver[HeadInput], waiting: bool) -> Option[HeadInput] wai
     }
 }
 
-// H3's group ends when the inbox stays empty while every task that was ready
-// has had its turn: arrivals that a reader or owner is already carrying join
-// this group instead of each paying a durable, a Release and a fan-out round.
-// A try_receive that finds Empty is a poll, and the head yields to ready tasks
-// only when its polls end a CONC-10 turn (64 polls). The bound is one full
-// turn, so every settle crosses a turn boundary before the gate; at 32 half
-// the groups gate without yielding, and 1,000 clients at 500 calls/s fall
-// behind.
-const SETTLE_PROBES: u64 = 64
-
-fn settle_probe(inbox: Receiver[HeadInput]) -> Option[HeadInput] waits {
-    let mut polls = 0u64
-    while polls < SETTLE_PROBES {
-        if let Some(take more) = head_next(inbox, false) {
-            return Some(take more)
-        }
-        polls += 1u64
-    }
-    None
-}
-
 fn close_head_admission[G: send, H: shareable + inert + send](mut head: Head[G, H]) -> Result[(), store.Error] waits {
     close_keyed_admission(mut head)?
     // A parked call is cancelled; its position stays Admitted and is re-admitted as Abandoned.

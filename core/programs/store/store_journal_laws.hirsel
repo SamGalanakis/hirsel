@@ -231,11 +231,11 @@ fn journal_test_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
 }
 
-const JOURNAL_IMMEDIATE_CADENCE: journal.JournalCadence = journal.JournalCadence(group_delay_us: 0, end_groups: 64, end_interval_ms: 0)
+const JOURNAL_IMMEDIATE_CADENCE: journal.JournalCadence = journal.JournalCadence(end_groups: 64, end_interval_ms: 0)
 
 // Live-capture laws need a named END for each durable group. The barrier
 // acknowledges only after the worker has finished the previous group.
-const JOURNAL_LAW_NAMED_END_CADENCE: journal.JournalCadence = journal.JournalCadence(group_delay_us: 0, end_groups: 1, end_interval_ms: 10)
+const JOURNAL_LAW_NAMED_END_CADENCE: journal.JournalCadence = journal.JournalCadence(end_groups: 1, end_interval_ms: 10)
 
 fn journal_law_await_end(db: Db) -> Result[(), Error] waits {
     let state = disk_state(db)

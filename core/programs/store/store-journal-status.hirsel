@@ -136,29 +136,9 @@ fn journal_receive(db: Db) -> JournalAck waits {
     }
 }
 
-fn journal_flush(db: Db) waits {
-    if let DirBackend(directory) = disk_state(db).backend {
-        journal.flush_directory(directory)
-    }
-}
-
-/// Asks a Directory journal to end its open group now instead of at its gather
-/// deadline (L94), without waiting for the sync. A caller that waits on
-/// `sync_notices` for a commit `durable_now` found unsynced calls this before it
-/// parks: no other arrival may come to end the group (RUNNER-SPEC H3). Other
-/// stores do nothing: their syncs never wait on a deadline.
-pub fn request_sync(db: Db) waits {
-    if is_disk(db) {
-        journal_flush(db)
-    }
-}
-
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
     if let Some(raw) = frame {
         let size = list.len(raw)
-        if queue_accounting(disk_state(db)).inflight > db.limits.frame - size {
-            journal_flush(db)
-        }
         while queue_accounting(disk_state(db)).inflight > db.limits.frame - size {
             let acknowledged = journal_receive(db)
             journal_ack(mut db, take acknowledged)?
@@ -193,9 +173,6 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
     }
     let mut groups = drained ?=> durable_latch_error
     if is_disk(db) {
-        if !covered(db, t.mark) {
-            journal_flush(db)
-        }
         while !covered(db, t.mark) {
             let ack = journal_receive(db)
             journal_ack(mut db, take ack) ?=> durable_latch_error

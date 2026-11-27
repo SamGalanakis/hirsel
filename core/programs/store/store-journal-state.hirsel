@@ -1,6 +1,6 @@
 pub const JOURNAL_WORKER_SLACK: u64 = 32768
 
-pub type DirJournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile, Bytes) | Barrier | Flush
+pub type DirJournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile, Bytes) | Barrier
 
 pub type DirAck: send = DirJournaled(u64, u64) | DirBroken(IoError)
 
@@ -47,8 +47,7 @@ pub opaque type DirJournalState {
     written: Receiver[WriteNotice],
     written_send: Sender[WriteNotice],
     synced: Option[Receiver[()]],
-    writer: Task[Result[(), types.Failure]],
-    gather: bool
+    writer: Task[Result[(), types.Failure]]
 }
 
 pub type DirJournalChannels {
@@ -97,7 +96,7 @@ pub fn start_directory(tasks: Tasks, d: Dir, c: Clock, id: types.StoreKey, group
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     types.capacity(result.unwrap(channel.receive(waiting)))?
-    Ok(DirJournalState(lock: take lock, d: d, creation: take creation, file_seq: seq, file_end: 72, journal: take frames, acks: take journal_received, accounting: queue_accounting(uncovered), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take writer, gather: cadence.group_delay_us != 0))
+    Ok(DirJournalState(lock: take lock, d: d, creation: take creation, file_seq: seq, file_end: 72, journal: take frames, acks: take journal_received, accounting: queue_accounting(uncovered), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take writer))
 }
 
 pub fn directory(state: DirJournalState) -> Dir {
@@ -155,13 +154,6 @@ pub fn dir_written_send(state: DirJournalState) -> View[Sender[WriteNotice]] in 
 
 pub fn dir_sync_notices(mut state: DirJournalState) -> Option[Receiver[()]] {
     replace(mut state.synced, None)
-}
-
-pub fn flush_directory(state: DirJournalState) waits {
-    if state.gather {
-        // The ack channel preserves the worker's first failure if it exited.
-        let _ = channel.send(state.journal, Flush)
-    }
 }
 
 pub fn rotate(mut state: DirJournalState, c: Clock, id: types.StoreKey, seq: u64, previous: u64) -> Result[bool, types.Failure] waits {

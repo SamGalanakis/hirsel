@@ -1,3 +1,3 @@
 fn forge_dir_journal_state(take lock: HostFile, d: Dir, take journal_to: Sender[store.journal.DirJournalMsg], take acks: Receiver[store.journal.DirAck], take written: Receiver[store.journal.WriteNotice], take written_send: Sender[store.journal.WriteNotice], take writer: Task[Result[(), store.types.Failure]]) -> store.journal.DirJournalState {
-    store.journal.DirJournalState(lock: take lock, d: d, creation: list.new(), file_seq: 1, file_end: 72, journal: take journal_to, acks: take acks, accounting: store.journal.queue_accounting(0), written: take written, written_send: take written_send, synced: None, writer: take writer, gather: false)
+    store.journal.DirJournalState(lock: take lock, d: d, creation: list.new(), file_seq: 1, file_end: 72, journal: take journal_to, acks: take acks, accounting: store.journal.queue_accounting(0), written: take written, written_send: take written_send, synced: None, writer: take writer)
 }

@@ -1,12 +1,11 @@
 pub type WriteNotice: send = Written | WriteFailed(IoError)
 
 pub type JournalCadence: cross {
-    group_delay_us: u32,
     end_groups: u32,
     end_interval_ms: u64
 }
 
-pub const DIRECTORY_JOURNAL_CADENCE: JournalCadence = JournalCadence(group_delay_us: 50, end_groups: 64, end_interval_ms: 10)
+pub const DIRECTORY_JOURNAL_CADENCE: JournalCadence = JournalCadence(end_groups: 64, end_interval_ms: 10)
 
 pub type JournalWorker: send {
     store: types.StoreKey,
@@ -146,12 +145,8 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
     let mut end_named = 72u64
     let mut written = 0u64
     let mut groups = 0u64
-    let delay_us: u64 = int.widen(cadence_spec.group_delay_us)
-    let delay_ns = delay_us * 1000
     let interval_ns = int.saturating_mul(cadence_spec.end_interval_ms, 1000000u64)
     let mut end_due: Option[u64] = None
-    let mut armed = false
-    let mut solos = 0u8
     let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
     let mut buffer = take reserved
     list.append(mut buffer, first_header)
@@ -244,9 +239,7 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
         let mut frames = 0u64
         let mut group_bytes = 0u64
         let mut last_frame = 0u64
-        let mut gather_until: Option[u64] = None
         let mut idle = false
-        let mut expired = false
         let mut rotating: Option[(HostFile, HostFile, Bytes)] = None
         let mut answering = false
         loop {
@@ -258,15 +251,9 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
                 },
                 Some(Frame(take raw, number)) => {
                     let length = list.len(raw)
-                    if let Some(until) = gather_until {
-                        expired = group_bytes >= JOURNAL_BULK_GROUP || host.mono_ns(clock) >= until
-                    }
-                    if expired || (frames != 0 && group_bytes + length > group_limit) {
+                    if frames != 0 && group_bytes + length > group_limit {
                         deferred = Some(Frame(take raw, number))
                         break
-                    }
-                    if frames == 0 && armed && length < JOURNAL_BULK_GROUP {
-                        gather_until = Some(int.saturating_add(host.mono_ns(clock), delay_ns))
                     }
                     if length > group_limit {
                         oversized = Some(take raw)
@@ -288,29 +275,14 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
                     answering = true;
                     break
                 },
-                Some(Flush) => break,
             }
-            if let Some(until) = gather_until {
-                if group_bytes >= JOURNAL_BULK_GROUP || host.mono_ns(clock) >= until {
-                    expired = true
-                    break
-                }
-            }
-            let pending = match channel.try_receive(receive) {
-                Error(Empty) => if let Some(until) = gather_until {
-                    channel.receive_until(receive, At(clock, until))
-                } else {
-                    Error(Empty)
-                },
-                other => take other,
-            }
+            let pending = channel.try_receive(receive)
             match take pending {
                 Ok(take msg) => {
                     next_message = Some(take msg)
                 },
                 Error(Empty) => {
-                    idle = gather_until == None
-                    expired = !idle
+                    idle = true
                     break
                 },
                 Error(Closed) => {
@@ -348,16 +320,6 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
             // After the ack, so a writer woken by this notice finds it.
             let _ = channel.try_send(synced, ())
             groups += 1
-            if delay_ns != 0 && frames >= 2 {
-                armed = true
-                solos = 0
-            } else if expired && frames == 1 {
-                solos += 1
-                if solos == 2 {
-                    armed = false
-                    solos = 0
-                }
-            }
             small_groups = if group_bytes >= JOURNAL_BULK_GROUP {
                 0u64
             } else {

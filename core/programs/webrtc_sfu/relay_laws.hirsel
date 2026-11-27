@@ -390,3 +390,55 @@ fn relay_only_over(stream: bool, seed: u64) {
         fail("a revoked subject allocated again")
     }
 }
+
+/// bug: the idle TURN relay woke every millisecond and polled the allocation pool.
+/// oracle: the test clock registers only shutdown, and a served Net sees no pool reads.
+@test
+fn idle_relay_waits_until_shutdown(tasks: Tasks, out: Stdout) -> Result[(), turn.TurnError] waits {
+    let until = 20u64 * MS
+    let listen = Addr(ip: RELAY_LISTEN.ip, port: RELAY_LISTEN.port)
+    let sockets = option.unwrap(signal.relay_socket_plan(64, 1200, 1))
+    let (test_clock, hand) = provide.clock(0, MINT_UNIX * 1000)
+    let mut time = take hand
+    let (net, port) = provide.net(bytes 4194304)
+    let mut served = take port
+    let (revoke, revokes): (Sender[signal.RelayRevoke], Receiver[signal.RelayRevoke]) = channel.new(1)
+    let (ready, started): (Sender[()], Receiver[()]) = channel.new(1)
+    let job = turn_runtime.Start(net, clock: test_clock, random: provide.random(1), tasks, out, listen, master: master("mac kdf"), nonce: master("mac"), plan: plan(), sockets, revokes: take revokes, ready: take ready, until)
+    let relay = task.spawn(tasks, bytes turn_runtime.reserve_bytes(sockets), take job, turn_runtime.run)
+    let mut binds = 0u64
+    let mut pending: List[Call[NetOp]] = list.new()
+    while let Some(take request) = provide.next(mut served) {
+        match provide.net_op(request) {
+            UdpBind(..) => {
+                let addr = if binds == 0 {
+                    listen
+                } else {
+                    Addr(ip: listen.ip, port: int.narrow(50000u64 + binds))
+                }
+                result.unwrap(provide.reply(mut served, take request, provide.net_reply(UdpSockets(first: 1 + binds, count: 1, addr))))
+                binds += 1
+            },
+            Listen(addr: address, backlog: _) => result.unwrap(provide.reply(mut served, take request, provide.net_reply(Listener(100, address)))),
+            UdpRecv(socket: 1, ..) => list.push(mut pending, take request),
+            Accept(listener: 100) => list.push(mut pending, take request),
+            _ => fail("idle relay touched an allocation socket"),
+        }
+    }
+    if clock.idle(mut time) != Some(until) {
+        fail("idle relay registered a wake before shutdown")
+    }
+    let Ok(()) = channel.try_receive(started) else {
+        fail("the relay did not become ready")
+    }
+    if binds != 65 || list.len(pending) != 2 {
+        fail("expected both listeners pending and 64 inactive sockets")
+    }
+    clock.advance_to(mut time, until - 1)
+    if clock.idle(mut time) != Some(until) {
+        fail("idle relay woke during the idle interval")
+    }
+    clock.advance_to(mut time, until)
+    let _ = take revoke
+    result.unwrap(task.join(take relay))
+}

@@ -1,0 +1,238 @@
+const STREAM_READ_BYTES: u64 = 4096
+
+const STREAM_TASK_BYTES: u64 = 8192
+
+const DATAGRAM_FORWARD_BYTES: u64 = 4096
+
+type DatagramSource: send = Server | Peer(Addr, u64)
+
+type DatagramBatch: send {
+    data: Bytes,
+    packets: List[UdpPacket]
+}
+
+type RelayEvent: send = Datagrams(DatagramSource) | DatagramEnded(DatagramSource) | Accepted(Socket, Addr) | AcceptEnded | StreamBytes(u64, Bytes) | StreamEnded(u64) | Revoked(signal.RelayRevoke)
+
+type DatagramCommand: send = Transmit(Addr, Bytes) | Resume(DatagramBatch) | Stop
+
+type DatagramSocket {
+    socket: UdpSocket,
+    interrupt: Clock,
+    hand: ClockHand
+}
+
+fn datagram_socket(take socket: UdpSocket) -> DatagramSocket {
+    let (interrupt, hand) = provide.clock(0, 0)
+    DatagramSocket(socket: take socket, interrupt, hand: take hand)
+}
+
+type DatagramWork: send {
+    socket: UdpSocket,
+    interrupt: Clock,
+    commands: Receiver[DatagramCommand],
+    sent: Sender[()],
+    batches: Sender[DatagramBatch],
+    ready: Sender[bool],
+    options: UdpOptions
+}
+
+type DatagramForward: send {
+    source: DatagramSource,
+    ready: Receiver[bool],
+    inbox: Sender[RelayEvent]
+}
+
+fn datagram_reader_bytes(options: UdpOptions) -> u64 {
+    let UdpOptions(slots: count, slot_bytes) = options
+    let slots: u64 = int.widen(count)
+    let stride: u64 = int.widen(slot_bytes)
+    option.unwrap(charge.seq(1u64, slots * stride)) + option.unwrap(charge.seq(bytes[UdpPacket], slots)) + 8192
+}
+
+fn forward_datagrams(take job: DatagramForward) waits {
+    let DatagramForward(source, ready: take ready, inbox: take inbox) = take job
+    while let Ok(readable) = channel.receive(ready) {
+        let event = if readable {
+            Datagrams(source)
+        } else {
+            DatagramEnded(source)
+        }
+        if let Error(_) = channel.send(inbox, take event) {
+            return
+        }
+    }
+}
+
+// This task owns both directions of a move-only UDP socket. Commands advance
+// its private clock to interrupt a blocked receive without cancelling the owner.
+fn read_datagrams(take job: DatagramWork) -> UdpSocket waits {
+    let DatagramWork(socket: take owned, interrupt, commands: take commands, sent: take sent, batches: take batches, ready: take ready, options) = take job
+    let mut socket = take owned
+    let UdpOptions(slots: count, slot_bytes) = options
+    let slots: u64 = int.widen(count)
+    let mut buffer = Some(DatagramBatch(data: list.with_capacity(slots * int.widen(slot_bytes)), packets: list.with_capacity(slots)))
+    loop {
+        let next = host.mono_ns(interrupt) + 1u64
+        let command = if let None = buffer {
+            channel.receive_until(commands, Never)
+        } else {
+            channel.try_receive(commands)
+        }
+        match take command {
+            Ok(Transmit(to, take data)) => {
+                transmit(mut socket, to, data)
+                let _ = channel.send(sent, ())
+            },
+            Ok(Resume(take batch)) => {
+                buffer = Some(take batch)
+            },
+            Ok(Stop) => return take socket,
+            Error(Closed) => return take socket,
+            Error(Empty) => {
+                let Some(take available) = replace(mut buffer, None) else {
+                    return take socket
+                }
+                let mut batch = take available
+                list.clear(mut batch.data)
+                list.clear(mut batch.packets)
+                match host.udp_recv(mut socket, mut batch.data, mut batch.packets, At(interrupt, next)) {
+                    Error(TimedOut) => {
+                        buffer = Some(take batch)
+                    },
+                    Error(Refused) => {
+                        buffer = Some(take batch)
+                    },
+                    Error(Unreachable) => {
+                        buffer = Some(take batch)
+                    },
+                    Ok(_) => {
+                        if let Error(_) = channel.send(batches, take batch) {
+                            return take socket
+                        }
+                        if let Error(_) = channel.send(ready, true) {
+                            return take socket
+                        }
+                    },
+                    Error(_) => {
+                        let _ = channel.send(ready, false)
+                    },
+                }
+            },
+        }
+    }
+}
+
+fn transmit(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    let _ = host.udp_send(mut socket, data, tx, Never)
+}
+
+type DatagramPort {
+    commands: Sender[DatagramCommand],
+    sent: Receiver[()],
+    batches: Receiver[DatagramBatch],
+    interrupt: Clock,
+    hand: ClockHand,
+    reader: Task[UdpSocket],
+    forwarder: Task[()]
+}
+
+fn start_datagrams(tasks: Tasks, take bound_socket: DatagramSocket, options: UdpOptions, source: DatagramSource, inbox: Sender[RelayEvent]) -> Result[DatagramPort, turn.TurnError] {
+    let DatagramSocket(socket: take socket, interrupt, hand: take hand) = take bound_socket
+    let (commands, input): (Sender[DatagramCommand], Receiver[DatagramCommand]) = channel.new(1)
+    let (sent, complete): (Sender[()], Receiver[()]) = channel.new(1)
+    let (batches, waiting): (Sender[DatagramBatch], Receiver[DatagramBatch]) = channel.new(1)
+    let (ready, notice): (Sender[bool], Receiver[bool]) = channel.new(1)
+    // One batch per socket can be outstanding. A separate sender can wait for
+    // inbox space while the socket owner handles writes and retirement.
+    let direction = DatagramForward(source, ready: take notice, inbox: channel.sender(inbox))
+    let forwarder = task.try_spawn(tasks, bytes DATAGRAM_FORWARD_BYTES, take direction, forward_datagrams) ?=> |(cap, _)| Capacity(cap)
+    let job = DatagramWork(socket: take socket, interrupt, commands: take input, sent: take sent, batches: take batches, ready: take ready, options)
+    let reader = task.try_spawn(tasks, bytes datagram_reader_bytes(options), take job, read_datagrams) ?=> |(cap, _)| Capacity(cap)
+    Ok(DatagramPort(commands: take commands, sent: take complete, batches: take waiting, interrupt, hand: take hand, reader: take reader, forwarder: take forwarder))
+}
+
+fn command_datagrams(mut port: DatagramPort, take command: DatagramCommand) -> Result[(), turn.TurnError] waits {
+    channel.send(port.commands, take command) ?=> |_| Config
+    let at = host.mono_ns(port.interrupt) + 1u64
+    clock.advance_to(mut port.hand, at)
+    Ok(())
+}
+
+fn send_datagram(mut port: DatagramPort, to: Addr, data: Bytes) -> Result[(), turn.TurnError] waits {
+    command_datagrams(mut port, Transmit(to, copy_of(data)))?
+    channel.receive(port.sent) ?=> |_| Config
+    Ok(())
+}
+
+fn resume_datagrams(port: DatagramPort, take batch: DatagramBatch) -> Result[(), turn.TurnError] waits {
+    channel.send(port.commands, Resume(take batch)) ?=> |_| Config
+    Ok(())
+}
+
+fn stop_datagrams(take owned: DatagramPort) -> Result[DatagramSocket, turn.TurnError] waits {
+    let mut port = take owned
+    command_datagrams(mut port, Stop)?
+    let DatagramPort(interrupt, hand: take hand, reader: take reader, batches: take pending, forwarder: take forwarder, ..) = take port
+    let socket = task.join(take reader) ?=> |_| Config
+    let _ = take pending
+    let _ = std.task.cancel_join(take forwarder)
+    Ok(DatagramSocket(socket: take socket, interrupt, hand: take hand))
+}
+
+type AcceptWork: send {
+    listener: Listener,
+    inbox: Sender[RelayEvent]
+}
+
+fn accept_streams(take job: AcceptWork) waits {
+    let AcceptWork(listener: take owned, inbox: take inbox) = take job
+    let mut listener = take owned
+    loop {
+        match host.accept(mut listener, Never) {
+            Ok((take stream, peer)) => if let Error(_) = channel.send(inbox, Accepted(take stream, peer)) {
+                return
+            },
+            Error(_) => {
+                let _ = channel.send(inbox, AcceptEnded)
+                return
+            },
+        }
+    }
+}
+
+type StreamWork: send {
+    conn: u64,
+    reader: ReadHalf,
+    permit: Receiver[()],
+    inbox: Sender[RelayEvent]
+}
+
+fn read_stream(take job: StreamWork) waits {
+    let StreamWork(conn, reader: take half, permit: take permit, inbox: take inbox) = take job
+    let mut reader = take half
+    loop {
+        let mut data: Bytes = list.with_capacity(STREAM_READ_BYTES)
+        match host.recv_bounded(mut reader, mut data, STREAM_READ_BYTES, Never) {
+            Ok(0) => break,
+            Error(_) => break,
+            Ok(_) => if let Error(_) = channel.send(inbox, StreamBytes(conn, take data)) {
+                return
+            },
+        }
+        if let Error(_) = channel.receive(permit) {
+            return
+        }
+    }
+    let _ = channel.send(inbox, StreamEnded(conn))
+}
+
+fn forward_revokes(take job: (Receiver[signal.RelayRevoke], Sender[RelayEvent])) waits {
+    let (take revokes, take inbox) = take job
+    while let Ok(take revoke) = channel.receive(revokes) {
+        if let Error(_) = channel.send(inbox, Revoked(take revoke)) {
+            return
+        }
+    }
+}

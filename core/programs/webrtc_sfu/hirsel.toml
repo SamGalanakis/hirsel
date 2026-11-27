@@ -44,6 +44,7 @@ rtp_jitter = { major = 1, path = "../rtp_jitter" }
 "signal.hirsel" = "signal"
 "signal_turn.hirsel" = "signal"
 "turn_runtime.hirsel" = "turn_runtime"
+"turn_readers.hirsel" = "turn_runtime"
 "signal_build.hirsel" = "signal"
 "signal_serve.hirsel" = "signal"
 "signal_pool.hirsel" = "signal"
@@ -114,3 +115,7 @@ limit = 1476395008
 
 [tests.runs."webrtc_sfu@1/laws/pool_room_cost_is_exact"]
 limit = 268435456
+
+[tests.runs."webrtc_sfu@1/laws/idle_relay_waits_until_shutdown"]
+limit = 134217728
+grants = ["Tasks", "Stdout"]

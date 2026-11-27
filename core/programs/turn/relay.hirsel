@@ -15,6 +15,8 @@ const PAYLOAD_MAX: u64 = 65507
 /// Every response this relay builds fits here; from_client grows out to it.
 const RESPONSE_MAX: u64 = 512
 
+pub const DEFAULT_STREAMS: u32 = 4096
+
 pub type Prefix: send {
     ip: Ip,
     bits: u8
@@ -111,6 +113,7 @@ pub opaque type Relay {
     has_v4: bool,
     has_v6: bool,
     leases: List[Lease],
+    allocation_revision: u64,
     on_origin: Map[Origin, u64],
     at_relayed: Map[Addr, u64],
     conns: List[Conn],
@@ -127,7 +130,7 @@ pub opaque type Relay {
 pub fn relay_defaults(realm: Bytes) -> RelayConfig {
     let mut name: Bytes = list.with_capacity(list.len(realm))
     list.append(mut name, realm)
-    RelayConfig(realm: take name, lifetime_s: 600, lifetime_max_s: 3600, nonce_s: 600, credential_max_s: 86400, quota: 12, permissions: 64, channels: 64, streams: 4096, streams_per_source: 64, stream_allocate_s: 60, sources: 65536, challenge_per_s: 10, derive_per_source_s: 10, policy: PeerPolicy(deny: list.new(), allow: list.new(), local: list.new()))
+    RelayConfig(realm: take name, lifetime_s: 600, lifetime_max_s: 3600, nonce_s: 600, credential_max_s: 86400, quota: 12, permissions: 64, channels: 64, streams: DEFAULT_STREAMS, streams_per_source: 64, stream_allocate_s: 60, sources: 65536, challenge_per_s: 10, derive_per_source_s: 10, policy: PeerPolicy(deny: list.new(), allow: list.new(), local: list.new()))
 }
 
 fn family_of(a: Addr) -> Family {
@@ -169,7 +172,7 @@ pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_k
     list.try_reserve(mut scratch, RESPONSE_MAX) ?=> Capacity
     list.fill(mut scratch, RESPONSE_MAX, 0)
     let discards = RelayDiscards(malformed: 0, no_allocation: 0, no_permission: 0, policy: 0, unbound_channel: 0, reserved_channel: 0, throttled: 0, challenged: 0, oversize: 0, unknown_stream: 0, idle_stream: 0)
-    Ok(Relay(c: take c, g: take g, free: take pool, own: take own, has_v4: has_v4, has_v6: has_v6, leases: list.new(), on_origin: map.new(), at_relayed: map.new(), conns: list.new(), closing: list.new(), discards: discards, ind_high: ind.high, ind_low: ind.low, last_ns: 0, due_ns: NEVER, fields: list.new(), scratch: take scratch))
+    Ok(Relay(c: take c, g: take g, free: take pool, own: take own, has_v4: has_v4, has_v6: has_v6, leases: list.new(), allocation_revision: 0, on_origin: map.new(), at_relayed: map.new(), conns: list.new(), closing: list.new(), discards: discards, ind_high: ind.high, ind_low: ind.low, last_ns: 0, due_ns: NEVER, fields: list.new(), scratch: take scratch))
 }
 
 /// The gate's pre-authentication discards are the relay's malformed, throttled and challenged.
@@ -194,6 +197,25 @@ pub fn relay_counts(r: Relay) -> RelayCounts {
         }
     }
     RelayCounts(allocations: list.len(r.leases), permissions: permissions, channels: channels, pool_free: list.len(r.free))
+}
+
+/// Changes whenever a relayed address is assigned or returned.
+pub fn relay_allocation_revision(r: Relay) -> u64 {
+    r.allocation_revision
+}
+
+/// The address of the live allocation at index i, in unspecified order.
+pub fn relay_allocation_at(r: Relay, i: u64) -> Option[Addr] {
+    if i < list.len(r.leases) {
+        Some(r.leases[i].relayed)
+    } else {
+        None
+    }
+}
+
+/// Whether relayed currently has an allocation.
+pub fn relay_allocated(r: Relay, relayed: Addr) -> bool {
+    map.contains(r.at_relayed, relayed)
 }
 
 /// Expire allocations, permissions, channels and quarantines due at now_ns, and keep due_ns
@@ -282,10 +304,12 @@ fn add_lease(mut r: Relay, take l: Lease) {
     map.insert(mut r.on_origin, l.origin, i)
     map.insert(mut r.at_relayed, l.relayed, i)
     list.push(mut r.leases, take l)
+    r.allocation_revision += 1
 }
 
 /// Every allocation is removed here: the last lease moves to i and is indexed there.
 fn drop_lease(mut r: Relay, i: u64) -> Lease {
+    r.allocation_revision += 1
     let gone = list.swap_remove(mut r.leases, i)
     let _ = map.remove(mut r.on_origin, gone.origin)
     let _ = map.remove(mut r.at_relayed, gone.relayed)

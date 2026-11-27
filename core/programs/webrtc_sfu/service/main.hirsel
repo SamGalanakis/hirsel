@@ -153,7 +153,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     list.fill(mut master_bytes, 32, 0)
     let (revoke_to, revoked): (Sender[webrtc_sfu.signal.RelayRevoke], Receiver[webrtc_sfu.signal.RelayRevoke]) = channel.new(256u64)
     let (relay_ready, relay_started): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let relay_start = webrtc_sfu.turn_runtime.Start(net: n, clock: clock, random: random, out: out, listen: c.turn, master: take relay_master, nonce: take nonce, plan: clone(plan), sockets: c.relay_sockets, revokes: take revoked, ready: take relay_ready, until: until)
+    let relay_start = webrtc_sfu.turn_runtime.Start(net: n, clock: clock, random: random, tasks: tasks, out: out, listen: c.turn, master: take relay_master, nonce: take nonce, plan: clone(plan), sockets: c.relay_sockets, revokes: take revoked, ready: take relay_ready, until: until)
     let relay_need = webrtc_sfu.turn_runtime.reserve_bytes(c.relay_sockets)
     let Ok(relaying) = task.try_spawn(tasks, bytes relay_need, take relay_start, webrtc_sfu.turn_runtime.run) else {
         say_number(out, "the relay place needs bytes", relay_need)

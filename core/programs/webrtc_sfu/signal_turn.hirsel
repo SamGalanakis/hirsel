@@ -37,6 +37,10 @@ pub fn relay_socket_plan(allocations: u16, media_datagram: u16, packets_per_seco
     Some(RelaySocketPlan(allocations: allocations, slots: slots, slot_bytes: stride))
 }
 
+pub fn relay_allocation_limit(p: RelaySocketPlan) -> u64 {
+    int.widen(p.allocations)
+}
+
 pub fn relay_udp_options(p: RelaySocketPlan) -> UdpOptions {
     UdpOptions(slots: p.slots, slot_bytes: p.slot_bytes)
 }

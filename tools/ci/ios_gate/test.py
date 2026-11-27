@@ -4,6 +4,7 @@ import argparse
 from contextlib import contextmanager
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -50,6 +51,23 @@ def simulator(cert=None):
         simctl("delete", udid)
 
 
+def write_symbols(work):
+    framework = work / "SimGate/SimGateCore.xcframework"
+    prefixes = {}
+    for slice_name in ("ios-arm64-simulator", "macos-arm64"):
+        header = (framework / slice_name / "Headers/hirsel_product.h").read_text()
+        anchor = re.search(r"require_anchor_([a-f0-9]{16})", header)[1]
+        prefixes[slice_name] = f"_hirsel_{anchor}_"
+    (work / "GateSymbols.h").write_text(
+        "#include <TargetConditionals.h>\n"
+        "#if TARGET_OS_SIMULATOR\n"
+        f'#define HIRSEL_HARNESS_PREFIX "{prefixes["ios-arm64-simulator"]}"\n'
+        "#else\n"
+        f'#define HIRSEL_HARNESS_PREFIX "{prefixes["macos-arm64"]}"\n'
+        "#endif\n"
+    )
+
+
 def test(work, logs, name, destination):
     result = logs / f"{name}.xcresult"
     logfile = logs / f"{name}.log"
@@ -92,6 +110,7 @@ def main():
                      "Workers.c", "Memory.h", "TLSTests.swift"):
             shutil.copyfile(HERE / name, work / name)
         (work / "SimGate").symlink_to((args.artifacts / "SimGate").resolve(), target_is_directory=True)
+        write_symbols(work)
         resources = work / "TLS"
         resources.mkdir()
         certs = work / "certificates"

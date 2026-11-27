@@ -248,6 +248,10 @@ fn hmac_rfc_4231_vectors() {
         if is_seed(&package.package) {
             package.sources.retain(|source| {
                 source.modules == ["sha256"]
+                    || source.modules == ["sha1"]
+                    || source.modules == ["int"]
+                    || source.modules == ["string"]
+                    || source.modules == ["hex"]
                     || source.modules == ["hmac"]
                     || source.modules == ["tests", "hmac"]
             });

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import json
 import os
 import pathlib
@@ -176,18 +175,6 @@ def tool_version(path: pathlib.Path) -> str:
     return subprocess.check_output([path, "--version"], env=env, text=True).strip()
 
 
-def unpack_headers(deb: pathlib.Path, headers: pathlib.Path) -> None:
-    # AlmaLinux 8's dpkg does not read Ubuntu's zstd-compressed header package.
-    members = subprocess.check_output(["ar", "t", deb], text=True).splitlines()
-    if "data.tar.zst" not in members:
-        subprocess.run(["dpkg-deb", "-x", deb, headers], check=True)
-        return
-    compressed = subprocess.check_output(["ar", "p", deb, "data.tar.zst"])
-    data = subprocess.check_output(["zstd", "-dq"], input=compressed)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
-        archive.extractall(headers, filter="data")
-
-
 def build_darwin(stage: pathlib.Path) -> None:
     with tempfile.TemporaryDirectory(prefix="hirsel-llvm-") as raw:
         scratch = pathlib.Path(raw)
@@ -216,6 +203,9 @@ def build_darwin(stage: pathlib.Path) -> None:
 
 
 def build_linux(stage: pathlib.Path) -> None:
+    sys.path.insert(0, str(pathlib.Path(__file__).with_name("native-toolchain")))
+    from deb_unpack import unpack_deb
+
     with tempfile.TemporaryDirectory(prefix="hirsel-llvm-") as raw:
         scratch = pathlib.Path(raw)
         bootstrap = scratch / "bootstrap"
@@ -229,7 +219,7 @@ def build_linux(stage: pathlib.Path) -> None:
         place(fetch_built("engine_llvm", scratch), stage / LINUX_ENGINE)
         headers = scratch / "cxx-headers"
         for pin in json.loads(CXX_LOCK.read_text())["debs"]:
-            unpack_headers(fetch(pin, scratch), headers)
+            unpack_deb(fetch(pin, scratch), headers, rooted_links=True)
         place_tree(headers / "usr/include", stage / "sysroot/usr/include")
     for name in ("clang", "clang++", "llvm-ar"):
         wrapper = stage / "bin" / f"hirsel-{name}"

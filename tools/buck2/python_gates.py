@@ -27,6 +27,8 @@ def python_gates(out, call, Raw):
           "core/langarena/run.py", "core/langarena/layout/measure.py", "core/langarena/layout/run.py",
           "core/langarena/layout/service.py", "core/langarena/layout/service_build.py"] + std_inputs + product),
         ("test-prelude-overlay", "tools/tests/prelude_overlay.py", ["//tools/buck2:prelude_overlay.py"]),
+        ("test-deb-unpack", "tools/tests/deb_unpack.py",
+         ["//tools/buck2/native-toolchain:deb_unpack.py"]),
         ("test-bootstrap-llvm", "tools/tests/bootstrap_llvm.py", ["//tools/buck2:bootstrap_llvm.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:pins.json", "//tools/buck2:llvm-cxx-headers-lock.json", "tools/native-toolchain/llvm-23.lock", *product]),
         ("test-action-sizes", "tools/tests/action_sizes.py", ["//tools/buck2:action_sizes_from_log.py"]),
         ("test-pool-usage", "tools/tests/pool_usage.py", ["//tools/buck2:pool_usage.py", "//tools/buck2:event_logs.py", "//tools/buck2:action_sizes_from_log.py"]),

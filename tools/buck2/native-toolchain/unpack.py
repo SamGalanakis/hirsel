@@ -55,13 +55,15 @@ def place_runtime_debug(output):
 
 
 def unpack(kind, output, archives, linker=None):
+    from deb_unpack import unpack_deb
+
     with tempfile.TemporaryDirectory(prefix="hirsel-native-unpack-") as scratch:
         tree = Path(scratch)
         if kind == "glibc-floor":
             # Each release's loader and libraries, as `<triple>/`.
             for archive in archives:
                 release = tree / Path(archive).name
-                subprocess.run(["dpkg-deb", "-x", archive, release], check=True)
+                unpack_deb(archive, release, rooted_links=True)
                 (libraries,) = (release / "lib").glob("*-linux-gnu")
                 triple = libraries.name.replace("-linux-gnu", "-unknown-linux-gnu")
                 copy_tree(libraries, output / triple)
@@ -82,7 +84,7 @@ def unpack(kind, output, archives, linker=None):
             wrapper.chmod(0o755)
             return
         for archive in archives:
-            subprocess.run(["dpkg-deb", "-x", archive, tree], check=True)
+            unpack_deb(archive, tree, rooted_links=True)
         normalize_links(tree)
         if kind == "qemu":
             output.mkdir()

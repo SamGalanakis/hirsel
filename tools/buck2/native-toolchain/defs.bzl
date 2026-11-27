@@ -3,7 +3,7 @@
 Unpacking and the link kit run on the pool like any compile (the default
 platform, platforms.bzl), so the remote action cache shares their outputs
 between checkouts instead of every worktree redoing them on this host. They
-use python3, dpkg-deb and readelf from the worker image, plus the pinned LLVM
+use python3, libzstd and readelf from the worker image, plus the pinned LLVM
 tree. Downloads are deferred: with a SHA-256 the daemon fetches an archive
 only when the pool's CAS lacks it, and not at all on an action-cache hit
 (buck2 app/buck2_action_impl/src/actions/impls/download_file.rs `declare_http`,
@@ -15,12 +15,15 @@ LIBRARIES = ["libSystem", "CoreFoundation", "Security"]
 DARWIN_SYMBOLS = {library: "root//:darwin-{}-symbols".format(library.lower()) for library in LIBRARIES}
 IOS_SYMBOLS = {library: "root//:ios-{}-symbols".format(library.lower()) for library in LIBRARIES}
 
+DEB_UNPACK = "//tools/buck2/native-toolchain:deb_unpack.py"
+
 def _unpack(ctx):
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     ctx.actions.run(
         cmd_args("python3", ctx.attrs._unpack, ctx.attrs.kind, output.as_output(),
                  [cmd_args("--linker=", ctx.attrs.linker[DefaultInfo].default_outputs[0], delimiter = "")] if ctx.attrs.linker else [],
-                 [dep[DefaultInfo].default_outputs[0] for dep in ctx.attrs.archives]),
+                 [dep[DefaultInfo].default_outputs[0] for dep in ctx.attrs.archives],
+                 hidden = [ctx.attrs._deb_unpack]),
         category = "native_toolchain_unpack",
     )
     return [DefaultInfo(default_output = output)]
@@ -30,7 +33,8 @@ unpack_toolchain = rule(impl = _unpack, attrs = {
     "kind": attrs.string(),
     # kind llvm: the executable placed as bin/ld.lld instead of the deb's.
     "linker": attrs.option(attrs.dep(), default = None),
-    "_unpack": attrs.source(default = "//tools/buck2/native-toolchain:unpack.py"),
+    "_unpack": attrs.source(default = "//tools/buck2/native-toolchain:unpack-source"),
+    "_deb_unpack": attrs.source(default = DEB_UNPACK),
 })
 
 def _link_kit(ctx):
@@ -51,6 +55,7 @@ def _link_kit(ctx):
         [cmd_args("--ios-symbols", cmd_args(library, "=", path, delimiter = "")) for library, path in sorted(ctx.attrs._ios_symbols.items())],
         "--pins", pins,
         "--output", output.as_output(),
+        hidden = [ctx.attrs._deb_unpack],
     )
     for name in sorted(ctx.attrs.sources):
         if ":" in name:
@@ -65,7 +70,8 @@ link_kit = rule(impl = _link_kit, attrs = {
     "arm": attrs.dep(),
     "sources": attrs.dict(attrs.string(), attrs.dep()),
     "pins": attrs.dict(attrs.string(), attrs.dict(attrs.string(), attrs.any())),
-    "_script": attrs.source(default = "//tools/buck2/native-toolchain:link_kit.py"),
+    "_script": attrs.source(default = "//tools/buck2/native-toolchain:link-kit-source"),
+    "_deb_unpack": attrs.source(default = DEB_UNPACK),
     "_darwin_symbols": attrs.dict(attrs.string(), attrs.source(), default = DARWIN_SYMBOLS),
     "_ios_symbols": attrs.dict(attrs.string(), attrs.source(), default = IOS_SYMBOLS),
 })

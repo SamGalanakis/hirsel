@@ -343,6 +343,8 @@ def write_manifest(output, manifest):
 
 
 def main():
+    from deb_unpack import unpack_deb
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--llvm", type=Path, required=True)
     parser.add_argument("--arm-sysroot", type=Path, required=True)
@@ -401,7 +403,7 @@ def main():
         for triple, target in TARGETS.items():
             root = scratch / ("root-" + target["deb"])
             for role in ("glibc-dev", "glibc", "linux-headers"):
-                run(["dpkg-deb", "-x", debs[f"{role}:{target['deb']}"], root])
+                unpack_deb(debs[f"{role}:{target['deb']}"], root, rooted_links=True)
             files = {}
             directory = output / triple
             (directory / "lib").mkdir(parents=True)
@@ -418,7 +420,7 @@ def main():
             # dynamic ABI floor at 2.28 on both targets.
             static_root = scratch / ("static-" + target["deb"])
             if target["deb"] == "amd64":
-                run(["dpkg-deb", "-x", debs["glibc-static:amd64"], static_root])
+                unpack_deb(debs["glibc-static:amd64"], static_root, rooted_links=True)
             static_development = (args.arm_sysroot / "usr/lib64" if target["deb"] == "arm64" else
                                   static_root / "usr/lib" / target["multiarch"])
             static_source = ("Arm GNU Toolchain 14.3.rel1 sysroot: usr/lib64" if target["deb"] == "arm64" else

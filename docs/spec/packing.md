@@ -86,6 +86,10 @@ Place between them is an explicit `activate` (PACK-6).
 
 **Module digest.** `SHA-256("hirsel.mod.v1", file bytes)`.
 
+Both digests use the repository's framed hash: the domain string, then each part, every one
+preceded by its length. Integers in the key are little-endian (`target` and `backend` as in
+the header, `policy` as `u64`).
+
 ### Sections
 
 | # | section | loaded | contents |
@@ -99,7 +103,7 @@ Place between them is an explicit `activate` (PACK-6).
 | 6 | `spans` | no | function spans: `(start: u32, length: u32)`, sorted, disjoint |
 | 7 | `cfi` | no | call frame information for final text offsets (PACK-9) |
 | 8 | `sites` | no | the release's source position table |
-| 9 | `names` | no | one name per span, for profiles and reports |
+| 9 | `names` | no | one name per span, in span order: one `u32` end offset per span, then the names' UTF-8 bytes end to end |
 | 10 to 12 | reserved | | length zero in version 1 |
 
 Loaded data is read-only once published. Version 1 has no writable data: a build that
@@ -139,23 +143,25 @@ The row table is closed. Each row has an identifier, a symbol, and one **class**
 
 ### Fixups
 
-A fixup record is 16 bytes: `site: u32`, `kind: u32`, `addend: i64`. `site` is an offset
-into the section the record's table names. Records are sorted by `site`, and patched fields
-do not overlap. `T` is the address the loader gave `text[0]`, `D` the address of `data[0]`
+A fixup record is 16 bytes: `site: u32`, `kind: u8`, `bias: u8`, zero `u16`,
+`addend: i64`. `site` is an offset into the section the record's table names. Records are
+sorted by `site`, and patched fields do not overlap. `bias` is the distance from the field
+to the end of its instruction, 4 to 8, for `Rel32Data`, and zero for every other kind; it
+keeps `addend` a plain offset into the target section. `T` is the address the loader gave `text[0]`, `D` the address of `data[0]`
 and `P` the address of the site.
 
 | kind | where | target | patched field |
 |---:|---|---|---|
 | 1 `Abs64Text` | data | any | 64-bit `T + addend` |
 | 2 `Abs64Data` | data | any | 64-bit `D + addend` |
-| 3 `Rel32Data` | text | x86-64 | 32-bit `D + addend - P` |
+| 3 `Rel32Data` | text | x86-64 | 32-bit `D + addend - (P + bias)` |
 | 4 `PageData` | text | aarch64 | `adrp` immediate: page of `D + addend` minus page of `P` |
 | 5 `Low12AddData` | text | aarch64 | `add` immediate: low 12 bits of `D + addend` |
 | 6 `Low12LoadData` | text | aarch64 | scaled load or store immediate: low 12 bits of `D + addend`, divided by the access size the instruction encodes |
 
 That is the whole set. Calls and branches inside the module are resolved by the `Compiler`
 and need no fixup. The loader refuses any other kind, a kind on the wrong target or in the
-wrong table, a site whose field leaves its section, a `T + addend` or `D + addend` that
+wrong table, a site whose field or `bias` leaves its section, a `T + addend` or `D + addend` that
 leaves its section (one past the end is allowed), a value that does not fit its field, a
 `Low12LoadData` value that is not a multiple of its access size, and a site whose
 instruction is not the form its kind names.
@@ -166,7 +172,7 @@ An entry record is 80 bytes: `identity: [u8; 32]`, `signature: [u8; 32]`, `text:
 `descriptor: u32`, `flags: u32`, zero `u32`. `identity` is the function's instance digest
 ([PROG-5](programs.md#prog-5-code-identity)), `signature` the digest of its lowered
 signature, `text` its code offset, `descriptor` the `data` offset of its PROG-9 descriptor
-or `0xFFFFFFFF`, and `flags` bit 0 is set when the entry waits. Entries are sorted by
+(past the import slots) or `0xFFFFFFFF`, and `flags` bit 0 is set when the entry waits. Entries are sorted by
 `identity`, which is unique. `text` must be the start of a span.
 
 ## PACK-3: The `Compiler` service

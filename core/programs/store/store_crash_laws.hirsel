@@ -175,7 +175,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
 }
 
 fn install_target_value(target: PreparedTarget, _witness: Inline[u8, 32]) -> Result[Bytes, DeployError] {
-    deploy_result(copied(target.release))
+    deploy_result(failure_result_from_rep(types.copied(target.release)))
 }
 
 fn install_fixture_bytes(n: u64, b: u8) -> Bytes {
@@ -201,7 +201,7 @@ fn crash_install_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
 }
 
 fn crash_install_prepared(mut db: Db, d: Dir, c: Clock, tasks: Tasks, attempt: Bytes) -> Result[(Dir, u64), DeployError] waits {
-    let copying = begin_export(mut db, tasks, d, deploy_result(copied(attempt))?, 1u64, 4194304u64)?
+    let copying = begin_export(mut db, tasks, d, deploy_result(failure_result_from_rep(types.copied(attempt)))?, 1u64, 4194304u64)?
     let exported = match task.join(take copying) {
         Ok(take answer) => (take answer)?,
         Error(_) => return Error(ExportMismatch),
@@ -223,7 +223,7 @@ fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes
 }
 
 fn crash_apply(mut db: Db, attempt: Bytes, digest: Inline[u8, 32]) -> Result[u64, DeployError] waits {
-    let requested = Cutover(attempt: deploy_result(copied(attempt))?, digest: digest, deadline: 18446744073709551615u64)
+    let requested = Cutover(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, digest: digest, deadline: 18446744073709551615u64)
     let description = install_fixture_bytes(32u64, 65u8)
     perform_cutover(mut db, requested, 1u64, description, std.codec.of_bytes(), install_target_value, scoped fn() -> bool {
         true
@@ -244,8 +244,8 @@ fn export_refuses_a_second_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let mut db = deploy_result(open(tasks, directory, c, r, disk_crash_options("install")))?
     let first = install_fixture_bytes(16, 7)
     let second = install_fixture_bytes(16, 8)
-    let _ = begin_export_copy(mut db, scratch, deploy_result(copied(first))?, 0)?
-    if let Error(AttemptBusy) = begin_export_copy(mut db, scratch, deploy_result(copied(second))?, 0) {} else {
+    let _ = begin_export_copy(mut db, scratch, deploy_result(failure_result_from_rep(types.copied(first)))?, 0)?
+    if let Error(AttemptBusy) = begin_export_copy(mut db, scratch, deploy_result(failure_result_from_rep(types.copied(second)))?, 0) {} else {
         fail("a second export replaced the current lease")
     }
     release_export(mut db, second)
@@ -253,7 +253,7 @@ fn export_refuses_a_second_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
         fail("the refused attempt could release the first export")
     }
     release_export(mut db, first)
-    let _ = begin_export_copy(mut db, scratch, deploy_result(copied(second))?, 0)?
+    let _ = begin_export_copy(mut db, scratch, deploy_result(failure_result_from_rep(types.copied(second)))?, 0)?
     release_export(mut db, second)
     deploy_result(close(take db))
 }
@@ -268,7 +268,7 @@ fn crash_prepared_meta(d: Dir) -> Result[Bytes, DeployError] waits {
     if kind != 0x0081 || width != 248 {
         fail("unexpected PREPARED metadata frame")
     }
-    deploy_result(copied(list.slice(frame, 16, 264)))
+    deploy_result(failure_result_from_rep(types.copied(list.slice(frame, 16, 264))))
 }
 
 // Exercise the pre-rename refusals together with a fresh export after drift.
@@ -657,7 +657,7 @@ fn lix_expected(id: u32, model: List[Option[u64]]) -> Result[List[Bytes], Error]
             let Some(v) = model[k] else {
                 continue
             }
-            let keys = capacity(lix_keys(k, v))?
+            let keys = failure_result_from_rep(types.capacity(lix_keys(k, v)))?
             if keys[0] == j || keys[1] == j {
                 let mut logical = prefix(id)?
                 list.put_word_be(mut logical, j)

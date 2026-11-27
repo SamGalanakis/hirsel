@@ -13,9 +13,20 @@ pub opaque type LevelSync: send {
 }
 
 pub type LevelUntil: send = Never | At(u64) | AfterSynced(String, u64)
-pub type LevelHold: send { level: String, until: LevelUntil }
+
+pub type LevelHold: send {
+    level: String,
+    until: LevelUntil
+}
+
 pub type LevelKind: send = Requested(u64) | Synced(u64) | Mark(u64)
-pub type LevelEvent: send { level: String, epoch: u64, kind: LevelKind, at_ns: u64 }
+
+pub type LevelEvent: send {
+    level: String,
+    epoch: u64,
+    kind: LevelKind,
+    at_ns: u64
+}
 
 type LevelProgress: shareable + send {
     epoch: u64,
@@ -23,7 +34,9 @@ type LevelProgress: shareable + send {
     seq: u64
 }
 
-type WeakFrontiers: shareable + send { seqs: Inline[u64, 15] }
+type WeakFrontiers: shareable + send {
+    seqs: Inline[u64, 15]
+}
 
 type WeakNotice: send = WeakSynced(u64, u64) | StrongChanged
 
@@ -72,8 +85,12 @@ type LevelStart: send {
 }
 
 pub fn level_world(tasks: Tasks, clock: Clock, take holds: List[LevelHold], world_bytes: u64) -> Result[LevelWorld, Error] waits {
-    let (outlet, inbound): (Sender[LevelCommand], Receiver[LevelCommand]) = disk_allocation(fn() -> Result[(Sender[LevelCommand], Receiver[LevelCommand]), Error] { Ok(channel.new(1)) })?
-    let (ready, started): (Sender[()], Receiver[()]) = capacity(bound bytes 64 { channel.new(1) })?
+    let (outlet, inbound): (Sender[LevelCommand], Receiver[LevelCommand]) = disk_allocation(fn() -> Result[(Sender[LevelCommand], Receiver[LevelCommand]), Error] {
+        Ok(channel.new(1))
+    })?
+    let (ready, started): (Sender[()], Receiver[()]) = failure_result_from_rep(types.capacity(bound bytes 64 {
+        channel.new(1)
+    }))?
     let start = LevelStart(clock, tasks, holds: take holds, commands: take inbound, outlet: channel.sender(outlet), ready: take ready)
     let worker = task.try_spawn(tasks, bytes world_bytes, take start, level_world_loop) ?=> |(room, _)| Full(Allocation(room))
     channel.receive(started) ?=> |_| Io(Closed)
@@ -85,7 +102,9 @@ pub fn level_sync(mut w: LevelWorld) -> Result[LevelSync, Error] {
 }
 
 pub fn level_mark(mut s: LevelSync, label: u64) -> Result[(), Error] waits {
-    let (response, await_mark): (Sender[()], Receiver[()]) = capacity(bound bytes 64 { channel.new(1) })?
+    let (response, await_mark): (Sender[()], Receiver[()]) = failure_result_from_rep(types.capacity(bound bytes 64 {
+        channel.new(1)
+    }))?
     channel.send(s.commands, MarkLevel(label, take response)) ?=> |_| Io(Closed)
     channel.receive(await_mark) ?=> |_| Io(Closed)
     Ok(())
@@ -108,18 +127,27 @@ fn level_event(mut events: List[LevelEvent], name: String, epoch: u64, kind: Lev
 
 fn level_released(name: String, holds: List[LevelHold], events: List[LevelEvent], clock: Clock) -> bool {
     for hold in holds {
-        if hold.level != name { continue }
+        if hold.level != name {
+            continue
+        }
         match hold.until {
             Never => return false,
-            At(at) => if host.mono_ns(clock) < at { return false },
+            At(at) => if host.mono_ns(clock) < at {
+                return false
+            },
             AfterSynced(other, target) => {
                 let mut reached = false
                 for event in events {
                     if let Synced(at) = event.kind {
-                        if event.level == other && at >= target { reached = true; break }
+                        if event.level == other && at >= target {
+                            reached = true;
+                            break
+                        }
                     }
                 }
-                if !reached { return false }
+                if !reached {
+                    return false
+                }
             },
         }
     }
@@ -141,7 +169,9 @@ fn level_sample(mut opens: List[LevelOpen], holds: List[LevelHold], mut events: 
         changed = false
         let n = list.len(opens)
         for slot_index in 0u64 .. n {
-            if level_sample_open(mut opens[slot_index], holds, mut events, clock) { changed = true }
+            if level_sample_open(mut opens[slot_index], holds, mut events, clock) {
+                changed = true
+            }
         }
     }
 }
@@ -206,9 +236,9 @@ fn level_world_loop(take input: LevelStart) -> List[LevelEvent] waits {
 }
 
 fn weak_publisher(sync: LevelSync, names: List[String]) -> Result[WeakWriterOpen, Error] waits {
-    let (take publisher, take waiters, take registration) = capacity(bound bytes sim_level_bytes(names) {
+    let (take publisher, take waiters, take registration) = failure_result_from_rep(types.capacity(bound bytes sim_level_bytes(names) {
         let progress = latest.new(arc.new(LevelProgress(epoch: 0, position: 0, seq: 0)))
-        let frontiers = latest.new(arc.new(WeakFrontiers(seqs: [0; 15])))
+        let frontiers = latest.new(arc.new(WeakFrontiers(seqs:[0; 15])))
         let (lifetime, end): (Sender[()], Receiver[()]) = channel.new(1)
         let n = list.len(names)
         let mut journal_notices: List[Sender[WeakNotice]] = list.with_capacity(n)
@@ -220,26 +250,30 @@ fn weak_publisher(sync: LevelSync, names: List[String]) -> Result[WeakWriterOpen
             list.push(mut world_notices, take outlet)
             list.push(mut caller_notices, take inbound)
         }
-        let registration = LevelOpen(names: clone(names), progress: latest.handle(progress), requested: 0,
-            synced: [0; 15], frontiers: latest.handle(frontiers), notices: take world_notices, lifetime: take end)
-        let publisher = WeakPublisher(commands: channel.sender(sync.commands), progress: take progress,
-            lifetime: take lifetime, notices: take journal_notices)
+        let registration = LevelOpen(names: clone(names), progress: latest.handle(progress), requested: 0, synced:[0; 15], frontiers: latest.handle(frontiers), notices: take world_notices, lifetime: take end)
+        let publisher = WeakPublisher(commands: channel.sender(sync.commands), progress: take progress, lifetime: take lifetime, notices: take journal_notices)
         let waiters = WeakWaiters(frontiers: take frontiers, notices: take caller_notices)
         (take publisher, take waiters, take registration)
-    })?
+    }))?
     channel.send(sync.commands, RegisterLevels(take registration)) ?=> |_| Io(Closed)
     Ok(WeakWriterOpen(publisher: take publisher, waiters: take waiters))
 }
 
 fn weak_notice_senders(weak: Option[WeakPublisher]) -> List[Sender[WeakNotice]] {
-    let Some(publisher) = view weak else { return list.new() }
+    let Some(publisher) = view weak else {
+        return list.new()
+    }
     let mut notices: List[Sender[WeakNotice]] = list.with_capacity(list.len(publisher.notices))
-    for outlet in publisher.notices { list.push(mut notices, channel.sender(outlet)) }
+    for outlet in publisher.notices {
+        list.push(mut notices, channel.sender(outlet))
+    }
     take notices
 }
 
 fn weak_notify_strong(notices: List[Sender[WeakNotice]]) {
-    for outlet in notices { let _ = channel.try_send(outlet, StrongChanged) }
+    for outlet in notices {
+        let _ = channel.try_send(outlet, StrongChanged)
+    }
 }
 
 fn weak_publish(p: WeakPublisher, head: HistoryHead, created: u64, seq: u64) {

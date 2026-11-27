@@ -142,13 +142,13 @@ fn bucket_order_fresh_case(tasks: Tasks, c: Clock, r: Random, seed: u64, orderin
     match ordering {
         Overtaken => {
             for write in report.head_writes {
-                if read_le(write.data, 88, 8) == 1 && read_le(write.data, 120, 8) >= 5 {
+                if format.read_le(write.data, 88, 8) == 1 && format.read_le(write.data, 120, 8) >= 5 {
                     fail("L57-a: the overtaken holder advanced its prefix")
                 }
             }
         },
         _ => {
-            if list.len(report.head_writes) < 5 || read_le(report.head_writes[4].data, 120, 8) != 5 || !bucket_order_history(report) {
+            if list.len(report.head_writes) < 5 || format.read_le(report.head_writes[4].data, 120, 8) != 5 || !bucket_order_history(report) {
                 fail("L57-a: head requests did not follow the reply-loss and fresh sequence")
             }
         },
@@ -224,8 +224,8 @@ fn bucket_ack_history(report: std.sim.s3.Report, expected: u64) -> Result[(), Er
     let mut position_at = 0u64
     let mut written: Map[u64, u64] = map.new()
     for event in report.head_writes {
-        if read_le(event.data, 88, 8) == 1 {
-            map.insert(mut written, event.request, read_le(event.data, 120, 8))
+        if format.read_le(event.data, 88, 8) == 1 {
+            map.insert(mut written, event.request, format.read_le(event.data, 120, 8))
         }
     }
     for req in report.requests {
@@ -272,7 +272,7 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
             }
             let prior_authority = list.slice(prior.data, 240, history_authority_end(prior.data)?)
             let authority = list.slice(event.data, 240, history_authority_end(event.data)?)
-            if precondition != prior.etag || event.if_none_match != None || !same(previous.store, current.store) || prior.etag == event.etag || prior_authority != authority {
+            if precondition != prior.etag || event.if_none_match != None || !types.same(previous.store.hi, previous.store.lo, current.store.hi, current.store.lo) || prior.etag == event.etag || prior_authority != authority {
                 fail("VP1: HEAD did not condition on its predecessor or changed the authority")
             }
             if current.pair.epoch == previous.pair.epoch {
@@ -280,7 +280,7 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
                 if !bucket_law_same_origin(current.origin, previous.origin) {
                     fail("VP1: a same-epoch HEAD advance changed ORIGIN")
                 }
-                if !same(current.pair.holder, previous.pair.holder) {
+                if !types.same(current.pair.holder.hi, current.pair.holder.lo, previous.pair.holder.hi, previous.pair.holder.lo) {
                     fail("VP1: a same-epoch HEAD advance changed the holder")
                 }
                 // An attached Place may rewrite only ATTACH (a settle that
@@ -347,7 +347,7 @@ fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let retained = HistoryRetention(floor: pos, earlier: list.new())
     let locate = HistoryLocateRoot(depth: 0, rows: list.new())
-    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate)?
+    let entry_ref = history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate)?
     let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding:[0; 32], origin: None)
     Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
@@ -428,7 +428,7 @@ fn witness_ceiling_check(report: std.sim.s3.Report, removed: String, next_cut: u
         fail("L52-W: B wrote a head or C missed an advance")
     }
     let last_write = report.head_writes[list.len(report.head_writes) - 1]
-    if read_le(last_write.data, 88, 8) != 2 || read_le(last_write.data, 120, 8) != next_cut + 1 {
+    if format.read_le(last_write.data, 88, 8) != 2 || format.read_le(last_write.data, 120, 8) != next_cut + 1 {
         fail("L52-W: the successor did not advance after reclaim")
     }
     Ok(())
@@ -496,7 +496,7 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
             fail("L52-W: the successor's head writes were missing")
         }
         let body = view report.head_writes[3].data
-        let reference = HistoryRef(seq: read_le(body, 120, 8), epoch: read_le(body, 128, 8), len: read_le(body, 136, 8), digest: read_le(body, 144, 8))
+        let reference = HistoryRef(seq: format.read_le(body, 120, 8), epoch: format.read_le(body, 128, 8), len: format.read_le(body, 136, 8), digest: format.read_le(body, 144, 8))
         let claimed_entry = history_key("e-", reference)
         witness_ceiling_check(report, manifest_key, 22, claimed_entry)?
     }
@@ -592,9 +592,9 @@ fn bucket_test_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[
     }
     durable(mut a, w1.ticket)?
     let v_a = version(snapshot(a))
-    std.sim.history.model(mut history, v_a, key_word(10u64))
-    std.sim.history.check(std.sim.history.committed(mut history, key_word(1u64), v_a, key_word(10u64)))
-    std.sim.history.check(std.sim.history.reply(mut history, 1, key_word(1u64), v_a, Some(key_word(10u64))))
+    std.sim.history.model(mut history, v_a, types.key_word(10u64))
+    std.sim.history.check(std.sim.history.committed(mut history, types.key_word(1u64), v_a, types.key_word(10u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 1, types.key_word(1u64), v_a, Some(types.key_word(10u64))))
     // While A still owns the claim, a zero-mutation run succeeds with 0 new PUT head.
     let seq_before = a.frame_seq
     let req_a1 = std.sim.history.request(history, 1, Fresh)
@@ -609,7 +609,7 @@ fn bucket_test_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[
     if let Some(_) = r_ok.info {
         fail("L91 F1/F2: unfenced skipped run returned Some(CallInfo)")
     }
-    std.sim.history.check(std.sim.history.read(mut history, req_a1, v_a, key_word(10u64)))
+    std.sim.history.check(std.sim.history.read(mut history, req_a1, v_a, types.key_word(10u64)))
     // B claims the store and commits k = 20.
     let mut b = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
     let rows_b = table(mut b, "rows", std.codec.key_u64(), std.codec.of_u64())?
@@ -620,9 +620,9 @@ fn bucket_test_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[
     }
     durable(mut b, w2.ticket)?
     let v_b = version(snapshot(b))
-    std.sim.history.model(mut history, v_b, key_word(20u64))
-    std.sim.history.check(std.sim.history.committed(mut history, key_word(2u64), v_b, key_word(20u64)))
-    std.sim.history.check(std.sim.history.reply(mut history, 2, key_word(2u64), v_b, Some(key_word(20u64))))
+    std.sim.history.model(mut history, v_b, types.key_word(20u64))
+    std.sim.history.check(std.sim.history.committed(mut history, types.key_word(2u64), v_b, types.key_word(20u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 2, types.key_word(2u64), v_b, Some(types.key_word(20u64))))
     close(take b)?
     // A is idle with every frame durable; A runs a zero-mutation run reading k.
     // Without the skip-time head read, A would return Ok(Committed(Some(10)))
@@ -634,7 +634,7 @@ fn bucket_test_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[
         Error(Fenced(1)) => (),
         Ok(Committed(done)) => {
             let _ = durable(mut a, done.ticket)
-            std.sim.history.check(std.sim.history.read(mut history, req_stale, version(snapshot(a)), key_word(option.unwrap(done.value))))
+            std.sim.history.check(std.sim.history.read(mut history, req_stale, version(snapshot(a)), types.key_word(option.unwrap(done.value))))
             fail("L91 F1: deposed Bucket holder committed stale zero-mutation run")
         },
         _ => fail("L91 F1: deposed Bucket holder did not return Fenced(1)"),

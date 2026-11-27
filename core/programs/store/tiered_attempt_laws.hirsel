@@ -11,7 +11,7 @@ fn tiered_attempt_state_entry(mut a: TieredTouchSet, take nothing: ()) -> Tiered
 
 // Runs one resolve of BLOB stamp 1 under a step bound, with the attempt
 // outside the bound, and reads it back the way the driver does.
-fn l62_bounded_resolve(visible: Map[TieredCacheKey, Arc[TieredFrame]], steps: u64) -> (TieredTouchSet, bool) {
+fn l62_bounded_resolve(visible: Map[TieredCacheKey, Arc[format.TieredFrame]], steps: u64) -> (TieredTouchSet, bool) {
     let target = l70_cache_target(1)
     let attempt = tiered_attempt(2097, 0)
     let ran = bound steps steps {
@@ -30,8 +30,8 @@ fn l62_bounded_resolve(visible: Map[TieredCacheKey, Arc[TieredFrame]], steps: u6
 // hit and the miss commit at the same step, since nothing miss-specific runs
 // before the one assignment that installs the touch.
 fn l62_stop_sweep() -> Result[(), Error] {
-    let cold_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
-    let mut warm_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let cold_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let mut warm_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     map.insert(mut warm_pins, (7, 2120), l70_cache_frame(1))
     let mut saw_before = false
     let mut saw_after = false
@@ -197,7 +197,7 @@ fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, 
         None => 0,
     }, root_stamp: tree_stamp(s.roots.collections))
     let mut pins = empty_tiered_pins(root, partition)
-    let mut pending: Option[(TieredTarget, Error)] = None
+    let mut pending: Option[(format.TieredTarget, Error)] = None
     let mut attempts = 0u64
     loop {
         attempts += 1

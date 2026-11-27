@@ -40,7 +40,7 @@ fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] wa
 
 // The worker sends one Journaled ack after each successful group sync.
 fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
-    if !same(db.store, t.store) || t.open != open_number(db) {
+    if !types.same(db.store.hi, db.store.lo, t.store.hi, t.store.lo) || t.open != open_number(db) {
         return Error(Foreign)
     }
     if object_writer_open(db) && covered(db, t.mark) {

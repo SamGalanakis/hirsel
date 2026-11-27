@@ -133,7 +133,7 @@ fn corpus_push_bytes(mut out: String, raw: Bytes) {
 
 fn corpus_canonical_dump(mut db: Db, schema: CorpusSchema) -> Result[String, Error] waits {
     let mut out = string.from("format ")
-    string.push_u64(mut out, DISK_FORMAT)
+    string.push_u64(mut out, format.DISK_FORMAT)
     string.push(mut out, "\nhead ")
     let main_snap = snapshot(db)
     string.push_u64(mut out, version(main_snap))
@@ -302,7 +302,7 @@ pub fn corpus_freeze_main(dir_out: Dir, bucket_out: Dir, meta_out: Dir, c: Clock
     corpus_freeze_directory(dir_out, meta_out, c, r, tasks) ?=> |_| Exit(status: 41u8)
     corpus_freeze_bucket(bucket_out, meta_out, c, r, tasks) ?=> |_| Exit(status: 42u8)
     let mut msg = string.from("frozen format ")
-    string.push_u64(mut msg, DISK_FORMAT)
+    string.push_u64(mut msg, format.DISK_FORMAT)
     string.push(mut msg, "\n")
     let _ = stdout.write(out, msg)
     Ok(())
@@ -376,7 +376,7 @@ fn corpus_verify_bucket(sim: BucketSim, r: Random, tasks: Tasks, bucket_objects:
 
 @test
 fn test_frozen_format_corpus(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    if corpus_format_version() != DISK_FORMAT {
+    if corpus_format_version() != format.DISK_FORMAT {
         fail("frozen corpus format does not match DISK_FORMAT; refreeze via core/tools/store_freeze_corpus.py")
     }
     let dir_files = corpus_directory_files()

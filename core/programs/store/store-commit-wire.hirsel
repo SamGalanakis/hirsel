@@ -1,99 +1,19 @@
-fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, order: DataOrder, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
-    if let Some(record) = rec {
-        return encode_frame(ci, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(view record), settlement, keyed, seq, offset, frame_limit)
-    }
-    match call {
-        Some(section) => encode_frame(ci, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(view section.record), section.settlement, keyed, seq, offset, frame_limit),
-        None => encode_frame(ci, base, prior_stamp, tiered, mut ops, order, tail, streams, None, None, keyed, seq, offset, frame_limit),
-    }
+pub scoped type CallView {
+    key: View[Bytes],
+    args: View[Bytes],
+    issuer: u8,
+    subject: View[Bytes],
+    t: u64,
+    n: u64,
+    revision: View[Option[Bytes]],
+    code: View[Bytes]
 }
 
-fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, order: DataOrder, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], keyed: Option[KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
-    let keyed_size = match keyed {
-        Some(draft) => keyed_frame_bytes(draft.edits),
-        None => 0u64
-    }
-    let data = data_row_count(ops) != 0 || (data_row_count(streams) == 0 && keyed_size == 0)
-    let control = stream_control_slot(streams)
-    let control_count = if let Some(_) = control {
-        1u64
-    } else {
-        0u64
-    }
-    let stream_count = data_row_count(streams) - control_count
-    let sections = (if data {
-        1u64
-    } else {
-        0u64
-    }) + (if stream_count != 0u64 {
-        1u64
-    } else {
-        0u64
-    }) + control_count
-    let keyed_sections = if keyed_size == 0 {
-        0u64
-    } else {
-        1u64
-    }
-    let mut size = 21 + 5 * sections + keyed_size
-    for slot in 0u64 .. data_row_count(ops) {
-        let operation = data_row(ops, slot)
-        size += data_op_size(operation, false)
-    }
-    for slot in 0u64 .. data_row_count(streams) {
-        let operation = data_row(streams, slot)
-        size += data_op_size(operation, true)
-        if let (Some(_), Some(record)) = (view operation.value, view call) {
-            if stream_record_matches(operation.key, record.stream) {
-                size += call_section_bytes(record, settlement)
-            }
-        }
-    }
-    if size + 16 > frame_limit {
-        return Error(Capacity(requested: size + 16, available: frame_limit))
-    }
-    let room = 16 + size + BINDING_BYTES
-    let mut out: Bytes = if tail == 0 {
-        bytebuf.from_tail(mut ops.first[0].key, room)
-    } else if tail == 1 {
-        bytebuf.from_tail(mut ops.first[1].key, room)
-    } else if tail < OPEN_FRAME_TAIL {
-        bytebuf.from_tail(mut ops.rest[tail - 2].key, room)
-    } else {
-        list.with_capacity(room)
-    }
-    le(mut out, 0x0011, 2)?
-    le(mut out, 1, 2)?
-    le(mut out, size, 4)?
-    le(mut out, 0, 8)?
-    le(mut out, int.widen(ci.id.branch), 4)?
-    le(mut out, ci.id.version, 8)?
-    le(mut out, ci.at, 8)?
-    le(mut out, sections + keyed_sections, 1)?
-    if data {
-        encode_data_ops(mut out, base, prior_stamp, tiered, ops, order)?
-    }
-    if stream_count != 0u64 {
-        encode_stream_ops(mut out, streams, stream_count, call, settlement)?
-    }
-    if let Some(slot) = control {
-        le(mut out, 2u64, 1u64)?
-        le(mut out, 1u64, 4u64)?
-        let operation = data_row(streams, slot)
-        encode_data_op(mut out, operation.key, operation.value, None)?
-    }
-    if let Some(draft) = keyed {
-        encode_keyed_edits(mut out, draft.edits)?
-    }
-    seal_frame(mut out, DiskContext(store: ci.id.store, role: 2, seq: seq), offset)?
-    Ok(take out)
-}
-
-fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settlement]) -> Result[(), Capacity] {
+pub fn encode_call(mut payload: Bytes, record: CallView, settlement: Option[Settlement]) -> Result[(), Capacity] {
     encode_call_fields(mut payload, record.key, record.args, record.revision, record.code, settlement)
 }
 
-fn encode_call_fields(mut payload: Bytes, entry_key: Bytes, args: Bytes, revision: Option[Bytes], signature: Bytes, settlement: Option[Settlement]) -> Result[(), Capacity] {
+pub fn encode_call_fields(mut payload: Bytes, entry_key: Bytes, args: Bytes, revision: Option[Bytes], signature: Bytes, settlement: Option[Settlement]) -> Result[(), Capacity] {
     blob(mut payload, entry_key)?
     blob(mut payload, args)?
     if let Some(raw) = revision {
@@ -106,14 +26,14 @@ fn encode_call_fields(mut payload: Bytes, entry_key: Bytes, args: Bytes, revisio
         None => le(mut payload, 0, 1),
         Some(context) => {
             le(mut payload, int.widen(context.way), 1)?
-            append_be(mut payload, context.base, 8)?
-            append_be(mut payload, context.at, 8)?
-            append_be(mut payload, context.seed, 8)?
+            types.append_be(mut payload, context.base, 8)?
+            types.append_be(mut payload, context.at, 8)?
+            types.append_be(mut payload, context.seed, 8)?
             match context.stop {
                 Some(Raised) => le(mut payload, 1, 1),
                 Some(OutOfSteps(steps)) => {
                     le(mut payload, 2, 1)?
-                    append_be(mut payload, steps, 8)
+                    types.append_be(mut payload, steps, 8)
                 },
                 Some(OutOfBytes) => le(mut payload, 3, 1),
                 Some(Conflict) => le(mut payload, 4, 1),
@@ -123,15 +43,15 @@ fn encode_call_fields(mut payload: Bytes, entry_key: Bytes, args: Bytes, revisio
     }
 }
 
-fn call_section_bytes(rec: CallRecord, settlement: Option[Settlement]) -> u64 {
-    call_fields_size(rec.key, rec.args, rec.revision, rec.code, settlement)
+pub fn call_section_bytes(key: Bytes, args: Bytes, revision: Option[Bytes], code_raw: Bytes, settlement: Option[Settlement]) -> u64 {
+    call_fields_size(key, args, revision, code_raw, settlement)
 }
 
-fn keyed_record_size(rec: KeyedCallRecord, settlement: Option[Settlement]) -> u64 {
-    call_fields_size(rec.entry, rec.args, rec.revision, rec.code, settlement)
+pub fn keyed_record_size(entry: Bytes, args: Bytes, revision: Option[Bytes], code_raw: Bytes, settlement: Option[Settlement]) -> u64 {
+    call_fields_size(entry, args, revision, code_raw, settlement)
 }
 
-fn call_fields_size(entry_key: Bytes, args: Bytes, revision: Option[Bytes], signature: Bytes, settlement: Option[Settlement]) -> u64 {
+pub fn call_fields_size(entry_key: Bytes, args: Bytes, revision: Option[Bytes], signature: Bytes, settlement: Option[Settlement]) -> u64 {
     let revision_bytes = match revision {
         Some(raw) => list.len(raw),
         None => 0u64
@@ -145,17 +65,17 @@ fn call_fields_size(entry_key: Bytes, args: Bytes, revision: Option[Bytes], sign
     17 + list.len(entry_key) + list.len(args) + revision_bytes + list.len(signature) + extra
 }
 
-fn decode_call(file: String, raw: Bytes, mut at: u64, take stream: Bytes) -> Result[CallSection, Error] {
+pub fn decode_call(file: String, raw: Bytes, mut at: u64, take stream: Bytes) -> Result[CallSection, types.Failure] {
     let (take fields, settlement) = decode_call_fields(file, raw, mut at)?
     let Some(take name) = parse_stream_key(stream) else {
         return Error(disk_fault(file, at, Malformed))
     }
-    let KeyedCallRecord(entry: take entry_key, args: take args, revision: take revision, code: take signature) = take fields
-    let record = CallRecord(key: take entry_key, args: take args, stream: take name, revision: take revision, code: take signature)
+    let KeyedCallRecordRep(entry: take entry_key, args: take args, revision: take revision, code: take signature) = take fields
+    let record = CallRecordRep(key: take entry_key, args: take args, stream: take name, revision: take revision, code: take signature)
     Ok(CallSection(record: take record, settlement: settlement))
 }
 
-fn decode_call_fields(file: String, raw: Bytes, mut at: u64) -> Result[(KeyedCallRecord, Option[Settlement]), Error] {
+pub fn decode_call_fields(file: String, raw: Bytes, mut at: u64) -> Result[(KeyedCallRecordRep, Option[Settlement]), types.Failure] {
     let key = disk_blob(file, raw, mut at, 16777280)?
     let args = disk_blob(file, raw, mut at, 16777280)?
     let revision_at = at
@@ -177,87 +97,14 @@ fn decode_call_fields(file: String, raw: Bytes, mut at: u64) -> Result[(KeyedCal
         2 => Some(decode_settlement(file, raw, mut at, way)?),
         _ => return Error(disk_fault(file, at - 1, Malformed)),
     }
-    Ok((KeyedCallRecord(entry: take key, args: take args, revision: take revision, code: take code), settlement))
+    Ok((KeyedCallRecordRep(entry: take key, args: take args, revision: take revision, code: take code), settlement))
 }
 
-type DataOrder = InOrder | ReversePair | SortedSlots(List[u64])
+pub type DataOrder = InOrder | ReversePair | SortedSlots(List[u64])
 
-fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
-    let n = data_row_count(ops)
-    if n < 2 {
-        return Ok(InOrder)
-    }
-    if n == 2 {
-        return Ok(if list.compare_bytes(data_row(ops, 0).key, data_row(ops, 1).key) == Greater {
-            ReversePair
-        } else {
-            InOrder
-        })
-    }
-    if rows_ascending(ops) {
-        return Ok(InOrder)
-    }
-    let mut slots: List[u64] = list.new()
-    list.try_reserve(mut slots, n)?
-    for slot_order in 0u64 .. n {
-        list.push(mut slots, slot_order)
-    }
-    list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
-        list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
-    })
-    Ok(SortedSlots(take slots))
-}
-
-fn ordered_row(ops: DataRows, order: DataOrder, slot_order: u64) -> View[DataOp] in ops {
-    let slot = match order {
-        InOrder => slot_order,
-        ReversePair => 1 - slot_order,
-        SortedSlots(slots) => slots[slot_order],
-    }
-    data_row(ops, slot)
-}
-
-fn stored_prior(raw: Option[View[Bytes]]) -> u32 {
+pub fn stored_prior(raw: Option[View[Bytes]]) -> u32 {
     match raw {
         Some(value) => int.truncate(1 + list.len(value)),
         None => 0,
     }
-}
-
-fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[TieredDataDelta]]]], ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
-    let use_cached_prior = match base {
-        Some(head) => prior_stamp == Some(tree_stamp(head)),
-        None => false,
-    }
-    le(mut payload, 0, 1)?
-    le(mut payload, data_row_count(ops), 4)?
-    for slot_order in 0u64 .. data_row_count(ops) {
-        let op = ordered_row(ops, order, slot_order)
-        let delta = match tiered {
-            Some(slots) => slots[slot_order],
-            None => None,
-        }
-        if let Some(trim) = op.trim {
-            let dropped = match delta {
-                Some(TieredDropped(bytes_dropped)) => bytes_dropped,
-                _ => trim.dropped,
-            }
-            encode_log_trim(mut payload, op.key, trim.floor, dropped)
-            continue
-        }
-        let prior = match (delta, use_cached_prior, op.prior, base) {
-            (Some(TieredPrior(prior)), _, _, _) => prior,
-            (_, true, Some(prior), _) => prior,
-            (_, _, _, Some(head)) => {
-                if collection_kind(head, list.slice(op.key, 0, 4)) == Some(LogCollection) {
-                    0u32
-                } else {
-                    stored_prior(get_page_row(head, op.key))
-                }
-            },
-            (_, _, _, None) => 0,
-        }
-        encode_data_op(mut payload, op.key, op.value, Some(prior))?
-    }
-    Ok(())
 }

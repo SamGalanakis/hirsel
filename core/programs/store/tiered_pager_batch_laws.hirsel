@@ -1,6 +1,6 @@
-fn l84_write_blob_pack(mut client: std.object.Client, owner: StoreId, pack_seq: u64, first: u64, frame_count: u64, value_bytes: u64) -> Result[(HistoryRef, PagePack, List[TieredTarget]), Error] waits {
+fn l84_write_blob_pack(mut client: std.object.Client, owner: StoreId, pack_seq: u64, first: u64, frame_count: u64, value_bytes: u64) -> Result[(HistoryRef, PagePack, List[format.TieredTarget]), Error] waits {
     let mut draft = begin_tiered_pack(owner, pack_seq, 4, frame_count * (value_bytes + 64) + 4096)?
-    let mut written: List[TieredTarget] = list.new()
+    let mut written: List[format.TieredTarget] = list.new()
     for offset in 0u64 .. frame_count {
         let stamp = first + offset
         let mut value: Bytes = list.with_capacity(value_bytes)
@@ -33,12 +33,12 @@ fn l84_bucket_pager_batch(model: BucketSim, tasks: Tasks, cache: Option[ObjectsC
     let (take first_listed, _) = std.omap.insert(mut ids, blank, first.seq, TieredPagerPack(inventory: first_pack, object: Some(first)))
     let (take both, _) = std.omap.insert(mut ids, first_listed, second.seq, TieredPagerPack(inventory: second_pack, object: Some(second)))
     let (take packs, _) = std.omap.insert(mut ids, both, large.seq, TieredPagerPack(inventory: large_pack, object: Some(large)))
-    let mut siblings: List[TieredTarget] = list.with_capacity(4)
+    let mut siblings: List[format.TieredTarget] = list.with_capacity(4)
     list.push(mut siblings, clone(first_blobs[1u64]))
     list.push(mut siblings, clone(first_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
-    let demand = TieredPointDemand(target: clone(second_blobs[0u64]), key: key_word(42), values: ValuesNone, room: 0, direction: TieredBackward, paths: list.new(), siblings: take siblings, packs: take packs, next_stamp: 44, deadline: 0, grant: None)
+    let demand = TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredBackward, paths: list.new(), siblings: take siblings, packs: take packs, next_stamp: 44, deadline: 0, grant: None)
     let mut input = PagerObjects(take client, BUCKET_LAW_OP_MS, pack_cache_directory(cache))
     let runs = if let None = cache {
         2u64
@@ -77,10 +77,10 @@ fn l84_bucket_pager_paths(model: BucketSim, tasks: Tasks) -> Result[(), Error] w
     let (take first_listed, _) = std.omap.insert(mut ids, blank, first.seq, TieredPagerPack(inventory: first_pack, object: Some(first)))
     let (take packs, _) = std.omap.insert(mut ids, first_listed, second.seq, TieredPagerPack(inventory: second_pack, object: Some(second)))
     let mut paths: List[TieredPath] = list.with_capacity(3)
-    list.push(mut paths, TieredPath(target: clone(first_blobs[1u64]), key: key_word(41), values: ValuesNone))
-    list.push(mut paths, TieredPath(target: clone(second_blobs[0u64]), key: key_word(42), values: ValuesNone))
-    list.push(mut paths, TieredPath(target: clone(first_blobs[0u64]), key: key_word(40), values: ValuesNone))
-    let demand = TieredPointDemand(target: clone(second_blobs[0u64]), key: key_word(42), values: ValuesNone, room: 0, direction: TieredForward, paths: take paths, siblings: list.new(), packs: take packs, next_stamp: 43, deadline: 0, grant: None)
+    list.push(mut paths, TieredPath(target: clone(first_blobs[1u64]), key: types.key_word(41), values: ValuesNone))
+    list.push(mut paths, TieredPath(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone))
+    list.push(mut paths, TieredPath(target: clone(first_blobs[0u64]), key: types.key_word(40), values: ValuesNone))
+    let demand = TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredForward, paths: take paths, siblings: list.new(), packs: take packs, next_stamp: 43, deadline: 0, grant: None)
     let mut input = PagerObjects(take client, BUCKET_LAW_OP_MS, None)
     let mut cache_state = new_tiered_cache(1048576)
     let delivered = tiered_pager_point(mut input, mut cache_state, owner, demand)?
@@ -107,14 +107,14 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
         }
         // A leaf numbers its BLOB bodies in slot order.
         let numbered = std.page.BlobRef(stamp: reference.stamp, len: reference.len, checksum: reference.checksum, pack: reference.pack, offset: reference.offset, body: int.truncate(row))
-        list.push(mut rows, std.page.Entry(key: key_word(row + 1), cell: BlobValue(numbered)))
+        list.push(mut rows, std.page.Entry(key: types.key_word(row + 1), cell: BlobValue(numbered)))
     }
     let image = page_result(std.page.encode(rows, 0, 43, Collection))?
     let page = page_result(std.page.attach_cold(take image))?
     let mut draft = begin_tiered_pack(owner, 9, 3, 8192)?
     let width = std.page.sealed_size(std.page.image_of(page))
     let frame = PackFrame(stamp: 43, size: width, body: PageBody(take page))
-    let Some(leaf) = add_tiered_pack_frame(mut draft, frame, 9, logical_key(9, key_word(1))?, fn(stamp: u64) -> std.page.PagePtr {
+    let Some(leaf) = add_tiered_pack_frame(mut draft, frame, 9, logical_key(9, types.key_word(1))?, fn(stamp: u64) -> std.page.PagePtr {
         std.page.unlocated(stamp)
     })? else {
         fail("L84: the leaf fits its pack")
@@ -151,7 +151,7 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
         } else {
             TieredPoint
         }
-        let demand = TieredPointDemand(target: TieredPage(clone(leaf)), key: key_word(2), values: clone(values), room: room, direction: direction, paths: list.new(), siblings: list.new(), packs: std.omap.snapshot(packs), next_stamp: 44, deadline: 0, grant: None)
+        let demand = TieredPointDemand(target: TieredPage(clone(leaf)), key: types.key_word(2), values: clone(values), room: room, direction: direction, paths: list.new(), siblings: list.new(), packs: std.omap.snapshot(packs), next_stamp: 44, deadline: 0, grant: None)
         let delivered = tiered_pager_point(mut input, mut cache_state, owner, demand)?
         if let Some(_) = delivered.failure {
             fail("L84: every value's BLOB exists")
@@ -173,16 +173,16 @@ fn l84_branch_scan_demands(reverse: bool) -> Result[(), Error] {
         let separator: Bytes = if child == 0 {
             list.new()
         } else {
-            key_word(child + 1)
+            types.key_word(child + 1)
         }
         let ptr = std.page.PagePtr(pack: 8 + child, offset: 72, len: 80, checksum: child, stamp: 40 + child)
         list.push(mut children, std.page.Entry(key: take separator, cell: Child(std.page.Branch(child: ptr, rows: 1, charge: 86))))
     }
     let image = page_result(std.page.encode(children, 1, 43, Collection))?
     let root: std.page.Slot = HotPage(page_result(std.page.attach_cold(take image))?)
-    let visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let attempt = tiered_attempt(4096, 8)
-    let failed = tiered_scan_edge(attempt, visible, root, None, key_word(1), None, reverse)
+    let failed = tiered_scan_edge(attempt, visible, root, None, types.key_word(1), None, reverse)
     let Error(Missed) = failed else {
         fail("L84: the selected child is Cold")
     }
@@ -199,7 +199,7 @@ fn l84_branch_scan_demands(reverse: bool) -> Result[(), Error] {
     } else {
         42u64
     }
-    if tiered_frame_id(target).stamp != begin || list.len(tiered_attempt_state(attempt).siblings) != 2 || tiered_frame_id(tiered_attempt_state(attempt).siblings[0u64]).stamp != 41 || tiered_frame_id(tiered_attempt_state(attempt).siblings[1u64]).stamp != end {
+    if format.tiered_frame_id(target).stamp != begin || list.len(tiered_attempt_state(attempt).siblings) != 2 || format.tiered_frame_id(tiered_attempt_state(attempt).siblings[0u64]).stamp != 41 || format.tiered_frame_id(tiered_attempt_state(attempt).siblings[1u64]).stamp != end {
         fail("L84: the demanded siblings must follow the scan direction")
     }
     Ok(())

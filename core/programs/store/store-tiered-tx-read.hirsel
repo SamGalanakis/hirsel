@@ -14,9 +14,9 @@ type TxTieredRows {
 }
 
 // What an index cursor needs to read Tiered primaries without its Tx.
-pub scoped type TxIndexTiered {
+pub opaque scoped type TxIndexTiered {
     attempt: View[Option[core.Cell[TieredTouchSet]]],
-    pins: View[Map[TieredCacheKey, Arc[TieredFrame]]],
+    pins: View[Map[TieredCacheKey, Arc[format.TieredFrame]]],
     staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]]
 }
 
@@ -63,12 +63,12 @@ fn tx_tiered_stage_rows(tree: PageTree, rows: DataRows, only: Option[u32], mut i
             continue
         }
         let value: Option[Arc[Bytes]] = match op.value {
-            Some(PageValue(raw)) => Some(arc.new(copied(raw)?)),
+            Some(PageValue(raw)) => Some(arc.new(failure_result_from_rep(types.copied(raw))?)),
             Some(BlobBody(raw)) => Some(arc.share(raw)),
             None => None,
         }
         let held = replace(mut staged, std.omap.new())
-        let (take updated, _) = std.omap.insert_owned(mut ids, take held, copied(op.key)?, take value)
+        let (take updated, _) = std.omap.insert_owned(mut ids, take held, failure_result_from_rep(types.copied(op.key))?, take value)
         staged = take updated
     }
     Ok(())
@@ -83,7 +83,7 @@ fn tx_tiered_rows(tx: Tx, collection: u32, low: Bytes, high: Bytes, staged: bool
     } else {
         std.omap.new()
     }
-    Ok(Some(TxTieredRows(collection: collection, staged: take rows, from: copied(low)?, to: copied(high)?)))
+    Ok(Some(TxTieredRows(collection: collection, staged: take rows, from: failure_result_from_rep(types.copied(low))?, to: failure_result_from_rep(types.copied(high))?)))
 }
 
 fn tx_index_tiered(tx: Tx) -> Result[Option[TxIndexTiered], Error] in tx {
@@ -101,7 +101,7 @@ fn tx_tiered_stopped(attempt: core.Cell[TieredTouchSet]) -> Result[(), Error] {
 }
 
 // The next row of a Tiered Tx cursor, or None once [from, to) is spent.
-fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], collection: u32, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut from: Bytes, mut to: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], collection: u32, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut from: Bytes, mut to: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, prefix(collection)?) else {
         return Error(Stale(collection))
     }
@@ -126,13 +126,13 @@ fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSe
         // cap has no staged op.
         let (take low, take high) = match nearest {
             Some((key, _)) => if reverse {
-                let mut after = copied(key)?
+                let mut after = failure_result_from_rep(types.copied(key))?
                 list.push(mut after, 0u8)
-                (take after, copied(to)?)
+                (take after, failure_result_from_rep(types.copied(to))?)
             } else {
-                (copied(from)?, copied(key)?)
+                (failure_result_from_rep(types.copied(from))?, failure_result_from_rep(types.copied(key))?)
             },
-            None => (copied(from)?, copied(to)?),
+            None => (failure_result_from_rep(types.copied(from))?, failure_result_from_rep(types.copied(to))?),
         }
         let (take start, take stop) = tiered_scan_bounds(descriptor, collection, take low, take high)?
         let cold = if start < stop {
@@ -141,7 +141,7 @@ fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSe
             } else {
                 view start
             }
-            tiered_seek(attempt, SeekKey(copied(list.slice(hint, 4, list.len(hint)))?))
+            tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(list.slice(hint, 4, list.len(hint))))?))
             tiered_reading(attempt, if reverse {
                 ValuesNone
             } else {
@@ -157,7 +157,7 @@ fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSe
             Some(take row) => take row,
             None => {
                 let Some((take key, take staged_value)) = take nearest else {
-                    from = copied(to)?
+                    from = failure_result_from_rep(types.copied(to))?
                     return Ok(None)
                 }
                 let Some(take value) = take staged_value else {
@@ -175,9 +175,9 @@ fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSe
             },
         }
         if reverse {
-            to = copied(key)?
+            to = failure_result_from_rep(types.copied(key))?
         } else {
-            let mut after = copied(key)?
+            let mut after = failure_result_from_rep(types.copied(key))?
             list.push(mut after, 0u8)
             from = take after
         }
@@ -186,9 +186,9 @@ fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSe
     Ok(None)
 }
 
-fn next_tiered_index_row(tree: PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    let mut start = copied(low)?
-    let mut stop = copied(high)?
+fn next_tiered_index_row(tree: PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    let mut start = failure_result_from_rep(types.copied(low))?
+    let mut stop = failure_result_from_rep(types.copied(high))?
     next_tiered_in(tree, attempt, pins, id, staged, mut start, mut stop, false)
 }
 
@@ -218,7 +218,7 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
     let before = if low == id {
         0u64
     } else {
-        tiered_seek(attempt, SeekKey(copied(start)?))
+        tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(start))?))
         let rank = tiered_page_rank(attempt, tx.pins, edge, None, start)?
         tiered_seek(attempt, SeekOperation)
         rank
@@ -231,7 +231,7 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
         }
         total
     } else {
-        tiered_seek(attempt, SeekKey(copied(end)?))
+        tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(end))?))
         let through = tiered_page_rank(attempt, tx.pins, edge, None, end)?
         tiered_seek(attempt, SeekOperation)
         let Some(base_count) = int.checked_sub(through, before) else {
@@ -241,7 +241,7 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
     }
     let staged = tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
     let mut total = committed
-    let mut cursor = std.omap.range(staged, Included(copied(low)?), Excluded(copied(high)?))
+    let mut cursor = std.omap.range(staged, Included(failure_result_from_rep(types.copied(low))?), Excluded(failure_result_from_rep(types.copied(high))?))
     while let Some((key, value)) = std.omap.next(mut cursor) {
         let had = match tx_page_row(tx, key)? {
             Some(_) => true,
@@ -297,7 +297,7 @@ fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: P
 /// Alloc: the result list. Cost: one `fetch` per key.
 pub fn fetch_many[K, V](tx: Tx, t: Table[K, V], keys: List[K]) -> Result[List[Option[V]], Error] {
     let mut rows: List[Option[V]] = list.new()
-    capacity(list.try_reserve(mut rows, list.len(keys)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut rows, list.len(keys))))?
     let Some(attempt) = tx.attempt else {
         for k in keys {
             list.push(mut rows, fetch(tx, t, k)?)

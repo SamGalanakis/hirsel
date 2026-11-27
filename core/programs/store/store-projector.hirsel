@@ -301,14 +301,14 @@ fn project_binding[K, V](p: Projector[K, V], db: Db) -> Result[Binding, Error] {
         Local => main_branch(db),
         Follower(remote) => follower_main(remote),
     }
-    if !same(p.input.store, source_branch.store) {
+    if !types.same(p.input.store.hi, p.input.store.lo, source_branch.store.hi, source_branch.store.lo) {
         return Error(Foreign)
     }
     Ok(binding(p.input, source_branch))
 }
 
 fn same_project_snapshot(s: Snapshot, b: Binding, head: u64) -> bool {
-    same(s.store, b.store) && s.branch == b.branch && version(s) == head
+    types.same(s.store.hi, s.store.lo, b.store.hi, b.store.lo) && s.branch == b.branch && version(s) == head
 }
 
 fn borrowed_projection_base[K, V](mut p: Projector[K, V], db: Db, b: Binding, image: Image) -> Result[Option[Snapshot], Error] waits {
@@ -349,12 +349,12 @@ fn exact_follower_checkpoint(mut remote: Follower, wanted: u64) -> Result[Option
 }
 
 fn projection_page[K, V](p: Projector[K, V], base: Option[Snapshot], target: Snapshot, resume: Option[Bytes], limits: Limits) -> Result[ChangePage, Error] waits {
-    if !same(p.input.store, target.store) {
+    if !types.same(p.input.store.hi, p.input.store.lo, target.store.hi, target.store.lo) {
         return Error(Foreign)
     }
     readable(target.roots, p.input.catalog_key, p.input.catalog_page, p.input.id)?
     let low = match resume {
-        Some(key) => copied(key)?,
+        Some(key) => failure_result_from_rep(types.copied(key))?,
         None => prefix(p.input.id)?,
     }
     let page = changes_page(p.reads, base, target, low, prefix(p.input.id + 1)?, limits)?

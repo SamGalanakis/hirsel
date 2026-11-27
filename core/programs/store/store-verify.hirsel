@@ -77,7 +77,7 @@ pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
         } else {
             Walked
         }
-        capacity(list.try_reserve(mut out, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
         list.push(mut out, IndexCoverage(table: record.owner, index: declaration_index_name(key)?, coverage: coverage))
     }
     Ok(take out)
@@ -90,7 +90,7 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
     let mut low: Bytes = list.new()
     list.push(mut low, 2u8)
     if let Some((key, _)) = view walk.at {
-        low = copied(key)?
+        low = failure_result_from_rep(types.copied(key))?
     }
     let mut end_key: Bytes = list.new()
     list.push(mut end_key, 3u8)
@@ -108,7 +108,7 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
             None => false,
         }
         if !same_index {
-            walk.at = Some((copied(key)?, record.id))
+            walk.at = Some((failure_result_from_rep(types.copied(key))?, record.id))
             walk.entries = false
             walk.cursor = None
             walk.sums = None
@@ -175,7 +175,7 @@ fn verify_step_read(db: Db, mut walk: IndexWalk, limit: u64, direct: bool) -> Re
 fn walk_past(mut walk: IndexWalk) -> Result[(), Error] {
     let past = match walk.at {
         Some((at_key, _)) => {
-            let mut k = copied(at_key)?
+            let mut k = failure_result_from_rep(types.copied(at_key))?
             list.push(mut k, 0u8)
             Some((take k, 0u32))
         },
@@ -189,8 +189,8 @@ fn walk_past(mut walk: IndexWalk) -> Result[(), Error] {
 }
 
 fn walk_finding(mut findings: List[WalkFinding], name: String, entry_key: Bytes, fault: WalkFault) -> Result[(), Error] {
-    capacity(list.try_reserve(mut findings, 1))?
-    list.push(mut findings, WalkFinding(index: clone(name), entry: copied(entry_key)?, fault: fault))
+    failure_result_from_rep(types.capacity(list.try_reserve(mut findings, 1)))?
+    list.push(mut findings, WalkFinding(index: clone(name), entry: failure_result_from_rep(types.copied(entry_key))?, fault: fault))
     Ok(())
 }
 
@@ -216,7 +216,7 @@ fn walk_sums(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
     for (logical, raw) in rows {
         let primary = list.slice(logical, 4, list.len(logical))
         let values = (extractor.extract)(raw, primary)?
-        let next_key = copied(primary)?
+        let next_key = failure_result_from_rep(types.copied(primary))?
         match walk.sums {
             Some(mut fold) => fold_sum_row(mut fold, values)?,
             None => fail("aggregate walk has no fold"),
@@ -245,7 +245,7 @@ fn fold_sum_row(mut fold: WalkSums, values: IndexValue) -> Result[(), Error] {
                 return Error(Limit(Value))
             }
             let prior = replace(mut groups, std.omap.new())
-            let (take merged, _) = std.omap.insert_owned(mut ids, take prior, copied(key)?, Totals(count: members + 1, sum: total))
+            let (take merged, _) = std.omap.insert_owned(mut ids, take prior, failure_result_from_rep(types.copied(key))?, Totals(count: members + 1, sum: total))
             groups = take merged
         }
         Ok((take groups, ids))
@@ -279,7 +279,7 @@ fn next_verify_entry(mut walk: VerifyEntries) -> Result[Option[(Bytes, Arc[Bytes
             }
             let (key, raw) = view rows[at]
             at += 1
-            Ok(Some((copied(key)?, arc.new(copied(raw)?))))
+            Ok(Some((failure_result_from_rep(types.copied(key))?, arc.new(failure_result_from_rep(types.copied(raw))?))))
         },
     }
 }
@@ -325,11 +325,11 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, 
         None => fail("aggregate walk has no fold"),
     }
     let lower: std.omap.Bound[Bytes] = match walk.cursor {
-        Some(final_key) => Excluded(copied(final_key)?),
+        Some(final_key) => Excluded(failure_result_from_rep(types.copied(final_key))?),
         None => Unbounded,
     }
     let after = match walk.cursor {
-        Some(final_key) => Some(copied(list.slice(final_key, 4, list.len(final_key)))?),
+        Some(final_key) => Some(failure_result_from_rep(types.copied(list.slice(final_key, 4, list.len(final_key))))?),
         None => None,
     }
     let mut groups = std.omap.range(folded, lower, Unbounded)
@@ -380,7 +380,7 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, 
 // bound extractor and looked up by the index collection's residency.
 fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let cursor = match walk.cursor {
-        Some(final_key) => Some(copied(final_key)?),
+        Some(final_key) => Some(failure_result_from_rep(types.copied(final_key))?),
         None => None,
     }
     let (take rows, done) = tiered_rows_after_mode(db, record.owner, cursor, limit, direct)?
@@ -404,7 +404,7 @@ fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
                 walk_finding(mut findings, name, entry_key, found)?
             }
         }
-        walk.cursor = Some(copied(primary)?)
+        walk.cursor = Some(failure_result_from_rep(types.copied(primary))?)
     }
     walk.checked = int.saturating_add(walk.checked, list.len(rows))
     if done {
@@ -446,7 +446,7 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limi
         if let Some(found) = fault {
             walk_finding(mut findings, name, entry_key, found)?
         }
-        walk.cursor = Some(copied(list.slice(entry_key, 4, list.len(entry_key)))?)
+        walk.cursor = Some(failure_result_from_rep(types.copied(list.slice(entry_key, 4, list.len(entry_key))))?)
         read += 1
     }
     walk.checked = int.saturating_add(walk.checked, read)

@@ -238,9 +238,9 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     let object_ref = history_new_ref(1, 1, content)
     for name in["p-1", "m-1"] {
         history_create(mut client, name, mut content, mut compared, due)?
-        let refused = capacity(bound bytes destination - 1 {
+        let refused = failure_result_from_rep(types.capacity(bound bytes destination - 1 {
             history_read_object(mut client, name, object_ref, due)
-        })?
+        }))?
         if let Error(Full(Allocation(cause))) = refused {
             if cause.requested != destination || cause.available != destination - 1 {
                 fail("L85: rounded destination admission reported the wrong charge")
@@ -248,9 +248,9 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
         } else {
             fail("L85: a one-byte-short destination read was admitted")
         }
-        let accepted = capacity(bound bytes destination {
+        let accepted = failure_result_from_rep(types.capacity(bound bytes destination {
             history_read_object(mut client, name, object_ref, due)
-        })?
+        }))?
         if accepted? != content {
             fail("L85: the exactly funded destination did not read its object")
         }
@@ -258,9 +258,9 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)), activation: 0, entry: HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32], origin: None)
     // 171 links at three u64 fields each need 4,104 bytes.
     let suffix = option.unwrap(charge.seq(bytes[HistoryLink], observed.entry.seq - object_ref.seq))
-    let denied = capacity(bound bytes 4096 {
+    let denied = failure_result_from_rep(types.capacity(bound bytes 4096 {
         history_suffix(mut client, observed, object_ref, due)
-    })?
+    }))?
     if let Error(Full(Allocation(cause))) = denied {
         if cause.requested != suffix || cause.available != 4096 {
             fail("L85: suffix rows reported the wrong charge")
@@ -268,9 +268,9 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     } else {
         fail("L85: 171 suffix rows fit in 4,096 bytes")
     }
-    let accepted = capacity(bound bytes 4096 {
+    let accepted = failure_result_from_rep(types.capacity(bound bytes 4096 {
         history_link_slots(170)
-    })?
+    }))?
     if list.len(accepted?) != 170 {
         fail("L85: 170 suffix rows did not fit")
     }
@@ -280,9 +280,9 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     let pack = PagePack(class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
     // The longest object key has 60 bytes, rounded to 64.
     let key_room = option.unwrap(charge.round(60))
-    let bad = capacity(bound bytes key_room {
+    let bad = failure_result_from_rep(types.capacity(bound bytes key_room {
         history_load_data_pack(mut client, locator, due, None, observed.store, 1, pack, 1)
-    })?
+    }))?
     if let Error(Corrupt(Fault(why: Malformed, ..))) = bad {} else {
         fail("L85: the known format error consumed another key allocation")
     }
@@ -567,12 +567,12 @@ fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     }
     close(open(tasks, directory, c, r, options)?)?
     let limit = option.unwrap(service_bytes(list.new())) + plan_bytes(plan) + follower_starter_bytes()
-    capacity(bound bytes limit - 1 {
+    failure_result_from_rep(types.capacity(bound bytes limit - 1 {
         follower_starter_trial(directory, c, tasks, plan, provision, false)
-    })??
-    capacity(bound bytes limit {
+    }))??
+    failure_result_from_rep(types.capacity(bound bytes limit {
         follower_starter_trial(directory, c, tasks, plan, provision, true)
-    })?
+    }))?
 }
 
 fn follower_law_room() -> u64 {
@@ -808,7 +808,7 @@ fn follower_cancel_apply(take job: FollowerCancelApply) waits {
 }
 
 fn follower_cancel_capture(id: StoreId, at_version: u64) -> Result[Arc[FollowCapture], Error] {
-    let state = capacity(main_state(empty_roots(), at_version, 0))?
+    let state = failure_result_from_rep(types.capacity(main_state(empty_roots(), at_version, 0)))?
     follow_capture(id, take state, 0, None, 0, at_version)
 }
 
@@ -917,7 +917,7 @@ fn follower_heal_start(mut marker: std.object.Client, time: Clock) -> u64 waits 
 }
 
 fn follower_heal_end(mut marker: std.object.Client, time: Clock, healed_ns: u64, wanted: Position, law: String, at: Position) waits {
-    if host.mono_ns(time) - healed_ns > FOLLOWER_HEAL_NS || !same(at.store, wanted.store) || at.branch != wanted.branch || at.version < wanted.version {
+    if host.mono_ns(time) - healed_ns > FOLLOWER_HEAL_NS || !types.same(at.store.hi, at.store.lo, wanted.store.hi, wanted.store.lo) || at.branch != wanted.branch || at.version < wanted.version {
         follower_heal_failed(time, healed_ns, wanted, law, Ok(at))
     }
     follower_heal_mark(mut marker, "vp2-reached")

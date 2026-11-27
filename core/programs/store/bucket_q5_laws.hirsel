@@ -81,12 +81,12 @@ type Q5Site {
 }
 
 fn q5_selects(operation: Q5Operation, head_bytes: Bytes) -> bool {
-    let epoch = read_le(head_bytes, 88, 8)
-    let sequence = read_le(head_bytes, 120, 8)
+    let epoch = format.read_le(head_bytes, 88, 8)
+    let sequence = format.read_le(head_bytes, 120, 8)
     match operation {
         GenesisWrite => epoch == 1 && sequence == 1,
         ClaimWrite => epoch == 2 && sequence == 2,
-        ActivationWrite => epoch == 1 && sequence == 7 && read_le(head_bytes, 112, 8) == 4,
+        ActivationWrite => epoch == 1 && sequence == 7 && format.read_le(head_bytes, 112, 8) == 4,
     }
 }
 
@@ -331,13 +331,13 @@ fn genesis_debris_case(d: Dir, real: Clock, tasks: Tasks, seed: u64, phase: Gene
     let first_seed = 1u64
     let second_seed = 2u64
     let predict = provide.random(first_seed)
-    let _ = capacity(disk_identity(predict)) ?=> Store
-    let identity_bytes = capacity(disk_identity(predict)) ?=> Store
+    let _ = failure_result_from_rep(types.capacity(types.disk_identity(predict))) ?=> Store
+    let identity_bytes = failure_result_from_rep(types.capacity(types.disk_identity(predict))) ?=> Store
     let mut manifest: Bytes = list.new()
-    let manifest_ref = deploy_result(history_manifest_packet(mut manifest, identity_bytes, 1, default_limits()))?
+    let manifest_ref = deploy_result(history_manifest_packet(mut manifest, store_key_from_rep(identity_bytes), 1, default_limits()))?
     let mut entry_bytes: Bytes = list.new()
     let no_packs = HistoryLocateRoot(depth: 0, rows: list.new())
-    let checkpoint_ref = deploy_result(history_genesis_packet(mut entry_bytes, identity_bytes, 1, manifest_ref, no_packs))?
+    let checkpoint_ref = deploy_result(history_genesis_packet(mut entry_bytes, store_key_from_rep(identity_bytes), 1, manifest_ref, no_packs))?
     let manifest_name = history_key("m-", manifest_ref)
     let entry_name = history_key("e-", checkpoint_ref)
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)

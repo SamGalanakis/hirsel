@@ -93,7 +93,7 @@ fn stream_foreign_watch_poll(mut watch: ForeignStreamWatch, mut lane: StreamLane
         let tok = watch.watched_tokens[i].0
         let mut present = false
         for row in lane.reg.rows {
-            if same(row.token, tok) {
+            if types.same(row.token.hi, row.token.lo, tok.hi, tok.lo) {
                 present = true
                 break
             }
@@ -108,18 +108,18 @@ fn stream_foreign_watch_poll(mut watch: ForeignStreamWatch, mut lane: StreamLane
     for row in lane.reg.rows {
         let mut found_ns: Option[u64] = None
         for (tok, seen_ns) in watch.watched_tokens {
-            if same(tok, row.token) {
+            if types.same(tok.hi, tok.lo, row.token.hi, row.token.lo) {
                 found_ns = Some(seen_ns)
                 break
             }
         }
         match found_ns {
             Some(first_ns) => if now >= int.saturating_add(first_ns, limit_ns) {
-                return Ok(Some(TriggerServing(row.token)))
+                return Ok(Some(TriggerServing(store_key_from_rep(row.token))))
             },
             None => {
-                capacity(list.try_reserve(mut watch.watched_tokens, 1))?
-                list.push(mut watch.watched_tokens, (row.token, now))
+                failure_result_from_rep(types.capacity(list.try_reserve(mut watch.watched_tokens, 1)))?
+                list.push(mut watch.watched_tokens, (store_key_from_rep(row.token), now))
             },
         }
     }
@@ -158,13 +158,13 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
         let pfx = if string.byte_len(held_pin.prefix) != 0 {
             string.from(held_pin.prefix)
         } else {
-            match map.get(prefixes, held_pin.store) {
+            match map.get(prefixes, store_key_from_rep(held_pin.store)) {
                 Some(found) => string.from(found),
                 None => continue,
             }
         }
-        capacity(list.try_reserve(mut targets, 1))?
-        list.push(mut targets, (held_pin.store, take pfx))
+        failure_result_from_rep(types.capacity(list.try_reserve(mut targets, 1)))?
+        list.push(mut targets, (store_key_from_rep(held_pin.store), take pfx))
     }
     for (store, place_prefix) in targets {
         let key = stream_key(place_prefix, "head")
@@ -184,7 +184,7 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
         stream_gc_record_head(mut gc, prefixes, lane.reg.low_inc, lane.reg.low_seq, store, lane.inc, 0, ranges, now)?
     }
     let (new_low_inc, new_low_seq) = stream_gc_compute_low(gc, lane.reg, lane.inc, 1)
-    if !stream_pair_below(lane.reg.low_inc, lane.reg.low_seq, new_low_inc, new_low_seq) {
+    if !format.stream_pair_below(lane.reg.low_inc, lane.reg.low_seq, new_low_inc, new_low_seq) {
         return Ok(list.len(gc.pins) == 0)
     }
     let old_k = match lane.reg.index {
@@ -193,21 +193,21 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
     }
     let next_k = old_k + 1
     stream_gc_refresh_pins(mut gc, prefixes, new_low_inc, new_low_seq, now)?
-    let mut snap_entries: List[XIndexEntry] = list.new()
+    let mut snap_entries: List[format.XIndexEntry] = list.new()
     for e in gc.entries {
         let mut bs: List[(u64, u64)] = list.new()
         for (bi, bseq) in e.batches {
-            if !stream_pair_below(bi, bseq, new_low_inc, new_low_seq) {
-                capacity(list.try_reserve(mut bs, 1))?
+            if !format.stream_pair_below(bi, bseq, new_low_inc, new_low_seq) {
+                failure_result_from_rep(types.capacity(list.try_reserve(mut bs, 1)))?
                 list.push(mut bs, (bi, bseq))
             }
         }
         if list.len(bs) != 0 {
-            capacity(list.try_reserve(mut snap_entries, 1))?
-            list.push(mut snap_entries, XIndexEntry(store: e.store, epoch: e.epoch, batches: take bs))
+            failure_result_from_rep(types.capacity(list.try_reserve(mut snap_entries, 1)))?
+            list.push(mut snap_entries, format.XIndexEntry(store: e.store, epoch: e.epoch, batches: take bs))
         }
     }
-    let snap_pins = disk_allocation(scoped fn() -> Result[List[StreamPin], Error] {
+    let snap_pins = disk_allocation(scoped fn() -> Result[List[format.StreamPin], Error] {
         Ok(clone(gc.pins))
     })?
     let covers_inc = lane.inc - 1
@@ -215,9 +215,9 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
         Some(term) if term > 1 => term - 1,
         _ => 0u64,
     }
-    let xidx = XIndex(k: next_k, low_inc: new_low_inc, low_seq: new_low_seq, covers_inc, covers_seq, entries: take snap_entries, pins: take snap_pins)
+    let xidx = format.XIndex(k: next_k, low_inc: new_low_inc, low_seq: new_low_seq, covers_inc, covers_seq, entries: take snap_entries, pins: take snap_pins)
     let mut xbuf: Bytes = list.new()
-    let reg_idx = stream_xindex_encode(mut xbuf, lane.sid, lane.inc, lane.authority_kind, xidx)?
+    let reg_idx = failure_result_from_rep(format.stream_xindex_encode(mut xbuf, host_stream_id_to_rep(lane.sid), lane.inc, lane.authority_kind, xidx))?
     let mut xname = string.with_capacity(32)
     stream_xindex_key(mut xname, next_k)
     let xkey = stream_key(lane.dir, xname)
@@ -227,14 +227,14 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
         Ok(Applied(_)) => (),
         Ok(Mismatch) => {
             let mut cmp: Bytes = list.new()
-            capacity(list.try_reserve(mut cmp, list.len(xbuf)))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut cmp, list.len(xbuf))))?
             let (take got, take cback) = std.object.fetch(mut client, xkey, take cmp, deadline)
             cmp = take cback
             if let Error(_) = got {
                 return Ok(false)
             }
             if cmp != xbuf {
-                return Error(disk_fault(xkey, 0, Malformed))
+                return Error(failure_from_rep(format.disk_fault(xkey, 0, Malformed)))
             }
         },
         Error(take problem) => return Error(Remote(take problem)),
@@ -249,7 +249,7 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
     let mut name = string.with_capacity(48)
     let mut cur_inc = gc.deleted_inc
     let mut cur_seq = gc.deleted_seq
-    while stream_pair_below(cur_inc, cur_seq, lane.reg.low_inc, lane.reg.low_seq) {
+    while format.stream_pair_below(cur_inc, cur_seq, lane.reg.low_inc, lane.reg.low_seq) {
         if cur_inc < lane.reg.low_inc {
             let Some(term) = stream_gc_fence_of(gc.fences, cur_inc) else {
                 cur_inc += 1
@@ -257,7 +257,7 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
                 continue
             }
             while cur_seq <= term {
-                stream_batch_key(mut name, cur_inc, cur_seq)
+                format.stream_batch_key(mut name, cur_inc, cur_seq)
                 let key = stream_key(lane.dir, name)
                 let _ = std.object.erase(mut client, key, deadline)
                 cur_seq += 1
@@ -265,7 +265,7 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
             cur_inc += 1
             cur_seq = 1
         } else {
-            stream_batch_key(mut name, cur_inc, cur_seq)
+            format.stream_batch_key(mut name, cur_inc, cur_seq)
             let key = stream_key(lane.dir, name)
             let _ = std.object.erase(mut client, key, deadline)
             cur_seq += 1

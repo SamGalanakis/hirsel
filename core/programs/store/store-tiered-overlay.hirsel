@@ -48,7 +48,7 @@ fn replay_overlay_edit(mut overlay: Arc[ReplayOverlay], path: String, at: u64, l
     let (base, removed) = match replay_overlay_at(overlay, logical) {
         Some(row) => {
             if replay_value_prior(row.now) != prior {
-                return Error(disk_fault(path, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
             (row.base, charge + replay_value_width(row.now))
         },
@@ -74,9 +74,9 @@ type ReplayLogHead {
 
 // Account for the suffix appends before dropping their overlay_entries. Only the
 // Cold part and its interval go to the fold, where the Cold tree is available.
-fn replay_overlay_trim(mut overlay: Arc[ReplayOverlay], path: String, at: u64, collection: u32, head: ReplayLogHead, trim: JournalTrim) -> Result[ReplayLogHead, Error] {
+fn replay_overlay_trim(mut overlay: Arc[ReplayOverlay], path: String, at: u64, collection: u32, head: ReplayLogHead, trim: format.JournalTrim) -> Result[ReplayLogHead, Error] {
     if trim.floor < head.first || trim.dropped > head.row_bytes {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let end = order.min(trim.floor, head.next)
     let suffix_start = order.max(head.first, head.cold_next)
@@ -90,21 +90,21 @@ fn replay_overlay_trim(mut overlay: Arc[ReplayOverlay], path: String, at: u64, c
             let mut n = 0u64
             while let Some((key, row)) = std.omap.next(mut cursor) {
                 let ReplayPut(value) = view row.now else {
-                    return Error(disk_fault(path, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
                 suffix_charge += entry(key, value)
                 removed += 24 + list.len(key) + list.len(value)
                 n += 1
             }
             if n != end - suffix_start {
-                return Error(disk_fault(path, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
         }
         let Some(cold_charge) = int.checked_sub(trim.dropped, suffix_charge) else {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         if head.first >= hi && cold_charge != 0 {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         let mut ids = overlay.ids
         let overlay_entries = if suffix_start < end {
@@ -138,10 +138,10 @@ fn replay_overlay_count(overlay: Arc[ReplayOverlay], low: Bytes, high: Bytes, ba
             }
         }
         let Some(surviving) = int.checked_sub(base_count, removed) else {
-            return Error(disk_fault("overlay", 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault("overlay", 0, Malformed)))
         }
         let Some(total) = int.checked_add(surviving, added) else {
-            return Error(disk_fault("overlay", 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault("overlay", 0, Malformed)))
         }
         Ok(total)
     })

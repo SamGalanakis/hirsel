@@ -89,7 +89,7 @@ pub const ROW_KEY_LIMIT: u64 = KEY_LIMIT - 4
 // format's frame allowance and 64 KiB of MANIFEST metadata (§11.1 AP4a).
 pub fn small_place_limits() -> StoreLimits {
     let value = std.wsock.defaults().max_frame
-    StoreLimits(frame: value + LIMIT_FRAME_ROOM, value, meta: 65536)
+    StoreLimits(frame: value + types.LIMIT_FRAME_ROOM, value, meta: 65536)
 }
 
 // One cut step holds a full key and a full value of the store.
@@ -417,7 +417,7 @@ const CUT_HISTORY_RETAIN_LIMIT: u64 = 255
 fn cut_history_packet_room() -> u64 {
     // CHECKPOINT carries up to one root locator's rows and retain (a u8)
     // checkpoint references. This also covers one locator chunk.
-    189 + BINDING_BYTES + (4 * bytes[u64]) * (HISTORY_LOCATE_ROWS + CUT_HISTORY_RETAIN_LIMIT)
+    189 + format.BINDING_BYTES + (4 * bytes[u64]) * (HISTORY_LOCATE_ROWS + CUT_HISTORY_RETAIN_LIMIT)
 }
 
 fn bucket_cut_parts(pack: u64, l: StoreLimits) -> WriterParts {
@@ -442,7 +442,7 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
     let unbounded = 18446744073709551615u64
     let pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
     let checkpoint_budget = size_or(o.checkpoint_bytes, pack)
-    let l = named_limits(o.limits)
+    let l = limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits)))
     let frame = l.frame
     let floor = int.checked_add(checkpoint_budget, frame)
     let minimum_journal = size_or(floor, unbounded)
@@ -452,7 +452,7 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         Some(n) => n,
         None => 64u32
     }
-    let mut valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64 && limits_fit(l)
+    let mut valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64 && types.limits_fit(limits_to_rep(l))
     let mut parts = writer_parts()
     let mut cut_parts = writer_parts()
     let mut recovery = JOURNAL_CHUNK_BYTES + frame
@@ -617,16 +617,12 @@ fn pin_record_bytes(name: String) -> u64 {
     130 + string.byte_len(name)
 }
 
-fn round8(n: u64) -> u64 {
-    ((n + 7) / 8) * 8
-}
-
 fn entry(key: Bytes, val: Bytes) -> u64 {
     stored_row_charge(list.len(key), list.len(val))
 }
 
 fn stored_row_charge(key: u64, value: u64) -> u64 {
-    int.saturating_add(62 + round8(key), round8(value))
+    int.saturating_add(62 + format.round8(key), format.round8(value))
 }
 
 // What one table row adds to the resident account (§1.11), for a key that encodes to `key`

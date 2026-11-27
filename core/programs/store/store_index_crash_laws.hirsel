@@ -47,11 +47,11 @@ fn location_indexes_match(tx: Tx, input: (Table[u64, Bytes], Index[u64, u64, Byt
     let mut grouped: List[(u64, u64)] = list.new()
     let mut owners: List[(u64, u64)] = list.new()
     while let Some((key, value)) = next_in(tx, mut rows)? {
-        let groups = capacity(location_group(key, value))?
+        let groups = failure_result_from_rep(types.capacity(location_group(key, value)))?
         for group in groups {
             list.push(mut grouped, (group, key))
         }
-        let unique = capacity(location_owner(key, value))?
+        let unique = failure_result_from_rep(types.capacity(location_owner(key, value)))?
         list.push(mut owners, (unique[0u64], key))
     }
     Ok(list.len(owners) == 6666 && exact_index_entries(tx, input.1, take grouped)? && exact_index_entries(tx, input.2, take owners)?)
@@ -150,7 +150,7 @@ fn index_build_sums_match(db: Db, schema: IndexBuildSchema) -> Result[bool, Erro
             return Ok(false)
         }
         let found_group: u64 = list.word_be(key, 4)
-        if found_group != group || read_le(raw, 0, 8) != members[group] || read_le(raw, 8, 8) != sums[group] {
+        if found_group != group || format.read_le(raw, 0, 8) != members[group] || format.read_le(raw, 8, 8) != sums[group] {
             return Ok(false)
         }
     }
@@ -294,7 +294,7 @@ fn d7_check_demoted(db: Db, schema: IndexBuildSchema, primary: u64) -> Result[()
     let Some(raw) = get_page_row(tree, logical) else {
         fail("L68: the acknowledged table row must survive demotion")
     }
-    if read_le(raw, 2, 8) != 20u64 {
+    if format.read_le(raw, 2, 8) != 20u64 {
         fail("L68: the table row must retain its acknowledged value")
     }
     Ok(())
@@ -439,7 +439,7 @@ fn test_lix_tiered_index_build_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks)
     let Backfilling(Some(cursor)) = lix_state(db, "by_v")? else {
         fail("L-IX: the first chunk leaves a durable cursor")
     }
-    if cursor != key_word(1u64) {
+    if cursor != types.key_word(1u64) {
         fail("L-IX: the first chunk processes exactly one primary")
     }
     d7_index_write(mut db, schema.rows, 1u64, 30u64)?

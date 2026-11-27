@@ -53,7 +53,7 @@ fn journal_test_fork_history(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let beta = deploy_result(fork_history(mut db))?
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 17u8)
-    let captured = begin_export_copy(mut db, scratch, result.unwrap(copied(attempt)), 0)?
+    let captured = begin_export_copy(mut db, scratch, result.unwrap(failure_result_from_rep(types.copied(attempt))), 0)?
     let exported = export_copy(take captured)?
     let from_export = open_export(exported.dir, c, attempt, options)?
     if accounts(from_export.db).logical != 7806 {
@@ -132,13 +132,13 @@ fn stream_age_refusal_survives_longer_retention(d: Dir, c: Clock, r: Random, tas
 
 fn count_stream_effect(mut db: Db, key: Bytes, effect: u64) -> Ticket waits {
     let saved = result.unwrap(run(mut db, None, (copy_env(key), effect), fn(mut tx, args) -> Result[(), Error] {
-        let row = logical_key(1u32, key_word(args.1))?
+        let row = logical_key(1u32, types.key_word(args.1))?
         let prior = match get_page_row(tx.roots.collections, row) {
             Some(value) => decode_word(value),
             None => 0u64,
         }
-        put_bytes(mut tx, 1u32, key_word(args.1), key_word(prior + 1u64))?
-        reply(mut tx, args.0, 0u64, key_word(args.1))
+        put_bytes(mut tx, 1u32, types.key_word(args.1), types.key_word(prior + 1u64))?
+        reply(mut tx, args.0, 0u64, types.key_word(args.1))
     }))
     let Committed(done) = saved else {
         fail("stream effect did not commit")
@@ -182,7 +182,7 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     // X did not receive its committed response. Reopening still has its reply.
     let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
     match result.unwrap(admit(mut reopened, first, 0u64, first_digest)) {
-        Duplicate(saved) if saved.reply == key_word(10u64) => (),
+        Duplicate(saved) if saved.reply == types.key_word(10u64) => (),
         _ => return Error(2u64),
     }
     if let Admitted(_) = result.unwrap(admit(mut reopened, second, 0u64, second_digest)) {} else {
@@ -197,11 +197,11 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
         return Error(4u64)
     }
     match result.unwrap(admit(mut after, second, 0u64, second_digest)) {
-        Duplicate(saved) if saved.reply == key_word(20u64) => (),
+        Duplicate(saved) if saved.reply == types.key_word(20u64) => (),
         _ => return Error(5u64),
     }
     for effect in[10u64, 20u64] {
-        let row = result.unwrap(logical_key(1u32, key_word(effect)))
+        let row = result.unwrap(logical_key(1u32, types.key_word(effect)))
         match get_page_row(after.heads[0].roots.collections, row) {
             Some(value) if decode_word(value) == 1u64 => (),
             _ => return Error(effect),

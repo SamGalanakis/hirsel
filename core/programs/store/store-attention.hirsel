@@ -78,7 +78,7 @@ pub type Attention: codec + shareable + send {
 
 pub fn attention(db: Db) -> Result[Attention, Error] {
     let mut drift: List[IndexDrift] = list.new()
-    capacity(list.try_reserve(mut drift, list.len(db.drift)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut drift, list.len(db.drift))))?
     for seen in db.drift {
         list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: named(seen.index)?, count: seen.count, demoted: seen.demoted))
     }
@@ -106,7 +106,7 @@ fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
     while let Some((take key, raw)) = next_bytes(mut records)? {
         let record = decode_catalog(raw)?
         let state = copied_state(catalog_index(record)?.state)?
-        capacity(list.try_reserve(mut out, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
         list.push(mut out, IndexReport(table: record.owner, id: record.id, index: declaration_index_name(key)?, state: take state))
     }
     Ok(take out)
@@ -127,7 +127,7 @@ fn count_drift(mut db: Db, catalog: PageTree, seen: List[(u32, u32)]) -> Result[
         }
         if !found {
             let name = find_index_name(catalog, owner, id)?
-            capacity(list.try_reserve(mut db.drift, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut db.drift, 1)))?
             list.push(mut db.drift, IndexDrift(table: owner, id: id, index: take name, count: 1, demoted: 0))
         }
     }

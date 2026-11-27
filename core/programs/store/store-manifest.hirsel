@@ -1,8 +1,6 @@
-const META_LIMIT: u64 = 16777216
-
 const MANIFEST_FIXED_BYTES: u64 = 280
 
-const MANIFEST_LIMIT: u64 = MANIFEST_FIXED_BYTES + META_LIMIT
+const MANIFEST_LIMIT: u64 = MANIFEST_FIXED_BYTES + types.META_LIMIT
 
 // A store's MANIFEST payload limit: the fixed fields and its `meta` records.
 fn manifest_limit(l: StoreLimits) -> u64 {
@@ -14,15 +12,6 @@ const PAGE_LIMIT: u64 = std.page.PAGE_MAX
 const BLOB_LIMIT: u64 = VALUE_LIMIT + bytes[u64]
 
 const UNKNOWN_ROOM: u64 = 1048576
-
-fn disk_fault(file: String, at: u64, why: Why) -> Error {
-    match (bound bytes round8(string.byte_len(file)) {
-        string.from(file)
-    }) {
-        Ok(take name) => Corrupt(Fault(file: take name, offset: at, why: why)),
-        Error(problem) => Full(Allocation(problem)),
-    }
-}
 
 fn disk_allocation[T](operation: scoped[view] fn() -> Result[T, Error]) -> Result[T, Error] {
     match isolate(operation) {
@@ -37,21 +26,19 @@ fn disk_allocation[T](operation: scoped[view] fn() -> Result[T, Error]) -> Resul
 
 fn paged_pack_path(seq: u64) -> Result[String, Error] {
     disk_allocation(scoped fn() -> Result[String, Error] {
-        capacity(disk_path("p-", seq, ""))
+        failure_result_from_rep(types.capacity(disk_path("p-", seq, "")))
     })
 }
-
-const CLAIM_BYTES: u64 = 24
 
 const PAGE_MANIFEST_FILE_LIMIT: u64 = 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM
 
 fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -> Result[(), Error] {
     if kind == 0x0001 {
-        return Error(disk_fault(path, at, Header))
+        return Error(failure_from_rep(format.disk_fault(path, at, Header)))
     }
     if kind == expected {
         if flags != 1 {
-            return Error(disk_fault(path, at, Flags))
+            return Error(failure_from_rep(format.disk_fault(path, at, Flags)))
         }
         return Ok(())
     }
@@ -69,7 +56,7 @@ fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -
         _ => kind >= 0x0080 && kind <= 0x0085,
     }
     if known {
-        return Error(disk_fault(path, at, Kind(int.widen(kind))))
+        return Error(failure_from_rep(format.disk_fault(path, at, Kind(int.widen(kind)))))
     }
     if flags != 0 {
         return Error(Unsupported(int.widen(kind)))
@@ -88,23 +75,23 @@ fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(StoreId, PageMan
         let payload = list.slice(raw, frame.payload, frame.end)
         if frame.kind == 0x0070 {
             if fence != 0 || frame.flags != 1 || list.len(payload) != 4 {
-                return Error(disk_fault(path, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
             fence = list.word_le(payload, 0)
             if fence == 0 {
-                return Error(disk_fault(path, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
         } else {
             disk_page_kind(path, at, frame.kind, 0x0031, frame.flags)?
             if frame.kind == 0x0031 {
                 if let Some(_) = found {
-                    return Error(disk_fault(path, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
                 found = Some(decode_page_manifest(path, payload, header.context.seq)?)
             } else {
                 room += frame.end - at
                 if room > UNKNOWN_ROOM {
-                    return Error(disk_fault(path, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
             }
         }
@@ -114,11 +101,11 @@ fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(StoreId, PageMan
         return Error(Unsupported(0x0070))
     }
     let Some(take record) = take found else {
-        return Error(disk_fault(path, 72, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, 72, Malformed)))
     }
     let mut manifest = take record
     manifest.fence = fence
-    Ok((header.context.store, take manifest))
+    Ok((store_key_from_rep(header.context.store), take manifest))
 }
 
 fn disk_page_manifest_bytes(id: StoreId, m: PageManifest) -> Result[Bytes, Error] {
@@ -136,15 +123,15 @@ fn fill_page_manifest_file(mut raw: Bytes, id: StoreId, m: PageManifest) -> Resu
     if size > manifest_limit(m.limits) {
         return Error(Limit(Manifest))
     }
-    let context = DiskContext(store: id, role: 1, seq: m.generation)
+    let context = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: m.generation)
     begin_page_manifest_file(mut raw, context)?
     append_page_manifest(mut raw, m)?
     seal_page_manifest_file(mut raw, context, m.fence)
 }
 
-fn begin_page_manifest_file(mut raw: Bytes, context: DiskContext) -> Result[(), Error] {
+fn begin_page_manifest_file(mut raw: Bytes, context: format.DiskContext) -> Result[(), Error] {
     let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        capacity(disk_header_bytes(context, 0, 0))
+        failure_result_from_rep(types.capacity(format.disk_header_bytes(context, 0, 0)))
     })?
     list.clear(mut raw)
     list.append(mut raw, header)
@@ -155,7 +142,7 @@ fn begin_page_manifest_file(mut raw: Bytes, context: DiskContext) -> Result[(), 
     Ok(())
 }
 
-fn seal_page_manifest_file(mut raw: Bytes, context: DiskContext, level_number: u32) -> Result[(), Error] {
+fn seal_page_manifest_file(mut raw: Bytes, context: format.DiskContext, level_number: u32) -> Result[(), Error] {
     let size = list.len(raw) - 88
     if size > MANIFEST_LIMIT {
         return Error(Limit(Manifest))
@@ -163,7 +150,7 @@ fn seal_page_manifest_file(mut raw: Bytes, context: DiskContext, level_number: u
     let width: u32 = int.truncate(size)
     list.set_word_le(mut raw, 76, width)
     let check = disk_allocation(scoped fn() -> Result[u64, Error] {
-        capacity(disk_check(context, 72, list.slice(raw, 72, 80), list.slice(raw, 88, list.len(raw))))
+        failure_result_from_rep(types.capacity(format.disk_check(context, 72, list.slice(raw, 72, 80), list.slice(raw, 88, list.len(raw)))))
     })?
     list.set_word_le(mut raw, 80, check)
     if level_number != 0 {
@@ -174,7 +161,7 @@ fn seal_page_manifest_file(mut raw: Bytes, context: DiskContext, level_number: u
         list.put_word_le(mut raw, 0u64)
         list.put_word_le(mut raw, level_number)
         let fence = disk_allocation(scoped fn() -> Result[u64, Error] {
-            capacity(disk_check(context, at, list.slice(raw, at, at + 8), list.slice(raw, at + 16, at + 20)))
+            failure_result_from_rep(types.capacity(format.disk_check(context, at, list.slice(raw, at, at + 8), list.slice(raw, at + 16, at + 20))))
         })?
         list.set_word_le(mut raw, at + 8, fence)
     }
@@ -192,7 +179,7 @@ type PagePack: shareable + send {
 
 fn pack_record(path: String, at: u64, raw: Bytes) -> Result[PagePack, Error] {
     if list.len(raw) != 29 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let frames: u32 = list.word_le(raw, 1)
     let live_bytes: u64 = list.word_le(raw, 5)
@@ -200,14 +187,14 @@ fn pack_record(path: String, at: u64, raw: Bytes) -> Result[PagePack, Error] {
     let class = raw[0u64]
     let index_offset: u64 = list.word_le(raw, 21)
     if live_bytes > payload_bytes || class == 2 || class > 4 || (class < 3 && index_offset != 0) || (class >= 3 && (index_offset < 72 || index_offset >= payload_bytes || payload_bytes - index_offset < 28)) {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     Ok(PagePack(class: class, frames: frames, live: live_bytes, payload_bytes: payload_bytes, index: index_offset))
 }
 
 type LoadedPack {
     class: u8,
-    payloads: Map[u64, DiskFrame],
+    payloads: Map[u64, format.DiskFrame],
     raw: Bytes
 }
 
@@ -215,7 +202,7 @@ fn disk_read_paged_file(d: Dir, path: String, limit: u64) -> Result[Bytes, Error
     let mut handle = disk_io(host.open(d, path, Read))?
     let size = disk_io(host.stat_file(mut handle))?.size
     if size > limit {
-        return Error(disk_fault(path, limit, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, limit, Malformed)))
     }
     let raw = read_disk_bytes(mut handle, path, 0, size)?
     disk_io(host.close(take handle))?
@@ -230,7 +217,7 @@ fn disk_read_file(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] wait
         if size == limit {
             let mut probe = disk_read_buffer(1)?
             if disk_io(host.read(mut file, mut probe))? != 0 {
-                return Error(disk_fault(path, size, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, size, Malformed)))
             }
             break
         }
@@ -243,7 +230,7 @@ fn disk_read_file(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] wait
         if disk_io(host.read(mut file, mut chunk))? == 0 {
             break
         }
-        capacity(list.try_reserve(mut out, list.len(chunk)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out, list.len(chunk))))?
         list.append(mut out, chunk)
     }
     disk_io(host.close(take file))?
@@ -254,11 +241,11 @@ fn disk_read_buffer(size: u64) -> Result[Bytes, Error] {
     let charge = if size > 18446744073709551608u64 {
         18446744073709551615u64
     } else {
-        round8(size)
+        format.round8(size)
     }
-    capacity(bound bytes charge {
+    failure_result_from_rep(types.capacity(bound bytes charge {
         list.with_capacity(size)
-    })
+    }))
 }
 
 fn read_disk_bytes(mut handle: HostFile, path: String, offset: u64, size: u64) -> Result[Bytes, Error] waits {
@@ -266,7 +253,7 @@ fn read_disk_bytes(mut handle: HostFile, path: String, offset: u64, size: u64) -
     while list.len(raw) < size {
         let at = offset + list.len(raw)
         if disk_io(host.read_at(mut handle, at, mut raw))? == 0 {
-            return Error(disk_fault(path, at, Truncated))
+            return Error(failure_from_rep(format.disk_fault(path, at, Truncated)))
         }
     }
     Ok(take raw)
@@ -274,7 +261,7 @@ fn read_disk_bytes(mut handle: HostFile, path: String, offset: u64, size: u64) -
 
 fn check_page_manifest_header(mut handle: HostFile) -> Result[(), Error] waits {
     let header = read_disk_bytes(mut handle, "MANIFEST", 0, 72)?
-    let _ = disk_allocation(scoped fn() -> Result[DiskHeader, Error] {
+    let _ = disk_allocation(scoped fn() -> Result[format.DiskHeader, Error] {
         disk_read_header("MANIFEST", header, 1, None, None)
     })?
     Ok(())
@@ -286,7 +273,7 @@ fn read_page_manifest_bytes(d: Dir) -> Result[Bytes, Error] waits {
     check_page_manifest_header(mut handle)?
     let size = disk_io(host.stat_file(mut handle))?.size
     if size > PAGE_MANIFEST_FILE_LIMIT {
-        return Error(disk_fault(path, PAGE_MANIFEST_FILE_LIMIT, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, PAGE_MANIFEST_FILE_LIMIT, Malformed)))
     }
     let raw = read_disk_bytes(mut handle, path, 0, size)?
     disk_io(host.close(take handle))?
@@ -303,7 +290,7 @@ fn read_page_manifest_file(d: Dir) -> Result[(StoreId, PageManifest), Error] wai
 fn disk_check_stamp(path: String, at: u64, raw: Bytes, slot_order: u64, next_stamp: u64) -> Result[(), Error] {
     let stamp: u64 = list.word_le(raw, slot_order)
     if stamp == 0 || stamp >= next_stamp {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     Ok(())
 }
@@ -318,7 +305,7 @@ fn disk_load_page_pack(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_stamp
     let expected_frames: u64 = int.widen(pack.frames)
     // frames is u32. Even the larger BLOB limit gives a product below 2^56.
     let raw = disk_read_paged_file(d, path, 72 + expected_frames * (16 + limit) + UNKNOWN_ROOM)?
-    let payloads = disk_allocation(scoped fn() -> Result[Map[u64, DiskFrame], Error] {
+    let payloads = disk_allocation(scoped fn() -> Result[Map[u64, format.DiskFrame], Error] {
         index_page_pack(path, id, seq, pack, next_stamp, raw)
     })?
     Ok(LoadedPack(class: pack.class, payloads: take payloads, raw: take raw))
@@ -363,11 +350,11 @@ fn pack_scan_finished(checked: PackScan, frames: u64, payload_bytes: u64, at: u6
 fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16, flags: u16, size: u64, stamp_bytes: Bytes) -> Result[Option[u64], Error] {
     if checked_pack.class >= 3 && at >= checked_pack.index {
         if checked_pack.data_end != checked_pack.index {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         disk_page_kind(path, at, kind, PACK_INDEX_KIND, flags)?
         if kind != PACK_INDEX_KIND {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         checked_pack.index_frames += 1
         return Ok(None)
@@ -375,16 +362,16 @@ fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16,
     disk_page_kind(path, at, kind, checked_pack.kind, flags)?
     if kind != checked_pack.kind {
         if checked_pack.class >= 3 {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         checked_pack.unknown_bytes += 16 + size
         if checked_pack.unknown_bytes > UNKNOWN_ROOM {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         return Ok(None)
     }
     if size < checked_pack.stamp_at + 8 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     disk_check_stamp(path, at, stamp_bytes, checked_pack.stamp_at, checked_pack.next_stamp)?
     checked_pack.frames += 1
@@ -392,20 +379,20 @@ fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16,
     if checked_pack.class >= 3 {
         checked_pack.data_end = at + 16 + size
         if checked_pack.data_end > checked_pack.index {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
     }
     Ok(Some(list.word_le(stamp_bytes, checked_pack.stamp_at)))
 }
 
-fn index_page_pack(path: String, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, DiskFrame], Error] {
+fn index_page_pack(path: String, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, format.DiskFrame], Error] {
     let header = disk_read_header(path, raw, 3, Some(seq), Some(id))?
     index_pack_frames(path, header.context, pack, next_stamp, raw)
 }
 
-fn index_pack_frames(path: String, ctx: DiskContext, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, DiskFrame], Error] {
+fn index_pack_frames(path: String, ctx: format.DiskContext, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, format.DiskFrame], Error] {
     let expected_frames: u64 = int.widen(pack.frames)
-    let mut frames: Map[u64, DiskFrame] = map.new()
+    let mut frames: Map[u64, format.DiskFrame] = map.new()
     let mut checked_pack = pack_scan(pack.class, next_stamp)
     let mut at = 72u64
     while at < list.len(raw) {
@@ -414,19 +401,19 @@ fn index_pack_frames(path: String, ctx: DiskContext, pack: PagePack, next_stamp:
         let stamp_bytes = list.slice(raw, frame.payload, frame.payload + order.min(size, checked_pack.stamp_at + 8))
         let _ = scan_pack_frame(mut checked_pack, path, at, frame.kind, frame.flags, size, stamp_bytes)?
         if checked_pack.frames > expected_frames {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         map.insert(mut frames, at, frame)
         at = frame.end
     }
     if checked_pack.payload_bytes != pack.payload_bytes || checked_pack.frames != expected_frames {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     Ok(take frames)
 }
 
 fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[PagePack, Error] waits {
-    let path = capacity(disk_path("p-", seq, ""))?
+    let path = failure_result_from_rep(types.capacity(disk_path("p-", seq, "")))?
     let opened = disk_io(host.open(d, path, Read))?
     let mut input = journal_input(take opened, false)?
     let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 3, Some(seq), Some(id))?
@@ -440,7 +427,7 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
     let mut slot_order = 0u64
     let mut live_bytes = 0u64
     let mut checked_pack = pack_scan(2, next_stamp)
-    while at < input.size {
+    while at < format.journal_input_size(input) {
         let mut spent = 0u64
         let frame = read_pack_frame(mut input, path, header.context, mut checked_pack, at, false, mut spent)?
         let end = at + 16 + frame.size
@@ -449,14 +436,14 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
             live_bytes += frame.size
         }
         if slot_order < list.len(reached) && reached[slot_order] < end {
-            return Error(disk_fault(path, reached[slot_order], Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, reached[slot_order], Malformed)))
         }
         at = end
     }
     if slot_order != list.len(reached) || checked_pack.frames > 4294967295 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
-    let JournalInput(file: take handle, ..) = take input
+    let handle = format.take_journal_file(take input)
     disk_io(host.close(take handle))?
     Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
@@ -472,15 +459,15 @@ type PageGraph {
 }
 
 fn graph_add(mut graph: PageGraph, stamp: u64, take frame: ReadFrame) -> Result[(), Error] {
-    capacity(map.try_reserve(mut graph.frames, 1))?
-    capacity(list.try_reserve(mut graph.postorder, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut graph.frames, 1)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut graph.postorder, 1)))?
     map.insert(mut graph.frames, stamp, take frame)
     list.push(mut graph.postorder, stamp)
     Ok(())
 }
 
 fn resolve_blob(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, reference: std.page.BlobRef, mut graph: PageGraph) -> Result[(), Error] {
-    let path = capacity(disk_path("p-", reference.pack, ""))?
+    let path = failure_result_from_rep(types.capacity(disk_path("p-", reference.pack, "")))?
     let Some(pack) = map.get(packs, reference.pack) else {
         let width = 8 + reference.len
         let loc = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(width), checksum: reference.checksum, stamp: reference.stamp)
@@ -491,25 +478,25 @@ fn resolve_blob(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settl
 
 fn resolve_blob_frame(path: String, pack: LoadedPack, reference: std.page.BlobRef, mut graph: PageGraph) -> Result[(), Error] {
     if pack.class != 1 {
-        return Error(disk_fault(path, reference.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, reference.offset, Malformed)))
     }
     let Some(frame) = map.get(pack.payloads, reference.offset) else {
-        return Error(disk_fault(path, reference.offset, Dangling(reference.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, reference.offset, Dangling(reference.stamp))))
     }
     let width = 8 + reference.len
     if frame.kind != 0x0022 || frame.end - frame.payload != width {
-        return Error(disk_fault(path, reference.offset, Checksum))
+        return Error(failure_from_rep(format.disk_fault(path, reference.offset, Checksum)))
     }
     let stamp: u64 = list.word_le(pack.raw, frame.payload)
     let start = frame.payload + 8
     if stamp != reference.stamp || std.check.xxh3(pack.raw, start, frame.end) != reference.checksum {
-        return Error(disk_fault(path, reference.offset, Checksum))
+        return Error(failure_from_rep(format.disk_fault(path, reference.offset, Checksum)))
     }
     let loc = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(width), checksum: reference.checksum, stamp: reference.stamp)
     if !mark_reached(mut graph.stamps, path, loc)? {
         return Ok(())
     }
-    let value = copied(list.slice(pack.raw, start, frame.end))?
+    let value = failure_result_from_rep(types.copied(list.slice(pack.raw, start, frame.end)))?
     graph_add(mut graph, loc.stamp, ReadBlob(take value))
 }
 
@@ -528,19 +515,19 @@ scoped type SettledPacks {
 // this place.
 fn settled_frame(inventory: RecoveryInventory, settled: SettledPacks, path: String, ptr: std.page.PagePtr, class: u8, mut graph: PageGraph) -> Result[(), Error] {
     if ptr.pack >= settled.below {
-        return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
     }
     let Some(listed) = map.get(inventory.packs, ptr.pack) else {
-        return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
     }
     if listed.class != class {
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
     let Some(record) = disk_index_get(settled.locations.frames, ptr.stamp) else {
-        return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
     }
     if record.class != class || record.place != ptr {
-        return Error(disk_fault(path, ptr.offset, Checksum))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Checksum)))
     }
     let _ = mark_reached(mut graph.stamps, path, ptr)?
     Ok(())
@@ -558,11 +545,11 @@ fn validate_cold_root(inventory: RecoveryInventory, ptr: std.page.PagePtr) -> Re
     }
     let path = paged_pack_path(ptr.pack)?
     let Some(pack) = map.get(inventory.packs, ptr.pack) else {
-        return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
     }
     let width: u64 = int.widen(ptr.len)
     if pack.class != 3 || ptr.stamp >= inventory.next_stamp || width < 24 || width > PAGE_LIMIT || ptr.offset < 72 || ptr.offset >= pack.index || 16 + width > pack.index - ptr.offset {
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
     Ok(())
 }
@@ -571,18 +558,18 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
     if ptr.stamp == 0 {
         return Ok(())
     }
-    let path = capacity(disk_path("p-", ptr.pack, ""))?
+    let path = failure_result_from_rep(types.capacity(disk_path("p-", ptr.pack, "")))?
     let Some(pack) = map.get(packs, ptr.pack) else {
         return settled_frame(inventory, settled, path, ptr, 0, mut graph)
     }
     if pack.class != 0 {
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
     let Some(frame) = map.get(pack.payloads, ptr.offset) else {
-        return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
     }
     if frame.kind != 0x0021 {
-        return Error(disk_fault(path, ptr.offset, Checksum))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Checksum)))
     }
     let payload = list.slice(pack.raw, frame.payload, frame.end)
     check_page_pointer(path, ptr, payload)?
@@ -590,22 +577,22 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
         let existing = map.get(graph.frames, ptr.stamp)
         if let Some(ReadPage(image, _, _)) = existing {
             if std.page.key_domain(image) != domain {
-                return Error(disk_fault(path, ptr.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
             }
             if let Some(wanted) = expected_level {
                 if std.page.level(image) != wanted {
-                    return Error(disk_fault(path, ptr.offset, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
                 }
             }
             return Ok(())
         }
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
-    let image = decode_manifest_page(path, ptr.offset, copied(payload)?, domain, inventory.allow_tiered)?
+    let image = decode_manifest_page(path, ptr.offset, failure_result_from_rep(types.copied(payload))?, domain, inventory.allow_tiered)?
     let height = std.page.level(image)
     if let Some(wanted) = expected_level {
         if height != wanted {
-            return Error(disk_fault(path, ptr.offset, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
     }
     let mut kids: List[u64] = list.new()
@@ -614,12 +601,12 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => {
                 if child.stamp != 0 {
-                    page_edge_order(path, ptr, child)?
+                    failure_result_from_rep(format.page_edge_order(path, ptr, child))?
                 }
                 if let Some(_) = std.page.tiered_root_at(image, slot) {
                     validate_cold_root(inventory, child)?
                     if collect_cold && child.stamp != 0 {
-                        capacity(list.try_reserve(mut cold_roots, 1))?
+                        failure_result_from_rep(types.capacity(list.try_reserve(mut cold_roots, 1)))?
                         list.push(mut cold_roots, child)
                     }
                     list.push(mut kids, 0u64)
@@ -690,26 +677,26 @@ fn walk_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_
     validate_lineage_forks("MANIFEST", manifest, lists.lineage.forks)?
     for (seq, _) in lists.class_two {
         if map.contains(lists.packs, seq) {
-            return Error(disk_fault("MANIFEST", 72, Malformed))
+            return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
         }
     }
     let mut data: Map[u64, LoadedPack] = map.new()
     for (seq, pack) in lists.class_two {
         let checked = check_list_pack(d, id, seq, manifest.next_stamp, pack)?
-        capacity(map.try_reserve(mut lists.packs, 1))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut lists.packs, 1)))?
         map.insert(mut lists.packs, seq, checked)
     }
     for (seq, pack) in lists.packs {
         if pack.class != 2 && seq < settled.below {
             let Some(record) = disk_index_get(settled.locations.packs, seq) else {
-                return Error(disk_fault("MANIFEST", 72, Malformed))
+                return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
             }
             if record.class != pack.class || record.frames != pack.frames || record.payload_bytes != pack.payload_bytes || record.index != pack.index {
-                return Error(disk_fault("MANIFEST", 72, Malformed))
+                return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
             }
         } else if pack.class < 2 {
             let loaded = disk_load_page_pack(d, id, seq, pack, manifest.next_stamp)?
-            capacity(map.try_reserve(mut data, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut data, 1)))?
             map.insert(mut data, seq, take loaded)
         }
     }
@@ -878,14 +865,14 @@ fn select_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> Res
 }
 
 fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: TargetLimits, settled: SettledPacks) -> Result[(), Error] waits {
-    if let Some(problem) = journal_floor(target.checkpoint, target.journal, target.frame) {
+    if let Some(problem) = types.journal_floor(target.checkpoint, target.journal, target.frame) {
         return Error(Full(Journal(problem)))
     }
     let (owner, take manifest) = disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
         disk_read_page_manifest("MANIFEST.tmp", raw)
     })?
-    if !same(owner, id) {
-        return Error(disk_fault("MANIFEST.tmp", 0, Header))
+    if !types.same(owner.hi, owner.lo, id.hi, id.lo) {
+        return Error(failure_from_rep(format.disk_fault("MANIFEST.tmp", 0, Header)))
     }
     let requested = manifest.account_memory
     require_unarchived_manifest(manifest)?
@@ -935,13 +922,13 @@ fn publish_page_manifest_bytes(d: Dir, raw: Bytes) -> Result[(), Error] waits {
 
 fn journal_path(seq: u64, suffix: String) -> Result[String, Error] {
     disk_allocation(scoped fn() -> Result[String, Error] {
-        capacity(disk_path("j-", seq, suffix))
+        failure_result_from_rep(types.capacity(disk_path("j-", seq, suffix)))
     })
 }
 
 // The lookahead needs only the next HEADER's prev_end. Read that prefix, not
 // a second whole segment, while the current segment's buffer is retained.
-fn journal_header(d: Dir, id: StoreId, seq: u64, flush: Option[Clock]) -> Result[Option[DiskHeader], Error] waits {
+fn journal_header(d: Dir, id: StoreId, seq: u64, flush: Option[Clock]) -> Result[Option[format.DiskHeader], Error] waits {
     let path = journal_path(seq, "")?
     let mut file = match host.open(d, path, Read) {
         Ok(take file) => take file,

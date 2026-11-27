@@ -692,7 +692,7 @@ pub fn law_pinned_delete(c: Clock) -> bool waits {
     let first = snapshot(db)
     let _ = result.unwrap(pin(mut db, "p", first))
     let removed = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[bool, Error] {
-        delete_bytes(mut tx, 1, key_word(1))
+        delete_bytes(mut tx, 1, types.key_word(1))
     }))
     match take removed {
         Committed(done) => if !done.value {
@@ -702,7 +702,7 @@ pub fn law_pinned_delete(c: Clock) -> bool waits {
     }
     let after_delete = version(snapshot(db))
     let inserted = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), Error] {
-        put_bytes(mut tx, 1, key_word(2), key_word(20))
+        put_bytes(mut tx, 1, types.key_word(2), types.key_word(20))
     }))
     match take inserted {
         Refused(Resident(cap)) => if cap.requested != 298 || cap.available != 216 {
@@ -743,7 +743,7 @@ fn mark_is(t: Ticket, n: u64) -> bool {
 // (position, state) of a stream on main, or (0, 0) when it has none.
 fn stream_now(db: Db, name: Bytes) -> (u64, u64) {
     match get_page_row(db.heads[0].roots.streams, name) {
-        Some(raw) => (read_le(raw, 0, 8), int.widen(raw[40])),
+        Some(raw) => (format.read_le(raw, 0, 8), int.widen(raw[40])),
         None => (0, 0)
     }
 }
@@ -762,7 +762,7 @@ fn call_for(stream: Bytes, revision: u64) -> CallRecord {
     list.fill(mut args, 16, 2u8)
     let mut r: Bytes = list.new()
     list.fill(mut r, revision, 3u8)
-    CallRecord(key: take key, args: take args, stream: option.unwrap(parse_stream_key(stream)), revision: Some(take r), code: code_vector())
+    CallRecord(key: take key, args: take args, stream: option.unwrap(optional_stream_key_from_rep(format.parse_stream_key(stream))), revision: Some(take r), code: code_vector())
 }
 
 // The digest of a request with call_for's entry key and these args.

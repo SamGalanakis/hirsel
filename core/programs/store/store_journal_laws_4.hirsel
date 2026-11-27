@@ -56,7 +56,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         _ => return Error(Foreign),
     }
     let empty_args: Bytes = list.new()
-    let request = request_digest(key_word(7), empty_args)
+    let request = request_digest(types.key_word(7), empty_args)
     let extra_stream = law_stream_name(b"stream01", keyed_time(db))
     match admit(mut db, extra_stream, 0, request) {
         Error(Full(Journal(problem))) if problem.requested == 16781569 && problem.available == 16781392 => (),
@@ -174,9 +174,9 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let refused = serve(mut db, take first, plan, None, rows, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
         let empty: Bytes = list.new()
         if let Error(_) = put(mut tx, call_env, 4, empty) {
-            return Error(key_word(0))
+            return Error(types.key_word(0))
         }
-        Ok(key_word(7))
+        Ok(types.key_word(7))
     })
     match take refused {
         Error(Before(Full(Journal(problem)), None)) if problem.requested == 16781554 && problem.available == 16781392 => (),
@@ -186,7 +186,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(())
     }
     // The 360-byte vector in L29(d) without its 64-byte data section.
-    let settle_refusal = conclude(mut db, take pend, key_word(7), Resident)
+    let settle_refusal = conclude(mut db, take pend, types.key_word(7), Resident)
     let Error(Before(Full(Journal(problem)), Some(take retry))) = take settle_refusal else {
         return Error(())
     }
@@ -194,11 +194,11 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(())
     }
     result.unwrap(checkpoint(mut db))
-    let answered = result.unwrap(conclude(mut db, take retry, key_word(7), Resident))
+    let answered = result.unwrap(conclude(mut db, take retry, types.key_word(7), Resident))
     let Committed(receipt) = answered else {
         return Error(())
     }
-    if receipt.reply != key_word(7) {
+    if receipt.reply != types.key_word(7) {
         return Error(())
     }
     let observed = result.unwrap(recorded(db, main_branch(db), before + 1))
@@ -257,17 +257,17 @@ fn journal_test_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()
 // L29c: a separately laid out over-limit frame has a valid checksum, so it
 // must be rejected for its length even though none of its bytes are torn.
 pub fn journal_law_frame_oversize() -> bool {
-    let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 2, seq: 7)
+    let ctx = format.DiskContext(store: store_key_to_rep(StoreId(hi: 1, lo: 2)), role: 2, seq: 7)
     let mut payload: Bytes = list.with_capacity(16777281)
     list.fill(mut payload, 16777281, 0u8)
     let mut frame: Bytes = list.with_capacity(16777297)
-    result.unwrap(le(mut frame, 0x0011, 2))
-    result.unwrap(le(mut frame, 1, 2))
-    result.unwrap(le(mut frame, 16777281, 4))
-    let check = result.unwrap(disk_check(ctx, 72, frame, payload))
-    result.unwrap(le(mut frame, check, 8))
+    result.unwrap(format.le(mut frame, 0x0011, 2))
+    result.unwrap(format.le(mut frame, 1, 2))
+    result.unwrap(format.le(mut frame, 16777281, 4))
+    let check = result.unwrap(format.disk_check(ctx, 72, frame, payload))
+    result.unwrap(format.le(mut frame, check, 8))
     list.append(mut frame, payload)
-    let mut file = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    let mut file = result.unwrap(format.disk_header_bytes(ctx, 0, 0))
     list.append(mut file, frame)
     match disk_read_frame("j-7", ctx, file, 72) {
         Error(Corrupt(f)) => match f.why {
@@ -375,12 +375,12 @@ fn test_step_bounds(c: Clock) -> Result[(), ()] waits {
 // burns `burn` steps.
 fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
     for i in 0u64 .. k {
-        if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(i)) {
-            return Error(key_word(1))
+        if let Error(_) = put_bytes(mut tx, 1, types.key_word(1), types.key_word(i)) {
+            return Error(types.key_word(1))
         }
     }
     for _ in 0u64 .. burn {}
-    Ok(key_word(7))
+    Ok(types.key_word(7))
 }
 
 // L33's six adapter steps cover draft_call, isolate and its callback,
@@ -389,7 +389,7 @@ fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
 pub fn law_reserve_latches(c: Clock) -> bool waits {
     let k = 255u64
     let mut db = raw_test_db(c, 1073741824)
-    let key = key_word(29)
+    let key = types.key_word(29)
     let stream = law_stream_name(key, keyed_time(db))
     let admission = result.unwrap(admit(mut db, stream, 0, request_digest(key, key)))
     let Admitted(take complete) = take admission else {
@@ -397,7 +397,7 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
     }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let s_e = 200000u64
     // The least n_e that admits the body.
     let mut low = 1u64
@@ -516,12 +516,12 @@ fn refused_reply(mut db: Db, oversized: bool) -> bool waits {
                 }
                 let mut v: Bytes = list.with_capacity(size)
                 list.fill(mut v, size, 0u8)
-                if let Error(_) = put_bytes(mut tx, 1, key_word(k), v) {
+                if let Error(_) = put_bytes(mut tx, 1, types.key_word(k), v) {
                     fail("fixture data exhausted the frame before staging a reply")
                 }
             }
         } else {
-            put_bytes(mut tx, 1, key_word(1), key_word(10))?
+            put_bytes(mut tx, 1, types.key_word(1), types.key_word(10))?
         }
         let mut call = call_for(call_env.1, if call_env.0 {
             32u64
@@ -531,7 +531,7 @@ fn refused_reply(mut db: Db, oversized: bool) -> bool waits {
         if call_env.0 {
             list.fill(mut call.args, 1024, 0u8)
         }
-        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, take call)
+        reply_recorded(mut tx, 0, failure_result_from_rep(types.copied(string.as_bytes("success")))?, take call)
     }))
     match take attempted {
         Aborted(Undone(value: Limit(Transaction), ticket: None)) => if !oversized {
@@ -546,7 +546,7 @@ fn refused_reply(mut db: Db, oversized: bool) -> bool waits {
     if version(head) != admitted {
         return false
     }
-    if let Some(_) = result.unwrap(get_raw(head, 1, key_word(1))) {
+    if let Some(_) = result.unwrap(get_raw(head, 1, types.key_word(1))) {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, stream, 0, digest)) {
@@ -562,7 +562,7 @@ fn refused_reply(mut db: Db, oversized: bool) -> bool waits {
     let rejected = result.unwrap(run_with_reply(mut db, None, fn(_error: Error) -> bool {
         false
     }, stream, fn(mut tx, call_env) -> Result[(), Error] {
-        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, call_for(call_env, 32))?
+        reply_recorded(mut tx, 0, failure_result_from_rep(types.copied(string.as_bytes("success")))?, call_for(call_env, 32))?
         Error(Limit(Transaction))
     }))
     match take rejected {
@@ -599,13 +599,13 @@ fn test_refused_reply(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), (
     }
 }
 
-fn window_law_commit(ctx: DiskContext, offset: u64, head: u64, width: u64) -> Bytes {
+fn window_law_commit(ctx: format.DiskContext, offset: u64, head: u64, width: u64) -> Bytes {
     let mut value: Bytes = list.with_capacity(width)
     list.fill(mut value, width, 119u8)
-    let key = result.unwrap(logical_key(1, key_word(head)))
+    let key = result.unwrap(logical_key(1, types.key_word(head)))
     let mut data = new_data_rows()
-    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
-    let ci = CallInfo(id: CallId(store: ctx.store, branch: 0, version: head), at: head + 100, seed: 0)
+    push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
+    let ci = CallInfo(id: CallId(store: store_key_from_rep(ctx.store), branch: 0, version: head), at: head + 100, seed: 0)
     result.unwrap(encode_commit(ci, mut data, ctx.seq, offset))
 }
 
@@ -634,8 +634,8 @@ fn window_law_image(d: Dir, c: Clock, id: StoreId, raw: Bytes, start: u64, frame
 fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
     let dir = disk_test_directory(d)
     let id = StoreId(hi: 1, lo: 2)
-    let ctx = DiskContext(store: id, role: 2, seq: 7)
-    let mut acked_image = capacity(disk_header_bytes(ctx, 0, 0))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7)
+    let mut acked_image = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     list.append(mut acked_image, journal_empty_commit(ctx, 72, 1))
     let acked_end = list.len(acked_image)
     let empty = journal_empty_commit(ctx, acked_end, 2)
@@ -670,7 +670,7 @@ fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
         }
         for cut in cuts {
             for room in[0u64, 1u64, length - 1, 4096u64, 8192u64, 4194304u64] {
-                let mut image = copied(acked_image)?
+                let mut image = failure_result_from_rep(types.copied(acked_image))?
                 list.append(mut image, list.slice(group, 0, cut))
                 if room > cut {
                     list.fill(mut image, room - cut, 0u8)
@@ -678,7 +678,7 @@ fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
                 window_law_image(dir, c, id, image, acked_end, frames)?
             }
         }
-        let mut subset = copied(acked_image)?
+        let mut subset = failure_result_from_rep(types.copied(acked_image))?
         let later_page = 8192 - acked_end
         list.fill(mut subset, later_page, 0u8)
         list.append(mut subset, list.slice(group, later_page, later_page + 4096))
@@ -774,7 +774,7 @@ fn disk_window_read(d: Dir, c: Clock, r: Random, tasks: Tasks, issued: u64, ackn
         issued_end += disk_window_width(commit_number)
     }
     if size < end || size > (order.max(end + target, issued_end) + 4095) / 4096 * 4096 {
-        return Error(disk_fault(segment, size, Malformed))
+        return Error(failure_from_rep(format.disk_fault(segment, size, Malformed)))
     }
     close(take db)
 }

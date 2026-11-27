@@ -16,9 +16,9 @@ type ScrubPack: send {
 }
 
 type ScrubInput {
-    input: JournalInput,
+    input: format.JournalInput,
     path: String,
-    context: DiskContext,
+    context: format.DiskContext,
     checked_pack: PackScan,
     expected: List[std.page.PagePtr],
     slot: u64
@@ -69,7 +69,7 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
     })?
     let lease = arc.new(ScrubLease(packs: take seqs))
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
-        capacity(list.try_reserve(mut state.scrubs, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut state.scrubs, 1)))?
         list.push(mut state.scrubs, arc.share(lease))
         Ok(())
     })?
@@ -84,13 +84,13 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
         match scrub_next(mut tour, mut spent) {
             Ok(()) => (),
             Error(Corrupt(take fault)) => {
-                capacity(list.try_reserve(mut faults, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut faults, 1)))?
                 list.push(mut faults, take fault)
                 scrub_finish_pack(mut tour)?
             },
             Error(Unsupported(kind)) => {
                 let path = paged_pack_path(tour.packs[tour.position].seq)?
-                capacity(list.try_reserve(mut faults, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut faults, 1)))?
                 list.push(mut faults, Fault(file: take path, offset: tour.at, why: Kind(kind)))
                 scrub_finish_pack(mut tour)?
             },
@@ -109,7 +109,7 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
 fn scrub_finish_pack(mut tour: Scrub) -> Result[(), Error] waits {
     if let Some(take reading) = replace(mut tour.open, None) {
         let ScrubInput(input: take input, ..) = take reading
-        let JournalInput(file: take handle, ..) = take input
+        let handle = format.take_journal_file(take input)
         disk_io(host.close(take handle))?
     }
     tour.position += 1
@@ -122,7 +122,7 @@ fn scrub_pack_pointers(known: PageLocations, seq: u64) -> Result[List[std.page.P
     let mut members = std.omap.range(known.members.values, Included((seq, 0u64)), Included((seq, 18446744073709551615u64)))
     while let Some(((_, stamp), _)) = std.omap.next(mut members) {
         let location = option.unwrap(disk_index_get(known.frames, stamp))
-        capacity(list.try_reserve(mut expected, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut expected, 1)))?
         list.push(mut expected, location.place)
     }
     list.sort(mut expected, fn(a: std.page.PagePtr, b: std.page.PagePtr) -> Order {
@@ -166,11 +166,11 @@ fn scrub_next(mut tour: Scrub, mut spent: u64) -> Result[(), Error] waits {
     }
 }
 
-fn scrub_prefix(mut input: JournalInput, path: String, offset: u64, width: u64, mut spent: u64) -> Result[Bytes, Error] waits {
-    let available = order.min(width, input.size - offset)
+fn scrub_prefix(mut input: format.JournalInput, path: String, offset: u64, width: u64, mut spent: u64) -> Result[Bytes, Error] waits {
+    let available = order.min(width, format.journal_input_size(input) - offset)
     let raw = journal_read_prefix(mut input, path, offset, available, mut spent)?
     if available < width {
-        return Error(disk_fault(path, offset, Truncated))
+        return Error(failure_from_rep(format.disk_fault(path, offset, Truncated)))
     }
     Ok(take raw)
 }
@@ -179,12 +179,12 @@ fn scrub_prefix(mut input: JournalInput, path: String, offset: u64, width: u64, 
 // record the generation listed.
 fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at: u64, mut spent: u64) -> Result[Option[u64], Error] waits {
     let has_pointer = reading.slot < list.len(reading.expected)
-    if at >= reading.input.size {
+    if at >= format.journal_input_size(reading.input) {
         if has_pointer {
-            return Error(disk_fault(reading.path, reading.expected[reading.slot].offset, Checksum))
+            return Error(failure_from_rep(format.disk_fault(reading.path, reading.expected[reading.slot].offset, Checksum)))
         }
         if !pack_scan_finished(reading.checked_pack, frames, payload_bytes, at) {
-            return Error(disk_fault(reading.path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(reading.path, at, Malformed)))
         }
         return Ok(None)
     }
@@ -194,13 +194,13 @@ fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at: u64
         let pointer = reading.expected[reading.slot]
         let width: u64 = int.widen(pointer.len)
         if frame.stamp != Some(pointer.stamp) || width != frame.size || pointer.checksum != frame.checksum {
-            return Error(disk_fault(reading.path, at, Checksum))
+            return Error(failure_from_rep(format.disk_fault(reading.path, at, Checksum)))
         }
         reading.slot += 1
     }
     let end = at + 16 + frame.size
     if reading.slot < list.len(reading.expected) && reading.expected[reading.slot].offset < end {
-        return Error(disk_fault(reading.path, reading.expected[reading.slot].offset, Checksum))
+        return Error(failure_from_rep(format.disk_fault(reading.path, reading.expected[reading.slot].offset, Checksum)))
     }
     Ok(Some(end))
 }
@@ -211,7 +211,7 @@ type ScannedPackFrame {
     checksum: u64
 }
 
-fn read_pack_frame(mut input: JournalInput, path: String, context: DiskContext, mut checked_pack: PackScan, at: u64, check_pointer: bool, mut spent: u64) -> Result[ScannedPackFrame, Error] waits {
+fn read_pack_frame(mut input: format.JournalInput, path: String, context: format.DiskContext, mut checked_pack: PackScan, at: u64, check_pointer: bool, mut spent: u64) -> Result[ScannedPackFrame, Error] waits {
     let head = scrub_prefix(mut input, path, at, 16, mut spent)?
     let frame = disk_read_frame_head(path, head, at)?
     let keep = if frame.kind == checked_pack.kind {
@@ -236,13 +236,13 @@ fn read_pack_frame(mut input: JournalInput, path: String, context: DiskContext, 
 // that a located pointer carries, over the payload from skip on (a PAGE's
 // whole payload, a BLOB's body after its stamp). keep bytes of the payload
 // go to captured.
-fn scrub_payload(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, skip: u64, mut captured: Bytes, mut spent: u64) -> Result[u64, Error] waits {
-    if frame.size > input.size - offset - 16 {
-        return Error(disk_fault(path, offset, Truncated))
+fn scrub_payload(mut input: format.JournalInput, path: String, context: format.DiskContext, offset: u64, head: Bytes, frame: format.DiskFrameHead, skip: u64, mut captured: Bytes, mut spent: u64) -> Result[u64, Error] waits {
+    if frame.size > format.journal_input_size(input) - offset - 16 {
+        return Error(failure_from_rep(format.disk_fault(path, offset, Truncated)))
     }
     let keep = list.capacity(captured)
     let mut check = disk_allocation(scoped fn() -> Result[std.check.Xxh3, Error] {
-        capacity(disk_check_start(context, offset, head))
+        failure_result_from_rep(types.capacity(format.disk_check_start(context, offset, head)))
     })?
     let mut plain = std.check.start()
     let begin = offset + 16
@@ -250,8 +250,8 @@ fn scrub_payload(mut input: JournalInput, path: String, context: DiskContext, of
     let mut at = begin
     while at < end {
         let start = journal_chunk(mut input, path, at)?
-        let part = order.min(end - at, list.len(input.chunk) - start)
-        std.check.add(mut check, input.chunk, start, start + part)
+        let part = order.min(end - at, list.len(format.journal_input_chunk(input)) - start)
+        std.check.add(mut check, format.journal_input_chunk(input), start, start + part)
         let from = at - begin
         if from + part > skip {
             let low = if from >= skip {
@@ -259,17 +259,17 @@ fn scrub_payload(mut input: JournalInput, path: String, context: DiskContext, of
             } else {
                 start + (skip - from)
             }
-            std.check.add(mut plain, input.chunk, low, start + part)
+            std.check.add(mut plain, format.journal_input_chunk(input), low, start + part)
         }
         if list.len(captured) < keep {
             let capture = order.min(part, keep - list.len(captured))
-            list.append(mut captured, list.slice(input.chunk, start, start + capture))
+            list.append(mut captured, list.slice(format.journal_input_chunk(input), start, start + capture))
         }
         at += part
         spent = int.saturating_add(spent, part)
     }
     if std.check.finish(check) != frame.checksum {
-        return Error(disk_fault(path, offset, Checksum))
+        return Error(failure_from_rep(format.disk_fault(path, offset, Checksum)))
     }
     Ok(std.check.finish(plain))
 }

@@ -32,7 +32,7 @@ fn admit_change(mut out: ChangeOutput, key: Bytes, width: u64) -> Result[bool, E
     if let Some(limits) = out.limits {
         let filled = out.carried + list.len(out.rows) + list.len(out.trimmed) + list.len(out.bounds)
         if filled == limits.rows || (filled != 0 && width > out.remaining) {
-            out.next = Some(copied(key)?)
+            out.next = Some(failure_result_from_rep(types.copied(key))?)
             return Ok(false)
         }
         out.remaining = int.saturating_sub(out.remaining, width)
@@ -88,7 +88,7 @@ fn page_change_cell(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk,
     if !admit_change(mut out, key, 4 + width)? {
         return Ok(false)
     }
-    list.push(mut out.rows, Change(tree_key: copied(key)?, value: take after))
+    list.push(mut out.rows, Change(tree_key: failure_result_from_rep(types.copied(key))?, value: take after))
     Ok(true)
 }
 
@@ -127,11 +127,11 @@ fn change_in_range(key: Bytes, low: Option[Bytes], high: Option[Bytes]) -> bool 
 
 fn page_change_trim(mut out: ChangeOutput, take first: Bytes, take end: Bytes, low: Option[Bytes], high: Option[Bytes]) -> Result[bool, Error] {
     let lo = match low {
-        Some(edge) if first < edge => copied(edge)?,
+        Some(edge) if first < edge => failure_result_from_rep(types.copied(edge))?,
         _ => take first
     }
     let hi = match high {
-        Some(edge) if edge < end => copied(edge)?,
+        Some(edge) if edge < end => failure_result_from_rep(types.copied(edge))?,
         _ => take end
     }
     if hi <= lo {
@@ -171,7 +171,7 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, 
         if !admit_change(mut out, key, 4)? {
             return Ok(false)
         }
-        list.push(mut out.bounds, copied(key)?)
+        list.push(mut out.bounds, failure_result_from_rep(types.copied(key))?)
     }
     if let (Some(a), Some(b)) = (before, after) {
         let old_stamp: u64 = list.word_le(a, 28)
@@ -191,7 +191,7 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, 
             if !page_change_trim(mut out, log_key(id, old.first)?, log_key(id, end)?, low, high)? {
                 return Ok(false)
             }
-            let suffix = key_word(end)
+            let suffix = types.key_word(end)
             if change_in_range(suffix, start, None) {
                 start = Some(take suffix)
             }
@@ -396,7 +396,7 @@ pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: 
     }
     page_limits(l)?
     if let Some(base) = a {
-        if !same(base.store, b.store) || base.open != b.open {
+        if !types.same(base.store.hi, base.store.lo, b.store.hi, b.store.lo) || base.open != b.open {
             return Error(Foreign)
         }
         if snapshot_paged(base) || snapshot_paged(b) {

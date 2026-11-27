@@ -426,7 +426,7 @@ fn bucket_test_read_only_capture(c: Clock, r: Random, tasks: Tasks) -> Result[()
 
 fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number: u64) -> Result[(), Error] {
     let seq = history_next_id(head.entry.seq)?
-    let ctx = DiskContext(store: head.store, role: 2, seq)
+    let ctx = format.DiskContext(store: store_key_to_rep(head.store), role: 2, seq)
     history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, 0u32)
@@ -435,7 +435,7 @@ fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number
     list.push(mut raw, 1u8)
     list.push(mut raw, 0u8)
     list.put_word_le(mut raw, 0u32)
-    capacity(history_seal(mut raw, ctx, 112, 0x0011))
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, 112, 0x0011)))
 }
 
 fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, HistoryRef), Error] waits {
@@ -571,8 +571,8 @@ fn bucket_m2_seed_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
 }
 
 fn bucket_m2_object_header(mut raw: Bytes, id: StoreId, role: u8, seq: u64) -> Result[(), Error] {
-    let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
-    capacity(history_append_header(mut header, DiskContext(store: id, role, seq), 1, 1))?
+    let mut header: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
+    failure_result_from_rep(types.capacity(format.history_append_header(mut header, format.DiskContext(store: store_key_to_rep(id), role, seq), 1, 1)))?
     for at in 0u64 .. 72 {
         raw[at] = header[at]
     }
@@ -580,7 +580,7 @@ fn bucket_m2_object_header(mut raw: Bytes, id: StoreId, role: u8, seq: u64) -> R
 }
 
 fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: HistoryRef, refs: List[HistoryRef]) -> Result[HistoryRef, Error] {
-    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
     let empty = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
     history_packet_header(mut raw, ctx, 1, 1, empty)?
     list.fill(mut raw, 16, 0u8)
@@ -591,13 +591,13 @@ fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: HistoryRef, refs:
     list.put_word_le(mut raw, 1u64)
     list.push(mut raw, 0u8)
     list.put_word_le(mut raw, 0u32)
-    capacity(history_seal(mut raw, ctx, 112, 0x0090))?
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, 112, 0x0090)))?
     let at = list.len(raw)
     list.fill(mut raw, 16, 0u8)
     for item in refs {
         history_ref_encode(mut raw, item)
     }
-    capacity(history_seal(mut raw, ctx, at, 0x00C0))?
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, at, 0x00C0)))?
     Ok(history_new_ref(1, 1, raw))
 }
 
@@ -768,7 +768,7 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
     let Some((take capture, tag)) = history_probe_head(mut old, previous.tag, mut first.witness, deadline)? else {
         fail("conditional head probe hid a foreign advance")
     }
-    if capture.head.pair.epoch != 2 || !same(capture.head.pair.holder, holder) || capture.head.entry.seq != 2 || tag == previous.tag {
+    if capture.head.pair.epoch != 2 || !types.same(capture.head.pair.holder.hi, capture.head.pair.holder.lo, holder.hi, holder.lo) || capture.head.entry.seq != 2 || tag == previous.tag {
         fail("conditional head probe returned the wrong capture")
     }
     Ok(())

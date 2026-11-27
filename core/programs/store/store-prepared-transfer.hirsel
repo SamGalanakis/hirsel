@@ -39,7 +39,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
         }
     }
     let base: ExportStamp = clone(source.stamp)
-    let ctx = DiskContext(store: source.db.store, role: 6, seq: source.stamp.opened)
+    let ctx = format.DiskContext(store: store_key_to_rep(source.db.store), role: 6, seq: source.stamp.opened)
     let meta = PreparedMeta(base: take base, target: take target, next_table: staged.plan.next_table, changes: list.len(delta), ranges: list.len(inventory))
     let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
     let mut encoded_meta: Bytes = list.new()
@@ -74,7 +74,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
         } else {
             let mut rows = deploy_result(entries_of(built_roots.collections, desc.id))?
             while let Some((take key, value)) = deploy_result(next_bytes(mut rows))? {
-                let row = PreparedRow(key: take key, value: deploy_result(copied(value))?)
+                let row = PreparedRow(key: take key, value: deploy_result(failure_result_from_rep(types.copied(value)))?)
                 scratch_result(write_prepared_frame(mut file, 0x0084, row_codec, row))?
             }
         }
@@ -163,7 +163,7 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
             return Error(ImportMalformed)
         }
         if kind == 1 {
-            if list.len(encoded) < 2 || read_le(encoded, 0, 2) + 1 != int.widen(schema_number) {
+            if list.len(encoded) < 2 || format.read_le(encoded, 0, 2) + 1 != int.widen(schema_number) {
                 return Error(ImportMalformed)
             }
         } else if kind == 2 {
@@ -186,9 +186,9 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
         }
         if keep_rows {
             charge = int.saturating_add(charge, row_charge)
-            list.push(mut rows, std.page.Row(key: deploy_result(copied(suffix))?, value: take encoded, charge: row_charge))
+            list.push(mut rows, std.page.Row(key: deploy_result(failure_result_from_rep(types.copied(suffix)))?, value: take encoded, charge: row_charge))
         } else {
-            prev_suffix = Some(deploy_result(copied(suffix))?)
+            prev_suffix = Some(deploy_result(failure_result_from_rep(types.copied(suffix)))?)
         }
     }
     if std.check.finish(digest) != desc.digest {
@@ -256,7 +256,7 @@ fn validate_prepared_inner(owner: Option[View[Db]], d: Dir) -> Result[ValidatedI
                 Some(lease) => deploy_result(base_descriptors_from_tree(lease.collections))?,
                 None => deploy_result(base_descriptors_from_tree(db.heads[0u64].roots.collections))?,
             },
-            None => deploy_result(read_export_base_descriptors(d, head.context.store))?,
+            None => deploy_result(read_export_base_descriptors(d, store_key_from_rep(head.context.store)))?,
         }
         derive_range_residencies(base_descs, needed, source_map, meta.base.next_table, false)?
     }
@@ -521,7 +521,7 @@ fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result
         let had_tiered = deploy_result(table_is_tiered(plan.roots.collections, replaced.id))?
         if had_tiered {
             deploy_result(discard_replayed_collection(mut plan.roots.collections, replaced.id))?
-            deploy_result(capacity(list.try_reserve(mut plan.superseded, 1)))?
+            deploy_result(failure_result_from_rep(types.capacity(list.try_reserve(mut plan.superseded, 1))))?
             list.push(mut plan.superseded, replaced.id)
         }
         if replaced.kind == 0 {

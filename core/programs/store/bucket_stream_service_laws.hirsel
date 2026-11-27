@@ -93,7 +93,7 @@ fn stream_service_expected(commits: u64) -> List[ServiceStep] {
     list.push(mut steps, service_step("GET", "marker-1", true, 404))
     for k in 0u64 .. commits {
         let mut name = string.with_capacity(48)
-        stream_batch_key(mut name, 1, k + 2)
+        format.stream_batch_key(mut name, 1, k + 2)
         list.push(mut steps, service_step("PUT", stream_service_key(take name), true, 200))
         list.push(mut steps, service_step("GET", stream_service_key("reg"), true, 200))
     }
@@ -107,7 +107,7 @@ fn stream_service_expected(commits: u64) -> List[ServiceStep] {
     // writes 1 GROUP entry and 1 head PUT dropping ATTACH (2 A).
     for k in 0u64 .. commits {
         let mut name = string.with_capacity(48)
-        stream_batch_key(mut name, 1, k + 2)
+        format.stream_batch_key(mut name, 1, k + 2)
         let key = stream_service_key(take name)
         list.push(mut steps, service_step("GET", clone(key), true, 206))
         list.push(mut steps, service_step("GET", take key, true, 206))
@@ -165,7 +165,7 @@ fn bucket_stream_streamed_genesis(c: Clock, r: Random, tasks: Tasks) -> Result[(
         fail("the streamed genesis head names no live tail")
     }
     // Incarnation 1 is the stream's first election; its first batch is seq 1.
-    if a.settles != 0 || list.len(a.sealed) != 0 || !stream_same(tail.sid, stream_law_sid()) || tail.inc != 1 || tail.from_seq != 1 || tail.from_frame != 0 {
+    if a.settles != 0 || list.len(a.sealed) != 0 || !format.stream_same(tail.sid, host_stream_id_to_rep(stream_law_sid())) || tail.inc != 1 || tail.from_seq != 1 || tail.from_frame != 0 {
         fail("the streamed genesis ATTACH is not {0, (S, 1, (1, 0)), []}")
     }
     let (_, take closed_attach) = history_decode_head_attach(report.head_writes[1u64].data)?
@@ -525,9 +525,9 @@ fn stream_empty_commit_fenced_run(s: BucketSim, tasks: Tasks, r: Random) -> Resu
     }
     durable(mut a, w1.ticket)?
     let v_a = version(snapshot(a))
-    std.sim.history.model(mut history, v_a, key_word(10u64))
-    std.sim.history.check(std.sim.history.committed(mut history, key_word(1u64), v_a, key_word(10u64)))
-    std.sim.history.check(std.sim.history.reply(mut history, 1, key_word(1u64), v_a, Some(key_word(10u64))))
+    std.sim.history.model(mut history, v_a, types.key_word(10u64))
+    std.sim.history.check(std.sim.history.committed(mut history, types.key_word(1u64), v_a, types.key_word(10u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 1, types.key_word(1u64), v_a, Some(types.key_word(10u64))))
     // Unfenced zero-mutation run on attached A succeeds via 304 head GET with 0 stream frames.
     let seq_before = a.frame_seq
     let req_ok = std.sim.history.request(history, 1, Fresh)
@@ -542,7 +542,7 @@ fn stream_empty_commit_fenced_run(s: BucketSim, tasks: Tasks, r: Random) -> Resu
     if let Some(_) = r_ok.info {
         fail("L91 F1/F2 (stream): unfenced skip returned Some(CallInfo)")
     }
-    std.sim.history.check(std.sim.history.read(mut history, req_ok, v_a, key_word(10u64)))
+    std.sim.history.check(std.sim.history.read(mut history, req_ok, v_a, types.key_word(10u64)))
     // B claims the attached Place and commits k = 20.
     let slot_b = journal_slot(mut service)?
     let client_b = stream_service_client(s, tasks, 913, "p1/", "us-east-1")?
@@ -558,9 +558,9 @@ fn stream_empty_commit_fenced_run(s: BucketSim, tasks: Tasks, r: Random) -> Resu
     }
     durable(mut b, w2.ticket)?
     let v_b = version(snapshot(b))
-    std.sim.history.model(mut history, v_b, key_word(20u64))
-    std.sim.history.check(std.sim.history.committed(mut history, key_word(2u64), v_b, key_word(20u64)))
-    std.sim.history.check(std.sim.history.reply(mut history, 2, key_word(2u64), v_b, Some(key_word(20u64))))
+    std.sim.history.model(mut history, v_b, types.key_word(20u64))
+    std.sim.history.check(std.sim.history.committed(mut history, types.key_word(2u64), v_b, types.key_word(20u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 2, types.key_word(2u64), v_b, Some(types.key_word(20u64))))
     close(take b)?
     // Idle deposed A runs a zero-mutation run reading k: must return and latch Fenced.
     let req_stale = std.sim.history.request(history, 1, Fresh)
@@ -570,7 +570,7 @@ fn stream_empty_commit_fenced_run(s: BucketSim, tasks: Tasks, r: Random) -> Resu
         Error(Fenced(_)) => (),
         Ok(Committed(done)) => {
             let _ = durable(mut a, done.ticket)
-            std.sim.history.check(std.sim.history.read(mut history, req_stale, version(snapshot(a)), key_word(option.unwrap(done.value))))
+            std.sim.history.check(std.sim.history.read(mut history, req_stale, version(snapshot(a)), types.key_word(option.unwrap(done.value))))
             fail("L91 F1 (stream): deposed attached holder committed stale zero-mutation run")
         },
         _ => fail("L91 F1 (stream): deposed attached holder did not return Fenced"),
@@ -610,7 +610,7 @@ fn stream_reissue_settle(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Er
     let mut parked = result.unwrap(channel.receive(paused))
     // One answer fits behind the blocked relay. Both are occupied before hold_ms.
     let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(1, bytes 0)
-    let (take answer_client, take answers) = capacity(take made)?
+    let (take answer_client, take answers) = failure_result_from_rep(types.capacity(take made))?
     let relay = match parked.stream {
         Some(mut link) => {
             link.answer_client = Some(take answer_client)
@@ -653,14 +653,14 @@ fn stream_reap_pending_settle(s: BucketSim, tasks: Tasks) -> Result[(), Error] w
     let gc = stream_gc_new(lane.reg)
     let (take control, take service_control): (Sender[ServiceControl], Receiver[ServiceControl]) = channel.new(1)
     let rings: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(1, bytes 0)
-    let (take bell, take ring_inbox) = capacity(take rings)?
+    let (take bell, take ring_inbox) = failure_result_from_rep(types.capacity(take rings))?
     let reports: Result[(Client[SlotReport], Inbox[SlotReport]), Capacity] = conn.new(1, bytes 0)
-    let (take report, take report_inbox) = capacity(take reports)?
+    let (take report, take report_inbox) = failure_result_from_rep(types.capacity(take reports))?
     let mut service = StreamService(lane: take lane, client: take client, clock: s.time, plan: stream_unhold_plan(4), op_ms: UNHOLD_OP_MS, slots: list.with_capacity(1), rings: take ring_inbox, reports: take report_inbox, control: take service_control, waiting: list.new(), tickets: list.new(), prefixes: map.new(), observed_rows: list.new(), active_settles: list.with_capacity(1), stall_polls: list.new(), next_settle_id: 2, last_reg_ns: 0, tasks, bell: take bell, timer: None, poll_at: 0, gc: take gc, janitor_asks: list.new())
     let data: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(1, bytes 0)
-    let (take data_client, take data_inbox) = capacity(take data)?
+    let (take data_client, take data_inbox) = failure_result_from_rep(types.capacity(take data))?
     let answers: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(1, bytes 0)
-    let (take answer_client, take answer_inbox) = capacity(take answers)?
+    let (take answer_client, take answer_inbox) = failure_result_from_rep(types.capacity(take answers))?
     let place = SlotPlace(store, epoch: 1, fenced: false, settled_from: 0, answers: take answer_client)
     list.push(mut service.slots, ServiceSlot(inbox: Some(take data_inbox), place: Some(take place), held: None, unsent: Some(SlotSettle(1, 0, 1))))
     list.push(mut service.active_settles, ActiveSettle(id: 1, slot: 0, store, epoch: 1, tokens: list.new()))

@@ -270,12 +270,12 @@ type Touch {
 // Notes `key` before the round changes it in `tree`.
 fn note_touch(mut touched: List[Touch], tree: PageTree, key: Bytes) -> Result[(), Error] {
     let prior = match get_page_row(tree, key) {
-        Some(raw) => Some(copied(raw)?),
+        Some(raw) => Some(failure_result_from_rep(types.copied(raw))?),
         None => None,
     }
     let seq = list.len(touched)
-    let note = Touch(key: copied(key)?, seq: seq, prior: take prior)
-    capacity(list.try_reserve(mut touched, 1))?
+    let note = Touch(key: failure_result_from_rep(types.copied(key))?, seq: seq, prior: take prior)
+    failure_result_from_rep(types.capacity(list.try_reserve(mut touched, 1)))?
     list.push(mut touched, take note)
     Ok(())
 }
@@ -314,11 +314,11 @@ fn round_ops(after: PageTree, mut touched: List[Touch]) -> Result[List[RoundOp],
                     },
                     None => false,
                 }
-                list.push(mut ops, RoundOp(key: copied(note.key)?, value: Some(copied(raw)?), prior: had))
+                list.push(mut ops, RoundOp(key: failure_result_from_rep(types.copied(note.key))?, value: Some(failure_result_from_rep(types.copied(raw))?), prior: had))
             },
             None => {
                 if let Some(_) = note.prior {
-                    list.push(mut ops, RoundOp(key: copied(note.key)?, value: None, prior: true))
+                    list.push(mut ops, RoundOp(key: failure_result_from_rep(types.copied(note.key))?, value: None, prior: true))
                 }
             },
         }
@@ -338,7 +338,7 @@ fn bytes_order(a: Bytes, b: Bytes) -> Order {
 
 // Writes ROUND: the meta frame, then one frame per op in key order.
 fn write_round(d: Dir, id: StoreId, take meta: RoundMeta, ops: List[RoundOp]) -> Result[(), DeployError] waits {
-    let ctx = DiskContext(store: id, role: ROUND_ROLE, seq: meta.round)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: ROUND_ROLE, seq: meta.round)
     let meta_codec: std.codec.Codec[RoundMeta] = std.codec.of()
     let mut encoded: Bytes = list.new()
     std.codec.encode(meta_codec, meta, mut encoded) ?=> |_| Scratch(Limit(Value))
@@ -359,15 +359,15 @@ fn write_round(d: Dir, id: StoreId, take meta: RoundMeta, ops: List[RoundOp]) ->
 type FrameFile {
     file: HostFile,
     pending: Bytes,
-    ctx: DiskContext,
+    ctx: format.DiskContext,
     offset: u64
 }
 
 const FRAME_BATCH: u64 = 1048576
 
-fn open_frames(d: Dir, name: String, ctx: DiskContext) -> Result[FrameFile, Error] waits {
+fn open_frames(d: Dir, name: String, ctx: format.DiskContext) -> Result[FrameFile, Error] waits {
     let file = disk_io(host.open(d, name, Write))?
-    let header = capacity(disk_header_bytes(ctx, 0u64, 0))?
+    let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0u64, 0)))?
     Ok(FrameFile(file: take file, pending: take header, ctx: ctx, offset: 72u64))
 }
 
@@ -378,9 +378,9 @@ fn write_prepared_frame[T](mut out: FrameFile, kind: u16, codec: std.codec.Codec
 }
 
 fn write_prepared_payload(mut out: FrameFile, kind: u16, encoded: Bytes) -> Result[(), Error] waits {
-    let raw = capacity(disk_seal(out.ctx, out.offset, kind, 1, encoded))?
+    let raw = failure_result_from_rep(types.capacity(format.disk_seal(out.ctx, out.offset, kind, 1, encoded)))?
     out.offset += list.len(raw)
-    capacity(list.try_reserve(mut out.pending, list.len(raw)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut out.pending, list.len(raw))))?
     list.append(mut out.pending, raw)
     if list.len(out.pending) >= FRAME_BATCH {
         flush_frames(mut out)?
@@ -582,10 +582,10 @@ fn removed_pin(delta: HolderDelta) -> Option[u64] {
 // The installed state's account: the import pin the install cut drops holds
 // nothing main will not.
 fn install_account(db: Db, roots: Roots) -> Result[u64, DeployError] {
-    let mut s = deploy_result(capacity(current_state(db)))?
+    let mut s = deploy_result(failure_result_from_rep(types.capacity(current_state(db))))?
     s.tips[0].roots = share_roots(roots)
     list.retain(mut s.pins, scoped fn(held: Pin) -> bool {
         held.owner != ImportPin
     })
-    deploy_result(capacity(state_account(s)))
+    deploy_result(failure_result_from_rep(types.capacity(state_account(s))))
 }

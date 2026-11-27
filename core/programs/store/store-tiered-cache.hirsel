@@ -33,7 +33,7 @@ fn tiered_fifo_remove[T: plain](mut fifo: TieredFifo[T]) {
 }
 
 type TieredCacheEntry: send {
-    frame: Arc[TieredFrame],
+    frame: Arc[format.TieredFrame],
     frequency: u8
 }
 
@@ -51,7 +51,7 @@ type TieredCache: send {
     ghost_numbers: Map[TieredCacheKey, u64],
     ghost_next: u64,
     ghost_limit: u64,
-    overlap: List[Option[Arc[TieredFrame]]],
+    overlap: List[Option[Arc[format.TieredFrame]]],
     reader_grants: List[Option[Arc[TieredReaderGrant]]],
     cached_bytes: u64,
     small_bytes: u64,
@@ -65,18 +65,18 @@ fn new_tiered_cache(shared: u64) -> TieredCache {
     TieredCache(entries: map.new(), small: tiered_fifo(), main: tiered_fifo(), ghosts: tiered_fifo(), ghost_numbers: map.new(), ghost_next: 1, ghost_limit: shared / 24, overlap: list.new(), reader_grants: list.new(), cached_bytes: 0, small_bytes: 0, overlap_bytes: 0, reader_reserved: 0, shared_bytes: shared, small_limit: shared / 10)
 }
 
-fn tiered_cache_key(facts: TieredFrameId) -> TieredCacheKey {
+fn tiered_cache_key(facts: format.TieredFrameId) -> TieredCacheKey {
     (facts.pack, facts.offset)
 }
 
-fn tiered_frame_charge(frame: TieredFrame) -> u64 {
+fn tiered_frame_charge(frame: format.TieredFrame) -> u64 {
     16 + frame.identity.len
 }
 
-fn tiered_cache_lookup(mut pager_cache: TieredCache, path: String, target: TieredTarget) -> Result[Option[Arc[TieredFrame]], Error] {
-    let key = tiered_cache_key(tiered_frame_id(target))
-    let found = map.update(mut pager_cache.entries, key, scoped fn(mut cached_entry: TieredCacheEntry) -> Result[Arc[TieredFrame], Error] {
-        verify_tiered_edge(path, target, cached_entry.frame.identity)?
+fn tiered_cache_lookup(mut pager_cache: TieredCache, path: String, target: format.TieredTarget) -> Result[Option[Arc[format.TieredFrame]], Error] {
+    let key = tiered_cache_key(format.tiered_frame_id(target))
+    let found = map.update(mut pager_cache.entries, key, scoped fn(mut cached_entry: TieredCacheEntry) -> Result[Arc[format.TieredFrame], Error] {
+        failure_result_from_rep(format.verify_tiered_edge(path, target, cached_entry.frame.identity))?
         if cached_entry.frequency < 3 {
             cached_entry.frequency += 1
         }
@@ -215,7 +215,7 @@ fn tiered_cache_room(mut pager_cache: TieredCache, extra: u64) -> Result[u64, Ca
     }
 }
 
-fn tiered_cache_admit(mut pager_cache: TieredCache, frame: Arc[TieredFrame]) {
+fn tiered_cache_admit(mut pager_cache: TieredCache, frame: Arc[format.TieredFrame]) {
     let key = tiered_cache_key(frame.identity)
     if map.contains(pager_cache.entries, key) {
         return
@@ -258,11 +258,11 @@ fn check_reader_pin_bytes(requested: u64) -> Result[(), Error] {
 fn tiered_cache_reserve_reader(mut pager_cache: TieredCache, grant: TieredReaderGrant) -> Result[Arc[TieredReaderGrant], Error] {
     let requested = grant.pin_bytes
     check_reader_pin_bytes(requested)?
-    let available = capacity(tiered_cache_room(mut pager_cache, requested))?
+    let available = failure_result_from_rep(types.capacity(tiered_cache_room(mut pager_cache, requested)))?
     if available < requested {
         return Error(Full(Cache(Capacity(requested: requested, available: available))))
     }
-    capacity(list.try_reserve(mut pager_cache.reader_grants, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut pager_cache.reader_grants, 1)))?
     let granted = disk_allocation(fn() -> Result[Arc[TieredReaderGrant], Error] {
         Ok(arc.new(grant))
     })?

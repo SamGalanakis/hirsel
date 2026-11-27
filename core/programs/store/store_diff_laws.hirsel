@@ -1,9 +1,9 @@
 fn diff_oracle_key(k: u64) -> Bytes {
-    key_word(0x1020304050600000u64 + 3 * k)
+    types.key_word(0x1020304050600000u64 + 3 * k)
 }
 
 fn diff_oracle_value(seed: u64) -> Bytes {
-    let mut raw = key_word(seed)
+    let mut raw = types.key_word(seed)
     list.fill(mut raw, if seed % 5 == 0 {
         120
     } else {

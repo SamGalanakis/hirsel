@@ -105,8 +105,8 @@ pub opaque type JournalService {
 // buffers, the doorbell, the stall poll's alarm, and per slot its room and
 // ack item (§12.11.12).
 pub fn stream_service_bytes(plan: StreamPlan) -> u64 {
-    let batch = int.saturating_add(plan.batching.max_batch_bytes, BINDING_BYTES + 64)
-    let reg = REG_LIMIT + 88 + BINDING_BYTES + 64
+    let batch = int.saturating_add(plan.batching.max_batch_bytes, format.BINDING_BYTES + 64)
+    let reg = format.REG_LIMIT + 88 + format.BINDING_BYTES + 64
     let slots: u64 = int.widen(plan.limits.max_slots)
     let room = plan.limits.slot_bytes
     let slot_headers = STREAM_CONNECTION_BASE + STREAM_SLOT_CHUNKS * bytes[SlotMsg] + bytes[ServiceSlot]
@@ -124,11 +124,11 @@ fn stream_plan_check(plan: StreamPlan, op_ms: u64) -> Result[(), Error] {
     }
     let limits = plan.limits
     let batch = plan.batching.max_batch_bytes
-    if batch < LIMIT_VALUE_FLOOR + LIMIT_FRAME_ROOM + stream_batch_overhead(1) || batch > 4294967296 {
+    if batch < types.LIMIT_VALUE_FLOOR + types.LIMIT_FRAME_ROOM + format.stream_batch_overhead(1) || batch > 4294967296 {
         return Error(Stream(Bound(MaxBatchBytes)))
     }
     let slots: u64 = int.widen(limits.max_slots)
-    if slots == 0 || slots > STREAM_MAX_SLOTS {
+    if slots == 0 || slots > format.STREAM_MAX_SLOTS {
         return Error(Stream(Bound(MaxSlots)))
     }
     if limits.hold_ms / 4 < op_ms {
@@ -196,7 +196,7 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
     if budget < wanted {
         return Error(Refusal(error: Full(Allocation(Capacity(requested: wanted, available: budget))), authority: take a))
     }
-    let holder = match capacity(disk_identity(r)) {
+    let holder = match failure_result_from_rep(types.capacity(types.disk_identity(r))) {
         Ok(id) => id,
         Error(take e) => return Error(Refusal(error: take e, authority: take a)),
     }
@@ -224,7 +224,7 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
     let (control_send, control_receive): (Sender[ServiceControl], Receiver[ServiceControl]) = channel.new(slots + 1)
     let (ready_send, ready_receive): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
     let (take requests, take workers) = std.object.split(take client)
-    let input = StreamServiceInput(requests: take requests, clock: c, plan: clone(plan), dir: stream_root_dir(plan.prefix), authority_kind: kind, holder, op_ms, control: take control_receive, rings: take rings, reports: take report_inbox, ready: take ready_send, tasks, bell: conn.client(bell))
+    let input = StreamServiceInput(requests: take requests, clock: c, plan: clone(plan), dir: stream_root_dir(plan.prefix), authority_kind: kind, holder: store_key_from_rep(holder), op_ms, control: take control_receive, rings: take rings, reports: take report_inbox, ready: take ready_send, tasks, bell: conn.client(bell))
     let running = match task.try_spawn(tasks, bytes budget, take input, stream_service_task) {
         Ok(take handle) => take handle,
         Error((problem, take back)) => {
@@ -408,7 +408,7 @@ type SlotLink: send {
 
 fn slot_link(slot: JournalSlot) -> Result[SlotLink, Error] {
     let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(STREAM_SLOT_ACKS, bytes 0)
-    let (take answer_client, take answers) = capacity(take made)?
+    let (take answer_client, take answers) = failure_result_from_rep(types.capacity(take made))?
     Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), reports: conn.client(slot.reports), slot: slot.slot, sid: slot.sid, chunk: stream_slot_chunk(slot.slot_bytes), max_batch_bytes: slot.max_batch_bytes, answers: Some(take answers), answer_client: Some(take answer_client), inc: 0, last_batch_seq: 0, commit_batches: list.new(), root: string.from(slot.root), max_rows: slot.max_rows))
 }
 
@@ -421,7 +421,7 @@ fn slot_report(link: SlotLink, take report: SlotReport) {
     slot_ring(link)
 }
 
-fn slot_report_head(link: SlotLink, store: StoreId, attach: Option[Attach], obs_seq: u64) {
+fn slot_report_head(link: SlotLink, store: StoreId, attach: Option[format.Attach], obs_seq: u64) {
     let ranges = stream_attach_head_ranges(attach, link.sid)
     slot_report(link, ReportHead(link.slot, store.hi, store.lo, link.inc, obs_seq, ranges))
 }
@@ -450,20 +450,20 @@ fn slot_relay(take input: SlotRelayInput) waits {
 // The grant (§12.11.5): the service registers (store, epoch, place_prefix) on
 // this slot and names its incarnation and the next_seq batch seq.
 fn slot_attach(mut link: SlotLink, store: StoreId, epoch: u64, place_prefix: String, limits: StoreLimits) -> Result[(u64, u64), Error] waits {
-    if limits.frame + stream_batch_overhead(1) > link.max_batch_bytes {
+    if limits.frame + format.stream_batch_overhead(1) > link.max_batch_bytes {
         return Error(Stream(Bound(MaxBatchBytes)))
     }
     // The service holds the only answer client, so a service that ends
     // closes the Place's answers.
     let Some(take answer_client) = replace(mut link.answer_client, None) else {
-        return Error(disk_fault("slot", 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault("slot", 0, Malformed)))
     }
     if let Error(_) = conn.send(link.data, SlotAttach(store.hi, store.lo, epoch, string.from(place_prefix), take answer_client)) {
         return Error(Io(Closed))
     }
     slot_ring(link)
     let Some(answers) = view link.answers else {
-        return Error(disk_fault("slot", 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault("slot", 0, Malformed)))
     }
     match conn.receive(answers) {
         Ok(SlotGranted(inc, next_seq)) => {
@@ -474,7 +474,7 @@ fn slot_attach(mut link: SlotLink, store: StoreId, epoch: u64, place_prefix: Str
             Ok((inc, next_seq))
         },
         Ok(SlotLatched(cause)) => Error(Latched(cause)),
-        Ok(_) => Error(disk_fault("slot", 0, Malformed)),
+        Ok(_) => Error(failure_from_rep(format.disk_fault("slot", 0, Malformed))),
         Error(_) => Error(Io(Closed)),
     }
 }
@@ -517,7 +517,7 @@ fn slot_send(link: SlotLink, raw: Bytes, sequence: u64) -> Result[(), Error] wai
 fn slot_wait(mut link: SlotLink, sequence: u64) -> Result[(), Error] waits {
     slot_ring(link)
     let Some(answers) = view link.answers else {
-        return Error(disk_fault("slot", 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault("slot", 0, Malformed)))
     }
     loop {
         match conn.receive(answers) {
@@ -535,7 +535,7 @@ fn slot_wait(mut link: SlotLink, sequence: u64) -> Result[(), Error] waits {
             Ok(SlotLatched(cause)) => return Error(Latched(cause)),
             Ok(SlotPollHead) => (),
             Ok(SlotSettle(_, _, _)) => (),
-            Ok(SlotGranted(_, _)) => return Error(disk_fault("slot", 0, Malformed)),
+            Ok(SlotGranted(_, _)) => return Error(failure_from_rep(format.disk_fault("slot", 0, Malformed))),
             Error(_) => return Error(Io(Closed)),
         }
     }

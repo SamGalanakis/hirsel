@@ -53,7 +53,7 @@ fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, 
     for (k, obj) in report.objects {
         if string.starts_with(k, seg_prefix) {
             seg_key = Some(string.from(k))
-            seg_raw = copied(obj.data)?
+            seg_raw = failure_result_from_rep(types.copied(obj.data))?
         }
     }
     let Some(take found_key) = take seg_key else {
@@ -137,7 +137,7 @@ fn exit_l90_e_export_run(d: Dir, s: BucketSim, tasks: Tasks, c: Clock, r: Random
     bucket_law_commit(mut p1, 2)?
     let dir1 = disk_test_directory(d)
     let att1 = exit_attempt(1u8)
-    let job1 = match begin_backup(mut p1, dir1, copied(att1)?) {
+    let job1 = match begin_backup(mut p1, dir1, failure_result_from_rep(types.copied(att1))?) {
         Ok(take j) => take j,
         Error(_) => fail("L90-E(1): begin_backup failed with empty sealed"),
     }
@@ -174,7 +174,7 @@ fn exit_l90_e_export_run(d: Dir, s: BucketSim, tasks: Tasks, c: Clock, r: Random
     let mut p2_b = exit_open_attached(s, tasks, r, mut svc_bad, "s3.test", 606, string.from("p2/"), false, 4)?
     let dir2a = disk_test_directory(d)
     let att2a = exit_attempt(2u8)
-    match begin_backup(mut p2_b, dir2a, copied(att2a)?) {
+    match begin_backup(mut p2_b, dir2a, failure_result_from_rep(types.copied(att2a))?) {
         Error(Store(Remote(Uncertain(Status(200, _))))) => (),
         Ok(_) => fail("L90-E(2a): export succeeded despite refused cut with non-empty sealed"),
         Error(_) => fail("L90-E(2a): unexpected error on refused-cut export"),
@@ -198,7 +198,7 @@ fn exit_l90_e_export_run(d: Dir, s: BucketSim, tasks: Tasks, c: Clock, r: Random
     }
     let dir2b = disk_test_directory(d)
     let att2b = exit_attempt(3u8)
-    let job2b = match begin_backup(mut p2_d, dir2b, copied(att2b)?) {
+    let job2b = match begin_backup(mut p2_d, dir2b, failure_result_from_rep(types.copied(att2b))?) {
         Ok(take j) => take j,
         Error(_) => fail("L90-E(2b): begin_backup failed with non-empty sealed on clean host"),
     }

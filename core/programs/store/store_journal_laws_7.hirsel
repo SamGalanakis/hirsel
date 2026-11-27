@@ -13,7 +13,7 @@ fn journal_small_commit(mut db: Db, n: u64) -> u8 waits {
             }
             let mut value: Bytes = list.with_capacity(size)
             list.fill(mut value, size, 0u8)
-            put_bytes(mut tx, 1, key_word(k), value)?
+            put_bytes(mut tx, 1, types.key_word(k), value)?
         }
         Ok(0u64)
     }))
@@ -47,7 +47,7 @@ pub fn journal_law_small_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     result.unwrap(close(take db))
     options.limits = None
     let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
-    if !same_limits(store_limits(reopened), small) || page_row_count(reopened.heads[0].roots.collections) != 2 {
+    if !types.same_limits(limits_to_rep(store_limits(reopened)), limits_to_rep(small)) || page_row_count(reopened.heads[0].roots.collections) != 2 {
         return false
     }
     if journal_small_commit(mut reopened, 65525) != 0u8 || journal_small_commit(mut reopened, 65524) != 1u8 {
@@ -56,7 +56,7 @@ pub fn journal_law_small_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     result.unwrap(close(take reopened))
     options.limits = Some(default_limits())
     match open(tasks, dir, c, r, options) {
-        Error(LimitsDiffer(found)) => same_limits(found, small),
+        Error(LimitsDiffer(found)) => types.same_limits(limits_to_rep(found), limits_to_rep(small)),
         _ => false,
     }
 }
@@ -79,14 +79,14 @@ pub fn journal_law_genesis_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let mut options = journal_crash_options()
     options.limits = Some(small)
     let first = result.unwrap(disk_session(dir, c, r, options))
-    if !same_limits(first.startup.limits, small) {
+    if !types.same_limits(limits_to_rep(first.startup.limits), limits_to_rep(small)) {
         return false
     }
     let DiskSession(lock: take lock, startup: _) = take first
     result.unwrap(disk_io(host.close(take lock)))
     options.limits = None
     let db = result.unwrap(open(tasks, dir, c, r, options))
-    let kept = same_limits(store_limits(db), small) && db.heads[0].head == 0
+    let kept = types.same_limits(limits_to_rep(store_limits(db)), limits_to_rep(small)) && db.heads[0].head == 0
     result.unwrap(close(take db))
     kept
 }
@@ -115,7 +115,7 @@ pub fn journal_law_replay_over_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) 
         for k in 0u64 .. 2 {
             let mut value: Bytes = list.with_capacity(call_env)
             list.fill(mut value, call_env, 0u8)
-            put_bytes(mut tx, 1, key_word(k), value)?
+            put_bytes(mut tx, 1, types.key_word(k), value)?
         }
         Ok(option.unwrap(tx.frame_bytes))
     }))
@@ -205,7 +205,7 @@ fn journal_test_empty_commit_skip(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     if r_pure.value != Some(100u64) || list.len(r_pure.reads) != 1u64 {
         fail("L91 E2: pure read value or reads wrong")
     }
-    let expected_key = logical_key(rows.id, key_word(1u64))?
+    let expected_key = logical_key(rows.id, types.key_word(1u64))?
     match r_pure.reads[0u64] {
         Point(k) if k == expected_key => (),
         _ => fail("L91 E2: pure read Point mismatch"),
@@ -411,7 +411,7 @@ fn journal_test_info_commits_and_clock_monotonic(d: Dir, r: Random, tasks: Tasks
     close(take reopened)
 }
 
-fn cadence_frame(send: Sender[JournalMsg], ctx: DiskContext, number: u64) waits {
+fn cadence_frame(send: Sender[JournalMsg], ctx: format.DiskContext, number: u64) waits {
     let raw = journal_empty_commit(ctx, 72 + (number - 1) * 42, number)
     result.unwrap(channel.send(send, Frame(take raw, number)))
 }
@@ -446,7 +446,7 @@ fn journal_coalesce_and_end_cadence(tasks: Tasks) -> Result[(), Error] waits {
     })
     let (d, mount) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1), 1048576)
     let id = StoreId(hi: 1, lo: 2)
-    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7)
     let mut creation = disk_creation_block()?
     let (take segment, take end_file, take header) = disk_new_segment(d, c, id, 7, 0, mut creation)?
     let JournalChannels(frames: take send, queued: take receive, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take notices, written_receive: take written, synced_send: take synced_send, synced_receive: take synced) = journal_channels(4)
@@ -455,7 +455,7 @@ fn journal_coalesce_and_end_cadence(tasks: Tasks) -> Result[(), Error] waits {
     let cadence_spec = JournalCadence(group_delay_us: 50, end_groups: 3, end_interval_ms: 10)
     let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: 4, group_bytes: 65536, clock: c, cadence: cadence_spec, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take notices, synced: take synced_send)
     let worker = task.spawn(tasks, bytes journal_group_room(65536) + JOURNAL_WORKER_SLACK, take input, journal_worker)
-    capacity(result.unwrap(channel.receive(waiting)))?
+    failure_result_from_rep(types.capacity(result.unwrap(channel.receive(waiting))))?
     cadence_ack(received, synced, 2)
     cadence_wait(mut hand, Some(10000000u64))
     cadence_frame(send, ctx, 3)
@@ -540,9 +540,9 @@ fn cadence_failed_write(tasks: Tasks, c: Clock, fail_end: bool) -> Result[(), Er
     let JournalChannels(frames: take send, queued: take receive, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take notices, written_receive: take written, synced_send: take synced_send, synced_receive: take synced) = journal_channels(1)
     let cadence_spec = JournalCadence(group_delay_us: 50, end_groups: 1, end_interval_ms: 10)
     let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: 1, group_bytes: 65536, clock: c, cadence: cadence_spec, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take notices, synced: take synced_send)
-    cadence_frame(send, DiskContext(store: id, role: 2, seq: 7), 1)
+    cadence_frame(send, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), 1)
     let worker = task.spawn(tasks, bytes journal_group_room(65536) + JOURNAL_WORKER_SLACK, take input, journal_worker)
-    capacity(result.unwrap(channel.receive(waiting)))?
+    failure_result_from_rep(types.capacity(result.unwrap(channel.receive(waiting))))?
     if fail_end {
         match result.unwrap(channel.receive(received)) {
             Journaled(1, 42) => (),

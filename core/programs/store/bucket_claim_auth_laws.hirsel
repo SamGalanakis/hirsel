@@ -302,16 +302,16 @@ fn race_c_janitor_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error
 @test
 fn bucket_claim_auth_attempt_as_holder_negative(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let att = claim_law_attempt(0x60)
-    let att_as_holder = StoreId(hi: read_le(att, 0, 8), lo: read_le(att, 8, 8))
+    let att_as_holder = StoreId(hi: format.read_le(att, 0, 8), lo: format.read_le(att, 8, 8))
     // 1. Negative case: both physical opens reuse `attempt` as `holder` -> TWO winners (red!).
     let bad_winners = two_claimants_same_attempt(c, r, tasks, 30484, att_as_holder, att_as_holder, clone(att))?
     if bad_winners != 2 {
         fail("negative test: reusing attempt as holder did not trigger two writers")
     }
     // 2. Positive case: each physical open draws a fresh random holder -> AT MOST ONE winner (green!).
-    let h1 = capacity(disk_identity(r))?
-    let h2 = capacity(disk_identity(r))?
-    let good_winners = two_claimants_same_attempt(c, r, tasks, 30485, h1, h2, take att)?
+    let h1 = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+    let h2 = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+    let good_winners = two_claimants_same_attempt(c, r, tasks, 30485, store_key_from_rep(h1), store_key_from_rep(h2), take att)?
     if good_winners != 1 {
         fail("fresh random holders did not enforce single writer")
     }
@@ -508,8 +508,8 @@ fn permit_h_then_crash(s: BucketSim, tasks: Tasks, r: Random, take expect: Claim
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let fetched = history_fetch(mut client, "head", mut buffers.witness, due)?
     let captured = history_decode_head(buffers.witness)?
-    let holder = capacity(disk_identity(r))?
-    let candidate = history_claim_head(captured.head, holder, ClaimAuth(expect: Some(take expect), attempt: take attempt, class: Permit))?
+    let holder = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+    let candidate = history_claim_head(captured.head, store_key_from_rep(holder), ClaimAuth(expect: Some(take expect), attempt: take attempt, class: Permit))?
     let authority_end = history_authority_end(buffers.witness)?
     history_encode_register_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end), None)?
     let issued_head = history_write_head_issue(mut client, Match(fetched.etag), mut buffers.body, due)
@@ -570,7 +570,7 @@ fn origin_o4_malformed_checks() -> Result[(), Error] {
     let mut old: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
     list.append(mut old, list.slice(raw, 0, 72))
     list.set_word_le(mut old, 24, 10u32)
-    capacity(history_seal(mut old, DiskContext(store: id, role: 7, seq: read_le(raw, 56, 8)), 0, 0x0001))?
+    failure_result_from_rep(types.capacity(format.history_seal(mut old, format.DiskContext(store: store_key_to_rep(id), role: 7, seq: format.read_le(raw, 56, 8)), 0, 0x0001)))?
     list.append(mut old, list.slice(raw, 72, list.len(raw)))
     match history_decode_head(old) {
         Error(Unsupported(10)) => (),

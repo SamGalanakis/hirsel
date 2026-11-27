@@ -68,7 +68,7 @@ fn stream_service_reports(mut s: StreamService) -> Result[(), Error] waits {
                 let mut has_unsettled = false
                 let mut i = 0u64
                 while i < list.len(s.tickets) {
-                    if s.tickets[i].slot == slot && same(s.tickets[i].store, store) && s.tickets[i].epoch == old_epoch {
+                    if s.tickets[i].slot == slot && types.same(s.tickets[i].store.hi, s.tickets[i].store.lo, store.hi, store.lo) && s.tickets[i].epoch == old_epoch {
                         let t = list.remove(mut s.tickets, i)
                         if t.batch_seq < settled_from {
                             ok_through = order.max(ok_through, t.through)
@@ -138,7 +138,7 @@ fn stream_service_reports(mut s: StreamService) -> Result[(), Error] waits {
 fn stream_clear_place_tracking(mut s: StreamService, store: StoreId, epoch: u64) {
     let mut i = 0u64
     while i < list.len(s.lane.stalled) {
-        if same(s.lane.stalled[i].store, store) && s.lane.stalled[i].epoch == epoch {
+        if types.same(s.lane.stalled[i].store.hi, s.lane.stalled[i].store.lo, store.hi, store.lo) && s.lane.stalled[i].epoch == epoch {
             let _ = list.remove(mut s.lane.stalled, i)
         } else {
             i += 1
@@ -146,7 +146,7 @@ fn stream_clear_place_tracking(mut s: StreamService, store: StoreId, epoch: u64)
     }
     i = 0
     while i < list.len(s.active_settles) {
-        if same(s.active_settles[i].store, store) && s.active_settles[i].epoch == epoch {
+        if types.same(s.active_settles[i].store.hi, s.active_settles[i].store.lo, store.hi, store.lo) && s.active_settles[i].epoch == epoch {
             let _ = list.remove(mut s.active_settles, i)
         } else {
             i += 1
@@ -154,7 +154,7 @@ fn stream_clear_place_tracking(mut s: StreamService, store: StoreId, epoch: u64)
     }
     i = 0
     while i < list.len(s.stall_polls) {
-        if same(s.stall_polls[i].store, store) && s.stall_polls[i].epoch == epoch {
+        if types.same(s.stall_polls[i].store.hi, s.stall_polls[i].store.lo, store.hi, store.lo) && s.stall_polls[i].epoch == epoch {
             let _ = list.remove(mut s.stall_polls, i)
         } else {
             i += 1
@@ -168,7 +168,7 @@ fn stream_sync_observed(mut s: StreamService, now: u64) {
         let tok = s.observed_rows[i].token
         let mut alive_held = false
         for row in s.lane.reg.rows {
-            if same(row.token, tok) && !row.abandoned {
+            if types.same(row.token.hi, row.token.lo, tok.hi, tok.lo) && !row.abandoned {
                 alive_held = true
                 break
             }
@@ -185,14 +185,14 @@ fn stream_sync_observed(mut s: StreamService, now: u64) {
         }
         let mut seen = false
         for obs in s.observed_rows {
-            if same(obs.token, row.token) {
+            if types.same(obs.token.hi, obs.token.lo, row.token.hi, row.token.lo) {
                 seen = true
                 break
             }
         }
         if !seen {
             if let Ok(()) = list.try_reserve(mut s.observed_rows, 1) {
-                list.push(mut s.observed_rows, ObservedRow(store: row.store, epoch: row.epoch, token: row.token, first_seen_ns: now))
+                list.push(mut s.observed_rows, ObservedRow(store: store_key_from_rep(row.store), epoch: row.epoch, token: store_key_from_rep(row.token), first_seen_ns: now))
             }
         }
     }
@@ -200,7 +200,7 @@ fn stream_sync_observed(mut s: StreamService, now: u64) {
 
 fn stream_first_seen(s: StreamService, token: StoreId, fallback: u64) -> u64 {
     for obs in s.observed_rows {
-        if same(obs.token, token) {
+        if types.same(obs.token.hi, obs.token.lo, token.hi, token.lo) {
             return obs.first_seen_ns
         }
     }
@@ -209,7 +209,7 @@ fn stream_first_seen(s: StreamService, token: StoreId, fallback: u64) -> u64 {
 
 fn stream_has_active_settle(s: StreamService, store: StoreId, epoch: u64) -> bool {
     for act in s.active_settles {
-        if same(act.store, store) && act.epoch == epoch {
+        if types.same(act.store.hi, act.store.lo, store.hi, store.lo) && act.epoch == epoch {
             return true
         }
     }
@@ -227,7 +227,7 @@ fn stream_take_active_settle(mut s: StreamService, id: u64) -> Option[ActiveSett
 
 fn stream_has_stall_poll(s: StreamService, store: StoreId, epoch: u64) -> bool {
     for sp in s.stall_polls {
-        if same(sp.store, store) && sp.epoch == epoch {
+        if types.same(sp.store.hi, sp.store.lo, store.hi, store.lo) && sp.epoch == epoch {
             return true
         }
     }
@@ -263,7 +263,7 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
         return Ok(())
     }
     stream_reap_closed_slots(mut s)
-    if s.lane.reg.inc != s.lane.inc || !same(s.lane.reg.holder, s.lane.holder) {
+    if s.lane.reg.inc != s.lane.inc || !types.same(s.lane.reg.holder.hi, s.lane.reg.holder.lo, s.lane.holder.hi, s.lane.holder.lo) {
         s.lane.latched = Some(Superseded)
         stream_service_latched(mut s, Superseded)
         return Ok(())
@@ -275,14 +275,14 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
     let mut pairs: List[(StoreId, u64)] = list.new()
     for p in s.lane.stalled {
         if !stream_pair_in(pairs, p.store, p.epoch) {
-            capacity(list.try_reserve(mut pairs, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut pairs, 1)))?
             list.push(mut pairs, (p.store, p.epoch))
         }
     }
     for row in s.lane.reg.rows {
-        if !stream_pair_in(pairs, row.store, row.epoch) {
-            capacity(list.try_reserve(mut pairs, 1))?
-            list.push(mut pairs, (row.store, row.epoch))
+        if !stream_pair_in(pairs, store_key_from_rep(row.store), row.epoch) {
+            failure_result_from_rep(types.capacity(list.try_reserve(mut pairs, 1)))?
+            list.push(mut pairs, (store_key_from_rep(row.store), row.epoch))
         }
     }
     for (store, epoch) in pairs {
@@ -293,12 +293,12 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
         let mut has_held = false
         let mut oldest_ns = now
         for row in s.lane.reg.rows {
-            if same(row.store, store) && row.epoch == epoch {
-                capacity(list.try_reserve(mut tokens, 1))?
-                list.push(mut tokens, row.token)
+            if types.same(row.store.hi, row.store.lo, store.hi, store.lo) && row.epoch == epoch {
+                failure_result_from_rep(types.capacity(list.try_reserve(mut tokens, 1)))?
+                list.push(mut tokens, store_key_from_rep(row.token))
                 if !row.abandoned {
                     has_held = true
-                    oldest_ns = order.min(oldest_ns, stream_first_seen(s, row.token, now))
+                    oldest_ns = order.min(oldest_ns, stream_first_seen(s, store_key_from_rep(row.token), now))
                 }
             }
         }
@@ -352,7 +352,7 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
                 // pinned to the fixed token set from this completed GET (M1).
                 let sid_num = s.next_settle_id
                 s.next_settle_id += 1
-                capacity(list.try_reserve(mut s.active_settles, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut s.active_settles, 1)))?
                 list.push(mut s.active_settles, ActiveSettle(id: sid_num, slot: slot_i, store, epoch, tokens: take tokens))
                 let through_seq = if s.lane.seq > 1 {
                     s.lane.seq - 1
@@ -374,7 +374,7 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
 
 fn stream_pair_in(pairs: List[(StoreId, u64)], store: StoreId, epoch: u64) -> bool {
     for (st, ep) in pairs {
-        if same(st, store) && ep == epoch {
+        if types.same(st.hi, st.lo, store.hi, store.lo) && ep == epoch {
             return true
         }
     }
@@ -388,7 +388,7 @@ fn stream_janitor_cause_holds(s: StreamService, ask: JanitorAsk) -> bool {
     match ask {
         JanitorOrphanHold(store, _, pair) => {
             for row in s.lane.reg.rows {
-                if same(row.store, store) && row.epoch == pair.epoch && !row.abandoned {
+                if types.same(row.store.hi, row.store.lo, store.hi, store.lo) && row.epoch == pair.epoch && !row.abandoned {
                     return true
                 }
             }
@@ -396,7 +396,7 @@ fn stream_janitor_cause_holds(s: StreamService, ask: JanitorAsk) -> bool {
         },
         JanitorStragglerPin(store, _, _) => {
             for held in s.gc.pins {
-                if same(held.store, store) {
+                if types.same(held.store.hi, held.store.lo, store.hi, store.lo) {
                     return true
                 }
             }
@@ -410,11 +410,11 @@ fn stream_push_janitor_ask(mut s: StreamService, take ask: JanitorAsk) {
     for existing in s.janitor_asks {
         let same_ask = match existing {
             JanitorOrphanHold(sa, _, pa) => match ask {
-                JanitorOrphanHold(sb, _, pb) => same(sa, sb) && history_pair_matches(pa, pb),
+                JanitorOrphanHold(sb, _, pb) => types.same(sa.hi, sa.lo, sb.hi, sb.lo) && history_pair_matches(pa, pb),
                 _ => false,
             },
             JanitorStragglerPin(sa, _, pa) => match ask {
-                JanitorStragglerPin(sb, _, pb) => same(sa, sb) && history_pair_matches(pa, pb),
+                JanitorStragglerPin(sb, _, pb) => types.same(sa.hi, sa.lo, sb.hi, sb.lo) && history_pair_matches(pa, pb),
                 _ => false,
             },
         }
@@ -457,7 +457,7 @@ fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, age
     }
     // A different Store at the remembered prefix is not this row's Place:
     // neither its pair nor its ATTACH may clear the row or authorize an ask.
-    if !same(capture.head.store, store) {
+    if !types.same(capture.head.store.hi, capture.head.store.lo, store.hi, store.lo) {
         return Ok(())
     }
     let obs_epoch = capture.head.pair.epoch
@@ -467,7 +467,7 @@ fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, age
     } else if obs_epoch == epoch {
         still_live = match attach {
             Some(a) => match a.live {
-                Some(r) => stream_same(r.sid, s.lane.sid) && r.inc == s.lane.inc,
+                Some(r) => format.stream_same(r.sid, host_stream_id_to_rep(s.lane.sid)) && r.inc == s.lane.inc,
                 None => false,
             },
             None => false,
@@ -603,10 +603,10 @@ fn stream_service_unstall(mut s: StreamService, store: StoreId, epoch: u64) {
     let mut acked_slot: Option[(u64, u64, u64)] = None
     let mut i = 0u64
     while i < list.len(s.tickets) {
-        if same(s.tickets[i].store, store) && s.tickets[i].epoch == epoch {
+        if types.same(s.tickets[i].store.hi, s.tickets[i].store.lo, store.hi, store.lo) && s.tickets[i].epoch == epoch {
             let t = list.remove(mut s.tickets, i)
             let serving = match s.slots[t.slot].place {
-                Some(place) => !place.fenced && same(place.store, store) && place.epoch == epoch,
+                Some(place) => !place.fenced && types.same(place.store.hi, place.store.lo, store.hi, store.lo) && place.epoch == epoch,
                 None => false,
             }
             if serving {

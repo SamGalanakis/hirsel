@@ -1,0 +1,161 @@
+// Checks HEADER of a stream object read from `key`, with the expected role.
+fn stream_read_header(key: String, raw: Bytes, sid: HostStreamId, role: u8) -> Result[format.StreamObjectHead, Error] {
+    if list.len(raw) < 72 {
+        return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
+    }
+    let ctx = format.DiskContext(store: store_key_to_rep(StoreId(hi: format.read_le(raw, 32, 8), lo: format.read_le(raw, 40, 8))), role: raw[28], seq: format.read_le(raw, 56, 8))
+    let header = history_frame(key, ctx, raw, 0, 0x0001)?
+    if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || format.read_le(raw, 30, 2) != 0 || format.read_le(raw, 64, 8) != 0 {
+        return Error(failure_from_rep(format.disk_fault(key, 0, Header)))
+    }
+    let disk_version = format.read_le(raw, 24, 4)
+    if disk_version != format.DISK_FORMAT {
+        return Error(Unsupported(disk_version))
+    }
+    if raw[29] != 1 && raw[29] != 2 {
+        return Error(Unsupported(int.widen(raw[29])))
+    }
+    if ctx.role != role || !types.same(ctx.store.hi, ctx.store.lo, sid.hi, sid.lo) {
+        return Error(failure_from_rep(format.disk_fault(key, 0, Header)))
+    }
+    Ok(format.StreamObjectHead(ctx, inc: format.read_le(raw, 48, 8), authority_kind: raw[29]))
+}
+
+// Decodes `reg`. `seen_rev` is the highest rev this reader has seen: a lower
+// one is an old body seen again (§12.11.3 rule 1).
+fn stream_register_decode(raw: Bytes, sid: HostStreamId, seen_rev: u64) -> Result[format.StreamRegister, Error] {
+    let head = stream_read_header("reg", raw, sid, format.ROLE_REGISTER)?
+    if head.ctx.seq != 0 {
+        return Error(failure_from_rep(format.disk_fault("reg", 0, Header)))
+    }
+    let frame = history_frame("reg", head.ctx, raw, 72, 0x0103)?
+    if frame.end != list.len(raw) {
+        return Error(failure_from_rep(format.disk_fault("reg", frame.end, Malformed)))
+    }
+    let p = list.slice(raw, frame.payload, frame.end)
+    let size = list.len(p)
+    if size < format.REG_FIXED_BYTES || (size - format.REG_FIXED_BYTES) % format.REG_ROW_BYTES != 0 {
+        return Error(failure_from_rep(format.disk_fault("reg", 72, Malformed)))
+    }
+    let n = format.read_le(p, 106, 4)
+    if format.REG_FIXED_BYTES + format.REG_ROW_BYTES * n != size || p[48] > 1 || p[65] > 1 {
+        return Error(failure_from_rep(format.disk_fault("reg", 72, Malformed)))
+    }
+    let rev = format.read_le(p, 0, 8)
+    let reg_sid = HostStreamId(hi: format.read_le(p, 8, 8), lo: format.read_le(p, 16, 8))
+    let inc = format.read_le(p, 24, 8)
+    if !format.stream_same(host_stream_id_to_rep(reg_sid), host_stream_id_to_rep(sid)) || inc != head.inc || rev == 0 {
+        return Error(failure_from_rep(format.disk_fault("reg", 72, Malformed)))
+    }
+    if rev < seen_rev {
+        return Error(failure_from_rep(format.disk_fault("reg", 0, Regressed)))
+    }
+    let reg_index = if p[65] == 1 {
+        Some(format.RegIndex(k: format.read_le(p, 66, 8), len: format.read_le(p, 74, 8), digest: format.read_le(p, 82, 8), covers_inc: format.read_le(p, 90, 8), covers_seq: format.read_le(p, 98, 8)))
+    } else {
+        for i in 66u64 .. 106 {
+            if p[i] != 0 {
+                return Error(failure_from_rep(format.disk_fault("reg", 72, Malformed)))
+            }
+        }
+        None
+    }
+    let mut rows: List[format.RegRow] = failure_result_from_rep(types.capacity(bound bytes (64 * n + 64) {
+        list.with_capacity(n)
+    }))?
+    let mut cursor = format.REG_FIXED_BYTES
+    for _ in 0u64 .. n {
+        let state = p[cursor + 48]
+        if state > 1 {
+            return Error(failure_from_rep(format.disk_fault("reg", 72, Malformed)))
+        }
+        list.push(mut rows, format.RegRow(store: store_key_to_rep(StoreId(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8))), epoch: format.read_le(p, cursor + 16, 8), token: store_key_to_rep(StoreId(hi: format.read_le(p, cursor + 24, 8), lo: format.read_le(p, cursor + 32, 8))), rev_hold: format.read_le(p, cursor + 40, 8), abandoned: state == 1))
+        cursor += format.REG_ROW_BYTES
+    }
+    Ok(format.StreamRegister(rev, sid: host_stream_id_to_rep(reg_sid), inc, holder: store_key_to_rep(StoreId(hi: format.read_le(p, 32, 8), lo: format.read_le(p, 40, 8))), collecting: p[48] == 1, low_inc: format.read_le(p, 49, 8), low_seq: format.read_le(p, 57, 8), index: reg_index, rows: take rows))
+}
+
+// Decodes what a batch key holds from its first bytes: INDEX (which needs
+// `byte_len` bytes; a shorter `raw` returns `Rows` with no rows read and the
+// caller reads up to `byte_len`) or TERM.
+fn stream_batch_head(key: String, raw: Bytes, sid: HostStreamId, inc: u64, seq: u64) -> Result[format.BatchBody, Error] {
+    let head = stream_read_header(key, raw, sid, format.ROLE_BATCH)?
+    if head.inc != inc || head.ctx.seq != seq {
+        return Error(failure_from_rep(format.disk_fault(key, 0, Header)))
+    }
+    if list.len(raw) < 88 {
+        return Error(failure_from_rep(format.disk_fault(key, 72, Truncated)))
+    }
+    let kind = format.read_le(raw, 72, 2)
+    if kind == 0x0102 {
+        let frame = history_frame(key, head.ctx, raw, 72, 0x0102)?
+        let p = list.slice(raw, frame.payload, frame.end)
+        if frame.end != list.len(raw) || list.len(p) != format.STREAM_TERM_BYTES || format.read_le(p, 0, 8) != sid.hi || format.read_le(p, 8, 8) != sid.lo || format.read_le(p, 16, 8) != inc || format.read_le(p, 24, 8) != seq {
+            return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
+        }
+        return Ok(Term(inc, seq))
+    }
+    if kind != 0x0101 {
+        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
+    }
+    if list.len(raw) < format.STREAM_INDEX_PREFIX {
+        return Error(failure_from_rep(format.disk_fault(key, 72, Truncated)))
+    }
+    let byte_len = format.read_le(raw, 88, 4)
+    let n = format.read_le(raw, 100, 4)
+    if byte_len != format.STREAM_INDEX_PREFIX + format.STREAM_INDEX_ROW_BYTES * n || n > format.STREAM_MAX_SLOTS {
+        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
+    }
+    if list.len(raw) < byte_len {
+        return Ok(Rows(format.BatchIndex(byte_len, seen_rev: format.read_le(raw, 92, 8), rows: list.new())))
+    }
+    let frame = history_frame(key, head.ctx, list.slice(raw, 0, byte_len), 72, 0x0101)?
+    let p = list.slice(raw, frame.payload, frame.end)
+    let mut rows: List[format.BatchRow] = failure_result_from_rep(types.capacity(bound bytes (88 * n + 64) {
+        list.with_capacity(n)
+    }))?
+    let mut cursor = 16u64
+    let mut slice_at = byte_len
+    for i in 0u64 .. n {
+        let store = StoreId(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8))
+        let offset = format.read_le(p, cursor + 24, 4)
+        let len = format.read_le(p, cursor + 28, 4)
+        if offset != slice_at || (i > 0 && !format.stream_store_below(rows[i - 1].store, store_key_to_rep(store))) {
+            return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
+        }
+        let mut digest: Inline[u8, 32] =[0; 32]
+        for j in 0u64 .. 32 {
+            digest[j] = p[cursor + 36 + j]
+        }
+        list.push(mut rows, format.BatchRow(store: store_key_to_rep(store), epoch: format.read_le(p, cursor + 16, 8), offset, len, frames: format.read_le(p, cursor + 32, 4), digest))
+        slice_at = offset + len
+        cursor += format.STREAM_INDEX_ROW_BYTES
+    }
+    Ok(Rows(format.BatchIndex(byte_len, seen_rev: format.read_le(p, 4, 8), rows: take rows)))
+}
+
+// A full read checks FOOTER's body digest over HEADER through the last slice.
+fn stream_batch_check(key: String, raw: Bytes, sid: HostStreamId, inc: u64, seq: u64) -> Result[format.BatchIndex, Error] {
+    let Rows(take found) = stream_batch_head(key, raw, sid, inc, seq)? else {
+        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
+    }
+    let mut body_end = found.byte_len
+    for i in 0u64 .. list.len(found.rows) {
+        body_end = found.rows[i].offset + found.rows[i].len
+    }
+    if list.len(raw) < body_end + 16 + format.STREAM_FOOTER_BYTES {
+        return Error(failure_from_rep(format.disk_fault(key, body_end, Truncated)))
+    }
+    let ctx = format.DiskContext(store: format.stream_identity(host_stream_id_to_rep(sid)), role: format.ROLE_BATCH, seq)
+    let frame = history_frame(key, ctx, raw, body_end, 0x0105)?
+    if frame.end != list.len(raw) || frame.end - frame.payload != format.STREAM_FOOTER_BYTES {
+        return Error(failure_from_rep(format.disk_fault(key, body_end, Malformed)))
+    }
+    let body = std.sha256.hash(list.slice(raw, 0, body_end))
+    for j in 0u64 .. 32 {
+        if body[j] != raw[frame.payload + j] {
+            return Error(failure_from_rep(format.disk_fault(key, body_end, Checksum)))
+        }
+    }
+    Ok(take found)
+}

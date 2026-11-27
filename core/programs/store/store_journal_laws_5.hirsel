@@ -30,34 +30,34 @@ fn revision_is_none(got: Option[Bytes]) -> bool {
 // L10/L12/L29: hand-laid payload with data followed by a Replied stream op and its CALL.
 pub fn journal_law_payload() -> bool {
     let mut payload: Bytes = list.new()
-    result.unwrap(le(mut payload, 3, 4))
-    result.unwrap(le(mut payload, 257, 8))
-    result.unwrap(le(mut payload, 1234, 8))
-    result.unwrap(le(mut payload, 2, 1))
-    result.unwrap(le(mut payload, 0, 1))
-    result.unwrap(le(mut payload, 2, 4))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(blob(mut payload, string.as_bytes("key")))
-    result.unwrap(le(mut payload, 0, 4))
-    result.unwrap(blob(mut payload, string.as_bytes("value")))
-    result.unwrap(le(mut payload, 2, 1))
-    result.unwrap(blob(mut payload, string.as_bytes("gone")))
-    result.unwrap(le(mut payload, 10, 4))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(le(mut payload, 1, 4))
-    result.unwrap(le(mut payload, 3, 1))
+    result.unwrap(format.le(mut payload, 3, 4))
+    result.unwrap(format.le(mut payload, 257, 8))
+    result.unwrap(format.le(mut payload, 1234, 8))
+    result.unwrap(format.le(mut payload, 2, 1))
+    result.unwrap(format.le(mut payload, 0, 1))
+    result.unwrap(format.le(mut payload, 2, 4))
+    result.unwrap(format.le(mut payload, 1, 1))
+    result.unwrap(format.blob(mut payload, string.as_bytes("key")))
+    result.unwrap(format.le(mut payload, 0, 4))
+    result.unwrap(format.blob(mut payload, string.as_bytes("value")))
+    result.unwrap(format.le(mut payload, 2, 1))
+    result.unwrap(format.blob(mut payload, string.as_bytes("gone")))
+    result.unwrap(format.le(mut payload, 10, 4))
+    result.unwrap(format.le(mut payload, 1, 1))
+    result.unwrap(format.le(mut payload, 1, 4))
+    result.unwrap(format.le(mut payload, 3, 1))
     let stream = journal_vector_stream()
-    result.unwrap(blob(mut payload, stream))
+    result.unwrap(format.blob(mut payload, stream))
     let mut replied: Bytes = list.new()
     list.fill(mut replied, 40, 0u8)
     list.push(mut replied, 2u8)
     list.append(mut replied, string.as_bytes("reply"))
-    result.unwrap(blob(mut payload, replied))
-    result.unwrap(blob(mut payload, string.as_bytes("entry")))
-    result.unwrap(blob(mut payload, string.as_bytes("arguments")))
-    result.unwrap(blob(mut payload, revision_vector()))
-    result.unwrap(blob(mut payload, code_vector()))
-    result.unwrap(le(mut payload, 0, 1))
+    result.unwrap(format.blob(mut payload, replied))
+    result.unwrap(format.blob(mut payload, string.as_bytes("entry")))
+    result.unwrap(format.blob(mut payload, string.as_bytes("arguments")))
+    result.unwrap(format.blob(mut payload, revision_vector()))
+    result.unwrap(format.blob(mut payload, code_vector()))
+    result.unwrap(format.le(mut payload, 0, 1))
     let got = result.unwrap(journal_decode_commit("j-7", payload))
     if got.branch != 3 || got.version != 257 || got.at != 1234 || list.len(got.data) != 2 || list.len(got.streams) != 1 {
         return false
@@ -84,7 +84,7 @@ pub fn journal_law_payload() -> bool {
         None => return false
     }
     match got.call {
-        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != journal_vector_stream_name() || !revision_is_vector(c.record.revision) {
+        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != stream_key_to_rep(journal_vector_stream_name()) || !revision_is_vector(c.record.revision) {
             return false
         },
         None => return false
@@ -92,8 +92,8 @@ pub fn journal_law_payload() -> bool {
     // The 21-byte fixed header, 39-byte data section, 84-byte streams prefix,
     // 9-byte entry key and 13-byte args place revision at [166, 202).
     for size in 0u64 .. 2 {
-        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 166)))
-        result.unwrap(le(mut other, size, 4))
+        let mut other: Bytes = result.unwrap(failure_result_from_rep(types.copied(list.slice(payload, 0, 166))))
+        result.unwrap(format.le(mut other, size, 4))
         if size == 1 {
             list.push(mut other, 0u8)
         }
@@ -121,31 +121,31 @@ pub fn journal_law_payload() -> bool {
             return false
         }
     }
-    let mut trailing = result.unwrap(copied(payload))
+    let mut trailing = result.unwrap(failure_result_from_rep(types.copied(payload)))
     list.push(mut trailing, 0u8)
     if !disk_corrupt(journal_decode_commit("j-7", trailing)) {
         return false
     }
     // The CALL's stream op must have state Replied. The value starts at 98.
-    let mut no_reply = result.unwrap(copied(payload))
+    let mut no_reply = result.unwrap(failure_result_from_rep(types.copied(payload)))
     let _ = list.set(mut no_reply, 138, 1u8)
     if !disk_corrupt(journal_decode_commit("j-7", no_reply)) {
         return false
     }
     // A second op, put or delete, cannot overwrite the CALL's stream op.
     for tag in 1u64 .. 3 {
-        let mut repeated: Bytes = result.unwrap(copied(payload))
+        let mut repeated: Bytes = result.unwrap(failure_result_from_rep(types.copied(payload)))
         list.set_word_le(mut repeated, 61, 2u32)
-        result.unwrap(le(mut repeated, tag, 1))
-        result.unwrap(blob(mut repeated, stream))
+        result.unwrap(format.le(mut repeated, tag, 1))
+        result.unwrap(format.blob(mut repeated, stream))
         if tag == 1 {
-            result.unwrap(blob(mut repeated, replied))
+            result.unwrap(format.blob(mut repeated, replied))
         }
         if !disk_corrupt(journal_decode_commit("j-7", repeated)) {
             return false
         }
     }
-    let mut two_calls: Bytes = result.unwrap(copied(payload))
+    let mut two_calls: Bytes = result.unwrap(failure_result_from_rep(types.copied(payload)))
     list.set_word_le(mut two_calls, 61, 2u32)
     list.append(mut two_calls, list.slice(payload, 65, list.len(payload)))
     let _ = list.set(mut two_calls, list.len(payload) + 7, b'x')
@@ -153,28 +153,28 @@ pub fn journal_law_payload() -> bool {
         return false
     }
     // The stream section cannot precede data. Format 6 tag 2 accepts only control.
-    let mut reversed: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
+    let mut reversed: Bytes = result.unwrap(failure_result_from_rep(types.copied(list.slice(payload, 0, 21))))
     list.append(mut reversed, list.slice(payload, 60, list.len(payload)))
     list.append(mut reversed, list.slice(payload, 21, 60))
     if !disk_corrupt(journal_decode_commit("j-7", reversed)) {
         return false
     }
-    let mut control: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
+    let mut control: Bytes = result.unwrap(failure_result_from_rep(types.copied(list.slice(payload, 0, 21))))
     let _ = list.set(mut control, 20, 1u8)
-    result.unwrap(le(mut control, 2, 1))
+    result.unwrap(format.le(mut control, 2, 1))
     list.append(mut control, list.slice(payload, 61, list.len(payload)))
     if !disk_corrupt(journal_decode_commit("j-7", control)) {
         return false
     }
     // Two sections with the same tag are malformed, including an empty one.
     let mut duplicate: Bytes = list.new()
-    result.unwrap(le(mut duplicate, 0, 4))
-    result.unwrap(le(mut duplicate, 1, 8))
-    result.unwrap(le(mut duplicate, 2, 8))
-    result.unwrap(le(mut duplicate, 2, 1))
+    result.unwrap(format.le(mut duplicate, 0, 4))
+    result.unwrap(format.le(mut duplicate, 1, 8))
+    result.unwrap(format.le(mut duplicate, 2, 8))
+    result.unwrap(format.le(mut duplicate, 2, 1))
     for i in 0u64 .. 2 {
-        result.unwrap(le(mut duplicate, 0, 1))
-        result.unwrap(le(mut duplicate, 0, 4))
+        result.unwrap(format.le(mut duplicate, 0, 1))
+        result.unwrap(format.le(mut duplicate, 0, 4))
     }
     disk_corrupt(journal_decode_commit("j-7", duplicate))
 }
@@ -188,26 +188,26 @@ fn journal_test_payload() -> Result[(), ()] {
     }
 }
 
-fn journal_empty_commit(ctx: DiskContext, offset: u64, head: u64) -> Bytes {
+fn journal_empty_commit(ctx: format.DiskContext, offset: u64, head: u64) -> Bytes {
     let mut payload: Bytes = list.new()
-    result.unwrap(le(mut payload, 0, 4))
-    result.unwrap(le(mut payload, head, 8))
-    result.unwrap(le(mut payload, head + 100, 8))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(le(mut payload, 0, 1))
-    result.unwrap(le(mut payload, 0, 4))
-    result.unwrap(disk_seal(ctx, offset, 0x0011, 1, payload))
+    result.unwrap(format.le(mut payload, 0, 4))
+    result.unwrap(format.le(mut payload, head, 8))
+    result.unwrap(format.le(mut payload, head + 100, 8))
+    result.unwrap(format.le(mut payload, 1, 1))
+    result.unwrap(format.le(mut payload, 0, 1))
+    result.unwrap(format.le(mut payload, 0, 4))
+    result.unwrap(format.disk_seal(ctx, offset, 0x0011, 1, payload))
 }
 
-fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], final_item: bool) -> Result[(u64, u64, List[JournalEvent]), Error] waits {
+fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], final_item: bool) -> Result[(u64, u64, List[format.JournalEvent]), Error] waits {
     disk_write_synced(d, "j-7", raw)?
     let mut input = journal_input(disk_io(host.open(d, "j-7", Read))?, false)?
-    let mut events: List[JournalEvent] = list.new()
-    let scanned = journal_scan(mut input, "j-7", id, 7, 72, boundary, final_item, mut events, scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
+    let mut events: List[format.JournalEvent] = list.new()
+    let scanned = journal_scan(mut input, "j-7", id, 7, 72, boundary, final_item, mut events, scoped fn(mut observed: List[format.JournalEvent], take event: format.JournalEvent) -> Result[(), Error] {
         list.push(mut observed, take event)
         Ok(())
     })
-    let JournalInput(file: take opened_file, ..) = take input
+    let opened_file = format.take_journal_file(take input)
     disk_io(host.close(take opened_file))?
     let (end, accepted) = scanned?
     Ok((end, accepted, take events))
@@ -218,11 +218,11 @@ fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], 
 // and corruption at d=156.
 fn journal_law_segment_boundaries(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
-    let ctx = DiskContext(store: id, role: 2, seq: 7)
-    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7)
+    let header = result.unwrap(format.disk_header_bytes(ctx, 0, 0))
     let first = journal_empty_commit(ctx, 72, 1)
     let second = journal_empty_commit(ctx, 114, 2)
-    let mut raw = result.unwrap(copied(header))
+    let mut raw = result.unwrap(failure_result_from_rep(types.copied(header)))
     list.append(mut raw, first)
     list.append(mut raw, second)
     if list.len(raw) != 156 {
@@ -243,7 +243,7 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
         return false
     }
     // D3: the segment length survives, but every byte past the durable frame is zero.
-    let mut zeroed = result.unwrap(copied(list.slice(raw, 0, 114)))
+    let mut zeroed = result.unwrap(failure_result_from_rep(types.copied(list.slice(raw, 0, 114))))
     list.fill(mut zeroed, 42, 0u8)
     let (zeroed_end, zeroed_bytes, take zeroed_events) = result.unwrap(journal_scan_fixture(d, id, zeroed, Some(114), true))
     if zeroed_end != 114 || zeroed_bytes != 42 || list.len(zeroed_events) != 1 {
@@ -266,7 +266,7 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
         }
     }
     for n in 72u64 .. 114 {
-        let mut broken = result.unwrap(copied(raw))
+        let mut broken = result.unwrap(failure_result_from_rep(types.copied(raw)))
         let changed = broken[n] ^ 1u8
         let _ = list.set(mut broken, n, changed)
         if !disk_corrupt(journal_scan_fixture(d, id, broken, Some(114), true)) {
@@ -281,9 +281,9 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
         return false
     }
     let empty: Bytes = list.new()
-    let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
+    let optional = result.unwrap(format.disk_seal(ctx, 72, 0x7ffe, 0, empty))
     let shifted = journal_empty_commit(ctx, 88, 1)
-    let mut extended = result.unwrap(copied(header))
+    let mut extended = result.unwrap(failure_result_from_rep(types.copied(header)))
     list.append(mut extended, optional)
     list.append(mut extended, shifted)
     let (future_end, future_bytes, take future) = result.unwrap(journal_scan_fixture(d, id, extended, None, true))
@@ -291,7 +291,7 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
         return false
     }
     // PRINCIPAL is a MUST kind no reader builds yet.
-    let required = result.unwrap(disk_seal(ctx, 156, 0x0060, 1, empty))
+    let required = result.unwrap(format.disk_seal(ctx, 156, 0x0060, 1, empty))
     list.append(mut raw, required)
     match journal_scan_fixture(d, id, raw, Some(114), true) {
         Error(Unsupported(0x0060)) => true,
@@ -301,8 +301,8 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
 
 fn journal_law_segment_fork(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
-    let ctx = DiskContext(store: id, role: 2, seq: 7)
-    let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7)
+    let mut raw = result.unwrap(format.disk_header_bytes(ctx, 0, 0))
     list.append(mut raw, journal_empty_commit(ctx, 72, 64))
     list.append(mut raw, fork_frame_bytes())
     let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(160), true))
@@ -317,32 +317,32 @@ fn journal_law_segment_fork(d: Dir) -> bool waits {
 
 fn journal_law_chunked_segment(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
-    let context = DiskContext(store: id, role: 2, seq: 7)
-    let mut raw = result.unwrap(disk_header_bytes(context, 0, 0))
+    let context = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7)
+    let mut raw = result.unwrap(format.disk_header_bytes(context, 0, 0))
     // Optional extension: offset 72, length 16 + 65,536, ending at 65,624.
     // Checksums are libxxhash over the independent wire layout and binding.
-    result.unwrap(le(mut raw, 0x7ffe, 2))
-    result.unwrap(le(mut raw, 0, 2))
-    result.unwrap(le(mut raw, 65536, 4))
-    result.unwrap(le(mut raw, 17032182677987914202, 8))
+    result.unwrap(format.le(mut raw, 0x7ffe, 2))
+    result.unwrap(format.le(mut raw, 0, 2))
+    result.unwrap(format.le(mut raw, 65536, 4))
+    result.unwrap(format.le(mut raw, 17032182677987914202, 8))
     list.fill(mut raw, 65536, 9u8)
     // One COMMIT: 42 + put (9 + key 12 + prior length 4 + value 65,536) = 65,603.
-    result.unwrap(le(mut raw, 0x0011, 2))
-    result.unwrap(le(mut raw, 1, 2))
-    result.unwrap(le(mut raw, 65587, 4))
-    result.unwrap(le(mut raw, 3906595394227617390, 8))
-    result.unwrap(le(mut raw, 0, 4))
-    result.unwrap(le(mut raw, 1, 8))
-    result.unwrap(le(mut raw, 100, 8))
-    result.unwrap(le(mut raw, 1, 1))
-    result.unwrap(le(mut raw, 0, 1))
-    result.unwrap(le(mut raw, 1, 4))
-    result.unwrap(le(mut raw, 1, 1))
-    result.unwrap(le(mut raw, 12, 4))
-    result.unwrap(append_be(mut raw, 1, 4))
-    result.unwrap(append_be(mut raw, 7, 8))
-    result.unwrap(le(mut raw, 0, 4))
-    result.unwrap(le(mut raw, 65536, 4))
+    result.unwrap(format.le(mut raw, 0x0011, 2))
+    result.unwrap(format.le(mut raw, 1, 2))
+    result.unwrap(format.le(mut raw, 65587, 4))
+    result.unwrap(format.le(mut raw, 3906595394227617390, 8))
+    result.unwrap(format.le(mut raw, 0, 4))
+    result.unwrap(format.le(mut raw, 1, 8))
+    result.unwrap(format.le(mut raw, 100, 8))
+    result.unwrap(format.le(mut raw, 1, 1))
+    result.unwrap(format.le(mut raw, 0, 1))
+    result.unwrap(format.le(mut raw, 1, 4))
+    result.unwrap(format.le(mut raw, 1, 1))
+    result.unwrap(format.le(mut raw, 12, 4))
+    result.unwrap(types.append_be(mut raw, 1, 4))
+    result.unwrap(types.append_be(mut raw, 7, 8))
+    result.unwrap(format.le(mut raw, 0, 4))
+    result.unwrap(format.le(mut raw, 65536, 4))
     list.fill(mut raw, 65536, 17u8)
     list.fill(mut raw, 11, 0u8)
     let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131227), true))
@@ -468,7 +468,7 @@ fn test_s4_transfer_budget(c: Clock) -> Result[(), String] waits {
         let from = start
         let seeded = execute(mut db, 0, 20, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
             for i in 0u32 .. 10000u32 {
-                put_bytes(mut tx, 1, s4_account_key(from + i + 1), key_word(1000000000))?
+                put_bytes(mut tx, 1, s4_account_key(from + i + 1), types.key_word(1000000000))?
             }
             Ok(())
         })
@@ -482,7 +482,7 @@ fn test_s4_transfer_budget(c: Clock) -> Result[(), String] waits {
         let (from, to) = pair
         let wide_from: u64 = int.widen(from)
         let wide_to: u64 = int.widen(to)
-        let request = key_word(wide_from * 1000000 + wide_to)
+        let request = types.key_word(wide_from * 1000000 + wide_to)
         let stream = law_stream_name(request, keyed_time(db))
         let admission = result.unwrap(admit(mut db, stream, 0, request_digest(request, request)))
         let Admitted(take complete) = take admission else {
@@ -490,23 +490,23 @@ fn test_s4_transfer_budget(c: Clock) -> Result[(), String] waits {
         }
         let ci = next_call_info(db)
         let no_record: Option[CallRecord] = None
-        let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+        let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
         let drafted = draft_call(db, complete, ci, Plan(n_e: 65536, s_e: 1048576, reply_max: 64), no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             let debit = match fetch_logical(tx, result.unwrap(logical_key(1, s4_account_key(from)))) {
                 Ok(Some(raw)) => decode_word(raw),
-                _ => return Error(key_word(1)),
+                _ => return Error(types.key_word(1)),
             }
             let credit = match fetch_logical(tx, result.unwrap(logical_key(1, s4_account_key(to)))) {
                 Ok(Some(raw)) => decode_word(raw),
-                _ => return Error(key_word(2)),
+                _ => return Error(types.key_word(2)),
             }
-            if let Error(_) = put_bytes(mut tx, 1, s4_account_key(from), key_word(debit - 1)) {
-                return Error(key_word(3))
+            if let Error(_) = put_bytes(mut tx, 1, s4_account_key(from), types.key_word(debit - 1)) {
+                return Error(types.key_word(3))
             }
-            if let Error(_) = put_bytes(mut tx, 1, s4_account_key(to), key_word(credit + 1)) {
-                return Error(key_word(4))
+            if let Error(_) = put_bytes(mut tx, 1, s4_account_key(to), types.key_word(credit + 1)) {
+                return Error(types.key_word(4))
             }
-            Ok(key_word(0))
+            Ok(types.key_word(0))
         })
         let admitted = match drafted.stage {
             Ran(_) => true,

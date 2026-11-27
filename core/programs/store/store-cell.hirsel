@@ -54,7 +54,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogR
             let Migrate = d.mode else {
                 return Error(Missing(named(name)?))
             }
-            let initial = Catalog(record: take form, id: d.plan.next_table, owner: 0, epoch: 1, key: copied(key_schema)?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
+            let initial = Catalog(record: take form, id: d.plan.next_table, owner: 0, epoch: 1, key: failure_result_from_rep(types.copied(key_schema))?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
             (take initial, true)
         },
     }
@@ -102,13 +102,13 @@ fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, catalog: Catalog, cr
 }
 
 fn readable_value[V](store_id: StoreId, roots: Roots, schema_binding: ValueCollection[V]) -> Result[(), Error] {
-    if !same(store_id, schema_binding.store) {
+    if !types.same(store_id.hi, store_id.lo, schema_binding.store.hi, schema_binding.store.lo) {
         return Error(Foreign)
     }
     readable(roots, schema_binding.catalog_key, schema_binding.catalog_page, schema_binding.id)
 }
 
-type CellEdit: shareable + send = CellPut(StagedValue) | CellDelete | CellRevert
+type CellEdit: shareable + send = CellPut(format.StagedValue) | CellDelete | CellRevert
 
 fn lower_cell_edit(layers: List[Arc[Staged]], id: u32) -> Option[View[CellEdit]] in layers {
     let mut layer = list.len(layers)
@@ -130,7 +130,7 @@ fn cell_edit(tx: Tx, id: u32) -> Option[View[CellEdit]] in tx {
 
 fn cell_current(tx: Tx, id: u32, key: Bytes) -> Option[View[Bytes]] in tx {
     match cell_edit(tx, id) {
-        Some(CellPut(value)) => Some(staged_bytes(value)),
+        Some(CellPut(value)) => Some(format.staged_bytes(value)),
         Some(CellDelete) => None,
         _ => cell_page_row(tx.roots.collections, key),
     }
@@ -138,7 +138,7 @@ fn cell_current(tx: Tx, id: u32, key: Bytes) -> Option[View[Bytes]] in tx {
 
 pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
     readable_value(tx.store, tx.roots, c.binding)?
-    note_read(tx, Point(copied(c.key)?))?
+    note_read(tx, Point(failure_result_from_rep(types.copied(c.key))?))?
     let value = match cell_current(tx, c.binding.id, c.key) {
         Some(raw) => Some(row_value(c.binding.readers, c.binding.id, raw)?),
         None => None,
@@ -174,7 +174,7 @@ fn inline_cell(descriptor: Bytes) -> Option[View[Bytes]] in descriptor {
 
 fn owned_cell(root: Arc[std.page.Page], descriptor: Bytes) -> Option[Arc[Bytes]] {
     if let Some(raw) = inline_cell(descriptor) {
-        return Some(arc.new(result.unwrap(copied(raw))))
+        return Some(arc.new(result.unwrap(failure_result_from_rep(types.copied(raw)))))
     }
     let mut rows = std.page.cursor_open(root, None, true, false)
     let Some(take item) = std.page.cursor_next(mut rows) else {
@@ -230,7 +230,7 @@ pub fn cell_clear[V](mut tx: Tx, c: Cell[V]) -> Result[(), Error] {
 
 fn cell_wire_size(edit: Option[View[CellEdit]]) -> u64 {
     match edit {
-        Some(CellPut(value)) => 17 + list.len(staged_bytes(value)),
+        Some(CellPut(value)) => 17 + list.len(format.staged_bytes(value)),
         Some(CellDelete) => 13,
         _ => 0,
     }
@@ -238,7 +238,7 @@ fn cell_wire_size(edit: Option[View[CellEdit]]) -> u64 {
 
 fn cell_charge(raw: Option[View[Bytes]]) -> u64 {
     match raw {
-        Some(value) => 70 + round8(list.len(value)),
+        Some(value) => 70 + format.round8(list.len(value)),
         None => 0,
     }
 }
@@ -263,7 +263,7 @@ fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Err
         let previous = cell_edit(tx, id)
         let was = if tx.retain_old {
             match previous {
-                Some(CellPut(raw)) => cell_charge(Some(staged_bytes(raw))),
+                Some(CellPut(raw)) => cell_charge(Some(format.staged_bytes(raw))),
                 _ => 0u64,
             }
         } else {
@@ -272,7 +272,7 @@ fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Err
         (cell_matches(get_page_row(tx.roots.collections, key), wanted), cell_wire_size(previous), was)
     }
     let (new_width, new_charge) = match view wanted {
-        Some(raw) => (17 + list.len(raw), 70 + round8(list.len(raw))),
+        Some(raw) => (17 + list.len(raw), 70 + format.round8(list.len(raw))),
         None => (13u64, 0u64),
     }
     let effective_width = if reverts {
@@ -300,7 +300,7 @@ fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Err
             } else {
                 0u64
             }
-            if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > transaction_limit(tx.limits) {
+            if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > types.transaction_limit(limits_to_rep(tx.limits)) {
                 return Error(Limit(Transaction))
             }
             Some(after)
@@ -351,8 +351,8 @@ fn seal_cell_edits(mut rows: DataRows, cells: Map[u32, CellEdit]) {
     for (id, edit) in cells {
         let key = result.unwrap(prefix(id))
         match edit {
-            CellPut(value) => push_data_row(mut rows, DataOp(key: take key, value: Some(clone(value)), trim: None, prior: None)),
-            CellDelete => push_data_row(mut rows, DataOp(key: take key, value: None, trim: None, prior: None)),
+            CellPut(value) => push_data_row(mut rows, format.DataOp(key: take key, value: Some(clone(value)), trim: None, prior: None)),
+            CellDelete => push_data_row(mut rows, format.DataOp(key: take key, value: None, trim: None, prior: None)),
             CellRevert => (),
         }
     }

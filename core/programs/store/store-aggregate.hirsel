@@ -87,7 +87,7 @@ pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, 
     declaration_name(name)?
     let lookup_key = catalog_index_key(t.handle.id, name)?
     let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?
-    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Sums, payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision)
+    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Sums, payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: failure_result_from_rep(types.copied(code.identity(by)))?, revision: take revision)
     let existing = existing_index_record(d, lookup_key, name)?
     let rebuilt_for = settle_index_record(mut d, lookup_key, name, take existing, mut proposed, ends)?
     let schema_binding = aggregate_binding(t.handle, proposed, by, key)
@@ -107,7 +107,7 @@ pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, 
 
 /// The totals of group `g`; a group no row is in has count and sum 0.
 pub fn totals[G](tx: Tx, a: Aggregate[G], g: G) -> Result[Totals, Error] {
-    if !same(tx.store, a.store) {
+    if !types.same(tx.store.hi, tx.store.lo, a.store.hi, a.store.lo) {
         return Error(Foreign)
     }
     index_readable(tx.roots, a.catalog_key, a.catalog_page, a.id, a.public)?
@@ -126,7 +126,7 @@ pub fn totals[G](tx: Tx, a: Aggregate[G], g: G) -> Result[Totals, Error] {
 /// reads refuse until the builder finishes it.
 pub fn rebuild_aggregate[G](mut db: Db, a: Aggregate[G]) -> Result[(), Error] waits {
     healthy(db)?
-    if !same(db.store, a.store) {
+    if !types.same(db.store.hi, db.store.lo, a.store.hi, a.store.lo) {
         return Error(Foreign)
     }
     let mut plan = schema_plan(db)
@@ -155,7 +155,7 @@ fn extract_aggregate[G, K, V](extractor: AggregateExtractor[G, K, V], raw: Bytes
     let t = view extractor.table
     let k = decoded(std.codec.decode_key(t.key, primary))?
     let v = row_value(t.readers, t.id, raw)?
-    let pairs = capacity((code.callable(extractor.by))(k, v))?
+    let pairs = failure_result_from_rep(types.capacity((code.callable(extractor.by))(k, v)))?
     let mut parts: List[GroupPart] = list.new()
     for (g, value) in pairs {
         let mut row = prefix(extractor.id)?
@@ -173,13 +173,13 @@ fn group_totals(raw: Bytes) -> Result[(u64, u64), Error] {
     if list.len(raw) != 16 {
         return Error(malformed(0))
     }
-    Ok((read_le(raw, 0, 8), read_le(raw, 8, 8)))
+    Ok((format.read_le(raw, 0, 8), format.read_le(raw, 8, 8)))
 }
 
 fn totals_bytes(members: u64, sum: u64) -> Result[Bytes, Error] {
     let mut raw: Bytes = list.with_capacity(16)
-    capacity(le(mut raw, members, 8))?
-    capacity(le(mut raw, sum, 8))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, members, 8)))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, sum, 8)))?
     Ok(take raw)
 }
 
@@ -205,9 +205,9 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
         let take_old = i < list.len(old_keys) && (j >= list.len(new_keys) || old_keys[i] <= new_keys[j])
         let take_new = j < list.len(new_keys) && (i >= list.len(old_keys) || new_keys[j] <= old_keys[i])
         let key = if take_old {
-            copied(old_keys[i])?
+            failure_result_from_rep(types.copied(old_keys[i]))?
         } else {
-            copied(new_keys[j])?
+            failure_result_from_rep(types.copied(new_keys[j]))?
         }
         let (less_count, less_sum) = if take_old {
             (1u64, old_sums[i])
@@ -246,7 +246,7 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
                 return Ok(())
             }
             if let Some(refund) = delete_refund(tx, key)? {
-                frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, transaction_limit(tx.limits))?
+                frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, types.transaction_limit(limits_to_rep(tx.limits)))?
                 push_index_edit(mut edits, RemoveRow(take key, refund))
             }
             continue
@@ -276,7 +276,7 @@ fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bo
         let group = view groups[at]
         let added = counts[at]
         let total = added_sums[at]
-        let prior_width = stored_prior(get_page_row(collections, group))
+        let prior_width = format.stored_prior(get_page_row(collections, group))
         let (members, sum) = match get_page_row(collections, group) {
             Some(prior) => {
                 if !retained {
@@ -294,8 +294,8 @@ fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bo
         over_ceiling(live_bytes, ceiling)?
         put_page_row(mut collections, group, value, first, mut next_stamp)?
         if let Some(mut step_rows) = written_ops {
-            capacity(list.try_reserve(mut step_rows, 1))?
-            list.push(mut step_rows, StepOp(key: copied(group)?, value: Some(copied(value)?), prior: prior_width))
+            failure_result_from_rep(types.capacity(list.try_reserve(mut step_rows, 1)))?
+            list.push(mut step_rows, StepOp(key: failure_result_from_rep(types.copied(group))?, value: Some(failure_result_from_rep(types.copied(value))?), prior: prior_width))
         }
     }
     Ok(())

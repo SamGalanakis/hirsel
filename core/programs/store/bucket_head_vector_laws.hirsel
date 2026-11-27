@@ -89,7 +89,7 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
         Error(Corrupt(Fault(file: f, offset: 72, why: Malformed))) if f == "head" => (),
         _ => fail("equal positions with different refs"),
     }
-    let mut bad_style = copied(payload)?
+    let mut bad_style = failure_result_from_rep(types.copied(payload))?
     bad_style[0] = 2u8
     history_encode_head(mut raw, first, bad_style)?
     match history_decode_head(raw) {
@@ -97,12 +97,12 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
         _ => fail("unknown authority style"),
     }
     // Unknown MUST=1 frame kind 0x0050 in a current-format head is refused Unsupported(0x0050).
-    let ctx1 = DiskContext(store: first.store, role: 7, seq: first.entry.seq)
+    let ctx1 = format.DiskContext(store: store_key_to_rep(first.store), role: 7, seq: first.entry.seq)
     history_encode_base_head(mut raw, first, payload)?
     let unknown_at = list.len(raw)
     list.fill(mut raw, 16, 0u8)
     list.push(mut raw, 0u8)
-    capacity(history_seal(mut raw, ctx1, unknown_at, 0x0050))?
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx1, unknown_at, 0x0050)))?
     match history_decode_head(raw) {
         Error(Unsupported(0x0050)) => Ok(()),
         _ => fail("unknown MUST=1 frame kind was accepted"),

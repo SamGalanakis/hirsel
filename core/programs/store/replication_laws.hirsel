@@ -43,7 +43,7 @@ fn replication_stream_row(mut raw: Bytes, key: u64, value: u64) {
 }
 
 fn replication_packet(mut raw: Bytes, head: HistoryHead, entry_version: u64, value: u64) -> Result[(), Error] {
-    let ctx = DiskContext(store: head.store, role: 2, seq: history_next_id(head.entry.seq)?)
+    let ctx = format.DiskContext(store: store_key_to_rep(head.store), role: 2, seq: history_next_id(head.entry.seq)?)
     history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, 0u32)
@@ -61,7 +61,7 @@ fn replication_packet(mut raw: Bytes, head: HistoryHead, entry_version: u64, val
         replication_stream_row(mut raw, 128 + entry_version - 1, 0)
     }
     replication_stream_row(mut raw, 128 + entry_version, 1)
-    capacity(history_seal(mut raw, ctx, 112, 0x0011))
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, 112, 0x0011)))
 }
 
 fn replication_advance(mut writer: ReplicationWriter, entry_version: u64, value: u64) -> Result[(), Error] waits {
@@ -121,7 +121,7 @@ fn replication_check(node: String, seed: u64, tip: Tip, held: u64, expected: Lis
         let Some(marker) = get_page_row(tree, replication_key(128 + n)) else {
             replication_failure(node, seed, n, "missing order marker")
         }
-        if list.len(marker) != 8 || read_le(marker, 0, 8) != (if n == held {
+        if list.len(marker) != 8 || format.read_le(marker, 0, 8) != (if n == held {
             1u64
         } else {
             0u64
@@ -131,7 +131,7 @@ fn replication_check(node: String, seed: u64, tip: Tip, held: u64, expected: Lis
         if list.len(payload) != 8 {
             replication_failure(node, seed, n, "wrong payload width")
         }
-        hash = replication_mix(hash, n, read_le(payload, 0, 8))
+        hash = replication_mix(hash, n, format.read_le(payload, 0, 8))
         if hash != expected[n] {
             replication_failure(node, seed, n, "running hash differs from committed inputs")
         }

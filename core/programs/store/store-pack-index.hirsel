@@ -1,7 +1,5 @@
 const PACK_INDEX_KIND: u16 = 0x0023
 
-const PACK_INDEX_LIMIT: u64 = 1048576 - 16
-
 const PACK_INDEX_PREFIX: u64 = 12
 
 const PACK_INDEX_ROW: u64 = 29
@@ -39,7 +37,7 @@ fn pack_index_frame_end(rows: List[PackIndexRow], begin: u64) -> (u64, u64) {
     let mut end = begin
     while end < list.len(rows) {
         let row_room = pack_index_row_room(rows[end])
-        if row_room > PACK_INDEX_LIMIT - room {
+        if row_room > format.PACK_INDEX_LIMIT - room {
             break
         }
         room += row_room
@@ -48,7 +46,7 @@ fn pack_index_frame_end(rows: List[PackIndexRow], begin: u64) -> (u64, u64) {
     (end, room)
 }
 
-fn append_pack_index(mut out: Bytes, context: DiskContext, rows: List[PackIndexRow]) -> Result[u64, Error] {
+fn append_pack_index(mut out: Bytes, context: format.DiskContext, rows: List[PackIndexRow]) -> Result[u64, Error] {
     let first = list.len(out)
     let mut prev = 0u64
     let mut begin = 0u64
@@ -65,16 +63,16 @@ fn append_pack_index(mut out: Bytes, context: DiskContext, rows: List[PackIndexR
     Ok(first)
 }
 
-fn append_pack_index_frame(mut out: Bytes, context: DiskContext, prev: u64, rows: List[PackIndexRow], begin: u64, end: u64, room: u64) -> Result[(), Error] {
+fn append_pack_index_frame(mut out: Bytes, context: format.DiskContext, prev: u64, rows: List[PackIndexRow], begin: u64, end: u64, room: u64) -> Result[(), Error] {
     let mut frame = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(16 + room + BINDING_BYTES))
+        Ok(list.with_capacity(16 + room + format.BINDING_BYTES))
     })?
-    capacity(le(mut frame, int.widen(PACK_INDEX_KIND), 2))?
-    capacity(le(mut frame, 1, 2))?
-    capacity(le(mut frame, 0, 4))?
-    capacity(le(mut frame, 0, 8))?
-    capacity(le(mut frame, end - begin, 4))?
-    capacity(le(mut frame, prev, 8))?
+    failure_result_from_rep(types.capacity(format.le(mut frame, int.widen(PACK_INDEX_KIND), 2)))?
+    failure_result_from_rep(types.capacity(format.le(mut frame, 1, 2)))?
+    failure_result_from_rep(types.capacity(format.le(mut frame, 0, 4)))?
+    failure_result_from_rep(types.capacity(format.le(mut frame, 0, 8)))?
+    failure_result_from_rep(types.capacity(format.le(mut frame, end - begin, 4)))?
+    failure_result_from_rep(types.capacity(format.le(mut frame, prev, 8)))?
     for i in begin .. end {
         let row = rows[i]
         let shared = if i == begin {
@@ -83,19 +81,19 @@ fn append_pack_index_frame(mut out: Bytes, context: DiskContext, prev: u64, rows
             std.page.common_prefix(rows[i - 1].key, row.key)
         }
         let key_len = list.len(row.key)
-        capacity(le(mut frame, row.offset, 8))?
-        capacity(le(mut frame, int.widen(row.len), 4))?
-        capacity(le(mut frame, int.widen(row.kind), 1))?
-        capacity(le(mut frame, int.widen(row.collection), 4))?
-        capacity(le(mut frame, row.stamp, 8))?
-        capacity(le(mut frame, shared, 2))?
-        capacity(le(mut frame, key_len - shared, 2))?
+        failure_result_from_rep(types.capacity(format.le(mut frame, row.offset, 8)))?
+        failure_result_from_rep(types.capacity(format.le(mut frame, int.widen(row.len), 4)))?
+        failure_result_from_rep(types.capacity(format.le(mut frame, int.widen(row.kind), 1)))?
+        failure_result_from_rep(types.capacity(format.le(mut frame, int.widen(row.collection), 4)))?
+        failure_result_from_rep(types.capacity(format.le(mut frame, row.stamp, 8)))?
+        failure_result_from_rep(types.capacity(format.le(mut frame, shared, 2)))?
+        failure_result_from_rep(types.capacity(format.le(mut frame, key_len - shared, 2)))?
         list.append(mut frame, list.slice(row.key, shared, key_len))
     }
     let size: u32 = int.truncate(list.len(frame) - 16)
     list.set_word_le(mut frame, 4, size)
-    capacity(seal_frame(mut frame, context, list.len(out)))?
-    capacity(list.try_reserve(mut out, list.len(frame)))?
+    failure_result_from_rep(types.capacity(format.seal_frame(mut frame, context, list.len(out))))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut out, list.len(frame))))?
     list.append(mut out, frame)
     Ok(())
 }
@@ -108,14 +106,14 @@ type PackIndexCursor: send {
 }
 
 fn start_pack_index(file: String, offset: u64, raw: Bytes, last_data: u64) -> Result[(u64, PackIndexCursor), Error] {
-    if list.len(raw) > PACK_INDEX_LIMIT {
-        return Error(disk_fault(file, offset, Malformed))
+    if list.len(raw) > format.PACK_INDEX_LIMIT {
+        return Error(failure_from_rep(format.disk_fault(file, offset, Malformed)))
     }
     let mut at = 0u64
-    let row_count = disk_number(file, raw, mut at, 4)?
-    let prev = disk_number(file, raw, mut at, 8)?
+    let row_count = failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?
+    let prev = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
     if row_count == 0 || row_count > (list.len(raw) - at) / PACK_INDEX_ROW || (prev != 0 && (prev < 72 || prev >= offset || offset - prev < 28)) {
-        return Error(disk_fault(file, offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, offset, Malformed)))
     }
     Ok((prev, PackIndexCursor(at: at, remaining: row_count, last_data: last_data, prior_key: list.new())))
 }
@@ -125,30 +123,30 @@ fn next_pack_index(file: String, offset: u64, raw: Bytes, mut cursor: PackIndexC
         return Ok(None)
     }
     let row_at = cursor.at
-    let place = disk_number(file, raw, mut cursor.at, 8)?
-    let len = disk_number(file, raw, mut cursor.at, 4)?
-    let kind = disk_number(file, raw, mut cursor.at, 1)?
-    let collection = disk_number(file, raw, mut cursor.at, 4)?
-    let stamp = disk_number(file, raw, mut cursor.at, 8)?
-    let shared = disk_number(file, raw, mut cursor.at, 2)?
-    let suffix = disk_number(file, raw, mut cursor.at, 2)?
+    let place = failure_result_from_rep(format.disk_number(file, raw, mut cursor.at, 8))?
+    let len = failure_result_from_rep(format.disk_number(file, raw, mut cursor.at, 4))?
+    let kind = failure_result_from_rep(format.disk_number(file, raw, mut cursor.at, 1))?
+    let collection = failure_result_from_rep(format.disk_number(file, raw, mut cursor.at, 4))?
+    let stamp = failure_result_from_rep(format.disk_number(file, raw, mut cursor.at, 8))?
+    let shared = failure_result_from_rep(format.disk_number(file, raw, mut cursor.at, 2))?
+    let suffix = failure_result_from_rep(format.disk_number(file, raw, mut cursor.at, 2))?
     if place < 72 || place >= offset || offset - place < len + 16 || stamp == 0 || (kind != 0x21 && kind != 0x22) || (kind == 0x21 && len > PAGE_LIMIT) || (kind == 0x22 && (len < 8 || len > BLOB_LIMIT)) || shared > list.len(cursor.prior_key) || shared + suffix > 4096 || suffix > list.len(raw) - cursor.at {
-        return Error(disk_fault(file, offset + 16 + row_at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, offset + 16 + row_at, Malformed)))
     }
     if place <= cursor.last_data {
-        return Error(disk_fault(file, offset + 16 + row_at, Order))
+        return Error(failure_from_rep(format.disk_fault(file, offset + 16 + row_at, Order)))
     }
     let mut key: Bytes = list.new()
-    capacity(list.try_reserve(mut key, shared + suffix))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut key, shared + suffix)))?
     list.append(mut key, list.slice(cursor.prior_key, 0, shared))
     list.append(mut key, list.slice(raw, cursor.at, cursor.at + suffix))
     cursor.at += suffix
     cursor.remaining -= 1
     cursor.last_data = place
     if cursor.remaining == 0 && cursor.at != list.len(raw) {
-        return Error(disk_fault(file, offset + 16 + cursor.at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, offset + 16 + cursor.at, Malformed)))
     }
-    cursor.prior_key = copied(key)?
+    cursor.prior_key = failure_result_from_rep(types.copied(key))?
     Ok(Some(PackIndexRow(offset: place, len: int.truncate(len), kind: int.truncate(kind), collection: int.truncate(collection), stamp: stamp, key: take key)))
 }
 
@@ -156,7 +154,7 @@ fn decode_pack_index(file: String, offset: u64, raw: Bytes, mut final_item: u64)
     let (prev, take initial) = start_pack_index(file, offset, raw, final_item)?
     let mut cursor = take initial
     let mut rows: List[PackIndexRow] = list.new()
-    capacity(list.try_reserve(mut rows, cursor.remaining))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut rows, cursor.remaining)))?
     while let Some(take row) = next_pack_index(file, offset, raw, mut cursor)? {
         final_item = row.offset
         list.push(mut rows, take row)

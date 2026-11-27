@@ -14,7 +14,7 @@ pub type Need: send {
 // to 4,096 key bytes and 1,024 inline value bytes.
 const PAGE_DECODED: u64 = 4096 + 1024
 
-const MANIFEST_DECODED: u64 = 2 * META_LIMIT + 4096
+const MANIFEST_DECODED: u64 = 2 * types.META_LIMIT + 4096
 
 const CAPTURE_PATH: u64 = 65 * (8400 + PAGE_DECODED)
 
@@ -71,7 +71,7 @@ fn capture_need_part(mut n: Need, name: String, amount: u64) {
 }
 
 fn capture_bootstrap(p: PreparedCapture) -> u64 {
-    2 * round8(list.len(p.raw)) + 2 * p.manifest.limits.meta + 4096 + END_IMAGE + p.manifest.limits.frame + CAPTURE_PATH
+    2 * format.round8(list.len(p.raw)) + 2 * p.manifest.limits.meta + 4096 + END_IMAGE + p.manifest.limits.frame + CAPTURE_PATH
 }
 
 fn capture_list_slots(p: PreparedCapture) -> u64 {
@@ -176,7 +176,7 @@ fn capture_measure(d: Dir, locked: Option[Clock]) -> Result[CaptureSelection, Er
             if !capture_same_manifest(d, raw)? {
                 return Error(Changed("MANIFEST"))
             }
-            return Error(disk_fault("MANIFEST", 72, Absent))
+            return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Absent)))
         },
         Error(take problem) => return Error(take problem),
     }
@@ -203,7 +203,7 @@ fn capture_segment_walk(d: Dir, id: StoreId, first: u64, hold: bool, locked: Opt
         let mut file = match host.open(d, path, Read) {
             Ok(take opened) => take opened,
             Error(NotFound) if seq != first => return Ok(true),
-            Error(NotFound) => return Error(disk_fault(path, 0, Header)),
+            Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, 0, Header))),
             Error(problem) => return Error(Io(problem)),
         }
         if let Some(c) = locked {
@@ -315,24 +315,24 @@ fn prepare_capture(d: Dir, c: Clock, purpose: Purpose, take lock: Option[HostFil
         Some(c)
     }
     loop {
-        let selection = capacity(bound bytes BOOTSTRAP {
+        let selection = failure_result_from_rep(types.capacity(bound bytes BOOTSTRAP {
             capture_measure(d, locked)
-        })?
+        }))?
         let s = match take selection {
             Ok(take found) => take found,
             Error(Changed(file)) if file == "MANIFEST" => continue,
             Error(take problem) => return Error(take problem),
         }
-        let mut segments: List[PreparedSegment] = capacity(bound bytes capture_mul(SEG, s.segments) {
+        let mut segments: List[PreparedSegment] = failure_result_from_rep(types.capacity(bound bytes capture_mul(SEG, s.segments) {
             list.with_capacity(s.segments)
-        })?
-        let selected = capacity(bound bytes BOOTSTRAP {
+        }))?
+        let selected = failure_result_from_rep(types.capacity(bound bytes BOOTSTRAP {
             if purpose == Describe {
                 capture_segment_bounds(s, c, mut segments)
             } else {
                 capture_locked_bounds(s, c, mut segments)
             }
-        })?
+        }))?
         let stable = match take selected {
             Ok(stable) => stable,
             Error(take problem) => {
@@ -355,7 +355,7 @@ fn prepare_capture(d: Dir, c: Clock, purpose: Purpose, take lock: Option[HostFil
 fn capture_locked_bounds(s: CaptureSelection, c: Clock, mut segments: List[PreparedSegment]) -> Result[bool, Error] waits {
     let mut segment_count = s.segments
     if !capture_segment_walk(s.dir, s.id, s.manifest.first_live, true, Some(c), mut segment_count, mut segments)? {
-        return Error(disk_fault("MANIFEST", 72, Malformed))
+        return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
     }
     disk_io(host.sync_dir(s.dir))?
     let n = list.len(segments)

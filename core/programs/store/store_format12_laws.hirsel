@@ -470,12 +470,12 @@ fn format12_manifest_law() -> Result[(), Error] {
     if !disk_corrupt(decode_page_manifest(path, list.slice(payload, 0, list.len(payload) - 1), 1)) {
         return Error(Foreign)
     }
-    let mut invalid_owner = copied(payload)?
+    let mut invalid_owner = failure_result_from_rep(types.copied(payload))?
     invalid_owner[463 - 36] = 0
     if !disk_corrupt(decode_page_manifest(path, invalid_owner, 1)) {
         return Error(Foreign)
     }
-    let mut overflow = copied(payload)?
+    let mut overflow = failure_result_from_rep(types.copied(payload))?
     list.set_word_le(mut overflow, 64, 18446744073709551615u64)
     if !disk_corrupt(decode_page_manifest(path, overflow, 1)) {
         return Error(Foreign)
@@ -490,7 +490,7 @@ fn format12_archive_law() -> Result[(), Error] {
         return Error(Foreign)
     }
     let expected: Inline[u8, 40] =[15, 0, 0, 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 27, 0, 0, 0, 0, 0, 0, 0, 51, 0, 0, 0, 0, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0]
-    if list.len(archive_entry.key) != 8 || read_le(archive_entry.key, 0, 8) != 0x0700000000000000 || list.len(value) != 40 {
+    if list.len(archive_entry.key) != 8 || format.read_le(archive_entry.key, 0, 8) != 0x0700000000000000 || list.len(value) != 40 {
         return Error(Foreign)
     }
     for i in 0u64 .. 40 {
@@ -525,19 +525,19 @@ fn format12_pack_row_law() -> Result[(), Error] {
 fn format12_index_law() -> Result[(), Error] {
     let path = "p-6"
     let id = StoreId(hi: 1, lo: 2)
-    let ctx = DiskContext(store: id, role: 3, seq: 6)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 6)
     let expected = format12_blob_index()
     let following_wire = format12_blob_index_next()
     let mut key: Bytes = list.new()
     list.put_word_be(mut key, 7u32)
     list.append(mut key, string.as_bytes("ax"))
-    let mut other = copied(key)?
+    let mut other = failure_result_from_rep(types.copied(key))?
     let _ = list.set(mut other, 5, 121u8)
     let first = std.page.BlobRef(stamp: 17, len: 1025, checksum: 0, pack: 6, offset: 72, body: 0)
     let second = std.page.BlobRef(stamp: 19, len: 65, checksum: 0, pack: 6, offset: 1121, body: 1)
     let mut rows: List[PackIndexRow] = list.new()
-    list.push(mut rows, blob_index_row(first, 7, copied(key)?))
-    list.push(mut rows, blob_index_row(second, 7, copied(other)?))
+    list.push(mut rows, blob_index_row(first, 7, failure_result_from_rep(types.copied(key))?))
+    list.push(mut rows, blob_index_row(second, 7, failure_result_from_rep(types.copied(other))?))
     let mut out: Bytes = list.new()
     list.fill(mut out, 1500, 0u8)
     let at = append_pack_index(mut out, ctx, rows)?
@@ -547,7 +547,7 @@ fn format12_index_law() -> Result[(), Error] {
     let second_at = list.len(out)
     let mut remaining: List[PackIndexRow] = list.new()
     let third = std.page.BlobRef(stamp: 21, len: 4, checksum: 0, pack: 6, offset: 1210, body: 2)
-    list.push(mut remaining, blob_index_row(third, 7, copied(key)?))
+    list.push(mut remaining, blob_index_row(third, 7, failure_result_from_rep(types.copied(key))?))
     append_pack_index_frame(mut out, ctx, at, remaining, 0, 1, 47)?
     if list.slice(out, second_at, list.len(out)) != following_wire {
         return Error(Foreign)
@@ -560,7 +560,7 @@ fn format12_index_law() -> Result[(), Error] {
     if frame.kind != 0x0023 || frame.flags != 1 || parsed.prev != 0 || list.len(parsed.rows) != 2 || parsed.rows[0].offset != 72 || parsed.rows[0].len != 1033 || parsed.rows[0].kind != 0x22 || parsed.rows[0].collection != 7 || parsed.rows[0].stamp != 17 || parsed.rows[0].key != key || parsed.rows[1].len != 73 || parsed.rows[1].key != other || tail.prev != at || tail.rows[0].key != key || final_item != 1210 {
         return Error(Foreign)
     }
-    let mut corrupt = copied(payload)?
+    let mut corrupt = failure_result_from_rep(types.copied(payload))?
     let _ = list.set(mut corrupt, 37, 1u8)
     final_item = 0
     if !disk_corrupt(decode_pack_index(path, at, corrupt, mut final_item)) || !disk_corrupt(decode_pack_index(path, at, list.slice(payload, 0, list.len(payload) - 1), mut final_item)) {
@@ -570,7 +570,7 @@ fn format12_index_law() -> Result[(), Error] {
     if !disk_corrupt(decode_pack_index(path, at, payload, mut final_item)) {
         return Error(Foreign)
     }
-    let page_ctx = DiskContext(store: id, role: 3, seq: 7)
+    let page_ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 7)
     let ptr = std.page.PagePtr(pack: 7, offset: 72, len: 47, checksum: 0, stamp: 23)
     let mut page_key: Bytes = list.new()
     list.put_word_be(mut page_key, 9u32)

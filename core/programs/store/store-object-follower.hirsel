@@ -22,7 +22,7 @@ type ObjectFollowHead: shareable + send {
     current: HistoryHead,
     tag: std.object.ETag,
     next_node: u64,
-    attach: Option[Attach],
+    attach: Option[format.Attach],
     head_bytes: Bytes,
     live_next_seq: u64
 }
@@ -146,7 +146,7 @@ fn history_settle(head: HeadView, predecessor: Claim, attempt: Bytes) -> Result[
         return Ok(HeadOpen)
     }
     if head.claim.epoch <= predecessor.epoch {
-        return Error(disk_fault("head", 72, Regressed))
+        return Error(failure_from_rep(format.disk_fault("head", 72, Regressed)))
     }
     if let Some(o) = head.origin {
         if o.permit_epoch == predecessor.epoch + 1 && o.permit_attempt == attempt {
@@ -164,7 +164,7 @@ fn copy_follow_state(previous: State) -> Result[State, Error] {
             list.push(mut tips, Tip(id: old_tip.id, name: string.from(old_tip.name), parent: old_tip.parent, forked_at: old_tip.forked_at, roots: share_roots(old_tip.roots), head: old_tip.head, at: old_tip.at))
         }
         for old_pin in previous.pins {
-            list.push(mut pins, capacity(share_pin(old_pin))?)
+            list.push(mut pins, failure_result_from_rep(types.capacity(share_pin(old_pin)))?)
         }
         Ok(State(tips: take tips, pins: take pins, next_branch: previous.next_branch, next_table: previous.next_table))
     })
@@ -240,7 +240,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
             fail("object follower missing remote head")
         }
         if latest.floor < old.current.floor || latest.entry.seq < old.current.entry.seq {
-            return Error(disk_fault("head", 72, Order))
+            return Error(failure_from_rep(format.disk_fault("head", 72, Order)))
         }
         if history_ref_matches(latest.entry, old.current.entry) {
             return disk_allocation(scoped fn() -> Result[Option[Arc[FollowCapture]], Error] {

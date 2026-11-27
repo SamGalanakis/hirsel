@@ -172,7 +172,7 @@ fn small_directory_place_need(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let place = planned(Directory, need, o) ?=> |_| Missing("small directory sizing")
     let options = planned_options(place)
     let kept = match options.limits {
-        Some(l) => same_limits(l, small_place_limits()),
+        Some(l) => types.same_limits(limits_to_rep(l), limits_to_rep(small_place_limits())),
         None => false,
     }
     if planned_bytes(place) != need || !kept {
@@ -316,7 +316,7 @@ fn staged_row_layout_charge() -> Result[(), Error] {
         return Error(Missing("staged row logical size changed"))
     }
     let mut ops = empty_ops()
-    push_data_row(mut ops.rows, DataOp(key: list.new(), value: None, trim: None, prior: None))
+    push_data_row(mut ops.rows, format.DataOp(key: list.new(), value: None, trim: None, prior: None))
     let staged = Staged(ops: take ops, stream_ops: empty_ops(), call: None)
     let before = writer_law_room()
     let frozen = arc.new(take staged)

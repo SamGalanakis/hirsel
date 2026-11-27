@@ -17,7 +17,7 @@ fn f4_tiered_setup(mut db: Db) -> Result[(Table[u64, u64], Index[u64, u64, u64, 
     let Committed(_) = run(mut db, None, copy_env(pad), fn(mut tx: Tx, pad_table: Table[u64, Bytes]) -> Result[(), Error] {
         let payload = install_fixture_bytes(16384u64, 0x5Au8)
         for k in 0u64 .. 64 {
-            put(mut tx, pad_table, k, copied(payload)?)?
+            put(mut tx, pad_table, k, failure_result_from_rep(types.copied(payload))?)?
         }
         Ok(())
     })? else {
@@ -127,7 +127,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         }
         let id = StoreId(hi: new_stamp.store_hi, lo: new_stamp.store_lo)
         let before = share_roots(child.db.heads[0].roots)
-        let state = deploy_result(capacity(current_state(child.db)))?
+        let state = deploy_result(failure_result_from_rep(types.capacity(current_state(child.db))))?
         let mut initial = deploy_result(journal_replay(take state, child.db.next_node, child.db.limits))?
         initial.tiered.total = child.db.tiered
         let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?
@@ -199,7 +199,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let new_stamp = read_export_stamp(exported.dir)?
         let steps = read_steps(exported.dir, new_stamp)?
         let id = StoreId(hi: new_stamp.store_hi, lo: new_stamp.store_lo)
-        let state = deploy_result(capacity(current_state(child.db)))?
+        let state = deploy_result(failure_result_from_rep(types.capacity(current_state(child.db))))?
         let mut initial = deploy_result(journal_replay(take state, child.db.next_node, child.db.limits))?
         initial.tiered.total = before_tiered
         let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?

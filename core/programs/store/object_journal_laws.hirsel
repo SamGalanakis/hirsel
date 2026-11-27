@@ -43,7 +43,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let mut expected_bytes = 0u64
     for n in 1u64 .. 3 {
         bucket_m2_law_commit_packet(mut workspace.packet, initial_head, n)?
-        let frame = copied(list.slice(workspace.packet, 112, list.len(workspace.packet)))?
+        let frame = failure_result_from_rep(types.copied(list.slice(workspace.packet, 112, list.len(workspace.packet))))?
         expected_bytes += list.len(frame)
         result.unwrap(channel.send(send_to, Frame(take frame, n)))
     }
@@ -600,7 +600,7 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let retained = HistoryRetention(floor: 2, earlier: list.new())
     let locate = HistoryLocateRoot(depth: 0, rows: take refs)
-    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: 2), 1, 1, predecessor.entry, base, retained, locate)?
+    let entry_ref = history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 2), 1, 1, predecessor.entry, base, retained, locate)?
     let mut selected = predecessor
     selected.entry = entry_ref
     selected.checkpoint = entry_ref

@@ -95,21 +95,21 @@ fn read_scrub_history(d: Dir, id: StoreId) -> Result[Option[ScrubHistory], Error
     let size = disk_io(host.stat_file(mut file))?.size
     if size < 72u64 || size > SCRUB_HISTORY_FILE_LIMIT {
         let _ = host.close(take file)
-        return Error(disk_fault("SCRUB", 0u64, Malformed))
+        return Error(failure_from_rep(format.disk_fault("SCRUB", 0u64, Malformed)))
     }
     let raw = read_disk_bytes(mut file, "SCRUB", 0u64, size)?
     let _ = host.close(take file)
     let header = disk_read_header("SCRUB", raw, SCRUB_HISTORY_ROLE, None, Some(id))?
     if 72u64 >= list.len(raw) {
-        return Error(disk_fault("SCRUB", 72u64, Truncated))
+        return Error(failure_from_rep(format.disk_fault("SCRUB", 72u64, Truncated)))
     }
     let frame = disk_frame_bytes("SCRUB", header.context, raw, 72u64)?
     if frame.kind != SCRUB_HISTORY_KIND || frame.flags != 1u16 || frame.end != list.len(raw) {
-        return Error(disk_fault("SCRUB", 72u64, Malformed))
+        return Error(failure_from_rep(format.disk_fault("SCRUB", 72u64, Malformed)))
     }
     let payload = list.slice(raw, frame.payload, frame.end)
     let codec: std.codec.Codec[ScrubHistory] = std.codec.of()
-    let parsed = std.codec.decode(codec, payload) ?=> |_| disk_fault("SCRUB", 72u64, Malformed)
+    let parsed = std.codec.decode(codec, payload) ?=> |_| failure_from_rep(format.disk_fault("SCRUB", 72u64, Malformed))
     Ok(Some(take parsed))
 }
 
@@ -120,10 +120,10 @@ fn write_scrub_history(d: Dir, id: StoreId, history: ScrubHistory) -> Result[(),
         std.codec.encode(codec, history, mut out) ?=> |_| Limit(Value)
         Ok(take out)
     })?
-    let ctx = DiskContext(store: id, role: SCRUB_HISTORY_ROLE, seq: history.next_round)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: SCRUB_HISTORY_ROLE, seq: history.next_round)
     let raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        let mut out = capacity(disk_header_bytes(ctx, 0u64, 0u8))?
-        list.append(mut out, capacity(disk_seal(ctx, 72u64, SCRUB_HISTORY_KIND, 1u16, payload))?)
+        let mut out = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0u64, 0u8)))?
+        list.append(mut out, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72u64, SCRUB_HISTORY_KIND, 1u16, payload)))?)
         Ok(take out)
     })?
     if list.len(raw) > SCRUB_HISTORY_FILE_LIMIT {

@@ -127,7 +127,7 @@ type ObjectReclaimCapture: send {
 
 fn live_reclaim_name(mut live_bytes: Map[String, ()], lead: String, item: HistoryRef) -> Result[(), Error] {
     let name = history_key(lead, item)
-    capacity(map.try_reserve(mut live_bytes, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut live_bytes, 1)))?
     map.insert(mut live_bytes, take name, ())
     Ok(())
 }
@@ -237,7 +237,7 @@ fn history_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, mut 
     for member in members {
         let name = std.object.key_text(member.key)
         let Some(parsed_name) = history_parse_name(name) else {
-            return Error(disk_fault(name, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(name, 0, Malformed)))
         }
         if parsed_name.seq >= pass.floor {
             lane.sweep = sweep_start()
@@ -282,13 +282,13 @@ fn history_reclaim_prefix(mut lane: ObjectJournalSession, pass: ReclaimPass, lea
         }
         let following = std.object.key_text(page.after)
         if order.compare(following, after) != Greater {
-            return Error(disk_fault("authority", 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault("authority", 0, Malformed)))
         }
         after = take following
     }
 }
 
-pub const RECLAIM_FORMAT_VERSION: u64 = DISK_FORMAT
+pub const RECLAIM_FORMAT_VERSION: u64 = format.DISK_FORMAT
 
 pub const RECLAIM_TOOL_VERSION: u64 = 1u64
 
@@ -328,7 +328,7 @@ fn reclaim_pass_for_lane(mut lane: ObjectJournalSession, fixed: ObjectReclaimCap
     let released = match lane.export_lease {
         Some(leased) => {
             if let Error(Empty) = channel.try_receive(leased.lifetime) {
-                capacity(map.try_reserve(mut pass.leased, map.len(leased.names)))?
+                failure_result_from_rep(types.capacity(map.try_reserve(mut pass.leased, map.len(leased.names))))?
                 for (name, _) in leased.names {
                     map.insert(mut pass.leased, string.from(name), ())
                 }
@@ -382,7 +382,7 @@ type PreviewAcc {
 
 fn preview_record(mut acc: PreviewAcc, kind: ReclaimKind, take key: String, size: u64) -> Result[(), Error] {
     if list.len(acc.items) < acc.max_items {
-        capacity(list.try_reserve(mut acc.items, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut acc.items, 1)))?
         list.push(mut acc.items, ReclaimItem(kind, key: take key, size))
         acc.total_bytes = int.saturating_add(acc.total_bytes, size)
     } else {
@@ -403,7 +403,7 @@ fn preview_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, curs
     for member in members {
         let name = std.object.key_text(member.key)
         let Some(parsed_name) = history_parse_name(name) else {
-            return Error(disk_fault(name, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(name, 0, Malformed)))
         }
         if parsed_name.seq >= pass.floor {
             return Ok(())
@@ -444,7 +444,7 @@ fn preview_reclaim_prefix(mut lane: ObjectJournalSession, pass: ReclaimPass, lea
         }
         let following = std.object.key_text(page.after)
         if order.compare(following, after) != Greater {
-            return Error(disk_fault("authority", 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault("authority", 0, Malformed)))
         }
         after = take following
     }
@@ -562,7 +562,7 @@ fn purge_on_lane(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture, pl
                     Some(n) => n + 0u64,
                     None => 0u64,
                 }
-                capacity(map.try_reserve(mut planned_uploads, 1))?
+                failure_result_from_rep(types.capacity(map.try_reserve(mut planned_uploads, 1)))?
                 map.insert(mut planned_uploads, string.from(item.key), current + 1u64)
                 uploads_wanted += 1u64
             } else {

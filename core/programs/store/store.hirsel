@@ -74,7 +74,7 @@ pub opaque type Db {
     // The `changes` count at which `resident` was last exact (I4).
     settled: u64,
     ceiling: u64,
-    keyed_credit: KeyedCredit,
+    keyed_credit: format.KeyedCredit,
     checkpointed: u64,
     // Stream name to the unreplied Admitted(p) this open committed (§1.8).
     admits: Map[Bytes, OpenAdmit],
@@ -213,10 +213,10 @@ fn current_state(db: Db) -> Result[State, Capacity] {
 fn prepare_holder_slot(mut db: Db, delta: HolderDelta) -> Result[(), Error] {
     match delta {
         AddHead(_, _) => {
-            capacity(map.try_reserve(mut db.branch_names, 1))?
-            capacity(list.try_reserve(mut db.heads, 1))
+            failure_result_from_rep(types.capacity(map.try_reserve(mut db.branch_names, 1)))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut db.heads, 1)))
         },
-        AddPin(_) => capacity(list.try_reserve(mut db.pins, 1)),
+        AddPin(_) => failure_result_from_rep(types.capacity(list.try_reserve(mut db.pins, 1))),
         _ => Ok(()),
     }
 }
@@ -298,7 +298,7 @@ fn state_account(s: State) -> Result[u64, Capacity] {
 // page, so `accounts` computes it when asked (§13.8).
 fn memory_cut_account(state: State) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
-        Ok(page_row_account(capacity(state_roots(state))?))
+        Ok(page_row_account(failure_result_from_rep(types.capacity(state_roots(state)))?))
     })
 }
 
@@ -319,7 +319,7 @@ fn branch_slot(db: Db, id: u32) -> Result[u64, u64] {
 }
 
 fn branch_index(db: Db, b: Branch) -> Result[u64, Error] {
-    if !same(b.store, db.store) {
+    if !types.same(b.store.hi, b.store.lo, db.store.hi, db.store.lo) {
         return Error(Foreign)
     }
     Ok(branch_slot(db, b.id) ?=> |_| Missing("branch"))
@@ -396,29 +396,11 @@ pub type Page[K, V]: send {
 
 pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 
-type DataOp: shareable + send {
-    key: Bytes,
-    value: Option[StagedValue],
-    trim: Option[JournalTrim],
-    prior: Option[u32]
-}
-
-// Inline pages copy the bytes into the page image. Overflow pages share the
-// body with the staged operation.
-type StagedValue: shareable + send = PageValue(Bytes) | BlobBody(Arc[Bytes])
-
-fn stage_value(take raw: Bytes, inline: u64) -> StagedValue {
+fn stage_value(take raw: Bytes, inline: u64) -> format.StagedValue {
     if list.len(raw) <= inline {
         PageValue(take raw)
     } else {
         BlobBody(arc.new(take raw))
-    }
-}
-
-fn staged_bytes(value: StagedValue) -> View[Bytes] in value {
-    match value {
-        PageValue(raw) => view raw,
-        BlobBody(raw) => view raw,
     }
 }
 
@@ -449,7 +431,7 @@ fn empty_ops() -> DataOps {
 type Staged: shareable + send {
     ops: DataOps,
     stream_ops: DataOps,
-    call: Option[CallSection]
+    call: Option[format.CallSection]
 }
 
 pub opaque scoped type Tx {
@@ -469,7 +451,7 @@ pub opaque scoped type Tx {
     // The attempt record and the pin map it reads (§13.3, v2.81). The call's
     // driver owns both, outside the body's isolation and step bound.
     attempt: View[Option[core.Cell[TieredTouchSet]]],
-    pins: View[Map[TieredCacheKey, Arc[TieredFrame]]],
+    pins: View[Map[TieredCacheKey, Arc[format.TieredFrame]]],
     refusal: Option[Capacity],
     // The index error that makes this transaction abort-only.
     index_conflict: Option[IndexStop],
@@ -486,9 +468,9 @@ pub opaque scoped type Tx {
     // The streams section's ops (§1.8). `extra_bytes` is that section with
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
     stream_ops: DataOps,
-    keyed: Option[KeyedDraft],
+    keyed: Option[format.KeyedDraft],
     extra_bytes: u64,
-    call: Option[CallSection],
+    call: Option[format.CallSection],
     // Layers beneath `ops`, oldest first. The last `own` are this Tx's own
     // staged writes, frozen when it entered a callback; the rest are shared
     // with the transactions it runs inside. `rows` and `streams` count the
@@ -528,18 +510,8 @@ fn call_info(id: StoreId, b: u32, v: u64, wall: u64, previous: u64) -> CallInfo 
     }, seed: splitmix64(splitmix64(splitmix64(splitmix64(id.hi) ^ id.lo) ^ int.widen(b)) ^ v))
 }
 
-fn same(a: StoreId, b: StoreId) -> bool {
-    a.hi == b.hi && a.lo == b.lo
-}
-
-fn make_id(r: Random) -> StoreId {
-    let mut raw: Bytes = list.with_capacity(16)
-    host.random(r, mut raw)
-    StoreId(hi: list.word_le(raw, 0), lo: list.word_le(raw, 8))
-}
-
 pub fn memory(c: Clock, r: Random, o: Options) -> Db {
-    memory_at(c, make_id(r), o)
+    memory_at(c, store_key_from_rep(types.make_id(r)), o)
 }
 
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
@@ -549,7 +521,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, skip_test_teardown: false, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), limits: named_limits(o.limits), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, bases: no_tail_bases(), projectors: list.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, skip_test_teardown: false, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, bases: no_tail_bases(), projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -625,7 +597,7 @@ pub fn branch(db: Db, name: String) -> Option[Branch] {
 // Section 1.9 and 1.12: fork and pin take only a Snapshot of this open, whose
 // node ids this open issued.
 fn this_open(db: Db, s: Snapshot) -> Result[(), Error] {
-    if !same(s.store, db.store) || s.open != open_number(db) {
+    if !types.same(s.store.hi, s.store.lo, db.store.hi, db.store.lo) || s.open != open_number(db) {
         return Error(Foreign)
     }
     Ok(())
@@ -651,7 +623,7 @@ fn cut_install_emitted(mut db: Db, take delta: HolderDelta, mut emitted: Option[
     }
     prepare_holder_slot(mut db, delta)?
     let proposed = disk_allocation(scoped fn() -> Result[State, Error] {
-        capacity(state_with_delta(db, delta))
+        failure_result_from_rep(types.capacity(state_with_delta(db, delta)))
     })?
     let admission = match delta {
         AddHead(_, _) => true,
@@ -700,7 +672,7 @@ pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
         return Error(Diverged(b.id))
     }
     let merged = ProposedMain(roots: share_roots(db.heads[i].roots), head: db.heads[i].head, at: db.heads[i].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = capacity(prepare_publication(db, 0, merged.head, merged.roots, db.next_node))?
+    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, merged.head, merged.roots, db.next_node)))?
     let commit_ticket = cut_install(mut db, ReplaceMain(take merged, Some(i)))?
     publish(take publication)
     Ok(commit_ticket)
@@ -761,13 +733,6 @@ pub type Receipt {
 
 pub type Stop = Raised(u32) | OutOfSteps(u64) | OutOfBytes(Capacity) | Conflict(String)
 
-fn append_be(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
-    for i in 0u64 .. width {
-        list.push(mut raw, int.truncate(value >> int.truncate(8 * (width - 1 - i))))
-    }
-    Ok(())
-}
-
 pub type Plan {
     n_e: u64,
     s_e: u64,
@@ -825,7 +790,7 @@ pub fn untried(take complete: Completion, take rec: Option[CallRecord], attempte
 }
 
 fn registered_completion(db: Db, complete: Completion) -> Result[(), ServeError] {
-    if !same(db.store, complete.admitted.store) || open_number(db) != complete.admitted.open {
+    if !types.same(db.store.hi, db.store.lo, complete.admitted.store.hi, complete.admitted.store.lo) || open_number(db) != complete.admitted.open {
         return Error(Before(Foreign, None))
     }
     if let Some(keyed) = complete.keyed {
@@ -870,17 +835,17 @@ fn cause_number(causes: Causes) -> u32 {
     0u32
 }
 
-fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement], credit: Option[KeyedCredit]) -> Result[(), Error] {
+fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[format.Settlement], credit: Option[format.KeyedCredit]) -> Result[(), Error] {
     if let Some(keyed) = complete.keyed {
         let Some(remaining) = credit else {
             fail("store: keyed completion must apply its terminal credit")
         }
-        let call = KeyedCallSection(record: clone(keyed.record), settlement: settlement)
+        let call = format.KeyedCallSection(record: keyed_call_record_to_rep(clone(keyed.record)), settlement: settlement)
         return stage_claim_reply(mut tx, complete.stream, complete.request, keyed.policy.retention_ms, output, remaining, Some(take call))
     }
     let size = if let Some(_) = tx.frame_bytes {
         match rec {
-            Some(value) => call_section_bytes(value, settlement),
+            Some(value) => format.call_section_bytes(value.key, value.args, value.revision, value.code, settlement),
             None => 0u64,
         }
     } else {
@@ -890,7 +855,7 @@ fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallR
     stream_write(mut tx, take key, take value, size)
 }
 
-fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_max: u64, credit: Option[KeyedCredit], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Bytes, ServeReply] {
+fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_max: u64, credit: Option[format.KeyedCredit], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Bytes, ServeReply] {
     let returned = body(mut tx)
     if let Some(problem) = tx.refusal {
         tx.refusal = None
@@ -988,15 +953,15 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
         Some(_) => 1u8,
         None => 2u8
     }
-    let settlement: Option[Settlement] = if attempted.id.version == 0 {
+    let settlement: Option[format.Settlement] = if attempted.id.version == 0 {
         None
     } else {
-        Some(Settlement(way: way, base: attempted.id.version - 1, at: attempted.at, seed: attempted.seed, stop: pending_run.stop))
+        Some(format.Settlement(way: way, base: attempted.id.version - 1, at: attempted.at, seed: attempted.seed, stop: optional_stop_kind_to_rep(pending_run.stop)))
     }
     let keep: Option[fn(ServeReply) -> bool] = None
     // Saving a reply reads no Tiered row, so it carries no attempt record.
     let attempt: Option[core.Cell[TieredTouchSet]] = None
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let credit = keyed_completion_credit(db, pending_run.completion)
     let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, false, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
         let held: Bytes = clone(output)
@@ -1095,9 +1060,9 @@ type Ran[R, A] {
     value: Result[R, A],
     roots: Option[Roots],
     edits: DataRows,
-    order: DataOrder,
+    order: format.DataOrder,
     replies: DataRows,
-    keyed: Option[KeyedDraft],
+    keyed: Option[format.KeyedDraft],
     first_stamp: u64,
     prepared_roots: bool,
     tiered: Option[u64],
@@ -1128,31 +1093,31 @@ type Prepared[R, A] {
     live: u64,
     frame: Option[Bytes],
     ops: DataRows,
-    order: DataOrder,
+    order: format.DataOrder,
     base_stamp: u64,
     frame_tail: u64,
     stream_ops: DataRows,
-    keyed: Option[KeyedDraft],
+    keyed: Option[format.KeyedDraft],
     first_stamp: u64,
     prepared_roots: bool,
     observed_info: bool,
     skipped: bool,
-    call: Option[CallSection]
+    call: Option[format.CallSection]
 }
 
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok, or Error after a reply, is final here.
-fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     stage_with(mut db, i, wall, steps, keep_reply, false, attempt, pins, body)
 }
 
-fn stage_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let no_record: Option[CallRecord] = None
     stage_call(mut db, i, wall, steps, keep_reply, no_record, None, force_frame, attempt, pins, body)
 }
 
 // The caller keeps owning the record so a refused publication can return it.
-fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[Settlement], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
@@ -1203,7 +1168,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     }
 }
 
-fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let (frame_bytes, initial_tail) = match db.disk {
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
@@ -1334,7 +1299,7 @@ pub fn sync_notices(mut db: Db) -> Option[Receiver[()]] {
 /// `durable` without waiting: whether t's commit is synced now. A journal that ended
 /// without an ack is terminal, as in journal_receive.
 pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
-    if !same(db.store, t.store) || t.open != open_number(db) {
+    if !types.same(db.store.hi, db.store.lo, t.store.hi, t.store.lo) || t.open != open_number(db) {
         return Error(Foreign)
     }
     if object_writer_open(db) && covered(db, t.mark) {
@@ -1377,17 +1342,6 @@ fn covered(db: Db, mark: Mark) -> bool {
         },
         Cut(n) => db.checkpointed >= n
     }
-}
-
-fn capacity[T](take r: Result[T, Capacity]) -> Result[T, Error] {
-    match take r {
-        Ok(take value) => Ok(take value),
-        Error(c) => Error(Full(Allocation(c)))
-    }
-}
-
-fn copied(raw: Bytes) -> Result[Bytes, Error] {
-    Ok(clone(raw))
 }
 
 fn prefix(id: u32) -> Result[Bytes, Error] {
@@ -1483,14 +1437,6 @@ pub type Stored {
     reply: Bytes
 }
 
-fn key_word(n: u64) -> Bytes {
-    let mut b: Bytes = list.with_capacity(8)
-    for i in 0u64 .. 8 {
-        list.push(mut b, int.truncate(n >> int.truncate((7 - i) * 8)))
-    }
-    b
-}
-
 fn test_db(c: Clock, cap: u64) -> Db {
     let mut opts = result.unwrap(sized(Memory, 1074790400u64))
     opts.resident_limit = cap
@@ -1500,7 +1446,7 @@ fn test_db(c: Clock, cap: u64) -> Db {
 fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
     if let Some(slot) = op_slot(tx.stream_ops, key) {
         return match data_row(tx.stream_ops.rows, slot).value {
-            Some(raw) => Some(staged_bytes(raw)),
+            Some(raw) => Some(format.staged_bytes(raw)),
             None => None,
         }
     }
@@ -1508,7 +1454,7 @@ fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
         let layer = view tx.below[at]
         if let Some(slot) = op_slot(layer.stream_ops, key) {
             return match data_row(layer.stream_ops.rows, slot).value {
-                Some(raw) => Some(staged_bytes(raw)),
+                Some(raw) => Some(format.staged_bytes(raw)),
                 None => None,
             }
         }
@@ -1537,7 +1483,7 @@ fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u
 // The frame bytes of the op staged for `key`, in `ops` or the newest layer.
 fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: Bytes) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
-        return data_op_size(data_row(ops.rows, slot), streams)
+        return format.data_op_size(data_row(ops.rows, slot), streams)
     }
     let mut size = 0u64
     for layer in below {
@@ -1547,84 +1493,10 @@ fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: 
             view layer.ops
         }
         if let Some(slot) = op_slot(staged, key) {
-            size = data_op_size(data_row(staged.rows, slot), streams)
+            size = format.data_op_size(data_row(staged.rows, slot), streams)
         }
     }
     size
-}
-
-fn data_op_size(operation: DataOp, stream: bool) -> u64 {
-    if let Some(_) = operation.trim {
-        return 21
-    }
-    let size = (if stream {
-        5u64
-    } else {
-        9u64
-    }) + list.len(operation.key)
-    match operation.value {
-        None => size,
-        Some(raw) => size + 4 + list.len(staged_bytes(raw)),
-    }
-}
-
-fn le(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
-    match width {
-        1 => {
-            list.reserve(mut out, 1)
-            Ok(list.push(mut out, int.truncate(x)))
-        },
-        2 => {
-            let word: u16 = int.truncate(x)
-            Ok(list.put_word_le(mut out, word))
-        },
-        4 => {
-            let word: u32 = int.truncate(x)
-            Ok(list.put_word_le(mut out, word))
-        },
-        8 => Ok(list.put_word_le(mut out, x)),
-        _ => fail("store: invalid frame word width"),
-    }
-}
-
-fn blob(mut out: Bytes, b: Bytes) -> Result[(), Capacity] {
-    le(mut out, list.len(b), 4)?
-    Ok(list.append(mut out, b))
-}
-
-fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue], prior: Option[u32]) -> Result[(), Capacity] {
-    let tag: u64 = match value {
-        Some(_) => 1,
-        None => 2
-    }
-    le(mut payload, tag, 1)?
-    blob(mut payload, key)?
-    if let Some(width) = prior {
-        list.put_word_le(mut payload, width)
-    }
-    if let Some(raw) = value {
-        blob(mut payload, staged_bytes(raw))?
-    }
-    Ok(())
-}
-
-fn encode_log_trim(mut payload: Bytes, key: Bytes, floor: u64, dropped: u64) {
-    list.push(mut payload, 3u8)
-    list.append(mut payload, key)
-    list.put_word_be(mut payload, floor)
-    list.put_word_be(mut payload, dropped)
-}
-
-fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
-    if let (Some(raw), Some(record)) = (view operation.value, view call) {
-        if stream_record_matches(operation.key, record.stream) {
-            le(mut payload, 3, 1)?
-            blob(mut payload, operation.key)?
-            blob(mut payload, staged_bytes(raw))?
-            return encode_call(mut payload, record, settlement)
-        }
-    }
-    encode_data_op(mut payload, operation.key, operation.value, None)
 }
 
 fn stream_control_slot(ops: DataRows) -> Option[u64] {
@@ -1636,14 +1508,14 @@ fn stream_control_slot(ops: DataRows) -> Option[u64] {
     None
 }
 
-fn encode_stream_ops(mut payload: Bytes, ops: DataRows, stream_count: u64, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
-    le(mut payload, 1, 1)?
-    le(mut payload, stream_count, 4)?
+fn encode_stream_ops(mut payload: Bytes, ops: DataRows, stream_count: u64, call: Option[format.CallView], settlement: Option[format.Settlement]) -> Result[(), Capacity] {
+    format.le(mut payload, 1, 1)?
+    format.le(mut payload, stream_count, 4)?
     let order = data_order(ops)?
     for slot_order in 0u64 .. data_row_count(ops) {
         let operation = ordered_row(ops, order, slot_order)
         if list.len(operation.key) != 0u64 {
-            encode_stream_op(mut payload, operation, call, settlement)?
+            format.encode_stream_op(mut payload, operation, call, settlement)?
         }
     }
     Ok(())
@@ -1715,27 +1587,11 @@ fn decoded[T](take r: Result[T, std.codec.DecodeError]) -> Result[T, Error] {
     }
 }
 
-fn read_le(raw: Bytes, at: u64, width: u64) -> u64 {
-    match width {
-        1 => int.widen(raw[at]),
-        2 => {
-            let word: u16 = list.word_le(raw, at)
-            int.widen(word)
-        },
-        4 => {
-            let word: u32 = list.word_le(raw, at)
-            int.widen(word)
-        },
-        8 => list.word_le(raw, at),
-        _ => fail("store: invalid frame word width"),
-    }
-}
-
 fn row_value[V](r: Readers[V], id: u32, raw: Bytes) -> Result[V, Error] {
     if list.len(raw) < 2 {
         return Error(Decode(Truncated(0)))
     }
-    let number: u16 = int.truncate(read_le(raw, 0, 2))
+    let number: u16 = int.truncate(format.read_le(raw, 0, 2))
     if number == r.current {
         return decoded(std.codec.decode_at(r.codec, raw, 2))
     }
@@ -1764,7 +1620,7 @@ fn typed_bound[K](k: std.codec.Key[K], limit: Bound[K]) -> Result[Bound[Bytes], 
 }
 
 fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)], Error] {
-    if !same(tx.store, t.store) {
+    if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
@@ -1773,7 +1629,7 @@ fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)], Error]
 
 /// Borrow the stored schema tag and codec bytes, including any staged write.
 pub fn fetch_bytes[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[View[Bytes]], Error] in tx {
-    if !same(tx.store, t.store) {
+    if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
@@ -1814,7 +1670,7 @@ fn publish_row[V](id: u32, registered: Readers[V], c: Change) -> Result[Option[B
     if list.len(raw) < 2 {
         return Error(Decode(Truncated(0)))
     }
-    let number: u16 = int.truncate(read_le(raw, 0, 2))
+    let number: u16 = int.truncate(format.read_le(raw, 0, 2))
     let mut out: Bytes = list.with_capacity(list.len(raw) - 2)
     if number == registered.current {
         list.append(mut out, list.slice(raw, 2, list.len(raw)))
@@ -1845,7 +1701,7 @@ fn index_decoder[J, K, V, P](ix: Index[J, K, V, P]) -> RowDecoder[K, V] {
 }
 
 fn prefix_after(raw: Bytes) -> Result[Bytes, Error] {
-    let mut out = copied(raw)?
+    let mut out = failure_result_from_rep(types.copied(raw))?
     let mut i = list.len(out)
     while i > 0 {
         i -= 1
@@ -1995,7 +1851,7 @@ fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16, schema: Bytes
             let _ = list.set(mut older, int.widen(old.number), Some(take resolved))
         }
     }
-    let schemas = arc.new(RowSchemas(key: copied(c.key)?, value: copied(schema)?))
+    let schemas = arc.new(RowSchemas(key: failure_result_from_rep(types.copied(c.key))?, value: failure_result_from_rep(types.copied(schema))?))
     Ok(arc.new(Readers(codec: value, current: current, older: take older, schemas: take schemas)))
 }
 
@@ -2183,7 +2039,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
             break
         }
         let (take k, take v, source_width) = found?
-        if let Some((k2, v2)) = capacity(f(k, v))? {
+        if let Some((k2, v2)) = failure_result_from_rep(types.capacity(f(k, v)))? {
             let encoded = encode_key(to_key, k2)?
             if list.len(encoded) > 4092 {
                 return Error(Limit(Key))
@@ -2192,12 +2048,12 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
             // the row's size encodes it with no regrowth.
             let width = order.max(source_width, 2 + std.codec.least(to_value))
             let mut raw: Bytes = list.with_capacity(order.min(width, value_limit))
-            capacity(le(mut raw, int.widen(number), 2))?
+            failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(number), 2)))?
             std.codec.encode(to_value, v2, mut raw) ?=> |_| Limit(Value)
             if list.len(raw) > value_limit {
                 return Error(Limit(Value))
             }
-            let charge = 62 + round8(4 + list.len(encoded)) + round8(list.len(raw))
+            let charge = 62 + format.round8(4 + list.len(encoded)) + format.round8(list.len(raw))
             workspace = int.saturating_add(workspace, charge + 8)
             over_ceiling(workspace, ceiling)?
             live_bytes = int.saturating_add(live_bytes, charge)
@@ -2260,7 +2116,7 @@ fn catalog_insert(mut ids: u64, roots: Roots, k: Bytes, v: Bytes) -> Result[Root
 }
 
 fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
-    if !same(plan.store, from.store) {
+    if !types.same(plan.store.hi, plan.store.lo, from.store.hi, from.store.lo) {
         return Error(Foreign)
     }
     let meta = catalog_entry_in(plan.roots.catalog, from.catalog_key)?
@@ -2325,14 +2181,14 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         let convert_row: own[send] fn(Bytes, Bytes) -> Result[Option[(Bytes, Bytes)], Error] = fn(key_bytes: Bytes, raw_val: Bytes) -> Result[Option[(Bytes, Bytes)], Error] {
             let decoded_key = decoded(std.codec.decode_key(from.key, key_bytes))?
             let decoded_val = row_value(from.readers, from_id, raw_val)?
-            match capacity(f(decoded_key, decoded_val))? {
+            match failure_result_from_rep(types.capacity(f(decoded_key, decoded_val)))? {
                 Some((k2, v2)) => {
                     let encoded = encode_key(to_key, k2)?
                     if list.len(encoded) > 4092 {
                         return Error(Limit(Key))
                     }
                     let mut out_val: Bytes = list.new()
-                    capacity(le(mut out_val, int.widen(number), 2))?
+                    failure_result_from_rep(types.capacity(format.le(mut out_val, int.widen(number), 2)))?
                     std.codec.encode(to_value, v2, mut out_val) ?=> |_| Limit(Value)
                     if list.len(out_val) > value_limit {
                         return Error(Limit(Value))
@@ -2342,7 +2198,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
                 None => Ok(None),
             }
         }
-        capacity(list.try_reserve(mut plan.pending_migrates, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut plan.pending_migrates, 1)))?
         list.push(mut plan.pending_migrates, DeferredMigrate(from_id: from_id, to_id: id, to_name: named(to_name)?, olds: take old_ids, convert: take convert_row, preview_slot: preview_slot))
         return Ok(())
     }
@@ -2426,7 +2282,7 @@ pub type Change {
 pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] waits {
     read_access(r, a)?
     read_access(r, b)?
-    if !same(a.store, b.store) || a.open != b.open {
+    if !types.same(a.store.hi, a.store.lo, b.store.hi, b.store.lo) || a.open != b.open {
         return Error(Foreign)
     }
     snapshot_changes(r, a, b)
@@ -2444,85 +2300,6 @@ fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, ret
     int.saturating_add(int.saturating_sub(live_bytes, old_charge), entry(key, value))
 }
 
-// Store disk format. STORE-SPEC §2.3 and §11.10.
-const DISK_FORMAT: u64 = 12
-
-type DiskContext {
-    store: StoreId,
-    role: u8,
-    seq: u64
-}
-
-type DiskFrame {
-    kind: u16,
-    flags: u16,
-    payload: u64,
-    end: u64
-}
-
-type DiskHeader {
-    context: DiskContext,
-    prev_end: u64
-}
-
-// Every check starts with the store, file role, file sequence and offset.
-const BINDING_BYTES: u64 = 33
-
-fn put_binding(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
-    le(mut out, ctx.store.hi, 8)?
-    le(mut out, ctx.store.lo, 8)?
-    le(mut out, int.widen(ctx.role), 1)?
-    le(mut out, ctx.seq, 8)?
-    le(mut out, offset, 8)
-}
-
-fn disk_check_start(ctx: DiskContext, offset: u64, head: Bytes) -> Result[std.check.Xxh3, Capacity] {
-    let mut schema_binding: Bytes = (bound bytes round8(BINDING_BYTES) {
-        list.with_capacity(BINDING_BYTES)
-    })?
-    put_binding(mut schema_binding, ctx, offset)?
-    let mut state = std.check.start()
-    std.check.add(mut state, schema_binding, 0, BINDING_BYTES)
-    std.check.add(mut state, head, 0, 8)
-    Ok(take state)
-}
-
-// Writes the check of a frame laid out as head[0..8], check[8..16] and
-// payload[16..]. The binding goes past the payload, into capacity the caller
-// reserved, and is hashed from there, so sealing allocates nothing and needs no
-// allocation isolation when a commit seals its frame at the file end.
-fn seal_frame(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
-    let end = list.len(out)
-    if list.capacity(out) - end < BINDING_BYTES {
-        fail("store: frame has no room for its check binding")
-    }
-    put_binding(mut out, ctx, offset)?
-    let mut state = std.check.start()
-    std.check.add(mut state, out, end, end + BINDING_BYTES)
-    std.check.add(mut state, out, 0, 8)
-    std.check.add(mut state, out, 16, end)
-    list.truncate(mut out, end)
-    list.set_word_le(mut out, 8, std.check.finish(state))
-    Ok(())
-}
-
-fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Result[u64, Capacity] {
-    let mut state = disk_check_start(ctx, offset, head)?
-    std.check.add(mut state, payload, 0, list.len(payload))
-    Ok(std.check.finish(state))
-}
-
-fn disk_seal(ctx: DiskContext, offset: u64, kind: u16, flags: u16, payload: Bytes) -> Result[Bytes, Capacity] {
-    let mut out: Bytes = list.with_capacity(16 + list.len(payload) + BINDING_BYTES)
-    le(mut out, int.widen(kind), 2)?
-    le(mut out, int.widen(flags), 2)?
-    le(mut out, list.len(payload), 4)?
-    le(mut out, 0, 8)?
-    list.append(mut out, payload)
-    seal_frame(mut out, ctx, offset)?
-    Ok(take out)
-}
-
 fn disk_kind_limit(kind: u16) -> Option[u64] {
     match kind {
         0x0001 => Some(56),
@@ -2531,9 +2308,9 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0013 => Some(281),
         0x0021 => Some(8384),
         0x0022 => Some(16711688),
-        0x0023 => Some(PACK_INDEX_LIMIT),
+        0x0023 => Some(format.PACK_INDEX_LIMIT),
         0x0031 => Some(MANIFEST_LIMIT),
-        0x0040 => Some(CLAIM_BYTES),
+        0x0040 => Some(format.CLAIM_BYTES),
         0x0070 => Some(4),
         0x0080 => Some(128),
         0x0081 => Some(1048832),
@@ -2550,37 +2327,30 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
     }
 }
 
-type DiskFrameHead {
-    kind: u16,
-    flags: u16,
-    size: u64,
-    checksum: u64
-}
-
-fn disk_read_frame_head(file: String, raw: Bytes, at: u64) -> Result[DiskFrameHead, Error] {
+fn disk_read_frame_head(file: String, raw: Bytes, at: u64) -> Result[format.DiskFrameHead, Error] {
     let kind: u16 = list.word_le(raw, 0)
     let flags: u16 = list.word_le(raw, 2)
-    let size = read_le(raw, 4, 4)
+    let size = format.read_le(raw, 4, 4)
     if kind == 0 {
-        return Error(disk_fault(file, at, Kind(0)))
+        return Error(failure_from_rep(format.disk_fault(file, at, Kind(0))))
     }
     if flags & 65534 != 0 {
-        return Error(disk_fault(file, at, Flags))
+        return Error(failure_from_rep(format.disk_fault(file, at, Flags)))
     }
     match disk_kind_limit(kind) {
         Some(limit) => if size > limit {
-            return Error(disk_fault(file, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
         },
         None => if flags & 1 == 0 && size > 65536 {
-            return Error(disk_fault(file, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
         }
     }
-    Ok(DiskFrameHead(kind: kind, flags: flags, size: size, checksum: list.word_le(raw, 8)))
+    Ok(format.DiskFrameHead(kind: kind, flags: flags, size: size, checksum: list.word_le(raw, 8)))
 }
 
-fn disk_check_frame_kind(file: String, ctx: DiskContext, kind: u16, flags: u16, at: u64) -> Result[(), Error] {
+fn disk_check_frame_kind(file: String, ctx: format.DiskContext, kind: u16, flags: u16, at: u64) -> Result[(), Error] {
     if ((kind == 0x0040 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (((kind >= 0x0081 && kind <= 0x0085) || kind == 0x008B) && ctx.role != 6) {
-        return Error(disk_fault(file, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
     }
     if let None = disk_kind_limit(kind) {
         if flags & 1 != 0 {
@@ -2588,161 +2358,95 @@ fn disk_check_frame_kind(file: String, ctx: DiskContext, kind: u16, flags: u16, 
         }
     }
     if kind == 0x0001 && at != 0 {
-        return Error(disk_fault(file, at, Header))
+        return Error(failure_from_rep(format.disk_fault(file, at, Header)))
     }
     if kind == 0x00E0 || (kind >= 0x0100 && kind <= 0x0105) || ((kind == 0x0011 || kind == 0x0013) && ctx.role != 2) || (kind == 0x0012 && ctx.role != 4) || ((kind >= 0x0021 && kind <= 0x0023) && ctx.role != 3) || (kind == 0x0031 && ctx.role != 1) {
-        return Error(disk_fault(file, at, Kind(int.widen(kind))))
+        return Error(failure_from_rep(format.disk_fault(file, at, Kind(int.widen(kind)))))
     }
     if (kind == 0x0013 || kind == 0x0023) && flags != 1 {
-        return Error(disk_fault(file, at, Flags))
+        return Error(failure_from_rep(format.disk_fault(file, at, Flags)))
     }
     Ok(())
 }
 
-fn disk_read_frame(file: String, ctx: DiskContext, raw: Bytes, at: u64) -> Result[DiskFrame, Error] {
+fn disk_read_frame(file: String, ctx: format.DiskContext, raw: Bytes, at: u64) -> Result[format.DiskFrame, Error] {
     let frame = disk_frame_bytes(file, ctx, raw, at)?
     disk_check_frame_kind(file, ctx, frame.kind, frame.flags, at)?
     Ok(frame)
 }
 
-fn disk_frame_bytes(file: String, ctx: DiskContext, raw: Bytes, at: u64) -> Result[DiskFrame, Error] {
+fn disk_frame_bytes(file: String, ctx: format.DiskContext, raw: Bytes, at: u64) -> Result[format.DiskFrame, Error] {
     if at > list.len(raw) || list.len(raw) - at < 16 {
-        return Error(disk_fault(file, at, Truncated))
+        return Error(failure_from_rep(format.disk_fault(file, at, Truncated)))
     }
     let head = list.slice(raw, at, at + 16)
     let frame = disk_read_frame_head(file, head, at)?
     if frame.size > list.len(raw) - at - 16 {
-        return Error(disk_fault(file, at, Truncated))
+        return Error(failure_from_rep(format.disk_fault(file, at, Truncated)))
     }
     let end = at + 16 + frame.size
     let payload = list.slice(raw, at + 16, end)
-    let check = capacity(disk_check(ctx, at, head, payload))?
+    let check = failure_result_from_rep(types.capacity(format.disk_check(ctx, at, head, payload)))?
     if check != frame.checksum {
-        return Error(disk_fault(file, at, Checksum))
+        return Error(failure_from_rep(format.disk_fault(file, at, Checksum)))
     }
-    Ok(DiskFrame(kind: frame.kind, flags: frame.flags, payload: at + 16, end: end))
+    Ok(format.DiskFrame(kind: frame.kind, flags: frame.flags, payload: at + 16, end: end))
 }
 
-fn disk_header_bytes(ctx: DiskContext, prev_end: u64, authority: u8) -> Result[Bytes, Capacity] {
-    let mut payload: Bytes = list.with_capacity(56)
-    list.append(mut payload, string.as_bytes("HIRSTORE"))
-    le(mut payload, DISK_FORMAT, 4)?
-    list.push(mut payload, ctx.role)
-    list.push(mut payload, authority)
-    list.put_word_le(mut payload, 0u16)
-    le(mut payload, ctx.store.hi, 8)?
-    le(mut payload, ctx.store.lo, 8)?
-    le(mut payload, 0, 8)?
-    le(mut payload, ctx.seq, 8)?
-    le(mut payload, prev_end, 8)?
-    disk_seal(ctx, 0, 0x0001, 1, payload)
-}
-
-fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expected_id: Option[StoreId]) -> Result[DiskHeader, Error] {
+fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expected_id: Option[StoreId]) -> Result[format.DiskHeader, Error] {
     if list.len(raw) < 72 {
-        return Error(disk_fault(file, 0, Truncated))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Truncated)))
     }
-    let ctx = DiskContext(store: StoreId(hi: read_le(raw, 32, 8), lo: read_le(raw, 40, 8)), role: role, seq: read_le(raw, 56, 8))
+    let ctx = format.DiskContext(store: store_key_to_rep(StoreId(hi: format.read_le(raw, 32, 8), lo: format.read_le(raw, 40, 8))), role: role, seq: format.read_le(raw, 56, 8))
     let frame = disk_read_frame(file, ctx, raw, 0)?
     if frame.kind != 1 || frame.end != 72 {
-        return Error(disk_fault(file, 0, Header))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Header)))
     }
     let magic = list.slice(raw, 16, 24)
-    if magic != string.as_bytes("HIRSTORE") || raw[28] != role || read_le(raw, 30, 2) != 0 {
-        return Error(disk_fault(file, 0, Header))
+    if magic != string.as_bytes("HIRSTORE") || raw[28] != role || format.read_le(raw, 30, 2) != 0 {
+        return Error(failure_from_rep(format.disk_fault(file, 0, Header)))
     }
-    let format = read_le(raw, 24, 4)
-    if format != DISK_FORMAT {
-        return Error(Unsupported(format))
+    let disk_version = format.read_le(raw, 24, 4)
+    if disk_version != format.DISK_FORMAT {
+        return Error(Unsupported(disk_version))
     }
     if raw[29] != 0 {
         return Error(Unsupported(int.widen(raw[29])))
     }
-    let epoch = read_le(raw, 48, 8)
+    let epoch = format.read_le(raw, 48, 8)
     if epoch != 0 {
         return Error(Unsupported(epoch))
     }
     if let Some(expected) = seq {
         if expected != ctx.seq {
-            return Error(disk_fault(file, 0, Header))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Header)))
         }
     }
     if let Some(expected) = expected_id {
-        if !same(expected, ctx.store) {
-            return Error(disk_fault(file, 0, Header))
+        if !types.same(expected.hi, expected.lo, ctx.store.hi, ctx.store.lo) {
+            return Error(failure_from_rep(format.disk_fault(file, 0, Header)))
         }
     }
-    let previous = read_le(raw, 64, 8)
+    let previous = format.read_le(raw, 64, 8)
     if role != 2 && previous != 0 {
-        return Error(disk_fault(file, 0, Header))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Header)))
     }
-    Ok(DiskHeader(context: ctx, prev_end: previous))
+    Ok(format.DiskHeader(context: ctx, prev_end: previous))
 }
 
-fn disk_number(file: String, raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
-    if at > list.len(raw) || width > list.len(raw) - at {
-        return Error(disk_fault(file, at, Truncated))
-    }
-    let value = read_le(raw, at, width)
-    at += width
-    Ok(value)
-}
-
-fn disk_count(file: String, raw: Bytes, mut at: u64, least: u64) -> Result[u64, Error] {
-    let n = disk_number(file, raw, mut at, 4)?
-    if n > (list.len(raw) - at) / least {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    Ok(n)
-}
-
-fn disk_name(file: String, raw: Bytes, mut at: u64) -> Result[String, Error] {
-    let size = disk_number(file, raw, mut at, 2)?
-    disk_name_bytes(file, raw, mut at, size)
-}
-
-fn disk_name_bytes(file: String, raw: Bytes, mut at: u64, size: u64) -> Result[String, Error] {
-    if size > 255 || size > list.len(raw) - at {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    let chars = list.slice(raw, at, at + size)
-    let owned = copied(chars)?
-    at += size
-    match string.from_utf8(take owned) {
-        Ok(take text) => Ok(take text),
-        Error(_) => Error(disk_fault(file, at - size, Malformed))
-    }
-}
-
-fn disk_put_name(mut out: Bytes, name: String) -> Result[(), Capacity] {
-    le(mut out, string.byte_len(name), 2)?
-    Ok(list.append(mut out, string.as_bytes(name)))
-}
-
-fn encode_fork(context: DiskContext, offset: u64, head: Head, watermark: u64) -> Result[Bytes, Capacity] {
+fn encode_fork(context: format.DiskContext, offset: u64, head: Head, watermark: u64) -> Result[Bytes, Capacity] {
     let size = 26 + string.byte_len(head.name)
-    let mut out: Bytes = list.with_capacity(16 + size + BINDING_BYTES)
-    le(mut out, 0x0013, 2)?
-    le(mut out, 1, 2)?
-    le(mut out, size, 4)?
-    le(mut out, 0, 8)?
-    le(mut out, int.widen(head.id), 4)?
-    le(mut out, int.widen(head.parent), 4)?
-    le(mut out, head.forked_at, 8)?
-    disk_put_name(mut out, head.name)?
-    le(mut out, watermark, 8)?
-    seal_frame(mut out, context, offset)?
-    Ok(take out)
-}
-
-fn disk_blob(file: String, raw: Bytes, mut at: u64, limit: u64) -> Result[Bytes, Error] {
-    let size = disk_number(file, raw, mut at, 4)?
-    if size > limit || size > list.len(raw) - at {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    let value = list.slice(raw, at, at + size)
-    let out = copied(value)?
-    at += size
+    let mut out: Bytes = list.with_capacity(16 + size + format.BINDING_BYTES)
+    format.le(mut out, 0x0013, 2)?
+    format.le(mut out, 1, 2)?
+    format.le(mut out, size, 4)?
+    format.le(mut out, 0, 8)?
+    format.le(mut out, int.widen(head.id), 4)?
+    format.le(mut out, int.widen(head.parent), 4)?
+    format.le(mut out, head.forked_at, 8)?
+    format.disk_put_name(mut out, head.name)?
+    format.le(mut out, watermark, 8)?
+    format.seal_frame(mut out, context, offset)?
     Ok(take out)
 }
 
@@ -2858,9 +2562,9 @@ fn catalog_changes(base: Roots, target: Roots) -> Result[List[CatalogChange], Er
     while let Some((take key, old_arc)) = next_page_range(mut before)? {
         match get_page_row(target.catalog, key) {
             Some(new) => if list.compare_bytes(new, old_arc) != Equal {
-                list.push(mut edits, CatalogChange(key: take key, before: Some(copied(old_arc)?), after: Some(copied(new)?)))
+                list.push(mut edits, CatalogChange(key: take key, before: Some(failure_result_from_rep(types.copied(old_arc))?), after: Some(failure_result_from_rep(types.copied(new))?)))
             },
-            None => list.push(mut edits, CatalogChange(key: take key, before: Some(copied(old_arc)?), after: None)),
+            None => list.push(mut edits, CatalogChange(key: take key, before: Some(failure_result_from_rep(types.copied(old_arc))?), after: None)),
         }
     }
     let mut after = open_page_range(target.catalog, None, true, false, None)?
@@ -2870,7 +2574,7 @@ fn catalog_changes(base: Roots, target: Roots) -> Result[List[CatalogChange], Er
             None => false
         }
         if !exists {
-            list.push(mut edits, CatalogChange(key: take key, before: None, after: Some(copied(new)?)))
+            list.push(mut edits, CatalogChange(key: take key, before: None, after: Some(failure_result_from_rep(types.copied(new))?)))
         }
     }
     list.sort(mut edits, fn(a: CatalogChange, b: CatalogChange) -> Order {
@@ -2900,7 +2604,7 @@ fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Re
             // finished under the same id: its entries ship as a replaced range.
             if let (Some(before), Some(after)) = (change.before, change.after) {
                 if catalog_kind(decode_catalog(after)?.record) == IndexCollection && !record_public(before) {
-                    list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(copied(after)?)))
+                    list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(failure_result_from_rep(types.copied(after))?)))
                 }
             }
             continue
@@ -2909,7 +2613,7 @@ fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Re
             list.push(mut changes_by_id, RangeChange(id: old, catalog: None))
         }
         if let Some(raw) = change.after {
-            list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(copied(raw)?)))
+            list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(failure_result_from_rep(types.copied(raw))?)))
         }
     }
     list.sort(mut changes_by_id, fn(a: RangeChange, b: RangeChange) -> Order {
@@ -2944,8 +2648,8 @@ fn entries_of(data: PageTree, id: u32) -> Result[PageRange, Error] {
 
 fn checksum_row(mut checksum: std.check.Xxh3, key: Bytes, encoded: Bytes) -> Result[(), Error] {
     let mut lengths: Bytes = list.with_capacity(8u64)
-    capacity(le(mut lengths, list.len(key), 4u64))?
-    capacity(le(mut lengths, list.len(encoded), 4u64))?
+    failure_result_from_rep(types.capacity(format.le(mut lengths, list.len(key), 4u64)))?
+    failure_result_from_rep(types.capacity(format.le(mut lengths, list.len(encoded), 4u64)))?
     std.check.add(mut checksum, lengths, 0u64, 8u64)
     std.check.add(mut checksum, key, 0u64, list.len(key))
     std.check.add(mut checksum, encoded, 0u64, list.len(encoded))
@@ -2968,9 +2672,9 @@ fn range_inventory(data: PageTree, ranges: List[RangeChange]) -> Result[List[Inv
 }
 
 pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
-    let mut state = capacity(current_state(source.db))?
+    let mut state = failure_result_from_rep(types.capacity(current_state(source.db)))?
     state.tips[0].roots = share_roots(staged.plan.roots)
-    over_ceiling(capacity(state_account(state))?, available_resident(source.db))
+    over_ceiling(failure_result_from_rep(types.capacity(state_account(state)))?, available_resident(source.db))
 }
 
 fn db_target(db: Db) -> Option[TargetLimits] {
@@ -3040,12 +2744,6 @@ fn remove_cut_files(d: Dir, take plan: DiskRemovals) -> Result[(), Error] waits 
     Ok(())
 }
 
-fn disk_identity(r: Random) -> Result[StoreId, Capacity] {
-    let mut raw: Bytes = list.with_capacity(16)
-    host.random(r, mut raw)
-    Ok(StoreId(hi: list.word_le(raw, 0), lo: list.word_le(raw, 8)))
-}
-
 // END damage loses the detection boundary, never the journal's valid prefix.
 // A valid unknown MUST kind is a newer format and still refuses the open.
 fn disk_read_end(file: String, id: StoreId, seq: u64, raw: Bytes) -> Result[u64, Error] {
@@ -3057,23 +2755,23 @@ fn disk_read_end(file: String, id: StoreId, seq: u64, raw: Bytes) -> Result[u64,
         let frame = disk_read_frame(file, header.context, raw, at)?
         if frame.kind == 0x0012 {
             if let Some(_) = found {
-                return Error(disk_fault(file, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
             }
             if frame.end - frame.payload != 8 {
-                return Error(disk_fault(file, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
             }
-            found = Some(read_le(raw, frame.payload, 8))
+            found = Some(format.read_le(raw, frame.payload, 8))
         } else {
             room += frame.end - at
             if room > 1048576 {
-                return Error(disk_fault(file, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
             }
         }
         at = frame.end
     }
     match found {
         Some(value) => Ok(value),
-        None => Error(disk_fault(file, 72, Malformed))
+        None => Error(failure_from_rep(format.disk_fault(file, 72, Malformed)))
     }
 }
 
@@ -3184,7 +2882,7 @@ fn manifest_state(m: PageManifest, all: List[Roots]) -> Result[State, Capacity] 
 
 fn check_expected_store(expected: Option[StoreId], found: StoreId) -> Result[(), Error] {
     if let Some(wanted) = expected {
-        if !same(wanted, found) {
+        if !types.same(wanted.hi, wanted.lo, found.hi, found.lo) {
             return Error(Foreign)
         }
     }
@@ -3196,7 +2894,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
     let mut loaded = match take selected {
         Ok((id, take manifest)) => {
             check_expected_store(options.expect, id)?
-            check_limits(options.limits, manifest.limits)?
+            failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), limits_to_rep(manifest.limits)))?
             let validated = select_page_manifest(d, id, take manifest)?
             let loaded = disk_loaded(id, take validated)?
             // §13.8: a catalog with a Tiered collection opens only on a funded
@@ -3213,19 +2911,19 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
             if !options.create {
                 return Error(NotFound)
             }
-            let id = capacity(disk_identity(r))?
-            let manifest = page_manifest_empty(named_limits(options.limits))
+            let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+            let manifest = page_manifest_empty(limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))))
             let mut creation = disk_creation_block()?
-            let (take segment, take end_file, take header) = disk_new_segment(d, c, id, 1, 0, mut creation)?
-            disk_publish_manifest(d, id, manifest)?
-            let genesis = capacity(main_state(empty_roots(), 0, 0))?
+            let (take segment, take end_file, take header) = disk_new_segment(d, c, store_key_from_rep(id), 1, 0, mut creation)?
+            disk_publish_manifest(d, store_key_from_rep(id), manifest)?
+            let genesis = failure_result_from_rep(types.capacity(main_state(empty_roots(), 0, 0)))?
             let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
-            return Ok(DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: named_limits(options.limits)))
+            return Ok(DiskStartup(store: store_key_from_rep(id), fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits)))))
         },
         Error(take problem) => return Error(take problem),
     }
     let manifested = disk_allocation(scoped fn() -> Result[State, Error] {
-        capacity(manifest_state(loaded.manifest, loaded.all))
+        failure_result_from_rep(types.capacity(manifest_state(loaded.manifest, loaded.all)))
     })?
     list.clear(mut loaded.all)
     let owners = disk_allocation(scoped fn() -> Result[Map[IncomingEdge, u64], Error] {
@@ -3240,14 +2938,14 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
     check_stream_quota(state.tips[0u64].roots.streams, options.streams_max)?
     over_ceiling(live_bytes, options.resident_limit)?
     let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
-        let roots = capacity(state_roots(state))?
+        let roots = failure_result_from_rep(types.capacity(state_roots(state)))?
         Ok(int.saturating_add(resident_images(roots, Some(view loaded.lists)), location_storage_charge(loaded.locations)))
     })?
     let Some(seq) = int.checked_add(last_seq, 1) else {
         return Error(Limit(Ids))
     }
     // Fence the removal of an orphan END before making its successor HEADER.
-    let orphan_end = capacity(disk_path("j-", seq, ".end"))?
+    let orphan_end = failure_result_from_rep(types.capacity(disk_path("j-", seq, ".end")))?
     let _ = disk_remove_optional(d, orphan_end)?
     disk_io(host.sync_dir(d))?
     let mut creation = disk_creation_block()?
@@ -3373,8 +3071,8 @@ fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
     let State(tips: take tips, pins: take pins, next_branch: next_branch, next_table: _) = take state
     let mut heads: List[Head] = list.new()
     let mut names: Map[String, u32] = map.new()
-    capacity(list.try_reserve(mut heads, list.len(tips)))?
-    capacity(map.try_reserve(mut names, list.len(tips) - 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut heads, list.len(tips))))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut names, list.len(tips) - 1)))?
     let mut total = 0u64
     for take t in take tips {
         let Tip(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
@@ -3441,7 +3139,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
     loop {
         let (take raw, id, take manifest) = read_only_manifest(d)?
         check_expected_store(options.expect, id)?
-        check_limits(options.limits, manifest.limits)?
+        failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), limits_to_rep(manifest.limits)))?
         let candidate = capture_walk(d, id, manifest.first_live, restarted)?
         let Some(take selected) = take candidate else {
             restarted = true
@@ -3492,9 +3190,9 @@ fn open_checks(options: Options) -> Result[(), Error] {
     if options.group_bytes == 0 {
         return Error(Missing("group_bytes"))
     }
-    check_named_limits(options.limits)?
+    failure_result_from_rep(types.check_named_limits(optional_limits_to_rep(options.limits)))?
     // Before the MANIFEST is read, the floor uses the named limits or the ceilings.
-    if let Some(problem) = journal_floor(options.checkpoint_bytes, options.journal_limit, named_limits(options.limits).frame) {
+    if let Some(problem) = types.journal_floor(options.checkpoint_bytes, options.journal_limit, limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))).frame) {
         return Error(Full(Journal(problem)))
     }
     Ok(())
@@ -3537,7 +3235,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
-    capacity(result.unwrap(channel.receive(waiting)))?
+    failure_result_from_rep(types.capacity(result.unwrap(channel.receive(waiting))))?
     let journal_wake = if cadence_spec.group_delay_us == 0 {
         NoJournalWake
     } else {
@@ -3604,7 +3302,7 @@ type CutTiming {
     drain_groups: u64
 }
 
-fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
+fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     let target = db_target(db)
     let pack_bytes = match target {
         Some(wanted) => wanted.pack,
@@ -3614,12 +3312,12 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut
     disk_cut_with_limit(mut db, take delta, write_seal, target, pack_bytes, limit, mut timing)
 }
 
-fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
+fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     let mut emitted: Option[Map[u64, std.page.PagePtr]] = None
     disk_cut_with_limit_emitted(mut db, take requested, write_seal, target, pack_bytes, limit, mut timing, mut emitted)
 }
 
-fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming], mut emitted_out: Option[Map[u64, std.page.PagePtr]]) -> Result[Ticket, Error] waits {
+fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming], mut emitted_out: Option[Map[u64, std.page.PagePtr]]) -> Result[Ticket, Error] waits {
     let mut delta = take requested
     if let NoHolderChange = delta {
         if let Some(slot) = orphan_import_pin(db) {
@@ -3779,21 +3477,6 @@ pub type CallRecord: codec + shareable + send {
 
 pub type StopKind: key = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
 
-// The CALL carries the original execution context only when a later frame
-// settles the call. An inline reply uses the context of its own frame.
-type Settlement: shareable + send {
-    way: u8,
-    base: u64,
-    at: u64,
-    seed: u64,
-    stop: Option[StopKind]
-}
-
-type CallSection: shareable + send {
-    record: CallRecord,
-    settlement: Option[Settlement]
-}
-
 pub type Recorded {
     record: CallRecord,
     settle: u8,
@@ -3812,7 +3495,7 @@ fn call_checked(c: CallRecord) -> Result[(), Error] {
             return Error(Missing("revision"))
         }
     }
-    if !call_code_size(list.len(c.code)) {
+    if !format.call_code_size(list.len(c.code)) {
         return Error(Missing("code"))
     }
     Ok(())
@@ -3831,268 +3514,117 @@ fn check_completion_record(complete: Completion, rec: Option[CallRecord]) -> Res
     Ok(())
 }
 
-fn call_code_size(size: u64) -> bool {
-    size == 16 || size == 48
-}
-
-type JournalTrim: shareable + send {
-    floor: u64,
-    dropped: u64
-}
-
-type JournalOp: shareable + send {
-    key: Bytes,
-    value: Option[Bytes],
-    prior: u32,
-    trim: Option[JournalTrim]
-}
-
-type JournalCommit {
-    branch: u32,
-    version: u64,
-    at: u64,
-    data: List[JournalOp],
-    streams: List[JournalOp],
-    keyed: List[KeyedEdit],
-    call: Option[CallSection],
-    // The COMMIT payload's length, checked against the recorded limits.
-    payload: u64
-}
-
-type JournalFork {
-    id: u32,
-    parent: u32,
-    forked_at: u64,
-    name: String,
-    watermark: u64
-}
-
-type JournalEvent = Commit(JournalCommit) | Fork(JournalFork)
-
-fn journal_event_kind(kind: u16) -> bool {
-    kind == 0x0011 || kind == 0x0013
-}
-
-fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Option[CallSection]) -> Result[List[JournalOp], Error] {
-    let operation_count = disk_count(file, raw, mut at, if stream {
-        5u64
-    } else {
-        9u64
-    })?
-    let mut ops: List[JournalOp] = list.new()
-    let value_limit = if stream {
-        1048576u64
-    } else {
-        FORMAT_VALUE_MAX
-    }
-    for i in 0u64 .. operation_count {
-        let op_at = at
-        let kind = disk_number(file, raw, mut at, 1)?
-        if kind == 3 && !stream {
-            if list.len(raw) - at < 20 {
-                return Error(disk_fault(file, op_at, Malformed))
-            }
-            let key = copied(list.slice(raw, at, at + 4))?
-            let floor = word_be(raw, at + 4)
-            let dropped = word_be(raw, at + 12)
-            at += 20
-            list.push(mut ops, JournalOp(key: take key, value: None, prior: 0, trim: Some(JournalTrim(floor: floor, dropped: dropped))))
-            continue
-        }
-        if kind < 1 || kind > 3 {
-            return Error(disk_fault(file, op_at, Malformed))
-        }
-        let key = disk_blob(file, raw, mut at, 4096)?
-        let prior = if stream {
-            0u64
-        } else {
-            disk_number(file, raw, mut at, 4)?
-        }
-        if prior > FORMAT_VALUE_MAX + 1 {
-            return Error(disk_fault(file, op_at, Malformed))
-        }
-        let value: Option[Bytes] = if kind == 2 {
-            None
-        } else {
-            let stored = disk_blob(file, raw, mut at, value_limit)?
-            if kind == 3 {
-                if let Some(_) = call {
-                    return Error(disk_fault(file, op_at, Malformed))
-                }
-                if list.len(stored) < 41 || stored[40] != 2 {
-                    return Error(disk_fault(file, op_at, Malformed))
-                }
-                call = Some(decode_call(file, raw, mut at, copied(key)?)?)
-            }
-            Some(take stored)
-        }
-        list.push(mut ops, JournalOp(key: take key, value: take value, prior: int.truncate(prior), trim: None))
-    }
-    Ok(take ops)
-}
-
-fn decode_settlement(file: String, raw: Bytes, mut at: u64, way: u8) -> Result[Settlement, Error] {
-    if list.len(raw) - at < 24 {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    let base = word_be(raw, at)
-    let wall = word_be(raw, at + 8)
-    let seed = word_be(raw, at + 16)
-    at += 24
-    let stop: Option[StopKind] = if way == 1 {
-        if at == list.len(raw) {
-            return Error(disk_fault(file, at, Malformed))
-        }
-        let tag = raw[at]
-        at += 1
-        match tag {
-            1 => Some(Raised),
-            2 => {
-                if list.len(raw) - at < 8 {
-                    return Error(disk_fault(file, at, Malformed))
-                }
-                let steps = word_be(raw, at)
-                at += 8
-                Some(OutOfSteps(steps))
-            },
-            3 => Some(OutOfBytes),
-            4 => Some(Conflict),
-            _ => return Error(disk_fault(file, at - 1, Malformed)),
-        }
-    } else {
-        None
-    }
-    Ok(Settlement(way: way, base: base, at: wall, seed: seed, stop: stop))
-}
-
-fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
+fn journal_decode_commit(file: String, raw: Bytes) -> Result[format.JournalCommit, Error] {
     let mut at = 0u64
-    let br: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-    let head = disk_number(file, raw, mut at, 8)?
-    let wall = disk_number(file, raw, mut at, 8)?
-    let sections = disk_number(file, raw, mut at, 1)?
+    let br: u32 = int.truncate(failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?)
+    let head = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+    let wall = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+    let sections = failure_result_from_rep(format.disk_number(file, raw, mut at, 1))?
     if sections == 0 || sections > 4 {
-        return Error(disk_fault(file, at - 1, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, at - 1, Malformed)))
     }
-    let mut data: List[JournalOp] = list.new()
-    let mut streams: List[JournalOp] = list.new()
-    let mut keyed: List[KeyedEdit] = list.new()
-    let mut call: Option[CallSection] = None
+    let mut data: List[format.JournalOp] = list.new()
+    let mut streams: List[format.JournalOp] = list.new()
+    let mut keyed: List[format.KeyedEdit] = list.new()
+    let mut call: Option[format.CallSection] = None
     let mut previous_tag: Option[u64] = None
     for _ in 0u64 .. sections {
-        let tag = disk_number(file, raw, mut at, 1)?
+        let tag = failure_result_from_rep(format.disk_number(file, raw, mut at, 1))?
         if tag > 3u64 || (if let Some(prior_tag) = previous_tag {
             tag <= prior_tag
         } else {
             false
         }) {
-            return Error(disk_fault(file, at - 1, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, at - 1, Malformed)))
         }
         previous_tag = Some(tag)
         match tag {
             0 => {
-                data = journal_ops(file, raw, false, mut at, mut call)?
+                data = failure_result_from_rep(format.journal_ops(file, raw, false, mut at, mut call))?
             },
             1 => {
-                streams = journal_ops(file, raw, true, mut at, mut call)?
+                streams = failure_result_from_rep(format.journal_ops(file, raw, true, mut at, mut call))?
                 for operation in streams {
                     if list.len(operation.key) == 0u64 {
-                        return Error(disk_fault(file, at, Malformed))
+                        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
                     }
                 }
             },
             2 => {
-                let mut no_call: Option[CallSection] = None
-                let mut control_rows = journal_ops(file, raw, true, mut at, mut no_call)?
+                let mut no_call: Option[format.CallSection] = None
+                let mut control_rows = failure_result_from_rep(format.journal_ops(file, raw, true, mut at, mut no_call))?
                 if list.len(control_rows) != 1u64 || list.len(control_rows[0u64].key) != 0u64 {
-                    return Error(disk_fault(file, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
                 }
                 if let Some(_) = no_call {
-                    return Error(disk_fault(file, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
                 }
                 let row = option.unwrap(list.pop(mut control_rows))
                 {
                     let Some(control) = view row.value else {
-                        return Error(disk_fault(file, at, Malformed))
+                        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
                     }
-                    let _ = decode_stream_control(control) ?=> |_| disk_fault(file, at, Malformed)
+                    let _ = decode_stream_control(control) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
                 }
                 list.insert(mut streams, 0u64, take row)
             },
             _ => {
                 if br != 0 {
-                    return Error(disk_fault(file, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
                 }
                 keyed = decode_keyed_edits(file, raw, mut at)?
             },
         }
     }
     if at != list.len(raw) {
-        return Error(disk_fault(file, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
     }
     if let Some(c) = call {
         let mut matching = 0u64
         for op in streams {
-            if stream_record_matches(op.key, c.record.stream) {
+            if format.stream_record_matches(op.key, c.record.stream.caller.issuer, c.record.stream.caller.subject, c.record.stream.id.t, c.record.stream.id.n) {
                 matching += 1
             }
         }
         if matching != 1 {
-            return Error(disk_fault(file, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
         }
     }
-    Ok(JournalCommit(branch: br, version: head, at: wall, data: take data, streams: take streams, keyed: take keyed, call: take call, payload: list.len(raw)))
+    Ok(format.JournalCommit(branch: br, version: head, at: wall, data: take data, streams: take streams, keyed: take keyed, call: take call, payload: list.len(raw)))
 }
 
-fn journal_decode(file: String, kind: u16, raw: Bytes) -> Result[JournalEvent, Error] {
+fn journal_decode(file: String, kind: u16, raw: Bytes) -> Result[format.JournalEvent, Error] {
     if kind == 0x0011 {
         return Ok(Commit(journal_decode_commit(file, raw)?))
     }
-    Ok(Fork(journal_decode_fork(file, raw)?))
+    Ok(Fork(failure_result_from_rep(format.journal_decode_fork(file, raw))?))
 }
 
-fn journal_torn(why: Why) -> bool {
-    match why {
-        Truncated => true,
-        Flags => true,
-        Checksum => true,
-        Malformed => true,
-        Kind(0) => true,
-        _ => false,
-    }
-}
-
-fn journal_prefix(mut input: JournalInput, path: String, offset: u64, width: u64) -> Result[Bytes, Error] waits {
-    if offset > input.size || width > input.size - offset {
-        return Error(disk_fault(path, offset, Truncated))
+fn journal_prefix(mut input: format.JournalInput, path: String, offset: u64, width: u64) -> Result[Bytes, Error] waits {
+    if offset > format.journal_input_size(input) || width > format.journal_input_size(input) - offset {
+        return Error(failure_from_rep(format.disk_fault(path, offset, Truncated)))
     }
     let mut spent = 0u64
     journal_read_prefix(mut input, path, offset, width, mut spent)
 }
 
-fn journal_read_prefix(mut input: JournalInput, path: String, offset: u64, width: u64, mut spent: u64) -> Result[Bytes, Error] waits {
+fn journal_read_prefix(mut input: format.JournalInput, path: String, offset: u64, width: u64, mut spent: u64) -> Result[Bytes, Error] waits {
     let mut raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(width))
     })?
     while list.len(raw) < width {
         let start = journal_chunk(mut input, path, offset + list.len(raw))?
-        let part = order.min(width - list.len(raw), list.len(input.chunk) - start)
-        list.append(mut raw, list.slice(input.chunk, start, start + part))
+        let part = order.min(width - list.len(raw), list.len(format.journal_input_chunk(input)) - start)
+        list.append(mut raw, list.slice(format.journal_input_chunk(input), start, start + part))
         spent = int.saturating_add(spent, part)
     }
     Ok(take raw)
 }
 
-type JournalFrame {
-    end: u64,
-    kind: u16,
-    payload: Option[Bytes]
-}
-
-fn journal_read_frame(mut input: JournalInput, path: String, context: DiskContext, offset: u64) -> Result[JournalFrame, Error] waits {
+fn journal_read_frame(mut input: format.JournalInput, path: String, context: format.DiskContext, offset: u64) -> Result[format.JournalFrame, Error] waits {
     let head = journal_prefix(mut input, path, offset, 16)?
     let frame = disk_read_frame_head(path, head, offset)?
-    let keep = journal_event_kind(frame.kind)
+    let keep = format.journal_event_kind(frame.kind)
     let payload = disk_stream_payload(mut input, path, context, offset, head, frame, if keep {
         frame.size
     } else {
@@ -4104,20 +3636,20 @@ fn journal_read_frame(mut input: JournalInput, path: String, context: DiskContex
     } else {
         None
     }
-    Ok(JournalFrame(end: offset + 16 + frame.size, kind: frame.kind, payload: take event_payload))
+    Ok(format.JournalFrame(end: offset + 16 + frame.size, kind: frame.kind, payload: take event_payload))
 }
 
-fn disk_stream_payload(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, keep: u64) -> Result[Bytes, Error] waits {
+fn disk_stream_payload(mut input: format.JournalInput, path: String, context: format.DiskContext, offset: u64, head: Bytes, frame: format.DiskFrameHead, keep: u64) -> Result[Bytes, Error] waits {
     let mut spent = 0u64
     disk_stream_payload_counted(mut input, path, context, offset, head, frame, keep, mut spent)
 }
 
-fn disk_stream_payload_counted(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, keep: u64, mut spent: u64) -> Result[Bytes, Error] waits {
-    if frame.size > input.size - offset - 16 {
-        return Error(disk_fault(path, offset, Truncated))
+fn disk_stream_payload_counted(mut input: format.JournalInput, path: String, context: format.DiskContext, offset: u64, head: Bytes, frame: format.DiskFrameHead, keep: u64, mut spent: u64) -> Result[Bytes, Error] waits {
+    if frame.size > format.journal_input_size(input) - offset - 16 {
+        return Error(failure_from_rep(format.disk_fault(path, offset, Truncated)))
     }
     let mut check = disk_allocation(scoped fn() -> Result[std.check.Xxh3, Error] {
-        capacity(disk_check_start(context, offset, head))
+        failure_result_from_rep(types.capacity(format.disk_check_start(context, offset, head)))
     })?
     let mut payload = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(keep))
@@ -4126,40 +3658,40 @@ fn disk_stream_payload_counted(mut input: JournalInput, path: String, context: D
     let mut at = offset + 16
     while at < end {
         let start = journal_chunk(mut input, path, at)?
-        let part = order.min(end - at, list.len(input.chunk) - start)
-        std.check.add(mut check, input.chunk, start, start + part)
+        let part = order.min(end - at, list.len(format.journal_input_chunk(input)) - start)
+        std.check.add(mut check, format.journal_input_chunk(input), start, start + part)
         if list.len(payload) < keep {
             let capture = order.min(part, keep - list.len(payload))
-            list.append(mut payload, list.slice(input.chunk, start, start + capture))
+            list.append(mut payload, list.slice(format.journal_input_chunk(input), start, start + capture))
         }
         at += part
         spent = int.saturating_add(spent, part)
     }
     if std.check.finish(check) != frame.checksum {
-        return Error(disk_fault(path, offset, Checksum))
+        return Error(failure_from_rep(format.disk_fault(path, offset, Checksum)))
     }
     Ok(take payload)
 }
 
 // Middle segments stop at the next HEADER's prev_end. Only the last segment
 // reads beyond its durable boundary, stopping at the first physically bad frame.
-fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64, start: u64, boundary: Option[u64], final_item: bool, mut destination: S, consume: scoped fn(mut S, take JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
+fn journal_scan[S](mut input: format.JournalInput, path: String, id: StoreId, seq: u64, start: u64, boundary: Option[u64], final_item: bool, mut destination: S, consume: scoped fn(mut S, take format.JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
     let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 2, Some(seq), Some(id))?
     let durable_end = match boundary {
         Some(d) => d,
         None => 72u64
     }
-    if durable_end < 72 || durable_end > input.size {
-        return Error(disk_fault(path, input.size, Truncated))
+    if durable_end < 72 || durable_end > format.journal_input_size(input) {
+        return Error(failure_from_rep(format.disk_fault(path, format.journal_input_size(input), Truncated)))
     }
     let stop = if final_item {
-        input.size
+        format.journal_input_size(input)
     } else {
         durable_end
     }
     // A catch-up resumes a segment at the end the previous round replayed.
     if start < 72 || start > durable_end {
-        return Error(disk_fault(path, start, Truncated))
+        return Error(failure_from_rep(format.disk_fault(path, start, Truncated)))
     }
     let mut at = start
     let mut accepted = 0u64
@@ -4168,7 +3700,7 @@ fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64,
         let frame = match take received {
             Ok(take valid) => take valid,
             Error(Corrupt(take fault)) => {
-                if !final_item || at < durable_end || !journal_torn(fault.why) {
+                if !final_item || at < durable_end || !format.journal_torn(why_to_rep(fault.why)) {
                     return Error(Corrupt(take fault))
                 }
                 break
@@ -4176,10 +3708,10 @@ fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64,
             Error(take problem) => return Error(take problem),
         }
         if at < durable_end && frame.end > durable_end {
-            return Error(disk_fault(path, at, Truncated))
+            return Error(failure_from_rep(format.disk_fault(path, at, Truncated)))
         }
         if let Some(payload) = frame.payload {
-            let event = disk_allocation(scoped fn() -> Result[JournalEvent, Error] {
+            let event = disk_allocation(scoped fn() -> Result[format.JournalEvent, Error] {
                 journal_decode(path, frame.kind, payload)
             })?
             consume(mut destination, take event)?
@@ -4209,7 +3741,7 @@ type JournalReplay {
 fn journal_replay(take state: State, next_node: u64, limits: StoreLimits) -> Result[JournalReplay, Error] {
     let (take names, total) = disk_allocation(scoped fn() -> Result[(Map[String, u32], u64), Error] {
         let mut names: Map[String, u32] = map.new()
-        capacity(map.try_reserve(mut names, list.len(state.tips)))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut names, list.len(state.tips))))?
         let mut total = 0u64
         for held in state.pins {
             total += pin_root_bytes(held.name, held.roots)
@@ -4226,11 +3758,11 @@ fn journal_replay(take state: State, next_node: u64, limits: StoreLimits) -> Res
 
 fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
-        capacity(state_account(replay.state))
+        failure_result_from_rep(types.capacity(state_account(replay.state)))
     })
 }
 
-fn journal_following(d: Dir, id: StoreId, seq: u64, flush: Option[Clock]) -> Result[Option[DiskHeader], Error] waits {
+fn journal_following(d: Dir, id: StoreId, seq: u64, flush: Option[Clock]) -> Result[Option[format.DiskHeader], Error] waits {
     let Some(next_seq) = int.checked_add(seq, 1) else {
         return Ok(None)
     }
@@ -4245,7 +3777,7 @@ fn journal_following(d: Dir, id: StoreId, seq: u64, flush: Option[Clock]) -> Res
             }
             if beyond || disk_end(d, id, next_seq)? != None {
                 let next_path = journal_path(next_seq, "")?
-                return Error(disk_fault(next_path, 0, Header))
+                return Error(failure_from_rep(format.disk_fault(next_path, 0, Header)))
             }
             Ok(None)
         },
@@ -4265,7 +3797,7 @@ fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {
         let no_values: List[u64] = list.new()
         let _ = no_values[0]
     }
-    Ok(key_word(7))
+    Ok(types.key_word(7))
 }
 
 // L33: AM5 and MEM-24 give 4096 + 32 bytes. MEM-30 gives 8192 + 6 steps.
@@ -4280,11 +3812,11 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         return false
     }
     let mut db = test_db(c, 1073741824)
-    let key = key_word(23)
+    let key = types.key_word(23)
     let request = request_digest(key, key)
     let stream_name = StreamKey(caller: Caller(issuer: 2u8, subject: take key), id: StreamId(t: keyed_time(db), n: 0u64))
     let no_record: Option[CallRecord] = None
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     for fault in[false, true] {
         let p = if fault {
             1u64
@@ -4342,11 +3874,11 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             })
         }
         match take exact {
-            Ok(Ok(Committed(receipt))) if !fault => if receipt.reply != key_word(7) {
+            Ok(Ok(Committed(receipt))) if !fault => if receipt.reply != types.key_word(7) {
                 return false
             },
-            Ok(Ok(Failed(take pending_run, Raised(2u32)))) if fault => match conclude(mut db, take pending_run, key_word(2), Resident) {
-                Ok(Committed(receipt)) => if receipt.reply != key_word(2) {
+            Ok(Ok(Failed(take pending_run, Raised(2u32)))) if fault => match conclude(mut db, take pending_run, types.key_word(2), Resident) {
+                Ok(Committed(receipt)) => if receipt.reply != types.key_word(2) {
                     return false
                 },
                 _ => return false,
@@ -4377,10 +3909,10 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
 fn reserve_pinned_data(mut db: Db, t: Table[u64, u64], rows: u64) -> () {
     let mut input: List[std.page.Row] = list.with_capacity(rows)
     let mut raw: Bytes = list.with_capacity(10)
-    result.unwrap(le(mut raw, 0, 2))
-    result.unwrap(le(mut raw, 1, 8))
+    result.unwrap(format.le(mut raw, 0, 2))
+    result.unwrap(format.le(mut raw, 1, 8))
     for i in 0u64 .. rows {
-        list.push(mut input, std.page.Row(key: key_word(i), value: result.unwrap(copied(raw)), charge: 94))
+        list.push(mut input, std.page.Row(key: types.key_word(i), value: result.unwrap(failure_result_from_rep(types.copied(raw))), charge: 94))
     }
     result.unwrap(bulk_store_collection(mut db.heads[0].roots.collections, t.id, 1, input, mut db.next_node))
     db.resident = one_page_account(db.heads[0].roots)
@@ -4402,7 +3934,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
             return false
         }
     }
-    let label = key_word(47)
+    let label = types.key_word(47)
     let request = request_digest(label, label)
     let stream = StreamKey(caller: Caller(issuer: 2u8, subject: take label), id: StreamId(t: keyed_time(db), n: 0u64))
     let admission = result.unwrap(admit(mut db, stream, 0, request))
@@ -4420,10 +3952,10 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let short = bound steps grant.steps {
         metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
-            Ok(key_word(7))
+            Ok(types.key_word(7))
         })
     }
     match take short {
@@ -4433,9 +3965,9 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
         _ => return false,
     }
     match serve(mut db, take complete, plan, None, (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
-        Ok(key_word(7))
+        Ok(types.key_word(7))
     }) {
-        Ok(Committed(receipt)) => receipt.reply == key_word(7) && accounts(db).exact && db.checkpointed == cut + 1,
+        Ok(Committed(receipt)) => receipt.reply == types.key_word(7) && accounts(db).exact && db.checkpointed == cut + 1,
         _ => false,
     }
 }

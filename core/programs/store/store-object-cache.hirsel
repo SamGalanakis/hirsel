@@ -84,9 +84,9 @@ fn pack_cache_scan(d: Dir, requested: u64, evict: bool) -> Result[u64, Error] wa
             if kind == 1u8 || kind == 2u8 || size < 60u16 || size > 104u16 || buf[from] != b'p' || (size > 60u16 && buf[from + 60] != b'-') {
                 continue
             }
-            let path = capacity(bound bytes 104 {
+            let path = failure_result_from_rep(types.capacity(bound bytes 104 {
                 string.from_utf8(clone(list.slice(buf, from, offset)))
-            })?
+            }))?
             let Ok(take name) = take path else {
                 continue
             }
@@ -161,7 +161,7 @@ fn pack_cache_read(cache: ObjectsCache, path: String, width: u64, expected: Opti
             if list.len(raw) == stored_width {
                 let digest = match expected {
                     Some(value) => value,
-                    None => read_le(raw, width, 8),
+                    None => format.read_le(raw, width, 8),
                 }
                 if digest == std.check.xxh3(raw, 0, width) {
                     list.truncate(mut raw, width)

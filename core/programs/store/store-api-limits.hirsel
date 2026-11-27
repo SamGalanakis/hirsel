@@ -1,0 +1,25 @@
+// A store's limits: the ceilings, the floors, and the checks that use them
+// (STORE-SPEC §11.1 AP4a).
+pub const FRAME_LIMIT: u64 = types.FRAME_LIMIT
+
+pub const VALUE_LIMIT: u64 = types.VALUE_LIMIT
+
+/// A store's own limits (§11.1 AP4a). Genesis records them in the MANIFEST,
+/// every later open reads them back, and every limit check uses them:
+/// `frame` bounds a journal frame (16 + the COMMIT payload), `value` a stored
+/// value, `meta` the MANIFEST's branch and pin records.
+pub type StoreLimits: codec + shareable + cross {
+    frame: u64,
+    value: u64,
+    meta: u64
+}
+
+/// Today's ceilings, the limits of a store made without any.
+pub fn default_limits() -> StoreLimits {
+    limits_from_rep(types.default_limits())
+}
+
+/// The limits this store records (§11.1 AP4a).
+pub fn store_limits(db: Db) -> StoreLimits {
+    db.limits
+}

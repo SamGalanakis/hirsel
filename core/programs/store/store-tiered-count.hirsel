@@ -1,4 +1,4 @@
-fn tiered_page_rank(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected: Option[u8], sought: Bytes) -> Result[u64, Error] {
+fn tiered_page_rank(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], edge: std.page.Slot, expected: Option[u8], sought: Bytes) -> Result[u64, Error] {
     let page = tiered_point_page(attempt, visible, edge, expected)?
     let image = std.page.image_of(page)
     let Some(selected) = std.page.descend(image, sought) else {
@@ -39,7 +39,7 @@ fn read_tiered_count(source: TieredPageSource, grant: Arc[TieredReaderGrant], ro
         Some(replay) => std.omap.get(replay.collections, collection),
         None => None,
     }
-    retry_tiered_read(source, grant, root, start, Some(end), TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[u64, Error] {
+    retry_tiered_read(source, grant, root, start, Some(end), TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[u64, Error] {
         let before = if low == id {
             0u64
         } else {

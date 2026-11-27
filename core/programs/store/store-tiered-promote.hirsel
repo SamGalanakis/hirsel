@@ -104,7 +104,7 @@ fn promotion_resolve_blob(cut: TieredPromotion, reference: std.page.BlobRef, cur
                 fail("store: a BLOB reference resolved to a PAGE")
             }
             return disk_allocation(scoped fn() -> Result[std.page.BlobSlot, Error] {
-                Ok(HotBlob(arc.new(copied(body)?)))
+                Ok(HotBlob(arc.new(failure_result_from_rep(types.copied(body))?)))
             })
         }
     }
@@ -165,7 +165,7 @@ fn promotion_resolve_page(cut: TieredPromotion, collection: u32, root: std.page.
                 }
                 reemit = reemit || place != child.child
                 child.child = place
-                capacity(list.try_reserve(mut children, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut children, 1)))?
                 list.push(mut children, take resolved)
             },
             BlobValue(mut reference) => {
@@ -174,12 +174,12 @@ fn promotion_resolve_page(cut: TieredPromotion, collection: u32, root: std.page.
                 let place = promotion_ref(reference, mut resolved, int.truncate(list.len(bodies)))
                 reemit = reemit || place != reference
                 reference = place
-                capacity(list.try_reserve(mut bodies, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut bodies, 1)))?
                 list.push(mut bodies, take resolved)
             },
             InlineValue(_) => (),
         }
-        capacity(list.try_reserve(mut rows, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut rows, 1)))?
         list.push(mut rows, take row)
     }
     if !reemit {
@@ -209,7 +209,7 @@ fn promotion_tiered_collections(root: Arc[std.page.Page], mut found: List[(u32, 
         }
         let key = option.unwrap(std.page.key_at(image, slot))
         let collection: u32 = list.word_be(key, 0)
-        capacity(list.try_reserve(mut found, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut found, 1)))?
         list.push(mut found, (collection, clone(option.unwrap(std.page.child_slot(root, slot)))))
     }
     Ok(())
@@ -225,7 +225,7 @@ fn promotion_queue_root(source: TieredPageSource, row: DeferredFree, mut roots_f
     if let None = std.omap.get(source.packs, pack) {
         return Ok(())
     }
-    capacity(list.try_reserve(mut roots_found, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut roots_found, 1)))?
     list.push(mut roots_found, take root)
     Ok(())
 }
@@ -269,7 +269,7 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
     let captured = TieredPageSource(pager: channel.sender(requests), packs: captured_packs, next_stamp: next_stamp, deadline: 0)
     let mut probed_through: Map[u64, u64] = map.new()
     for (seq, cursor) in installed.compaction.probes {
-        capacity(map.try_reserve(mut probed_through, 1))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut probed_through, 1)))?
         map.insert(mut probed_through, seq, cursor.next_data - 1)
     }
     let mut queue_roots: List[TieredPromotionRoot] = list.new()
@@ -291,11 +291,11 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
                 continue
             }
             if let Some(take other) = promotion_collection_root(roots[slot].collections, collection)? {
-                capacity(list.try_reserve(mut against, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut against, 1)))?
                 list.push(mut against, PromotionPage(take other))
             }
         }
-        capacity(list.try_reserve(mut against, list.len(queue_roots)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut against, list.len(queue_roots))))?
         for queue_root in queue_roots {
             list.push(mut against, clone(queue_root))
         }
@@ -306,7 +306,7 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
         // resolved base straight to `promotion_materialize` so
         // `install_tiered_root` checks totals against the materialized root.
         if promotion_has_overlay(roots[at].collections, collection) {
-            capacity(map.try_reserve(mut resolved_bases, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut resolved_bases, 1)))?
             map.insert(mut resolved_bases, collection, take resolved)
             continue
         }

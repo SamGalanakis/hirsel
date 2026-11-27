@@ -29,16 +29,16 @@ type ObjectJournalTask: send {
     reclaims: Option[Latest[ReclaimFailures]]
 }
 
-fn history_group_context(head: HistoryHead) -> Result[DiskContext, Error] {
+fn history_group_context(head: HistoryHead) -> Result[format.DiskContext, Error] {
     let seq = history_next_id(head.entry.seq)?
-    Ok(DiskContext(store: head.store, role: 2, seq))
+    Ok(format.DiskContext(store: store_key_to_rep(head.store), role: 2, seq))
 }
 
-fn history_group_append(mut packet: Bytes, ctx: DiskContext, frame: Bytes) -> Result[(), Error] {
+fn history_group_append(mut packet: Bytes, ctx: format.DiskContext, frame: Bytes) -> Result[(), Error] {
     let at = list.len(packet)
     list.append(mut packet, frame)
-    let kind: u16 = int.narrow(read_le(frame, 0, 2))
-    capacity(history_seal(mut packet, ctx, at, kind))
+    let kind: u16 = int.narrow(format.read_le(frame, 0, 2))
+    failure_result_from_rep(types.capacity(format.history_seal(mut packet, ctx, at, kind)))
 }
 
 fn history_probe_writer(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
@@ -114,9 +114,9 @@ fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Resu
     }
 }
 
-fn object_journal_add(mut lane: ObjectJournalSession, ctx: DiskContext, frame: Bytes) -> Result[(), Error] {
+fn object_journal_add(mut lane: ObjectJournalSession, ctx: format.DiskContext, frame: Bytes) -> Result[(), Error] {
     let bytes_wanted = list.len(frame)
-    capacity(list.try_reserve(mut lane.buffers.packet, bytes_wanted + BINDING_BYTES))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.packet, bytes_wanted + format.BINDING_BYTES)))?
     history_group_append(mut lane.buffers.packet, ctx, frame)
 }
 
@@ -271,7 +271,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 if use_stream {
                     if let Some(link) = lane.stream {
                         if stream_in_flight != None || is_stalled || stream_awaiting_fence {
-                            capacity(list.try_reserve(mut stream_queued, 1))?
+                            failure_result_from_rep(types.capacity(list.try_reserve(mut stream_queued, 1)))?
                             list.push(mut stream_queued, (take raw, sequence))
                             continue
                         }
@@ -320,7 +320,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     }
                 }
                 list.clear(mut lane.buffers.compare)
-                capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet)))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet))))?
                 object_journal_advance(mut lane, last_sequence)?
                 written += group_size
                 if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
@@ -435,7 +435,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     match take closed {
                         Ok(SettleApplied) => {
                             if let Some(link) = lane.stream {
-                                let no_attach: Option[Attach] = None
+                                let no_attach: Option[format.Attach] = None
                                 slot_report_head(link, lane.register.head.store, no_attach, last_seq)
                                 slot_report(link, ReportDetached(link.slot, lane.register.head.pair.epoch))
                             }
@@ -557,7 +557,7 @@ fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Resul
     if !is_attached {
         return history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
     }
-    let live_opt: Option[StreamRef] = match view lane.register.attach {
+    let live_opt: Option[format.StreamRef] = match view lane.register.attach {
         Some(a) => a.live,
         None => None,
     }
@@ -566,9 +566,9 @@ fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Resul
     let epoch = head.pair.epoch
     if let Some(tail) = live_opt {
         if let Some(link) = lane.stream {
-            let dir = stream_key(link.root, stream_dir(tail.sid))
-            let reg = stream_at_root(mut lane.client, scoped fn(mut c: std.object.Client) -> Result[StreamRegister, Error] waits {
-                stream_reg_fetch_once(mut c, dir, tail.sid, link.max_rows, due)
+            let dir = stream_key(link.root, stream_dir(host_stream_id_from_rep(tail.sid)))
+            let reg = stream_at_root(mut lane.client, scoped fn(mut c: std.object.Client) -> Result[format.StreamRegister, Error] waits {
+                stream_reg_fetch_once(mut c, dir, host_stream_id_from_rep(tail.sid), link.max_rows, due)
             })?
             if reg.inc != tail.inc || reg.collecting {
                 return Error(Latched(Superseded))

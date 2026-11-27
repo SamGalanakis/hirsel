@@ -10,14 +10,14 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
     let pack = request.listed.inventory
     let at = request.offset
     if (pack.class != 3 && pack.class != 4) || at < pack.index || at >= pack.payload_bytes || pack.payload_bytes - at < 16 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
-    let width = order.min(PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
+    let width = order.min(format.PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
     let (take raw, end) = match input {
         PagerLocal(d) => {
             let mut opened = match host.open(d, path, Read) {
                 Ok(take fd) => take fd,
-                Error(NotFound) => return Error(disk_fault(path, at, Absent)),
+                Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, at, Absent))),
                 Error(problem) => return Error(Io(problem)),
             }
             let obtained = read_disk_bytes(mut opened, path, at, width)
@@ -28,10 +28,10 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
         },
         PagerObjects(mut client, op_ms, cache) => {
             let Some(item) = request.listed.object else {
-                return Error(disk_fault(path, at, Absent))
+                return Error(failure_from_rep(format.disk_fault(path, at, Absent)))
             }
             if item.seq != request.pack || item.len != pack.payload_bytes {
-                return Error(disk_fault(path, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
             let deadline = if request.deadline == 0 {
                 std.object.deadline_after_ms(client, op_ms)
@@ -59,12 +59,12 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
 fn checked_tiered_index(path: String, owner: StoreId, pack_seq: u64, at: u64, width: u64, wire: Bytes) -> Result[u64, Error] {
     let head = disk_read_frame_head(path, list.slice(wire, 0, 16), at)?
     if head.kind != PACK_INDEX_KIND || head.flags != 1 || head.size > width - 16 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let end = 16 + head.size
-    let context = DiskContext(store: owner, role: 3, seq: pack_seq)
-    if capacity(disk_check(context, at, list.slice(wire, 0, 16), list.slice(wire, 16, end)))? != head.checksum {
-        return Error(disk_fault(path, at, Checksum))
+    let context = format.DiskContext(store: store_key_to_rep(owner), role: 3, seq: pack_seq)
+    if failure_result_from_rep(types.capacity(format.disk_check(context, at, list.slice(wire, 0, 16), list.slice(wire, 16, end))))? != head.checksum {
+        return Error(failure_from_rep(format.disk_fault(path, at, Checksum)))
     }
     Ok(end)
 }
@@ -97,7 +97,7 @@ fn start_tiered_probe(pack: PagePack) -> TieredProbeCursor {
 fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, mut state: S, visit: scoped fn(mut S, PackIndexRow) -> Result[bool, Error] waits) -> Result[bool, Error] waits {
     let path = paged_pack_path(seq)?
     let Some(listed) = std.omap.get(cut.packs, seq) else {
-        return Error(disk_fault(path, cursor.index_at, Absent))
+        return Error(failure_from_rep(format.disk_fault(path, cursor.index_at, Absent)))
     }
     let pack = listed.inventory
     let mut work = 0u64
@@ -110,7 +110,7 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
             None => {
                 let (prev, take first) = start_pack_index(path, at, payload, 0)?
                 if prev != cursor.previous_index {
-                    return Error(disk_fault(path, at, Order))
+                    return Error(failure_from_rep(format.disk_fault(path, at, Order)))
                 }
                 take first
             },
@@ -127,7 +127,7 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
                 0x22u8
             }
             if row.kind != expected_kind || row.offset != cursor.next_data || row.stamp >= cut.next_stamp || row.offset >= pack.index || 16 + width > pack.index - row.offset || cursor.rows >= int.widen(pack.frames) {
-                return Error(disk_fault(path, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
             let _ = probe_routing_key(seq, row)?
             if !visit(mut state, row)? {
@@ -147,7 +147,7 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
     }
     if cursor.index_at == pack.payload_bytes {
         if cursor.next_data != pack.index || cursor.rows != int.widen(pack.frames) {
-            return Error(disk_fault(path, cursor.index_at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, cursor.index_at, Malformed)))
         }
         return Ok(true)
     }

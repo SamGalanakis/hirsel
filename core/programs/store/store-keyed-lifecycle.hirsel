@@ -44,7 +44,7 @@ pub fn recover_claim(db: Db, encoded: Bytes) -> Result[Option[ClaimRecovery], Er
     if let None = keyed_lookup(roots.keyed, CLAIM_OPEN, encoded) {
         return Ok(None)
     }
-    let Some(raw_claim) = keyed_lookup(roots.keyed, CLAIMS, encoded) else {
+    let Some(raw_claim) = keyed_lookup(roots.keyed, format.CLAIMS, encoded) else {
         return Error(malformed(0))
     }
     let state = claim_parse(raw_claim)?
@@ -58,11 +58,11 @@ pub fn recover_claim(db: Db, encoded: Bytes) -> Result[Option[ClaimRecovery], Er
         return Error(malformed(0))
     }
     let policy = read_keyed_policy(raw_policy)?
-    let arguments = copied(list.slice(raw_claim, 41, list.len(raw_claim)))?
-    let caller = Caller(issuer: encoded[op_end], subject: copied(list.slice(encoded, op_end + 2, principal_end))?)
-    let claim = ClaimKey(op: copied(list.slice(op, 1, op_end))?, caller: take caller, key: copied(list.slice(encoded, principal_end + 1, list.len(encoded)))?)
+    let arguments = failure_result_from_rep(types.copied(list.slice(raw_claim, 41, list.len(raw_claim))))?
+    let caller = Caller(issuer: encoded[op_end], subject: failure_result_from_rep(types.copied(list.slice(encoded, op_end + 2, principal_end)))?)
+    let claim = ClaimKey(op: failure_result_from_rep(types.copied(list.slice(op, 1, op_end)))?, caller: take caller, key: failure_result_from_rep(types.copied(list.slice(encoded, principal_end + 1, list.len(encoded))))?)
     let committed = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0u64].head))
-    let completion = ClaimCompletion(ticket: committed, key: copied(encoded)?, request: state.digest, policy: take policy, admitted_width: list.len(raw_claim))
+    let completion = ClaimCompletion(ticket: committed, key: failure_result_from_rep(types.copied(encoded))?, request: state.digest, policy: take policy, admitted_width: list.len(raw_claim))
     Ok(Some(ClaimRecovery(claim: take claim, arguments: take arguments, completion: take completion)))
 }
 
@@ -88,13 +88,13 @@ fn claim_op_latest(roots: Roots, encoded_op: Bytes, at: u64) -> Result[Option[Cl
     let open_slot: u64 = int.widen(CLAIM_OPEN)
     let exp_slot: u64 = int.widen(CLAIM_EXP)
     let high = claim_op_high(encoded_op)?
-    let start = copied(encoded_op)?
-    let mut admissions = std.page.cursor_open_bounded(roots.keyed[open_slot].root, Some(take start), true, false, Some(copied(high)?))
+    let start = failure_result_from_rep(types.copied(encoded_op))?
+    let mut admissions = std.page.cursor_open_bounded(roots.keyed[open_slot].root, Some(take start), true, false, Some(failure_result_from_rep(types.copied(high))?))
     let no_prefix: Bytes = list.new()
     if let Some(_) = std.page.cursor_next_key(mut admissions, no_prefix) {
         return Ok(Some(Never))
     }
-    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(take high), false, true, Some(copied(encoded_op)?))
+    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(take high), false, true, Some(failure_result_from_rep(types.copied(encoded_op))?))
     let Some((take indexed, _)) = std.page.cursor_next_key(mut expiry_index, no_prefix) else {
         return Ok(None)
     }
@@ -132,7 +132,7 @@ fn check_keyed_open(db: Db, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[
             },
         }
         if let Some(expiry) = claim_op_latest(roots, encoded, at)? {
-            return Ok((sampled, Some(DroppedClaimOp(op: copied(op)?, last_expiry: expiry))))
+            return Ok((sampled, Some(DroppedClaimOp(op: failure_result_from_rep(types.copied(op))?, last_expiry: expiry))))
         }
     }
     Ok((sampled, None))
@@ -188,15 +188,15 @@ pub type ClaimSweepWork {
     deleted_rows: u64
 }
 
-fn plan_claim_sweep(roots: Roots, cursor: ClaimSweep, at: u64, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[(ClaimSweep, ClaimSweepWork, List[KeyedEdit]), Error] {
-    let mut edits: List[KeyedEdit] = list.new()
+fn plan_claim_sweep(roots: Roots, cursor: ClaimSweep, at: u64, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[(ClaimSweep, ClaimSweepWork, List[format.KeyedEdit]), Error] {
+    let mut edits: List[format.KeyedEdit] = list.new()
     if list.len(roots.keyed) == 0 {
         return Ok((claim_sweep_start(), ClaimSweepWork(examined: 0, deleted_rows: 0), take edits))
     }
     let seek = match cursor.revisit {
-        Some(op) => Some(copied(op)?),
+        Some(op) => Some(failure_result_from_rep(types.copied(op))?),
         None => match cursor.after {
-            Some(op) => Some(copied(op)?),
+            Some(op) => Some(failure_result_from_rep(types.copied(op))?),
             None => None
         },
     }
@@ -215,7 +215,7 @@ fn plan_claim_sweep(roots: Roots, cursor: ClaimSweep, at: u64, bound_op: scoped[
         return Ok((ClaimSweep(after: Some(take encoded), revisit: None), ClaimSweepWork(examined: 1, deleted_rows: 0), take edits))
     }
     let exp_slot: u64 = int.widen(CLAIM_EXP)
-    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(copied(encoded)?), true, false, Some(claim_op_high(encoded)?))
+    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(failure_result_from_rep(types.copied(encoded))?), true, false, Some(claim_op_high(encoded)?))
     let mut examined = 1u64
     let mut deleted_rows = 0u64
     let op_width = list.len(encoded)
@@ -255,7 +255,7 @@ pub fn sweep_claims(mut db: Db, mut cursor: ClaimSweep, bound_op: scoped[view] f
         let keep: Option[fn(Error) -> bool] = None
         let held = db.keyed_credit
         let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
-            tx.keyed = Some(KeyedDraft(edits: clone(edits), after: held))
+            tx.keyed = Some(format.KeyedDraft(edits: clone(edits), after: held))
             Ok(())
         })?
         match take outcome {

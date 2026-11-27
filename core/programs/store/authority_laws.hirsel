@@ -60,7 +60,7 @@ fn position_survives_three_cuts_run(d: Dir, c: Clock, r: Random, tasks: Tasks, s
         }
     }
     let saved = position(mut db, receipt)?
-    if !same(saved.store, db.store) || saved.branch != 0 || saved.version != 2 {
+    if !types.same(saved.store.hi, saved.store.lo, db.store.hi, db.store.lo) || saved.branch != 0 || saved.version != 2 {
         fail("the ticket lost its original branch version")
     }
     trust_store(mut db)?
@@ -114,7 +114,7 @@ fn log_follower_refuses_expired_catch_up(d: Dir, c: Clock, r: Random, tasks: Tas
     // already published position without trying to load another manifest.
     disk_io(host.remove(directory, "MANIFEST"))?
     match catch_up(mut mirror, 0) {
-        Error(Behind(p)) if same(p.store, main.store) && p.branch == 0 && p.version == 1 => (),
+        Error(Behind(p)) if types.same(p.store.hi, p.store.lo, main.store.hi, main.store.lo) && p.branch == 0 && p.version == 1 => (),
         _ => fail("expired catch-up did not return Behind at the applied position"),
     }
     if version(snapshot_follower(mirror, main)?) != 1 {
@@ -154,7 +154,7 @@ fn object_branch_position_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result
         bucket_law_checkpoint(mut writer)?
     }
     let saved = position(mut writer, done.ticket)?
-    if !same(saved.store, expected.store) || saved.branch != 1 || saved.version != 2 {
+    if !types.same(saved.store.hi, saved.store.lo, expected.store.hi, expected.store.lo) || saved.branch != 1 || saved.version != 2 {
         fail("L57: the branch ticket changed its Position across cuts")
     }
     let cold = bucket_law_client_lanes(sim, tasks, "s3.test", 703, true, 1)?
@@ -218,7 +218,7 @@ fn sim_law_follower(mut writer: Db, wanted: Position, receipt: Ticket, tasks: Ta
     }
     let short = clock.deadline_after_ms(host.mono_ns(sim.time), 10)
     match at_least(mut watch, wanted, short) {
-        Error(Behind(visible)) if same(visible.store, wanted.store) && visible.branch == 0 && visible.version == 6 => (),
+        Error(Behind(visible)) if types.same(visible.store.hi, visible.store.lo, wanted.store.hi, wanted.store.lo) && visible.branch == 0 && visible.version == 6 => (),
         _ => fail("L56-W: the first at_least did not report Behind at version 6"),
     }
     sim_law_get_mark(tasks, sim)?
@@ -281,13 +281,13 @@ fn sim_law_bad_header(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelW
     // AUTHORITY begins with style and four length-prefixed strings.
     let mut cursor = 241u64
     for _ in 0u64 .. 4 {
-        cursor += 2 + read_le(wire, cursor, 2)
+        cursor += 2 + format.read_le(wire, cursor, 2)
     }
     cursor += 1
-    cursor += 2 + read_le(wire, cursor, 2)
+    cursor += 2 + format.read_le(wire, cursor, 2)
     wire[cursor] = 1
-    let header = DiskContext(store: StoreId(hi: read_le(wire, 32, 8), lo: read_le(wire, 40, 8)), role: 7, seq: read_le(wire, 56, 8))
-    capacity(history_seal(mut wire, header, 224, 0x00D0))?
+    let header = format.DiskContext(store: store_key_to_rep(StoreId(hi: format.read_le(wire, 32, 8), lo: format.read_le(wire, 40, 8))), role: 7, seq: format.read_le(wire, 56, 8))
+    failure_result_from_rep(types.capacity(format.history_seal(mut wire, header, 224, 0x00D0)))?
     let (written, _) = std.object.store_if(mut client, "head", Match(old.etag), take wire, due)
     if let Ok(Applied(_)) = written {} else {
         fail("L55-2: the fixture did not write its malformed declaration")
@@ -403,12 +403,12 @@ fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_las
     let mut newest = 0u64
     let mut successor_writes = 0u64
     for item in report.head_writes {
-        let epoch = read_le(item.data, 88, 8)
+        let epoch = format.read_le(item.data, 88, 8)
         if item.data[29] != 2 {
             fail("L55-1: sim head did not record authority 2")
         }
         if epoch == 1 {
-            newest = read_le(item.data, 120, 8)
+            newest = format.read_le(item.data, 120, 8)
         }
         if epoch == 2 {
             successor_writes += 1

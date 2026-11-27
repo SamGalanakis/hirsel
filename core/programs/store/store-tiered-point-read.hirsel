@@ -48,7 +48,7 @@ fn read_tiered_point_with[R](take backend: TieredPageBackend, packs: std.omap.OM
         return decode_row(stored)
     }
     let key = list.slice(logical, 4, list.len(logical))
-    retry_tiered_read_with(take backend, packs, next_stamp, deadline, root_grant, root, key, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error] {
+    retry_tiered_read_with(take backend, packs, next_stamp, deadline, root_grant, root, key, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, Error] {
         tiered_reading(attempt, ValuesAt)
         let backing = TieredBorrowedRoot(edge: view edge, pins: view visible)
         let stored = tiered_point_bytes(attempt, backing, key)?
@@ -56,13 +56,13 @@ fn read_tiered_point_with[R](take backend: TieredPageBackend, packs: std.omap.OM
     })
 }
 
-fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: TieredDirection, read: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: TieredDirection, read: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     retry_tiered_read_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, key, upper, direction, read)
 }
 
-fn retry_tiered_read_with[R](take backend: TieredPageBackend, packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: TieredDirection, read: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+fn retry_tiered_read_with[R](take backend: TieredPageBackend, packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: TieredDirection, read: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)
-    let mut pending: Option[(TieredTarget, Error)] = None
+    let mut pending: Option[(format.TieredTarget, Error)] = None
     loop {
         // The attempt lives outside the body's isolation, so a stop that
         // escapes the body still leaves its touches and latch readable.
@@ -101,11 +101,11 @@ fn retry_tiered_read_with[R](take backend: TieredPageBackend, packs: std.omap.OM
 // Delivers a latched miss's batch into the pin map, in the order the batch
 // names it. A target whose delivery failed once fails the read or call when
 // an attempt demands it again.
-fn serve_tiered_miss(source: TieredPageSource, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+fn serve_tiered_miss(source: TieredPageSource, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)]) -> Result[(), Error] waits {
     serve_tiered_miss_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root, state, sought, direction, take grant, mut pins, mut pending)
 }
 
-fn serve_tiered_miss_with(backend: TieredPageBackend, packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+fn serve_tiered_miss_with(backend: TieredPageBackend, packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)]) -> Result[(), Error] waits {
     let demand = tiered_miss_demand_raw(packs, next_stamp, deadline, state, sought, direction, take grant, mut pending)?
     let delivered = match backend {
         PagerTask(requests) => tiered_point_delivery(requests, take demand)?,
@@ -121,23 +121,23 @@ fn serve_tiered_miss_with(backend: TieredPageBackend, packs: std.omap.OMap[u64, 
 
 // The demand for a latched miss, or the failure an earlier delivery of the
 // same target recorded.
-fn tiered_miss_demand(source: TieredPageSource, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pending: Option[(TieredTarget, Error)]) -> Result[TieredPointDemand, Error] {
+fn tiered_miss_demand(source: TieredPageSource, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pending: Option[(format.TieredTarget, Error)]) -> Result[TieredPointDemand, Error] {
     tiered_miss_demand_raw(source.packs, source.next_stamp, source.deadline, state, sought, direction, take grant, mut pending)
 }
 
-fn tiered_miss_demand_raw(packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pending: Option[(TieredTarget, Error)]) -> Result[TieredPointDemand, Error] {
+fn tiered_miss_demand_raw(packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, state: TieredTouchSet, sought: Bytes, direction: TieredDirection, take grant: Option[Arc[TieredReaderGrant]], mut pending: Option[(format.TieredTarget, Error)]) -> Result[TieredPointDemand, Error] {
     let Some(AttemptMiss(target)) = view state.stopped else {
         fail("store: only a latched miss is delivered")
     }
     let failed_here = match pending {
-        Some((failed, _)) => tiered_frame_id(failed) == tiered_frame_id(target),
+        Some((failed, _)) => format.tiered_frame_id(failed) == format.tiered_frame_id(target),
         None => false,
     }
     if failed_here {
         let (_, take problem) = option.unwrap(replace(mut pending, None))
         return Error(take problem)
     }
-    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, values: clone(state.values), room: int.saturating_sub(state.partition, state.touched_bytes), direction: direction, paths: clone(state.gather.paths), siblings: clone(state.siblings), packs: std.omap.snapshot(packs), next_stamp: next_stamp, deadline: deadline, grant: take grant))
+    Ok(TieredPointDemand(target: clone(target), key: failure_result_from_rep(types.copied(sought))?, values: clone(state.values), room: int.saturating_sub(state.partition, state.touched_bytes), direction: direction, paths: clone(state.gather.paths), siblings: clone(state.siblings), packs: std.omap.snapshot(packs), next_stamp: next_stamp, deadline: deadline, grant: take grant))
 }
 
 // Installs a delivered batch in its order and records its failure. The
@@ -145,11 +145,11 @@ fn tiered_miss_demand_raw(packs: std.omap.OMap[u64, TieredPagerPack], next_stamp
 // later frame of the same batch never evicts one and the next attempt finds
 // every path it was demanded for. It is false when a path frame did not fit
 // the map's partition (§13.3a "crowded").
-fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinRoot, touched: Map[u64, ()], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[bool, Error] {
+fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinRoot, touched: Map[u64, ()], mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)]) -> Result[bool, Error] {
     let TieredPointDelivery(frames: take frames, held: held, failure: take failure, ..) = take delivered
     let mut kept: Map[u64, ()] = map.new()
     if held != 0 {
-        capacity(map.try_reserve(mut kept, map.len(touched) + held))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut kept, map.len(touched) + held)))?
         for (stamp, _) in touched {
             map.insert(mut kept, stamp, ())
         }

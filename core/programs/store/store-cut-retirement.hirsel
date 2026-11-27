@@ -12,12 +12,12 @@ fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option
         if tiered_leased(compaction.held, seq) || (is_tiered && (pack_leased(lease, seq) || scrub_leased(scrubs, seq))) {
             // A retired Tiered pack leaves the inventory at once; its file
             // waits for the last read inventory, export lease or scrub lease.
-            let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
+            let _ = failure_result_from_rep(types.capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge)))?
             list.push(mut carried, seq)
         } else if pack_leased(lease, seq) || scrub_leased(scrubs, seq) {
             list.push(mut carried, seq)
         } else {
-            let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
+            let _ = failure_result_from_rep(types.capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge)))?
             list.push(mut packs, seq)
         }
     }

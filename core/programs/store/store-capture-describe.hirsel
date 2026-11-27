@@ -39,7 +39,7 @@ fn describe_signed(path: String, at: u64, base: i64, add: u64, remove: u64) -> R
         remove - add
     }
     let Some(magnitude): Option[i64] = int.try_narrow(amount) else {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let delta = if add >= remove {
         magnitude
@@ -47,7 +47,7 @@ fn describe_signed(path: String, at: u64, base: i64, add: u64, remove: u64) -> R
         -magnitude
     }
     let Some(value) = int.checked_add(base, delta) else {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     Ok(value)
 }
@@ -61,7 +61,7 @@ fn describe_adjust(path: String, at: u64, value: u64, delta: i64) -> Result[u64,
         int.checked_sub(value, int.wrapping_neg(signed))
     }
     let Some(total) = shifted else {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     Ok(total)
 }
@@ -74,7 +74,7 @@ fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, o
             // Only a Log uses this field. The suffix of a 12-byte key in an
             // ordinary table is opaque and may have any u64 bit pattern.
             let next_seq = if width == 12 && before == 0 {
-                int.saturating_add(word_be(raw, key_at + 4), 1)
+                int.saturating_add(format.word_be(raw, key_at + 4), 1)
             } else {
                 0u64
             }
@@ -87,7 +87,7 @@ fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, o
     }
     let i: u64 = int.widen(id)
     if i == 0 || i >= list.len(folded.deltas) {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let plus = if is_put {
         stored_row_charge(key_len, value_len)
@@ -118,13 +118,13 @@ fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, o
 
 fn describe_commit(mut folded: DescribeFold, path: String, at: u64, _kind: u16, raw: Bytes) -> Result[(), Error] {
     let mut pos = 0u64
-    let branch_id = disk_number(path, raw, mut pos, 4)?
+    let branch_id = failure_result_from_rep(format.disk_number(path, raw, mut pos, 4))?
     if branch_id != 0 {
         return Ok(())
     }
-    let head = disk_number(path, raw, mut pos, 8)?
+    let head = failure_result_from_rep(format.disk_number(path, raw, mut pos, 8))?
     if int.checked_add(folded.head, 1) != Some(head) {
-        return Error(disk_fault(path, at, Gap(head)))
+        return Error(failure_from_rep(format.disk_fault(path, at, Gap(head))))
     }
     let mut ops = capture_data_ops(path, raw)?
     while let Some(op) = capture_next_op(path, raw, folded.value_limit, mut ops)? {
@@ -168,7 +168,7 @@ fn describe_collect(mut packs: CapturePacks, p: PreparedCapture) -> Result[Descr
     capture_walk_pages(mut packs, m.branches[0].roots.catalog, 0, None, mut walk, mut pages, scoped fn(mut source: CapturePacks, mut found: DescribeCatalogWalk, path: String, at: u64, key: Bytes, value: std.page.Cell) -> Result[(), Error] waits {
         let cat = capture_catalog_cell(mut source, path, at, value)?
         if cat.id >= m.next_table || ((cat.kind == 2) != (key[0] == 2)) {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         let _ = describe_descriptor(mut source, collection_root, cat.id)?
         if cat.kind != 2 {
@@ -207,9 +207,9 @@ fn describe_collection(mut packs: CapturePacks, names: List[DescribeName], root:
     }
     let desc = describe_descriptor(mut packs, root, cat.id)?
     let (rows, charge, log_first, log_next) = if let Some(record) = view desc {
-        let descriptor = std.page_descriptor.collection_descriptor(record) ?=> |_| disk_fault(path, at, Malformed)
+        let descriptor = std.page_descriptor.collection_descriptor(record) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
         if cat.kind == 4 && descriptor.kind != LogCollection {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         let rows: u64 = descriptor.rows
         let charge: u64 = descriptor.row_bytes
@@ -251,7 +251,7 @@ pub fn describe_capture(take p: PreparedCapture, line: scoped[view] fn(DescribeL
             if !capture_same_manifest(capture.dir, capture.raw)? {
                 return Error(Changed("MANIFEST"))
             }
-            return Error(disk_fault("MANIFEST", 72, Absent))
+            return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Absent)))
         },
         Error(Io(Other(24))) => {
             line(DescribeOpenPacks(list.len(packs.files)))?
@@ -312,7 +312,7 @@ fn describe_lines(p: PreparedCapture, mut packs: CapturePacks, names: List[Descr
     capture_walk_pages(mut packs, p.manifest.pack_root, 2, None, mut ignored, mut pages, scoped fn(mut _source: CapturePacks, mut _walk: (), path: String, at: u64, key: Bytes, value: std.page.Cell) -> Result[(), Error] waits {
         let raw = match value {
             InlineValue(found) => found,
-            _ => return Error(disk_fault(path, at, Malformed)),
+            _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
         }
         let pack = pack_record(path, at, raw)?
         let seq: u64 = list.word_be(key, 0)

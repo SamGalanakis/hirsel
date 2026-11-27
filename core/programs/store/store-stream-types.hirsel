@@ -18,7 +18,7 @@ pub type StreamLatch = status.StreamLatch
 pub fn stream_refusal_text(reason: StreamRefusal) -> String {
     if let Bound(MaxSlots) = reason {
         let mut message = string.from("the stream plan's max_slots is outside 1 to ")
-        string.push_u64(mut message, STREAM_MAX_SLOTS)
+        string.push_u64(mut message, format.STREAM_MAX_SLOTS)
         return take message
     }
     string.from(match reason {

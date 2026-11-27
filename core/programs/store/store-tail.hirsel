@@ -112,7 +112,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
     }
     let base = view bases[slot]
     let low = match resume {
-        Some(key) => copied(key)?,
+        Some(key) => failure_result_from_rep(types.copied(key))?,
         None => prefix(source.id)?,
     }
     let high = prefix(source.id + 1)?
@@ -132,7 +132,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
         return Error(malformed(0))
     }
     let span_end = match out.next {
-        Some(key) => copied(key)?,
+        Some(key) => failure_result_from_rep(types.copied(key))?,
         None => take high,
     }
     note_read(tx, Span(take low, take span_end))?

@@ -55,9 +55,9 @@ type StepsMeta: codec + send {
 // A step as the child's replay applies it.
 type ReplayStep {
     version: u64,
-    catalog: List[JournalOp],
+    catalog: List[format.JournalOp],
     superseded: List[u32],
-    rows: List[JournalOp]
+    rows: List[format.JournalOp]
 }
 
 const STEPS_ROLE: u8 = 10
@@ -100,7 +100,7 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
             _ => return Some(StepDrift),
         }
         list.push(mut ids, moved_id)
-        list.push(mut catalog, StepOp(key: take key, value: Some(take raw), prior: stored_prior(Some(view prior_raw))))
+        list.push(mut catalog, StepOp(key: take key, value: Some(take raw), prior: format.stored_prior(Some(view prior_raw))))
     }
     // F4: every superseded collection id must be one of the moved index ids
     // AND must be empty in the published main root (non-empty bulk rebuild or
@@ -138,12 +138,12 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
         if !list_contains_u32(row_owners, owner) {
             list.push(mut row_owners, owner)
         }
-        let key_copy = match copied(op.key) {
+        let key_copy = match failure_result_from_rep(types.copied(op.key)) {
             Ok(take k) => take k,
             Error(_) => return Some(StepDrift),
         }
         let val_copy: Option[Bytes] = match view op.value {
-            Some(raw) => match copied(raw) {
+            Some(raw) => match failure_result_from_rep(types.copied(raw)) {
                 Ok(take v) => Some(take v),
                 Error(_) => return Some(StepDrift),
             },
@@ -249,7 +249,7 @@ fn op_bytes(op: StepOp) -> u64 {
 
 // Writes STEPS: the meta frame, then one frame per step.
 fn write_steps(to: Dir, id: StoreId, stamp: ExportStamp, steps: List[ExportStep]) -> Result[(), Error] waits {
-    let ctx = DiskContext(store: id, role: STEPS_ROLE, seq: stamp.head)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: STEPS_ROLE, seq: stamp.head)
     let mut file = open_frames(to, "STEPS", ctx)?
     let meta_codec: std.codec.Codec[StepsMeta] = std.codec.of()
     write_prepared_frame(mut file, 0x0088, meta_codec, StepsMeta(head: stamp.head, terminal: stamp.terminal, end: stamp.end, steps: list.len(steps)))?
@@ -285,11 +285,11 @@ fn read_steps(d: Dir, stamp: ExportStamp) -> Result[List[ReplayStep], DeployErro
     Ok(take steps)
 }
 
-fn replay_ops(take ops: List[StepOp]) -> List[JournalOp] {
-    let mut out: List[JournalOp] = list.with_capacity(list.len(ops))
+fn replay_ops(take ops: List[StepOp]) -> List[format.JournalOp] {
+    let mut out: List[format.JournalOp] = list.with_capacity(list.len(ops))
     for take op in take ops {
         let StepOp(key: take key, value: take value, prior: prior) = take op
-        list.push(mut out, JournalOp(key: take key, value: take value, prior: prior, trim: None))
+        list.push(mut out, format.JournalOp(key: take key, value: take value, prior: prior, trim: None))
     }
     take out
 }
@@ -353,7 +353,7 @@ fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u6
         let read_size = disk_io(host.read(mut input, mut chunk))?
         if read_size == 0 {
             if let Some(_) = end {
-                return Error(disk_fault(name, offset, Truncated))
+                return Error(failure_from_rep(format.disk_fault(name, offset, Truncated)))
             }
             break
         }
@@ -380,11 +380,11 @@ fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u6
 
 fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
     let codec: std.codec.Codec[ExportStamp] = std.codec.of()
-    let ctx = DiskContext(store: StoreId(hi: stamp.store_hi, lo: stamp.store_lo), role: 5, seq: stamp.opened)
-    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let ctx = format.DiskContext(store: store_key_to_rep(StoreId(hi: stamp.store_hi, lo: stamp.store_lo)), role: 5, seq: stamp.opened)
+    let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     let mut body: Bytes = list.new()
     std.codec.encode(codec, stamp, mut body) ?=> |_| Limit(Value)
-    list.append(mut raw, capacity(disk_seal(ctx, 72, 0x0080, 1, body))?)
+    list.append(mut raw, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0080, 1, body)))?)
     Ok(take raw)
 }
 
@@ -407,13 +407,13 @@ pub fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits 
 
 fn copy_log_export(from: Dir, raw: Bytes, to: Dir, lease: Arc[ExportLease], stamp: ExportStamp) -> Result[(), DeployError] waits {
     for pack in lease.packs {
-        let path = scratch_result(capacity(disk_path("p-", pack, "")))?
+        let path = scratch_result(failure_result_from_rep(types.capacity(disk_path("p-", pack, ""))))?
         scratch_result(copy_export_file(from, to, path, None))?
     }
     scratch_result(disk_write_synced(to, "MANIFEST", raw))?
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     for seq in lease.first .. stamp.terminal {
-        let path = scratch_result(capacity(disk_path("j-", seq, "")))?
+        let path = scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", seq, ""))))?
         let following = match journal_header(from, id, seq + 1, None) {
             Ok(header) => header,
             Error(Corrupt(_)) => None,
@@ -421,11 +421,11 @@ fn copy_log_export(from: Dir, raw: Bytes, to: Dir, lease: Arc[ExportLease], stam
         }
         let Some(successor) = following else {
             let next_path = scratch_result(journal_path(seq + 1, ""))?
-            return Error(Scratch(disk_fault(next_path, 0, Header)))
+            return Error(Scratch(failure_from_rep(format.disk_fault(next_path, 0, Header))))
         }
         scratch_result(copy_export_file(from, to, path, Some(successor.prev_end)))?
     }
-    let terminal = scratch_result(capacity(disk_path("j-", stamp.terminal, "")))?
+    let terminal = scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", stamp.terminal, ""))))?
     scratch_result(copy_export_file(from, to, terminal, Some(stamp.end)))?
     Ok(())
 }
@@ -476,7 +476,7 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     deploy_result(durable(mut db, final_item))?
     let from = deploy_result(log_directory(db))?
     let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
-    let lease_attempt = deploy_result(copied(attempt))?
+    let lease_attempt = deploy_result(failure_result_from_rep(types.copied(attempt)))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: match activation {
         Some(given) => given,
         None => 0u64
@@ -565,12 +565,12 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
     let tail = int.saturating_add(journaled, step_bytes(steps))
     if tail > db.resident / 100 {
         release_export(mut db, attempt)
-        let renewed = begin_copy(mut db, Scratch(scratch), deploy_result(copied(attempt))?, Some(lease.activation))?
+        let renewed = begin_copy(mut db, Scratch(scratch), deploy_result(failure_result_from_rep(types.copied(attempt)))?, Some(lease.activation))?
         return Ok(Full(take renewed))
     }
-    let stamp = ExportStamp(attempt: deploy_result(copied(attempt))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: lease.activation, terminal: db.file_seq, end: db.file_end)
+    let stamp = ExportStamp(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: lease.activation, terminal: db.file_seq, end: db.file_end)
     let packs: List[u64] = clone(lease.packs)
-    let kept = ExportLease(attempt: deploy_result(copied(attempt))?, packs: take packs, collections: share_page_tree(db.heads[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
+    let kept = ExportLease(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, packs: take packs, collections: share_page_tree(db.heads[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     write_disk(mut db.disk, arc.new(take kept), scoped fn(mut state: DiskState, take advanced: Arc[ExportLease]) {
         state.lease = Some(take advanced)
         if let Some(mut kept_import) = state.imported {
@@ -589,7 +589,7 @@ fn tail_bytes(from: Dir, id: StoreId, terminal: u64, end: u64, final_seq: u64, f
     loop {
         let boundary = segment_boundary(from, id, seq, final_seq, final_end)?
         if boundary < start {
-            return Error(disk_fault(journal_path(seq, "")?, start, Truncated))
+            return Error(failure_from_rep(format.disk_fault(journal_path(seq, "")?, start, Truncated)))
         }
         total += boundary - start
         if seq == final_seq {
@@ -606,7 +606,7 @@ fn segment_boundary(from: Dir, id: StoreId, seq: u64, final_seq: u64, final_end:
     }
     match journal_header(from, id, seq + 1, None)? {
         Some(following) => Ok(following.prev_end),
-        None => Error(disk_fault(journal_path(seq + 1, "")?, 0, Header)),
+        None => Error(failure_from_rep(format.disk_fault(journal_path(seq + 1, "")?, 0, Header))),
     }
 }
 
@@ -620,7 +620,7 @@ pub fn copy_export_tail(take tail: ExportTail, to: Dir) -> Result[u64, DeployErr
     let mut total = 0u64
     let mut seq = terminal
     loop {
-        let path = scratch_result(capacity(disk_path("j-", seq, "")))?
+        let path = scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", seq, ""))))?
         let boundary = scratch_result(segment_boundary(from, id, seq, stamp.terminal, stamp.end))?
         if seq == terminal {
             scratch_result(append_export_range(from, to, path, end, boundary))?
@@ -655,7 +655,7 @@ fn append_export_range(from: Dir, to: Dir, name: String, low: u64, high: u64) ->
         list.clear(mut chunk)
         let read_size = disk_io(host.read_at(mut input, at, mut chunk))?
         if read_size == 0 {
-            return Error(disk_fault(name, at, Truncated))
+            return Error(failure_from_rep(format.disk_fault(name, at, Truncated)))
         }
         let written = order.min(read_size, high - at)
         match host.write(mut output, list.slice(chunk, 0u64, written)) {
@@ -726,7 +726,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
                 }
             }
         }
-        let state = capacity(manifest_state(selected, holders))?
+        let state = failure_result_from_rep(types.capacity(manifest_state(selected, holders)))?
         Ok((take state, tiered))
     }))?
     let replay = deploy_result(journal_replay_manifest(take initial, selected))?
@@ -797,17 +797,17 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
     let counts = deploy_result(capture_lists(mut packs, manifest))?
     let slots = capture_add(counts.rows, counts.pages)
     let need_bytes = capture_add(CAPTURE_PATH + CAPTURE_SCRATCH, capture_mul(CAPTURE_LIST_ROW, slots))
-    let selected = deploy_result(capacity(bound bytes need_bytes {
+    let selected = deploy_result(failure_result_from_rep(types.capacity(bound bytes need_bytes {
         check_inventory(from, id, manifest, slots)
-    }))?
+    })))?
     let inventory = deploy_result(take selected)?
     for pack in inventory {
         copy_restore_file(from, to, deploy_result(paged_pack_path(pack.seq))?)?
     }
     for seq in manifest.first_live .. stamp.terminal {
-        copy_restore_file(from, to, scratch_result(capacity(disk_path("j-", seq, "")))?)?
+        copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", seq, ""))))?)?
     }
-    copy_restore_file(from, to, scratch_result(capacity(disk_path("j-", stamp.terminal, "")))?)?
+    copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", stamp.terminal, ""))))?)?
     scratch_result(disk_io(host.sync_dir(to)))?
     let _validated = open_copied(to, c, stamp.attempt, options, false)?
     scratch_result(disk_io(host.remove(to, "EXPORT")))?
@@ -826,21 +826,21 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
     let mut start = from
     let mut stepped = 0u64
     loop {
-        let path = capacity(disk_path("j-", seq, ""))?
+        let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
         let boundary = if seq == terminal {
             limit
         } else {
             let following = journal_header(d, id, seq + 1u64, None)?
             match following {
                 Some(head) => head.prev_end,
-                None => return Error(disk_fault(path, 0u64, Header))
+                None => return Error(failure_from_rep(format.disk_fault(path, 0u64, Header)))
             }
         }
         let mut source = journal_input(disk_io(host.open(d, path, Read))?, false)?
-        if seq == terminal && source.size > boundary {
-            return Error(disk_fault(path, boundary, Malformed))
+        if seq == terminal && format.journal_input_size(source) > boundary {
+            return Error(failure_from_rep(format.disk_fault(path, boundary, Malformed)))
         }
-        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             let through = match event {
                 Commit(commit) => if commit.branch == 0u32 {
                     int.saturating_sub(commit.version, 1u64)
@@ -856,7 +856,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
             apply_steps(path, mut recovered_state, steps, mut stepped, through)?
             journal_apply(path, mut recovered_state, take event)
         })?
-        let JournalInput(file: take file, ..) = take source
+        let file = format.take_journal_file(take source)
         disk_io(host.close(take file))?
         if seq == terminal {
             apply_steps(path, mut replay, steps, mut stepped, 18446744073709551615u64)?
@@ -877,7 +877,7 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
     while stepped < list.len(steps) && steps[stepped].version <= through {
         let step = view steps[stepped]
         if replay.state.tips[0u64].id != 0u32 || int.checked_add(replay.state.tips[0u64].head, 1) != Some(step.version) {
-            return Error(disk_fault(file, 0, Gap(step.version)))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Gap(step.version))))
         }
         for id in step.superseded {
             let id_key = prefix(id)?
@@ -895,7 +895,7 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
                     fold_record_lost(old_root, map.new(), map.new(), true, mut effects)?
                     for take effect in take effects {
                         if let FoldDropped(take target) = take effect {
-                            capacity(list.try_reserve(mut replay.deferred_frees, 1))?
+                            failure_result_from_rep(types.capacity(list.try_reserve(mut replay.deferred_frees, 1)))?
                             list.push(mut replay.deferred_frees, DeferredFree(branch_id: 0u32, target: take target))
                         }
                     }
@@ -906,7 +906,7 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
                     define_store_collection(mut replay.state.tips[0u64].roots.collections, id, descriptor_kind_byte(fields.kind), mut replay.next_node)?
                 }
             }
-            capacity(list.try_reserve(mut replay.superseded, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut replay.superseded, 1)))?
             list.push(mut replay.superseded, id)
         }
         journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.catalog, step.catalog, mut replay.tiered, false)?

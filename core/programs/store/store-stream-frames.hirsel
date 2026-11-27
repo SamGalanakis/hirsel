@@ -1,40 +1,40 @@
 // The host stream's frames and objects (STORE-SPEC §12.11.2): ATTACH in a
 // Place's head, and the register, batch, TERM and FOOTER objects under a
 // stream root. Encoders and decoders only; the service is built on them.
-const ATTACH_LIMIT: u64 = 512
+pub const ATTACH_LIMIT: u64 = 512
 
-const ATTACH_SEALED_MAX: u64 = 8
+pub const ATTACH_SEALED_MAX: u64 = 8
 
-const STREAM_TERM_BYTES: u64 = 32
+pub const STREAM_TERM_BYTES: u64 = 32
 
-const REG_LIMIT: u64 = 1048576
+pub const REG_LIMIT: u64 = 1048576
 
-const STREAM_XINDEX_LIMIT: u64 = 16777216
+pub const STREAM_XINDEX_LIMIT: u64 = 16777216
 
-const STREAM_FOOTER_BYTES: u64 = 32
+pub const STREAM_FOOTER_BYTES: u64 = 32
 
-const REG_FIXED_BYTES: u64 = 110
+pub const REG_FIXED_BYTES: u64 = 110
 
-const REG_ROW_BYTES: u64 = 49
+pub const REG_ROW_BYTES: u64 = 49
 
-const STREAM_MAX_SLOTS: u64 = (REG_LIMIT - REG_FIXED_BYTES) / (2 * REG_ROW_BYTES)
+pub const STREAM_MAX_SLOTS: u64 = (REG_LIMIT - REG_FIXED_BYTES) / (2 * REG_ROW_BYTES)
 
-const STREAM_INDEX_BODY_HEAD: u64 = bytes[u32] + bytes[u64] + bytes[u32]
+pub const STREAM_INDEX_BODY_HEAD: u64 = bytes[u32] + bytes[u64] + bytes[u32]
 
-const STREAM_INDEX_ROW_BYTES: u64 = 68
+pub const STREAM_INDEX_ROW_BYTES: u64 = 68
 
 // HEADER (72), INDEX's frame head (16) and its own head.
-const STREAM_INDEX_PREFIX: u64 = 72 + 16 + STREAM_INDEX_BODY_HEAD
+pub const STREAM_INDEX_PREFIX: u64 = 72 + 16 + STREAM_INDEX_BODY_HEAD
 
-const STREAM_INDEX_LIMIT: u64 = STREAM_INDEX_BODY_HEAD + STREAM_INDEX_ROW_BYTES * STREAM_MAX_SLOTS
+pub const STREAM_INDEX_LIMIT: u64 = STREAM_INDEX_BODY_HEAD + STREAM_INDEX_ROW_BYTES * STREAM_MAX_SLOTS
 
-const STREAM_FOOTER_WIRE_BYTES: u64 = 16 + STREAM_FOOTER_BYTES
+pub const STREAM_FOOTER_WIRE_BYTES: u64 = 16 + STREAM_FOOTER_BYTES
 
 // A reader's first range GET of a batch: HEADER, INDEX's head and 58 rows.
-const STREAM_INDEX_PROBE: u64 = 4096
+pub const STREAM_INDEX_PROBE: u64 = 4096
 
 // The stream frames' limits (§11.1), read by `disk_kind_limit`.
-fn stream_kind_limit(kind: u16) -> Option[u64] {
+pub fn stream_kind_limit(kind: u16) -> Option[u64] {
     match kind {
         0x0100 => Some(ATTACH_LIMIT),
         0x0101 => Some(STREAM_INDEX_LIMIT),
@@ -46,14 +46,14 @@ fn stream_kind_limit(kind: u16) -> Option[u64] {
     }
 }
 
-const ROLE_REGISTER: u8 = 11
+pub const ROLE_REGISTER: u8 = 11
 
-const ROLE_BATCH: u8 = 12
+pub const ROLE_BATCH: u8 = 12
 
 // The position of a Place's tail in a stream: frame `from_frame` of its slice
 // in batch `from_seq` of incarnation `inc` (M4).
-type StreamRef: shareable + send {
-    sid: HostStreamId,
+pub type StreamRef: shareable + send {
+    sid: types.HostStreamIdRep,
     inc: u64,
     from_seq: u64,
     from_frame: u32
@@ -61,27 +61,27 @@ type StreamRef: shareable + send {
 
 // A tail a claim froze: the Place's frames from `tail` through the end of its
 // slice in batch `cutoff`, frozen at entry position `at`.
-type SealedTail: shareable + send {
+pub type SealedTail: shareable + send {
     tail: StreamRef,
     cutoff: u64,
     at: u64
 }
 
-type Attach: shareable + send {
+pub type Attach: shareable + send {
     settles: u64,
     live: Option[StreamRef],
     sealed: List[SealedTail]
 }
 
 // The value of `Attached(..)`: the live stream, or None under direct service.
-fn stream_attached_sid(a: Attach) -> Option[HostStreamId] {
+pub fn stream_attached_sid(a: Attach) -> Option[types.HostStreamIdRep] {
     match a.live {
         Some(r) => Some(r.sid),
         None => None,
     }
 }
 
-fn stream_ref_put(mut raw: Bytes, r: StreamRef) {
+pub fn stream_ref_put(mut raw: Bytes, r: StreamRef) {
     list.put_word_le(mut raw, r.sid.hi)
     list.put_word_le(mut raw, r.sid.lo)
     list.put_word_le(mut raw, r.inc)
@@ -89,11 +89,11 @@ fn stream_ref_put(mut raw: Bytes, r: StreamRef) {
     list.put_word_le(mut raw, r.from_frame)
 }
 
-fn stream_ref_read(raw: Bytes, at: u64) -> StreamRef {
-    StreamRef(sid: HostStreamId(hi: read_le(raw, at, 8), lo: read_le(raw, at + 8, 8)), inc: read_le(raw, at + 16, 8), from_seq: read_le(raw, at + 24, 8), from_frame: int.narrow(read_le(raw, at + 32, 4)))
+pub fn stream_ref_read(raw: Bytes, at: u64) -> StreamRef {
+    StreamRef(sid: types.HostStreamIdRep(hi: read_le(raw, at, 8), lo: read_le(raw, at + 8, 8)), inc: read_le(raw, at + 16, 8), from_seq: read_le(raw, at + 24, 8), from_frame: int.narrow(read_le(raw, at + 32, 4)))
 }
 
-fn stream_attach_bytes(a: Attach) -> u64 {
+pub fn stream_attach_bytes(a: Attach) -> u64 {
     let live_bytes = match a.live {
         Some(_) => 37u64,
         None => 1u64,
@@ -102,7 +102,7 @@ fn stream_attach_bytes(a: Attach) -> u64 {
 }
 
 // Appends ATTACH after a head's AUTHORITY. `ctx` is the head's context.
-fn stream_attach_append(mut raw: Bytes, ctx: DiskContext, a: Attach) -> Result[(), Error] {
+pub fn stream_attach_append(mut raw: Bytes, ctx: DiskContext, a: Attach) -> Result[(), types.Failure] {
     let n = list.len(a.sealed)
     let needed = list.len(raw) + 16 + stream_attach_bytes(a) + BINDING_BYTES
     if list.capacity(raw) < needed {
@@ -125,11 +125,11 @@ fn stream_attach_append(mut raw: Bytes, ctx: DiskContext, a: Attach) -> Result[(
         list.put_word_le(mut raw, frozen.cutoff)
         list.put_word_le(mut raw, frozen.at)
     }
-    capacity(history_seal(mut raw, ctx, at, 0x0100))
+    types.capacity(history_seal(mut raw, ctx, at, 0x0100))
 }
 
 // Decodes ATTACH's payload under §12.11.2's rules; `head_at` is HEAD's.
-fn stream_attach_decode(raw: Bytes, frame: DiskFrame, head_at: u64) -> Result[Attach, Error] {
+pub fn stream_attach_decode(raw: Bytes, frame: DiskFrame, head_at: u64) -> Result[Attach, types.Failure] {
     let at = frame.payload - 16
     let p = list.slice(raw, frame.payload, frame.end)
     let size = list.len(p)
@@ -161,7 +161,7 @@ fn stream_attach_decode(raw: Bytes, frame: DiskFrame, head_at: u64) -> Result[At
     if n > ATTACH_SEALED_MAX || size - cursor != 52 * n {
         return Error(disk_fault("head", at, Malformed))
     }
-    let mut sealed: List[SealedTail] = capacity(bound bytes (56 * ATTACH_SEALED_MAX) {
+    let mut sealed: List[SealedTail] = types.capacity(bound bytes (56 * ATTACH_SEALED_MAX) {
         list.with_capacity(n)
     })?
     let mut last_at = 0u64
@@ -180,44 +180,21 @@ fn stream_attach_decode(raw: Bytes, frame: DiskFrame, head_at: u64) -> Result[At
 }
 
 // --- Stream objects: HEADER(sid, role, seq, epoch = inc) then their frames.
-fn stream_header(mut raw: Bytes, sid: HostStreamId, role: u8, seq: u64, inc: u64, authority_kind: u8) -> Result[DiskContext, Error] {
+pub fn stream_header(mut raw: Bytes, sid: types.HostStreamIdRep, role: u8, seq: u64, inc: u64, authority_kind: u8) -> Result[DiskContext, types.Failure] {
     let ctx = DiskContext(store: stream_identity(sid), role, seq)
     list.clear(mut raw)
-    capacity(history_append_header(mut raw, ctx, inc, authority_kind))?
+    types.capacity(history_append_header(mut raw, ctx, inc, authority_kind))?
     Ok(ctx)
 }
 
-type StreamObjectHead {
+pub type StreamObjectHead {
     ctx: DiskContext,
     inc: u64,
     authority_kind: u8
 }
 
-// Checks HEADER of a stream object read from `key`, with the expected role.
-fn stream_read_header(key: String, raw: Bytes, sid: HostStreamId, role: u8) -> Result[StreamObjectHead, Error] {
-    if list.len(raw) < 72 {
-        return Error(disk_fault(key, 0, Truncated))
-    }
-    let ctx = DiskContext(store: StoreId(hi: read_le(raw, 32, 8), lo: read_le(raw, 40, 8)), role: raw[28], seq: read_le(raw, 56, 8))
-    let header = history_frame(key, ctx, raw, 0, 0x0001)?
-    if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || read_le(raw, 30, 2) != 0 || read_le(raw, 64, 8) != 0 {
-        return Error(disk_fault(key, 0, Header))
-    }
-    let format = read_le(raw, 24, 4)
-    if format != DISK_FORMAT {
-        return Error(Unsupported(format))
-    }
-    if raw[29] != 1 && raw[29] != 2 {
-        return Error(Unsupported(int.widen(raw[29])))
-    }
-    if ctx.role != role || !same(ctx.store, stream_identity(sid)) {
-        return Error(disk_fault(key, 0, Header))
-    }
-    Ok(StreamObjectHead(ctx, inc: read_le(raw, 48, 8), authority_kind: raw[29]))
-}
-
 // --- The register (role 11).
-type RegIndex: send {
+pub type RegIndex: send {
     k: u64,
     len: u64,
     digest: u64,
@@ -225,19 +202,19 @@ type RegIndex: send {
     covers_seq: u64
 }
 
-type RegRow: send {
-    store: StoreId,
+pub type RegRow: send {
+    store: types.StoreKey,
     epoch: u64,
-    token: StoreId,
+    token: types.StoreKey,
     rev_hold: u64,
     abandoned: bool
 }
 
-type StreamRegister: send {
+pub type StreamRegister: send {
     rev: u64,
-    sid: HostStreamId,
+    sid: types.HostStreamIdRep,
     inc: u64,
-    holder: StoreId,
+    holder: types.StoreKey,
     collecting: bool,
     low_inc: u64,
     low_seq: u64,
@@ -245,11 +222,11 @@ type StreamRegister: send {
     rows: List[RegRow]
 }
 
-fn stream_register_bytes(rows: u64) -> u64 {
+pub fn stream_register_bytes(rows: u64) -> u64 {
     REG_FIXED_BYTES + REG_ROW_BYTES * rows
 }
 
-fn stream_register_encode(mut raw: Bytes, reg: StreamRegister, authority_kind: u8) -> Result[(), Error] {
+pub fn stream_register_encode(mut raw: Bytes, reg: StreamRegister, authority_kind: u8) -> Result[(), types.Failure] {
     let n = list.len(reg.rows)
     let size = stream_register_bytes(n)
     if size > REG_LIMIT {
@@ -305,70 +282,16 @@ fn stream_register_encode(mut raw: Bytes, reg: StreamRegister, authority_kind: u
             0u8
         })
     }
-    capacity(history_seal(mut raw, ctx, at, 0x0103))
+    types.capacity(history_seal(mut raw, ctx, at, 0x0103))
 }
 
-// Decodes `reg`. `seen_rev` is the highest rev this reader has seen: a lower
-// one is an old body seen again (§12.11.3 rule 1).
-fn stream_register_decode(raw: Bytes, sid: HostStreamId, seen_rev: u64) -> Result[StreamRegister, Error] {
-    let head = stream_read_header("reg", raw, sid, ROLE_REGISTER)?
-    if head.ctx.seq != 0 {
-        return Error(disk_fault("reg", 0, Header))
-    }
-    let frame = history_frame("reg", head.ctx, raw, 72, 0x0103)?
-    if frame.end != list.len(raw) {
-        return Error(disk_fault("reg", frame.end, Malformed))
-    }
-    let p = list.slice(raw, frame.payload, frame.end)
-    let size = list.len(p)
-    if size < REG_FIXED_BYTES || (size - REG_FIXED_BYTES) % REG_ROW_BYTES != 0 {
-        return Error(disk_fault("reg", 72, Malformed))
-    }
-    let n = read_le(p, 106, 4)
-    if REG_FIXED_BYTES + REG_ROW_BYTES * n != size || p[48] > 1 || p[65] > 1 {
-        return Error(disk_fault("reg", 72, Malformed))
-    }
-    let rev = read_le(p, 0, 8)
-    let reg_sid = HostStreamId(hi: read_le(p, 8, 8), lo: read_le(p, 16, 8))
-    let inc = read_le(p, 24, 8)
-    if !stream_same(reg_sid, sid) || inc != head.inc || rev == 0 {
-        return Error(disk_fault("reg", 72, Malformed))
-    }
-    if rev < seen_rev {
-        return Error(disk_fault("reg", 0, Regressed))
-    }
-    let reg_index = if p[65] == 1 {
-        Some(RegIndex(k: read_le(p, 66, 8), len: read_le(p, 74, 8), digest: read_le(p, 82, 8), covers_inc: read_le(p, 90, 8), covers_seq: read_le(p, 98, 8)))
-    } else {
-        for i in 66u64 .. 106 {
-            if p[i] != 0 {
-                return Error(disk_fault("reg", 72, Malformed))
-            }
-        }
-        None
-    }
-    let mut rows: List[RegRow] = capacity(bound bytes (64 * n + 64) {
-        list.with_capacity(n)
-    })?
-    let mut cursor = REG_FIXED_BYTES
-    for _ in 0u64 .. n {
-        let state = p[cursor + 48]
-        if state > 1 {
-            return Error(disk_fault("reg", 72, Malformed))
-        }
-        list.push(mut rows, RegRow(store: StoreId(hi: read_le(p, cursor, 8), lo: read_le(p, cursor + 8, 8)), epoch: read_le(p, cursor + 16, 8), token: StoreId(hi: read_le(p, cursor + 24, 8), lo: read_le(p, cursor + 32, 8)), rev_hold: read_le(p, cursor + 40, 8), abandoned: state == 1))
-        cursor += REG_ROW_BYTES
-    }
-    Ok(StreamRegister(rev, sid: reg_sid, inc, holder: StoreId(hi: read_le(p, 32, 8), lo: read_le(p, 40, 8)), collecting: p[48] == 1, low_inc: read_le(p, 49, 8), low_seq: read_le(p, 57, 8), index: reg_index, rows: take rows))
-}
-
-fn stream_pair_below(a_inc: u64, a_seq: u64, b_inc: u64, b_seq: u64) -> bool {
+pub fn stream_pair_below(a_inc: u64, a_seq: u64, b_inc: u64, b_seq: u64) -> bool {
     a_inc < b_inc || (a_inc == b_inc && a_seq < b_seq)
 }
 
 // A REG write is valid only if `rev` is the read rev + 1 and none of `inc`,
 // `low` or `index.k` falls (§12.11.2).
-fn stream_register_follows(prior: StreamRegister, later: StreamRegister) -> bool {
+pub fn stream_register_follows(prior: StreamRegister, later: StreamRegister) -> bool {
     let index_holds = match prior.index {
         Some(a) => match later.index {
             Some(b) => b.k >= a.k,
@@ -380,15 +303,15 @@ fn stream_register_follows(prior: StreamRegister, later: StreamRegister) -> bool
 }
 
 // --- Batches (role 12): HEADER ‖ INDEX ‖ the slices ‖ FOOTER, or HEADER ‖ TERM.
-type BatchSlice: send {
-    store: StoreId,
+pub type BatchSlice: send {
+    store: types.StoreKey,
     epoch: u64,
     frames: u64,
     octets: Bytes
 }
 
-type BatchRow: send {
-    store: StoreId,
+pub type BatchRow: send {
+    store: types.StoreKey,
     epoch: u64,
     offset: u64,
     len: u64,
@@ -396,15 +319,15 @@ type BatchRow: send {
     digest: Inline[u8, 32]
 }
 
-type BatchIndex: send {
+pub type BatchIndex: send {
     byte_len: u64,
     seen_rev: u64,
     rows: List[BatchRow]
 }
 
-type BatchBody: send = Rows(BatchIndex) | Term(u64, u64)
+pub type BatchBody: send = Rows(BatchIndex) | Term(u64, u64)
 
-fn stream_batch_key(mut key: String, inc: u64, seq: u64) {
+pub fn stream_batch_key(mut key: String, inc: u64, seq: u64) {
     string.clear(mut key)
     string.push(mut key, "b-")
     history_number(mut key, inc)
@@ -412,11 +335,11 @@ fn stream_batch_key(mut key: String, inc: u64, seq: u64) {
     history_number(mut key, seq)
 }
 
-fn stream_batch_overhead(rows: u64) -> u64 {
+pub fn stream_batch_overhead(rows: u64) -> u64 {
     STREAM_INDEX_PREFIX + STREAM_INDEX_ROW_BYTES * rows + STREAM_FOOTER_WIRE_BYTES
 }
 
-fn stream_batch_size(slices: List[BatchSlice]) -> u64 {
+pub fn stream_batch_size(slices: List[BatchSlice]) -> u64 {
     let mut total = stream_batch_overhead(list.len(slices))
     for i in 0u64 .. list.len(slices) {
         total += list.len(slices[i].octets)
@@ -425,7 +348,7 @@ fn stream_batch_size(slices: List[BatchSlice]) -> u64 {
 }
 
 // `slices` are ascending by store, one per Place with frames in the batch.
-fn stream_batch_encode(mut raw: Bytes, sid: HostStreamId, inc: u64, seq: u64, authority_kind: u8, seen_rev: u64, slices: List[BatchSlice]) -> Result[(), Error] {
+pub fn stream_batch_encode(mut raw: Bytes, sid: types.HostStreamIdRep, inc: u64, seq: u64, authority_kind: u8, seen_rev: u64, slices: List[BatchSlice]) -> Result[(), types.Failure] {
     let n = list.len(slices)
     let needed = stream_batch_size(slices) + BINDING_BYTES
     if list.capacity(raw) < needed {
@@ -459,25 +382,25 @@ fn stream_batch_encode(mut raw: Bytes, sid: HostStreamId, inc: u64, seq: u64, au
         }
         offset += len
     }
-    capacity(history_seal(mut raw, ctx, at, 0x0101))?
+    types.capacity(history_seal(mut raw, ctx, at, 0x0101))?
     for i in 0u64 .. n {
         list.append(mut raw, slices[i].octets)
     }
     stream_footer_append(mut raw, ctx)
 }
 
-fn stream_footer_append(mut raw: Bytes, ctx: DiskContext) -> Result[(), Error] {
+pub fn stream_footer_append(mut raw: Bytes, ctx: DiskContext) -> Result[(), types.Failure] {
     let body = std.sha256.hash(raw)
     let at = list.len(raw)
     list.fill(mut raw, 16, 0u8)
     for j in 0u64 .. 32 {
         list.push(mut raw, body[j])
     }
-    capacity(history_seal(mut raw, ctx, at, 0x0105))
+    types.capacity(history_seal(mut raw, ctx, at, 0x0105))
 }
 
 // The terminal fence of incarnation `inc` at `seq` (§12.11.7 step 4).
-fn stream_term_encode(mut raw: Bytes, sid: HostStreamId, inc: u64, seq: u64, authority_kind: u8) -> Result[(), Error] {
+pub fn stream_term_encode(mut raw: Bytes, sid: types.HostStreamIdRep, inc: u64, seq: u64, authority_kind: u8) -> Result[(), types.Failure] {
     let needed = 72 + 16 + STREAM_TERM_BYTES + BINDING_BYTES
     if list.capacity(raw) < needed {
         return Error(Full(Allocation(Capacity(requested: needed, available: list.capacity(raw)))))
@@ -489,109 +412,24 @@ fn stream_term_encode(mut raw: Bytes, sid: HostStreamId, inc: u64, seq: u64, aut
     list.put_word_le(mut raw, sid.lo)
     list.put_word_le(mut raw, inc)
     list.put_word_le(mut raw, seq)
-    capacity(history_seal(mut raw, ctx, at, 0x0102))
-}
-
-// Decodes what a batch key holds from its first bytes: INDEX (which needs
-// `byte_len` bytes; a shorter `raw` returns `Rows` with no rows read and the
-// caller reads up to `byte_len`) or TERM.
-fn stream_batch_head(key: String, raw: Bytes, sid: HostStreamId, inc: u64, seq: u64) -> Result[BatchBody, Error] {
-    let head = stream_read_header(key, raw, sid, ROLE_BATCH)?
-    if head.inc != inc || head.ctx.seq != seq {
-        return Error(disk_fault(key, 0, Header))
-    }
-    if list.len(raw) < 88 {
-        return Error(disk_fault(key, 72, Truncated))
-    }
-    let kind = read_le(raw, 72, 2)
-    if kind == 0x0102 {
-        let frame = history_frame(key, head.ctx, raw, 72, 0x0102)?
-        let p = list.slice(raw, frame.payload, frame.end)
-        if frame.end != list.len(raw) || list.len(p) != STREAM_TERM_BYTES || read_le(p, 0, 8) != sid.hi || read_le(p, 8, 8) != sid.lo || read_le(p, 16, 8) != inc || read_le(p, 24, 8) != seq {
-            return Error(disk_fault(key, 72, Malformed))
-        }
-        return Ok(Term(inc, seq))
-    }
-    if kind != 0x0101 {
-        return Error(disk_fault(key, 72, Malformed))
-    }
-    if list.len(raw) < STREAM_INDEX_PREFIX {
-        return Error(disk_fault(key, 72, Truncated))
-    }
-    let byte_len = read_le(raw, 88, 4)
-    let n = read_le(raw, 100, 4)
-    if byte_len != STREAM_INDEX_PREFIX + STREAM_INDEX_ROW_BYTES * n || n > STREAM_MAX_SLOTS {
-        return Error(disk_fault(key, 72, Malformed))
-    }
-    if list.len(raw) < byte_len {
-        return Ok(Rows(BatchIndex(byte_len, seen_rev: read_le(raw, 92, 8), rows: list.new())))
-    }
-    let frame = history_frame(key, head.ctx, list.slice(raw, 0, byte_len), 72, 0x0101)?
-    let p = list.slice(raw, frame.payload, frame.end)
-    let mut rows: List[BatchRow] = capacity(bound bytes (88 * n + 64) {
-        list.with_capacity(n)
-    })?
-    let mut cursor = 16u64
-    let mut slice_at = byte_len
-    for i in 0u64 .. n {
-        let store = StoreId(hi: read_le(p, cursor, 8), lo: read_le(p, cursor + 8, 8))
-        let offset = read_le(p, cursor + 24, 4)
-        let len = read_le(p, cursor + 28, 4)
-        if offset != slice_at || (i > 0 && !stream_store_below(rows[i - 1].store, store)) {
-            return Error(disk_fault(key, 72, Malformed))
-        }
-        let mut digest: Inline[u8, 32] =[0; 32]
-        for j in 0u64 .. 32 {
-            digest[j] = p[cursor + 36 + j]
-        }
-        list.push(mut rows, BatchRow(store, epoch: read_le(p, cursor + 16, 8), offset, len, frames: read_le(p, cursor + 32, 4), digest))
-        slice_at = offset + len
-        cursor += STREAM_INDEX_ROW_BYTES
-    }
-    Ok(Rows(BatchIndex(byte_len, seen_rev: read_le(p, 4, 8), rows: take rows)))
+    types.capacity(history_seal(mut raw, ctx, at, 0x0102))
 }
 
 // HEADER's identity field of a stream object.
-fn stream_identity(sid: HostStreamId) -> StoreId {
-    StoreId(hi: sid.hi, lo: sid.lo)
+pub fn stream_identity(sid: types.HostStreamIdRep) -> types.StoreKey {
+    types.StoreKey(hi: sid.hi, lo: sid.lo)
 }
 
-fn stream_same(a: HostStreamId, b: HostStreamId) -> bool {
+pub fn stream_same(a: types.HostStreamIdRep, b: types.HostStreamIdRep) -> bool {
     a.hi == b.hi && a.lo == b.lo
 }
 
-fn stream_store_below(a: StoreId, b: StoreId) -> bool {
+pub fn stream_store_below(a: types.StoreKey, b: types.StoreKey) -> bool {
     a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo)
 }
 
-// A full read checks FOOTER's body digest over HEADER through the last slice.
-fn stream_batch_check(key: String, raw: Bytes, sid: HostStreamId, inc: u64, seq: u64) -> Result[BatchIndex, Error] {
-    let Rows(take found) = stream_batch_head(key, raw, sid, inc, seq)? else {
-        return Error(disk_fault(key, 72, Malformed))
-    }
-    let mut body_end = found.byte_len
-    for i in 0u64 .. list.len(found.rows) {
-        body_end = found.rows[i].offset + found.rows[i].len
-    }
-    if list.len(raw) < body_end + 16 + STREAM_FOOTER_BYTES {
-        return Error(disk_fault(key, body_end, Truncated))
-    }
-    let ctx = DiskContext(store: stream_identity(sid), role: ROLE_BATCH, seq)
-    let frame = history_frame(key, ctx, raw, body_end, 0x0105)?
-    if frame.end != list.len(raw) || frame.end - frame.payload != STREAM_FOOTER_BYTES {
-        return Error(disk_fault(key, body_end, Malformed))
-    }
-    let body = std.sha256.hash(list.slice(raw, 0, body_end))
-    for j in 0u64 .. 32 {
-        if body[j] != raw[frame.payload + j] {
-            return Error(disk_fault(key, body_end, Checksum))
-        }
-    }
-    Ok(take found)
-}
-
 // A slice read checks its row's digest. `raw` holds the slice's bytes.
-fn stream_slice_check(key: String, row: BatchRow, raw: Bytes) -> Result[(), Error] {
+pub fn stream_slice_check(key: String, row: BatchRow, raw: Bytes) -> Result[(), types.Failure] {
     if list.len(raw) != row.len {
         return Error(disk_fault(key, row.offset, Truncated))
     }

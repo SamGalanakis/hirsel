@@ -22,8 +22,8 @@ fn history_claim_matches_pair(expected: Claim, current: HistoryPair) -> bool {
     if expected.epoch != current.epoch || list.len(expected.holder) != 16 {
         return false
     }
-    let hi = read_le(expected.holder, 0, 8)
-    let lo = read_le(expected.holder, 8, 8)
+    let hi = format.read_le(expected.holder, 0, 8)
+    let lo = format.read_le(expected.holder, 8, 8)
     hi == current.holder.hi && lo == current.holder.lo
 }
 
@@ -150,7 +150,7 @@ fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(
         }
         let following = std.object.key_text(page.after)
         if order.compare(following, after) != Greater {
-            return Error(disk_fault("authority", 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault("authority", 0, Malformed)))
         }
         after = take following
     }
@@ -173,17 +173,17 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
     }
     history_check_empty(mut client, deadline)?
     let first = disk_allocation(scoped fn() -> Result[State, Error] {
-        capacity(main_state(empty_roots(), 0, 0))
+        failure_result_from_rep(types.capacity(main_state(empty_roots(), 0, 0)))
     })?
-    let initial = journal_replay(take first, 0, named_limits(options.limits))?
+    let initial = journal_replay(take first, 0, limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))))?
     over_ceiling(journal_account(initial)?, options.resident_limit)?
-    let id = capacity(disk_identity(r))?
-    let admitted = prepare_writer(id, initial)?
+    let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+    let admitted = prepare_writer(store_key_from_rep(id), initial)?
     if let Some(mut attaching) = link {
-        let register = history_stream_genesis(mut client, mut attaching, id, holder, authority_kind, authority, mut workspace, deadline, initial.limits)?
+        let register = history_stream_genesis(mut client, mut attaching, store_key_from_rep(id), holder, authority_kind, authority, mut workspace, deadline, initial.limits)?
         return Ok((take register, take initial, take admitted, take authority))
     }
-    let created = history_publish_genesis(mut client, id, holder, authority_kind, authority, mut workspace, deadline, initial.limits, None)
+    let created = history_publish_genesis(mut client, store_key_from_rep(id), holder, authority_kind, authority, mut workspace, deadline, initial.limits, None)
     let mut register = match take created {
         Ok(take granted) => take granted,
         Error(Exists(existing)) if existing == "head" => return Error(Lost),
@@ -200,7 +200,7 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
 fn history_stream_genesis(mut client: std.object.Client, mut link: SlotLink, id: StoreId, holder: StoreId, authority_kind: u8, authority: Bytes, mut workspace: HistoryBuffers, deadline: u64, limits: StoreLimits) -> Result[HistoryRegister, Error] waits {
     let place_prefix = std.object.bucket_config(client).prefix
     let (inc, first_seq) = slot_attach(mut link, id, 1, place_prefix, limits)?
-    let attach = Attach(settles: 0, live: Some(StreamRef(sid: link.sid, inc, from_seq: first_seq, from_frame: 0)), sealed: list.new())
+    let attach = format.Attach(settles: 0, live: Some(format.StreamRef(sid: host_stream_id_to_rep(link.sid), inc, from_seq: first_seq, from_frame: 0)), sealed: list.new())
     let created = history_publish_genesis(mut client, id, holder, authority_kind, authority, mut workspace, deadline, limits, Some(take attach))
     let register = match take created {
         Ok(take granted) => take granted,
@@ -227,7 +227,7 @@ fn history_advance_claim(mut client: std.object.Client, mut register: HistoryReg
 fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, deadline: u64) waits {
     list.clear(mut entropy)
     host.random(r, mut entropy)
-    let jitter = read_le(entropy, 0, 8) % pause
+    let jitter = format.read_le(entropy, 0, 8) % pause
     host.sleep_until(c, order.min(clock.deadline_after_ms(host.mono_ns(c), pause + jitter), deadline))
 }
 
@@ -256,7 +256,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
         let trial = match replace(mut admitted, None) {
             Some((base, take replay)) if selected.head.checkpoint.seq <= base.entry.seq => {
                 if selected.head.floor < base.floor {
-                    return Error(disk_fault("head", 72, Malformed))
+                    return Error(failure_from_rep(format.disk_fault("head", 72, Malformed)))
                 }
                 history_rebase_suffix(mut read_source, selected.head, base.entry, take replay, options.resident_limit)
             },
@@ -277,15 +277,15 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
             },
             Error(take problem) => return Error(take problem),
         }
-        check_limits(options.limits, replay.limits)?
+        failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), limits_to_rep(replay.limits)))?
         let admitted_state = prepare_writer(selected.head.store, replay)?
         let head = selected.head
         let authority_end = history_authority_end(workspace.witness)?
-        let authority = copied(list.slice(workspace.witness, 240, authority_end))?
+        let authority = failure_result_from_rep(types.copied(list.slice(workspace.witness, 240, authority_end)))?
         if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
         }
-        let attach: Option[Attach] = match link {
+        let attach: Option[format.Attach] = match link {
             Some(mut attaching) => {
                 let (inc, next_seq) = match granted {
                     // A head moved to another epoch is another claimant's.
@@ -301,7 +301,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
                         (inc, next_seq)
                     },
                 }
-                Some(Attach(settles: 0, live: Some(StreamRef(sid: attaching.sid, inc, from_seq: next_seq, from_frame: 0)), sealed: list.new()))
+                Some(format.Attach(settles: 0, live: Some(format.StreamRef(sid: host_stream_id_to_rep(attaching.sid), inc, from_seq: next_seq, from_frame: 0)), sealed: list.new()))
             },
             None => None,
         }
@@ -382,7 +382,7 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
                         check_expected_store(options.expect, capture.head.store)?
                         history_check_namespace(capture, read_source.client)?
                         let _ = history_check_claim_auth(options, capture.head.pair)?
-                        return Error(Attached(stream_attached_sid(a)))
+                        return Error(Attached(optional_host_stream_id_from_rep(format.stream_attached_sid(a))))
                     }
                     Some((take capture, None))
                 },
@@ -394,7 +394,7 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
     if authority_kind == 1 {
         history_check_endpoint(mut read_source.client, read_source.deadline)?
     }
-    let holder = capacity(disk_identity(r))?
+    let holder = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
     match take selected {
         Some((take capture, take attached)) => {
             let joined = match attached {
@@ -403,10 +403,10 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
             }
             match link {
                 // Attaching an attached Place is its claim (§12.11.5).
-                Some(mut attaching) if joined => stream_open_attached(mut read_source, mut attaching, r, holder, options, requested_levels, authority_kind, mut workspace, prepare_writer),
-                _ => history_open_existing(mut read_source, c, r, holder, take capture, options, requested_levels, authority_kind, mut workspace, mut link, prepare_writer),
+                Some(mut attaching) if joined => stream_open_attached(mut read_source, mut attaching, r, store_key_from_rep(holder), options, requested_levels, authority_kind, mut workspace, prepare_writer),
+                _ => history_open_existing(mut read_source, c, r, store_key_from_rep(holder), take capture, options, requested_levels, authority_kind, mut workspace, mut link, prepare_writer),
             }
         },
-        None => history_open_genesis(mut read_source.client, r, holder, options, authority_kind, take genesis_authority, mut workspace, read_source.deadline, mut link, prepare_writer),
+        None => history_open_genesis(mut read_source.client, r, store_key_from_rep(holder), options, authority_kind, take genesis_authority, mut workspace, read_source.deadline, mut link, prepare_writer),
     }
 }

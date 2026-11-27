@@ -42,7 +42,9 @@ fn plan_fork(mut db: Db, name: String, from: Snapshot) -> Result[ForkPlan, Error
         return Ok(LiveFork(slot))
     }
     db.next_branch += 1
-    if is_disk(db) { note_fork_row(mut db, LineageFork(child: id, parent: from.branch, watermark: from.watermark, adopted: false))? }
+    if is_disk(db) {
+        note_fork_row(mut db, LineageFork(child: id, parent: from.branch, watermark: from.watermark, adopted: false))?
+    }
     let (take head, take indexed_name) = disk_allocation(scoped fn() -> Result[(Head, String), Error] {
         Ok((Head(id: id, name: string.from(name), parent: from.branch, forked_at: from.head, roots: share_roots(from.roots), head: from.head, at: at, following: None), string.from(name)))
     })?
@@ -63,15 +65,15 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         let source = db.heads[parent]
         let head = Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: share_roots(source.roots), head: source.head, at: source.at, following: None)
         let frame: Option[Bytes] = if disk {
-            let context = DiskContext(store: db.store, role: 2, seq: db.file_seq)
-            Some(capacity(encode_fork(context, db.file_end, head, watermark))?)
+            let context = format.DiskContext(store: store_key_to_rep(db.store), role: 2, seq: db.file_seq)
+            Some(failure_result_from_rep(types.capacity(encode_fork(context, db.file_end, head, watermark)))?)
         } else {
             None
         }
         Ok((take head, string.from(name), take frame))
     })?
-    capacity(map.try_reserve(mut db.branch_names, 1))?
-    capacity(list.try_reserve(mut db.heads, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut db.branch_names, 1)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut db.heads, 1)))?
     let store = db.store
     let opened = open_number(db)
     if disk {

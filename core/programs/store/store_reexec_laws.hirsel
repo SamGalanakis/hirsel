@@ -18,7 +18,7 @@ fn info_entry(mut tx: Tx, t: Table[u64, u64], forced: Option[CallInfo], extra: b
     }
     let mut output: Bytes = list.new()
     for word in[before, ci.at, ci.seed, ci.id.version] {
-        result.unwrap(le(mut output, word, 8))
+        result.unwrap(format.le(mut output, word, 8))
     }
     Ok(take output)
 }
@@ -47,7 +47,7 @@ fn verdict_code(v: Verdict) -> u8 {
 }
 
 fn reexecute_admit(mut db: Db, stream: u64) -> (Completion, CallRecord) waits {
-    let key = law_stream_bytes(key_word(stream), keyed_time(db))
+    let key = law_stream_bytes(types.key_word(stream), keyed_time(db))
     let record = call_for(key, 32)
     let admitted = result.unwrap(admit(mut db, record.stream, 0, request_digest(record.key, record.args)))
     let Admitted(take complete) = take admitted else {
@@ -59,7 +59,7 @@ fn reexecute_admit(mut db: Db, stream: u64) -> (Completion, CallRecord) waits {
 
 fn reexecute_error_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes] {
     result.unwrap(put(mut tx, t, 9, 99))
-    Error(key_word(17))
+    Error(types.key_word(17))
 }
 
 // §7 Kept: the error reply survives with its CALL, and the staged row does not.
@@ -78,24 +78,24 @@ fn reexecute_kept(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
     let v = version(snapshot(db))
     let line = main_branch(db)
     let failed = fn(_stop: Stop) -> Bytes {
-        key_word(0)
+        types.key_word(0)
     }
     let kept = result.unwrap(reexecute(db, line, v, plan, failed, t, fn(_call, mut tx, call_env) -> Result[Bytes, Bytes] {
         reexecute_error_entry(mut tx, call_env)
     }))
     let same_without_writes = result.unwrap(reexecute(db, line, v, plan, failed, (), fn(_call, mut tx, unused_env) -> Result[Bytes, Bytes] {
-        Ok(key_word(17))
+        Ok(types.key_word(17))
     }))
     let changed = result.unwrap(reexecute(db, line, v, plan, failed, (), fn(_call, mut tx, unused_env) -> Result[Bytes, Bytes] {
-        Error(key_word(18))
+        Error(types.key_word(18))
     }))
     verdict_is(kept, Same) && verdict_is(same_without_writes, Same) && verdict_is(changed, Different(Reply))
 }
 
 fn reexecute_fault_bytes(stop: Stop) -> Bytes {
     match stop {
-        Raised(kind) => key_word(int.widen(kind)),
-        _ => key_word(0),
+        Raised(kind) => types.key_word(int.widen(kind)),
+        _ => types.key_word(0),
     }
 }
 
@@ -104,7 +104,7 @@ fn reexecute_fault_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes]
         result.unwrap(put(mut tx, t, 10, 1))
         fail("re-execution law: raised from the attempted base")
     }
-    Ok(key_word(5))
+    Ok(types.key_word(5))
 }
 
 // §7 Failed: two commits intervene between the attempt's base and conclude.
@@ -125,7 +125,7 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
     if !set_row(mut db, t, 9, 10) || !set_row(mut db, t, 9, 11) {
         return false
     }
-    let concluded = conclude(mut db, take pending_run, key_word(5), Resident)
+    let concluded = conclude(mut db, take pending_run, types.key_word(5), Resident)
     let Ok(Committed(receipt)) = take concluded else {
         return false
     }
@@ -134,9 +134,9 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
     let line = main_branch(db)
     let fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, (copy_env(t), copy_env(attempted)), fn(_call, mut tx, call_env) -> Result[Bytes, Bytes] {
         let ci = info(mut tx)
-        let same_id = same(ci.id.store, call_env.1 .id.store) && ci.id.branch == call_env.1 .id.branch && ci.id.version == call_env.1 .id.version
+        let same_id = ci.id.store == call_env.1 .id.store && ci.id.branch == call_env.1 .id.branch && ci.id.version == call_env.1 .id.version
         if !same_id || ci.at != call_env.1 .at || ci.seed != call_env.1 .seed {
-            return Error(key_word(1))
+            return Error(types.key_word(1))
         }
         reexecute_fault_entry(mut tx, call_env.0)
     }))
@@ -145,7 +145,7 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
         Ok(option.unwrap(take absent))
     }))
     let returned = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, (), fn(_call, mut tx, unused_env) -> Result[Bytes, Bytes] {
-        Ok(key_word(5))
+        Ok(types.key_word(5))
     }))
     verdict_is(fault, Same) && verdict_is(different_fault, Different(Reply)) && verdict_is(returned, Different(Reply))
 }
@@ -180,7 +180,7 @@ pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let (probe, _) = result.unwrap(fork(mut db, "probe", head))
     let forked = call_info(db.store, probe.id, version(snapshot(db)) + 1, 0, 0)
     let failed = fn(_stop: Stop) -> Bytes {
-        key_word(0)
+        types.key_word(0)
     }
     let line = main_branch(db)
     let honest = result.unwrap(reexecute(db, line, v, plan, failed, t, fn(call, mut tx, call_env) -> Result[Bytes, Bytes] {
@@ -227,13 +227,13 @@ fn test_l62_replay_stop_precedence(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     let ample = Plan(n_e: 65536, s_e: 65536, reply_max: 4096)
     let short = Plan(n_e: 65536, s_e: 1, reply_max: 4096)
     let return_reply = fn(mut tx: Tx, env: ()) -> Result[Bytes, Bytes] {
-        Ok(key_word(17))
+        Ok(types.key_word(17))
     }
     let replay_reply = fn(call: Recorded, mut tx: Tx, env: ()) -> Result[Bytes, Bytes] {
-        Ok(key_word(17))
+        Ok(types.key_word(17))
     }
     let failed = fn(stop: Stop) -> Bytes {
-        key_word(17)
+        types.key_word(17)
     }
     let line = main_branch(db)
     {
@@ -241,7 +241,7 @@ fn test_l62_replay_stop_precedence(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
         let Ok(Failed(take pending_steps, OutOfSteps(_))) = serve(mut db, take complete, short, Some(take record), (), return_reply) else {
             fail("L62(d): expected a recorded step stop")
         }
-        let Committed(steps_receipt) = result.unwrap(conclude(mut db, take pending_steps, key_word(17), Resident)) else {
+        let Committed(steps_receipt) = result.unwrap(conclude(mut db, take pending_steps, types.key_word(17), Resident)) else {
             fail("L62(d): step stop did not settle")
         }
         result.unwrap(durable(mut db, steps_receipt.ticket))
@@ -268,7 +268,7 @@ fn test_l62_replay_stop_precedence(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
         let Ok(Failed(take pending_raise, Raised(_))) = take raised else {
             fail("L62(d): expected a recorded raise")
         }
-        let Committed(raised_receipt) = result.unwrap(conclude(mut db, take pending_raise, key_word(17), Resident)) else {
+        let Committed(raised_receipt) = result.unwrap(conclude(mut db, take pending_raise, types.key_word(17), Resident)) else {
             fail("L62(d): raise did not settle")
         }
         result.unwrap(durable(mut db, raised_receipt.ticket))
@@ -292,7 +292,7 @@ fn reexecute_zero_data_write_serve(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     if !set_row(mut db, t, 9u64, 42u64) {
         fail("L91 E6: seed write failed")
     }
-    let key = law_stream_bytes(key_word(91u64), keyed_time(db))
+    let key = law_stream_bytes(types.key_word(91u64), keyed_time(db))
     let mut record = call_for(clone(key), 32u64)
     let mut rev: Bytes = list.with_capacity(32u64)
     for b in 0u64 .. 32u64 {
@@ -314,14 +314,14 @@ fn reexecute_zero_data_write_serve(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
             Some(n) => n,
             None => 0u64,
         }
-        Ok(key_word(got))
+        Ok(types.key_word(got))
     }))
     let Committed(receipt) = take served else {
         fail("L91 E6: zero-data-write serve did not commit")
     }
     durable(mut db, receipt.ticket)?
     let v_after = version(snapshot(db))
-    if v_after != v_before + 1 || db.frame_seq != seq_before + 1 || receipt.reply != key_word(42u64) {
+    if v_after != v_before + 1 || db.frame_seq != seq_before + 1 || receipt.reply != types.key_word(42u64) {
         fail("L91 E6: zero-data-write serve was skipped or lost its reply")
     }
     let Some(saved_call) = recorded(db, main_branch(db), v_after)? else {
@@ -331,14 +331,14 @@ fn reexecute_zero_data_write_serve(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
         fail("L91 E6: recorded lost code.revision")
     }
     let failed = fn(_stop: Stop) -> Bytes {
-        key_word(0u64)
+        types.key_word(0u64)
     }
     let verdict = reexecute(db, main_branch(db), v_after, plan, failed, copy_env(t), fn(_call, mut tx, rows) -> Result[Bytes, Bytes] {
         let got = match result.unwrap(fetch(tx, rows, 9u64)) {
             Some(n) => n,
             None => 0u64,
         }
-        Ok(key_word(got))
+        Ok(types.key_word(got))
     })?
     if !verdict_is(verdict, Same) {
         fail("L91 E6: reexecute did not return Same")
@@ -346,7 +346,7 @@ fn reexecute_zero_data_write_serve(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     close(take db)?
     let mut reopened = open(tasks, dir, c, r, options)?
     match admit_law_stream(mut reopened, key, 0u64, digest)? {
-        Duplicate(stored) if stored.reply == key_word(42u64) => (),
+        Duplicate(stored) if stored.reply == types.key_word(42u64) => (),
         _ => fail("L91 E6: retry admit after reopen did not return Duplicate"),
     }
     close(take reopened)

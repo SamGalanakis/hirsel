@@ -1,7 +1,7 @@
 fn cursor_law_rows(mut db: Db, t: Table[u64, u64], row_count: u64) -> Result[(), Error] {
     let mut rows: List[std.page.Row] = list.with_capacity(row_count)
     for i in 0u64 .. row_count {
-        let key = key_word(2 * i)
+        let key = types.key_word(2 * i)
         let mut raw: Bytes = list.with_capacity(10)
         list.put_word_le(mut raw, t.readers.current)
         list.put_word_le(mut raw, 2 * i + 1)

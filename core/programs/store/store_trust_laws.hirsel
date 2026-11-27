@@ -82,7 +82,7 @@ fn trust_bucket_report(report: std.sim.s3.Report) -> Result[(), Error] {
     if mark.depth == 0 {
         let mut at = mark.locate_at
         while at < mark.locate_end {
-            let item = HistoryRef(seq: read_le(stored_cp.data, at, 8), epoch: read_le(stored_cp.data, at + 8, 8), len: read_le(stored_cp.data, at + 16, 8), digest: read_le(stored_cp.data, at + 24, 8))
+            let item = HistoryRef(seq: format.read_le(stored_cp.data, at, 8), epoch: format.read_le(stored_cp.data, at + 8, 8), len: format.read_le(stored_cp.data, at + 16, 8), digest: format.read_le(stored_cp.data, at + 24, 8))
             let pack_key = history_key("p-", item)
             let Some(stored_pack) = map.get(report.objects, pack_key) else {
                 return Error(Corrupt(Fault(file: pack_key, offset: 0, why: Absent)))

@@ -1,0 +1,441 @@
+fn store_key_to_rep(take value: StoreId) -> types.StoreKey {
+    let StoreId(hi: hi, lo: lo) = take value
+    types.StoreKey(hi: hi, lo: lo)
+}
+
+fn store_key_from_rep(take value: types.StoreKey) -> StoreId {
+    let types.StoreKey(hi: hi, lo: lo) = take value
+    StoreId(hi: hi, lo: lo)
+}
+
+fn limits_to_rep(take value: StoreLimits) -> types.LimitsRep {
+    let StoreLimits(frame: frame, value: value_max, meta: meta) = take value
+    types.LimitsRep(frame: frame, value: value_max, meta: meta)
+}
+
+fn limits_from_rep(take value: types.LimitsRep) -> StoreLimits {
+    let types.LimitsRep(frame: frame, value: value_max, meta: meta) = take value
+    StoreLimits(frame: frame, value: value_max, meta: meta)
+}
+
+fn fault_to_rep(take value: Fault) -> types.FaultRep {
+    let Fault(file: take file, offset: offset, why: why) = take value
+    types.FaultRep(file: take file, offset: offset, why: why_to_rep(why))
+}
+
+fn fault_from_rep(take value: types.FaultRep) -> Fault {
+    let types.FaultRep(file: take file, offset: offset, why: why) = take value
+    Fault(file: take file, offset: offset, why: why_from_rep(why))
+}
+
+fn why_to_rep(take value: Why) -> types.WhyRep {
+    match take value {
+        Checksum => Checksum,
+        Truncated => Truncated,
+        Flags => Flags,
+        Kind(item) => Kind(item),
+        Header => Header,
+        Gap(item) => Gap(item),
+        Order => Order,
+        Dangling(item) => Dangling(item),
+        Absent => Absent,
+        Malformed => Malformed,
+        Regressed => Regressed,
+    }
+}
+
+fn why_from_rep(take value: types.WhyRep) -> Why {
+    match take value {
+        Checksum => Checksum,
+        Truncated => Truncated,
+        Flags => Flags,
+        Kind(item) => Kind(item),
+        Header => Header,
+        Gap(item) => Gap(item),
+        Order => Order,
+        Dangling(item) => Dangling(item),
+        Absent => Absent,
+        Malformed => Malformed,
+        Regressed => Regressed,
+    }
+}
+
+fn capacity_to_rep(take value: StoreCapacity) -> types.CapacityRep {
+    match take value {
+        Journal(item) => Journal(item),
+        Resident(item) => Resident(item),
+        Allocation(item) => Allocation(item),
+        Cache(item) => Cache(item),
+        Slots(item) => Slots(item),
+        Pins(item) => Pins(item),
+        Register(item) => Register(item),
+    }
+}
+
+fn capacity_from_rep(take value: types.CapacityRep) -> StoreCapacity {
+    match take value {
+        Journal(item) => Journal(item),
+        Resident(item) => Resident(item),
+        Allocation(item) => Allocation(item),
+        Cache(item) => Cache(item),
+        Slots(item) => Slots(item),
+        Pins(item) => Pins(item),
+        Register(item) => Register(item),
+    }
+}
+
+fn failure_to_rep(take value: Error) -> types.Failure {
+    match take value {
+        Held => Held,
+        NotFound => NotFound,
+        Corrupt(take item) => Corrupt(fault_to_rep(take item)),
+        Unsupported(item) => Unsupported(item),
+        Io(item) => Io(item),
+        Poisoned(item) => Poisoned(item),
+        Full(item) => Full(capacity_to_rep(item)),
+        Limit(item) => Limit(limit_to_rep(item)),
+        Schema(item) => Schema(item),
+        Stale(item) => Stale(item),
+        Decode(item) => Decode(item),
+        Exists(take item) => Exists(take item),
+        Missing(take item) => Missing(take item),
+        Changed(take item) => Changed(take item),
+        Conflict(take item) => Conflict(take item),
+        Undeclared(take item) => Undeclared(take item),
+        NoLevel(take item) => NoLevel(take item),
+        Behind(item) => Behind(position_to_rep(item)),
+        Gone(item) => Gone(item),
+        Unseen(item) => Unseen(item),
+        Diverged(item) => Diverged(item),
+        Foreign => Foreign,
+        MigrationFault => MigrationFault,
+        ExportDirectory => ExportDirectory,
+        Fenced(item) => Fenced(item),
+        Lost => Lost,
+        Superseded(take item) => Superseded(claim_to_rep(take item)),
+        Undecided => Undecided,
+        Declared(take item) => Declared(take item),
+        NotCurrent(item) => NotCurrent(item),
+        Endpoint(item) => Endpoint(endpoint_refusal_to_rep(item)),
+        HistoryMissing(take value_0, value_1) => HistoryMissing(take value_0, value_1),
+        Reclaimed(item) => Reclaimed(item),
+        Retired => Retired,
+        Remote(take item) => Remote(take item),
+        Missed => Missed,
+        Tiered(item) => Tiered(tiered_refusal_to_rep(item)),
+        NotReady(take item) => NotReady(take item),
+        Drift(take item) => Drift(take item),
+        LimitsDiffer(item) => LimitsDiffer(limits_to_rep(item)),
+        Attached(item) => Attached(optional_host_stream_id_to_rep(item)),
+        Stream(item) => Stream(stream_refusal_to_rep(item)),
+        Latched(item) => Latched(item),
+    }
+}
+
+fn failure_from_rep(take value: types.Failure) -> Error {
+    match take value {
+        Held => Held,
+        NotFound => NotFound,
+        Corrupt(take item) => Corrupt(fault_from_rep(take item)),
+        Unsupported(item) => Unsupported(item),
+        Io(item) => Io(item),
+        Poisoned(item) => Poisoned(item),
+        Full(item) => Full(capacity_from_rep(item)),
+        Limit(item) => Limit(limit_from_rep(item)),
+        Schema(item) => Schema(item),
+        Stale(item) => Stale(item),
+        Decode(item) => Decode(item),
+        Exists(take item) => Exists(take item),
+        Missing(take item) => Missing(take item),
+        Changed(take item) => Changed(take item),
+        Conflict(take item) => Conflict(take item),
+        Undeclared(take item) => Undeclared(take item),
+        NoLevel(take item) => NoLevel(take item),
+        Behind(item) => Behind(position_from_rep(item)),
+        Gone(item) => Gone(item),
+        Unseen(item) => Unseen(item),
+        Diverged(item) => Diverged(item),
+        Foreign => Foreign,
+        MigrationFault => MigrationFault,
+        ExportDirectory => ExportDirectory,
+        Fenced(item) => Fenced(item),
+        Lost => Lost,
+        Superseded(take item) => Superseded(claim_from_rep(take item)),
+        Undecided => Undecided,
+        Declared(take item) => Declared(take item),
+        NotCurrent(item) => NotCurrent(item),
+        Endpoint(item) => Endpoint(endpoint_refusal_from_rep(item)),
+        HistoryMissing(take value_0, value_1) => HistoryMissing(take value_0, value_1),
+        Reclaimed(item) => Reclaimed(item),
+        Retired => Retired,
+        Remote(take item) => Remote(take item),
+        Missed => Missed,
+        Tiered(item) => Tiered(tiered_refusal_from_rep(item)),
+        NotReady(take item) => NotReady(take item),
+        Drift(take item) => Drift(take item),
+        LimitsDiffer(item) => LimitsDiffer(limits_from_rep(item)),
+        Attached(item) => Attached(optional_host_stream_id_from_rep(item)),
+        Stream(item) => Stream(stream_refusal_from_rep(item)),
+        Latched(item) => Latched(item),
+    }
+}
+
+fn limit_to_rep(take value: Limit) -> types.LimitRep {
+    match take value {
+        Key => Key,
+        Value => Value,
+        Transaction => Transaction,
+        Name => Name,
+        Ids => Ids,
+        Manifest => Manifest,
+        Triggers => Triggers,
+    }
+}
+
+fn limit_from_rep(take value: types.LimitRep) -> Limit {
+    match take value {
+        Key => Key,
+        Value => Value,
+        Transaction => Transaction,
+        Name => Name,
+        Ids => Ids,
+        Manifest => Manifest,
+        Triggers => Triggers,
+    }
+}
+
+fn claim_to_rep(take value: Claim) -> types.ClaimRep {
+    let Claim(epoch: epoch, holder: take holder) = take value
+    types.ClaimRep(epoch: epoch, holder: take holder)
+}
+
+fn claim_from_rep(take value: types.ClaimRep) -> Claim {
+    let types.ClaimRep(epoch: epoch, holder: take holder) = take value
+    Claim(epoch: epoch, holder: take holder)
+}
+
+fn position_to_rep(take value: Position) -> types.PositionRep {
+    let Position(store: store, branch: branch_id, version: sequence) = take value
+    types.PositionRep(store: store_key_to_rep(store), branch: branch_id, version: sequence)
+}
+
+fn position_from_rep(take value: types.PositionRep) -> Position {
+    let types.PositionRep(store: store, branch: branch_id, version: sequence) = take value
+    Position(store: store_key_from_rep(store), branch: branch_id, version: sequence)
+}
+
+fn endpoint_refusal_to_rep(take value: EndpointRefusal) -> types.EndpointRefusalRep {
+    match take value {
+        Insecure => Insecure,
+        Unproven => Unproven,
+        NotSimulator => NotSimulator,
+        IgnoresIfNoneMatch => IgnoresIfNoneMatch,
+        IgnoresIfMatch => IgnoresIfMatch,
+    }
+}
+
+fn endpoint_refusal_from_rep(take value: types.EndpointRefusalRep) -> EndpointRefusal {
+    match take value {
+        Insecure => Insecure,
+        Unproven => Unproven,
+        NotSimulator => NotSimulator,
+        IgnoresIfNoneMatch => IgnoresIfNoneMatch,
+        IgnoresIfMatch => IgnoresIfMatch,
+    }
+}
+
+fn host_stream_id_to_rep(take value: HostStreamId) -> types.HostStreamIdRep {
+    let HostStreamId(hi: hi, lo: lo) = take value
+    types.HostStreamIdRep(hi: hi, lo: lo)
+}
+
+fn host_stream_id_from_rep(take value: types.HostStreamIdRep) -> HostStreamId {
+    let types.HostStreamIdRep(hi: hi, lo: lo) = take value
+    HostStreamId(hi: hi, lo: lo)
+}
+
+fn tiered_refusal_to_rep(take value: TieredRefusal) -> types.TieredRefusalRep {
+    match take value {
+        Memory => Memory,
+        Migrate => Migrate,
+        Export => Export,
+        Install => Install,
+        Authority => Authority,
+        Tail => Tail,
+    }
+}
+
+fn tiered_refusal_from_rep(take value: types.TieredRefusalRep) -> TieredRefusal {
+    match take value {
+        Memory => Memory,
+        Migrate => Migrate,
+        Export => Export,
+        Install => Install,
+        Authority => Authority,
+        Tail => Tail,
+    }
+}
+
+fn stream_refusal_to_rep(take value: StreamRefusal) -> types.StreamRefusalRep {
+    match take value {
+        WeakLevels => WeakLevels,
+        Overlap => Overlap,
+        Bound(item) => Bound(stream_field_to_rep(item)),
+    }
+}
+
+fn stream_refusal_from_rep(take value: types.StreamRefusalRep) -> StreamRefusal {
+    match take value {
+        WeakLevels => WeakLevels,
+        Overlap => Overlap,
+        Bound(item) => Bound(stream_field_from_rep(item)),
+    }
+}
+
+fn stream_field_to_rep(take value: StreamField) -> types.StreamFieldRep {
+    match take value {
+        MaxBatchBytes => MaxBatchBytes,
+        MaxSlots => MaxSlots,
+        MaxPins => MaxPins,
+        HoldMs => HoldMs,
+        IdlePollMs => IdlePollMs,
+        IndexEvery => IndexEvery,
+        SlotBytes => SlotBytes,
+    }
+}
+
+fn stream_field_from_rep(take value: types.StreamFieldRep) -> StreamField {
+    match take value {
+        MaxBatchBytes => MaxBatchBytes,
+        MaxSlots => MaxSlots,
+        MaxPins => MaxPins,
+        HoldMs => HoldMs,
+        IdlePollMs => IdlePollMs,
+        IndexEvery => IndexEvery,
+        SlotBytes => SlotBytes,
+    }
+}
+
+fn stream_key_to_rep(take value: StreamKey) -> format.StreamKeyRep {
+    let StreamKey(caller: take caller, id: id) = take value
+    format.StreamKeyRep(caller: caller_to_rep(take caller), id: stream_id_to_rep(id))
+}
+
+fn stream_key_from_rep(take value: format.StreamKeyRep) -> StreamKey {
+    let format.StreamKeyRep(caller: take caller, id: id) = take value
+    StreamKey(caller: caller_from_rep(take caller), id: stream_id_from_rep(id))
+}
+
+fn caller_to_rep(take value: Caller) -> format.CallerRep {
+    let Caller(issuer: issuer, subject: take subject) = take value
+    format.CallerRep(issuer: issuer, subject: take subject)
+}
+
+fn caller_from_rep(take value: format.CallerRep) -> Caller {
+    let format.CallerRep(issuer: issuer, subject: take subject) = take value
+    Caller(issuer: issuer, subject: take subject)
+}
+
+fn stream_id_to_rep(take value: StreamId) -> format.StreamIdRep {
+    let StreamId(t: t, n: n) = take value
+    format.StreamIdRep(t: t, n: n)
+}
+
+fn stream_id_from_rep(take value: format.StreamIdRep) -> StreamId {
+    let format.StreamIdRep(t: t, n: n) = take value
+    StreamId(t: t, n: n)
+}
+
+fn call_record_to_rep(take value: CallRecord) -> format.CallRecordRep {
+    let CallRecord(key: take key, args: take args, stream: take stream, revision: take revision, code: take code) = take value
+    format.CallRecordRep(key: take key, args: take args, stream: stream_key_to_rep(take stream), revision: take revision, code: take code)
+}
+
+fn call_record_from_rep(take value: format.CallRecordRep) -> CallRecord {
+    let format.CallRecordRep(key: take key, args: take args, stream: take stream, revision: take revision, code: take code) = take value
+    CallRecord(key: take key, args: take args, stream: stream_key_from_rep(take stream), revision: take revision, code: take code)
+}
+
+fn keyed_call_record_to_rep(take value: KeyedCallRecord) -> format.KeyedCallRecordRep {
+    let KeyedCallRecord(entry: take entry_key, args: take args, revision: take revision, code: take code) = take value
+    format.KeyedCallRecordRep(entry: take entry_key, args: take args, revision: take revision, code: take code)
+}
+
+fn keyed_call_record_from_rep(take value: format.KeyedCallRecordRep) -> KeyedCallRecord {
+    let format.KeyedCallRecordRep(entry: take entry_key, args: take args, revision: take revision, code: take code) = take value
+    KeyedCallRecord(entry: take entry_key, args: take args, revision: take revision, code: take code)
+}
+
+fn stop_kind_to_rep(take value: StopKind) -> format.StopKindRep {
+    match take value {
+        Raised => Raised,
+        OutOfSteps(item) => OutOfSteps(item),
+        OutOfBytes => OutOfBytes,
+        Conflict => Conflict,
+    }
+}
+
+fn stop_kind_from_rep(take value: format.StopKindRep) -> StopKind {
+    match take value {
+        Raised => Raised,
+        OutOfSteps(item) => OutOfSteps(item),
+        OutOfBytes => OutOfBytes,
+        Conflict => Conflict,
+    }
+}
+
+fn optional_host_stream_id_to_rep(take value: Option[HostStreamId]) -> Option[types.HostStreamIdRep] {
+    match take value {
+        Some(take item) => Some(host_stream_id_to_rep(take item)),
+        None => None,
+    }
+}
+
+fn optional_host_stream_id_from_rep(take value: Option[types.HostStreamIdRep]) -> Option[HostStreamId] {
+    match take value {
+        Some(take item) => Some(host_stream_id_from_rep(take item)),
+        None => None,
+    }
+}
+
+fn optional_limits_to_rep(take value: Option[StoreLimits]) -> Option[types.LimitsRep] {
+    match take value {
+        Some(take item) => Some(limits_to_rep(take item)),
+        None => None,
+    }
+}
+
+fn optional_stream_key_from_rep(take value: Option[format.StreamKeyRep]) -> Option[StreamKey] {
+    match take value {
+        Some(take item) => Some(stream_key_from_rep(take item)),
+        None => None,
+    }
+}
+
+fn failure_result_from_rep[T](take value: Result[T, types.Failure]) -> Result[T, Error] {
+    match take value {
+        Ok(take output) => Ok(take output),
+        Error(take failure) => Error(failure_from_rep(take failure)),
+    }
+}
+
+fn failure_result_to_rep[T](take value: Result[T, Error]) -> Result[T, types.Failure] {
+    match take value {
+        Ok(take output) => Ok(take output),
+        Error(take failure) => Error(failure_to_rep(take failure)),
+    }
+}
+
+fn optional_stop_kind_to_rep(take value: Option[StopKind]) -> Option[format.StopKindRep] {
+    match take value {
+        Some(item) => Some(stop_kind_to_rep(item)),
+        None => None,
+    }
+}
+
+fn optional_stop_kind_from_rep(take value: Option[format.StopKindRep]) -> Option[StopKind] {
+    match take value {
+        Some(item) => Some(stop_kind_from_rep(item)),
+        None => None,
+    }
+}

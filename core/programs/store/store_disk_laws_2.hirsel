@@ -31,11 +31,11 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let after = disk_state(db).pages.next_pack
     let mut stamps: Map[u64, ()] = map.new()
     for seq in first .. after {
-        let raw = disk_read_file(d, capacity(disk_path("p-", seq, ""))?, 8500)?
+        let raw = disk_read_file(d, failure_result_from_rep(types.capacity(disk_path("p-", seq, "")))?, 8500)?
         let mut at = 72u64
         while at < list.len(raw) {
-            let kind = read_le(raw, at, 2)
-            let stamp = read_le(raw, at + (if kind == 33 {
+            let kind = format.read_le(raw, at, 2)
+            let stamp = format.read_le(raw, at + (if kind == 33 {
                 24u64
             } else {
                 16u64
@@ -44,7 +44,7 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
                 return Error(Foreign)
             }
             map.insert(mut stamps, stamp, ())
-            at += 16 + read_le(raw, at + 4, 4)
+            at += 16 + format.read_le(raw, at + 4, 4)
         }
     }
     let manifest = disk_read_file(d, "MANIFEST", 4096)?
@@ -53,9 +53,9 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     // A versioned (disk) value also holds the revision: the extractor's 32-byte
     // code.revision, then 96 bytes for each of the K, V, J and payload codecs.
     let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
-    let index_charge = 62 + round8(7 + 44 + list.len(schema) + list.len(code.identity(by)) + 32 + 4 * 96)
+    let index_charge = 62 + format.round8(7 + 44 + list.len(schema) + list.len(code.identity(by)) + 32 + 4 * 96)
     let logical = 2 * 126 + 2 * 94 + 2 * 86 + 134 + index_charge
-    if read_le(manifest, 152, 8) != logical {
+    if format.read_le(manifest, 152, 8) != logical {
         return Error(Foreign)
     }
     close(take db)?
@@ -191,7 +191,7 @@ pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     result.unwrap(durable(mut db, commit_ticket))
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
-    if !same(identity(reopened), id) || open_number(reopened) != 4 || version(snapshot(reopened)) != 2 || reopened.next_node < high {
+    if identity(reopened) != id || open_number(reopened) != 4 || version(snapshot(reopened)) != 2 || reopened.next_node < high {
         return false
     }
     if result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 1)) != Some(10u64) || result.unwrap(get(reader_before_close, held, sh, 1)) != Some(10u64) {
@@ -279,8 +279,8 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = view t
     let (_, take manifest) = disk_read_page_manifest("MANIFEST", disk_read_file(d, "MANIFEST", 4096)?)?
-    let segment = capacity(disk_path("j-", db.file_seq, ""))?
-    let end = capacity(disk_path("j-", db.file_seq, ".end"))?
+    let segment = failure_result_from_rep(types.capacity(disk_path("j-", db.file_seq, "")))?
+    let end = failure_result_from_rep(types.capacity(disk_path("j-", db.file_seq, ".end")))?
     let durable_prefix = read_journal_prefix(d, segment, db.file_end)?
     let boundary = disk_read_file(d, end, 4096)?
     if !typed_put(mut db, t, 1, 10) {
@@ -309,7 +309,7 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
     options.create = false
     let mut reopened = open(tasks, d, c, r, options)?
     let recovered = snapshot(reopened)
-    if !same(old.store, recovered.store) || old.open == recovered.open {
+    if !types.same(old.store.hi, old.store.lo, recovered.store.hi, recovered.store.lo) || old.open == recovered.open {
         fail("watermark: missing reopen fence")
     }
     if !disk_watermark_rows(recovered, sh, None)? {
@@ -567,7 +567,7 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
             return Error(Foreign)
         }
     }
-    let committed_at = disk_cut_with_limit(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+    let committed_at = disk_cut_with_limit(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
         if list.capacity(raw) != pack_size {
             return Error(Foreign)
         }
@@ -575,7 +575,7 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     }, None, options.pack_bytes, pack_size, mut timing)?
     durable(mut db, committed_at)?
     let written = disk_read_paged_file(directory, pack, pack_size)?
-    if list.len(written) != pack_size || read_le(written, 72, 2) != 0x0022 {
+    if list.len(written) != pack_size || format.read_le(written, 72, 2) != 0x0022 {
         return Error(Foreign)
     }
     close(take db)
@@ -678,12 +678,12 @@ fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
     let mut stamps = 1u64
     for id in 1u32 .. 5 {
         define_collection(mut tree, id, 1, 1, mut stamps)?
-        put_page_row(mut tree, logical_key(id, key_word(1))?, string.as_bytes("x"), 1, mut stamps)?
+        put_page_row(mut tree, logical_key(id, types.key_word(1))?, string.as_bytes("x"), 1, mut stamps)?
     }
     define_collection(mut tree, 5, 1, 1, mut stamps)?
     bulk_collection(mut tree, 6, 1, list.new(), 1, mut stamps)?
     for id in 1u32 .. 5 {
-        if !remove_page_row(mut tree, logical_key(id, key_word(1))?, 1, mut stamps)? {
+        if !remove_page_row(mut tree, logical_key(id, types.key_word(1))?, 1, mut stamps)? {
             return Error(Foreign)
         }
     }
@@ -909,10 +909,10 @@ fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) 
     if scenario == "gap" {
         let loaded = disk_load(d, options.resident_limit)?
         let seq = loaded.manifest.next_pack
-        let first_name = capacity(disk_path("p-", seq, ""))?
-        let second_name = capacity(disk_path("p-", seq + 1, ""))?
-        let first = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq), 0, 0))?
-        let second = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq + 1), 0, 0))?
+        let first_name = failure_result_from_rep(types.capacity(disk_path("p-", seq, "")))?
+        let second_name = failure_result_from_rep(types.capacity(disk_path("p-", seq + 1, "")))?
+        let first = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: seq), 0, 0)))?
+        let second = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: seq + 1), 0, 0)))?
         disk_write_synced(d, first_name, first)?
         disk_write_synced(d, second_name, second)?
         disk_io(host.sync_dir(d))?

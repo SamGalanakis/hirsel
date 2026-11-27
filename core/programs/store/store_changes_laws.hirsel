@@ -571,12 +571,12 @@ fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) ->
             if at == list.len(delta) {
                 return false
             }
-            if delta[at].tree_key != result.unwrap(logical_key(1, key_word(k))) {
+            if delta[at].tree_key != result.unwrap(logical_key(1, types.key_word(k))) {
                 return false
             }
             let good = match delta[at].value {
                 None => after[k] == 0,
-                Some(raw) => list.slice(raw, 0, list.len(raw)) == key_word(after[k]) && after[k] != 0
+                Some(raw) => list.slice(raw, 0, list.len(raw)) == types.key_word(after[k]) && after[k] != 0
             }
             if !good {
                 return false
@@ -615,9 +615,9 @@ pub fn law_changes(c: Clock) -> bool waits {
         }
         let outcome = execute(mut db, 0, operation, None, fn(mut tx: Tx) -> Result[(), Error] {
             if v == 0 {
-                let _ = delete_bytes(mut tx, 1, key_word(k))?
+                let _ = delete_bytes(mut tx, 1, types.key_word(k))?
             } else {
-                put_bytes(mut tx, 1, key_word(k), key_word(v))?
+                put_bytes(mut tx, 1, types.key_word(k), types.key_word(v))?
             }
             Ok(())
         })
@@ -677,7 +677,7 @@ pub fn law_shared_changes(c: Clock) -> bool waits {
     let outcome = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
         let mut payload: Bytes = list.with_capacity(8192)
         list.fill(mut payload, 8192, 51u8)
-        put_bytes(mut tx, 1, key_word(7), payload)
+        put_bytes(mut tx, 1, types.key_word(7), payload)
     })
     if let Ok(Committed(_)) = outcome {} else {
         return false

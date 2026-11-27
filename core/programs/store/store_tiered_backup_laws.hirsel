@@ -161,7 +161,7 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
     }
     let leased = snapshot(db)
     let attempt = b"l96a-backup-0001"
-    let job = result.unwrap(begin_backup(mut db, target, copied(attempt)?))
+    let job = result.unwrap(begin_backup(mut db, target, failure_result_from_rep(types.copied(attempt))?))
     // Post-lease mutations and cut must not appear in the restored backup.
     l96_put_bytes(mut db, rows, 0, l96_blob_value(200, 32))?
     l96_put_bytes(mut db, rows, 42, l96_blob_value(201, 2000))?
@@ -268,7 +268,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
     close(take db)?
     let mut db2 = open(tasks, s1, c, r, clone(run_opts))?
     let attempt = b"l96b-lease-00001"
-    let job = result.unwrap(begin_backup(mut db2, b1, copied(attempt)?))
+    let job = result.unwrap(begin_backup(mut db2, b1, failure_result_from_rep(types.copied(attempt))?))
     // First cut after reopen is Tiered-idle: retires every listed class-3/4 pack
     // from MANIFEST while the export lease keeps their files on disk.
     let _ = checkpoint(mut db2)?
@@ -323,7 +323,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
     close(take db3)?
     let mut db4 = open(tasks, s2, c, r, clone(run_opts))?
     let attempt2 = b"l96b-lease-00002"
-    let job2 = result.unwrap(begin_backup(mut db4, b2, copied(attempt2)?))
+    let job2 = result.unwrap(begin_backup(mut db4, b2, failure_result_from_rep(types.copied(attempt2))?))
     let _ = checkpoint(mut db4)?
     if compact_listed(db4, old_pack) || !disk_exists(s2, paged_pack_path(old_pack)?)? {
         fail("L96 (b): reading-probe retirement did not defer unlink of leased pack")
@@ -359,7 +359,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
     // E1: crash after begin_backup (drop without close). Reopen has no lease,
     // and the next cut retires and removes P.
     let attempt = b"l96c-crash-00001"
-    let _dropped_job = result.unwrap(begin_backup(mut db, target, copied(attempt)?))
+    let _dropped_job = result.unwrap(begin_backup(mut db, target, failure_result_from_rep(types.copied(attempt))?))
     if !export_leased(db) {
         fail("L96 (c) E1: lease not active")
     }
@@ -375,7 +375,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
     // Re-Tier for E2/E3/R3/R5.
     set_residency(mut after_e1, rows.id, Tiered)?
     let head_h = version(snapshot(after_e1))
-    let job = result.unwrap(begin_backup(mut after_e1, target, copied(attempt)?))
+    let job = result.unwrap(begin_backup(mut after_e1, target, failure_result_from_rep(types.copied(attempt))?))
     let _ = result.unwrap(export_copy(take job))
     release_export(mut after_e1, attempt)
     close(take after_e1)?
@@ -440,7 +440,7 @@ fn l96_corrupt_cold_incoming_ptr(dir: Dir, id: StoreId, target_ptr: std.page.Pag
     let col_path = paged_pack_path(col_ptr.pack)?
     let mut pack_raw = disk_read_file(dir, col_path, 1048576)?
     let width: u64 = int.widen(col_ptr.len)
-    let mut page_payload = copied(list.slice(pack_raw, col_ptr.offset + 16, col_ptr.offset + 16 + width))?
+    let mut page_payload = failure_result_from_rep(types.copied(list.slice(pack_raw, col_ptr.offset + 16, col_ptr.offset + 16 + width)))?
     let needle = std.page.encode_ptr(target_ptr)
     let Some(at) = l96_find_bytes(page_payload, needle) else {
         fail("L96 (d): could not locate Cold PagePtr inside CollectionMap page")
@@ -453,8 +453,8 @@ fn l96_corrupt_cold_incoming_ptr(dir: Dir, id: StoreId, target_ptr: std.page.Pag
     }
     let patched = std.page.encode_ptr(broken)
     list.copy_from_slice(mut page_payload, at, patched)
-    let ctx = DiskContext(store: id, role: 3, seq: col_ptr.pack)
-    let resealed = capacity(disk_seal(ctx, col_ptr.offset, 0x0021, 1, page_payload))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: col_ptr.pack)
+    let resealed = failure_result_from_rep(types.capacity(format.disk_seal(ctx, col_ptr.offset, 0x0021, 1, page_payload)))?
     list.copy_from_slice(mut pack_raw, col_ptr.offset, resealed)
     disk_write_synced(dir, col_path, pack_raw)?
     let mut updated_col = col_ptr
@@ -464,9 +464,9 @@ fn l96_corrupt_cold_incoming_ptr(dir: Dir, id: StoreId, target_ptr: std.page.Pag
     let Some(m_at) = l96_find_bytes(raw_manifest, old_col_bytes) else {
         fail("L96 (d): could not locate CollectionMap pointer in MANIFEST")
     }
-    let mut next_manifest = copied(raw_manifest)?
+    let mut next_manifest = failure_result_from_rep(types.copied(raw_manifest))?
     list.copy_from_slice(mut next_manifest, m_at, new_col_bytes)
-    let m_ctx = DiskContext(store: id, role: 1, seq: manifest.generation)
+    let m_ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: manifest.generation)
     seal_page_manifest_file(mut next_manifest, m_ctx, manifest.fence)?
     disk_write_synced(dir, "MANIFEST", next_manifest)
 }
@@ -489,7 +489,7 @@ fn test_l96_d_corrupt_incoming_cold_pointer_at_r4(d: Dir, c: Clock, r: Random, t
         let backup_dir = disk_test_directory(d)
         let restore_dir = disk_test_directory(d)
         let attempt = b"l96d-corrupt-001"
-        let job = result.unwrap(begin_backup(mut db, backup_dir, copied(attempt)?))
+        let job = result.unwrap(begin_backup(mut db, backup_dir, failure_result_from_rep(types.copied(attempt))?))
         let _ = result.unwrap(export_copy(take job))
         release_export(mut db, attempt)
         l96_corrupt_cold_incoming_ptr(backup_dir, id, cold_ptr, mutate_stamp)?
@@ -526,7 +526,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
     set_residency(mut db, rows.id, Tiered)?
     let pack_p = compact_branch_root(db, 0, rows.id)?.pack
     let attempt = b"l96e-admit-00001"
-    let job = result.unwrap(begin_backup(mut db, tiered_backup, copied(attempt)?))
+    let job = result.unwrap(begin_backup(mut db, tiered_backup, failure_result_from_rep(types.copied(attempt))?))
     let _ = result.unwrap(export_copy(take job))
     release_export(mut db, attempt)
     // Unfunded options on a Tiered image must refuse Missing("cache_bytes") at R4.
@@ -547,7 +547,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
         fail("L96 (e) D-ZL-2: last-conversion lease must be positive-live plus the one zero-live class-3 pack")
     }
     let resident_exact = db.resident
-    let job2 = result.unwrap(begin_backup(mut db, conv_backup, copied(attempt)?))
+    let job2 = result.unwrap(begin_backup(mut db, conv_backup, failure_result_from_rep(types.copied(attempt))?))
     let _ = result.unwrap(export_copy(take job2))
     release_export(mut db, attempt)
     if !disk_exists(conv_backup, paged_pack_path(pack_p)?)? {
@@ -599,7 +599,7 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
     let _ = pin(mut db_a, "s", snap_s)?
     drop(take snap_s)
     let attempt_a = b"l100c-case-a-001"
-    let job_a = result.unwrap(begin_backup(mut db_a, bak_a, copied(attempt_a)?))
+    let job_a = result.unwrap(begin_backup(mut db_a, bak_a, failure_result_from_rep(types.copied(attempt_a))?))
     let _ = result.unwrap(export_copy(take job_a))
     release_export(mut db_a, attempt_a)
     let want_pa = disk_read_file(src_a, paged_pack_path(pack_a)?, 1048576)?
@@ -633,7 +633,7 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
     set_residency(mut db_b, rows_b.id, Memory)?
     let _ = checkpoint(mut db_b)?
     let attempt_b = b"l100c-case-b-002"
-    let job_b = result.unwrap(begin_backup(mut db_b, bak_b, copied(attempt_b)?))
+    let job_b = result.unwrap(begin_backup(mut db_b, bak_b, failure_result_from_rep(types.copied(attempt_b))?))
     let _ = result.unwrap(export_copy(take job_b))
     release_export(mut db_b, attempt_b)
     let want_pb = disk_read_file(src_b, paged_pack_path(pack_b)?, 1048576)?
@@ -656,7 +656,7 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
             copy_export_file(bak_b, missing_p, listed.name, None)?
         }
     }
-    match open_copied(missing_p, c, copied(attempt_b)?, clone(run_opts), false) {
+    match open_copied(missing_p, c, failure_result_from_rep(types.copied(attempt_b))?, clone(run_opts), false) {
         Error(Store(Unsupported(0x0023))) => Ok(()),
         _ => fail("L100 (c): R4 did not refuse image missing listed class-3 pack P with Unsupported(0x0023)"),
     }

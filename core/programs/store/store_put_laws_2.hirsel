@@ -67,7 +67,7 @@ fn agg_stored(db: Db, id: u32) -> Result[List[(Bytes, Bytes)], Error] {
     let mut cursor = byte_cursor(s.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
     let mut out: List[(Bytes, Bytes)] = list.new()
     while let Some((take key, value)) = next_bytes(mut cursor)? {
-        list.push(mut out, (take key, copied(value)?))
+        list.push(mut out, (take key, failure_result_from_rep(types.copied(value))?))
     }
     Ok(take out)
 }
@@ -347,14 +347,14 @@ fn frame_boundary_points() -> bool {
     let segments: Inline[u64, 5] =[9, 9, 9, 10, 256]
     let offsets: Inline[u64, 5] =[72, 73, 1048576, 73, 1048576]
     let mut ops: DataRows = new_data_rows()
-    let key = result.unwrap(logical_key(1, key_word(7)))
+    let key = result.unwrap(logical_key(1, types.key_word(7)))
     let mut value: Bytes = list.new()
     list.push(mut value, 0u8)
     list.push(mut value, 0u8)
     for i in 0u64 .. 32 {
         list.push(mut value, int.truncate(i))
     }
-    push_data_row(mut ops, DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
+    push_data_row(mut ops, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, mut ops, segments[i], offsets[i]))
@@ -438,7 +438,7 @@ pub fn law_changes_rewritten_equal(c: Clock) -> bool waits {
     for k in 0u64 .. 96 {
         let x = option.unwrap(result.unwrap(next_bytes(mut left)))
         let y = option.unwrap(result.unwrap(next_bytes(mut right)))
-        if x.0 != result.unwrap(logical_key(1, key_word(k))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
+        if x.0 != result.unwrap(logical_key(1, types.key_word(k))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
             return false
         }
         sum += decode_word(x.1)
@@ -518,8 +518,8 @@ fn cell_and_table_frame() -> bool {
             seal_cell_edits(mut ops, cells)
         }
         for k in 1u64 .. 3 {
-            let key = result.unwrap(logical_key(2, key_word(k)))
-            push_data_row(mut ops, DataOp(key: take key, value: None, trim: None, prior: None))
+            let key = result.unwrap(logical_key(2, types.key_word(k)))
+            push_data_row(mut ops, format.DataOp(key: take key, value: None, trim: None, prior: None))
         }
         if offset == 1 {
             seal_cell_edits(mut ops, cells)
@@ -553,10 +553,10 @@ fn trim_and_table_frame(c: Clock) -> Result[(), Error] waits {
     let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
     let Prepared(take candidate) = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, None, map.new(), scoped fn(mut tx: Tx) -> Result[(), Error] {
-        let _ = append(mut tx, events, key_word(3))?
+        let _ = append(mut tx, events, types.key_word(3))?
         trim_before(mut tx, events, 1)?
-        put_bytes(mut tx, 1, key_word(1), key_word(11))?
-        put_bytes(mut tx, 1, key_word(2), key_word(22))
+        put_bytes(mut tx, 1, types.key_word(1), types.key_word(11))?
+        put_bytes(mut tx, 1, types.key_word(2), types.key_word(22))
     }) else {
         return Error(Missing("trim and table draft"))
     }
@@ -564,7 +564,7 @@ fn trim_and_table_frame(c: Clock) -> Result[(), Error] waits {
     if let Error(take problem) = replace(mut staged.outcome, Ok(())) {
         return Error(take problem)
     }
-    let raw = capacity(encode_commit(ci, mut staged.ops, 1, 72))?
+    let raw = failure_result_from_rep(types.capacity(encode_commit(ci, mut staged.ops, 1, 72)))?
     if list.len(raw) != 129 {
         return Error(Missing("trim and table frame length"))
     }

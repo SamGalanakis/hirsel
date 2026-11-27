@@ -299,6 +299,8 @@ v3 assigned owners by file and checked acyclicity by layer name. A body-level sc
 
 Result at `3f6679cc`: 0 violations. 395 private declarations change owner, 265 to another module and 130 to the root, and 15 public declarations are A-split. No declaration lands later than its module's lane, so no temporary root adapter is needed, and the owner below is each declaration's **final** owner. Every lane is therefore landable alone, in order. In particular, L1 (`types`, `format`) references only `status`, `types`, `format`, `core` and `std`.
 
+L1 makes `TxIndexTiered` opaque so its `pins` field can use `format.TieredFrame`. Its root type name and scoped kind stay public.
+
 The scan is token-based and conservative. A lane may move a declaration lower than this table only after it rewrites the body over neutral inputs, as its §10 row proposes (for example `fill_cut_manifest` over `manifest.CutInput`), the placement gate (§9.2) still passes, and the lane records the move in its ticket. A lane may never move a declaration higher, or to a later landing, without amending this section.
 
 Owner changes from §3.4/§7.2 (every other private declaration keeps its §3.4/§7.2 owner; `placement.tsv` lists every declaration with its owner and landing; the public types `Health` and `StreamLatch`, named in both `status` and the root, share one row each):

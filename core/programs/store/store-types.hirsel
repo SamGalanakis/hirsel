@@ -1,0 +1,92 @@
+pub type StoreKey: key {
+    hi: u64,
+    lo: u64
+}
+
+pub type LimitsRep: codec + shareable + cross {
+    frame: u64,
+    value: u64,
+    meta: u64
+}
+
+pub type FaultRep: shareable + cross {
+    file: String,
+    offset: u64,
+    why: WhyRep
+}
+
+pub type WhyRep: shareable + cross = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed | Regressed
+
+pub type CapacityRep: shareable + cross = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity) | Slots(Capacity) | Pins(Capacity) | Register(Capacity)
+
+pub type Failure: shareable + cross = Held | NotFound | Corrupt(FaultRep) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(CapacityRep) | Limit(LimitRep) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(PositionRep) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Superseded(ClaimRep) | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusalRep) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusalRep) | NotReady(String) | Drift(String) | LimitsDiffer(LimitsRep) | Attached(Option[HostStreamIdRep]) | Stream(StreamRefusalRep) | Latched(status.StreamLatch)
+
+pub type LimitRep: shareable + cross = Key | Value | Transaction | Name | Ids | Manifest | Triggers
+
+pub type ClaimRep: key + shareable + cross {
+    epoch: u64,
+    holder: Bytes
+}
+
+pub type PositionRep: shareable + cross {
+    store: StoreKey,
+    branch: u32,
+    version: u64
+}
+
+pub type EndpointRefusalRep: shareable + cross = Insecure | Unproven | NotSimulator | IgnoresIfNoneMatch | IgnoresIfMatch
+
+pub type HostStreamIdRep: shareable + cross {
+    hi: u64,
+    lo: u64
+}
+
+pub type TieredRefusalRep: shareable + cross = Memory | Migrate | Export | Install | Authority | Tail
+
+pub type StreamRefusalRep: shareable + cross = WeakLevels | Overlap | Bound(StreamFieldRep)
+
+pub type StreamFieldRep: shareable + cross = MaxBatchBytes | MaxSlots | MaxPins | HoldMs | IdlePollMs | IndexEvery | SlotBytes
+
+pub fn same(a_hi: u64, a_lo: u64, b_hi: u64, b_lo: u64) -> bool {
+    a_hi == b_hi && a_lo == b_lo
+}
+
+pub fn make_id(r: Random) -> StoreKey {
+    let mut raw: Bytes = list.with_capacity(16)
+    host.random(r, mut raw)
+    StoreKey(hi: list.word_le(raw, 0), lo: list.word_le(raw, 8))
+}
+
+pub fn append_be(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
+    for i in 0u64 .. width {
+        list.push(mut raw, int.truncate(value >> int.truncate(8 * (width - 1 - i))))
+    }
+    Ok(())
+}
+
+pub fn capacity[T](take r: Result[T, Capacity]) -> Result[T, Failure] {
+    match take r {
+        Ok(take value) => Ok(take value),
+        Error(c) => Error(Full(Allocation(c)))
+    }
+}
+
+pub fn copied(raw: Bytes) -> Result[Bytes, Failure] {
+    Ok(clone(raw))
+}
+
+pub fn key_word(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(8)
+    for i in 0u64 .. 8 {
+        list.push(mut b, int.truncate(n >> int.truncate((7 - i) * 8)))
+    }
+    b
+}
+
+pub fn disk_identity(r: Random) -> Result[StoreKey, Capacity] {
+    let mut raw: Bytes = list.with_capacity(16)
+    host.random(r, mut raw)
+    Ok(StoreKey(hi: list.word_le(raw, 0), lo: list.word_le(raw, 8)))
+}
+
+pub const META_LIMIT: u64 = 16777216

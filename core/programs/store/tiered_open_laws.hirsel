@@ -73,8 +73,8 @@ fn l70_reexecute_cold_read(mut db: Db, rows: Table[u64, u32]) -> Result[(), Erro
     let (take complete, take record) = reexecute_admit(mut db, 81)
     let read = fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[Bytes, Bytes] {
         match fetch(tx, handle, 3u64) {
-            Ok(Some(value)) => Ok(key_word(int.widen(value))),
-            _ => Error(key_word(0)),
+            Ok(Some(value)) => Ok(types.key_word(int.widen(value))),
+            _ => Error(types.key_word(0)),
         }
     }
     let body = fn(mut tx: Tx, env: (Table[u64, u32], fn(mut Tx, Table[u64, u32]) -> Result[Bytes, Bytes])) -> Result[Bytes, Bytes] {
@@ -86,12 +86,12 @@ fn l70_reexecute_cold_read(mut db: Db, rows: Table[u64, u32]) -> Result[(), Erro
         fail("L62: serve must record the Tiered read")
     }
     durable(mut db, receipt.ticket)?
-    if receipt.reply != key_word(30) {
+    if receipt.reply != types.key_word(30) {
         fail("L62: the recorded reply must come from the Cold row")
     }
     let before = version(snapshot(db))
     let failed = fn(_stop: Stop) -> Bytes {
-        key_word(0)
+        types.key_word(0)
     }
     let replay_read = fn(_record: Recorded, mut tx: Tx, env: (Table[u64, u32], fn(mut Tx, Table[u64, u32]) -> Result[Bytes, Bytes])) -> Result[Bytes, Bytes] {
         (env.1)(mut tx, env.0)
@@ -269,10 +269,10 @@ fn test_l68_refused_cut_keeps_acknowledged_write(d: Dir, c: Clock, r: Random, ta
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     l68_write_rows(mut db, 3u64, 31u32, None)?
     let installed = disk_state(db).pages.next_pack
-    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
-        capacity(bound bytes 0 {
+    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
+        failure_result_from_rep(types.capacity(bound bytes 0 {
             seal_page_manifest_file(mut raw, context, fence)
-        })?
+        }))?
     }) {
         Error(Full(Allocation(_))) => (),
         _ => fail("L68: the refused seal fails the cut before its rename"),

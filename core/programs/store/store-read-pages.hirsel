@@ -11,7 +11,7 @@ fn page_limits(limits: Limits) -> Result[(), Error] {
 pub fn scan_page[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] waits {
     read_access(read_handle, s)?
     page_limits(l)?
-    if !same(s.store, t.store) {
+    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
@@ -23,7 +23,7 @@ pub fn scan_page[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], lo: Bou
 pub fn find_page[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] waits {
     read_access(read_handle, s)?
     page_limits(l)?
-    if !same(s.store, ix.store) {
+    if !types.same(s.store.hi, s.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
     index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
@@ -33,10 +33,10 @@ pub fn find_page[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V
 }
 
 fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
-    if !same(s.store, store) {
+    if !types.same(s.store.hi, s.store.lo, store.hi, store.lo) {
         return Error(Foreign)
     }
-    if !same(s.store, r.store) || s.open != r.open || s.branch != r.branch || s.head != r.version {
+    if !types.same(s.store.hi, s.store.lo, r.store.hi, r.store.lo) || s.open != r.open || s.branch != r.branch || s.head != r.version {
         return Ok(false)
     }
     if id != r.source {
@@ -92,9 +92,9 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                     Some(replay) => std.omap.get(replay.collections, source),
                     None => None,
                 }
-                return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Page[K, V], Error] {
+                return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Page[K, V], Error] {
                     let mut walk = ()
-                    read_snapshot_page(s, source, copied(high)?, limits, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
+                    read_snapshot_page(s, source, failure_result_from_rep(types.copied(high))?, limits, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
                         let found = if tiered_rows {
                             if let Some(last_key) = previous {
                                 let after = scan_page_after(last_key)?
@@ -145,14 +145,14 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
 
 fn scan_page_start(low: Bound[Bytes], id: Bytes) -> Result[Bytes, Error] {
     match low {
-        Included(key) => copied(key),
+        Included(key) => failure_result_from_rep(types.copied(key)),
         Excluded(key) => scan_page_after(key),
-        Unbounded => copied(id),
+        Unbounded => failure_result_from_rep(types.copied(id)),
     }
 }
 
 fn scan_page_after(key: Bytes) -> Result[Bytes, Error] {
-    let mut after = copied(key)?
+    let mut after = failure_result_from_rep(types.copied(key))?
     list.push(mut after, 0u8)
     Ok(take after)
 }

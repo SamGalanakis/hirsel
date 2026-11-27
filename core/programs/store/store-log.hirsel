@@ -201,7 +201,7 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
         None => None,
         Some(before) => {
             let after = before + 25 + list.len(raw)
-            if int.saturating_add(after, tx.extra_bytes) - 16 > transaction_limit(tx.limits) {
+            if int.saturating_add(after, tx.extra_bytes) - 16 > types.transaction_limit(limits_to_rep(tx.limits)) {
                 return Error(Limit(Transaction))
             }
             Some(after)
@@ -368,7 +368,7 @@ fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, 
     let Some(raw) = transaction_row(tx, key)? else {
         return Error(malformed(0))
     }
-    let body = arc.new(copied(raw)?)
+    let body = arc.new(failure_result_from_rep(types.copied(raw))?)
     tail.seq += 1
     Ok(Some((take key, take body)))
 }
@@ -416,7 +416,7 @@ fn trim_log_floor(mut tx: Tx, id: u32, seq: u64) -> Result[(), Error] {
                 0u64
             }
             let after = before - masked_wire + added
-            if int.saturating_add(after, tx.extra_bytes) - 16 > transaction_limit(tx.limits) {
+            if int.saturating_add(after, tx.extra_bytes) - 16 > types.transaction_limit(limits_to_rep(tx.limits)) {
                 return Error(Limit(Transaction))
             }
             Some(after)
@@ -458,7 +458,7 @@ fn trim_log_page(mut tree: PageTree, key: Bytes, floor: u64, expected: Option[u6
             }
             arc.share(empty)
         } else {
-            let suffix = key_word(floor)
+            let suffix = types.key_word(floor)
             page_result(std.page.cut_before(old, suffix, mut ids))?
         }
         let (rows, charge) = std.page.totals(candidate)
@@ -510,7 +510,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
             }
             removed
         }
-        push_data_row(mut operations, DataOp(key: take key, value: None, trim: Some(JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
+        push_data_row(mut operations, format.DataOp(key: take key, value: None, trim: Some(format.JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
     }
     if data_row_count(operations) == 0 {
         return Ok(replace(mut tx.ops.rows, new_data_rows()))
@@ -558,7 +558,7 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
         let descriptor = option.unwrap(std.page.lookup(tree.root, list.slice(low, 0, 4)))
         if collection_descriptor(descriptor).residency == ResidentTiered {
             let rows = snapshot_tiered_span(r, after, inventory, low, high)?
-            capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut out.rows, list.len(rows))))?
             for take row in take rows {
                 list.push(mut out.rows, take row)
             }
@@ -593,10 +593,10 @@ fn shared_cold_window(mut out: ChangeOutput, before: PageTree, after: PageTree, 
     }
     let path = paged_pack_path(left.pack)?
     let Some(cold_next) = old_log.cold_next else {
-        return Error(disk_fault(path, left.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
     }
     if new_log.cold_next != Some(cold_next) {
-        return Error(disk_fault(path, left.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
     }
     let start = order.max(lo, cold_next)
     if start >= hi {
@@ -608,13 +608,13 @@ fn shared_cold_window(mut out: ChangeOutput, before: PageTree, after: PageTree, 
         let mut changed: List[Change] = list.new()
         for seq in start .. hi {
             let Some((take old_key, ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {
-                return Error(disk_fault(path, left.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
             }
             let Some((take new_key, ReplayRow(now: ReplayPut(take new_value), ..))) = std.omap.next(mut new) else {
-                return Error(disk_fault(path, left.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
             }
             if old_key != new_key || list.word_be(new_key, 4) != seq {
-                return Error(disk_fault(path, left.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
             }
             if old_value != new_value {
                 list.push(mut changed, Change(tree_key: take new_key, value: Some(take new_value)))
@@ -622,7 +622,7 @@ fn shared_cold_window(mut out: ChangeOutput, before: PageTree, after: PageTree, 
         }
         Ok(take changed)
     })?
-    capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut out.rows, list.len(rows))))?
     for take row in take rows {
         list.push(mut out.rows, take row)
     }
@@ -640,9 +640,9 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
     window_insertions(r, mut out, b, id, new.first, order.min(new.next, old.first))?
     if a.branch != b.branch && overlap_first < overlap_next && !shared_cold_window(mut out, a.roots.collections, b.roots.collections, id, overlap_first, overlap_next)? {
         let key = prefix(id)?
-        let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(key_word(overlap_first)))
-        let mut current = start_diff(std.page.collection_child(b.roots.collections.root, key), Some(key_word(overlap_first)))
-        let _ = page_change_rows(mut out, id, mut previous, mut current, Some(key_word(overlap_next)))?
+        let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(types.key_word(overlap_first)))
+        let mut current = start_diff(std.page.collection_child(b.roots.collections.root, key), Some(types.key_word(overlap_first)))
+        let _ = page_change_rows(mut out, id, mut previous, mut current, Some(types.key_word(overlap_next)))?
     }
     window_deletions(mut out, id, order.max(old.first, new.next), old.next)?
     window_insertions(r, mut out, b, id, order.max(new.first, old.next), new.next)?

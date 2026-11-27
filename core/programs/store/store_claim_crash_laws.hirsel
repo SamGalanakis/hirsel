@@ -139,9 +139,9 @@ fn claim_terminal_credit_survives_reopen(d: Dir, c: Clock, r: Random, tasks: Tas
         Error(Full(Journal(_))) => (),
         _ => fail("new claim result"),
     }
-    let _ = capacity(bound bytes 1048576 {
+    let _ = failure_result_from_rep(types.capacity(bound bytes 1048576 {
         conclude_claim(mut db, take one, b"done")
-    })??
+    }))??
     if db.keyed_credit.journal != hand_frame || accounts(db).journal <= options.checkpoint_bytes || accounts(db).journal > options.journal_limit - hand_frame {
         fail("first terminal credit")
     }

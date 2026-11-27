@@ -173,8 +173,8 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let leased = snapshot(db)
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 3u8)
-    let job = begin_backup(mut db, target, result.unwrap(copied(attempt)))?
-    match begin_backup(mut db, restored, result.unwrap(copied(attempt))) {
+    let job = begin_backup(mut db, target, result.unwrap(failure_result_from_rep(types.copied(attempt))))?
+    match begin_backup(mut db, restored, result.unwrap(failure_result_from_rep(types.copied(attempt)))) {
         Error(AttemptBusy) => (),
         _ => return Error(ExportMismatch),
     }
@@ -210,7 +210,7 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         Error(Store(ExportDirectory)) => (),
         _ => return Error(ExportMismatch),
     }
-    match begin_backup(mut db, source, result.unwrap(copied(attempt))) {
+    match begin_backup(mut db, source, result.unwrap(failure_result_from_rep(types.copied(attempt)))) {
         Error(Scratch(Exists(_))) => (),
         _ => return Error(ExportMismatch),
     }
@@ -260,7 +260,7 @@ fn bucket_backup_restore_body(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: Bu
     let leased = snapshot(db)
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 9u8)
-    let job = begin_backup(mut db, target, result.unwrap(copied(attempt)))?
+    let job = begin_backup(mut db, target, result.unwrap(failure_result_from_rep(types.copied(attempt))))?
     // Post-lease mutations and checkpoint on the live Bucket writer must not appear in the restore.
     if !typed_put(mut db, items, 99, 99) || !backup_law_delete(mut db, other, 0) || !backup_law_cell_set(mut db, meta, 888u64) || !backup_law_log_edit(mut db, events, 50u64, 2u64, Some(2u64)) {
         return Error(ExportMismatch)
@@ -559,7 +559,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
     let want_packs = live_pack_sequences(disk_state(db).pages.locations)
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 17u8)
-    let job = begin_backup(mut db, target, result.unwrap(copied(attempt)))?
+    let job = begin_backup(mut db, target, result.unwrap(failure_result_from_rep(types.copied(attempt))))?
     let leased_ok = match disk_state(db).lease {
         Some(held_lease) => held_lease.packs == want_packs,
         None => false,
@@ -577,7 +577,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
     while low < high {
         let mid = low + (high - low) / 2
         let probe_dir = disk_test_directory(d)
-        let probe_job = begin_backup(mut db, probe_dir, result.unwrap(copied(attempt)))?
+        let probe_job = begin_backup(mut db, probe_dir, result.unwrap(failure_result_from_rep(types.copied(attempt))))?
         let passed = match task.try_spawn(tasks, bytes mid, take probe_job, export_copy) {
             Ok(take running) => match task.join(take running) {
                 Ok(Ok(_)) => true,
@@ -597,7 +597,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
         return Error(ExportMismatch)
     }
     let exact_dir = disk_test_directory(d)
-    let exact_job = begin_backup(mut db, exact_dir, result.unwrap(copied(attempt)))?
+    let exact_job = begin_backup(mut db, exact_dir, result.unwrap(failure_result_from_rep(types.copied(attempt))))?
     let exact_ok = match task.try_spawn(tasks, bytes low, take exact_job, export_copy) {
         Ok(take running) => match task.join(take running) {
             Ok(Ok(_)) => true,
@@ -611,7 +611,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
     }
     let below = low - 1
     let below_dir = disk_test_directory(d)
-    let below_job = begin_backup(mut db, below_dir, result.unwrap(copied(attempt)))?
+    let below_job = begin_backup(mut db, below_dir, result.unwrap(failure_result_from_rep(types.copied(attempt))))?
     let below_failed = match task.try_spawn(tasks, bytes below, take below_job, export_copy) {
         Ok(take running) => match task.join(take running) {
             Error(_) => true,

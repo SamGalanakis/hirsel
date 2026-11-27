@@ -1,6 +1,6 @@
 fn l69_pack() -> Result[DiskIndex[u64, PagePack], Error] {
     let mut packs: DiskIndex[u64, PagePack] = disk_index()
-    capacity(disk_index_put(mut packs, 7, PagePack(class: 3, frames: 3, live: 12000, payload_bytes: 13000, index: 12500), pack_edge_charge))?
+    failure_result_from_rep(types.capacity(disk_index_put(mut packs, 7, PagePack(class: 3, frames: 3, live: 12000, payload_bytes: 13000, index: 12500), pack_edge_charge)))?
     Ok(take packs)
 }
 

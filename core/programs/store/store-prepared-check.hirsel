@@ -39,7 +39,7 @@ fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
     } else if c.next != 0 || list.len(c.schemas) != 0 {
         return false
     }
-    let text = match copied(list.slice(key, prefix_size, list.len(key))) {
+    let text = match failure_result_from_rep(types.copied(list.slice(key, prefix_size, list.len(key)))) {
         Ok(take b) => take b,
         Error(_) => return false
     }

@@ -26,8 +26,8 @@ fn sim_disk_unmount(take d: Dir, take server: Task[std.sim.fs.Fs]) -> std.sim.fs
 
 fn scrub_sim_fault(tasks: Tasks, c: Clock, rates: std.sim.world.WriteFaults, kind: u64) -> Result[(), Error] waits {
     let name = "pack"
-    let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 3, seq: 7)
-    let frame = capacity(disk_seal(ctx, 0, 0x0021, 0, string.as_bytes("payload")))?
+    let ctx = format.DiskContext(store: store_key_to_rep(StoreId(hi: 1, lo: 2)), role: 3, seq: 7)
+    let frame = failure_result_from_rep(types.capacity(format.disk_seal(ctx, 0, 0x0021, 0, string.as_bytes("payload"))))?
     let width = list.len(frame)
     let mut blank: Bytes = list.with_capacity(width * 2)
     list.fill(mut blank, width * 2, 0u8)

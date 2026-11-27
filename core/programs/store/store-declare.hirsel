@@ -47,7 +47,7 @@ fn follower_base(f: Follower) -> DeclarationBase {
 }
 
 fn same_declaration_base(a: DeclarationBase, b: DeclarationBase) -> bool {
-    same(a.store, b.store) && a.opened == b.opened && a.version == b.version && a.stamp == b.stamp && a.changes == b.changes && a.live == b.live
+    types.same(a.store.hi, a.store.lo, b.store.hi, b.store.lo) && a.opened == b.opened && a.version == b.version && a.stamp == b.stamp && a.changes == b.changes && a.live == b.live
 }
 
 fn new_declaration(mode: Mode, base: DeclarationBase, take plan: SchemaPlan, versioned: bool) -> Declare {
@@ -66,7 +66,7 @@ fn validate_local_projector[K, V](d: Declare, decl: ProjectionDecl, source: Tabl
     if d.failed {
         return Error(MigrationFault)
     }
-    if !same(d.plan.store, source.store) || !same(d.plan.store, decl.rows.store) || !map.contains(d.tables, source.id) {
+    if !types.same(d.plan.store.hi, d.plan.store.lo, source.store.hi, source.store.lo) || !types.same(d.plan.store.hi, d.plan.store.lo, decl.rows.store.hi, decl.rows.store.lo) || !map.contains(d.tables, source.id) {
         return Error(Foreign)
     }
     readable(d.plan.roots, source.catalog_key, source.catalog_page, source.id)?
@@ -117,7 +117,7 @@ pub fn declare(db: Db, mode: Mode) -> Result[Declare, Error] {
     match mode {
         Follower => Error(Foreign),
         Migrate => {
-            require_memory_collections(store_has_tiered(db), Migrate)?
+            failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
             Ok(new_declaration(mode, declaration_base(db), schema_plan(db), is_disk(db)))
         },
         Open => Ok(new_declaration(mode, declaration_base(db), schema_plan(db), is_disk(db))),
@@ -189,7 +189,7 @@ pub fn declare_follower(f: Follower) -> Declare {
 }
 
 pub fn declare_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[Declare, Error] waits {
-    require_memory_collections(store_has_tiered(db), Migrate)?
+    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
     let staged = stage_migration(db, tasks, configure)?
     let StagedMigration(base, plan: take plan, ..) = take staged
     Ok(new_declaration(Migrate, base, take plan, is_disk(db)))
@@ -215,7 +215,7 @@ pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[Stati
     let mut d = match configure {
         Some(callback) => {
             healthy(source.db)?
-            require_memory_collections(store_has_tiered(source.db), Migrate)?
+            failure_result_from_rep(types.require_memory_collections(store_has_tiered(source.db), tiered_refusal_to_rep(Migrate)))?
             let ctx = child_cut_context(source)
             let (take plan, take updated_ctx) = stage_migration_plan_with(source.db, tasks, callback, schema_plan(source.db), Some(take ctx), source.stamp.opened)?
             if let Some(done_ctx) = updated_ctx {
@@ -276,7 +276,7 @@ fn declare_table_inner[K, V](mut d: Declare, name: String, take key: std.codec.K
                 }
                 return Error(Changed(named(name)?))
             }
-            let id: u32 = int.truncate(read_le(record, 1, 4))
+            let id: u32 = int.truncate(format.read_le(record, 1, 4))
             if map.contains(d.tables, id) {
                 return Error(Exists(named(name)?))
             }
@@ -322,7 +322,7 @@ fn active_table[K, V](d: Declare, t: TableDecl[K, V]) -> Result[(), Error] {
 }
 
 fn declaration_index_name(key: Bytes) -> Result[String, Error] {
-    let raw = copied(list.slice(key, 5, list.len(key)))?
+    let raw = failure_result_from_rep(types.copied(list.slice(key, 5, list.len(key))))?
     let name = string.from_utf8(take raw) ?=> |_| malformed(0)
     Ok(take name)
 }
@@ -348,7 +348,7 @@ fn declaration_revision[F](versioned: bool, f: StaticFn[F]) -> Result[Bytes, Err
         let Some(hash) = code.revision(f) else {
             return Error(Missing("revision"))
         }
-        return copied(hash)
+        return failure_result_from_rep(types.copied(hash))
     }
     Ok(list.new())
 }
@@ -464,17 +464,17 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
     let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, codec)?
     let mut planned_index = IndexRecord(shape: Entries(kind), payload_schemas: list.new(), projection: None, state: Backfilling(None))
     let key_schema = std.codec.key_schema(key) ?=> |_| Schema(0)
-    let extractor_identity = copied(code.identity(by))?
+    let extractor_identity = failure_result_from_rep(types.copied(code.identity(by)))?
     let existing = existing_index_record(d, lookup_key, name)?
     let mut extractor_project: Option[IndexProjection[K, V, P]] = None
     let mut payload_readers = take row_readers
     if cover_row {
         let source = catalog_entry_in(d.plan.roots.catalog, t.handle.catalog_key)?
         for schema in source.schemas {
-            list.push(mut planned_index.payload_schemas, copied(schema.schema)?)
+            list.push(mut planned_index.payload_schemas, failure_result_from_rep(types.copied(schema.schema))?)
         }
     } else if let Some(projection_record) = project {
-        planned_index.projection = Some((copied(code.identity(projection_record))?, declaration_revision(d.versioned, projection_record)?))
+        planned_index.projection = Some((failure_result_from_rep(types.copied(code.identity(projection_record)))?, declaration_revision(d.versioned, projection_record)?))
         let description = std.codec.schema(codec) ?=> |_| Schema(0)
         let unit = std.codec.schema(std.codec.of_unit()) ?=> |_| Schema(0)
         let number: Option[u16] = if description == unit {
@@ -547,7 +547,7 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
                 } else if schemas_changed {
                     Error(Schema(0))
                 } else if let Some(mut changed) = d.verifying {
-                    capacity(list.try_reserve(mut changed, 1))?
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut changed, 1)))?
                     list.push(mut changed, named(name)?)
                     proposed.id = old.id
                     set_index_state(mut proposed, copied_state(old_index.state)?)?
@@ -609,7 +609,7 @@ fn index_payload_number(mut schemas: List[Bytes], description: Bytes) -> Result[
     if next_number == 65535 {
         return Error(Limit(Value))
     }
-    list.push(mut schemas, copied(description)?)
+    list.push(mut schemas, failure_result_from_rep(types.copied(description))?)
     Ok(int.truncate(next_number))
 }
 
@@ -627,7 +627,7 @@ fn index_payload_readers[P](codec: std.codec.Codec[P], key_schema: Bytes, payloa
             list.push(mut older, Some(take resolved_payload))
         }
     }
-    let schemas = arc.new(RowSchemas(key: copied(key_schema)?, value: copied(description)?))
+    let schemas = arc.new(RowSchemas(key: failure_result_from_rep(types.copied(key_schema))?, value: failure_result_from_rep(types.copied(description))?))
     Ok(arc.new(Readers(codec: codec, current: current, older: take older, schemas: take schemas)))
 }
 
@@ -664,7 +664,7 @@ fn complete_declaration(d: Declare) -> Result[(), Error] {
     while let Some((take key, take raw)) = next_bytes(mut cursor)? {
         let name = catalog_collection_name(key, 1)?
         if !std.string.starts_with(name, "hirsel.") {
-            let id: u32 = int.truncate(read_le(raw, 1, 4))
+            let id: u32 = int.truncate(format.read_le(raw, 1, 4))
             if option.copied(map.get(d.tables, id)) != Some(true) {
                 return Error(Undeclared(take name))
             }
@@ -714,7 +714,7 @@ pub fn seal_follower(f: Follower, take d: Declare) -> Result[(), Error] {
 }
 
 pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key: std.codec.Key[K], take from_value: std.codec.Codec[V], to: String, take to_key: std.codec.Key[K2], take to_value: std.codec.Codec[V2], convert: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
-    require_memory_collections(m.tiered, Migrate)?
+    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     declaration_name(from)?
     declaration_name(to)?
     let prior = catalog_handle(m.plan.store, m.plan.roots.catalog, named(from)?, from_key, from_value)?
@@ -722,7 +722,7 @@ pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key
 }
 
 pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error] {
-    require_memory_collections(m.tiered, Migrate)?
+    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     declaration_name(name)?
     let key = table_key(name)?
     let table_id = match get_page_row(m.plan.roots.catalog, key) {
@@ -733,7 +733,7 @@ pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error] {
 }
 
 pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Error] {
-    require_memory_collections(m.tiered, Migrate)?
+    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     declaration_name(from)?
     declaration_name(to)?
     let old_key = table_key(from)?
@@ -752,7 +752,7 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
         if !m.plan.retained {
             live_bytes -= entry(old_key, raw)
         }
-        copied(raw)?
+        failure_result_from_rep(types.copied(raw))?
     }
     let base = share_roots(m.plan.roots)
     let mut roots = catalog_insert(mut m.plan.next_node, base, new_key, value)?

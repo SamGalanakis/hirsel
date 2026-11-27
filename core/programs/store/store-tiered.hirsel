@@ -54,7 +54,7 @@ fn replaced_blob(reference: std.page.BlobRef) -> ReplacedFrame {
 // and subtrees or blobs a Log floor detached.
 type TieredFreed: send {
     replaced: List[ReplacedFrame],
-    dropped: List[TieredTarget]
+    dropped: List[format.TieredTarget]
 }
 
 fn no_tiered_freed() -> TieredFreed {
@@ -71,9 +71,9 @@ fn reserve_tiered_commit(mut dirty: TieredDirty, freed: TieredFreed, limit: u64)
         return Error(Full(Resident(Capacity(requested: requested, available: limit))))
     }
     if list.len(freed.replaced) != 0 {
-        capacity(list.try_reserve(mut dirty.replaced, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut dirty.replaced, 1)))?
     }
-    capacity(list.try_reserve(mut dirty.dropped, list.len(freed.dropped)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut dirty.dropped, list.len(freed.dropped))))?
     Ok(())
 }
 
@@ -98,7 +98,7 @@ fn tiered_data_key(tree: PageTree, key: Bytes) -> bool {
 }
 
 fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: PageTree, operations: DataRows) -> Result[u64, Error] {
-    let order = capacity(data_order(operations))?
+    let order = failure_result_from_rep(types.capacity(data_order(operations)))?
     let mut prior_collection: Option[u32] = None
     let mut charged = total
     for slot in 0u64 .. data_row_count(operations) {
@@ -113,7 +113,7 @@ fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: Pa
         }
         if retained {
             if let Some(raw) = view op.value {
-                charged = replay_charge("MANIFEST", charged, 0, entry(op.key, staged_bytes(raw)))?
+                charged = replay_charge("MANIFEST", charged, 0, entry(op.key, format.staged_bytes(raw)))?
             }
         } else {
             let collection: u32 = list.word_be(id, 0)

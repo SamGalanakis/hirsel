@@ -24,7 +24,11 @@ fn lineage_row(row: LineageRow) -> std.page.Row {
             let mut encoded_value: Bytes = list.with_capacity(13)
             list.put_word_le(mut encoded_value, fork_row.parent)
             list.put_word_le(mut encoded_value, fork_row.watermark)
-            list.push(mut encoded_value, if fork_row.adopted { 1u8 } else { 0u8 })
+            list.push(mut encoded_value, if fork_row.adopted {
+                1u8
+            } else {
+                0u8
+            })
             (take encoded_key, take encoded_value)
         },
         CellRow(cell, live_bytes) => {
@@ -46,25 +50,25 @@ fn lineage_row(row: LineageRow) -> std.page.Row {
 
 fn decode_lineage_row(file: String, at: u64, key: Bytes, value: Bytes) -> Result[LineageRow, Error] {
     let Some(kind) = list.get(key, 0) else {
-        return Error(disk_fault(file, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
     }
     match kind {
         1 if list.len(key) == 5 && list.len(value) == 13 && value[12] <= 1 => {
             let child: u32 = list.word_be(key, 1)
             if child == 0 {
-                return Error(disk_fault(file, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
             }
             Ok(ForkRow(LineageFork(child: child, parent: list.word_le(value, 0), watermark: list.word_le(value, 4), adopted: value[12] == 1)))
         },
         2 if list.len(key) == 30 && list.len(value) == 8 && key[13] <= 1 => {
             let live_bytes: u64 = list.word_le(value, 0)
             if live_bytes == 0 {
-                return Error(disk_fault(file, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
             }
             let cell = LineageCell(branch: list.word_be(key, 1), boundary: list.word_be(key, 5), side: key[13], interval: list.word_be(key, 14), pack: list.word_be(key, 22))
             Ok(CellRow(cell, live_bytes))
         },
-        _ => Error(disk_fault(file, at, Malformed)),
+        _ => Error(failure_from_rep(format.disk_fault(file, at, Malformed))),
     }
 }
 
@@ -81,28 +85,28 @@ fn validate_lineage_forks(file: String, manifest: PageManifest, forks: Map[u32, 
     for head in manifest.branches {
         if head.id != 0 {
             let Some(row) = map.get(forks, head.id) else {
-                return Error(disk_fault(file, manifest.lineage.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, manifest.lineage.offset, Malformed)))
             }
             if row.adopted || row.parent != head.parent {
-                return Error(disk_fault(file, manifest.lineage.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, manifest.lineage.offset, Malformed)))
             }
         }
     }
     let mut seen: Map[u32, bool] = map.new()
     let mut path: List[u32] = list.new()
-    capacity(map.try_reserve(mut seen, map.len(forks)))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut seen, map.len(forks))))?
     for (child, row) in forks {
         if row.child >= manifest.next_branch || row.parent >= manifest.next_branch || row.watermark > manifest.next_stamp {
-            return Error(disk_fault(file, manifest.lineage.offset, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, manifest.lineage.offset, Malformed)))
         }
         let mut current: u32 = child
         while let Some(fork_row) = map.get(forks, current) {
             match map.get(seen, current) {
                 Some(true) => break,
-                Some(false) => return Error(disk_fault(file, manifest.lineage.offset, Malformed)),
+                Some(false) => return Error(failure_from_rep(format.disk_fault(file, manifest.lineage.offset, Malformed))),
                 None => (),
             }
-            capacity(list.try_reserve(mut path, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut path, 1)))?
             list.push(mut path, current)
             map.insert(mut seen, current, false)
             current = fork_row.parent
@@ -116,11 +120,12 @@ fn validate_lineage_forks(file: String, manifest: PageManifest, forks: Map[u32, 
 }
 
 fn note_fork_dependent(mut counts: Map[u32, u64], branch_id: u32) {
-    let _ = map.update(mut counts, branch_id, fn(mut n: u64) { n += 1 })
+    let _ = map.update(mut counts, branch_id, fn(mut n: u64) {
+        n += 1
+    })
 }
 
-fn prune_lineage_forks(mut forks: Map[u32, LineageFork], live_heads: List[u32], pins: List[(u32, u64)], anchors: List[(u32, u64)],
-    queued: List[DeferredFree]) {
+fn prune_lineage_forks(mut forks: Map[u32, LineageFork], live_heads: List[u32], pins: List[(u32, u64)], anchors: List[(u32, u64)], queued: List[DeferredFree]) {
     let mut counts: Map[u32, u64] = map.new()
     for (child, _) in forks {
         map.insert(mut counts, child, 0u64)
@@ -202,7 +207,9 @@ fn lineage_holders(forks: Map[u32, LineageFork], pins: List[(u32, u64)], anchors
     }
     for chain in chains {
         let _ = map.update(mut holders.watermarks, chain, fn(mut current: List[u64]) {
-            list.sort(mut current, fn(a: u64, b: u64) -> Order { order.compare(a, b) })
+            list.sort(mut current, fn(a: u64, b: u64) -> Order {
+                order.compare(a, b)
+            })
         })
     }
     take holders
@@ -257,7 +264,11 @@ fn lineage_kill_cell(forks: Map[u32, LineageFork], holders: LineageHolders, bran
 // caller applies the charge only when a holder cell has no surviving bucket.
 fn drop_lineage_cell(forks: Map[u32, LineageFork], holders: LineageHolders, cell: LineageCell) -> Option[LineageCell] {
     if cell.side == 0 {
-        return if lineage_origin(forks, cell.branch) == Some(cell.boundary) { Some(cell) } else { None }
+        return if lineage_origin(forks, cell.branch) == Some(cell.boundary) {
+            Some(cell)
+        } else {
+            None
+        }
     }
     let Some(watermarks) = map.get(holders.watermarks, cell.branch) else {
         return None
@@ -283,16 +294,16 @@ fn add_lineage_cell(mut cells: Map[LineageCell, u64], cell: LineageCell, bytes_k
         return Error(malformed(0))
     }
     if sum == 0 {
-        capacity(map.try_reserve(mut cells, 1))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut cells, 1)))?
     }
     map.insert(mut cells, cell, following)
     Ok(())
 }
 
 fn subtract_pack_live(mut packs: DiskIndex[u64, PagePack], pack: u64, bytes_killed: u64) -> Result[(), Error] {
-    let _ = capacity(disk_index_update(mut packs, pack, pack_edge_charge, scoped fn(mut row: PagePack) {
+    let _ = failure_result_from_rep(types.capacity(disk_index_update(mut packs, pack, pack_edge_charge, scoped fn(mut row: PagePack) {
         row.live = int.saturating_sub(row.live, bytes_killed)
-    }))?
+    })))?
     Ok(())
 }
 
@@ -306,7 +317,7 @@ fn file_lineage_kill(mut lineage: Lineage, holders: LineageHolders, mut packs: D
 
 fn apply_lineage_drops(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, PagePack]) -> Result[(), Error] {
     let mut kept: Map[LineageCell, u64] = map.new()
-    capacity(map.try_reserve(mut kept, map.len(lineage.cells)))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut kept, map.len(lineage.cells))))?
     for (cell, live_bytes) in lineage.cells {
         if let Some(rekeyed) = drop_lineage_cell(lineage.forks, holders, cell) {
             add_lineage_cell(mut kept, rekeyed, live_bytes)?
@@ -320,7 +331,7 @@ fn apply_lineage_drops(mut lineage: Lineage, holders: LineageHolders, mut packs:
 
 fn adopt_lineage_cells(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, PagePack], child: u32) -> Result[(), Error] {
     let mut kept: Map[LineageCell, u64] = map.new()
-    capacity(map.try_reserve(mut kept, map.len(lineage.cells)))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut kept, map.len(lineage.cells))))?
     let main_watermarks = map.get(holders.watermarks, 0u32)
     for (cell, live_bytes) in lineage.cells {
         if cell.branch != child {
@@ -369,7 +380,7 @@ fn same_lineage(a: Lineage, b: Lineage) -> bool {
 // Keys sort fork rows (0x01) before cells (0x02).
 fn build_lineage_tree(rows: Lineage, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
     let mut built: List[std.page.Row] = list.new()
-    capacity(list.try_reserve(mut built, map.len(rows.forks) + map.len(rows.cells)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut built, map.len(rows.forks) + map.len(rows.cells))))?
     for (_, fork_row) in rows.forks {
         list.push(mut built, lineage_row(ForkRow(fork_row)))
     }
@@ -395,7 +406,7 @@ fn queued_branch_ids(root: Arc[std.page.Page], mut out: List[u32]) -> Result[(),
         }
         let value = option.unwrap(std.page.value_at(root, slot))
         let owner: u32 = list.word_le(value, 1)
-        capacity(list.try_reserve(mut out, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
         list.push(mut out, owner)
     }
     Ok(())
@@ -411,7 +422,7 @@ fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List
     let mut rows = disk_allocation(scoped fn() -> Result[Lineage, Error] {
         Ok(clone(pages.lists.rows))
     })?
-    capacity(map.try_reserve(mut rows.forks, list.len(pages.forked)))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut rows.forks, list.len(pages.forked))))?
     for fork_row in pages.forked {
         map.insert(mut rows.forks, fork_row.child, fork_row)
     }
@@ -421,7 +432,7 @@ fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List
         })
     }
     let mut dependents: List[u32] = list.new()
-    capacity(list.try_reserve(mut dependents, list.len(holders)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut dependents, list.len(holders))))?
     for branch_id in holders {
         list.push(mut dependents, branch_id)
     }
@@ -440,7 +451,7 @@ fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, queue
     let mut rows = take settled
     let mut pin_marks: List[(u32, u64)] = list.new()
     visit_cut_pins(db, delta, mut pin_marks, scoped fn(mut out: List[(u32, u64)], held: Pin) -> Result[(), Error] {
-        capacity(list.try_reserve(mut out, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
         list.push(mut out, (held.branch, held.watermark))
         Ok(())
     })?
@@ -477,7 +488,7 @@ fn settle_compaction(mut lineage: Lineage, queue: CutQueue, mut packs: DiskIndex
         return Ok(())
     }
     let mut kept: Map[LineageCell, u64] = map.new()
-    capacity(map.try_reserve(mut kept, map.len(lineage.cells)))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut kept, map.len(lineage.cells))))?
     for (cell, live_bytes) in lineage.cells {
         if !list.contains(queue.retiring, cell.pack) {
             add_lineage_cell(mut kept, cell, live_bytes)?
@@ -491,7 +502,7 @@ fn settle_compaction(mut lineage: Lineage, queue: CutQueue, mut packs: DiskIndex
 // watermark, or a cut-path fork's capture watermark.
 fn note_fork_row(mut db: Db, fork_row: LineageFork) -> Result[(), Error] {
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
-        capacity(list.try_reserve(mut state.pages.forked, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut state.pages.forked, 1)))?
         list.push(mut state.pages.forked, fork_row)
         Ok(())
     })

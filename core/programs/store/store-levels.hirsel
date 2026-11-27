@@ -32,7 +32,7 @@ pub fn level(db: Db, name: String) -> Result[Level, Error] {
 }
 
 pub fn durable_at(mut db: Db, receipt: Ticket, requested: Level) -> Result[(), Error] waits {
-    if !same(requested.store, db.store) {
+    if !types.same(requested.store.hi, requested.store.lo, db.store.hi, db.store.lo) {
         return Error(Foreign)
     }
     if object_writer_open(db) {
@@ -96,7 +96,7 @@ pub type Position: shareable + cross {
 }
 
 pub fn position(mut db: Db, receipt: Ticket) -> Result[Position, Error] waits {
-    if !same(receipt.store, db.store) || receipt.open != open_number(db) {
+    if !types.same(receipt.store.hi, receipt.store.lo, db.store.hi, db.store.lo) || receipt.open != open_number(db) {
         return Error(Foreign)
     }
     let Journal(_, branch_id, committed_version) = receipt.mark else {

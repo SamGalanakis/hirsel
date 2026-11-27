@@ -24,7 +24,7 @@ pub fn expire_rows[K, V](mut d: Declare, mut t: TableDecl[K, V], by: StaticFn[fn
     let key = std.codec.key_u64()
     let lookup_key = catalog_index_key(t.handle.id, EXPIRY_INDEX)?
     let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?
-    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision)
+    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: failure_result_from_rep(types.copied(code.identity(by)))?, revision: take revision)
     let existing = existing_index_record(d, lookup_key, EXPIRY_INDEX)?
     let rebuilt_for = settle_index_record(mut d, lookup_key, EXPIRY_INDEX, take existing, mut proposed, ends)?
     let schema_binding = expiry_binding(t.handle, proposed, by)
@@ -153,7 +153,7 @@ fn due_rows(db: Db, now: u64, limits: Limits) -> Result[List[DueRow], Error] {
         }
         let mut due = byte_cursor(roots.collections, Included(prefix(record.id)?), high)?
         while let Some((take entry_key, _)) = next_bytes(mut due)? {
-            let primary = copied(list.slice(entry_key, 12, list.len(entry_key)))?
+            let primary = failure_result_from_rep(types.copied(list.slice(entry_key, 12, list.len(entry_key))))?
             let size = match get_page_row(roots.collections, logical_key(record.owner, primary)?) {
                 Some(row) => list.len(row),
                 None => 0u64,

@@ -17,15 +17,15 @@ type CaptureCatalogCount {
 
 fn capture_catalog_name(path: String, at: u64, key: Bytes) -> Result[String, Error] {
     if list.len(key) == 0 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let name_at = match key[0] {
         1 => 1u64,
         2 => 5u64,
-        _ => return Error(disk_fault(path, at, Malformed)),
+        _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
     }
     if list.len(key) < name_at || list.len(key) - name_at > 255 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     catalog_collection_name(key, if name_at == 5 {
         2u8
@@ -39,12 +39,12 @@ fn capture_count_catalog(mut packs: CapturePacks, root: std.page.PagePtr) -> Res
     let mut pages = 0u64
     capture_walk_pages(mut packs, root, 0, None, mut counted, mut pages, fn(mut _packs: CapturePacks, mut tally: CaptureCatalogCount, path: String, at: u64, key: Bytes, _value: std.page.Cell) -> Result[(), Error] {
         if list.len(tally.last) != 0 && order.compare(tally.last, key) != Less {
-            return Error(disk_fault(path, at, Order))
+            return Error(failure_from_rep(format.disk_fault(path, at, Order)))
         }
         let name = capture_catalog_name(path, at, key)?
         tally.records = capture_add(tally.records, 1)
-        tally.name_bytes = capture_add(tally.name_bytes, round8(string.byte_len(name)))
-        tally.last = copied(key)?
+        tally.name_bytes = capture_add(tally.name_bytes, format.round8(string.byte_len(name)))
+        tally.last = failure_result_from_rep(types.copied(key))?
         Ok(())
     })?
     Ok((counted.records, counted.name_bytes))
@@ -56,13 +56,13 @@ fn capture_catalog_cell(mut packs: CapturePacks, path: String, at: u64, value: s
             let mut ignored = ()
             let mut inline_source = ()
             capture_catalog_fields(mut ignored, mut inline_source, path, at, list.len(raw), scoped fn(mut _target: (), mut _read: (), offset: u64, width: u64) -> Result[u64, Error] {
-                Ok(read_le(raw, offset, width))
+                Ok(format.read_le(raw, offset, width))
             }, scoped fn(mut _target: (), mut _read: (), offset: u64, width: u64) -> Result[Bytes, Error] {
-                copied(list.slice(raw, offset, offset + width))
+                failure_result_from_rep(types.copied(list.slice(raw, offset, offset + width)))
             })
         },
         BlobValue(reference) => capture_catalog_blob(mut packs, reference),
-        Child(_) => Error(disk_fault(path, at, Malformed)),
+        Child(_) => Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
     }
 }
 
@@ -74,21 +74,21 @@ fn capture_catalog_blob(mut packs: CapturePacks, reference: std.page.BlobRef) ->
     capture_with_pack(mut packs, path, reference.pack, reference.stamp, reference.offset, 1, scoped fn(mut file: HostFile) -> Result[CaptureCatalog, Error] waits {
         let size = disk_io(host.stat_file(mut file))?.size
         if reference.offset > size || 24 + reference.len > size - reference.offset {
-            return Error(disk_fault(path, reference.offset, Truncated))
+            return Error(failure_from_rep(format.disk_fault(path, reference.offset, Truncated)))
         }
         let start = reference.offset + 24
         let end = start + reference.len
         let mut source = new_capture_chunk(end)
         let head = capture_prefix(mut file, path, mut source, reference.offset, 16)?
         let frame = disk_read_frame_head(path, head, reference.offset)?
-        let ctx = DiskContext(store: id, role: 3, seq: reference.pack)
+        let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: reference.pack)
         disk_check_frame_kind(path, ctx, frame.kind, frame.flags, reference.offset)?
         let stamp = capture_prefix(mut file, path, mut source, reference.offset + 16, 8)?
         let actual_stamp: u64 = list.word_le(stamp, 0)
         if frame.kind != 0x0022 || frame.size != 8 + reference.len || actual_stamp != reference.stamp {
-            return Error(disk_fault(path, reference.offset, Checksum))
+            return Error(failure_from_rep(format.disk_fault(path, reference.offset, Checksum)))
         }
-        let mut envelope = capacity(disk_check_start(ctx, reference.offset, head))?
+        let mut envelope = failure_result_from_rep(types.capacity(format.disk_check_start(ctx, reference.offset, head)))?
         let mut check = std.check.start()
         std.check.add(mut envelope, stamp, 0, 8)
         let mut offset = start
@@ -100,7 +100,7 @@ fn capture_catalog_blob(mut packs: CapturePacks, reference: std.page.BlobRef) ->
             offset += width
         }
         if std.check.finish(envelope) != frame.checksum || std.check.finish(check) != reference.checksum {
-            return Error(disk_fault(path, reference.offset, Checksum))
+            return Error(failure_from_rep(format.disk_fault(path, reference.offset, Checksum)))
         }
         capture_catalog_blob_fields(mut file, path, start, reference.len, mut source)
     })
@@ -109,7 +109,7 @@ fn capture_catalog_blob(mut packs: CapturePacks, reference: std.page.BlobRef) ->
 fn capture_catalog_blob_fields(mut file: HostFile, path: String, start: u64, width: u64, mut source: CaptureChunk) -> Result[CaptureCatalog, Error] waits {
     capture_catalog_fields(mut file, mut source, path, start, width, scoped fn(mut handle: HostFile, mut chunk: CaptureChunk, offset: u64, n: u64) -> Result[u64, Error] waits {
         let raw = capture_prefix(mut handle, path, mut chunk, start + offset, n)?
-        Ok(read_le(raw, 0, n))
+        Ok(format.read_le(raw, 0, n))
     }, scoped fn(mut handle: HostFile, mut chunk: CaptureChunk, offset: u64, n: u64) -> Result[Bytes, Error] waits {
         capture_prefix(mut handle, path, mut chunk, start + offset, n)
     })
@@ -122,7 +122,7 @@ type CaptureCatalogCursor {
 
 fn capture_catalog_advance(path: String, offset: u64, mut cursor: CaptureCatalogCursor, width: u64) -> Result[u64, Error] {
     if width > cursor.len - cursor.at {
-        return Error(disk_fault(path, offset + cursor.at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, offset + cursor.at, Malformed)))
     }
     let from = cursor.at
     cursor.at += width
@@ -136,7 +136,7 @@ fn capture_catalog_fields[T, S](mut target: T, mut source: S, path: String, offs
     let owner: u32 = int.truncate(number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 4)?, 4)?)
     let epoch = number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 8)?, 8)?
     if kind < 1 || kind > 4 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
-        return Error(disk_fault(path, offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, offset, Malformed)))
     }
     let key_width = number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 4)?, 4)?
     let _ = capture_catalog_advance(path, offset, mut pos, key_width)?
@@ -152,7 +152,7 @@ fn capture_catalog_fields[T, S](mut target: T, mut source: S, path: String, offs
     let rev_width = number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 4)?, 4)?
     let rev_at = capture_catalog_advance(path, offset, mut pos, rev_width)?
     if rev_width > CATALOG_REVISION_MAX {
-        return Error(disk_fault(path, offset + rev_at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, offset + rev_at, Malformed)))
     }
     let revision = copy_field(mut target, mut source, rev_at, rev_width)?
     let mut shape = 0u8
@@ -160,7 +160,7 @@ fn capture_catalog_fields[T, S](mut target: T, mut source: S, path: String, offs
     if kind == 2 {
         shape = int.truncate(number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 1)?, 1)?)
         if shape > 2 {
-            return Error(disk_fault(path, offset + pos.at - 1, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, offset + pos.at - 1, Malformed)))
         }
         let payloads = number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 2)?, 2)?
         for _ in 0u64 .. payloads + 2 {
@@ -168,11 +168,11 @@ fn capture_catalog_fields[T, S](mut target: T, mut source: S, path: String, offs
             let _ = capture_catalog_advance(path, offset, mut pos, n)?
         }
         if pos.at == width {
-            return Error(disk_fault(path, offset + pos.at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, offset + pos.at, Malformed)))
         }
         state = int.truncate(number(mut target, mut source, width - 1, 1)?)
         if state > 3 {
-            return Error(disk_fault(path, offset + width - 1, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, offset + width - 1, Malformed)))
         }
         let state_fields = if state == 2 {
             1u64
@@ -188,7 +188,7 @@ fn capture_catalog_fields[T, S](mut target: T, mut source: S, path: String, offs
         let _ = capture_catalog_advance(path, offset, mut pos, 1)?
     }
     if pos.at != width {
-        return Error(disk_fault(path, offset + pos.at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, offset + pos.at, Malformed)))
     }
     Ok(CaptureCatalog(kind: kind, id: id, owner: owner, shape: shape, state: state, revision: take revision))
 }

@@ -70,7 +70,7 @@ fn replay_law_compare(primary: Tip, replayed: Tip) {
 }
 
 fn replay_law_capture(db: Db, d: Dir, c: Clock, floor: u64, wanted: u64) -> Result[(), Error] waits {
-    let primary = capacity(current_state(db))?
+    let primary = failure_result_from_rep(types.capacity(current_state(db)))?
     let tip = view primary.tips[0]
     if db.checkpointed != floor || tip.head != wanted {
         replay_law_mismatch(tip, "journal coverage")
@@ -84,7 +84,7 @@ fn replay_law_capture(db: Db, d: Dir, c: Clock, floor: u64, wanted: u64) -> Resu
     // Compare the exact union of the live roots with the reconstructed one.
     // Exclude cached Accounts.logical and Accounts.exact. L51(d) allows the
     // live retained union to charge 604 conservatively and reopen to charge 518.
-    if capacity(state_account(primary))? != replayed.resident {
+    if failure_result_from_rep(types.capacity(state_account(primary)))? != replayed.resident {
         replay_law_mismatch(tip, "exact row account")
     }
     Ok(())

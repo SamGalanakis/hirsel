@@ -7,7 +7,7 @@ fn issue_residency_stamp(mut next_stamp: u64) -> Result[u64, Error] {
 fn resident_blob_from_tiered(source: TieredPageSource, body: std.page.BlobSlot) -> Result[Arc[Bytes], Error] waits {
     match body {
         HotBlob(contents) => disk_allocation(scoped fn() -> Result[Arc[Bytes], Error] {
-            Ok(arc.new(copied(contents)?))
+            Ok(arc.new(failure_result_from_rep(types.copied(contents))?))
         }),
         ColdBlob(ptr) => {
             let frame = fold_frame_at(source, TieredBlob(ptr))?
@@ -15,7 +15,7 @@ fn resident_blob_from_tiered(source: TieredPageSource, body: std.page.BlobSlot) 
                 fail("store: a BLOB reference resolved to a PAGE")
             }
             disk_allocation(scoped fn() -> Result[Arc[Bytes], Error] {
-                Ok(arc.new(copied(contents)?))
+                Ok(arc.new(failure_result_from_rep(types.copied(contents))?))
             })
         },
     }
@@ -48,7 +48,7 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
                 let edge = option.unwrap(std.page.child_slot(page, slot))
                 let child = resident_page_from_tiered(source, edge, mut next_stamp)?
                 previous.child = std.page.unlocated(std.page.stamp(std.page.image_of(child)))
-                capacity(list.try_reserve(mut children, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut children, 1)))?
                 list.push(mut children, HotPage(take child))
             },
             BlobValue(mut previous) => {
@@ -58,12 +58,12 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
                 previous.pack = 0
                 previous.offset = 0
                 previous.body = int.truncate(list.len(bodies))
-                capacity(list.try_reserve(mut bodies, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut bodies, 1)))?
                 list.push(mut bodies, HotBlob(take body))
             },
             InlineValue(_) => (),
         }
-        capacity(list.try_reserve(mut rows, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut rows, 1)))?
         list.push(mut rows, take row)
     }
     let stamp = issue_residency_stamp(mut next_stamp)?
@@ -78,7 +78,7 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
 fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[DeferredFree]) -> Result[(), Error] {
     match root {
         ColdPage(place) => {
-            capacity(list.try_reserve(mut queued, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
             list.push(mut queued, DeferredFree(branch_id: branch_id, target: TieredPage(place)))
         },
         HotPage(page) => {
@@ -88,7 +88,7 @@ fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[Defer
                     residency_release(edge, branch_id, mut queued)?
                 } else if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
                     if let Some(ColdBlob(ptr)) = std.page.blob_slot(page, reference.body) {
-                        capacity(list.try_reserve(mut queued, 1))?
+                        failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
                         list.push(mut queued, DeferredFree(branch_id: branch_id, target: TieredBlob(ptr)))
                     }
                 }
@@ -238,7 +238,7 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
         let Some((here, before)) = std.page.collection_entry(tree.root, key) else {
             return Error(Stale(id))
         }
-        let mut record = copied(before)?
+        let mut record = failure_result_from_rep(types.copied(before))?
         std.page_descriptor.set_collection_residency(mut record, ResidentTiered)
         (arc.share(here), take record)
     }
@@ -249,7 +249,7 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
     changed.collections = take tree
     let head = db.heads[0u64].head + 1
     let replacement = ProposedMain(roots: take changed, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, draw - 1))?
+    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, draw - 1)))?
     db.next_node = draw - 1
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.restamp = Some(id)
@@ -277,7 +277,7 @@ fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error
     let SchemaPlan(roots: take roots, next_node: ids, ..) = schema_plan(db)
     let head = db.heads[0u64].head + 1
     let replacement = ProposedMain(roots: take roots, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, ids))?
+    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, ids)))?
     db.next_node = ids
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.unload = Some(id)
@@ -307,7 +307,7 @@ fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut ro
             return Error(Stale(id))
         }
         let slot: std.page.Slot = clone(edge)
-        (take slot, copied(before)?)
+        (take slot, failure_result_from_rep(types.copied(before))?)
     }
     let loaded = resident_page_from_tiered(source, old, mut next_stamp)?
     residency_release(old, branches[0u64], mut queued)?

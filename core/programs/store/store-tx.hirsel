@@ -153,7 +153,7 @@ type Drafted[R, E] {
     view_tree: core.Cell[Option[TxView]],
     stream_ops: DataOps,
     extra_bytes: u64,
-    call: Option[CallSection],
+    call: Option[format.CallSection],
     rows: u64,
     cell_rows: u64,
     trim_rows: u64,
@@ -245,7 +245,7 @@ fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, cache: Op
     let mut head = take first
     // Moved, not copied: the frame-tail key keeps the spare room it was made with.
     for slot in 0u64 .. order.min(staged, 2) {
-        let DataOp(key: take key, value: take value, prior: prior, ..) = replace(mut head[slot], DataOp(key: list.new(), value: None, trim: None, prior: None))
+        let format.DataOp(key: take key, value: take value, prior: prior, ..) = replace(mut head[slot], format.DataOp(key: list.new(), value: None, trim: None, prior: None))
         let mut ignored = 0u64
         let (_, replaced) = save_data_op(mut ops, below, streams, mut ignored, take key, take value, prior)
         if let Some(c) = cache {
@@ -253,7 +253,7 @@ fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, cache: Op
         }
     }
     for take op in take rest {
-        let DataOp(key: take key, value: take value, prior: prior, ..) = take op
+        let format.DataOp(key: take key, value: take value, prior: prior, ..) = take op
         let mut ignored = 0u64
         let (_, replaced) = save_data_op(mut ops, below, streams, mut ignored, take key, take value, prior)
         if let Some(c) = cache {
@@ -342,7 +342,7 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
 // key new to the transaction, else OPEN_FRAME_TAIL. A key a layer beneath
 // staged keeps its slot there, so `ops` holds the replacement uncounted.
 // The second result names a replaced slot in this layer, if any.
-fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut next_slot: u64, take key: Bytes, take value: Option[StagedValue], prior: Option[u32]) -> (u64, Option[u64]) {
+fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut next_slot: u64, take key: Bytes, take value: Option[format.StagedValue], prior: Option[u32]) -> (u64, Option[u64]) {
     if let Some(slot) = op_slot(ops, key) {
         if slot < 2 {
             ops.rows.first[slot].value = take value
@@ -373,7 +373,7 @@ fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut n
     if hashed {
         map.insert(mut ops.slots, clone(key), slot_order)
     }
-    push_data_row(mut ops.rows, DataOp(key: take key, value: take value, trim: None, prior: prior))
+    push_data_row(mut ops.rows, format.DataOp(key: take key, value: take value, trim: None, prior: prior))
     if !hashed && slot_order >= SCANNED_OPS && !rows_ascending(ops.rows) {
         // Match the final capacity of the old doubling sequence without
         // growing the map while the long ascending prefix is already held.
@@ -398,7 +398,7 @@ fn put_frame(tx: Tx, key: Bytes, value: Bytes, frame: Option[u64]) -> Result[Opt
     if size > tx.limits.value {
         return Error(Limit(Value))
     }
-    edit_frame(tx.ops, tx.below, tx.extra_bytes, key, Some(size), frame, transaction_limit(tx.limits))
+    edit_frame(tx.ops, tx.below, tx.extra_bytes, key, Some(size), frame, types.transaction_limit(limits_to_rep(tx.limits)))
 }
 
 fn edit_frame(ops: DataOps, below: List[Arc[Staged]], extra: u64, key: Bytes, value_size: Option[u64], frame: Option[u64], transaction: u64) -> Result[Option[u64], Error] {
@@ -484,7 +484,7 @@ fn put_charge(mut tx: Tx, key: Bytes) -> Result[(u64, u64, Option[u32]), Error] 
     // the selection takes none.
     let (previous, prior) = match staged_op(tx, key) {
         Some(op) => (match op.value {
-            Some(value) => entry(key, staged_bytes(value)),
+            Some(value) => entry(key, format.staged_bytes(value)),
             None => 0u64,
         }, op.prior),
         None => {
@@ -496,7 +496,7 @@ fn put_charge(mut tx: Tx, key: Bytes) -> Result[(u64, u64, Option[u32]), Error] 
             (charge, if held.kind == CellCollection || held.kind == LogCollection {
                 None
             } else {
-                Some(stored_prior(base))
+                Some(format.stored_prior(base))
             })
         },
     }
@@ -521,7 +521,7 @@ fn row_refund(tx: Tx, key: Bytes, value: Bytes) -> DataRefund {
     } else if let Some(op) = staged_op(tx, key) {
         op.prior
     } else {
-        Some(stored_prior(Some(view value)))
+        Some(format.stored_prior(Some(view value)))
     }
     DataRefund(charge: if tx.retain_old {
         0u64
@@ -596,9 +596,9 @@ fn pop_table_edge[K, V](mut tx: Tx, t: Table[K, V], reverse: bool) -> Result[Opt
         return Ok(None)
     }
     if reverse {
-        note_read(tx, Span(copied(key)?, take high))?
+        note_read(tx, Span(failure_result_from_rep(types.copied(key))?, take high))?
     } else {
-        let mut after = copied(key)?
+        let mut after = failure_result_from_rep(types.copied(key))?
         list.push(mut after, 0u8)
         note_read(tx, Span(take low, take after))?
     }
@@ -664,7 +664,7 @@ fn transaction_write_height(tx: Tx, key: Bytes) -> Result[u64, Error] {
     if collection_descriptor(descriptor).residency == ResidentMemory {
         return Ok(collection_write_height(tree, key))
     }
-    tiered_seek(attempt, SeekKey(copied(list.slice(key, 4, list.len(key)))?))
+    tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key))))?))
     let root = tiered_point_page(attempt, tx.pins, edge, None)?
     tiered_seek(attempt, SeekOperation)
     Ok(tree_height(tree) + int.widen(std.page.level(std.page.image_of(root))) + 1)
@@ -690,13 +690,13 @@ fn staged_row(tx: Tx, key: Bytes) -> Option[Option[View[Bytes]]] in tx {
         return None
     }
     Some(match op.value {
-        Some(raw) => Some(staged_bytes(raw)),
+        Some(raw) => Some(format.staged_bytes(raw)),
         None => None,
     })
 }
 
 // The row this Tx or a layer beneath it staged for key, if any.
-fn staged_op(tx: Tx, key: Bytes) -> Option[View[DataOp]] in tx {
+fn staged_op(tx: Tx, key: Bytes) -> Option[View[format.DataOp]] in tx {
     if let Some(slot) = op_slot(tx.ops, key) {
         return Some(data_row(tx.ops.rows, slot))
     }

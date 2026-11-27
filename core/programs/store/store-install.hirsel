@@ -40,11 +40,11 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     }
     let target = view staged.meta.target
     if let Some(wanted) = target.limits {
-        if !same_limits(wanted, db.limits) {
+        if !types.same_limits(limits_to_rep(wanted), limits_to_rep(db.limits)) {
             return Error(Store(LimitsDiffer(db.limits)))
         }
     }
-    if let Some(problem) = journal_floor(target.checkpoint_bytes, target.journal_limit, db.limits.frame) {
+    if let Some(problem) = types.journal_floor(target.checkpoint_bytes, target.journal_limit, db.limits.frame) {
         return Error(FullNew(Journal(problem)))
     }
     let disk_limit = disk_state(db).options.resident_limit
@@ -99,7 +99,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     } else {
         None
     }
-    let prior = deploy_result(copied(old_describe))?
+    let prior = deploy_result(failure_result_from_rep(types.copied(old_describe)))?
     let release = release_from(target, request.digest)?
     deploy_result(stage_activation(mut installation, release_at, Some(take prior), target.describe, release_codec, release))?
     installation.plan.live = install_account(db, installation.plan.roots)?

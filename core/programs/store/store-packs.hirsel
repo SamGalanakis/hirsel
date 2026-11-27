@@ -77,22 +77,22 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
         for slot in pack_plan.first .. pack_plan.end {
             let frame = layout.frames[slot]
             let place = std.page.PagePtr(pack: pack_plan.seq, offset: offset, len: int.truncate(frame.size), checksum: 0, stamp: frame.stamp)
-            let old = option.unwrap(capacity(disk_index_update(mut known.frames, frame.stamp, frame_edge_charge, fn(mut location: FrameLocation) -> std.page.PagePtr {
+            let old = option.unwrap(failure_result_from_rep(types.capacity(disk_index_update(mut known.frames, frame.stamp, frame_edge_charge, fn(mut location: FrameLocation) -> std.page.PagePtr {
                 replace(mut location.place, place)
-            }))?)
+            })))?)
             if old.pack != 0 {
-                let _ = capacity(disk_index_remove(mut known.members, (old.pack, frame.stamp), member_charge))?
-                let _ = capacity(disk_index_update(mut known.packs, old.pack, pack_edge_charge, fn(mut pack: PagePack) {
+                let _ = failure_result_from_rep(types.capacity(disk_index_remove(mut known.members, (old.pack, frame.stamp), member_charge)))?
+                let _ = failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, old.pack, pack_edge_charge, fn(mut pack: PagePack) {
                     let width: u64 = int.widen(old.len)
                     pack.live -= width
-                }))?
+                })))?
             }
-            capacity(disk_index_put(mut known.members, (pack_plan.seq, frame.stamp), (), member_charge))?
+            failure_result_from_rep(types.capacity(disk_index_put(mut known.members, (pack_plan.seq, frame.stamp), (), member_charge)))?
             offset += 16 + frame.size
         }
         let frame_count: u32 = int.truncate(pack_plan.end - pack_plan.first)
         let record = PagePack(class: layout.class, frames: frame_count, live: pack_plan.payload_bytes, payload_bytes: pack_plan.payload_bytes, index: 0)
-        capacity(disk_index_put(mut known.packs, pack_plan.seq, record, pack_edge_charge))?
+        failure_result_from_rep(types.capacity(disk_index_put(mut known.packs, pack_plan.seq, record, pack_edge_charge)))?
     }
     Ok(())
 }
@@ -125,7 +125,7 @@ fn child_place(known: PageLocations, seq: u64, emitted: List[std.page.PagePtr], 
     }
 }
 
-fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[std.page.PagePtr, Error] {
+fn emit_located_frame(mut out: Bytes, context: format.DiskContext, frame: PackFrame, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[std.page.PagePtr, Error] {
     let offset = list.len(out)
     let kind: u16 = match frame.body {
         BlobBody(_) => 0x0022,
@@ -151,7 +151,7 @@ fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, lo
         },
     }
     let bound_checksum = disk_allocation(scoped fn() -> Result[u64, Error] {
-        capacity(disk_check(context, offset, list.slice(out, offset, offset + 8), list.slice(out, offset + 16, list.len(out))))
+        failure_result_from_rep(types.capacity(format.disk_check(context, offset, list.slice(out, offset, offset + 8), list.slice(out, offset + 16, list.len(out)))))
     })?
     list.set_word_le(mut out, offset + 8, bound_checksum)
     Ok(std.page.PagePtr(pack: context.seq, offset: offset, len: size, checksum: checksum, stamp: frame.stamp))
@@ -161,10 +161,10 @@ fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, lo
 // frame index is shared and its nodes copied once per pack, not once per frame.
 fn encode_pack(id: StoreId, layout: PackRun, pack: PlannedPack, mut known: PageLocations, mut out: Bytes) -> Result[(), Error] {
     list.clear(mut out)
-    let context = DiskContext(store: id, role: 3, seq: pack.seq)
+    let context = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: pack.seq)
     let (take header, take reserved) = disk_allocation(scoped fn() -> Result[(Bytes, List[std.page.PagePtr]), Error] {
         let places: List[std.page.PagePtr] = list.with_capacity(pack.end - pack.first)
-        Ok((capacity(disk_header_bytes(context, 0, 0))?, take places))
+        Ok((failure_result_from_rep(types.capacity(format.disk_header_bytes(context, 0, 0)))?, take places))
     })?
     let mut emitted = take reserved
     list.append(mut out, header)
@@ -177,9 +177,9 @@ fn encode_pack(id: StoreId, layout: PackRun, pack: PlannedPack, mut known: PageL
     let updated = disk_allocation(scoped fn() -> Result[DiskIndex[u64, FrameLocation], Error] {
         let mut frames = disk_index_share(known.frames)
         for located in emitted {
-            let _ = capacity(disk_index_update(mut frames, located.stamp, frame_edge_charge, fn(mut location: FrameLocation) {
+            let _ = failure_result_from_rep(types.capacity(disk_index_update(mut frames, located.stamp, frame_edge_charge, fn(mut location: FrameLocation) {
                 location.place = located
-            }))?
+            })))?
         }
         Ok(take frames)
     })?
@@ -281,7 +281,7 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: 
         if pack.class == 2 {
             continue
         }
-        let key = key_word(seq)
+        let key = types.key_word(seq)
         // A Tiered pack stays in the inventory until a probe retires it.
         if (pack.class < 3 && pack.live == 0) || (pack.class >= 3 && list.contains(retiring, seq)) {
             let listed = match std.page.lookup(root, key) {
@@ -329,7 +329,7 @@ fn empty_paged_lists() -> PagedLists {
 fn transfer_deferred_rows(mut root: Arc[std.page.Page], mut deferred_next: u64, queued: List[DeferredFree], private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[(), Error] {
     for row in queued {
         let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
-        page_result(std.page.insert(mut root, key_word(deferred_next), deferred_free_value(row), None, 1024, private_from, mut draw))?
+        page_result(std.page.insert(mut root, types.key_word(deferred_next), deferred_free_value(row), None, 1024, private_from, mut draw))?
         deferred_next = stamp_after(deferred_next)?
     }
     Ok(())
@@ -393,11 +393,11 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQ
     // The installed rows this cut's compaction moved take their new values.
     for (seq, row) in queue.rewritten {
         let mut draw = reserve_list_edit(deferred_root, mut next_stamp, issued)?
-        page_result(std.page.insert(mut deferred_root, key_word(seq), deferred_free_value(row), None, 1024, private_from, mut draw))?
+        page_result(std.page.insert(mut deferred_root, types.key_word(seq), deferred_free_value(row), None, 1024, private_from, mut draw))?
     }
     for seq in queue.drained {
         let mut draw = reserve_list_edit(deferred_root, mut next_stamp, issued)?
-        if !page_result(std.page.remove(mut deferred_root, key_word(seq), private_from, mut draw))? {
+        if !page_result(std.page.remove(mut deferred_root, types.key_word(seq), private_from, mut draw))? {
             fail("store: the drain consumed a row the queue lacks")
         }
     }

@@ -50,7 +50,7 @@ fn tiered_without_paging(roots: List[Roots]) -> bool {
 }
 
 fn encode_tiered_run(id: StoreId, layout: TieredPackRun, mut emitted: Map[u64, std.page.PagePtr], mut packs: List[TieredCutPack]) -> Result[(), Error] {
-    capacity(list.try_reserve(mut packs, list.len(layout.packs)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut packs, list.len(layout.packs))))?
     for laid in layout.packs {
         let (take wire, inventory) = encode_tiered_cut_pack(id, layout, laid, mut emitted)?
         list.push(mut packs, TieredCutPack(seq: laid.seq, wire: take wire, pack: inventory))
@@ -74,7 +74,7 @@ fn encode_tiered_run(id: StoreId, layout: TieredPackRun, mut emitted: Map[u64, s
 // first `heads` roots) whose fork row the cut does not first publish.
 fn fold_owners(branches: List[u32], heads: u64, forked: List[LineageFork]) -> Result[List[bool], Error] {
     let mut owners: List[bool] = list.new()
-    capacity(list.try_reserve(mut owners, list.len(branches)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut owners, list.len(branches))))?
     for slot in 0u64 .. list.len(branches) {
         let mut owns = slot < heads
         for fork_row in forked {
@@ -102,21 +102,21 @@ fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: Li
             for effect in effects {
                 match effect {
                     FoldDropped(target) => {
-                        let frame = tiered_frame_id(target)
+                        let frame = format.tiered_frame_id(target)
                         let key = (branches[slot], frame.pack, frame.offset)
                         if !map.contains(seen, key) {
-                            capacity(map.try_reserve(mut seen, 1))?
+                            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
                             map.insert(mut seen, key, ())
-                            capacity(list.try_reserve(mut queued, 1))?
+                            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
                             list.push(mut queued, DeferredFree(branch_id: branches[slot], target: clone(target)))
                         }
                     },
                     FoldReplaced(frame) => {
                         let key = (branches[slot], frame.pack, frame.stamp)
                         if owners[slot] && !map.contains(filed, key) {
-                            capacity(map.try_reserve(mut filed, 1))?
+                            failure_result_from_rep(types.capacity(map.try_reserve(mut filed, 1)))?
                             map.insert(mut filed, key, ())
-                            capacity(list.try_reserve(mut replaced, 1))?
+                            failure_result_from_rep(types.capacity(list.try_reserve(mut replaced, 1)))?
                             list.push(mut replaced, TieredDrainKill(branch_id: branches[slot], frame: frame))
                         }
                     },
@@ -132,12 +132,12 @@ fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: Li
 // fold's. A row is added once per branch and frame.
 fn queue_live_dropped(dropped: List[DeferredFree], mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree]) -> Result[(), Error] {
     for row in dropped {
-        let frame = tiered_frame_id(row.target)
+        let frame = format.tiered_frame_id(row.target)
         let key = (row.branch_id, frame.pack, frame.offset)
         if !map.contains(seen, key) {
-            capacity(map.try_reserve(mut seen, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
             map.insert(mut seen, key, ())
-            capacity(list.try_reserve(mut queued, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
             list.push(mut queued, clone(row))
         }
     }
@@ -163,12 +163,12 @@ fn queue_superseded(db: Db, delta: HolderDelta, mut seen: Map[(u32, u64, u64), (
         fold_record_lost(root, map.new(), map.new(), true, mut effects)?
         for take effect in take effects {
             if let FoldDropped(take target) = take effect {
-                let frame = tiered_frame_id(target)
+                let frame = format.tiered_frame_id(target)
                 let key = (head.id, frame.pack, frame.offset)
                 if !map.contains(seen, key) {
-                    capacity(map.try_reserve(mut seen, 1))?
+                    failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
                     map.insert(mut seen, key, ())
-                    capacity(list.try_reserve(mut queued, 1))?
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
                     list.push(mut queued, DeferredFree(branch_id: head.id, target: take target))
                 }
             }
@@ -241,7 +241,7 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
     encode_tiered_run(id, page_run, mut emitted, mut packs)?
     settle_queue_moves(mut queue, moving, emitted, disk_state(db).pages.lists.deferred_next)?
     let mut sealed: List[Roots] = list.new()
-    capacity(list.try_reserve(mut sealed, list.len(roots)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut sealed, list.len(roots))))?
     for held in roots {
         let collections = seal_holder_tiered(held.collections, emitted)?
         list.push(mut sealed, PageRoots(collections: take collections, streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
@@ -291,7 +291,7 @@ fn sealed_cut_holders(take holders: List[HeldPage], cut_stage: TieredCutStage) -
         return Ok(take holders)
     }
     let mut ready: List[HeldPage] = list.new()
-    capacity(list.try_reserve(mut ready, list.len(holders)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut ready, list.len(holders))))?
     let mut slot = 0u64
     for held in holders {
         let root = if let HolderSource(_, _, 0) = held.source {
@@ -310,7 +310,7 @@ fn sealed_cut_holders(take holders: List[HeldPage], cut_stage: TieredCutStage) -
 // `live` = its laid-out payload, so AP16 item 7 lists it.
 fn list_tiered_cut(mut known: PageLocations, cut_stage: TieredCutStage) -> Result[(), Error] {
     for written in cut_stage.packs {
-        capacity(disk_index_put(mut known.packs, written.seq, written.pack, pack_edge_charge))?
+        failure_result_from_rep(types.capacity(disk_index_put(mut known.packs, written.seq, written.pack, pack_edge_charge)))?
     }
     Ok(())
 }
@@ -354,7 +354,7 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
             if map.contains(seen, stamp) {
                 continue
             }
-            capacity(map.try_reserve(mut seen, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
             map.insert(mut seen, stamp, ())
         }
         let Some(sum) = int.checked_add(total, descriptor.row_bytes) else {
@@ -481,16 +481,16 @@ fn tiered_index_dirty_room(db: Db, roots: List[Roots], freed: TieredFreed) -> Re
 
 fn queue_index_chunk_frees(freed: TieredFreed, branch_id: u32, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree], mut replaced: List[TieredDrainKill]) -> Result[(), Error] {
     for frame in freed.replaced {
-        capacity(list.try_reserve(mut replaced, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut replaced, 1)))?
         list.push(mut replaced, TieredDrainKill(branch_id: branch_id, frame: frame))
     }
     for target in freed.dropped {
-        let frame = tiered_frame_id(target)
+        let frame = format.tiered_frame_id(target)
         let key = (branch_id, frame.pack, frame.offset)
         if !map.contains(seen, key) {
-            capacity(map.try_reserve(mut seen, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
             map.insert(mut seen, key, ())
-            capacity(list.try_reserve(mut queued, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
             list.push(mut queued, DeferredFree(branch_id: branch_id, target: clone(target)))
         }
     }

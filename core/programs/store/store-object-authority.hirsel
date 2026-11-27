@@ -20,9 +20,9 @@ fn history_check_endpoint(mut client: std.object.Client, deadline: u64) -> Resul
     if std.object.proven(client) {
         // The client refuses any answer without the loopback simulator's
         // proof for its credential, so one answered request proves it.
-        let location = capacity(bound bytes 16 {
+        let location = failure_result_from_rep(types.capacity(bound bytes 16 {
             std.object.bucket_location(mut client, deadline)
-        })?
+        }))?
         let Ok(_) = location else {
             return Error(Endpoint(Unproven))
         }
@@ -52,13 +52,13 @@ fn history_probe_head(mut client: std.object.Client, cached_tag: std.object.ETag
         Ok(None) => Ok(None),
         Ok(Some(meta)) => {
             if meta.size != list.len(scratch) || meta.etag.len == 0 {
-                return Error(disk_fault("head", 0, Truncated))
+                return Error(failure_from_rep(format.disk_fault("head", 0, Truncated)))
             }
             let received = history_decode_head(scratch)?
             history_check_namespace(received, client)?
             Ok(Some((take received, meta.etag)))
         },
-        Error(NotFound) => Error(disk_fault("head", 0, Absent)),
+        Error(NotFound) => Error(failure_from_rep(format.disk_fault("head", 0, Absent))),
         Error(take e) => Error(Remote(take e)),
     }
 }
@@ -71,13 +71,13 @@ fn history_probe_head_attach(mut client: std.object.Client, cached_tag: std.obje
         Ok(None) => Ok(None),
         Ok(Some(meta)) => {
             if meta.size != list.len(scratch) || meta.etag.len == 0 {
-                return Error(disk_fault("head", 0, Truncated))
+                return Error(failure_from_rep(format.disk_fault("head", 0, Truncated)))
             }
             let (take received, _) = history_decode_head_attach(scratch)?
             history_check_namespace(received, client)?
             Ok(Some((take received, meta.etag)))
         },
-        Error(NotFound) => Error(disk_fault("head", 0, Absent)),
+        Error(NotFound) => Error(failure_from_rep(format.disk_fault("head", 0, Absent))),
         Error(take e) => Error(Remote(take e)),
     }
 }

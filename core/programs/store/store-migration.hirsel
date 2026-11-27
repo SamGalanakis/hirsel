@@ -11,7 +11,7 @@ pub type CollectionInfo: send {
 }
 
 pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error] {
-    require_memory_collections(m.tiered, Migrate)?
+    failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     let mut rows = top_level_catalog(m.plan.roots.catalog)?
     let mut collections: List[CollectionInfo] = list.new()
     while let Some((take key, take raw)) = next_bytes(mut rows)? {
@@ -24,7 +24,7 @@ pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error] {
                 4 => Log(),
                 _ => return Error(malformed(0)),
             }
-            capacity(list.try_reserve(mut collections, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut collections, 1)))?
             list.push(mut collections, CollectionInfo(name: take name, kind: kind))
         }
     }
@@ -114,7 +114,7 @@ fn prepare_migration(take job: MigrationJob) -> () waits {
 
 pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
     healthy(db)?
-    require_memory_collections(store_has_tiered(db), Migrate)?
+    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
     let plan = stage_migration_plan(db, tasks, configure, schema_plan(db))?
     Ok(staged_migration(db, take plan, false, list.new()))
 }
@@ -194,7 +194,7 @@ pub type MigrationPreview {
 // diagnostics leave this function. No staged roots can be installed.
 pub fn preview_migration[H](db: Db, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]], schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[MigrationPreview, Error] waits {
     healthy(db)?
-    require_memory_collections(store_has_tiered(db), Migrate)?
+    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Migrate)))?
     let mut plan = schema_plan(db)
     plan.preview = Some(list.new())
     let ready = match configure {
@@ -221,7 +221,7 @@ fn catalog_collection_name(key: Bytes, kind: u8) -> Result[String, Error] {
     } else {
         1u64
     }
-    Ok(string.from_utf8(copied(list.slice(key, start, list.len(key)))?) ?=> |_| malformed(0u64))
+    Ok(string.from_utf8(failure_result_from_rep(types.copied(list.slice(key, start, list.len(key))))?) ?=> |_| malformed(0u64))
 }
 
 fn catalog_descriptions(catalog: PageTree) -> Result[List[DeclaredCollection], Error] {

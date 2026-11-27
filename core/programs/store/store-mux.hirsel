@@ -1,7 +1,6 @@
 // The call multiplexer (§13.3a): the Db task's queue of served calls whose
 // attempt latched a miss, the one-slot writer channel their demands go out
 // on, and the attempt loop `serve` and `resume` share.
-
 type ParkEntry {
     id: u64,
     ready: bool,
@@ -13,7 +12,7 @@ type ParkEntry {
     // The demand not yet sent, and the answer to the one in flight.
     demand: Option[TieredPointDemand],
     answer: Option[Receiver[Result[TieredPointDelivery, Error]]],
-    pending: Option[(TieredTarget, Error)],
+    pending: Option[(format.TieredTarget, Error)],
     // A failure the next resume returns before it runs anything.
     failed: Option[Error],
     crowded: bool
@@ -44,7 +43,7 @@ type CallRun {
     id: Option[u64],
     attempts: u64,
     pins: TieredPins,
-    pending: Option[(TieredTarget, Error)],
+    pending: Option[(format.TieredTarget, Error)],
     crowded: bool
 }
 
@@ -250,7 +249,7 @@ pub fn poll_parked(mut db: Db) -> Result[List[u64], Error] {
     }
     send_parked_demand(mut db)
     let mut ready: List[u64] = list.new()
-    capacity(list.try_reserve(mut ready, n))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut ready, n)))?
     for queued in db.parked.entries {
         if queued.ready {
             list.push(mut ready, queued.id)
@@ -310,8 +309,7 @@ fn call_page_source(db: Db) -> Result[TieredPageSource, Error] {
 // as it is now over the call's pin map. A latched miss parks the call on
 // attempts 1 and 2; from attempt 3, or once crowded, the call is held: it
 // revokes every parked call and its misses are delivered inline.
-fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallReserve, take rec: Option[CallRecord], at: u64, take carry: CallRun,
-    body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
+fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallReserve, take rec: Option[CallRecord], at: u64, take carry: CallRun, body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
     let mut call = take carry
     let mut revoked = false
     loop {
@@ -375,8 +373,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
                 while place != 0 && db.parked.entries[place - 1].id > id {
                     place -= 1
                 }
-                list.insert(mut db.parked.entries, place, ParkEntry(id: id, ready: false, attempts: attempts, pins: take pins, stamps: take stamps,
-                    demand: Some(take demand), answer: None, pending: take pending, failed: None, crowded: crowded))
+                list.insert(mut db.parked.entries, place, ParkEntry(id: id, ready: false, attempts: attempts, pins: take pins, stamps: take stamps, demand: Some(take demand), answer: None, pending: take pending, failed: None, crowded: crowded))
                 send_parked_demand(mut db)
                 return Ok(Parked(Parked(id: id, completion: take complete, record: take rec, plan: plan, grant: grant, attempted: ci)))
             },

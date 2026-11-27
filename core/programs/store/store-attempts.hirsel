@@ -6,7 +6,7 @@
 // into the map and the body reruns; any other latch decides the call.
 fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Stage[R, A], Error] waits {
     let mut pins = empty_tiered_pins(call_pin_root(db, i), db.writer_pin_bytes)
-    let mut pending: Option[(TieredTarget, Error)] = None
+    let mut pending: Option[(format.TieredTarget, Error)] = None
     loop {
         refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
         let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes, tiered_window(pins))
@@ -47,14 +47,14 @@ fn tiered_pin_root(opened: u64, branch_id: u32, tree: PageTree) -> TieredPinRoot
     TieredPinRoot(domain: opened, branch: branch_id, generation: generation, root_stamp: tree_stamp(tree))
 }
 
-fn refresh_call_pins(mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)], root: TieredPinRoot) {
+fn refresh_call_pins(mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)], root: TieredPinRoot) {
     if pins.root != root {
         tiered_reset_pins(mut pins, root)
         pending = None
     }
 }
 
-fn deliver_call_miss(db: Db, tree: PageTree, state: TieredTouchSet, mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+fn deliver_call_miss(db: Db, tree: PageTree, state: TieredTouchSet, mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)]) -> Result[(), Error] waits {
     let SeekKey(sought) = view state.seek else {
         fail("store: a call's miss has no seek key")
     }
@@ -68,7 +68,7 @@ fn deliver_call_miss(db: Db, tree: PageTree, state: TieredTouchSet, mut pins: Ti
 
 // One serve attempt over the pin map `drive_served` holds. A latched
 // attempt's stage is discarded by the driver, so it is not read here.
-fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
+fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
     let caught = isolate(fn() -> Result[Result[CallDraft, Capacity], OutOfTime] {
         let perform = scoped fn() -> Result[CallDraft, Capacity] {
             let keep: Option[fn(ServeReply) -> bool] = None
@@ -132,7 +132,7 @@ type DraftedCall {
 
 type DraftRefusal = AdmissionBytes(Capacity) | DraftStopped(Stop)
 
-fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, DraftRefusal] {
+fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, DraftRefusal] {
     // These synchronous scopes cannot lose task room between admission and use.
     // Refund the admission before encoding, so frame bytes come from the head.
     let admitted = bound bytes grant.retained {
@@ -201,7 +201,7 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
         fail("store: a Tiered row read without an attempt record")
     }
     let inner = list.slice(key, 4, list.len(key))
-    tiered_seek(attempt, SeekKey(copied(inner)?))
+    tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(inner))?))
     tiered_reading(attempt, ValuesAt)
     let backing = TieredBorrowedRoot(edge: edge, pins: tx.pins)
     let found = tiered_point_bytes(attempt, backing, inner)?
@@ -225,7 +225,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
         None => 0,
     }, root_stamp: tree_stamp(s.roots.collections))
     let mut pins = empty_tiered_pins(root, partition)
-    let mut pending: Option[(TieredTarget, Error)] = None
+    let mut pending: Option[(format.TieredTarget, Error)] = None
     loop {
         let attempt = call_attempt(s.roots.collections.root, partition, tiered_window(pins))
         let looked = look_attempt(s, steps, env, body, attempt, pins.frames)
@@ -252,7 +252,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
     }
 }
 
-fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Looked[R] {
+fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Looked[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let observed_info: core.Cell[bool] = cell.new(false)

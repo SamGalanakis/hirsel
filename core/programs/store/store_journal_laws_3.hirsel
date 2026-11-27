@@ -1,23 +1,23 @@
 pub fn journal_law_call_vector() -> bool {
     let mut value: Bytes = list.with_capacity(34)
-    result.unwrap(le(mut value, 0, 2))
+    result.unwrap(format.le(mut value, 0, 2))
     list.fill(mut value, 32, 4u8)
-    let key = result.unwrap(logical_key(1, key_word(7)))
+    let key = result.unwrap(logical_key(1, types.key_word(7)))
     let mut data: DataRows = new_data_rows()
-    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
+    push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     let mut stream_value: Bytes = list.new()
-    result.unwrap(le(mut stream_value, 1, 8))
+    result.unwrap(format.le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
-    result.unwrap(le(mut stream_value, 2, 1))
+    result.unwrap(format.le(mut stream_value, 2, 1))
     list.fill(mut stream_value, 8, 3u8)
     let stream = law_stream_bytes(b"stream00", 0u64)
     let mut streams: DataRows = new_data_rows()
-    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take stream_value)), trim: None, prior: None))
+    push_data_row(mut streams, format.DataOp(key: result.unwrap(failure_result_from_rep(types.copied(stream))), value: Some(PageValue(take stream_value)), trim: None, prior: None))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
     list.fill(mut args, 16, 2u8)
-    let call = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: option.unwrap(parse_stream_key(stream)), revision: Some(revision_vector()), code: code_vector()), settlement: None))
+    let call = Some(format.CallSection(record: format.CallRecordRep(key: result.unwrap(failure_result_from_rep(types.copied(entry_key))), args: result.unwrap(failure_result_from_rep(types.copied(args))), stream: option.unwrap(format.parse_stream_key(stream)), revision: Some(revision_vector()), code: code_vector()), settlement: None))
     let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 257), at: 1234, seed: 0)
     let raw = result.unwrap(encode_sections(ci, mut data, streams, call, 7, 72))
     // L29 (d): independent layout from AP1a's fields, checked with libxxhash XXH3.
@@ -32,13 +32,13 @@ pub fn journal_law_call_vector() -> bool {
     }
     for way in 1u64 .. 3 {
         let settle: u8 = int.truncate(way)
-        let record = CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: option.unwrap(parse_stream_key(stream)), revision: Some(revision_vector()), code: code_vector())
-        let context = Settlement(way: settle, base: 256, at: 1122, seed: 3344, stop: if way == 1 {
+        let record = format.CallRecordRep(key: result.unwrap(failure_result_from_rep(types.copied(entry_key))), args: result.unwrap(failure_result_from_rep(types.copied(args))), stream: option.unwrap(format.parse_stream_key(stream)), revision: Some(revision_vector()), code: code_vector())
+        let context = format.Settlement(way: settle, base: 256, at: 1122, seed: 3344, stop: if way == 1 {
             Some(Raised)
         } else {
             None
         })
-        let shifted = result.unwrap(encode_sections(ci, mut data, streams, Some(CallSection(record: take record, settlement: Some(context))), 7, 72))
+        let shifted = result.unwrap(encode_sections(ci, mut data, streams, Some(format.CallSection(record: take record, settlement: Some(context))), 7, 72))
         let checksum = if way == 1 {
             7732084696176172798u64
         } else {
@@ -49,10 +49,10 @@ pub fn journal_law_call_vector() -> bool {
         } else {
             359u64
         }
-        if list.len(shifted) != width || read_le(shifted, 8, 8) != checksum || shifted[334] != settle {
+        if list.len(shifted) != width || format.read_le(shifted, 8, 8) != checksum || shifted[334] != settle {
             return false
         }
-        if word_be(shifted, 335) != 256 || word_be(shifted, 343) != 1122 || word_be(shifted, 351) != 3344 {
+        if format.word_be(shifted, 335) != 256 || format.word_be(shifted, 343) != 1122 || format.word_be(shifted, 351) != 3344 {
             return false
         }
         let call_commit = result.unwrap(journal_decode_commit("j-7", list.slice(shifted, 16, width)))
@@ -68,7 +68,7 @@ pub fn journal_law_call_vector() -> bool {
     }
     // Without the replay identity the entry's two allowances remain.
     let available = code_vector()
-    let without_identity = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: option.unwrap(parse_stream_key(stream)), revision: Some(revision_vector()), code: result.unwrap(copied(list.slice(available, 0, 16)))), settlement: None))
+    let without_identity = Some(format.CallSection(record: format.CallRecordRep(key: result.unwrap(failure_result_from_rep(types.copied(entry_key))), args: result.unwrap(failure_result_from_rep(types.copied(args))), stream: option.unwrap(format.parse_stream_key(stream)), revision: Some(revision_vector()), code: result.unwrap(failure_result_from_rep(types.copied(list.slice(available, 0, 16))))), settlement: None))
     let short = result.unwrap(encode_sections(ci, mut data, streams, without_identity, 7, 72))
     if list.len(short) != 303 {
         return false
@@ -80,7 +80,7 @@ pub fn journal_law_call_vector() -> bool {
         None => return false,
     }
     // None is a zero length: 4 bytes, not 36, and reads back as None.
-    let no_revision = Some(CallSection(record: CallRecord(key: take entry_key, args: take args, stream: option.unwrap(parse_stream_key(stream)), revision: None, code: code_vector()), settlement: None))
+    let no_revision = Some(format.CallSection(record: format.CallRecordRep(key: take entry_key, args: take args, stream: option.unwrap(format.parse_stream_key(stream)), revision: None, code: code_vector()), settlement: None))
     let bare = result.unwrap(encode_sections(ci, mut data, streams, no_revision, 7, 72))
     if list.len(bare) != 303 {
         return false
@@ -112,9 +112,9 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     healthy(db)?
     let stream = law_stream_bytes(b"stream00", 0u64)
     let mut value: Bytes = list.new()
-    result.unwrap(le(mut value, 1, 8))
+    result.unwrap(format.le(mut value, 1, 8))
     list.fill(mut value, 32, 0u8)
-    result.unwrap(le(mut value, 2, 1))
+    result.unwrap(format.le(mut value, 2, 1))
     list.fill(mut value, 32, 0u8)
     list.fill(mut value, if large {
         1000000u64
@@ -122,14 +122,14 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
         8u64
     }, 3u8)
     let mut streams: DataRows = new_data_rows()
-    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take value)), trim: None, prior: None))
+    push_data_row(mut streams, format.DataOp(key: result.unwrap(failure_result_from_rep(types.copied(stream))), value: Some(PageValue(take value)), trim: None, prior: None))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
     list.fill(mut args, 16, 2u8)
-    let checked = CallRecord(key: take entry_key, args: take args, stream: option.unwrap(parse_stream_key(stream)), revision: take revision, code: code_vector())
+    let checked = CallRecord(key: take entry_key, args: take args, stream: option.unwrap(optional_stream_key_from_rep(format.parse_stream_key(stream))), revision: take revision, code: code_vector())
     call_checked(checked)?
-    let call = Some(CallSection(record: take checked, settlement: None))
+    let call = Some(format.CallSection(record: call_record_to_rep(take checked), settlement: None))
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, db.heads[i].at + 1, db.heads[i].at)
     let mut data: DataRows = new_data_rows()
     let raw = result.unwrap(encode_sections(ci, mut data, streams, call, db.file_seq, db.file_end))
@@ -138,7 +138,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
         let payload = list.slice(raw, 16, size)
         result.unwrap(journal_decode_commit("fixture", payload))
     }
-    let mut replay = journal_replay(capacity(current_state(db))?, db.next_node, db.limits)?
+    let mut replay = journal_replay(failure_result_from_rep(types.capacity(current_state(db)))?, db.next_node, db.limits)?
     result.unwrap(journal_apply("fixture", mut replay, Commit(take commit)))
     db.heads[i].roots = share_roots(replay.state.tips[i].roots)
     db.heads[i].head = replay.state.tips[i].head
@@ -189,10 +189,10 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     if refuse {
         for _ in 0u64 .. 2 {
             let segment = db.file_seq
-            match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
-                capacity(bound bytes 0 {
+            match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
+                failure_result_from_rep(types.capacity(bound bytes 0 {
                     seal_page_manifest_file(mut raw, context, fence)
-                })?
+                }))?
             }) {
                 Error(Full(Allocation(_))) if db.file_seq == segment + 1 => (),
                 _ => return false
@@ -213,10 +213,10 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
 }
 
 fn settle_body(mut tx: Tx, s: Bytes) -> Result[(), u64] {
-    if let Error(_) = put_bytes(mut tx, 1, key_word(9), key_word(5)) {
+    if let Error(_) = put_bytes(mut tx, 1, types.key_word(9), types.key_word(5)) {
         return Error(1)
     }
-    if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(copied(string.as_bytes("r2"))), call_for(s, 32)) {
+    if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r2")))), call_for(s, 32)) {
         return Error(2)
     }
     Ok(())
@@ -225,7 +225,7 @@ fn settle_body(mut tx: Tx, s: Bytes) -> Result[(), u64] {
 // put_one's commit through run, which hands its frame to the journal.
 fn put_run(mut db: Db, k: u64, v: u64) -> bool waits {
     let outcome = run(mut db, None, (copy_env(k), copy_env(v)), fn(mut tx, call_env) -> Result[(), Error] {
-        put_bytes(mut tx, 1, key_word(call_env.0), key_word(call_env.1))
+        put_bytes(mut tx, 1, types.key_word(call_env.0), types.key_word(call_env.1))
     })
     match take outcome {
         Ok(Committed(_)) => true,
@@ -309,10 +309,10 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }
     let frames = db.frame_seq
     let effect = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(11)) {
+        if let Error(_) = put_bytes(mut tx, 1, types.key_word(1), types.key_word(11)) {
             return Error(1)
         }
-        if let Error(_) = reply_recorded(mut tx, 0, result.unwrap(copied(string.as_bytes("r0"))), call_for(call_env, 32)) {
+        if let Error(_) = reply_recorded(mut tx, 0, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r0")))), call_for(call_env, 32)) {
             return Error(2)
         }
         Ok(())
@@ -336,10 +336,10 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         _ => return false
     }
     let aborted = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) {
+        if let Error(_) = put_bytes(mut tx, 1, types.key_word(2), types.key_word(22)) {
             return Error(1)
         }
-        if let Error(_) = reply_recorded(mut tx, 1, result.unwrap(copied(string.as_bytes("r1"))), call_for(call_env, 32)) {
+        if let Error(_) = reply_recorded(mut tx, 1, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r1")))), call_for(call_env, 32)) {
             return Error(2)
         }
         Error(5)
@@ -354,7 +354,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         },
         None => return false
     }
-    if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(2)))) {
+    if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
         return false
     }
     // I4 with a pin: three overwrites of key 9 leave obsolete charges.
@@ -377,7 +377,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let wall = host.wall_ms(db.clock)
     let keep_reply: Option[fn(u64) -> bool] = None
     let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes, 0)
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let figure = match stage(mut db, 0, wall, None, keep_reply, attempt, no_pins, fn(mut tx: Tx) -> Result[(), u64] {
         settle_body(mut tx, s)
     }) {
@@ -407,7 +407,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if stream_now(after, s) != (2u64, 2u64) || !stream_reply_is(after, s, string.as_bytes("r2")) {
         return false
     }
-    match get_page_row(after.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(9)))) {
+    match get_page_row(after.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(9)))) {
         Some(v) => if decode_word(v) != 5 {
             return false
         },
@@ -860,7 +860,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
             }
             let mut value: Bytes = list.with_capacity(size)
             list.fill(mut value, size, 0u8)
-            put_bytes(mut tx, 1, key_word(k), value)?
+            put_bytes(mut tx, 1, types.key_word(k), value)?
         }
         // §2.4:26-byte section prelude +16*(1+4+12+4+4)+stored values.
         let expected = 16 + 26 + 16 * 25 + 15 * 1048576 + call_env
@@ -886,7 +886,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
     let path = result.unwrap(disk_path("j-", seq, ""))
     if accepted {
         let raw = result.unwrap(read_journal_prefix(d, path, 72 + 15729082 + final_item))
-        if read_le(raw, 76, 4) != 15729066 + final_item {
+        if format.read_le(raw, 76, 4) != 15729066 + final_item {
             return false
         }
     } else {
@@ -919,7 +919,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
     }
     if accepted {
         for k in 0u64 .. 16 {
-            let found = option.unwrap(result.unwrap(get_raw(snapshot(reopened), 1, key_word(k))))
+            let found = option.unwrap(result.unwrap(get_raw(snapshot(reopened), 1, types.key_word(k))))
             let expected_size = if k == 15 {
                 final_item
             } else {

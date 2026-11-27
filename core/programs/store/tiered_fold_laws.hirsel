@@ -1,7 +1,7 @@
 fn l79_fold_base(d: Dir, owner: StoreId) -> Result[std.page.PagePtr, Error] waits {
     let mut rows: List[std.page.Entry] = list.with_capacity(3)
     for seq in 0u64 .. 3 {
-        list.push(mut rows, std.page.Entry(key: key_word(seq), cell: InlineValue(string.into_bytes(string.from("stored")))))
+        list.push(mut rows, std.page.Entry(key: types.key_word(seq), cell: InlineValue(string.into_bytes(string.from("stored")))))
     }
     let image = page_result(std.page.encode(rows, 0, 40, Collection))?
     l68_write_page_pack(d, owner, 8, 40, std.page.payload(image))
@@ -10,13 +10,13 @@ fn l79_fold_base(d: Dir, owner: StoreId) -> Result[std.page.PagePtr, Error] wait
 fn l79_fold_parent(d: Dir, owner: StoreId, left: std.page.PagePtr) -> Result[(std.page.PagePtr, std.page.PagePtr), Error] waits {
     let mut rows: List[std.page.Entry] = list.with_capacity(2)
     for seq in 3u64 .. 5 {
-        list.push(mut rows, std.page.Entry(key: key_word(seq), cell: InlineValue(string.into_bytes(string.from("stored")))))
+        list.push(mut rows, std.page.Entry(key: types.key_word(seq), cell: InlineValue(string.into_bytes(string.from("stored")))))
     }
     let right_leaf = page_result(std.page.encode(rows, 0, 41, Collection))?
     let right = l68_write_page_pack(d, owner, 6, 41, std.page.payload(right_leaf))?
     let mut children: List[std.page.Entry] = list.with_capacity(2)
     list.push(mut children, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 3, charge: 258))))
-    list.push(mut children, std.page.Entry(key: key_word(3), cell: Child(std.page.Branch(child: right, rows: 2, charge: 172))))
+    list.push(mut children, std.page.Entry(key: types.key_word(3), cell: Child(std.page.Branch(child: right, rows: 2, charge: 172))))
     let branch_image = page_result(std.page.encode(children, 1, 42, Collection))?
     let root = l68_write_page_pack(d, owner, 10, 42, std.page.payload(branch_image))?
     Ok((root, right))
@@ -25,8 +25,8 @@ fn l79_fold_parent(d: Dir, owner: StoreId, left: std.page.PagePtr) -> Result[(st
 fn l79_fold_trims(first_charge: u64, final_charge: u64) -> Result[Arc[ReplayOverlay], Error] {
     let mut overlay = empty_replay_overlay(Some(3u64))
     let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
-    let middle = replay_overlay_trim(mut overlay, "j-1", 72, 9, initial, JournalTrim(floor: 2, dropped: first_charge))?
-    let _ = replay_overlay_trim(mut overlay, "j-1", 90, 9, middle, JournalTrim(floor: 3, dropped: final_charge))?
+    let middle = replay_overlay_trim(mut overlay, "j-1", 72, 9, initial, format.JournalTrim(floor: 2, dropped: first_charge))?
+    let _ = replay_overlay_trim(mut overlay, "j-1", 90, 9, middle, format.JournalTrim(floor: 3, dropped: final_charge))?
     Ok(take overlay)
 }
 
@@ -52,7 +52,7 @@ fn l79_fold_checks(source: TieredPageSource, base: std.page.PagePtr) -> Result[(
 fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
     let mut overlay = empty_replay_overlay(Some(3u64))
     let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
-    let _ = replay_overlay_trim(mut overlay, "j-1", 72, 9, initial, JournalTrim(floor: 2, dropped: 172))?
+    let _ = replay_overlay_trim(mut overlay, "j-1", 72, 9, initial, format.JournalTrim(floor: 2, dropped: 172))?
     let next_key = log_key(9, 3)?
     replay_overlay_edit(mut overlay, "j-1", 90, next_key, 0, ReplayPut(arc.new(string.into_bytes(string.from("next")))))?
     verify_tiered_fold(source, base, overlay)?
@@ -65,7 +65,7 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
     let HotPage(take ready) = fold_materialize_row(source, kept, empty, next_key, appended, 1024, true, 41, mut stamp, mut ignored)? else {
         fail("L79: the overlay append must make a fresh leaf")
     }
-    if std.page.totals(ready) != (2u64, 172u64) || std.page.lookup(ready, key_word(0)) != None || std.page.lookup(ready, key_word(1)) != None || std.page.lookup(ready, key_word(2)) != Some(string.as_bytes("stored")) || std.page.lookup(ready, key_word(3)) != Some(string.as_bytes("next")) {
+    if std.page.totals(ready) != (2u64, 172u64) || std.page.lookup(ready, types.key_word(0)) != None || std.page.lookup(ready, types.key_word(1)) != None || std.page.lookup(ready, types.key_word(2)) != Some(string.as_bytes("stored")) || std.page.lookup(ready, types.key_word(3)) != Some(string.as_bytes("next")) {
         fail("L79: only the retained Cold row and the replay append belong to the fold")
     }
     Ok(())
@@ -89,7 +89,7 @@ fn l79_cut_table(base: std.page.PagePtr, total_rows: u64, row_bytes: u64, mut ne
 fn l79_cut_candidate(source: TieredPageSource, base: std.page.PagePtr, body: Bytes, mut next_stamp: u64) -> Result[Roots, Error] waits {
     let mut roots = l79_cut_table(base, 3, 258, mut next_stamp)?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
-    let change = JournalOp(key: log_key(9, 1)?, value: Some(clone(body)), prior: 7, trim: None)
+    let change = format.JournalOp(key: log_key(9, 1)?, value: Some(clone(body)), prior: 7, trim: None)
     replay_tiered_op("j-1", mut roots.collections, mut next_stamp, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), change)?
     let _ = fold_page_tree(source, mut roots.collections, mut next_stamp)?
     Ok(take roots)
@@ -149,7 +149,7 @@ fn l79_cut_emits_folded_tree(source: TieredPageSource, base: std.page.PagePtr, o
 fn l64_fold_with_writer_pin(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr) -> Result[(), Error] waits {
     // The fixture's leaf frame occupies all writer room:
     // 16 + 24 + 7 + 3 * (2 + 1 + 1 + 2 + 6 + 2) = 89.
-    let demand = TieredPointDemand(target: TieredPage(base), key: key_word(2), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
+    let demand = TieredPointDemand(target: TieredPage(base), key: types.key_word(2), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
     let held = tiered_point_delivery(source.pager, take demand)?
     l79_fold_checks(source, base)?
     let empty = std.page.empty(0, 0, Collection)
@@ -313,11 +313,11 @@ fn l87_fold_fork_shape(source: TieredPageSource, base: std.page.PagePtr) -> Resu
     let mut manifest = page_manifest_empty(default_limits())
     manifest.next_stamp = stamp
     manifest.account_tiered = 430
-    let mut replay = journal_replay_manifest(capacity(main_state(take roots, 0, 0))?, manifest)?
-    let mut deleted: List[JournalOp] = list.with_capacity(1)
-    list.push(mut deleted, JournalOp(key: log_key(9, 2)?, value: None, prior: 7, trim: None))
-    journal_apply("j-1", mut replay, Commit(JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), keyed: list.new(), call: None, payload: 0)))?
-    journal_apply("j-1", mut replay, Fork(JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 60)))?
+    let mut replay = journal_replay_manifest(failure_result_from_rep(types.capacity(main_state(take roots, 0, 0)))?, manifest)?
+    let mut deleted: List[format.JournalOp] = list.with_capacity(1)
+    list.push(mut deleted, format.JournalOp(key: log_key(9, 2)?, value: None, prior: 7, trim: None))
+    journal_apply("j-1", mut replay, Commit(format.JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), keyed: list.new(), call: None, payload: 0)))?
+    journal_apply("j-1", mut replay, Fork(format.JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 60)))?
     journal_apply("j-1", mut replay, l68_replay_put(1, 2, 0, "stored")?)?
     let mut parent_tree = share_page_tree(replay.state.tips[0u64].roots.collections)
     let mut child_tree = share_page_tree(replay.state.tips[1u64].roots.collections)
@@ -413,7 +413,7 @@ fn l88_memory_load_restamps(source: TieredPageSource, root: std.page.PagePtr, bo
         fail("L88(g): the old Cold location must remain a probe root")
     }
     let mut rows: List[std.page.Entry] = list.new()
-    list.push(mut rows, std.page.Entry(key: key_word(0), cell: BlobValue(body)))
+    list.push(mut rows, std.page.Entry(key: types.key_word(0), cell: BlobValue(body)))
     let image = page_result(std.page.encode(rows, 0, 60, Collection))?
     let mut bodies: List[std.page.BlobSlot] = list.new()
     list.push(mut bodies, ColdBlob(body))
@@ -441,7 +441,7 @@ fn l88_tiered_emission_restamps(owner: StoreId) -> Result[(), Error] {
     let stored: Arc[Bytes] = arc.new(clone(body))
     let mut stamps = 60u64
     let mut memory_root = std.page.empty(0, 0, Collection)
-    page_result(std.page.insert_shared(mut memory_root, key_word(1), stored, 1024, 60, mut stamps))?
+    page_result(std.page.insert_shared(mut memory_root, types.key_word(1), stored, 1024, 60, mut stamps))?
     let old_page = std.page.stamp(std.page.image_of(memory_root))
     let Some(BlobEdge(original)) = std.page.owning_edge(std.page.image_of(memory_root), 0) else {
         fail("L88(g): the Memory leaf must own the large value")

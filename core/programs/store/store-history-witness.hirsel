@@ -18,7 +18,7 @@ fn history_witness(mut client: std.object.Client, capture: HistoryHead, required
             if seq < witness.head.floor {
                 return Ok(HistoryEvicted(take witness))
             }
-            return Error(disk_fault(file, 0, Absent))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Absent)))
         }
         let marker = history_checkpoint(mut client, witness.head, deadline)
         let mark = match take marker {
@@ -27,11 +27,11 @@ fn history_witness(mut client: std.object.Client, capture: HistoryHead, required
             Error(take failure) => return Error(take failure),
         }
         if history_ref_matches(witness.head.checkpoint, capture.checkpoint) {
-            return Error(disk_fault(file, 0, Absent))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Absent)))
         }
         for retained in mark.retained {
             if history_ref_matches(retained, capture.checkpoint) {
-                return Error(disk_fault(file, 0, Absent))
+                return Error(failure_from_rep(format.disk_fault(file, 0, Absent)))
             }
         }
         return Ok(HistoryEvicted(take witness))

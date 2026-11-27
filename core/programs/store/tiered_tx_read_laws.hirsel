@@ -341,9 +341,9 @@ fn test_l98_index_residency_pairs_read_the_model(d: Dir, c: Clock, r: Random, ta
 // L98(d) exercises each Memory index cursor at a real step and byte boundary.
 fn l98_memory_case(tx: Tx, input: (TxReadHandles, u64, Option[u64])) -> Result[bool, Error] {
     if let Some(grant_bytes) = input.2 {
-        return capacity(bound bytes grant_bytes {
+        return failure_result_from_rep(types.capacity(bound bytes grant_bytes {
             l98_memory_read(tx, input.0, input.1)
-        })?
+        }))?
     }
     l98_memory_read(tx, input.0, input.1)
 }

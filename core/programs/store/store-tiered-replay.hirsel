@@ -46,35 +46,35 @@ fn prior_row_charge(key: Bytes, prior: u32) -> u64 {
         return 0
     }
     let width: u64 = int.widen(prior - 1)
-    62 + round8(list.len(key)) + round8(width)
+    62 + format.round8(list.len(key)) + format.round8(width)
 }
 
 fn replay_charge(file: String, before: u64, removed: u64, added: u64) -> Result[u64, Error] {
     let Some(remaining) = int.checked_sub(before, removed) else {
-        return Error(disk_fault(file, 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     }
     let Some(total) = int.checked_add(remaining, added) else {
-        return Error(disk_fault(file, 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     }
     Ok(total)
 }
 
-fn replay_row_edit(file: String, mut overlay: Arc[ReplayOverlay], before: ReplayDescriptor, op: JournalOp) -> Result[(ReplayDescriptor, u64, u64), Error] {
+fn replay_row_edit(file: String, mut overlay: Arc[ReplayOverlay], before: ReplayDescriptor, op: format.JournalOp) -> Result[(ReplayDescriptor, u64, u64), Error] {
     let mut seq_bounds = before.seq_bounds
     if let Some(window) = before.seq_bounds {
         let Some(value) = view op.value else {
-            return Error(disk_fault(file, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
         }
         if op.prior != 0 || list.len(op.key) != 12 || list.len(value) < 2 || list.word_be(op.key, 4) != window.next {
-            return Error(disk_fault(file, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
         }
         let Some(following) = int.checked_add(window.next, 1) else {
-            return Error(disk_fault(file, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
         }
         seq_bounds = Some(LogBounds(first: window.first, next: following))
     }
     let (now, added, added_rows): (ReplayValue, u64, u64) = match op.value {
-        Some(value) => (ReplayPut(arc.new(copied(value)?)), entry(op.key, value), 1),
+        Some(value) => (ReplayPut(arc.new(failure_result_from_rep(types.copied(value))?)), entry(op.key, value), 1),
         None => (ReplayAbsent, 0, 0),
     }
     let removed = prior_row_charge(op.key, op.prior)
@@ -89,12 +89,12 @@ fn replay_row_edit(file: String, mut overlay: Arc[ReplayOverlay], before: Replay
     Ok((ReplayDescriptor(rows: rows, row_bytes: row_bytes, seq_bounds: seq_bounds), removed, added))
 }
 
-fn replay_trim_edit(file: String, mut overlay: Arc[ReplayOverlay], collection: u32, before: ReplayDescriptor, op: JournalOp, trim: JournalTrim) -> Result[(ReplayDescriptor, u64, u64), Error] {
+fn replay_trim_edit(file: String, mut overlay: Arc[ReplayOverlay], collection: u32, before: ReplayDescriptor, op: format.JournalOp, trim: format.JournalTrim) -> Result[(ReplayDescriptor, u64, u64), Error] {
     let Some(window) = before.seq_bounds else {
-        return Error(disk_fault(file, 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     }
     if list.len(op.key) != 4 {
-        return Error(disk_fault(file, 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     }
     let start = ReplayLogHead(first: window.first, next: window.next, cold_next: option.unwrap(overlay.cold_next), row_bytes: before.row_bytes)
     let revised = replay_overlay_trim(mut overlay, file, 0, collection, start, trim)?
@@ -102,7 +102,7 @@ fn replay_trim_edit(file: String, mut overlay: Arc[ReplayOverlay], collection: u
     Ok((ReplayDescriptor(rows: revised.next - revised.first, row_bytes: revised.row_bytes, seq_bounds: Some(seq_bounds)), trim.dropped, 0u64))
 }
 
-fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut account: ReplayTieredAccount, before: ReplayDescriptor, op: JournalOp) -> Result[(), Error] {
+fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut account: ReplayTieredAccount, before: ReplayDescriptor, op: format.JournalOp) -> Result[(), Error] {
     let id: u32 = list.word_be(op.key, 0)
     let (take ready_root, take next_branch_overlay, following_stamp, total) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], Arc[ReplayBranch], u64, u64), Error] {
         let previous = match tree.replay {

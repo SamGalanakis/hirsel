@@ -250,7 +250,7 @@ fn settle_fault_at(mut tx: Tx, attempted_at: u64) -> Result[Bytes, Bytes] {
         let no_values: List[u64] = list.new()
         let _ = no_values[0]
     }
-    Ok(key_word(19))
+    Ok(types.key_word(19))
 }
 
 // L33/AM6. Two intervening commits put the attempted base three versions
@@ -275,7 +275,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let dir = disk_test_directory(d)
     let options = journal_crash_options()
     let mut db = result.unwrap(open(tasks, dir, c, r, options))
-    let stream = law_stream_bytes(key_word(55), keyed_time(db))
+    let stream = law_stream_bytes(types.key_word(55), keyed_time(db))
     let rec = call_for(stream, 32)
     let request = request_digest(rec.key, rec.args)
     let admission = result.unwrap(admit_law_stream(mut db, stream, 0, request))
@@ -325,11 +325,11 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
             return false
         }
     }
-    let settled = conclude(mut db, take stopped, key_word(2), Resident)
+    let settled = conclude(mut db, take stopped, types.key_word(2), Resident)
     let Ok(Committed(receipt)) = take settled else {
         return false
     }
-    if receipt.reply != key_word(2) {
+    if receipt.reply != types.key_word(2) {
         return false
     }
     result.unwrap(durable(mut db, receipt.ticket))
@@ -345,7 +345,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     }
     let duplicate = result.unwrap(admit_law_stream(mut reopened, stream, 0, request))
     let good = match duplicate {
-        Duplicate(stored) => stored.reply == key_word(2),
+        Duplicate(stored) => stored.reply == types.key_word(2),
         _ => false,
     }
     result.unwrap(close(take reopened))

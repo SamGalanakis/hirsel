@@ -1,42 +1,13 @@
-type JournalInput {
-    file: HostFile,
-    size: u64,
-    base: u64,
-    chunk: Bytes,
-    copy_to: Option[HostFile]
+fn journal_input(take file: HostFile, flush: bool) -> Result[format.JournalInput, Error] waits {
+    failure_result_from_rep(format.open_journal_input(take file, flush, fn() -> Result[Bytes, types.Failure] {
+        failure_result_to_rep(disk_allocation(fn() -> Result[Bytes, Error] {
+            Ok(list.with_capacity(JOURNAL_CHUNK_BYTES))
+        }))
+    }))
 }
 
-fn journal_input(take file: HostFile, flush: bool) -> Result[JournalInput, Error] waits {
-    let mut opened = take file
-    if flush {
-        disk_io(host.sync(mut opened))?
-    }
-    let file_stat = disk_io(host.stat_file(mut opened))?
-    let chunk = disk_allocation(fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(JOURNAL_CHUNK_BYTES))
-    })?
-    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, chunk: take chunk, copy_to: None))
-}
-
-fn journal_chunk(mut input: JournalInput, path: String, offset: u64) -> Result[u64, Error] waits {
-    if offset >= input.base && offset - input.base < list.len(input.chunk) {
-        return Ok(offset - input.base)
-    }
-    list.clear(mut input.chunk)
-    if disk_io(host.read_at(mut input.file, offset, mut input.chunk))? == 0 {
-        return Error(disk_fault(path, offset, Truncated))
-    }
-    // The pack envelope consumes the entire file in order. Copy each
-    // refill once, using the same bytes that the checksum pass reads.
-    if let Some(mut output) = input.copy_to {
-        let width = order.min(list.len(input.chunk), input.size - offset)
-        match host.write(mut output, list.slice(input.chunk, 0, width)) {
-            Ok(()) => (),
-            Error(problem) => return Error(Io(problem.error)),
-        }
-    }
-    input.base = offset
-    Ok(0u64)
+fn journal_chunk(mut input: format.JournalInput, path: String, offset: u64) -> Result[u64, Error] waits {
+    failure_result_from_rep(format.refill_journal_chunk(mut input, path, offset))
 }
 
 type JournalRecovered {
@@ -56,13 +27,8 @@ fn journal_wait_shared(mut file: HostFile, c: Clock) -> Result[(), Error] waits 
 // A live reader may stat before the writer extends the file and then read a
 // newer END or successor. The boundary names bytes the writer synced, so the
 // handle's current size covers it unless the file is damaged.
-fn journal_refresh_size(mut input: JournalInput, boundary: Option[u64]) -> Result[(), Error] waits {
-    if let Some(d) = boundary {
-        if d > input.size {
-            input.size = disk_io(host.stat_file(mut input.file))?.size
-        }
-    }
-    Ok(())
+fn journal_refresh_size(mut input: format.JournalInput, boundary: Option[u64]) -> Result[(), Error] waits {
+    failure_result_from_rep(format.refresh_journal_size(mut input, boundary))
 }
 
 fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: JournalReplay) -> Result[JournalRecovered, Error] waits {
@@ -73,7 +39,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
         let path = journal_path(seq, "")?
         let mut file = match host.open(d, path, Read) {
             Ok(take handle) => take handle,
-            Error(NotFound) => return Error(disk_fault(path, 0, Header)),
+            Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, 0, Header))),
             Error(e) => return Error(Io(e))
         }
         journal_wait_shared(mut file, c)?
@@ -87,10 +53,10 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
             None => true,
             Some(_) => false
         }
-        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })
-        let JournalInput(file: take consumed_file, ..) = take source
+        let consumed_file = format.take_journal_file(take source)
         let mut consumed = take consumed_file
         disk_io(host.unlock(mut consumed))?
         disk_io(host.close(take consumed))?
@@ -120,23 +86,10 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
     }
 }
 
-fn journal_decode_fork(file: String, raw: Bytes) -> Result[JournalFork, Error] {
-    let mut at = 0u64
-    let id: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-    let parent: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-    let forked_at = disk_number(file, raw, mut at, 8)?
-    let name = disk_name(file, raw, mut at)?
-    let watermark = disk_number(file, raw, mut at, 8)?
-    if at != list.len(raw) || watermark == 0 {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    Ok(JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark))
-}
-
-fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
-    let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
+fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: format.JournalFork) -> Result[(), Error] {
+    let format.JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
     if id < replay.state.next_branch || id == 4294967295 || map.contains(replay.names, name) {
-        return Error(disk_fault(file, 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     }
     let (take roots, at, take key) = disk_allocation(scoped fn() -> Result[(Roots, u64, String), Error] {
         for source in replay.state.tips {
@@ -144,7 +97,7 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
                 continue
             }
             if source.head != forked_at {
-                return Error(disk_fault(file, 0, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
             }
             let mut roots = share_roots(source.roots)
             if let Some(layer) = view source.roots.collections.replay {
@@ -152,15 +105,15 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
             }
             return Ok((take roots, source.at, string.from(name)))
         }
-        Error(disk_fault(file, 0, Malformed))
+        Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     })?
     let charge = branch_root_bytes(name, roots)
     if charge > replay.limits.meta - replay.record_bytes {
-        return Error(disk_fault(file, 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     }
-    capacity(list.try_reserve(mut replay.state.tips, 1))?
-    capacity(list.try_reserve(mut replay.forked, 1))?
-    capacity(map.try_reserve(mut replay.names, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut replay.state.tips, 1)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut replay.forked, 1)))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut replay.names, 1)))?
     map.insert(mut replay.names, take key, id)
     list.push(mut replay.state.tips, Tip(id: id, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: forked_at, at: at))
     replay.record_bytes += charge
@@ -218,7 +171,7 @@ fn capture_walk(d: Dir, id: StoreId, first: u64, restarted: bool) -> Result[Opti
         let mut file = match host.open(d, path, Read) {
             Ok(take opened) => take opened,
             Error(NotFound) if seq != first => break,
-            Error(NotFound) => return Error(disk_fault(path, 0, Header)),
+            Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, 0, Header))),
             Error(problem) => return Error(Io(problem)),
         }
         let image = capture_end_image(d, seq)?
@@ -315,10 +268,10 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
         let path = journal_path(seq, "")?
         let mut source = journal_input(take opened, torn)?
         journal_refresh_size(mut source, boundary)?
-        let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })?
-        let JournalInput(file: take consumed, ..) = take source
+        let consumed = format.take_journal_file(take source)
         let mut file = take consumed
         if torn {
             disk_io(host.unlock(mut file))?
@@ -328,7 +281,7 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
     Ok(take replay)
 }
 
-fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: JournalCommit) -> Result[(), Error] {
+fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: format.JournalCommit) -> Result[(), Error] {
     // Section 3.4 step 6: the branch must exist, and the version is its head + 1.
     let total_count = list.len(replay.state.tips)
     let mut i = total_count
@@ -338,9 +291,9 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
         }
     }
     if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
-        return Error(disk_fault(file, 0, Gap(commit.version)))
+        return Error(failure_from_rep(format.disk_fault(file, 0, Gap(commit.version))))
     }
-    replay_within_limits(file, replay.limits, commit)?
+    failure_result_from_rep(format.replay_within_limits(file, limits_to_rep(replay.limits), commit))?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered, replay.immutable)?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered, replay.immutable)?
     if list.len(commit.keyed) != 0 {
@@ -353,7 +306,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
         replay.next_node = draw - 1
         replay.record_bytes = replay.record_bytes - before + keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
         if replay.record_bytes > replay.limits.meta {
-            return Error(disk_fault(file, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
         }
     }
     replay.state.tips[i].head = commit.version
@@ -361,7 +314,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
     Ok(())
 }
 
-fn journal_apply(file: String, mut replay: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+fn journal_apply(file: String, mut replay: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
     match take event {
         Commit(take commit) => journal_apply_commit(file, mut replay, commit),
         Fork(take encoded) => journal_apply_fork(file, mut replay, take encoded),
@@ -370,7 +323,7 @@ fn journal_apply(file: String, mut replay: JournalReplay, take event: JournalEve
 
 // Replay settles the Memory union from the final roots. A put can make
 // the head and a pin share a row version again, lowering that union.
-fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount, immutable: bool) -> Result[(), Error] {
+fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[format.JournalOp], mut account: ReplayTieredAccount, immutable: bool) -> Result[(), Error] {
     if list.len(ops) == 0 {
         return Ok(())
     }
@@ -384,11 +337,11 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
         let op = view ops[slot]
         if domain == CollectionMap {
             if list.len(op.key) < 4 {
-                return Error(disk_fault(file, 0, Malformed))
+                return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
             }
             let (kind, tiered_descriptor, row_count) = {
                 let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
-                    return Error(disk_fault(file, 0, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                 }
                 journal_collection_descriptor(descriptor)
             }
@@ -399,23 +352,23 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             if let Some(trim) = op.trim {
                 match trim_log_page(mut tree, op.key, trim.floor, Some(trim.dropped), 0, mut next_stamp) {
                     Ok(_) => (),
-                    Error(Corrupt(_)) => return Error(disk_fault(file, 0, Malformed)),
+                    Error(Corrupt(_)) => return Error(failure_from_rep(format.disk_fault(file, 0, Malformed))),
                     Error(take problem) => return Error(take problem),
                 }
                 continue
             }
             if kind == LogCollection {
                 let Some(value) = view op.value else {
-                    return Error(disk_fault(file, 0, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                 }
                 if list.len(op.key) != 12 || op.prior != 0 || list.len(value) < 2 {
-                    return Error(disk_fault(file, 0, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                 }
                 let seq: u64 = list.word_be(op.key, 4)
                 let id: u32 = list.word_be(op.key, 0)
                 let limits = committed_log_bounds(tree, id)?
                 if seq != limits.next || seq == 18446744073709551615u64 {
-                    return Error(disk_fault(file, 0, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                 }
                 apply_log_append(mut tree, op.key, value, None, 0, mut next_stamp)?
                 continue
@@ -431,12 +384,12 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                     continue
                 }
             }
-            if op.prior != stored_prior(get_page_row(tree, op.key)) {
-                return Error(disk_fault(file, 0, Malformed))
+            if op.prior != format.stored_prior(get_page_row(tree, op.key)) {
+                return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
             }
             if kind == CellCollection {
                 if list.len(op.key) != 4 {
-                    return Error(disk_fault(file, 0, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                 }
                 let raw = match op.value {
                     Some(stored) => Some(view stored),
@@ -444,14 +397,14 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 }
                 if let Some(stored) = raw {
                     if list.len(stored) < 2 {
-                        return Error(disk_fault(file, 0, Malformed))
+                        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                     }
                 }
                 apply_cell(mut tree, op.key, raw, None, 0, mut next_stamp)?
                 continue
             }
         } else if let Some(_) = op.trim {
-            return Error(disk_fault(file, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
         }
         match op.value {
             Some(value) => put_page_row(mut tree, op.key, value, 0, mut next_stamp)?,
@@ -467,7 +420,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
     Ok(())
 }
 
-fn journal_sorted_run(ops: List[JournalOp], start: u64) -> u64 {
+fn journal_sorted_run(ops: List[format.JournalOp], start: u64) -> u64 {
     let collection = list.slice(ops[start].key, 0, 4)
     let mut end = start + 1
     while end < list.len(ops) {
@@ -483,16 +436,16 @@ fn journal_sorted_run(ops: List[JournalOp], start: u64) -> u64 {
     end
 }
 
-fn journal_collection_batch(file: String, mut tree: PageTree, ops: List[JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
+fn journal_collection_batch(file: String, mut tree: PageTree, ops: List[format.JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
     let collection = list.slice(ops[start].key, 0, 4)
     match apply_collection_batch(mut tree, collection, ops, visit_journal_edit, start, end, 0, mut draw) {
         Ok(()) => Ok(()),
-        Error(MalformedPage) => Error(disk_fault(file, 0, Malformed)),
+        Error(MalformedPage) => Error(failure_from_rep(format.disk_fault(file, 0, Malformed))),
         Error(problem) => Error(page_error(problem)),
     }
 }
 
-fn visit_journal_edit(ops: List[JournalOp], slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+fn visit_journal_edit(ops: List[format.JournalOp], slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
     let op = view ops[slot]
     let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
         Some(raw) => Some((raw, None)),
@@ -501,12 +454,12 @@ fn visit_journal_edit(ops: List[JournalOp], slot: u64, visit: scoped fn(std.page
     visit(std.page.SourceEdit(key: list.slice(op.key, 4, list.len(op.key)), value: value, prior: Some(op.prior)))
 }
 
-fn journal_collection_empty(file: String, mut tree: PageTree, ops: List[JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
+fn journal_collection_empty(file: String, mut tree: PageTree, ops: List[format.JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
     let mut has_put = false
     for slot in start .. end {
         let op = view ops[slot]
         if op.prior != 0 {
-            return Error(disk_fault(file, 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
         }
         if let Some(_) = view op.value {
             has_put = true

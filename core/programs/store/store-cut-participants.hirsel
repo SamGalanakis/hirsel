@@ -133,7 +133,7 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
 // AP16 item 9's MANIFEST. Each branch and pin names the root the cut
 // published for it: `published` holds the participants' roots in
 // `cut_participants` order, sealed or folded by the Tiered stage.
-fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List[Roots], generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
+fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List[Roots], generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let tables = match delta {
         ReplaceMain(main, _) => main.tables,
         _ => db.next_table
@@ -141,7 +141,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
     let zero = std.page.unlocated(0)
     let account_tiered = cut_tiered_account(published)?
     let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, limits: db.limits, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: published_tree_pointer(layout.locations, layout.lists.roots.lineage), deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), branches: list.new(), pins: list.new())
-    let context = DiskContext(store: db.store, role: 1, seq: generation)
+    let context = format.DiskContext(store: store_key_to_rep(db.store), role: 1, seq: generation)
     begin_page_manifest_file(mut raw, context)?
     append_page_manifest_fields(mut raw, manifest)?
     let heads = list.len(db.heads)
@@ -151,7 +151,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
         ReplaceMain(_, Some(_)) => heads - 1,
         _ => heads,
     }
-    capacity(le(mut raw, branch_count, 4))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, branch_count, 4)))?
     let mut slot = 0u64
     visit_cut_heads(db, delta, mut raw, scoped fn(mut buffer: Bytes, head: Head, _roots: Roots, head_version: u64, at: u64) -> Result[(), Error] {
         slot += 1
@@ -166,7 +166,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
             pins
         }
     }
-    capacity(le(mut raw, pin_count, 4))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, pin_count, 4)))?
     visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
         slot += 1
         append_page_manifest_pin(mut buffer, held.owner, held.name, held.branch, held.version, published_page_roots(layout.locations, published[slot - 1]), held.watermark)
@@ -174,7 +174,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
     for order_slot in 0u64 .. list.len(published) {
         let keyed = view published[order_slot].keyed
         if list.len(keyed) != 0 {
-            capacity(le(mut raw, order_slot, 4))?
+            failure_result_from_rep(types.capacity(format.le(mut raw, order_slot, 4)))?
             for tree in keyed {
                 put_page_ptr(mut raw, published_page_pointer(layout.locations, tree))
             }
@@ -184,7 +184,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
     Ok(())
 }
 
-fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
+fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
     let mut timing: Option[CutTiming] = None
     disk_cut_timed(mut db, take delta, write_seal, mut timing)
 }

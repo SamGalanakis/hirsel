@@ -1,21 +1,19 @@
-type TieredDataDelta = TieredPrior(u32) | TieredDropped(u64)
-
 type TieredWritePlan {
     tree: PageTree,
-    deltas: List[Option[TieredDataDelta]],
+    deltas: List[Option[format.TieredDataDelta]],
     next_stamp: u64,
     freed: TieredFreed
 }
 
-fn tiered_staged_value(op: DataOp) -> Result[ReplayValue, Error] {
+fn tiered_staged_value(op: format.DataOp) -> Result[ReplayValue, Error] {
     match op.value {
         Some(BlobBody(raw)) => Ok(ReplayPut(arc.share(raw))),
-        Some(PageValue(raw)) => Ok(ReplayPut(arc.new(copied(raw)?))),
+        Some(PageValue(raw)) => Ok(ReplayPut(arc.new(failure_result_from_rep(types.copied(raw))?))),
         None => Ok(ReplayAbsent),
     }
 }
 
-fn tiered_stage_collection_edit(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], staged: PageTree, logical: DataOp, prior: u32, private_from: u64, mut next_stamp: u64) -> Result[(Arc[std.page.Page], Bytes, TieredDataDelta), Error] {
+fn tiered_stage_collection_edit(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], staged: PageTree, logical: format.DataOp, prior: u32, private_from: u64, mut next_stamp: u64) -> Result[(Arc[std.page.Page], Bytes, format.TieredDataDelta), Error] {
     let id = list.slice(logical.key, 0, 4)
     let Some((root, descriptor)) = std.page.collection_slot(staged.root, id) else {
         return Error(Stale(list.word_be(id, 0)))
@@ -44,7 +42,7 @@ fn tiered_stage_collection_edit(attempt: core.Cell[TieredTouchSet], visible: Map
     Ok((take ready, take revised, TieredPrior(prior)))
 }
 
-fn tiered_wait_for_fold(attempt: core.Cell[TieredTouchSet], base: PageTree, operations: DataRows, order: DataOrder) -> Result[(), Error] {
+fn tiered_wait_for_fold(attempt: core.Cell[TieredTouchSet], base: PageTree, operations: DataRows, order: format.DataOrder) -> Result[(), Error] {
     if tiered_stopped(attempt) {
         return Error(Missed)
     }
@@ -64,11 +62,11 @@ fn tiered_wait_for_fold(attempt: core.Cell[TieredTouchSet], base: PageTree, oper
 
 // The original root supplies every previous value. Sequential edits take
 // siblings from the private candidate's shape, including after an earlier merge.
-fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], base: PageTree, operations: DataRows, order: DataOrder, first_stamp: u64) -> Result[TieredWritePlan, Error] {
+fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], base: PageTree, operations: DataRows, order: format.DataOrder, first_stamp: u64) -> Result[TieredWritePlan, Error] {
     tiered_wait_for_fold(attempt, base, operations, order)?
     let mut staged = share_page_tree(base)
-    let mut deltas: List[Option[TieredDataDelta]] = list.new()
-    capacity(list.try_reserve(mut deltas, data_row_count(operations)))?
+    let mut deltas: List[Option[format.TieredDataDelta]] = list.new()
+    failure_result_from_rep(types.capacity(list.try_reserve(mut deltas, data_row_count(operations))))?
     let inline = staged.inline
     let mut draw = first_stamp
     let mut touched: List[PlannedCollection] = list.new()
@@ -83,8 +81,8 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
             continue
         }
         let sought = match op.trim {
-            Some(trim) => key_word(trim.floor),
-            None => copied(list.slice(op.key, 4, list.len(op.key)))?,
+            Some(trim) => types.key_word(trim.floor),
+            None => failure_result_from_rep(types.copied(list.slice(op.key, 4, list.len(op.key))))?,
         }
         tiered_seek(attempt, SeekKey(take sought))
         let prior = match op.trim {
@@ -107,7 +105,7 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
 
 // A loaded Cold page the edit left unchanged goes back to its location, as
 // the fold's restore does, so the cut never re-emits a stamp it already has.
-fn restore_planned_root(mut root: Arc[std.page.Page], id: Bytes, first_stamp: u64, visible: Map[TieredCacheKey, Arc[TieredFrame]], mut draw: u64) -> Result[(), Error] {
+fn restore_planned_root(mut root: Arc[std.page.Page], id: Bytes, first_stamp: u64, visible: Map[TieredCacheKey, Arc[format.TieredFrame]], mut draw: u64) -> Result[(), Error] {
     let held: Option[Arc[std.page.Page]] = match std.page.collection_slot(root, id) {
         Some((HotPage(page), _)) => Some(arc.share(page)),
         _ => None,
@@ -133,8 +131,8 @@ fn note_planned_collection(mut touched: List[PlannedCollection], id: Bytes, trim
         }
         return Ok(())
     }
-    capacity(list.try_reserve(mut touched, 1))?
-    list.push(mut touched, PlannedCollection(id: copied(id)?, trimmed: trimmed))
+    failure_result_from_rep(types.capacity(list.try_reserve(mut touched, 1)))?
+    list.push(mut touched, PlannedCollection(id: failure_result_from_rep(types.copied(id))?, trimmed: trimmed))
     Ok(())
 }
 
@@ -142,7 +140,7 @@ fn note_planned_collection(mut touched: List[PlannedCollection], id: Bytes, trim
 // frames each touched collection's deciding root reached and its planned
 // root no longer does. A floor's detached subtrees and blobs are dropped
 // rows; loaded pages and the edges a write replaced are replaced rows.
-fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollection], first_stamp: u64, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[TieredFreed, Error] {
+fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollection], first_stamp: u64, visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[TieredFreed, Error] {
     let mut freed = no_tiered_freed()
     for collection in touched {
         let Some((before, _)) = std.page.collection_slot(base.root, collection.id) else {
@@ -155,11 +153,11 @@ fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollecti
         for take effect in take effects {
             match take effect {
                 FoldReplaced(frame) => {
-                    capacity(list.try_reserve(mut freed.replaced, 1))?
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut freed.replaced, 1)))?
                     list.push(mut freed.replaced, frame)
                 },
                 FoldDropped(take target) => {
-                    capacity(list.try_reserve(mut freed.dropped, 1))?
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut freed.dropped, 1)))?
                     list.push(mut freed.dropped, take target)
                 },
             }
@@ -168,7 +166,7 @@ fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollecti
     Ok(take freed)
 }
 
-fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ops: DataRows, order: DataOrder, first: u64) -> Result[Option[TieredWritePlan], Error] {
+fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], ops: DataRows, order: format.DataOrder, first: u64) -> Result[Option[TieredWritePlan], Error] {
     for slot in 0u64 .. data_row_count(ops) {
         if tiered_data_key(base, data_row(ops, slot).key) {
             return Ok(Some(prepare_tiered_writes(attempt, visible, base, ops, order, first)?))
@@ -192,7 +190,7 @@ fn index_build_has_overlay(tree: PageTree, id: u32) -> bool {
 // and replacements belong to the cut candidate until MANIFEST publication.
 fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, Bytes)]) -> Result[TieredIndexChunk, Error] waits {
     let mut pins = empty_tiered_pins(call_pin_root(db, 0), db.writer_pin_bytes)
-    let mut pending: Option[(TieredTarget, Error)] = None
+    let mut pending: Option[(format.TieredTarget, Error)] = None
     loop {
         let attempt = tiered_attempt(db.writer_pin_bytes, tiered_window(pins))
         let prepared = disk_allocation(scoped fn() -> Result[Result[TieredIndexChunk, Error], Error] {
@@ -216,7 +214,7 @@ fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, By
     }
 }
 
-fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], tree: PageTree, record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], first: u64) -> Result[TieredIndexChunk, Error] {
+fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: PageTree, record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], first: u64) -> Result[TieredIndexChunk, Error] {
     let shape = catalog_index(record)?.shape
     let Some((edge, _)) = std.page.collection_slot(tree.root, prefix(record.id)?) else {
         return Error(Stale(record.id))
@@ -242,12 +240,12 @@ fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[Tie
                     if let Some(value) = view prior {
                         let owner = list.slice(value, 4, unique_owner_end(value)?)
                         if owner != primary {
-                            return Ok(ChunkDuplicate(copied(owner)?, copied(primary)?))
+                            return Ok(ChunkDuplicate(failure_result_from_rep(types.copied(owner))?, failure_result_from_rep(types.copied(primary))?))
                         }
                     }
-                    copied(payload)?
+                    failure_result_from_rep(types.copied(payload))?
                 },
-                Entries(Many) => copied(payload)?,
+                Entries(Many) => failure_result_from_rep(types.copied(payload))?,
                 Sums => {
                     let (members, sum) = match prior {
                         Some(body) => group_totals(body)?,
@@ -263,7 +261,7 @@ fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[Tie
             let _ = save_data_op(mut operations, no_layers, false, mut row_count, take key, Some(stage_value(take value, tree.inline)), None)
         }
     }
-    let order = capacity(data_order(operations.rows))?
+    let order = failure_result_from_rep(types.capacity(data_order(operations.rows)))?
     let write_plan = prepare_tiered_writes(attempt, visible, tree, operations.rows, order, first)?
     let mut step_rows: List[StepOp] = list.with_capacity(data_row_count(operations.rows))
     for slot in 0u64 .. data_row_count(operations.rows) {
@@ -273,26 +271,26 @@ fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[Tie
             _ => 0u32,
         }
         let val: Option[Bytes] = match op.value {
-            Some(BlobBody(raw)) => Some(copied(raw)?),
-            Some(PageValue(raw)) => Some(copied(raw)?),
+            Some(BlobBody(raw)) => Some(failure_result_from_rep(types.copied(raw))?),
+            Some(PageValue(raw)) => Some(failure_result_from_rep(types.copied(raw))?),
             None => None,
         }
-        list.push(mut step_rows, StepOp(key: copied(op.key)?, value: take val, prior: prior))
+        list.push(mut step_rows, StepOp(key: failure_result_from_rep(types.copied(op.key))?, value: take val, prior: prior))
     }
     Ok(ChunkReady(take write_plan, take step_rows))
 }
 
-fn tiered_chunk_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, staged: DataOps, key: Bytes) -> Result[Option[Arc[Bytes]], Error] {
+fn tiered_chunk_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], edge: std.page.Slot, staged: DataOps, key: Bytes) -> Result[Option[Arc[Bytes]], Error] {
     if let Some(slot) = op_slot(staged, key) {
         let raw = data_row(staged.rows, slot).value
         return Ok(match raw {
             Some(BlobBody(body)) => Some(arc.share(body)),
-            Some(PageValue(body)) => Some(arc.new(copied(body)?)),
+            Some(PageValue(body)) => Some(arc.new(failure_result_from_rep(types.copied(body))?)),
             None => None,
         })
     }
     let suffix = list.slice(key, 4, list.len(key))
-    tiered_seek(attempt, SeekKey(copied(suffix)?))
+    tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
     tiered_reading(attempt, ValuesAt)
     let selected = tiered_point_path(attempt, visible, edge, None, suffix)?
     tiered_seek(attempt, SeekOperation)

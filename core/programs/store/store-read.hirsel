@@ -19,7 +19,7 @@ pub opaque resource type Reader: send {
 } drop(owned_reader) {}
 
 fn hot_read_access(id: StoreId, opened: u64, captured: Snapshot) -> Result[(), Error] {
-    if !same(id, captured.store) || opened != captured.open {
+    if !types.same(id.hi, id.lo, captured.store.hi, captured.store.lo) || opened != captured.open {
         return Error(Foreign)
     }
     Ok(())
@@ -81,7 +81,7 @@ pub fn open_span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result
     read_access(r, s)?
     disk_allocation(scoped fn() -> Result[SpanRows, Error] {
         let captured: Snapshot = clone(s)
-        Ok(SpanRows(capture: take captured, low: copied(lo)?, high: copied(hi)?, cursor: None, last: None, done: hi <= lo))
+        Ok(SpanRows(capture: take captured, low: failure_result_from_rep(types.copied(lo))?, high: failure_result_from_rep(types.copied(hi))?, cursor: None, last: None, done: hi <= lo))
     })
 }
 
@@ -124,7 +124,7 @@ fn memory_span_step(mut cursor: Option[PageRange], tree: PageTree, low: Bytes, h
         let Some((take key, take value)) = take found else {
             return Ok(None)
         }
-        let resume = copied(key)?
+        let resume = failure_result_from_rep(types.copied(key))?
         cell.set(exchange, Some(take walk))
         Ok(Some((take key, take value, take resume)))
     })
@@ -146,7 +146,7 @@ pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List
     if let Some(inventory) = view s.roots.collections.paging {
         return snapshot_tiered_span(r, s, inventory, lo, hi)
     }
-    let mut cursor = byte_cursor(s.roots.collections, Included(copied(lo)?), hi)?
+    let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(types.copied(lo))?), hi)?
     while let Some((take key, take value)) = next_bytes(mut cursor)? {
         list.push(mut out, Change(tree_key: take key, value: Some(take value)))
     }
@@ -194,7 +194,7 @@ fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[
 
 pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[V], Error] waits {
     read_access(r, s)?
-    if !same(s.store, t.store) {
+    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
@@ -210,7 +210,7 @@ pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[
 
 pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] waits {
     read_access(r, s)?
-    if !same(s.store, t.store) {
+    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
@@ -284,7 +284,7 @@ fn finish_row[K, V](r: RowDecoder[K, V], take key: K, row_key: Bytes, raw: Bytes
 
 fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
-    if !same(s.store, t.store) {
+    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
@@ -332,7 +332,7 @@ pub fn scan_reverse[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], 
 
 pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
-    if !same(s.store, ix.store) {
+    if !types.same(s.store.hi, s.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
     index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
@@ -349,20 +349,20 @@ fn resume_data(data: PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes
         }
     }
     let start = match final_item {
-        Some(previous) => Excluded(copied(previous)?),
-        None => Included(copied(low)?),
+        Some(previous) => Excluded(failure_result_from_rep(types.copied(previous))?),
+        None => Included(failure_result_from_rep(types.copied(low))?),
     }
     byte_cursor(data, take start, high)
 }
 
 fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: PageTree, inventory: TieredReadInventory, edge: std.page.Slot, descriptor: Bytes) -> Result[Option[(Bytes, (K, V))], Error] waits {
-    let mut start = copied(rows.low)?
-    let mut stop = copied(rows.high)?
+    let mut start = failure_result_from_rep(types.copied(rows.low))?
+    let mut stop = failure_result_from_rep(types.copied(rows.high))?
     if let Some(previous) = view rows.last {
         if rows.reverse {
-            stop = copied(previous)?
+            stop = failure_result_from_rep(types.copied(previous))?
         } else {
-            start = copied(previous)?
+            start = failure_result_from_rep(types.copied(previous))?
             list.push(mut start, 0u8)
         }
     }
@@ -472,7 +472,7 @@ pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -
 }
 
 fn check_table_read[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
-    if !same(tx.store, t.store) {
+    if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.catalog_page, t.id)
@@ -532,7 +532,7 @@ pub opaque scoped type TxRows[K, V] {
 // Before decoding an attempted row, record it and the gap traversed to find it.
 // Exhaustion records the remainder once. An unused cursor observes no keys.
 pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Error] {
-    if !same(tx.store, r.owner.store) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
+    if !types.same(tx.store.hi, tx.store.lo, r.owner.store.hi, r.owner.store.lo) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
         return Error(Foreign)
     }
     if let Some(mut cursor) = r.cursor {
@@ -587,12 +587,12 @@ fn next_tx_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDec
 
 fn note_tx_row(reads: View[core.Log[Read]], mut low: Bytes, mut high: Bytes, reverse: bool, key: Bytes) -> Result[(), Error] {
     if reverse {
-        let new_high = copied(key)?
+        let new_high = failure_result_from_rep(types.copied(key))?
         let end = replace(mut high, take new_high)
-        log.append(reads, Span(copied(key)?, take end))
+        log.append(reads, Span(failure_result_from_rep(types.copied(key))?, take end))
     } else {
         let mut end = scan_page_after(key)?
-        let start = replace(mut low, copied(end)?)
+        let start = replace(mut low, failure_result_from_rep(types.copied(end))?)
         log.append(reads, Span(take start, take end))
     }
     Ok(())
@@ -626,7 +626,7 @@ pub fn primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> std.codec.Key[K] {
 }
 
 fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Error] {
-    if !same(tx.store, ix.store) {
+    if !types.same(tx.store.hi, tx.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
     index_readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)
@@ -672,9 +672,9 @@ fn open_index_cursor(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result
     let HotPage(root) = edge else {
         fail("store: a Memory index has a Cold root")
     }
-    let start = Some(copied(list.slice(low, 4, list.len(low)))?)
+    let start = Some(failure_result_from_rep(types.copied(list.slice(low, 4, list.len(low))))?)
     let stop = if list.len(high) >= 4 && list.slice(high, 0, 4) == leading {
-        Some(copied(list.slice(high, 4, list.len(high)))?)
+        Some(failure_result_from_rep(types.copied(list.slice(high, 4, list.len(high))))?)
     } else {
         None
     }
@@ -689,7 +689,7 @@ type EntryCursor: send = Unopened(PageTree) | Open(CollectionCursor) | OpenTiere
 
 scoped type EntryRead {
     attempt: View[Option[core.Cell[TieredTouchSet]]],
-    pins: View[Map[TieredCacheKey, Arc[TieredFrame]]],
+    pins: View[Map[TieredCacheKey, Arc[format.TieredFrame]]],
     below: View[List[Arc[Staged]]],
     ops: View[DataOps]
 }
@@ -819,10 +819,10 @@ fn lends_i8_rows[P](payload: Option[Arc[Readers[P]]]) -> bool {
 // returns the same value or error the copying scan returns.
 fn lends_codes(registered: Readers[List[i8]], payload: Bytes) -> bool {
     let n = list.len(payload)
-    if n < 6 || read_le(payload, 0, 2) != int.widen(registered.current) {
+    if n < 6 || format.read_le(payload, 0, 2) != int.widen(registered.current) {
         return false
     }
-    read_le(payload, 2, 4) == n - 6
+    format.read_le(payload, 2, 4) == n - 6
 }
 
 /// The next entry of an index whose payload is `List[i8]`, passed to `visit` with its
@@ -851,13 +851,13 @@ fn note_index_step(reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, las
     }
     let end = match last_key {
         Some(key) => {
-            let mut after = copied(key)?
+            let mut after = failure_result_from_rep(types.copied(key))?
             list.push(mut after, 0u8)
             take after
         },
-        None => copied(high)?,
+        None => failure_result_from_rep(types.copied(high))?,
     }
-    let start = replace(mut low, copied(end)?)
+    let start = replace(mut low, failure_result_from_rep(types.copied(end))?)
     log.append(reads, Span(take start, take end))
     Ok(())
 }
@@ -877,10 +877,10 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
                 fail("store: a Tiered index read without an attempt")
             }
             if let Some((key, raw)) = next_tiered_index_row(r.rows.data, context.attempt, context.pins, context.staged, index_id, r.low, r.high)? {
-                let mut boundary = copied(r.low)?
+                let mut boundary = failure_result_from_rep(types.copied(r.low))?
                 note_index_step(r.reads, mut boundary, r.high, Some(view key))?
                 let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
-                    log.append(r.reads, Point(copied(observed)?))
+                    log.append(r.reads, Point(failure_result_from_rep(types.copied(observed))?))
                     Ok(())
                 }
                 let row = tx_tiered_index_row(context, r.rows.decoder, r.rows.data, key, raw, seen)
@@ -908,7 +908,7 @@ fn next_index_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: Row
         let mut boundary: Bytes = clone(low)
         note_index_step(reads, mut boundary, high, Some(view key))?
         let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
-            log.append(reads, Point(copied(observed)?))
+            log.append(reads, Point(failure_result_from_rep(types.copied(observed))?))
             Ok(())
         }
         let row = match tiered {

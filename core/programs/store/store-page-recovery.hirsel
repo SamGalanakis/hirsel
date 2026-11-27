@@ -15,14 +15,14 @@ fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page])
                     body = option.unwrap(replace(mut moved, None))
                 })
                 let _ = option.unwrap(attached)
-                capacity(map.try_reserve(mut bodies, 1))?
+                failure_result_from_rep(types.capacity(map.try_reserve(mut bodies, 1)))?
                 map.insert(mut bodies, stamp, take counted)
             },
             ReadPage(take image, take children, take refs) => {
                 let mut kids: List[std.page.Slot] = list.new()
                 let mut blobs: List[std.page.BlobSlot] = list.new()
-                capacity(list.try_reserve(mut kids, list.len(children)))?
-                capacity(list.try_reserve(mut blobs, list.len(refs)))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut kids, list.len(children))))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut blobs, list.len(refs))))?
                 for slot in 0u64 .. list.len(children) {
                     let child = children[slot]
                     let attached: std.page.Slot = match std.page.tiered_root_at(image, slot) {
@@ -43,8 +43,8 @@ fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page])
                     }
                     list.push(mut blobs, HotBlob(arc.share(value)))
                 }
-                let page = page_result(capacity(std.page.attach_fallible(take image, take kids, take blobs))?)?
-                capacity(map.try_reserve(mut pages, 1))?
+                let page = page_result(failure_result_from_rep(types.capacity(std.page.attach_fallible(take image, take kids, take blobs)))?)?
+                failure_result_from_rep(types.capacity(map.try_reserve(mut pages, 1)))?
                 map.insert(mut pages, stamp, take page)
             },
         }

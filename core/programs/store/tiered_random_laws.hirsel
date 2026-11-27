@@ -514,13 +514,13 @@ fn random_span(read_handle: Reader, s: Snapshot, t: Table[u64, Bytes], model: Ma
 // seal more than once; the crash lands after the last attempt's packs.
 fn random_refused_cut(mut db: Db) -> Result[Bytes, Error] waits {
     let sealed: core.Log[Bytes] = log.new()
-    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
         let mut whole: Bytes = clone(raw)
         seal_page_manifest_file(mut whole, context, fence)?
         log.append(sealed, take whole)
-        capacity(bound bytes 0 {
+        failure_result_from_rep(types.capacity(bound bytes 0 {
             seal_page_manifest_file(mut raw, context, fence)
-        })?
+        }))?
     }) {
         Error(Full(Allocation(_))) => (),
         _ => fail("L69 random: the refused seal fails the cut before its rename"),

@@ -80,7 +80,7 @@ fn law_scan_location_pack(mut graph: LawLocationGraph, seq: u64, class: u8, raw:
 }
 
 fn law_location_key(raw: Bytes, row: u64, cell: u64) -> u64 {
-    let prefix_width = read_le(raw, 4, 2)
+    let prefix_width = format.read_le(raw, 4, 2)
     let suffix_width = cell - row - 2
     if prefix_width + suffix_width != 8 {
         fail("location law: pack-list key")
@@ -96,7 +96,7 @@ fn law_read_location_list_row(mut graph: LawLocationGraph, tree: LawLocationTree
     if seq == 0 || seq >= graph.next_pack || page[cell] != 0 {
         fail("location law: pack-list row")
     }
-    let width = read_le(page, cell + 1, 2)
+    let width = format.read_le(page, cell + 1, 2)
     let value = cell + 3
     if width != 29 || page[value] > 1 || map.contains(graph.listed, seq) {
         fail("location law: listed pack row")
@@ -135,14 +135,14 @@ fn law_entry_key(page: Bytes, row: u64, cell: u64, first_branch: bool) -> Bytes 
     if first_branch {
         return take key
     }
-    list.append(mut key, list.slice(page, 24, 24 + read_le(page, 4, 2)))
+    list.append(mut key, list.slice(page, 24, 24 + format.read_le(page, 4, 2)))
     list.append(mut key, list.slice(page, row + 2, cell))
     take key
 }
 
 fn law_bound(b: Option[Bytes]) -> Result[Option[Bytes], Error] {
     match b {
-        Some(at) => Ok(Some(copied(at)?)),
+        Some(at) => Ok(Some(failure_result_from_rep(types.copied(at))?)),
         None => Ok(None),
     }
 }
@@ -179,18 +179,18 @@ fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr
     let mut frame = LawLocationFrame(place: ptr, class: class, outgoing: list.new())
     if class != 1 {
         let page = list.slice(raw, ptr.offset + 16, ptr.offset + 16 + width)
-        let slots = read_le(page, 2, 2)
+        let slots = format.read_le(page, 2, 2)
         let on_branch = page[0u64] != 0
         let mut slot = list.len(page) - 2 * slots
         let mut previous: Option[Bytes] = None
         while slot < list.len(page) {
-            let row = read_le(page, slot, 2)
-            let cell = row + 2 + read_le(page, row, 2)
+            let row = format.read_le(page, slot, 2)
+            let cell = row + 2 + format.read_le(page, row, 2)
             let first = slot == list.len(page) - 2 * slots
             slot += 2
             let key = law_entry_key(page, row, cell, on_branch && first)
             if on_branch && first {
-                if read_le(page, row, 2) != 0 {
+                if format.read_le(page, row, 2) != 0 {
                     fail("location law: a branch's entry 0 has a separator")
                 }
             } else {
@@ -208,16 +208,16 @@ fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr
             let child_lo = if on_branch && first {
                 law_bound(lo)?
             } else {
-                Some(copied(key)?)
+                Some(failure_result_from_rep(types.copied(key))?)
             }
             let child_hi = if on_branch && slot < list.len(page) {
-                let next_row = read_le(page, slot, 2)
-                Some(law_entry_key(page, next_row, next_row + 2 + read_le(page, next_row, 2), false))
+                let next_row = format.read_le(page, slot, 2)
+                Some(law_entry_key(page, next_row, next_row + 2 + format.read_le(page, next_row, 2), false))
             } else {
                 law_bound(hi)?
             }
             if !(on_branch && first) {
-                previous = Some(copied(key)?)
+                previous = Some(failure_result_from_rep(types.copied(key))?)
             }
             let mut child_class = class
             let mut child_tree = tree
@@ -234,7 +234,7 @@ fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr
             } else if page[cell] == 1 {
                 child_class = 1
                 let body = cell + 1
-                std.page.PagePtr(pack: list.word_le(page, body + 24), offset: list.word_le(page, body + 32), len: int.truncate(8 + read_le(page, body + 8, 8)), checksum: list.word_le(page, body + 16), stamp: list.word_le(page, body))
+                std.page.PagePtr(pack: list.word_le(page, body + 24), offset: list.word_le(page, body + 32), len: int.truncate(8 + format.read_le(page, body + 8, 8)), checksum: list.word_le(page, body + 16), stamp: list.word_le(page, body))
             } else {
                 if page[cell] != 0 {
                     fail("location law: value tag")
@@ -268,7 +268,7 @@ fn law_same_pack(a: PagePack, b: PagePack) -> bool {
 fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     let raw = disk_read_paged_file(d, "MANIFEST", 16384)?
     let manifest_kind: u16 = list.word_le(raw, 72)
-    if manifest_kind != 0x0031 || read_le(raw, 76, 4) + 88 != list.len(raw) {
+    if manifest_kind != 0x0031 || format.read_le(raw, 76, 4) + 88 != list.len(raw) {
         fail("location law: MANIFEST frame")
     }
     let mut graph = LawLocationGraph(next_pack: list.word_le(raw, 128), next_stamp: list.word_le(raw, 112), physical: map.new(), packs: map.new(), listed: map.new(), frames: map.new(), incoming: map.new())
@@ -277,11 +277,11 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     // name no pack the inventory counts.
     law_follow_location(d, mut graph, law_read_location_ptr(raw, 168), 2, LawRows, LawList(3))?
     law_follow_location(d, mut graph, law_read_location_ptr(raw, 204), 2, LawRows, LawList(2))?
-    let branches = read_le(raw, 360, 4)
+    let branches = format.read_le(raw, 360, 4)
     let mut at = 364u64
     for _ in 0u64 .. branches {
-        let id = read_le(raw, at, 4)
-        let name_bytes = read_le(raw, at + 4, 2)
+        let id = format.read_le(raw, at, 4)
+        let name_bytes = format.read_le(raw, at + 4, 2)
         let roots = at + 34 + name_bytes
         for tree in 0u8 .. 3 {
             let tree_slot: u64 = int.widen(tree)
@@ -297,7 +297,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
         }
         at = roots + 109
     }
-    let pins = read_le(raw, at, 4)
+    let pins = format.read_le(raw, at, 4)
     at += 4
     for _ in 0u64 .. pins {
         let owner = match raw[at] {
@@ -306,7 +306,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
             _ => fail("location law: pin owner"),
         }
         let name_bytes: u64 = int.widen(raw[at + 1])
-        let name = result.unwrap(string.from_utf8(copied(list.slice(raw, at + 2, at + 2 + name_bytes))?))
+        let name = result.unwrap(string.from_utf8(failure_result_from_rep(types.copied(list.slice(raw, at + 2, at + 2 + name_bytes)))?))
         let roots = at + 14 + name_bytes
         for tree in 0u8 .. 3 {
             let tree_slot: u64 = int.widen(tree)
@@ -623,7 +623,7 @@ fn walk_entry(j: u64, primary: Option[u64]) -> Bytes {
 fn walk_stored(db: Db, id: u32, edited: Bytes) -> Result[Bytes, Error] {
     let p = logical_key(id, edited)?
     match get_page_row(db.heads[0].roots.collections, p) {
-        Some(v) => copied(v),
+        Some(v) => failure_result_from_rep(types.copied(v)),
         None => Error(Missing("walk fixture entry")),
     }
 }
@@ -661,7 +661,7 @@ fn walk_all(mut db: Db, rows: Table[u64, u64], mode: WalkMode, limit: u64, betwe
         let report = verify_step(mut db, mut walk, limit)?
         slices += 1
         for f in report.findings {
-            list.push(mut found, WalkFinding(index: clone(f.index), entry: copied(f.entry)?, fault: f.fault))
+            list.push(mut found, WalkFinding(index: clone(f.index), entry: failure_result_from_rep(types.copied(f.entry))?, fault: f.fault))
         }
         if report.done {
             return Ok((take found, report.checked))
@@ -869,23 +869,23 @@ fn test_index_walker_corruptions(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     walk_corrupt_case(c, 0, walk_entry(3, Some(3)), None, Missing, None)?
     walk_corrupt_case(c, 0, walk_entry(121, Some(10)), None, Missing, None)?
     // Extra: an entry for row 99, which does not exist.
-    walk_corrupt_case(c, 0, walk_entry(5, Some(99)), Some(copied(any_bucket)?), Extra, None)?
+    walk_corrupt_case(c, 0, walk_entry(5, Some(99)), Some(failure_result_from_rep(types.copied(any_bucket))?), Extra, None)?
     // Extra: row 12 (55) exists but produces bucket 5, not 2.
-    walk_corrupt_case(c, 0, walk_entry(2, Some(12)), Some(copied(any_bucket)?), Extra, None)?
+    walk_corrupt_case(c, 0, walk_entry(2, Some(12)), Some(failure_result_from_rep(types.copied(any_bucket))?), Extra, None)?
     // Payload: uniq 26 names row 3 as its owner. The rows phase reads row 2
     // first, which produces 26, and a Unique entry's owner is in its payload.
     // A report walk goes on to the entries phase: row 3 produces 39, not 26, so Extra.
-    walk_corrupt_case(c, 1, walk_entry(26, None), Some(copied(owner_3)?), Payload, Some(Extra))?
+    walk_corrupt_case(c, 1, walk_entry(26, None), Some(failure_result_from_rep(types.copied(owner_3))?), Payload, Some(Extra))?
     // Extra: uniq 999, which no row produces, names row 3, which produces 39.
-    walk_corrupt_case(c, 1, walk_entry(999, None), Some(copied(owner_3)?), Extra, None)?
+    walk_corrupt_case(c, 1, walk_entry(999, None), Some(failure_result_from_rep(types.copied(owner_3))?), Extra, None)?
     // Payload: row 4's cover entry carries row 2's projection, 26 for 52,
     // seen from row 4 and again from the entry.
-    walk_corrupt_case(c, 2, walk_entry(2, Some(4)), Some(copied(payload_2)?), Payload, Some(Payload))?
+    walk_corrupt_case(c, 2, walk_entry(2, Some(4)), Some(failure_result_from_rep(types.copied(payload_2))?), Payload, Some(Payload))?
     // Group 0 has rows. Group 3 has none. The zero payload is wrong for group 1.
     let mut wrong: Bytes = list.with_capacity(16)
     list.fill(mut wrong, 16, 0u8)
     walk_corrupt_case(c, 3, walk_entry(0, None), None, Missing, None)?
-    walk_corrupt_case(c, 3, walk_entry(3, None), Some(copied(wrong)?), Extra, None)?
+    walk_corrupt_case(c, 3, walk_entry(3, None), Some(failure_result_from_rep(types.copied(wrong))?), Extra, None)?
     walk_corrupt_case(c, 3, walk_entry(1, None), Some(take wrong), Payload, None)?
     Ok(())
 }

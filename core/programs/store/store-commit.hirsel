@@ -70,7 +70,7 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
                 let inline = db.heads[i].roots.streams.inline
                 let empty_key: Bytes = list.new()
                 let mut stamps = ran.first_stamp
-                std.page.put_inline_unique(mut db.heads[i].roots.streams.root, empty_key, op.key, staged_bytes(raw), inline, mut stamps)?
+                std.page.put_inline_unique(mut db.heads[i].roots.streams.root, empty_key, op.key, format.staged_bytes(raw), inline, mut stamps)?
             },
         }
     }
@@ -106,7 +106,7 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
                 return Ok(false)
             }
         }
-        if !std.page.inline_unique_ready(mut db.heads[i].roots.collections.root, collection, list.slice(op.key, 4, list.len(op.key)), staged_bytes(raw), inline)? {
+        if !std.page.inline_unique_ready(mut db.heads[i].roots.collections.root, collection, list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline)? {
             return Ok(false)
         }
     }
@@ -116,7 +116,7 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
         let Some(raw) = view op.value else {
             fail("store: a checked direct edit lost its value")
         }
-        match std.page.put_inline_unique(mut db.heads[i].roots.collections.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), staged_bytes(raw), inline, mut stamps) {
+        match std.page.put_inline_unique(mut db.heads[i].roots.collections.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline, mut stamps) {
             Ok(true) => (),
             _ => fail("store: a checked direct edit did not apply"),
         }
@@ -167,7 +167,7 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
         let Some(roots) = view draft.roots else {
             fail("store: prepared draft has no roots")
         }
-        capacity(prepare_publication(db, i, db.heads[i].head + 1, roots, db.next_node))
+        failure_result_from_rep(types.capacity(prepare_publication(db, i, db.heads[i].head + 1, roots, db.next_node)))
     })
     let publication = match take drafted_publication {
         Ok(take plan) => take plan,
@@ -205,7 +205,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
             if map.contains(db.admits, drafted_reply.key) {
                 let settled = match drafted_reply.value {
                     None => true,
-                    Some(raw) => result.unwrap(stream_state(staged_bytes(raw))).state == 2u8,
+                    Some(raw) => result.unwrap(stream_state(format.staged_bytes(raw))).state == 2u8,
                 }
                 if settled {
                     let _ = map.remove(mut db.admits, drafted_reply.key)
@@ -277,18 +277,18 @@ fn commit_skipped[R, A](db: Db, i: u64, take ran: Ran[R, A]) -> Outcome[R, A] {
     }
 }
 
-fn keyed_credit_equal(a: KeyedCredit, b: KeyedCredit) -> bool {
+fn keyed_credit_equal(a: format.KeyedCredit, b: format.KeyedCredit) -> bool {
     a.resident == b.resident && a.padding == b.padding && a.journal == b.journal
 }
 
-fn keyed_draft_empty(db: Db, keyed: Option[KeyedDraft]) -> bool {
+fn keyed_draft_empty(db: Db, keyed: Option[format.KeyedDraft]) -> bool {
     match keyed {
         None => true,
         Some(draft) => list.len(draft.edits) == 0 && keyed_credit_equal(draft.after, db.keyed_credit),
     }
 }
 
-fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], settlement: Option[Settlement], prepared: Prepared[R, A]) -> bool {
+fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], settlement: Option[format.Settlement], prepared: Prepared[R, A]) -> bool {
     if force_frame || prepared.observed_info {
         return false
     }
@@ -383,7 +383,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
         }
         if let Some(take frame) = replace(mut draft.frame, None) {
             let mut raw = take frame
-            if let Error(c) = seal_frame(mut raw, DiskContext(store: db.store, role: 2, seq: db.file_seq), db.file_end) {
+            if let Error(c) = format.seal_frame(mut raw, format.DiskContext(store: store_key_to_rep(db.store), role: 2, seq: db.file_seq), db.file_end) {
                 return Ok(OverLimit(take draft, Allocation(c)))
             }
             draft.frame = Some(take raw)
@@ -416,7 +416,7 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
     }
 }
 
-fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], force_frame: bool, take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
+fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
@@ -426,7 +426,7 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
             let skipped = draft_is_empty(db, force_frame, rec, settlement, prepared)
             prepared.skipped = skipped
             if !skipped && is_disk(db) {
-                let deltas: Option[View[List[Option[TieredDataDelta]]]] = match prepared.plan {
+                let deltas: Option[View[List[Option[format.TieredDataDelta]]]] = match prepared.plan {
                     Some(plan) => Some(view plan.deltas),
                     None => None,
                 }
@@ -442,7 +442,7 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
 // Memory rows apply first; the Tiered plan then stages its collections over
 // that tree, and its tree is the commit's collection map. Every stamp drawn
 // here is raised into `issued`, so the watermark covers it.
-fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
+fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
@@ -487,11 +487,11 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
 // With `memory_only`, rows of Tiered collections are left to the Tiered
 // write plan, which stages them through the attempt's resolver.
 fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
-    let order = capacity(data_order(operations))?
+    let order = failure_result_from_rep(types.capacity(data_order(operations)))?
     materialize_ordered_rows(mut tree, operations, order, memory_only, first, mut draw)
 }
 
-fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
+fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: format.DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
     let collection_map = tree_domain(tree) == CollectionMap
     let mut processed = 0u64
     for slot_order in 0u64 .. data_row_count(operations) {
@@ -526,7 +526,7 @@ fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: Dat
     Ok(())
 }
 
-fn materialize_row(mut tree: PageTree, op: DataOp, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
+fn materialize_row(mut tree: PageTree, op: format.DataOp, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
     if let Some(_) = op.trim {
         return Ok(())
     }
@@ -560,7 +560,7 @@ fn materialize_row(mut tree: PageTree, op: DataOp, memory_only: bool, first: u64
     }
 }
 
-fn materialize_collection_batch(mut tree: PageTree, operations: DataRows, order: DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), Error] {
+fn materialize_collection_batch(mut tree: PageTree, operations: DataRows, order: format.DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), Error] {
     let collection = list.slice(ordered_row(operations, order, start).key, 0, 4)
     let edit_at = scoped fn(_unused: (), slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
         visit_materialized_edit(operations, order, slot, visit)
@@ -568,7 +568,7 @@ fn materialize_collection_batch(mut tree: PageTree, operations: DataRows, order:
     page_result(apply_collection_batch(mut tree, collection, (), edit_at, start, end, first, mut draw))
 }
 
-fn visit_materialized_edit(operations: DataRows, order: DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+fn visit_materialized_edit(operations: DataRows, order: format.DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
     let op = ordered_row(operations, order, slot)
     let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
         Some(PageValue(raw)) => Some((raw, None)),

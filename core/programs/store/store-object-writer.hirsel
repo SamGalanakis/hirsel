@@ -98,7 +98,7 @@ fn object_open_checks(options: Options) -> Result[(), Error] {
 const OBJECT_TIMER_GRANT: u64 = 4096
 
 fn object_writer_entry_room(group: u64) -> u64 {
-    order.max(group + 112, 152) + BINDING_BYTES
+    order.max(group + 112, 152) + format.BINDING_BYTES
 }
 
 fn object_writer_journal_room(group: u64) -> u64 {
@@ -281,7 +281,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
                 Some(tail) => {
                     if !foreign_or_many {
                         for st in a.sealed {
-                            if !stream_same(st.tail.sid, tail.sid) {
+                            if !format.stream_same(st.tail.sid, tail.sid) {
                                 foreign_or_many = true
                                 break
                             }
@@ -315,7 +315,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.fence = fence
     db.file_seq = head.entry.seq
     db.page_resident = resident_location_charge(pages.locations)
-    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache)
+    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: optional_host_stream_id_from_rep(attached_sid), attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache)
     let journal_wake = match take timer {
         Some(take running) => ObjectIdleTimer(take running),
         None => NoJournalWake,
@@ -426,7 +426,7 @@ fn return_object_journal(take lane: ObjectJournalSession, resume: Sender[ObjectJ
     Ok(())
 }
 
-fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
     let latest_receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, latest_receipt)?
     prepare_holder_slot(mut db, delta)?
@@ -447,7 +447,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     take outcome
 }
 
-fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
     // Under archival (§12.11.11 M6, §13.9), an attached Place settles every
     // sealed tail in order and then its live tail as GROUP entries BEFORE
     // sealing the window's archive segment so the segment names every commit.
@@ -505,11 +505,11 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         cut_participants(db, delta)
     })?
     // objects@1 has no Tiered publisher (§13.6a); its open refuses a Tiered account.
-    require_memory_collections(holders_tiered(participants.roots), Install)?
+    failure_result_from_rep(types.require_memory_collections(holders_tiered(participants.roots), tiered_refusal_to_rep(Install)))?
     let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, participants.holders, participants.roots)?
     over_ceiling(base.account, available_resident(db))?
     if let Some(wanted) = target {
-        if let Some(problem) = journal_floor(wanted.checkpoint, wanted.journal, wanted.frame) {
+        if let Some(problem) = types.journal_floor(wanted.checkpoint, wanted.journal, wanted.frame) {
             return Error(Full(Journal(problem)))
         }
         over_ceiling(base.account, wanted.resident)?
@@ -543,7 +543,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         }
         let mut candidate_locator = disk_allocation(scoped fn() -> Result[HistoryLocator, Error] {
             let mut located = empty_history_locator()
-            capacity(map.try_reserve(mut located.rows, list.len(refs)))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut located.rows, list.len(refs))))?
             for item in refs {
                 map.insert(mut located.rows, item.seq, item)
                 located.last_pack = item.seq
@@ -558,7 +558,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
                 Ok(_) => (),
                 Error(HistoryMissing(take name, _)) => {
                     history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, now)?
-                    return Error(disk_fault(name, 0, Absent))
+                    return Error(failure_from_rep(format.disk_fault(name, 0, Absent)))
                 },
                 Error(take problem) => return Error(take problem),
             }
@@ -571,12 +571,12 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         // ATTACH completely. Restore the previous ATTACH if publish does not apply.
         let drop_on_cut = object_state(db).drop_attach_on_cut
         let prior_attach = replace(mut lane.register.attach, None)
-        let cut_attach: Option[Attach] = match prior_attach {
+        let cut_attach: Option[format.Attach] = match prior_attach {
             Some(old_attach) => if drop_on_cut {
                 None
             } else {
                 match lane.stream {
-                    Some(link) => Some(Attach(settles: old_attach.settles, live: Some(StreamRef(sid: link.sid, inc: link.inc, from_seq: link.last_batch_seq + 1, from_frame: 0)), sealed: list.new())),
+                    Some(link) => Some(format.Attach(settles: old_attach.settles, live: Some(format.StreamRef(sid: host_stream_id_to_rep(link.sid), inc: link.inc, from_seq: link.last_batch_seq + 1, from_frame: 0)), sealed: list.new())),
                     None => Some(clone(old_attach)),
                 }
             },
@@ -631,7 +631,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
             object_writer.entries = 0
             object_writer.locator = take installed_locator
             object_writer.has_sealed = false
-            object_writer.stream = next_sid
+            object_writer.stream = optional_host_stream_id_from_rep(next_sid)
             object_writer.archive_on = next_archive_on
             if dropped_attach {
                 object_writer.attached = false

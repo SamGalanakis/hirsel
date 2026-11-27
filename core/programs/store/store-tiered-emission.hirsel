@@ -20,7 +20,7 @@ fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.pag
     if stamp == 0 || map.contains(pending.seen, stamp) {
         return Ok(())
     }
-    capacity(map.try_reserve(mut pending.seen, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut pending.seen, 1)))?
     map.insert(mut pending.seen, stamp, ())
     for slot in 0u64 .. std.page.count(image) {
         if let Some(edge) = std.page.child_slot(page, slot) {
@@ -31,8 +31,8 @@ fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.pag
                     let suffix = option.unwrap(std.page.key_at(image, slot))
                     let key = logical_key(collection, suffix)?
                     let frame = PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
-                    capacity(map.try_reserve(mut pending.seen, 1))?
-                    capacity(list.try_reserve(mut pending.blobs, 1))?
+                    failure_result_from_rep(types.capacity(map.try_reserve(mut pending.seen, 1)))?
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut pending.blobs, 1)))?
                     map.insert(mut pending.seen, reference.stamp, ())
                     list.push(mut pending.blobs, TieredEmitFrame(collection: collection, stamp_in_image: reference.stamp, key: take key, frame: take frame))
                 }
@@ -41,7 +41,7 @@ fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.pag
     }
     let key = tiered_page_index_key(collection, image)?
     let frame = PackFrame(stamp: stamp, size: std.page.sealed_size(image), body: PageBody(arc.share(page)))
-    capacity(list.try_reserve(mut pending.pages, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut pending.pages, 1)))?
     list.push(mut pending.pages, TieredEmitFrame(collection: collection, stamp_in_image: stamp, key: take key, frame: take frame))
     Ok(())
 }
@@ -63,8 +63,8 @@ fn tiered_emit_map(mut pending: TieredCutFrames, root: Arc[std.page.Page], resta
             let edge = option.unwrap(std.page.child_slot(root, slot))
             if restamp == Some(collection) {
                 let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = restamp_tiered_emission(edge, collection, mut next_stamp)?
-                capacity(list.try_reserve(mut pending.pages, list.len(pages)))?
-                capacity(list.try_reserve(mut pending.blobs, list.len(blobs)))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut pending.pages, list.len(pages))))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut pending.blobs, list.len(blobs))))?
                 for take frame in take pages {
                     list.push(mut pending.pages, take frame)
                 }
@@ -119,7 +119,7 @@ fn layout_tiered_packs(take frames: List[TieredEmitFrame], class: u8, first_pack
         let key_width = list.len(item.key)
         let (following, room) = tiered_frame_extent(extent, index_room, width, key_width)?
         if slot != first && (following > cap || slot - first == 4294967295) {
-            capacity(list.try_reserve(mut packs, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut packs, 1)))?
             list.push(mut packs, PlannedPack(seq: seq, first: first, end: slot, size: extent, payload_bytes: payload))
             seq = stamp_after(seq)?
             first = slot
@@ -135,7 +135,7 @@ fn layout_tiered_packs(take frames: List[TieredEmitFrame], class: u8, first_pack
     }
     let end = list.len(frames)
     if end != first {
-        capacity(list.try_reserve(mut packs, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut packs, 1)))?
         list.push(mut packs, PlannedPack(seq: seq, first: first, end: end, size: extent, payload_bytes: payload))
         seq = stamp_after(seq)?
     }
@@ -152,7 +152,7 @@ fn planned_tiered_pack(layout: TieredPackRun, pack: PlannedPack) -> PagePack {
     for slot in pack.first .. pack.end {
         let key = view layout.frames[slot].key
         let width = PACK_INDEX_ROW + list.len(key)
-        if room == 0 || width > PACK_INDEX_LIMIT - room {
+        if room == 0 || width > format.PACK_INDEX_LIMIT - room {
             room = PACK_INDEX_PREFIX + width
             index_bytes += 16 + room
         } else {
@@ -167,8 +167,8 @@ fn planned_tiered_pack(layout: TieredPackRun, pack: PlannedPack) -> PagePack {
 fn encode_tiered_cut_pack(id: StoreId, layout: TieredPackRun, pack: PlannedPack, mut emitted: Map[u64, std.page.PagePtr]) -> Result[(Bytes, PagePack), Error] {
     let mut draft = begin_tiered_pack(id, pack.seq, layout.class, pack.size)?
     let room = pack.size - list.len(draft.raw)
-    capacity(list.try_reserve(mut draft.raw, room))?
-    capacity(map.try_reserve(mut emitted, pack.end - pack.first))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut draft.raw, room)))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut emitted, pack.end - pack.first)))?
     for slot in pack.first .. pack.end {
         let item = view layout.frames[slot]
         let Some(place) = add_tiered_pack_frame(mut draft, item.frame, item.collection, item.key, scoped fn(stamp: u64) -> std.page.PagePtr {
@@ -214,7 +214,7 @@ fn seal_tiered_map(root: Arc[std.page.Page], emitted: Map[u64, std.page.PagePtr]
     let mut changed: Map[u64, std.page.Slot] = map.new()
     for slot in 0u64 .. width {
         if let Some(take updated) = seal_tiered_map_slot(root, image, slot, emitted)? {
-            capacity(map.try_reserve(mut changed, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut changed, 1)))?
             map.insert(mut changed, slot, take updated)
         }
     }

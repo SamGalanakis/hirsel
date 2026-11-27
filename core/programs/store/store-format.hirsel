@@ -1,0 +1,730 @@
+pub type StreamKeyRep: key + shareable + send {
+    caller: CallerRep,
+    id: StreamIdRep
+}
+
+pub type CallerRep: key + shareable + cross {
+    issuer: u8,
+    subject: Bytes
+}
+
+pub type StreamIdRep: key + shareable + send {
+    t: u64,
+    n: u64
+}
+
+pub type CallRecordRep: shareable + send {
+    key: Bytes,
+    args: Bytes,
+    stream: StreamKeyRep,
+    // AD1: code.revision of the entry that ran, exactly 32 bytes; None only
+    // when the program was assembled without revisions. Never 32 zero bytes.
+    revision: Option[Bytes],
+    // The code that ran: u64 n ‖ u64 s, big-endian, then the replay identity
+    // (32 bytes, or none when the launch has no identity), RUNNER-SPEC §7.
+    code: Bytes
+}
+
+pub type KeyedCallRecordRep: shareable + send {
+    entry: Bytes,
+    args: Bytes,
+    revision: Option[Bytes],
+    code: Bytes
+}
+
+pub type StopKindRep: key = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
+
+pub type DataOp: shareable + send {
+    key: Bytes,
+    value: Option[StagedValue],
+    trim: Option[JournalTrim],
+    prior: Option[u32]
+}
+
+// Inline pages copy the bytes into the page image. Overflow pages share the
+// body with the staged operation.
+pub type StagedValue: shareable + send = PageValue(Bytes) | BlobBody(Arc[Bytes])
+
+pub fn staged_bytes(value: StagedValue) -> View[Bytes] in value {
+    match value {
+        PageValue(raw) => view raw,
+        BlobBody(raw) => view raw,
+    }
+}
+
+pub fn data_op_size(operation: DataOp, stream: bool) -> u64 {
+    if let Some(_) = operation.trim {
+        return 21
+    }
+    let size = (if stream {
+        5u64
+    } else {
+        9u64
+    }) + list.len(operation.key)
+    match operation.value {
+        None => size,
+        Some(raw) => size + 4 + list.len(staged_bytes(raw)),
+    }
+}
+
+pub fn le(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
+    match width {
+        1 => {
+            list.reserve(mut out, 1)
+            Ok(list.push(mut out, int.truncate(x)))
+        },
+        2 => {
+            let word: u16 = int.truncate(x)
+            Ok(list.put_word_le(mut out, word))
+        },
+        4 => {
+            let word: u32 = int.truncate(x)
+            Ok(list.put_word_le(mut out, word))
+        },
+        8 => Ok(list.put_word_le(mut out, x)),
+        _ => fail("store: invalid frame word width"),
+    }
+}
+
+pub fn blob(mut out: Bytes, b: Bytes) -> Result[(), Capacity] {
+    le(mut out, list.len(b), 4)?
+    Ok(list.append(mut out, b))
+}
+
+pub fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue], prior: Option[u32]) -> Result[(), Capacity] {
+    let tag: u64 = match value {
+        Some(_) => 1,
+        None => 2
+    }
+    le(mut payload, tag, 1)?
+    blob(mut payload, key)?
+    if let Some(width) = prior {
+        list.put_word_le(mut payload, width)
+    }
+    if let Some(raw) = value {
+        blob(mut payload, staged_bytes(raw))?
+    }
+    Ok(())
+}
+
+pub fn encode_log_trim(mut payload: Bytes, key: Bytes, floor: u64, dropped: u64) {
+    list.push(mut payload, 3u8)
+    list.append(mut payload, key)
+    list.put_word_be(mut payload, floor)
+    list.put_word_be(mut payload, dropped)
+}
+
+pub fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[CallView], settlement: Option[Settlement]) -> Result[(), Capacity] {
+    if let (Some(raw), Some(record)) = (view operation.value, view call) {
+        if stream_record_matches(operation.key, record.issuer, record.subject, record.t, record.n) {
+            le(mut payload, 3, 1)?
+            blob(mut payload, operation.key)?
+            blob(mut payload, staged_bytes(raw))?
+            return encode_call(mut payload, record, settlement)
+        }
+    }
+    encode_data_op(mut payload, operation.key, operation.value, None)
+}
+
+pub fn read_le(raw: Bytes, at: u64, width: u64) -> u64 {
+    match width {
+        1 => int.widen(raw[at]),
+        2 => {
+            let word: u16 = list.word_le(raw, at)
+            int.widen(word)
+        },
+        4 => {
+            let word: u32 = list.word_le(raw, at)
+            int.widen(word)
+        },
+        8 => list.word_le(raw, at),
+        _ => fail("store: invalid frame word width"),
+    }
+}
+
+// Store disk format. STORE-SPEC §2.3 and §11.10.
+pub const DISK_FORMAT: u64 = 12
+
+pub type DiskContext {
+    store: types.StoreKey,
+    role: u8,
+    seq: u64
+}
+
+pub type DiskFrame {
+    kind: u16,
+    flags: u16,
+    payload: u64,
+    end: u64
+}
+
+pub type DiskHeader {
+    context: DiskContext,
+    prev_end: u64
+}
+
+// Every check starts with the store, file role, file sequence and offset.
+pub const BINDING_BYTES: u64 = 33
+
+pub fn put_binding(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
+    le(mut out, ctx.store.hi, 8)?
+    le(mut out, ctx.store.lo, 8)?
+    le(mut out, int.widen(ctx.role), 1)?
+    le(mut out, ctx.seq, 8)?
+    le(mut out, offset, 8)
+}
+
+pub fn disk_check_start(ctx: DiskContext, offset: u64, head: Bytes) -> Result[std.check.Xxh3, Capacity] {
+    let mut schema_binding: Bytes = (bound bytes round8(BINDING_BYTES) {
+        list.with_capacity(BINDING_BYTES)
+    })?
+    put_binding(mut schema_binding, ctx, offset)?
+    let mut state = std.check.start()
+    std.check.add(mut state, schema_binding, 0, BINDING_BYTES)
+    std.check.add(mut state, head, 0, 8)
+    Ok(take state)
+}
+
+// Writes the check of a frame laid out as head[0..8], check[8..16] and
+// payload[16..]. The binding goes past the payload, into capacity the caller
+// reserved, and is hashed from there, so sealing allocates nothing and needs no
+// allocation isolation when a commit seals its frame at the file end.
+pub fn seal_frame(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
+    let end = list.len(out)
+    if list.capacity(out) - end < BINDING_BYTES {
+        fail("store: frame has no room for its check binding")
+    }
+    put_binding(mut out, ctx, offset)?
+    let mut state = std.check.start()
+    std.check.add(mut state, out, end, end + BINDING_BYTES)
+    std.check.add(mut state, out, 0, 8)
+    std.check.add(mut state, out, 16, end)
+    list.truncate(mut out, end)
+    list.set_word_le(mut out, 8, std.check.finish(state))
+    Ok(())
+}
+
+pub fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Result[u64, Capacity] {
+    let mut state = disk_check_start(ctx, offset, head)?
+    std.check.add(mut state, payload, 0, list.len(payload))
+    Ok(std.check.finish(state))
+}
+
+pub fn disk_seal(ctx: DiskContext, offset: u64, kind: u16, flags: u16, payload: Bytes) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.with_capacity(16 + list.len(payload) + BINDING_BYTES)
+    le(mut out, int.widen(kind), 2)?
+    le(mut out, int.widen(flags), 2)?
+    le(mut out, list.len(payload), 4)?
+    le(mut out, 0, 8)?
+    list.append(mut out, payload)
+    seal_frame(mut out, ctx, offset)?
+    Ok(take out)
+}
+
+pub type DiskFrameHead {
+    kind: u16,
+    flags: u16,
+    size: u64,
+    checksum: u64
+}
+
+pub fn disk_header_bytes(ctx: DiskContext, prev_end: u64, authority: u8) -> Result[Bytes, Capacity] {
+    let mut payload: Bytes = list.with_capacity(56)
+    list.append(mut payload, string.as_bytes("HIRSTORE"))
+    le(mut payload, DISK_FORMAT, 4)?
+    list.push(mut payload, ctx.role)
+    list.push(mut payload, authority)
+    list.put_word_le(mut payload, 0u16)
+    le(mut payload, ctx.store.hi, 8)?
+    le(mut payload, ctx.store.lo, 8)?
+    le(mut payload, 0, 8)?
+    le(mut payload, ctx.seq, 8)?
+    le(mut payload, prev_end, 8)?
+    disk_seal(ctx, 0, 0x0001, 1, payload)
+}
+
+pub fn disk_number(file: String, raw: Bytes, mut at: u64, width: u64) -> Result[u64, types.Failure] {
+    if at > list.len(raw) || width > list.len(raw) - at {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let value = read_le(raw, at, width)
+    at += width
+    Ok(value)
+}
+
+pub fn disk_count(file: String, raw: Bytes, mut at: u64, least: u64) -> Result[u64, types.Failure] {
+    let n = disk_number(file, raw, mut at, 4)?
+    if n > (list.len(raw) - at) / least {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    Ok(n)
+}
+
+pub fn disk_name(file: String, raw: Bytes, mut at: u64) -> Result[String, types.Failure] {
+    let size = disk_number(file, raw, mut at, 2)?
+    disk_name_bytes(file, raw, mut at, size)
+}
+
+pub fn disk_name_bytes(file: String, raw: Bytes, mut at: u64, size: u64) -> Result[String, types.Failure] {
+    if size > 255 || size > list.len(raw) - at {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let chars = list.slice(raw, at, at + size)
+    let owned = types.copied(chars)?
+    at += size
+    match string.from_utf8(take owned) {
+        Ok(take text) => Ok(take text),
+        Error(_) => Error(disk_fault(file, at - size, Malformed))
+    }
+}
+
+pub fn disk_put_name(mut out: Bytes, name: String) -> Result[(), Capacity] {
+    le(mut out, string.byte_len(name), 2)?
+    Ok(list.append(mut out, string.as_bytes(name)))
+}
+
+pub fn disk_blob(file: String, raw: Bytes, mut at: u64, limit: u64) -> Result[Bytes, types.Failure] {
+    let size = disk_number(file, raw, mut at, 4)?
+    if size > limit || size > list.len(raw) - at {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let value = list.slice(raw, at, at + size)
+    let out = types.copied(value)?
+    at += size
+    Ok(take out)
+}
+
+// The CALL carries the original execution context only when a later frame
+// settles the call. An inline reply uses the context of its own frame.
+pub type Settlement: shareable + send {
+    way: u8,
+    base: u64,
+    at: u64,
+    seed: u64,
+    stop: Option[StopKindRep]
+}
+
+pub type CallSection: shareable + send {
+    record: CallRecordRep,
+    settlement: Option[Settlement]
+}
+
+pub fn call_code_size(size: u64) -> bool {
+    size == 16 || size == 48
+}
+
+pub type JournalTrim: shareable + send {
+    floor: u64,
+    dropped: u64
+}
+
+pub type JournalOp: shareable + send {
+    key: Bytes,
+    value: Option[Bytes],
+    prior: u32,
+    trim: Option[JournalTrim]
+}
+
+pub type JournalCommit {
+    branch: u32,
+    version: u64,
+    at: u64,
+    data: List[JournalOp],
+    streams: List[JournalOp],
+    keyed: List[KeyedEdit],
+    call: Option[CallSection],
+    // The COMMIT payload's length, checked against the recorded limits.
+    payload: u64
+}
+
+pub type JournalFork {
+    id: u32,
+    parent: u32,
+    forked_at: u64,
+    name: String,
+    watermark: u64
+}
+
+pub type JournalEvent = Commit(JournalCommit) | Fork(JournalFork)
+
+pub fn journal_event_kind(kind: u16) -> bool {
+    kind == 0x0011 || kind == 0x0013
+}
+
+pub fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Option[CallSection]) -> Result[List[JournalOp], types.Failure] {
+    let operation_count = disk_count(file, raw, mut at, if stream {
+        5u64
+    } else {
+        9u64
+    })?
+    let mut ops: List[JournalOp] = list.new()
+    let value_limit = if stream {
+        1048576u64
+    } else {
+        types.FORMAT_VALUE_MAX
+    }
+    for i in 0u64 .. operation_count {
+        let op_at = at
+        let kind = disk_number(file, raw, mut at, 1)?
+        if kind == 3 && !stream {
+            if list.len(raw) - at < 20 {
+                return Error(disk_fault(file, op_at, Malformed))
+            }
+            let key = types.copied(list.slice(raw, at, at + 4))?
+            let floor = word_be(raw, at + 4)
+            let dropped = word_be(raw, at + 12)
+            at += 20
+            list.push(mut ops, JournalOp(key: take key, value: None, prior: 0, trim: Some(JournalTrim(floor: floor, dropped: dropped))))
+            continue
+        }
+        if kind < 1 || kind > 3 {
+            return Error(disk_fault(file, op_at, Malformed))
+        }
+        let key = disk_blob(file, raw, mut at, 4096)?
+        let prior = if stream {
+            0u64
+        } else {
+            disk_number(file, raw, mut at, 4)?
+        }
+        if prior > types.FORMAT_VALUE_MAX + 1 {
+            return Error(disk_fault(file, op_at, Malformed))
+        }
+        let value: Option[Bytes] = if kind == 2 {
+            None
+        } else {
+            let stored = disk_blob(file, raw, mut at, value_limit)?
+            if kind == 3 {
+                if let Some(_) = call {
+                    return Error(disk_fault(file, op_at, Malformed))
+                }
+                if list.len(stored) < 41 || stored[40] != 2 {
+                    return Error(disk_fault(file, op_at, Malformed))
+                }
+                call = Some(decode_call(file, raw, mut at, types.copied(key)?)?)
+            }
+            Some(take stored)
+        }
+        list.push(mut ops, JournalOp(key: take key, value: take value, prior: int.truncate(prior), trim: None))
+    }
+    Ok(take ops)
+}
+
+pub fn decode_settlement(file: String, raw: Bytes, mut at: u64, way: u8) -> Result[Settlement, types.Failure] {
+    if list.len(raw) - at < 24 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let base = word_be(raw, at)
+    let wall = word_be(raw, at + 8)
+    let seed = word_be(raw, at + 16)
+    at += 24
+    let stop: Option[StopKindRep] = if way == 1 {
+        if at == list.len(raw) {
+            return Error(disk_fault(file, at, Malformed))
+        }
+        let tag = raw[at]
+        at += 1
+        match tag {
+            1 => Some(Raised),
+            2 => {
+                if list.len(raw) - at < 8 {
+                    return Error(disk_fault(file, at, Malformed))
+                }
+                let steps = word_be(raw, at)
+                at += 8
+                Some(OutOfSteps(steps))
+            },
+            3 => Some(OutOfBytes),
+            4 => Some(Conflict),
+            _ => return Error(disk_fault(file, at - 1, Malformed)),
+        }
+    } else {
+        None
+    }
+    Ok(Settlement(way: way, base: base, at: wall, seed: seed, stop: stop))
+}
+
+pub fn journal_torn(why: types.WhyRep) -> bool {
+    match why {
+        Truncated => true,
+        Flags => true,
+        Checksum => true,
+        Malformed => true,
+        Kind(0) => true,
+        _ => false,
+    }
+}
+
+pub type JournalFrame {
+    end: u64,
+    kind: u16,
+    payload: Option[Bytes]
+}
+
+// A frame or value past the recorded limits was never admitted (§11.1 AP4a).
+pub fn replay_within_limits(file: String, limits: types.LimitsRep, commit: JournalCommit) -> Result[(), types.Failure] {
+    if commit.payload > types.transaction_limit(limits) {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    for op in commit.data {
+        if let Some(value) = view op.value {
+            if list.len(value) > limits.value {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+        }
+    }
+    Ok(())
+}
+
+pub const CLAIMS: u8 = 1
+
+pub const CLAIM_DONE_MAX: u64 = 8192
+
+pub fn word_be(raw: Bytes, offset: u64) -> u64 {
+    let mut value = 0u64
+    for i in 0u64 .. 8 {
+        value = (value << 8) | int.widen(raw[offset + i])
+    }
+    value
+}
+
+pub fn round8(n: u64) -> u64 {
+    ((n + 7) / 8) * 8
+}
+
+pub opaque type JournalInput {
+    file: HostFile,
+    size: u64,
+    base: u64,
+    chunk: Bytes,
+    copy_to: Option[HostFile]
+}
+
+pub fn journal_decode_fork(file: String, raw: Bytes) -> Result[JournalFork, types.Failure] {
+    let mut at = 0u64
+    let id: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
+    let parent: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
+    let forked_at = disk_number(file, raw, mut at, 8)?
+    let name = disk_name(file, raw, mut at)?
+    let watermark = disk_number(file, raw, mut at, 8)?
+    if at != list.len(raw) || watermark == 0 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    Ok(JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark))
+}
+
+pub type TieredDataDelta = TieredPrior(u32) | TieredDropped(u64)
+
+pub fn disk_fault(file: String, at: u64, why: types.WhyRep) -> types.Failure {
+    match (bound bytes round8(string.byte_len(file)) {
+        string.from(file)
+    }) {
+        Ok(take name) => Corrupt(types.FaultRep(file: take name, offset: at, why: why)),
+        Error(problem) => Full(Allocation(problem)),
+    }
+}
+
+pub const CLAIM_BYTES: u64 = 24
+
+pub fn page_edge_order(path: String, parent: std.page.PagePtr, child: std.page.PagePtr) -> Result[(), types.Failure] {
+    if child.pack > parent.pack || (child.pack == parent.pack && child.offset >= parent.offset) {
+        return Error(disk_fault(path, parent.offset, Order))
+    }
+    Ok(())
+}
+
+pub const PACK_INDEX_LIMIT: u64 = 1048576 - 16
+
+pub fn history_number(mut key: String, n: u64) {
+    let mut divisor = 10000000000000000000u64
+    while divisor > n && divisor > 1 {
+        string.push_char(mut key, '0')
+        divisor /= 10
+    }
+    string.push_u64(mut key, n)
+}
+
+// The frame buffer has room for the binding immediately after the frame.
+pub fn history_seal(mut raw_bytes: Bytes, context: DiskContext, at: u64, kind: u16) -> Result[(), Capacity] {
+    let end = list.len(raw_bytes)
+    let size = end - at - 16
+    list.set_word_le(mut raw_bytes, at, kind)
+    list.set_word_le(mut raw_bytes, at + 2, 1u16)
+    let encoded: u32 = int.narrow(size)
+    list.set_word_le(mut raw_bytes, at + 4, encoded)
+    put_binding(mut raw_bytes, context, at)?
+    let mut checksum = std.check.start()
+    std.check.add(mut checksum, raw_bytes, end, end + BINDING_BYTES)
+    std.check.add(mut checksum, raw_bytes, at, at + 8)
+    std.check.add(mut checksum, raw_bytes, at + 16, end)
+    list.truncate(mut raw_bytes, end)
+    list.set_word_le(mut raw_bytes, at + 8, std.check.finish(checksum))
+    Ok(())
+}
+
+pub fn history_append_header(mut raw_bytes: Bytes, context: DiskContext, epoch: u64, kind: u8) -> Result[(), Capacity] {
+    list.fill(mut raw_bytes, 16, 0u8)
+    list.append(mut raw_bytes, string.as_bytes("HIRSTORE"))
+    let format: u32 = int.narrow(DISK_FORMAT)
+    list.put_word_le(mut raw_bytes, format)
+    list.push(mut raw_bytes, context.role)
+    list.push(mut raw_bytes, kind)
+    list.put_word_le(mut raw_bytes, 0u16)
+    list.put_word_le(mut raw_bytes, context.store.hi)
+    list.put_word_le(mut raw_bytes, context.store.lo)
+    list.put_word_le(mut raw_bytes, epoch)
+    list.put_word_le(mut raw_bytes, context.seq)
+    list.put_word_le(mut raw_bytes, 0u64)
+    history_seal(mut raw_bytes, context, 0, 0x0001)
+}
+
+// The host stream's XINDEX checkpoints (0x0104, role 13 `x-<k>`), pin
+// tracking, head summaries, low-water retirement and batch deletes
+// (STORE-SPEC §12.11.2, §12.11.8, §12.11.12).
+pub const ROLE_XINDEX: u8 = 13
+
+// One `(store, epoch)` batch index entry inside XINDEX (`0x0104`).
+pub type XIndexEntry: send {
+    store: types.StoreKey,
+    epoch: u64,
+    batches: List[(u64, u64)]
+}
+
+// One Place pinning at least one unreleased batch on this stream.
+pub type StreamPin: send {
+    store: types.StoreKey,
+    pin_inc: u64,
+    pin_seq: u64,
+    prefix: String,
+    first_pinned_ns: u64
+}
+
+pub type XIndex: send {
+    k: u64,
+    low_inc: u64,
+    low_seq: u64,
+    covers_inc: u64,
+    covers_seq: u64,
+    entries: List[XIndexEntry],
+    pins: List[StreamPin]
+}
+
+// Encodes `x-<k>` (`ROLE_XINDEX`, frame `0x0104`) and returns its `RegIndex`.
+pub fn stream_xindex_encode(mut raw: Bytes, sid: types.HostStreamIdRep, inc: u64, authority_kind: u8, idx: XIndex) -> Result[RegIndex, types.Failure] {
+    let mut payload_len = 32u64 + 4 + 4
+    for e in idx.entries {
+        payload_len += 28 + 16 * list.len(e.batches)
+    }
+    for p in idx.pins {
+        payload_len += 36 + string.byte_len(p.prefix)
+    }
+    if payload_len > STREAM_XINDEX_LIMIT {
+        return Error(Full(Allocation(Capacity(requested: payload_len, available: STREAM_XINDEX_LIMIT))))
+    }
+    let needed = 72 + 16 + payload_len + BINDING_BYTES
+    types.capacity(list.try_reserve(mut raw, needed))?
+    let ctx = stream_header(mut raw, sid, ROLE_XINDEX, idx.k, inc, authority_kind)?
+    let at = list.len(raw)
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, idx.low_inc)
+    list.put_word_le(mut raw, idx.low_seq)
+    list.put_word_le(mut raw, idx.covers_inc)
+    list.put_word_le(mut raw, idx.covers_seq)
+    let ec: u32 = int.narrow(list.len(idx.entries))
+    list.put_word_le(mut raw, ec)
+    for e in idx.entries {
+        list.put_word_le(mut raw, e.store.hi)
+        list.put_word_le(mut raw, e.store.lo)
+        list.put_word_le(mut raw, e.epoch)
+        let bc: u32 = int.narrow(list.len(e.batches))
+        list.put_word_le(mut raw, bc)
+        for (b_inc, b_seq) in e.batches {
+            list.put_word_le(mut raw, b_inc)
+            list.put_word_le(mut raw, b_seq)
+        }
+    }
+    let pc: u32 = int.narrow(list.len(idx.pins))
+    list.put_word_le(mut raw, pc)
+    for p in idx.pins {
+        list.put_word_le(mut raw, p.store.hi)
+        list.put_word_le(mut raw, p.store.lo)
+        list.put_word_le(mut raw, p.pin_inc)
+        list.put_word_le(mut raw, p.pin_seq)
+        let pb = string.as_bytes(p.prefix)
+        let plen: u32 = int.narrow(list.len(pb))
+        list.put_word_le(mut raw, plen)
+        list.append(mut raw, pb)
+    }
+    types.capacity(history_seal(mut raw, ctx, at, 0x0104))?
+    let len = list.len(raw)
+    let digest = std.check.xxh3(raw, 0, len)
+    Ok(RegIndex(k: idx.k, len, digest, covers_inc: idx.covers_inc, covers_seq: idx.covers_seq))
+}
+
+pub fn open_journal_input(take file: HostFile, flush: bool, make_chunk: scoped fn() -> Result[Bytes, types.Failure]) -> Result[JournalInput, types.Failure] waits {
+    let mut opened = take file
+    if flush {
+        host.sync(mut opened) ?=> Io
+    }
+    let file_stat = host.stat_file(mut opened) ?=> Io
+    let mut chunk = make_chunk()?
+    if list.len(chunk) != 0u64 {
+        list.clear(mut chunk)
+    }
+    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, chunk: take chunk, copy_to: None))
+}
+
+pub fn journal_input_size(input: JournalInput) -> u64 {
+    input.size
+}
+
+pub fn journal_input_chunk(input: JournalInput) -> View[Bytes] in input {
+    view input.chunk
+}
+
+pub fn journal_input_copy_to(mut input: JournalInput, take output: HostFile) {
+    input.copy_to = Some(take output)
+}
+
+pub fn with_journal_file[T](mut input: JournalInput, read: scoped[view] fn(mut HostFile) -> T waits) -> T waits {
+    read(mut input.file)
+}
+
+pub fn take_journal_file(take input: JournalInput) -> HostFile {
+    let JournalInput(file: take file, ..) = take input
+    take file
+}
+
+pub fn take_journal_copy(take input: JournalInput) -> Option[HostFile] {
+    let JournalInput(copy_to: take output, ..) = take input
+    take output
+}
+
+pub fn refill_journal_chunk(mut input: JournalInput, path: String, offset: u64) -> Result[u64, types.Failure] waits {
+    if offset >= input.base && offset - input.base < list.len(input.chunk) {
+        return Ok(offset - input.base)
+    }
+    list.clear(mut input.chunk)
+    if (host.read_at(mut input.file, offset, mut input.chunk) ?=> Io) == 0 {
+        return Error(disk_fault(path, offset, Truncated))
+    }
+    // The pack envelope consumes the entire file in order. Copy each
+    // refill once, using the same bytes that the checksum pass reads.
+    if let Some(mut output) = input.copy_to {
+        let width = order.min(list.len(input.chunk), input.size - offset)
+        match host.write(mut output, list.slice(input.chunk, 0, width)) {
+            Ok(()) => (),
+            Error(problem) => return Error(Io(problem.error)),
+        }
+    }
+    input.base = offset
+    Ok(0u64)
+}
+
+pub fn refresh_journal_size(mut input: JournalInput, boundary: Option[u64]) -> Result[(), types.Failure] waits {
+    if let Some(d) = boundary {
+        if d > input.size {
+            input.size = (host.stat_file(mut input.file) ?=> Io).size
+        }
+    }
+    Ok(())
+}

@@ -9,9 +9,9 @@ fn capture_test_lines(take prepared: PreparedCapture, reserve: bool) -> Result[(
     }
     let summary = if reserve {
         let budget = capture_need(prepared)
-        capacity(bound bytes budget.total {
+        failure_result_from_rep(types.capacity(bound bytes budget.total {
             describe_capture(take prepared, collect_line)
-        })??
+        }))??
     } else {
         describe_capture(take prepared, collect_line)?
     }
@@ -34,9 +34,9 @@ fn capture_test_checked(take prepared: PreparedCapture, reprice: u64, reserved: 
     }
     let checked = if reserved {
         let need = capture_need(prepared).total + reprice
-        capacity(bound bytes need {
+        failure_result_from_rep(types.capacity(bound bytes need {
             check_capture(take prepared, reject_fault)
-        })?
+        }))?
     } else {
         check_capture(take prepared, reject_fault)
     }
@@ -57,10 +57,10 @@ fn capture_test_check_cover(d: Dir, c: Clock, repeat_bytes: u64) -> Result[(), E
     Ok(())
 }
 
-fn capture_test_page(mut raw: Bytes, ctx: DiskContext, source: std.page.Image) -> Result[std.page.PagePtr, Error] {
+fn capture_test_page(mut raw: Bytes, ctx: format.DiskContext, source: std.page.Image) -> Result[std.page.PagePtr, Error] {
     let payload = std.page.payload(source)
     let offset = list.len(raw)
-    let frame = capacity(disk_seal(ctx, offset, 0x0021, 1, payload))?
+    let frame = failure_result_from_rep(types.capacity(format.disk_seal(ctx, offset, 0x0021, 1, payload)))?
     list.append(mut raw, frame)
     Ok(std.page.PagePtr(pack: ctx.seq, offset: offset, len: int.truncate(list.len(payload)), checksum: std.check.xxh3(payload, 0, list.len(payload)), stamp: std.page.stamp(source)))
 }
@@ -72,10 +72,10 @@ fn capture_test_fill(width: u64, value: u8) -> Bytes {
 }
 
 fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), Error] waits {
-    let data = DiskContext(store: id, role: 3, seq: 1)
-    let large = DiskContext(store: id, role: 3, seq: 2)
-    let inventory = DiskContext(store: id, role: 3, seq: 3)
-    let mut raw = capacity(disk_header_bytes(data, 0, 0))?
+    let data = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 1)
+    let large = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 2)
+    let inventory = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 3)
+    let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(data, 0, 0)))?
     let mut catalog_rows: List[std.page.Entry] = list.with_capacity(16)
     for i in 1u32 .. 16 {
         let mut name = string.from("table-")
@@ -93,8 +93,8 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
         fail("catalog BLOB fixture did not cross a chunk boundary")
     }
     let payload = page_result(std.page.encode_blob(1, large_value))?
-    let mut blob_bytes = capacity(disk_header_bytes(large, 0, 0))?
-    list.append(mut blob_bytes, capacity(disk_seal(large, 72, 0x0022, 1, payload))?)
+    let mut blob_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(large, 0, 0)))?
+    list.append(mut blob_bytes, failure_result_from_rep(types.capacity(format.disk_seal(large, 72, 0x0022, 1, payload)))?)
     disk_write_synced(d, "p-2", blob_bytes)?
     let reference = std.page.BlobRef(stamp: 1, len: list.len(large_value), checksum: std.check.xxh3(large_value, 0, list.len(large_value)), pack: 2, offset: 72, body: 0)
     list.push(mut catalog_rows, std.page.Entry(key: catalog_index_key(1, "large")?, cell: BlobValue(reference)))
@@ -110,10 +110,10 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
     disk_write_synced(d, "p-1", raw)?
     let mut pack_rows: List[std.page.Entry] = list.with_capacity(2)
     let page_bytes = list.len(raw) - 72 - 16 * 65
-    list.push(mut pack_rows, std.page.Entry(key: key_word(1), cell: InlineValue(encode_pack_row(PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
-    list.push(mut pack_rows, std.page.Entry(key: key_word(2), cell: InlineValue(encode_pack_row(PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(encode_pack_row(PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(encode_pack_row(PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
     let listing = page_result(std.page.encode(pack_rows, 0, 67, Unprefixed))?
-    let mut list_bytes = capacity(disk_header_bytes(inventory, 0, 0))?
+    let mut list_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(inventory, 0, 0)))?
     m.pack_root = capture_test_page(mut list_bytes, inventory, listing)?
     disk_write_synced(d, "p-3", list_bytes)?
     m.next_stamp = 68
@@ -133,7 +133,7 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
 fn capture_test_meta_ceiling(mut m: PageManifest) -> Result[(), Error] {
     let mut remaining = manifest_limit(m.limits) - page_manifest_size(m)
     let additional: u64 = (remaining + 397) / 398
-    capacity(list.try_reserve(mut m.branches, additional))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut m.branches, additional)))?
     for i in 0u64 .. additional {
         let left = additional - i
         let width = (remaining - 143 * left) / left
@@ -155,7 +155,7 @@ fn capture_test_meta_ceiling(mut m: PageManifest) -> Result[(), Error] {
     Ok(())
 }
 
-fn capture_test_commit(ctx: DiskContext, offset: u64, head_version: u64, width: u64, prior: u32) -> Result[Bytes, Error] {
+fn capture_test_commit(ctx: format.DiskContext, offset: u64, head_version: u64, width: u64, prior: u32) -> Result[Bytes, Error] {
     let key = log_key(1, 1)?
     let mut data: Bytes = list.with_capacity(width + 64)
     list.put_word_le(mut data, 0u32)
@@ -165,7 +165,7 @@ fn capture_test_commit(ctx: DiskContext, offset: u64, head_version: u64, width: 
     list.push(mut data, 0u8)
     list.put_word_le(mut data, 1u32)
     list.push(mut data, 1u8)
-    capacity(blob(mut data, key))?
+    failure_result_from_rep(types.capacity(format.blob(mut data, key)))?
     list.put_word_le(mut data, prior)
     let size: u32 = int.truncate(width)
     list.put_word_le(mut data, size)
@@ -174,7 +174,7 @@ fn capture_test_commit(ctx: DiskContext, offset: u64, head_version: u64, width: 
     list.put_word_le(mut data, body_len)
     let stored = capture_test_fill(width - 6, int.truncate(head_version))
     list.append(mut data, stored)
-    capacity(disk_seal(ctx, offset, 0x0011, 1, data))
+    failure_result_from_rep(types.capacity(format.disk_seal(ctx, offset, 0x0011, 1, data)))
 }
 
 fn capture_test_reopens(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
@@ -220,8 +220,8 @@ fn need_covers(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] w
     capture_test_catalog(mut manifest, id, d)?
     capture_test_meta_ceiling(mut manifest)?
     disk_write_synced(d, "MANIFEST", disk_page_manifest_bytes(id, manifest)?)?
-    let ctx = DiskContext(store: id, role: 2, seq: 1)
-    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
+    let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     list.append(mut raw, capture_test_commit(ctx, 72, 1, VALUE_LIMIT, 0)?)
     disk_write_synced(d, journal_path(1, "")?, raw)?
     let _ = take raw
@@ -266,7 +266,7 @@ fn describe_suffix_free(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let id = empty.id
     let _ = take empty
     let path = journal_path(seq, "")?
-    let ctx = DiskContext(store: id, role: 2, seq: seq)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq)
     let mut file = disk_io(host.open(d, path, ReadWrite))?
     let mut offset = segment_end
     let width = 1048576u64

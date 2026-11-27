@@ -10,7 +10,7 @@ type TieredRange: key {
 }
 
 type TieredDemand: send {
-    target: TieredTarget,
+    target: format.TieredTarget,
     direction: TieredDirection
 }
 
@@ -19,14 +19,14 @@ type TieredBucketWindow: send {
     demands: List[u64]
 }
 
-fn tiered_bucket_range(path: String, target: TieredTarget, bytes_total: u64, direction: TieredDirection) -> Result[TieredRange, Error] {
-    let expected = tiered_frame_id(target)
+fn tiered_bucket_range(path: String, target: format.TieredTarget, bytes_total: u64, direction: TieredDirection) -> Result[TieredRange, Error] {
+    let expected = format.tiered_frame_id(target)
     let lo = expected.offset
     let Some(width) = int.checked_add(expected.len, 16) else {
-        return Error(disk_fault(path, lo, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, lo, Malformed)))
     }
     if lo < 72 || lo > bytes_total || width > bytes_total - lo {
-        return Error(disk_fault(path, lo, Dangling(expected.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, lo, Dangling(expected.stamp))))
     }
     let hi = lo + width
     if width >= TIERED_GET_MIN {
@@ -52,12 +52,12 @@ fn tiered_bucket_range(path: String, target: TieredTarget, bytes_total: u64, dir
 fn tiered_bucket_windows(path: String, pack_ref: HistoryRef, demands: List[TieredDemand]) -> Result[List[TieredBucketWindow], Error] {
     let demand_count = list.len(demands)
     let mut expanded: List[(TieredRange, u64)] = list.new()
-    capacity(list.try_reserve(mut expanded, demand_count))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut expanded, demand_count)))?
     for slot in 0u64 .. demand_count {
         let demand = demands[slot]
-        let expected = tiered_frame_id(demand.target)
+        let expected = format.tiered_frame_id(demand.target)
         if expected.pack != pack_ref.seq {
-            return Error(disk_fault(path, expected.offset, Dangling(expected.stamp)))
+            return Error(failure_from_rep(format.disk_fault(path, expected.offset, Dangling(expected.stamp))))
         }
         let window = tiered_bucket_range(path, demand.target, pack_ref.len, demand.direction)?
         list.push(mut expanded, (window, slot))
@@ -72,15 +72,15 @@ fn tiered_bucket_windows(path: String, pack_ref: HistoryRef, demands: List[Tiere
             let previous = windows[n - 1].range
             let end = order.max(previous.hi, window.hi)
             if window == previous || end - previous.lo <= TIERED_GET_MAX {
-                capacity(list.try_reserve(mut windows[n - 1].demands, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut windows[n - 1].demands, 1)))?
                 windows[n - 1].range.hi = end
                 list.push(mut windows[n - 1].demands, slot)
                 continue
             }
         }
         let mut members: List[u64] = list.new()
-        capacity(list.try_reserve(mut members, 1))?
-        capacity(list.try_reserve(mut windows, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut members, 1)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut windows, 1)))?
         list.push(mut members, slot)
         list.push(mut windows, TieredBucketWindow(range: window, demands: take members))
     }
@@ -90,7 +90,7 @@ fn tiered_bucket_windows(path: String, pack_ref: HistoryRef, demands: List[Tiere
 fn read_tiered_bucket_window(mut client: std.object.Client, pack_ref: HistoryRef, window: TieredRange, deadline: u64) -> Result[Bytes, Error] waits {
     let path = history_key("p-", pack_ref)
     let mut raw: Bytes = list.new()
-    capacity(list.try_reserve(mut raw, window.hi - window.lo))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut raw, window.hi - window.lo)))?
     history_range(mut client, path, pack_ref, window.lo, window.hi, mut raw, deadline)?
     Ok(take raw)
 }
@@ -115,7 +115,7 @@ fn read_tiered_bucket_windows(mut client: std.object.Client, gets: List[TieredBu
     })?
     let responses = std.object.fetch_ranges(mut client, take prepared, streams)
     let mut outcomes: List[Result[Bytes, Error]] = list.new()
-    capacity(list.try_reserve(mut outcomes, width))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut outcomes, width)))?
     let mut at = 0u64
     for take response in take responses {
         let (take status, take raw) = take response
@@ -124,7 +124,7 @@ fn read_tiered_bucket_windows(mut client: std.object.Client, gets: List[TieredBu
         let item: Result[Bytes, Error] = match take status {
             Ok(meta) => {
                 if meta.size != read.pack_ref.len || list.len(raw) != read.window.hi - read.window.lo {
-                    Error(disk_fault(path, read.window.lo, Truncated))
+                    Error(failure_from_rep(format.disk_fault(path, read.window.lo, Truncated)))
                 } else {
                     Ok(take raw)
                 }
@@ -142,7 +142,7 @@ fn tiered_window_cache_key(request: TieredBucketGet) -> Result[(String, Option[u
     if request.window.lo == 0 && request.window.hi == request.pack_ref.len {
         return Ok((history_read_key("p-", request.pack_ref)?, Some(request.pack_ref.digest)))
     }
-    capacity(bound bytes 104 {
+    failure_result_from_rep(types.capacity(bound bytes 104 {
         let mut path = string.with_capacity(104)
         history_fill_key(mut path, "p-", request.pack_ref)
         string.push(mut path, "-")
@@ -150,7 +150,7 @@ fn tiered_window_cache_key(request: TieredBucketGet) -> Result[(String, Option[u
         string.push(mut path, "-")
         string.push_u64(mut path, request.window.hi)
         (take path, None)
-    })
+    }))
 }
 
 fn tiered_window_cached(cache: ObjectsCache, request: TieredBucketGet) -> Option[Bytes] waits {

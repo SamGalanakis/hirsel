@@ -71,7 +71,7 @@ fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: B
     let t = view extractor.table
     let k = decoded(std.codec.decode_key(t.key, primary))?
     let v = row_value(t.readers, t.id, raw)?
-    let js = capacity((code.callable(extractor.by))(k, v))?
+    let js = failure_result_from_rep(types.capacity((code.callable(extractor.by))(k, v)))?
     let mut encoded: List[Bytes] = list.new()
     for j in js {
         let mut row = prefix(extractor.id)?
@@ -97,12 +97,12 @@ fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: B
     }
     let mut payload: Bytes = list.new()
     if let Unique = extractor.kind {
-        capacity(blob(mut payload, primary))?
+        failure_result_from_rep(types.capacity(format.blob(mut payload, primary)))?
     }
     if extractor.cover_row {
         list.append(mut payload, raw)
     } else if let Some(project) = extractor.project {
-        let value = capacity((code.callable(project.by))(k, v))?
+        let value = failure_result_from_rep(types.capacity((code.callable(project.by))(k, v)))?
         if let Some(number) = project.number {
             list.put_word_le(mut payload, number)
             std.codec.encode(project.codec, value, mut payload) ?=> |_| Limit(Value)
@@ -159,7 +159,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
     let mut old = 0u64
     for take key in take keys {
         while old < list.len(old_keys) && old_keys[old] < key {
-            append_index_remove(tx, mut edits, record, primary, copied(old_keys[old])?, mut frame)?
+            append_index_remove(tx, mut edits, record, primary, failure_result_from_rep(types.copied(old_keys[old]))?, mut frame)?
             old += 1
         }
         let unchanged = old < list.len(old_keys) && old_keys[old] == key
@@ -167,7 +167,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
         if unchanged {
             old += 1
         } else if let Entries(Unique) = catalog_index(record)?.shape {
-            list.push(mut edits.probes, (record.id, copied(key)?))
+            list.push(mut edits.probes, (record.id, failure_result_from_rep(types.copied(key))?))
         }
         if let Some(prior) = stored {
             if prior == payload {
@@ -175,10 +175,10 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
             }
         }
         frame = put_frame(tx, key, payload, frame)?
-        push_index_edit(mut edits, StoreRow(take key, copied(payload)?))
+        push_index_edit(mut edits, StoreRow(take key, failure_result_from_rep(types.copied(payload))?))
     }
     while old < list.len(old_keys) {
-        append_index_remove(tx, mut edits, record, primary, copied(old_keys[old])?, mut frame)?
+        append_index_remove(tx, mut edits, record, primary, failure_result_from_rep(types.copied(old_keys[old]))?, mut frame)?
         old += 1
     }
     Ok(())
@@ -226,7 +226,7 @@ fn preflight_index_edits(tx: Tx, edits: IndexEdits, primary: Bytes) -> Result[()
 fn find_index_name(catalog: PageTree, table_id: u32, index_id: u32) -> Result[String, Error] {
     let mut cursor = byte_cursor(catalog, Included(index_prefix(table_id)?), index_prefix(table_id + 1)?)?
     while let Some((key, raw)) = next_bytes(mut cursor)? {
-        if read_le(raw, 1, 4) == int.widen(index_id) {
+        if format.read_le(raw, 1, 4) == int.widen(index_id) {
             return declaration_index_name(key)
         }
     }
@@ -328,8 +328,8 @@ fn copied_state(state: IndexState) -> Result[IndexState, Error] {
     Ok(match state {
         Public => Public,
         Backfilling(None) => Backfilling(None),
-        Backfilling(Some(cursor)) => Backfilling(Some(copied(cursor)?)),
-        Failed(first, second) => Failed(copied(first)?, copied(second)?),
+        Backfilling(Some(cursor)) => Backfilling(Some(failure_result_from_rep(types.copied(cursor))?)),
+        Failed(first, second) => Failed(failure_result_from_rep(types.copied(first))?, failure_result_from_rep(types.copied(second))?),
     })
 }
 
@@ -345,7 +345,7 @@ fn take_le(raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
     if at > list.len(raw) || width > list.len(raw) - at {
         return Error(malformed(at))
     }
-    let n = read_le(raw, at, width)
+    let n = format.read_le(raw, at, width)
     at += width
     Ok(n)
 }
@@ -356,7 +356,7 @@ fn take_blob(raw: Bytes, mut at: u64) -> Result[Bytes, Error] {
         return Error(malformed(at))
     }
     let data = list.slice(raw, at, at + n)
-    let out = copied(data)?
+    let out = failure_result_from_rep(types.copied(data))?
     at += n
     Ok(take out)
 }
@@ -460,44 +460,44 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
 
 fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
     let mut raw: Bytes = list.new()
-    capacity(le(mut raw, int.widen(descriptor_kind_byte(catalog_kind(c.record))), 1))?
-    capacity(le(mut raw, int.widen(c.id), 4))?
-    capacity(le(mut raw, int.widen(c.owner), 4))?
-    capacity(le(mut raw, c.epoch, 8))?
-    capacity(blob(mut raw, c.key))?
-    capacity(le(mut raw, list.len(c.schemas), 2))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(descriptor_kind_byte(catalog_kind(c.record))), 1)))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.id), 4)))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.owner), 4)))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, c.epoch, 8)))?
+    failure_result_from_rep(types.capacity(format.blob(mut raw, c.key)))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, list.len(c.schemas), 2)))?
     for schema in c.schemas {
-        capacity(le(mut raw, int.widen(schema.number), 2))?
-        capacity(le(mut raw, schema.fingerprint, 8))?
-        capacity(blob(mut raw, schema.schema))?
+        failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(schema.number), 2)))?
+        failure_result_from_rep(types.capacity(format.le(mut raw, schema.fingerprint, 8)))?
+        failure_result_from_rep(types.capacity(format.blob(mut raw, schema.schema)))?
     }
-    capacity(le(mut raw, int.widen(c.next), 2))?
-    capacity(blob(mut raw, c.by))?
-    capacity(blob(mut raw, c.revision))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.next), 2)))?
+    failure_result_from_rep(types.capacity(format.blob(mut raw, c.by)))?
+    failure_result_from_rep(types.capacity(format.blob(mut raw, c.revision)))?
     if let CatalogIndex(index_meta) = view c.record {
-        capacity(le(mut raw, shape_byte(index_meta.shape), 1))?
-        capacity(le(mut raw, list.len(index_meta.payload_schemas), 2))?
+        failure_result_from_rep(types.capacity(format.le(mut raw, shape_byte(index_meta.shape), 1)))?
+        failure_result_from_rep(types.capacity(format.le(mut raw, list.len(index_meta.payload_schemas), 2)))?
         for schema in index_meta.payload_schemas {
-            capacity(blob(mut raw, schema))?
+            failure_result_from_rep(types.capacity(format.blob(mut raw, schema)))?
         }
         match index_meta.projection {
             Some((project_id, revision)) => {
-                capacity(blob(mut raw, project_id))?
-                capacity(blob(mut raw, revision))?
+                failure_result_from_rep(types.capacity(format.blob(mut raw, project_id)))?
+                failure_result_from_rep(types.capacity(format.blob(mut raw, revision)))?
             },
-            None => capacity(le(mut raw, 0, 8))?,
+            None => failure_result_from_rep(types.capacity(format.le(mut raw, 0, 8)))?,
         }
         match index_meta.state {
-            Public => capacity(le(mut raw, 0, 1))?,
-            Backfilling(None) => capacity(le(mut raw, 1, 1))?,
+            Public => failure_result_from_rep(types.capacity(format.le(mut raw, 0, 1)))?,
+            Backfilling(None) => failure_result_from_rep(types.capacity(format.le(mut raw, 1, 1)))?,
             Backfilling(Some(cursor)) => {
-                capacity(blob(mut raw, cursor))?
-                capacity(le(mut raw, 2, 1))?
+                failure_result_from_rep(types.capacity(format.blob(mut raw, cursor)))?
+                failure_result_from_rep(types.capacity(format.le(mut raw, 2, 1)))?
             },
             Failed(first, second) => {
-                capacity(blob(mut raw, first))?
-                capacity(blob(mut raw, second))?
-                capacity(le(mut raw, 3, 1))?
+                failure_result_from_rep(types.capacity(format.blob(mut raw, first)))?
+                failure_result_from_rep(types.capacity(format.blob(mut raw, second)))?
+                failure_result_from_rep(types.capacity(format.le(mut raw, 3, 1)))?
             },
         }
     }
@@ -530,7 +530,7 @@ fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
 // is incomplete, so a remove there may find nothing.
 fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
     if let Some(refund) = delete_refund(tx, key)? {
-        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, transaction_limit(tx.limits))?
+        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, types.transaction_limit(limits_to_rep(tx.limits)))?
         push_index_edit(mut edits, RemoveRow(take key, refund))
         return Ok(())
     }
@@ -603,8 +603,8 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     } else {
         least
     }
-    capacity(bytebuf.try_reserve_hint(mut raw, least, hint))?
-    capacity(le(mut raw, int.widen(t.readers.current), 2))?
+    failure_result_from_rep(types.capacity(bytebuf.try_reserve_hint(mut raw, least, hint)))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(t.readers.current), 2)))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
     let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?
     if list.len(indexes) == 0 {
@@ -740,7 +740,7 @@ fn apply_delete_plan(mut tx: Tx, take p: Bytes, take plan: DeletePlan, popped: b
     if let Some(take seen) = replace(mut edit_plan.drift, None) {
         return Error(drift_stop(mut tx, take seen))
     }
-    let next_frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame, transaction_limit(tx.limits))?
+    let next_frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame, types.transaction_limit(limits_to_rep(tx.limits)))?
     if indexed {
         preflight_index_edits(tx, edit_plan, p)?
     }

@@ -4,33 +4,23 @@ pub const FRAME_LIMIT: u64 = 16777296
 
 pub const VALUE_LIMIT: u64 = FORMAT_VALUE_MAX
 
-const FORMAT_VALUE_MAX: u64 = std.page.VALUE_MAX
-
-/// A store's own limits (§11.1 AP4a). Genesis records them in the MANIFEST,
-/// every later open reads them back, and every limit check uses them:
-/// `frame` bounds a journal frame (16 + the COMMIT payload), `value` a stored
-/// value, `meta` the MANIFEST's branch and pin records.
-pub type StoreLimits: codec + shareable + cross {
-    frame: u64,
-    value: u64,
-    meta: u64
-}
+pub const FORMAT_VALUE_MAX: u64 = std.page.VALUE_MAX
 
 /// Today's ceilings, the limits of a store made without any.
-pub fn default_limits() -> StoreLimits {
-    StoreLimits(frame: FRAME_LIMIT, value: VALUE_LIMIT, meta: META_LIMIT)
+pub fn default_limits() -> LimitsRep {
+    LimitsRep(frame: FRAME_LIMIT, value: VALUE_LIMIT, meta: META_LIMIT)
 }
 
 // The least frame and value a store may record, and the room a frame keeps
 // beyond its value: a full key, a full value and the COMMIT's fixed fields
 // fit one frame, as at the ceilings (16,777,296 − 16,711,680).
-const LIMIT_VALUE_FLOOR: u64 = 4096
+pub const LIMIT_VALUE_FLOOR: u64 = 4096
 
-const LIMIT_META_FLOOR: u64 = 4096
+pub const LIMIT_META_FLOOR: u64 = 4096
 
-const LIMIT_FRAME_ROOM: u64 = FRAME_LIMIT - VALUE_LIMIT
+pub const LIMIT_FRAME_ROOM: u64 = FRAME_LIMIT - VALUE_LIMIT
 
-fn limits_valid(l: StoreLimits) -> Option[String] {
+pub fn limits_valid(l: LimitsRep) -> Option[String] {
     if l.value < LIMIT_VALUE_FLOOR || l.value > VALUE_LIMIT {
         return Some(string.from("value_limit"))
     }
@@ -43,18 +33,18 @@ fn limits_valid(l: StoreLimits) -> Option[String] {
     None
 }
 
-fn limits_fit(l: StoreLimits) -> bool {
+pub fn limits_fit(l: LimitsRep) -> bool {
     match limits_valid(l) {
         Some(_) => false,
         None => true,
     }
 }
 
-fn same_limits(a: StoreLimits, b: StoreLimits) -> bool {
+pub fn same_limits(a: LimitsRep, b: LimitsRep) -> bool {
     a.frame == b.frame && a.value == b.value && a.meta == b.meta
 }
 
-fn named_limits(o: Option[StoreLimits]) -> StoreLimits {
+pub fn named_limits(o: Option[LimitsRep]) -> LimitsRep {
     match o {
         Some(l) => l,
         None => default_limits(),
@@ -62,17 +52,12 @@ fn named_limits(o: Option[StoreLimits]) -> StoreLimits {
 }
 
 // The COMMIT payload limit: the frame less its 16-byte head.
-fn transaction_limit(l: StoreLimits) -> u64 {
+pub fn transaction_limit(l: LimitsRep) -> u64 {
     l.frame - 16
 }
 
-/// The limits this store records (§11.1 AP4a).
-pub fn store_limits(db: Db) -> StoreLimits {
-    db.limits
-}
-
 // An open that names limits must name the recorded ones (§11.1 AP4a).
-fn check_limits(wanted: Option[StoreLimits], found: StoreLimits) -> Result[(), Error] {
+pub fn check_limits(wanted: Option[LimitsRep], found: LimitsRep) -> Result[(), Failure] {
     if let Some(l) = wanted {
         if !same_limits(l, found) {
             return Error(LimitsDiffer(found))
@@ -83,7 +68,7 @@ fn check_limits(wanted: Option[StoreLimits], found: StoreLimits) -> Result[(), E
 
 // The journal must hold a checkpoint and one more frame of the store's
 // frame limit (§11.1 AP4a).
-fn journal_floor(checkpoint_bytes: u64, journal_limit: u64, frame: u64) -> Option[Capacity] {
+pub fn journal_floor(checkpoint_bytes: u64, journal_limit: u64, frame: u64) -> Option[Capacity] {
     let Some(floor) = int.checked_add(checkpoint_bytes, frame) else {
         return Some(Capacity(requested: 18446744073709551615u64, available: journal_limit))
     }
@@ -94,23 +79,8 @@ fn journal_floor(checkpoint_bytes: u64, journal_limit: u64, frame: u64) -> Optio
     }
 }
 
-// A frame or value past the recorded limits was never admitted (§11.1 AP4a).
-fn replay_within_limits(file: String, limits: StoreLimits, commit: JournalCommit) -> Result[(), Error] {
-    if commit.payload > transaction_limit(limits) {
-        return Error(disk_fault(file, 0, Malformed))
-    }
-    for op in commit.data {
-        if let Some(value) = view op.value {
-            if list.len(value) > limits.value {
-                return Error(disk_fault(file, 0, Malformed))
-            }
-        }
-    }
-    Ok(())
-}
-
 // Limits an open names must lie between the floors and the ceilings.
-fn check_named_limits(limits: Option[StoreLimits]) -> Result[(), Error] {
+pub fn check_named_limits(limits: Option[LimitsRep]) -> Result[(), Failure] {
     if let Some(l) = limits {
         if let Some(name) = limits_valid(l) {
             return Error(Missing(name))

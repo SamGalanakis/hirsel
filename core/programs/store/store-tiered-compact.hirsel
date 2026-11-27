@@ -66,7 +66,7 @@ fn lease_cut_inventories(installed: TieredCompaction, roots: List[Roots]) -> Res
                 }
             }
             if !known {
-                capacity(list.try_reserve(mut held, 1))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut held, 1)))?
                 list.push(mut held, arc.share(inventory))
             }
         }
@@ -167,9 +167,9 @@ fn compact_note_moved(mut work: TieredCompactWork, ptr: std.page.PagePtr) -> Res
     if map.contains(work.moved_stamps, ptr.stamp) {
         return Ok(())
     }
-    capacity(map.try_reserve(mut work.moved_stamps, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut work.moved_stamps, 1)))?
     map.insert(mut work.moved_stamps, ptr.stamp, ())
-    capacity(list.try_reserve(mut work.moved, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut work.moved, 1)))?
     list.push(mut work.moved, (ptr.pack, int.widen(ptr.len)))
     Ok(())
 }
@@ -193,7 +193,7 @@ fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredP
                 fail("store: a BLOB reference resolved to a PAGE")
             }
             let moved_body = disk_allocation(scoped fn() -> Result[std.page.BlobSlot, Error] {
-                Ok(HotBlob(arc.new(copied(body)?)))
+                Ok(HotBlob(arc.new(failure_result_from_rep(types.copied(body))?)))
             })?
             return compact_rebuild(page, at, None, Some(moved_body))
         }
@@ -231,7 +231,7 @@ fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: 
                         fail("store: a BLOB reference resolved to a PAGE")
                     }
                     let moved_body = disk_allocation(scoped fn() -> Result[Arc[Bytes], Error] {
-                        Ok(arc.new(copied(body)?))
+                        Ok(arc.new(failure_result_from_rep(types.copied(body))?))
                     })?
                     Some(MovedQueueBlob(reference, take moved_body))
                 } else {
@@ -244,9 +244,9 @@ fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: 
         return Ok(())
     }
     let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        copied(row.key)
+        failure_result_from_rep(types.copied(row.key))
     })?
-    capacity(map.try_reserve(mut work.queue, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut work.queue, 1)))?
     map.insert(mut work.queue, at, TieredQueueMove(branch_id: queued.branch_id, collection: row.collection, key: take key, value: take value))
     Ok(())
 }
@@ -286,7 +286,7 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
 fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), Error] waits {
     let mut packs_in_order: List[u64] = list.new()
     for (seq, _) in probes {
-        capacity(list.try_reserve(mut packs_in_order, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut packs_in_order, 1)))?
         list.push(mut packs_in_order, seq)
     }
     list.sort(mut packs_in_order, fn(a: u64, b: u64) -> Order {
@@ -307,10 +307,10 @@ fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installe
         })?
         left = int.saturating_sub(left, walk.rows - rows_before)
         if finished {
-            capacity(list.try_reserve(mut retiring, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut retiring, 1)))?
             list.push(mut retiring, seq)
         } else {
-            capacity(map.try_reserve(mut probes, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut probes, 1)))?
             map.insert(mut probes, seq, take walk)
         }
     }
@@ -352,7 +352,7 @@ fn select_compaction(installed: PageLocations, running: Map[u64, TieredProbeCurs
             Some(kept) => clone(kept),
             None => start_tiered_probe(pack),
         }
-        capacity(map.try_reserve(mut probes, 1))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut probes, 1)))?
         map.insert(mut probes, seq, take cursor)
     }
     Ok(take probes)
@@ -390,7 +390,7 @@ fn compact_idle_probes(installed: PageLocations, running: Map[u64, TieredProbeCu
         let frame_count: u64 = int.widen(pack.frames)
         let rows_left = int.saturating_sub(frame_count, done)
         left = int.saturating_sub(left, rows_left)
-        capacity(list.try_reserve(mut retiring, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut retiring, 1)))?
         list.push(mut retiring, seq)
         let _ = map.remove(mut probes, seq)
     }
@@ -456,7 +456,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     // were never charged dead.
     let shared = disk_allocation(scoped fn() -> Result[List[Roots], Error] {
         let mut shares: List[Roots] = list.new()
-        capacity(list.try_reserve(mut shares, list.len(roots)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut shares, list.len(roots))))?
         for held in roots {
             list.push(mut shares, PageRoots(collections: share_page_tree(held.collections), streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
         }
@@ -487,7 +487,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
 
 fn queue_moves_in_order(moving: Map[u64, TieredQueueMove]) -> Result[List[u64], Error] {
     let mut seqs: List[u64] = list.new()
-    capacity(list.try_reserve(mut seqs, map.len(moving)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut seqs, map.len(moving))))?
     for (at, _) in moving {
         list.push(mut seqs, at)
     }
@@ -508,10 +508,10 @@ fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueM
             MovedQueuePage(slot) => tiered_emit_tree(mut pending, moved.collection, slot)?,
             MovedQueueBlob(reference, body) => {
                 if !map.contains(pending.seen, reference.stamp) {
-                    let key = copied(moved.key)?
+                    let key = failure_result_from_rep(types.copied(moved.key))?
                     let frame = PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
-                    capacity(map.try_reserve(mut pending.seen, 1))?
-                    capacity(list.try_reserve(mut pending.blobs, 1))?
+                    failure_result_from_rep(types.capacity(map.try_reserve(mut pending.seen, 1)))?
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut pending.blobs, 1)))?
                     map.insert(mut pending.seen, reference.stamp, ())
                     list.push(mut pending.blobs, TieredEmitFrame(collection: moved.collection, stamp_in_image: reference.stamp, key: take key, frame: take frame))
                 }
@@ -528,7 +528,7 @@ fn settle_queue_moves(mut queue: CutQueue, moving: Map[u64, TieredQueueMove], em
         let Some(moved) = map.get(moving, at) else {
             continue
         }
-        let target = match moved.value {
+        let target: format.TieredTarget = match moved.value {
             MovedQueuePage(slot) => {
                 let HotPage(page) = view slot else {
                     fail("store: a moved queue row lost its copy")
@@ -549,7 +549,7 @@ fn settle_queue_moves(mut queue: CutQueue, moving: Map[u64, TieredQueueMove], em
         if at >= first_added {
             queue.added[at - first_added] = take row
         } else {
-            capacity(list.try_reserve(mut queue.rewritten, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut queue.rewritten, 1)))?
             list.push(mut queue.rewritten, (at, take row))
         }
     }

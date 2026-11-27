@@ -25,7 +25,7 @@ fn resident_rows_after(roots: Roots, table_id: u32, cursor: Option[Bytes], limit
         let Some((take key, raw)) = next_bytes(mut rows)? else {
             return Ok((take out, true))
         }
-        list.push(mut out, (take key, copied(raw)?))
+        list.push(mut out, (take key, failure_result_from_rep(types.copied(raw))?))
     }
     let done = match next_bytes(mut rows)? {
         Some(_) => false,
@@ -85,7 +85,7 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
             if list.len(out) == limit {
                 return Ok((take out, false))
             }
-            list.push(mut out, (take key, copied(value)?))
+            list.push(mut out, (take key, failure_result_from_rep(types.copied(value))?))
             previous = Some(take resume)
         }
         return Ok((take out, false))
@@ -110,7 +110,7 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
         if list.len(out) == limit {
             return Ok((take out, false))
         }
-        list.push(mut out, (take key, copied(value)?))
+        list.push(mut out, (take key, failure_result_from_rep(types.copied(value))?))
         previous = Some(take resume)
     }
     Ok((take out, false))
@@ -136,7 +136,7 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     if let Sums = catalog_index(record)?.shape {
         add_chunk_totals(mut roots.collections, mut live_bytes, plan.retained, plan.ceiling, first, mut next_stamp, extractor, rows, mut chunk_steps)?
         if let Some((logical, _)) = list.last(rows) {
-            cursor = Some(copied(list.slice(logical, 4, list.len(logical)))?)
+            cursor = Some(failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?)
         }
     } else {
         for (logical, raw) in rows {
@@ -146,13 +146,13 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
                 if list.len(row) > 4096 {
                     return Error(Limit(Key))
                 }
-                let prior_width = stored_prior(get_page_row(roots.collections, row))
+                let prior_width = format.stored_prior(get_page_row(roots.collections, row))
                 if let Some(prior) = get_page_row(roots.collections, row) {
                     if let Entries(Unique) = catalog_index(record)?.shape {
                         let owner = list.slice(prior, 4, unique_owner_end(prior)?)
                         if owner != primary {
                             if let None = duplicate {
-                                duplicate = Some((copied(owner)?, copied(primary)?))
+                                duplicate = Some((failure_result_from_rep(types.copied(owner))?, failure_result_from_rep(types.copied(primary))?))
                             }
                             if !preview {
                                 return Ok(take duplicate)
@@ -168,11 +168,11 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
                 over_ceiling(live_bytes, plan.ceiling)?
                 put_page_row(mut roots.collections, row, values.payload, first, mut next_stamp)?
                 if let Some(mut step_rows) = chunk_steps {
-                    capacity(list.try_reserve(mut step_rows, 1))?
-                    list.push(mut step_rows, StepOp(key: copied(row)?, value: Some(copied(values.payload)?), prior: prior_width))
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut step_rows, 1)))?
+                    list.push(mut step_rows, StepOp(key: failure_result_from_rep(types.copied(row))?, value: Some(failure_result_from_rep(types.copied(values.payload))?), prior: prior_width))
                 }
             }
-            cursor = Some(copied(primary)?)
+            cursor = Some(failure_result_from_rep(types.copied(primary))?)
         }
     }
     canonical_tree(mut roots.collections)?
@@ -189,7 +189,7 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     keep_schema(mut plan, take roots, live_bytes, next_table)?
     if let Some(take ops) = take chunk_steps {
         for take op in take ops {
-            capacity(list.try_reserve(mut plan.step_rows, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut plan.step_rows, 1)))?
             list.push(mut plan.step_rows, take op)
         }
     }
@@ -231,8 +231,8 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
                 let charge = entry(row, values.payload)
                 workspace = int.saturating_add(workspace, charge + 8)
                 over_ceiling(workspace, plan.ceiling)?
-                capacity(list.try_reserve(mut extracted, 1))?
-                list.push(mut extracted, std.page.Row(key: copied(list.slice(row, 4, list.len(row)))?, value: copied(values.payload)?, charge: charge))
+                failure_result_from_rep(types.capacity(list.try_reserve(mut extracted, 1)))?
+                list.push(mut extracted, std.page.Row(key: failure_result_from_rep(types.copied(list.slice(row, 4, list.len(row))))?, value: failure_result_from_rep(types.copied(values.payload))?, charge: charge))
             }
         }
     }
@@ -242,7 +242,7 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
     sort_bulk_rows(mut extracted)?
     let mut duplicate: Option[(Bytes, Bytes)] = None
     let mut kept: List[std.page.Row] = list.new()
-    capacity(list.try_reserve(mut kept, list.len(extracted)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut kept, list.len(extracted))))?
     for take row in take extracted {
         if let Some(previous) = list.last(kept) {
             if previous.key == row.key {
@@ -254,7 +254,7 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
                         None => true,
                     }
                     if owner != second && earlier {
-                        duplicate = Some((copied(owner)?, copied(second)?))
+                        duplicate = Some((failure_result_from_rep(types.copied(owner))?, failure_result_from_rep(types.copied(second))?))
                     }
                 }
                 continue
@@ -283,7 +283,7 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
     bulk_store_collection(mut roots.collections, current.id, 2, take kept, mut plan.next_node)?
     // F4: mark the replaced collection id superseded so a non-empty bulk
     // redefinition under an export lease is caught as Drift at the cut.
-    capacity(list.try_reserve(mut plan.superseded, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut plan.superseded, 1)))?
     list.push(mut plan.superseded, current.id)
     set_index_state(mut current, Public)?
     let raw = encode_catalog(current)?
@@ -301,7 +301,7 @@ fn chunked_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, ext
     let mut duplicate: Option[(Bytes, Bytes)] = None
     loop {
         let cursor = match catalog_index(current)?.state {
-            Backfilling(Some(final_key)) => Some(copied(final_key)?),
+            Backfilling(Some(final_key)) => Some(failure_result_from_rep(types.copied(final_key))?),
             _ => None,
         }
         let (take rows, done) = resident_rows_after(plan.roots, current.owner, cursor, INDEX_CHUNK)?
@@ -406,7 +406,7 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
         let _ = cut_install(mut db, NoHolderChange)?
     }
     let cursor = match catalog_index(record)?.state {
-        Backfilling(Some(final_key)) => Some(copied(final_key)?),
+        Backfilling(Some(final_key)) => Some(failure_result_from_rep(types.copied(final_key))?),
         _ => None,
     }
     let (take rows, done) = tiered_rows_after(db, record.owner, cursor, limit)?
@@ -424,7 +424,7 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
                 if done {
                     set_index_state(mut published, Public)?
                 } else if let Some((logical, _)) = list.last(rows) {
-                    let after = copied(list.slice(logical, 4, list.len(logical)))?
+                    let after = failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?
                     set_index_state(mut published, Backfilling(Some(take after)))?
                 }
                 put_index_record(mut plan, key, published)?
@@ -474,7 +474,7 @@ fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[bool, Error] {
         define_store_collection(mut roots.collections, id, 2, mut plan.next_node)?
     }
     // D-CU-1: demotion supersedes the collection id for Memory and Tiered alike.
-    capacity(list.try_reserve(mut plan.superseded, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut plan.superseded, 1)))?
     list.push(mut plan.superseded, id)
     let mut live_bytes = plan.live
     if !plan.retained {
@@ -499,7 +499,7 @@ fn demote_drifted(mut db: Db, seen: List[(u32, u32)]) -> Result[(), Error] waits
     for (owner, id) in seen {
         let name = find_index_name(plan.roots.catalog, owner, id)?
         if demote_index(mut plan, catalog_index_key(owner, name)?)? {
-            capacity(list.try_reserve(mut demoted, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut demoted, 1)))?
             list.push(mut demoted, (owner, id))
         }
     }
@@ -513,7 +513,7 @@ fn demote_drifted(mut db: Db, seen: List[(u32, u32)]) -> Result[(), Error] waits
 // `index_build_step` then rebuilds it while every other index serves.
 pub fn rebuild_index[J, K, V, P](mut db: Db, ix: Index[J, K, V, P]) -> Result[(), Error] waits {
     healthy(db)?
-    if !same(db.store, ix.store) {
+    if !types.same(db.store.hi, db.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
     let mut plan = schema_plan(db)
@@ -533,7 +533,7 @@ pub fn rebuild_index[J, K, V, P](mut db: Db, ix: Index[J, K, V, P]) -> Result[()
 // index is rebuilt whole, an aggregate resumes from its cursor, and a Failed
 // one restarts from an empty index.
 fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, take record: Catalog, extractor: RegisteredIndex, new_index: bool, take cause: String) -> Result[(), Error] {
-    if !same(plan.store, t.store) {
+    if !types.same(plan.store.hi, plan.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
     let mut proposed = take record
@@ -576,8 +576,8 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         } else {
             None
         }
-        capacity(list.try_reserve(mut plan.pending_indexes, 1))?
-        list.push(mut plan.pending_indexes, DeferredIndexBuild(catalog_key: copied(key)?, name: named(name)?, record_raw: encode_catalog(current)?, preview_slot: preview_slot))
+        failure_result_from_rep(types.capacity(list.try_reserve(mut plan.pending_indexes, 1)))?
+        list.push(mut plan.pending_indexes, DeferredIndexBuild(catalog_key: failure_result_from_rep(types.copied(key))?, name: named(name)?, record_raw: encode_catalog(current)?, preview_slot: preview_slot))
         plan.step_drift = true
         return Ok(())
     }
@@ -658,7 +658,7 @@ fn key_word_at(key: Bytes, at: u64) -> u64 {
 fn sort_bulk_rows(mut rows: List[std.page.Row]) -> Result[(), Error] {
     let mut order_keys: List[(u64, u64, u64)] = list.new()
     let n = list.len(rows)
-    capacity(list.try_reserve(mut order_keys, n))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut order_keys, n)))?
     for slot in 0u64 .. n {
         let key = view rows[slot].key
         list.push(mut order_keys, (key_word_at(key, 0), key_word_at(key, 8), slot))
@@ -676,7 +676,7 @@ fn sort_bulk_rows(mut rows: List[std.page.Row]) -> Result[(), Error] {
         }
     })
     let mut positions: List[u64] = list.new()
-    capacity(list.try_reserve(mut positions, n))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut positions, n)))?
     for (_, _, slot) in order_keys {
         list.push(mut positions, slot)
     }

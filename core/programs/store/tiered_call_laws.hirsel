@@ -145,18 +145,18 @@ fn test_l63_missed_attempt_fallback_commits_nothing(d: Dir, c: Clock, tasks: Tas
 // again, and the rerun commits once with the hit's write and reply. With no
 // pager the same miss is `Before(Io(Closed))`, so row 3 really is Cold.
 fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
-    let stream = law_stream_bytes(key_word(23), keyed_time(db))
+    let stream = law_stream_bytes(types.key_word(23), keyed_time(db))
     let request = request_digest(stream, stream)
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
     let body = fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[Bytes, Bytes] {
         match fetch(tx, env.0, 3u64) {
             Ok(Some(v)) => {
                 result.unwrap(put(mut tx, env.1, 2u64, v))
-                Ok(key_word(3))
+                Ok(types.key_word(3))
             },
             _ => {
                 result.unwrap(put(mut tx, env.1, 1u64, 1u32))
-                Ok(key_word(0))
+                Ok(types.key_word(0))
             },
         }
     }
@@ -187,7 +187,7 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
     let Ok(Committed(receipt)) = l63_settle(mut db, take parked, handles, body) else {
         fail("L63: the served call commits after the delivered miss")
     }
-    if receipt.reply != key_word(3) {
+    if receipt.reply != types.key_word(3) {
         fail("L63: the committed reply is the rerun's hit")
     }
     if version(snapshot(db)) != before + 1 {
@@ -251,9 +251,9 @@ fn l63_parking_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Resu
     match row {
         Ok(Some(v)) => {
             result.unwrap(put(mut tx, env.1, 8u64, v + mark))
-            Ok(key_word(info(mut tx).id.version * 1000 + int.widen(mark)))
+            Ok(types.key_word(info(mut tx).id.version * 1000 + int.widen(mark)))
         },
-        _ => Ok(key_word(0)),
+        _ => Ok(types.key_word(0)),
     }
 }
 
@@ -262,7 +262,7 @@ fn l63_parking_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Resu
 // carries the write's value and its own version, which is the write's + 1,
 // and it commits once.
 fn l63_moved_head(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
-    let stream = law_stream_bytes(key_word(29), keyed_time(db))
+    let stream = law_stream_bytes(types.key_word(29), keyed_time(db))
     let request = request_digest(stream, stream)
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
     let Admitted(take first) = admit_law_stream(mut db, stream, 0, request)? else {
@@ -281,7 +281,7 @@ fn l63_moved_head(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Re
     let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take p)), handles, l63_parking_body) else {
         fail("L63: the parked call commits after the head moved")
     }
-    if receipt.reply != key_word((moved + 1) * 1000 + 70) {
+    if receipt.reply != types.key_word((moved + 1) * 1000 + 70) {
         fail("L63: the rerun decides at the moved head and reads its write")
     }
     if version(snapshot(db)) != moved + 1 {
@@ -306,11 +306,11 @@ fn test_l63_parked_call_reruns_at_moved_head(d: Dir, c: Clock, tasks: Tasks) -> 
 // parks in its old place; then P and Q each rerun and commit once.
 fn l63_revoke_race(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
-    let p_stream = law_stream_bytes(key_word(31), keyed_time(db))
+    let p_stream = law_stream_bytes(types.key_word(31), keyed_time(db))
     let Admitted(take p_first) = admit_law_stream(mut db, p_stream, 0, request_digest(p_stream, p_stream))? else {
         fail("L63: P is admitted")
     }
-    let q_stream = law_stream_bytes(key_word(37), keyed_time(db))
+    let q_stream = law_stream_bytes(types.key_word(37), keyed_time(db))
     let Admitted(take q_first) = admit_law_stream(mut db, q_stream, 0, request_digest(q_stream, q_stream))? else {
         fail("L63: Q is admitted")
     }
@@ -355,7 +355,7 @@ fn l63_revoke_race(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
     let Ok(Committed(q_receipt)) = l63_settle(mut db, Ok(Parked(take q)), handles, l63_parking_body) else {
         fail("L63: Q commits after its revocation")
     }
-    if p_receipt.reply != key_word((base + 1) * 1000) || q_receipt.reply != key_word((base + 2) * 1000) {
+    if p_receipt.reply != types.key_word((base + 1) * 1000) || q_receipt.reply != types.key_word((base + 2) * 1000) {
         fail("L63: each rerun decides at the head it commits on")
     }
     if version(snapshot(db)) != base + 2 {
@@ -406,13 +406,13 @@ fn l63_prior_body(mut tx: Tx, rows: Table[u64, u32]) -> Result[Bytes, Bytes] {
     match fetch(tx, rows, 4u64) {
         Ok(Some(v)) => {
             result.unwrap(put(mut tx, rows, 4u64, v + 1))
-            Ok(key_word(int.widen(v)))
+            Ok(types.key_word(int.widen(v)))
         },
         Ok(None) => {
             result.unwrap(put(mut tx, rows, 4u64, 1u32))
-            Ok(key_word(0))
+            Ok(types.key_word(0))
         },
-        Error(_) => Ok(key_word(9999)),
+        Error(_) => Ok(types.key_word(9999)),
     }
 }
 
@@ -428,7 +428,7 @@ fn l63_prior_body(mut tx: Tx, rows: Table[u64, u32]) -> Result[Bytes, Bytes] {
 fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let (directory, options, take opened, take rows, _) = l63_directory_fixture(d, c, r, tasks)?
     let mut db = take opened
-    let stream = law_stream_bytes(key_word(41), keyed_time(db))
+    let stream = law_stream_bytes(types.key_word(41), keyed_time(db))
     let request = request_digest(stream, stream)
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
     let Admitted(take first) = admit_law_stream(mut db, stream, 0, request)? else {
@@ -449,13 +449,13 @@ fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
         fail("L63 (d): A commits after B moved the head")
     }
     durable(mut db, receipt.ticket)?
-    if receipt.reply != key_word(40) || version(snapshot(db)) != option.unwrap(inserted.info).id.version + 1 {
+    if receipt.reply != types.key_word(40) || version(snapshot(db)) != option.unwrap(inserted.info).id.version + 1 {
         fail("L63 (d): A reruns at B's head, reads 40 and commits once")
     }
-    let path = capacity(disk_path("j-", seq, ""))?
+    let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
     let wire = read_journal_prefix(directory, path, db.file_end)?
-    let frame = journal_decode_commit(path, copied(list.slice(wire, start + 16, db.file_end))?)?
-    let k = logical_key(rows.id, key_word(4))?
+    let frame = journal_decode_commit(path, failure_result_from_rep(types.copied(list.slice(wire, start + 16, db.file_end)))?)?
+    let k = logical_key(rows.id, types.key_word(4))?
     let mut prior: Option[u32] = None
     for op in frame.data {
         if op.key == k {
@@ -564,7 +564,7 @@ fn l63_cold_snapshot_diffs(mut db: Db, base: Snapshot, rows_handle: Table[u64, u
 // the mark it read * 1000000 + the row + 1. A missed attempt replies 0.
 fn l63_schedule_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32], u64, u64)) -> Result[Bytes, Bytes] {
     let Ok(seen) = fetch(tx, env.0, env.2) else {
-        return Ok(key_word(0))
+        return Ok(types.key_word(0))
     }
     let old = match fetch(tx, env.1, env.3) {
         Ok(Some(m)) => m,
@@ -581,7 +581,7 @@ fn l63_schedule_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32], u64, u6
 fn schedule_reply(old: u32, add: u32) -> Bytes {
     let read: u64 = int.widen(old)
     let row: u64 = int.widen(add)
-    key_word(read * 1000000 + row + 1)
+    types.key_word(read * 1000000 + row + 1)
 }
 
 // The ordered-map model of `rows` and `marks`, and the head it is current at.
@@ -660,7 +660,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             let row_key: u64 = 1 + std.rand.below(mut g, 6)
             let mark_key: u64 = std.rand.below(mut g, 4)
             let env: (Table[u64, u32], Table[u64, u32], u64, u64) = (copy_env(handles.0), copy_env(handles.1), row_key, mark_key)
-            let stream = law_stream_bytes(key_word(1000 + streams), keyed_time(db))
+            let stream = law_stream_bytes(types.key_word(1000 + streams), keyed_time(db))
             streams += 1
             let Admitted(take first) = admit_law_stream(mut db, stream, 0, request_digest(stream, stream))? else {
                 fail("L63 schedule: a fresh stream is admitted")

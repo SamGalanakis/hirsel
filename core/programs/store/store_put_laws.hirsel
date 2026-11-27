@@ -10,7 +10,7 @@ fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R
 fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
     let keep_reply: Option[fn(A) -> bool] = None
     let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes, 0)
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     match stage(mut db, i, wall, steps, keep_reply, attempt, no_pins, body) {
         Over(take o) => Ok(take o),
         Ran(take ran) => commit_ran(mut db, i, take ran),
@@ -22,7 +22,7 @@ fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped
 
 fn fetch_raw(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
     match fetch_logical(tx, logical_key(id, key)?)? {
-        Some(v) => Ok(Some(copied(v)?)),
+        Some(v) => Ok(Some(failure_result_from_rep(types.copied(v))?)),
         None => Ok(None)
     }
 }
@@ -40,7 +40,7 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
         define_collection(mut tx.roots.collections, id, 1, tx.private_from, mut draw)?
         tx.resident += 126
     }
-    apply_put(mut tx, take p, copied(val)?, false)?
+    apply_put(mut tx, take p, failure_result_from_rep(types.copied(val))?, false)?
     tx.frame_bytes = frame
     Ok(())
 }
@@ -57,7 +57,7 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     let Some(refund) = delete_refund(tx, p)? else {
         return Ok(false)
     }
-    let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, tx.frame_bytes, transaction_limit(tx.limits))?
+    let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, tx.frame_bytes, types.transaction_limit(limits_to_rep(tx.limits)))?
     apply_delete(mut tx, take p, refund)?
     tx.frame_bytes = frame
     Ok(true)
@@ -77,16 +77,16 @@ fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Resu
     }
     let (take key, take value) = reply_row(tx, result.unwrap(stream_key_bytes(c.stream)), p, r)?
     call_checked(c)?
-    let size = call_section_bytes(c, None)
+    let size = format.call_section_bytes(c.key, c.args, c.revision, c.code, None)
     stream_write(mut tx, take key, take value, size)?
-    tx.call = Some(CallSection(record: take c, settlement: None))
+    tx.call = Some(format.CallSection(record: call_record_to_rep(take c), settlement: None))
     Ok(())
 }
 
 fn get_raw(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
     let p = logical_key(id, key)?
     match get_page_row(s.roots.collections, p) {
-        Some(v) => Ok(Some(copied(v)?)),
+        Some(v) => Ok(Some(failure_result_from_rep(types.copied(v))?)),
         None => Ok(None)
     }
 }
@@ -108,7 +108,7 @@ fn raw_test_db(c: Clock, cap: u64) -> Db {
 
 fn put_one(mut db: Db, k: u64, v: u64) -> bool {
     let outcome = execute(mut db, 0, 20, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put_bytes(mut tx, 1, key_word(k), key_word(v))
+        put_bytes(mut tx, 1, types.key_word(k), types.key_word(v))
     })
     match take outcome {
         Ok(Committed(_)) => true,
@@ -117,7 +117,7 @@ fn put_one(mut db: Db, k: u64, v: u64) -> bool {
 }
 
 fn value_at(s: Snapshot, k: u64) -> u64 {
-    match result.unwrap(get_raw(s, 1, key_word(k))) {
+    match result.unwrap(get_raw(s, 1, types.key_word(k))) {
         Some(raw) => decode_word(raw),
         None => 0
     }
@@ -232,7 +232,7 @@ pub fn law_snapshots(c: Clock) -> bool {
     let before = version(held)
     let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[PageRange, Error] {
         let rows = byte_cursor(tx.roots.collections, Included(prefix(1)?), prefix(2)?)?
-        put_bytes(mut tx, 1, key_word(0), key_word(9999))?
+        put_bytes(mut tx, 1, types.key_word(0), types.key_word(9999))?
         Ok(take rows)
     })
     let mut rows = match take rows_result {
@@ -295,12 +295,12 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
             if done.value != 46 || list.len(done.reads) != 4 {
                 return false
             }
-            let one = result.unwrap(logical_key(t.id, key_word(1)))
-            let two = result.unwrap(logical_key(t.id, key_word(2)))
-            let lo = result.unwrap(lower_bytes(t.id, Excluded(key_word(1)), false))
-            let middle = result.unwrap(lower_bytes(t.id, Excluded(key_word(2)), false))
-            let hi = result.unwrap(lower_bytes(t.id, Included(key_word(3)), true))
-            same_read(done.reads[0], Point(take one)) && same_read(done.reads[1], Point(take two)) && same_read(done.reads[2], Span(take lo, result.unwrap(copied(middle)))) && same_read(done.reads[3], Span(take middle, take hi))
+            let one = result.unwrap(logical_key(t.id, types.key_word(1)))
+            let two = result.unwrap(logical_key(t.id, types.key_word(2)))
+            let lo = result.unwrap(lower_bytes(t.id, Excluded(types.key_word(1)), false))
+            let middle = result.unwrap(lower_bytes(t.id, Excluded(types.key_word(2)), false))
+            let hi = result.unwrap(lower_bytes(t.id, Included(types.key_word(3)), true))
+            same_read(done.reads[0], Point(take one)) && same_read(done.reads[1], Point(take two)) && same_read(done.reads[2], Span(take lo, result.unwrap(failure_result_from_rep(types.copied(middle))))) && same_read(done.reads[3], Span(take middle, take hi))
         },
         _ => false
     }
@@ -350,7 +350,7 @@ pub fn law_resident(c: Clock) -> bool {
         return false
     }
     let refused_write = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put_bytes(mut tx, 1, key_word(2), key_word(20))
+        put_bytes(mut tx, 1, types.key_word(2), types.key_word(20))
     })
     match take refused_write {
         Ok(Refused(Resident(cap))) => if cap.requested != 298 || cap.available != 212 {
@@ -362,7 +362,7 @@ pub fn law_resident(c: Clock) -> bool {
         return false
     }
     let removed = execute(mut db, 0, 2, None, fn(mut tx: Tx) -> Result[bool, Error] {
-        delete_bytes(mut tx, 1, key_word(1))
+        delete_bytes(mut tx, 1, types.key_word(1))
     })
     match take removed {
         Ok(Committed(done)) => if !done.value {
@@ -396,10 +396,10 @@ fn model_step(mut db: Db, wall: u64, kind: u64, k: u64) -> bool {
     let outcome = execute(mut db, 0, wall, None, fn(mut tx: Tx) -> Result[u64, Error] {
         let v = info(mut tx).at + 1
         if kind == 0 {
-            let _ = delete_bytes(mut tx, 1, key_word(k))?
+            let _ = delete_bytes(mut tx, 1, types.key_word(k))?
         } else {
-            put_bytes(mut tx, 1, key_word(k), key_word(v))?
-            let raw = option.unwrap(fetch_raw(tx, 1, key_word(k))?)
+            put_bytes(mut tx, 1, types.key_word(k), types.key_word(v))?
+            let raw = option.unwrap(fetch_raw(tx, 1, types.key_word(k))?)
             if decode_word(raw) != v {
                 return Error(Missing("law"))
             }
@@ -485,7 +485,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     let mut ops = new_data_rows()
     list.reserve(mut ops.rest, n - 2)
     for slot_order in 0u64 .. n {
-        push_data_row(mut ops, DataOp(key: key_word(n - slot_order), value: None, trim: None, prior: None))
+        push_data_row(mut ops, format.DataOp(key: types.key_word(n - slot_order), value: None, trim: None, prior: None))
     }
     // Independently observe the allocator's grant for the index list. The
     // encoder's ordering pass can fit into that grant without owning any key.
@@ -511,7 +511,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     Ok(())
 }
 
-fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[format.CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     let order = data_order(ops)?
     encode_staged(ci, None, None, None, mut ops, order, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset, FRAME_LIMIT)
 }
@@ -525,14 +525,14 @@ pub fn law_frames(c: Clock) -> bool {
     }
     let mut db = raw_test_db(c, 1073741824)
     let outcome = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[Bytes, Error] {
-        put_bytes(mut tx, 1, key_word(2), key_word(22))?
-        put_bytes(mut tx, 1, key_word(1), key_word(11))?
-        put_bytes(mut tx, 1, key_word(2), key_word(33))?
-        let _ = delete_bytes(mut tx, 1, key_word(1))?
+        put_bytes(mut tx, 1, types.key_word(2), types.key_word(22))?
+        put_bytes(mut tx, 1, types.key_word(1), types.key_word(11))?
+        put_bytes(mut tx, 1, types.key_word(2), types.key_word(33))?
+        let _ = delete_bytes(mut tx, 1, types.key_word(1))?
         if data_row_count(tx.ops.rows) != 2 {
             return Error(Foreign)
         }
-        capacity(encode_commit(info(mut tx), mut tx.ops.rows, 1, 72))
+        failure_result_from_rep(types.capacity(encode_commit(info(mut tx), mut tx.ops.rows, 1, 72)))
     })
     match take outcome {
         Ok(Committed(done)) => {
@@ -608,7 +608,7 @@ fn test_memory_identity(c: Clock, r: Random) -> Result[(), ()] {
     let a = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let b = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let first_id = identity(a)
-    if same(first_id, identity(a)) && !same(first_id, identity(b)) && version(snapshot(a)) == 0 {
+    if first_id == identity(a) && first_id != identity(b) && version(snapshot(a)) == 0 {
         Ok(())
     } else {
         Error(())
@@ -637,7 +637,7 @@ pub fn law_follow(c: Clock) -> bool {
     }
     let second = result.unwrap(follow(mut db, Branch(store: StoreId(hi: 1, lo: 2), id: 0)))
     let removed = execute(mut db, 0, 2, None, fn(mut tx: Tx) -> Result[bool, Error] {
-        delete_bytes(mut tx, 1, key_word(1))
+        delete_bytes(mut tx, 1, types.key_word(1))
     })
     match take removed {
         Ok(Committed(_)) => {},
@@ -709,7 +709,7 @@ fn follow_schedules(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 pub fn law_node_ids(c: Clock) -> bool {
     let mut db = raw_test_db(c, 1073741824)
     let failed = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put_bytes(mut tx, 1, key_word(1), key_word(10))?
+        put_bytes(mut tx, 1, types.key_word(1), types.key_word(10))?
         fail("node id fault")
     })
     match take failed {
@@ -723,7 +723,7 @@ pub fn law_node_ids(c: Clock) -> bool {
     let capacity_result = result.unwrap(bound bytes 512 {
         execute(mut db, 0, 2, None, fn(mut tx: Tx) -> Result[(), Error] {
             for k in 0u64 .. 100 {
-                put_bytes(mut tx, 1, key_word(k), key_word(k))?
+                put_bytes(mut tx, 1, types.key_word(k), types.key_word(k))?
             }
             Ok(())
         })

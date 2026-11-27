@@ -85,7 +85,7 @@ fn bucket_stream_claim_admission(c: Clock, r: Random, tasks: Tasks) -> Result[()
     }
     let body = stream_register_decode(final.data, stream_law_sid(), 0)?
     for row in body.rows {
-        if row.abandoned || row.token == token {
+        if row.abandoned || row.token == store_key_to_rep(token) {
             fail("L90-Q4: B's Abandoned row outlived A's unhold")
         }
     }
@@ -93,7 +93,7 @@ fn bucket_stream_claim_admission(c: Clock, r: Random, tasks: Tasks) -> Result[()
 }
 
 // The rows of `reg` as the service holds them now.
-fn stream_q4_rows(s: BucketSim, tasks: Tasks, reg: String) -> Result[List[RegRow], Error] waits {
+fn stream_q4_rows(s: BucketSim, tasks: Tasks, reg: String) -> Result[List[format.RegRow], Error] waits {
     let mut client = stream_service_client(s, tasks, 98, "", "us-east-1")?
     let mut raw: Bytes = list.with_capacity(256)
     let _ = history_fetch(mut client, reg, mut raw, std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS))?
@@ -102,12 +102,12 @@ fn stream_q4_rows(s: BucketSim, tasks: Tasks, reg: String) -> Result[List[RegRow
 }
 
 // The one row of `reg` carrying B's hold, by its state.
-fn stream_q4_one(rows: List[RegRow], abandoned: bool, take why: String) -> Result[StoreId, Error] {
+fn stream_q4_one(rows: List[format.RegRow], abandoned: bool, take why: String) -> Result[StoreId, Error] {
     if list.len(rows) != 1 || rows[0].abandoned != abandoned {
         fail(take why)
     }
     let row = rows[0]
-    Ok(row.token)
+    Ok(store_key_from_rep(row.token))
 }
 
 fn stream_q4_run(s: BucketSim, tasks: Tasks, r: Random, reg: String) -> Result[StoreId, Error] waits {

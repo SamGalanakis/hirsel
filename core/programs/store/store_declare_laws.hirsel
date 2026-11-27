@@ -234,7 +234,7 @@ fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(
         let Some((index_key, raw)) = next_bytes(mut cursor)? else {
             return Error(MigrationFault)
         }
-        if list.len(index_key) != 12 || list.len(raw) != 12 || read_le(raw, 0, 4) != 8 {
+        if list.len(index_key) != 12 || list.len(raw) != 12 || format.read_le(raw, 0, 4) != 8 {
             return Error(MigrationFault)
         }
         let j: u64 = list.word_be(index_key, 4)
@@ -281,7 +281,7 @@ fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[
     let Some(raw) = get_page_row(s.roots.collections, logical) else {
         return Error(MigrationFault)
     }
-    if list.len(raw) != 10 || read_le(raw, 0, 2) != 0 || read_le(raw, 2, 8) != expected {
+    if list.len(raw) != 10 || format.read_le(raw, 0, 2) != 0 || format.read_le(raw, 2, 8) != expected {
         return Error(MigrationFault)
     }
     Ok(())
@@ -392,7 +392,7 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
         },
         DriftProjection => {
             if let CatalogIndex(mut index_meta) = record.record {
-                index_meta.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision))
+                index_meta.projection = Some((failure_result_from_rep(types.copied(code.identity(code.describe(cover_sum))))?, take prior_revision))
             } else {
                 return Error(malformed(0))
             }
@@ -536,7 +536,7 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
     let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes, 0)
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let staged = draft_body(db, db.indexes, db.heads[0].roots, next_call_info(db), keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[(), Error] {
         tx.frame_bytes = Some(42)
         put_conflict_sequence(mut tx, items)
@@ -569,7 +569,7 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     if version(unchanged) != before || get(result.unwrap(reader(db, 0)), unchanged, items, 1)? != None {
         return Error(MigrationFault)
     }
-    let stream = law_stream_bytes(key_word(23), keyed_time(db))
+    let stream = law_stream_bytes(types.key_word(23), keyed_time(db))
     let request = request_digest(stream, stream)
     let admitted = admit_law_stream(mut db, stream, 0, request)?
     let Admitted(take complete) = take admitted else {
@@ -578,10 +578,10 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
     let served = serve(mut db, take complete, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
         result.unwrap(put_conflict_sequence(mut tx, handle))
-        Error(key_word(7))
+        Error(types.key_word(7))
     })
     match take served {
-        Ok(Kept(receipt)) if receipt.reply == key_word(7) => (),
+        Ok(Kept(receipt)) if receipt.reply == types.key_word(7) => (),
         _ => return Error(MigrationFault),
     }
     if get(result.unwrap(reader(db, 0)), snapshot(db), items, 1)? != None {
@@ -594,7 +594,7 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let staged_base = version(snapshot(db))
     let next_result = serve(mut db, take next_completion, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
         result.unwrap(put_conflict_sequence(mut tx, handle))
-        Ok(key_word(8))
+        Ok(types.key_word(8))
     })
     match take next_result {
         Ok(Failed(_, Conflict(name))) if name == "z_first" => (),
@@ -783,13 +783,13 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
             let mut cursor = byte_cursor(tx.roots.collections, Included(prefix(index_id)?), prefix(index_id + 1)?)?
             while let Some((row_key, _)) = next_bytes(mut cursor)? {
                 found += 1
-                target = copied(row_key)?
+                target = failure_result_from_rep(types.copied(row_key))?
             }
         }
         let Some(refund) = delete_refund(tx, target)? else {
             return Error(Missing("bucket entry"))
         }
-        let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, target, None, tx.frame_bytes, transaction_limit(tx.limits))?
+        let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, target, None, tx.frame_bytes, types.transaction_limit(limits_to_rep(tx.limits)))?
         apply_delete(mut tx, take target, refund)?
         tx.frame_bytes = frame
         Ok(found)

@@ -6,12 +6,12 @@ type SettleOutcome = SettleApplied | SettleFenced(u64, Option[u64]) | SettleNotA
 
 // Finds the sealed cutoff for (sid, inc) in `attach` (§12.11.4 "The second
 // authority: a sealed cutoff"). None is A3's missing evidence.
-fn stream_find_sealed_cutoff(attach: Option[Attach], sid: HostStreamId, inc: u64) -> Option[u64] {
+fn stream_find_sealed_cutoff(attach: Option[format.Attach], sid: HostStreamId, inc: u64) -> Option[u64] {
     let Some(a) = view attach else {
         return None
     }
     for st in a.sealed {
-        if stream_same(st.tail.sid, sid) && st.tail.inc == inc {
+        if format.stream_same(st.tail.sid, host_stream_id_to_rep(sid)) && st.tail.inc == inc {
             return Some(st.cutoff)
         }
     }
@@ -36,14 +36,14 @@ fn stream_poll_head(mut lane: ObjectJournalSession) -> Result[Option[(u64, Optio
 
 // Publishes one settle head write, with or without a new GROUP entry in
 // `lane.buffers.packet` (`has_entry`). Updates `lane.register` only on Applied.
-fn stream_settle_publish(mut lane: ObjectJournalSession, sid: HostStreamId, inc: u64, has_entry: bool, take next_attach: Option[Attach], drop_attach: bool, deadline: u64) -> Result[SettleOutcome, Error] waits {
+fn stream_settle_publish(mut lane: ObjectJournalSession, sid: HostStreamId, inc: u64, has_entry: bool, take next_attach: Option[format.Attach], drop_attach: bool, deadline: u64) -> Result[SettleOutcome, Error] waits {
     let mut candidate = lane.register.head
     if has_entry {
         let next_pos = history_next_id(candidate.entry.seq)?
         candidate.entry = history_new_ref(next_pos, candidate.pair.epoch, lane.buffers.packet)
         history_fill_key(mut lane.buffers.key, "e-", candidate.entry)
         list.clear(mut lane.buffers.compare)
-        capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet))))?
         history_create(mut lane.client, lane.buffers.key, mut lane.buffers.packet, mut lane.buffers.compare, deadline)?
     }
     history_encode_register_head(mut lane.buffers.body, candidate, lane.authority, next_attach)?
@@ -77,11 +77,11 @@ fn stream_settle_publish(mut lane: ObjectJournalSession, sid: HostStreamId, inc:
 
 // Builds `Attach` for a settle step: `live.from` moved to `(from_seq, from_frame)`
 // and `settles` raised by 1 (M1, M4).
-fn stream_settle_attach(base: Attach, sid: HostStreamId, inc: u64, from_seq: u64, from_frame: u32) -> Result[Attach, Error] {
-    let sealed = disk_allocation(scoped fn() -> Result[List[SealedTail], Error] {
+fn stream_settle_attach(base: format.Attach, sid: HostStreamId, inc: u64, from_seq: u64, from_frame: u32) -> Result[format.Attach, Error] {
+    let sealed = disk_allocation(scoped fn() -> Result[List[format.SealedTail], Error] {
         Ok(clone(base.sealed))
     })?
-    Ok(Attach(settles: base.settles + 1, live: Some(StreamRef(sid, inc, from_seq, from_frame)), sealed: take sealed))
+    Ok(format.Attach(settles: base.settles + 1, live: Some(format.StreamRef(sid: host_stream_id_to_rep(sid), inc, from_seq, from_frame)), sealed: take sealed))
 }
 
 // Writes GROUP entries carrying X's live tail from `live.from` through
@@ -121,14 +121,14 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
     let head = lane.register.head
     let store = head.store
     let epoch = head.pair.epoch
-    let dir = stream_key(root, stream_dir(sid))
+    let dir = stream_key(root, stream_dir(host_stream_id_from_rep(sid)))
     // Build the exact ascending list of batch seqs to inspect: known acked
     // commit batches of this Place in `[live_tail.from_seq, through_seq]`, plus
     // any unacked (stalled) batches in `(last_acked, through_seq]`.
     let mut seqs: List[u64] = list.new()
     for bseq in known_batches {
         if bseq >= live_tail.from_seq && bseq <= through_seq {
-            capacity(list.try_reserve(mut seqs, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut seqs, 1)))?
             list.push(mut seqs, bseq)
         }
     }
@@ -136,7 +136,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
         let tail_start = order.max(live_tail.from_seq, last_acked + 1)
         let mut s = tail_start
         while s <= through_seq {
-            capacity(list.try_reserve(mut seqs, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut seqs, 1)))?
             list.push(mut seqs, s)
             s += 1
         }
@@ -149,34 +149,34 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
     for seq in seqs {
         let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
         let mut name = string.with_capacity(48)
-        stream_batch_key(mut name, inc, seq)
+        format.stream_batch_key(mut name, inc, seq)
         let key = stream_key(dir, name)
-        let fetched = stream_at_root(mut lane.client, scoped fn(mut c: std.object.Client) -> Result[Option[BatchRow], Error] waits {
-            if let None = stream_tail_range(mut c, key, 0, STREAM_INDEX_PROBE, mut buffers.index, due)? {
+        let fetched = stream_at_root(mut lane.client, scoped fn(mut c: std.object.Client) -> Result[Option[format.BatchRow], Error] waits {
+            if let None = stream_tail_range(mut c, key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, due)? {
                 return Ok(None)
             }
-            let mut batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+            let mut batch_index = match stream_batch_head(key, buffers.index, host_stream_id_from_rep(sid), inc, seq)? {
                 Rows(take found) => take found,
                 Term(_, _) => return Error(Latched(Superseded)),
             }
             if list.len(buffers.index) < batch_index.byte_len {
                 if let None = stream_tail_range(mut c, key, 0, batch_index.byte_len, mut buffers.index, due)? {
-                    return Error(disk_fault(key, 0, Absent))
+                    return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
                 }
-                batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+                batch_index = match stream_batch_head(key, buffers.index, host_stream_id_from_rep(sid), inc, seq)? {
                     Rows(take found) => take found,
-                    Term(_, _) => return Error(disk_fault(key, 72, Malformed)),
+                    Term(_, _) => return Error(failure_from_rep(format.disk_fault(key, 72, Malformed))),
                 }
             }
             for row in batch_index.rows {
-                if same(row.store, store) && row.epoch == epoch {
+                if types.same(row.store.hi, row.store.lo, store.hi, store.lo) && row.epoch == epoch {
                     if row.len == 0 {
-                        return Error(disk_fault(key, row.offset, Malformed))
+                        return Error(failure_from_rep(format.disk_fault(key, row.offset, Malformed)))
                     }
                     if let None = stream_tail_range(mut c, key, row.offset, row.offset + row.len, mut buffers.slice, due)? {
-                        return Error(disk_fault(key, row.offset, Absent))
+                        return Error(failure_from_rep(format.disk_fault(key, row.offset, Absent)))
                     }
-                    stream_slice_check(key, row, buffers.slice)?
+                    failure_result_from_rep(format.stream_slice_check(key, row, buffers.slice))?
                     return Ok(Some(row))
                 }
             }
@@ -188,25 +188,25 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
             } else {
                 0
             }
-            let batch_ctx = DiskContext(store, role: ROLE_BATCH, seq)
+            let batch_ctx = format.DiskContext(store: store_key_to_rep(store), role: format.ROLE_BATCH, seq)
             let mut at = 0u64
             let mut fidx = 0u64
             while at < list.len(buffers.slice) {
                 let frame = disk_frame_bytes(key, batch_ctx, buffers.slice, at)?
                 if fidx >= skip {
                     if frame.kind == 0x0040 {
-                        if frame.end - frame.payload != 24 || read_le(buffers.slice, frame.payload, 8) != epoch {
-                            return Error(disk_fault(key, row.offset + at, Malformed))
+                        if frame.end - frame.payload != 24 || format.read_le(buffers.slice, frame.payload, 8) != epoch {
+                            return Error(failure_from_rep(format.disk_fault(key, row.offset + at, Malformed)))
                         }
                     } else if frame.kind == 0x0011 || frame.kind == 0x0013 {
                         let width = frame.end - at
                         if entry_frames > 0 && entry_bytes + width > group_bytes {
                             let step_attach = match lane.register.attach {
-                                Some(cur_attach) => stream_settle_attach(cur_attach, sid, inc, cursor_seq, cursor_frame)?,
+                                Some(cur_attach) => stream_settle_attach(cur_attach, host_stream_id_from_rep(sid), inc, cursor_seq, cursor_frame)?,
                                 None => return Ok(SettleNotApplied),
                             }
                             let pub_due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-                            match stream_settle_publish(mut lane, sid, inc, true, Some(take step_attach), drop_attach, pub_due)? {
+                            match stream_settle_publish(mut lane, host_stream_id_from_rep(sid), inc, true, Some(take step_attach), drop_attach, pub_due)? {
                                 SettleApplied => (),
                                 other => return Ok(other),
                             }
@@ -229,26 +229,26 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
                             cursor_frame = 0
                         }
                     } else {
-                        return Error(disk_fault(key, row.offset + at, Kind(int.widen(frame.kind))))
+                        return Error(failure_from_rep(format.disk_fault(key, row.offset + at, Kind(int.widen(frame.kind)))))
                     }
                 }
                 fidx += 1
                 at = frame.end
             }
             if fidx != row.frames {
-                return Error(disk_fault(key, row.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(key, row.offset, Malformed)))
             }
         }
     }
-    let final_attach: Option[Attach] = if drop_attach {
+    let final_attach: Option[format.Attach] = if drop_attach {
         None
     } else {
         let final_seq = order.max(next_seq, order.max(live_tail.from_seq, cursor_seq))
         match lane.register.attach {
-            Some(cur_attach) => Some(stream_settle_attach(cur_attach, sid, inc, final_seq, 0)?),
+            Some(cur_attach) => Some(stream_settle_attach(cur_attach, host_stream_id_from_rep(sid), inc, final_seq, 0)?),
             None => return Ok(SettleNotApplied),
         }
     }
     let pub_due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    stream_settle_publish(mut lane, sid, inc, entry_frames > 0, take final_attach, drop_attach, pub_due)
+    stream_settle_publish(mut lane, host_stream_id_from_rep(sid), inc, entry_frames > 0, take final_attach, drop_attach, pub_due)
 }

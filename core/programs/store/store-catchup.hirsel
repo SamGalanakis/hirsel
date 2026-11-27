@@ -48,7 +48,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     }
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     let before = share_roots(source.db.heads[0].roots)
-    let state = deploy_result(capacity(current_state(source.db)))?
+    let state = deploy_result(failure_result_from_rep(types.capacity(current_state(source.db))))?
     let mut initial = deploy_result(journal_replay(take state, source.db.next_node, source.db.limits))?
     initial.tiered.total = source.db.tiered
     let steps = read_steps(d, stamp)?
@@ -66,7 +66,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
             Some(v) => Some(arc.share(v)),
             None => None,
         }
-        list.push(mut row_changes, CatchUpChange(tree_key: deploy_result(copied(row.tree_key))?, before: None, after: take after_val))
+        list.push(mut row_changes, CatchUpChange(tree_key: deploy_result(failure_result_from_rep(types.copied(row.tree_key)))?, before: None, after: take after_val))
     }
     if list.len(deferred) != 0 {
         let before_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: base.head, roots: share_roots(before), watermark: source.db.next_node + 1, bases: no_tail_bases())
@@ -252,7 +252,7 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
                 }
                 note_touch_direct(mut touched, ctx, opened, roots.collections, key)?
                 if target_tiered {
-                    child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, copied(key)?, ReplayAbsent, first, mut next_stamp)?
+                    child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, failure_result_from_rep(types.copied(key))?, ReplayAbsent, first, mut next_stamp)?
                     if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
                         canonical_tree(mut roots.collections)?
                         child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
@@ -266,7 +266,7 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
             if let Some(take value) = take current {
                 let IndexValue(keys: take keys, payload: take payload, ..) = take value
                 for take key in take keys {
-                    list.push(mut additions, (i, take key, copied(payload)?, copied(primary)?))
+                    list.push(mut additions, (i, take key, failure_result_from_rep(types.copied(payload))?, failure_result_from_rep(types.copied(primary))?))
                 }
             }
         }
@@ -290,7 +290,7 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
         }
         note_touch_direct(mut touched, ctx, opened, roots.collections, key)?
         if target_tiered {
-            child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, copied(key)?, ReplayPut(arc.new(copied(payload)?)), first, mut next_stamp)?
+            child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, failure_result_from_rep(types.copied(key))?, ReplayPut(arc.new(failure_result_from_rep(types.copied(payload))?)), first, mut next_stamp)?
             if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
                 canonical_tree(mut roots.collections)?
                 child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
@@ -322,8 +322,8 @@ fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: PageTree, key: By
 fn note_touch_direct(mut touched: List[Touch], ctx: ChildCutContext, opened: u64, tree: PageTree, key: Bytes) -> Result[(), Error] waits {
     let prior = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, tree, key)?
     let seq = list.len(touched)
-    let note = Touch(key: copied(key)?, seq: seq, prior: take prior)
-    capacity(list.try_reserve(mut touched, 1))?
+    let note = Touch(key: failure_result_from_rep(types.copied(key))?, seq: seq, prior: take prior)
+    failure_result_from_rep(types.capacity(list.try_reserve(mut touched, 1)))?
     list.push(mut touched, take note)
     Ok(())
 }
@@ -359,11 +359,11 @@ fn round_ops_direct(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64, aft
                     },
                     None => false,
                 }
-                list.push(mut ops, RoundOp(key: copied(note.key)?, value: Some(take raw), prior: had))
+                list.push(mut ops, RoundOp(key: failure_result_from_rep(types.copied(note.key))?, value: Some(take raw), prior: had))
             },
             None => {
                 if let Some(_) = note.prior {
-                    list.push(mut ops, RoundOp(key: copied(note.key)?, value: None, prior: true))
+                    list.push(mut ops, RoundOp(key: failure_result_from_rep(types.copied(note.key))?, value: None, prior: true))
                 }
             },
         }

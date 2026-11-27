@@ -52,15 +52,15 @@ fn tiered_changes(r: Reader, a: Snapshot, b: Snapshot, take lo: Option[Bytes], h
             Ok(take part)
         })?
         let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, remaining, next: take resume, deferred: take deferred, ..) = take part
-        capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out.rows, list.len(rows))))?
         for take row in take rows {
             list.push(mut out.rows, take row)
         }
-        capacity(list.try_reserve(mut out.trimmed, list.len(trimmed)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out.trimmed, list.len(trimmed))))?
         for take span in take trimmed {
             list.push(mut out.trimmed, take span)
         }
-        capacity(list.try_reserve(mut out.bounds, list.len(changed_bounds)))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out.bounds, list.len(changed_bounds))))?
         for take edge in take changed_bounds {
             list.push(mut out.bounds, take edge)
         }
@@ -91,7 +91,7 @@ fn tiered_row_changes(r: Reader, a: Snapshot, b: Snapshot, mut out: ChangeOutput
     let collection = prefix(diff.id)?
     let low = match diff.start {
         Some(suffix) => logical_key(diff.id, suffix)?,
-        None => copied(collection)?
+        None => failure_result_from_rep(types.copied(collection))?
     }
     let high = match diff.stop {
         Some(suffix) => logical_key(diff.id, suffix)?,
@@ -107,8 +107,8 @@ fn tiered_row_changes(r: Reader, a: Snapshot, b: Snapshot, mut out: ChangeOutput
 }
 
 fn tiered_span_changes(r: Reader, a: Snapshot, b: Snapshot, mut out: ChangeOutput, diff: TieredRowDiff, low: Bytes, high: Bytes) -> Result[bool, Error] waits {
-    let mut left = TieredDiffSide(rows: list.new(), at: 0, from: copied(low)?, done: !diff.before)
-    let mut right = TieredDiffSide(rows: list.new(), at: 0, from: copied(low)?, done: !diff.after)
+    let mut left = TieredDiffSide(rows: list.new(), at: 0, from: failure_result_from_rep(types.copied(low))?, done: !diff.before)
+    let mut right = TieredDiffSide(rows: list.new(), at: 0, from: failure_result_from_rep(types.copied(low))?, done: !diff.after)
     loop {
         tiered_diff_fill(r, a, diff.id, mut left, high)?
         tiered_diff_fill(r, b, diff.id, mut right, high)?
@@ -129,13 +129,13 @@ fn tiered_span_changes(r: Reader, a: Snapshot, b: Snapshot, mut out: ChangeOutpu
             (Some(x), Some(y)) => list.compare_bytes(x, y),
         }
         if comparison == Less {
-            let key = copied(left.rows[left.at].0)?
+            let key = failure_result_from_rep(types.copied(left.rows[left.at].0))?
             if !admit_change(mut out, key, list.len(key))? {
                 return Ok(false)
             }
             list.push(mut out.rows, Change(tree_key: take key, value: None))
         } else if comparison == Greater || left.rows[left.at].1 != right.rows[right.at].1 {
-            let key = copied(right.rows[right.at].0)?
+            let key = failure_result_from_rep(types.copied(right.rows[right.at].0))?
             let value = arc.share(right.rows[right.at].1)
             if !admit_change(mut out, key, int.saturating_add(list.len(key), list.len(value)))? {
                 return Ok(false)
@@ -189,7 +189,7 @@ fn tiered_diff_spans(r: Reader, a: Snapshot, b: Snapshot, diff: TieredRowDiff, l
     let key = prefix(diff.id)?
     let both = diff.before && diff.after && tiered_diff_paged(a, key) && tiered_diff_paged(b, key)
     if !both {
-        list.push(mut spans, (copied(low)?, copied(high)?))
+        list.push(mut spans, (failure_result_from_rep(types.copied(low))?, failure_result_from_rep(types.copied(high))?))
         return Ok(take spans)
     }
     let mut left = tiered_diff_root(a.roots.collections, key)
@@ -327,7 +327,7 @@ fn tiered_diff_expand(r: Reader, s: Snapshot, take edges: List[TieredDiffEdge]) 
     }
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[List[TieredDiffEdge], Error] {
+    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[List[TieredDiffEdge], Error] {
         let mut out: List[TieredDiffEdge] = list.new()
         for edge in edges {
             let expected: Option[u8] = if edge.level == TIERED_DIFF_UNREAD {
@@ -339,14 +339,14 @@ fn tiered_diff_expand(r: Reader, s: Snapshot, take edges: List[TieredDiffEdge]) 
             let image = std.page.image_of(page)
             let height = std.page.level(image)
             if height == 0 {
-                list.push(mut out, TieredDiffEdge(slot: clone(edge.slot), stamp: edge.stamp, level: 0, lo: copied(edge.lo)?, hi: clone(edge.hi)))
+                list.push(mut out, TieredDiffEdge(slot: clone(edge.slot), stamp: edge.stamp, level: 0, lo: failure_result_from_rep(types.copied(edge.lo))?, hi: clone(edge.hi)))
                 continue
             }
             let n = std.page.count(image)
             for at in 0u64 .. n {
                 let child: std.page.Slot = clone(option.unwrap(std.page.child_slot(page, at)))
                 let lo = if at == 0 {
-                    copied(edge.lo)?
+                    failure_result_from_rep(types.copied(edge.lo))?
                 } else {
                     option.unwrap(std.page.key_at(image, at))
                 }
@@ -365,17 +365,17 @@ fn tiered_diff_expand(r: Reader, s: Snapshot, take edges: List[TieredDiffEdge]) 
 
 fn tiered_diff_push(mut spans: List[(Bytes, Bytes)], take lo: Bytes, take hi: Bytes, low: Bytes, high: Bytes) -> Result[(), Error] {
     let start = if lo < low {
-        copied(low)?
+        failure_result_from_rep(types.copied(low))?
     } else {
         take lo
     }
     let stop = if hi > high {
-        copied(high)?
+        failure_result_from_rep(types.copied(high))?
     } else {
         take hi
     }
     if start < stop {
-        capacity(list.try_reserve(mut spans, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut spans, 1)))?
         list.push(mut spans, (take start, take stop))
     }
     Ok(())
@@ -398,9 +398,9 @@ fn tiered_diff_overlay_spans(mut spans: List[(Bytes, Bytes)], s: Snapshot, id: u
     let Some(overlay) = std.omap.get(replay.collections, id) else {
         return Ok(())
     }
-    let mut cursor = std.omap.range(overlay.entries, Included(copied(low)?), Excluded(copied(high)?))
+    let mut cursor = std.omap.range(overlay.entries, Included(failure_result_from_rep(types.copied(low))?), Excluded(failure_result_from_rep(types.copied(high))?))
     while let Some((take key, _)) = std.omap.next(mut cursor) {
-        let mut after = copied(key)?
+        let mut after = failure_result_from_rep(types.copied(key))?
         list.push(mut after, 0u8)
         tiered_diff_push(mut spans, take key, take after, low, high)?
     }
@@ -450,10 +450,10 @@ fn snapshot_collection_rows(r: Reader, s: Snapshot, id: u32, low: Bytes, high: B
         if collection_descriptor(descriptor).residency != ResidentMemory {
             let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
             let empty_hint: Bytes = list.new()
-            return retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[List[(Bytes, Arc[Bytes])], Error] {
+            return retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[List[(Bytes, Arc[Bytes])], Error] {
                 let (edge, slot_descriptor) = option.unwrap(std.page.collection_slot(tree.root, key))
                 let mut rows: List[(Bytes, Arc[Bytes])] = list.new()
-                let mut start = copied(low)?
+                let mut start = failure_result_from_rep(types.copied(low))?
                 while list.len(rows) < TIERED_DIFF_BATCH {
                     let Some((take row_key, take value)) = tiered_span_collection(attempt, visible, s.roots.collections, edge, slot_descriptor, id, start, high)? else {
                         break
@@ -467,7 +467,7 @@ fn snapshot_collection_rows(r: Reader, s: Snapshot, id: u32, low: Bytes, high: B
     }
     disk_allocation(scoped fn() -> Result[List[(Bytes, Arc[Bytes])], Error] {
         let mut rows: List[(Bytes, Arc[Bytes])] = list.new()
-        let mut cursor = byte_cursor(s.roots.collections, Included(copied(low)?), high)?
+        let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(types.copied(low))?), high)?
         while list.len(rows) < TIERED_DIFF_BATCH {
             let Some((take row_key, take value)) = next_bytes(mut cursor)? else {
                 break

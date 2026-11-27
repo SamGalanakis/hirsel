@@ -64,7 +64,7 @@ fn check_rewrite_indexes(plan: SchemaPlan, id: u32, schema: u16, key: Bytes, old
 pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     let (take key, take logical, take raw, staged_range, schema_number, is_tiered) = {
         let plan = view staged.plan
-        if !same(plan.store, t.store) {
+        if !types.same(plan.store.hi, plan.store.lo, t.store.hi, t.store.lo) {
             return Error(Foreign)
         }
         let record = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
@@ -80,7 +80,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
         // A table the staging replaced has its rows only in the staged range (v2.103).
         let staged_range = t.id >= staged.first_table
         let mut raw: Bytes = list.new()
-        capacity(le(mut raw, int.widen(current.number), 2))?
+        failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(current.number), 2)))?
         std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
         if list.len(raw) > staged.plan.value_limit {
             return Error(Limit(Value))
@@ -101,7 +101,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
                 }
             }
         }
-        capacity(list.try_reserve(mut staged.queued_rewrites, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut staged.queued_rewrites, 1)))?
         list.push(mut staged.queued_rewrites, QueuedRewrite(id: t.id, schema: schema_number, key: take key, logical: take logical, raw: take raw, staged_range: staged_range))
         return Ok(())
     }
@@ -135,7 +135,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
     let _ = insert_row(mut ids, mut roots, take logical, take raw)?
     // The staged range carries the edit, so the frame gets no row for it.
     if !staged_range {
-        capacity(map.try_reserve(mut staged.rewrites, 1))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut staged.rewrites, 1)))?
         map.insert(mut staged.rewrites, take address, ())
     }
     staged.plan.roots = take roots
@@ -159,7 +159,7 @@ fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.K
 fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     let p = logical_key(t.id, encode_key(t.key, k)?)?
     let mut raw: Bytes = list.new()
-    capacity(le(mut raw, int.widen(t.readers.current), 2))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(t.readers.current), 2)))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
     if list.len(raw) > plan.value_limit {
         return Error(Limit(Value))
@@ -190,7 +190,7 @@ pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previou
 }
 
 pub fn activation_install_allowed(db: Db) -> Result[(), Error] {
-    require_memory_collections(store_has_tiered(db), Install)
+    failure_result_from_rep(types.require_memory_collections(store_has_tiered(db), tiered_refusal_to_rep(Install)))
 }
 
 pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[(), Error] waits {
@@ -274,7 +274,7 @@ fn publish_schema_plan_binding(mut db: Db, take prepared: SchemaPlan, activation
     over_ceiling(live_bytes, available_resident(db))?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let replacement = ProposedMain(roots: take roots, head: db.heads[0u64].head + 1, at: db.heads[0u64].at, tables: tables, activation, drop_pin: drop_pin, superseded: take superseded, chunk_freed: take chunk_freed, step_rows: take step_rows, step_drift: step_drift)
-    let publication = capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids))?
+    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids)))?
     // Stamps stay consumed on refusal. Table ids publish with the roots.
     db.next_node = ids
     for take schema_binding in take bindings {
@@ -302,7 +302,7 @@ fn encode_rewrite_frame(staged: StagedMigration, take extra: List[ActivationRewr
         if size > limit {
             return Error(Scratch(Limit(Triggers)))
         }
-        list.push(mut rows, ActivationRewrite(id, key: deploy_result(copied(key))?, value: deploy_result(copied(raw))?))
+        list.push(mut rows, ActivationRewrite(id, key: deploy_result(failure_result_from_rep(types.copied(key)))?, value: deploy_result(failure_result_from_rep(types.copied(raw)))?))
     }
     for take row in take extra {
         size = int.saturating_add(size, 12 + list.len(row.key) + list.len(row.value))
@@ -322,7 +322,7 @@ fn encode_rewrite_frame(staged: StagedMigration, take extra: List[ActivationRewr
 
 type PreparedInput {
     file: HostFile,
-    ctx: DiskContext,
+    ctx: format.DiskContext,
     offset: u64,
     digest: std.sha256.Sha256,
     peek: Option[u8]
@@ -350,14 +350,14 @@ fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
         let room = n - list.len(out)
         // Keep the old temporary's admission before issuing the read.
         let charge = ((room + 7u64) / 8u64) * 8u64
-        capacity(bound bytes charge {})?
+        failure_result_from_rep(types.capacity(bound bytes charge {}))?
         if disk_io(host.read(mut file, mut out))? == 0 {
             // The old temporary was still charged when the eight-byte name
             // was cloned. Check both charges before cloning in the caller.
             if let Error(c) = bound bytes (charge + 8u64) {} {
                 return Error(Full(Allocation(Capacity(requested: 8, available: c.available - charge))))
             }
-            return Error(disk_fault("PREPARED", list.len(out), Truncated))
+            return Error(failure_from_rep(format.disk_fault("PREPARED", list.len(out), Truncated)))
         }
     }
     Ok(take out)
@@ -373,13 +373,13 @@ fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec
 }
 
 fn prepared_payload(mut input: PreparedInput, kind: u16, raw: Bytes) -> Result[Bytes, DeployError] waits {
-    let n = read_le(raw, 4u64, 4u64)
-    if read_le(raw, 0u64, 2u64) != int.widen(kind) || read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(disk_kind_limit(kind)) {
+    let n = format.read_le(raw, 4u64, 4u64)
+    if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(disk_kind_limit(kind)) {
         return Error(ImportMalformed)
     }
     let encoded = scratch_result(prepared_read(mut input.file, n))?
-    let check = deploy_result(capacity(disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded)))?
-    if check != read_le(raw, 8u64, 8u64) {
+    let check = deploy_result(failure_result_from_rep(types.capacity(format.disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded))))?
+    if check != format.read_le(raw, 8u64, 8u64) {
         return Error(ImportMalformed)
     }
     std.sha256.add(mut input.digest, raw, 0u64, 16u64)
@@ -403,7 +403,7 @@ fn read_rewrite_frame(mut input: PreparedInput) -> Result[List[ActivationRewrite
     let offset = input.offset
     let payload = prepared_payload(mut input, 0x0085, first)?
     let codec: std.codec.Codec[List[ActivationRewrite]] = std.codec.of()
-    let rewrites = std.codec.decode(codec, payload) ?=> |_| Scratch(disk_fault("PREPARED", offset, Malformed))
+    let rewrites = std.codec.decode(codec, payload) ?=> |_| Scratch(failure_from_rep(format.disk_fault("PREPARED", offset, Malformed)))
     if list.len(rewrites) == 0 {
         return Error(ImportMalformed)
     }
@@ -451,7 +451,7 @@ fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), Deploy
 fn apply_import_rewrites(mut plan: SchemaPlan, rewrites: List[ActivationRewrite]) -> Result[(), DeployError] {
     for row in rewrites {
         let key = deploy_result(logical_key(row.id, row.key))?
-        let raw = deploy_result(copied(row.value))?
+        let raw = deploy_result(failure_result_from_rep(types.copied(row.value)))?
         let _ = deploy_result(insert_row(mut plan.next_node, mut plan.roots, take key, take raw))?
     }
     Ok(())
@@ -492,7 +492,7 @@ pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Res
         let tree = view lease.collections
         let mut rows = deploy_result(byte_cursor(tree, Included(deploy_result(prefix(old))?), deploy_result(prefix(old + 1))?))?
         while let Some((take logical, raw)) = deploy_result(next_bytes(mut rows))? {
-            list.push(mut base, (clone(list.slice(logical, 4, list.len(logical))), deploy_result(copied(raw))?))
+            list.push(mut base, (clone(list.slice(logical, 4, list.len(logical))), deploy_result(failure_result_from_rep(types.copied(raw)))?))
         }
     }
     let mut rewrites: List[(Bytes, Bytes)] = list.new()

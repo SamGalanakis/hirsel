@@ -346,7 +346,7 @@ fn with_value(c: Change, number: u8, rest: u64) -> Change {
     for _ in 0u64 .. rest {
         list.push(mut v, 0u8)
     }
-    Change(tree_key: result.unwrap(copied(c.tree_key)), value: Some(arc.new(take v)))
+    Change(tree_key: result.unwrap(failure_result_from_rep(types.copied(c.tree_key))), value: Some(arc.new(take v)))
 }
 
 pub fn law_published_value(c: Clock) -> bool waits {
@@ -870,9 +870,9 @@ pub fn law_put_validation(c: Clock) -> bool waits {
         // Install a raw fixture with a valid schema tag and a value the current
         // reader rejects. The attempted indexed overwrite has to read it.
         let mut old: Bytes = list.with_capacity(10)
-        le(mut old, int.widen(call_env.0.readers.current), 2) ?=> |problem| Full(Allocation(problem))
+        format.le(mut old, int.widen(call_env.0 .readers.current), 2) ?=> |problem| Full(Allocation(problem))
         std.codec.put_u64(99, mut old)
-        put_bytes(mut tx, call_env.0.id, key_word(1), old)?
+        put_bytes(mut tx, call_env.0 .id, types.key_word(1), old)?
         let prior = write_state(tx)
         let rejected = match put(mut tx, call_env.0, 1, 100) {
             Error(Decode(Value(2))) => true,

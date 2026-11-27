@@ -92,7 +92,7 @@ fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mu
     for i in 0u64 .. 8 {
         raw[16 + i] = magic[i]
     }
-    journal_set(mut raw, 24, DISK_FORMAT, 4)
+    journal_set(mut raw, 24, format.DISK_FORMAT, 4)
     journal_set(mut raw, 28, 4, 1)
     journal_set(mut raw, 32, id.hi, 8)
     journal_set(mut raw, 40, id.lo, 8)
@@ -468,14 +468,14 @@ fn disk_creation_block() -> Result[Bytes, Error] {
 
 fn disk_new_segment(d: Dir, c: Clock, id: StoreId, seq: u64, prev_end: u64, mut creation: Bytes) -> Result[(HostFile, HostFile, Bytes), Error] waits {
     let (take path, take end_path, take journal, take end_bytes) = disk_allocation(scoped fn() -> Result[(String, String, Bytes, Bytes), Error] {
-        let path = capacity(disk_path("j-", seq, ""))?
-        let end_path = capacity(disk_path("j-", seq, ".end"))?
-        let header = capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq), prev_end, 0))?
-        let ctx = DiskContext(store: id, role: 4, seq: seq)
-        let mut end_bytes = capacity(disk_header_bytes(ctx, 0, 0))?
+        let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
+        let end_path = failure_result_from_rep(types.capacity(disk_path("j-", seq, ".end")))?
+        let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq), prev_end, 0)))?
+        let ctx = format.DiskContext(store: store_key_to_rep(id), role: 4, seq: seq)
+        let mut end_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
         let mut payload: Bytes = list.with_capacity(8)
-        capacity(le(mut payload, 72, 8))?
-        let frame = capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?
+        failure_result_from_rep(types.capacity(format.le(mut payload, 72, 8)))?
+        let frame = failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0012, 1, payload)))?
         list.append(mut end_bytes, frame)
         Ok((take path, take end_path, take header, take end_bytes))
     })?

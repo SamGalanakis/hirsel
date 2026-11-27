@@ -22,15 +22,15 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
         Error(take problem) => return Error(take problem),
     }
     history_check_empty(mut client, deadline)?
-    let id = capacity(disk_identity(r))?
-    let holder = capacity(disk_identity(r))?
+    let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+    let holder = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
     let Preparation(db: take recovered, ..) = take source
     let mut draft = take recovered
-    draft.store = id
+    draft.store = store_key_from_rep(id)
     draft.fence = 1
     let (manifest, take locator) = history_import_base(mut client, draft, options, mut workspace, deadline)?
-    match history_publish_base(mut client, id, holder, 1, metadata, manifest, locator, mut workspace, deadline, None) {
-        Ok(_) => Ok(id),
+    match history_publish_base(mut client, store_key_from_rep(id), store_key_from_rep(holder), 1, metadata, manifest, locator, mut workspace, deadline, None) {
+        Ok(_) => Ok(store_key_from_rep(id)),
         Error(Exists(existing)) if existing == "head" => Error(Lost),
         Error(take problem) => Error(take problem),
     }

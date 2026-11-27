@@ -256,7 +256,7 @@ fn lcu_indexed_expected(model: List[Option[u64]]) -> Result[List[(u64, u64)], Er
             let Some(v) = model[k] else {
                 continue
             }
-            let keys = capacity(lix_keys(k, v))?
+            let keys = failure_result_from_rep(types.capacity(lix_keys(k, v)))?
             if keys[0] == j || keys[1] == j {
                 list.push(mut out, (k, v))
             }
@@ -437,7 +437,7 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
     }
     let _ = deploy_result(checkpoint(mut db))?
     let attempt = install_fixture_bytes(16u64, 7u8)
-    let first = begin_export_copy(mut db, scratch, deploy_result(copied(attempt))?, 1u64)?
+    let first = begin_export_copy(mut db, scratch, deploy_result(failure_result_from_rep(types.copied(attempt)))?, 1u64)?
     let mut exported = export_copy(take first)?
     if building && !untouched {
         // A chunk while the child prepares, before PREPARED is kept: the
@@ -541,7 +541,7 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
         state = lix_next(state)
         deploy_result(lcu_round(mut db, t, 115u8, state, mut next_value, mut model))?
         let name = deploy_result(paged_pack_path(disk_state(db).pages.next_pack))?
-        let refused = disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] waits {
+        let refused = disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] waits {
             let mut pack = disk_read_paged_file(directory, name, 67108864)?
             pack[88] = pack[88] ^ 1u8
             disk_write_synced(directory, name, pack)?

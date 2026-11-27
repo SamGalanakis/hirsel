@@ -1,7 +1,7 @@
 hirsel.laws 1
 search@1/example/find_document src=c270a58b90ac4420 sig=9fa7e5d6b9d3eaf2 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-search@1/tests/block_max_differential src=826ae4798fd9f8a9 sig=2f08ea1e758b4e60 run=b1818af2b24835d3 bug=3227d9ee6098eb7d oracle=3198b63929895f76 rows=pending
-search@1/tests/bm25_histories src=d3859edb0f273d72 sig=68e0348cc74dc36d run=b1818af2b24835d3 bug=0c5220c1d57d6b6f oracle=3198b63929895f76 rows=pending
-search@1/tests/filtered_top_k src=823eea8ebaae5fbf sig=99a2052749bda309 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-search@1/tests/read_only_search_form_b_law src=939019a49e3613f8 sig=ce8f79a2c7d744c3 run=ea720f3846592392 bug=7f2ff24c33aaa243 oracle=86f8a649ffeff023 rows=pending
-search@1/tests/snapshot_bm25 src=fa5c7f2e019bd260 sig=37b5e13c285adaa8 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/tests/block_max_differential src=826ae4798fd9f8a9 sig=e02ab0ef15434e30 run=b1818af2b24835d3 bug=3227d9ee6098eb7d oracle=3198b63929895f76 rows=pending
+search@1/tests/bm25_histories src=d3859edb0f273d72 sig=495d7699587a06db run=b1818af2b24835d3 bug=0c5220c1d57d6b6f oracle=3198b63929895f76 rows=pending
+search@1/tests/filtered_top_k src=823eea8ebaae5fbf sig=1658a0877baa6b8c run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/tests/read_only_search_form_b_law src=939019a49e3613f8 sig=abd1b2598205709b run=ea720f3846592392 bug=7f2ff24c33aaa243 oracle=86f8a649ffeff023 rows=pending
+search@1/tests/snapshot_bm25 src=fa5c7f2e019bd260 sig=188e4640e0cd8a17 run=b1818af2b24835d3 bug=- oracle=- rows=pending

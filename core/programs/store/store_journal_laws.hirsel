@@ -4,17 +4,17 @@ pub fn journal_law_apply() -> bool {
     let mut replay = journal_initial()
     result.unwrap(define_store_collection(mut replay.state.tips[0].roots.collections, 1, 1, mut replay.next_node))
     for head in 1u64 .. 4 {
-        let key = result.unwrap(logical_key(1, key_word(7)))
-        let mut data: List[JournalOp] = list.new()
+        let key = result.unwrap(logical_key(1, types.key_word(7)))
+        let mut data: List[format.JournalOp] = list.new()
         let prior: u32 = if head == 1 {
             0
         } else {
             9
         }
-        list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10)), prior: prior, trim: None))
-        let mut streams: List[JournalOp] = list.new()
-        list.push(mut streams, JournalOp(key: result.unwrap(copied(string.as_bytes("stream"))), value: Some(key_word(head)), prior: 0, trim: None))
-        let commit = JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, keyed: list.new(), call: None, payload: 0)
+        list.push(mut data, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(key))), value: Some(types.key_word(head * 10)), prior: prior, trim: None))
+        let mut streams: List[format.JournalOp] = list.new()
+        list.push(mut streams, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("stream")))), value: Some(types.key_word(head)), prior: 0, trim: None))
+        let commit = format.JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, keyed: list.new(), call: None, payload: 0)
         result.unwrap(journal_apply("j-7", mut replay, Commit(take commit)))
         if replay.state.tips[0].head != head || replay.state.tips[0].at != 100 + head {
             return false
@@ -33,7 +33,7 @@ pub fn journal_law_apply() -> bool {
         }
     }
     let saved = share_page_tree(replay.state.tips[0].roots.collections)
-    let duplicate = JournalCommit(branch: 0, version: 3, at: 103, data: list.new(), streams: list.new(), keyed: list.new(), call: None, payload: 0)
+    let duplicate = format.JournalCommit(branch: 0, version: 3, at: 103, data: list.new(), streams: list.new(), keyed: list.new(), call: None, payload: 0)
     match journal_apply("j-7", mut replay, Commit(take duplicate)) {
         Error(Corrupt(f)) => match f.why {
             Gap(3) => {},
@@ -41,7 +41,7 @@ pub fn journal_law_apply() -> bool {
         },
         _ => return false
     }
-    let foreign_branch = JournalCommit(branch: 1, version: 4, at: 104, data: list.new(), streams: list.new(), keyed: list.new(), call: None, payload: 0)
+    let foreign_branch = format.JournalCommit(branch: 1, version: 4, at: 104, data: list.new(), streams: list.new(), keyed: list.new(), call: None, payload: 0)
     match journal_apply("j-7", mut replay, Commit(take foreign_branch)) {
         Error(Corrupt(f)) => match f.why {
             Gap(4) => {},
@@ -49,10 +49,10 @@ pub fn journal_law_apply() -> bool {
         },
         _ => return false
     }
-    let key = result.unwrap(logical_key(1, key_word(7)))
-    let mut deletes: List[JournalOp] = list.new()
-    list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None, prior: 9, trim: None))
-    let removed = JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), keyed: list.new(), call: None, payload: 0)
+    let key = result.unwrap(logical_key(1, types.key_word(7)))
+    let mut deletes: List[format.JournalOp] = list.new()
+    list.push(mut deletes, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(key))), value: None, prior: 9, trim: None))
+    let removed = format.JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), keyed: list.new(), call: None, payload: 0)
     result.unwrap(journal_apply("j-7", mut replay, Commit(take removed)))
     if page_row_count(replay.state.tips[0].roots.collections) != 0 || page_row_count(saved) != 1 || replay.state.tips[0].head != 4 || replay.state.tips[0].at != 104 {
         return false
@@ -76,11 +76,11 @@ fn journal_test_apply() -> Result[(), ()] {
 }
 
 fn journal_end_bytes(id: StoreId, seq: u64, end: u64) -> Bytes {
-    let ctx = DiskContext(store: id, role: 4, seq: seq)
-    let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 4, seq: seq)
+    let mut raw = result.unwrap(format.disk_header_bytes(ctx, 0, 0))
     let mut payload: Bytes = list.new()
-    result.unwrap(le(mut payload, end, 8))
-    let frame = result.unwrap(disk_seal(ctx, 72, 0x0012, 1, payload))
+    result.unwrap(format.le(mut payload, end, 8))
+    let frame = result.unwrap(format.disk_seal(ctx, 72, 0x0012, 1, payload))
     list.append(mut raw, frame)
     take raw
 }
@@ -100,7 +100,7 @@ fn read_journal_prefix(d: Dir, path: String, size: u64) -> Result[Bytes, Error] 
 fn journal_fixture_segment(d: Dir, id: StoreId, seq: u64, prev_end: u64) -> Result[(HostFile, HostFile), Error] waits {
     let path = journal_path(seq, "")?
     let end_path = journal_path(seq, ".end")?
-    let header = capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq), prev_end, 0))?
+    let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq), prev_end, 0)))?
     let mut file = disk_io(host.open(d, path, Write))?
     match host.write(mut file, header) {
         Ok(()) => (),
@@ -118,7 +118,7 @@ pub fn journal_law_recovery(d: Dir, c: Clock) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let (take old, take old_end) = result.unwrap(journal_fixture_segment(d, id, 7, 0))
     let mut old_file = take old
-    let first = journal_empty_commit(DiskContext(store: id, role: 2, seq: 7), 72, 1)
+    let first = journal_empty_commit(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), 72, 1)
     result.unwrap(host.write(mut old_file, first))
     let mut junk: Bytes = list.new()
     list.fill(mut junk, 16, 255u8)
@@ -129,7 +129,7 @@ pub fn journal_law_recovery(d: Dir, c: Clock) -> bool waits {
     result.unwrap(disk_write_synced(d, "j-7.end", journal_end_bytes(id, 7, 114)))
     let (take next_file, take next_end) = result.unwrap(journal_fixture_segment(d, id, 8, 114))
     let mut newest = take next_file
-    let second = journal_empty_commit(DiskContext(store: id, role: 2, seq: 8), 72, 2)
+    let second = journal_empty_commit(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 8), 72, 2)
     result.unwrap(host.write(mut newest, second))
     result.unwrap(host.sync(mut newest))
     result.unwrap(host.close(take newest))
@@ -181,11 +181,11 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let next_node = db.next_node
     result.unwrap(close(take db))
     let mut stored: Bytes = list.new()
-    result.unwrap(le(mut stored, 0, 2))
-    result.unwrap(le(mut stored, 70, 8))
-    let key = result.unwrap(logical_key(1, key_word(7)))
+    result.unwrap(format.le(mut stored, 0, 2))
+    result.unwrap(format.le(mut stored, 70, 8))
+    let key = result.unwrap(logical_key(1, types.key_word(7)))
     let mut written: DataRows = new_data_rows()
-    push_data_row(mut written, DataOp(key: take key, value: Some(PageValue(take stored)), trim: None, prior: None))
+    push_data_row(mut written, format.DataOp(key: take key, value: Some(PageValue(take stored)), trim: None, prior: None))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
     let raw = result.unwrap(encode_commit(ci, mut written, seq, 72))
     if list.len(raw) != 77 {
@@ -246,7 +246,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
     let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
     let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(2)
     let (synced_send, _synced): (Sender[()], Receiver[()]) = channel.new(1)
-    let first = journal_empty_commit(DiskContext(store: id, role: 2, seq: 7), 72, 1)
+    let first = journal_empty_commit(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), 72, 1)
     result.unwrap(channel.send(send, Frame(take first, 1)))
     if mode == 3 {
         let (take rotated, take rotated_end, take rotated_header) = result.unwrap(disk_new_segment(d, c, id, 8, 114, mut creation))
@@ -268,7 +268,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
         } else {
             72 + (head - 1) * 42
         }
-        let raw = journal_empty_commit(DiskContext(store: id, role: 2, seq: seq), offset, head)
+        let raw = journal_empty_commit(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq), offset, head)
         result.unwrap(channel.send(send, Frame(take raw, head)))
     }
     let max_frames = if mode == 1 {
@@ -298,7 +298,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
             _ => return false
         }
         for head in 3u64 .. 5 {
-            let raw = journal_empty_commit(DiskContext(store: id, role: 2, seq: 7), 72 + (head - 1) * 42, head)
+            let raw = journal_empty_commit(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), 72 + (head - 1) * 42, head)
             result.unwrap(channel.send(send, Frame(take raw, head)))
         }
         match result.unwrap(channel.receive(received)) {
@@ -307,7 +307,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
         }
         // Another batch after the worker goes back to receive.
         for head in 5u64 .. 7 {
-            let raw = journal_empty_commit(DiskContext(store: id, role: 2, seq: 7), 72 + (head - 1) * 42, head)
+            let raw = journal_empty_commit(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), 72 + (head - 1) * 42, head)
             result.unwrap(channel.send(send, Frame(take raw, head)))
         }
         previously_acked = 4
@@ -484,12 +484,12 @@ fn journal_test_end_storage(d: Dir) -> Result[(), ()] waits {
 // The law alone gives the running loop zero new bytes after its startup.
 // Production reserves its root once and relies on the preallocated buffers.
 fn journal_worker_zero(take input: JournalWorker) -> Result[(), Error] waits {
-    let reserved = capacity(journal_buffers(int.widen(input.group_bytes)))?
+    let reserved = failure_result_from_rep(types.capacity(journal_buffers(int.widen(input.group_bytes))))?
     let _ = channel.send(input.ready, Ok(()))
     let attempt = bound bytes 0 {
         journal_loop(take input, take reserved)
     }
-    capacity(take attempt)?
+    failure_result_from_rep(types.capacity(take attempt))?
 }
 
 // STORE-SPEC §1.8: issuer, length, subject, and two BE u64s.
@@ -518,33 +518,33 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let seq = db.file_seq
     result.unwrap(close(take db))
     let mut payload: Bytes = list.new()
-    result.unwrap(le(mut payload, 0, 4))
-    result.unwrap(le(mut payload, 1, 8))
-    result.unwrap(le(mut payload, 101, 8))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(le(mut payload, 1, 4))
-    result.unwrap(le(mut payload, 3, 1))
-    result.unwrap(blob(mut payload, journal_vector_stream()))
+    result.unwrap(format.le(mut payload, 0, 4))
+    result.unwrap(format.le(mut payload, 1, 8))
+    result.unwrap(format.le(mut payload, 101, 8))
+    result.unwrap(format.le(mut payload, 1, 1))
+    result.unwrap(format.le(mut payload, 1, 1))
+    result.unwrap(format.le(mut payload, 1, 4))
+    result.unwrap(format.le(mut payload, 3, 1))
+    result.unwrap(format.blob(mut payload, journal_vector_stream()))
     let mut stream_value: Bytes = list.new()
-    result.unwrap(le(mut stream_value, 1, 8))
+    result.unwrap(format.le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
-    result.unwrap(le(mut stream_value, 2, 1))
+    result.unwrap(format.le(mut stream_value, 2, 1))
     list.append(mut stream_value, string.as_bytes("reply"))
-    result.unwrap(blob(mut payload, stream_value))
-    result.unwrap(blob(mut payload, string.as_bytes("entry")))
-    result.unwrap(blob(mut payload, string.as_bytes("arguments")))
+    result.unwrap(format.blob(mut payload, stream_value))
+    result.unwrap(format.blob(mut payload, string.as_bytes("entry")))
+    result.unwrap(format.blob(mut payload, string.as_bytes("arguments")))
     // AP1a and §1.8. The 21-byte prefix, 5-byte streams head and 79-byte reply op
     // are followed by the 9-byte entry and 13-byte args blobs.
     let revision_at = 127u64
-    result.unwrap(blob(mut payload, revision_vector()))
-    result.unwrap(blob(mut payload, code_vector()))
-    result.unwrap(le(mut payload, 0, 1))
+    result.unwrap(format.blob(mut payload, revision_vector()))
+    result.unwrap(format.blob(mut payload, code_vector()))
+    result.unwrap(format.le(mut payload, 0, 1))
     // Revision (36), code (52) and settle (1) add 89 bytes.
     if list.len(payload) != 216 {
         return false
     }
-    let raw = result.unwrap(disk_seal(DiskContext(store: id, role: 2, seq: seq), 72, 0x0011, 1, payload))
+    let raw = result.unwrap(format.disk_seal(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq), 72, 0x0011, 1, payload))
     let path = result.unwrap(disk_path("j-", seq, ""))
     let mut file = result.unwrap(host.open(d, path, ReadWrite))
     result.unwrap(host.write_at(mut file, 72, raw))
@@ -590,15 +590,15 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(close(take bad))
     let mut one: Bytes = list.new()
     list.fill(mut one, 1, 7u8)
-    let mut short = result.unwrap(copied(list.slice(payload, 0, revision_at)))
-    result.unwrap(blob(mut short, one))
-    result.unwrap(blob(mut short, code_vector()))
-    result.unwrap(le(mut short, 0, 1))
+    let mut short = result.unwrap(failure_result_from_rep(types.copied(list.slice(payload, 0, revision_at))))
+    result.unwrap(format.blob(mut short, one))
+    result.unwrap(format.blob(mut short, code_vector()))
+    result.unwrap(format.le(mut short, 0, 1))
     // The one-byte revision makes this payload 31 bytes shorter.
     if list.len(short) != 185 {
         return false
     }
-    let short_raw = result.unwrap(disk_seal(DiskContext(store: bad_id, role: 2, seq: bad_seq), 72, 0x0011, 1, short))
+    let short_raw = result.unwrap(format.disk_seal(format.DiskContext(store: store_key_to_rep(bad_id), role: 2, seq: bad_seq), 72, 0x0011, 1, short))
     let short_path = result.unwrap(disk_path("j-", bad_seq, ""))
     let mut short_file = result.unwrap(host.open(bad_dir, short_path, ReadWrite))
     result.unwrap(host.write_at(mut short_file, 72, short_raw))
@@ -710,7 +710,7 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let (beta, _) = deploy_result(fork(mut db, "beta", parent))?
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 1u8)
-    let fork_only = begin_export_copy(mut db, scratch, result.unwrap(copied(attempt)), 0)?
+    let fork_only = begin_export_copy(mut db, scratch, result.unwrap(failure_result_from_rep(types.copied(attempt))), 0)?
     let exported = export_copy(take fork_only)?
     let opened = open_export(exported.dir, c, attempt, options)?
     if opened.db.next_branch != 2 || opened.db.heads[1].id != 1 || opened.db.heads[1].parent != 0 || opened.db.heads[1].forked_at != 2 || opened.db.heads[1].head != 2 || opened.db.heads[1].at != wall || tree_stamp(opened.db.heads[1].roots.collections) != tree_stamp(opened.db.heads[0].roots.collections) {
@@ -733,19 +733,19 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     if !revision_is_none(main_call.record.revision) || !revision_is_vector(beta_call.record.revision) || main_call.base != 2 || beta_call.base != 2 || main_call.at != wall + 1 || beta_call.at != wall + 1 {
         return Error(ExportMismatch)
     }
-    let calls = begin_export_copy(mut db, scratch, result.unwrap(copied(attempt)), 0)?
+    let calls = begin_export_copy(mut db, scratch, result.unwrap(failure_result_from_rep(types.copied(attempt))), 0)?
     let _ = deploy_result(checkpoint(mut db))?
     let saved_calls = export_copy(take calls)?
     // HEADER(72), put(77), FORK(46), then two CALL frames. The first CALL
     // starts at 195 and is 42 + 116 + 113 = 271 bytes. The second adds a
     // 32-byte revision. Each stream key includes 18 bytes beyond its subject.
-    let name = deploy_result(capacity(disk_path("j-", saved_calls.stamp.terminal, "")))?
+    let name = deploy_result(failure_result_from_rep(types.capacity(disk_path("j-", saved_calls.stamp.terminal, ""))))?
     let wire = deploy_result(disk_read_file(saved_calls.dir, name, 769))?
-    if list.len(wire) != 769 || read_le(wire, 149, 2) != 19 || read_le(wire, 195, 2) != 17 || read_le(wire, 211, 4) != 0 || read_le(wire, 466, 2) != 17 || read_le(wire, 482, 4) != 1 || read_le(wire, 215, 8) != 3 || read_le(wire, 486, 8) != 3 {
+    if list.len(wire) != 769 || format.read_le(wire, 149, 2) != 19 || format.read_le(wire, 195, 2) != 17 || format.read_le(wire, 211, 4) != 0 || format.read_le(wire, 466, 2) != 17 || format.read_le(wire, 482, 4) != 1 || format.read_le(wire, 215, 8) != 3 || format.read_le(wire, 486, 8) != 3 {
         return Error(ExportMismatch)
     }
     release_export(mut db, attempt)
-    let cover_copy = begin_export_copy(mut db, scratch, result.unwrap(copied(attempt)), 0)?
+    let cover_copy = begin_export_copy(mut db, scratch, result.unwrap(failure_result_from_rep(types.copied(attempt))), 0)?
     let covered_export = export_copy(take cover_copy)?
     if let Some(_) = deploy_result(recorded(db, main, 3))? {
         return Error(ExportMismatch)
@@ -790,12 +790,12 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let old_segment = db.file_seq
     let old_stamp = db.next_node
     let old_end = db.file_end
-    let file = capacity(disk_path("j-", old_segment, ""))?
+    let file = failure_result_from_rep(types.capacity(disk_path("j-", old_segment, "")))?
     let saved = snapshot(db)
     let (beta, receipt) = fork(mut db, "beta", saved)?
     let after = accounts(db)
     let raw = read_journal_prefix(child, file, old_end + 46)?
-    if read_le(raw, old_end, 2) != 19 || read_le(raw, old_end + 2, 2) != 1 || read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || db.next_node != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
+    if format.read_le(raw, old_end, 2) != 19 || format.read_le(raw, old_end + 2, 2) != 1 || format.read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || db.next_node != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
         return Error(Foreign)
     }
     let on_beta = snapshot_of(db, beta)?
@@ -813,19 +813,19 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
 
 fn fork_test_payload(id: u64, name: String) -> Bytes {
     let mut raw: Bytes = list.new()
-    result.unwrap(le(mut raw, id, 4))
-    result.unwrap(le(mut raw, 0, 4))
-    result.unwrap(le(mut raw, 0, 8))
-    result.unwrap(le(mut raw, string.byte_len(name), 2))
+    result.unwrap(format.le(mut raw, id, 4))
+    result.unwrap(format.le(mut raw, 0, 4))
+    result.unwrap(format.le(mut raw, 0, 8))
+    result.unwrap(format.le(mut raw, string.byte_len(name), 2))
     list.append(mut raw, string.as_bytes(name))
     list.put_word_le(mut raw, 1u64)
     take raw
 }
 
 fn fork_test_append(d: Dir, store: StoreId, seq: u64, offset: u64, id: u64, name: String) -> Result[(), Error] waits {
-    let path = capacity(disk_path("j-", seq, ""))?
-    let ctx = DiskContext(store: store, role: 2, seq: seq)
-    let raw = capacity(disk_seal(ctx, offset, 19, 1, fork_test_payload(id, name)))?
+    let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
+    let ctx = format.DiskContext(store: store_key_to_rep(store), role: 2, seq: seq)
+    let raw = failure_result_from_rep(types.capacity(format.disk_seal(ctx, offset, 19, 1, fork_test_payload(id, name))))?
     let mut file = disk_io(host.open(d, path, ReadWrite))?
     if let Error(failure) = host.write_at(mut file, offset, raw) {
         return Error(Io(failure.error))

@@ -76,7 +76,7 @@ fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
     while let Some(row) = std.page.cursor_next(mut cursor) {
         let seq: u64 = list.word_be(row.key, 0)
         let owner: u32 = list.word_le(row.value, 1)
-        let target = if row.value[0u64] == 0 {
+        let target: format.TieredTarget = if row.value[0u64] == 0 {
             TieredPage(std.page.decode_ptr(list.slice(row.value, 5, 41)) ?=> |_| Missing("L87 queued Page row"))
         } else {
             TieredBlob(std.page.decode_ref(list.slice(row.value, 5, 47)) ?=> |_| Missing("L87 queued Blob row"))
@@ -556,7 +556,7 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
     let mut edited: List[ReplacedFrame] = list.new()
     list.push(mut edited, replaced_page(one))
     list.push(mut edited, replaced_blob(two))
-    let mut detached: List[TieredTarget] = list.new()
+    let mut detached: List[format.TieredTarget] = list.new()
     list.push(mut detached, TieredPage(three))
     // 2 × 24 + 1 × 48 = 96.
     let first = TieredFreed(replaced: take edited, dropped: take detached)
@@ -565,7 +565,7 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
     }
     admit_tiered_commit(mut dirty, 7, take first)
     // 2 × 24 + 3 × 48 = 192.
-    let mut blobs: List[TieredTarget] = list.new()
+    let mut blobs: List[format.TieredTarget] = list.new()
     list.push(mut blobs, TieredBlob(two))
     list.push(mut blobs, TieredBlob(std.page.BlobRef(stamp: 4, len: 900, checksum: 104, pack: 11, offset: 1120, body: 0)))
     let second = TieredFreed(replaced: list.new(), dropped: take blobs)

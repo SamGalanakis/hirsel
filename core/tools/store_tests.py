@@ -91,6 +91,55 @@ def crash_inputs(root):
     return inputs(root, package='store-crash', with_tests=('store', 'runner'))
 
 
+CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
+                    'index_rows_write_refused', 'completion_unreachable',
+                    'view_tx_write_refused', 'journal_input_refused')
+
+
+def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
+    rows = []
+    for control in controls:
+        negative = inputs(root)
+        source = dict(
+            file=str(root / ('core/programs/store/' + control + '.hirsel')),
+            modules=[control], signatures=False)
+        if control == 'journal_input_refused':
+            negative['packages'].append({
+                'package': {'name': control, 'version': '1'},
+                'dependencies': [{'name': 'core', 'version': '1'}, {'name': 'store', 'version': '1'}],
+                'sources': [source],
+            })
+        else:
+            negative['packages'][-1]['sources'].append(source)
+        rejected = work / (control + '.json')
+        rejected.write_text(json.dumps(negative))
+        result = run_case(control, 'checker', [str(compiler), 'check', '--inputs', str(rejected),
+                                 '--source-core', '--source-std', '--store', str(work / control),
+                                 '--json'], capture_output=True, text=True)
+        report = json.loads(result.stdout)
+        ds = report.get('diagnostics', [])
+        expected = {
+            'completion_unreachable': [('PROG-2', '`store@1/store/Completion` is private or opaque')],
+            'journal_input_refused': [('PROG-2', '`store@1/format/JournalInput` is private or opaque')],
+            'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
+            'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],
+            'view_tx_write_refused': [('OWN-10', '`tx` is viewed')],
+            'look_info_refused': [('OWN-5', '`tx` is not writable'),
+                                  ('PROG-2', '`Tx` is opaque outside its module'),
+                                  ('PROG-2', '`RequestDigest` is opaque outside its module'),
+                                  ('PROG-2', '`RequestDigest` is opaque outside its module')],
+        }.get(control, [('OWN-5', '`tx` is not writable')])
+        actual = [(d.get('rule'), d.get('message')) for d in ds]
+        good = (result.returncode == 1 and report.get('accepted') is False
+                and sorted(actual) == sorted(expected)
+                and not report.get('incomplete') and not report.get('resources'))
+        rows.append(dict(engine='checker', law=control, passed=good, result=report))
+        if (work / control).is_dir():
+            shutil.rmtree(work / control)
+        print(f'checker {control}: {"PASS" if good else "FAIL"}', flush=True)
+    return rows
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, default=ROOT)
@@ -110,38 +159,7 @@ def main():
         manifest = work / 'inputs.json'
         manifest.write_text(json.dumps(inputs(args.root.resolve(), tests=True)))
         if args.compiler is not None:
-            for control in ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
-                            'index_rows_write_refused', 'completion_unreachable',
-                            'view_tx_write_refused'):
-                negative = inputs(args.root.resolve())
-                negative['packages'][-1]['sources'].append(dict(
-                    file=str(args.root.resolve() / ('core/programs/store/' + control + '.hirsel')),
-                    modules=[control], signatures=False))
-                rejected = work / (control + '.json')
-                rejected.write_text(json.dumps(negative))
-                result = run_case(control, 'checker', [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
-                                         '--source-core', '--source-std', '--store', str(work / control),
-                                         '--json'], capture_output=True, text=True)
-                report = json.loads(result.stdout)
-                ds = report.get('diagnostics', [])
-                expected = {
-                    'completion_unreachable': [('PROG-2', '`store@1/store/Completion` is private or opaque')],
-                    'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
-                    'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],
-                    'view_tx_write_refused': [('OWN-10', '`tx` is viewed')],
-                    'look_info_refused': [('OWN-5', '`tx` is not writable'),
-                                          ('PROG-2', '`Tx` is opaque outside its module'),
-                                          ('PROG-2', '`RequestDigest` is opaque outside its module'),
-                                          ('PROG-2', '`RequestDigest` is opaque outside its module')],
-                }.get(control, [('OWN-5', '`tx` is not writable')])
-                actual = [(d.get('rule'), d.get('message')) for d in ds]
-                good = (result.returncode == 1 and report.get('accepted') is False
-                        and sorted(actual) == sorted(expected)
-                        and not report.get('incomplete') and not report.get('resources'))
-                rows.append(dict(engine='checker', law=control, passed=good, result=report))
-                if (work / control).is_dir():
-                    shutil.rmtree(work / control)
-                print(f'checker {control}: {"PASS" if good else "FAIL"}', flush=True)
+            rows.extend(checker_controls(args.root.resolve(), args.compiler.resolve(), work))
         for engine in engines:
             if engine == 'evaluator':
                 if args.evaluator is None:

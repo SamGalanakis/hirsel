@@ -97,7 +97,7 @@ fn stream_timer(take job: StreamTimer) waits {
 type BatchEntry {
     slot: u64,
     through: u64,
-    slice: BatchSlice
+    slice: format.BatchSlice
 }
 
 type StreamService {
@@ -283,14 +283,14 @@ fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotM
         }
     }
     let made: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(STREAM_SLOT_CHUNKS, bytes s.plan.limits.slot_bytes)
-    let (take data, take inbox) = capacity(take made)?
+    let (take data, take inbox) = failure_result_from_rep(types.capacity(take made))?
     let slot = ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None)
     if let Some(i) = free {
         stream_retire_slot_settles(mut s, i)
         let _ = replace(mut s.slots[i], take slot)
         return Ok((take data, int.narrow(i)))
     }
-    capacity(list.try_reserve(mut s.slots, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut s.slots, 1)))?
     list.push(mut s.slots, take slot)
     Ok((take data, int.narrow(list.len(s.slots) - 1)))
 }
@@ -382,7 +382,7 @@ fn stream_batch_room(batch: List[BatchEntry], width: u64, added: bool) -> u64 {
     if added {
         rows += 1
     }
-    let mut total = stream_batch_overhead(rows) + width
+    let mut total = format.stream_batch_overhead(rows) + width
     for e in batch {
         total += list.len(e.slice.octets)
     }
@@ -460,8 +460,8 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                     let row = match at {
                         Some(found) => found,
                         None => {
-                            capacity(list.try_reserve(mut batch, 1))?
-                            list.push(mut batch, BatchEntry(slot: i, through: 0, slice: BatchSlice(store: owner, epoch: fence, frames: 0, octets: list.new())))
+                            failure_result_from_rep(types.capacity(list.try_reserve(mut batch, 1)))?
+                            list.push(mut batch, BatchEntry(slot: i, through: 0, slice: format.BatchSlice(store: store_key_to_rep(owner), epoch: fence, frames: 0, octets: list.new())))
                             list.len(batch) - 1
                         },
                     }
@@ -476,7 +476,7 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
 
 fn stream_store_in(batch: List[BatchEntry], store: StoreId) -> bool {
     for e in batch {
-        if same(e.slice.store, store) {
+        if types.same(e.slice.store.hi, e.slice.store.lo, store.hi, store.lo) {
             return true
         }
     }
@@ -487,7 +487,7 @@ fn stream_store_in(batch: List[BatchEntry], store: StoreId) -> bool {
 // slice under (X, ROLE_BATCH, batch seq) at its offset in the slice.
 fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, width: u64, sequence: u64, take first: Bytes) -> Result[(), Error] waits {
     let at = list.len(filling.slice.octets)
-    capacity(list.try_reserve(mut filling.slice.octets, width + BINDING_BYTES))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut filling.slice.octets, width + format.BINDING_BYTES)))?
     list.append(mut filling.slice.octets, first)
     while list.len(filling.slice.octets) - at < width {
         let received = match s.slots[i].inbox {
@@ -504,9 +504,9 @@ fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, widt
             },
         }
     }
-    let kind: u16 = int.narrow(read_le(filling.slice.octets, at, 2))
-    let ctx = DiskContext(store: filling.slice.store, role: ROLE_BATCH, seq: s.lane.seq)
-    capacity(history_seal(mut filling.slice.octets, ctx, at, kind))?
+    let kind: u16 = int.narrow(format.read_le(filling.slice.octets, at, 2))
+    let ctx = format.DiskContext(store: filling.slice.store, role: format.ROLE_BATCH, seq: s.lane.seq)
+    failure_result_from_rep(types.capacity(format.history_seal(mut filling.slice.octets, ctx, at, kind)))?
     filling.slice.frames += 1
     filling.through = sequence
     Ok(())
@@ -521,9 +521,9 @@ fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> R
             other => other,
         }
     })
-    let mut slices: List[BatchSlice] = list.new()
-    capacity(list.try_reserve(mut slices, list.len(ordered)))?
-    capacity(list.try_reserve(mut s.waiting, list.len(ordered)))?
+    let mut slices: List[format.BatchSlice] = list.new()
+    failure_result_from_rep(types.capacity(list.try_reserve(mut slices, list.len(ordered))))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut s.waiting, list.len(ordered))))?
     for take e in take ordered {
         let BatchEntry(slot, through, slice: take slice) = take e
         list.push(mut s.waiting, (slot, through))
@@ -578,7 +578,7 @@ fn stream_service_decided(mut s: StreamService, decided: List[SliceDecision]) {
 
 fn stream_ticket_stall(mut s: StreamService, slot: u64, store: StoreId, epoch: u64, batch_seq: u64, through: u64) {
     for i in 0u64 .. list.len(s.tickets) {
-        if s.tickets[i].slot == slot && same(s.tickets[i].store, store) && s.tickets[i].epoch == epoch && s.tickets[i].batch_seq == batch_seq {
+        if s.tickets[i].slot == slot && types.same(s.tickets[i].store.hi, s.tickets[i].store.lo, store.hi, store.lo) && s.tickets[i].epoch == epoch && s.tickets[i].batch_seq == batch_seq {
             s.tickets[i].through = order.max(s.tickets[i].through, through)
             return
         }
@@ -593,7 +593,7 @@ fn stream_ticket_stall(mut s: StreamService, slot: u64, store: StoreId, epoch: u
 fn stream_serving_slot(s: StreamService, store: StoreId, epoch: u64) -> Option[u64] {
     for i in 0u64 .. list.len(s.slots) {
         if let Some(place) = s.slots[i].place {
-            if !place.fenced && same(place.store, store) && place.epoch == epoch {
+            if !place.fenced && types.same(place.store.hi, place.store.lo, store.hi, store.lo) && place.epoch == epoch {
                 return Some(i)
             }
         }

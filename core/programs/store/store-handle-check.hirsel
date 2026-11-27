@@ -1,7 +1,6 @@
 // I3's read-handle checks (STORE-SPEC §1.2 "Read handles"): a handle's
 // catalog key must still name its id in the roots a read sees, and an index
 // handle's record must also be Public.
-
 fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
     Ok(arc.new(take key))
 }
@@ -17,7 +16,7 @@ fn catalog_page(catalog: PageTree) -> Result[Arc[Bytes], Error] {
     if let Some(_) = std.page.body(catalog.root, 0) {
         return Ok(arc.new(list.new()))
     }
-    Ok(arc.new(copied(std.page.payload(image))?))
+    Ok(arc.new(failure_result_from_rep(types.copied(std.page.payload(image)))?))
 }
 
 // I3's catalog check. `page` is the catalog root page the handle was resolved
@@ -39,7 +38,7 @@ fn index_readable(roots: Roots, key: Bytes, page: Bytes, id: u32, public: bool) 
     if list.len(raw) < 5 {
         return Error(malformed(0))
     }
-    if read_le(raw, 1, 4) != int.widen(id) {
+    if format.read_le(raw, 1, 4) != int.widen(id) {
         return Error(Stale(id))
     }
     if !record_public(raw) {
@@ -57,7 +56,7 @@ fn readable(roots: Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error]
             if list.len(raw) < 5 {
                 return Error(malformed(0))
             }
-            if read_le(raw, 1, 4) == int.widen(id) {
+            if format.read_le(raw, 1, 4) == int.widen(id) {
                 Ok(())
             } else {
                 Error(Stale(id))

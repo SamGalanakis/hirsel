@@ -31,7 +31,7 @@ fn history_mark_ref(mut raw: Bytes, item: HistoryRef) {
     list.put_word_le(mut raw, item.len)
 }
 
-fn history_checkpoint_packet(mut raw: Bytes, ctx: DiskContext, epoch: u64, kind: u8, predecessor: HistoryRef, manifest: HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot) -> Result[HistoryRef, Error] {
+fn history_checkpoint_packet(mut raw: Bytes, ctx: format.DiskContext, epoch: u64, kind: u8, predecessor: HistoryRef, manifest: HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot) -> Result[HistoryRef, Error] {
     history_packet_header(mut raw, ctx, epoch, kind, predecessor)?
     list.fill(mut raw, 16, 0u8)
     history_mark_ref(mut raw, manifest)
@@ -42,10 +42,10 @@ fn history_checkpoint_packet(mut raw: Bytes, ctx: DiskContext, epoch: u64, kind:
     for older in retained.earlier {
         history_mark_ref(mut raw, older)
     }
-    capacity(history_seal(mut raw, ctx, 112, 0x0090))?
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, 112, 0x0090)))?
     let at = list.len(raw)
     history_encode_locator(mut raw, locator.rows)
-    capacity(history_seal(mut raw, ctx, at, 0x00C0))?
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, at, 0x00C0)))?
     Ok(history_new_ref(ctx.seq, epoch, raw))
 }
 
@@ -89,9 +89,9 @@ fn history_make_locator_reusing(mut client: std.object.Client, id: StoreId, seq:
     }
     if list.len(rows) > HISTORY_LOCATE_ROWS {
         list.clear(mut workspace.packet)
-        capacity(list.try_reserve(mut workspace.packet, 88 + 32 * HISTORY_LOCATE_ROWS + BINDING_BYTES))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.packet, 88 + 32 * HISTORY_LOCATE_ROWS + format.BINDING_BYTES)))?
         list.clear(mut workspace.compare)
-        capacity(list.try_reserve(mut workspace.compare, 88 + 32 * HISTORY_LOCATE_ROWS))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.compare, 88 + 32 * HISTORY_LOCATE_ROWS)))?
     }
     while list.len(rows) > HISTORY_LOCATE_ROWS {
         let row_count = list.len(rows)
@@ -100,7 +100,7 @@ fn history_make_locator_reusing(mut client: std.object.Client, id: StoreId, seq:
         let mut parents = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
             Ok(list.with_capacity(length))
         })?
-        let ctx = DiskContext(store: id, role: 8, seq)
+        let ctx = format.DiskContext(store: store_key_to_rep(id), role: 8, seq)
         let mut first_index = 0u64
         while first_index < row_count {
             let remaining = (layer_capacity - list.len(parents) - 1) * HISTORY_LOCATE_ROWS
@@ -119,9 +119,9 @@ fn history_make_locator_reusing(mut client: std.object.Client, id: StoreId, seq:
                     }
                     let slice_rows = list.slice(rows, first_index, until)
                     list.clear(mut workspace.packet)
-                    capacity(history_append_header(mut workspace.packet, ctx, epoch, kind))?
+                    failure_result_from_rep(types.capacity(format.history_append_header(mut workspace.packet, ctx, epoch, kind)))?
                     history_encode_locator(mut workspace.packet, slice_rows)
-                    capacity(history_seal(mut workspace.packet, ctx, 72, 0x00C0))?
+                    failure_result_from_rep(types.capacity(format.history_seal(mut workspace.packet, ctx, 72, 0x00C0)))?
                     let reference = history_new_ref(seq, epoch, workspace.packet)
                     history_fill_key(mut workspace.key, "l-", reference)
                     history_create(mut client, workspace.key, mut workspace.packet, mut workspace.compare, deadline)?
@@ -130,11 +130,11 @@ fn history_make_locator_reusing(mut client: std.object.Client, id: StoreId, seq:
             }
             let mut children: List[HistoryRef] = list.new()
             if depth > 0 {
-                capacity(list.try_reserve(mut children, chunk_end - first_index))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut children, chunk_end - first_index)))?
                 list.append(mut children, list.slice(rows, first_index, chunk_end))
             }
             history_remember_chunk(mut located, chunk, depth, chunk_end - first_index, rows[first_index], rows[chunk_end - 1], take children)?
-            capacity(list.try_reserve(mut parents, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut parents, 1)))?
             list.push(mut parents, chunk)
             first_index = chunk_end
         }
@@ -153,12 +153,12 @@ fn history_make_locator(mut client: std.object.Client, id: StoreId, seq: u64, ep
 fn history_publish_checkpoint(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, manifest: HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot, activation_update: Option[HistoryActivation], mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {
     let mut candidate = register.head
     let seq = history_next_id(candidate.entry.seq)?
-    let ctx = DiskContext(store: candidate.store, role: 2, seq)
+    let ctx = format.DiskContext(store: store_key_to_rep(candidate.store), role: 2, seq)
     let width = 189 + 32 * (list.len(retained.earlier) + list.len(locator.rows))
     list.clear(mut workspace.packet)
-    capacity(list.try_reserve(mut workspace.packet, width + BINDING_BYTES))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.packet, width + format.BINDING_BYTES)))?
     list.clear(mut workspace.compare)
-    capacity(list.try_reserve(mut workspace.compare, width))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.compare, width)))?
     let base = history_checkpoint_packet(mut workspace.packet, ctx, candidate.pair.epoch, candidate.authority_kind, candidate.entry, manifest, retained, locator)?
     candidate.entry = base
     candidate.checkpoint = base
@@ -173,9 +173,9 @@ fn history_publish_checkpoint(mut client: std.object.Client, mut register: Histo
 fn history_create_manifest(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, manifest: PageManifest, mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryRef, Error] waits {
     let (take prepared, take header) = disk_allocation(scoped fn() -> Result[(Bytes, Bytes), Error] {
         let raw = disk_page_manifest_bytes(id, manifest)?
-        let mut leader: Bytes = list.with_capacity(72 + BINDING_BYTES)
-        let ctx = DiskContext(store: id, role: 1, seq: manifest.generation)
-        capacity(history_append_header(mut leader, ctx, epoch, kind))?
+        let mut leader: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
+        let ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: manifest.generation)
+        failure_result_from_rep(types.capacity(format.history_append_header(mut leader, ctx, epoch, kind)))?
         Ok((take raw, take leader))
     })?
     let mut raw = take prepared
@@ -193,10 +193,10 @@ fn history_create_manifest(mut client: std.object.Client, id: StoreId, epoch: u6
     Ok(item)
 }
 
-fn history_copy_header(mut raw: Bytes, ctx: DiskContext, epoch: u64, kind: u8) -> Result[(), Error] {
+fn history_copy_header(mut raw: Bytes, ctx: format.DiskContext, epoch: u64, kind: u8) -> Result[(), Error] {
     let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        let mut leader: Bytes = list.with_capacity(72 + BINDING_BYTES)
-        capacity(history_append_header(mut leader, ctx, epoch, kind))?
+        let mut leader: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
+        failure_result_from_rep(types.capacity(format.history_append_header(mut leader, ctx, epoch, kind)))?
         Ok(take leader)
     })?
     for i in 0u64 .. 72 {
@@ -223,13 +223,13 @@ fn history_pack_parts(mut client: std.object.Client, mut upload: std.object.Uplo
 
 fn history_confirm_pack(mut client: std.object.Client, key: String, raw: Bytes, mut scratch: Bytes, deadline: u64) -> Result[bool, Error] waits {
     list.clear(mut scratch)
-    capacity(list.try_reserve(mut scratch, list.len(raw)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut scratch, list.len(raw))))?
     let (take fetched, take bytes_back) = std.object.fetch(mut client, key, replace(mut scratch, list.new()), deadline)
     scratch = take bytes_back
     match take fetched {
         Ok(meta) if meta.size == list.len(raw) && scratch == raw => Ok(true),
-        Ok(_) => Error(disk_fault(key, 0, Malformed)),
-        Error(TooLarge) => Error(disk_fault(key, 0, Malformed)),
+        Ok(_) => Error(failure_from_rep(format.disk_fault(key, 0, Malformed))),
+        Error(TooLarge) => Error(failure_from_rep(format.disk_fault(key, 0, Malformed))),
         Error(NotFound) => Ok(false),
         Error(take problem) => Error(Remote(take problem)),
     }
@@ -287,7 +287,7 @@ fn history_upload_pack(mut client: std.object.Client, key: String, raw: Bytes, m
 fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, cache: Option[ObjectsCache], pack_layout: PackRun, mut known: PageLocations, mut pack_objects: Map[u64, HistoryRef], mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
     for pack in pack_layout.packs {
         encode_pack(id, pack_layout, pack, mut known, mut buffers.out)?
-        history_copy_header(mut buffers.out, DiskContext(store: id, role: 3, seq: pack.seq), epoch, kind)?
+        history_copy_header(mut buffers.out, format.DiskContext(store: store_key_to_rep(id), role: 3, seq: pack.seq), epoch, kind)?
         let item = history_new_ref(pack.seq, epoch, buffers.out)
         history_fill_key(mut workspace.key, "p-", item)
         history_upload_pack(mut client, workspace.key, buffers.out, mut workspace.compare, deadline)?
@@ -305,11 +305,11 @@ fn history_write_page_cut(mut client: std.object.Client, id: StoreId, epoch: u64
     let (take uploaded, take covered_packs) = disk_allocation(scoped fn() -> Result[(Map[u64, HistoryRef], List[HistoryRef]), Error] {
         let new_packs = list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
         let mut refs: Map[u64, HistoryRef] = map.new()
-        capacity(map.try_reserve(mut refs, new_packs))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut refs, new_packs)))?
         Ok((take refs, list.with_capacity(std.omap.len(prepared.locations.packs.values))))
     })?
     list.clear(mut workspace.compare)
-    capacity(list.try_reserve(mut workspace.compare, 65536))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.compare, 65536)))?
     let PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take prepared
     let mut known = take locations
     let mut packs = take uploaded

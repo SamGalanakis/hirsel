@@ -23,7 +23,7 @@ type ColdWalk {
     settled_below: u64,
     headers_checked: Map[u64, ()],
     page_levels: Map[u64, u8],
-    reached_by_pack: Map[u64, List[TieredFrameId]]
+    reached_by_pack: Map[u64, List[format.TieredFrameId]]
 }
 
 fn cold_check_pack_header(mut walk: ColdWalk, seq: u64, pack: PagePack, path: String) -> Result[(), Error] waits {
@@ -32,7 +32,7 @@ fn cold_check_pack_header(mut walk: ColdWalk, seq: u64, pack: PagePack, path: St
     }
     let mut opened = match host.open(walk.d, path, Read) {
         Ok(take fd) => take fd,
-        Error(NotFound) => return Error(disk_fault(path, 0, Absent)),
+        Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, 0, Absent))),
         Error(problem) => return Error(Io(problem)),
     }
     let size = disk_io(host.stat_file(mut opened))?.size
@@ -43,31 +43,31 @@ fn cold_check_pack_header(mut walk: ColdWalk, seq: u64, pack: PagePack, path: St
         } else {
             Malformed
         }
-        return Error(disk_fault(path, size, why))
+        return Error(failure_from_rep(format.disk_fault(path, size, why_to_rep(why))))
     }
     let header_raw = read_disk_bytes(mut opened, path, 0, 72)?
     disk_io(host.close(take opened))?
-    let _ = disk_allocation(scoped fn() -> Result[DiskHeader, Error] {
+    let _ = disk_allocation(scoped fn() -> Result[format.DiskHeader, Error] {
         disk_read_header(path, header_raw, 3, Some(seq), Some(walk.id))
     })?
-    capacity(map.try_reserve(mut walk.headers_checked, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut walk.headers_checked, 1)))?
     map.insert(mut walk.headers_checked, seq, ())
     Ok(())
 }
 
-fn cold_record_reached(mut walk: ColdWalk, frame: TieredFrameId) -> Result[(), Error] {
-    let appended = map.update(mut walk.reached_by_pack, frame.pack, fn(mut items: List[TieredFrameId]) -> Result[(), Capacity] {
+fn cold_record_reached(mut walk: ColdWalk, frame: format.TieredFrameId) -> Result[(), Error] {
+    let appended = map.update(mut walk.reached_by_pack, frame.pack, fn(mut items: List[format.TieredFrameId]) -> Result[(), Capacity] {
         list.try_reserve(mut items, 1)?
         list.push(mut items, frame)
         Ok(())
     })
     match take appended {
-        Some(take result) => capacity(take result),
+        Some(take result) => failure_result_from_rep(types.capacity(take result)),
         None => {
-            let mut items: List[TieredFrameId] = list.new()
-            capacity(list.try_reserve(mut items, 1))?
+            let mut items: List[format.TieredFrameId] = list.new()
+            failure_result_from_rep(types.capacity(list.try_reserve(mut items, 1)))?
             list.push(mut items, frame)
-            capacity(map.try_reserve(mut walk.reached_by_pack, 1))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut walk.reached_by_pack, 1)))?
             map.insert(mut walk.reached_by_pack, frame.pack, take items)
             Ok(())
         },
@@ -77,14 +77,14 @@ fn cold_record_reached(mut walk: ColdWalk, frame: TieredFrameId) -> Result[(), E
 fn walk_cold_blob(mut walk: ColdWalk, packs: Map[u64, PagePack], reference: std.page.BlobRef, mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
     let path = paged_pack_path(reference.pack)?
     if reference.stamp == 0 || reference.stamp >= walk.next_stamp || reference.len > BLOB_LIMIT - 8 {
-        return Error(disk_fault(path, reference.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, reference.offset, Malformed)))
     }
     let width = 8 + reference.len
     let Some(pack) = map.get(packs, reference.pack) else {
-        return Error(disk_fault(path, reference.offset, Dangling(reference.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, reference.offset, Dangling(reference.stamp))))
     }
     if pack.class != 4 || reference.offset < 72 || reference.offset >= pack.index || 16 + width > pack.index - reference.offset {
-        return Error(disk_fault(path, reference.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, reference.offset, Malformed)))
     }
     let loc = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(width), checksum: reference.checksum, stamp: reference.stamp)
     if !mark_reached(mut stamps, path, loc)? {
@@ -97,16 +97,16 @@ fn walk_cold_blob(mut walk: ColdWalk, packs: Map[u64, PagePack], reference: std.
     {
         let mut opened = match host.open(walk.d, path, Read) {
             Ok(take fd) => take fd,
-            Error(NotFound) => return Error(disk_fault(path, reference.offset, Absent)),
+            Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, reference.offset, Absent))),
             Error(problem) => return Error(Io(problem)),
         }
         let raw = read_disk_bytes(mut opened, path, reference.offset, 16 + width)?
         disk_io(host.close(take opened))?
-        let _ = disk_allocation(scoped fn() -> Result[Arc[TieredFrame], Error] {
+        let _ = disk_allocation(scoped fn() -> Result[Arc[format.TieredFrame], Error] {
             read_tiered_frame(path, walk.id, TieredBlob(reference), raw, reference.offset, walk.next_stamp)
         })?
     }
-    cold_record_reached(mut walk, tiered_frame_id(TieredBlob(reference)))
+    cold_record_reached(mut walk, format.tiered_frame_id(TieredBlob(reference)))
 }
 
 fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.PagePtr, expected_level: Option[u8], mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
@@ -115,17 +115,17 @@ fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.P
     }
     let path = paged_pack_path(ptr.pack)?
     let Some(pack) = map.get(packs, ptr.pack) else {
-        return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
     }
     let width: u64 = int.widen(ptr.len)
     if pack.class != 3 || ptr.stamp >= walk.next_stamp || width < 24 || width > PAGE_LIMIT || ptr.offset < 72 || ptr.offset >= pack.index || 16 + width > pack.index - ptr.offset {
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
     if !mark_reached(mut stamps, path, ptr)? {
         if let Some(wanted) = expected_level {
             if let Some(seen_level) = map.get(walk.page_levels, ptr.stamp) {
                 if seen_level != wanted {
-                    return Error(disk_fault(path, ptr.offset, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
                 }
             }
         }
@@ -138,7 +138,7 @@ fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.P
     let (height, take child_pages, take child_blobs) = {
         let mut opened = match host.open(walk.d, path, Read) {
             Ok(take fd) => take fd,
-            Error(NotFound) => return Error(disk_fault(path, ptr.offset, Absent)),
+            Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Absent))),
             Error(problem) => return Error(Io(problem)),
         }
         let raw = read_disk_bytes(mut opened, path, ptr.offset, 16 + width)?
@@ -150,7 +150,7 @@ fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.P
             let h = std.page.level(image)
             if let Some(wanted) = expected_level {
                 if h != wanted {
-                    return Error(disk_fault(path, ptr.offset, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
                 }
             }
             let mut pages_out: List[std.page.PagePtr] = list.new()
@@ -159,13 +159,13 @@ fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.P
                 match std.page.owning_edge(image, slot) {
                     Some(PageEdge(child)) => {
                         if child.stamp != 0 {
-                            page_edge_order(path, ptr, child)?
-                            capacity(list.try_reserve(mut pages_out, 1))?
+                            failure_result_from_rep(format.page_edge_order(path, ptr, child))?
+                            failure_result_from_rep(types.capacity(list.try_reserve(mut pages_out, 1)))?
                             list.push(mut pages_out, child)
                         }
                     },
                     Some(BlobEdge(body)) => {
-                        capacity(list.try_reserve(mut blobs_out, 1))?
+                        failure_result_from_rep(types.capacity(list.try_reserve(mut blobs_out, 1)))?
                         list.push(mut blobs_out, body)
                     },
                     None => (),
@@ -174,12 +174,12 @@ fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.P
             Ok((h, take pages_out, take blobs_out))
         })?
     }
-    capacity(map.try_reserve(mut walk.page_levels, 1))?
+    failure_result_from_rep(types.capacity(map.try_reserve(mut walk.page_levels, 1)))?
     map.insert(mut walk.page_levels, ptr.stamp, height)
-    cold_record_reached(mut walk, tiered_frame_id(TieredPage(ptr)))?
+    cold_record_reached(mut walk, format.tiered_frame_id(TieredPage(ptr)))?
     for child in child_pages {
         if height == 0 {
-            return Error(disk_fault(path, ptr.offset, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
         walk_cold_page(mut walk, packs, child, Some(height - 1), mut stamps)?
     }
@@ -191,17 +191,17 @@ fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.P
 
 // Verifies a touched unsettled class-3/4 pack's PACK_INDEX chain using one
 // frame buffer at a time and matches every reached edge against its row.
-fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, reached_in: List[TieredFrameId]) -> Result[(), Error] waits {
+fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, reached_in: List[format.TieredFrameId]) -> Result[(), Error] waits {
     let path = paged_pack_path(seq)?
-    let mut reached: List[TieredFrameId] = disk_allocation(scoped fn() -> Result[List[TieredFrameId], Error] {
+    let mut reached: List[format.TieredFrameId] = disk_allocation(scoped fn() -> Result[List[format.TieredFrameId], Error] {
         Ok(clone(reached_in))
     })?
-    list.sort(mut reached, fn(a: TieredFrameId, b: TieredFrameId) -> Order {
+    list.sort(mut reached, fn(a: format.TieredFrameId, b: format.TieredFrameId) -> Order {
         order.compare(a.offset, b.offset)
     })
     for i in 1u64 .. list.len(reached) {
         if reached[i].offset == reached[i - 1].offset {
-            return Error(disk_fault(path, reached[i].offset, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, reached[i].offset, Malformed)))
         }
     }
     let expected_row_kind = if pack.class == 3 {
@@ -211,7 +211,7 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_st
     }
     let mut opened = match host.open(d, path, Read) {
         Ok(take fd) => take fd,
-        Error(NotFound) => return Error(disk_fault(path, pack.index, Absent)),
+        Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, pack.index, Absent))),
         Error(problem) => return Error(Io(problem)),
     }
     let mut at = pack.index
@@ -222,10 +222,10 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_st
     let mut problem: Option[Error] = None
     while at < pack.payload_bytes {
         if pack.payload_bytes - at < 16 {
-            problem = Some(disk_fault(path, at, Malformed))
+            problem = Some(failure_from_rep(format.disk_fault(path, at, Malformed)))
             break
         }
-        let width = order.min(PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
+        let width = order.min(format.PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
         let wire = match read_disk_bytes(mut opened, path, at, width) {
             Ok(take bytes_read) => take bytes_read,
             Error(take err) => {
@@ -241,7 +241,7 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_st
             let payload = list.slice(wire, 16, end)
             let (prev, take initial) = start_pack_index(path, at, payload, 0)?
             if prev != prev_index {
-                return Error(disk_fault(path, at, Order))
+                return Error(failure_from_rep(format.disk_fault(path, at, Order)))
             }
             let mut cursor = take initial
             let mut cur_data = start_data
@@ -250,10 +250,10 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_st
             while let Some(take row) = next_pack_index(path, at, payload, mut cursor)? {
                 let row_len: u64 = int.widen(row.len)
                 if row.kind != expected_row_kind || row.offset != cur_data || row.stamp >= next_stamp || row.offset >= pack.index || 16 + row_len > pack.index - row.offset || cur_rows >= int.widen(pack.frames) {
-                    return Error(disk_fault(path, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
                 if cur_matched < list.len(reached) && reached[cur_matched].offset < row.offset {
-                    return Error(disk_fault(path, reached[cur_matched].offset, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, reached[cur_matched].offset, Malformed)))
                 }
                 if cur_matched < list.len(reached) && reached[cur_matched].offset == row.offset {
                     let row_frame_kind: u16 = if row.kind == 0x21 {
@@ -262,7 +262,7 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_st
                         0x0022u16
                     }
                     if row_len != reached[cur_matched].len || row.stamp != reached[cur_matched].stamp || row_frame_kind != reached[cur_matched].kind {
-                        return Error(disk_fault(path, row.offset, Checksum))
+                        return Error(failure_from_rep(format.disk_fault(path, row.offset, Checksum)))
                     }
                     cur_matched += 1
                 }
@@ -290,10 +290,10 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_st
         return Error(take err)
     }
     if at != pack.payload_bytes || next_data != pack.index || rows_seen != int.widen(pack.frames) {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     if matched < list.len(reached) {
-        return Error(disk_fault(path, reached[matched].offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, reached[matched].offset, Malformed)))
     }
     Ok(())
 }
@@ -315,7 +315,7 @@ fn walk_cold_reachable(d: Dir, id: StoreId, packs: Map[u64, PagePack], next_stam
     let ColdWalk(reached_by_pack: take touched, ..) = take walk
     for (seq, reached) in touched {
         let Some(pack) = map.get(packs, seq) else {
-            return Error(disk_fault(paged_pack_path(seq)?, 72, Malformed))
+            return Error(failure_from_rep(format.disk_fault(paged_pack_path(seq)?, 72, Malformed)))
         }
         verify_cold_pack_index(d, id, seq, pack, next_stamp, reached)?
     }
@@ -324,7 +324,7 @@ fn walk_cold_reachable(d: Dir, id: StoreId, packs: Map[u64, PagePack], next_stam
 
 // Offline walker helper: verifies that a single Cold frame edge is named by a
 // PACK_INDEX row in its pack, using one PACK_INDEX frame buffer at a time.
-fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class: u8, index_at: u64, size: u64, next_stamp: u64, expected: TieredFrameId) -> Result[(), Error] waits {
+fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class: u8, index_at: u64, size: u64, next_stamp: u64, expected: format.TieredFrameId) -> Result[(), Error] waits {
     let expected_row_kind = if class == 3 {
         0x21u8
     } else {
@@ -332,7 +332,7 @@ fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class:
     }
     let mut opened = match host.open(d, path, Read) {
         Ok(take fd) => take fd,
-        Error(NotFound) => return Error(disk_fault(path, index_at, Absent)),
+        Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, index_at, Absent))),
         Error(problem) => return Error(Io(problem)),
     }
     let mut at = index_at
@@ -342,10 +342,10 @@ fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class:
     let mut problem: Option[Error] = None
     while at < size {
         if size - at < 16 {
-            problem = Some(disk_fault(path, at, Malformed))
+            problem = Some(failure_from_rep(format.disk_fault(path, at, Malformed)))
             break
         }
-        let width = order.min(PACK_INDEX_LIMIT + 16, size - at)
+        let width = order.min(format.PACK_INDEX_LIMIT + 16, size - at)
         let wire = match read_disk_bytes(mut opened, path, at, width) {
             Ok(take bytes_read) => take bytes_read,
             Error(take err) => {
@@ -359,7 +359,7 @@ fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class:
             let payload = list.slice(wire, 16, end)
             let (prev, take initial) = start_pack_index(path, at, payload, 0)?
             if prev != prev_index {
-                return Error(disk_fault(path, at, Order))
+                return Error(failure_from_rep(format.disk_fault(path, at, Order)))
             }
             let mut cursor = take initial
             let mut cur_data = start_data
@@ -367,7 +367,7 @@ fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class:
             while let Some(take row) = next_pack_index(path, at, payload, mut cursor)? {
                 let row_len: u64 = int.widen(row.len)
                 if row.kind != expected_row_kind || row.offset != cur_data || row.stamp >= next_stamp || row.offset >= index_at || 16 + row_len > index_at - row.offset {
-                    return Error(disk_fault(path, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
                 if row.offset == expected.offset {
                     let row_frame_kind: u16 = if row.kind == 0x21 {
@@ -376,7 +376,7 @@ fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class:
                         0x0022u16
                     }
                     if row_len != expected.len || row.stamp != expected.stamp || row_frame_kind != expected.kind {
-                        return Error(disk_fault(path, row.offset, Checksum))
+                        return Error(failure_from_rep(format.disk_fault(path, row.offset, Checksum)))
                     }
                     hit = true
                 }
@@ -405,7 +405,7 @@ fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class:
         return Error(take err)
     }
     if !found {
-        return Error(disk_fault(path, expected.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, expected.offset, Malformed)))
     }
     Ok(())
 }

@@ -17,9 +17,9 @@ type TailBuffers {
 }
 
 fn stream_tail_buffers() -> Result[TailBuffers, Error] {
-    let probe: Bytes = capacity(bound bytes (STREAM_INDEX_PROBE + 64) {
-        list.with_capacity(STREAM_INDEX_PROBE)
-    })?
+    let probe: Bytes = failure_result_from_rep(types.capacity(bound bytes (format.STREAM_INDEX_PROBE + 64) {
+        list.with_capacity(format.STREAM_INDEX_PROBE)
+    }))?
     Ok(TailBuffers(index: take probe, slice: list.new()))
 }
 
@@ -27,7 +27,7 @@ fn stream_tail_buffers() -> Result[TailBuffers, Error] {
 // request. `None` is a 404: the batch is not yet created (§12.11.8).
 fn stream_tail_range(mut client: std.object.Client, key: String, lo: u64, hi: u64, mut into: Bytes, deadline: u64) -> Result[Option[()], Error] waits {
     list.clear(mut into)
-    capacity(list.try_reserve(mut into, hi - lo))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut into, hi - lo)))?
     let (take outcome, take buffer) = std.object.fetch_range(mut client, key, lo, hi, replace(mut into, list.new()), deadline)
     into = take buffer
     match take outcome {
@@ -44,10 +44,10 @@ fn stream_resolve_404(mut client: std.object.Client, mut lane: StreamLane, mut b
     stream_reg_read(mut lane, mut client, deadline)?
     let head_key = stream_key(place_prefix, "head")
     let mut head_scratch: Bytes = list.new()
-    capacity(list.try_reserve(mut head_scratch, order.max(65776u64, list.len(head_witness))))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut head_scratch, order.max(65776u64, list.len(head_witness)))))?
     let _ = history_fetch(mut client, head_key, mut head_scratch, deadline)?
     let head_changed = head_scratch != head_witness
-    if stream_pair_below(inc, seq, lane.reg.low_inc, lane.reg.low_seq) {
+    if format.stream_pair_below(inc, seq, lane.reg.low_inc, lane.reg.low_seq) {
         if head_changed {
             return Ok(Some(TailHeadMoved))
         }
@@ -57,14 +57,14 @@ fn stream_resolve_404(mut client: std.object.Client, mut lane: StreamLane, mut b
         return Ok(Some(TailSkipTo(lane.reg.low_seq)))
     }
     let below_covers = match lane.reg.index {
-        Some(idx) => !stream_pair_below(idx.covers_inc, idx.covers_seq, inc, seq),
+        Some(idx) => !format.stream_pair_below(idx.covers_inc, idx.covers_seq, inc, seq),
         None => false,
     }
     if in_sealed_range || seen_higher_batch || below_covers {
-        if let Some(()) = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+        if let Some(()) = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
             return Ok(None)
         }
-        return Error(disk_fault(key, 0, Absent))
+        return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
     }
     Ok(Some(TailAbsent))
 }
@@ -73,9 +73,9 @@ fn stream_resolve_404(mut client: std.object.Client, mut lane: StreamLane, mut b
 // to `replay`, from frame `skip` on. Resolves 404 via §12.11.8's full table.
 fn stream_tail_batch(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, sid: HostStreamId, inc: u64, seq: u64, store: StoreId, epoch: u64, skip: u64, stop_rev: u64, in_sealed_range: bool, seen_higher_batch: bool, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailBatch, Error] waits {
     let mut name = string.with_capacity(48)
-    stream_batch_key(mut name, inc, seq)
+    format.stream_batch_key(mut name, inc, seq)
     let key = stream_key(lane.dir, name)
-    if let None = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+    if let None = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
         if let Some(outcome) = stream_resolve_404(mut client, mut lane, mut buffers, place_prefix, head_witness, key, inc, seq, in_sealed_range, seen_higher_batch, deadline)? {
             return Ok(outcome)
         }
@@ -86,25 +86,25 @@ fn stream_tail_batch(mut client: std.object.Client, mut lane: StreamLane, mut bu
     }
     if list.len(buffers.index) < batch_index.byte_len {
         if let None = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
-            return Error(disk_fault(key, 0, Absent))
+            return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
         }
         batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
             Rows(take found) => take found,
-            Term(_, _) => return Error(disk_fault(key, 72, Malformed)),
+            Term(_, _) => return Error(failure_from_rep(format.disk_fault(key, 72, Malformed))),
         }
     }
     if batch_index.seen_rev >= stop_rev {
         return Ok(TailBeyond)
     }
     for row in batch_index.rows {
-        if same(row.store, store) && row.epoch == epoch {
+        if types.same(row.store.hi, row.store.lo, store.hi, store.lo) && row.epoch == epoch {
             if row.len == 0 {
-                return Error(disk_fault(key, row.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(key, row.offset, Malformed)))
             }
             if let None = stream_tail_range(mut client, key, row.offset, row.offset + row.len, mut buffers.slice, deadline)? {
-                return Error(disk_fault(key, row.offset, Absent))
+                return Error(failure_from_rep(format.disk_fault(key, row.offset, Absent)))
             }
-            stream_slice_check(key, row, buffers.slice)?
+            failure_result_from_rep(format.stream_slice_check(key, row, buffers.slice))?
             stream_tail_apply(key, buffers.slice, row, seq, store, epoch, skip, mut replay, ceiling)?
             return Ok(TailRead(true))
         }
@@ -115,32 +115,32 @@ fn stream_tail_batch(mut client: std.object.Client, mut lane: StreamLane, mut bu
 // X's frames in one slice, sealed under (X, BATCH, seq) at slice offsets
 // (§12.11.2): commits apply in order and are re-admitted after each; the
 // CLAIM names this epoch; nothing else may ride a Place's slice.
-fn stream_tail_apply(key: String, slice: Bytes, row: BatchRow, seq: u64, store: StoreId, epoch: u64, skip: u64, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
-    let ctx = DiskContext(store, role: ROLE_BATCH, seq)
+fn stream_tail_apply(key: String, slice: Bytes, row: format.BatchRow, seq: u64, store: StoreId, epoch: u64, skip: u64, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
+    let ctx = format.DiskContext(store: store_key_to_rep(store), role: format.ROLE_BATCH, seq)
     let mut at = 0u64
     let mut frames = 0u64
     while at < list.len(slice) {
         let frame = disk_frame_bytes(key, ctx, slice, at)?
         if frames >= skip {
             if frame.kind == 0x0040 {
-                if frame.end - frame.payload != 24 || read_le(slice, frame.payload, 8) != epoch {
-                    return Error(disk_fault(key, row.offset + at, Malformed))
+                if frame.end - frame.payload != 24 || format.read_le(slice, frame.payload, 8) != epoch {
+                    return Error(failure_from_rep(format.disk_fault(key, row.offset + at, Malformed)))
                 }
             } else if frame.kind == 0x0011 || frame.kind == 0x0013 {
-                let event = disk_allocation(scoped fn() -> Result[JournalEvent, Error] {
+                let event = disk_allocation(scoped fn() -> Result[format.JournalEvent, Error] {
                     journal_decode(key, frame.kind, list.slice(slice, frame.payload, frame.end))
                 })?
                 journal_apply(key, mut replay, take event)?
                 over_ceiling(journal_account(replay)?, ceiling)?
             } else {
-                return Error(disk_fault(key, row.offset + at, Kind(int.widen(frame.kind))))
+                return Error(failure_from_rep(format.disk_fault(key, row.offset + at, Kind(int.widen(frame.kind)))))
             }
         }
         frames += 1
         at = frame.end
     }
     if frames != row.frames {
-        return Error(disk_fault(key, row.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(key, row.offset, Malformed)))
     }
     Ok(())
 }
@@ -155,14 +155,14 @@ type TailScan {
 // Reads batches from `cursor.next` until one is not yet created, hits TERM,
 // sees head move on a retired 404, or (for the delta) has `seen_rev ≥ stop_rev`
 // (§12.11.5 steps 2 and 4, §12.11.8 404 table).
-fn stream_tail_scan(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, stop_rev: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailStop, Error] waits {
+fn stream_tail_scan(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, tail: format.StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, stop_rev: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailStop, Error] waits {
     loop {
         let skip: u64 = if cursor.next == tail.from_seq {
             int.widen(tail.from_frame)
         } else {
             0
         }
-        match stream_tail_batch(mut client, mut lane, mut buffers, place_prefix, head_witness, tail.sid, tail.inc, cursor.next, store, epoch, skip, stop_rev, false, false, mut replay, ceiling, deadline)? {
+        match stream_tail_batch(mut client, mut lane, mut buffers, place_prefix, head_witness, host_stream_id_from_rep(tail.sid), tail.inc, cursor.next, store, epoch, skip, stop_rev, false, false, mut replay, ceiling, deadline)? {
             TailAbsent => return Ok(StopAbsent),
             TailBeyond => return Ok(StopBeyond),
             TailTerm => return Ok(StopTerm),
@@ -187,18 +187,18 @@ fn stream_tail_scan(mut client: std.object.Client, mut lane: StreamLane, mut buf
 // Step 2 XINDEX fast path (§12.11.5 step 2): when `reg.index` covers
 // `(tail.inc, cursor.next)`, fetches `x-<k>` and reads only the batches X had
 // rows in up to `covers_seq`, falling back cleanly on corrupt/missing XINDEX.
-fn stream_tail_prescan_xindex(mut client: std.object.Client, mut side: ClaimStream, place_prefix: String, head_witness: Bytes, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
+fn stream_tail_prescan_xindex(mut client: std.object.Client, mut side: ClaimStream, place_prefix: String, head_witness: Bytes, tail: format.StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
     let Some(meta) = side.lane.reg.index else {
         return Ok(true)
     }
     if meta.covers_inc != tail.inc || meta.covers_seq < cursor.next {
         return Ok(true)
     }
-    let Some(take xidx) = stream_xindex_fetch(mut client, side.lane.dir, tail.sid, meta, deadline)? else {
+    let Some(take xidx) = stream_xindex_fetch(mut client, side.lane.dir, host_stream_id_from_rep(tail.sid), meta, deadline)? else {
         return Ok(true)
     }
     for e in xidx.entries {
-        if same(e.store, store) && e.epoch == epoch {
+        if types.same(e.store.hi, e.store.lo, store.hi, store.lo) && e.epoch == epoch {
             for (bi, bs) in e.batches {
                 if bi == tail.inc && bs >= cursor.next && bs <= meta.covers_seq {
                     let skip: u64 = if bs == tail.from_seq {
@@ -206,7 +206,7 @@ fn stream_tail_prescan_xindex(mut client: std.object.Client, mut side: ClaimStre
                     } else {
                         0
                     }
-                    match stream_tail_batch(mut client, mut side.lane, mut side.buffers, place_prefix, head_witness, tail.sid, tail.inc, bs, store, epoch, skip, 18446744073709551615u64, false, false, mut replay, ceiling, deadline)? {
+                    match stream_tail_batch(mut client, mut side.lane, mut side.buffers, place_prefix, head_witness, host_stream_id_from_rep(tail.sid), tail.inc, bs, store, epoch, skip, 18446744073709551615u64, false, false, mut replay, ceiling, deadline)? {
                         TailRead(had) => if had {
                             cursor.last_x = Some(bs)
                         },
@@ -229,7 +229,7 @@ fn stream_tail_prescan_xindex(mut client: std.object.Client, mut side: ClaimStre
 // The no-hold rule (§12.11.7): when `live.inc < reg.inc`, scan through the
 // terminal fence of `live.inc`. If no TERM sits at the first 404, create it
 // there (advancing over any late batch that won the race so it is included).
-fn stream_no_hold_scan(mut client: std.object.Client, mut side: ClaimStream, place_prefix: String, head_witness: Bytes, tail: StreamRef, store: StoreId, epoch: u64, authority_kind: u8, mut cursor: TailScan, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
+fn stream_no_hold_scan(mut client: std.object.Client, mut side: ClaimStream, place_prefix: String, head_witness: Bytes, tail: format.StreamRef, store: StoreId, epoch: u64, authority_kind: u8, mut cursor: TailScan, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
     let mut name = string.with_capacity(48)
     loop {
         match stream_tail_scan(mut client, mut side.lane, mut side.buffers, place_prefix, head_witness, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)? {
@@ -237,18 +237,18 @@ fn stream_no_hold_scan(mut client: std.object.Client, mut side: ClaimStream, pla
             StopBeyond => return Ok(true),
             StopHeadMoved => return Ok(false),
             StopAbsent => {
-                stream_batch_key(mut name, tail.inc, cursor.next)
+                format.stream_batch_key(mut name, tail.inc, cursor.next)
                 let key = stream_key(side.lane.dir, name)
-                stream_term_encode(mut side.lane.body, tail.sid, tail.inc, cursor.next, authority_kind)?
+                failure_result_from_rep(format.stream_term_encode(mut side.lane.body, host_stream_id_to_rep(host_stream_id_from_rep(tail.sid)), tail.inc, cursor.next, authority_kind))?
                 let (take outcome, take buffer) = std.object.store_if_retry(mut client, key, Absent, replace(mut side.lane.body, list.new()), deadline)
                 side.lane.body = take buffer
                 match take outcome {
                     Ok(Applied(_)) => return Ok(true),
                     Ok(Mismatch) => {
-                        let Some(()) = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut side.buffers.index, deadline)? else {
-                            return Error(disk_fault(key, 0, Absent))
+                        let Some(()) = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut side.buffers.index, deadline)? else {
+                            return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
                         }
-                        match stream_batch_head(key, side.buffers.index, tail.sid, tail.inc, cursor.next)? {
+                        match stream_batch_head(key, side.buffers.index, host_stream_id_from_rep(tail.sid), tail.inc, cursor.next)? {
                             Term(_, _) => return Ok(true),
                             Rows(_) => (),
                         }
@@ -317,44 +317,44 @@ fn stream_open_attached[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
 // X's unique row in `st.cutoff` (Fable §3 guarantees it exists), then applies
 // X's slices in `[st.tail.from_seq, st.cutoff]` at that epoch. Returns `false`
 // if a 404 resolved to a moved head (restart attempt).
-fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: SealedTail, store: StoreId, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
-    let dir = stream_key(root, stream_dir(st.tail.sid))
-    let mut seal_lane = stream_lane(st.tail.sid, authority_kind, 2, store)?
+fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: format.SealedTail, store: StoreId, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
+    let dir = stream_key(root, stream_dir(host_stream_id_from_rep(st.tail.sid)))
+    let mut seal_lane = stream_lane(host_stream_id_from_rep(st.tail.sid), authority_kind, 2, store)?
     seal_lane.dir = string.from(dir)
     let mut cut_name = string.with_capacity(48)
-    stream_batch_key(mut cut_name, st.tail.inc, st.cutoff)
+    format.stream_batch_key(mut cut_name, st.tail.inc, st.cutoff)
     let cut_key = stream_key(dir, cut_name)
     let tail_epoch_opt = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[Option[u64], Error] waits {
-        if let None = stream_tail_range(mut c, cut_key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+        if let None = stream_tail_range(mut c, cut_key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
             if let Some(outcome) = stream_resolve_404(mut c, mut seal_lane, mut buffers, place_prefix, head_witness, cut_key, st.tail.inc, st.cutoff, true, false, deadline)? {
                 return match outcome {
                     TailHeadMoved => Ok(None),
-                    _ => Error(disk_fault(cut_key, 0, Absent)),
+                    _ => Error(failure_from_rep(format.disk_fault(cut_key, 0, Absent))),
                 }
             }
         }
-        let mut batch_index = match stream_batch_head(cut_key, buffers.index, st.tail.sid, st.tail.inc, st.cutoff)? {
+        let mut batch_index = match stream_batch_head(cut_key, buffers.index, host_stream_id_from_rep(st.tail.sid), st.tail.inc, st.cutoff)? {
             Rows(take found) => take found,
-            Term(_, _) => return Error(disk_fault(cut_key, 72, Malformed)),
+            Term(_, _) => return Error(failure_from_rep(format.disk_fault(cut_key, 72, Malformed))),
         }
         if list.len(buffers.index) < batch_index.byte_len {
             if let None = stream_tail_range(mut c, cut_key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
-                return Error(disk_fault(cut_key, 0, Absent))
+                return Error(failure_from_rep(format.disk_fault(cut_key, 0, Absent)))
             }
-            batch_index = match stream_batch_head(cut_key, buffers.index, st.tail.sid, st.tail.inc, st.cutoff)? {
+            batch_index = match stream_batch_head(cut_key, buffers.index, host_stream_id_from_rep(st.tail.sid), st.tail.inc, st.cutoff)? {
                 Rows(take found) => take found,
-                Term(_, _) => return Error(disk_fault(cut_key, 72, Malformed)),
+                Term(_, _) => return Error(failure_from_rep(format.disk_fault(cut_key, 72, Malformed))),
             }
         }
         for row in batch_index.rows {
-            if same(row.store, store) {
+            if types.same(row.store.hi, row.store.lo, store.hi, store.lo) {
                 if st.cutoff == st.tail.from_seq && row.frames <= int.widen(st.tail.from_frame) {
-                    return Error(disk_fault(cut_key, 0, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(cut_key, 0, Malformed)))
                 }
                 return Ok(Some(row.epoch))
             }
         }
-        Error(disk_fault(cut_key, 0, Malformed))
+        Error(failure_from_rep(format.disk_fault(cut_key, 0, Malformed)))
     })?
     let Some(tail_epoch) = tail_epoch_opt else {
         return Ok(false)
@@ -367,13 +367,13 @@ fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuff
             0
         }
         let ok = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
-            match stream_tail_batch(mut c, mut seal_lane, mut buffers, place_prefix, head_witness, st.tail.sid, st.tail.inc, seq, store, tail_epoch, skip, 18446744073709551615u64, true, false, mut replay, ceiling, deadline)? {
+            match stream_tail_batch(mut c, mut seal_lane, mut buffers, place_prefix, head_witness, host_stream_id_from_rep(st.tail.sid), st.tail.inc, seq, store, tail_epoch, skip, 18446744073709551615u64, true, false, mut replay, ceiling, deadline)? {
                 TailRead(_) => Ok(true),
                 TailHeadMoved => Ok(false),
-                TailAbsent => Error(disk_fault(cut_key, 0, Absent)),
-                TailSkipTo(_) => Error(disk_fault(cut_key, 0, Absent)),
-                TailBeyond => Error(disk_fault(cut_key, 0, Malformed)),
-                TailTerm => Error(disk_fault(cut_key, 72, Malformed)),
+                TailAbsent => Error(failure_from_rep(format.disk_fault(cut_key, 0, Absent))),
+                TailSkipTo(_) => Error(failure_from_rep(format.disk_fault(cut_key, 0, Absent))),
+                TailBeyond => Error(failure_from_rep(format.disk_fault(cut_key, 0, Malformed))),
+                TailTerm => Error(failure_from_rep(format.disk_fault(cut_key, 72, Malformed))),
             }
         })?
         if !ok {
@@ -388,7 +388,7 @@ fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuff
 // entries interleaved with `attach.sealed` at each `st.at`, then the entries
 // past the last sealed tail through `head.entry.seq`. Returns `None` if a
 // sealed-tail 404 observed a moved head.
-fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attach: Attach, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, mut buffers: TailBuffers, ceiling: u64) -> Result[Option[JournalReplay], Error] waits {
+fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attach: format.Attach, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, mut buffers: TailBuffers, ceiling: u64) -> Result[Option[JournalReplay], Error] waits {
     if list.len(attach.sealed) == 0 {
         return Ok(Some(history_load_admitted(mut read_source, head, ceiling)?))
     }
@@ -408,7 +408,7 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
     let mut done_seq = base_seq
     for st in attach.sealed {
         if st.at < done_seq || st.at > head.entry.seq {
-            return Error(disk_fault("head", 72, Malformed))
+            return Error(failure_from_rep(format.disk_fault("head", 72, Malformed)))
         }
         if st.at > done_seq {
             let lo = done_seq - base_seq
@@ -454,7 +454,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             return Ok(None)
         }
         let replay = take loaded_settled
-        check_limits(options.limits, replay.limits)?
+        failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), limits_to_rep(replay.limits)))?
         if let None = side.granted {
             let grant = slot_attach(mut link, store, epoch + 1, place_prefix, replay.limits)?
             side.granted = Some(grant)
@@ -464,7 +464,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         }
         let claimed = history_claim_head(head, holder, auth)?
         let authority_end = history_authority_end(workspace.witness)?
-        let authority = copied(list.slice(workspace.witness, 240, authority_end))?
+        let authority = failure_result_from_rep(types.copied(list.slice(workspace.witness, 240, authority_end)))?
         history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach)))?
         let issued_head = history_write_head_issue(mut read_source.client, Match(tag), mut workspace.body, deadline)
         let written = history_write_head_finish(mut read_source.client, take issued_head, mut workspace.body, mut workspace.witness, deadline)
@@ -495,9 +495,9 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         history_advance_claim(mut read_source.client, mut reg, authority, mut workspace, deadline)?
         return Ok(Some((take reg, take replay, take admitted, take authority)))
     }
-    if !stream_same(side.lane.sid, tail.sid) {
-        let mut next_lane = stream_lane(tail.sid, authority_kind, link.max_rows, holder)?
-        next_lane.dir = stream_key(link.root, stream_dir(tail.sid))
+    if !format.stream_same(host_stream_id_to_rep(side.lane.sid), tail.sid) {
+        let mut next_lane = stream_lane(host_stream_id_from_rep(tail.sid), authority_kind, link.max_rows, holder)?
+        next_lane.dir = stream_key(link.root, stream_dir(host_stream_id_from_rep(tail.sid)))
         side.lane = take next_lane
     }
     let head = capture.head
@@ -510,21 +510,21 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         return Ok(None)
     }
     let mut replay = take loaded_settled
-    check_limits(options.limits, replay.limits)?
+    failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), limits_to_rep(replay.limits)))?
     let mut cursor = TailScan(next: tail.from_seq, last_x: None)
     let ceiling = options.resident_limit
     let mut no_hold = false
     let step2_ok = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
         stream_reg_read(mut side.lane, mut c, deadline)?
         if side.lane.reg.inc < tail.inc {
-            return Error(disk_fault("reg", 0, Regressed))
+            return Error(failure_from_rep(format.disk_fault("reg", 0, Regressed)))
         }
         if side.lane.reg.inc > tail.inc {
             no_hold = true
             return stream_no_hold_scan(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
         }
         if side.lane.reg.collecting {
-            return Error(disk_fault("reg", 0, Malformed))
+            return Error(failure_from_rep(format.disk_fault("reg", 0, Malformed)))
         }
         if !stream_tail_prescan_xindex(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, mut cursor, mut replay, ceiling, deadline)? {
             return Ok(false)
@@ -547,13 +547,13 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     }
     if !no_hold {
         // Step 3: the hold, the one thing written before H.
-        let token = capacity(disk_identity(r))?
+        let token = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
         let held = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[RegWrite, Error] waits {
-            stream_reg_write(mut side.lane, mut c, Hold(RegRow(store, epoch, token, rev_hold: 0, abandoned: false), tail.inc), deadline)
+            stream_reg_write(mut side.lane, mut c, Hold(format.RegRow(store: store_key_to_rep(store), epoch, token, rev_hold: 0, abandoned: false), tail.inc), deadline)
         })
         match take held {
             Ok(Written) => {
-                side.token = Some(token)
+                side.token = Some(store_key_from_rep(token))
             },
             Ok(Moved) => {
                 no_hold = true
@@ -565,7 +565,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
                 }
             },
             Error(Undecided) => {
-                side.token = Some(token)
+                side.token = Some(store_key_from_rep(token))
                 stream_claim_abandon(mut read_source.client, mut side, deadline)
                 return Error(Undecided)
             },
@@ -591,7 +591,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     // Step 6: H, the one authoritative publication. The candidate is built
     // while the hold is still ours: any failure before H abandons it (rule
     // e). Once H is sent the row stays Held.
-    let next_slot = StreamRef(sid: link.sid, inc: inc_b, from_seq: next_b, from_frame: 0)
+    let next_slot = format.StreamRef(sid: host_stream_id_to_rep(link.sid), inc: inc_b, from_seq: next_b, from_frame: 0)
     let built = stream_claim_candidate(head, attach, tail, cursor, next_slot, holder, auth, mut workspace)
     let (claimed, take attach_next, take authority) = match take built {
         Ok(take ready) => take ready,
@@ -651,13 +651,13 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
 // Steps 4 and 5 under the hold: every failure here abandons the row (rule
 // e). `None`: the claim's pair moved position. Otherwise the writer's
 // prepared state and the tag H matches.
-fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimStream, place_prefix: String, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, options: Options, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
+fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimStream, place_prefix: String, tail: format.StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, options: Options, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
     let deadline = read_source.deadline
     let Some(token) = side.token else {
-        return Error(disk_fault("reg", 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault("reg", 0, Malformed)))
     }
     let Some(rev_hold) = stream_hold_rev(side.lane.reg, token) else {
-        return Error(disk_fault("reg", 0, Malformed))
+        return Error(failure_from_rep(format.disk_fault("reg", 0, Malformed)))
     }
     // Step 4: the delta, cut at the first batch absent or seen at or after
     // the hold, applied and re-admitted.
@@ -697,26 +697,26 @@ fn stream_claim_final_head[T](mut read_source: ObjectPackRead, store: StoreId, r
 // Step 6's candidate: `old.sealed` copied with the incumbent's tail appended
 // only when non-empty (Fable §3), the claimed head with its ORIGIN, and H's
 // bytes in `workspace.body`. Writes nothing.
-fn stream_claim_candidate(head: HistoryHead, attach: Attach, tail: StreamRef, cursor: TailScan, next_slot: StreamRef, holder: StoreId, auth: ClaimAuth, mut workspace: HistoryBuffers) -> Result[(HistoryHead, Attach, Bytes), Error] {
-    let mut sealed: List[SealedTail] = disk_allocation(scoped fn() -> Result[List[SealedTail], Error] {
-        let mut out: List[SealedTail] = list.with_capacity(list.len(attach.sealed) + 1)
+fn stream_claim_candidate(head: HistoryHead, attach: format.Attach, tail: format.StreamRef, cursor: TailScan, next_slot: format.StreamRef, holder: StoreId, auth: ClaimAuth, mut workspace: HistoryBuffers) -> Result[(HistoryHead, format.Attach, Bytes), Error] {
+    let mut sealed: List[format.SealedTail] = disk_allocation(scoped fn() -> Result[List[format.SealedTail], Error] {
+        let mut out: List[format.SealedTail] = list.with_capacity(list.len(attach.sealed) + 1)
         for st in attach.sealed {
             list.push(mut out, st)
         }
         Ok(take out)
     })?
     if let Some(k) = cursor.last_x {
-        list.push(mut sealed, SealedTail(tail, cutoff: k, at: head.entry.seq))
+        list.push(mut sealed, format.SealedTail(tail, cutoff: k, at: head.entry.seq))
     }
-    let next_live: Option[StreamRef] = if list.len(sealed) >= ATTACH_SEALED_MAX {
+    let next_live: Option[format.StreamRef] = if list.len(sealed) >= format.ATTACH_SEALED_MAX {
         None
     } else {
         Some(next_slot)
     }
-    let attach_next = Attach(settles: attach.settles, live: next_live, sealed: take sealed)
+    let attach_next = format.Attach(settles: attach.settles, live: next_live, sealed: take sealed)
     let claimed = history_claim_head(head, holder, auth)?
     let authority_end = history_authority_end(workspace.witness)?
-    let authority = copied(list.slice(workspace.witness, 240, authority_end))?
+    let authority = failure_result_from_rep(types.copied(list.slice(workspace.witness, 240, authority_end)))?
     history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach_next)))?
     Ok((claimed, take attach_next, take authority))
 }

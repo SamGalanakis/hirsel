@@ -1,7 +1,7 @@
 fn l88_leaf_pack(d: Dir, owner: StoreId, seq: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut rows: List[std.page.Entry] = list.with_capacity(3)
     for row in 0u64 .. 3 {
-        list.push(mut rows, std.page.Entry(key: key_word(row), cell: InlineValue(string.into_bytes(string.from("stored")))))
+        list.push(mut rows, std.page.Entry(key: types.key_word(row), cell: InlineValue(string.into_bytes(string.from("stored")))))
     }
     let image = page_result(std.page.encode(rows, 0, 40, Collection))?
     l68_write_page_pack(d, owner, seq, 40, std.page.payload(image))
@@ -110,12 +110,12 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(PagePack, std.page.PagePtr)
     let mut first = std.page.unlocated(0)
     for slot in 0u64 .. 4 {
         let mut rows: List[std.page.Entry] = list.with_capacity(1)
-        list.push(mut rows, std.page.Entry(key: key_word(slot), cell: InlineValue(key_word(slot))))
+        list.push(mut rows, std.page.Entry(key: types.key_word(slot), cell: InlineValue(types.key_word(slot))))
         let image = page_result(std.page.encode(rows, 0, 30 + slot, Collection))?
         let page = page_result(std.page.attach(take image, list.new(), list.new()))?
         let width = std.page.sealed_size(std.page.image_of(page))
         let frame = PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
-        let key = logical_key(9, key_word(slot))?
+        let key = logical_key(9, types.key_word(slot))?
         let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
             std.page.unlocated(stamp)
         })? else {
@@ -189,7 +189,7 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     l88_assert_current_pin(mut db, "relocated", old_capture, current_location)?
     let mut rows: List[std.page.Entry] = list.with_capacity(3)
     for slot in 0u64 .. 3 {
-        list.push(mut rows, std.page.Entry(key: key_word(slot), cell: InlineValue(string.into_bytes(string.from("stored")))))
+        list.push(mut rows, std.page.Entry(key: types.key_word(slot), cell: InlineValue(string.into_bytes(string.from("stored")))))
     }
     let image = page_result(std.page.encode(rows, 0, old.stamp, Collection))?
     let page = page_result(std.page.attach(take image, list.new(), list.new()))?

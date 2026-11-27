@@ -1,6 +1,6 @@
 type DeferredFree: shareable + send {
     branch_id: u32,
-    target: TieredTarget
+    target: format.TieredTarget
 }
 
 fn deferred_free_value(row: DeferredFree) -> Bytes {
@@ -23,39 +23,39 @@ fn deferred_free_entry(seq: u64, row: DeferredFree) -> std.page.Entry {
 
 fn decode_deferred_free(file: String, at: u64, key: Bytes, value: Bytes, manifest: PageManifest) -> Result[(u64, DeferredFree), Error] {
     if list.len(key) != 8 || list.len(value) < 5 {
-        return Error(disk_fault(file, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
     }
     let seq: u64 = list.word_be(key, 0)
     let branch_id: u32 = list.word_le(value, 1)
     if seq >= manifest.deferred_next || branch_id >= manifest.next_branch {
-        return Error(disk_fault(file, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
     }
-    let target = match value[0u64] {
+    let target: format.TieredTarget = match value[0u64] {
         0 if list.len(value) == 41 => {
-            let ptr = std.page.decode_ptr(list.slice(value, 5, 41)) ?=> |_| disk_fault(file, at, Malformed)
+            let ptr = std.page.decode_ptr(list.slice(value, 5, 41)) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
             TieredPage(ptr)
         },
         1 if list.len(value) == 47 => {
-            let reference = std.page.decode_ref(list.slice(value, 5, 47)) ?=> |_| disk_fault(file, at, Malformed)
+            let reference = std.page.decode_ref(list.slice(value, 5, 47)) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
             TieredBlob(reference)
         },
-        _ => return Error(disk_fault(file, at, Malformed)),
+        _ => return Error(failure_from_rep(format.disk_fault(file, at, Malformed))),
     }
     Ok((seq, DeferredFree(branch_id: branch_id, target: take target)))
 }
 
-fn validate_deferred_target(inventory: RecoveryInventory, target: TieredTarget) -> Result[(), Error] {
-    let frame = tiered_frame_id(target)
+fn validate_deferred_target(inventory: RecoveryInventory, target: format.TieredTarget) -> Result[(), Error] {
+    let frame = format.tiered_frame_id(target)
     let path = paged_pack_path(frame.pack)?
     let (class, least, limit): (u8, u64, u64) = match target {
         TieredPage(_) => (3, 24, PAGE_LIMIT),
         TieredBlob(_) => (4, 8, BLOB_LIMIT),
     }
     let Some(pack) = map.get(inventory.packs, frame.pack) else {
-        return Error(disk_fault(path, frame.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, frame.offset, Malformed)))
     }
     if pack.class != class || frame.stamp == 0 || frame.stamp >= inventory.next_stamp || frame.len < least || frame.len > limit || frame.offset < 72 || frame.offset >= pack.index || 16 + frame.len > pack.index - frame.offset {
-        return Error(disk_fault(path, frame.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, frame.offset, Malformed)))
     }
     Ok(())
 }
@@ -99,13 +99,13 @@ fn queue_page_children(cut: TieredPageSource, ptr: std.page.PagePtr, branch_id: 
     let frame = fold_frame_at(cut, TieredPage(ptr))?
     let image = std.page.image_of(fold_page(frame))
     for slot in 0u64 .. std.page.count(image) {
-        let edge: Option[TieredTarget] = match std.page.owning_edge(image, slot) {
+        let edge: Option[format.TieredTarget] = match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => Some(TieredPage(child)),
             Some(BlobEdge(body)) => Some(TieredBlob(body)),
             None => None,
         }
         if let Some(take child) = take edge {
-            capacity(list.try_reserve(mut out, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
             list.push(mut out, DeferredFree(branch_id: branch_id, target: take child))
         }
     }
@@ -136,7 +136,7 @@ fn drain_tiered_frees(cut: TieredPageSource, mut queue: TieredDeferredQueue, rew
             },
             TieredBlob(body) => replaced_blob(body),
         }
-        capacity(list.try_reserve(mut killed, 1))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut killed, 1)))?
         let (take remaining, following) = disk_allocation(scoped fn() -> Result[(std.omap.OMap[u64, DeferredFree], u64), Error] {
             let mut draw = queue.issued
             let rows = std.omap.remove(mut draw, queue.rows, seq)
@@ -174,7 +174,7 @@ fn no_cut_queue() -> CutQueue {
 
 fn queued_free(value: Bytes) -> DeferredFree {
     let branch_id: u32 = list.word_le(value, 1)
-    let target = match value[0u64] {
+    let target: format.TieredTarget = match value[0u64] {
         0 => TieredPage(result.unwrap(std.page.decode_ptr(list.slice(value, 5, 41)))),
         _ => TieredBlob(result.unwrap(std.page.decode_ref(list.slice(value, 5, 47)))),
     }
@@ -190,8 +190,8 @@ fn drain_queue_row(cut: TieredPageSource, seq: u64, row: DeferredFree, mut queue
         },
         TieredBlob(body) => replaced_blob(body),
     }
-    capacity(list.try_reserve(mut queue.drained, 1))?
-    capacity(list.try_reserve(mut queue.kills, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut queue.drained, 1)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut queue.kills, 1)))?
     list.push(mut queue.drained, seq)
     list.push(mut queue.kills, TieredDrainKill(branch_id: row.branch_id, frame: frame))
     Ok(())

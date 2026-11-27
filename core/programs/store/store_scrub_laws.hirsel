@@ -86,8 +86,8 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let b_name = paged_pack_path(b)?
     let mut a_raw = disk_read_paged_file(path, a_name, 67108864)?
     let mut b_raw = disk_read_paged_file(path, b_name, 67108864)?
-    let old_stamp = read_le(a_raw, 96, 8)
-    let width = 16 + read_le(a_raw, 76, 4)
+    let old_stamp = format.read_le(a_raw, 96, 8)
+    let width = 16 + format.read_le(a_raw, 76, 4)
     if 72 + width > list.len(b_raw) {
         return Error(MigrationFault)
     }
@@ -103,9 +103,9 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let c_seq = data[2u64]
     let c_name = paged_pack_path(c_seq)?
     let mut c_raw = disk_read_paged_file(path, c_name, 67108864)?
-    let c_width = read_le(c_raw, 76, 4)
+    let c_width = format.read_le(c_raw, 76, 4)
     c_raw[87 + c_width] = c_raw[87 + c_width] ^ 1u8
-    let sealed = capacity(disk_check(DiskContext(store: db.store, role: 3, seq: c_seq), 72, list.slice(c_raw, 72, 80), list.slice(c_raw, 88, 88 + c_width)))?
+    let sealed = failure_result_from_rep(types.capacity(format.disk_check(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: c_seq), 72, list.slice(c_raw, 72, 80), list.slice(c_raw, 88, 88 + c_width))))?
     list.set_word_le(mut c_raw, 80, sealed)
     disk_write_synced(path, c_name, c_raw)?
     // D's live frame is replaced by a same-width frame sealed for D at
@@ -113,12 +113,12 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let d_seq = data[3u64]
     let d_name = paged_pack_path(d_seq)?
     let mut d_raw = disk_read_paged_file(path, d_name, 67108864)?
-    let d_width = read_le(d_raw, 76, 4)
-    if old_stamp == read_le(d_raw, 96, 8) {
+    let d_width = format.read_le(d_raw, 76, 4)
+    if old_stamp == format.read_le(d_raw, 96, 8) {
         fail("the stale frame needs a different stamp")
     }
     list.set_word_le(mut d_raw, 96, old_stamp)
-    let d_seal = capacity(disk_check(DiskContext(store: db.store, role: 3, seq: d_seq), 72, list.slice(d_raw, 72, 80), list.slice(d_raw, 88, 88 + d_width)))?
+    let d_seal = failure_result_from_rep(types.capacity(format.disk_check(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: d_seq), 72, list.slice(d_raw, 72, 80), list.slice(d_raw, 88, 88 + d_width))))?
     list.set_word_le(mut d_raw, 80, d_seal)
     disk_write_synced(path, d_name, d_raw)?
     let mut faults: List[Fault] = list.new()
@@ -162,7 +162,7 @@ fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let first_name = paged_pack_path(first)?
     let mut raw = disk_read_paged_file(path, first_name, 67108864)?
     // The 72-byte HEADER and the first frame's 16-byte envelope and payload.
-    let budget = 72 + 16 + read_le(raw, 76, 4)
+    let budget = 72 + 16 + format.read_le(raw, 76, 4)
     raw[budget - 1] = raw[budget - 1] ^ 1u8
     disk_write_synced(path, first_name, raw)?
     let second_name = paged_pack_path(second)?
@@ -302,8 +302,8 @@ fn check_test_dir(d: Dir) -> Dir waits {
 }
 
 fn check_test_pack(d: Dir, id: StoreId, seq: u64, image: std.page.Image, stale: bool) -> Result[std.page.PagePtr, Error] waits {
-    let ctx = DiskContext(store: id, role: 3, seq: seq)
-    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: seq)
+    let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     let mut ptr = capture_test_page(mut raw, ctx, image)?
     if stale {
         // The bytes on disk have a valid envelope. Only the pointer disagrees.
@@ -315,16 +315,16 @@ fn check_test_pack(d: Dir, id: StoreId, seq: u64, image: std.page.Image, stale: 
 
 fn check_test_stamp(stamp: u64) -> Result[std.page.Image, Error] {
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
-    list.push(mut rows, std.page.Entry(key: key_word(1), cell: InlineValue(b"x")))
+    list.push(mut rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(b"x")))
     page_result(std.page.encode(rows, 0, stamp, Unprefixed))
 }
 
 fn check_test_inventory(d: Dir, id: StoreId, second: bool, width: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut rows: List[std.page.Entry] = list.with_capacity(2)
     let packed = encode_pack_row(PagePack(class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
-    list.push(mut rows, std.page.Entry(key: key_word(1), cell: InlineValue(clone(packed))))
+    list.push(mut rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(clone(packed))))
     if second {
-        list.push(mut rows, std.page.Entry(key: key_word(2), cell: InlineValue(take packed)))
+        list.push(mut rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(take packed)))
     }
     let image = page_result(std.page.encode(rows, 0, 2, Unprefixed))?
     check_test_pack(d, id, 3, image, false)
@@ -360,8 +360,8 @@ fn check_test_packs(d: Dir, id: StoreId, mut m: PageManifest, damage: CheckDamag
 }
 
 fn check_test_lineage(d: Dir, id: StoreId, mut m: PageManifest) -> Result[u64, Error] waits {
-    let ctx = DiskContext(store: id, role: 3, seq: 1)
-    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 1)
+    let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     let edge = lineage_row(ForkRow(LineageFork(child: 1, parent: 0, watermark: 1, adopted: true)))
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut rows, std.page.Entry(key: clone(edge.key), cell: InlineValue(clone(edge.value))))
@@ -378,19 +378,19 @@ fn check_test_lineage(d: Dir, id: StoreId, mut m: PageManifest) -> Result[u64, E
 }
 
 fn check_test_end(d: Dir, id: StoreId, end: u64) -> Result[(), Error] waits {
-    let ctx = DiskContext(store: id, role: 4, seq: 1)
-    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 4, seq: 1)
+    let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     let mut payload: Bytes = list.with_capacity(8)
     list.put_word_le(mut payload, end)
-    list.append(mut raw, capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?)
+    list.append(mut raw, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0012, 1, payload)))?)
     disk_write_synced(d, "j-1.end", raw)
 }
 
 fn check_test_damage(d: Dir, c: Clock, damage: CheckDamage) -> Result[(), Error] waits {
     let id = StoreId(hi: 7, lo: 3013)
     let mut m = page_manifest_empty(default_limits())
-    let ctx = DiskContext(store: id, role: 2, seq: 1)
-    let mut journal = capacity(disk_header_bytes(ctx, 0, 0))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
+    let mut journal = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     let (path, at, reason) = match damage {
         LineageEnvelope => ("p-1", check_test_lineage(d, id, mut m)?, Checksum),
         SuffixChecksum => {
@@ -407,7 +407,7 @@ fn check_test_damage(d: Dir, c: Clock, damage: CheckDamage) -> Result[(), Error]
             capture_test_meta_ceiling(mut m)?
             m.limits.meta = 4096
             let payload = fork_test_payload(int.widen(m.next_branch), "fork")
-            list.append(mut journal, capacity(disk_seal(ctx, 72, 0x0013, 1, payload))?)
+            list.append(mut journal, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0013, 1, payload)))?)
             ("j-1", 72u64, Malformed)
         },
         _ => check_test_packs(d, id, mut m, damage)?,

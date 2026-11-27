@@ -1,0 +1,3 @@
+fn forge_journal_input(take file: HostFile) -> store.format.JournalInput {
+    store.format.JournalInput(file: take file, size: 1, base: 0, chunk: list.new(), copy_to: None)
+}

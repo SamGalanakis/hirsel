@@ -60,7 +60,7 @@ fn location_storage_charge(known: PageLocations) -> u64 {
 fn frame_edge_charge(record: FrameLocation) -> u64 {
     let outgoing = 8 * list.capacity(record.outgoing)
     // IncomingEdge's largest payload has u8, u64, u8 and a tag.
-    let incoming = round8(18 * list.capacity(record.incoming))
+    let incoming = format.round8(18 * list.capacity(record.incoming))
     int.saturating_add(outgoing, incoming)
 }
 
@@ -122,9 +122,9 @@ fn published_page_roots(known: PageLocations, roots: PageRoots) -> LocatedRoots 
 
 fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
     if stamp != 0 {
-        let changed = capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) {
+        let changed = failure_result_from_rep(types.capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) {
             list.push(mut location.incoming, source)
-        }))?
+        })))?
         if let None = changed {
             fail("store: missing live frame")
         }
@@ -139,9 +139,9 @@ fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, imag
     }
     let item = FrameLocation(place: ptr, class: class, image: image, outgoing: take outgoing, incoming: list.new())
     let charge = frame_charge(item)
-    capacity(disk_index_put(mut known.frames, ptr.stamp, take item, frame_edge_charge))?
+    failure_result_from_rep(types.capacity(disk_index_put(mut known.frames, ptr.stamp, take item, frame_edge_charge)))?
     if ptr.pack != 0 {
-        capacity(disk_index_put(mut known.members, (ptr.pack, ptr.stamp), (), member_charge))?
+        failure_result_from_rep(types.capacity(disk_index_put(mut known.members, (ptr.pack, ptr.stamp), (), member_charge)))?
     }
     known.images = int.saturating_add(known.images, charge)
     Ok(())
@@ -166,7 +166,7 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
         if loaded.class < 3 {
             loaded.live = 0
         }
-        capacity(disk_index_put(mut known.packs, seq, loaded, pack_edge_charge))?
+        failure_result_from_rep(types.capacity(disk_index_put(mut known.packs, seq, loaded, pack_edge_charge)))?
     }
     for stamp in validated.graph.postorder {
         let Some(ptr) = map.get(validated.graph.stamps, stamp) else {
@@ -175,11 +175,11 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
         let Some(frame) = map.get(validated.graph.frames, stamp) else {
             fail("store: missing validated frame")
         }
-        let class = option.unwrap(capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: PagePack) -> u8 {
+        let class = option.unwrap(failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: PagePack) -> u8 {
             let width: u64 = int.widen(ptr.len)
             pack.live += width
             pack.class
-        }))?)
+        })))?)
         let mut outgoing: List[u64] = list.new()
         let mut image = 0u16
         if let ReadPage(raw, kids, blobs) = frame {
@@ -212,7 +212,7 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
     if stamp == 0 {
         return Ok(())
     }
-    let dead = capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) -> bool {
+    let dead = failure_result_from_rep(types.capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) -> bool {
         for slot in 0u64 .. list.len(location.incoming) {
             if location.incoming[slot] == source {
                 let _ = list.swap_remove(mut location.incoming, slot)
@@ -220,16 +220,16 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
             }
         }
         fail("store: missing incoming edge")
-    }))?
+    })))?
     if let Some(true) = dead {
-        let location = option.unwrap(capacity(disk_index_remove(mut known.frames, stamp, frame_edge_charge))?)
+        let location = option.unwrap(failure_result_from_rep(types.capacity(disk_index_remove(mut known.frames, stamp, frame_edge_charge)))?)
         known.images -= frame_charge(location)
         if location.place.pack != 0 {
-            let _ = capacity(disk_index_remove(mut known.members, (location.place.pack, stamp), member_charge))?
-            let _ = capacity(disk_index_update(mut known.packs, location.place.pack, pack_edge_charge, fn(mut pack: PagePack) {
+            let _ = failure_result_from_rep(types.capacity(disk_index_remove(mut known.members, (location.place.pack, stamp), member_charge)))?
+            let _ = failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, location.place.pack, pack_edge_charge, fn(mut pack: PagePack) {
                 let width: u64 = int.widen(location.place.len)
                 pack.live -= width
-            }))?
+            })))?
         }
         for child in location.outgoing {
             remove_page_source(mut known, child, PageSource(stamp))?

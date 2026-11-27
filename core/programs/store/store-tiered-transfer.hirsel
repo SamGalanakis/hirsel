@@ -82,7 +82,7 @@ fn record_migrate_source(mut plan: SchemaPlan, from_id: u32, to_id: u32) -> Resu
         }
         plan.migrate_sources = take kept
     }
-    capacity(list.try_reserve(mut plan.migrate_sources, 1))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut plan.migrate_sources, 1)))?
     list.push(mut plan.migrate_sources, MigrateSource(target: to_id, source: base_source))
     Ok(())
 }
@@ -170,7 +170,7 @@ fn collect_base_descriptors(root: Arc[std.page.Page], mut out: Map[u32, (std.pag
         let key = option.unwrap(std.page.key_at(image, slot))
         let id: u32 = list.word_be(key, 0)
         let desc = unwrap_collection_descriptor(std.page.value_at(root, slot))
-        capacity(map.try_reserve(mut out, 1))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut out, 1)))?
         map.insert(mut out, id, (desc.kind, desc.residency))
     }
     Ok(())
@@ -201,7 +201,7 @@ fn read_export_base_descriptors(d: Dir, id: StoreId) -> Result[Map[u32, (std.pag
     let (owner, take manifest) = disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
         disk_read_page_manifest("MANIFEST", manifest_raw)
     })?
-    if !same(owner, id) || list.len(manifest.branches) == 0 {
+    if !types.same(owner.hi, owner.lo, id.hi, id.lo) || list.len(manifest.branches) == 0 {
         return Ok(take out)
     }
     let root_ptr = manifest.branches[0u64].roots.collections
@@ -222,9 +222,9 @@ fn read_disk_file_bounded(mut file: HostFile, name: String, limit: u64) -> Resul
             return Ok(take out)
         }
         if list.len(out) + n > limit {
-            return Error(disk_fault(name, list.len(out), Malformed))
+            return Error(failure_from_rep(format.disk_fault(name, list.len(out), Malformed)))
         }
-        capacity(list.try_reserve(mut out, n))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out, n)))?
         list.append(mut out, list.slice(chunk, 0, n))
     }
 }
@@ -239,7 +239,7 @@ fn read_collection_map_descriptors(d: Dir, id: StoreId, ptr: std.page.PagePtr, m
     let wire = read_disk_bytes(mut file, path, ptr.offset, 16 + width)?
     disk_io(host.close(take file))?
     let (height, take children, take found_descs) = disk_allocation(scoped fn() -> Result[(u8, List[std.page.PagePtr], List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]), Error] {
-        let image = page_result(std.page.decode(copied(list.slice(wire, 16, 16 + width))?, CollectionMap))?
+        let image = page_result(std.page.decode(failure_result_from_rep(types.copied(list.slice(wire, 16, 16 + width)))?, CollectionMap))?
         let lvl = std.page.level(image)
         let mut kids: List[std.page.PagePtr] = list.new()
         let mut descs: List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = list.new()
@@ -260,7 +260,7 @@ fn read_collection_map_descriptors(d: Dir, id: StoreId, ptr: std.page.PagePtr, m
         Ok((lvl, take kids, take descs))
     })?
     for (cid, kind, residency) in found_descs {
-        capacity(map.try_reserve(mut out, 1))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut out, 1)))?
         map.insert(mut out, cid, (kind, residency))
     }
     if height != 0 {
@@ -459,10 +459,10 @@ fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut curso
     for take row in take leaf_rows {
         let std.page.Row(key: take key, value: take value, charge: row_charge) = take row
         if idx == 0 {
-            first = deploy_result(copied(key))?
+            first = deploy_result(failure_result_from_rep(types.copied(key)))?
         }
         if idx + 1 == n {
-            last_key = deploy_result(copied(key))?
+            last_key = deploy_result(failure_result_from_rep(types.copied(key)))?
         }
         idx += 1
         rows += 1
@@ -514,8 +514,8 @@ fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u
     let image = deploy_result(page_result(std.page.encode(page_entries, lvl, id, Collection)))?
     let hot = std.page.sealed_size(image)
     let page = deploy_result(page_result(std.page.attach(take image, take kids, list.new())))?
-    let first = deploy_result(copied(nodes[lo].first))?
-    let last_key = deploy_result(copied(nodes[hi - 1u64].last))?
+    let first = deploy_result(failure_result_from_rep(types.copied(nodes[lo].first)))?
+    let last_key = deploy_result(failure_result_from_rep(types.copied(nodes[hi - 1u64].last)))?
     Ok((StreamNode(slot: HotPage(take page), stamp: id, level: lvl, first: take first, last: take last_key, rows: rows, charge: charge), hot))
 }
 
@@ -792,7 +792,7 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
             }
             deploy_result(checksum_row(mut digest, key, encoded))?
             let row_charge = entry(key, encoded)
-            let suffix = deploy_result(copied(list.slice(key, 4, list.len(key))))?
+            let suffix = deploy_result(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key)))))?
             stream_push_row(mut db, mut builder, mut collections, std.page.Row(key: take suffix, value: take encoded, charge: row_charge))?
         }
         if std.check.finish(digest) != target.digest {

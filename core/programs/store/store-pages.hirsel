@@ -130,8 +130,8 @@ fn descriptor_kind_byte(kind: std.page_descriptor.CollectionKind) -> u8 {
 
 fn collection_header(stamp: u64, rows: u64, charge: u64, kind: u8, residency: std.page_descriptor.Residency) -> Result[Bytes, Error] {
     let mut record = std.page.encode_ptr(std.page.unlocated(stamp))
-    capacity(le(mut record, rows, 8))?
-    capacity(le(mut record, charge, 8))?
+    failure_result_from_rep(types.capacity(format.le(mut record, rows, 8)))?
+    failure_result_from_rep(types.capacity(format.le(mut record, charge, 8)))?
     list.push(mut record, kind)
     list.fill(mut record, 3, 0u8)
     std.page_descriptor.set_collection_residency(mut record, residency)
@@ -150,8 +150,8 @@ fn rooted_collection_record(root: Arc[std.page.Page], kind: u8, residency: std.p
 
 fn cell_record(root: Arc[std.page.Page], inline: Option[View[Bytes]]) -> Result[Bytes, Error] {
     if let Some(value) = inline {
-        let mut record = collection_header(0, 1, 70 + round8(list.len(value)), 3, ResidentMemory)?
-        capacity(le(mut record, list.len(value), 2))?
+        let mut record = collection_header(0, 1, 70 + format.round8(list.len(value)), 3, ResidentMemory)?
+        failure_result_from_rep(types.capacity(format.le(mut record, list.len(value), 2)))?
         list.append(mut record, value)
         return Ok(take record)
     }
@@ -358,7 +358,7 @@ fn count_row_versions(walks: List[std.page_walk.Walk], mut group: List[u64], key
         let Some(raw) = std.page_walk.value(walks[current]) else {
             fail("store: missing row version")
         }
-        charge = int.saturating_add(charge, 62 + round8(key_width) + round8(list.len(raw)))
+        charge = int.saturating_add(charge, 62 + format.round8(key_width) + format.round8(list.len(raw)))
     }
     charge
 }
@@ -518,7 +518,7 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
         })
         for i in 0u64 .. list.len(versions) {
             if i == 0 || versions[i - 1] != versions[i] {
-                charge = int.saturating_add(charge, 70 + round8(list.len(versions[i])))
+                charge = int.saturating_add(charge, 70 + format.round8(list.len(versions[i])))
             }
         }
     }
@@ -629,12 +629,12 @@ fn collection_cursor(tree: PageTree, id: u32, low: Bytes, high: Bytes, reverse: 
         return Ok(None)
     }
     let start = if low_prefix == leading {
-        Some(copied(list.slice(low, 4, list.len(low)))?)
+        Some(failure_result_from_rep(types.copied(list.slice(low, 4, list.len(low))))?)
     } else {
         None
     }
     let stop = if high_prefix == leading {
-        Some(copied(list.slice(high, 4, list.len(high)))?)
+        Some(failure_result_from_rep(types.copied(list.slice(high, 4, list.len(high))))?)
     } else {
         None
     }
@@ -668,11 +668,11 @@ fn open_page_range(tree: PageTree, start: Option[Bytes], inclusive: bool, revers
     let nested = tree_domain(tree) == CollectionMap
     let initial: Option[Bytes] = match start {
         None => None,
-        Some(key) => Some(copied(list.slice(key, 0, if nested {
+        Some(key) => Some(failure_result_from_rep(types.copied(list.slice(key, 0, if nested {
             order.min(4, list.len(key))
         } else {
             list.len(key)
-        }))?),
+        })))?),
     }
     let outer_stop: Option[Bytes] = match view stop {
         None => None,
@@ -688,7 +688,7 @@ fn open_page_range(tree: PageTree, start: Option[Bytes], inclusive: bool, revers
                     5
                 }, list.len(key))
             }
-            Some(copied(list.slice(key, 0, width))?)
+            Some(failure_result_from_rep(types.copied(list.slice(key, 0, width)))?)
         },
     }
     // In reverse, an exclusive four-byte key precedes every row of its
@@ -761,7 +761,7 @@ fn open_page_collection(mut rows: PageRange, key: Bytes, root: Arc[std.page.Page
     rows.collection = list.word_be(key, 0)
     let start: Option[Bytes] = match rows.start {
         Some(boundary) => if list.len(boundary) >= 4 && list.slice(boundary, 0, 4) == key {
-            Some(copied(list.slice(boundary, 4, list.len(boundary)))?)
+            Some(failure_result_from_rep(types.copied(list.slice(boundary, 4, list.len(boundary))))?)
         } else {
             None
         },
@@ -769,7 +769,7 @@ fn open_page_collection(mut rows: PageRange, key: Bytes, root: Arc[std.page.Page
     }
     let stop: Option[Bytes] = match rows.stop {
         Some(boundary) => if list.len(boundary) > 4 && list.slice(boundary, 0, 4) == key {
-            Some(copied(list.slice(boundary, 4, list.len(boundary)))?)
+            Some(failure_result_from_rep(types.copied(list.slice(boundary, 4, list.len(boundary))))?)
         } else {
             None
         },
@@ -785,14 +785,14 @@ const DATA_ROWS_UNORDERED: u64 = 1u64 << 63
 
 type DataRows: shareable + send {
     count_word: u64,
-    first: Inline[DataOp, 2],
-    rest: List[DataOp]
+    first: Inline[format.DataOp, 2],
+    rest: List[format.DataOp]
 }
 
 fn new_data_rows() -> DataRows {
-    let first: Inline[DataOp, 2] =[
-        DataOp(key: list.new(), value: None, trim: None, prior: None),
-        DataOp(key: list.new(), value: None, trim: None, prior: None),
+    let first: Inline[format.DataOp, 2] =[
+        format.DataOp(key: list.new(), value: None, trim: None, prior: None),
+        format.DataOp(key: list.new(), value: None, trim: None, prior: None),
     ]
     DataRows(count_word: 0, first: take first, rest: list.new())
 }
@@ -805,7 +805,7 @@ fn rows_ascending(rows: DataRows) -> bool {
     rows.count_word & DATA_ROWS_UNORDERED == 0
 }
 
-fn data_row(rows: DataRows, slot: u64) -> View[DataOp] in rows {
+fn data_row(rows: DataRows, slot: u64) -> View[format.DataOp] in rows {
     if slot < 2 {
         view rows.first[slot]
     } else {
@@ -813,7 +813,7 @@ fn data_row(rows: DataRows, slot: u64) -> View[DataOp] in rows {
     }
 }
 
-fn push_data_row(mut rows: DataRows, take row: DataOp) {
+fn push_data_row(mut rows: DataRows, take row: format.DataOp) {
     let n = data_row_count(rows)
     let inversion = n > 0 && rows_ascending(rows) && list.compare_bytes(data_row(rows, n - 1).key, row.key) != Less
     if n < 2 {

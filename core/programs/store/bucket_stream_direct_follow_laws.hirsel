@@ -109,7 +109,7 @@ fn df_follower_rows(f: Follower, rows_tbl: Table[u64, Bytes]) -> Result[u64, Err
     }
 }
 
-fn df_head_attach_live(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, place_prefix: String) -> Result[(HistoryHead, Option[Attach]), Error] waits {
+fn df_head_attach_live(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, place_prefix: String) -> Result[(HistoryHead, Option[format.Attach]), Error] waits {
     let mut client = df_client_host(s.endpoint, s.time, tasks, host_name, seed, place_prefix, 1)?
     let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
     let due = std.object.deadline_after_ms(client, DF_OP_MS)
@@ -374,7 +374,7 @@ fn df_l90_f_run(s: BucketSim, tasks: Tasks, r: Random, fsvc: FollowerService, fp
     let mut hc = df_client_host(s.endpoint, s.time, tasks, "spare.test", 205, "", 1)?
     let due_h = std.object.deadline_after_ms(hc, DF_OP_MS)
     stream_reg_read(mut hold_lane, mut hc, due_h)?
-    let _ = stream_reg_write(mut hold_lane, mut hc, Hold(RegRow(store: db_a.store, epoch: 1, token: hold_tok, rev_hold: 0, abandoned: false), 1), due_h)?
+    let _ = stream_reg_write(mut hold_lane, mut hc, Hold(format.RegRow(store: store_key_to_rep(db_a.store), epoch: 1, token: store_key_to_rep(hold_tok), rev_hold: 0, abandoned: false), 1), due_h)?
     // While the hold stands, follower `fresh` must return Behind and publish nothing new!
     let due1 = clock.deadline_after_ms(host.mono_ns(s.time), 500)
     match fresh(mut f, due1) {

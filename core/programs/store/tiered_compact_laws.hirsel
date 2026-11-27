@@ -603,13 +603,13 @@ fn refused_cut_bytes(mut db: Db, take delta: HolderDelta) -> Result[Bytes, Error
 // The last attempt's sealed bytes, and how many attempts sealed.
 fn refused_cut_seals(mut db: Db, take delta: HolderDelta) -> Result[(Bytes, u64), Error] waits {
     let sealed: core.Log[Bytes] = log.new()
-    match disk_cut_state(mut db, take delta, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+    match disk_cut_state(mut db, take delta, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
         let mut whole: Bytes = clone(raw)
         seal_page_manifest_file(mut whole, context, fence)?
         log.append(sealed, take whole)
-        capacity(bound bytes 0 {
+        failure_result_from_rep(types.capacity(bound bytes 0 {
             seal_page_manifest_file(mut raw, context, fence)
-        })?
+        }))?
     }) {
         Error(Full(Allocation(_))) => (),
         _ => fail("§13.6 crash: the refused seal fails the retiring cut before its rename"),

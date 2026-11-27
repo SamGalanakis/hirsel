@@ -40,7 +40,7 @@ fn capture_pack_slot(files: List[HeldCapturePack], seq: u64) -> u64 {
 
 fn capture_with_pack[T](mut packs: CapturePacks, path: String, seq: u64, stamp: u64, at: u64, class: u8, read: scoped[view] fn(mut HostFile) -> Result[T, Error] waits) -> Result[T, Error] waits {
     if seq == 0 || seq >= packs.next_pack || stamp >= packs.next_stamp || at < 72 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     if !packs.hold {
         let mut file = capture_open_pack(packs, path, seq)?
@@ -49,13 +49,13 @@ fn capture_with_pack[T](mut packs: CapturePacks, path: String, seq: u64, stamp: 
     let lo = capture_pack_slot(packs.files, seq)
     if lo == list.len(packs.files) || packs.files[lo].seq != seq {
         if list.len(packs.files) == list.capacity(packs.files) {
-            return Error(disk_fault(path, at, Dangling(stamp)))
+            return Error(failure_from_rep(format.disk_fault(path, at, Dangling(stamp))))
         }
         let file = capture_open_pack(packs, path, seq)?
         list.insert(mut packs.files, lo, HeldCapturePack(seq: seq, file: take file, class: class, listed: false))
     }
     if packs.files[lo].class != class {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     read(mut packs.files[lo].file)
 }
@@ -65,7 +65,7 @@ fn capture_page(mut packs: CapturePacks, ptr: std.page.PagePtr, domain: std.page
     let id = packs.id
     let width: u64 = int.widen(ptr.len)
     if width > PAGE_LIMIT {
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
     capture_with_pack(mut packs, path, ptr.pack, ptr.stamp, ptr.offset, class, scoped fn(mut file: HostFile) -> Result[std.page.Image, Error] waits {
         capture_read_page_mode(mut file, path, id, ptr, domain, expected_level, domain == CollectionMap)
@@ -79,22 +79,22 @@ fn capture_read_page(mut file: HostFile, path: String, id: StoreId, ptr: std.pag
 fn capture_read_page_mode(mut file: HostFile, path: String, id: StoreId, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], allow_tiered: bool) -> Result[std.page.Image, Error] waits {
     let width: u64 = int.widen(ptr.len)
     if width > PAGE_LIMIT {
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
     let image = {
         let size = disk_io(host.stat_file(mut file))?.size
         if ptr.offset > size || 16 + width > size - ptr.offset {
-            return Error(disk_fault(path, ptr.offset, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
         let raw = read_disk_bytes(mut file, path, ptr.offset, 16 + width)?
         {
             let head = list.slice(raw, 0, 16)
             let frame = disk_read_frame_head(path, head, ptr.offset)?
             let payload = list.slice(raw, 16, 16 + width)
-            let ctx = DiskContext(store: id, role: 3, seq: ptr.pack)
+            let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: ptr.pack)
             disk_check_frame_kind(path, ctx, frame.kind, frame.flags, ptr.offset)?
-            if frame.kind != 0x0021 || frame.size != width || capacity(disk_check(ctx, ptr.offset, head, payload))? != frame.checksum {
-                return Error(disk_fault(path, ptr.offset, Checksum))
+            if frame.kind != 0x0021 || frame.size != width || failure_result_from_rep(types.capacity(format.disk_check(ctx, ptr.offset, head, payload)))? != frame.checksum {
+                return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Checksum)))
             }
             check_page_pointer(path, ptr, payload)?
         }
@@ -109,7 +109,7 @@ fn capture_read_page_mode(mut file: HostFile, path: String, id: StoreId, ptr: st
     } else {
         false
     }) {
-        return Error(disk_fault(path, ptr.offset, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
     }
     Ok(take image)
 }
@@ -130,9 +130,9 @@ fn capture_walk_list[S](mut packs: CapturePacks, ptr: std.page.PagePtr, class: u
     for i in 0u64 .. std.page.count(image) {
         if height != 0 {
             let PageEdge(child) = option.unwrap(std.page.owning_edge(image, i)) else {
-                return Error(disk_fault(path, ptr.offset, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
             }
-            page_edge_order(path, ptr, child)?
+            failure_result_from_rep(format.page_edge_order(path, ptr, child))?
             capture_walk_list(mut packs, child, class, Some(height - 1), mut state, mut pages, page, row)?
         } else {
             let slot = option.unwrap(std.page.entry(image, i))
@@ -162,23 +162,23 @@ fn capture_lists(mut packs: CapturePacks, m: PageManifest) -> Result[CaptureList
         capture_walk_pages(mut packs, root, 2, None, mut tally, mut pages, scoped fn(mut _packs: CapturePacks, mut walk: CaptureListWalk, path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] {
             let raw = match cell_value {
                 InlineValue(value) => value,
-                _ => return Error(disk_fault(path, at, Malformed)),
+                _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
             }
             if list.len(walk.previous) != 0 && order.compare(walk.previous, key) != Less {
-                return Error(disk_fault(path, at, Order))
+                return Error(failure_from_rep(format.disk_fault(path, at, Order)))
             }
             if let LineageList = kind {
                 let _ = decode_lineage_row(path, at, key, raw)?
             } else {
                 if list.len(key) != 8 {
-                    return Error(disk_fault(path, at, Malformed))
+                    return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
                 let seq: u64 = list.word_be(key, 0)
                 match kind {
                     PackList => {
                         let _ = pack_record(path, at, raw)?
                         if seq == 0 || seq >= m.next_pack {
-                            return Error(disk_fault(path, at, Malformed))
+                            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                         }
                     },
                     DeferredList => {
@@ -187,7 +187,7 @@ fn capture_lists(mut packs: CapturePacks, m: PageManifest) -> Result[CaptureList
                     LineageList => (),
                 }
             }
-            walk.previous = copied(key)?
+            walk.previous = failure_result_from_rep(types.copied(key))?
             walk.rows = capture_add(walk.rows, 1)
             Ok(())
         })?
@@ -215,14 +215,14 @@ fn capture_lookup(mut packs: CapturePacks, root: std.page.PagePtr, domain: std.p
             let std.page.Entry(cell: take found, ..) = option.unwrap(std.page.entry(image, slot))
             return match take found {
                 InlineValue(take raw) => Ok(Some(take raw)),
-                _ => Error(disk_fault(path, ptr.offset, Malformed)),
+                _ => Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed))),
             }
         }
         let slot = option.unwrap(std.page.descend(image, key))
         let PageEdge(child) = option.unwrap(std.page.owning_edge(image, slot)) else {
-            return Error(disk_fault(path, ptr.offset, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
-        page_edge_order(path, ptr, child)?
+        failure_result_from_rep(format.page_edge_order(path, ptr, child))?
         ptr = child
         expected = Some(height - 1)
     }
@@ -235,14 +235,14 @@ fn capture_pack_classes(mut packs: CapturePacks, m: PageManifest) -> Result[(), 
     capture_walk_pages(mut packs, m.pack_root, 2, None, mut ignored, mut visited, fn(mut source: CapturePacks, mut _state: (), path: String, at: u64, key: Bytes, value: std.page.Cell) -> Result[(), Error] {
         let raw = match value {
             InlineValue(found) => found,
-            _ => return Error(disk_fault(path, at, Malformed)),
+            _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
         }
         let row = pack_record(path, at, raw)?
         let seq: u64 = list.word_be(key, 0)
         let slot = capture_pack_slot(source.files, seq)
         if slot != list.len(source.files) && source.files[slot].seq == seq {
             if source.files[slot].class != row.class {
-                return Error(disk_fault(path, at, Malformed))
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
             source.files[slot].listed = true
         }
@@ -250,7 +250,7 @@ fn capture_pack_classes(mut packs: CapturePacks, m: PageManifest) -> Result[(), 
     })?
     for held in packs.files {
         if held.class != 2 && !held.listed {
-            return Error(disk_fault(paged_pack_path(held.seq)?, 72, Absent))
+            return Error(failure_from_rep(format.disk_fault(paged_pack_path(held.seq)?, 72, Absent)))
         }
     }
     Ok(())

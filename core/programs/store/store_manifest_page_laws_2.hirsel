@@ -98,17 +98,17 @@ fn disk_test_paged_inventory(d: Dir) -> Result[(), Error] waits {
 }
 
 // The HEADER of `raw` resealed with another format word.
-fn format_header(ctx: DiskContext, raw: Bytes, word: u32) -> Result[Bytes, Error] {
-    let mut payload = copied(list.slice(raw, 16, 72))?
+fn format_header(ctx: format.DiskContext, raw: Bytes, word: u32) -> Result[Bytes, Error] {
+    let mut payload = failure_result_from_rep(types.copied(list.slice(raw, 16, 72)))?
     list.set_word_le(mut payload, 8, word)
-    capacity(disk_seal(ctx, 0, 0x0001, 1, payload))
+    failure_result_from_rep(types.capacity(format.disk_seal(ctx, 0, 0x0001, 1, payload)))
 }
 
 // L99 (§11.1 rule 6): a directory whose MANIFEST names another format word is
 // `Unsupported(word)` at the HEADER read and is left byte-unchanged.
 fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreId, word: u32) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
-    let ctx = DiskContext(store: id, role: 1, seq: 1)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: 1)
     let current = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
     let mut manifest = format_header(ctx, current, word)?
     list.append(mut manifest, list.slice(current, 72, list.len(current)))
@@ -125,8 +125,8 @@ fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreI
     if disk_read_paged_file(directory, "MANIFEST", list.len(manifest))? != manifest || disk_read_paged_file(directory, "MANIFEST.tmp", list.len(scratch))? != scratch || disk_exists(directory, "j-1")? {
         return Error(Missing("directory changed after format refusal"))
     }
-    let retired = capacity(disk_seal(ctx, 72, 0x0030, 1, list.new()))?
-    let mut unknown = copied(list.slice(current, 0, 72))?
+    let retired = failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0030, 1, list.new())))?
+    let mut unknown = failure_result_from_rep(types.copied(list.slice(current, 0, 72)))?
     list.append(mut unknown, retired)
     match disk_read_page_manifest("MANIFEST", unknown) {
         Error(Unsupported(0x0030)) => Ok(()),
@@ -135,16 +135,16 @@ fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreI
 }
 
 fn refuse_frozen_bucket(id: StoreId) -> Result[(), Error] {
-    let mut raw: Bytes = list.with_capacity(72 + BINDING_BYTES)
-    let head = DiskContext(store: id, role: 7, seq: 1)
-    capacity(history_append_header(mut raw, head, 2, 1))?
+    let mut raw: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
+    let head = format.DiskContext(store: store_key_to_rep(id), role: 7, seq: 1)
+    failure_result_from_rep(types.capacity(format.history_append_header(mut raw, head, 2, 1)))?
     match history_head_frame(format_header(head, raw, 9u32)?) {
         Error(Unsupported(9)) => (),
         _ => return Error(Missing("bucket head format refusal")),
     }
     list.clear(mut raw)
-    let manifest = DiskContext(store: id, role: 1, seq: 1)
-    capacity(history_append_header(mut raw, manifest, 2, 1))?
+    let manifest = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: 1)
+    failure_result_from_rep(types.capacity(format.history_append_header(mut raw, manifest, 2, 1)))?
     let old = format_header(manifest, raw, 9u32)?
     let reference = HistoryRef(seq: 1, epoch: 2, len: list.len(old), digest: std.check.xxh3(old, 0, list.len(old)))
     match history_object_context("m-1", id, 1, reference, old) {
@@ -155,8 +155,8 @@ fn refuse_frozen_bucket(id: StoreId) -> Result[(), Error] {
 
 fn refuse_stream_format() -> Result[(), Error] {
     let sid = HostStreamId(hi: 3, lo: 4)
-    let mut raw: Bytes = list.with_capacity(72 + BINDING_BYTES)
-    let ctx = stream_header(mut raw, sid, 11, 1, 2, 1)?
+    let mut raw: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
+    let ctx = failure_result_from_rep(format.stream_header(mut raw, host_stream_id_to_rep(sid), 11, 1, 2, 1))?
     match stream_read_header("reg", format_header(ctx, raw, 9u32)?, sid, 11) {
         Error(Unsupported(9)) => Ok(()),
         _ => Error(Missing("stream format refusal")),

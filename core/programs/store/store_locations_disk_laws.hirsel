@@ -26,8 +26,8 @@ fn location_edge_charge(n: Arc[std.omap.Node[u64, FrameLocation]]) -> u64 {
 
 fn check_page_location_closure() -> Result[(), Error] {
     let mut installed = new_page_locations()
-    capacity(disk_index_put(mut installed.packs, 1, PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10, index: 0), pack_edge_charge))?
-    capacity(disk_index_put(mut installed.packs, 2, PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66, index: 0), pack_edge_charge))?
+    failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, 1, PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10, index: 0), pack_edge_charge)))?
+    failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, 2, PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66, index: 0), pack_edge_charge)))?
     add_location(mut installed, std.page.PagePtr(pack: 1, offset: 72, len: 10, checksum: 1, stamp: 1), 1, 0, list.new())?
     for parent in 2u64 .. 4 {
         let mut outgoing: List[u64] = list.with_capacity(1)

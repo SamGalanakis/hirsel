@@ -202,7 +202,7 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     }
     // M3b-S4 (L70 revised): log@1 export is lifted for Tiered stores.
     let export_attempt = b"l70-export-lift!"
-    let leased_job = match begin_export_copy(mut db, scratch, copied(export_attempt)?, 0) {
+    let leased_job = match begin_export_copy(mut db, scratch, failure_result_from_rep(types.copied(export_attempt))?, 0) {
         Ok(take job) => take job,
         Error(_) => fail("L70(c): expected log@1 Tiered export lease to succeed"),
     }
@@ -239,8 +239,8 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     close(take db)
 }
 
-fn l65_wrong_edge(target: TieredTarget, cached: Arc[TieredFrame]) -> bool {
-    match verify_tiered_edge("p-7", target, cached.identity) {
+fn l65_wrong_edge(target: format.TieredTarget, cached: Arc[format.TieredFrame]) -> bool {
+    match failure_result_from_rep(format.verify_tiered_edge("p-7", target, cached.identity)) {
         Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) => true,
         _ => false,
     }
@@ -306,7 +306,7 @@ fn test_l65_tiered_edges() -> Result[(), ()] {
     list.put_word_le(mut raw, 0x1c7a045bb5175e24u64)
     list.put_word_le(mut raw, 2u64)
     list.fill(mut raw, 1025, 106u8)
-    let valid = TieredBlob(reference)
+    let valid: format.TieredTarget = TieredBlob(reference)
     let cached = result.unwrap(read_tiered_frame("p-7", owner, valid, raw, 64, 3))
     let TieredValue(value) = cached.payload else {
         return Error(())
@@ -333,7 +333,7 @@ fn test_l65_tiered_edges() -> Result[(), ()] {
     if !l65_wrong_edge(TieredPage(wrong_kind), cached) {
         return Error(())
     }
-    let _ = result.unwrap(verify_tiered_edge("p-7", valid, cached.identity))
+    let _ = result.unwrap(failure_result_from_rep(format.verify_tiered_edge("p-7", valid, cached.identity)))
     raw[16u64] = 0
     let Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) = read_tiered_frame("p-7", owner, valid, raw, 64, 3) else {
         return Error(())
@@ -374,7 +374,7 @@ fn test_l84_bucket_window(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     let low = tiered_bucket_range("p-7", l84_page(72, TieredBackward).target, 500000, TieredBackward)?
     let high = tiered_bucket_range("p-7", l84_page(490000, TieredForward).target, 500000, TieredForward)?
     let whole = tiered_bucket_range("p-7", l84_page(72, TieredPoint).target, 50000, TieredPoint)?
-    let large_blob = TieredBlob(std.page.BlobRef(stamp: 1, len: 300000, checksum: 1, pack: 7, offset: 720, body: 0))
+    let large_blob: format.TieredTarget = TieredBlob(std.page.BlobRef(stamp: 1, len: 300000, checksum: 1, pack: 7, offset: 720, body: 0))
     let large = tiered_bucket_range("p-7", large_blob, 500000, TieredForward)?
     if low != TieredRange(lo: 0, hi: 131072) || high != TieredRange(lo: 368928, hi: 500000) || whole != TieredRange(lo: 0, hi: 50000) || large != TieredRange(lo: 720, hi: 300744) {
         fail("L84: boundary, small pack or large frame range")
@@ -388,14 +388,14 @@ fn test_l84_bucket_window(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     got
 }
 
-fn l70_cache_target(stamp: u64) -> TieredTarget {
+fn l70_cache_target(stamp: u64) -> format.TieredTarget {
     TieredBlob(std.page.BlobRef(stamp: stamp, len: 1025, checksum: 101, pack: 7, offset: 72 + 2048 * stamp, body: 0))
 }
 
-fn l70_cache_frame(stamp: u64) -> Arc[TieredFrame] {
+fn l70_cache_frame(stamp: u64) -> Arc[format.TieredFrame] {
     let mut bytes_value: Bytes = list.with_capacity(1025)
     list.fill(mut bytes_value, 1025, 19u8)
-    arc.new(TieredFrame(identity: tiered_frame_id(l70_cache_target(stamp)), payload: TieredValue(arc.new(take bytes_value))))
+    arc.new(format.TieredFrame(identity: format.tiered_frame_id(l70_cache_target(stamp)), payload: TieredValue(arc.new(take bytes_value))))
 }
 
 @test
@@ -485,8 +485,8 @@ fn test_l79_overlay_trim_evidence() -> Result[(), Error] {
     let initial = ReplayLogHead(first: 0, next: 5, cold_next: 3, row_bytes: 430)
     // These have offsetting errors. Keep the separate Cold intervals
     // and charges so the fold can reject each one.
-    let trimmed = replay_overlay_trim(mut edited, "j-1", 88, 9, initial, JournalTrim(floor: 2, dropped: 180))?
-    let retained = replay_overlay_trim(mut edited, "j-1", 104, 9, trimmed, JournalTrim(floor: 4, dropped: 164))?
+    let trimmed = replay_overlay_trim(mut edited, "j-1", 88, 9, initial, format.JournalTrim(floor: 2, dropped: 180))?
+    let retained = replay_overlay_trim(mut edited, "j-1", 104, 9, trimmed, format.JournalTrim(floor: 4, dropped: 164))?
     {
         let Some(first_proof) = std.omap.get(edited.trims, 0u64) else {
             fail("L79: first trim evidence is missing")
@@ -508,7 +508,7 @@ fn test_l79_overlay_trim_evidence() -> Result[(), Error] {
         (None, Some(_), Some(_)) => (),
         _ => fail("L79: trim removed the wrong listed_entries or changed the fork source"),
     }
-    let Error(Corrupt(Fault(offset: 120, why: Malformed, ..))) = replay_overlay_trim(mut edited, "j-1", 120, 9, retained, JournalTrim(floor: 5, dropped: 85)) else {
+    let Error(Corrupt(Fault(offset: 120, why: Malformed, ..))) = replay_overlay_trim(mut edited, "j-1", 120, 9, retained, format.JournalTrim(floor: 5, dropped: 85)) else {
         fail("L79: trim undercounting known suffix bytes must fail at replay")
     }
     if edited.floor != Some(4u64) || edited.charged != 90 {
@@ -520,8 +520,8 @@ fn test_l79_overlay_trim_evidence() -> Result[(), Error] {
     Ok(())
 }
 
-fn l65_ask_pager(requests: Sender[TieredPagerMessage], demand: TieredPagerTarget) -> Result[Arc[TieredFrame], Error] waits {
-    let (answer, delivered): (Sender[Result[Arc[TieredFrame], Error]], Receiver[Result[Arc[TieredFrame], Error]]) = channel.new(1u64)
+fn l65_ask_pager(requests: Sender[TieredPagerMessage], demand: TieredPagerTarget) -> Result[Arc[format.TieredFrame], Error] waits {
+    let (answer, delivered): (Sender[Result[Arc[format.TieredFrame], Error]], Receiver[Result[Arc[format.TieredFrame], Error]]) = channel.new(1u64)
     let _ = result.unwrap(channel.send(requests, PagerRead(clone(demand), take answer)))
     result.unwrap(channel.receive(delivered))
 }
@@ -609,7 +609,7 @@ fn test_l84_parallel_bucket_windows(c: Clock, tasks: Tasks) -> Result[(), Error]
     status
 }
 
-fn l62_refusal(pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(), Error] {
+fn l62_refusal(pins: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(), Error] {
     let attempt = tiered_attempt(2097, 0)
     let first_frame = l70_cache_target(1)
     let second_frame = l70_cache_target(2)
@@ -632,7 +632,7 @@ fn l62_refusal(pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(), Error]
 
 @test
 fn test_l62_attempt_touch_order() -> Result[(), Error] {
-    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let first_frame = l70_cache_target(1)
     let refused = tiered_attempt(2097, 0)
     if let Some(_) = tiered_resolve_cold(refused, visible, first_frame)? {
@@ -672,7 +672,7 @@ fn test_l62_root_scoped_pins() -> Result[(), Error] {
         fail("L62: the full partition evicted touched pins")
     }
     let lost = std.page.BlobRef(stamp: 4, len: 1025, checksum: 0, pack: 7, offset: 8264, body: 0)
-    let mut pending: Option[(TieredTarget, Error)] = Some((TieredBlob(lost), Io(Closed)))
+    let mut pending: Option[(format.TieredTarget, Error)] = Some((TieredBlob(lost), Io(Closed)))
     refresh_call_pins(mut pins, mut pending, old_root)
     if let None = pending {
         fail("L62: the same head keeps its pending delivery result")
@@ -736,10 +736,10 @@ fn test_l68_lazy_collection_root() -> Result[(), Error] {
 }
 
 fn l68_page_pack(owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[(Bytes, std.page.PagePtr), Error] {
-    let context = DiskContext(store: owner, role: 3, seq: seq)
+    let context = format.DiskContext(store: store_key_to_rep(owner), role: 3, seq: seq)
     let width: u32 = int.truncate(list.len(payload_bytes))
-    let frame = capacity(disk_seal(context, 72, 0x0021, 1, payload_bytes))?
-    let mut pack_bytes = capacity(disk_header_bytes(context, 0, 0))?
+    let frame = failure_result_from_rep(types.capacity(format.disk_seal(context, 72, 0x0021, 1, payload_bytes)))?
+    let mut pack_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(context, 0, 0)))?
     list.append(mut pack_bytes, frame)
     Ok((take pack_bytes, std.page.PagePtr(pack: seq, offset: 72, len: width, checksum: std.check.xxh3(payload_bytes, 0, list.len(payload_bytes)), stamp: stamp)))
 }
@@ -754,10 +754,10 @@ fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
     let mut records: List[std.page.Entry] = list.with_capacity(2)
     let cold = PagePack(class: 3, frames: 1, live: 80, payload_bytes: 220, index: class_three_end)
     let warm = PagePack(class: 0, frames: 1, live: 91, payload_bytes: 91, index: 0)
-    list.push(mut records, std.page.Entry(key: key_word(8), cell: InlineValue(encode_pack_row(cold))))
-    list.push(mut records, std.page.Entry(key: key_word(9), cell: InlineValue(encode_pack_row(warm))))
+    list.push(mut records, std.page.Entry(key: types.key_word(8), cell: InlineValue(encode_pack_row(cold))))
+    list.push(mut records, std.page.Entry(key: types.key_word(9), cell: InlineValue(encode_pack_row(warm))))
     let image = page_result(std.page.encode(records, 0, 101, Unprefixed))?
-    copied(std.page.payload(image))
+    failure_result_from_rep(types.copied(std.page.payload(image)))
 }
 
 @test
@@ -813,13 +813,13 @@ fn l68_replay_base() -> Result[JournalReplay, Error] {
     let mut manifest = page_manifest_empty(default_limits())
     manifest.account_tiered = 172
     manifest.next_stamp = 101
-    journal_replay_manifest(capacity(main_state(take roots, 0, 0))?, manifest)
+    journal_replay_manifest(failure_result_from_rep(types.capacity(main_state(take roots, 0, 0)))?, manifest)
 }
 
-fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[JournalEvent, Error] {
-    let mut ops: List[JournalOp] = list.new()
-    list.push(mut ops, JournalOp(key: log_key(9, 2)?, value: Some(string.into_bytes(string.from(value))), prior: prior, trim: None))
-    Ok(Commit(JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), keyed: list.new(), call: None, payload: 0)))
+fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[format.JournalEvent, Error] {
+    let mut ops: List[format.JournalOp] = list.new()
+    list.push(mut ops, format.JournalOp(key: log_key(9, 2)?, value: Some(string.into_bytes(string.from(value))), prior: prior, trim: None))
+    Ok(Commit(format.JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), keyed: list.new(), call: None, payload: 0)))
 }
 
 fn l68_check_replay_root(tree: PageTree, rows: u64, charge: u64, expected_value: String) -> Result[(), Error] {
@@ -860,7 +860,7 @@ fn test_l68_replay_branch_accounts() -> Result[(), Error] {
     }
     l68_check_replay_root(p.state.tips[0u64].roots.collections, 2, 172, "stored")?
     l68_check_replay_root(q.state.tips[0u64].roots.collections, 3, 258, "stored")?
-    journal_apply("j-1", mut q, Fork(JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 102)))?
+    journal_apply("j-1", mut q, Fork(format.JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 102)))?
     journal_apply("j-1", mut q, l68_replay_put(1, 2, 7, "second")?)?
     if q.tiered.total != 344 || q.tiered.exact {
         fail("L68: the fork did not make subsequent Tiered accounting conservative")
@@ -886,7 +886,7 @@ fn test_l68_replay_branch_accounts() -> Result[(), Error] {
 fn test_l87_replay_fork_raises_stamp_counter() -> Result[(), Error] {
     let mut replay = l68_replay_base()?
     replay.next_node = 299
-    journal_apply("j-1", mut replay, Fork(JournalFork(id: 1, parent: 0, forked_at: 0, name: "beta", watermark: 500)))?
+    journal_apply("j-1", mut replay, Fork(format.JournalFork(id: 1, parent: 0, forked_at: 0, name: "beta", watermark: 500)))?
     if stamp_after(replay.next_node)? != 500 {
         fail("L87(e): replay did not reserve the stamps below the fork watermark")
     }
@@ -896,7 +896,7 @@ fn test_l87_replay_fork_raises_stamp_counter() -> Result[(), Error] {
         fail("L87(e): the child drew an inherited stamp after the fork")
     }
     let counter = replay.next_node
-    journal_apply("j-1", mut replay, Fork(JournalFork(id: 2, parent: 0, forked_at: 0, name: "gamma", watermark: 500)))?
+    journal_apply("j-1", mut replay, Fork(format.JournalFork(id: 2, parent: 0, forked_at: 0, name: "gamma", watermark: 500)))?
     if counter != replay.next_node {
         fail("L87(e): replay lowered an already advanced counter")
     }
@@ -906,7 +906,7 @@ fn test_l87_replay_fork_raises_stamp_counter() -> Result[(), Error] {
 fn l68_object_pack(mut source: ObjectPackRead, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
     let (take raw, ptr) = l68_page_pack(owner, seq, stamp, payload_bytes)?
     let mut object_bytes = take raw
-    history_copy_header(mut object_bytes, DiskContext(store: owner, role: 3, seq: seq), 1, 1)?
+    history_copy_header(mut object_bytes, format.DiskContext(store: store_key_to_rep(owner), role: 3, seq: seq), 1, 1)?
     let item = history_new_ref(seq, 1, object_bytes)
     let (take stored, _) = std.object.store(mut source.client, history_key("p-", item), take object_bytes, source.deadline)
     let _ = stored ?=> |problem| Remote(problem)

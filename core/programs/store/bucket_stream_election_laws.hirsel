@@ -21,7 +21,7 @@ fn stream_elect_service(s: BucketSim, tasks: Tasks, r: Random, seed: u64, max_sl
     Ok(journal_service(tasks, take authority, plan, stream_service_budget(plan), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem)
 }
 
-fn stream_elect_decode_head_attach(report: std.sim.s3.Report, key: String) -> Result[Attach, Error] {
+fn stream_elect_decode_head_attach(report: std.sim.s3.Report, key: String) -> Result[format.Attach, Error] {
     let Some(obj) = map.get(report.objects, key) else {
         fail("head object is missing")
     }
@@ -32,7 +32,7 @@ fn stream_elect_decode_head_attach(report: std.sim.s3.Report, key: String) -> Re
     Ok(take attach)
 }
 
-fn stream_elect_batch_body(report: std.sim.s3.Report, key: String, inc: u64, seq: u64) -> Result[BatchBody, Error] {
+fn stream_elect_batch_body(report: std.sim.s3.Report, key: String, inc: u64, seq: u64) -> Result[format.BatchBody, Error] {
     let Some(obj) = map.get(report.objects, key) else {
         fail("expected batch/TERM object is missing")
     }

@@ -50,15 +50,15 @@ type HistoryRegister: send {
     head: HistoryHead,
     tag: std.object.ETag,
     terminal: Option[HistoryTerminal],
-    attach: Option[Attach]
+    attach: Option[format.Attach]
 }
 
 // Encodes `head` with AUTHORITY, optional ATTACH, and optional ORIGIN.
-fn history_encode_register_head(mut raw: Bytes, head: HistoryHead, authority: Bytes, attach: Option[Attach]) -> Result[(), Error] {
+fn history_encode_register_head(mut raw: Bytes, head: HistoryHead, authority: Bytes, attach: Option[format.Attach]) -> Result[(), Error] {
     history_encode_base_head(mut raw, head, authority)?
-    let ctx = DiskContext(store: head.store, role: 7, seq: head.entry.seq)
+    let ctx = format.DiskContext(store: store_key_to_rep(head.store), role: 7, seq: head.entry.seq)
     if let Some(a) = attach {
-        stream_attach_append(mut raw, ctx, a)?
+        failure_result_from_rep(format.stream_attach_append(mut raw, ctx, a))?
     }
     if let Some(o) = head.origin {
         history_origin_append(mut raw, ctx, o)?
@@ -86,20 +86,20 @@ type HistoryBuffers: send {
 }
 
 fn history_buffers(packet_bytes: u64) -> Result[HistoryBuffers, Error] {
-    let room = order.max(packet_bytes, 152 + BINDING_BYTES)
+    let room = order.max(packet_bytes, 152 + format.BINDING_BYTES)
     disk_allocation(scoped fn() -> Result[HistoryBuffers, Error] {
         Ok(HistoryBuffers(body: list.with_capacity(HISTORY_HEAD_LIMIT), witness: list.with_capacity(HISTORY_HEAD_LIMIT), packet: list.with_capacity(room), compare: list.with_capacity(room), key: string.with_capacity(HISTORY_BUFFER_KEY_BYTES)))
     })
 }
 
-fn history_packet_header(mut raw: Bytes, ctx: DiskContext, epoch: u64, kind: u8, predecessor: HistoryRef) -> Result[(), Error] {
+fn history_packet_header(mut raw: Bytes, ctx: format.DiskContext, epoch: u64, kind: u8, predecessor: HistoryRef) -> Result[(), Error] {
     list.clear(mut raw)
-    capacity(history_append_header(mut raw, ctx, epoch, kind))?
+    failure_result_from_rep(types.capacity(format.history_append_header(mut raw, ctx, epoch, kind)))?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, predecessor.epoch)
     list.put_word_le(mut raw, predecessor.len)
     list.put_word_le(mut raw, predecessor.digest)
-    capacity(history_seal(mut raw, ctx, 72, 0x00B0))
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, 72, 0x00B0)))
 }
 
 fn history_new_ref(seq: u64, epoch: u64, raw: Bytes) -> HistoryRef {
@@ -113,7 +113,7 @@ fn history_fetch(mut client: std.object.Client, key: String, mut raw: Bytes, dea
     match take outcome {
         Ok(meta) => {
             if meta.size != list.len(raw) {
-                return Error(disk_fault(key, 0, Truncated))
+                return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
             }
             Ok(meta)
         },
@@ -129,7 +129,7 @@ fn history_create(mut client: std.object.Client, key: String, mut raw: Bytes, mu
         Ok(Mismatch) => {
             let _ = history_fetch(mut client, key, mut compare, deadline)?
             if raw != compare {
-                return Error(disk_fault(key, 0, Malformed))
+                return Error(failure_from_rep(format.disk_fault(key, 0, Malformed)))
             }
             Ok(())
         },
@@ -184,20 +184,20 @@ fn history_register_publish(mut client: std.object.Client, mut register: History
 
 fn history_claim_packet(mut raw: Bytes, head: HistoryHead) -> Result[(), Error] {
     let seq = history_next_id(head.entry.seq)?
-    let ctx = DiskContext(store: head.store, role: 2, seq)
+    let ctx = format.DiskContext(store: store_key_to_rep(head.store), role: 2, seq)
     history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, head.pair.epoch)
     list.put_word_le(mut raw, head.pair.holder.hi)
     list.put_word_le(mut raw, head.pair.holder.lo)
-    capacity(history_seal(mut raw, ctx, 112, 0x0040))
+    failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, 112, 0x0040)))
 }
 
 fn history_manifest_packet(mut raw: Bytes, id: StoreId, kind: u8, limits: StoreLimits) -> Result[HistoryRef, Error] {
     raw = disk_page_manifest_bytes(id, page_manifest_empty(limits))?
-    let ctx = DiskContext(store: id, role: 1, seq: 1)
-    let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
-    capacity(history_append_header(mut header, ctx, 1, kind))?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: 1)
+    let mut header: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
+    failure_result_from_rep(types.capacity(format.history_append_header(mut header, ctx, 1, kind)))?
     for at in 0u64 .. 72 {
         raw[at] = header[at]
     }
@@ -205,7 +205,7 @@ fn history_manifest_packet(mut raw: Bytes, id: StoreId, kind: u8, limits: StoreL
 }
 
 fn history_genesis_packet(mut raw: Bytes, id: StoreId, kind: u8, manifest: HistoryRef, locator: HistoryLocateRoot) -> Result[HistoryRef, Error] {
-    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
     let none = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
     let retained = HistoryRetention(floor: 1, earlier: list.new())
     history_checkpoint_packet(mut raw, ctx, 1, kind, none, manifest, retained, locator)
@@ -244,7 +244,7 @@ fn history_check_conditions(mut client: std.object.Client, key: String, mut raw:
     }
 }
 
-fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64, limits: StoreLimits, take attach: Option[Attach]) -> Result[HistoryRegister, Error] waits {
+fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64, limits: StoreLimits, take attach: Option[format.Attach]) -> Result[HistoryRegister, Error] waits {
     let manifest = history_manifest_packet(mut buffers.packet, id, kind, limits)?
     history_create(mut client, history_key("m-", manifest), mut buffers.packet, mut buffers.compare, deadline)?
     let locator = HistoryLocateRoot(depth: 0, rows: list.new())
@@ -252,12 +252,12 @@ fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: S
 }
 
 // With `attach` the head is a streamed genesis's (§12.11.5): no step 5a probe.
-fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, manifest: HistoryRef, locator: HistoryLocateRoot, mut buffers: HistoryBuffers, deadline: u64, take attach: Option[Attach]) -> Result[HistoryRegister, Error] waits {
+fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, manifest: HistoryRef, locator: HistoryLocateRoot, mut buffers: HistoryBuffers, deadline: u64, take attach: Option[format.Attach]) -> Result[HistoryRegister, Error] waits {
     let bytes_wanted = 189 + 32 * list.len(locator.rows)
     list.clear(mut buffers.packet)
     list.clear(mut buffers.compare)
-    capacity(list.try_reserve(mut buffers.packet, bytes_wanted + BINDING_BYTES))?
-    capacity(list.try_reserve(mut buffers.compare, bytes_wanted))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut buffers.packet, bytes_wanted + format.BINDING_BYTES)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut buffers.compare, bytes_wanted)))?
     let base = history_genesis_packet(mut buffers.packet, id, kind, manifest, locator)?
     let base_key = history_key("e-", base)
     history_create(mut client, base_key, mut buffers.packet, mut buffers.compare, deadline)?
@@ -338,7 +338,7 @@ fn history_claim_changed(head: HistoryHead, observed: Bytes, backoff: bool) -> R
     }
     let latest = history_decode_head(observed)?
     if latest.head.entry.seq <= head.entry.seq {
-        return Error(disk_fault("head", 72, Malformed))
+        return Error(failure_from_rep(format.disk_fault("head", 72, Malformed)))
     }
     Ok(HistoryClaimMoved(backoff))
 }
@@ -346,16 +346,16 @@ fn history_claim_changed(head: HistoryHead, observed: Bytes, backoff: bool) -> R
 // The caller has already recovered and admitted the head in witness, a
 // head with no ATTACH. `attach` is the ATTACH the replace writes when the
 // Place is opened streamed (§12.11.5, "No ATTACH").
-fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, auth: ClaimAuth, mut buffers: HistoryBuffers, deadline: u64, attach: Option[Attach]) -> Result[HistoryClaimResult, Error] waits {
+fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, auth: ClaimAuth, mut buffers: HistoryBuffers, deadline: u64, attach: Option[format.Attach]) -> Result[HistoryClaimResult, Error] waits {
     let candidate = history_claim_head(admitted, holder, auth)?
     let saved = history_claim_saved(buffers.witness)
     let authority_end = history_authority_end(buffers.witness)?
     let saved_origin = history_claim_saved_origin(buffers.witness, authority_end)
     history_encode_base_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end))?
     let standalone_end = list.len(buffers.body)
-    let ctx = DiskContext(store: candidate.store, role: 7, seq: candidate.entry.seq)
+    let ctx = format.DiskContext(store: store_key_to_rep(candidate.store), role: 7, seq: candidate.entry.seq)
     if let Some(a) = attach {
-        stream_attach_append(mut buffers.body, ctx, a)?
+        failure_result_from_rep(format.stream_attach_append(mut buffers.body, ctx, a))?
     }
     if let Some(o) = candidate.origin {
         history_origin_append(mut buffers.body, ctx, o)?

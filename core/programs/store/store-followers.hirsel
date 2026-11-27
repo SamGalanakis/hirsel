@@ -49,10 +49,10 @@ type FollowerCommand: send {
 type FollowerSource = DirectorySource(Dir, Clock) | ObjectSource(ObjectPackRead)
 
 fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result[FollowerResponse, Error] waits {
-    let (take command, take answer) = capacity(bound bytes follower_request_bytes() {
+    let (take command, take answer) = failure_result_from_rep(types.capacity(bound bytes follower_request_bytes() {
         let (outlet, inbox): (Sender[Result[FollowerResponse, Error]], Receiver[Result[FollowerResponse, Error]]) = channel.new(1)
         (FollowerCommand(request: box.new(take request), reply: take outlet), take inbox)
-    })?
+    }))?
     if let Error(_) = channel.send(slot.commands, take command) {
         return Error(Retired)
     }
@@ -60,13 +60,13 @@ fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result
 }
 
 fn follow_capture(id: StoreId, take state: State, resident: u64, take remote: Option[ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
-    let shared = capacity(bound bytes option.unwrap(charge.counted(bytes[State])) {
+    let shared = failure_result_from_rep(types.capacity(bound bytes option.unwrap(charge.counted(bytes[State])) {
         arc.new(take state)
-    })?
+    }))?
     let mut held = take remote
-    capacity(bound bytes (option.unwrap(charge.counted(bytes[FollowCapture])) + 64) {
+    failure_result_from_rep(types.capacity(bound bytes (option.unwrap(charge.counted(bytes[FollowCapture])) + 64) {
         arc.new(FollowCapture(store: id, state: arc.share(shared), resident, remote: replace(mut held, None), log_id, watermark))
-    })
+    }))
 }
 
 type LogCaptureKey {
@@ -328,7 +328,7 @@ pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {
 }
 
 fn capture_tip(captured: FollowCapture, b: Branch) -> Result[View[Tip], Error] in captured {
-    if !same(captured.store, b.store) {
+    if !types.same(captured.store.hi, captured.store.lo, b.store.hi, b.store.lo) {
         return Error(Foreign)
     }
     for i in 0u64 .. list.len(captured.state.tips) {
@@ -549,7 +549,7 @@ fn read_only_checkpoint(d: Dir, id: StoreId, take manifest: PageManifest) -> Res
     let pages = attach_page_graph(mut graph, empty_collection)?
     let state = disk_allocation(scoped fn() -> Result[State, Error] {
         let holders = attach_manifest_holders(selected, pages, empty_collection)
-        capacity(manifest_state(selected, holders))
+        failure_result_from_rep(types.capacity(manifest_state(selected, holders)))
     })?
     journal_replay_manifest(take state, selected)
 }

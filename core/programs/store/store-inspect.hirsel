@@ -64,8 +64,8 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
             },
             None => (0u64, 0u64, false),
         }
-        capacity(list.try_reserve(mut out, 1))?
-        list.push(mut out, CatalogEntry(name: take name, table: take owner_name, id: record.id, form: form, state: take state, revision: copied(record.revision)?, rows: rows, charge: charge, tiered: tiered))
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
+        list.push(mut out, CatalogEntry(name: take name, table: take owner_name, id: record.id, form: form, state: take state, revision: failure_result_from_rep(types.copied(record.revision))?, rows: rows, charge: charge, tiered: tiered))
     }
     Ok(take out)
 }
@@ -105,7 +105,7 @@ pub fn verify_release[H](mut db: Db, schema: StaticFn[fn(mut Declare) -> Result[
             loop {
                 let report = scrub_step(mut scrubbing, OPERATOR_SCRUB_BYTES)?
                 for f in report.faults {
-                    capacity(list.try_reserve(mut faults, 1))?
+                    failure_result_from_rep(types.capacity(list.try_reserve(mut faults, 1)))?
                     list.push(mut faults, clone(f))
                 }
                 if let None = report.next {
@@ -124,8 +124,8 @@ pub fn verify_release[H](mut db: Db, schema: StaticFn[fn(mut Declare) -> Result[
         let report = verify_step(mut db, mut walk, OPERATOR_ROWS)?
         checked = report.checked
         for f in report.findings {
-            capacity(list.try_reserve(mut findings, 1))?
-            list.push(mut findings, WalkFinding(index: clone(f.index), entry: copied(f.entry)?, fault: f.fault))
+            failure_result_from_rep(types.capacity(list.try_reserve(mut findings, 1)))?
+            list.push(mut findings, WalkFinding(index: clone(f.index), entry: failure_result_from_rep(types.copied(f.entry))?, fault: f.fault))
         }
         if report.done {
             break
@@ -150,8 +150,8 @@ pub fn repair_indexes(mut db: Db) -> Result[RepairOutcome, Error] waits {
     loop {
         let report = verify_step(mut db, mut walk, OPERATOR_ROWS)?
         for f in report.findings {
-            capacity(list.try_reserve(mut findings, 1))?
-            list.push(mut findings, WalkFinding(index: clone(f.index), entry: copied(f.entry)?, fault: f.fault))
+            failure_result_from_rep(types.capacity(list.try_reserve(mut findings, 1)))?
+            list.push(mut findings, WalkFinding(index: clone(f.index), entry: failure_result_from_rep(types.copied(f.entry))?, fault: f.fault))
         }
         if report.done {
             break
@@ -161,14 +161,14 @@ pub fn repair_indexes(mut db: Db) -> Result[RepairOutcome, Error] waits {
     while let Some(take name) = index_build_step(mut db, OPERATOR_ROWS)? {
         let so_far = list.len(built)
         if so_far == 0 || built[so_far - 1] != name {
-            capacity(list.try_reserve(mut built, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut built, 1)))?
             list.push(mut built, take name)
         }
     }
     let mut failed: List[String] = list.new()
     for seen in attention(db)?.indexes {
         if let Failed(_, _) = seen.state {
-            capacity(list.try_reserve(mut failed, 1))?
+            failure_result_from_rep(types.capacity(list.try_reserve(mut failed, 1)))?
             list.push(mut failed, named(seen.index)?)
         }
     }

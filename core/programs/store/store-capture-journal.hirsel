@@ -8,16 +8,16 @@ type CaptureOps {
 
 fn capture_data_ops(path: String, raw: Bytes) -> Result[CaptureOps, Error] {
     let mut at = 20u64
-    let sections = disk_number(path, raw, mut at, 1)?
+    let sections = failure_result_from_rep(format.disk_number(path, raw, mut at, 1))?
     if sections == 0 || sections > 4 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
-    let tag = disk_number(path, raw, mut at, 1)?
+    let tag = failure_result_from_rep(format.disk_number(path, raw, mut at, 1))?
     if tag > 3 {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let op_count = if tag == 0 {
-        disk_count(path, raw, mut at, 9)?
+        failure_result_from_rep(format.disk_count(path, raw, mut at, 9))?
     } else {
         0u64
     }
@@ -25,9 +25,9 @@ fn capture_data_ops(path: String, raw: Bytes) -> Result[CaptureOps, Error] {
 }
 
 fn capture_blob_width(path: String, raw: Bytes, mut at: u64, limit: u64) -> Result[u64, Error] {
-    let size = disk_number(path, raw, mut at, 4)?
+    let size = failure_result_from_rep(format.disk_number(path, raw, mut at, 4))?
     if size > limit || size > list.len(raw) - at {
-        return Error(disk_fault(path, at, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     Ok(size)
 }
@@ -37,25 +37,25 @@ fn capture_next_op(path: String, raw: Bytes, value_limit: u64, mut ops: CaptureO
         return Ok(None)
     }
     ops.left -= 1
-    let kind = disk_number(path, raw, mut ops.at, 1)?
+    let kind = failure_result_from_rep(format.disk_number(path, raw, mut ops.at, 1))?
     if kind == 3 {
         let at = ops.at
         if list.len(raw) - at < 20 {
-            return Error(disk_fault(path, at, Malformed))
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         let id: u32 = list.word_be(raw, at)
         ops.at += 20
-        return Ok(Some(CaptureTrim(id, word_be(raw, at + 4), word_be(raw, at + 12))))
+        return Ok(Some(CaptureTrim(id, format.word_be(raw, at + 4), format.word_be(raw, at + 12))))
     }
     if kind != 1 && kind != 2 {
-        return Error(disk_fault(path, ops.at - 1, Malformed))
+        return Error(failure_from_rep(format.disk_fault(path, ops.at - 1, Malformed)))
     }
     let key_len = capture_blob_width(path, raw, mut ops.at, 4096)?
     let key_at = ops.at
     ops.at += key_len
-    let prior = disk_number(path, raw, mut ops.at, 4)?
-    if key_len < 4 || prior > FORMAT_VALUE_MAX + 1 {
-        return Error(disk_fault(path, key_at, Malformed))
+    let prior = failure_result_from_rep(format.disk_number(path, raw, mut ops.at, 4))?
+    if key_len < 4 || prior > types.FORMAT_VALUE_MAX + 1 {
+        return Error(failure_from_rep(format.disk_fault(path, key_at, Malformed)))
     }
     if kind == 2 {
         return Ok(Some(CaptureDelete(key_at, key_len, prior)))
@@ -89,7 +89,7 @@ fn capture_chunk_at(mut file: HostFile, path: String, mut source: CaptureChunk, 
 
 fn capture_prefix(mut file: HostFile, path: String, mut source: CaptureChunk, at: u64, size: u64) -> Result[Bytes, Error] waits {
     if at > source.end || size > source.end - at {
-        return Error(disk_fault(path, at, Truncated))
+        return Error(failure_from_rep(format.disk_fault(path, at, Truncated)))
     }
     let mut raw = disk_read_buffer(size)?
     while list.len(raw) < size {
@@ -102,20 +102,20 @@ fn capture_prefix(mut file: HostFile, path: String, mut source: CaptureChunk, at
 
 type CapturePayload: key = SkipPayload | KeepCommit | KeepEvents
 
-fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk, ctx: DiskContext, limits: StoreLimits, at: u64, keep: CapturePayload) -> Result[JournalFrame, Error] waits {
+fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk, ctx: format.DiskContext, limits: StoreLimits, at: u64, keep: CapturePayload) -> Result[format.JournalFrame, Error] waits {
     let head = capture_prefix(mut file, path, mut source, at, 16)?
     let frame = disk_read_frame_head(path, head, at)?
     if frame.size > source.end - at - 16 {
-        return Error(disk_fault(path, at, Truncated))
+        return Error(failure_from_rep(format.disk_fault(path, at, Truncated)))
     }
-    let oversized = frame.kind == 0x0011 && frame.size > transaction_limit(limits)
-    let retained = !oversized && ((keep == KeepCommit && frame.kind == 0x0011) || (keep == KeepEvents && journal_event_kind(frame.kind)))
+    let oversized = frame.kind == 0x0011 && frame.size > types.transaction_limit(limits_to_rep(limits))
+    let retained = !oversized && ((keep == KeepCommit && frame.kind == 0x0011) || (keep == KeepEvents && format.journal_event_kind(frame.kind)))
     let mut payload = disk_read_buffer(if retained {
         frame.size
     } else {
         0u64
     })?
-    let mut check = capacity(disk_check_start(ctx, at, head))?
+    let mut check = failure_result_from_rep(types.capacity(format.disk_check_start(ctx, at, head)))?
     let end = at + 16 + frame.size
     let mut offset = at + 16
     while offset < end {
@@ -128,10 +128,10 @@ fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk
         offset += width
     }
     if std.check.finish(check) != frame.checksum {
-        return Error(disk_fault(path, at, Checksum))
+        return Error(failure_from_rep(format.disk_fault(path, at, Checksum)))
     }
     disk_check_frame_kind(path, ctx, frame.kind, frame.flags, at)?
-    Ok(JournalFrame(end: end, kind: frame.kind, payload: if retained {
+    Ok(format.JournalFrame(end: end, kind: frame.kind, payload: if retained {
         Some(take payload)
     } else {
         None
@@ -141,7 +141,7 @@ fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk
 fn capture_scan_frames[S](mut file: HostFile, id: StoreId, seq: u64, limits: StoreLimits, durable_end: u64, end: u64, torn: bool, keep: CapturePayload, mut state: S, consume: scoped[view] fn(mut S, String, u64, u16, Bytes) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
     let path = journal_path(seq, "")?
     if durable_end < 72 || end < durable_end || disk_io(host.stat_file(mut file))?.size < end {
-        return Error(disk_fault(path, end, Truncated))
+        return Error(failure_from_rep(format.disk_fault(path, end, Truncated)))
     }
     let mut source = new_capture_chunk(end)
     let header = disk_read_header(path, capture_prefix(mut file, path, mut source, 0, 72)?, 2, Some(seq), Some(id))?
@@ -151,7 +151,7 @@ fn capture_scan_frames[S](mut file: HostFile, id: StoreId, seq: u64, limits: Sto
         let frame = match capture_read_frame(mut file, path, mut source, header.context, limits, at, keep) {
             Ok(take good) => take good,
             Error(Corrupt(take fault)) => {
-                if torn && at >= durable_end && journal_torn(fault.why) {
+                if torn && at >= durable_end && format.journal_torn(why_to_rep(fault.why)) {
                     break
                 }
                 return Error(Corrupt(take fault))
@@ -159,10 +159,10 @@ fn capture_scan_frames[S](mut file: HostFile, id: StoreId, seq: u64, limits: Sto
             Error(take problem) => return Error(take problem),
         }
         if at < durable_end && frame.end > durable_end {
-            return Error(disk_fault(path, at, Truncated))
+            return Error(failure_from_rep(format.disk_fault(path, at, Truncated)))
         }
-        if frame.kind == 0x0011 && frame.end - at - 16 > transaction_limit(limits) {
-            return Error(disk_fault(path, at, Malformed))
+        if frame.kind == 0x0011 && frame.end - at - 16 > types.transaction_limit(limits_to_rep(limits)) {
+            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         if let Some(payload) = view frame.payload {
             consume(mut state, path, at, frame.kind, payload)?

@@ -307,37 +307,37 @@ fn ascending_draft_slots() -> Result[(), Error] {
     let below: List[Arc[Staged]] = list.new()
     let mut next_slot = 0u64
     for i in 0u64 .. 999 {
-        let key = logical_key(1, key_word(i + 2))?
+        let key = logical_key(1, types.key_word(i + 2))?
         let _ = save_data_op(mut ops, below, false, mut next_slot, take key, None, None)
         if i == 7 || i == 8 || i == 998 {
             if map.len(ops.slots) != 0 || !rows_ascending(ops.rows) {
                 return Error(Missing("ascending draft allocated a slot map"))
             }
             for at in 0u64 .. i + 1 {
-                if op_slot(ops, logical_key(1, key_word(at + 2))?) != Some(at) {
+                if op_slot(ops, logical_key(1, types.key_word(at + 2))?) != Some(at) {
                     return Error(Missing("ascending draft lost a staged key"))
                 }
             }
         }
     }
-    let key = logical_key(1, key_word(1))?
+    let key = logical_key(1, types.key_word(1))?
     // The row list already has room. The map needs one 1,024-entry backing
     // and a rounded 16-byte key copy for each of the 1,000 rows.
     let promoted = bound bytes 65152 {
         let _ = save_data_op(mut ops, below, false, mut next_slot, take key, None, None)
     }
     if let Error(problem) = promoted {
-        return capacity(Error(problem))
+        return failure_result_from_rep(types.capacity(Error(problem)))
     }
     if rows_ascending(ops.rows) || map.len(ops.slots) != 1000 || data_row_count(ops.rows) != 1000 {
         return Error(Missing("the first late inversion did not build the slot map"))
     }
     for at in 0u64 .. 999 {
-        if op_slot(ops, logical_key(1, key_word(at + 2))?) != Some(at) {
+        if op_slot(ops, logical_key(1, types.key_word(at + 2))?) != Some(at) {
             return Error(Missing("the slot map lost a key from the ascending prefix"))
         }
     }
-    if op_slot(ops, logical_key(1, key_word(1))?) != Some(999u64) || op_slot(ops, logical_key(1, key_word(0))?) != None {
+    if op_slot(ops, logical_key(1, types.key_word(1))?) != Some(999u64) || op_slot(ops, logical_key(1, types.key_word(0))?) != None {
         return Error(Missing("the slot map disagrees with the staged key set"))
     }
     Ok(())

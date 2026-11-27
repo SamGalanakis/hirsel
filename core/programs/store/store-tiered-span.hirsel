@@ -1,11 +1,11 @@
 // The collection map is Memory metadata. The span's single attempt
 // crosses those entries and charges the Tiered data reached beneath them.
-fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], data: PageTree, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], data: PageTree, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     if high <= low {
         return Ok(None)
     }
     let beginning = list.slice(low, 0, order.min(4, list.len(low)))
-    let mut collections = std.page.cursor_open(data.root, Some(copied(beginning)?), true, false)
+    let mut collections = std.page.cursor_open(data.root, Some(failure_result_from_rep(types.copied(beginning))?), true, false)
     let no_prefix: Bytes = list.new()
     while let Some((take id, _)) = std.page.cursor_next_key(mut collections, no_prefix) {
         if id >= high {
@@ -31,15 +31,15 @@ fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheK
     Ok(None)
 }
 
-fn tiered_span_collection(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], data: PageTree, edge: std.page.Slot, descriptor: Bytes, collection: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn tiered_span_collection(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], data: PageTree, edge: std.page.Slot, descriptor: Bytes, collection: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     if low >= high {
         return Ok(None)
     }
     if collection_descriptor(descriptor).residency == ResidentMemory {
-        let mut cursor = byte_cursor(data, Included(copied(low)?), high)?
+        let mut cursor = byte_cursor(data, Included(failure_result_from_rep(types.copied(low))?), high)?
         return next_bytes(mut cursor)
     }
-    let (take start, take stop) = tiered_scan_bounds(descriptor, collection, copied(low)?, copied(high)?)?
+    let (take start, take stop) = tiered_scan_bounds(descriptor, collection, failure_result_from_rep(types.copied(low))?, failure_result_from_rep(types.copied(high))?)?
     if start >= stop {
         return Ok(None)
     }
@@ -47,7 +47,7 @@ fn tiered_span_collection(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
         Some(replay) => std.omap.get(replay.collections, collection),
         None => None,
     }
-    tiered_seek(attempt, SeekKey(copied(list.slice(start, 4, list.len(start)))?))
+    tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(list.slice(start, 4, list.len(start))))?))
     let found = tiered_scan_row(attempt, visible, edge, collection, overlay, start, stop, false)?
     tiered_seek(attempt, SeekOperation)
     Ok(take found)
@@ -70,15 +70,15 @@ fn snapshot_tiered_span_step_with(take backend: TieredPageBackend, packs: std.om
     let beginning = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         match previous {
             Some(last_key) => scan_page_after(last_key),
-            None => copied(low),
+            None => failure_result_from_rep(types.copied(low)),
         }
     })?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read_with(take backend, packs, next_stamp, deadline, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+    retry_tiered_read_with(take backend, packs, next_stamp, deadline, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
         let Some((take key, take value)) = tiered_span_row(attempt, visible, s.roots.collections, beginning, high)? else {
             return Ok(None)
         }
-        let resume = copied(key)?
+        let resume = failure_result_from_rep(types.copied(key))?
         Ok(Some((take key, take value, take resume)))
     })
 }
@@ -86,9 +86,9 @@ fn snapshot_tiered_span_step_with(take backend: TieredPageBackend, packs: std.om
 fn snapshot_tiered_span(r: Reader, s: Snapshot, inventory: TieredReadInventory, low: Bytes, high: Bytes) -> Result[List[Change], Error] waits {
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[List[Change], Error] {
+    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[List[Change], Error] {
         let mut out: List[Change] = list.new()
-        let mut start = copied(low)?
+        let mut start = failure_result_from_rep(types.copied(low))?
         while let Some((take key, take value)) = tiered_span_row(attempt, visible, s.roots.collections, start, high)? {
             start = scan_page_after(key)?
             list.push(mut out, Change(tree_key: take key, value: Some(take value)))

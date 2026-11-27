@@ -1,6 +1,6 @@
 // J1: finish collecting the lookup before writing the Tx it borrows.
 pub fn rejected(mut db: store.Db, t: store.Table[u64, u64], ix: store.Index[u64, u64, u64, ()]) -> bool waits {
-    let answer = store.run(mut db, None, (copy_env(ix), copy_env(t)), fn(mut tx, call_env) -> Result[(), store.Error] {
+    let answer = store.run(mut db, None, (store.copy_env(ix), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), store.Error] {
         let mut rows = store.lookup(tx, call_env.0, Unbounded, Unbounded)?
         store.put(mut tx, call_env.1, 1, 2)?
         let _ = store.next_indexed(mut rows)?

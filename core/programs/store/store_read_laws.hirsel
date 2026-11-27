@@ -16,7 +16,7 @@ fn law_stream_bytes(label: Bytes, time: u64) -> Bytes {
 }
 
 fn admit_law_stream(mut db: Db, raw: Bytes, p: u64, digest: RequestDigest) -> Result[Admission, Error] waits {
-    let name = option.unwrap(parse_stream_key(raw))
+    let name = option.unwrap(optional_stream_key_from_rep(format.parse_stream_key(raw)))
     admit(mut db, name, p, digest)
 }
 
@@ -68,10 +68,10 @@ pub fn law_streams(c: Clock) -> bool waits {
         if !missing_is(reply(mut tx, call_env, 1, list.new()), "reply") {
             return Error(1)
         }
-        if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(11)) {
+        if let Error(_) = put_bytes(mut tx, 1, types.key_word(1), types.key_word(11)) {
             return Error(2)
         }
-        if let Error(_) = reply(mut tx, call_env, 0, result.unwrap(copied(string.as_bytes("r0")))) {
+        if let Error(_) = reply(mut tx, call_env, 0, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r0"))))) {
             return Error(3)
         }
         // Ruling 2: position 0 is now Replied, so a second reply is refused.
@@ -87,7 +87,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     if db.heads[0].head != 2 || stream_now(db, s) != (0u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r0")) {
         return false
     }
-    match get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(1)))) {
+    match get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(1)))) {
         Some(v) => if decode_word(v) != 11 {
             return false
         },
@@ -116,10 +116,10 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // F2: a body that replies and returns Error keeps the reply alone.
     let kept = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) {
+        if let Error(_) = put_bytes(mut tx, 1, types.key_word(2), types.key_word(22)) {
             return Error(1)
         }
-        if let Error(_) = reply(mut tx, call_env, 1, result.unwrap(copied(string.as_bytes("r1")))) {
+        if let Error(_) = reply(mut tx, call_env, 1, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r1"))))) {
             return Error(2)
         }
         // A 113-byte reply frame plus the 5-byte data head and one 33-byte put.
@@ -138,7 +138,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     if db.heads[0].head != 4 || stream_now(db, s) != (1u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r1")) {
         return false
     }
-    if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(2)))) {
+    if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
@@ -150,7 +150,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     // Aborted without a reply, Failed and Refused keep nothing; each later
     // admit of 2 is Abandoned with the commit_ticket of 5 and commits nothing.
     let dropped = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), u64] {
-        if let Error(_) = put_bytes(mut tx, 1, key_word(3), key_word(33)) {
+        if let Error(_) = put_bytes(mut tx, 1, types.key_word(3), types.key_word(33)) {
             return Error(1)
         }
         Error(8)
@@ -187,7 +187,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     let ceiling = db.ceiling
     db.ceiling = db.resident - 1
     let over = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, call_env, 2, key_word(9)) {
+        if let Error(_) = reply(mut tx, call_env, 2, types.key_word(9)) {
             return Error(1)
         }
         Ok(())
@@ -197,7 +197,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         _ => return false
     }
     let over_abort = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, call_env, 2, key_word(9)) {
+        if let Error(_) = reply(mut tx, call_env, 2, types.key_word(9)) {
             return Error(1)
         }
         Error(9)
@@ -248,7 +248,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         if !missing_is(reply_recorded(mut tx, 2, list.new(), call_for(call_env, 31)), "revision") {
             return Error(3)
         }
-        if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(copied(string.as_bytes("r2"))), call_for(call_env, 32)) {
+        if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r2")))), call_for(call_env, 32)) {
             return Error(4)
         }
         match reply_recorded(mut tx, 2, list.new(), call_for(call_env, 32)) {
@@ -277,7 +277,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     // is 145 B (four blobs of sizes 32, 16, 32 and 48, and the settle byte).
     // A 12-byte key, 4-byte prior length and 8-byte value add 38 B for data.
     let measured = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(copied(string.as_bytes("ab"))), call_for(call_env, 32)) {
+        if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("ab")))), call_for(call_env, 32)) {
             return Error(1)
         }
         let ci = info(mut tx)
@@ -289,7 +289,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         if two != 258 {
             return Error(4)
         }
-        if let Error(_) = put_bytes(mut tx, 1, key_word(4), key_word(44)) {
+        if let Error(_) = put_bytes(mut tx, 1, types.key_word(4), types.key_word(44)) {
             return Error(5)
         }
         let three = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
@@ -334,7 +334,7 @@ pub fn law_request_digest() -> bool {
     if !digest_hex(request_digest(key, args), "172630b31e7cd5050e8c06447738d3002e79578c1bb18836380fa604eb1c2135") || !digest_hex(request_digest(key, empty), "2b8d69847b046143da891fdb319ab0fb26033ef1b8116ff0e61e544adceb307b") {
         return false
     }
-    let mut changed = result.unwrap(copied(key))
+    let mut changed = result.unwrap(failure_result_from_rep(types.copied(key)))
     changed[5] = 0xff
     let short = list.slice(key, 0, 31)
     let moved: Bytes = b"\x1f\x01\x02\x03"
@@ -547,15 +547,15 @@ fn lookup_cover_points(c: Clock) -> bool waits {
     if list.len(values) != 2 || values[0] != 1 || values[1] != 1 || list.len(reads) != 2 {
         return false
     }
-    let mut suffix = key_word(1)
-    list.append(mut suffix, key_word(1))
+    let mut suffix = types.key_word(1)
+    list.append(mut suffix, types.key_word(1))
     list.push(mut suffix, 0u8)
     let span = match reads[0] {
-        Span(low, high) => low == result.unwrap(logical_key(2, key_word(1))) && high == result.unwrap(logical_key(2, suffix)),
+        Span(low, high) => low == result.unwrap(logical_key(2, types.key_word(1))) && high == result.unwrap(logical_key(2, suffix)),
         _ => false
     }
     let point = match reads[1] {
-        Point(key) => key == result.unwrap(logical_key(1, key_word(1))),
+        Point(key) => key == result.unwrap(logical_key(1, types.key_word(1))),
         _ => false
     }
     if !span || !point {
@@ -824,7 +824,7 @@ pub fn law_read_spans(c: Clock) -> bool waits {
     let mid = result.unwrap(key_span(sh, Included(2), Excluded(4)))
     let shifted = result.unwrap(key_span(sh, Excluded(2), Included(4)))
     let all = result.unwrap(key_span(sh, Unbounded, Unbounded))
-    let point = Point(result.unwrap(copied(d[0].tree_key)))
+    let point = Point(result.unwrap(failure_result_from_rep(types.copied(d[0].tree_key))))
     let no_match = result.unwrap(key_span(sh, Included(3), Excluded(3)))
     if !same_rows(span_rows(after, mid), d, 1, 2) || !same_rows(span_rows(after, shifted), d, 2, 2) || !same_rows(span_rows(after, all), d, 0, 5) || list.len(span_rows(before, all)) != 0 || list.len(span_rows(after, no_match)) != 0 || reads_key(no_match, d[2].tree_key) {
         return false

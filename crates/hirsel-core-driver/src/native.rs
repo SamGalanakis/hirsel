@@ -1529,14 +1529,14 @@ fn link_objects(
         // unit is stored under their key; the rest are linked one by one.
         #[cfg(test)]
         let image = image.filter(|_| !SEPARATE_IMAGE.get());
-        // ld64 has no `-r`: a Mach-O link prelinks no unit.
         let format = hirsel_core_layout::Target::from_triple(&options.target)
             .ok_or_else(|| NativeStop::Link(format!("no link target {}", options.target)))?
             .object_format();
-        let image = image.filter(|_| match format {
+        let elf = match format {
             hirsel_core_layout::ObjectFormat::Elf => true,
             hirsel_core_layout::ObjectFormat::MachO => false,
-        });
+        };
+        let image = image.filter(|_| elf);
         let (in_image, separate): (Vec<&ObjectProduct>, Vec<&ObjectProduct>) = objects
             .iter()
             .partition(|o| image.is_some_and(|image| image.holds(&o.path)));
@@ -1608,7 +1608,7 @@ fn link_objects(
             std::fs::write(&entry, &bytes)?;
             Ok(bytes)
         };
-        if options.debug_lines {
+        if options.debug_lines && elf {
             let debug = crate::native_debug::bind_side_products(
                 debug_rows(),
                 &sources,

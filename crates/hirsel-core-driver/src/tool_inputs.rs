@@ -1002,10 +1002,8 @@ pub(crate) fn missing_recipe_inputs(recipe: &LinkRecipe) -> Vec<PathBuf> {
             expects_path = false;
             continue;
         }
-        if arg == "-dynamic-linker" {
-            // This is the target's runtime interpreter, not a host-side link
-            // input; it is intentionally allowed to be absent on a cross
-            // linker host.
+        if matches!(arg.as_str(), "-dynamic-linker" | "-rpath") {
+            // The image records these paths for the runtime loader.
             skips_path = true;
         } else if arg == "--sysroot" {
             expects_path = true;

@@ -17,7 +17,7 @@ std::unique_ptr<TargetMachine> test_machine(StringRef &facts) {
     std::string error;
     const Target *target = TargetRegistry::lookupTarget(triple, error);
     if (!target) return nullptr;
-    // The x86-64 release machine from the driver. Every property it
+    // The native release machine from the driver. Every property it
     // contributes to the key must agree with the reconstructed machine.
     auto machine = std::unique_ptr<TargetMachine>(target->createTargetMachine(
         triple, cpu, features, TargetOptions(), Reloc::PIC_, std::nullopt,
@@ -133,9 +133,7 @@ Law key_law(StringRef input, StringRef ir) {
 
 int main(int argc, char **argv) {
     if (argc != 5) return 2;
-    LLVMInitializeX86TargetInfo();
-    LLVMInitializeX86Target();
-    LLVMInitializeX86TargetMC();
+    InitializeNativeTarget();
     auto key = MemoryBuffer::getFile(argv[1]);
     auto input = MemoryBuffer::getFile(argv[2]);
     auto cached = MemoryBuffer::getFile(argv[3]);

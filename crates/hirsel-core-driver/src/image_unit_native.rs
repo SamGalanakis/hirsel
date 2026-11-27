@@ -78,7 +78,10 @@ fn image_unit_links_what_its_objects_link(backend: Backend) {
         let (unit, ran, read) = unit_build(dir.path(), backend, &format!("{name}-unit"), source, "unit-cache", false);
         let (separate, expected, none) =
             unit_build(dir.path(), backend, &format!("{name}-separate"), source, "separate-cache", true);
-        assert!(read.is_some_and(|unit| unit.prelinked), "{name}: the link prelinked its unit");
+        match crate::host::HOST_TARGET.object_format() {
+            hirsel_core_layout::ObjectFormat::Elf => assert!(read.is_some_and(|unit| unit.prelinked), "{name}: the link prelinked its unit"),
+            hirsel_core_layout::ObjectFormat::MachO => assert!(read.is_none(), "{name}: ld64 links the objects directly"),
+        }
         assert!(none.is_none(), "{name}: the separate link read no unit");
         assert_eq!(
             (ran.status.code(), &ran.stdout, &ran.stderr),
@@ -86,11 +89,18 @@ fn image_unit_links_what_its_objects_link(backend: Backend) {
             "{name}: what the program does and reports"
         );
         assert_eq!(unit_functions(&unit), unit_functions(&separate), "{name}: functions");
-        assert_eq!(
-            crate::native_debug::source_positions(&unit).unwrap(),
-            crate::native_debug::source_positions(&separate).unwrap(),
-            "{name}: debug line rows"
-        );
+        let rows = |project: &str, image: &[u8]| {
+            use crate::native_debug::{resolve_symbols, source_positions, SymbolSource};
+            let path = dir.path().join(format!("{name}-{project}/program"));
+            let rows = match (crate::host::HOST_TARGET.object_format(), resolve_symbols(&path, image, None).unwrap()) {
+                (hirsel_core_layout::ObjectFormat::Elf, SymbolSource::EmbeddedDwarf) => source_positions(image),
+                (hirsel_core_layout::ObjectFormat::MachO, SymbolSource::DetachedDwarf(dwarf)) => source_positions(&dwarf),
+                (_, source) => panic!("{name}: unexpected debug symbols {}", source.tier()),
+            }.unwrap();
+            assert!(!rows.is_empty(), "{name}: missing debug line rows");
+            rows
+        };
+        assert_eq!(rows("unit", &unit), rows("separate", &separate), "{name}: debug line rows");
     }
 }
 #[test]
@@ -112,6 +122,37 @@ fn a_damaged_or_misplaced_image_unit_is_prelinked_again() {
         unit_build(dir.path(), Backend::Cranelift, project, source, "cache", false)
     };
     let (bounds, strings) = (UNIT_PROGRAMS[0].1, UNIT_PROGRAMS[2].1);
+    let direct_link = match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => false,
+        hirsel_core_layout::ObjectFormat::MachO => true,
+    };
+    if direct_link {
+        // ld64 force-loads the image members individually. Damage and misplace the
+        // actual cached link inputs and verify the rebuilt image in both cases.
+        let paths = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let cache = dir.path().join("bounds/cas/sides");
+        let seen = paths.clone();
+        AFTER_CHECK.with(|hook| *hook.borrow_mut() = Some(Box::new(move |members| {
+            seen.borrow_mut().extend(members.iter().filter(|path| path.starts_with(&cache)).cloned());
+        })));
+        let (_, _, unit) = build("bounds", bounds);
+        AFTER_CHECK.with(|hook| hook.borrow_mut().take());
+        assert!(unit.is_none());
+        let paths = paths.borrow();
+        let target = paths.first().expect("a directly linked image member");
+        let original = std::fs::read(target).unwrap();
+        let other = paths.iter().map(|p| std::fs::read(p).unwrap()).find(|b| b != &original).expect("a different member");
+        for (case, replacement) in [("damaged", { let mut b = original.clone(); b[0x50] ^= 1; b }), ("misplaced", other)] {
+            std::fs::write(target, replacement).unwrap();
+            let edited = bounds.replace("mut xs, 3", &format!("mut xs, {}", if case == "damaged" { 4 } else { 5 }));
+            let (again, ran, unit) = build("bounds", &edited);
+            let (fresh, _, _) = build(case, &edited);
+            assert!(unit.is_none() && again == fresh, "{case}: direct link restored the executable");
+            assert_eq!(ran.status.code(), Some(101));
+            assert!(std::fs::read(target).unwrap() == original, "{case}: image member repaired");
+        }
+        return;
+    }
     let (first, _, first_unit) = build("bounds", bounds);
     let first_unit = first_unit.unwrap();
     let (other, _, other_unit) = build("strings", strings);
@@ -201,7 +242,13 @@ fn a_child_tool_sees_only_its_listed_environment() {
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     let bin = dir.join("tree/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let (driver, editor) = (bin.join("clang"), bin.join("ld.lld"));
+    let format = crate::host::HOST_TARGET.object_format();
+    let editor_name = crate::link_closure::editor_name(format);
+    let (driver, editor) = (bin.join("clang"), bin.join(editor_name));
+    let (marker, uses_prelink) = match format {
+        hirsel_core_layout::ObjectFormat::Elf => ("--defsym=review_marker=${REVIEW_MARK:-1}", true),
+        hirsel_core_layout::ObjectFormat::MachO => ("-rpath,@loader_path/review-${REVIEW_MARK:-1}", false),
+    };
     let (driver_log, editor_log) = (dir.join("driver-env"), dir.join("editor-env"));
     let script = |path: &Path, body: String| {
         crate::executable::write(path, format!("#!/bin/sh\n/usr/bin/env >> '{body}").as_bytes(), 0o755)
@@ -210,7 +257,7 @@ fn a_child_tool_sees_only_its_listed_environment() {
     script(
         &driver,
         format!(
-            "{}'\necho >> '{}'\nexec '{}' --ld-path='{}' \"$@\" \"-Wl,--defsym=review_marker=${{REVIEW_MARK:-1}}\"\n",
+            "{}'\necho >> '{}'\nexec '{}' --ld-path='{}' \"$@\" \"-Wl,{marker}\"\n",
             driver_log.display(),
             driver_log.display(),
             llvm.join("bin/clang").display(),
@@ -223,7 +270,7 @@ fn a_child_tool_sees_only_its_listed_environment() {
             "{}'\necho >> '{}'\nexec '{}' \"$@\"\n",
             editor_log.display(),
             editor_log.display(),
-            llvm.join("bin/ld.lld").display()
+            llvm.join("bin").join(editor_name).display()
         ),
     );
     let path = std::env::var_os("PATH").unwrap();
@@ -267,11 +314,18 @@ fn a_child_tool_sees_only_its_listed_environment() {
     let (oracle, oracle_unit, prelinked) = build("fresh", "2", &path);
     assert!(rebuilt == oracle, "1: the rebuilt executable is a fresh build's");
     assert!(rebuilt == primed, "1: REVIEW_MARK reaches no tool");
-    assert!(prelinked, "3: the fresh build prelinks its unit");
+    assert_eq!(prelinked, uses_prelink, "3: prelink for this editor");
     assert!(primed_unit == oracle_unit, "3: the unit prelinked under another variable is the primed one");
-    let shell = BTreeSet::from(["PWD".to_owned()]);
-    let listed: BTreeSet<String> =
-        ["PATH", "LD_LIBRARY_PATH", "PWD"].into_iter().map(str::to_owned).collect();
+    let empty = Command::new("/bin/sh").args(["-c", "/usr/bin/env; :"]).env_clear().output().unwrap();
+    assert!(empty.status.success());
+    let shell: BTreeSet<String> = String::from_utf8(empty.stdout).unwrap().lines()
+        .filter_map(|line| line.split_once('=')).map(|(name, _)| name.to_owned()).collect();
+    let mut listed = shell.clone();
+    listed.extend(["PATH".to_owned(), "LD_LIBRARY_PATH".to_owned()]);
+    match format {
+        hirsel_core_layout::ObjectFormat::MachO => listed.extend(["SDKROOT".to_owned()]),
+        hirsel_core_layout::ObjectFormat::Elf => {},
+    }
     let (drivers, editors) = (blocks(&driver_log), blocks(&editor_log));
     assert!(!drivers.is_empty() && editors.len() >= 2, "every capture, prelink and link logged");
     for names in &drivers {
@@ -312,7 +366,7 @@ fn run_and_build_share_the_release_unit() {
     let runtime = options.runtime.canonicalize().unwrap();
     let clang = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
     let libraries = core_sources().parent().unwrap().canonicalize().unwrap();
-    let cache = dir.path().join("cache");
+    let cache = dir.path().join("bounds/cas/sides");
     let cas = cache.join("hirsel/cas");
     let metrics = dir.path().join("metrics.json");
     let store = dir.path().join("store");

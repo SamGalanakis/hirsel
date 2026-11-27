@@ -11,7 +11,7 @@ def python_gates(out, call, Raw):
                                  "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
                                  "//tools/buck2:llvm-cxx-headers-lock.json",
                                  "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock", *product]))
-    std_inputs = ["core/tools/std_native.py", "core/tools/std_contracts.py", "core/tools/case_progress.py", "tools/loopback_peer.py"]
+    std_inputs = ["core/tools/std_native.py", "core/tools/contract_exec.py", "core/tools/std_contracts.py", "core/tools/case_progress.py", "tools/loopback_peer.py"]
     python_units = [
         ("test-merging", "tools/tests/merging.py", ["//tools/buck2:merging.py"]),
         ("test-native-toolchain", "tools/tests/native_toolchain.py",

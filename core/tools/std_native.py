@@ -22,13 +22,14 @@ import struct
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import tomllib
 
 from std_contracts import (Contract, discover, evaluator_meter, host_parameter, matches_filter,
                            native_meter, reached_sites, test_module)
 from case_progress import Case
+# library_sources and wait_load are re-exported for the bench scripts.
+from contract_exec import Evaluator, first_stop, library_sources, native_build, source_manifest, wait_load  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -255,71 +256,6 @@ def entry_observation(case, result):
     return True, observation(case, subprocess.CompletedProcess([], result.returncode, stdout, result.stderr))
 
 
-class Evaluator:
-    """One checked-product store per gate, one fresh evaluator world per request."""
-    def __init__(self, binary):
-        self.binary = binary
-        self.errors = tempfile.TemporaryFile()
-        self.active_case = None
-        self.process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE)
-        self.stderr_reader = threading.Thread(target=self.read_errors)
-        self.stderr_reader.start()
-
-    def read_errors(self):
-        with self.process.stderr as errors:
-            while chunk := errors.read1(8192):
-                self.errors.write(chunk)
-                if progress := self.active_case:
-                    progress.output(errors, chunk)
-
-    def __enter__(self):
-        return self
-
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, events=False, progress=None, meter=False, meter_limit=None, root_limit=None):
-        request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
-        if events:
-            # CONC-10 events are recorded only on request (22f95498).
-            request["events"] = True
-        if instructions is not None:
-            request["instructions"] = instructions
-        if meter:
-            request.update(meter=True, meter_limit=meter_limit, root_limit=root_limit)
-        if sdk_out is not None:
-            request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
-        with (contextlib.nullcontext(progress) if progress else Case(entry, 'evaluator')) as active:
-            self.active_case = active
-            line = bytearray()
-            try:
-                with contextlib.suppress(BrokenPipeError):
-                    self.process.stdin.write(json.dumps(request).encode() + b'\n')
-                    self.process.stdin.flush()
-                    while chunk := self.process.stdout.peek(8192):
-                        line_end = chunk.find(b'\n') + 1
-                        read = self.process.stdout.read(line_end or len(chunk))
-                        active.output(self.process.stdout, read)
-                        line.extend(read)
-                        if line_end:
-                            break
-                    active.end_stream(self.process.stdout)
-                if line:
-                    return subprocess.CompletedProcess([str(self.binary)], 0, bytes(line), b'')
-                status = self.process.wait()
-                self.stderr_reader.join()
-                self.errors.seek(0)
-                return subprocess.CompletedProcess([str(self.binary)], status or 1, b'', self.errors.read())
-            finally:
-                self.active_case = None
-
-    def __exit__(self, *exc):
-        with contextlib.suppress(BrokenPipeError):
-            self.process.stdin.close()
-        self.process.stdout.close()
-        self.process.wait()
-        self.stderr_reader.join()
-        self.errors.close()
-
-
 def wrapper(case, port=None, metering=False):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
@@ -377,32 +313,6 @@ def manifest(root, case, adapted):
     return source_manifest(root, case.package, ['tests', case.file.stem], adapted)
 
 
-def library_sources(directory, signatures):
-    return [
-        {'file': str(p.resolve()), 'modules': list(relative.with_suffix('').parts), 'signatures': signatures}
-        for p in sorted(directory.rglob('*.hirsel'))
-        if (relative := p.relative_to(directory)).parts[0] != 'tests'
-    ]
-
-
-def source_manifest(root, package, modules, source, *, replace=False):
-    core = {'name': 'core', 'version': '1'}
-    std = {'name': 'std', 'version': '1'}
-    packages = [
-        {'package': core, 'sources': library_sources(root / 'core/core', True), 'dependencies': []},
-        {'package': std, 'sources': library_sources(root / 'core/std', False), 'dependencies': [core]}]
-    if package == 'runner':
-        from store_tests import inputs
-        packages = inputs(root, package='runner')['packages']
-    files = next(p['sources'] for p in packages if p['package']['name'] == package)
-    if replace:
-        original = next(f for f in files if f['modules'] == modules)
-        original.update(file=str(source), signatures=package == 'core')
-    else:
-        files.append({'file': str(source), 'modules': modules, 'signatures': False})
-    return {'core': core, 'packages': packages}
-
-
 def owner(message, owners):
     # Rows are copied from the public NOT-BUILT census, not inferred from test success.
     for row in owners:
@@ -413,26 +323,6 @@ def owner(message, owners):
     if 'cranelift' in message.lower():
         return 'core-cranelift-904'
     return 'unassigned (route first cause)'
-
-
-def first_stop(product):
-    reached = (product.get('reachable') or {}).get('first_stops', [])
-    stops = reached or product.get('diagnostics', []) or product.get('incomplete', [])
-    if stops:
-        stop = stops[0]
-        site = stop['primary']
-        span = site['span']
-        return f"{stop.get('rule', 'GAP')} {site['module']}:{span['start']}..{span['end']}: {stop.get('construct', stop.get('message'))}"
-    return product.get('stopped') or 'native product unavailable without a diagnostic'
-
-
-def wait_load():
-    printed = False
-    while os.getloadavg()[0] > 32:
-        if not printed:
-            print('waiting: host load exceeds 32; no build started', flush=True)
-            printed = True
-        time.sleep(10)
 
 
 def expected_stop_stderr(case):
@@ -757,15 +647,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         row['revision'] = None
                     row['seconds'] = round(time.monotonic() - law_started, 3)
                     if compare_revisions:
-                        reference = [str(compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', entry,
-                                     '--backend', 'cranelift', '--runtime', str(runtime), '--store', str(work / 'revision-store'),
-                                     '--json', '--limit', str(case.root_limit), '-o', str(scratch / 'revision-program')]
-                        for capability in ('Tasks', 'Clock'):
-                            if simulated and capability == 'Tasks' or not simulated and ':' + capability in host_parameter(case)[0]:
-                                reference.extend(['--grant', capability])
-                        if cc:
-                            reference.extend(['--cc', str(cc)])
-                        built = progress.run(reference, capture_output=True, cwd=host)
+                        grants = [capability for capability in ('Tasks', 'Clock')
+                                  if simulated and capability == 'Tasks' or not simulated and ':' + capability in host_parameter(case)[0]]
+                        built = native_build(compiler, runtime, inputs, entry, 'cranelift', work / 'revision-store',
+                                             scratch / 'revision-program', limit=case.root_limit, grants=grants,
+                                             cc=cc, cwd=host, progress=progress)
                         try:
                             product = json.loads(built.stdout)
                         except ValueError:

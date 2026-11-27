@@ -446,16 +446,19 @@ minimised program to the containment law corpus (R6) as a law that is red on the
   is itself a red under the key `containment:timeout:<form>`.
 
 **Cost per batch.** One batch is one package of M = 32 entries, compiled once per build.
-These figures are estimates for slice C1 to replace with measured numbers:
+Measured in slice C1 over seeds 0..200, eight batches at a time (wall seconds per part,
+mean over the 200 batches):
 
-| part | estimate |
+| part | measured |
 |---|---|
-| checker and evaluator lowering | ~2 s |
-| Cranelift dev, LLVM dev and LLVM release compiles | ~2 s, ~4 s, ~15 s |
-| runs: 32 entries × (1 run + 2 repeats + 3 injected) × 3 builds, and 6 evaluator runs each, small class at ~50 ms | ~40 s |
-| large class: 8 of the 32 entries, natives only, about 1 s each | ~25 s |
+| evaluator: check, lowering and the 32 small-class entries | 1.23 s (max 1.82 s) |
+| Cranelift dev compile | 0.35 s |
+| Cranelift dev runs: 32 small-class entries and 8 large-class entries | 0.18 s (max 1.24 s) |
+| whole batch, evaluator and Cranelift dev | 1.87 CPU-s |
 
-That is about 90 CPU-s per batch, so about 30 batches and 960 programs a night.
+The 200 batches took 374 CPU-s, and 9906 of 9906 compared records agreed exactly. The LLVM
+dev and release builds come in with C2 and their cost is added there. At this rate the
+night's budget covers far more batches than the earlier estimate of about 30.
 
 **Hook.** In `tools/nightly-board.sh`, a `run_containment` step follows the
 `core/tools/law_board.py nightly` call in the laws stage. It runs only when the toolchain

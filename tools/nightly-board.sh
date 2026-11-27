@@ -22,6 +22,7 @@ boat_status=
 toolchain_status=
 cgroup_status=
 containment_status=
+ownership_status=
 vopr_status=
 law_status=
 media_status=
@@ -29,7 +30,7 @@ w2_status=
 n1_status=
 record() {
   local auxiliary=() stage field
-  for stage in bootstrap boat toolchain cgroup containment vopr law media w2 n1; do
+  for stage in bootstrap boat toolchain cgroup containment ownership vopr law media w2 n1; do
     field=${stage}_status
     if [[ -n "${!field}" ]]; then auxiliary+=("--${stage}-status" "${!field}"); fi
   done
@@ -57,6 +58,10 @@ finish() {
   if [[ -s "$run/containment/alert.txt" ]]; then
     { mkdir -p "$base/alerts" && cat "$run/containment/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
       printf 'Containment alert could not be copied from %s/containment/alert.txt.\n' "$run" >&2
+  fi
+  if [[ -s "$run/ownership-soundness/alert.txt" ]]; then
+    { mkdir -p "$base/alerts" && cat "$run/ownership-soundness/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
+      printf 'Ownership soundness alert could not be copied from %s/ownership-soundness/alert.txt.\n' "$run" >&2
   fi
   if python3 "$tools/board-history.py" append --base "$base" "$run" >>"$run/run.log" 2>&1; then
     if (( recorded == 0 )); then
@@ -309,6 +314,31 @@ fi
 if (( containment_status != 0 )); then
   printf 'Containment generator exited %s. See %s/containment.log.\n' "$containment_status" "$run" >>"$run/run.log"
 fi
+# Ownership & capability soundness fuzzer: curated negative controls + bounded multi-feature
+# campaign checked against CoreIR wf::own (R1-R3), Evaluator, Cranelift, and LLVM.
+run_ownership_soundness() (
+  local output compiler runtime evaluator
+  python3 core/tools/test_ownership_soundness_fuzz.py || return
+  output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-core-driver-bin-hirsel \
+    //:core-driver-runtime-pic //:hirsel-core-contract-eval-bin-hirsel-core-contract-eval) || return
+  read -r compiler runtime evaluator < <(python3 -c 'import json, sys; j = json.load(sys.stdin); print(*(j["root//:" + target] for target in ("hirsel-core-driver-bin-hirsel", "core-driver-runtime-pic", "hirsel-core-contract-eval-bin-hirsel-core-contract-eval")))' <<<"$output") || return
+  export LLVM_SYS_231_PREFIX="$checkout/tools/buck2/toolchains/llvm-files"
+  export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  exec taskset -c 8-11 python3 core/tools/ownership_soundness_fuzz.py nightly --count 240 --cpu-seconds 600 \
+    --base-seed "$started" --jobs 4 --builds evaluator,cranelift-dev,llvm-dev --shrink \
+    --compiler "$compiler" --runtime-archive "$runtime" --evaluator "$evaluator" \
+    --out "$run/ownership-soundness" --alert "$run/ownership-soundness/alert.txt"
+)
+
+if (( toolchain_status == 0 )); then
+  step="Ownership soundness"
+  record
+  ownership_status=0
+  run_ownership_soundness >>"$run/ownership-soundness.log" 2>&1 || ownership_status=$?
+fi
+if (( ownership_status != 0 )); then
+  printf 'Ownership soundness exited %s. See %s/ownership-soundness.log.\n' "$ownership_status" "$run" >>"$run/run.log"
+fi
 if (( toolchain_status == 0 )); then
   step="VOPR campaign"
   record
@@ -408,7 +438,7 @@ step=$performance_step
 # Keep the performance verdict and promotion independent of the service exit.
 if (( status == 0 )); then
   if (( bootstrap_status || boat_status || toolchain_status || cgroup_status || containment_status ||
-        (vopr_status && vopr_status != 75) || law_status || media_status ||
+        ownership_status || (vopr_status && vopr_status != 75) || law_status || media_status ||
         (w2_status && w2_status != 75) || n1_status )); then
     echo "Nightly board auxiliary checks failed. See $current and $run." >&2
     exit 4

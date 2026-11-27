@@ -24,6 +24,7 @@ AUXILIARY_STAGES = {
     "boat": "Boat", "vopr": "VOPR", "law": "Laws", "media": "Media vectors",
     "bootstrap": "Fresh worktree bootstrap", "toolchain": "Toolchain build",
     "cgroup": "Launcher cgroup law", "containment": "Containment generator",
+    "ownership": "Ownership soundness",
     "w2": "W2 damage sweep", "n1": "N1 browser_room",
 }
 DEFERRED_STAGES = {"vopr", "w2"}

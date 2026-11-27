@@ -1,0 +1,140 @@
+fn history_write_pack_run(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, cache: Option[pager.ObjectsCache], pack_layout: manifest.PackRun, mut known: manifest.PageLocations, mut pack_objects: Map[u64, pages.HistoryRef], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), types.Failure] waits {
+    for pack in pack_layout.packs {
+        manifest.encode_pack(id, pack_layout, pack, mut known, mut buffers.out)?
+        history.history_copy_header(mut buffers.out, format.DiskContext(store: id, role: 3, seq: pack.seq), epoch, kind)?
+        let item = history.history_new_ref(pack.seq, epoch, buffers.out)
+        pager.history_fill_key(mut workspace.key, "p-", item)
+        history.history_upload_pack(mut client, workspace.key, buffers.out, mut workspace.compare, deadline)?
+        if let Some(local) = cache {
+            if item.len <= local.capacity_bytes {
+                pack_cache_write(local, workspace.key, buffers.out, false)
+            }
+        }
+        map.insert(mut pack_objects, pack.seq, item)
+    }
+    Ok(())
+}
+
+pub fn history_write_page_cut(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, take prepared: manifest.PagedCutLayout, inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
+    let (take uploaded, take covered_packs) = manifest.disk_allocation(scoped fn() -> Result[(Map[u64, pages.HistoryRef], List[pages.HistoryRef]), types.Failure] {
+        let new_packs = list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
+        let mut refs: Map[u64, pages.HistoryRef] = map.new()
+        types.capacity(map.try_reserve(mut refs, new_packs))?
+        Ok((take refs, list.with_capacity(std.omap.len(prepared.locations.packs.values))))
+    })?
+    list.clear(mut workspace.compare)
+    types.capacity(list.try_reserve(mut workspace.compare, 65536))?
+    let manifest.PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take prepared
+    let mut known = take locations
+    let mut packs = take uploaded
+    let mut rows = take covered_packs
+    history_write_pack_run(mut client, id, epoch, kind, cache, blobs, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    history_write_pack_run(mut client, id, epoch, kind, cache, data_pages, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    history_write_pack_run(mut client, id, epoch, kind, cache, lists.run_packs, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
+    while let Some((seq, record)) = std.omap.next(mut cursor) {
+        if record.live == 0 {
+            continue
+        }
+        let item = match map.get(packs, seq) {
+            Some(created) => created,
+            None => option.unwrap(map.get(history.locator_rows(inherited), seq)),
+        }
+        list.push(mut rows, item)
+    }
+    Ok((manifest.PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists), take rows))
+}
+
+pub opaque type PublishedCut {
+    seq: u64,
+    locator: history.HistoryLocator,
+    sid: Option[types.HostStreamIdRep],
+    archive_on: u64,
+    dropped_attach: bool
+}
+
+fn publish_cut(mut lane: ObjectJournalSession, installed: pages.HistoryRef, retained: history.HistoryRetention, locate_root: history.HistoryLocateRoot, activation: Option[history.HistoryActivation], take candidate_locator: history.HistoryLocator, drop_on_cut: bool, next_archive_on: u64, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
+    let old = history.register_head(lane.register)
+    // A cut of an attached Place consumes every sealed tail and the live
+    // tail into the checkpoint (§12.11.11): a normal cut resets ATTACH to
+    // `sealed := []`, `live := (S, inc, (next_seq, 0))`; a close cut drops
+    // ATTACH completely. Restore the previous ATTACH if publish does not apply.
+    let cut_attach: Option[format.Attach] = match history.register_attach(lane.register) {
+        Some(old_attach) => if drop_on_cut {
+            None
+        } else {
+            match lane.stream {
+                Some(link) => Some(format.Attach(settles: old_attach.settles, live: Some(format.StreamRef(sid: host_stream.slot_sid(link), inc: host_stream.slot_inc(link), from_seq: host_stream.slot_last_batch(link) + 1, from_frame: 0)), sealed: list.new())),
+                None => Some(clone(old_attach)),
+            }
+        },
+        None => None,
+    }
+    let advanced = history.history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, take cut_attach, mut workspace, now)
+    match take advanced {
+        Ok(HistoryApplied(_)) => {
+            if let Some(link) = lane.stream {
+                observed = Some(host_stream.defer_slot_head(link, old.store, history.register_attach(lane.register), host_stream.slot_last_batch(link)))
+                if drop_on_cut {
+                    completion = Some(host_stream.defer_slot_report(link, ReportDetached(host_stream.slot_number(link), old.store, old.pair.epoch)))
+                }
+            }
+            let sid = match history.register_attach(lane.register) {
+                Some(a) => match a.live {
+                    Some(tail) => Some(tail.sid),
+                    None => None,
+                },
+                None => None,
+            }
+            let seq = history.register_head(lane.register).checkpoint.seq
+            Ok(PublishedCut(seq, locator: take candidate_locator, sid, archive_on: next_archive_on, dropped_attach: drop_on_cut))
+        },
+        Ok(_) => Error(Undecided),
+        Error(take problem) => Error(take problem),
+    }
+}
+
+pub fn cut_next_pack(lane: ObjectJournalSession) -> u64 {
+    lane.next_pack
+}
+
+pub fn read_checkpoint(mut lane: ObjectJournalSession, head: history.HistoryHead, deadline: u64) -> Result[(history.HistoryMark, Bytes), types.Failure] waits {
+    history.history_checkpoint(mut lane.client, head, deadline)
+}
+
+pub fn write_cut_packs(mut lane: ObjectJournalSession, old: history.HistoryHead, take cut_plan: manifest.PagedCutLayout, inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, now: u64) -> Result[(u64, manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
+    // Refused cuts can leave orphaned objects, so this epoch does not reuse their numbers.
+    let generation = history.history_next_id(lane.issued_generation)?
+    lane.issued_generation = generation
+    lane.next_pack = cut_plan.lists.run_packs.next_pack
+    let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, inherited, cache, mut buffers, mut workspace, now)?
+    Ok((generation, take layout, take refs))
+}
+
+pub fn publish_page_cut(mut lane: ObjectJournalSession, old: history.HistoryHead, seq: u64, take candidate: manifest.PageManifest, retained: history.HistoryRetention, take refs: List[pages.HistoryRef], inherited: history.HistoryLocator, check_target: bool, activation: Option[history.HistoryActivation], drop_on_cut: bool, was_archived: bool, next_archive_on: u64, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
+    let mut page_record = take candidate
+    page_record.sweep = lane.sweep
+    page_record.archive_on = next_archive_on
+    if was_archived {
+        let _ = host_stream.history_write_archive_segment(mut lane.client, old, seq, old.pair.epoch, old.authority_kind, mut workspace, now)?
+    }
+    let mut candidate_locator = manifest.disk_allocation(scoped fn() -> Result[history.HistoryLocator, types.Failure] {
+        history.locator_for_cut(refs)
+    })?
+    if check_target {
+        let checked = manifest.disk_allocation(scoped fn() -> Result[manifest.PageManifest, types.Failure] {
+            Ok(clone(page_record))
+        })?
+        match history_validate_manifest(mut lane.client, candidate_locator, now, old.store, "prepared MANIFEST", take checked, None) {
+            Ok(_) => (),
+            Error(HistoryMissing(take name, _)) => {
+                history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, now)?
+                return Error(format.disk_fault(name, 0, Absent))
+            },
+            Error(take problem) => return Error(take problem),
+        }
+    }
+    let locate_root = history.history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, old.authority_kind, take refs, inherited, mut candidate_locator, mut workspace, now)?
+    let installed = history.history_create_manifest(mut lane.client, old.store, old.pair.epoch, old.authority_kind, page_record, mut workspace, now)?
+    publish_cut(mut lane, installed, retained, locate_root, activation, take candidate_locator, drop_on_cut, next_archive_on, mut workspace, now, mut observed, mut completion)
+}

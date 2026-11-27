@@ -99,7 +99,9 @@ DEPENDENT_CONTROLS = ('journal_input_refused', 'holder_table_refused', 'declare_
                       'prepared_capture_state_refused', 'capture_lock_refused', 'capture_packs_refused',
                       'stream_settle_view_refused', 'stream_follow_material_refused',
                       'stream_hold_guard_refused', 'stream_claim_machine_refused',
-                      'issued_register_head_refused')
+                      'issued_register_head_refused', 'object_writer_state_refused',
+                      'object_worker_open_refused', 'object_cut_published_refused',
+                      'object_journal_start_refused', 'object_journal_session_refused')
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
                     'view_tx_write_refused', *DEPENDENT_CONTROLS)
@@ -153,6 +155,11 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             'stream_hold_guard_refused': [('PROG-2', '`store@1/host_stream/HoldGuard` is private or opaque')],
             'stream_claim_machine_refused': [('PROG-2', '`store@1/host_stream/ClaimMachine` is private or opaque')],
             'issued_register_head_refused': [('PROG-2', '`store@1/history/IssuedRegisterHead` is private or opaque')],
+            'object_writer_state_refused': [('PROG-2', '`store@1/object_writer/ObjectWriterState` is private or opaque')],
+            'object_worker_open_refused': [('PROG-2', '`store@1/object_writer/ObjectWorkerOpen` is private or opaque')],
+            'object_cut_published_refused': [('PROG-2', '`store@1/object_writer/PublishedCut` is private or opaque')],
+            'object_journal_start_refused': [('PROG-2', '`store@1/object_writer/ObjectJournalStart` is private or opaque')],
+            'object_journal_session_refused': [('PROG-2', '`store@1/object_writer/ObjectJournalSession` is private or opaque')],
             'declare_state_refused': [('PROG-2', '`store@1/catalog/DeclareState` is private or opaque')],
             'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],

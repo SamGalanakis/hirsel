@@ -310,7 +310,7 @@ fn stream_load_settled(mut read_source: history.ObjectPackRead, head: history.Hi
     let chain = failure_result_from_rep(history.history_suffix(mut read_source.client, head, head.checkpoint, deadline))?
     let (take mark, take checkpoint_data) = failure_result_from_rep(history.history_checkpoint(mut read_source.client, head, deadline))?
     let page_record = failure_result_from_rep(history.history_read_manifest(mut read_source.client, head.store, mark, head.checkpoint.seq, deadline))?
-    let (take replay, take checkpoint_state) = history_open_checkpoint(mut read_source, head, mark, checkpoint_data, take page_record, ceiling)?
+    let (take replay, take checkpoint_state) = failure_result_from_rep(object_writer.history_open_checkpoint(mut read_source, head, mark, checkpoint_data, take page_record, ceiling))?
     let owners = disk_allocation(scoped fn() -> Result[Map[manifest.IncomingEdge, u64], Error] {
         Ok(manifest.located_owners(checkpoint_state.manifest))
     })?

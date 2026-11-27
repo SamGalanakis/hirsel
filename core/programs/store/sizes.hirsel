@@ -369,11 +369,11 @@ fn journal_ready_bytes() -> u64 {
 }
 
 fn journal_channel_bytes(group_count: u64) -> u64 {
-    journal_channel_charge(group_count, bytes[journal.DirJournalMsg], bytes[journal.DirAck])
+    journal_channel_charge(group_count, bytes[journal.DirJournalMsg], bytes[journal.DirAck], journal_ready_bytes())
 }
 
-fn journal_channel_charge(group_count: u64, message_bytes: u64, ack_bytes: u64) -> u64 {
-    option.unwrap(charge.channel(message_bytes, 2 * group_count)) + option.unwrap(charge.channel(ack_bytes, 3 * group_count + 3)) + journal_ready_bytes() + option.unwrap(charge.channel(bytes[journal.WriteNotice], 2)) + option.unwrap(charge.channel(bytes[()], 1))
+fn journal_channel_charge(group_count: u64, message_bytes: u64, ack_bytes: u64, ready_bytes: u64) -> u64 {
+    option.unwrap(charge.channel(message_bytes, 2 * group_count)) + option.unwrap(charge.channel(ack_bytes, 3 * group_count + 3)) + ready_bytes + option.unwrap(charge.channel(bytes[journal.WriteNotice], 2)) + option.unwrap(charge.channel(bytes[()], 1))
 }
 
 fn writer_state_bytes() -> u64 {
@@ -447,16 +447,16 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         valid = valid && lanes != None
         writer_add(mut parts, "client_lanes", history.size_or(lanes, unbounded))
         let group_room = order.min(group, 4294967295u64)
-        let packet = object_writer_entry_room(group_room)
+        let packet = object_writer.object_writer_entry_room(group_room)
         writer_add(mut parts, "history_workspace", option.unwrap(history_workspace_bytes(packet, packet)))
-        writer_add(mut parts, "journal_worker", option.unwrap(charge.task(bytes[Result[(), Error]], object_writer_journal_room(group_room))))
-        writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], OBJECT_TIMER_GRANT)))
+        writer_add(mut parts, "journal_worker", option.unwrap(charge.task(bytes[Result[(), types.Failure]], object_writer.object_writer_journal_room(group_room))))
+        writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], object_writer.OBJECT_TIMER_GRANT)))
         writer_add(mut parts, "journal_timer_channel", option.unwrap(charge.channel(bytes[()], 1)))
         // Recovery reads one object at a time. Replay can hold the fetched
         // entry beside its decoded frame. The checkpoint can hold its entry
         // beside a pack read. The growing suffix and location tables remain
         // charged at the call that allocates them.
-        let fetched_entry = option.unwrap(charge.seq(bytes[u8], object_writer_entry_room(order.max(group_room, frame))))
+        let fetched_entry = option.unwrap(charge.seq(bytes[u8], object_writer.object_writer_entry_room(order.max(group_room, frame))))
         let checkpoint_read = int.checked_add(option.unwrap(charge.seq(bytes[u8], cut_history_packet_room())), history.size_or(charge.seq(bytes[u8], cut_output_bytes(pack, l)), unbounded))
         recovery = order.max(fetched_entry + frame, history.size_or(checkpoint_read, unbounded))
         cut_parts = bucket_cut_parts(pack, l)
@@ -469,7 +469,7 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         writer_add(mut cut_parts, "cut_output", history.size_or(charge.seq(bytes[u8], cut_output_bytes(pack, l)), unbounded))
     }
     let channels = if let Bucket(_) = kind {
-        journal_channel_charge(int.widen(commits), bytes[JournalMsg], bytes[journal.Ack])
+        journal_channel_charge(int.widen(commits), bytes[object_writer.JournalMsg], bytes[object_writer.ObjectAck], option.unwrap(charge.channel(bytes[object_writer.ObjectJournalStart], 1)))
     } else {
         journal_channel_bytes(int.widen(commits))
     }
@@ -547,7 +547,7 @@ pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
 
 fn follower_from_options(kind: Kind, take options: Options, envelope: u64) -> Result[FollowerPlan, Shortage] {
     let control = follower_control_bytes()
-    let task_bytes = follower_task_bytes(0)
+    let task_bytes = object_writer.follower_task_bytes(0)
     let overhead = control + task_bytes
     if envelope < overhead {
         let mut parts: List[(String, u64)] = list.with_capacity(2)
@@ -571,33 +571,16 @@ pub fn service_bytes(plans: List[FollowerPlan]) -> Option[u64] {
 }
 
 pub fn follower_starter_bytes() -> u64 {
-    follower_task_bytes(0) + order.max(follower_startup_reply_bytes(), order.max(follower_provision_bytes(), follower_request_bytes()))
+    object_writer.follower_task_bytes(0) + order.max(follower_startup_reply_bytes(), order.max(follower_provision_bytes(), follower_request_bytes()))
 }
 
 // Price the fixed roots and the per-level allocations in weak_publisher.
-fn sim_level_bytes(names: List[String]) -> u64 {
-    let roots = 2 * option.unwrap(charge.latest())
-    let progress = option.unwrap(charge.counted(bytes[LevelProgress]))
-    let frontiers = option.unwrap(charge.counted(bytes[WeakFrontiers]))
-    let lifetime = option.unwrap(charge.channel(bytes[()], 1))
-    let n = list.len(names)
-    let notice = option.unwrap(charge.channel(bytes[WeakNotice], 1))
-    let senders = option.unwrap(charge.seq(bytes[Sender[WeakNotice]], n))
-    let receivers = option.unwrap(charge.seq(bytes[Receiver[WeakNotice]], n))
-    let names_storage = option.unwrap(charge.seq(bytes[String], n))
-    let mut room = roots + progress + frontiers + lifetime + n * notice + 2 * senders + receivers + names_storage
-    for name in names {
-        room += option.unwrap(charge.seq(bytes[u8], string.byte_len(name)))
-    }
-    room
-}
-
 /// Fixed opening room for sim@1's weak barriers.
 pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
     if list.len(declaration.weak) == 0 {
         return 0
     }
-    sim_level_bytes(declaration.weak)
+    object_writer.sim_level_bytes(declaration.weak)
 }
 
 fn entry(key: Bytes, val: Bytes) -> u64 {

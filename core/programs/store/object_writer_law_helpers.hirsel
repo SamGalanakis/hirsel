@@ -1,0 +1,50 @@
+pub fn group_law_worker(tasks: Tasks) -> (Sender[ObjectJournalStart], Sender[JournalMsg], Receiver[ObjectAck], Receiver[journal.WriteNotice], Receiver[()], Task[Result[(), types.Failure]]) {
+    let (init, ready): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (send_to, receive): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(4)
+    let (acks, delivered): (Sender[ObjectAck], Receiver[ObjectAck]) = channel.new(4)
+    let (notices, observed): (Sender[journal.WriteNotice], Receiver[journal.WriteNotice]) = channel.new(1)
+    let (synced, woken): (Sender[()], Receiver[()]) = channel.new(1)
+    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None, reclaims: None)
+    let actor = task.spawn(tasks, bytes 1048576, take actor_input, object_journal_worker)
+    (take init, take send_to, take delivered, take observed, take woken, take actor)
+}
+
+pub fn start_group_law_worker(init: Sender[ObjectJournalStart], take requests: std.object.Requests, take held: history.HistoryRegister, take metadata: Bytes, take workspace: history.HistoryBuffers, op_ms: u64) waits {
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep: sweep_start(), archive_on: 0, issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None, stream: None)
+    result.unwrap(channel.send(init, take opened))
+}
+
+pub fn reclaim_law_barrier(mut lane: ObjectJournalSession) -> Result[(), types.Failure] waits {
+    match replace(mut lane.reclaim, None) {
+        Some(pending_reclaim) => history_execute_reclaim(mut lane, pending_reclaim),
+        None => Ok(()),
+    }
+}
+
+pub fn reclaim_still_pending(parked: ObjectJournalStart) -> bool {
+    match parked.reclaim {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn reclaim_law_cursor(parked: ObjectJournalStart) -> manifest.SweepCursor {
+    parked.sweep
+}
+
+pub fn rewire_relay_law(tasks: Tasks, mut parked: ObjectJournalStart, store: types.StoreKey, epoch: u64, limits: types.LimitsRep, take answer_client: Client[journal.SlotAck], take answers: Inbox[journal.SlotAck], sender_to_worker: Sender[JournalMsg]) -> Result[Task[()], types.Failure] waits {
+    let relay = match parked.stream {
+        Some(mut link) => {
+            host_stream.rewire_law_slot(mut link, take answer_client, take answers)
+            let _ = host_stream.slot_attach(mut link, store, epoch, "p1/", limits)?
+            SlotRelayInput(answers: option.unwrap(host_stream.slot_take_answers(mut link)), journal: channel.sender(sender_to_worker))
+        },
+        None => fail("paused journal lost its stream"),
+    }
+    Ok(task.spawn(tasks, bytes OBJECT_TIMER_GRANT, take relay, slot_relay))
+}
+
+pub fn join_worker_law(take state: ObjectWriterState) -> Result[(), types.Failure] waits {
+    let ObjectWriterState(writer: take worker, ..) = take state
+    result.unwrap(task.join(take worker))
+}

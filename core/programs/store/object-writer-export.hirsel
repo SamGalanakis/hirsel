@@ -1,0 +1,30 @@
+type ObjectExportLease: send {
+    names: Map[String, ()],
+    lifetime: Receiver[()]
+}
+
+fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: pages.HistoryRef, take buffer: Bytes) -> Result[Bytes, types.Failure] waits {
+    let mut raw = take buffer
+    let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    match history.history_range(mut lane.client, key, reference, 0, reference.len, mut raw, due) {
+        Ok(()) => Ok(take raw),
+        Error(HistoryMissing(..)) => {
+            object_journal_fresh_probe(mut lane, due)?
+            Error(format.disk_fault(key, 0, Absent))
+        },
+        Error(take problem) => Error(take problem),
+    }
+}
+
+pub fn read_export_suffix(mut lane: ObjectJournalSession, head: history.HistoryHead, deadline: u64) -> Result[List[history.HistoryLink], types.Failure] waits {
+    history.history_suffix(mut lane.client, head, head.checkpoint, deadline)
+}
+
+pub fn read_export_frame(mut lane: ObjectJournalSession, key: String, item: pages.HistoryRef, deadline: u64) -> Result[format.DiskFrameHead, types.Failure] waits {
+    history.history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, deadline)?
+    manifest.disk_read_frame_head(key, lane.buffers.compare, 112)
+}
+
+pub fn hold_export(mut lane: ObjectJournalSession, take names: Map[String, ()], take lifetime: Receiver[()]) {
+    lane.export_lease = Some(ObjectExportLease(names: take names, lifetime: take lifetime))
+}

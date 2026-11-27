@@ -34,8 +34,6 @@ pub fn check_list_pack(d: Dir, id: types.StoreKey, seq: u64, next_stamp: u64, of
     Ok(pages.PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
-pub type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u64, u64) | ObjectBroken(types.Failure)
-
 type SegmentSpan: send {
     first: u64,
     end: u64

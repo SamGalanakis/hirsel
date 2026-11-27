@@ -1,0 +1,20 @@
+// Delivers a latched miss's batch into the pin map, in the order the batch
+// names it. A target whose delivery failed once fails the read or call when
+// an attempt demands it again.
+pub fn serve_tiered_miss(source: pager.TieredPageSource, root: pager.TieredPinRoot, state: pager.TieredTouchSet, sought: Bytes, direction: pager.TieredDirection, take grant: Option[Arc[pager.TieredReaderGrant]], mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), types.Failure] waits {
+    serve_tiered_miss_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root, state, sought, direction, take grant, mut pins, mut pending)
+}
+
+pub fn serve_tiered_miss_with(backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root: pager.TieredPinRoot, state: pager.TieredTouchSet, sought: Bytes, direction: pager.TieredDirection, take grant: Option[Arc[pager.TieredReaderGrant]], mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), types.Failure] waits {
+    let demand = pager.tiered_miss_demand_raw(packs, next_stamp, deadline, state, sought, direction, take grant, mut pending)?
+    let delivered = match backend {
+        PagerTask(requests) => pager.tiered_point_delivery(requests, take demand)?,
+        PagerDirect(d, owner) => {
+            let mut input: pager.TieredPagerInput = PagerLocal(d)
+            let mut local_cache = pager.new_tiered_cache(0)
+            tiered_pager_point(mut input, mut local_cache, owner, demand)?
+        },
+    }
+    let _ = pager.tiered_install_delivery(take delivered, root, state.stamps, mut pins, mut pending)?
+    Ok(())
+}

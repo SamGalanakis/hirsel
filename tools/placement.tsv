@@ -514,17 +514,17 @@ apply_steps	store-export.hirsel	transfer	transfer	L13
 FollowerService	store-follower-service.hirsel	store	store	-
 FollowerOwner	store-follower-service.hirsel	store	store	-
 FollowerSlot	store-follower-service.hirsel	store	store	-
-FollowerServiceMessage	store-follower-service.hirsel	object_writer	object_writer	L9
-FollowerProvision	store-follower-service.hirsel	object_writer	object_writer	L9
-FollowerServiceStart	store-follower-service.hirsel	object_writer	object_writer	L9
+FollowerServiceMessage	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+FollowerProvision	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+FollowerServiceStart	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
 FollowerNode	store-follower-service.hirsel	object_writer	object_writer	L9
 FollowerEntry	store-follower-service.hirsel	object_writer	object_writer	L9
-FollowerApplyStart	store-follower-service.hirsel	object_writer	object_writer	L9
-follower_startup_reply_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
-follower_provision_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
-follower_request_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
-follower_control_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
-follower_service_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
+FollowerApplyStart	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+follower_startup_reply_bytes	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+follower_provision_bytes	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+follower_request_bytes	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+follower_control_bytes	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+follower_service_bytes	store-follower-service.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
 follower_task_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
 follower_service	store-follower-service.hirsel	store	store	-
 follower_owner	store-follower-service.hirsel	store	store	-
@@ -543,11 +543,11 @@ FollowCapture	store-followers.hirsel	object_writer	object_writer	L9
 Follower	store-followers.hirsel	store	store	-
 FollowerTransport	store-followers.hirsel	object_writer	object_writer	L9
 FollowerRequest	store-followers.hirsel	object_writer	object_writer	L9
-FollowerObservation	store-followers.hirsel	object_writer	object_writer	L9
-FollowerResponse	store-followers.hirsel	object_writer	object_writer	L9
-FollowerCommand	store-followers.hirsel	object_writer	object_writer	L9
+FollowerObservation	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+FollowerResponse	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
+FollowerCommand	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
 FollowerSource	store-followers.hirsel	object_writer	object_writer	L9
-request_follower	store-followers.hirsel	object_writer	object_writer	L9
+request_follower	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower service handles and reply payloads
 follow_capture	store-followers.hirsel	object_writer	object_writer	L9
 LogCaptureKey	store-followers.hirsel	object_writer	object_writer	L9
 LogCaptureAttempt	store-followers.hirsel	object_writer	object_writer	L9
@@ -557,26 +557,26 @@ behind_branch	store-followers.hirsel	object_writer	object_writer	L9
 log_follow_capture	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
 initial_follow_capture	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
 advancing_follow_capture	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
-floor_follow_capture	store-followers.hirsel	object_writer	object_writer	L9
+floor_follow_capture	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower handle, branch, position, snapshot or authority
 follower_step	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
 follower_apply	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
 follower	store-followers.hirsel	store	store	-
-object_follow_transport	store-followers.hirsel	object_writer	object_writer	L9
+object_follow_transport	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower handle, branch, position, snapshot or authority
 follower_branch	store-followers.hirsel	store	store	-
-capture_tip	store-followers.hirsel	object_writer	object_writer	L9
-follower_tip	store-followers.hirsel	object_writer	object_writer	L9
-follower_snapshot	store-followers.hirsel	object_writer	object_writer	L9
+capture_tip	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower handle, branch, position, snapshot or authority
+follower_tip	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower handle, branch, position, snapshot or authority
+follower_snapshot	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower handle, branch, position, snapshot or authority
 snapshot_follower	store-followers.hirsel	store	store	-
 applied	store-followers.hirsel	store	store	-
-follower_main	store-followers.hirsel	object_writer	object_writer	L9
+follower_main	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower handle, branch, position, snapshot or authority
 catch_up	store-followers.hirsel	store	store	-
 follower_prepare_fresh	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
 fresh	store-followers.hirsel	store	store	-
 follower_observe	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
-follower_deadline	store-followers.hirsel	object_writer	object_writer	L9
+follower_deadline	store-followers.hirsel	object_writer	store	-	L9 standing ruling: public follower handle, branch, position, snapshot or authority
 at_least	store-followers.hirsel	store	store	-
-read_only_checkpoint	store-followers.hirsel	object_writer	object_writer	L9
-log_floor	store-followers.hirsel	object_writer	object_writer	L9
+read_only_checkpoint	store-followers.hirsel	object_writer	store	-	L9 standing ruling: root Directory validation and Cold walk
+log_floor	store-followers.hirsel	object_writer	store	-	L9 standing ruling: root Directory validation and Cold walk
 follower_floor	store-followers.hirsel	store	maintenance	L14	A-split body to maintenance (used by exact_follower_checkpoint)
 ForkPlan	store-fork.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
 fork	store-fork.hirsel	store	store	-
@@ -1271,11 +1271,11 @@ object_journal_fresh_probe	store-object-journal.hirsel	object_writer	object_writ
 object_journal_worker	store-object-journal.hirsel	object_writer	object_writer	L9
 HistoryOpenBase	store-object-open.hirsel	object_writer	history	L7	pull-down object_writer -> history (used by ObjectPackRead)
 history_load_admitted	store-object-open.hirsel	object_writer	store	-	pull-down object_writer -> host_stream (used by stream_load_settled); push-up host_stream -> store (refs at layer 12)
-history_check_open	store-object-open.hirsel	object_writer	object_writer	L9
+history_check_open	store-object-open.hirsel	object_writer	store	-	L9 ruling: public Options and ClaimAuth, root claim authorization
 history_binding_equals	store-object-open.hirsel	object_writer	object_writer	L9
 history_genesis_debris	store-object-open.hirsel	object_writer	object_writer	L9
 history_check_empty	store-object-open.hirsel	object_writer	object_writer	L9
-history_open_genesis	store-object-open.hirsel	object_writer	object_writer	L9
+history_open_genesis	store-object-open.hirsel	object_writer	store	-	L9 standing ruling: public Options and root candidate builder
 history_stream_genesis	store-object-open.hirsel	object_writer	object_writer	L9
 history_advance_claim	store-object-open.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_claim_attempt)
 history_claim_retry	store-object-open.hirsel	object_writer	object_writer	L9
@@ -1609,17 +1609,17 @@ ReclaimList	store-reclaim.hirsel	store	store	-
 PurgeReport	store-reclaim.hirsel	store	store	-
 ReclaimError	store-reclaim.hirsel	store	store	-
 reclaim_pass_for_lane	store-reclaim.hirsel	object_writer	object_writer	L9
-reclaim_kind_for_prefix	store-reclaim.hirsel	object_writer	object_writer	L9
+reclaim_kind_for_prefix	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
 history_execute_reclaim	store-reclaim.hirsel	object_writer	object_writer	L9
-PreviewAcc	store-reclaim.hirsel	object_writer	object_writer	L9
-preview_record	store-reclaim.hirsel	object_writer	object_writer	L9
-preview_sweep_entries	store-reclaim.hirsel	object_writer	object_writer	L9
-preview_reclaim_prefix	store-reclaim.hirsel	object_writer	object_writer	L9
-preview_reclaim_uploads	store-reclaim.hirsel	object_writer	object_writer	L9
+PreviewAcc	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
+preview_record	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
+preview_sweep_entries	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
+preview_reclaim_prefix	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
+preview_reclaim_uploads	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
 record_object_lane_failure	store-reclaim.hirsel	store	store	-
-preview_on_lane	store-reclaim.hirsel	object_writer	object_writer	L9
+preview_on_lane	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
 reclaim_preview	store-reclaim.hirsel	store	store	-
-purge_on_lane	store-reclaim.hirsel	object_writer	object_writer	L9
+purge_on_lane	store-reclaim.hirsel	object_writer	store	-	L9 standing ruling: public reclaim plan, types and preview result
 reclaim_purge	store-reclaim.hirsel	store	store	-
 Difference	store-reexec.hirsel	store	store	-
 UnknownReason	store-reexec.hirsel	store	store	-
@@ -1771,17 +1771,17 @@ WeakPublisher	store-sim-levels.hirsel	object_writer	object_writer	L9
 LevelOpen	store-sim-levels.hirsel	object_writer	object_writer	L9
 LevelCommand	store-sim-levels.hirsel	object_writer	object_writer	L9
 LevelTimer	store-sim-levels.hirsel	object_writer	object_writer	L9
-LevelStart	store-sim-levels.hirsel	object_writer	object_writer	L9
+LevelStart	store-sim-levels.hirsel	object_writer	store	-	L9 standing ruling: public sim level events and holds
 level_world	store-sim-levels.hirsel	store	store	-
 level_sync	store-sim-levels.hirsel	store	store	-
 level_mark	store-sim-levels.hirsel	store	store	-
 level_log	store-sim-levels.hirsel	store	store	-
 wake_level_at	store-sim-levels.hirsel	object_writer	object_writer	L9
-level_event	store-sim-levels.hirsel	object_writer	object_writer	L9
-level_released	store-sim-levels.hirsel	object_writer	object_writer	L9
-level_sample	store-sim-levels.hirsel	object_writer	object_writer	L9
-level_sample_open	store-sim-levels.hirsel	object_writer	object_writer	L9
-level_world_loop	store-sim-levels.hirsel	object_writer	object_writer	L9
+level_event	store-sim-levels.hirsel	object_writer	store	-	L9 standing ruling: public sim level events and holds
+level_released	store-sim-levels.hirsel	object_writer	store	-	L9 standing ruling: public sim level events and holds
+level_sample	store-sim-levels.hirsel	object_writer	store	-	L9 standing ruling: public sim level events and holds
+level_sample_open	store-sim-levels.hirsel	object_writer	store	-	L9 standing ruling: public sim level events and holds
+level_world_loop	store-sim-levels.hirsel	object_writer	store	-	L9 standing ruling: public sim level events and holds
 weak_publisher	store-sim-levels.hirsel	object_writer	object_writer	L9
 weak_notice_senders	store-sim-levels.hirsel	object_writer	object_writer	L9
 weak_notify_strong	store-sim-levels.hirsel	object_writer	object_writer	L9
@@ -1794,7 +1794,7 @@ stream_sealed_step_attach	store-stream-archive.hirsel	host_stream	host_stream	L8
 stream_sealed_tail_epoch	store-stream-archive.hirsel	host_stream	host_stream	L8
 stream_sealed_fetch_slice	store-stream-archive.hirsel	host_stream	host_stream	L8
 stream_settle_sealed_core	store-stream-archive.hirsel	host_stream	host_stream	L8
-stream_settle_sealed	store-stream-archive.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+stream_settle_sealed	store-stream-archive.hirsel	host_stream	host_stream	L8	L9 ruling: accesses the opaque host_stream settle view
 history_write_archive_segment	store-stream-archive.hirsel	host_stream	host_stream	L8
 history_parse_archive_name	store-stream-archive.hirsel	host_stream	host_stream	L8
 history_decode_archive_segment	store-stream-archive.hirsel	host_stream	host_stream	L8
@@ -1825,7 +1825,7 @@ stream_follow_reg_has_row	store-stream-follow.hirsel	host_stream	host_stream	L8
 stream_follow_find_sealed	store-stream-follow.hirsel	host_stream	host_stream	L8
 stream_follow_scan_slices	store-stream-follow.hirsel	host_stream	host_stream	L8
 stream_follow_apply_sealed_range	store-stream-follow.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
-stream_follow_make_capture	store-stream-follow.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+stream_follow_make_capture	store-stream-follow.hirsel	host_stream	host_stream	L8	L9 ruling: constructs the opaque host_stream material
 stream_follow_load_fresh	store-stream-follow.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
 stream_follow_capture	store-stream-follow.hirsel	host_stream	store	-	push-up host_stream -> object_writer (refs at layer 8); push-up object_writer -> store (refs at layer 12)
 ATTACH_LIMIT	store-stream-frames.hirsel	format	format	L1
@@ -1979,10 +1979,10 @@ stream_decide_pending	store-stream-service.hirsel	host_stream	host_stream	L8
 stream_cycle	store-stream-service.hirsel	host_stream	host_stream	L8
 SettleOutcome	store-stream-settle.hirsel	host_stream	host_stream	L8
 stream_find_sealed_cutoff	store-stream-settle.hirsel	host_stream	host_stream	L8
-stream_poll_head	store-stream-settle.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
-stream_settle_publish	store-stream-settle.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+stream_poll_head	store-stream-settle.hirsel	host_stream	host_stream	L8	L9 ruling: accesses the opaque host_stream settle view
+stream_settle_publish	store-stream-settle.hirsel	host_stream	host_stream	L8	L9 ruling: accesses the opaque host_stream settle view
 stream_settle_attach	store-stream-settle.hirsel	host_stream	host_stream	L8
-stream_settle	store-stream-settle.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+stream_settle	store-stream-settle.hirsel	host_stream	host_stream	L8	L9 ruling: accesses the opaque host_stream settle view
 Batching	store-stream-slot.hirsel	store	store	-
 StreamLimits	store-stream-slot.hirsel	store	store	-
 StreamPlan	store-stream-slot.hirsel	store	store	-
@@ -2021,8 +2021,8 @@ slot_link	store-stream-slot.hirsel	host_stream	host_stream	L8
 slot_ring	store-stream-slot.hirsel	host_stream	host_stream	L8
 slot_report	store-stream-slot.hirsel	host_stream	host_stream	L8
 slot_report_head	store-stream-slot.hirsel	host_stream	host_stream	L8
-SlotRelayInput	store-stream-slot.hirsel	store	store	-
-slot_relay	store-stream-slot.hirsel	store	store	-
+SlotRelayInput	store-stream-slot.hirsel	store	object_writer	L9	L9 ruling: move with the Object queue
+slot_relay	store-stream-slot.hirsel	store	object_writer	L9	L9 ruling: move with the Object queue
 slot_attach	store-stream-slot.hirsel	host_stream	host_stream	L8
 slot_send	store-stream-slot.hirsel	host_stream	host_stream	L8
 slot_wait	store-stream-slot.hirsel	host_stream	host_stream	L8
@@ -2247,7 +2247,7 @@ tiered_emit_queue	store-tiered-compact.hirsel	pager	pager	L5
 settle_queue_moves	store-tiered-compact.hirsel	pager	pager	L5
 tiered_page_rank	store-tiered-count.hirsel	pager	pager	L5
 tiered_count_overlay	store-tiered-count.hirsel	pager	pager	L5
-read_tiered_count	store-tiered-count.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+read_tiered_count	store-tiered-count.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
 TieredEmitFrame	store-tiered-emission.hirsel	pager	pager	L5
 TieredCutFrames	store-tiered-emission.hirsel	pager	pager	L5
 tiered_emit_tree	store-tiered-emission.hirsel	pager	pager	L5
@@ -2424,11 +2424,11 @@ planned_freed	store-tiered-plan.hirsel	pager	pager	L5
 plan_tiered_edits	store-tiered-plan.hirsel	pager	pager	L5
 tiered_replayed_row	store-tiered-point-read.hirsel	pager	pager	L5
 TieredPageBackend	store-tiered-point-read.hirsel	pager	pager	L5
-read_tiered_point	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
-read_tiered_point_direct	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
-read_tiered_point_with	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
-retry_tiered_read	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
-retry_tiered_read_with	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+read_tiered_point	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
+read_tiered_point_direct	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
+read_tiered_point_with	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
+retry_tiered_read	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
+retry_tiered_read_with	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
 serve_tiered_miss	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
 serve_tiered_miss_with	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
 tiered_miss_demand	store-tiered-point-read.hirsel	pager	pager	L5
@@ -2547,8 +2547,8 @@ read_tiered_scan	store-tiered-scan.hirsel	pager	read	L11	push-up pager -> read (
 tiered_span_row	store-tiered-span.hirsel	pager	pager	L5
 tiered_span_collection	store-tiered-span.hirsel	pager	pager	L5
 snapshot_tiered_span_step	store-tiered-span.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
-snapshot_tiered_span_step_direct	store-tiered-span.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
-snapshot_tiered_span_step_with	store-tiered-span.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+snapshot_tiered_span_step_direct	store-tiered-span.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
+snapshot_tiered_span_step_with	store-tiered-span.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
 snapshot_tiered_span	store-tiered-span.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
 TxTieredRows	store-tiered-tx-read.hirsel	txn	txn	L12
 TxIndexTiered	store-tiered-tx-read.hirsel	store	store	-
@@ -2660,7 +2660,7 @@ Error	store.hirsel	store	store	-
 Roots	store.hirsel	pages	pages	L2
 empty_roots	store.hirsel	pages	pages	L2
 share_roots	store.hirsel	pages	pages	L2
-Ack	store.hirsel	journal	journal	L6
+ObjectAck	object-writer-queue.hirsel	object_writer	object_writer	L9	L9 Object queue uses its own ack type
 Db	store.hirsel	store	store	-
 Branch	store.hirsel	store	store	-
 Head	store.hirsel	pages	pages	L2
@@ -3092,3 +3092,8 @@ DirJournalChannels	store-journal-state.hirsel	journal	journal	L6
 DirJournalStart	store-journal-state.hirsel	journal	journal	L6
 dir_journal_channels	store-journal-state.hirsel	journal	journal	L6
 start_directory	store-journal-state.hirsel	journal	journal	L6
+ObjectWorkerOpen	object-writer-state.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
+PublishedCut	object-writer-cut.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
+with_object_settle	object-writer-settle.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
+settle_object_stream	object-writer-settle.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
+settle_worker_sealed	object-writer-archive.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session

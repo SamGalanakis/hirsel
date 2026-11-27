@@ -604,22 +604,14 @@ fn stream_reissue_settle(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Er
     let first = stream_unhold_commit_ticket(mut place, 1)?
     durable(mut place, first)?
     let epoch = claim_of(place)?.epoch
-    let (take handover, take paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let (take resume, take resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (take handover, take paused): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
+    let (take resume, take resuming): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
     result.unwrap(channel.send(object_sender(disk_state(place)), ObjectPause(take handover, take resuming)))
     let mut parked = result.unwrap(channel.receive(paused))
     // One answer fits behind the blocked relay. Both are occupied before hold_ms.
     let made: Result[(Client[journal.SlotAck], Inbox[journal.SlotAck]), Capacity] = conn.new(1, bytes 0)
     let (take answer_client, take answers) = failure_result_from_rep(types.capacity(take made))?
-    let relay = match parked.stream {
-        Some(mut link) => {
-            host_stream.rewire_law_slot(mut link, take answer_client, take answers)
-            let _ = failure_result_from_rep(host_stream.slot_attach(mut link, store_key_to_rep(place.store), epoch, "p1/", limits_to_rep(place.limits)))?
-            SlotRelayInput(answers: option.unwrap(host_stream.slot_take_answers(mut link)), journal: channel.sender(object_sender(disk_state(place))))
-        },
-        None => fail("paused journal lost its stream"),
-    }
-    let running = task.spawn(tasks, bytes OBJECT_TIMER_GRANT, take relay, slot_relay)
+    let running = failure_result_from_rep(object_writer.rewire_relay_law(tasks, mut parked, store_key_to_rep(place.store), epoch, limits_to_rep(place.limits), take answer_client, take answers, object_sender(disk_state(place))))?
     let stalled = stream_unhold_commit_ticket(mut place, 2)?
     while let Ok(()) = channel.try_send(object_sender(disk_state(place)), Barrier) {}
     stream_unhold_raw_hold(s, tasks, 240, place.store, epoch, StoreId(hi: 3134, lo: 1))?

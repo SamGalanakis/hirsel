@@ -896,12 +896,12 @@ fn handoff(mut db: Db) -> Result[(), Error] waits {
         })
         if let Some(take raw) = take pending {
             let sent = list.len(raw)
-            let closed = match journal_sender(state) {
-                Dir(take sender) => match channel.send(sender, Frame(take raw, db.frame_seq)) {
+            let closed = match state.backend {
+                DirBackend(directory) => match channel.send(journal.dir_sender(directory), Frame(take raw, db.frame_seq)) {
                     Ok(()) => false,
                     Error(_) => true,
                 },
-                Object(take sender) => match channel.send(sender, Frame(take raw, db.frame_seq)) {
+                ObjectBackend(writer) => match channel.send(object_writer.sender(writer), Frame(take raw, db.frame_seq)) {
                     Ok(()) => false,
                     Error(_) => true,
                 },
@@ -1172,7 +1172,7 @@ pub fn sync_notices(mut db: Db) -> Option[Receiver[()]] {
     match db.disk {
         Some(mut state) => match state.backend {
             DirBackend(mut directory) => journal.dir_sync_notices(mut directory),
-            ObjectBackend(mut object) => replace(mut object.synced, None),
+            ObjectBackend(mut writer) => object_writer.sync_notices(mut writer),
         },
         None => None
     }
@@ -2154,7 +2154,6 @@ type DiskState {
     target: Option[manifest.TargetLimits],
     retention: journal.RecordRetention,
     packs: manifest.PackDiskState,
-    object: Option[ObjectWriterState],
     backend: Backend,
     tasks: Tasks,
     tiered: pager.DiskPagerState
@@ -2210,30 +2209,6 @@ fn open_heads(mut db: Db, take state: pages.State) -> Result[(), Error] {
     Ok(())
 }
 
-type JournalChannels {
-    frames: Sender[JournalMsg],
-    queued: Receiver[JournalMsg],
-    acks: Sender[journal.Ack],
-    received: Receiver[journal.Ack],
-    ready: Sender[Result[(), Capacity]],
-    waiting: Receiver[Result[(), Capacity]],
-    written_send: Sender[journal.WriteNotice],
-    written_receive: Receiver[journal.WriteNotice],
-    synced_send: Sender[()],
-    synced_receive: Receiver[()]
-}
-
-fn journal_channels(group_count: u64) -> JournalChannels {
-    let (frames, queued): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(group_count * 2)
-    // One ack per frame, for the queued and grouped frames, the handoff
-    // and byte-split frames, and a final failure (Y1).
-    let (acks, received): (Sender[journal.Ack], Receiver[journal.Ack]) = channel.new(group_count * 3 + 3)
-    let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
-    let (written_send, written_receive): (Sender[journal.WriteNotice], Receiver[journal.WriteNotice]) = channel.new(2)
-    let (synced_send, synced_receive): (Sender[()], Receiver[()]) = channel.new(1)
-    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive)
-}
-
 // S3 makes the disk opener public with its journal and final durability path.
 /// Opens a Directory store. An object store opens with `open_authority`.
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
@@ -2246,7 +2221,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
     if let Bucket(_) = options.authority {
         return Error(Unsupported(1))
     }
-    open_checks(options)?
+    failure_result_from_rep(object_writer.open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit))?
     let mut restarted = false
     loop {
         let (take raw, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
@@ -2274,28 +2249,6 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
     }
 }
 
-fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), Error] waits {
-    if failure_result_from_rep(manifest.read_page_manifest_bytes(d))? != raw {
-        return Error(Held)
-    }
-    Ok(())
-}
-
-fn open_checks(options: Options) -> Result[(), Error] {
-    if options.group_commits == 0 {
-        return Error(Missing("group_commits"))
-    }
-    if options.group_bytes == 0 {
-        return Error(Missing("group_bytes"))
-    }
-    failure_result_from_rep(types.check_named_limits(optional_limits_to_rep(options.limits)))?
-    // Before the MANIFEST is read, the floor uses the named limits or the ceilings.
-    if let Some(problem) = types.journal_floor(options.checkpoint_bytes, options.journal_limit, limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))).frame) {
-        return Error(Full(Journal(problem)))
-    }
-    Ok(())
-}
-
 fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: journal.JournalCadence, take session: journal.DiskSession) -> Result[Db, Error] waits {
     let journal.DiskSession(lock: take lock, startup: take startup) = take session
     let zero_extension = failure_result_from_rep(manifest.disk_io(host.zero_extension(d)))?
@@ -2311,7 +2264,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     // reserves C + K + P (§1.1); a queued Cold frame needs it to drain (§13.6).
     let pager_task: Option[Task[()]] = if store_has_tiered(db) || std.page.count(std.page.image_of(manifest.pack_lists(page_disk).deferred)) != 0 {
         let funding = pager.TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
-        let link = start_tiered_pager_link(tasks, id, seq, PagerDirectory(d), funding, pager.TIERED_PAGER_QUEUE)?
+        let link = failure_result_from_rep(object_writer.start_tiered_pager_link(tasks, store_key_to_rep(id), seq, PagerDirectory(d), funding, pager.TIERED_PAGER_QUEUE))?
         Some(attach_tiered_pager(mut db, take link))
     } else {
         None
@@ -2325,7 +2278,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     db.checkpointed = generation
     let start = journal.DirJournalStart(lock: take lock, seq: seq, uncovered: uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header)
     let directory = failure_result_from_rep(journal.start_directory(tasks, d, c, store, options.group_commits, options.group_bytes, cadence_spec, zero_extension, take start))?
-    db.disk = Some(DiskState(open: seq, options: clone(options), lease: None, steps: list.new(), imported: None, reserving: None, target: None, retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, object: None, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
+    db.disk = Some(DiskState(open: seq, options: clone(options), lease: None, steps: list.new(), imported: None, reserving: None, target: None, retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
     Ok(take db)
 }
 

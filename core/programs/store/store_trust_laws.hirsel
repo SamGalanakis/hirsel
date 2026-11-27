@@ -31,7 +31,7 @@ fn trust_store(mut db: Db) -> Result[(), Error] waits {
         if let Some(d) = disk_directory(state) {
             trust_directory(d)?
         }
-        if let Some(_) = view state.object {
+        if let ObjectBackend(_) = view state.backend {
             teardown_check_bucket(db)?
         }
     }
@@ -49,7 +49,7 @@ fn trust_bucket_sim(tasks: Tasks, sim: BucketSim, host_name: String) -> Result[(
         Error(take problem) => return Error(take problem),
     }
     let captured = failure_result_from_rep(history.history_decode_head(raw))?
-    teardown_validate_bucket_checkpoint(mut client, captured.head, deadline)
+    failure_result_from_rep(object_writer.teardown_validate_bucket_checkpoint(mut client, captured.head, deadline))
 }
 
 fn trust_bucket_then[T](tasks: Tasks, sim: BucketSim, host_name: String, take observed: Result[T, Error]) -> Result[T, Error] waits {

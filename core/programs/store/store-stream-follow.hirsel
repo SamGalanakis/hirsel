@@ -26,10 +26,10 @@ fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: 
     Ok(true)
 }
 
-fn stream_follow_wrap_capture(head: history.HistoryHead, tag: std.object.ETag, take attach: Option[format.Attach], take head_bytes: Bytes, live_next_seq: u64, take replay: pager.JournalReplay) -> Result[Option[Arc[FollowCapture]], Error] {
+fn stream_follow_wrap_capture(head: history.HistoryHead, tag: std.object.ETag, take attach: Option[format.Attach], take head_bytes: Bytes, live_next_seq: u64, take replay: pager.JournalReplay) -> Result[Option[Arc[object_writer.FollowCapture]], Error] {
     let material = failure_result_from_rep(host_stream.stream_follow_make_capture(head, tag, take attach, take head_bytes, live_next_seq, take replay))?
     let (store, take state, resident, take remote, watermark) = host_stream.stream_follow_parts(take material)
-    Ok(Some(follow_capture(store_key_from_rep(store), take state, resident, Some(take remote), 0, watermark)?))
+    Ok(Some(failure_result_from_rep(object_writer.follow_capture(store_key_to_rep(store_key_from_rep(store)), take state, resident, Some(take remote), 0, watermark))?))
 }
 
 // Loads a head's settled history in §12.11.9 order, restarting if a sealed-tail
@@ -55,7 +55,7 @@ fn stream_follow_load_fresh(mut source: history.ObjectPackRead, root: String, pl
     }
 }
 
-fn stream_follow_capture(mut source: history.ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn stream_follow_capture(mut source: history.ObjectPackRead, previous: Option[Arc[object_writer.FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[object_writer.FollowCapture]], Error] waits {
     let root = match view source.stream_root {
         Some(r) => string.from(r),
         None => return Error(Missing("stream_root")),

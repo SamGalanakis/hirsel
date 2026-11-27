@@ -8,11 +8,7 @@ pub fn fixture_broken_handoff(mut db: Db) {
                 drop(take abandoned)
                 let _ = journal.replace_sender(mut directory, take to)
             },
-            ObjectBackend(mut queue) => {
-                let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
-                drop(take abandoned)
-                queue.journal = take to
-            },
+            ObjectBackend(mut writer) => object_writer.break_handoff(mut writer),
         }
     })
 }

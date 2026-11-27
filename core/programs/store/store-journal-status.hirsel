@@ -1,26 +1,6 @@
-type Backend = DirBackend(journal.DirJournalState) | ObjectBackend(ObjectJournalQueue)
+type JournalAck: send = Journaled(u64, u64) | Broken(IoError) | ObjectAck(object_writer.ObjectAck)
 
-type ObjectJournalQueue {
-    file_seq: u64,
-    file_end: u64,
-    journal: Sender[JournalMsg],
-    acks: Receiver[journal.Ack],
-    accounting: journal.QueueAccounting,
-    written: Receiver[journal.WriteNotice],
-    written_send: Sender[journal.WriteNotice],
-    synced: Option[Receiver[()]],
-    writer: Task[Result[(), Error]],
-    timer: Option[Task[()]]
-}
-
-type JournalSender = Dir(Sender[journal.DirJournalMsg]) | Object(Sender[JournalMsg])
-
-fn journal_sender(state: DiskState) -> JournalSender {
-    match state.backend {
-        DirBackend(directory) => Dir(channel.sender(journal.dir_sender(directory))),
-        ObjectBackend(queue) => Object(channel.sender(queue.journal)),
-    }
-}
+type Backend = DirBackend(journal.DirJournalState) | ObjectBackend(object_writer.ObjectWriterState)
 
 fn dir_state(state: DiskState) -> View[journal.DirJournalState] in state {
     match state.backend {
@@ -29,9 +9,9 @@ fn dir_state(state: DiskState) -> View[journal.DirJournalState] in state {
     }
 }
 
-fn object_sender(state: DiskState) -> View[Sender[JournalMsg]] in state {
+fn object_sender(state: DiskState) -> View[Sender[object_writer.JournalMsg]] in state {
     match state.backend {
-        ObjectBackend(queue) => view queue.journal,
+        ObjectBackend(queue) => object_writer.sender(queue),
         DirBackend(_) => fail("store: an Object journal is required"),
     }
 }
@@ -47,7 +27,7 @@ fn file_seq(db: Db) -> u64 {
     match db.disk {
         Some(state) => match state.backend {
             DirBackend(directory) => journal.segment_seq(directory),
-            ObjectBackend(queue) => queue.file_seq,
+            ObjectBackend(queue) => object_writer.segment_seq(queue),
         },
         None => 1,
     }
@@ -57,7 +37,7 @@ fn file_end(db: Db) -> u64 {
     match db.disk {
         Some(state) => match state.backend {
             DirBackend(directory) => journal.segment_end(directory),
-            ObjectBackend(queue) => queue.file_end,
+            ObjectBackend(queue) => object_writer.segment_end(queue),
         },
         None => 72,
     }
@@ -69,34 +49,31 @@ fn stage_disk_frame(mut state: DiskState, size: u64, take frame: Option[Bytes]) 
             journal.advance_offset(mut directory, size)
             journal.stash_frame(mut directory, take frame)
         },
-        ObjectBackend(mut queue) => {
-            queue.file_end += size
-            queue.accounting.pending = take frame
-        },
+        ObjectBackend(mut queue) => object_writer.stage_frame(mut queue, size, take frame),
     }
 }
 
 fn queue_accounting(state: DiskState) -> View[journal.QueueAccounting] in state {
     match state.backend {
         DirBackend(directory) => journal.dir_accounting(directory),
-        ObjectBackend(queue) => view queue.accounting,
+        ObjectBackend(queue) => object_writer.queue_accounting(queue),
     }
 }
 
 fn edit_accounting[R](mut state: DiskState, edit: scoped fn(mut journal.QueueAccounting) -> R) -> R {
     match state.backend {
         DirBackend(mut directory) => journal.edit_accounting(mut directory, edit),
-        ObjectBackend(mut queue) => edit(mut queue.accounting),
+        ObjectBackend(mut queue) => object_writer.edit_accounting(mut queue, edit),
     }
 }
 
 fn journal_barrier(state: DiskState) waits {
-    match journal_sender(state) {
-        Dir(take sender) => {
-            let _ = channel.send(sender, Barrier)
+    match state.backend {
+        DirBackend(directory) => {
+            let _ = channel.send(journal.dir_sender(directory), Barrier)
         },
-        Object(take sender) => {
-            let _ = channel.send(sender, Barrier)
+        ObjectBackend(writer) => {
+            let _ = channel.send(object_writer.sender(writer), Barrier)
         },
     }
 }
@@ -104,31 +81,34 @@ fn journal_barrier(state: DiskState) waits {
 fn journal_written(state: DiskState) -> View[Receiver[journal.WriteNotice]] in state {
     match state.backend {
         DirBackend(directory) => journal.dir_written(directory),
-        ObjectBackend(queue) => view queue.written,
+        ObjectBackend(queue) => object_writer.write_notices(queue),
     }
 }
 
 fn journal_written_send(state: DiskState) -> View[Sender[journal.WriteNotice]] in state {
     match state.backend {
         DirBackend(directory) => journal.dir_written_send(directory),
-        ObjectBackend(queue) => view queue.written_send,
+        ObjectBackend(queue) => object_writer.write_notice_sender(queue),
     }
 }
 
-fn dir_ack(ack: journal.DirAck) -> journal.Ack {
+fn dir_ack(ack: journal.DirAck) -> JournalAck {
     match ack {
         DirJournaled(seq, written) => Journaled(seq, written),
         DirBroken(e) => Broken(e),
     }
 }
 
-fn try_journal_receive(state: DiskState) -> Result[journal.Ack, ReceiveError] {
+fn try_journal_receive(state: DiskState) -> Result[JournalAck, ReceiveError] {
     match state.backend {
         DirBackend(directory) => match channel.try_receive(journal.dir_acks(directory)) {
             Ok(ack) => Ok(dir_ack(ack)),
             Error(e) => Error(e),
         },
-        ObjectBackend(queue) => channel.try_receive(queue.acks),
+        ObjectBackend(queue) => match channel.try_receive(object_writer.ack_receiver(queue)) {
+            Ok(take ack) => Ok(ObjectAck(take ack)),
+            Error(e) => Error(e),
+        },
     }
 }
 
@@ -143,14 +123,14 @@ fn durable_latch_error(take e: Error) -> Error {
 
 // A writer that ended without its ack (cancelled before it could send
 // Broken) is a terminal failure: the place stops, unacked sequences unanswered.
-fn journal_receive(db: Db) -> journal.Ack waits {
+fn journal_receive(db: Db) -> JournalAck waits {
     match disk_state(db).backend {
         DirBackend(directory) => match channel.receive(journal.dir_acks(directory)) {
             Ok(ack) => dir_ack(ack),
             Error(_) => Broken(Closed),
         },
-        ObjectBackend(queue) => match channel.receive(queue.acks) {
-            Ok(ack) => ack,
+        ObjectBackend(queue) => match channel.receive(object_writer.ack_receiver(queue)) {
+            Ok(take ack) => ObjectAck(take ack),
             Error(_) => Broken(Closed),
         },
     }
@@ -225,8 +205,8 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
     Ok(groups)
 }
 
-fn journal_ack(mut db: Db, take ack: journal.Ack) -> Result[(), Error] {
-    write_disk(mut db.disk, take ack, scoped fn(mut state: DiskState, take incoming: journal.Ack) -> Result[(), Error] {
+fn journal_ack(mut db: Db, take ack: JournalAck) -> Result[(), Error] {
+    write_disk(mut db.disk, take ack, scoped fn(mut state: DiskState, take incoming: JournalAck) -> Result[(), Error] {
         match take incoming {
             Journaled(n, bytes_out) => {
                 edit_accounting(mut state, scoped fn(mut queue: journal.QueueAccounting) {
@@ -236,24 +216,17 @@ fn journal_ack(mut db: Db, take ack: journal.Ack) -> Result[(), Error] {
                 })
                 Ok(())
             },
-            ObjectJournaled(n, bytes_out, journal_entries) => {
-                edit_accounting(mut state, scoped fn(mut queue: journal.QueueAccounting) {
-                    queue.journaled = n
-                    queue.inflight -= bytes_out - queue.acked_bytes
-                    queue.acked_bytes = bytes_out
-                })
-                if let Some(mut object_writer) = state.object {
-                    object_writer.entries = journal_entries
+            ObjectAck(ObjectJournaled(n, bytes_out, journal_entries)) => {
+                if let ObjectBackend(mut writer) = state.backend {
+                    object_writer.note_ack(mut writer, n, bytes_out, journal_entries)
                 }
                 Ok(())
             },
-            ObjectBroken(take reported) => {
-                let problem = failure_from_rep(take reported)
-                let terminal: Error = clone(problem)
-                if let Some(mut object_writer) = state.object {
-                    object_writer.failed = Some(take terminal)
+            ObjectAck(ObjectBroken(take reported)) => {
+                if let ObjectBackend(mut writer) = state.backend {
+                    object_writer.latch_failure(mut writer, clone(reported))
                 }
-                Error(take problem)
+                Error(failure_from_rep(take reported))
             },
             Broken(e) => {
                 edit_accounting(mut state, scoped fn(mut queue: journal.QueueAccounting) -> Result[(), Error] {
@@ -286,7 +259,7 @@ fn open_directory(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, c
     if let Bucket(_) = options.authority {
         return Error(Unsupported(1))
     }
-    open_checks(options)?
+    failure_result_from_rep(object_writer.open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit))?
     let session = disk_session(d, c, r, options)?
     open_started(tasks, d, c, options, cadence_spec, take session)
 }
@@ -317,9 +290,9 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     }
     if let None = failure {
         let (attached, has_sealed) = match owned.disk {
-            Some(state) => match state.object {
-                Some(w) => (w.attached, w.has_sealed),
-                None => (false, false),
+            Some(state) => match state.backend {
+                ObjectBackend(writer) => object_writer.attachment(writer),
+                DirBackend(_) => (false, false),
             },
             None => (false, false),
         }
@@ -338,7 +311,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     let connection = replace(mut owned.disk, None)
     pages.release_heads(mut owned.holders)
     list.clear(mut owned.followers)
-    let DiskState(backend: take backend, tiered: take tiered, object: take object_writer, ..) = option.unwrap(take connection)
+    let DiskState(backend: take backend, tiered: take tiered, ..) = option.unwrap(take connection)
     // A Reader may still hold the pager's requests, so the pager is cancelled
     // rather than waited for once the store's sender is dropped.
     clear_parked(mut owned)
@@ -350,69 +323,17 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
         task.cancel(mut pager_link)
         let _ = task.join(take pager_link)
     }
-    let queue = match take backend {
-        ObjectBackend(take queue) => take queue,
-        DirBackend(take directory) => {
-            let prior: Option[types.Failure] = match take failure {
-                Some(take e) => Some(failure_to_rep(take e)),
-                None => None,
-            }
-            return failure_result_from_rep(journal.close_directory(take directory, take prior))
-        },
+    let prior: Option[types.Failure] = match take failure {
+        Some(take e) => Some(failure_to_rep(take e)),
+        None => None,
     }
-    let ObjectJournalQueue(journal: take frames, acks: take acknowledgements, writer: take writer, timer: take timer, written: take notices, written_send: take notice_to, accounting: take accounting, ..) = take queue
-    if let Some(take running) = take timer {
-        let mut t = take running
-        task.cancel(mut t)
-        let _ = task.join(take t)
-    }
-    let _ = take frames
-    let mut poison = accounting.poison
-    let remaining: Option[Receiver[journal.Ack]] = if let Some(_) = poison {
-        let _ = take acknowledgements
-        None
-    } else {
-        Some(take acknowledgements)
-    }
-    match task.join(take writer) {
-        Ok(Error(Io(e))) => if let None = poison {
-            poison = Some(e)
-        },
-        Ok(Error(take e)) => if let None = failure {
-            failure = Some(take e)
-        },
-        Ok(Ok(())) => (),
-        Error(_) => if let None = poison {
-            poison = Some(Closed)
-        },
-    }
-    if let Some(receiver) = remaining {
-        while let Ok(ack) = channel.try_receive(receiver) {
-            if let Broken(e) = ack {
-                if let None = poison {
-                    poison = Some(e)
-                }
-            }
-        }
-    }
-    let _ = take notices
-    let _ = take notice_to
-    if let Some(ObjectWriterState(terminal: take terminal, watch: take watch, ..)) = take object_writer {
-        let _ = take terminal
-        if let Some(take live_watch) = take watch {
-            let _ = task.join(take live_watch)
-        }
-    }
-    match poison {
-        Some(e) => Error(Poisoned(e)),
-        None => match take failure {
-            Some(take e) => Error(take e),
-            None => Ok(()),
-        },
+    match take backend {
+        ObjectBackend(take writer) => failure_result_from_rep(object_writer.close_worker(take writer, take prior)),
+        DirBackend(take directory) => failure_result_from_rep(journal.close_directory(take directory, take prior)),
     }
 }
 
-fn close_ack(db: Db) -> Option[journal.Ack] {
+fn close_ack(db: Db) -> Option[JournalAck] {
     let Some(state) = view db.disk else {
         return None
     }

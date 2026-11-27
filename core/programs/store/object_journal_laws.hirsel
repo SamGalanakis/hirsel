@@ -33,13 +33,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let metadata = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(source.client), "bucket")))?
     let (take held, _) = history_open_register(mut source, sim.time, r, object_law_options(0), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let initial_head = history.register_head(held)
-    let (init, ready): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let (send_to, receive): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(4)
-    let (acks, delivered): (Sender[journal.Ack], Receiver[journal.Ack]) = channel.new(4)
-    let (notices, _observed): (Sender[journal.WriteNotice], Receiver[journal.WriteNotice]) = channel.new(1)
-    let (synced, _woken): (Sender[()], Receiver[()]) = channel.new(1)
-    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None, reclaims: None)
-    let actor = task.spawn(tasks, bytes 1048576, take actor_input, object_journal_worker)
+    let (take init, take send_to, take delivered, _observed, _woken, take actor) = object_writer.group_law_worker(tasks)
     let mut expected_bytes = 0u64
     for n in 1u64 .. 3 {
         bucket_m2_law_commit_packet(mut workspace.packet, initial_head, n)?
@@ -49,8 +43,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     }
     let history.ObjectPackRead(client: take client, ..) = take source
     let (take requests, take lifetime) = std.object.split(take client)
-    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, sweep: sweep_start(), archive_on: 0, issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None, stream: None)
-    result.unwrap(channel.send(init, take opened))
+    object_writer.start_group_law_worker(init, take requests, take held, take metadata, take workspace, BUCKET_LAW_OP_MS)
     let ObjectJournaled(2, observed_bytes, 2) = result.unwrap(channel.receive(delivered)) else {
         fail("the worker did not acknowledge both frames as one group")
     }
@@ -121,7 +114,7 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     if get(result.unwrap(reader(surviving, 0u64)), current, rows, 7)? != Some(clone(value)) || current.head != saved.version || claim_of(surviving)?.epoch != 2 {
         fail("a new holder did not recover the durable checkpoint")
     }
-    return_object_journal(take paused, resume)?
+    failure_result_from_rep(object_writer.return_object_journal(take paused, resume))?
     if let Error(Fenced(1)) = durable(mut incumbent, losing.ticket) {} else {
         fail("a stale holder acknowledged a fenced group")
     }
@@ -196,17 +189,13 @@ fn bucket_test_m2_fresh_holder(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 }
 
 fn reclaim_barrier(db: Db) -> Result[(), Error] waits {
-    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (handover, paused): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
     result.unwrap(channel.send(object_sender(disk_state(db)), ObjectPause(take handover, take resuming)))
     let parked = result.unwrap(channel.receive(paused))
-    let mut lane = object_journal_begin(take parked)
-    let execution = match replace(mut lane.reclaim, None) {
-        Some(pending_reclaim) => history_execute_reclaim(mut lane, pending_reclaim),
-        None => Ok(()),
-    }
-    let returned = object_journal_pause(take lane)
-    result.unwrap(channel.send(resume, take returned))
+    let mut lane = object_writer.object_journal_begin(take parked)
+    let execution = failure_result_from_rep(object_writer.reclaim_law_barrier(mut lane))
+    result.unwrap(object_writer.return_object_journal(take lane, resume))
     execution
 }
 
@@ -262,15 +251,11 @@ fn bucket_test_m2_reclaim_execution(c: Clock, r: Random, tasks: Tasks) -> Result
 // Hands the journal one message and returns its lane unchanged. The pause
 // is ordered after any reclaim pass the loop had already started.
 fn journal_turn(db: Db) -> Result[bool, Error] waits {
-    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (handover, paused): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
     result.unwrap(channel.send(object_sender(disk_state(db)), ObjectPause(take handover, take resuming)))
     let parked = result.unwrap(channel.receive(paused))
-    let pending = if let Some(_) = parked.reclaim {
-        true
-    } else {
-        false
-    }
+    let pending = object_writer.reclaim_still_pending(parked)
     result.unwrap(channel.send(resume, take parked))
     Ok(pending)
 }

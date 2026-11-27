@@ -1,0 +1,3 @@
+fn forge_object_session() -> store.object_writer.ObjectJournalSession {
+    store.object_writer.ObjectJournalSession()
+}

@@ -281,7 +281,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     // The longest object key has 60 bytes, rounded to 64.
     let key_room = option.unwrap(charge.round(60))
     let bad = failure_result_from_rep(types.capacity(bound bytes key_room {
-        history_load_data_pack(mut client, locator, due, None, store_key_from_rep(observed.store), 1, pack, 1)
+        failure_result_from_rep(object_writer.history_load_data_pack(mut client, locator, due, None, store_key_to_rep(store_key_from_rep(observed.store)), 1, pack, 1))
     }))?
     if let Error(Corrupt(Fault(why: Malformed, ..))) = bad {} else {
         fail("L85: the known format error consumed another key allocation")
@@ -393,7 +393,7 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     let grant = 8192u64
     let control = follower_control_bytes()
     let service_room = option.unwrap(service_bytes(list.new()))
-    let worker_room = follower_task_bytes(grant)
+    let worker_room = object_writer.follower_task_bytes(grant)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut tiny = follower_law_plan(Directory, options)
     tiny.envelope = control + worker_room
@@ -436,7 +436,7 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     let plan = follower_law_plan(Directory, options)
     let before_service = follower_law_room()
     let service = follower_law_service(tasks, plan, 1)?
-    if before_service - follower_law_room() != follower_task_bytes(service_room + plan_bytes(plan)) {
+    if before_service - follower_law_room() != object_writer.follower_task_bytes(service_room + plan_bytes(plan)) {
         fail("L85: the service retained its startup reply")
     }
     let available = follower_owner(service)?
@@ -458,7 +458,7 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     let duplicate = snapshot_follower(opened, follower_main(opened))?
     let _ = take opened
     let retained = follower_slot_shortage(available, plan)
-    if retained.requested != follower_task_bytes(plan.root) || retained.available >= retained.requested {
+    if retained.requested != object_writer.follower_task_bytes(plan.root) || retained.available >= retained.requested {
         fail("L85: retired worker roots did not stay charged to the service")
     }
     let _ = take captured
@@ -562,7 +562,7 @@ fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     }
     // The starter pays 256 + 32 + max(128, 1,146, 664) = 1,434. The provision
     // box (528) and its reply channel (618) each carry one 464-byte Options.
-    if follower_starter_bytes() != follower_task_bytes(0) + provision {
+    if follower_starter_bytes() != object_writer.follower_task_bytes(0) + provision {
         fail("L85: the starter peak differs from the task and provision charges")
     }
     close(open(tasks, directory, c, r, options)?)?
@@ -690,7 +690,7 @@ fn follower_refusal_retry(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(),
     // Fund both fixed read windows and checkpoint metadata. A 256 KiB
     // body cannot fit under this limit even with every scratch block free.
     plan.root = 2 * 65536 + 32768
-    plan.envelope = follower_task_bytes(plan.root) + follower_control_bytes()
+    plan.envelope = object_writer.follower_task_bytes(plan.root) + follower_control_bytes()
     let service = follower_law_service(tasks, plan, 1)?
     let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1202, true, 1)?
     let mut ids = followers()
@@ -792,7 +792,7 @@ fn follower_cancelled_slot(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
 
 type FollowerCancelApply: send {
     slot: FollowerSlot,
-    capture: Arc[FollowCapture],
+    capture: Arc[object_writer.FollowCapture],
     clock: Clock,
     published: Sender[Snapshot],
     hold: Receiver[()]
@@ -807,9 +807,9 @@ fn follower_cancel_apply(take job: FollowerCancelApply) waits {
     result.unwrap(channel.receive(hold))
 }
 
-fn follower_cancel_capture(id: StoreId, at_version: u64) -> Result[Arc[FollowCapture], Error] {
+fn follower_cancel_capture(id: StoreId, at_version: u64) -> Result[Arc[object_writer.FollowCapture], Error] {
     let state = failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), at_version, 0)))?
-    follow_capture(id, take state, 0, None, 0, at_version)
+    failure_result_from_rep(object_writer.follow_capture(store_key_to_rep(id), take state, 0, None, 0, at_version))
 }
 
 @test

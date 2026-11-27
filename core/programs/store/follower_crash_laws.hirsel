@@ -426,7 +426,7 @@ fn disk_crash_cut_reader(take job: CutReader) -> Result[u64, Error] waits {
         Error(NotFound) => (),
         _ => fail("BL7: the reader's start marker opened"),
     }
-    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
     let forever = 18446744073709551615u64
     let Some(captured) = log_follow_capture(job.d, job.c, forever, mut progress, None, forever, None)? else {
         fail("BL7: the suspended reader captured nothing")
@@ -483,7 +483,7 @@ fn log_follower_dropped_candidate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         fail("G2: the first row was refused")
     }
     close(take writer)?
-    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
     let forever = 18446744073709551615u64
     let Some(published) = log_follow_capture(directory, c, forever, mut progress, None, forever, None)? else {
         fail("G2: the first capture published nothing")
@@ -496,7 +496,7 @@ fn log_follower_dropped_candidate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let acked = version(snapshot(later))
     close(take later)?
     for _ in 0u64 .. 2 {
-        let Some(candidate) = log_follow_capture(directory, c, forever, mut progress, Some(published.store), forever, Some(arc.share(published)))? else {
+        let Some(candidate) = log_follow_capture(directory, c, forever, mut progress, Some(store_key_from_rep(published.store)), forever, Some(arc.share(published)))? else {
             fail("G2: a capture behind the acked head answered nothing new")
         }
         if candidate.state.tips[0u64].head != acked {
@@ -690,7 +690,7 @@ fn log_follower_end_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
 }
 
 fn log_end_bound_head(d: Dir, c: Clock) -> Result[u64, Error] waits {
-    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
     let forever = 18446744073709551615u64
     let Some(captured) = log_follow_capture(d, c, forever, mut progress, None, forever, None)? else {
         fail("BL4: a first capture published nothing")

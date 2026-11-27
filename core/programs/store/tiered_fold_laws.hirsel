@@ -197,7 +197,7 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let (queued_blob, blob_pack) = l87_probe_blob(fixtures, owner)?
     let (take all_packs, _) = std.omap.insert(mut ids, packs, 7u64, pages.TieredPagerPack(inventory: blob_pack, object: None))
     let funding = pager.TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
-    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), funding, 4)?
+    let (take requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), funding, 4))?
     let source = pager.TieredPageSource(pager: take requests, packs: take all_packs, next_stamp: 43, deadline: 0)
     let checked = l79_fold_and_emit(source, base, parent, right, queued_blob, owner)
     let _ = take source
@@ -235,7 +235,7 @@ fn test_l70_tiered_sizes_include_cut_quota(d: Dir, tasks: Tasks) -> Result[(), E
     }
     let owner = StoreId(hi: 3, lo: 4)
     let funding = pager.TieredPagerFunding(cache_bytes: exact.cache_bytes, writer_pin_bytes: exact.writer_pin_bytes, pager_task_bytes: exact.pager_task_bytes, cut_pins: true)
-    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(d), funding, 1)?
+    let (take requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(d), funding, 1))?
     let _ = failure_result_from_rep(pager.pager_reader_grant(requests, VALUE_LIMIT + history.MIB))?
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))

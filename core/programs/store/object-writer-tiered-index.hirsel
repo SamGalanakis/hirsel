@@ -1,30 +1,30 @@
-fn read_tiered_index_frame(mut input: pager.TieredPagerInput, owner: StoreId, request: pager.TieredIndexRequest) -> Result[Arc[Bytes], Error] waits {
-    let path = failure_result_from_rep(manifest.paged_pack_path(request.pack))?
+fn read_tiered_index_frame(mut input: pager.TieredPagerInput, owner: types.StoreKey, request: pager.TieredIndexRequest) -> Result[Arc[Bytes], types.Failure] waits {
+    let path = manifest.paged_pack_path(request.pack)?
     let pack = request.listed.inventory
     let at = request.offset
     if (pack.class != 3 && pack.class != 4) || at < pack.index || at >= pack.payload_bytes || pack.payload_bytes - at < 16 {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
+        return Error(format.disk_fault(path, at, Malformed))
     }
     let width = order.min(format.PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
     let (take raw, end) = match input {
         PagerLocal(d) => {
             let mut opened = match host.open(d, path, Read) {
                 Ok(take fd) => take fd,
-                Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, at, Absent))),
+                Error(NotFound) => return Error(format.disk_fault(path, at, Absent)),
                 Error(problem) => return Error(Io(problem)),
             }
-            let obtained = failure_result_from_rep(manifest.read_disk_bytes(mut opened, path, at, width))
-            failure_result_from_rep(manifest.disk_io(host.close(take opened)))?
+            let obtained = manifest.read_disk_bytes(mut opened, path, at, width)
+            manifest.disk_io(host.close(take opened))?
             let wire = obtained?
-            let end = failure_result_from_rep(pager.checked_tiered_index(path, store_key_to_rep(owner), request.pack, at, width, wire))?
+            let end = pager.checked_tiered_index(path, owner, request.pack, at, width, wire)?
             (take wire, end)
         },
         PagerObjects(mut client, op_ms, cache) => {
             let Some(item) = request.listed.object else {
-                return Error(failure_from_rep(format.disk_fault(path, at, Absent)))
+                return Error(format.disk_fault(path, at, Absent))
             }
             if item.seq != request.pack || item.len != pack.payload_bytes {
-                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
+                return Error(format.disk_fault(path, at, Malformed))
             }
             let deadline = if request.deadline == 0 {
                 std.object.deadline_after_ms(client, op_ms)
@@ -32,14 +32,14 @@ fn read_tiered_index_frame(mut input: pager.TieredPagerInput, owner: StoreId, re
                 request.deadline
             }
             let read = pager.TieredBucketGet(pack_ref: item, window: pager.TieredRange(lo: at, hi: at + width), deadline)
-            read_checked_bucket_window(mut client, cache, read, scoped fn(wire: Bytes) -> Result[u64, Error] {
-                failure_result_from_rep(pager.checked_tiered_index(path, store_key_to_rep(owner), request.pack, at, width, wire))
+            read_checked_bucket_window(mut client, cache, read, scoped fn(wire: Bytes) -> Result[u64, types.Failure] {
+                pager.checked_tiered_index(path, owner, request.pack, at, width, wire)
             })?
         },
     }
     let mut wire = take raw
     list.truncate(mut wire, end)
-    let mut pin_bytes_owner = disk_allocation(fn() -> Result[Arc[Bytes], Error] {
+    let mut pin_bytes_owner = manifest.disk_allocation(fn() -> Result[Arc[Bytes], types.Failure] {
         Ok(arc.new(list.new()))
     })?
     let installed = arc.with_unique(mut pin_bytes_owner, scoped fn(mut payload: Bytes) {

@@ -25,16 +25,6 @@ type FollowerServiceStart: send {
     ready: Sender[Result[FollowerOwner, Error]]
 }
 
-type FollowerNode {
-    entry: Box[FollowerEntry]
-}
-
-type FollowerEntry {
-    worker: Option[Task[()]],
-    retired: Receiver[()],
-    next: Option[FollowerNode]
-}
-
 type FollowerApplyStart: send {
     commands: Receiver[FollowerCommand],
     service: Sender[FollowerServiceMessage],
@@ -50,19 +40,15 @@ fn follower_provision_bytes() -> u64 {
 }
 
 fn follower_request_bytes() -> u64 {
-    option.unwrap(charge.boxed(bytes[FollowerRequest])) + option.unwrap(charge.channel(bytes[Result[FollowerResponse, Error]], 1))
+    option.unwrap(charge.boxed(bytes[object_writer.FollowerRequest])) + option.unwrap(charge.channel(bytes[Result[FollowerResponse, Error]], 1))
 }
 
 fn follower_control_bytes() -> u64 {
-    option.unwrap(charge.boxed(bytes[FollowerEntry])) + option.unwrap(charge.channel(bytes[FollowerCommand], 1)) + option.unwrap(charge.channel(bytes[()], 1))
+    option.unwrap(charge.boxed(bytes[object_writer.FollowerEntry])) + option.unwrap(charge.channel(bytes[FollowerCommand], 1)) + option.unwrap(charge.channel(bytes[()], 1))
 }
 
 fn follower_service_bytes() -> u64 {
     option.unwrap(charge.channel(bytes[FollowerServiceMessage], 1))
-}
-
-fn follower_task_bytes(grant: u64) -> u64 {
-    option.unwrap(charge.task(bytes[()], grant))
 }
 
 pub fn follower_service(tasks: Tasks, budget: u64) -> Result[FollowerService, Error] waits {
@@ -74,7 +60,7 @@ pub fn follower_service(tasks: Tasks, budget: u64) -> Result[FollowerService, Er
         Ok(take started) => take started,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
-    match follower_response(take answer) {
+    match failure_result_from_rep(object_writer.follower_response(take answer)) {
         Ok(Ok(take owner)) => Ok(FollowerService(owner: take owner, worker: take worker)),
         Ok(Error(take problem)) => Error(take problem),
         Error(take problem) => Error(take problem),
@@ -105,17 +91,7 @@ pub fn follower_slot(owner: FollowerOwner, p: FollowerPlan) -> Result[FollowerSl
     if let Error(_) = channel.send(owner.requests, Provision(take work)) {
         return Error(Retired)
     }
-    follower_response(take receive)?
-}
-
-fn follower_response[T: send](take answer: Receiver[T]) -> Result[T, Error] waits {
-    let Ok(take response) = channel.receive(answer) else {
-        return Error(Retired)
-    }
-    // A subsequent allocation at the requester must see the reply channel's
-    // refund even if the requester was resumed first.
-    let _ = channel.receive(answer)
-    Ok(take response)
+    failure_result_from_rep(object_writer.follower_response(take receive))?
 }
 
 fn follower_service_loop(take initial: FollowerServiceStart) waits {
@@ -134,9 +110,9 @@ fn follower_service_loop(take initial: FollowerServiceStart) waits {
         return
     }
     let _ = take ready
-    let mut registry: Option[FollowerNode] = None
+    let mut registry: Option[object_writer.FollowerNode] = None
     while let Ok(take command) = channel.receive(inbox) {
-        reap_followers(mut registry)
+        object_writer.reap_followers(mut registry)
         if let Provision(take requested) = take command {
             let FollowerProvision(plan, reply: take outlet) = box.unbox(take requested)
             let allocated = provision_follower(tasks, wake, plan, mut registry)
@@ -145,38 +121,11 @@ fn follower_service_loop(take initial: FollowerServiceStart) waits {
     }
 }
 
-fn reap_followers(mut registry: Option[FollowerNode]) waits {
-    loop {
-        let closed = match registry {
-            Some(active) => if let Error(Closed) = channel.try_receive(active.entry.retired) {
-                true
-            } else {
-                false
-            },
-            None => return,
-        }
-        if closed {
-            let mut node = option.unwrap(replace(mut registry, None))
-            registry = replace(mut node.entry.next, None)
-            if let Some(take worker) = replace(mut node.entry.worker, None) {
-                let mut stopping = take worker
-                task.cancel(mut stopping)
-                let _ = task.join(take stopping)
-            }
-        } else {
-            if let Some(mut current) = registry {
-                reap_followers(mut current.entry.next)
-            }
-            return
-        }
-    }
-}
-
-fn provision_follower(tasks: Tasks, wake: Sender[FollowerServiceMessage], plan: FollowerPlan, mut registry: Option[FollowerNode]) -> Result[FollowerSlot, Error] {
-    let admitted: Result[(FollowerSlot, Receiver[FollowerCommand], FollowerNode), Capacity] = bound bytes follower_control_bytes() {
+fn provision_follower(tasks: Tasks, wake: Sender[FollowerServiceMessage], plan: FollowerPlan, mut registry: Option[object_writer.FollowerNode]) -> Result[FollowerSlot, Error] {
+    let admitted: Result[(FollowerSlot, Receiver[FollowerCommand], object_writer.FollowerNode), Capacity] = bound bytes follower_control_bytes() {
         let (to, from): (Sender[FollowerCommand], Receiver[FollowerCommand]) = channel.new(1)
         let (retiring, retired): (Sender[()], Receiver[()]) = channel.new(1)
-        let node = FollowerNode(entry: box.new(FollowerEntry(worker: None, retired: take retired, next: None)))
+        let node = object_writer.FollowerNode(entry: box.new(object_writer.FollowerEntry(worker: None, retired: take retired, next: None)))
         (FollowerSlot(plan: clone(plan), commands: take to, retiring: take retiring), take from, take node)
     }
     let (take slot, take commands, take reserved) = failure_result_from_rep(types.capacity(take admitted))?

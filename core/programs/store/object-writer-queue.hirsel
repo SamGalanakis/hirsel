@@ -1,0 +1,40 @@
+pub type JournalMsg: send = Frame(Bytes, u64) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), types.Failure]], u64) | ObjectSkipFence(Sender[Result[(), types.Failure]]) | ObjectExportRead(journal.ObjectExportFetch) | StreamAnswer(journal.SlotAck) | ObjectClose(Sender[Result[(), types.Failure]])
+
+pub type ObjectAck: send = ObjectJournaled(u64, u64, u64) | ObjectBroken(types.Failure)
+
+type JournalIdleTimer: send {
+    clock: Clock,
+    requests: Receiver[()],
+    journal: Sender[JournalMsg],
+    interval_ns: u64
+}
+
+fn journal_idle_timer(take timer: JournalIdleTimer) waits {
+    while let Ok(()) = channel.receive(timer.requests) {
+        std.clock.sleep_ns(timer.clock, timer.interval_ns)
+        if let Error(_) = channel.send(timer.journal, IdleCheck) {
+            return
+        }
+    }
+}
+
+type JournalChannels {
+    frames: Sender[JournalMsg],
+    queued: Receiver[JournalMsg],
+    acks: Sender[ObjectAck],
+    received: Receiver[ObjectAck],
+    written_send: Sender[journal.WriteNotice],
+    written_receive: Receiver[journal.WriteNotice],
+    synced_send: Sender[()],
+    synced_receive: Receiver[()]
+}
+
+fn journal_channels(group_count: u64) -> JournalChannels {
+    let (frames, queued): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(group_count * 2)
+    // One ack per frame, for the queued and grouped frames, the handoff
+    // and byte-split frames, and a final failure (Y1).
+    let (acks, received): (Sender[ObjectAck], Receiver[ObjectAck]) = channel.new(group_count * 3 + 3)
+    let (written_send, written_receive): (Sender[journal.WriteNotice], Receiver[journal.WriteNotice]) = channel.new(2)
+    let (synced_send, synced_receive): (Sender[()], Receiver[()]) = channel.new(1)
+    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive)
+}

@@ -1,27 +1,9 @@
-type ObjectExportLease: send {
-    names: Map[String, ()],
-    lifetime: Receiver[()]
-}
-
 type ObjectExportCopy: send {
-    journal: Sender[JournalMsg],
+    journal: Sender[object_writer.JournalMsg],
     health: Latest[Health],
     manifest: pages.HistoryRef,
     packs: List[pages.HistoryRef],
     entries: List[pages.HistoryRef],
-}
-
-fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: pages.HistoryRef, take buffer: Bytes) -> Result[Bytes, Error] waits {
-    let mut raw = take buffer
-    let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    match failure_result_from_rep(history.history_range(mut lane.client, key, reference, 0, reference.len, mut raw, due)) {
-        Ok(()) => Ok(take raw),
-        Error(HistoryMissing(..)) => {
-            object_journal_fresh_probe(mut lane, due)?
-            Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
-        },
-        Error(take problem) => Error(take problem),
-    }
 }
 
 fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: pages.HistoryRef) -> Result[Bytes, Error] waits {
@@ -35,7 +17,7 @@ fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: pages.Hi
             return failure_result_from_rep(take observed)
         }
     }
-    health_result(latest.read(plan.health))?
+    failure_result_from_rep(object_writer.health_result(latest.read(plan.health)))?
     Error(Io(Closed))
 }
 
@@ -45,9 +27,9 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     // §12.11.11 M5: export/backup on an attached Place cuts when `sealed` is
     // non-empty (returning its refusal if refused), or settles keeping ATTACH
     // when `sealed` is empty so the holder keeps serving with ATTACH intact.
-    let (is_attached, has_sealed) = match disk_state(db).object {
-        Some(w) => (w.attached, w.has_sealed),
-        None => (false, false),
+    let (is_attached, has_sealed) = match disk_state(db).backend {
+        ObjectBackend(writer) => object_writer.attachment(writer),
+        DirBackend(_) => (false, false),
     }
     if is_attached && has_sealed {
         let cut_ticket = deploy_result(checkpoint(mut db))?
@@ -59,41 +41,41 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     let settle_err: Option[Error] = if is_attached && !has_sealed {
         let group_bytes: u64 = int.widen(disk_state(db).options.group_bytes)
         let group_commits: u64 = int.widen(disk_state(db).options.group_commits)
-        let last_seq = match view lane.stream {
+        let last_seq = match object_writer.paused_stream(lane) {
             Some(link) => host_stream.slot_last_batch(link),
             None => 0u64,
         }
-        let (take settled, take outcome) = stream_settle(take lane, last_seq, last_seq + 1, false, group_bytes, group_commits)
+        let (take settled, take outcome) = object_writer.settle_object_stream(take lane, last_seq, last_seq + 1, false, group_bytes, group_commits)
         lane = take settled
         match take outcome {
             Ok(SettleApplied) => {
-                let fseq = match history.register_attach(lane.register) {
+                let fseq = match object_writer.paused_attach(lane) {
                     Some(a) => match a.live {
                         Some(r) => r.from_seq,
                         None => 0u64,
                     },
                     None => 0u64,
                 }
-                object_journal_stream_trim_batches(mut lane, fseq)
-                if let Some(link) = view lane.stream {
-                    report = Some(host_stream.defer_slot_head(link, history.register_head(lane.register).store, history.register_attach(lane.register), last_seq))
+                object_writer.object_journal_stream_trim_batches(mut lane, fseq)
+                if let Some(link) = object_writer.paused_stream(lane) {
+                    report = Some(host_stream.defer_slot_head(link, object_writer.paused_head(lane).store, object_writer.paused_attach(lane), last_seq))
                 }
                 None
             },
             Ok(SettleFenced(moved_epoch, cutoff)) => {
-                if let Some(link) = view lane.stream {
-                    report = Some(host_stream.defer_slot_report(link, ReportFenced(host_stream.slot_number(link), history.register_head(lane.register).store, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff)))
+                if let Some(link) = object_writer.paused_stream(lane) {
+                    report = Some(host_stream.defer_slot_report(link, ReportFenced(host_stream.slot_number(link), object_writer.paused_head(lane).store, object_writer.paused_head(lane).pair.epoch, moved_epoch, cutoff)))
                 }
-                Some(Fenced(history.register_head(lane.register).pair.epoch))
+                Some(Fenced(object_writer.paused_head(lane).pair.epoch))
             },
             Ok(SettleNotApplied) => Some(Undecided),
-            Error(take problem) => Some(take problem),
+            Error(take problem) => Some(failure_from_rep(take problem)),
         }
     } else {
         None
     }
     if let Some(take problem) = take settle_err {
-        deploy_result(return_object_journal(take lane, resume))?
+        deploy_result(failure_result_from_rep(object_writer.return_object_journal(take lane, resume)))?
         if let Some(take completion) = take report {
             host_stream.deliver_slot_report(take completion)
         }
@@ -102,15 +84,15 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     let (lifetime, stop): (Sender[()], Receiver[()]) = channel.new(1)
     let captured: Result[ExportCopy, DeployError] = match object_export_capture(db, mut lane, take into, take attempt, activation, take stop) {
         Error(Store(HistoryMissing(take key, _))) => {
-            let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-            match object_journal_fresh_probe(mut lane, due) {
+            let due = object_writer.paused_deadline(lane)
+            match failure_result_from_rep(object_writer.object_journal_fresh_probe(mut lane, due)) {
                 Ok(()) => Error(Store(failure_from_rep(format.disk_fault(key, 0, Absent)))),
                 Error(take problem) => Error(Store(take problem)),
             }
         },
         other => take other,
     }
-    deploy_result(return_object_journal(take lane, resume))?
+    deploy_result(failure_result_from_rep(object_writer.return_object_journal(take lane, resume)))?
     if let Some(take completion) = take report {
         host_stream.deliver_slot_report(take completion)
     }
@@ -120,15 +102,15 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
         let (take sending, take lease) = take grant
         state.lease = Some(take lease)
         state.steps = list.new()
-        if let Some(mut object_writer) = state.object {
-            object_writer.export_lifetime = Some(take sending)
+        if let ObjectBackend(mut writer) = state.backend {
+            object_writer.set_export_lifetime(mut writer, Some(take sending))
         }
     })
     Ok(take job)
 }
 
-fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: ExportInto, take attempt: Bytes, wanted: Option[u64], take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
-    let head = history.register_head(lane.register)
+fn object_export_capture(db: Db, mut lane: object_writer.ObjectJournalSession, take into: ExportInto, take attempt: Bytes, wanted: Option[u64], take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
+    let head = object_writer.paused_head(lane)
     // A backup (no activation) takes the activation the head has.
     let activation = match wanted {
         Some(given) => given,
@@ -137,28 +119,28 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
     if activation != head.activation {
         return Error(Drift)
     }
-    let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    deploy_result(object_journal_fresh_probe(mut lane, due))?
-    let (take mark, _) = deploy_result(failure_result_from_rep(history.history_checkpoint(mut lane.client, head, due)))?
-    let suffix = deploy_result(failure_result_from_rep(history.history_suffix(mut lane.client, head, head.checkpoint, due)))?
+    let due = object_writer.paused_deadline(lane)
+    deploy_result(failure_result_from_rep(object_writer.object_journal_fresh_probe(mut lane, due)))?
+    let (take mark, _) = deploy_result(failure_result_from_rep(object_writer.read_checkpoint(mut lane, head, due)))?
+    let suffix = deploy_result(failure_result_from_rep(object_writer.read_export_suffix(mut lane, head, due)))?
     let (take packs, take history_entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[pages.HistoryRef], List[pages.HistoryRef], Map[String, ()]), Error] {
-        let locator = object_state(db).locator
+        let locator = object_writer.object_locator(object_state(db))
         let mut packs: List[pages.HistoryRef] = list.with_capacity(map.len(history.locator_rows(locator)))
         let mut history_entries: List[pages.HistoryRef] = list.with_capacity(list.len(suffix))
         let mut names: Map[String, ()] = map.new()
-        live_reclaim_name(mut names, "m-", mark.manifest)?
-        live_reclaim_name(mut names, "e-", head.checkpoint)?
+        failure_result_from_rep(object_writer.live_reclaim_name(mut names, "m-", mark.manifest))?
+        failure_result_from_rep(object_writer.live_reclaim_name(mut names, "e-", head.checkpoint))?
         for chunk in history.locator_chunks(locator) {
-            live_reclaim_name(mut names, "l-", chunk)?
+            failure_result_from_rep(object_writer.live_reclaim_name(mut names, "l-", chunk))?
         }
         for (_, item) in history.locator_rows(locator) {
             list.push(mut packs, item)
-            live_reclaim_name(mut names, "p-", item)?
+            failure_result_from_rep(object_writer.live_reclaim_name(mut names, "p-", item))?
         }
         for suffix_index in 0u64 .. list.len(suffix) {
             let item = history.history_length(suffix[suffix_index], head.checkpoint.seq + 1 + suffix_index)
             list.push(mut history_entries, item)
-            live_reclaim_name(mut names, "e-", item)?
+            failure_result_from_rep(object_writer.live_reclaim_name(mut names, "e-", item))?
         }
         Ok((take packs, take history_entries, take names))
     }))?
@@ -168,8 +150,7 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
         if item.len < 128 {
             return Error(Store(failure_from_rep(format.disk_fault(key, 112, Truncated))))
         }
-        deploy_result(failure_result_from_rep(history.history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, due)))?
-        let frame = deploy_result(failure_result_from_rep(manifest.disk_read_frame_head(key, lane.buffers.compare, 112)))?
+        let frame = deploy_result(failure_result_from_rep(object_writer.read_export_frame(mut lane, key, item, due)))?
         if frame.kind != 0x0040 {
             let Some(total) = int.checked_add(journal_end, item.len - 112) else {
                 return Error(Store(Limit(Value)))
@@ -177,11 +158,11 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
             journal_end = total
         }
     }
-    let source = ObjectExportCopy(journal: channel.sender(object_sender(disk_state(db))), health: latest.handle(object_state(db).health), manifest: mark.manifest, packs: take packs, entries: take history_entries)
+    let source = ObjectExportCopy(journal: channel.sender(object_sender(disk_state(db))), health: object_writer.health_handle(object_state(db)), manifest: mark.manifest, packs: take packs, entries: take history_entries)
     let retained = deploy_result(failure_result_from_rep(types.copied(attempt)))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation, terminal: head.checkpoint.seq, end: journal_end)
     let lease = arc.new(manifest.ExportLease(attempt: take retained, packs: list.new(), collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
-    lane.export_lease = Some(ObjectExportLease(names: take names, lifetime: take stop))
+    object_writer.hold_export(mut lane, take names, take stop)
     Ok(ExportCopy(source: ExportObject(take source), into: take into, stamp: take stamp, lease: take lease))
 }
 

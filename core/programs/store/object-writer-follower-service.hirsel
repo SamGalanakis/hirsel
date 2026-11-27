@@ -1,0 +1,50 @@
+pub type FollowerNode {
+    entry: Box[FollowerEntry]
+}
+
+pub type FollowerEntry {
+    worker: Option[Task[()]],
+    retired: Receiver[()],
+    next: Option[FollowerNode]
+}
+
+pub fn follower_task_bytes(grant: u64) -> u64 {
+    option.unwrap(charge.task(bytes[()], grant))
+}
+
+pub fn follower_response[T: send](take answer: Receiver[T]) -> Result[T, types.Failure] waits {
+    let Ok(take response) = channel.receive(answer) else {
+        return Error(Retired)
+    }
+    // A subsequent allocation at the requester must see the reply channel's
+    // refund even if the requester was resumed first.
+    let _ = channel.receive(answer)
+    Ok(take response)
+}
+
+pub fn reap_followers(mut registry: Option[FollowerNode]) waits {
+    loop {
+        let closed = match registry {
+            Some(active) => if let Error(Closed) = channel.try_receive(active.entry.retired) {
+                true
+            } else {
+                false
+            },
+            None => return,
+        }
+        if closed {
+            let mut node = option.unwrap(replace(mut registry, None))
+            registry = replace(mut node.entry.next, None)
+            if let Some(take worker) = replace(mut node.entry.worker, None) {
+                let mut stopping = take worker
+                task.cancel(mut stopping)
+                let _ = task.join(take stopping)
+            }
+        } else {
+            if let Some(mut current) = registry {
+                reap_followers(mut current.entry.next)
+            }
+            return
+        }
+    }
+}

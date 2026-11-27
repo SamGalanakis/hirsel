@@ -72,7 +72,7 @@ fn retry_tiered_read_with[R](take backend: pager.TieredPageBackend, packs: std.o
                     SeekUpper => option.unwrap(upper),
                     SeekOperation => view key,
                 }
-                serve_tiered_miss_with(backend, packs, next_stamp, deadline, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending)?
+                failure_result_from_rep(object_writer.serve_tiered_miss_with(backend, packs, next_stamp, deadline, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending))?
             },
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
@@ -83,25 +83,4 @@ fn retry_tiered_read_with[R](take backend: pager.TieredPageBackend, packs: std.o
             },
         }
     }
-}
-
-// Delivers a latched miss's batch into the pin map, in the order the batch
-// names it. A target whose delivery failed once fails the read or call when
-// an attempt demands it again.
-fn serve_tiered_miss(source: pager.TieredPageSource, root: pager.TieredPinRoot, state: pager.TieredTouchSet, sought: Bytes, direction: pager.TieredDirection, take grant: Option[Arc[pager.TieredReaderGrant]], mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), Error] waits {
-    serve_tiered_miss_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root, state, sought, direction, take grant, mut pins, mut pending)
-}
-
-fn serve_tiered_miss_with(backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root: pager.TieredPinRoot, state: pager.TieredTouchSet, sought: Bytes, direction: pager.TieredDirection, take grant: Option[Arc[pager.TieredReaderGrant]], mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), Error] waits {
-    let demand = failure_result_from_rep(pager.tiered_miss_demand_raw(packs, next_stamp, deadline, state, sought, direction, take grant, mut pending))?
-    let delivered = match backend {
-        PagerTask(requests) => failure_result_from_rep(pager.tiered_point_delivery(requests, take demand))?,
-        PagerDirect(d, owner) => {
-            let mut input: pager.TieredPagerInput = PagerLocal(d)
-            let mut local_cache = pager.new_tiered_cache(0)
-            tiered_pager_point(mut input, mut local_cache, store_key_from_rep(owner), demand)?
-        },
-    }
-    let _ = failure_result_from_rep(pager.tiered_install_delivery(take delivered, root, state.stamps, mut pins, mut pending))?
-    Ok(())
 }

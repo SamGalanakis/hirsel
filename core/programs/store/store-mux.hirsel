@@ -144,7 +144,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
                     let SeekKey(sought) = view state.seek else {
                         fail("store: a call's miss has no seek key")
                     }
-                    serve_before(serve_tiered_miss(source, root, state, sought, TieredPoint, None, mut call.pins, mut call.pending))?
+                    serve_before(failure_result_from_rep(object_writer.serve_tiered_miss(source, root, state, sought, TieredPoint, None, mut call.pins, mut call.pending)))?
                     continue
                 }
                 let demand = {

@@ -15,7 +15,7 @@ fn l63_call_fixture(d: Dir, c: Clock, tasks: Tasks, call: scoped[view] fn(mut Db
     l62_prepare_snapshot_pages(mut db, fixtures, rows.id, 8)?
     let _ = pager.replace_writer_pin_bytes(mut db.pager, 1048576)
     let funding = pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: pager.pin_partition(db.pager), pager_task_bytes: 1048576, cut_pins: false)
-    let link = start_tiered_pager_link(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    let link = failure_result_from_rep(object_writer.start_tiered_pager_link(tasks, store_key_to_rep(db.store), open_number(db), PagerDirectory(fixtures), funding, 4))?
     let worker = attach_tiered_pager(mut db, take link)
     let answer = call(mut db, (rows, marks))
     clear_parked(mut db)

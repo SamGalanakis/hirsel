@@ -513,12 +513,12 @@ fn bucket_m2_law_retained() -> Result[(), Error] {
     let mut earlier: List[pages.HistoryRef] = list.with_capacity(1)
     list.push(mut earlier, ten)
     let before = history.HistoryMark(manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
-    let cut = history_retain(before, twenty, 24, 1)?
+    let cut = failure_result_from_rep(object_writer.history_retain(before, twenty, 24, 1))?
     if cut.floor != 24 || list.len(cut.earlier) != 0 {
         fail("retain 1 kept an older checkpoint")
     }
     let short = history.HistoryMark(manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
-    let widened = history_retain(short, twenty_four, 28, 3)?
+    let widened = failure_result_from_rep(object_writer.history_retain(short, twenty_four, 28, 3))?
     if widened.floor != 24 || list.len(widened.earlier) != 1 || widened.earlier[0].seq != 24 {
         fail("raising retain revived a checkpoint")
     }
@@ -539,11 +539,11 @@ fn bucket_test_m2_reclaim_candidates() -> Result[(), Error] {
     map.insert(mut live_bytes, string.from("p-00000000000000000002-00000000000000000001-0000000000000002"), ())
     let mut leased: Map[String, ()] = map.new()
     map.insert(mut leased, string.from("e-00000000000000000009-00000000000000000001-0000000000000009"), ())
-    let pass = ReclaimPass(epoch: 2, recovered_checkpoint: 20, position: 24, checkpoint: 24, floor: 10, generation: 4, next_pack: 100, chain: take chain, live: take live_bytes, leased: take leased)
-    if history_dead_key(pass, "e-00000000000000000015-00000000000000000001-000000000000ffff") || history_dead_key(pass, "e-00000000000000000021-00000000000000000001-0000000000000015") || history_dead_key(pass, "e-00000000000000000025-00000000000000000002-000000000000ffff") || history_dead_key(pass, "e-00000000000000000009-00000000000000000001-0000000000000009") || history_dead_key(pass, "p-00000000000000000002-00000000000000000001-0000000000000002") || history_dead_key(pass, "p-00000000000000000003-00000000000000000003-0000000000000003") || history_dead_key(pass, "p-00000000000000000100-00000000000000000002-0000000000000003") || history_dead_upload(pass, "p-00000000000000000099-00000000000000000002-0000000000000003") {
+    let pass = object_writer.ReclaimPass(epoch: 2, recovered_checkpoint: 20, position: 24, checkpoint: 24, floor: 10, generation: 4, next_pack: 100, chain: take chain, live: take live_bytes, leased: take leased)
+    if object_writer.history_dead_key(pass, "e-00000000000000000015-00000000000000000001-000000000000ffff") || object_writer.history_dead_key(pass, "e-00000000000000000021-00000000000000000001-0000000000000015") || object_writer.history_dead_key(pass, "e-00000000000000000025-00000000000000000002-000000000000ffff") || object_writer.history_dead_key(pass, "e-00000000000000000009-00000000000000000001-0000000000000009") || object_writer.history_dead_key(pass, "p-00000000000000000002-00000000000000000001-0000000000000002") || object_writer.history_dead_key(pass, "p-00000000000000000003-00000000000000000003-0000000000000003") || object_writer.history_dead_key(pass, "p-00000000000000000100-00000000000000000002-0000000000000003") || object_writer.history_dead_upload(pass, "p-00000000000000000099-00000000000000000002-0000000000000003") {
         fail("the pass selected a live, leased or later name")
     }
-    if !history_dead_key(pass, "e-00000000000000000008-00000000000000000001-0000000000000008") || !history_dead_key(pass, "e-00000000000000000021-00000000000000000001-000000000000ffff") || !history_dead_key(pass, "p-00000000000000000099-00000000000000000002-0000000000000003") || !history_dead_upload(pass, "p-00000000000000000099-00000000000000000001-0000000000000003") {
+    if !object_writer.history_dead_key(pass, "e-00000000000000000008-00000000000000000001-0000000000000008") || !object_writer.history_dead_key(pass, "e-00000000000000000021-00000000000000000001-000000000000ffff") || !object_writer.history_dead_key(pass, "p-00000000000000000099-00000000000000000002-0000000000000003") || !object_writer.history_dead_upload(pass, "p-00000000000000000099-00000000000000000001-0000000000000003") {
         fail("the pass retained a name known to be dead")
     }
     Ok(())
@@ -653,7 +653,7 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
         fail("the object checkpoint did not reconstruct its row")
     }
-    teardown_validate_bucket_checkpoint(mut source.client, head, source.deadline)
+    failure_result_from_rep(object_writer.teardown_validate_bucket_checkpoint(mut source.client, head, source.deadline))
 }
 
 @test

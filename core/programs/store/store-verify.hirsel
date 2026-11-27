@@ -514,41 +514,39 @@ fn teardown_check_bucket(db: Db) -> Result[(), Error] waits {
     let Some(state) = view db.disk else {
         return Ok(())
     }
-    let Some(ow) = view state.object else {
+    let ObjectBackend(ow) = view state.backend else {
         return Ok(())
     }
-    if let Some(problem) = view ow.failed {
+    if let Some(problem) = object_writer.terminal_failure(ow) {
         return match problem {
-            Corrupt(fault) => Error(Corrupt(clone(fault))),
+            Corrupt(fault) => Error(Corrupt(fault_from_rep(clone(fault)))),
             Poisoned(e) => Error(Poisoned(e)),
             _ => Ok(()),
         }
     }
-    match health_result(latest.read(ow.health)) {
+    match failure_result_from_rep(object_writer.health_result(object_writer.health(ow))) {
         Ok(()) => (),
         Error(Corrupt(fault)) => return Error(Corrupt(fault)),
         Error(Poisoned(e)) => return Error(Poisoned(e)),
         Error(_) => return Ok(()),
     }
-    if let Some(_) = ow.stream {
+    if let Some(_) = object_writer.attached_stream(ow) {
         return Ok(())
     }
-    if ow.recovered.seq == 0 {
+    if object_writer.recovered_checkpoint(ow).seq == 0 {
         return Ok(())
     }
-    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (handover, paused): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
     if let Error(_) = channel.try_send(object_sender(state), ObjectPause(take handover, take resuming)) {
         return Ok(())
     }
     let Ok(take owned_io) = channel.receive(paused) else {
         return Ok(())
     }
-    let mut lane = object_journal_begin(take owned_io)
-    let head = history.register_head(lane.register)
-    let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    let checked = teardown_validate_bucket_checkpoint(mut lane.client, head, deadline)
-    let _ = return_object_journal(take lane, resume)
+    let mut lane = object_writer.object_journal_begin(take owned_io)
+    let checked = failure_result_from_rep(object_writer.check_paused_checkpoint(mut lane))
+    let _ = failure_result_from_rep(object_writer.return_object_journal(take lane, resume))
     match take checked {
         Ok(()) => Ok(()),
         Error(Corrupt(fault)) => Error(Corrupt(fault)),
@@ -556,18 +554,6 @@ fn teardown_check_bucket(db: Db) -> Result[(), Error] waits {
         // Ignore closed/fenced/remote transport errors if the sim stopped or faulted.
         Error(_) => Ok(()),
     }
-}
-
-fn teardown_validate_bucket_checkpoint(mut client: std.object.Client, head: history.HistoryHead, deadline: u64) -> Result[(), Error] waits {
-    if head.checkpoint.seq == 0 {
-        return Ok(())
-    }
-    let (take mark, take checkpoint_data) = failure_result_from_rep(history.history_checkpoint(mut client, head, deadline))?
-    let manifest = failure_result_from_rep(history.history_read_manifest(mut client, head.store, mark, head.checkpoint.seq, deadline))?
-    let locator = failure_result_from_rep(history.history_locator(mut client, head, mark, checkpoint_data, deadline))?
-    let name = failure_result_from_rep(history.history_read_key("m-", mark.manifest))?
-    let _ = validate_bucket_graph(mut client, locator, deadline, store_key_from_rep(head.store), name, take manifest, true, None)?
-    Ok(())
 }
 
 // Registered by the test launcher (`native_entry/start.rs`) only in `@test` builds.
@@ -592,15 +578,15 @@ fn verify_teardown(db: Db) waits {
                 Error(_) => (),
             }
         }
-        if let Some(ow) = view state.object {
-            if let Some(problem) = view ow.failed {
+        if let ObjectBackend(ow) = view state.backend {
+            if let Some(problem) = object_writer.terminal_failure(ow) {
                 match problem {
-                    Corrupt(fault) => teardown_fail_corrupt("bucket", clone(fault)),
+                    Corrupt(fault) => teardown_fail_corrupt("bucket", fault_from_rep(clone(fault))),
                     Poisoned(_) => fail("store trust teardown (bucket): Poisoned"),
                     _ => (),
                 }
             }
-            match health_result(latest.read(ow.health)) {
+            match failure_result_from_rep(object_writer.health_result(object_writer.health(ow))) {
                 Ok(()) => (),
                 Error(Corrupt(fault)) => teardown_fail_corrupt("bucket", fault),
                 Error(Poisoned(_)) => fail("store trust teardown (bucket): Poisoned"),

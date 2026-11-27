@@ -76,7 +76,7 @@ fn replay_law_capture(db: Db, d: Dir, c: Clock, floor: u64, wanted: u64) -> Resu
         replay_law_mismatch(tip, "journal coverage")
     }
     journal_law_await_end(db)?;
-    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
     let due = clock.deadline_after_ms(host.mono_ns(c), 1000)
     let Some(take replayed) = log_follow_capture(d, c, due, mut progress, Some(db.store), db.ceiling, None)? else {
         replay_law_mismatch(tip, "journal capture")

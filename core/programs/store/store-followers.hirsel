@@ -12,15 +12,6 @@ pub fn followers() -> Followers {
     Followers(issued: 0)
 }
 
-type FollowCapture: shareable + send {
-    store: StoreId,
-    state: Arc[pages.State],
-    resident: u64,
-    remote: Option[host_stream.ObjectFollowHead],
-    log_id: u64,
-    watermark: u64
-}
-
 pub opaque type Follower {
     open: u64,
     pager: Option[Sender[pager.TieredPagerMessage]],
@@ -29,26 +20,20 @@ pub opaque type Follower {
     on_log: bool,
     op_ms: u64,
     clock: Clock,
-    capture: Arc[FollowCapture],
+    capture: Arc[object_writer.FollowCapture],
     stopped: Option[StoreCapacity]
 }
 
-type FollowerTransport: send = DirectoryFollow(Dir, Clock) | ObjectFollow(std.object.Requests, u8, Option[String], Option[pager.ObjectsCache])
+type FollowerObservation: send = FollowerReached(Option[Arc[object_writer.FollowCapture]], Snapshot, Option[Position]) | FollowerWaiting(Option[Position])
 
-type FollowerRequest: send = Bind(FollowerTransport, Option[StoreId], u64) | Apply(Arc[FollowCapture], u64) | Floor(Arc[FollowCapture], u64, u64, u64) | Fresh(Arc[FollowCapture], u64, u64) | Await(Arc[FollowCapture], Position, u64, Option[u64])
-
-type FollowerObservation: send = FollowerReached(Option[Arc[FollowCapture]], Snapshot, Option[Position]) | FollowerWaiting(Option[Position])
-
-type FollowerResponse: send = Captured(Option[Arc[FollowCapture]]) | Historical(Option[Snapshot]) | Observed(FollowerObservation)
+type FollowerResponse: send = Captured(Option[Arc[object_writer.FollowCapture]]) | Historical(Option[Snapshot]) | Observed(FollowerObservation)
 
 type FollowerCommand: send {
-    request: Box[FollowerRequest],
+    request: Box[object_writer.FollowerRequest],
     reply: Sender[Result[FollowerResponse, Error]]
 }
 
-type FollowerSource = DirectorySource(Dir, Clock) | ObjectSource(history.ObjectPackRead)
-
-fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result[FollowerResponse, Error] waits {
+fn request_follower(slot: FollowerSlot, take request: object_writer.FollowerRequest) -> Result[FollowerResponse, Error] waits {
     let (take command, take answer) = failure_result_from_rep(types.capacity(bound bytes follower_request_bytes() {
         let (outlet, inbox): (Sender[Result[FollowerResponse, Error]], Receiver[Result[FollowerResponse, Error]]) = channel.new(1)
         (FollowerCommand(request: box.new(take request), reply: take outlet), take inbox)
@@ -56,68 +41,10 @@ fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result
     if let Error(_) = channel.send(slot.commands, take command) {
         return Error(Retired)
     }
-    follower_response(take answer)?
+    failure_result_from_rep(object_writer.follower_response(take answer))?
 }
 
-fn follow_capture(id: StoreId, take state: pages.State, resident: u64, take remote: Option[host_stream.ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
-    let shared = failure_result_from_rep(types.capacity(bound bytes option.unwrap(charge.counted(bytes[pages.State])) {
-        arc.new(take state)
-    }))?
-    let mut held = take remote
-    failure_result_from_rep(types.capacity(bound bytes (option.unwrap(charge.counted(bytes[FollowCapture])) + 64) {
-        arc.new(FollowCapture(store: id, state: arc.share(shared), resident, remote: replace(mut held, None), log_id, watermark))
-    }))
-}
-
-type LogCaptureKey {
-    manifest: Inline[u8, 32],
-    first: u64,
-    count: u64,
-    end_image: Option[Bytes],
-    torn_tail: bool
-}
-
-type LogCaptureAttempt {
-    key: LogCaptureKey,
-    capture_id: u64
-}
-
-type LogCaptureProgress {
-    next_id: u64,
-    last: Option[LogCaptureAttempt]
-}
-
-fn same_capture_key(a: LogCaptureKey, b: LogCaptureKey) -> bool {
-    a.manifest == b.manifest && a.first == b.first && a.count == b.count && a.end_image == b.end_image && a.torn_tail == b.torn_tail
-}
-
-fn behind_branch(candidate: pages.State, published: pages.State) -> Option[u32] {
-    let mut behind: Option[u32] = if candidate.next_branch < published.next_branch {
-        Some(candidate.next_branch)
-    } else {
-        None
-    }
-    for old in published.tips {
-        let mut regressed = old.id >= candidate.next_branch
-        for current in candidate.tips {
-            if current.id == old.id && current.head < old.head {
-                regressed = true
-                break
-            }
-        }
-        if regressed {
-            let id = old.id
-            if let Some(earlier) = behind {
-                behind = Some(order.min(earlier, id))
-            } else {
-                behind = Some(id)
-            }
-        }
-    }
-    behind
-}
-
-fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureProgress, expected: Option[StoreId], ceiling: u64, previous: Option[Arc[FollowCapture]]) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: object_writer.LogCaptureProgress, expected: Option[StoreId], ceiling: u64, previous: Option[Arc[object_writer.FollowCapture]]) -> Result[Option[Arc[object_writer.FollowCapture]], Error] waits {
     let mut restarted = false
     loop {
         if host.mono_ns(c) >= deadline {
@@ -134,14 +61,14 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
         let mut walk = take selected
         failure_result_from_rep(journal.capture_fence(d, c, deadline, mut walk))?
         let image = replace(mut walk.end_image, None)
-        let key = LogCaptureKey(manifest: std.sha256.hash(raw), first: page_record.first_live, count: list.len(walk.segments), end_image: take image, torn_tail: walk.torn_tail)
+        let key = object_writer.LogCaptureKey(manifest: std.sha256.hash(raw), first: page_record.first_live, count: list.len(walk.segments), end_image: take image, torn_tail: walk.torn_tail)
         let old_charge = if let Some(old) = previous {
             if let Some(attempt) = progress.last {
                 // A cancelled or timed-out caller may still name the capture
                 // before the last attempt. Only reuse against its actual base.
-                if attempt.capture_id == old.log_id && same_capture_key(attempt.key, key) {
+                if attempt.capture_id == old.log_id && object_writer.same_capture_key(attempt.key, key) {
                     let _ = validate_page_manifest(d, id, take page_record)?
-                    check_read_only_manifest(d, raw)?
+                    failure_result_from_rep(object_writer.check_read_only_manifest(d, raw))?
                     return Ok(None)
                 }
             }
@@ -159,13 +86,13 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
         let replay = capture_scan(id, take walk, take initial)?
         let resident = failure_result_from_rep(journal.journal_account(replay))?
         failure_result_from_rep(catalog.over_ceiling(int.saturating_add(old_charge, resident), ceiling))?
-        check_read_only_manifest(d, raw)?
+        failure_result_from_rep(object_writer.check_read_only_manifest(d, raw))?
         if let Some(old) = previous {
-            if let Some(regressed_id) = behind_branch(replay.state, old.state) {
+            if let Some(regressed_id) = object_writer.behind_branch(replay.state, old.state) {
                 if torn_tail {
                     return Error(Diverged(regressed_id))
                 }
-                progress.last = Some(LogCaptureAttempt(key: take key, capture_id: old.log_id))
+                progress.last = Some(object_writer.LogCaptureAttempt(key: take key, capture_id: old.log_id))
                 return Ok(None)
             }
         }
@@ -174,18 +101,18 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
             return Error(Limit(Ids))
         }
         let pager.JournalReplay(state: take state, next_node: last_stamp, ..) = take replay
-        let capture = follow_capture(id, take state, resident, None, serial, failure_result_from_rep(catalog.stamp_after(last_stamp))?)?
+        let capture = failure_result_from_rep(object_writer.follow_capture(store_key_to_rep(id), take state, resident, None, serial, failure_result_from_rep(catalog.stamp_after(last_stamp))?))?
         progress.next_id = next_serial
-        progress.last = Some(LogCaptureAttempt(key: take key, capture_id: serial))
+        progress.last = Some(object_writer.LogCaptureAttempt(key: take key, capture_id: serial))
         return Ok(Some(take capture))
     }
 }
 
-fn initial_follow_capture(mut source: FollowerSource, mut progress: LogCaptureProgress, expect: Option[StoreId], ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn initial_follow_capture(mut source: object_writer.FollowerSource, mut progress: object_writer.LogCaptureProgress, expect: Option[StoreId], ceiling: u64) -> Result[Option[Arc[object_writer.FollowCapture]], Error] waits {
     match source {
         DirectorySource(directory, c) => log_follow_capture(directory, c, 18446744073709551615u64, mut progress, expect, ceiling, None),
         ObjectSource(mut remote) => {
-            history_check_follower_path(remote.client)?;
+            failure_result_from_rep(object_writer.history_check_follower_path(remote.client))?;
             let initial = object_follow_capture(mut remote, None, expect, ceiling, false)
             remote.locator = history.empty_history_locator()
             take initial
@@ -193,8 +120,8 @@ fn initial_follow_capture(mut source: FollowerSource, mut progress: LogCapturePr
     }
 }
 
-fn advancing_follow_capture(mut source: FollowerSource, mut progress: LogCaptureProgress, take previous: Arc[FollowCapture], ceiling: u64, deadline: u64, require_fresh: bool) -> Result[Option[Arc[FollowCapture]], Error] waits {
-    let expected = Some(previous.store)
+fn advancing_follow_capture(mut source: object_writer.FollowerSource, mut progress: object_writer.LogCaptureProgress, take previous: Arc[object_writer.FollowCapture], ceiling: u64, deadline: u64, require_fresh: bool) -> Result[Option[Arc[object_writer.FollowCapture]], Error] waits {
+    let expected = Some(store_key_from_rep(previous.store))
     match source {
         DirectorySource(directory, c) => log_follow_capture(directory, c, deadline, mut progress, expected, ceiling, Some(take previous)),
         ObjectSource(mut remote) => {
@@ -203,7 +130,7 @@ fn advancing_follow_capture(mut source: FollowerSource, mut progress: LogCapture
             remote.locator = history.empty_history_locator()
             let selected = applied_state?
             if let Some(candidate) = selected {
-                if let Some(regressed_id) = behind_branch(candidate.state, previous.state) {
+                if let Some(regressed_id) = object_writer.behind_branch(candidate.state, previous.state) {
                     return Error(Diverged(regressed_id))
                 }
             }
@@ -212,13 +139,13 @@ fn advancing_follow_capture(mut source: FollowerSource, mut progress: LogCapture
     }
 }
 
-fn floor_follow_capture(mut source: FollowerSource, previous: FollowCapture, ceiling: u64, at_most: u64, deadline: u64, opened: u64) -> Result[Option[Snapshot], Error] waits {
+fn floor_follow_capture(mut source: object_writer.FollowerSource, previous: object_writer.FollowCapture, ceiling: u64, at_most: u64, deadline: u64, opened: u64) -> Result[Option[Snapshot], Error] waits {
     let room = ceiling - previous.resident
     let result = match source {
-        DirectorySource(directory, _) => log_floor(directory, previous.store, room, at_most),
+        DirectorySource(directory, _) => log_floor(directory, store_key_from_rep(previous.store), room, at_most),
         ObjectSource(mut remote) => {
             remote.deadline = deadline
-            let historical = object_follow_floor(mut remote, Some(previous.store), room, at_most)
+            let historical = failure_result_from_rep(object_writer.object_follow_floor(mut remote, Some(previous.store), room, at_most))
             remote.locator = history.empty_history_locator()
             take historical
         },
@@ -234,12 +161,12 @@ fn floor_follow_capture(mut source: FollowerSource, previous: FollowCapture, cei
     Ok(Some(follower_snapshot(capture, tip, opened)))
 }
 
-fn follower_step(mut source: FollowerSource, mut progress: LogCaptureProgress, ceiling: u64, take request: FollowerRequest) -> Result[FollowerResponse, Error] waits {
+fn follower_step(mut source: object_writer.FollowerSource, mut progress: object_writer.LogCaptureProgress, ceiling: u64, take request: object_writer.FollowerRequest) -> Result[FollowerResponse, Error] waits {
     match take request {
         Apply(take previous, deadline) => Ok(Captured(advancing_follow_capture(mut source, mut progress, take previous, ceiling, deadline, false)?)),
         Floor(previous, at_most, deadline, opened) => Ok(Historical(floor_follow_capture(mut source, previous, ceiling, at_most, deadline, opened)?)),
         Fresh(take previous, deadline, opened) => Ok(Observed(follower_prepare_fresh(mut source, mut progress, take previous, ceiling, deadline, opened)?)),
-        Await(take previous, wanted, opened, probe) => Ok(Observed(follower_observe(mut source, mut progress, take previous, ceiling, wanted, opened, probe)?)),
+        Await(take previous, wanted, opened, probe) => Ok(Observed(follower_observe(mut source, mut progress, take previous, ceiling, position_from_rep(wanted), opened, probe)?)),
         Bind(..) => Error(Held),
     }
 }
@@ -252,7 +179,7 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
     let Bind(take transport, expect, due) = box.unbox(take request) else {
         return
     }
-    let mut source = match take transport {
+    let mut source: object_writer.FollowerSource = match take transport {
         DirectoryFollow(directory, c) => DirectorySource(directory, c),
         ObjectFollow(take requests, kind, take stream_root, cache) => {
             let mut remote = history.history_reader(std.object.attach(take requests, None), due)
@@ -262,8 +189,12 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
             ObjectSource(take remote)
         },
     }
-    let mut progress = LogCaptureProgress(next_id: 1, last: None)
-    let initial = initial_follow_capture(mut source, mut progress, expect, ceiling)
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
+    let expected = match expect {
+        Some(id) => Some(store_key_from_rep(id)),
+        None => None,
+    }
+    let initial = initial_follow_capture(mut source, mut progress, expected, ceiling)
     let admitted = if let Ok(Some(_)) = initial {
         true
     } else {
@@ -290,14 +221,14 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
 }
 
 pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: Authority, c: Clock, expect: Option[StoreId]) -> Result[Follower, Error] waits {
-    let (take transport, take workers, on_log, op_ms, due): (FollowerTransport, Option[std.object.Workers], bool, u64, u64) = match (slot.plan.kind, take authority) {
+    let (take transport, take workers, on_log, op_ms, due): (object_writer.FollowerTransport, Option[std.object.Workers], bool, u64, u64) = match (slot.plan.kind, take authority) {
         (Directory, LogAuthority(directory)) => (DirectoryFollow(directory, c), None, true, 0u64, 0u64),
         (Bucket(lanes), ObjectAuthority(take config)) => object_follow_transport(take config, lanes, 1)?,
         (Bucket(lanes), SimAuthority(take config)) => object_follow_transport(take config, lanes, 2)?,
         _ => return Error(Missing("follower_kind")),
     }
     let minted = failure_result_from_rep(history.history_next_id(source.issued))?
-    let recovered = request_follower(slot, Bind(take transport, expect, due))?
+    let recovered = request_follower(slot, Bind(take transport, optional_store_key_to_rep(expect), due))?
     let Captured(Some(take captured)) = take recovered else {
         return Error(NotFound)
     }
@@ -306,7 +237,7 @@ pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: 
     Ok(Follower(open: history.HISTORY_OPEN_LIMIT | minted, pager: None, slot: take slot, workers: take workers, on_log, op_ms, clock: c, capture: take captured, stopped: None))
 }
 
-fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object.LaneConfig, kind: u8) -> Result[(FollowerTransport, Option[std.object.Workers], bool, u64, u64), Error] {
+fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object.LaneConfig, kind: u8) -> Result[(object_writer.FollowerTransport, Option[std.object.Workers], bool, u64, u64), Error] {
     let ObjectAuthorityConfig(client: take client, op_ms, stream_root: take stream_root, cache, ..) = take config
     if kind == 2 && !std.object.simulated(client) {
         return Error(Endpoint(NotSimulator))
@@ -322,13 +253,13 @@ fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {
     for tip in f.capture.state.tips {
         if tip.name == name {
-            return Some(Branch(store: f.capture.store, id: tip.id))
+            return Some(Branch(store: store_key_from_rep(f.capture.store), id: tip.id))
         }
     }
     None
 }
 
-fn capture_tip(captured: FollowCapture, b: Branch) -> Result[View[pages.Tip], Error] in captured {
+fn capture_tip(captured: object_writer.FollowCapture, b: Branch) -> Result[View[pages.Tip], Error] in captured {
     if !types.same(captured.store.hi, captured.store.lo, b.store.hi, b.store.lo) {
         return Error(Foreign)
     }
@@ -349,8 +280,8 @@ fn follower_tip(f: Follower, b: Branch) -> Result[View[pages.Tip], Error] in f {
     capture_tip(f.capture, b)
 }
 
-fn follower_snapshot(captured: FollowCapture, tip: pages.Tip, opened: u64) -> Snapshot {
-    Snapshot(store: captured.store, open: opened, branch: tip.id, head: tip.head, roots: pages.share_roots(tip.roots), watermark: captured.watermark, bases: pages.tail_bases(captured.state.pins))
+fn follower_snapshot(captured: object_writer.FollowCapture, tip: pages.Tip, opened: u64) -> Snapshot {
+    Snapshot(store: store_key_from_rep(captured.store), open: opened, branch: tip.id, head: tip.head, roots: pages.share_roots(tip.roots), watermark: captured.watermark, bases: pages.tail_bases(captured.state.pins))
 }
 
 pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error] {
@@ -364,7 +295,7 @@ pub fn applied(f: Follower, b: Branch) -> Result[Position, Error] {
 }
 
 fn follower_main(f: Follower) -> Branch {
-    Branch(store: f.capture.store, id: 0)
+    Branch(store: store_key_from_rep(f.capture.store), id: 0)
 }
 
 pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] waits {
@@ -406,7 +337,7 @@ pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] wa
     Ok(advanced)
 }
 
-fn follower_prepare_fresh(mut source: FollowerSource, mut progress: LogCaptureProgress, take previous: Arc[FollowCapture], ceiling: u64, deadline: u64, opened: u64) -> Result[FollowerObservation, Error] waits {
+fn follower_prepare_fresh(mut source: object_writer.FollowerSource, mut progress: object_writer.LogCaptureProgress, take previous: Arc[object_writer.FollowCapture], ceiling: u64, deadline: u64, opened: u64) -> Result[FollowerObservation, Error] waits {
     let update = advancing_follow_capture(mut source, mut progress, arc.share(previous), ceiling, deadline, true)?
     if let Some(take advanced) = take update {
         let ready = follower_snapshot(advanced, advanced.state.tips[0], opened)
@@ -450,7 +381,7 @@ pub fn fresh(mut f: Follower, deadline_ns: u64) -> Result[Snapshot, Error] waits
     }
 }
 
-fn follower_observe(mut source: FollowerSource, mut progress: LogCaptureProgress, take previous: Arc[FollowCapture], ceiling: u64, wanted: Position, opened: u64, probe: Option[u64]) -> Result[FollowerObservation, Error] waits {
+fn follower_observe(mut source: object_writer.FollowerSource, mut progress: object_writer.LogCaptureProgress, take previous: Arc[object_writer.FollowCapture], ceiling: u64, wanted: Position, opened: u64, probe: Option[u64]) -> Result[FollowerObservation, Error] waits {
     let b = Branch(store: wanted.store, id: wanted.branch)
     let published: Option[Position] = match capture_tip(previous, b) {
         Ok(tip) if tip.head >= wanted.version => {
@@ -506,7 +437,7 @@ pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapsh
         } else {
             Some(order.min(deadline_ns, clock.deadline_after_ms(now, f.op_ms)))
         }
-        let response = request_follower(f.slot, Await(arc.share(f.capture), p, f.open, due))
+        let response = request_follower(f.slot, Await(arc.share(f.capture), position_to_rep(p), f.open, due))
         let observed = match take response {
             Ok(Observed(take status)) => take status,
             Ok(_) => fail("follower wait returned the wrong response"),
@@ -555,7 +486,7 @@ fn read_only_checkpoint(d: Dir, id: StoreId, take page_record: manifest.PageMani
     failure_result_from_rep(pager.journal_replay_manifest(take state, selected))
 }
 
-fn log_floor(directory: Dir, store_id: StoreId, ceiling: u64, at_most: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn log_floor(directory: Dir, store_id: StoreId, ceiling: u64, at_most: u64) -> Result[Option[Arc[object_writer.FollowCapture]], Error] waits {
     let (take raw, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(directory))?
     let id = store_key_from_rep(store)
     failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(store_id)), store_key_to_rep(id)))?
@@ -565,9 +496,9 @@ fn log_floor(directory: Dir, store_id: StoreId, ceiling: u64, at_most: u64) -> R
     let recovered = read_only_checkpoint(directory, id, take page_record)?
     let resident = failure_result_from_rep(journal.journal_account(recovered))?
     failure_result_from_rep(catalog.over_ceiling(resident, ceiling))?
-    check_read_only_manifest(directory, raw)?
+    failure_result_from_rep(object_writer.check_read_only_manifest(directory, raw))?
     let pager.JournalReplay(state: take state, next_node, ..) = take recovered
-    Ok(Some(follow_capture(id, take state, resident, None, 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
+    Ok(Some(failure_result_from_rep(object_writer.follow_capture(store_key_to_rep(id), take state, resident, None, 0, failure_result_from_rep(catalog.stamp_after(next_node))?))?))
 }
 
 pub fn follower_floor(mut f: Follower, at_most: u64) -> Result[Option[Snapshot], Error] waits {

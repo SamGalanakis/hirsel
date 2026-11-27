@@ -1,0 +1,114 @@
+pub type LevelProgress: shareable + send {
+    epoch: u64,
+    position: u64,
+    seq: u64
+}
+
+pub type WeakFrontiers: shareable + send {
+    seqs: Inline[u64, 15]
+}
+
+pub type WeakNotice: send = WeakSynced(u64, u64) | StrongChanged
+
+pub type WeakWaiters {
+    frontiers: Latest[WeakFrontiers],
+    notices: List[Receiver[WeakNotice]]
+}
+
+pub type WeakWriterOpen {
+    publisher: WeakPublisher,
+    waiters: WeakWaiters
+}
+
+pub type WeakPublisher: send {
+    commands: Sender[LevelCommand],
+    progress: Latest[LevelProgress],
+    lifetime: Sender[()],
+    notices: List[Sender[WeakNotice]]
+}
+
+pub type LevelOpen: send {
+    names: List[String],
+    progress: Latest[LevelProgress],
+    requested: u64,
+    synced: Inline[u64, 15],
+    frontiers: Latest[WeakFrontiers],
+    notices: List[Sender[WeakNotice]],
+    lifetime: Receiver[()]
+}
+
+pub type LevelCommand: send = WakeLevels | RegisterLevels(LevelOpen) | MarkLevel(u64, Sender[()]) | EndLevels
+
+pub type LevelTimer: send {
+    at: u64,
+    clock: Clock,
+    outlet: Sender[LevelCommand]
+}
+
+pub fn wake_level_at(take timer: LevelTimer) waits {
+    host.sleep_until(timer.clock, timer.at)
+    let _ = channel.send(timer.outlet, WakeLevels)
+}
+
+pub fn weak_publisher(commands: Sender[LevelCommand], names: List[String]) -> Result[WeakWriterOpen, types.Failure] waits {
+    let (take publisher, take waiters, take registration) = types.capacity(bound bytes sim_level_bytes(names) {
+        let progress = latest.new(arc.new(LevelProgress(epoch: 0, position: 0, seq: 0)))
+        let frontiers = latest.new(arc.new(WeakFrontiers(seqs:[0; 15])))
+        let (lifetime, end): (Sender[()], Receiver[()]) = channel.new(1)
+        let n = list.len(names)
+        let mut journal_notices: List[Sender[WeakNotice]] = list.with_capacity(n)
+        let mut world_notices: List[Sender[WeakNotice]] = list.with_capacity(n)
+        let mut caller_notices: List[Receiver[WeakNotice]] = list.with_capacity(n)
+        for _ in 0u64 .. n {
+            let (outlet, inbound): (Sender[WeakNotice], Receiver[WeakNotice]) = channel.new(1)
+            list.push(mut journal_notices, channel.sender(outlet))
+            list.push(mut world_notices, take outlet)
+            list.push(mut caller_notices, take inbound)
+        }
+        let registration = LevelOpen(names: clone(names), progress: latest.handle(progress), requested: 0, synced:[0; 15], frontiers: latest.handle(frontiers), notices: take world_notices, lifetime: take end)
+        let publisher = WeakPublisher(commands: channel.sender(commands), progress: take progress, lifetime: take lifetime, notices: take journal_notices)
+        let waiters = WeakWaiters(frontiers: take frontiers, notices: take caller_notices)
+        (take publisher, take waiters, take registration)
+    })?
+    channel.send(commands, RegisterLevels(take registration)) ?=> |_| Io(Closed)
+    Ok(WeakWriterOpen(publisher: take publisher, waiters: take waiters))
+}
+
+fn weak_notice_senders(weak: Option[WeakPublisher]) -> List[Sender[WeakNotice]] {
+    let Some(publisher) = view weak else {
+        return list.new()
+    }
+    let mut notices: List[Sender[WeakNotice]] = list.with_capacity(list.len(publisher.notices))
+    for outlet in publisher.notices {
+        list.push(mut notices, channel.sender(outlet))
+    }
+    take notices
+}
+
+fn weak_notify_strong(notices: List[Sender[WeakNotice]]) {
+    for outlet in notices {
+        let _ = channel.try_send(outlet, StrongChanged)
+    }
+}
+
+fn weak_publish(p: WeakPublisher, head: history.HistoryHead, created: u64, seq: u64) {
+    latest.publish(p.progress, arc.new(LevelProgress(epoch: head.pair.epoch, position: created, seq)))
+    let _ = channel.try_send(p.commands, WakeLevels)
+}
+
+pub fn sim_level_bytes(names: List[String]) -> u64 {
+    let roots = 2 * option.unwrap(charge.latest())
+    let progress = option.unwrap(charge.counted(bytes[LevelProgress]))
+    let frontiers = option.unwrap(charge.counted(bytes[WeakFrontiers]))
+    let lifetime = option.unwrap(charge.channel(bytes[()], 1))
+    let n = list.len(names)
+    let notice = option.unwrap(charge.channel(bytes[WeakNotice], 1))
+    let senders = option.unwrap(charge.seq(bytes[Sender[WeakNotice]], n))
+    let receivers = option.unwrap(charge.seq(bytes[Receiver[WeakNotice]], n))
+    let names_storage = option.unwrap(charge.seq(bytes[String], n))
+    let mut room = roots + progress + frontiers + lifetime + n * notice + 2 * senders + receivers + names_storage
+    for name in names {
+        room += option.unwrap(charge.seq(bytes[u8], string.byte_len(name)))
+    }
+    room
+}

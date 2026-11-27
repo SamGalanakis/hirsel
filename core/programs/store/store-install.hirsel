@@ -167,8 +167,8 @@ fn forget_import(mut db: Db) {
         state.reserving = None
         state.lease = None
         state.steps = list.new()
-        if let Some(mut object_writer) = state.object {
-            object_writer.export_lifetime = None
+        if let ObjectBackend(mut writer) = state.backend {
+            object_writer.set_export_lifetime(mut writer, None)
         }
         state.options.resident_limit
     })

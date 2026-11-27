@@ -429,7 +429,7 @@ fn journal_late_owner(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, ge
 // fences the dead writer's segment and syncs it before reading, so the head it
 // publishes survives the power cut; the read phase checks it as the floor.
 fn journal_late_follow(d: Dir, c: Clock, out: Stdout) -> Result[(), Error] waits {
-    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
     let forever = 18446744073709551615u64
     let Some(captured) = log_follow_capture(d, c, forever, mut progress, None, forever, None)? else {
         fail("G1: the follower captured nothing")

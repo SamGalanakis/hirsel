@@ -49,7 +49,7 @@ pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] waits {
 }
 
 pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error] waits {
-    open_reader(f.capture.store, f.open, f.pager, pin_bytes)
+    open_reader(store_key_from_rep(f.capture.store), f.open, f.pager, pin_bytes)
 }
 
 pub fn read_only_reader(source: ReadOnly, pin_bytes: u64) -> Result[Reader, Error] waits {

@@ -1,0 +1,3 @@
+fn forge_object_worker() -> store.object_writer.ObjectWorkerOpen {
+    store.object_writer.ObjectWorkerOpen()
+}

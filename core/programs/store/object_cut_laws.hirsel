@@ -12,7 +12,7 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
     }
     let old_checkpoint = history.history_key("e-", history.register_head(held).checkpoint)
     let (take previous, _) = failure_result_from_rep(history.history_checkpoint(mut source.client, history.register_head(held), source.deadline))?
-    let retained = history_retain(previous, history.register_head(held).checkpoint, 4, 1)?
+    let retained = failure_result_from_rep(object_writer.history_retain(previous, history.register_head(held).checkpoint, 4, 1))?
     let mut page_manifest = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     page_manifest.generation = 2
     page_manifest.first_live = 4
@@ -601,7 +601,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(draft.holders)))?
     let cut_plan = plan_page_cut(base, participants.holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 1, 65536, map.new(), None, mut next_stamp)?
     let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), 65536))?
-    let (take layout, take packed) = history_write_page_cut(mut source.client, store_key_from_rep(history.register_head(held).store), history.register_head(held).pair.epoch, 1, take cut_plan, source.locator, None, mut buffers, mut workspace, source.deadline)?
+    let (take layout, take packed) = failure_result_from_rep(object_writer.history_write_page_cut(mut source.client, store_key_to_rep(store_key_from_rep(history.register_head(held).store)), history.register_head(held).pair.epoch, 1, take cut_plan, source.locator, None, mut buffers, mut workspace, source.deadline))?
     if list.len(packed) != 3 {
         fail("object cut did not emit exactly the three live pack classes")
     }
@@ -610,7 +610,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let manifest_ref = failure_result_from_rep(history.history_create_manifest(mut source.client, id, 1, 1, page_manifest, mut workspace, source.deadline))?
     let loc = failure_result_from_rep(history.history_make_locator(mut source.client, id, 3, 1, 1, take packed, mut workspace, source.deadline))?
     let (take mark, _) = failure_result_from_rep(history.history_checkpoint(mut source.client, history.register_head(held), source.deadline))?
-    let kept = history_retain(mark, history.register_head(held).checkpoint, 3, 2)?
+    let kept = failure_result_from_rep(object_writer.history_retain(mark, history.register_head(held).checkpoint, 3, 2))?
     let metadata = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(source.client), "bucket")))?
     let HistoryApplied(_) = failure_result_from_rep(history.history_publish_checkpoint(mut source.client, mut held, metadata, manifest_ref, kept, loc, None, None, mut workspace, source.deadline))? else {
         fail("checkpoint did not advance after creating packs")

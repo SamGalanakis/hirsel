@@ -10,11 +10,11 @@ fn count_reclaim_item(items: List[ReclaimItem], kind: ReclaimKind, key: String) 
 }
 
 fn lane_sweep_cursor(db: Db) -> manifest.SweepCursor waits {
-    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (handover, paused): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
     result.unwrap(channel.send(object_sender(disk_state(db)), ObjectPause(take handover, take resuming)))
     let parked = result.unwrap(channel.receive(paused))
-    let cursor = parked.sweep
+    let cursor = object_writer.reclaim_law_cursor(parked)
     result.unwrap(channel.send(resume, take parked))
     cursor
 }

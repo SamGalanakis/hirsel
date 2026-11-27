@@ -323,19 +323,19 @@ fn exit_l90_e_crash_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[StoreId
 }
 
 type PausedStreamCancel: send {
-    journal: Sender[JournalMsg],
+    journal: Sender[object_writer.JournalMsg],
     through: u64
 }
 
 fn exit_cancelled_settle(take input: PausedStreamCancel) -> Result[(), Error] waits {
     let PausedStreamCancel(journal: take journal, through) = take input
-    let (take handover, take paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let (take resume, take resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (take handover, take paused): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
+    let (take resume, take resuming): (Sender[object_writer.ObjectJournalStart], Receiver[object_writer.ObjectJournalStart]) = channel.new(1)
     result.unwrap(channel.send(journal, ObjectPause(take handover, take resuming)))
-    let active = object_journal_begin(result.unwrap(channel.receive(paused)))
-    let (take settled, take outcome) = stream_settle(take active, through, through + 1, false, 65536, 1)
-    return_object_journal(take settled, resume)?
-    let _ = outcome?
+    let active = object_writer.object_journal_begin(result.unwrap(channel.receive(paused)))
+    let (take settled, take outcome) = object_writer.settle_object_stream(take active, through, through + 1, false, 65536, 1)
+    failure_result_from_rep(object_writer.return_object_journal(take settled, resume))?
+    let _ = failure_result_from_rep(take outcome)?
     fail("the paused settle returned before cancellation")
 }
 
@@ -361,10 +361,10 @@ fn bucket_stream_cancelled_settle_joins_worker(c: Clock, tasks: Tasks, r: Random
     }
     stream_service_marker(sim, tasks, string.from("settle-cancel-release"))?
     let Db(disk: take disk, ..) = take place
-    let Some(DiskState(backend: ObjectBackend(ObjectJournalQueue(writer: take worker, ..)), ..)) = take disk else {
+    let Some(DiskState(backend: ObjectBackend(take worker), ..)) = take disk else {
         fail("the attached Place did not have an Object worker")
     }
-    result.unwrap(task.join(take worker))?
+    failure_result_from_rep(object_writer.join_worker_law(take worker))?
     close_journal_service(take service)?
     let _ = bucket_law_report(take sim)
     Ok(())

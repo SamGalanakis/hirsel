@@ -1,0 +1,394 @@
+pub opaque type ObjectWriterState {
+    workers: Option[std.object.Workers],
+    health: Latest[status.Health],
+    reclaims: Latest[ReclaimFailures],
+    unhealthy: Option[Receiver[()]],
+    export_lifetime: Option[Sender[()]],
+    watch: Option[Task[()]],
+    terminal: Sender[()],
+    locator: history.HistoryLocator,
+    levels: List[String],
+    weak: Option[WeakWaiters],
+    pair: history.HistoryPair,
+    origin: Option[history.HistoryOrigin],
+    recovered: pages.HistoryRef,
+    entries: u64,
+    failed: Option[types.Failure],
+    // The host stream the Place is attached to (§12.11.5).
+    stream: Option[types.HostStreamIdRep],
+    attached: bool,
+    has_sealed: bool,
+    drop_attach_on_cut: bool,
+    archive_on: u64,
+    pending_archive_on: Option[bool],
+    cache: Option[pager.ObjectsCache],
+    head_entry_seq: u64,
+    draft_offset: u64,
+    journal: Sender[JournalMsg],
+    acks: Receiver[ObjectAck],
+    accounting: journal.QueueAccounting,
+    written: Receiver[journal.WriteNotice],
+    written_send: Sender[journal.WriteNotice],
+    synced: Option[Receiver[()]],
+    writer: Task[Result[(), types.Failure]],
+    timer: Option[Task[()]]
+}
+
+pub fn object_writer_entry_room(group: u64) -> u64 {
+    order.max(group + 112, 152) + format.BINDING_BYTES
+}
+
+pub fn object_writer_journal_room(group: u64) -> u64 {
+    4 * group + 524288 + reclaim_page_bytes()
+}
+
+pub const OBJECT_TIMER_GRANT: u64 = 4096
+
+pub opaque type ObjectWorkerOpen {
+    start: Sender[ObjectJournalStart],
+    frames: Sender[JournalMsg],
+    journal_received: Receiver[ObjectAck],
+    written_send: Sender[journal.WriteNotice],
+    written_receive: Receiver[journal.WriteNotice],
+    synced_receive: Receiver[()],
+    health_state: Latest[status.Health],
+    reclaims_state: Latest[ReclaimFailures],
+    health_tx: Sender[()],
+    health_rx: Receiver[()],
+    timer: Option[Task[()]],
+    work: Task[Result[(), types.Failure]],
+    weak: Option[WeakWriterOpen]
+}
+
+pub fn prepare_worker(tasks: Tasks, c: Clock, group_room: u64, group_commits: u64, head_poll_ms: u64, slot: Option[View[host_stream.ServiceSlotHandle]], sim: Option[(View[List[String]], View[Sender[LevelCommand]])]) -> Result[(ObjectWorkerOpen, Option[host_stream.SlotLink]), types.Failure] waits {
+    let (take channels, (take start, take starting), take health_state, (take health_tx, take health_rx), (take idle_send, take idle_receive)) = manifest.disk_allocation(scoped fn() -> Result[(JournalChannels, (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]), Latest[status.Health], (Sender[()], Receiver[()]), (Sender[()], Receiver[()])), types.Failure] {
+        let startup: (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+        let initial_health: status.Health = Ok(0)
+        let live_health = latest.new(arc.new(take initial_health))
+        let signal: (Sender[()], Receiver[()]) = channel.new(1)
+        let idle: (Sender[()], Receiver[()]) = channel.new(1)
+        Ok((journal_channels(group_commits), take startup, take live_health, take signal, take idle))
+    })?
+    let reclaims_state = manifest.disk_allocation(scoped fn() -> Result[Latest[ReclaimFailures], types.Failure] {
+        Ok(latest.new(arc.new(ReclaimFailures(count: 0, pending: false))))
+    })?
+    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, ..) = take channels
+    let idle_ns = int.saturating_mul(head_poll_ms, 1000000)
+    let link = match slot {
+        Some(handle) => Some(host_stream.slot_link(handle)?),
+        None => None,
+    }
+    let attached = match link {
+        Some(_) => true,
+        None => false,
+    }
+    // An attached Place has no idle head poll: the service's `reg` GET
+    // stands in for it (§12.11.13). Instead its timer slot holds the reply
+    // relay task started once open finishes.
+    let timer = if !attached {
+        let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: idle_ns)
+        match task.try_spawn(tasks, bytes OBJECT_TIMER_GRANT, take timer_input, journal_idle_timer) {
+            Ok(take running) => Some(take running),
+            Error((problem, _)) => return Error(Full(Allocation(problem))),
+        }
+    } else {
+        None
+    }
+    let idle_requests = if !attached {
+        Some(take idle_send)
+    } else {
+        None
+    }
+    let weak = match sim {
+        Some((names, commands)) if list.len(names) != 0 => Some(weak_publisher(commands, names)?),
+        _ => None,
+    }
+    let actor = ObjectJournalTask(ready: take starting, receive: take queued, acks: take journal_acks, notices: channel.sender(written_send), synced: take synced_send, group_bytes: group_room, group_commits: group_commits, idle: take idle_requests, health_signal: Some(ObjectHealthSignal(value: latest.handle(health_state), terminal: channel.sender(health_tx))), reclaims: Some(latest.handle(reclaims_state)))
+    let worker_room = object_writer_journal_room(group_room)
+    let work = match task.try_spawn(tasks, bytes worker_room, take actor, object_journal_worker) {
+        Ok(take running) => take running,
+        Error((problem, _)) => return Error(Full(Allocation(problem))),
+    }
+    Ok((ObjectWorkerOpen(start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, weak: take weak), take link))
+}
+
+pub fn start_slot_relay(mut worker: ObjectWorkerOpen, tasks: Tasks, take answers: Inbox[journal.SlotAck]) -> Result[(), types.Failure] {
+    let relay_input = SlotRelayInput(answers: take answers, journal: channel.sender(worker.frames))
+    let timer = task.try_spawn(tasks, bytes OBJECT_TIMER_GRANT, take relay_input, slot_relay) ?=> |(problem, _)| Full(Allocation(problem))
+    worker.timer = Some(take timer)
+    Ok(())
+}
+
+pub fn activate_worker(take opening: ObjectWorkerOpen, take requests: std.object.Requests, take workers: Option[std.object.Workers], take register: history.HistoryRegister, take metadata: Bytes, take workspace: history.HistoryBuffers, op_ms: u64, sweep: manifest.SweepCursor, archive_on: u64, generation: u64, next_pack: u64, take names_in_order: List[String], take locator: history.HistoryLocator, cache: Option[pager.ObjectsCache], take link: Option[host_stream.SlotLink]) -> Result[(ObjectWriterState, bool), (std.object.Requests, Option[std.object.Workers])] waits {
+    let ObjectWorkerOpen(start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, weak: take weak) = take opening
+    let head = history.register_head(register)
+    let (attached, attached_sid, has_sealed, force_open_cut) = match history.register_attach(register) {
+        Some(a) => {
+            let live_missing = match a.live {
+                None => true,
+                Some(_) => false,
+            }
+            let mut foreign_or_many = live_missing || list.len(a.sealed) >= 4
+            let sid_opt = match a.live {
+                Some(tail) => {
+                    if !foreign_or_many {
+                        for st in a.sealed {
+                            if !format.stream_same(st.tail.sid, tail.sid) {
+                                foreign_or_many = true
+                                break
+                            }
+                        }
+                    }
+                    Some(tail.sid)
+                },
+                None => None,
+            }
+            (true, sid_opt, list.len(a.sealed) != 0, foreign_or_many)
+        },
+        None => (false, None, false, false),
+    }
+    let (take publisher, take waiters) = match take weak {
+        Some(WeakWriterOpen(publisher: take publisher, waiters: take waiters)) => (Some(take publisher), Some(take waiters)),
+        None => (None, None),
+    }
+    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep, archive_on, issued_generation: generation, next_pack, export_lease: None, reclaim: None, weak: take publisher, stream: take link)
+    if let Error(Closed(take unsent)) = channel.send(start, take startup) {
+        let ObjectJournalStart(requests: take returned, ..) = take unsent
+        return Error((take returned, take workers))
+    }
+    let object = ObjectWriterState(workers: take workers, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache, head_entry_seq: head.entry.seq, draft_offset: 72, journal: take frames, acks: take journal_received, accounting: journal.queue_accounting(0), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take work, timer: take timer)
+    Ok((take object, force_open_cut))
+}
+
+pub fn return_object_journal(take lane: ObjectJournalSession, resume: Sender[ObjectJournalStart]) -> Result[(), types.Failure] waits {
+    let return_io = object_journal_pause(take lane)
+    if let Error(_) = channel.send(resume, take return_io) {
+        return Error(Io(Closed))
+    }
+    Ok(())
+}
+
+pub fn sender(writer: ObjectWriterState) -> View[Sender[JournalMsg]] in writer {
+    view writer.journal
+}
+
+pub fn break_handoff(mut writer: ObjectWriterState) {
+    let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
+    drop(take abandoned)
+    writer.journal = take to
+}
+
+pub fn segment_seq(writer: ObjectWriterState) -> u64 {
+    writer.head_entry_seq
+}
+
+pub fn segment_end(writer: ObjectWriterState) -> u64 {
+    writer.draft_offset
+}
+
+pub fn stage_frame(mut writer: ObjectWriterState, size: u64, take frame: Option[Bytes]) {
+    writer.draft_offset += size
+    writer.accounting.pending = take frame
+}
+
+pub fn queue_accounting(writer: ObjectWriterState) -> View[journal.QueueAccounting] in writer {
+    view writer.accounting
+}
+
+pub fn edit_accounting[R](mut writer: ObjectWriterState, edit: scoped fn(mut journal.QueueAccounting) -> R) -> R {
+    edit(mut writer.accounting)
+}
+
+pub fn write_notices(writer: ObjectWriterState) -> View[Receiver[journal.WriteNotice]] in writer {
+    view writer.written
+}
+
+pub fn write_notice_sender(writer: ObjectWriterState) -> View[Sender[journal.WriteNotice]] in writer {
+    view writer.written_send
+}
+
+pub fn ack_receiver(writer: ObjectWriterState) -> View[Receiver[ObjectAck]] in writer {
+    view writer.acks
+}
+
+pub fn sync_notices(mut writer: ObjectWriterState) -> Option[Receiver[()]] {
+    replace(mut writer.synced, None)
+}
+
+pub fn entries(writer: ObjectWriterState) -> u64 {
+    writer.entries
+}
+
+pub fn note_ack(mut writer: ObjectWriterState, seq: u64, bytes_out: u64, journal_entries: u64) {
+    writer.accounting.journaled = seq
+    writer.accounting.inflight -= bytes_out - writer.accounting.acked_bytes
+    writer.accounting.acked_bytes = bytes_out
+    writer.entries = journal_entries
+}
+
+pub fn latch_failure(mut writer: ObjectWriterState, take problem: types.Failure) {
+    writer.failed = Some(take problem)
+}
+
+pub fn terminal_failure(writer: ObjectWriterState) -> View[Option[types.Failure]] in writer {
+    view writer.failed
+}
+
+pub fn healthy(writer: ObjectWriterState) -> Result[(), types.Failure] {
+    if let Some(problem) = writer.failed {
+        return Error(clone(problem))
+    }
+    health_result(latest.read(writer.health))
+}
+
+pub fn health(writer: ObjectWriterState) -> status.Health {
+    copy_health(latest.read(writer.health))
+}
+
+pub fn health_handle(writer: ObjectWriterState) -> Latest[status.Health] {
+    latest.handle(writer.health)
+}
+
+pub fn reclaims(writer: ObjectWriterState) -> ReclaimFailures {
+    let current = latest.read(writer.reclaims)
+    ReclaimFailures(count: current.count, pending: current.pending)
+}
+
+pub fn watch_unhealthy[M: send](mut writer: ObjectWriterState, tasks: Tasks, take destination: Sender[M], take message: M) -> Result[(), types.Failure] {
+    let Some(take ready) = replace(mut writer.unhealthy, None) else {
+        return Error(Held)
+    }
+    let notice = HealthNotice(ready: take ready, output: take destination, message: take message)
+    match task.try_spawn(tasks, bytes 4096, take notice, wait_unhealthy) {
+        Ok(take started) => {
+            writer.watch = Some(take started)
+            Ok(())
+        },
+        Error((problem, take returned)) => {
+            let HealthNotice(ready: take returned_receiver, ..) = take returned
+            writer.unhealthy = Some(take returned_receiver)
+            Error(Full(Allocation(problem)))
+        },
+    }
+}
+
+pub fn claim_pair(writer: ObjectWriterState) -> history.HistoryPair {
+    writer.pair
+}
+
+pub fn claim_origin(writer: ObjectWriterState) -> View[Option[history.HistoryOrigin]] in writer {
+    view writer.origin
+}
+
+pub fn attachment(writer: ObjectWriterState) -> (bool, bool) {
+    (writer.attached, writer.has_sealed)
+}
+
+pub fn attached_stream(writer: ObjectWriterState) -> Option[types.HostStreamIdRep] {
+    writer.stream
+}
+
+pub fn drops_attach(writer: ObjectWriterState) -> bool {
+    writer.drop_attach_on_cut
+}
+
+pub fn set_drop_attach(mut writer: ObjectWriterState, drop_attach: bool) {
+    writer.drop_attach_on_cut = drop_attach
+}
+
+pub fn archive_request(writer: ObjectWriterState) -> Option[bool] {
+    writer.pending_archive_on
+}
+
+pub fn set_archive_request(mut writer: ObjectWriterState, request: Option[bool]) {
+    writer.pending_archive_on = request
+}
+
+pub fn cache_directory(writer: ObjectWriterState) -> Option[pager.ObjectsCache] waits {
+    history.pack_cache_directory(writer.cache)
+}
+
+pub fn object_locator(writer: ObjectWriterState) -> View[history.HistoryLocator] in writer {
+    view writer.locator
+}
+
+pub fn recovered_checkpoint(writer: ObjectWriterState) -> pages.HistoryRef {
+    writer.recovered
+}
+
+pub fn levels(writer: ObjectWriterState) -> View[List[String]] in writer {
+    view writer.levels
+}
+
+pub fn weak_waiters(writer: ObjectWriterState) -> View[Option[WeakWaiters]] in writer {
+    view writer.weak
+}
+
+pub fn set_export_lifetime(mut writer: ObjectWriterState, take lifetime: Option[Sender[()]]) {
+    writer.export_lifetime = take lifetime
+}
+
+pub fn install_cut(mut writer: ObjectWriterState, mut lane: ObjectJournalSession, take cut: PublishedCut) {
+    let PublishedCut(seq, locator: take locator, sid, archive_on, dropped_attach) = take cut
+    lane.archive_on = archive_on
+    writer.accounting.uncovered = 0
+    writer.accounting.since_cut = 0
+    writer.entries = 0
+    writer.locator = take locator
+    writer.has_sealed = false
+    writer.stream = sid
+    writer.archive_on = archive_on
+    if dropped_attach {
+        writer.attached = false
+    }
+    writer.head_entry_seq = seq
+    writer.draft_offset = 72
+}
+
+pub fn close_worker(take state: ObjectWriterState, take prior: Option[types.Failure]) -> Result[(), types.Failure] waits {
+    let mut failure = take prior
+    let ObjectWriterState(workers: take workers, health: take live_health, reclaims: take live_reclaims, unhealthy: take unhealthy, export_lifetime: take export_lifetime, locator: take locator, levels: take level_names, weak: take waiters, failed: take failed_state, terminal: take terminal, watch: take watch, journal: take frames, acks: take acknowledgements, writer: take writer, timer: take timer, written: take notices, written_send: take notice_to, accounting: take accounting, ..) = take state
+    if let Some(take running) = take timer {
+        let mut t = take running
+        task.cancel(mut t)
+        let _ = task.join(take t)
+    }
+    let _ = take frames
+    let mut poison = accounting.poison
+    let remaining: Option[Receiver[ObjectAck]] = if let Some(_) = poison {
+        let _ = take acknowledgements
+        None
+    } else {
+        Some(take acknowledgements)
+    }
+    match task.join(take writer) {
+        Ok(Error(Io(e))) => if let None = poison {
+            poison = Some(e)
+        },
+        Ok(Error(take e)) => if let None = failure {
+            failure = Some(take e)
+        },
+        Ok(Ok(())) => (),
+        Error(_) => if let None = poison {
+            poison = Some(Closed)
+        },
+    }
+    if let Some(receiver) = remaining {
+        while let Ok(_) = channel.try_receive(receiver) {}
+    }
+    let _ = take notices
+    let _ = take notice_to
+    // The transport and export lease remain live while the journal drains.
+    let _ = (take workers, take live_health, take live_reclaims, take unhealthy, take export_lifetime, take locator, take level_names, take waiters, take failed_state)
+    let _ = take terminal
+    if let Some(take live_watch) = take watch {
+        let _ = task.join(take live_watch)
+    }
+    match poison {
+        Some(e) => Error(Poisoned(e)),
+        None => match take failure {
+            Some(take e) => Error(take e),
+            None => Ok(()),
+        },
+    }
+}

@@ -1,4 +1,4 @@
-type ObjectJournalStart: send {
+pub opaque type ObjectJournalStart: send {
     requests: std.object.Requests,
     register: history.HistoryRegister,
     authority: Bytes,
@@ -19,7 +19,7 @@ type ObjectJournalStart: send {
 type ObjectJournalTask: send {
     ready: Receiver[ObjectJournalStart],
     receive: Receiver[JournalMsg],
-    acks: Sender[journal.Ack],
+    acks: Sender[ObjectAck],
     notices: Sender[journal.WriteNotice],
     synced: Sender[()],
     group_bytes: u64,
@@ -29,33 +29,33 @@ type ObjectJournalTask: send {
     reclaims: Option[Latest[ReclaimFailures]]
 }
 
-fn history_probe_writer(mut client: std.object.Client, mut register: history.HistoryRegister, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
-    let result = failure_result_from_rep(history.history_probe_head(mut client, history.register_tag(register), mut workspace.witness, deadline))?
+fn history_probe_writer(mut client: std.object.Client, mut register: history.HistoryRegister, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), types.Failure] waits {
+    let result = history.history_probe_head(mut client, history.register_tag(register), mut workspace.witness, deadline)?
     if let Some((capture, _)) = result {
-        failure_result_from_rep(manifest.check_expected_store(Some(history.register_head(register).store), capture.head.store))?
+        manifest.check_expected_store(Some(history.register_head(register).store), capture.head.store)?
         if !history.history_pair_matches(capture.head.pair, history.register_head(register).pair) {
-            let fenced: Error = Fenced(history.register_head(register).pair.epoch)
-            history.fence_register(mut register, failure_to_rep(clone(fenced)))
+            let fenced: types.Failure = Fenced(history.register_head(register).pair.epoch)
+            history.fence_register(mut register, clone(fenced))
             return Error(fenced)
         }
     }
     Ok(())
 }
 
-fn history_probe_writer_attach(mut client: std.object.Client, mut register: history.HistoryRegister, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
-    let result = failure_result_from_rep(history.history_probe_head_attach(mut client, history.register_tag(register), mut workspace.witness, deadline))?
+fn history_probe_writer_attach(mut client: std.object.Client, mut register: history.HistoryRegister, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), types.Failure] waits {
+    let result = history.history_probe_head_attach(mut client, history.register_tag(register), mut workspace.witness, deadline)?
     if let Some((capture, _)) = result {
-        failure_result_from_rep(manifest.check_expected_store(Some(history.register_head(register).store), capture.head.store))?
+        manifest.check_expected_store(Some(history.register_head(register).store), capture.head.store)?
         if !history.history_pair_matches(capture.head.pair, history.register_head(register).pair) {
-            let fenced: Error = Fenced(history.register_head(register).pair.epoch)
-            history.fence_register(mut register, failure_to_rep(clone(fenced)))
+            let fenced: types.Failure = Fenced(history.register_head(register).pair.epoch)
+            history.fence_register(mut register, clone(fenced))
             return Error(fenced)
         }
     }
     Ok(())
 }
 
-type ObjectJournalSession {
+pub opaque type ObjectJournalSession {
     client: std.object.Client,
     register: history.HistoryRegister,
     authority: Bytes,
@@ -73,7 +73,7 @@ type ObjectJournalSession {
     stream: Option[host_stream.SlotLink]
 }
 
-fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
+pub fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
     let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, archive_on, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take input
     ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, archive_on, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
 }
@@ -84,17 +84,17 @@ fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart
     ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, archive_on, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
 }
 
-fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), Error] waits {
+fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), types.Failure] waits {
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
     let mut candidate = history.register_head(lane.register)
-    let next_position = failure_result_from_rep(history.history_next_id(candidate.entry.seq))?
+    let next_position = history.history_next_id(candidate.entry.seq)?
     candidate.entry = history.history_new_ref(next_position, candidate.pair.epoch, lane.buffers.packet)
     let weak_barrier = view lane.weak
-    let advanced = failure_result_from_rep(history.history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due, scoped fn(created: u64) {
+    let advanced = history.history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due, scoped fn(created: u64) {
         if let Some(publisher) = weak_barrier {
             weak_publish(publisher, candidate, created, sequence)
         }
-    }))
+    })
     match take advanced {
         Ok(HistoryApplied(_)) => Ok(()),
         Error(take e) => Error(take e),
@@ -102,16 +102,16 @@ fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Resu
     }
 }
 
-fn object_journal_add(mut lane: ObjectJournalSession, ctx: format.DiskContext, frame: Bytes) -> Result[(), Error] {
+fn object_journal_add(mut lane: ObjectJournalSession, ctx: format.DiskContext, frame: Bytes) -> Result[(), types.Failure] {
     let bytes_wanted = list.len(frame)
-    failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.packet, bytes_wanted + format.BINDING_BYTES)))?
-    failure_result_from_rep(host_stream.history_group_append(mut lane.buffers.packet, ctx, frame))
+    types.capacity(list.try_reserve(mut lane.buffers.packet, bytes_wanted + format.BINDING_BYTES))?
+    host_stream.history_group_append(mut lane.buffers.packet, ctx, frame)
 }
 
 // Sends one streamed group to the slot without waiting on the reply connection;
 // the relay task delivers `SlotAck` back into `object_journal_loop`.
-fn object_journal_stream_send(link: host_stream.SlotLink, input: ObjectJournalTask, take raw: Bytes, sequence: u64, mut queued: List[(Bytes, u64)], mut deferred: Option[JournalMsg]) -> Result[(u64, u64), Error] waits {
-    failure_result_from_rep(host_stream.slot_send(link, raw, sequence))?
+fn object_journal_stream_send(link: host_stream.SlotLink, input: ObjectJournalTask, take raw: Bytes, sequence: u64, mut queued: List[(Bytes, u64)], mut deferred: Option[JournalMsg]) -> Result[(u64, u64), types.Failure] waits {
+    host_stream.slot_send(link, raw, sequence)?
     let mut group_size = list.len(raw)
     let mut last_sequence = sequence
     let mut taken = 1u64
@@ -121,7 +121,7 @@ fn object_journal_stream_send(link: host_stream.SlotLink, input: ObjectJournalTa
             break
         }
         let (take next_raw, next_seq) = list.remove(mut queued, 0u64)
-        failure_result_from_rep(host_stream.slot_send(link, next_raw, next_seq))?
+        host_stream.slot_send(link, next_raw, next_seq)?
         group_size += width
         last_sequence = next_seq
         taken += 1
@@ -134,7 +134,7 @@ fn object_journal_stream_send(link: host_stream.SlotLink, input: ObjectJournalTa
                     deferred = Some(Frame(take follower_frame, following))
                     break
                 }
-                failure_result_from_rep(host_stream.slot_send(link, follower_frame, following))?
+                host_stream.slot_send(link, follower_frame, following)?
                 group_size += width
                 last_sequence = following
                 taken += 1
@@ -156,13 +156,13 @@ fn object_journal_stream_advance_batch(mut lane: ObjectJournalSession, batch_seq
     }
 }
 
-fn object_journal_stream_trim_batches(mut lane: ObjectJournalSession, from_seq: u64) {
+pub fn object_journal_stream_trim_batches(mut lane: ObjectJournalSession, from_seq: u64) {
     if let Some(mut link) = lane.stream {
         host_stream.slot_trim_batches(mut link, from_seq)
     }
 }
 
-fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJournalStart) -> Result[(), Error] waits {
+fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJournalStart) -> Result[(), types.Failure] waits {
     let mut lane = object_journal_begin(take initial)
     let mut written = 0u64
     let mut deferred: Option[JournalMsg] = None
@@ -179,12 +179,12 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut stream_awaiting_fence = false
     let mut stream_queued: List[(Bytes, u64)] = list.new()
     if let Some(link) = lane.stream {
-        host_stream.slot_report_head(link, store_key_to_rep(store_key_from_rep(history.register_head(lane.register).store)), history.register_attach(lane.register), host_stream.slot_last_batch(link))
+        host_stream.slot_report_head(link, history.register_head(lane.register).store, history.register_attach(lane.register), host_stream.slot_last_batch(link))
     }
     loop {
         if let Some(terminal) = history.register_terminal(lane.register) {
             return match terminal {
-                HistoryFault(problem) => Error(failure_from_rep(clone(problem))),
+                HistoryFault(problem) => Error(clone(problem)),
                 HistoryUnknown => Error(Undecided),
             }
         }
@@ -244,7 +244,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 if use_stream {
                     if let Some(link) = lane.stream {
                         if stream_in_flight != None || is_stalled || stream_awaiting_fence {
-                            failure_result_from_rep(types.capacity(list.try_reserve(mut stream_queued, 1)))?
+                            types.capacity(list.try_reserve(mut stream_queued, 1))?
                             list.push(mut stream_queued, (take raw, sequence))
                             continue
                         }
@@ -270,8 +270,8 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                         }
                     }
                 }
-                let ctx = failure_result_from_rep(host_stream.history_group_context(history.register_head(lane.register)))?
-                failure_result_from_rep(history.history_packet_header(mut lane.buffers.packet, ctx, history.register_head(lane.register).pair.epoch, history.register_head(lane.register).authority_kind, history.register_head(lane.register).entry))?
+                let ctx = host_stream.history_group_context(history.register_head(lane.register))?
+                history.history_packet_header(mut lane.buffers.packet, ctx, history.register_head(lane.register).pair.epoch, history.register_head(lane.register).authority_kind, history.register_head(lane.register).entry)?
                 object_journal_add(mut lane, ctx, raw)?
                 let mut group_size = list.len(raw)
                 let mut last_sequence = sequence
@@ -295,7 +295,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     }
                 }
                 list.clear(mut lane.buffers.compare)
-                failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet))))?
+                types.capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet)))?
                 object_journal_advance(mut lane, last_sequence)?
                 written += group_size
                 if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, history.register_head(lane.register).entry.seq - history.register_head(lane.register).checkpoint.seq)) {
@@ -351,7 +351,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     SlotSettle(settle_id, through_seq, next_seq) => {
                         is_stalled = true
                         if !stream_awaiting_fence {
-                            let (take settled, take outcome) = stream_settle(take lane, through_seq, next_seq, false, input.group_bytes, input.group_commits)
+                            let (take settled, take outcome) = settle_object_stream(take lane, through_seq, next_seq, false, input.group_bytes, input.group_commits)
                             lane = take settled
                             match take outcome {
                                 Ok(SettleApplied) => {
@@ -365,7 +365,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                                     }
                                     object_journal_stream_trim_batches(mut lane, fseq)
                                     if let Some(link) = lane.stream {
-                                        host_stream.slot_report_head(link, store_key_to_rep(store_key_from_rep(history.register_head(lane.register).store)), history.register_attach(lane.register), through_seq)
+                                        host_stream.slot_report_head(link, history.register_head(lane.register).store, history.register_attach(lane.register), through_seq)
                                         host_stream.slot_report(link, ReportSettled(host_stream.slot_number(link), history.register_head(lane.register).store, history.register_head(lane.register).pair.epoch, settle_id, true, history.register_head(lane.register).entry.seq, fseq, fframe))
                                     }
                                 },
@@ -409,16 +409,16 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     None => None,
                 }
                 if let Some(last_seq) = close_info {
-                    let (take settled, take outcome) = stream_settle(take lane, last_seq, last_seq + 1, true, input.group_bytes, input.group_commits)
+                    let (take settled, take outcome) = settle_object_stream(take lane, last_seq, last_seq + 1, true, input.group_bytes, input.group_commits)
                     lane = take settled
                     match take outcome {
                         Ok(SettleApplied) => {
                             if let Some(link) = lane.stream {
                                 let no_attach: Option[format.Attach] = None
-                                host_stream.slot_report_head(link, store_key_to_rep(store_key_from_rep(history.register_head(lane.register).store)), no_attach, last_seq)
+                                host_stream.slot_report_head(link, history.register_head(lane.register).store, no_attach, last_seq)
                                 host_stream.slot_report(link, ReportDetached(host_stream.slot_number(link), history.register_head(lane.register).store, history.register_head(lane.register).pair.epoch))
                             }
-                            let done_ok: Result[(), Error] = Ok(())
+                            let done_ok: Result[(), types.Failure] = Ok(())
                             let _ = channel.send(close_reply, take done_ok)
                             return Ok(())
                         },
@@ -426,7 +426,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                             if let Some(link) = lane.stream {
                                 host_stream.slot_report(link, ReportFenced(host_stream.slot_number(link), history.register_head(lane.register).store, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff))
                             }
-                            let problem: Error = Fenced(history.register_head(lane.register).pair.epoch)
+                            let problem: types.Failure = Fenced(history.register_head(lane.register).pair.epoch)
                             let _ = channel.send(close_reply, Error(clone(problem)))
                             return Error(take problem)
                         },
@@ -440,7 +440,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                         },
                     }
                 }
-                let done_ok: Result[(), Error] = Ok(())
+                let done_ok: Result[(), types.Failure] = Ok(())
                 let _ = channel.send(close_reply, take done_ok)
                 return Ok(())
             },
@@ -483,9 +483,9 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 }
             },
             ObjectSkipFence(take destination) => {
-                let observed: Result[(), Error] = if stream_awaiting_fence {
-                    let fenced: Error = Fenced(history.register_head(lane.register).pair.epoch)
-                    history.fence_register(mut lane.register, failure_to_rep(clone(fenced)))
+                let observed: Result[(), types.Failure] = if stream_awaiting_fence {
+                    let fenced: types.Failure = Fenced(history.register_head(lane.register).pair.epoch)
+                    history.fence_register(mut lane.register, clone(fenced))
                     Error(fenced)
                 } else {
                     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
@@ -508,7 +508,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
             ObjectExportRead(take request) => {
                 let journal.ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet) = take request
                 let read = object_export_read(mut lane, key, reference, take buffer)
-                let _ = channel.send(outlet, failure_result_to_rep(take read))
+                let _ = channel.send(outlet, take read)
             },
             ObjectPause(take pause_response, take resuming) => {
                 let owner = object_journal_pause(take lane)
@@ -522,13 +522,11 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     _ => return Ok(()),
                 }
             },
-            Rotate(..) => fail("object journal received a segment rotation"),
-            Flush => fail("object journal received a Directory flush"),
         }
     }
 }
 
-fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Result[(), Error] waits {
+pub fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Result[(), types.Failure] waits {
     let is_attached = match history.register_attach(lane.register) {
         Some(_) => true,
         None => false,
@@ -545,30 +543,30 @@ fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Resul
     let epoch = head.pair.epoch
     if let Some(tail) = live_opt {
         if let Some(link) = lane.stream {
-            let dir = host_stream.stream_key(host_stream.slot_root(link), host_stream.stream_dir(host_stream_id_to_rep(host_stream_id_from_rep(tail.sid))))
-            let reg = host_stream.stream_at_root(mut lane.client, scoped fn(mut c: std.object.Client) -> Result[format.StreamRegister, Error] waits {
-                failure_result_from_rep(host_stream.stream_reg_fetch_once(mut c, dir, host_stream_id_to_rep(host_stream_id_from_rep(tail.sid)), host_stream.slot_max_rows(link), due))
+            let dir = host_stream.stream_key(host_stream.slot_root(link), host_stream.stream_dir(tail.sid))
+            let reg = host_stream.stream_at_root(mut lane.client, scoped fn(mut c: std.object.Client) -> Result[format.StreamRegister, types.Failure] waits {
+                host_stream.stream_reg_fetch_once(mut c, dir, tail.sid, host_stream.slot_max_rows(link), due)
             })?
             if reg.inc != tail.inc || reg.collecting {
                 return Error(Latched(Superseded))
             }
-            if host_stream.stream_follow_reg_has_row(reg, store_key_to_rep(store_key_from_rep(store)), epoch) {
-                return Error(Behind(Position(store: store_key_from_rep(store), branch: 0, version: 0)))
+            if host_stream.stream_follow_reg_has_row(reg, store, epoch) {
+                return Error(Behind(types.PositionRep(store: store, branch: 0, version: 0)))
             }
         }
     }
-    let _ = failure_result_from_rep(history.history_fetch(mut lane.client, "head", mut lane.buffers.witness, due))?
-    let (take capture, _) = failure_result_from_rep(history.history_decode_head_attach(lane.buffers.witness))?
-    failure_result_from_rep(manifest.check_expected_store(Some(store), capture.head.store))?
+    let _ = history.history_fetch(mut lane.client, "head", mut lane.buffers.witness, due)?
+    let (take capture, _) = history.history_decode_head_attach(lane.buffers.witness)?
+    manifest.check_expected_store(Some(store), capture.head.store)?
     if !history.history_pair_matches(capture.head.pair, head.pair) {
-        let fenced: Error = Fenced(epoch)
-        history.fence_register(mut lane.register, failure_to_rep(clone(fenced)))
+        let fenced: types.Failure = Fenced(epoch)
+        history.fence_register(mut lane.register, clone(fenced))
         return Error(fenced)
     }
     Ok(())
 }
 
-fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] waits {
+fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), types.Failure] waits {
     let initial = match channel.receive(input.ready) {
         Ok(take ready) => take ready,
         Error(_) => return Ok(()),
@@ -585,7 +583,7 @@ fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] wai
         if let Some(signal) = signals {
             emit_health(signal, health_failure(problem))
         }
-        let _ = channel.send(acks, ObjectBroken(failure_to_rep(clone(problem))))
+        let _ = channel.send(acks, ObjectBroken(clone(problem)))
         weak_notify_strong(weak_wakes)
         let _ = channel.try_send(synced, ())
     }
@@ -611,4 +609,31 @@ fn slot_relay(take input: SlotRelayInput) waits {
             Error(_) => return,
         }
     }
+}
+
+pub fn paused_head(lane: ObjectJournalSession) -> history.HistoryHead {
+    history.register_head(lane.register)
+}
+
+pub fn paused_attach(lane: ObjectJournalSession) -> View[Option[format.Attach]] in lane {
+    history.register_attach(lane.register)
+}
+
+pub fn paused_stream(lane: ObjectJournalSession) -> View[Option[host_stream.SlotLink]] in lane {
+    view lane.stream
+}
+
+pub fn paused_terminal(lane: ObjectJournalSession) -> bool {
+    match history.register_terminal(lane.register) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn paused_deadline(lane: ObjectJournalSession) -> u64 {
+    std.object.deadline_after_ms(lane.client, lane.op_ms)
+}
+
+pub fn paused_archive(lane: ObjectJournalSession) -> u64 {
+    lane.archive_on
 }

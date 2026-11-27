@@ -448,7 +448,7 @@ fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     let inventory = pages.PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let demand = pager.TieredPagerTarget(edge: TieredPage(ptr), direction: TieredPoint, inventory: inventory, object: None, next_stamp: 42, deadline: 0)
-    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let (requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4))?
     let verified = l65_pager_exchange(requests, demand)
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))
@@ -820,7 +820,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let cold = pages.HistoryRef(seq: 8, epoch: 1, len: 220, digest: 79)
     // The locator names the Tiered pack, but the test never uploads it.
     history.fixture_set_pack(mut source.locator, cold)
-    let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(page_record), true, None)?
+    let verified = failure_result_from_rep(object_writer.validate_bucket_graph(mut source.client, source.locator, source.deadline, store_key_to_rep(owner), "MANIFEST", clone(page_record), true, None))?
     let loaded = failure_result_from_rep(history.rebuild_page_store(take verified, Some(view source.locator)))?
     let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: Bucket recovery did not preserve the Cold slot")
@@ -843,7 +843,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let mut truncated = cold
     truncated.len = 219
     history.fixture_set_pack(mut source.locator, truncated)
-    let Error(Corrupt(Fault(why: Malformed, ..))) = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", take page_record, true, None) else {
+    let Error(Corrupt(Fault(why: Malformed, ..))) = failure_result_from_rep(object_writer.validate_bucket_graph(mut source.client, source.locator, source.deadline, store_key_to_rep(owner), "MANIFEST", take page_record, true, None)) else {
         fail("L68: a Tiered locator width differing from the pack row was accepted")
     }
     Ok(())

@@ -1,13 +1,13 @@
 // Reads one round's edges, in order. One edge is read alone; more are read
 // as a batch, with one GET window per pack on a Bucket.
-fn tiered_pager_read_edges(mut input: pager.TieredPagerInput, mut pager_cache: pager.TieredCache, owner: StoreId, demand: pager.TieredPointDemand, edges: List[format.TieredTarget]) -> Result[List[Result[Arc[format.TieredFrame], Error]], Error] waits {
-    let mut fetched: List[Result[Arc[format.TieredFrame], Error]] = list.new()
+fn tiered_pager_read_edges(mut input: pager.TieredPagerInput, mut pager_cache: pager.TieredCache, owner: types.StoreKey, demand: pager.TieredPointDemand, edges: List[format.TieredTarget]) -> Result[List[Result[Arc[format.TieredFrame], types.Failure]], types.Failure] waits {
+    let mut fetched: List[Result[Arc[format.TieredFrame], types.Failure]] = list.new()
     let local = match input {
         PagerLocal(_) => true,
         PagerObjects(..) => false,
     }
     if local || list.len(edges) == 1 {
-        failure_result_from_rep(types.capacity(list.try_reserve(mut fetched, list.len(edges))))?
+        types.capacity(list.try_reserve(mut fetched, list.len(edges)))?
         for edge in edges {
             let delivered = tiered_pager_point_frame(mut input, mut pager_cache, owner, demand, edge)
             list.push(mut fetched, take delivered)
@@ -17,9 +17,9 @@ fn tiered_pager_read_edges(mut input: pager.TieredPagerInput, mut pager_cache: p
     tiered_pager_bucket_batch(mut input, mut pager_cache, owner, demand, edges)
 }
 
-fn tiered_pager_bucket_batch(mut input: pager.TieredPagerInput, mut pager_cache: pager.TieredCache, owner: StoreId, demand: pager.TieredPointDemand, edges: List[format.TieredTarget]) -> Result[List[Result[Arc[format.TieredFrame], Error]], Error] waits {
+fn tiered_pager_bucket_batch(mut input: pager.TieredPagerInput, mut pager_cache: pager.TieredCache, owner: types.StoreKey, demand: pager.TieredPointDemand, edges: List[format.TieredTarget]) -> Result[List[Result[Arc[format.TieredFrame], types.Failure]], types.Failure] waits {
     let width = list.len(edges)
-    let (take positions, take pending) = disk_allocation(scoped fn() -> Result[(List[Option[Result[Arc[format.TieredFrame], types.Failure]]], List[pager.TieredBucketTarget]), Error] {
+    let (take positions, take pending) = manifest.disk_allocation(scoped fn() -> Result[(List[Option[Result[Arc[format.TieredFrame], types.Failure]]], List[pager.TieredBucketTarget]), types.Failure] {
         // Reserve the two lists before probing the cache.
         let mut positions: List[Option[Result[Arc[format.TieredFrame], types.Failure]]] = list.with_capacity(width)
         for _ in 0u64 .. width {
@@ -67,27 +67,27 @@ fn tiered_pager_bucket_batch(mut input: pager.TieredPagerInput, mut pager_cache:
             list.sort(mut misses, fn(a: pager.TieredBucketTarget, b: pager.TieredBucketTarget) -> Order {
                 order.compare((a.pack.seq, a.slot), (b.pack.seq, b.slot))
             })
-            let batch = disk_allocation(scoped fn() -> Result[pager.TieredBucketBatch, Error] {
-                failure_result_from_rep(history.plan_bucket_batch(misses, deadline))
+            let batch = manifest.disk_allocation(scoped fn() -> Result[pager.TieredBucketBatch, types.Failure] {
+                history.plan_bucket_batch(misses, deadline)
             })?
             fetch_bucket_batch(mut client, cache, owner, demand.next_stamp, misses, batch, mut outcomes)?
         } else {
             fail("store: a Bucket batch needs an object client")
         }
     }
-    let mut accepted: List[Result[Arc[format.TieredFrame], Error]] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut accepted, width)))?
+    let mut accepted: List[Result[Arc[format.TieredFrame], types.Failure]] = list.new()
+    types.capacity(list.try_reserve(mut accepted, width))?
     for take item in take outcomes {
         let delivered = option.unwrap(take item)
         if let Ok(frame) = view delivered {
             pager.tiered_cache_admit(mut pager_cache, frame)
         }
-        list.push(mut accepted, failure_result_from_rep(take delivered))
+        list.push(mut accepted, take delivered)
     }
     Ok(take accepted)
 }
 
-fn fetch_bucket_batch(mut client: std.object.Client, cache: Option[pager.ObjectsCache], owner: StoreId, next_stamp: u64, misses: List[pager.TieredBucketTarget], batch: pager.TieredBucketBatch, mut outcomes: List[Option[Result[Arc[format.TieredFrame], types.Failure]]]) -> Result[(), Error] waits {
+fn fetch_bucket_batch(mut client: std.object.Client, cache: Option[pager.ObjectsCache], owner: types.StoreKey, next_stamp: u64, misses: List[pager.TieredBucketTarget], batch: pager.TieredBucketBatch, mut outcomes: List[Option[Result[Arc[format.TieredFrame], types.Failure]]]) -> Result[(), types.Failure] waits {
     let mut slots: List[u64] = list.new()
     let mut pending: List[pager.TieredBucketGet] = list.new()
     let window_count = list.len(batch.requests)
@@ -99,10 +99,10 @@ fn fetch_bucket_batch(mut client: std.object.Client, cache: Option[pager.Objects
         },
     }
     if !caching {
-        let responses = failure_result_from_rep(history.read_tiered_bucket_windows(mut client, batch.requests, pager.TIERED_GET_STREAMS))?
+        let responses = history.read_tiered_bucket_windows(mut client, batch.requests, pager.TIERED_GET_STREAMS)?
         let mut slot_at = 0u64
         for response in responses {
-            let _ = history.unpack_bucket_window(store_key_to_rep(owner), next_stamp, misses, batch.requests[slot_at], batch.members[slot_at], response, mut outcomes)
+            let _ = history.unpack_bucket_window(owner, next_stamp, misses, batch.requests[slot_at], batch.members[slot_at], response, mut outcomes)
             slot_at += 1
         }
         return Ok(())
@@ -113,7 +113,7 @@ fn fetch_bucket_batch(mut client: std.object.Client, cache: Option[pager.Objects
         if let Some(local) = cache {
             if let Some(take raw) = history.tiered_window_cached(local, request) {
                 let cached_read: Result[Bytes, types.Failure] = Ok(take raw)
-                if history.unpack_bucket_window(store_key_to_rep(owner), next_stamp, misses, request, members, cached_read, mut outcomes) {
+                if history.unpack_bucket_window(owner, next_stamp, misses, request, members, cached_read, mut outcomes) {
                     continue
                 }
                 for member in members {
@@ -125,12 +125,12 @@ fn fetch_bucket_batch(mut client: std.object.Client, cache: Option[pager.Objects
         list.push(mut slots, at)
         list.push(mut pending, request)
     }
-    let responses = failure_result_from_rep(history.read_tiered_bucket_windows(mut client, pending, pager.TIERED_GET_STREAMS))?
+    let responses = history.read_tiered_bucket_windows(mut client, pending, pager.TIERED_GET_STREAMS)?
     let mut answer_at = 0u64
     for response in responses {
         let at = slots[answer_at]
         let request = batch.requests[at]
-        let valid = history.unpack_bucket_window(store_key_to_rep(owner), next_stamp, misses, request, batch.members[at], response, mut outcomes)
+        let valid = history.unpack_bucket_window(owner, next_stamp, misses, request, batch.members[at], response, mut outcomes)
         if valid {
             if let (Some(local), Ok(raw)) = (cache, response) {
                 tiered_window_cache_store(local, request, raw)

@@ -1,0 +1,108 @@
+fn history_genesis_debris(key: String) -> bool {
+    let Some(name) = history_parse_name(key) else {
+        return false
+    }
+    name.epoch == 1 && (name.kind == b'p' || name.seq == 1)
+}
+
+pub fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(), types.Failure] waits {
+    let mut after = string.new()
+    let mut listed_entries = manifest.disk_allocation(scoped fn() -> Result[List[std.object.Entry], types.Failure] {
+        Ok(list.with_capacity(1000))
+    })?
+    loop {
+        list.clear(mut listed_entries)
+        let page = match std.object.list(mut client, "", after, mut listed_entries, deadline) {
+            Ok(value) => value,
+            Error(take e) => return Error(Remote(take e)),
+        }
+        for member in listed_entries {
+            if !history_genesis_debris(std.object.key_text(member.key)) {
+                return Error(Exists("authority"))
+            }
+        }
+        if !page.truncated {
+            return Ok(())
+        }
+        let following = std.object.key_text(page.after)
+        if order.compare(following, after) != Greater {
+            return Error(format.disk_fault("authority", 0, Malformed))
+        }
+        after = take following
+    }
+}
+
+pub fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, deadline: u64) waits {
+    list.clear(mut entropy)
+    host.random(r, mut entropy)
+    let jitter = format.read_le(entropy, 0, 8) % pause
+    host.sleep_until(c, order.min(clock.deadline_after_ms(host.mono_ns(c), pause + jitter), deadline))
+}
+
+pub fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), types.Failure] waits {
+    if manifest.read_page_manifest_bytes(d)? != raw {
+        return Error(Held)
+    }
+    Ok(())
+}
+
+pub fn history_binding_equals(octets: Bytes, schema_binding: Inline[u8, 32]) -> bool {
+    if list.len(octets) != 32 {
+        return false
+    }
+    for i in 0u64 .. 32 {
+        if octets[i] != schema_binding[i] {
+            return false
+        }
+    }
+    true
+}
+
+// Streamed genesis (§12.11.5): the service grants (inc, next seq) for
+// (X, 1), the head is created with ATTACH naming that live tail and no step
+// 5a probe (the service probed the endpoint), and X's CLAIM is its first
+// frame in the stream. Open returns once that frame is acked.
+pub fn history_stream_genesis(mut client: std.object.Client, mut link: host_stream.SlotLink, id: types.StoreKey, holder: types.StoreKey, authority_kind: u8, authority: Bytes, mut workspace: history.HistoryBuffers, deadline: u64, limits: types.LimitsRep) -> Result[history.HistoryRegister, types.Failure] waits {
+    let place_prefix = std.object.bucket_config(client).prefix
+    let (inc, first_seq) = host_stream.slot_attach(mut link, id, 1, place_prefix, limits)?
+    let attach = format.Attach(settles: 0, live: Some(format.StreamRef(sid: host_stream.slot_sid(link), inc, from_seq: first_seq, from_frame: 0)), sealed: list.new())
+    let created = history.history_publish_genesis(mut client, id, holder, authority_kind, authority, mut workspace, deadline, limits, Some(take attach))
+    let register = match take created {
+        Ok(take granted) => take granted,
+        Error(Exists(existing)) if existing == "head" => return Error(Lost),
+        Error(take problem) => return Error(take problem),
+    }
+    host_stream.slot_claim_frame(mut workspace.packet, 1, holder)
+    host_stream.slot_send(link, workspace.packet, 0)?
+    host_stream.slot_wait(mut link, 0)?
+    Ok(take register)
+}
+
+pub fn open_checks(group_commits: u32, group_bytes: u32, limits: Option[types.LimitsRep], checkpoint_bytes: u64, journal_limit: u64) -> Result[(), types.Failure] {
+    if group_commits == 0 {
+        return Error(Missing("group_commits"))
+    }
+    if group_bytes == 0 {
+        return Error(Missing("group_bytes"))
+    }
+    types.check_named_limits(limits)?
+    // Before the MANIFEST is read, the floor uses the named limits or the ceilings.
+    if let Some(problem) = types.journal_floor(checkpoint_bytes, journal_limit, types.named_limits(limits).frame) {
+        return Error(Full(Journal(problem)))
+    }
+    Ok(())
+}
+
+pub fn object_open_checks(group_commits: u32, group_bytes: u32, limits: Option[types.LimitsRep], checkpoint_bytes: u64, journal_limit: u64, head_poll_ms: u64, checkpoint_entries: u64, retain: u8) -> Result[(), types.Failure] {
+    open_checks(group_commits, group_bytes, limits, checkpoint_bytes, journal_limit)?
+    if head_poll_ms == 0 {
+        return Error(Missing("head_poll_ms"))
+    }
+    if checkpoint_entries == 0 {
+        return Error(Missing("checkpoint_entries"))
+    }
+    if retain == 0 {
+        return Error(Missing("retain"))
+    }
+    Ok(())
+}

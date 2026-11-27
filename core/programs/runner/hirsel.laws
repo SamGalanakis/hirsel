@@ -82,7 +82,7 @@ runner@1/runner/test_named_slots src=4450b3a392e0843e sig=cd2a266196fc243c run=b
 runner@1/runner/test_pool_releases_cancelled_reader src=c48fd3c3a8c41e03 sig=1843362e02c0efe8 run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
 runner@1/runner/test_projection_isolated src=bcac7b8ee5cbcb04 sig=cb53ce9a0ecd443d run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_range_reruns src=ed3cc3d53892bb15 sig=d5ee6a51636cc63c run=b1818af2b24835d3 bug=- oracle=- rows=pending
-runner@1/runner/test_release_after_durable src=d9b5c3b5bc6e13a5 sig=0a3b726226745593 run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/test_release_after_durable src=d9b5c3b5bc6e13a5 sig=094acb4911eb2778 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_removal_waits_for_writer src=5e2d15ce2d45dc5d sig=b4c89f97c5873e30 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_repair_coalesced src=9a31daf7e4c0819a sig=7abe8f259ca338a4 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_repair_one_unsent src=81c27d53893b1966 sig=cf5733ac7fcd9cf2 run=dbf6722727633166 bug=- oracle=- rows=pending
@@ -90,7 +90,7 @@ runner@1/runner/test_replay_caller src=fd7e0cd69cb21ee7 sig=c679d54d51f9d34f run
 runner@1/runner/test_retired_without_waiting src=4f510702dd18ff37 sig=e7989b29ac9e4613 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_rows_normalized src=c71ea24f90afe9b3 sig=9f9b2b04a3df0a7b run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_shared_view_once src=107c03a040010d0f sig=467b291f02bb744f run=b1818af2b24835d3 bug=- oracle=- rows=pending
-runner@1/runner/test_sim_release_uses_strongest src=18f137e391c96cfe sig=7823cac1a9080181 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+runner@1/runner/test_sim_release_uses_strongest src=18f137e391c96cfe sig=2c0d035d518db1db run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 runner@1/runner/test_slot_images src=c94481fbd2c120fd sig=6892152bd52e67e7 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_sse_expiry_terminal src=af3196dc0812e157 sig=e81d5a4705be1d19 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 runner@1/runner/test_stale_never_released src=fe8047c6571a674a sig=6bd10fa3d60c1d89 run=dbf6722727633166 bug=- oracle=- rows=pending
@@ -105,7 +105,7 @@ runner@1/runner/test_wire_admission src=a9518aa102ca094a sig=f69e8d99c08462a9 ru
 runner@1/runner/test_wire_replacement_generation src=7b78d64789604910 sig=282c070b15a67b24 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_session src=d2818cb6ad76abc9 sig=38a8a784ae94e467 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_write src=0fd42bfda9feccfd sig=4df39777515f318b run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
-runner@1/runner/test_zero_mutation_behind_latch src=954c34b6dbd8753f sig=15717a65ed490abf run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/test_zero_mutation_behind_latch src=954c34b6dbd8753f sig=ce2d485381cdb1ad run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/trigger_scan_classes src=02acddf0392b53db sig=317ab2dba4e94938 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/waiter_set_not_installed_after_promotion src=543e2dbc41a59697 sig=679e5c8ec1f1f73c run=607dcf6bff52df2b bug=- oracle=- rows=pending
 runner@1/runner_calls/test_anonymous_fresh src=1c72f0ca07712d1a sig=85af9860001a0f02 run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending

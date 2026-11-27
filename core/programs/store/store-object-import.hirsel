@@ -3,7 +3,7 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
     let ObjectAuthority(take settings) = take authority else {
         return Error(Unsupported(0))
     }
-    object_open_checks(options)?
+    failure_result_from_rep(object_writer.object_open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit, options.head_poll_ms, options.checkpoint_entries, options.retain))?
     if !options.create || (options.activation != None && options.activation != Some(0u64)) {
         return Error(NotFound)
     }
@@ -21,7 +21,7 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
         Error(Remote(NotFound)) => (),
         Error(take problem) => return Error(take problem),
     }
-    history_check_empty(mut client, deadline)?
+    failure_result_from_rep(object_writer.history_check_empty(mut client, deadline))?
     let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
     let holder = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
     let Preparation(db: take recovered, ..) = take source
@@ -48,7 +48,7 @@ fn history_import_base(mut client: std.object.Client, draft: Db, options: Option
     let limit = order.max(options.pack_bytes, manifest.page_manifest_file_size(manifest.MANIFEST_LIMIT, 1))
     let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit))?
     let no_packs = history.empty_history_locator()
-    let (take layout, take refs) = history_write_page_cut(mut client, draft.store, 1, 1, take cut_plan, no_packs, None, mut buffers, mut workspace, deadline)?
+    let (take layout, take refs) = failure_result_from_rep(object_writer.history_write_page_cut(mut client, store_key_to_rep(draft.store), 1, 1, take cut_plan, no_packs, None, mut buffers, mut workspace, deadline))?
     fill_cut_manifest(mut buffers.out, draft, NoHolderChange, participants.roots, 1, 1, 1, layout, next_stamp, base.account, seal_page_manifest_file)?
     let (_, take page_record) = disk_read_page_manifest("MANIFEST", buffers.out)?
     let uploaded = failure_result_from_rep(history.history_create_manifest(mut client, store_key_to_rep(draft.store), 1, 1, page_record, mut workspace, deadline))?

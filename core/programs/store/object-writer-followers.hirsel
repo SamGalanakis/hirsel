@@ -1,0 +1,72 @@
+pub type FollowCapture: shareable + send {
+    store: types.StoreKey,
+    state: Arc[pages.State],
+    resident: u64,
+    remote: Option[host_stream.ObjectFollowHead],
+    log_id: u64,
+    watermark: u64
+}
+
+pub type FollowerTransport: send = DirectoryFollow(Dir, Clock) | ObjectFollow(std.object.Requests, u8, Option[String], Option[pager.ObjectsCache])
+
+pub type FollowerRequest: send = Bind(FollowerTransport, Option[types.StoreKey], u64) | Apply(Arc[FollowCapture], u64) | Floor(Arc[FollowCapture], u64, u64, u64) | Fresh(Arc[FollowCapture], u64, u64) | Await(Arc[FollowCapture], types.PositionRep, u64, Option[u64])
+
+pub type FollowerSource = DirectorySource(Dir, Clock) | ObjectSource(history.ObjectPackRead)
+
+pub fn follow_capture(id: types.StoreKey, take state: pages.State, resident: u64, take remote: Option[host_stream.ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], types.Failure] {
+    let shared = types.capacity(bound bytes option.unwrap(charge.counted(bytes[pages.State])) {
+        arc.new(take state)
+    })?
+    let mut held = take remote
+    types.capacity(bound bytes (option.unwrap(charge.counted(bytes[FollowCapture])) + 64) {
+        arc.new(FollowCapture(store: id, state: arc.share(shared), resident, remote: replace(mut held, None), log_id, watermark))
+    })
+}
+
+pub type LogCaptureKey {
+    manifest: Inline[u8, 32],
+    first: u64,
+    count: u64,
+    end_image: Option[Bytes],
+    torn_tail: bool
+}
+
+pub type LogCaptureAttempt {
+    key: LogCaptureKey,
+    capture_id: u64
+}
+
+pub type LogCaptureProgress {
+    next_id: u64,
+    last: Option[LogCaptureAttempt]
+}
+
+pub fn same_capture_key(a: LogCaptureKey, b: LogCaptureKey) -> bool {
+    a.manifest == b.manifest && a.first == b.first && a.count == b.count && a.end_image == b.end_image && a.torn_tail == b.torn_tail
+}
+
+pub fn behind_branch(candidate: pages.State, published: pages.State) -> Option[u32] {
+    let mut behind: Option[u32] = if candidate.next_branch < published.next_branch {
+        Some(candidate.next_branch)
+    } else {
+        None
+    }
+    for old in published.tips {
+        let mut regressed = old.id >= candidate.next_branch
+        for current in candidate.tips {
+            if current.id == old.id && current.head < old.head {
+                regressed = true
+                break
+            }
+        }
+        if regressed {
+            let id = old.id
+            if let Some(earlier) = behind {
+                behind = Some(order.min(earlier, id))
+            } else {
+                behind = Some(id)
+            }
+        }
+    }
+    behind
+}

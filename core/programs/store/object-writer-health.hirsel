@@ -1,0 +1,71 @@
+// The object journal's count of failed reclaim passes, published to
+// `attention` (§II.4).
+// `pending` holds from a failed reclaim pass until a pass succeeds.
+pub type ReclaimFailures: send {
+    count: u64,
+    pending: bool
+}
+
+type ObjectHealthSignal: send {
+    value: Latest[status.Health],
+    terminal: Sender[()]
+}
+
+fn health_failure(problem: types.Failure) -> status.Health {
+    match problem {
+        Fenced(e) => Fenced(e),
+        Undecided => Undecided,
+        Latched(cause) => Latched(cause),
+        Remote(cause) => Remote(clone(cause)),
+        Poisoned(io) => Poisoned(io),
+        Io(io) => Poisoned(io),
+        _ => Poisoned(Closed),
+    }
+}
+
+fn health_is_working(value: status.Health) -> bool {
+    if let Ok(_) = value {
+        true
+    } else {
+        false
+    }
+}
+
+fn copy_health(value: status.Health) -> status.Health {
+    clone(value)
+}
+
+fn emit_health(signal: ObjectHealthSignal, take value: status.Health) {
+    let previous = latest.read(signal.value)
+    if health_is_working(previous) {
+        let asked = !health_is_working(value)
+        latest.publish(signal.value, arc.new(take value))
+        if asked {
+            let _ = channel.try_send(signal.terminal, ())
+        }
+    }
+}
+
+type HealthNotice[M: send]: send {
+    ready: Receiver[()],
+    output: Sender[M],
+    message: M
+}
+
+fn wait_unhealthy[M: send](take notice: HealthNotice[M]) waits {
+    let HealthNotice(ready: take ready, output: take output, message: take message) = take notice
+    if let Ok(()) = channel.receive(ready) {
+        let _ = channel.try_send(output, take message)
+    }
+}
+
+pub fn health_result(value: status.Health) -> Result[(), types.Failure] {
+    match value {
+        Ok(_) => Ok(()),
+        Fenced(e) => Error(Fenced(e)),
+        Undecided => Error(Undecided),
+        Poisoned(problem) => Error(Poisoned(problem)),
+        Remote(problem) => Error(Remote(clone(problem))),
+        Latched(cause) => Error(Latched(cause)),
+    }
+}

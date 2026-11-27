@@ -22,7 +22,10 @@ pub fn main(app: Foreign[ios.Ios], dir: Dir, tasks: Tasks, clock: Clock, random:
     let table = result.unwrap(counter.schema(mut declaration))
     let _ = result.unwrap(store.seal(mut db, take declaration))
     let value = match result.unwrap(store.run(mut db, None, Request(table: table, delta: delta), run_step)) {
-        Committed(store.Done(value: value, ..)) => value,
+        Committed(store.Done(value: value, ticket: ticket, ..)) => {
+            result.unwrap(store.durable(mut db, ticket))
+            value
+        },
         _ => fail("counter transaction did not commit"),
     }
     let mut text = string.new()

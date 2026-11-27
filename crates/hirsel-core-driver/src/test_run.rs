@@ -419,7 +419,7 @@ impl CheckProduct {
         let executable = std::fs::canonicalize(&built.executable)?;
         let mut command = runner.test_command(&executable);
         if let Some(worker) = options.compiler_worker() {
-            command.env("HIRSEL_COMPILER_WORKER", worker);
+            command.arg(format!("--hirsel-compiler-worker={}", worker.display()));
         }
         for grant in &options.exec_grants {
             grant.approve(&mut command);

@@ -629,14 +629,12 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     unsafe {
         match ((*request).operation, (*request).mode) {
             (CHECK_LIBRARY, _) => {
-                return Step {
-                    outcome: crate::tasks::host_operation(
-                        state,
-                        request,
-                        crate::host::compiler::issue,
-                    ),
-                    ..Step::default()
-                };
+                return crate::tasks::on_host_stack(
+                    false,
+                    #[cfg(feature = "prof")]
+                    (*request).site,
+                    || crate::host::compiler::step(&mut *request, token, true),
+                );
             }
             (EXEC_SPAWN, _) => {
                 let spawn = crate::exec_runtime::operations(request).spawn;
@@ -731,7 +729,9 @@ unsafe fn unix_operations(request: *const Request) -> &'static crate::os_unix::O
 unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -> Step {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
-        if (*request).operation == EXEC_WAIT {
+        if (*request).operation == CHECK_LIBRARY {
+            crate::host::compiler::step(&mut *request, token, false)
+        } else if (*request).operation == EXEC_WAIT {
             (crate::exec_runtime::operations(request).process)(&mut *request, token)
         } else if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).step)(request, token, false)
@@ -754,7 +754,9 @@ unsafe extern "C" fn abort(
 ) -> Outcome {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
-        if (*request).operation == EXEC_WAIT {
+        if (*request).operation == CHECK_LIBRARY {
+            crate::host::compiler::abort(&mut *request)
+        } else if (*request).operation == EXEC_WAIT {
             (crate::exec_runtime::operations(request).abort)(&mut *request, reason)
         } else if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).abort)(request, token, reason)

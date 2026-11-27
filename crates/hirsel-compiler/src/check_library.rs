@@ -9,9 +9,9 @@ use hirsel_core_ids::{ContentHash, PackageId};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -22,10 +22,15 @@ use std::time::{Duration, Instant};
 
 /// Internal worker entry recognized by the driver and its contract evaluator.
 pub const WORKER_ARG: &str = "__check-library";
-const WIRE_MAGIC: &[u8; 4] = b"HCL1";
-const UNSUPPORTED_PREFIX: &str = "check_library: unsupported: ";
-const LIMIT_INPUT_PREFIX: &str = "check_library: limit: input: ";
-const LIMIT_OUTPUT_PREFIX: &str = "check_library: limit: output: ";
+pub mod wire;
+use sha2::{Digest, Sha256};
+pub use wire::canonical_json;
+use wire::{LIMIT_INPUT_PREFIX, LIMIT_OUTPUT_PREFIX, UNSUPPORTED_PREFIX, write_wire_request};
+
+/// Remove launch-only syscall permissions before processing any worker input.
+pub fn seal_worker() -> std::io::Result<()> {
+    host::seal_worker()
+}
 
 /// Resource and input caps for registry `check_library` admission (`registry.md` §2).
 /// Separate from `Caps::HOST` (16 MiB module compile default).
@@ -290,6 +295,12 @@ pub struct CheckedLibrary {
     pub bindings: Vec<CheckedBinding>,
     pub interface: InterfaceV1,
     pub authority: AuthorityCard,
+    #[serde(skip)]
+    pub facts_bytes: Vec<u8>,
+    #[serde(skip)]
+    pub facts_digest: String,
+    #[serde(skip)]
+    pub compiler_id: String,
 }
 
 impl CheckedLibrary {
@@ -312,77 +323,6 @@ pub fn parse_digest(text: &str) -> Option<ContentHash> {
     }
     let bytes: [u8; 32] = hirsel_core_ids::hex::decode(text)?.try_into().ok()?;
     Some(ContentHash(bytes))
-}
-
-/// Format a [`serde_json::Value`] as RFC 8785 canonical UTF-8 JSON with no
-/// trailing newline.
-pub fn canonical_json(value: &Value) -> String {
-    let mut out = String::new();
-    write_canonical(value, &mut out);
-    out
-}
-
-fn write_canonical(value: &Value, out: &mut String) {
-    match value {
-        Value::Null => out.push_str("null"),
-        Value::Bool(true) => out.push_str("true"),
-        Value::Bool(false) => out.push_str("false"),
-        Value::Number(number) => {
-            if let Some(u) = number.as_u64() {
-                let _ = write!(out, "{u}");
-            } else if let Some(i) = number.as_i64() {
-                let _ = write!(out, "{i}");
-            } else {
-                out.push_str(&number.to_string());
-            }
-        }
-        Value::String(text) => write_canonical_string(text, out),
-        Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                write_canonical(item, out);
-            }
-            out.push(']');
-        }
-        Value::Object(map) => {
-            out.push('{');
-            let mut entries: Vec<(&str, &Value)> =
-                map.iter().map(|(k, v)| (k.as_str(), v)).collect();
-            entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-            for (index, (key, val)) in entries.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                write_canonical_string(key, out);
-                out.push(':');
-                write_canonical(val, out);
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn write_canonical_string(text: &str, out: &mut String) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{09}' => out.push_str("\\t"),
-            '\u{0a}' => out.push_str("\\n"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\u{0d}' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
 }
 
 fn validate_input_limits(
@@ -442,40 +382,25 @@ fn validate_input_limits(
     Ok(())
 }
 
-fn write_wire_request(
-    writer: &mut impl Write,
-    request: &CheckLibraryRequest<'_>,
-) -> std::io::Result<()> {
-    writer.write_all(WIRE_MAGIC)?;
-    writer.write_all(&request.root.0)?;
-    writer.write_all(&(request.content.len() as u64).to_le_bytes())?;
-    writer.write_all(request.content)?;
-    writer.write_all(&(request.closure.len() as u32).to_le_bytes())?;
-    for entry in request.closure {
-        writer.write_all(&entry.root.0)?;
-        writer.write_all(&(entry.content.len() as u64).to_le_bytes())?;
-        writer.write_all(entry.content)?;
-    }
-    writer.write_all(&(request.history.len() as u32).to_le_bytes())?;
-    for row in request.history {
-        writer.write_all(&(row.origin.len() as u32).to_le_bytes())?;
-        writer.write_all(row.origin.as_bytes())?;
-        writer.write_all(&(row.identity.len() as u32).to_le_bytes())?;
-        writer.write_all(row.identity.as_bytes())?;
-        writer.write_all(&(row.version.len() as u32).to_le_bytes())?;
-        writer.write_all(row.version.as_bytes())?;
-        writer.write_all(&row.root.0)?;
-    }
-    writer.flush()
-}
-
 pub(crate) fn run(
     service: &Service,
     request: &CheckLibraryRequest<'_>,
     caps: CheckLibraryCaps,
 ) -> Result<CheckedLibrary, Refusal> {
+    run_cancellable(service, request, caps, &AtomicBool::new(false))
+}
+
+pub(super) fn run_cancellable(
+    service: &Service,
+    request: &CheckLibraryRequest<'_>,
+    caps: CheckLibraryCaps,
+    cancelled: &AtomicBool,
+) -> Result<CheckedLibrary, Refusal> {
     // 1. Validate all input caps before taking a seat, allocating, or spawning.
     validate_input_limits(request, caps)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(unavailable("cancelled"));
+    }
     let _seat = service.seat()?;
 
     // 2. Create private per-job scratch directory (removed on drop; zero bytes
@@ -532,7 +457,8 @@ pub(crate) fn run(
     let child_pid = child.id() as libc::pid_t;
 
     let output_limit = caps.output_bytes as usize;
-    let diag_limit = caps.diagnostics_bytes;
+    let id_line_len = wire::ID_PREFIX.len() + 65;
+    let diag_limit = caps.diagnostics_bytes.saturating_add(id_line_len);
     let output_overflow = Arc::new(AtomicBool::new(false));
     let overflow_flag = Arc::clone(&output_overflow);
 
@@ -575,7 +501,7 @@ pub(crate) fn run(
 
         let mut status = None;
         while Instant::now() < deadline {
-            if output_overflow.load(Ordering::Acquire) {
+            if cancelled.load(Ordering::Acquire) || output_overflow.load(Ordering::Acquire) {
                 // SAFETY: child leads its own process group and is unreaped.
                 unsafe { libc::kill(-child_pid, libc::SIGKILL) };
                 status = child.wait().ok();
@@ -612,7 +538,19 @@ pub(crate) fn run(
         return Err(Refusal::Limit(Limit::Wall));
     };
 
-    let said = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let compiler_id = stderr_bytes
+        .get(..id_line_len)
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .and_then(|line| line.strip_prefix(wire::ID_PREFIX)?.strip_suffix('\n'))
+        .and_then(parse_digest);
+    let diagnostics = if compiler_id.is_some() {
+        &stderr_bytes[id_line_len..]
+    } else {
+        &stderr_bytes
+    };
+    let said =
+        String::from_utf8_lossy(&diagnostics[..diagnostics.len().min(caps.diagnostics_bytes)])
+            .into_owned();
     match (status.code(), status.signal()) {
         (Some(0), _) => {}
         (Some(MEMORY_STATUS), _) => return Err(Refusal::Limit(Limit::Memory)),
@@ -653,7 +591,7 @@ pub(crate) fn run(
     }
     let text = std::str::from_utf8(&reply_bytes)
         .map_err(|error| Refusal::Unavailable(format!("worker reply is not UTF-8: {error}")))?;
-    let checked: CheckedLibrary = serde_json::from_str(text)
+    let mut checked: CheckedLibrary = serde_json::from_str(text)
         .map_err(|error| Refusal::Unavailable(format!("malformed worker reply: {error}")))?;
     let expected_root = request.root.to_string();
     if checked.root != expected_root {
@@ -668,5 +606,10 @@ pub(crate) fn run(
             checked.header.charge
         )));
     }
+    checked.compiler_id = compiler_id
+        .ok_or_else(|| unavailable("missing worker compiler identity"))?
+        .to_string();
+    checked.facts_digest = ContentHash(Sha256::digest(&reply_bytes).into()).to_string();
+    checked.facts_bytes = reply_bytes;
     Ok(checked)
 }

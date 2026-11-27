@@ -345,7 +345,7 @@ impl OsProcess {
             for (index, value) in argv.clone().enumerate() {
                 std::str::from_utf8(value).map_err(|_| StartupError::NonUtf8Arg(index + 1))?;
             }
-            let options = launch_options::parse(argv.clone(), input.exec_bindings_len != 0)?;
+            let options = launch_options::parse(argv.clone(), input)?;
             let args: Vec<_> = argv.skip(options.prefix).map(<[u8]>::to_vec).collect();
             let place = input.place != 0;
             let prepare_path = options.prepare_path(&args, input.directories_len, place)?;
@@ -355,6 +355,7 @@ impl OsProcess {
             let program_args = if dry_run { &args[2..] } else { &args[..] };
             let installing = options.installing();
             let launch_options::LaunchOptions {
+                compiler_worker,
                 n_place,
                 n_place_explicit,
                 describe_mode,
@@ -585,13 +586,9 @@ impl OsProcess {
             } else {
                 None
             };
-            let compiler = (!describe_mode && input.grant_mask & (1 << COMPILER) != 0).then(|| {
-                crate::host::compiler::Binding::new(
-                    std::env::var_os("HIRSEL_COMPILER_WORKER")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| "/usr/local/bin/hirsel".into()),
-                )
-            });
+            let compiler = compiler_worker
+                .filter(|_| !describe_mode)
+                .map(|path| crate::host::compiler::Binding::new(path.to_owned()));
             let mut metadata = Vec::new();
             let mut secrets = Vec::new();
             let mut creds = Vec::new();
@@ -677,7 +674,7 @@ impl OsProcess {
                                 provider_pointer
                             },
                             handle: match kind {
-                                COMPILER => compiler.as_ref().unwrap().handle(),
+                                COMPILER => compiler.as_ref().map_or(0, |c| c.handle()),
                                 NET => net_rules.as_ref().unwrap().handle(),
                                 STDIN => std::ptr::from_ref(stdin.as_deref().unwrap()) as u64,
                                 ENV => env.as_ref().unwrap().handle(),

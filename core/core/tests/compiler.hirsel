@@ -16,6 +16,9 @@ fn admission(c: Compiler) -> bool waits {
         Error(Unavailable(why)) => fail(take why),
         Error(_) => fail("valid fixture refused")
     }
+    if checked.facts_bytes != b"{\"authority\":{\"carried\":{\"checked/inspect\":{\"returns\":[],\"takes\":[\"Compiler\",\"function\"]}},\"reached\":{\"checked/inspect\":{\"contained\":[],\"kinds\":[],\"provided\":[],\"unresolved\":null}},\"verdict\":\"conditional\"},\"bindings\":[[\"dep\",\"github.com/example/leaf@1\",\"exact\",\"76ae24ce4d9a71210574fcf579054da206f4f2d70b109aa4908233a7e4bb3126\"]],\"header\":{\"charge\":\"charge-v1\",\"identity\":\"github.com/example/checked@1\",\"version\":\"1.0.0\"},\"interface\":{\"modules\":[{\"extends_core\":false,\"items\":[{\"definition\":\"github.com/example/checked@1/checked/inspect\",\"doc\":\"Carries both designations.\",\"kind\":\"function\",\"name\":\"inspect\",\"signature\":\"pub fn inspect(c: Compiler, f: fn(u64) -> u64) -> u64\"}],\"path\":[\"checked\"]}],\"package\":{\"name\":\"github.com/example/checked\",\"version\":\"1\"},\"version\":1},\"root\":\"1deb571bbd582801213907f7455641123c0d84ee447d76c51f48ce8f20028abc\"}" || checked.facts_digest != "5aa76007e0aa6c88381081210ace94d38054e23ef8e2ceded7606e26bd8e53d4" || string.byte_len(checked.compiler_id) != 64 {
+        fail("canonical facts or compiler identity")
+    }
     if checked.root != "1deb571bbd582801213907f7455641123c0d84ee447d76c51f48ce8f20028abc" || checked.header.identity != "github.com/example/checked@1" || checked.header.version != "1.0.0" || checked.header.charge != "charge-v1" {
         fail("header")
     }

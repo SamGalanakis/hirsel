@@ -414,7 +414,7 @@ pub unsafe extern "C" fn hirsel_core_check_library(
 ) -> Outcome {
     unsafe {
         let buffer = *input;
-        let mut reply = Vec::<u8>::new();
+        let mut call = crate::host::compiler::Call::default();
         let mut row = request(
             CHECK_LIBRARY,
             0,
@@ -425,13 +425,14 @@ pub unsafe extern "C" fn hirsel_core_check_library(
                 capacity: 0,
             },
         );
-        row.path = (&raw mut reply).cast();
+        row.path = (&raw mut call).cast();
         row.handle = hirsel_core_capability_handle(context, compiler);
         let provider = hirsel_core_capability_provider(context, compiler);
         let outcome = crate::provider::hirsel_core_host(context, provider, &mut row);
         if outcome.status != 0 {
             return outcome;
         }
+        let reply = call.reply;
         if outcome.error != IoError::OK || (outcome.value == 0 && reply.is_empty()) {
             return Outcome {
                 value: 9,

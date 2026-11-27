@@ -11,8 +11,7 @@
 
 use crate::checked::RejectedCheck;
 use crate::package_content::{
-    ARCHIVE_LIMIT, Binding, CHARGE, CONTENT_LIMIT, Content, Id, Library, PACKAGE_LIMIT,
-    PackageArchive, Root, toolchain_bindings,
+    Binding, CHARGE, Content, Id, Library, PackageArchive, Root, toolchain_bindings,
 };
 use crate::package_dir::PackageDir;
 use crate::package_manifest::name::{self as names, Version};
@@ -22,40 +21,17 @@ use hirsel_core_ids::ContentHash;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 
-/// Internal argv token used by `hirsel-compiler` to invoke this worker.
-pub(crate) const WORKER_ARG: &str = "__check-library";
+pub(crate) use hirsel_compiler::check_library::WORKER_ARG;
+use hirsel_compiler::check_library::{CheckLibraryCaps, canonical_json, wire::*};
+const REPLY_LIMIT: usize = CheckLibraryCaps::REGISTRY.output_bytes as usize;
 
-const WIRE_MAGIC: &[u8; 4] = b"HCL1";
-const HISTORY_METADATA_LIMIT: usize = 64 << 20;
-const REPLY_LIMIT: usize = 64 << 20;
-const UNSUPPORTED_PREFIX: &str = "check_library: unsupported: ";
-const LIMIT_INPUT_PREFIX: &str = "check_library: limit: input: ";
-const LIMIT_OUTPUT_PREFIX: &str = "check_library: limit: output: ";
-
-enum Failure {
-    Rejected(String),
-    Unsupported(String),
-    InputLimit(String),
-    OutputLimit(String),
-    Unavailable(String),
-}
-
-struct WireRequest {
-    head_root: Root,
-    head_bytes: Vec<u8>,
-    closure: Vec<(Root, Vec<u8>)>,
-    history: Vec<WireHistory>,
-}
-
-struct WireHistory {
-    origin: String,
-    identity: String,
-    version: String,
-    root: Root,
+impl From<[u8; 32]> for Root {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
 }
 
 struct VerifiedHistoryRow {
@@ -73,6 +49,15 @@ struct CheckedHeader<'a> {
 }
 
 pub(crate) fn run_worker() -> i32 {
+    if writeln!(
+        io::stderr().lock(),
+        "{ID_PREFIX}{}",
+        crate::compiler_identity()
+    )
+    .is_err()
+    {
+        return 2;
+    }
     match execute() {
         Ok(json_bytes) => {
             let mut stdout = io::stdout().lock();
@@ -106,9 +91,32 @@ pub(crate) fn run_worker() -> i32 {
 }
 
 fn execute() -> Result<Vec<u8>, Failure> {
+    hirsel_compiler::check_library::seal_worker()
+        .map_err(|e| Failure::Unavailable(e.to_string()))?;
     let stdin = io::stdin();
-    let request = read_wire_request(BufReader::new(stdin.lock()))?;
-    let checked = check_wire_request(request)?;
+    let mut entries = BTreeMap::new();
+    let (head, history) = read_wire_request(BufReader::new(stdin.lock()), |claimed: Root, raw| {
+        let root = Root::of(&raw);
+        if root != claimed {
+            return Err(Failure::Rejected(format!(
+                "root mismatch: expected {claimed}, computed {root}"
+            )));
+        }
+        if entries.contains_key(&root) {
+            return Err(Failure::Rejected(format!("duplicate package root {root}")));
+        }
+        let content = Content::decode_as(&Bytes::from(raw), false)
+            .map_err(|e| Failure::Rejected(format!("content {root}: {e}")))?;
+        entries.insert(
+            root,
+            Library {
+                content,
+                encoded: Bytes::new(),
+            },
+        );
+        Ok(())
+    })?;
+    let checked = check_library(head, entries, history)?;
     let canonical = canonical_json(&checked);
     let bytes = canonical.into_bytes();
     if bytes.len() > REPLY_LIMIT {
@@ -120,237 +128,13 @@ fn execute() -> Result<Vec<u8>, Failure> {
     Ok(bytes)
 }
 
-fn read_exact_or_reject(reader: &mut impl Read, buf: &mut [u8], what: &str) -> Result<(), Failure> {
-    reader
-        .read_exact(buf)
-        .map_err(|e| Failure::Rejected(format!("truncated request while reading {what}: {e}")))
-}
-
-fn read_u32(reader: &mut impl Read, what: &str) -> Result<u32, Failure> {
-    let mut buf = [0u8; 4];
-    read_exact_or_reject(reader, &mut buf, what)?;
-    Ok(u32::from_le_bytes(buf))
-}
-
-fn read_u64(reader: &mut impl Read, what: &str) -> Result<u64, Failure> {
-    let mut buf = [0u8; 8];
-    read_exact_or_reject(reader, &mut buf, what)?;
-    Ok(u64::from_le_bytes(buf))
-}
-
-fn read_root(reader: &mut impl Read, what: &str) -> Result<Root, Failure> {
-    let mut buf = [0u8; 32];
-    read_exact_or_reject(reader, &mut buf, what)?;
-    Ok(Root(buf))
-}
-
-fn read_bounded_bytes(
-    reader: &mut impl Read,
-    len: u64,
-    per_entry_limit: usize,
-    total: &mut usize,
-    total_limit: usize,
-    what: &str,
-) -> Result<Vec<u8>, Failure> {
-    if len > per_entry_limit as u64 {
-        return Err(Failure::InputLimit(format!(
-            "{what} length {len} exceeds {per_entry_limit} bytes"
-        )));
-    }
-    let len = len as usize;
-    let next_total = total.checked_add(len).ok_or_else(|| {
-        Failure::InputLimit(format!("total input bytes exceed {total_limit} bytes"))
-    })?;
-    if next_total > total_limit {
-        return Err(Failure::InputLimit(format!(
-            "total {what} bytes {next_total} exceed {total_limit} bytes"
-        )));
-    }
-    *total = next_total;
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(len)
-        .map_err(|_| Failure::Unavailable("out of memory while reserving input buffer".into()))?;
-    buf.resize(len, 0);
-    read_exact_or_reject(reader, &mut buf, what)?;
-    Ok(buf)
-}
-
-fn read_history_string(
-    reader: &mut impl Read,
-    history_bytes: &mut usize,
-    what: &str,
-) -> Result<String, Failure> {
-    let len = read_u32(reader, what)? as usize;
-    let added = 4usize.checked_add(len).ok_or_else(|| {
-        Failure::InputLimit(format!(
-            "history metadata exceeds {HISTORY_METADATA_LIMIT} bytes"
-        ))
-    })?;
-    let next = history_bytes.checked_add(added).ok_or_else(|| {
-        Failure::InputLimit(format!(
-            "history metadata exceeds {HISTORY_METADATA_LIMIT} bytes"
-        ))
-    })?;
-    if next > HISTORY_METADATA_LIMIT {
-        return Err(Failure::InputLimit(format!(
-            "history metadata size {next} exceeds {HISTORY_METADATA_LIMIT} bytes"
-        )));
-    }
-    *history_bytes = next;
-    let mut buf = vec![0u8; len];
-    read_exact_or_reject(reader, &mut buf, what)?;
-    String::from_utf8(buf)
-        .map_err(|_| Failure::Rejected(format!("invalid UTF-8 in history {what}")))
-}
-
-fn read_wire_request(mut reader: impl Read) -> Result<WireRequest, Failure> {
-    let mut magic = [0u8; 4];
-    read_exact_or_reject(&mut reader, &mut magic, "request magic")?;
-    if &magic != WIRE_MAGIC {
-        return Err(Failure::Rejected(
-            "invalid check_library request magic".into(),
-        ));
-    }
-    let head_root = read_root(&mut reader, "head root")?;
-    let head_len = read_u64(&mut reader, "head length")?;
-    let mut total_content = 0usize;
-    let head_bytes = read_bounded_bytes(
-        &mut reader,
-        head_len,
-        CONTENT_LIMIT,
-        &mut total_content,
-        ARCHIVE_LIMIT,
-        "head content",
-    )?;
-    let closure_count = read_u32(&mut reader, "closure count")? as usize;
-    if closure_count >= PACKAGE_LIMIT {
-        return Err(Failure::InputLimit(format!(
-            "package count {} exceeds limit of {PACKAGE_LIMIT}",
-            closure_count.saturating_add(1)
-        )));
-    }
-    let mut closure = Vec::with_capacity(closure_count);
-    for index in 0..closure_count {
-        let root = read_root(&mut reader, "closure root")?;
-        let len = read_u64(&mut reader, "closure content length")?;
-        let bytes = read_bounded_bytes(
-            &mut reader,
-            len,
-            CONTENT_LIMIT,
-            &mut total_content,
-            ARCHIVE_LIMIT,
-            &format!("closure[{index}] content"),
-        )?;
-        closure.push((root, bytes));
-    }
-    let history_count = read_u32(&mut reader, "history count")? as usize;
-    let mut history_bytes = 4usize;
-    let min_row_bytes = history_count.saturating_mul(44);
-    if history_bytes.saturating_add(min_row_bytes) > HISTORY_METADATA_LIMIT {
-        return Err(Failure::InputLimit(format!(
-            "history count {history_count} exceeds {HISTORY_METADATA_LIMIT} byte metadata limit"
-        )));
-    }
-    let mut history = Vec::with_capacity(history_count);
-    for _ in 0..history_count {
-        let origin = read_history_string(&mut reader, &mut history_bytes, "origin")?;
-        let identity = read_history_string(&mut reader, &mut history_bytes, "identity")?;
-        let version = read_history_string(&mut reader, &mut history_bytes, "version")?;
-        history_bytes = history_bytes.checked_add(32).ok_or_else(|| {
-            Failure::InputLimit(format!(
-                "history metadata exceeds {HISTORY_METADATA_LIMIT} bytes"
-            ))
-        })?;
-        if history_bytes > HISTORY_METADATA_LIMIT {
-            return Err(Failure::InputLimit(format!(
-                "history metadata exceeds {HISTORY_METADATA_LIMIT} bytes"
-            )));
-        }
-        let root = read_root(&mut reader, "history root")?;
-        history.push(WireHistory {
-            origin,
-            identity,
-            version,
-            root,
-        });
-    }
-    let mut trailing = [0u8; 1];
-    match reader.read(&mut trailing) {
-        Ok(0) => {}
-        Ok(_) => {
-            return Err(Failure::Rejected(
-                "trailing bytes in check_library request".into(),
-            ));
-        }
-        Err(error) => {
-            return Err(Failure::Rejected(format!(
-                "failed reading end of request: {error}"
-            )));
-        }
-    }
-    Ok(WireRequest {
-        head_root,
-        head_bytes,
-        closure,
-        history,
-    })
-}
-
-fn check_wire_request(request: WireRequest) -> Result<Value, Failure> {
-    // 1. Verify head root and decode canonical C v3 (scoped only).
-    let actual_head = Root::of(&request.head_bytes);
-    if actual_head != request.head_root {
-        return Err(Failure::Rejected(format!(
-            "head root mismatch: expected {}, computed {}",
-            ContentHash(request.head_root.0),
-            ContentHash(actual_head.0)
-        )));
-    }
-    let head_encoded = Bytes::from(request.head_bytes);
-    let head_content = Content::decode_as(&head_encoded, false)
-        .map_err(|error| Failure::Rejected(format!("head content: {error}")))?;
-    drop(head_encoded);
-    let mut entries = BTreeMap::new();
-    entries.insert(
-        actual_head,
-        Library {
-            content: head_content,
-            encoded: Bytes::new(),
-        },
-    );
-
-    // 2. Verify every closure entry's root and decode canonical C v3.
-    for (claimed_root, raw_bytes) in request.closure {
-        let actual = Root::of(&raw_bytes);
-        if actual != claimed_root {
-            return Err(Failure::Rejected(format!(
-                "closure root mismatch: expected {}, computed {}",
-                ContentHash(claimed_root.0),
-                ContentHash(actual.0)
-            )));
-        }
-        if entries.contains_key(&actual) {
-            return Err(Failure::Rejected(format!(
-                "duplicate package root {} in closure",
-                ContentHash(actual.0)
-            )));
-        }
-        let encoded = Bytes::from(raw_bytes);
-        let content = Content::decode_as(&encoded, false).map_err(|error| {
-            Failure::Rejected(format!("closure {}: {error}", ContentHash(actual.0)))
-        })?;
-        drop(encoded);
-        entries.insert(
-            actual,
-            Library {
-                content,
-                encoded: Bytes::new(),
-            },
-        );
-    }
-
+fn check_library(
+    actual_head: Root,
+    entries: BTreeMap<Root, Library>,
+    rows: Vec<WireHistory<Root>>,
+) -> Result<Value, Failure> {
     // 3. Parse and validate caller-supplied verified release history tuples.
-    let history = validate_history(request.history, actual_head, &entries)?;
+    let history = validate_history(rows, actual_head, &entries)?;
 
     // 4. Walk the tested dependency graph without substitutions, verifying
     //    completeness, uniqueness, acyclicity, exact pins, floor history, and
@@ -444,7 +228,7 @@ fn check_wire_request(request: WireRequest) -> Result<Value, Failure> {
 }
 
 fn validate_history(
-    rows: Vec<WireHistory>,
+    rows: Vec<WireHistory<Root>>,
     head_root: Root,
     entries: &BTreeMap<Root, Library>,
 ) -> Result<BTreeMap<Root, VerifiedHistoryRow>, Failure> {
@@ -832,74 +616,4 @@ fn render_product_diagnostics(product: &CheckProduct) -> String {
     } else {
         lines.join("\n")
     }
-}
-
-/// RFC 8785 (JCS) canonical UTF-8 JSON with no trailing newline.
-fn canonical_json(value: &Value) -> String {
-    let mut out = String::new();
-    write_canonical(value, &mut out);
-    out
-}
-
-fn write_canonical(value: &Value, out: &mut String) {
-    match value {
-        Value::Null => out.push_str("null"),
-        Value::Bool(true) => out.push_str("true"),
-        Value::Bool(false) => out.push_str("false"),
-        Value::Number(number) => {
-            if let Some(u) = number.as_u64() {
-                let _ = write!(out, "{u}");
-            } else if let Some(i) = number.as_i64() {
-                let _ = write!(out, "{i}");
-            } else {
-                out.push_str(&number.to_string());
-            }
-        }
-        Value::String(text) => write_canonical_string(text, out),
-        Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                write_canonical(item, out);
-            }
-            out.push(']');
-        }
-        Value::Object(map) => {
-            out.push('{');
-            let mut entries: Vec<(&str, &Value)> =
-                map.iter().map(|(k, v)| (k.as_str(), v)).collect();
-            entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-            for (index, (key, val)) in entries.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                write_canonical_string(key, out);
-                out.push(':');
-                write_canonical(val, out);
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn write_canonical_string(text: &str, out: &mut String) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{09}' => out.push_str("\\t"),
-            '\u{0a}' => out.push_str("\\n"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\u{0d}' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
 }

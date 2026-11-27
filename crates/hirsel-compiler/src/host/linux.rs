@@ -1,8 +1,4 @@
-//! Linux: kernel-enforced aggregate resource caps (delegated cgroup v2
-//! `memory.max` + `memory.swap.max=0` + `pids.max=1`, or `RLIMIT_AS` +
-//! `RLIMIT_DATA` combined with single-process seccomp confinement), Landlock
-//! read-only allowlist + private scratch confinement, and seccomp-bpf
-//! socket/network/process-creation denial before `exec`.
+//! Linux worker confinement uses a delegated cgroup v2, Landlock and a syscall allowlist.
 
 use super::ConfinementSpec;
 use std::ffi::CString;
@@ -17,18 +13,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-pub(crate) const CONFINEMENT_SUPPORTED: bool = true;
+#[cfg(test)]
+pub(crate) use tests::missing_confinement;
 
 const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
 const SYS_LANDLOCK_ADD_RULE: libc::c_long = 445;
 const SYS_LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
-const SYS_IO_URING_SETUP: u32 = 425;
-const SYS_CLONE3: u32 = 435;
-
-/// Fixed virtual address space reserve for loader, libc, main stack, and guard
-/// pages when falling back to `RLIMIT_AS` without a delegated cgroup v2.
-const BASE_VIRTUAL_HEADROOM: u64 = 64 << 20;
-
 static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static DISABLE_CGROUP_FOR_TEST: AtomicBool = AtomicBool::new(false);
@@ -75,6 +65,7 @@ const NATIVE_AUDIT_ARCH: u32 = 0xc000_00b7;
 struct LandlockRulesetAttr {
     handled_access_fs: u64,
     handled_access_net: u64,
+    scoped: u64,
 }
 
 #[repr(C, packed)]
@@ -106,37 +97,91 @@ const BPF_JEQ: u16 = 0x10;
 const BPF_K: u16 = 0x00;
 const BPF_RET: u16 = 0x06;
 
-const DENIED_SYSCALLS: &[u32] = &[
-    libc::SYS_socket as u32,
-    libc::SYS_socketpair as u32,
-    libc::SYS_connect as u32,
-    libc::SYS_bind as u32,
-    libc::SYS_listen as u32,
-    libc::SYS_accept as u32,
-    libc::SYS_accept4 as u32,
-    libc::SYS_sendto as u32,
-    libc::SYS_recvfrom as u32,
-    libc::SYS_sendmsg as u32,
-    libc::SYS_recvmsg as u32,
-    libc::SYS_sendmmsg as u32,
-    libc::SYS_recvmmsg as u32,
-    SYS_IO_URING_SETUP,
-    libc::SYS_ptrace as u32,
-    libc::SYS_process_vm_readv as u32,
-    libc::SYS_process_vm_writev as u32,
-    libc::SYS_mount as u32,
-    libc::SYS_umount2 as u32,
-    libc::SYS_pivot_root as u32,
-    libc::SYS_unshare as u32,
-    libc::SYS_setns as u32,
-    libc::SYS_clone as u32,
-    SYS_CLONE3,
+const WORKER_SYSCALLS: &[u32] = &[
+    libc::SYS_read as u32,
+    libc::SYS_write as u32,
+    libc::SYS_readv as u32,
+    libc::SYS_writev as u32,
+    libc::SYS_pread64 as u32,
+    libc::SYS_pwrite64 as u32,
+    libc::SYS_close as u32,
+    libc::SYS_lseek as u32,
+    libc::SYS_fstat as u32,
+    libc::SYS_newfstatat as u32,
+    libc::SYS_statx as u32,
+    libc::SYS_openat as u32,
+    libc::SYS_readlinkat as u32,
+    libc::SYS_getdents64 as u32,
+    libc::SYS_faccessat as u32,
+    libc::SYS_fcntl as u32,
+    libc::SYS_flock as u32,
+    libc::SYS_ioctl as u32,
+    libc::SYS_dup as u32,
+    libc::SYS_dup3 as u32,
+    libc::SYS_mmap as u32,
+    libc::SYS_mprotect as u32,
+    libc::SYS_munmap as u32,
+    libc::SYS_mremap as u32,
+    libc::SYS_madvise as u32,
+    libc::SYS_brk as u32,
+    libc::SYS_futex as u32,
+    libc::SYS_set_tid_address as u32,
+    libc::SYS_set_robust_list as u32,
+    libc::SYS_rseq as u32,
+    libc::SYS_rt_sigaction as u32,
+    libc::SYS_rt_sigprocmask as u32,
+    libc::SYS_rt_sigreturn as u32,
+    libc::SYS_sigaltstack as u32,
+    libc::SYS_getpid as u32,
+    libc::SYS_gettid as u32,
+    libc::SYS_getppid as u32,
+    libc::SYS_getuid as u32,
+    libc::SYS_geteuid as u32,
+    libc::SYS_getgid as u32,
+    libc::SYS_getegid as u32,
+    libc::SYS_clock_gettime as u32,
+    libc::SYS_clock_nanosleep as u32,
+    libc::SYS_nanosleep as u32,
+    libc::SYS_gettimeofday as u32,
+    libc::SYS_getrandom as u32,
+    libc::SYS_sched_getaffinity as u32,
+    libc::SYS_sched_yield as u32,
+    libc::SYS_getcwd as u32,
+    libc::SYS_uname as u32,
+    libc::SYS_sysinfo as u32,
+    libc::SYS_getrusage as u32,
+    libc::SYS_ftruncate as u32,
+    libc::SYS_fchmod as u32,
+    libc::SYS_mkdirat as u32,
+    libc::SYS_unlinkat as u32,
+    libc::SYS_renameat as u32,
+    libc::SYS_renameat2 as u32,
+    libc::SYS_fchmodat as u32,
+    libc::SYS_fsync as u32,
+    libc::SYS_fdatasync as u32,
+    libc::SYS_exit as u32,
+    libc::SYS_exit_group as u32,
+    libc::SYS_ppoll as u32,
 ];
-
 #[cfg(target_arch = "x86_64")]
-const ARCH_DENIED_SYSCALLS: &[u32] = &[libc::SYS_fork as u32, libc::SYS_vfork as u32];
+const ARCH_SYSCALLS: &[u32] = &[
+    libc::SYS_open as u32,
+    libc::SYS_stat as u32,
+    libc::SYS_lstat as u32,
+    libc::SYS_access as u32,
+    libc::SYS_readlink as u32,
+    libc::SYS_arch_prctl as u32,
+    libc::SYS_poll as u32,
+    libc::SYS_mkdir as u32,
+    libc::SYS_rmdir as u32,
+    libc::SYS_unlink as u32,
+    libc::SYS_rename as u32,
+    libc::SYS_chmod as u32,
+    libc::SYS_getrlimit as u32,
+    libc::SYS_dup2 as u32,
+];
 #[cfg(not(target_arch = "x86_64"))]
-const ARCH_DENIED_SYSCALLS: &[u32] = &[];
+const ARCH_SYSCALLS: &[u32] = &[];
 
 fn limit(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> io::Result<()> {
     let limit = libc::rlimit {
@@ -162,18 +207,21 @@ fn current_limit(resource: libc::__rlimit_resource_t) -> io::Result<libc::rlimit
     Ok(current)
 }
 
-fn lower_limit(resource: libc::__rlimit_resource_t, requested: u64) -> io::Result<()> {
+fn lower_limit(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> io::Result<()> {
     let current = current_limit(resource)?;
-    let capped = requested.min(current.rlim_max);
-    limit(resource, capped, capped)
+    limit(
+        resource,
+        soft.min(current.rlim_cur),
+        hard.min(current.rlim_max),
+    )
 }
 
 /// Run in the worker between `fork` and `exec`: `cpu` seconds of processor time, no
 /// file longer than `file` bytes, no core dump.
 pub(crate) fn confine(cpu: u64, file: u64) -> io::Result<()> {
-    limit(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1))?;
+    lower_limit(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1))?;
     limit(libc::RLIMIT_CORE, 0, 0)?;
-    limit(libc::RLIMIT_FSIZE, file, file)?;
+    lower_limit(libc::RLIMIT_FSIZE, file, file)?;
     // SAFETY: prctl with this option reads its one integer argument.
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
         return Err(io::Error::last_os_error());
@@ -235,11 +283,7 @@ impl CgroupGuard {
             return None;
         }
         std::fs::write(dir.join("memory.max"), memory_bytes.to_string()).ok()?;
-        match std::fs::write(dir.join("memory.swap.max"), "0") {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return None,
-        }
+        std::fs::write(dir.join("memory.swap.max"), "0").ok()?;
         let _ = std::fs::write(dir.join("memory.oom.group"), "1");
         std::fs::write(dir.join("pids.max"), "1").ok()?;
 
@@ -285,21 +329,9 @@ impl Drop for CgroupGuard {
     }
 }
 
-enum MemoryCap {
-    /// Delegated cgroup v2 enforcing aggregate `memory.max`, `memory.swap.max=0`,
-    /// and `pids.max=1`.
-    Cgroup(CgroupGuard),
-    /// Per-process `RLIMIT_AS` (bounding heap, anonymous/shared `mmap`, and stacks)
-    /// + `RLIMIT_DATA`, combined with seccomp denial of `fork`/`vfork`/`clone`/`clone3`
-    /// so per-process caps are aggregate.
-    RlimitAs { as_bytes: u64 },
-}
-
-/// Prepared Linux confinement for a `check_library` worker: holds the Landlock
-/// ruleset descriptor and optional per-job cgroup until after the worker finishes.
 pub(crate) struct Confinement {
     ruleset: OwnedFd,
-    memory_cap: MemoryCap,
+    cgroup: CgroupGuard,
     worker: PathBuf,
     cpu_seconds: u64,
     memory_bytes: u64,
@@ -320,25 +352,15 @@ impl Confinement {
         let worker = std::fs::canonicalize(spec.worker)?;
         let scratch = std::fs::canonicalize(spec.scratch)?;
         let ruleset = build_landlock_ruleset(abi, &worker, &scratch)?;
-        let memory_cap = match CgroupGuard::try_create(spec.memory_bytes) {
-            Some(cgroup) => MemoryCap::Cgroup(cgroup),
-            None => {
-                current_limit(libc::RLIMIT_AS).map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        format!("RLIMIT_AS memory confinement unavailable: {error}"),
-                    )
-                })?;
-                MemoryCap::RlimitAs {
-                    as_bytes: spec
-                        .memory_bytes
-                        .saturating_add(worker_virtual_headroom(&worker)),
-                }
-            }
-        };
+        let cgroup = CgroupGuard::try_create(spec.memory_bytes).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "worker requires delegated cgroup v2 memory and pids controllers",
+            )
+        })?;
         Ok(Self {
             ruleset,
-            memory_cap,
+            cgroup,
             worker,
             cpu_seconds: spec.cpu_seconds,
             memory_bytes: spec.memory_bytes,
@@ -353,26 +375,18 @@ impl Confinement {
         let cpu = self.cpu_seconds;
         let memory = self.memory_bytes;
         let file = self.file_bytes;
-        let (cgroup_procs_fd, rlimit_as) = match &self.memory_cap {
-            MemoryCap::Cgroup(cg) => (Some(cg.procs_fd.as_raw_fd()), None),
-            MemoryCap::RlimitAs { as_bytes } => (None, Some(*as_bytes)),
-        };
+        let cgroup_procs_fd = self.cgroup.procs_fd.as_raw_fd();
         let parent = std::process::id() as libc::pid_t;
-        let filter = build_seccomp_filter();
+        let filter = build_seccomp_filter(true);
         // SAFETY: closure executes async-signal-safe syscalls only on
         // pre-allocated data before exec.
         unsafe {
             command.pre_exec(move || {
-                if let Some(cg_fd) = cgroup_procs_fd {
-                    join_cgroup(cg_fd)?;
-                }
-                limit(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1))?;
+                join_cgroup(cgroup_procs_fd)?;
+                lower_limit(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1))?;
                 limit(libc::RLIMIT_CORE, 0, 0)?;
-                limit(libc::RLIMIT_FSIZE, file, file)?;
-                lower_limit(libc::RLIMIT_DATA, memory)?;
-                if let Some(as_bytes) = rlimit_as {
-                    lower_limit(libc::RLIMIT_AS, as_bytes)?;
-                }
+                lower_limit(libc::RLIMIT_FSIZE, file, file)?;
+                lower_limit(libc::RLIMIT_DATA, memory, memory)?;
 
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                     return Err(io::Error::last_os_error());
@@ -399,10 +413,7 @@ impl Confinement {
 
     /// True if the kernel memory cgroup recorded an OOM event for this job.
     pub(crate) fn memory_limit_hit(&self) -> bool {
-        match &self.memory_cap {
-            MemoryCap::Cgroup(cg) => cg.oom_triggered(),
-            MemoryCap::RlimitAs { .. } => false,
-        }
+        self.cgroup.oom_triggered()
     }
 }
 
@@ -450,39 +461,6 @@ fn join_cgroup(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn dir_so_bytes(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut total = 0u64;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let bytes = name.as_bytes();
-        let is_so = bytes.ends_with(b".so") || bytes.windows(4).any(|w| w == b".so.");
-        if is_so
-            && let Ok(meta) = entry.metadata()
-            && meta.is_file()
-        {
-            total = total.saturating_add(meta.len());
-        }
-    }
-    total
-}
-
-fn worker_virtual_headroom(worker: &Path) -> u64 {
-    let exe_bytes = std::fs::metadata(worker).map(|m| m.len()).unwrap_or(0);
-    let lib_bytes = if let Some(root) = installed_toolchain_root(worker) {
-        dir_so_bytes(&root.join("lib"))
-    } else if let Some(parent) = worker.parent() {
-        dir_so_bytes(&parent.join("lib"))
-    } else {
-        0
-    };
-    BASE_VIRTUAL_HEADROOM
-        .saturating_add(exe_bytes)
-        .saturating_add(lib_bytes)
-}
-
 fn probe_landlock() -> io::Result<i32> {
     // SAFETY: null attr + size 0 + VERSION flag queries kernel Landlock ABI.
     let abi = unsafe {
@@ -493,13 +471,10 @@ fn probe_landlock() -> io::Result<i32> {
             LANDLOCK_CREATE_RULESET_VERSION,
         )
     };
-    if abi < 1 {
+    if abi < 3 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!(
-                "Landlock filesystem confinement unavailable: {}",
-                io::Error::last_os_error()
-            ),
+            format!("worker requires Landlock ABI 3 or higher (kernel returned {abi})"),
         ));
     }
     Ok(abi as i32)
@@ -529,7 +504,7 @@ fn probe_seccomp() -> io::Result<()> {
 }
 
 fn build_landlock_ruleset(abi: i32, worker: &Path, scratch: &Path) -> io::Result<OwnedFd> {
-    let mut handled_fs = LANDLOCK_ACCESS_FS_EXECUTE
+    let handled_fs = LANDLOCK_ACCESS_FS_EXECUTE
         | LANDLOCK_ACCESS_FS_WRITE_FILE
         | LANDLOCK_ACCESS_FS_READ_FILE
         | LANDLOCK_ACCESS_FS_READ_DIR
@@ -541,13 +516,9 @@ fn build_landlock_ruleset(abi: i32, worker: &Path, scratch: &Path) -> io::Result
         | LANDLOCK_ACCESS_FS_MAKE_SOCK
         | LANDLOCK_ACCESS_FS_MAKE_FIFO
         | LANDLOCK_ACCESS_FS_MAKE_BLOCK
-        | LANDLOCK_ACCESS_FS_MAKE_SYM;
-    if abi >= 2 {
-        handled_fs |= LANDLOCK_ACCESS_FS_REFER;
-    }
-    if abi >= 3 {
-        handled_fs |= LANDLOCK_ACCESS_FS_TRUNCATE;
-    }
+        | LANDLOCK_ACCESS_FS_MAKE_SYM
+        | LANDLOCK_ACCESS_FS_REFER
+        | LANDLOCK_ACCESS_FS_TRUNCATE;
     let handled_net = if abi >= 4 {
         LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP
     } else {
@@ -556,9 +527,12 @@ fn build_landlock_ruleset(abi: i32, worker: &Path, scratch: &Path) -> io::Result
     let attr = LandlockRulesetAttr {
         handled_access_fs: handled_fs,
         handled_access_net: handled_net,
+        scoped: if abi >= 6 { 1 << 1 } else { 0 }, // LANDLOCK_SCOPE_SIGNAL
     };
-    let attr_size = if abi >= 4 {
+    let attr_size = if abi >= 6 {
         std::mem::size_of::<LandlockRulesetAttr>()
+    } else if abi >= 4 {
+        16
     } else {
         std::mem::size_of::<u64>()
     };
@@ -622,9 +596,6 @@ fn build_landlock_ruleset(abi: i32, worker: &Path, scratch: &Path) -> io::Result
         "/usr/lib64",
         "/lib",
         "/lib64",
-        "/usr/libexec",
-        "/usr/bin",
-        "/bin",
         "/etc/ld.so.cache",
         "/etc/ld.so.conf",
         "/etc/ld.so.conf.d",
@@ -633,6 +604,18 @@ fn build_landlock_ruleset(abi: i32, worker: &Path, scratch: &Path) -> io::Result
         let p = Path::new(path);
         if let Ok(canonical) = std::fs::canonicalize(p) {
             add_path_rule(&ruleset, &canonical, ro_dir, ro_file)?;
+        }
+    }
+    // Only the script fixtures need interpreters from outside the designated toolchain.
+    #[cfg(test)]
+    for path in [
+        "/bin/sh",
+        "/usr/bin/python3",
+        "/bin/sleep",
+        "/usr/bin/printf",
+    ] {
+        if let Ok(path) = std::fs::canonicalize(path) {
+            add_path_rule(&ruleset, &path, ro_dir, ro_file)?;
         }
     }
     if Path::new("/dev/null").exists() {
@@ -733,9 +716,15 @@ fn cloexec_above_stderr() -> io::Result<()> {
     Ok(())
 }
 
-fn build_seccomp_filter() -> Vec<SockFilter> {
-    let total = DENIED_SYSCALLS.len() + ARCH_DENIED_SYSCALLS.len();
-    let mut filter = Vec::with_capacity(total + 6);
+fn build_seccomp_filter(launch: bool) -> Vec<SockFilter> {
+    // The pre-exec filter must admit the designated exec and installation of the
+    // final filter. The worker drops both calls before reading the request.
+    let bootstrap = [libc::SYS_execve as u32, libc::SYS_seccomp as u32];
+    let allowed = WORKER_SYSCALLS
+        .iter()
+        .chain(ARCH_SYSCALLS)
+        .chain(bootstrap.iter().take(if launch { 2 } else { 0 }));
+    let mut filter = Vec::new();
     // Load seccomp_data.arch (offset 4) and kill on non-native ABI.
     filter.push(SockFilter {
         code: BPF_LD | BPF_W | BPF_ABS,
@@ -762,33 +751,58 @@ fn build_seccomp_filter() -> Vec<SockFilter> {
         jf: 0,
         k: 0,
     });
-    for (index, &nr) in DENIED_SYSCALLS
-        .iter()
-        .chain(ARCH_DENIED_SYSCALLS.iter())
-        .enumerate()
-    {
-        let remaining = (total - index) as u8;
-        // On match, jump past remaining checks + ALLOW to the DENY instruction.
+    filter.extend([
+        SockFilter {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 0,
+            jf: 4,
+            k: libc::SYS_prlimit64 as u32,
+        },
+        SockFilter {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: 16,
+        },
+        SockFilter {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: 0,
+        },
+        SockFilter {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        },
+        SockFilter {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+    ]);
+    // Exact native numbers only. This also rejects all x32 syscall numbers.
+    for &nr in allowed {
         filter.push(SockFilter {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: remaining,
-            jf: 0,
+            jt: 0,
+            jf: 1,
             k: nr,
         });
+        filter.push(SockFilter {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        });
     }
-    // Default allow.
     filter.push(SockFilter {
         code: BPF_RET | BPF_K,
         jt: 0,
         jf: 0,
-        k: SECCOMP_RET_ALLOW,
-    });
-    // Denied syscall: return EPERM.
-    filter.push(SockFilter {
-        code: BPF_RET | BPF_K,
-        jt: 0,
-        jf: 0,
-        k: SECCOMP_RET_ERRNO | (libc::EPERM as u32),
+        k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
     });
     filter
 }
@@ -812,3 +826,11 @@ fn install_seccomp(filter: &[SockFilter]) -> io::Result<()> {
     }
     Ok(())
 }
+
+pub(crate) fn seal_worker() -> io::Result<()> {
+    install_seccomp(&build_seccomp_filter(false))
+}
+
+#[cfg(test)]
+#[path = "linux_filter_tests.rs"]
+mod tests;

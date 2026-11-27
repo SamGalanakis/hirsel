@@ -72,7 +72,7 @@ fn bindings(resolution: &Resolution) -> BTreeMap<Id, Vec<BindingRow>> {
         for (alias, id) in &member.aliases {
             rows.entry(id.clone()).or_default().push(BindingRow {
                 row: format!("{}: dependencies.{alias}", member.manifest_path.display()),
-                authority: member.ceilings.get(alias).map(|mask| names(*mask)),
+                authority: member.ceilings.get(alias).map(|mask| names((*mask).into())),
             });
         }
     }

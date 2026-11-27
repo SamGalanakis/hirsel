@@ -9,7 +9,7 @@ use hirsel_core_ids::ContentHash;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 struct Bound {
     service: Service,
@@ -44,7 +44,7 @@ impl Designation {
         let scratch = tempfile::Builder::new()
             .prefix("hirsel-compiler-")
             .permissions(Permissions::from_mode(0o700))
-            .tempdir_in("/tmp")?;
+            .tempdir()?;
         let service = Service::new(
             self.worker.clone(),
             scratch.path().into(),
@@ -62,8 +62,12 @@ impl Designation {
 
     /// Dispatch the private, length-delimited core.compiler row.
     pub fn check(&self, input: &[u8]) -> (u64, Vec<u8>) {
+        self.check_cancellable(input, &AtomicBool::new(false))
+    }
+
+    pub fn check_cancellable(&self, input: &[u8], cancelled: &AtomicBool) -> (u64, Vec<u8>) {
         match self.service() {
-            Ok(bound) => check(&bound.service, input),
+            Ok(bound) => check(&bound.service, input, cancelled),
             Err(error) => (9, error.to_string().into_bytes()),
         }
     }
@@ -110,7 +114,11 @@ impl<'a> Input<'a> {
     }
 }
 
-fn run(service: &Service, mut input: Input<'_>) -> Option<Result<CheckedLibrary, Refusal>> {
+fn run(
+    service: &Service,
+    mut input: Input<'_>,
+    cancelled: &AtomicBool,
+) -> Option<Result<CheckedLibrary, Refusal>> {
     let head = input.entry()?;
     let count = input.count()?;
     if count >= CheckLibraryCaps::REGISTRY.max_packages {
@@ -125,18 +133,23 @@ fn run(service: &Service, mut input: Input<'_>) -> Option<Result<CheckedLibrary,
     if !input.0.is_empty() {
         return None;
     }
-    Some(service.check_library(&CheckLibraryRequest {
-        root: head.root,
-        content: head.content,
-        closure: &closure,
-        history: &history,
-    }))
+    Some(crate::check_library::run_cancellable(
+        service,
+        &CheckLibraryRequest {
+            root: head.root,
+            content: head.content,
+            closure: &closure,
+            history: &history,
+        },
+        CheckLibraryCaps::REGISTRY,
+        cancelled,
+    ))
 }
 
 /// The tag is the private row's result. Text refusals carry UTF-8 in the
 /// reply, and success carries the length-delimited fields of CheckedLibrary.
-fn check(service: &Service, input: &[u8]) -> (u64, Vec<u8>) {
-    match run(service, Input(input)).unwrap_or_else(|| {
+fn check(service: &Service, input: &[u8], cancelled: &AtomicBool) -> (u64, Vec<u8>) {
+    match run(service, Input(input), cancelled).unwrap_or_else(|| {
         Err(Refusal::Rejected(
             "invalid library request or digest".into(),
         ))
@@ -270,6 +283,10 @@ impl Reply {
                 self.strings(kinds.iter());
             }
         }
+        self.text(&checked.facts_digest);
+        self.count(checked.facts_bytes.len());
+        self.0.extend_from_slice(&checked.facts_bytes);
+        self.text(&checked.compiler_id);
         Ok(())
     }
 }

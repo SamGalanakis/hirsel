@@ -12,7 +12,7 @@ pub(crate) struct Node {
     pub(crate) children: BTreeSet<Identity>,
     operations: BTreeMap<u8, String>,
     unresolved: Option<String>,
-    provided: u16,
+    provided: u32,
     contained: Option<String>,
 }
 

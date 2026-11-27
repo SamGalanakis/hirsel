@@ -166,7 +166,7 @@ pub(super) fn finish(
     sources: &crate::SourceFiles,
     runner: &crate::Runner,
     compiler_worker: Option<PathBuf>,
-    run_args: Vec<String>,
+    mut run_args: Vec<String>,
     record_path: Option<&str>,
     replay_outputs: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
@@ -235,6 +235,9 @@ pub(super) fn finish(
     let run_exit = if command == "run" || command == "replay" {
         if let Some(native) = &output.native {
             let path = std::fs::canonicalize(&native.executable)?;
+            if let Some(worker) = compiler_worker {
+                run_args.insert(0, format!("--hirsel-compiler-worker={}", worker.display()));
+            }
             if let Some(profile) = profile {
                 let status = profile.capture(&path, &run_args, record_path)?;
                 if !status.success() {
@@ -251,9 +254,6 @@ pub(super) fn finish(
                     .flatten()
                     .map(|record| ("HIRSEL_RECORD".into(), record.into()))
                     .into_iter()
-                    .chain(
-                        compiler_worker.map(|path| ("HIRSEL_COMPILER_WORKER".into(), path.into())),
-                    )
                     .collect();
                 let mode = if command == "replay" {
                     crate::tape_cli::outputs::Mode::Replay(replay_outputs.map(PathBuf::from))

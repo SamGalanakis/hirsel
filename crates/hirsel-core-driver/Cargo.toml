@@ -24,6 +24,7 @@ harness = false
 comptime-g1 = ["hirsel-core-eval/host-instructions"]
 
 [dependencies]
+hirsel-compiler = { path = "../hirsel-compiler" }
 bytes = "1"
 ring = "=0.17.14"
 hirsel-prof = { path = "../hirsel-prof" }

@@ -408,7 +408,7 @@ impl Registry {
         // The workspace lock omits unused shared rows. Resolve this declaration with
         // the same carrier walk and compiler checks as a member inheriting the row.
         let dir = tempfile::tempdir()?;
-        let kinds = crate::reachability::authority::names(ceiling);
+        let kinds = crate::reachability::authority::names(ceiling.into());
         let manifest = format!(
             "[package]\nname = \"local/consumer\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[dependencies]\nsubject = {{ package = {:?}, major = {}, root = \"{root}\", registry = \"{origin}\", authority = {kinds:?} }}\n",
             id.name, id.major

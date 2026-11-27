@@ -444,15 +444,16 @@ fn g22_check_library_boundary() {
     );
     assert!(!dir.path().join("never-scratch").exists());
 
-    if !host::CONFINEMENT_SUPPORTED {
-        let unavail = absent_service
-            .check_library(&req(ContentHash([0; 32]), &tiny, &[], &[]))
-            .unwrap_err();
+    if let Some(reason) = host::missing_confinement() {
         assert!(
-            matches!(unavail, Refusal::Unavailable(_)),
-            "host without OS aggregate memory cap must fail closed, got {unavail:?}"
+            std::env::var_os("HIRSEL_TEST_REQUIRE_CGROUP").is_none(),
+            "{reason}"
         );
-        assert_scratch_empty(&dir.path().join("never-scratch"));
+        assert_eq!(
+            real_service.check_library(&req(ContentHash([0; 32]), &tiny, &[], &[])),
+            Err(Refusal::Unavailable(reason.into()))
+        );
+        assert_scratch_empty(&scratch);
         return;
     }
 
@@ -599,10 +600,13 @@ fn g22_check_library_boundary() {
     // RFC 8785 canonical JSON round-trips with no trailing newline.
     let canonical = checked.to_canonical_json().unwrap();
     assert!(!canonical.ends_with('\n'));
+    assert_eq!(checked.facts_bytes, canonical.as_bytes());
     assert_eq!(
-        serde_json::from_str::<CheckedLibrary>(&canonical).unwrap(),
-        checked
+        checked.facts_digest,
+        ContentHash(<sha2::Sha256 as sha2::Digest>::digest(&checked.facts_bytes).into())
+            .to_string()
     );
+    assert!(parse_digest(&checked.compiler_id).is_some());
     assert_scratch_empty(&scratch);
 
     let assert_rejected = |r: CheckLibraryRequest<'_>| {
@@ -903,7 +907,7 @@ sys.stderr.write('sockets-and-fork-denied\\n'); sys.exit(1)";
 
     // Real memory-cap allocation: ignores HIRSEL_MEMORY_LIMIT and allocates + faults
     // 256 MiB via MAP_SHARED|MAP_ANONYMOUS (which bypasses RLIMIT_DATA on Linux).
-    // Proves OS enforcement under both default (cgroup v2 when writable) and RLIMIT_AS fallback.
+    // The delegated cgroup charges the faulted pages to the worker.
     let mem_caps = CheckLibraryCaps {
         memory_bytes: 64 << 20,
         ..base_caps
@@ -932,12 +936,16 @@ sys.stderr.write('MEMORY_CAP_BYPASSED\\n'); sys.exit(1)";
         }
         host::disable_cgroup_for_test(true);
         let _restore = RestoreCgroup;
-        assert_eq!(run_py(mem_hog_py, mem_caps), Refusal::Limit(Limit::Memory));
-        // Real hirsel worker must also succeed under the RLIMIT_AS + seccomp fallback.
-        let checked_as = real_service
-            .check_library(&req(head_root, &head_bytes, &valid_closure, &valid_history))
-            .expect("real check_library worker must succeed under RLIMIT_AS + seccomp");
-        assert_eq!(checked_as.root, head_root.to_string());
+        let result = real_service.check_library(&req(
+            head_root,
+            &head_bytes,
+            &valid_closure,
+            &valid_history,
+        ));
+        assert!(
+            matches!(result, Err(Refusal::Unavailable(ref why)) if why.contains("cgroup v2")),
+            "{result:?}"
+        );
         assert_scratch_empty(&scratch);
     }
 

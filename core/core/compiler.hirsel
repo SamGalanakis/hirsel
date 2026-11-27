@@ -77,7 +77,10 @@ pub type CheckedLibrary {
     header: Header,
     bindings: List[Binding],
     interface: InterfaceV1,
-    authority: Card
+    authority: Card,
+    facts_digest: String,
+    facts_bytes: Bytes,
+    compiler_id: String
 }
 
 pub type ResourceLimit = Input | Cpu | Wall | Memory | Output
@@ -120,7 +123,10 @@ pub fn check_library(c: Compiler, request: CheckLibrary) -> Result[CheckedLibrar
     if string.byte_len(request.root) != 64 {
         return Error(Rejected("invalid head digest"))
     }
-    let mut input: Bytes = list.new()
+    // The grant uses u64 lengths and 64-byte digest text. HCL1 uses u32
+    // history lengths and binary digests, accounted for in metadata above.
+    let capacity = total + 16 + 80 * (1 + list.len(request.closure)) + metadata - 4 + 52 * list.len(request.history)
+    let mut input: Bytes = list.with_capacity(capacity)
     put_text(mut input, request.root)
     put_bytes(mut input, request.content)
     list.put_word_le(mut input, list.len(request.closure))
@@ -186,12 +192,16 @@ fn count(b: Bytes, mut at: u64) -> u64 {
     int.widen(n)
 }
 
-fn read_text(b: Bytes, mut at: u64) -> String {
+fn read_bytes(b: Bytes, mut at: u64) -> Bytes {
     let n = count(b, mut at)
     let mut out: Bytes = list.with_capacity(n)
     list.append(mut out, list.slice(b, at, at + n))
     at = at + n
-    result.unwrap(string.from_utf8(take out))
+    take out
+}
+
+fn read_text(b: Bytes, mut at: u64) -> String {
+    result.unwrap(string.from_utf8(read_bytes(b, mut at)))
 }
 
 fn optional_text(b: Bytes, mut at: u64) -> Option[String] {
@@ -280,5 +290,5 @@ fn read_library(b: Bytes, mut at: u64) -> CheckedLibrary {
         list.push(mut bindings, read_binding(b, mut at))
     }
     let api = read_interface(b, mut at)
-    CheckedLibrary(root: take root, header: take head, bindings: take bindings, interface: take api, authority: read_card(b, mut at))
+    CheckedLibrary(root: take root, header: take head, bindings: take bindings, interface: take api, authority: read_card(b, mut at), facts_digest: read_text(b, mut at), facts_bytes: read_bytes(b, mut at), compiler_id: read_text(b, mut at))
 }

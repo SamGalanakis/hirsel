@@ -51,7 +51,7 @@ impl Delta {
         }
     }
 
-    fn of(before: u16, after: u16) -> Self {
+    fn of(before: u32, after: u32) -> Self {
         Self {
             added: names(after & !before),
             removed: names(before & !after),

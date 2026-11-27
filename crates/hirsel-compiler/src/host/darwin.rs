@@ -9,7 +9,10 @@ use std::convert::Infallible;
 use std::io;
 use std::process::Command;
 
-pub(crate) const CONFINEMENT_SUPPORTED: bool = false;
+#[cfg(test)]
+pub(crate) fn missing_confinement() -> Option<&'static str> {
+    Some("macOS host cannot enforce OS aggregate memory cap")
+}
 
 #[cfg(test)]
 pub(crate) fn disable_cgroup_for_test(_disable: bool) {}
@@ -59,4 +62,9 @@ impl Confinement {
     pub(crate) fn memory_limit_hit(&self) -> bool {
         match self._uninhabited {}
     }
+}
+
+// Darwin refuses before starting a worker.
+pub(crate) fn seal_worker() -> std::io::Result<()> {
+    Err(std::io::Error::other("compiler confinement unavailable"))
 }

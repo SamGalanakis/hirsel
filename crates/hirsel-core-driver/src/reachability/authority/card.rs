@@ -27,12 +27,12 @@ pub(crate) struct Carried {
     pub(crate) returns: u32,
 }
 
-const FUNCTION: u32 = 1 << 15;
+const FUNCTION: u32 = 1 << 31;
 
 #[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct Reached {
-    pub(crate) kinds: u16,
-    pub(crate) provided: u16,
+    pub(crate) kinds: u32,
+    pub(crate) provided: u32,
     pub(crate) contained: BTreeSet<String>,
     pub(crate) unresolved: Option<String>,
 }
@@ -44,7 +44,7 @@ pub(crate) enum Verdict {
     Kinds(Vec<&'static str>),
 }
 
-pub(crate) fn names(mask: u16) -> Vec<&'static str> {
+pub(crate) fn names(mask: u32) -> Vec<&'static str> {
     GRANT_NAMES
         .iter()
         .copied()
@@ -53,18 +53,12 @@ pub(crate) fn names(mask: u16) -> Vec<&'static str> {
         .collect()
 }
 
-// The carried-function bit predates Compiler's grant ordinal (15).
-fn carried_bit(ordinal: usize) -> u32 {
-    1 << (ordinal + usize::from(ordinal >= 15))
-}
-
 pub(crate) fn carried_names(mask: u32) -> Vec<&'static str> {
-    GRANT_NAMES
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &name)| (mask & carried_bit(i) != 0).then_some(name))
-        .chain((mask & FUNCTION != 0).then_some("function"))
-        .collect()
+    let mut result = names(mask);
+    if mask & FUNCTION != 0 {
+        result.push("function");
+    }
+    result
 }
 
 fn export_name(path: &DefPath) -> String {
@@ -203,7 +197,7 @@ fn core_kind(path: &DefPath) -> u32 {
     GRANT_NAMES
         .iter()
         .position(|kind| *kind == name)
-        .map_or(0, carried_bit)
+        .map_or(0, |ordinal| 1 << ordinal)
 }
 
 fn held(program: &Program<'_>, ty: TyId, active: &mut BTreeSet<TyId>) -> u32 {
@@ -237,3 +231,7 @@ fn held(program: &Program<'_>, ty: TyId, active: &mut BTreeSet<TyId>) -> u32 {
     active.remove(&ty);
     result
 }
+
+#[cfg(test)]
+#[path = "card_tests.rs"]
+mod tests;

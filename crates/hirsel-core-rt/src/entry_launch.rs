@@ -4,6 +4,7 @@ use super::{
 };
 
 pub(super) struct LaunchOptions<'a> {
+    pub(super) compiler_worker: Option<&'a Path>,
     pub(super) n_place: u64,
     pub(super) n_place_explicit: bool,
     pub(super) describe_mode: bool,
@@ -38,7 +39,7 @@ impl StoreOp<'_> {
 
 pub(super) fn parse<'a>(
     argv: impl Iterator<Item = &'a [u8]>,
-    has_exec: bool,
+    config: &OsConfig,
 ) -> Result<LaunchOptions<'a>, StartupError> {
     let mut n_place = hirsel_core_ids::launch::DEFAULT_N_PLACE;
     let mut n_place_explicit = false;
@@ -53,10 +54,18 @@ pub(super) fn parse<'a>(
     let mut store_id = None;
     let mut witness = None;
     let mut prefix = 0;
+    let mut compiler_worker = None;
     let mut exec_approvals = Vec::new();
     for argument in argv {
-        if let Some(approval) = argument.strip_prefix(b"--hirsel-exec=")
-            && has_exec
+        if let Some(worker) = argument.strip_prefix(b"--hirsel-compiler-worker=")
+            && config.grant_mask & (1 << super::COMPILER) != 0
+        {
+            let worker = Path::new(OsStr::from_bytes(worker));
+            if !worker.is_absolute() || compiler_worker.replace(worker).is_some() {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+            }
+        } else if let Some(approval) = argument.strip_prefix(b"--hirsel-exec=")
+            && config.exec_bindings_len != 0
         {
             exec_approvals.push(approval);
         } else if argument == b"--hirsel-describe" || argument == b"--hirsel-preview" {
@@ -146,6 +155,7 @@ pub(super) fn parse<'a>(
         return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
     }
     Ok(LaunchOptions {
+        compiler_worker,
         n_place,
         n_place_explicit,
         describe_mode,

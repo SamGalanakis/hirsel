@@ -464,7 +464,7 @@ store@1/store/test_reader_task src=168847fc215460b1 sig=4154498ad4286887 run=c90
 store@1/store/test_reads_ranges src=9e752127469e20b2 sig=982d76e25d1ecded run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_refused_reply src=d0ea76b799513ca2 sig=5bc77d1e9157f0f4 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_request_digest src=3cd167f62b43d2e4 sig=07ebccb330285449 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/test_reserve_latches src=154a1e742dbdfa93 sig=524547fa2c4a1ad5 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_reserve_latches src=82ba4834dff97a4e sig=524547fa2c4a1ad5 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_resident src=30ddf47c3fcca318 sig=098e2c9f6531ec8e run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_retention_keeps_steps src=3203e95de40f3df4 sig=0bf520b74079e542 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_rollback_on_overrun src=b10a87d0666aa804 sig=88c07ede55cb60fa run=aff7b6b8625190d8 bug=- oracle=- rows=pending

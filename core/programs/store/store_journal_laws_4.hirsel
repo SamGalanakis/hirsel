@@ -383,8 +383,8 @@ fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
     Ok(types.key_word(7))
 }
 
-// L33's six adapter steps cover draft_call, isolate and its callback,
-// issued-cell extraction, log.finish, and finish_stage.
+// L33's seven adapter steps cover the admission scope, draft_call, isolate
+// and its callback, issued-cell extraction, log.finish, and finish_stage.
 // Test that exact overhead after 255 puts and a body that spends all of s_e.
 pub fn law_reserve_latches(c: Clock) -> bool waits {
     let k = 255u64
@@ -420,7 +420,7 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
     let Some(grant) = call_reserves(plan) else {
         return false
     }
-    let attempt_steps = 200006u64
+    let attempt_steps = 200007u64
     if grant.steps != attempt_steps {
         return false
     }
@@ -460,8 +460,9 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
         Ok(Error(DraftStopped(OutOfSteps(used)))) if used == short_grant.steps => (),
         _ => return false,
     }
-    let granted = bound steps attempt_steps + 1u64 {
-        metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let wide_grant = CallReserve(retained: grant.retained, steps: plan.s_e + 7u64)
+    let granted = bound steps attempt_steps + 200u64 {
+        metered_draft(db, complete, ci, plan, wide_grant, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             latch_body(mut tx, k, saturated)
         })
     }

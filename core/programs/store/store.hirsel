@@ -611,11 +611,11 @@ pub type CallReserve {
     steps: u64
 }
 
-// Outside s_e, each metered draft pays for draft_call (1), isolate and its
-// callback (2), issued-cell into_inner (1), log.finish (1), and finish_stage
-// (1). Calls inside core's log.finish take no steps. A prepared reply has a
-// stream edit, so finish_stage skips the data-row scan.
-const CALL_FIXED_STEPS: u64 = 6
+// Outside s_e, each metered draft pays for its admission scope (1),
+// draft_call (1), isolate and its callback (2), issued-cell into_inner (1),
+// log.finish (1), and finish_stage (1). Calls inside core's log.finish take
+// no steps; a prepared reply makes finish_stage skip its data-row scan.
+const CALL_FIXED_STEPS: u64 = 7
 
 pub fn call_reserves(plan: Plan) -> Option[CallReserve] {
     // The isolate needs only the cause cell that a block charge includes.

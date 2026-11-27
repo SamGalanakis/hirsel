@@ -7,6 +7,8 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"txn-replay.hirsel" = "txn"
+"txn-read.hirsel" = "txn"
 "txn-indexes.hirsel" = "txn"
 "txn-tiered-read.hirsel" = "txn"
 "txn-reexec.hirsel" = "txn"

@@ -1,45 +1,6 @@
 // What an index cursor needs to read Tiered primaries without its Tx.
 pub opaque scoped type TxIndexTiered {
-    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
-    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
-    staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]]
-}
-
-fn tx_index_tiered(tx: Tx) -> Result[Option[TxIndexTiered], Error] in tx {
-    if let None = txn.tx_attempt(tx.inner) {
-        return Ok(None)
-    }
-    Ok(Some(TxIndexTiered(attempt: txn.tx_attempt(tx.inner), pins: txn.tx_pins(tx.inner), staged: tx_tiered_staged(txn.tx_roots(tx.inner).collections, txn.tx_below(tx.inner), txn.tx_ops(tx.inner), None)?)))
-}
-
-// An index row's primary when its table is Tiered: the staged op, else the
-// replay overlay, else the Cold row through the attempt.
-fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: pages.PageTree, row_key: Bytes, raw: Bytes, seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
-    let (take k, take owner) = decode_row_key(r, row_key, raw)?
-    let Some(primary) = view owner else {
-        return finish_row(r, take k, row_key, raw, None, seen)
-    }
-    let Some((edge, descriptor)) = std.page.collection_slot(data.root, list.slice(primary, 0, 4)) else {
-        return Error(Stale(r.table))
-    }
-    if pages.collection_descriptor(descriptor).residency == ResidentMemory {
-        let Some(value) = pages.get_page_row(data, primary) else {
-            return Error(Stale(r.table))
-        }
-        return finish_row(r, take k, primary, value, None, seen)
-    }
-    if let Some(staged) = std.omap.get(tiered.staged, primary) {
-        let Some(value) = view staged else {
-            return Error(Stale(r.table))
-        }
-        return finish_row(r, take k, primary, value, None, seen)
-    }
-    let Some(attempt) = tiered.attempt else {
-        fail("store: a Tiered Tx read without an attempt record")
-    }
-    tx_tiered_stopped(attempt)?
-    let value = failure_result_from_rep(pager.tiered_snapshot_primary(attempt, tiered.pins, data, edge, primary, r.table))?
-    finish_row(r, take k, primary, value, None, seen)
+    inner: txn.IndexTiered
 }
 
 /// The row of each key, in order: what `fetch` returns key by key, the same

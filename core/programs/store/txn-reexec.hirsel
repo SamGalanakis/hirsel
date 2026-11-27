@@ -60,3 +60,29 @@ pub fn replay_base_state(take validated: manifest.ValidatedPageManifest) -> Resu
     })?
     Ok((take selected, take state))
 }
+
+// The reply the frame wrote on the record's stream: position 8, digest 32,
+// state 2, then the reply (AH3).
+pub fn recorded_reply(commit: format.JournalCommit, issuer: u8, subject: Bytes, t: u64, n: u64) -> Option[View[Bytes]] in commit {
+    for op in commit.streams {
+        if format.stream_record_matches(op.key, issuer, subject, t, n) {
+            if let Some(raw) = view op.value {
+                if list.len(raw) >= 41 && raw[40u64] == 2u8 {
+                    return Some(view raw)
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn replay_declaration_base(store_key: types.StoreKey, opened: u64, base: u64, catalog_root: pages.PageTree) -> catalog.DeclarationBase {
+    catalog.DeclarationBase(store: store_key, opened: opened, version: base, stamp: std.page.stamp(std.page.image_of(catalog_root.root)), changes: 0, live: 0)
+}
+
+pub type BaseReplay {
+    replay: pager.JournalReplay,
+    branch: u32,
+    next: u64,
+    stopped: bool
+}

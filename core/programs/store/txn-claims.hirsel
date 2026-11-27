@@ -1,4 +1,4 @@
-pub fn keyed_drafted_charge(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
+fn keyed_drafted_charge(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
     let mut edit_index = list.len(edits)
     while edit_index != 0 {
         edit_index -= 1
@@ -16,7 +16,7 @@ pub fn keyed_drafted_charge(roots: pages.Roots, edits: List[format.KeyedEdit], t
     }
 }
 
-pub fn keyed_draft_live(base: pages.Roots, edits: List[format.KeyedEdit], retained: bool, current: u64) -> u64 {
+fn keyed_draft_live(base: pages.Roots, edits: List[format.KeyedEdit], retained: bool, current: u64) -> u64 {
     let mut total = current
     for slot in 0u64 .. list.len(edits) {
         let edit = view edits[slot]
@@ -34,11 +34,11 @@ pub fn claim_expired(expires: u64, at: u64) -> bool {
     expires != CLAIM_NEVER && expires <= at
 }
 
-pub fn claim_expiry(at: u64, retention_ms: u64) -> u64 {
+fn claim_expiry(at: u64, retention_ms: u64) -> u64 {
     int.saturating_add(at, retention_ms)
 }
 
-pub fn claim_deletion_planned(edits: List[format.KeyedEdit], key: Bytes) -> bool {
+fn claim_deletion_planned(edits: List[format.KeyedEdit], key: Bytes) -> bool {
     for edit in edits {
         if edit.tree == format.CLAIMS && edit.key == key {
             return true
@@ -47,7 +47,7 @@ pub fn claim_deletion_planned(edits: List[format.KeyedEdit], key: Bytes) -> bool
     false
 }
 
-pub fn claim_count_after(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
+fn claim_count_after(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
     let mut edit_index = list.len(edits)
     while edit_index != 0 {
         edit_index -= 1
@@ -93,7 +93,7 @@ pub const CLAIM_OPEN: u8 = 6
 
 pub const CLAIM_NEVER: u64 = 18446744073709551615
 
-pub fn keyed_page_height(ceiling: u64) -> u64 {
+fn keyed_page_height(ceiling: u64) -> u64 {
     let mut rows = int.saturating_add(ceiling / 70, 1)
     let mut height = 1u64
     while rows > 1 {
@@ -141,19 +141,19 @@ pub fn claim_principal_end(raw: Bytes, op_end: u64) -> Result[u64, types.Failure
     Ok(principal_end)
 }
 
-pub fn append_claim_edit(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, take value: Option[Bytes]) -> Result[(), types.Failure] {
+fn append_claim_edit(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, take value: Option[Bytes]) -> Result[(), types.Failure] {
     list.push(mut edits, format.KeyedEdit(tree: tree, key: types.copied(key)?, value: take value, call: None))
     Ok(())
 }
 
-pub fn claim_index_key(prefix_bytes: Bytes, expiry: u64, key: Bytes) -> Result[Bytes, types.Failure] {
+fn claim_index_key(prefix_bytes: Bytes, expiry: u64, key: Bytes) -> Result[Bytes, types.Failure] {
     let mut raw = types.copied(prefix_bytes)?
     list.put_word_be(mut raw, expiry)
     list.append(mut raw, key)
     Ok(take raw)
 }
 
-pub fn set_claim_count(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, cardinality: u64) -> Result[(), types.Failure] {
+fn set_claim_count(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, cardinality: u64) -> Result[(), types.Failure] {
     let value: Option[Bytes] = if cardinality == 0 {
         None
     } else {
@@ -164,7 +164,7 @@ pub fn set_claim_count(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, 
     append_claim_edit(mut edits, tree, key, take value)
 }
 
-pub fn forget_claim(roots: pages.Roots, mut edits: List[format.KeyedEdit], key: Bytes, expiry: u64) -> Result[(), types.Failure] {
+fn forget_claim(roots: pages.Roots, mut edits: List[format.KeyedEdit], key: Bytes, expiry: u64) -> Result[(), types.Failure] {
     let op_end = claim_op_end(key)?
     let principal_end = claim_principal_end(key, op_end)?
     let op = list.slice(key, 0, op_end)
@@ -178,7 +178,7 @@ pub fn forget_claim(roots: pages.Roots, mut edits: List[format.KeyedEdit], key: 
     set_claim_count(mut edits, CLAIM_PCOUNT, principal, pcount - 1)
 }
 
-pub fn reclaim_claim_scope(roots: pages.Roots, mut edits: List[format.KeyedEdit], tree: u8, prefix_bytes: Bytes, at: u64) -> Result[(), types.Failure] {
+fn reclaim_claim_scope(roots: pages.Roots, mut edits: List[format.KeyedEdit], tree: u8, prefix_bytes: Bytes, at: u64) -> Result[(), types.Failure] {
     if list.len(roots.keyed) == 0 {
         return Ok(())
     }
@@ -211,7 +211,7 @@ pub fn reclaim_claim_scope(roots: pages.Roots, mut edits: List[format.KeyedEdit]
     Ok(())
 }
 
-pub fn claim_op_high(encoded_op: Bytes) -> Result[Bytes, types.Failure] {
+fn claim_op_high(encoded_op: Bytes) -> Result[Bytes, types.Failure] {
     let Some(take high) = stream_prefix_end(encoded_op) else {
         return Error(pages.malformed(0))
     }
@@ -219,3 +219,213 @@ pub fn claim_op_high(encoded_op: Bytes) -> Result[Bytes, types.Failure] {
 }
 
 pub const KEYED_OP_RECORD_MAX: u64 = 16384
+
+pub type ClaimRow {
+    digest: Inline[u8, 32],
+    expiry: u64,
+    replied: bool
+}
+
+pub fn claim_parse(raw: Bytes) -> Result[ClaimRow, types.Failure] {
+    let width = list.len(raw)
+    if width < 41 {
+        return Error(pages.malformed(0))
+    }
+    let expiry: u64 = list.word_le(raw, 33)
+    if (raw[0u64] == 1 && expiry != 0) || (raw[0u64] == 2 && expiry == 0) || (raw[0u64] != 1 && raw[0u64] != 2) {
+        return Error(pages.malformed(0))
+    }
+    let mut digest_bytes: Inline[u8, 32] =[0u8; 32]
+    for i in 0u64 .. 32u64 {
+        digest_bytes[i] = raw[1 + i]
+    }
+    Ok(ClaimRow(digest: take digest_bytes, expiry: expiry, replied: raw[0u64] == 2))
+}
+
+fn claim_value(digest: Inline[u8, 32], expiry: u64, payload: Bytes) -> Bytes {
+    let replied = expiry != 0
+    let header = 41u64
+    let mut raw: Bytes = list.with_capacity(header + list.len(payload))
+    list.push(mut raw, if replied {
+        2u8
+    } else {
+        1u8
+    })
+    for byte in digest {
+        list.push(mut raw, byte)
+    }
+    list.put_word_le(mut raw, expiry)
+    list.append(mut raw, payload)
+    take raw
+}
+
+pub fn terminal_frame_credit(call_record_max: u64) -> u64 {
+    // Frame and commit headers, keyed-section header, four edits, and call.
+    37 + 5 + (10 + 387 + 41 + format.CLAIM_DONE_MAX) + (10 + 460) + (10 + 526) + (6 + 387) + call_record_max
+}
+
+pub fn claim_terminal_credit(ceiling: u64, call_record_max: u64, arg_max: u64, admitted_width: u64) -> format.KeyedCredit {
+    let frame = terminal_frame_credit(call_record_max)
+    let maximum_row = order.max(41 + arg_max, 41 + format.CLAIM_DONE_MAX)
+    let padding = format.round8(maximum_row) - format.round8(admitted_width)
+    let retained = 4 * (6 * keyed_page_height(ceiling) + 2) * 32768
+    format.KeyedCredit(resident: 526 + 590 + frame + retained, padding: padding, journal: frame)
+}
+
+pub fn stage_claim_reply[Event: inert + shareable + send](mut tx: TxState[Event], key: Bytes, digest: Inline[u8, 32], at: u64, retention_ms: u64, reply_bytes: Bytes, credit: format.KeyedCredit, take call: Option[format.KeyedCallSection]) -> Result[(), types.Failure] {
+    if list.len(reply_bytes) > format.CLAIM_DONE_MAX {
+        return Error(Limit(Value))
+    }
+    let op_end = claim_op_end(key)?
+    let principal_end = claim_principal_end(key, op_end)?
+    let expiry = claim_expiry(at, retention_ms)
+    let mut edits: List[format.KeyedEdit] = list.with_capacity(4)
+    list.push(mut edits, format.KeyedEdit(tree: format.CLAIMS, key: types.copied(key)?, value: Some(claim_value(digest, expiry, reply_bytes)), call: take call))
+    append_claim_edit(mut edits, CLAIM_EXP, claim_index_key(list.slice(key, 0, op_end), expiry, key)?, Some(list.new()))?
+    append_claim_edit(mut edits, CLAIM_PEXP, claim_index_key(list.slice(key, 0, principal_end), expiry, key)?, Some(list.new()))?
+    append_claim_edit(mut edits, CLAIM_OPEN, key, None)?
+    set_tx_keyed(mut tx, Some(format.KeyedDraft(edits: take edits, after: credit)))
+    Ok(())
+}
+
+pub fn stage_claim_admit[Event: inert + shareable + send](mut tx: TxState[Event], address: ClaimAddress, d: Inline[u8, 32], args: Bytes, at: u64, op_max: u64, principal_max: u64, encode_policy: scoped[view] fn() -> Result[Bytes, types.Failure], credit: format.KeyedCredit) -> Result[(), types.Failure] {
+    let mut edits: List[format.KeyedEdit] = list.new()
+    if let Some(raw) = pages.keyed_lookup(tx.roots.keyed, format.CLAIMS, address.full) {
+        let row = claim_parse(raw)?
+        forget_claim(tx.roots, mut edits, address.full, row.expiry)?
+    }
+    if claim_count_after(tx.roots, edits, CLAIM_PCOUNT, address.principal) >= principal_max {
+        reclaim_claim_scope(tx.roots, mut edits, CLAIM_PEXP, address.principal, at)?
+    }
+    if claim_count_after(tx.roots, edits, CLAIM_COUNT, address.op) >= op_max {
+        reclaim_claim_scope(tx.roots, mut edits, CLAIM_EXP, address.op, at)?
+    }
+    let op_count = claim_count_after(tx.roots, edits, CLAIM_COUNT, address.op)
+    let principal_count = claim_count_after(tx.roots, edits, CLAIM_PCOUNT, address.principal)
+    if principal_count >= principal_max {
+        return Error(Full(Resident(Capacity(requested: principal_count + 1, available: principal_max))))
+    }
+    if op_count >= op_max {
+        return Error(Full(Resident(Capacity(requested: op_count + 1, available: op_max))))
+    }
+    if let None = pages.keyed_lookup(tx.roots.keyed, KEYED_OPS, address.op) {
+        append_claim_edit(mut edits, KEYED_OPS, address.op, Some(encode_policy()?))?
+    }
+    append_claim_edit(mut edits, format.CLAIMS, address.full, Some(claim_value(d, 0, args)))?
+    append_claim_edit(mut edits, CLAIM_OPEN, address.full, Some(list.new()))?
+    set_claim_count(mut edits, CLAIM_COUNT, address.op, op_count + 1)?
+    set_claim_count(mut edits, CLAIM_PCOUNT, address.principal, principal_count + 1)?
+    set_tx_keyed(mut tx, Some(format.KeyedDraft(edits: take edits, after: credit)))
+    Ok(())
+}
+
+pub fn claim_op_latest(roots: pages.Roots, encoded_op: Bytes, at: u64) -> Result[Option[Option[u64]], types.Failure] {
+    let open_slot: u64 = int.widen(CLAIM_OPEN)
+    let exp_slot: u64 = int.widen(CLAIM_EXP)
+    let high = claim_op_high(encoded_op)?
+    let start = types.copied(encoded_op)?
+    let mut admissions = std.page.cursor_open_bounded(roots.keyed[open_slot].root, Some(take start), true, false, Some(types.copied(high)?))
+    let no_prefix: Bytes = list.new()
+    if let Some(_) = std.page.cursor_next_key(mut admissions, no_prefix) {
+        return Ok(Some(None))
+    }
+    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(take high), false, true, Some(types.copied(encoded_op)?))
+    let Some((take indexed, _)) = std.page.cursor_next_key(mut expiry_index, no_prefix) else {
+        return Ok(None)
+    }
+    let expiry: u64 = list.word_be(indexed, list.len(encoded_op))
+    if claim_expired(expiry, at) {
+        return Ok(None)
+    }
+    Ok(Some(if expiry == CLAIM_NEVER {
+        None
+    } else {
+        Some(expiry)
+    }))
+}
+
+pub opaque type ClaimSweepState {
+    after: Option[Bytes],
+    revisit: Option[Bytes]
+}
+
+pub fn claim_sweep_start() -> ClaimSweepState {
+    ClaimSweepState(after: None, revisit: None)
+}
+
+pub type SweepWork {
+    examined: u64,
+    deleted_rows: u64
+}
+
+pub fn plan_claim_sweep(roots: pages.Roots, cursor: ClaimSweepState, at: u64, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[(ClaimSweepState, SweepWork, List[format.KeyedEdit]), types.Failure] {
+    let mut edits: List[format.KeyedEdit] = list.new()
+    if list.len(roots.keyed) == 0 {
+        return Ok((claim_sweep_start(), SweepWork(examined: 0, deleted_rows: 0), take edits))
+    }
+    let seek = match cursor.revisit {
+        Some(op) => Some(types.copied(op)?),
+        None => match cursor.after {
+            Some(op) => Some(types.copied(op)?),
+            None => None
+        },
+    }
+    let inclusive = match cursor.revisit {
+        Some(_) => true,
+        None => false
+    }
+    let keyed_slot: u64 = int.widen(KEYED_OPS)
+    let sweep_tree = view roots.keyed[keyed_slot]
+    let mut ops = std.page.cursor_open(sweep_tree.root, take seek, inclusive, false)
+    let no_prefix: Bytes = list.new()
+    let Some((take encoded, _)) = std.page.cursor_next_key(mut ops, no_prefix) else {
+        return Ok((claim_sweep_start(), SweepWork(examined: 0, deleted_rows: 0), take edits))
+    }
+    if bound_op(list.slice(encoded, 1, list.len(encoded))) {
+        return Ok((ClaimSweepState(after: Some(take encoded), revisit: None), SweepWork(examined: 1, deleted_rows: 0), take edits))
+    }
+    let exp_slot: u64 = int.widen(CLAIM_EXP)
+    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(types.copied(encoded)?), true, false, Some(claim_op_high(encoded)?))
+    let mut examined = 1u64
+    let mut deleted_rows = 0u64
+    let op_width = list.len(encoded)
+    while examined < 3 {
+        let Some((take indexed, _)) = std.page.cursor_next_key(mut expiry_index, no_prefix) else {
+            break
+        }
+        examined += 1
+        let expiry: u64 = list.word_be(indexed, op_width)
+        if !claim_expired(expiry, at) {
+            break
+        }
+        forget_claim(roots, mut edits, list.slice(indexed, op_width + 8, list.len(indexed)), expiry)?
+        deleted_rows += 1
+    }
+    let work = SweepWork(examined: examined, deleted_rows: deleted_rows)
+    if claim_count_after(roots, edits, CLAIM_COUNT, encoded) == 0 {
+        append_claim_edit(mut edits, KEYED_OPS, encoded, None)?
+        return Ok((ClaimSweepState(after: Some(take encoded), revisit: None), work, take edits))
+    }
+    // A refused commit keeps the cursor at the same op. Successful deletions
+    // advance that op's index front, so its next pass needs no retained key.
+    let next_pass = if deleted_rows == 0 {
+        ClaimSweepState(after: Some(take encoded), revisit: None)
+    } else {
+        ClaimSweepState(after: None, revisit: Some(take encoded))
+    }
+    Ok((take next_pass, work, take edits))
+}
+
+// The root supplies the policy's nominal codec.
+pub fn keyed_policy_bytes[P](policy: P, codec: std.codec.Codec[P]) -> Result[Bytes, types.Failure] {
+    let mut raw: Bytes = list.new()
+    std.codec.encode(codec, policy, mut raw) ?=> |_| Limit(Value)
+    if list.len(raw) > KEYED_OP_RECORD_MAX {
+        return Error(Limit(Value))
+    }
+    Ok(take raw)
+}
+
+pub fn read_keyed_policy[P](raw: Bytes, codec: std.codec.Codec[P]) -> Result[P, types.Failure] {
+    catalog.decoded(std.codec.decode(codec, raw))
+}

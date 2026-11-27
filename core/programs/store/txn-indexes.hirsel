@@ -3,7 +3,7 @@ pub type IndexStop: send = Duplicate(String) | Drifted(String)
 
 // The drift that fails a transaction, with the (table, index) pairs its
 // removes proved wrong, or None when no remove did. A Duplicate stays.
-pub fn take_drift[Event: inert + shareable + send](mut tx: TxState[Event]) -> Option[(String, List[(u32, u32)])] {
+fn take_drift[Event: inert + shareable + send](mut tx: TxState[Event]) -> Option[(String, List[(u32, u32)])] {
     let drifted = match tx.index_conflict {
         Some(Drifted(_)) => true,
         _ => false,
@@ -21,14 +21,14 @@ pub fn take_drift[Event: inert + shareable + send](mut tx: TxState[Event]) -> Op
     Some((take name, take evidence))
 }
 
-pub fn registered_index[Event: inert + shareable + send](tx: TxState[Event], table_id: u32, schema: u16, record: indexes.Catalog) -> Result[View[indexes.RegisteredIndex], types.Failure] in tx {
+fn registered_index[Event: inert + shareable + send](tx: TxState[Event], table_id: u32, schema: u16, record: indexes.Catalog) -> Result[View[indexes.RegisteredIndex], types.Failure] in tx {
     match indexes.registered_index(tx.indexes, table_id, schema, record) {
         Some(held) => Ok(held),
         None => Error(Stale(table_id)),
     }
 }
 
-pub fn plan_index_put[Event: inert + shareable + send](tx: TxState[Event], mut edits: indexes.IndexEdits, mut frame: Option[u64], record: indexes.Catalog, primary: Bytes, old_keys: List[Bytes], take incoming: indexes.IndexValue) -> Result[(), types.Failure] {
+fn plan_index_put[Event: inert + shareable + send](tx: TxState[Event], mut edits: indexes.IndexEdits, mut frame: Option[u64], record: indexes.Catalog, primary: Bytes, old_keys: List[Bytes], take incoming: indexes.IndexValue) -> Result[(), types.Failure] {
     let indexes.IndexValue(keys: take keys, payload: take payload, ..) = take incoming
     let mut old = 0u64
     for take key in take keys {
@@ -58,7 +58,7 @@ pub fn plan_index_put[Event: inert + shareable + send](tx: TxState[Event], mut e
     Ok(())
 }
 
-pub fn probe_index_keys[Event: inert + shareable + send](tx: TxState[Event], table_id: u32, primary: Bytes, probes: List[(u32, Bytes)]) -> Result[(), types.Failure] {
+fn probe_index_keys[Event: inert + shareable + send](tx: TxState[Event], table_id: u32, primary: Bytes, probes: List[(u32, Bytes)]) -> Result[(), types.Failure] {
     for (index_id, key) in probes {
         if let Some(prior) = transaction_row(tx, key)? {
             if list.slice(prior, 4, indexes.unique_owner_end(prior)?) != primary {
@@ -69,21 +69,21 @@ pub fn probe_index_keys[Event: inert + shareable + send](tx: TxState[Event], tab
     Ok(())
 }
 
-pub fn edit_stamp_cost[Event: inert + shareable + send](tx: TxState[Event], edit: indexes.DataEdit) -> Result[u64, types.Failure] {
+fn edit_stamp_cost[Event: inert + shareable + send](tx: TxState[Event], edit: indexes.DataEdit) -> Result[u64, types.Failure] {
     match edit {
         StoreRow(key, _) => write_stamp_cost(tx, key),
         RemoveRow(key, _) => Ok(6 * transaction_write_height(tx, key)? + 2),
     }
 }
 
-pub fn write_stamp_cost[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[u64, types.Failure] {
+fn write_stamp_cost[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[u64, types.Failure] {
     if let None = std.page.collection_slot(tx.roots.collections.root, list.slice(key, 0, 4)) {
         return Error(Stale(list.word_be(key, 0)))
     }
     Ok(6 * transaction_write_height(tx, key)? + 2)
 }
 
-pub fn preflight_index_edits[Event: inert + shareable + send](tx: TxState[Event], edits: indexes.IndexEdits, primary: Bytes) -> Result[(), types.Failure] {
+fn preflight_index_edits[Event: inert + shareable + send](tx: TxState[Event], edits: indexes.IndexEdits, primary: Bytes) -> Result[(), types.Failure] {
     let mut stamps = write_stamp_cost(tx, primary)?
     if let Some(edit) = edits.first {
         stamps = int.saturating_add(stamps, edit_stamp_cost(tx, edit)?)
@@ -101,7 +101,7 @@ pub fn preflight_index_edits[Event: inert + shareable + send](tx: TxState[Event]
 // entries: a Public index, or a Backfilling one at or before its cursor.
 // A building index has no entries past its cursor yet, and a Failed one
 // is incomplete, so a remove there may find nothing.
-pub fn append_index_remove[Event: inert + shareable + send](tx: TxState[Event], mut edits: indexes.IndexEdits, record: indexes.Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), types.Failure] {
+fn append_index_remove[Event: inert + shareable + send](tx: TxState[Event], mut edits: indexes.IndexEdits, record: indexes.Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), types.Failure] {
     if let Some(refund) = delete_refund(tx, key)? {
         frame = indexes.edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, types.transaction_limit(tx.limits))?
         indexes.push_index_edit(mut edits, RemoveRow(take key, refund))
@@ -126,14 +126,14 @@ pub fn drift_stop[Event: inert + shareable + send](mut tx: TxState[Event], take 
     Drift(take name)
 }
 
-pub fn apply_edit[Event: inert + shareable + send](mut tx: TxState[Event], take edit: indexes.DataEdit) -> Result[(), types.Failure] {
+fn apply_edit[Event: inert + shareable + send](mut tx: TxState[Event], take edit: indexes.DataEdit) -> Result[(), types.Failure] {
     match take edit {
         StoreRow(take key, take raw) => apply_put(mut tx, take key, take raw, false),
         RemoveRow(take key, refund) => apply_delete(mut tx, take key, refund),
     }
 }
 
-pub fn apply_edits[Event: inert + shareable + send](mut tx: TxState[Event], take edits: indexes.IndexEdits, point_event: fn(take Bytes) -> Event) -> Result[(), types.Failure] {
+fn apply_edits[Event: inert + shareable + send](mut tx: TxState[Event], take edits: indexes.IndexEdits, point_event: fn(take Bytes) -> Event) -> Result[(), types.Failure] {
     let indexes.IndexEdits(probes: take probes, first: take first, rest: take rest, ..) = take edits
     if let Some(take edit) = take first {
         apply_edit(mut tx, take edit)?
@@ -288,7 +288,7 @@ pub fn apply_delete_plan[Event: inert + shareable + send](mut tx: TxState[Event]
 // its count and sum less the old row's part and plus the new row's. The
 // edits are planned against the transaction's rows before any is applied;
 // a claimed row whose old part is not in its group's totals is drift.
-pub fn plan_aggregate_edit[Event: inert + shareable + send](tx: TxState[Event], mut edits: indexes.IndexEdits, mut frame: Option[u64], record: indexes.Catalog, primary: Bytes, take old: Option[indexes.IndexValue], take new: Option[indexes.IndexValue]) -> Result[(), types.Failure] {
+fn plan_aggregate_edit[Event: inert + shareable + send](tx: TxState[Event], mut edits: indexes.IndexEdits, mut frame: Option[u64], record: indexes.Catalog, primary: Bytes, take old: Option[indexes.IndexValue], take new: Option[indexes.IndexValue]) -> Result[(), types.Failure] {
     if !indexes.index_claims(indexes.catalog_index(record)?.state, primary) {
         return Ok(())
     }
@@ -357,4 +357,14 @@ pub fn plan_aggregate_edit[Event: inert + shareable + send](tx: TxState[Event], 
         indexes.push_index_edit(mut edits, StoreRow(take key, take value))
     }
     Ok(())
+}
+
+pub fn read_totals[Event: inert + shareable + send, G](tx: TxState[Event], store_key: types.StoreKey, catalog_key: Bytes, catalog_page: Bytes, id: u32, visible: bool, key: std.codec.Key[G], group: G, notify: fn(take Bytes) -> Event) -> Result[(u64, u64), types.Failure] {
+    check_index_read(tx, store_key, catalog_key, catalog_page, id, visible)?
+    let mut encoded = catalog.prefix(id)?
+    std.codec.encode_key(key, group, mut encoded)
+    match fetch_logical(tx, take encoded, notify)? {
+        Some(raw) => indexes.group_totals(raw),
+        None => Ok((0u64, 0u64)),
+    }
 }

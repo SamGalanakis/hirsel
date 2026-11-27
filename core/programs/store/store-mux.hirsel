@@ -9,16 +9,6 @@ pub opaque type Parked {
     attempted: CallInfo
 }
 
-// What a call's attempts carry from one attempt to the next.
-type CallRun {
-    // The queue id the call keeps once it has parked (§13.3a "Wake sources").
-    id: Option[u64],
-    attempts: u64,
-    pins: pager.TieredPins,
-    pending: Option[(format.TieredTarget, types.Failure)],
-    crowded: bool
-}
-
 pub fn park_id(p: Parked) -> u64 {
     p.id
 }
@@ -88,7 +78,7 @@ pub fn resume_parked[E: inert](mut db: Db, take p: Parked, env: E, body: fn(mut 
         return Error(Before(failure_from_rep(take problem), None))
     }
     let Parked(id: id, completion: take complete, record: take rec, plan: plan, grant: grant, attempted: attempted) = take p
-    let carry = CallRun(id: Some(id), attempts: attempts, pins: take pins, pending: take pending, crowded: crowded)
+    let carry = txn.CallRun(id: Some(id), attempts: attempts, pins: take pins, pending: take pending, crowded: crowded)
     drive_served(mut db, take complete, plan, grant, take rec, attempted.at, take carry, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         body(mut tx, env)
     })
@@ -106,7 +96,7 @@ fn call_page_source(db: Db, source: u64) -> Result[pager.TieredPageSource, Error
 // as it is now over the call's pin map. A latched miss parks the call on
 // attempts 1 and 2; from attempt 3, or once crowded, the call is held: it
 // revokes every parked call and its misses are delivered inline.
-fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallReserve, take rec: Option[CallRecord], at: u64, take carry: CallRun, body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
+fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallReserve, take rec: Option[CallRecord], at: u64, take carry: txn.CallRun, body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
     let mut call = take carry
     let mut revoked = false
     loop {
@@ -154,7 +144,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
                     serve_before(failure_result_from_rep(pager.tiered_miss_demand(source, state, sought, TieredPoint, None, mut call.pending)))?
                 }
                 let pager.TieredTouchSet(stamps: take stamps, ..) = take state
-                let CallRun(id: kept, attempts: attempts, pins: take pins, pending: take pending, crowded: crowded) = take call
+                let txn.CallRun(id: kept, attempts: attempts, pins: take pins, pending: take pending, crowded: crowded) = take call
                 let id = pager.enqueue_parked(mut db.pager, kept, attempts, take pins, take stamps, take demand, take pending, crowded)
                 send_parked_demand(mut db)
                 return Ok(Parked(Parked(id: id, completion: take complete, record: take rec, plan: plan, grant: grant, attempted: ci)))
@@ -182,7 +172,7 @@ fn decide_served(mut db: Db, take complete: Completion, take rec: Option[CallRec
             Error(Before(Drift(take name), None))
         },
         Over(Stopped(limit)) => Ok(stopped_pending(take pending_run, OutOfSteps(limit.steps))),
-        Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
+        Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(txn.cause_number(causes)))),
         Over(Failed(Conflict(take name))) => Ok(stopped_pending(take pending_run, Conflict(take name))),
         Over(Refused(Allocation(problem))) => Ok(stopped_pending(take pending_run, OutOfBytes(problem))),
         Over(Refused(take problem)) => Ok(NoRoom(take pending_run, take problem)),

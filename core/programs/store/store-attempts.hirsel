@@ -151,7 +151,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             if high > next_id {
                 next_id = high
             }
-            finish_stage(ci, take result, log.finish(take reads))
+            txn.finish_stage(CallInfo(id: ci.id, at: ci.at, seed: ci.seed), take result, log.finish(take reads))
         },
     }
     // A fault or step stop drops the private roots, so none of their IDs escape.

@@ -99,13 +99,6 @@ fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, record: indexes.Cata
     keep_schema(mut plan, take roots, live_bytes, next_id)
 }
 
-fn readable_value[V](store_id: StoreId, roots: pages.Roots, schema_binding: ValueCollection[V]) -> Result[(), Error] {
-    if !types.same(store_id.hi, store_id.lo, schema_binding.store.hi, schema_binding.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.readable(roots, schema_binding.catalog_key, schema_binding.catalog_page, schema_binding.id))
-}
-
 pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
     readable_value(tx.info.id.store, txn.tx_roots(tx.inner), c.binding)?
     failure_result_from_rep(txn.note_read(tx.inner, Point(failure_result_from_rep(types.copied(c.key))?)))?
@@ -146,4 +139,8 @@ pub fn published_cell[V](c: Cell[V], change: Change) -> Result[Option[Bytes], Er
         return Error(Missing("cell"))
     }
     publish_row(c.binding.id, c.binding.readers, change)
+}
+
+fn readable_value[V](store_id: StoreId, roots: pages.Roots, schema_binding: ValueCollection[V]) -> Result[(), Error] {
+    failure_result_from_rep(txn.readable_value(types.StoreKey(hi: store_id.hi, lo: store_id.lo), roots, types.StoreKey(hi: schema_binding.store.hi, lo: schema_binding.store.lo), schema_binding.catalog_key, schema_binding.catalog_page, schema_binding.id))
 }

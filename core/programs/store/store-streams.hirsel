@@ -1,82 +1,8 @@
-type CallerStreams {
-    count: u64,
-    floor: Option[StreamId]
-}
-
 fn stream_control(db: Db) -> Result[txn.StreamControl, Error] {
     let Some(raw) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, b"") else {
         return Ok(txn.StreamControl(max: db.call_streams.streams_max, count: 0u64, expiry_floor: None))
     }
     failure_result_from_rep(txn.decode_stream_control(raw))
-}
-
-fn write_stream_control(mut tx: Tx, control: txn.StreamControl) -> Result[(), Error] {
-    let mut raw: Bytes = list.with_capacity(25u64)
-    std.codec.put_u64(control.max, mut raw)
-    std.codec.put_u64(control.count, mut raw)
-    match control.expiry_floor {
-        None => list.push(mut raw, 0u8),
-        Some(t) => {
-            list.push(mut raw, 1u8);
-            std.codec.put_u64(t, mut raw)
-        },
-    }
-    failure_result_from_rep(txn.stream_write(mut tx.inner, list.new(), take raw, 0u64))
-}
-
-fn caller_streams(tree: pages.PageTree, caller_prefix: Bytes) -> Result[CallerStreams, Error] {
-    let Some(raw) = pages.get_page_row(tree, caller_prefix) else {
-        return Ok(CallerStreams(count: 0u64, floor: None))
-    }
-    let mut at = 0u64
-    let saved_count = std.codec.take_u64(raw, mut at) ?=> Decode
-    if at == list.len(raw) {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    let floor: Option[StreamId] = match (list.len(raw), raw[at]) {
-        (9u64, 0u8) => None,
-        (25u64, 1u8) => {
-            at += 1u64
-            let t = std.codec.take_key_u64(raw, mut at) ?=> Decode
-            let n = std.codec.take_key_u64(raw, mut at) ?=> Decode
-            Some(StreamId(t: t, n: n))
-        },
-        _ => return Error(failure_from_rep(pages.malformed(0))),
-    }
-    Ok(CallerStreams(count: saved_count, floor: floor))
-}
-
-fn write_caller_streams(mut tx: Tx, take caller_prefix: Bytes, streams: CallerStreams) -> Result[(), Error] {
-    let mut raw: Bytes = list.with_capacity(25u64)
-    std.codec.put_u64(streams.count, mut raw)
-    match streams.floor {
-        None => list.push(mut raw, 0u8),
-        Some(id) => {
-            list.push(mut raw, 1u8)
-            std.codec.put_key_u64(id.t, mut raw)
-            std.codec.put_key_u64(id.n, mut raw)
-        },
-    }
-    failure_result_from_rep(txn.stream_write(mut tx.inner, take caller_prefix, take raw, 0u64))
-}
-
-fn stream_before(a: StreamId, b: StreamId) -> bool {
-    a.t < b.t || (a.t == b.t && a.n < b.n)
-}
-
-type StreamChanges {
-    caller_prefix: Bytes,
-    control: txn.StreamControl,
-    caller: CallerStreams,
-    deletes: List[Bytes],
-}
-
-fn write_stream_changes(mut tx: Tx, edits: StreamChanges) -> Result[(), Error] {
-    for key in edits.deletes {
-        failure_result_from_rep(txn.stream_edit(mut tx.inner, failure_result_from_rep(types.copied(key))?, None, 0u64))?
-    }
-    write_caller_streams(mut tx, failure_result_from_rep(types.copied(edits.caller_prefix))?, edits.caller)?
-    write_stream_control(mut tx, edits.control)
 }
 
 fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: RequestDigest, at: u64, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
@@ -94,7 +20,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
         txn.raise_expiry(mut control, option.unwrap(aged))
         let no_reply: Option[fn(Error) -> bool] = None
         let outcome = store_body_at(mut db, 0u64, at, None, no_reply, scoped fn(mut tx: Tx) -> Result[(), Error] {
-            write_stream_control(mut tx, control)
+            failure_result_from_rep(txn.write_stream_control(mut tx.inner, control))
         })?
         return match take outcome {
             Committed(done) => {
@@ -118,7 +44,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
     }
     let mut edits = stream_changes(db, name.caller, control)?
     if let Some(floor) = edits.caller.floor {
-        if !stream_before(floor, name.id) {
+        if !txn.stream_before(floor.t, floor.n, name.id.t, name.id.n) {
             return Ok(HistoryUnavailable)
         }
     }
@@ -127,14 +53,14 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
         let Some((take victim, id, busy)) = take oldest else {
             return Ok(StreamOverloaded)
         }
-        if !stream_before(id, name.id) {
+        if !txn.stream_before(id.t, id.n, name.id.t, name.id.n) {
             return Ok(HistoryUnavailable)
         }
         if busy {
             return Ok(StreamOverloaded)
         }
-        edits.caller.floor = Some(id)
-        remove_front(mut edits, take victim)
+        edits.caller.floor = Some(format.StreamIdRep(t: id.t, n: id.n))
+        txn.remove_front(mut edits, take victim)
     }
     if edits.control.count >= control.count && edits.control.count >= control.max {
         return Ok(StreamOverloaded)
@@ -144,22 +70,16 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
     admit_commit(mut db, key, 0u64, digest, false, at, Some(take edits))
 }
 
-fn stream_changes(db: Db, caller: Caller, control: txn.StreamControl) -> Result[StreamChanges, Error] {
+fn stream_changes(db: Db, caller: Caller, control: txn.StreamControl) -> Result[txn.StreamChanges, Error] {
     let mut caller_prefix: Bytes = list.new()
     failure_result_from_rep(types.capacity(caller_key(caller, mut caller_prefix)))?
     let metadata = caller_streams(pages.holder_heads(db.holders)[0].roots.streams, caller_prefix)?
-    Ok(StreamChanges(caller_prefix: take caller_prefix, control: control, caller: metadata, deletes: list.new()))
-}
-
-fn remove_front(mut edits: StreamChanges, take key: Bytes) {
-    edits.caller.count -= 1u64
-    edits.control.count -= 1u64
-    list.push(mut edits.deletes, take key)
+    Ok(txn.StreamChanges(caller_prefix: take caller_prefix, control: control, caller: metadata, deletes: list.new()))
 }
 
 // The first two aged idle rows can be reclaimed. The next row is the only
 // possible quota victim and can be examined without extending the reclaim.
-fn reclaim_front(db: Db, mut edits: StreamChanges, age: Option[u64], protected: scoped[view] fn(StreamKey) -> bool) -> Result[Option[(Bytes, StreamId, bool)], Error] {
+fn reclaim_front(db: Db, mut edits: txn.StreamChanges, age: Option[u64], protected: scoped[view] fn(StreamKey) -> bool) -> Result[Option[(Bytes, StreamId, bool)], Error] {
     let caller_prefix = failure_result_from_rep(types.copied(edits.caller_prefix))?
     let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, txn.stream_prefix_end(caller_prefix)))?
     for reclaimed in 0u64 .. 3u64 {
@@ -174,7 +94,7 @@ fn reclaim_front(db: Db, mut edits: StreamChanges, age: Option[u64], protected: 
             return Ok(Some((take key, name.id, busy)))
         }
         txn.raise_expiry(mut edits.control, name.id.t)
-        remove_front(mut edits, take key)
+        txn.remove_front(mut edits, take key)
     }
     Ok(None)
 }
@@ -212,7 +132,7 @@ pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
             failure_result_from_rep(txn.stream_edit(mut tx.inner, failure_result_from_rep(types.copied(key))?, None, 0u64))?
         }
         failure_result_from_rep(txn.stream_edit(mut tx.inner, failure_result_from_rep(types.copied(caller_prefix))?, None, 0u64))?
-        write_stream_control(mut tx, control)
+        failure_result_from_rep(txn.write_stream_control(mut tx.inner, control))
     })?
     match take settled {
         Committed(_) => Ok(metadata.count),
@@ -260,11 +180,6 @@ pub fn reclaim_startup_streams(mut db: Db, cursor: AnonymousCursor, current: sco
     Ok(Some(AnonymousCursor(key: take next_key)))
 }
 
-type StreamSweepEdit {
-    caller_prefix: Bytes,
-    metadata: Option[CallerStreams]
-}
-
 pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) -> Result[(), Error] waits {
     journal_poll(mut db)?
     healthy(db)?
@@ -277,7 +192,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     }
     let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, start, inclusive, false, None))?
     let mut after: Option[txn.StreamSweepCursor] = None
-    let mut edits: List[StreamSweepEdit] = list.new()
+    let mut edits: List[txn.StreamSweepEdit] = list.new()
     let mut deletes: List[Bytes] = list.new()
     for _ in 0u64 .. 8u64 {
         let Some((take key, _)) = failure_result_from_rep(catalog.next_page_range(mut rows))? else {
@@ -314,7 +229,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
                 if let Some(id) = metadata.floor {
                     txn.raise_expiry(mut control, id.t)
                 }
-                list.push(mut edits, StreamSweepEdit(caller_prefix: take caller_prefix, metadata: None))
+                list.push(mut edits, txn.StreamSweepEdit(caller_prefix: take caller_prefix, metadata: None))
             }
             continue
         }
@@ -340,7 +255,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
             caller_streams(pages.holder_heads(db.holders)[0].roots.streams, caller_prefix)?
         }
         metadata.count -= 1u64
-        list.push(mut edits, StreamSweepEdit(caller_prefix: take caller_prefix, metadata: Some(metadata)))
+        list.push(mut edits, txn.StreamSweepEdit(caller_prefix: take caller_prefix, metadata: Some(metadata)))
     }
     let _ = take rows
     if list.len(edits) == 0u64 {
@@ -355,11 +270,11 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
         for edit in edits {
             let key = failure_result_from_rep(types.copied(edit.caller_prefix))?
             match edit.metadata {
-                Some(metadata) => write_caller_streams(mut tx, take key, metadata)?,
+                Some(metadata) => failure_result_from_rep(txn.write_caller_streams(mut tx.inner, take key, metadata))?,
                 None => failure_result_from_rep(txn.stream_edit(mut tx.inner, take key, None, 0u64))?,
             }
         }
-        write_stream_control(mut tx, control)
+        failure_result_from_rep(txn.write_stream_control(mut tx.inner, control))
     })?
     match take settled {
         Committed(_) => {
@@ -370,10 +285,6 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
         Aborted(Undone(value: take e, ..)) => Error(take e),
         _ => Error(Missing("stream sweep")),
     }
-}
-
-fn stored_reply(raw: Bytes) -> Result[Stored, Error] {
-    Ok(Stored(reply: failure_result_from_rep(types.copied(list.slice(raw, 41, list.len(raw))))?))
 }
 
 pub opaque type Completion {
@@ -468,7 +379,7 @@ fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: Request
 fn admit_next(mut db: Db, caller: Caller, key: Bytes, p: u64, digest: RequestDigest, abandoned: bool, at: u64, age: Option[u64], control: txn.StreamControl, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
     let mut edits = stream_changes(db, caller, control)?
     let _ = reclaim_front(db, mut edits, age, protected)?
-    let stream_edits: Option[StreamChanges] = if list.len(edits.deletes) == 0u64 {
+    let stream_edits: Option[txn.StreamChanges] = if list.len(edits.deletes) == 0u64 {
         None
     } else {
         Some(take edits)
@@ -476,7 +387,7 @@ fn admit_next(mut db: Db, caller: Caller, key: Bytes, p: u64, digest: RequestDig
     admit_commit(mut db, key, p, digest, abandoned, at, take stream_edits)
 }
 
-fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: bool, at: u64, take edits: Option[StreamChanges]) -> Result[Admission, Error] waits {
+fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: bool, at: u64, take edits: Option[txn.StreamChanges]) -> Result[Admission, Error] waits {
     let held_stream = failure_result_from_rep(types.copied(stream))?
     let key = failure_result_from_rep(types.copied(stream))?
     // §1.8: a later admit of p in this open commits nothing, so the entry that
@@ -491,7 +402,7 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
     let keep: Option[fn(Error) -> bool] = None
     let outcome = store_body_at(mut db, i, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         if let Some(stream_delta) = edits {
-            write_stream_changes(mut tx, stream_delta)?
+            failure_result_from_rep(txn.write_stream_changes(mut tx.inner, stream_delta))?
         }
         let value = failure_result_from_rep(txn.stream_bytes(p, d.b, false, list.new()))?
         failure_result_from_rep(txn.stream_write(mut tx.inner, failure_result_from_rep(types.copied(stream))?, take value, 0))
@@ -512,4 +423,12 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
     } else {
         Admitted(take completion)
     })
+}
+
+fn stored_reply(raw: Bytes) -> Result[Stored, Error] {
+    Ok(Stored(reply: failure_result_from_rep(txn.stored_reply(raw))?))
+}
+
+fn caller_streams(tree: pages.PageTree, caller_prefix: Bytes) -> Result[txn.CallerStreams, Error] {
+    failure_result_from_rep(txn.caller_streams(tree, caller_prefix))
 }

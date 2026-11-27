@@ -46,7 +46,7 @@ fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[form
                 return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
             }
             let (take record, settlement) = failure_result_from_rep(format.decode_call_fields(file, raw, mut at))?
-            if request_digest(record.entry, record.args) != state.digest {
+            if request_digest(record.entry, record.args) != RequestDigest(b: state.digest) {
                 return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
             }
             saw_keyed_call = true

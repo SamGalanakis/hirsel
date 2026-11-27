@@ -317,10 +317,7 @@ pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -
 }
 
 fn check_table_read[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
-    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, t.store.hi, t.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.readable(txn.tx_roots(tx.inner), t.catalog_key, t.catalog_page, t.id))
+    failure_result_from_rep(txn.check_table_read(tx.inner, types.StoreKey(hi: t.store.hi, lo: t.store.lo), t.catalog_key, t.catalog_page, t.id))
 }
 
 fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[TxRows[K, V], Error] in tx {
@@ -351,13 +348,7 @@ pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result
 }
 
 fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: Bytes, reverse: bool) -> Result[TxRows[K, V], Error] in tx {
-    let tree = failure_result_from_rep(txn.transaction_collection_pages(tx.inner))?
-    let tiered = failure_result_from_rep(txn.tx_tiered_rows(tx.inner, t.id, low, high, true))?
-    let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
-        None
-    } else {
-        failure_result_from_rep(catalog.collection_cursor(tree, t.id, low, high, reverse))?
-    }
+    let (take cursor, take tiered) = failure_result_from_rep(txn.open_range_bounds(tx.inner, t.id, low, high, reverse))?
     Ok(TxRows(cursor: take cursor, decoder: table_decoder(t), owner: tx.info.id, depth: txn.tx_own(tx.inner), reads: txn.tx_reads(tx.inner), low: take low, high: take high, reverse: reverse, log_tail: None, tiered: take tiered))
 }
 
@@ -459,10 +450,7 @@ pub fn primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> std.codec.Key[K] {
 }
 
 fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Error] {
-    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, ix.store.hi, ix.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.index_readable(txn.tx_roots(tx.inner), ix.catalog_key, ix.catalog_page, ix.id, ix.public))
+    failure_result_from_rep(txn.check_index_read(tx.inner, types.StoreKey(hi: ix.store.hi, lo: ix.store.lo), ix.catalog_key, ix.catalog_page, ix.id, ix.public))
 }
 
 pub fn lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
@@ -479,10 +467,13 @@ pub fn lookup_prefix[J, K, V, P, Q](tx: Tx, ix: Index[J, K, V, P], q: Q, take ke
 }
 
 fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take high: Bytes) -> Result[IndexRows[K, V], Error] in tx {
-    let tree = failure_result_from_rep(txn.transaction_collection_pages(tx.inner))?
-    let (take cursor, cold) = open_index_cursor(tree, ix.id, low, high)?
+    let txn.IndexRange(tree: take tree, cursor: take cursor, tiered: take tiered, cold: cold) = txn.open_lookup(tx.inner, ix.id, low, high) ?=> failure_from_rep
     let rows = PageRows(cursor: take cursor, data: take tree, decoder: index_decoder(ix))
-    Ok(IndexRows(rows: take rows, reads: txn.tx_reads(tx.inner), low: take low, high: take high, tiered: tx_index_tiered(tx)?, tiered_index: if cold {
+    let context = match take tiered {
+        Some(take state) => Some(TxIndexTiered(inner: take state)),
+        None => None,
+    }
+    Ok(IndexRows(rows: take rows, reads: txn.tx_reads(tx.inner), low: take low, high: take high, tiered: take context, tiered_index: if cold {
         Some(ix.id)
     } else {
         None
@@ -564,14 +555,14 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
             let Some(context) = view r.tiered else {
                 fail("store: a Tiered index read without an attempt")
             }
-            if let Some((key, raw)) = failure_result_from_rep(read.next_tiered_index_row(r.rows.data, context.attempt, context.pins, context.staged, index_id, r.low, r.high))? {
+            if let Some((key, raw)) = failure_result_from_rep(txn.next_index_tiered_row(r.rows.data, context.inner, index_id, r.low, r.high))? {
                 let mut boundary = failure_result_from_rep(types.copied(r.low))?
                 note_index_step(r.reads, mut boundary, r.high, Some(view key))?
-                let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
-                    log.append(r.reads, Point(failure_result_from_rep(types.copied(observed))?))
+                let seen: scoped[view] fn(Bytes) -> Result[(), types.Failure] = scoped fn(observed: Bytes) -> Result[(), types.Failure] {
+                    log.append(r.reads, Point(types.copied(observed)?))
                     Ok(())
                 }
-                let row = tx_tiered_index_row(context, r.rows.decoder, r.rows.data, key, raw, seen)
+                let row = failure_result_from_rep(txn.tx_tiered_index_row(txn.index_tiered_view(context.inner), r.rows.decoder, r.rows.data, key, raw, read_row_value, seen))
                 Some((take boundary, take row))
             } else {
                 None
@@ -591,25 +582,22 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
 }
 
 fn next_index_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], data: pages.PageTree, tiered: Option[TxIndexTiered], reads: View[core.Log[Read]], low: Bytes, high: Bytes) -> Option[Result[(Bytes, Result[Option[(K, V)], Error]), Error]] {
-    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[(Bytes, Result[Option[(K, V)], Error]), Error] {
-        let key = pages.collection_row_key(leading, suffix)
-        let mut boundary: Bytes = clone(low)
-        note_index_step(reads, mut boundary, high, Some(view key))?
-        let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
-            log.append(reads, Point(failure_result_from_rep(types.copied(observed))?))
-            Ok(())
-        }
-        let row = match tiered {
-            Some(attempt) => tx_tiered_index_row(attempt, decoder, data, key, raw, seen),
-            None => advance_rows(decoder, data, key, raw, None, seen),
-        }
-        let value: Result[Option[(K, V)], Error] = match take row {
-            Ok(Some((take found, _))) => Ok(Some(take found)),
-            Ok(None) => Ok(None),
-            Error(take problem) => Error(take problem),
-        }
-        Ok((take boundary, take value))
-    })
+    let context = match tiered {
+        Some(held) => Some(txn.index_tiered_view(held.inner)),
+        None => None,
+    }
+    let record_span: scoped[view] fn(take Bytes, take Bytes) = scoped fn(take start: Bytes, take end: Bytes) {
+        log.append(reads, Span(take start, take end))
+    }
+    let record_point: scoped[view] fn(take Bytes) = scoped fn(take key: Bytes) {
+        log.append(reads, Point(take key))
+    }
+    let stepped = txn.next_index_page(mut walk, leading, decoder, data, context, low, high, read_row_value, record_span, record_point)
+    match take stepped {
+        Some(Ok((take boundary, take value))) => Some(Ok((take boundary, failure_result_from_rep(take value)))),
+        Some(Error(take problem)) => Some(Error(failure_from_rep(take problem))),
+        None => None,
+    }
 }
 
 /// The main-branch snapshot recovered by a read-only open.

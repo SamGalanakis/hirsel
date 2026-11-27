@@ -1,4 +1,4 @@
-pub fn masked_log_append(states: Map[u32, pages.LogState], key: Bytes) -> bool {
+fn masked_log_append(states: Map[u32, pages.LogState], key: Bytes) -> bool {
     if list.len(key) != 12 {
         return false
     }
@@ -81,7 +81,7 @@ pub fn trim_log_page(mut tree: pages.PageTree, key: Bytes, floor: u64, expected:
     Ok(dropped)
 }
 
-pub fn staged_log_state[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Option[pages.LogState] {
+fn staged_log_state[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Option[pages.LogState] {
     if let Some(existing) = map.get(tx.ops.logs, id) {
         return Some(existing)
     }
@@ -95,7 +95,7 @@ pub fn staged_log_state[Event: inert + shareable + send](tx: TxState[Event], id:
     None
 }
 
-pub fn transaction_log_state[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Result[pages.LogState, types.Failure] {
+fn transaction_log_state[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Result[pages.LogState, types.Failure] {
     if let Some(existing) = staged_log_state(tx, id) {
         return Ok(existing)
     }
@@ -172,7 +172,7 @@ pub fn trim_log_floor[Event: inert + shareable + send](mut tx: TxState[Event], i
     Ok(())
 }
 
-pub fn seal_log_trims[Event: inert + shareable + send](mut tx: TxState[Event], mut draw: u64) -> Result[pages.DataRows, types.Failure] {
+fn seal_log_trims[Event: inert + shareable + send](mut tx: TxState[Event], mut draw: u64) -> Result[pages.DataRows, types.Failure] {
     let mut operations = pages.new_data_rows()
     let first = draw
     let states = replace(mut tx.ops.logs, map.new())
@@ -240,4 +240,108 @@ pub fn append_log[Event: inert + shareable + send, V](mut tx: TxState[Event], id
     tx.resident = int.saturating_add(tx.resident, charge)
     tx.wrote = true
     Ok(seq)
+}
+
+pub fn committed_log_bounds(tree: pages.PageTree, id: u32) -> Result[pages.LogBoundsRep, types.Failure] {
+    let key = catalog.prefix(id)?
+    let Some(descriptor) = std.page.lookup(tree.root, key) else {
+        return Error(Stale(id))
+    }
+    let window = pager.descriptor_bounds(descriptor)
+    Ok(pages.LogBoundsRep(first: window.first, next: window.next))
+}
+
+pub fn transaction_log_bounds[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Result[pages.LogBoundsRep, types.Failure] {
+    if let Some(existing) = staged_log_state(tx, id) {
+        return Ok(pages.LogBoundsRep(first: existing.limits.first, next: existing.limits.next))
+    }
+    committed_log_bounds(tx.roots.collections, id)
+}
+
+pub fn window_deletions[Row, Trim](mut out: read.ChangeOutput[Row, Trim], id: u32, lo: u64, hi: u64, change: fn(take Bytes, take Option[Arc[Bytes]]) -> Row) -> Result[(), types.Failure] {
+    for seq in lo .. hi {
+        list.push(mut out.rows, change(pager.log_key(id, seq)?, None))
+    }
+    Ok(())
+}
+
+// With a shared Cold Log root, only the retained suffix can differ. Dense
+// sequence bounds make the two overlay cursors advance in lockstep.
+pub fn shared_cold_window[Row, Trim](mut out: read.ChangeOutput[Row, Trim], before: pages.PageTree, after: pages.PageTree, id: u32, lo: u64, hi: u64, change: fn(take Bytes, take Option[Arc[Bytes]]) -> Row) -> Result[bool, types.Failure] {
+    let key = catalog.prefix(id)?
+    let Some((ColdPage(left), _)) = std.page.collection_slot(before.root, key) else {
+        return Ok(false)
+    }
+    let Some((ColdPage(right), _)) = std.page.collection_slot(after.root, key) else {
+        return Ok(false)
+    }
+    if left != right {
+        return Ok(false)
+    }
+    let (Some(old_branch), Some(new_branch)) = (view before.replay, view after.replay) else {
+        return Ok(true)
+    }
+    let (Some(old_log), Some(new_log)) = (std.omap.get(old_branch.collections, id), std.omap.get(new_branch.collections, id)) else {
+        return Ok(true)
+    }
+    let path = manifest.paged_pack_path(left.pack)?
+    let Some(cold_next) = old_log.cold_next else {
+        return Error(format.disk_fault(path, left.offset, Malformed))
+    }
+    if new_log.cold_next != Some(cold_next) {
+        return Error(format.disk_fault(path, left.offset, Malformed))
+    }
+    let start = order.max(lo, cold_next)
+    if start >= hi {
+        return Ok(true)
+    }
+    let rows = manifest.disk_allocation(scoped fn() -> Result[List[Row], types.Failure] {
+        let mut old = std.omap.range(old_log.entries, Included(pager.log_key(id, start)?), Excluded(pager.log_key(id, hi)?))
+        let mut new = std.omap.range(new_log.entries, Included(pager.log_key(id, start)?), Excluded(pager.log_key(id, hi)?))
+        let mut changed: List[Row] = list.new()
+        for seq in start .. hi {
+            let Some((take old_key, pages.ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {
+                return Error(format.disk_fault(path, left.offset, Malformed))
+            }
+            let Some((take new_key, pages.ReplayRow(now: ReplayPut(take new_value), ..))) = std.omap.next(mut new) else {
+                return Error(format.disk_fault(path, left.offset, Malformed))
+            }
+            if old_key != new_key || list.word_be(new_key, 4) != seq {
+                return Error(format.disk_fault(path, left.offset, Malformed))
+            }
+            if old_value != new_value {
+                list.push(mut changed, change(take new_key, Some(take new_value)))
+            }
+        }
+        Ok(take changed)
+    })?
+    types.capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+    for take row in take rows {
+        list.push(mut out.rows, take row)
+    }
+    Ok(true)
+}
+
+pub fn log_decoder[R: shareable + send](id: u32, registered: Arc[R]) -> read.RowDecoder[u64, R] {
+    read.RowDecoder(table: id, key: std.codec.key_u64(), readers: arc.share(registered), unique: false, skip: None)
+}
+
+pub fn decode_log_row[V, R: shareable + send](id: u32, registered: Arc[R], raw: Option[View[Bytes]], decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[Option[V], types.Failure] {
+    match raw {
+        Some(stored) => {
+            let v = decode(registered, id, stored)?
+            Ok(Some(v))
+        },
+        None => Ok(None),
+    }
+}
+
+pub fn decode_log_last[V, R: shareable + send](id: u32, registered: Arc[R], seq: u64, raw: Option[View[Bytes]], decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[Option[(u64, V)], types.Failure] {
+    match raw {
+        Some(stored) => {
+            let v = decode(registered, id, stored)?
+            Ok(Some((seq, v)))
+        },
+        None => Ok(None),
+    }
 }

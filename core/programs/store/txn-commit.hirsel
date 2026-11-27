@@ -121,7 +121,7 @@ pub fn materialize_ordered_rows(mut tree: pages.PageTree, operations: pages.Data
     Ok(())
 }
 
-pub fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: bool, first: u64, mut draw: u64) -> Result[(), types.Failure] {
+fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: bool, first: u64, mut draw: u64) -> Result[(), types.Failure] {
     if let Some(_) = op.trim {
         return Ok(())
     }
@@ -155,7 +155,7 @@ pub fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only:
     }
 }
 
-pub fn materialize_collection_batch(mut tree: pages.PageTree, operations: pages.DataRows, order: format.DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), types.Failure] {
+fn materialize_collection_batch(mut tree: pages.PageTree, operations: pages.DataRows, order: format.DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), types.Failure] {
     let collection = list.slice(pager.ordered_row(operations, order, start).key, 0, 4)
     let edit_at = scoped fn(_unused: (), slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
         visit_materialized_edit(operations, order, slot, visit)
@@ -278,4 +278,119 @@ pub fn finish_body[Event: inert + shareable + send, R, A](take state: TxState[Ev
         None
     }
     BodyPrepared(Prepared(outcome: take value, roots: take roots, tiered: tiered_total, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: pages.tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, observed_info: saw_info, skipped: false, call: take call))
+}
+
+// A body whose commit the admission bound decides (section 1.11): one that
+// returned Ok, or one that returned Error after a reply, whose commit keeps
+// only its streams writes and its CALL section (F2).
+pub type Ran[R, A, Info, Event] {
+    value: Result[R, A],
+    roots: Option[pages.Roots],
+    edits: pages.DataRows,
+    order: format.DataOrder,
+    replies: pages.DataRows,
+    keyed: Option[format.KeyedDraft],
+    first_stamp: u64,
+    prepared_roots: bool,
+    tiered: Option[u64],
+    freed: Option[pager.TieredFreed],
+    live: u64,
+    exact: bool,
+    admits_rows: bool,
+    skipped: bool,
+    frame: Option[Bytes],
+    info: Info,
+    reads: List[Event]
+}
+
+// Latched: the attempt's latch was set, so its result, writes, reads and
+// issued ids are discarded and the driver serves or refuses the stop.
+pub type Stage[Draft, Outcome, Failure] = Over(Outcome) | Ran(Draft) | DraftError(Failure) | Latched | DriftStop(String, List[(u32, u32)])
+
+// Drifted: a remove proved an index wrong; the call fails with `Drift`
+// and its driver counts and demotes the indexes (§I.3).
+pub type Finished[R, A, Outcome, Failure] = RolledBack(Outcome) | Prepared(Prepared[R, A]) | DraftFault(Failure) | Drifted(String, List[(u32, u32)])
+
+pub fn finish_stage[R, A, Info, Event, Outcome, Failure](take ci: Info, take finished: Finished[R, A, Outcome, Failure], take seen: List[Event]) -> Stage[Ran[R, A, Info, Event], Outcome, Failure] {
+    let prepared = match take finished {
+        RolledBack(take o) => return Over(take o),
+        DraftFault(take problem) => return DraftError(take problem),
+        Drifted(take name, take evidence) => return DriftStop(take name, take evidence),
+        Prepared(take tx) => take tx,
+    }
+    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, order: take order, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, skipped: skipped, ..) = take prepared
+    // A draft without a Tiered plan makes no call here: the draft's step
+    // overhead is fixed (§13.3 call reserves).
+    let freed = match take plan {
+        Some(take written) => {
+            let pager.TieredWritePlan(freed: take plan_freed, ..) = take written
+            Some(take plan_freed)
+        },
+        None => None,
+    }
+    let keyed_writes = match keyed {
+        Some(_) => true,
+        None => false
+    }
+    let mut admits_rows = stream_edits.count_word != 0 || keyed_writes
+    if !admits_rows {
+        for slot in 0u64 .. pages.data_row_count(operations) {
+            let edit = pages.data_row(operations, slot)
+            if let Some(_) = edit.value {
+                if tiered != None && pager.tiered_data_key(roots.collections, edit.key) {
+                    continue
+                }
+                admits_rows = true;
+                break
+            }
+        }
+    }
+    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, order: take order, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, skipped: skipped, frame: take frame, info: take ci, reads: take seen))
+}
+
+// Charge page preparation to the existing call scope when the caller
+// supplied a byte or step grant. Only application is outside that scope.
+// Memory rows apply first; the Tiered plan then stages its collections over
+// that tree, and its tree is the commit's collection map. Every stamp drawn
+// here is raised into `issued`, so the watermark covers it.
+pub fn prepare_metered_pages[R, A, Outcome, Failure](issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], take finished: Finished[R, A, Outcome, Failure]) -> Result[Finished[R, A, Outcome, Failure], types.Failure] {
+    match take finished {
+        RolledBack(take outcome) => Ok(RolledBack(take outcome)),
+        DraftFault(take problem) => Ok(DraftFault(take problem)),
+        Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
+        Prepared(take staged) => {
+            let mut prepared = take staged
+            if pages.data_row_count(prepared.ops) == 0 && pages.data_row_count(prepared.stream_ops) == 0 {
+                if let None = prepared.keyed {
+                    return Ok(Prepared(take prepared))
+                }
+            }
+            let first = prepared.first_stamp
+            let mut draw = first
+            let memory_only = match attempt {
+                Some(_) => true,
+                None => false,
+            }
+            materialize_ordered_rows(mut prepared.roots.collections, prepared.ops, prepared.order, memory_only, first, mut draw)?
+            materialize_rows(mut prepared.roots.streams, prepared.stream_ops, false, first, mut draw)?
+            if let Some(record) = attempt {
+                if let Some(take tiered_plan) = pager.plan_tiered_edits(prepared.roots.collections, record, pins, prepared.ops, prepared.order, draw)? {
+                    prepared.roots.collections = pages.share_page_tree(tiered_plan.tree)
+                    draw = tiered_plan.next_stamp
+                    prepared.plan = Some(take tiered_plan)
+                }
+            }
+            if let Some(keyed) = prepared.keyed {
+                pages.materialize_keyed_edits(mut prepared.roots, keyed.edits, first, mut draw)?
+            }
+            pages.canonical_roots(mut prepared.roots)?
+            prepared.prepared_roots = true
+            let drawn = draw - 1
+            let high = cell.replace(issued, drawn)
+            if high > drawn {
+                let _ = cell.replace(issued, high)
+            }
+            Ok(Prepared(take prepared))
+        },
+    }
 }

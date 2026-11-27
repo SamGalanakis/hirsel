@@ -65,19 +65,8 @@ pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, 
 
 /// The totals of group `g`; a group no row is in has count and sum 0.
 pub fn totals[G](tx: Tx, a: Aggregate[G], g: G) -> Result[Totals, Error] {
-    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, a.store.hi, a.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.index_readable(txn.tx_roots(tx.inner), a.catalog_key, a.catalog_page, a.id, a.public))?
-    let mut k = failure_result_from_rep(catalog.prefix(a.id))?
-    std.codec.encode_key(a.key, g, mut k)
-    match (txn.fetch_logical(tx.inner, take k, point_event) ?=> failure_from_rep) {
-        Some(raw) => {
-            let (members, sum) = group_totals(raw)?
-            Ok(Totals(count: members, sum: sum))
-        },
-        None => Ok(Totals(count: 0, sum: 0)),
-    }
+    let (members, sum) = failure_result_from_rep(txn.read_totals(tx.inner, types.StoreKey(hi: a.store.hi, lo: a.store.lo), a.catalog_key, a.catalog_page, a.id, a.public, a.key, g, point_event))?
+    Ok(Totals(count: members, sum: sum))
 }
 
 /// Demotes the aggregate to an empty build from the table's first row;

@@ -115,23 +115,23 @@ aggregate_binding	store-aggregate.hirsel	indexes	store	-	Public root type bounda
 extract_aggregate	store-aggregate.hirsel	indexes	store	-	Public root type boundary (L10)
 group_totals	store-aggregate.hirsel	indexes	indexes	L10
 totals_bytes	store-aggregate.hirsel	indexes	indexes	L10
-plan_aggregate_edit	store-aggregate.hirsel	indexes	store	-	push-up indexes -> store (refs at layer 12)
-add_chunk_totals	store-aggregate.hirsel	indexes	txn	L12	push-up indexes -> txn (refs at layer 10)
+plan_aggregate_edit	store-aggregate.hirsel	indexes	txn	L12	L12 neutral inputs and transaction state
+add_chunk_totals	store-aggregate.hirsel	indexes	store	-	L12 root boundary: writes the root StepOp list for the schema coordinator
 staged_until_decided	store-attempts.hirsel	store	store	-
 call_pin_root	store-attempts.hirsel	store	store	-
 tiered_pin_root	store-attempts.hirsel	txn	txn	L12
 refresh_call_pins	store-attempts.hirsel	txn	txn	L12
 deliver_call_miss	store-attempts.hirsel	store	store	-
 draft_call	store-attempts.hirsel	store	store	-
-CallDraft	store-attempts.hirsel	txn	txn	L12
-DraftedCall	store-attempts.hirsel	txn	txn	L12
-DraftRefusal	store-attempts.hirsel	txn	txn	L12
+CallDraft	store-attempts.hirsel	txn	store	-	L12 root boundary: keeps the nominal Read log and callback outcome
+DraftedCall	store-attempts.hirsel	txn	store	-	L12 root boundary: carries the root ServeReply callback outcome
+DraftRefusal	store-attempts.hirsel	txn	store	-	L12 root boundary: carries root Stop
 metered_draft	store-attempts.hirsel	store	store	-
 raised_capacity	store-manifest-support.hirsel	txn	manifest	L4	pull-down txn -> manifest (used by disk_allocation)
-stopped_pending	store-attempts.hirsel	txn	txn	L12
+stopped_pending	store-attempts.hirsel	txn	store	-	L12 root boundary: returns root Pending and Served with a root Stop
 tx_page_row	store-attempts.hirsel	txn	txn	L12
 look	store-attempts.hirsel	store	store	-
-look_attempt	store-attempts.hirsel	txn	txn	L12
+look_attempt	store-attempts.hirsel	txn	store	-	L12 root boundary: calls a nominal Tx callback and returns Looked
 Accounts	store-attention.hirsel	store	store	-
 accounts	store-attention.hirsel	store	store	-
 memory_page_images	store-attention.hirsel	store	store	-
@@ -288,13 +288,13 @@ patch_entries	store-catchup.hirsel	transfer	transfer	L13
 owned_entry	store-catchup.hirsel	transfer	transfer	L13
 contains_bytes	store-catchup.hirsel	transfer	transfer	L13
 CELL_INLINE	store-cell.hirsel	txn	txn	L12
-ValueCollection	store-cell.hirsel	txn	txn	L12
+ValueCollection	store-cell.hirsel	txn	store	-	L12 root boundary: holds root StoreId and Readers
 Cell	store-cell.hirsel	store	store	-
 cell_identity	store-cell.hirsel	store	store	-
 cell_schemas	store-cell.hirsel	store	store	-
 declare_cell	store-cell.hirsel	store	store	-
 declare_value_collection	store-cell.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
-stage_value_collection	store-cell.hirsel	txn	txn	L12
+stage_value_collection	store-cell.hirsel	txn	store	-	L12 root boundary: edits the root schema plan and invokes keep_schema
 readable_value	store-cell.hirsel	txn	txn	L12
 CellEdit	store-cell.hirsel	txn	pages	L2	pull-down txn -> pages (used by DataOps)
 lower_cell_edit	store-cell.hirsel	txn	txn	L12
@@ -349,7 +349,7 @@ data_order	store-commit-wire.hirsel	txn	pages	L2
 ordered_row	store-commit-wire.hirsel	txn	pager	L5	pull-down txn -> pager (used by prepare_tiered_writes)
 stored_prior	store-commit-wire.hirsel	txn	format	L1	pull-down txn -> format (used by encode_data_ops)
 encode_data_ops	store-commit-wire.hirsel	format	pager	L5	push-up format -> pager (refs at layer 4)
-AdmittedDraft	store-commit.hirsel	txn	txn	L12
+AdmittedDraft	store-commit.hirsel	txn	store	-	L12 root boundary: carries the coordinator Publication and StoreCapacity
 prepare_edited_roots	store-commit.hirsel	store	store	-
 prepare_direct_edit	store-commit.hirsel	store	store	-
 direct_data_edits	store-commit.hirsel	store	store	-
@@ -419,7 +419,7 @@ declare_activation_table	store-declare.hirsel	store	store	-
 declare_table_inner	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
 active_table	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
 declaration_index_name	store-declare.hirsel	catalog	catalog	L3
-remove_declared_index	store-declare.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+remove_declared_index	store-declare.hirsel	catalog	store	-	L12 root boundary: edits the root schema plan and supersedes its replay overlay
 declaration_revision	store-declare.hirsel	catalog	catalog	L3
 index_revision	store-declare.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 revision_part	store-declare.hirsel	catalog	catalog	L3
@@ -444,7 +444,7 @@ drop_named_table	store-declare.hirsel	store	store	-
 rename_table	store-declare.hirsel	store	store	-
 Edge	store-edge.hirsel	store	store	-
 declare_edge	store-edge.hirsel	store	store	-
-edge_target	store-edge.hirsel	txn	txn	L12
+edge_target	store-edge.hirsel	txn	store	-	L12 root boundary: keeps the code.describe path of the persisted edge extractor
 edge_put	store-edge.hirsel	store	store	-
 edge_delete	store-edge.hirsel	store	store	-
 edge_out	store-edge.hirsel	store	store	-
@@ -719,13 +719,13 @@ extract_declared	store-index-registry.hirsel	indexes	store	-	Public root type bo
 declare_binding	store-index-registry.hirsel	indexes	store	-	Public root type boundary (L10)
 index_registration	store-index-registry.hirsel	indexes	indexes	L10
 register_index	store-index-registry.hirsel	indexes	indexes	L10
-registered_index	store-index-registry.hirsel	store	store	-
+registered_index	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 unique_owner_end	store-index-registry.hirsel	indexes	indexes	L10
-plan_index_put	store-index-registry.hirsel	store	store	-
-probe_index_keys	store-index-registry.hirsel	store	store	-
-edit_stamp_cost	store-index-registry.hirsel	store	store	-
-write_stamp_cost	store-index-registry.hirsel	store	store	-
-preflight_index_edits	store-index-registry.hirsel	store	store	-
+plan_index_put	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+probe_index_keys	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+edit_stamp_cost	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+write_stamp_cost	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+preflight_index_edits	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 find_index_name	store-index-registry.hirsel	indexes	indexes	L10
 ValueSchema	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by migrate_build)
 Catalog	store-index-registry.hirsel	indexes	indexes	L10
@@ -750,19 +750,19 @@ encode_catalog	store-index-registry.hirsel	indexes	indexes	L10
 DataEdit	store-index-registry.hirsel	indexes	indexes	L10
 IndexEdits	store-index-registry.hirsel	indexes	indexes	L10
 push_index_edit	store-index-registry.hirsel	indexes	indexes	L10
-append_index_remove	store-index-registry.hirsel	store	store	-
+append_index_remove	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 stage_index_drift	store-index-registry.hirsel	indexes	indexes	L10
-drift_stop	store-index-registry.hirsel	store	store	-
+drift_stop	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 stage_drift	store-index-registry.hirsel	indexes	indexes	L10
-apply_edit	store-index-registry.hirsel	store	store	-
-apply_edits	store-index-registry.hirsel	store	store	-
-put_impl	store-index-registry.hirsel	store	store	-
+apply_edit	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+apply_edits	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+put_impl	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 index_catalog_in	store-index-registry.hirsel	indexes	indexes	L10
-bound_indexes	store-index-registry.hirsel	store	store	-
-delete_impl	store-index-registry.hirsel	store	store	-
+bound_indexes	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+delete_impl	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 DeletePlan	store-index-registry.hirsel	indexes	indexes	L10
-plan_delete	store-index-registry.hirsel	store	store	-
-apply_delete_plan	store-index-registry.hirsel	store	store	-
+plan_delete	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+apply_delete_plan	store-index-registry.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 EntryForm	store-inspect.hirsel	store	store	-
 CatalogEntry	store-inspect.hirsel	store	store	-
 snapshot_identity	store-inspect.hirsel	store	store	-
@@ -802,7 +802,7 @@ journal_apply	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> tx
 journal_apply_ops	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> txn (refs at layer 10)
 journal_sorted_run	store-journal-recover.hirsel	journal	journal	L6
 journal_collection_batch	store-journal-recover.hirsel	journal	journal	L6
-journal_collection_bulk	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> txn (refs at layer 10)
+journal_collection_empty	store-dir-journal-recover.hirsel	journal	journal	L6	L12 reconciles the superseded journal_collection_bulk declaration
 durable_latch_error	store-journal-status.hirsel	journal	store	-	public root Error signature
 journal_receive	store-journal-status.hirsel	store	store	-
 journal_ack	store-journal-status.hirsel	store	store	-
@@ -880,7 +880,7 @@ validate_claim_completion	store-keyed-claims.hirsel	store	store	-
 conclude_claim	store-keyed-claims.hirsel	store	store	-
 rebuild_keyed_credit	store-keyed-claims.hirsel	store	store	-
 KeyedCallRecord	store-keyed-claims.hirsel	store	store	-
-KeyedRun	store-keyed-claims.hirsel	txn	txn	L12
+KeyedRun	store-keyed-claims.hirsel	txn	store	-	L12 root boundary: holds nominal KeyedPolicy and KeyedCallRecord
 keyed_completion	store-keyed-claims.hirsel	store	store	-
 keyed_completion_credit	store-keyed-claims.hirsel	store	store	-
 check_keyed_completion	store-keyed-claims.hirsel	store	store	-
@@ -897,9 +897,9 @@ keyed_lookup	store-keyed-journal.hirsel	pages	pages	L2
 keyed_drafted_charge	store-keyed-journal.hirsel	format	txn	L12	push-up format -> txn (refs at layer 10)
 keyed_draft_live	store-keyed-journal.hirsel	pages	txn	L12	push-up pages -> txn (refs at layer 10)
 resident_with_credit	store-keyed-journal.hirsel	txn	txn	L12
-available_resident	store-keyed-journal.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
-available_journal	store-keyed-journal.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
-draft_credit	store-keyed-journal.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+available_resident	store-keyed-journal.hirsel	txn	txn	L12	L12 neutral inputs and transaction state
+available_journal	store-keyed-journal.hirsel	txn	txn	L12	L12 neutral inputs and transaction state
+draft_credit	store-keyed-journal.hirsel	txn	txn	L12	L12 neutral inputs and transaction state
 OpenClaimCursor	store-keyed-lifecycle.hirsel	store	store	-
 open_claim_cursor	store-keyed-lifecycle.hirsel	store	store	-
 next_open_claim	store-keyed-lifecycle.hirsel	store	store	-
@@ -1556,11 +1556,11 @@ decode_table_row	store-read.hirsel	read	read	L11
 scan_raw	store-read.hirsel	read	store	-	L11 standing ruling: root Snapshot and Bound
 range	store-read.hirsel	store	store	-
 range_reverse	store-read.hirsel	store	store	-
-check_table_read	store-read.hirsel	store	store	-
-open_range	store-read.hirsel	store	store	-
+check_table_read	store-read.hirsel	store	txn	L12	L12 neutral inputs and transaction state
+open_range	store-read.hirsel	store	store	-	L12 root boundary: nominal Table, Bound and TxRows; cursor work in txn.open_range_bounds
 range_prefix	store-read.hirsel	store	store	-
 count	store-read.hirsel	store	store	-
-open_range_bounds	store-read.hirsel	store	store	-
+open_range_bounds	store-read.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 TxRows	store-read.hirsel	store	store	-
 next_in	store-read.hirsel	store	store	-
 next_tx_page	store-read.hirsel	read	store	-	L11 standing ruling: root Read log and Error
@@ -1569,10 +1569,10 @@ prefix_limits	store-read.hirsel	read	read	L11
 IndexRows	store-read.hirsel	store	store	-
 IndexEntries	store-read.hirsel	store	store	-
 primary_key	store-read.hirsel	store	store	-
-check_index_read	store-read.hirsel	store	store	-
+check_index_read	store-read.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 lookup	store-read.hirsel	store	store	-
 lookup_prefix	store-read.hirsel	store	store	-
-open_lookup	store-read.hirsel	store	store	-
+open_lookup	store-read.hirsel	store	txn	L12	L12 neutral inputs and transaction state
 entries	store-read.hirsel	store	store	-
 note_index_step	store-read.hirsel	read	read	L11
 next_indexed	store-read.hirsel	store	store	-
@@ -1629,8 +1629,8 @@ recorded_commit	store-reexec.hirsel	store	store	-
 BaseReplay	store-reexec.hirsel	txn	txn	L12
 base_roots	store-reexec.hirsel	store	store	-
 replay_base_state	store-reexec.hirsel	txn	txn	L12
-stop_kind	store-reexec.hirsel	txn	txn	L12
-Rerun	store-reexec.hirsel	txn	txn	L12
+stop_kind	store-reexec.hirsel	txn	store	-	L12 root boundary: maps root Stop to root StopKind
+Rerun	store-reexec.hirsel	txn	store	-	L12 root boundary: carries root Stop for callback replay
 rerun_attempt	store-reexec.hirsel	store	store	-
 rerun	store-reexec.hirsel	store	store	-
 recorded_reply	store-reexec.hirsel	txn	txn	L12
@@ -2746,7 +2746,7 @@ adopt	store.hirsel	store	store	-
 delete_branch	store.hirsel	store	store	-
 version	store.hirsel	store	maintenance	L14	A-split body to maintenance (used by exact_follower_checkpoint)
 follow	store.hirsel	store	store	-
-Publication	store.hirsel	store	txn	L12	pull-down root -> txn (used by AdmittedDraft)
+Publication	store.hirsel	store	store	-	L12 root boundary: carries Latest of root Snapshot
 prepare_publication	store.hirsel	store	store	-
 publish	store.hirsel	store	store	-
 Receipt	store.hirsel	store	store	-
@@ -2760,16 +2760,16 @@ ServeError	store.hirsel	store	store	-
 Reserve	store.hirsel	store	store	-
 Pending	store.hirsel	store	store	-
 Served	store.hirsel	store	store	-
-ServeReply	store.hirsel	txn	txn	L12
+ServeReply	store.hirsel	txn	store	-	L12 root boundary: carries root Error and Stop from nominal callbacks
 next_call_info	store.hirsel	store	store	-
 stream_retention_ms	store.hirsel	store	store	-
 untried	store.hirsel	store	store	-
 registered_completion	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
-serve_before	store.hirsel	txn	txn	L12
-serve_after	store.hirsel	txn	txn	L12
+serve_before	store.hirsel	txn	store	-	L12 root boundary: constructs the public ServeError before handoff
+serve_after	store.hirsel	txn	store	-	L12 root boundary: constructs the public ServeError after handoff
 cause_number	store.hirsel	txn	txn	L12
-save_reply	store.hirsel	txn	txn	L12
-stage_reply	store.hirsel	txn	txn	L12
+save_reply	store.hirsel	txn	store	-	L12 root boundary: dispatches on the root Completion and CallRecord
+stage_reply	store.hirsel	txn	store	-	L12 root boundary: calls the nominal Tx callback and handles its reply
 serve	store.hirsel	store	store	-
 finish_served	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
 conclude	store.hirsel	store	store	-
@@ -2855,13 +2855,13 @@ bulk_store_collection	store.hirsel	catalog	catalog	L3
 remove_store_row	store.hirsel	catalog	catalog	L3
 remove_store_collection	store.hirsel	catalog	catalog	L3
 system_table	store.hirsel	store	store	-
-stage_create_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+stage_create_table	store.hirsel	catalog	store	-	L12 root boundary: edits the root schema plan and invokes keep_schema
 readers	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 table	store.hirsel	store	store	-
-stage_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+stage_table	store.hirsel	catalog	store	-	L12 root boundary: edits the root schema plan and returns Table
 catalog_handle	store.hirsel	catalog	store	-	Public root type boundary (L10)
 catalog_index_handle	store.hirsel	catalog	store	-	Public root type boundary (L10)
-stage_drop_table_key	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+stage_drop_table_key	store.hirsel	catalog	store	-	L12 root boundary: edits the root schema plan and performs migration bookkeeping
 Built	store.hirsel	catalog	catalog	L3
 over_ceiling	store.hirsel	catalog	catalog	L3
 insert_row	store.hirsel	catalog	catalog	L3
@@ -3116,3 +3116,11 @@ defer_replay_overlays	store-changes.hirsel	read	read	L11	L11 read implementation
 list_contains_u32	store-export.hirsel	read	read	L11	L11 read implementation
 SnapshotPage	store-read-pages.hirsel	read	read	L11	L11 read implementation
 ByteLimit	store-read.hirsel	read	read	L11	L11 read implementation
+TxState	txn-state.hirsel	txn	txn	L12	L12 transaction module
+TxViews	txn-state.hirsel	txn	txn	L12	L12 transaction module
+TxStart	txn-state.hirsel	txn	txn	L12	L12 transaction module
+AccountingState	txn-accounting.hirsel	txn	txn	L12	L12 transaction module
+CallStreamState	txn-accounting.hirsel	txn	txn	L12	L12 transaction module
+CutDecision	txn-commit.hirsel	txn	txn	L12	L12 transaction module
+ClaimSweepState	txn-claims.hirsel	txn	txn	L12	L12 transaction module
+read_totals	txn-indexes.hirsel	txn	txn	L12	L12 transaction module

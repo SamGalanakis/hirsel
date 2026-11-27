@@ -622,23 +622,6 @@ fn serve_after(take result: Result[(), Error]) -> Result[(), ServeError] {
     }
 }
 
-fn cause_number(causes: Causes) -> u32 {
-    for cause in causes {
-        return match cause.kind {
-            Overflow => 1u32,
-            Bounds => 2u32,
-            Division => 3u32,
-            Unwrap => 4u32,
-            Fail(_) => 5u32,
-            Cancelled => 6u32,
-            Capacity(_) => 7u32,
-            OutOfTime => 8u32,
-            Stack => 10u32
-        }
-    }
-    0u32
-}
-
 fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[format.Settlement], credit: Option[format.KeyedCredit]) -> Result[(), Error] {
     if let Some(keyed) = complete.keyed {
         let Some(remaining) = credit else {
@@ -699,7 +682,7 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     let Some(grant) = call_reserves(plan) else {
         return Error(Before(Limit(Transaction), None))
     }
-    let first = CallRun(id: None, attempts: 0, pins: pager.empty_tiered_pins(call_pin_root(db, 0), pager.pin_partition(db.pager)), pending: None, crowded: false)
+    let first = txn.CallRun(id: None, attempts: 0, pins: pager.empty_tiered_pins(call_pin_root(db, 0), pager.pin_partition(db.pager)), pending: None, crowded: false)
     drive_served(mut db, take complete, plan, grant, take rec, wall, take first, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         body(mut tx, env)
     })
@@ -871,37 +854,6 @@ fn maybe_checkpoint(mut db: Db) -> Result[(), Error] waits {
     Ok(())
 }
 
-// A body whose commit the admission bound decides (section 1.11): one that
-// returned Ok, or one that returned Error after a reply, whose commit keeps
-// only its streams writes and its CALL section (F2).
-type Ran[R, A] {
-    value: Result[R, A],
-    roots: Option[pages.Roots],
-    edits: pages.DataRows,
-    order: format.DataOrder,
-    replies: pages.DataRows,
-    keyed: Option[format.KeyedDraft],
-    first_stamp: u64,
-    prepared_roots: bool,
-    tiered: Option[u64],
-    freed: Option[pager.TieredFreed],
-    live: u64,
-    exact: bool,
-    admits_rows: bool,
-    skipped: bool,
-    frame: Option[Bytes],
-    info: CallInfo,
-    reads: List[Read]
-}
-
-// Latched: the attempt's latch was set, so its result, writes, reads and
-// issued ids are discarded and the driver serves or refuses the stop.
-type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A]) | DraftError(Error) | Latched | DriftStop(String, List[(u32, u32)])
-
-// Drifted: a remove proved an index wrong; the call fails with `Drift`
-// and its driver counts and demotes the indexes (§I.3).
-type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(txn.Prepared[R, A]) | DraftFault(Error) | Drifted(String, List[(u32, u32)])
-
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok, or Error after a reply, is final here.
 fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
@@ -961,45 +913,8 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
             None => Over(Failed(Raised(take cs))),
         },
         Ok(Ok(Error(e))) => Over(Stopped(e)),
-        Ok(Ok(Ok(take f))) => finish_stage(ci, take f, take seen),
+        Ok(Ok(Ok(take f))) => txn.finish_stage(CallInfo(id: ci.id, at: ci.at, seed: ci.seed), take f, take seen),
     }
-}
-
-fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
-    let prepared = match take finished {
-        RolledBack(take o) => return Over(take o),
-        DraftFault(take problem) => return DraftError(take problem),
-        Drifted(take name, take evidence) => return DriftStop(take name, take evidence),
-        Prepared(take tx) => take tx,
-    }
-    let txn.Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, order: take order, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, skipped: skipped, ..) = take prepared
-    // A draft without a Tiered plan makes no call here: the draft's step
-    // overhead is fixed (§13.3 call reserves).
-    let freed = match take plan {
-        Some(take written) => {
-            let pager.TieredWritePlan(freed: take plan_freed, ..) = take written
-            Some(take plan_freed)
-        },
-        None => None,
-    }
-    let keyed_writes = match keyed {
-        Some(_) => true,
-        None => false
-    }
-    let mut admits_rows = stream_edits.count_word != 0 || keyed_writes
-    if !admits_rows {
-        for slot in 0u64 .. pages.data_row_count(operations) {
-            let edit = pages.data_row(operations, slot)
-            if let Some(_) = edit.value {
-                if tiered != None && pager.tiered_data_key(roots.collections, edit.key) {
-                    continue
-                }
-                admits_rows = true;
-                break
-            }
-        }
-    }
-    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, order: take order, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, skipped: skipped, frame: take frame, info: ci, reads: take seen))
 }
 
 pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
@@ -1205,25 +1120,6 @@ pub fn published_value[K, V](t: Table[K, V], c: Change) -> Result[Option[Bytes],
         return Error(Missing("table"))
     }
     publish_row(t.id, t.readers, c)
-}
-
-fn publish_row[V](id: u32, registered: Readers[V], c: Change) -> Result[Option[Bytes], Error] {
-    let raw = match c.value {
-        Some(v) => v,
-        None => return Ok(None)
-    }
-    if list.len(raw) < 2 {
-        return Error(Decode(Truncated(0)))
-    }
-    let number: u16 = int.truncate(format.read_le(raw, 0, 2))
-    let mut out: Bytes = list.with_capacity(list.len(raw) - 2)
-    if number == registered.current {
-        list.append(mut out, list.slice(raw, 2, list.len(raw)))
-        return Ok(Some(take out))
-    }
-    let v = row_value(registered, id, raw)?
-    std.codec.encode(registered.codec, v, mut out) ?=> |_| Limit(Value)
-    Ok(Some(take out))
 }
 
 // Whether a changed data-tree key falls in a read: equal to a Point, or in a Span's [low, high).
@@ -2246,33 +2142,6 @@ pub type Recorded {
     stop: Option[StopKind]
 }
 
-// AD1: the CALL revision check. A Some that is not code.revision's 32 bytes is refused
-// before anything is committed.
-fn call_checked(c: CallRecord) -> Result[(), Error] {
-    if let Some(r) = c.revision {
-        if list.len(r) != 32 {
-            return Error(Missing("revision"))
-        }
-    }
-    if !format.call_code_size(list.len(c.code)) {
-        return Error(Missing("code"))
-    }
-    Ok(())
-}
-
-fn check_completion_record(complete: Completion, rec: Option[CallRecord]) -> Result[(), Error] {
-    if let Some(c) = rec {
-        if let Some(_) = complete.keyed {
-            return Error(Foreign)
-        }
-        if !stream_record_matches(complete.stream, c.stream) {
-            return Error(Foreign)
-        }
-        call_checked(c)?
-    }
-    Ok(())
-}
-
 fn journal_decode_commit(file: String, raw: Bytes) -> Result[format.JournalCommit, Error] {
     let mut at = 0u64
     let br: u32 = int.truncate(failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?)
@@ -2599,4 +2468,30 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
 
 fn point_event(take key: Bytes) -> Read {
     Point(take key)
+}
+
+fn call_checked(c: CallRecord) -> Result[(), Error] {
+    failure_result_from_rep(txn.call_checked(c.revision, c.code))
+}
+
+type Ran[R, A] = txn.Ran[R, A, CallInfo, Read]
+
+type Stage[R, A] = txn.Stage[Ran[R, A], Outcome[R, A], Error]
+
+type Finished[R, A] = txn.Finished[R, A, Outcome[R, A], Error]
+
+fn publish_row[V](id: u32, registered: Readers[V], c: Change) -> Result[Option[Bytes], Error] {
+    failure_result_from_rep(txn.publish_row(id, registered.codec, registered.current, registered.older, c.value))
+}
+
+fn check_completion_record(complete: Completion, rec: Option[CallRecord]) -> Result[(), Error] {
+    if let Some(c) = rec {
+        let keyed = if let Some(_) = complete.keyed {
+            true
+        } else {
+            false
+        }
+        return failure_result_from_rep(txn.check_completion_record(keyed, complete.stream, c.stream.caller.issuer, c.stream.caller.subject, c.stream.id.t, c.stream.id.n, c.revision, c.code))
+    }
+    Ok(())
 }

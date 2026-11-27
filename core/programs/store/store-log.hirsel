@@ -96,22 +96,6 @@ pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] wait
     }
 }
 
-fn committed_log_bounds(tree: pages.PageTree, id: u32) -> Result[LogBounds, Error] {
-    let key = failure_result_from_rep(catalog.prefix(id))?
-    let Some(descriptor) = std.page.lookup(tree.root, key) else {
-        return Error(Stale(id))
-    }
-    let window = pager.descriptor_bounds(descriptor)
-    Ok(LogBounds(first: window.first, next: window.next))
-}
-
-fn transaction_log_bounds(tx: Tx, id: u32) -> Result[LogBounds, Error] {
-    if let Some(existing) = txn.staged_log_state(tx.inner, id) {
-        return Ok(LogBounds(first: existing.limits.first, next: existing.limits.next))
-    }
-    committed_log_bounds(txn.tx_roots(tx.inner).collections, id)
-}
-
 pub fn bounds[V](tx: Tx, l: Log[V]) -> Result[LogBounds, Error] {
     readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
     failure_result_from_rep(txn.note_read(tx.inner, Point(failure_result_from_rep(catalog.prefix(l.binding.id))?)))?
@@ -129,20 +113,6 @@ pub fn log_fetch[V](tx: Tx, l: Log[V], seq: u64) -> Result[Option[V], Error] {
     let row = (txn.transaction_row(tx.inner, key) ?=> failure_from_rep)
     failure_result_from_rep(txn.note_read(tx.inner, Point(take key)))?
     decode_log_row(l, row)
-}
-
-fn decode_log_row[V](l: Log[V], raw: Option[View[Bytes]]) -> Result[Option[V], Error] {
-    match raw {
-        Some(stored) => Ok(Some(row_value(l.binding.readers, l.binding.id, stored)?)),
-        None => Ok(None),
-    }
-}
-
-fn decode_log_last[V](l: Log[V], seq: u64, raw: Option[View[Bytes]]) -> Result[Option[(u64, V)], Error] {
-    match raw {
-        Some(stored) => Ok(Some((seq, row_value(l.binding.readers, l.binding.id, stored)?))),
-        None => Ok(None),
-    }
 }
 
 pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error] {
@@ -187,10 +157,6 @@ pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)]
     snapshot_point(r, s, key, scoped fn(raw: Option[View[Bytes]]) -> Result[Option[(u64, V)], Error] {
         decode_log_last(l, seq, raw)
     })
-}
-
-fn log_decoder[V](l: Log[V]) -> RowDecoder[u64, V] {
-    read.RowDecoder(table: l.binding.id, key: std.codec.key_u64(), readers: arc.share(l.binding.readers), unique: false, skip: None)
 }
 
 pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[Rows[u64, V], Error] waits {
@@ -247,13 +213,6 @@ pub fn tail_window[V](r: Reader, s: Snapshot, l: Log[V], t: u64) -> Result[LogBo
     Ok(LogBounds(first: ends.next - order.min(t, ends.next - ends.first), next: ends.next))
 }
 
-fn window_deletions(mut out: ChangeOutput, id: u32, lo: u64, hi: u64) -> Result[(), Error] {
-    for seq in lo .. hi {
-        list.push(mut out.rows, Change(tree_key: failure_result_from_rep(pager.log_key(id, seq))?, value: None))
-    }
-    Ok(())
-}
-
 fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32, lo: u64, hi: u64) -> Result[(), Error] waits {
     if lo >= hi {
         return Ok(())
@@ -277,63 +236,6 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
         list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
     }
     Ok(())
-}
-
-// With a shared Cold Log root, only the retained suffix can differ. Dense
-// sequence bounds make the two overlay cursors advance in lockstep.
-fn shared_cold_window(mut out: ChangeOutput, before: pages.PageTree, after: pages.PageTree, id: u32, lo: u64, hi: u64) -> Result[bool, Error] {
-    let key = failure_result_from_rep(catalog.prefix(id))?
-    let Some((ColdPage(left), _)) = std.page.collection_slot(before.root, key) else {
-        return Ok(false)
-    }
-    let Some((ColdPage(right), _)) = std.page.collection_slot(after.root, key) else {
-        return Ok(false)
-    }
-    if left != right {
-        return Ok(false)
-    }
-    let (Some(old_branch), Some(new_branch)) = (view before.replay, view after.replay) else {
-        return Ok(true)
-    }
-    let (Some(old_log), Some(new_log)) = (std.omap.get(old_branch.collections, id), std.omap.get(new_branch.collections, id)) else {
-        return Ok(true)
-    }
-    let path = failure_result_from_rep(manifest.paged_pack_path(left.pack))?
-    let Some(cold_next) = old_log.cold_next else {
-        return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
-    }
-    if new_log.cold_next != Some(cold_next) {
-        return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
-    }
-    let start = order.max(lo, cold_next)
-    if start >= hi {
-        return Ok(true)
-    }
-    let rows = disk_allocation(scoped fn() -> Result[List[Change], Error] {
-        let mut old = std.omap.range(old_log.entries, Included(failure_result_from_rep(pager.log_key(id, start))?), Excluded(failure_result_from_rep(pager.log_key(id, hi))?))
-        let mut new = std.omap.range(new_log.entries, Included(failure_result_from_rep(pager.log_key(id, start))?), Excluded(failure_result_from_rep(pager.log_key(id, hi))?))
-        let mut changed: List[Change] = list.new()
-        for seq in start .. hi {
-            let Some((take old_key, pages.ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {
-                return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
-            }
-            let Some((take new_key, pages.ReplayRow(now: ReplayPut(take new_value), ..))) = std.omap.next(mut new) else {
-                return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
-            }
-            if old_key != new_key || list.word_be(new_key, 4) != seq {
-                return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
-            }
-            if old_value != new_value {
-                list.push(mut changed, Change(tree_key: take new_key, value: Some(take new_value)))
-            }
-        }
-        Ok(take changed)
-    })?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut out.rows, list.len(rows))))?
-    for take row in take rows {
-        list.push(mut out.rows, take row)
-    }
-    Ok(true)
 }
 
 pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64) -> Result[List[Change], Error] waits {
@@ -376,4 +278,38 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
     readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
     let id = l.binding.id
     failure_result_from_rep(txn.append_log(mut tx.inner, id, l.binding.readers.current, l.binding.readers.codec, v))
+}
+
+fn committed_log_bounds(tree: pages.PageTree, id: u32) -> Result[LogBounds, Error] {
+    let limits = failure_result_from_rep(txn.committed_log_bounds(tree, id))?
+    Ok(LogBounds(first: limits.first, next: limits.next))
+}
+
+fn transaction_log_bounds(tx: Tx, id: u32) -> Result[LogBounds, Error] {
+    let limits = failure_result_from_rep(txn.transaction_log_bounds(tx.inner, id))?
+    Ok(LogBounds(first: limits.first, next: limits.next))
+}
+
+fn window_deletions(mut out: ChangeOutput, id: u32, lo: u64, hi: u64) -> Result[(), Error] {
+    failure_result_from_rep(txn.window_deletions(mut out, id, lo, hi, log_window_change))
+}
+
+fn shared_cold_window(mut out: ChangeOutput, before: pages.PageTree, after: pages.PageTree, id: u32, lo: u64, hi: u64) -> Result[bool, Error] {
+    failure_result_from_rep(txn.shared_cold_window(mut out, before, after, id, lo, hi, log_window_change))
+}
+
+fn log_window_change(take key: Bytes, take value: Option[Arc[Bytes]]) -> Change {
+    Change(tree_key: take key, value: take value)
+}
+
+fn log_decoder[V](l: Log[V]) -> RowDecoder[u64, V] {
+    txn.log_decoder(l.binding.id, l.binding.readers)
+}
+
+fn decode_log_row[V](l: Log[V], raw: Option[View[Bytes]]) -> Result[Option[V], Error] {
+    failure_result_from_rep(txn.decode_log_row(l.binding.id, l.binding.readers, raw, read_row_value))
+}
+
+fn decode_log_last[V](l: Log[V], seq: u64, raw: Option[View[Bytes]]) -> Result[Option[(u64, V)], Error] {
+    failure_result_from_rep(txn.decode_log_last(l.binding.id, l.binding.readers, seq, raw, read_row_value))
 }

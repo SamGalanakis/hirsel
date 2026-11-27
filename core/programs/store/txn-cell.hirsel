@@ -7,7 +7,7 @@ pub fn cell_page_row(tree: pages.PageTree, key: Bytes) -> Option[View[Bytes]] in
     std.page.lookup(root, list.new())
 }
 
-pub fn cell_wire_size(edit: Option[View[pages.CellEdit]]) -> u64 {
+fn cell_wire_size(edit: Option[View[pages.CellEdit]]) -> u64 {
     match edit {
         Some(CellPut(value)) => 17 + list.len(format.staged_bytes(value)),
         Some(CellDelete) => 13,
@@ -15,14 +15,14 @@ pub fn cell_wire_size(edit: Option[View[pages.CellEdit]]) -> u64 {
     }
 }
 
-pub fn cell_charge(raw: Option[View[Bytes]]) -> u64 {
+fn cell_charge(raw: Option[View[Bytes]]) -> u64 {
     match raw {
         Some(value) => 70 + format.round8(list.len(value)),
         None => 0,
     }
 }
 
-pub fn cell_matches(before: Option[View[Bytes]], after: Option[Bytes]) -> bool {
+fn cell_matches(before: Option[View[Bytes]], after: Option[Bytes]) -> bool {
     match after {
         Some(right) => match before {
             Some(left) => left == right,
@@ -32,7 +32,7 @@ pub fn cell_matches(before: Option[View[Bytes]], after: Option[Bytes]) -> bool {
     }
 }
 
-pub fn lower_cell_edit(layers: List[Arc[pages.Staged]], id: u32) -> Option[View[pages.CellEdit]] in layers {
+fn lower_cell_edit(layers: List[Arc[pages.Staged]], id: u32) -> Option[View[pages.CellEdit]] in layers {
     let mut layer = list.len(layers)
     while layer > 0 {
         layer -= 1
@@ -43,7 +43,7 @@ pub fn lower_cell_edit(layers: List[Arc[pages.Staged]], id: u32) -> Option[View[
     None
 }
 
-pub fn remove_cell_edit(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pages.Staged]], id: u32) {
+fn remove_cell_edit(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pages.Staged]], id: u32) {
     match lower_cell_edit(layers, id) {
         Some(CellPut(_)) => map.insert(mut cells, id, CellRevert),
         Some(CellDelete) => map.insert(mut cells, id, CellRevert),
@@ -53,7 +53,7 @@ pub fn remove_cell_edit(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pa
     }
 }
 
-pub fn fold_cell_edits(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pages.Staged]], newer: Map[u32, pages.CellEdit]) {
+fn fold_cell_edits(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pages.Staged]], newer: Map[u32, pages.CellEdit]) {
     for (id, edit) in newer {
         match edit {
             CellRevert => remove_cell_edit(mut cells, layers, id),
@@ -75,7 +75,7 @@ pub fn seal_cell_edits(mut rows: pages.DataRows, cells: Map[u32, pages.CellEdit]
 
 pub const CELL_INLINE: u64 = 256
 
-pub fn apply_cell(mut tree: pages.PageTree, key: Bytes, raw: Option[View[Bytes]], shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), types.Failure] {
+fn apply_cell(mut tree: pages.PageTree, key: Bytes, raw: Option[View[Bytes]], shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), types.Failure] {
     let mut root = {
         let Some(empty) = view tree.empty_collection else {
             fail("store: missing empty collection page")
@@ -98,7 +98,7 @@ pub fn apply_cell(mut tree: pages.PageTree, key: Bytes, raw: Option[View[Bytes]]
     pages.page_result(std.page.insert(mut tree.root, key, descriptor, Some(take root), tree.inline, first, mut ids))
 }
 
-pub fn cell_edit[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Option[View[pages.CellEdit]] in tx {
+fn cell_edit[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Option[View[pages.CellEdit]] in tx {
     if let Some(edit) = map.get(tx.ops.cells, id) {
         return Some(edit)
     }
@@ -186,4 +186,11 @@ pub fn stage_cell[Event: inert + shareable + send](mut tx: TxState[Event], id: u
     tx.frame_bytes = frame
     tx.cell_rows = cell_rows
     Ok(())
+}
+
+pub fn readable_value(store_id: types.StoreKey, roots: pages.Roots, expected: types.StoreKey, catalog_key: Bytes, catalog_page: Bytes, id: u32) -> Result[(), types.Failure] {
+    if store_id != expected {
+        return Error(Foreign)
+    }
+    catalog.readable(roots, catalog_key, catalog_page, id)
 }

@@ -1,6 +1,6 @@
 # Hirsel Store Module Architecture (`store@1`, v3.2)
 
-**Status:** Design only. No `.hirsel` source has moved. This is the normative cutover brief for `core/programs/store/`. v3.1 amends v3 (`2343476b`, `436a21b5`, with 3103's edits in `0585666d`) against astra's 3115 review; the disposition of its 11 findings, the placement scripts and the live-bug triage are in `hirsel-briefs/store-modules-amend-v31-3121/`. v3 revised v2 (`7d0cb44f`) against the 3107 review (REJECT). The store sources are unchanged since `ebcc4887`, and v3.1's facts are rechecked at `origin/main` `1e926f57` (line citations are at that commit); the §3.5 placement was recomputed at `3f6679cc`, which adds 11 private helpers. The `ebcc4887` tip includes the landed 3079 (`2d9e5e50`), 3082 (`f601b90a`) and 3080 (`979875cf`) lanes, the slot frame-limit change `1b1fc30f`, and the stream-quota change `10d42c7e`.
+**Status:** L1–L12 implemented. L13 and L14 are pending. This is the normative cutover brief for `core/programs/store/`. v3.1 amends v3 (`2343476b`, `436a21b5`, with 3103's edits in `0585666d`) against astra's 3115 review; the disposition of its 11 findings, the placement scripts and the live-bug triage are in `hirsel-briefs/store-modules-amend-v31-3121/`. v3 revised v2 (`7d0cb44f`) against the 3107 review (REJECT). The store sources are unchanged since `ebcc4887`, and v3.1's facts are rechecked at `origin/main` `1e926f57` (line citations are at that commit); the §3.5 placement was recomputed at `3f6679cc`, which adds 11 private helpers. The `ebcc4887` tip includes the landed 3079 (`2d9e5e50`), 3082 (`f601b90a`) and 3080 (`979875cf`) lanes, the slot frame-limit change `1b1fc30f`, and the stream-quota change `10d42c7e`.
 **Supersedes:** v3 (`store-modules-design-v3-3108`), v2 (`7d0cb44f`, `store-modules-design-v2-3097`) and v1 (`1f71060f`).
 **Wholehog principle:** Each cutover lane lands its final module seam and owned state in one pass. The module graph stays acyclic at every landing. Every public declaration keeps its definition identity for the whole cutover. There are no compatibility aliases and no dual APIs.
 
@@ -73,8 +73,7 @@ Under `PROG-9` (`docs/spec/programs.md:252-299`), `code.identity(code.describe(f
 // Root wrappers keep the declared kind, bounds and finalizer; only fields change.
 pub opaque resource type Reader: send { inner: read.ReaderState } drop(owned_reader) {}
 pub opaque type ReadOnly: shareable + send { inner: read.ReadOnlyState }
-pub opaque scoped type Tx { inner: txn.TxState }
-pub opaque type Pending { inner: txn.PendingRep }
+pub opaque scoped type Tx { inner: txn.TxState[Read], info: CallInfo }
 pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity) | Parked(Parked)
 ```
 
@@ -140,7 +139,7 @@ Layer 13:  main
 | `reclaim_preview` / `open_object_writer` | they call root durability, pause via a live `Db`, and build and checkpoint the root `Db` (`store-reclaim.hirsel:526-542`, `store-object-writer.hirsel:252,315-318`) | Both stay at the root (R3). `object_writer` receives owned state and inputs. |
 | Tx-bound index reads | `registered_index` borrows from `Tx`; `probe_index_keys` and `totals` read `Tx` (`store-index-registry.hirsel:138,187`, `store-aggregate.hirsel:109`) | L10 extracts the registry and the pure functions. The Tx adapters stay with `Tx` and are rewritten over `txn.TxState` at L12. |
 | `staged_reader(Preparation)` | is public in `store-read.hirsel:59` and reads `source.db` (`store-export.hirsel:607`) | `read` takes a neutral `read.ReaderInput` (roots, catalog, limits, pool). `staged_reader` stays at the root. |
-| Commit path | `available_journal(db,..)`; `settle_draft` calls root `cut_install` (`store-keyed-journal.hirsel:172-182`, `store-commit.hirsel:286,326`) | `txn` takes limits and an accounting snapshot as arguments. `settle_draft` returns `txn.CutDecision` (`None \| PreCut \| Reseal`) to the root coordinator, which runs the cut and the handoff. |
+| Commit path | `available_journal(db,..)`; `settle_draft` calls root `cut_install` (`store-keyed-journal.hirsel:172-182`, `store-commit.hirsel:286,326`) | `txn` takes limits and an accounting snapshot as arguments. `settle_draft` returns `txn.CutDecision` (`NoCut \| PreCut \| Reseal`) to the root coordinator, which runs the cut and the handoff. |
 | `Preparation` | it owns a full `Db`; `begin_copy` calls checkpoint and durable; activation installs projectors (`store-export.hirsel:391-412`, `store-activation.hirsel:203-229`) | The prepared `Db` and the publication and install orchestration stay at the root. `transfer` owns copy and lease state. |
 | Verify and repair | `verify_release` invokes a root-typed declaration on a `Db`; `verify_step` takes the `Db` (`store-inspect.hirsel:97-124`) | Both are public and stay at the root. `maintenance` owns `IndexWalk` and the pure fold and walk steps. |
 | Pack cache | `ObjectsCache` and `history_read_pack` (`store-object-cache.hirsel:2,284`) are used by history; `objects_cache` builds the public authority option | The `ObjectsCache` type goes to `pager` (L5), which stores it; cache I/O goes to `history` (L7), and scan, trim, write and `history_read_pack` to `object_writer` (L9) beside the pager worker loop (§3.5). Public `objects_cache` stays at the root. |
@@ -293,6 +292,10 @@ Rules for reading the table:
 **L4 compaction ruling.** The pack allocator, locations, lists, owners and scrub leases move into `manifest.PackDiskState`. The root keeps `TieredCompaction` separately on `Db` through L4. L5 moves it and `TieredProbeCursor` into `pager.DiskPagerState`. The coordinator installs the candidate pack state and compaction progress after MANIFEST or Object checkpoint publication, in the existing cut order.
 
 **L4 boundary rewrites.** `cut_participants`, `fill_cut_manifest`, `visit_cut_heads`, `visit_cut_pins`, `cut_manifest_size`, `cut_lineage_rows` and `settle_lineage_kills` move over `manifest.CutInput`. The root supplies holder views, the proposed delta and the cut scalars. `BranchReplacements` moves beside `ReplacedFrame`. Recovery supplies the locator's pack references and receives a `LoadedPackInventory`. Scrub helpers whose signatures name `Scrub`, `ScrubHistory` or `ScrubConfig` stay at the root under the public-type ruling.
+
+**L12 boundary rewrites.** The root `Tx` keeps its nominal `CallInfo` and instantiates `txn.TxState` with the root read-event type. The callback receives the same public `Tx`. The state owns staged edits, the read log view, and the attempt's pins. The root takes the owned draft out of an overrun bound before finalizing it. The drafting and replay helpers use neutral errors and accept the original codec or row-decoder callback where needed. The root supplies typed bounds, wraps cursors, and mints `Pending` from the nominal completion and call record.
+
+The root keeps callback dispatch (`CallDraft`, `DraftedCall`, `DraftRefusal`, `look_attempt`, `Rerun`, `ServeReply`, `stage_reply`), public error and completion conversion (`stopped_pending`, `stop_kind`, `serve_before`, `serve_after`, `save_reply`, `KeyedRun`), and the publication records `AdmittedDraft` and `Publication`. Schema-plan edits (`stage_value_collection`, `remove_declared_index`, `stage_create_table`, `stage_table`, `stage_drop_table_key`, `add_chunk_totals`) and `ValueCollection` name root types. `edge_target` keeps the identity named by `code.describe` in the persisted edge index. `journal_collection_empty` replaced the old `journal_collection_bulk` under `journal`.
 
 v3 assigned owners by file and checked acyclicity by layer name. A body-level scan of the code v3 moves (`edge_scan.py` in `hirsel-briefs/store-modules-amend-v31-3121/`) finds 441 upward or same-layer references, 110 references to root-held privates and 47 to root public functions; 3115's eight rows are a sample of these. v3.1 replaces hand-listed exceptions with a computed placement, `place.py` in the same directory. It starts from v3's owners and a short list of fixed owners, then reaches a fixpoint:
 
@@ -553,7 +556,7 @@ The root is the only foreground coordinator.
    - On Directory, there is zero I/O and no increment.
    - On Bucket or host-stream, the root runs a fresh head check even when the ticket is covered. A changed head or a lost claim returns `Fenced`.
    - Neither path cuts. This uses 3075's proven check as landed (§8).
-3. **Admission and optional pre-commit cut:** check `uncovered + len(frame) <= available_journal(limits, state)`. `txn` receives that bound as an argument. On `CutDecision.PreCut`, the root runs `cut_install(NoHolderChange)`, then reseals the frame against the post-cut `(file_seq, file_end)`.
+3. **Admission and optional pre-commit cut:** check `uncovered + len(frame) <= available_journal(limits, state)`. `txn` receives that bound as an argument. On `PreCut` or `Reseal`, the root runs `cut_install(NoHolderChange)`. `Reseal` then binds the frame to the post-cut `(file_seq, file_end)`.
 4. **Headroom:** `wait_for_frame_room` waits while `inflight > db.limits.frame - size` (`store.hirsel:1385-1394`). `db.limits.frame` is the open's recorded frame limit, and a store may record a limit smaller than `FRAME_LIMIT`. Using `FRAME_LIMIT` would let more bytes into flight than the open's budget allows.
 5. **Install:**
    - update `CallStreamState`;

@@ -1,4 +1,4 @@
-pub fn tx_page_row[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[Option[View[Bytes]], types.Failure] in tx {
+fn tx_page_row[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[Option[View[Bytes]], types.Failure] in tx {
     let tree = view tx.roots.collections
     if list.len(key) < 4 {
         return Ok(None)
@@ -142,4 +142,61 @@ pub fn tx_tiered_count[Event: inert + shareable + send](tx: TxState[Event], coll
         }
     }
     Ok(total)
+}
+
+pub scoped type IndexTiered {
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
+    staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]],
+}
+
+fn tx_index_tiered[Event: inert + shareable + send](tx: TxState[Event]) -> Result[Option[IndexTiered], types.Failure] in tx {
+    if let None = tx.attempt {
+        return Ok(None)
+    }
+    Ok(Some(IndexTiered(attempt: tx.attempt, pins: tx.pins, staged: read.tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, None)?)))
+}
+
+pub fn next_index_tiered_row(tree: pages.PageTree, context: IndexTiered, id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {
+    read.next_tiered_index_row(tree, context.attempt, context.pins, context.staged, id, low, high)
+}
+
+// An index row's primary when its table is Tiered: the staged op, else the
+// replay overlay, else the Cold row through the attempt.
+pub fn tx_tiered_index_row[K, V, R: shareable + send](tiered: IndexTieredView, r: read.RowDecoder[K, R], data: pages.PageTree, row_key: Bytes, raw: Bytes, decode: fn(R, u32, Bytes) -> Result[V, types.Failure], seen: scoped[view] fn(Bytes) -> Result[(), types.Failure]) -> Result[Option[((K, V), u64)], types.Failure] {
+    let (take k, take owner) = read.decode_row_key(r, row_key, raw)?
+    let Some(primary) = view owner else {
+        return read.finish_row(r, take k, row_key, raw, None, decode, seen)
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(data.root, list.slice(primary, 0, 4)) else {
+        return Error(Stale(r.table))
+    }
+    if pages.collection_descriptor(descriptor).residency == ResidentMemory {
+        let Some(value) = pages.get_page_row(data, primary) else {
+            return Error(Stale(r.table))
+        }
+        return read.finish_row(r, take k, primary, value, None, decode, seen)
+    }
+    if let Some(staged) = std.omap.get(tiered.staged, primary) {
+        let Some(value) = view staged else {
+            return Error(Stale(r.table))
+        }
+        return read.finish_row(r, take k, primary, value, None, decode, seen)
+    }
+    let Some(attempt) = tiered.attempt else {
+        fail("store: a Tiered Tx read without an attempt record")
+    }
+    read.tx_tiered_stopped(attempt)?
+    let value = pager.tiered_snapshot_primary(attempt, tiered.pins, data, edge, primary, r.table)?
+    read.finish_row(r, take k, primary, value, None, decode, seen)
+}
+
+pub scoped type IndexTieredView {
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
+    staged: View[std.omap.OMap[Bytes, Option[Arc[Bytes]]]],
+}
+
+pub fn index_tiered_view(held: IndexTiered) -> IndexTieredView in held {
+    IndexTieredView(attempt: held.attempt, pins: held.pins, staged: view held.staged)
 }

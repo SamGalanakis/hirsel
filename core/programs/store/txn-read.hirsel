@@ -1,0 +1,79 @@
+pub fn check_table_read[Event: inert + shareable + send](tx: TxState[Event], store_key: types.StoreKey, key: Bytes, page: Bytes, id: u32) -> Result[(), types.Failure] {
+    if tx.store != store_key {
+        return Error(Foreign)
+    }
+    catalog.readable(tx.roots, key, page, id)
+}
+
+pub fn check_index_read[Event: inert + shareable + send](tx: TxState[Event], store_key: types.StoreKey, key: Bytes, page: Bytes, id: u32, visible: bool) -> Result[(), types.Failure] {
+    if tx.store != store_key {
+        return Error(Foreign)
+    }
+    catalog.index_readable(tx.roots, key, page, id, visible)
+}
+
+pub fn open_range_bounds[Event: inert + shareable + send](tx: TxState[Event], id: u32, low: Bytes, high: Bytes, reverse: bool) -> Result[(Option[pages.CollectionCursor], Option[TxTieredRows]), types.Failure] {
+    let tree = transaction_collection_pages(tx)?
+    let tiered = tx_tiered_rows(tx, id, low, high, true)?
+    let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
+        None
+    } else {
+        catalog.collection_cursor(tree, id, low, high, reverse)?
+    }
+    Ok((take cursor, take tiered))
+}
+
+pub scoped type IndexRange {
+    tree: pages.PageTree,
+    cursor: Option[pages.CollectionCursor],
+    cold: bool,
+    tiered: Option[IndexTiered],
+}
+
+pub fn open_lookup[Event: inert + shareable + send](tx: TxState[Event], id: u32, low: Bytes, high: Bytes) -> Result[IndexRange, types.Failure] in tx {
+    let tree = transaction_collection_pages(tx)?
+    let (take cursor, cold) = read.open_index_cursor(tree, id, low, high)?
+    let tiered = tx_index_tiered(tx)?
+    Ok(IndexRange(tree: take tree, cursor: take cursor, cold: cold, tiered: take tiered))
+}
+
+pub fn next_index_page[K, V, R: shareable + send](mut walk: std.page.Cursor, leading: Bytes, decoder: read.RowDecoder[K, R], data: pages.PageTree, tiered: Option[IndexTieredView], low: Bytes, high: Bytes, decode: fn(R, u32, Bytes) -> Result[V, types.Failure], record_span: scoped[view] fn(take Bytes, take Bytes), record_point: scoped[view] fn(take Bytes)) -> Option[Result[(Bytes, Result[Option[(K, V)], types.Failure]), types.Failure]] {
+    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[(Bytes, Result[Option[(K, V)], types.Failure]), types.Failure] {
+        let key = pages.collection_row_key(leading, suffix)
+        let mut boundary: Bytes = clone(low)
+        read.note_index_step(record_span, mut boundary, high, Some(view key))?
+        let seen: scoped[view] fn(Bytes) -> Result[(), types.Failure] = scoped fn(observed: Bytes) -> Result[(), types.Failure] {
+            record_point(types.copied(observed)?)
+            Ok(())
+        }
+        let row = match tiered {
+            Some(attempt) => tx_tiered_index_row(attempt, decoder, data, key, raw, decode, seen),
+            None => read.advance_rows(decoder, data, key, raw, None, decode, seen),
+        }
+        let value: Result[Option[(K, V)], types.Failure] = match take row {
+            Ok(Some((take found, _))) => Ok(Some(take found)),
+            Ok(None) => Ok(None),
+            Error(take problem) => Error(take problem),
+        }
+        Ok((take boundary, take value))
+    })
+}
+
+pub fn publish_row[V](id: u32, codec: std.codec.Codec[V], current: u16, older: List[Option[std.codec.Reader[V]]], value: Option[Arc[Bytes]]) -> Result[Option[Bytes], types.Failure] {
+    let raw = match value {
+        Some(v) => v,
+        None => return Ok(None)
+    }
+    if list.len(raw) < 2 {
+        return Error(Decode(Truncated(0)))
+    }
+    let number: u16 = int.truncate(format.read_le(raw, 0, 2))
+    let mut out: Bytes = list.with_capacity(list.len(raw) - 2)
+    if number == current {
+        list.append(mut out, list.slice(raw, 2, list.len(raw)))
+        return Ok(Some(take out))
+    }
+    let v = read.decode_value(codec, current, older, id, raw)?
+    std.codec.encode(codec, v, mut out) ?=> |_| Limit(Value)
+    Ok(Some(take out))
+}

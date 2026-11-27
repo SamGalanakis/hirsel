@@ -123,7 +123,7 @@ fn check_keyed_ops(path: String, raw: Bytes, mut at: u64) -> Result[bool, Error]
                 let (first, end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 41 + CLAIM_DONE_MAX))?
                 let claim = claim_parse(list.slice(raw, first, end)) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
                 let digest = check_call_fields(path, raw, mut at)?
-                if !claim.replied || claim.digest != digest {
+                if !claim.replied || RequestDigest(b: claim.digest) != digest {
                     return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
                 }
                 saw_call = true

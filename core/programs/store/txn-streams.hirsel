@@ -66,7 +66,7 @@ pub fn stream_prefix_end(caller_prefix: Bytes) -> Option[Bytes] {
     None
 }
 
-pub fn transaction_stream[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Option[View[Bytes]] in tx {
+fn transaction_stream[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Option[View[Bytes]] in tx {
     if let Some(slot) = pages.op_slot(tx.stream_ops, key) {
         return match pages.data_row(tx.stream_ops.rows, slot).value {
             Some(raw) => Some(format.staged_bytes(raw)),
@@ -229,4 +229,93 @@ pub fn stream_bytes(p: u64, request: Inline[u8, 32], replied: bool, answer: Byte
         types.capacity(format.le(mut value, 1, 1))?
     }
     Ok(take value)
+}
+
+pub type CallerStreams {
+    count: u64,
+    floor: Option[format.StreamIdRep]
+}
+
+pub type StreamChanges {
+    caller_prefix: Bytes,
+    control: StreamControl,
+    caller: CallerStreams,
+    deletes: List[Bytes],
+}
+
+pub type StreamSweepEdit {
+    caller_prefix: Bytes,
+    metadata: Option[CallerStreams]
+}
+
+pub fn stored_reply(raw: Bytes) -> Result[Bytes, types.Failure] {
+    types.copied(list.slice(raw, 41, list.len(raw)))
+}
+
+pub fn caller_streams(tree: pages.PageTree, caller_prefix: Bytes) -> Result[CallerStreams, types.Failure] {
+    let Some(raw) = pages.get_page_row(tree, caller_prefix) else {
+        return Ok(CallerStreams(count: 0u64, floor: None))
+    }
+    let mut at = 0u64
+    let saved_count = std.codec.take_u64(raw, mut at) ?=> Decode
+    if at == list.len(raw) {
+        return Error(pages.malformed(0))
+    }
+    let floor: Option[format.StreamIdRep] = match (list.len(raw), raw[at]) {
+        (9u64, 0u8) => None,
+        (25u64, 1u8) => {
+            at += 1u64
+            let t = std.codec.take_key_u64(raw, mut at) ?=> Decode
+            let n = std.codec.take_key_u64(raw, mut at) ?=> Decode
+            Some(format.StreamIdRep(t: t, n: n))
+        },
+        _ => return Error(pages.malformed(0)),
+    }
+    Ok(CallerStreams(count: saved_count, floor: floor))
+}
+
+pub fn write_stream_control[Event: inert + shareable + send](mut tx: TxState[Event], control: StreamControl) -> Result[(), types.Failure] {
+    let mut raw: Bytes = list.with_capacity(25u64)
+    std.codec.put_u64(control.max, mut raw)
+    std.codec.put_u64(control.count, mut raw)
+    match control.expiry_floor {
+        None => list.push(mut raw, 0u8),
+        Some(t) => {
+            list.push(mut raw, 1u8);
+            std.codec.put_u64(t, mut raw)
+        },
+    }
+    stream_write(mut tx, list.new(), take raw, 0u64)
+}
+
+pub fn write_caller_streams[Event: inert + shareable + send](mut tx: TxState[Event], take caller_prefix: Bytes, streams: CallerStreams) -> Result[(), types.Failure] {
+    let mut raw: Bytes = list.with_capacity(25u64)
+    std.codec.put_u64(streams.count, mut raw)
+    match streams.floor {
+        None => list.push(mut raw, 0u8),
+        Some(id) => {
+            list.push(mut raw, 1u8)
+            std.codec.put_key_u64(id.t, mut raw)
+            std.codec.put_key_u64(id.n, mut raw)
+        },
+    }
+    stream_write(mut tx, take caller_prefix, take raw, 0u64)
+}
+
+pub fn write_stream_changes[Event: inert + shareable + send](mut tx: TxState[Event], edits: StreamChanges) -> Result[(), types.Failure] {
+    for key in edits.deletes {
+        stream_edit(mut tx, types.copied(key)?, None, 0u64)?
+    }
+    write_caller_streams(mut tx, types.copied(edits.caller_prefix)?, edits.caller)?
+    write_stream_control(mut tx, edits.control)
+}
+
+pub fn remove_front(mut edits: StreamChanges, take key: Bytes) {
+    edits.caller.count -= 1u64
+    edits.control.count -= 1u64
+    list.push(mut edits.deletes, take key)
+}
+
+pub fn stream_before(a_time: u64, a_num: u64, b_time: u64, b_num: u64) -> bool {
+    a_time < b_time || (a_time == b_time && a_num < b_num)
 }

@@ -13,6 +13,7 @@ targets:
     sources: [Host.swift]
     settings:
       base:
+        ARCHS: arm64
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: org.hirsel.simulator-gate
         SWIFT_VERSION: "6.0"
@@ -36,6 +37,7 @@ targets:
       - package: SimGate
     settings:
       base:
+        ARCHS: arm64
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: org.hirsel.simulator-gate.tests
         SWIFT_OBJC_BRIDGING_HEADER: AbiTests.h

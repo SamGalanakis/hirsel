@@ -96,7 +96,7 @@ pub(super) fn toolchain_image(
         Ok(image)
     } else {
         super::key(
-            "hirsel.archive-toolchain.v2",
+            "hirsel.archive-toolchain.v3",
             &(image, tool_identity(&options.link)?),
         )
     }
@@ -138,9 +138,12 @@ fn object_symbols<'a>(
     let referenced = object
         .sections()
         .flat_map(|section| section.relocations())
-        .filter_map(|(_, relocation)| match relocation.target() {
-            RelocationTarget::Symbol(symbol) => Some(symbol),
-            _ => None,
+        .flat_map(|(_, relocation)| {
+            let target = match relocation.target() {
+                RelocationTarget::Symbol(symbol) => Some(symbol),
+                _ => None,
+            };
+            target.into_iter().chain(relocation.subtractor())
         })
         .collect();
     Ok((object, referenced))

@@ -441,6 +441,17 @@ fn check_archive_exports(archive: &[u8], prefix: &str) {
     use object::{Object, ObjectSymbol};
 
     let file = ArchiveFile::parse(archive).unwrap();
+    for member in file.members() {
+        let member = member.unwrap();
+        let object = object::File::parse(member.data(archive).unwrap()).unwrap();
+        assert!(
+            !object.symbols().any(|symbol| {
+                symbol.is_undefined() && matches!(symbol.name(), Ok("_hirsel_core_sites_origin"))
+            }),
+            "unscoped Mach-O subtractor in {:?}",
+            member.name(),
+        );
+    }
     let anchor = format!("_hirsel_embed_v1_anchor_{prefix}");
     let member = file
         .members()

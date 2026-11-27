@@ -14,6 +14,7 @@ targets:
       - package: CounterGate
     settings:
       base:
+        ARCHS: arm64
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: org.hirsel.simulator-counter-embed
         SWIFT_VERSION: "6.0"

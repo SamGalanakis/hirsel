@@ -343,6 +343,11 @@ fi
 # 127.0.0.1 (ports 7800, 7810-7811 and 3478). Playwright installs into ~/.cache/hirsel/n1.
 run_n1() (
   local work="$run/n1"
+  if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
+    local node
+    node=$(mise which node) || return
+    export PATH="${node%/*}:$PATH"
+  fi
   python3 core/programs/webrtc_sfu/service/run.py \
     --hirsel "$toolchain_hirsel" --work "$work" --build-only || return
   TMPDIR="$work" exec timeout 900 node core/programs/webrtc_sfu/service/n1.mjs --sfu "$work/sfu"

@@ -1436,7 +1436,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if let (Some(to), Some(place), Ok(rep)) = (to, self.place_ty(elem, n), self.rep(elem)) {
                 if repeat {
                     // A compact CFG fills the array; source length never expands the checker work.
-                    self.repeat_array(to, place, rep, value, count, n);
+                    let _ = self.repeat_array(to, array, rep, value, count, n);
                 } else {
                     let address = match field {
                         Some(address) => address,
@@ -1483,40 +1483,45 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn repeat_array(
         &mut self,
         to: AddressId,
-        place: PlaceTy,
+        array: TyId,
         rep: Rep,
         value: Option<ValueId>,
         count: u64,
         n: NodeId,
-    ) {
+    ) -> Option<()> {
         if !self.live() || count == 0 {
-            return;
+            return Some(());
         }
-        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
-        let len = self.konst(Ty::Scalar(Scalar::U64), count, n).unwrap();
-        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n).unwrap();
+        let place = rep.stored()?;
+        let stored = self.list_storage_static(array);
+        if stored == Some(false) {
+            return Some(());
+        }
+        // The array layout already checked count times the logical element size.
+        let bytes = self.layout_size(array, true, n)?;
+        self.charge_work(hirsel_core_ids::work_steps::table::COPY, bytes, n)?;
+        let zero = self.u64k(0, n)?;
+        let len = self.u64k(count, n)?;
+        let one = self.u64k(1, n)?;
         let head = self.new_block(&[Ty::Scalar(Scalar::U64)]);
         let body = self.new_block(&[]);
         let out = self.new_block(&[]);
+        if stored.is_none() {
+            // A rigid element can acquire a zero-width layout at instantiation.
+            let size = self.layout_size(array, false, n)?;
+            let empty = self.list_compare(CompareOp::Eq, size, zero, n);
+            let fill = self.new_block(&[]);
+            self.branch(empty, out, fill, n);
+            self.start(fill);
+        }
         self.jump(head, &[zero], n);
         self.start(head);
         let index = self.b.blocks[head.index()]
             .params
             .get(&self.b.pools.values)
             .unwrap()[0];
-        let condition = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: condition,
-                op: CompareOp::Lt,
-                left: index,
-                right: len,
-            },
-            n,
-        );
-        let yes = self.edge(body, &[]);
-        let no = self.edge(out, &[]);
-        self.end(Terminator::Branch { condition, yes, no }, Some(n));
+        let condition = self.list_compare(CompareOp::Lt, index, len, n);
+        self.branch(condition, body, out, n);
         self.start(body);
         let address = self.address(
             AddressBase::Address(to),
@@ -1525,19 +1530,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         self.install(address, rep, value, n);
-        let next = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result: next,
-                op: BinaryOp::Add,
-                left: index,
-                right: one,
-                fail: None,
-            },
-            n,
-        );
+        let next = self.add(index, one, n);
         self.jump(head, &[next], n);
         self.start(out);
+        Some(())
     }
     /// The address of a used place as a pointer, for an argument passed by address.
     pub(super) fn place_ptr(&mut self, at: At, n: NodeId) -> Option<ValueId> {

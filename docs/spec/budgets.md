@@ -380,7 +380,7 @@ is core's plain record `{ steps: u64 }`.
   cleanup runs it, and a callable a core function calls back (a callable argument, a codec's
   `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
   `?`, patterns and `match` run no user code and take none, beyond the work and depth steps
-  of `==` and ordering (below). A call of `list.prefetch` or
+  of `==` and ordering and the work steps of a repeat literal (below). A call of `list.prefetch` or
   `inline.prefetch` takes none either, since a hint must not fail
   ([core](core.md#contracts-the-signatures-do-not-state)). Any other core function's call, and a
   foreign function's ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), is one
@@ -420,7 +420,7 @@ is core's plain record `{ steps: u64 }`.
 
   | operation | units | quantum | weight |
   |---|---|---|---|
-  | `list.append`, `copy_from_slice`, `copy_within`, `fill`, `fill_slice`, `compare_bytes`; `inline.copy_from_slice`, `copy_within`; `string.push`; `==` and ordering on `List[u8]`, `String` and `Bytes` | bytes moved, filled or compared (both operands for a comparison) | 4096 | 0 |
+  | runtime array repeat `[value; count]`; `list.append`, `copy_from_slice`, `copy_within`, `fill`, `fill_slice`, `compare_bytes`; `inline.copy_from_slice`, `copy_within`; `string.push`; `==` and ordering on `List[u8]`, `String` and `Bytes` | bytes moved, filled or compared (both operands for a comparison) | 4096 | 0 |
   | a clone, at the call | the value's own bytes | 4096 | 0 |
   | a clone, for each sequence, `Bytes` or column set it copies | its element (row) bytes | 4096 | 0 |
   | a clone, for each such sequence whose elements own storage | its length | 4 | 0 |
@@ -447,6 +447,10 @@ is core's plain record `{ steps: u64 }`.
   | `p384.verify`, `verify_der` | `msg` | 64 | 8192 |
   | `rsa.verify_pkcs1_sha256`, `verify_pss_sha256` (to an 8192-bit modulus) | `msg` | 256 | 2048 |
   | `secret.sign` with `Rs256` (to a 4096-bit modulus) | `msg` | 256 | 32768 |
+
+  A runtime repeat evaluates its element once, even at count zero. Before the first store
+  it takes the copy row's work steps for `count × logical size of the element`. A zero count
+  or a zero-width element requires no fill work.
 
   Empty input takes only the weight. A core function whose body performs operations of the
   table takes their work steps as well as its own row's: `string.encode_base64` takes the

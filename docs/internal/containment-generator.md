@@ -359,9 +359,10 @@ Four checks, from the most independent to the least.
   - `==` on `Deque` and `Map` does not check (LANG-21: not key);
   - key derivation has no operation apart from the derived key's hashing, which the
     derived-key control covers.
-- **A finding.** The controls also report step-free cycles outside core. The
-  `[0u64; 32768]` repeat literal lowers to a fill loop with no step. Its length is fixed by
-  the type, but MEM-30 does not name it.
+- **Repeat initialization.** MEM-30 charges the COPY row before the first fill store.
+  The `repeat_fill` std contract measures the repeat inside its bound. The assignment
+  control (`gap_3`) constructs the array outside its measured bound, so only the
+  assignment contributes to its O3b excess. O3c checks the fill cycle separately.
 - **Measured** over seeds 0..200 with every build, metering and the tally on: 15709 bounds
   judged, no O3b or O3c red, every control shown. The 200 batches took 5994 CPU-s against
   C2's 5044, so the tally adds about 19%, and 45 CPU-minutes cover about 90 batches.

@@ -1,0 +1,91 @@
+// MEM-30 COPY counts the logical bytes of a runtime repeat before filling it.
+fn large(budget: u64) -> Result[u64, OutOfTime] {
+    bound steps budget {
+        let a =[0u64; 32768]
+        a[0] + a[32767]
+    }
+}
+
+// expect: run repeat_fill() = true
+fn repeat_fill() -> bool {
+    match (large(63), large(64)) {
+        (Error(OutOfTime(steps: 63)), Ok(0)) => {}
+        _ => return false,
+    }
+    let one = bound steps 1 {
+        let a =[11u64; 1]
+        a[0]
+    }
+    let below = bound steps 1 {
+        let a =[13u64; 511]
+        a[510]
+    }
+    let at = bound steps 1 {
+        let a =[17u64; 512]
+        a[511]
+    }
+    match (one, below, at) {
+        (Ok(11), Ok(13), Ok(17)) => {}
+        _ => return false,
+    }
+    match (above(1), above(2)) {
+        (Error(OutOfTime(steps: 1)), Ok(19)) => true,
+        _ => false,
+    }
+}
+
+fn above(budget: u64) -> Result[u64, OutOfTime] {
+    bound steps budget {
+        let a =[19u64; 513]
+        a[512]
+    }
+}
+
+fn next(mut calls: u64) -> u64 {
+    calls += 1
+    calls
+}
+
+// expect: run repeat_elements() = true
+fn repeat_elements() -> bool {
+    let empty = bound steps 1 {
+        let mut calls = 0u64
+        let _ =[next(mut calls); 0]
+        calls
+    }
+    let zero_width = bound steps 0 {
+        let a =[(); 32768]
+        a[32767]
+    }
+    // A pair occupies nine logical bytes. 455 pairs fit in one COPY quantum.
+    let pairs = bound steps 2 {
+        let mut calls = 0u64
+        let a =[(next(mut calls), 7u8); 455]
+        (calls, a[0].0, a[454].1)
+    }
+    match (empty, zero_width, pairs) {
+        (Ok(1), Ok(()), Ok((1, 1, 7))) => true,
+        _ => false,
+    }
+}
+
+fn last[T: plain](item: T) -> T {
+    let a =[item; 513]
+    a[512]
+}
+
+// expect: run generic_repeat() = true
+fn generic_repeat() -> bool {
+    let empty: Inline[u64, 0] =[]
+    let zero_width = bound steps 1 {
+        let _ = last(empty)
+        true
+    }
+    let stored = bound steps 3 {
+        last(23u64)
+    }
+    match (zero_width, stored) {
+        (Ok(true), Ok(23)) => true,
+        _ => false,
+    }
+}

@@ -197,8 +197,14 @@ def controls(evaluator, root, work, manifest, root_limit, quiet):
                           f" > {bound['spent']} steps")
                 shown = units(bound, hashed=True) > bound['spent']
             reports.append(dict(gap=gap, shown=shown, detail=detail))
-            # A step-free cycle outside core in a control is not a generator red, but is reported:
-            # gap_3's `[0u64; 32768]` lowers to a fill loop with no step, which MEM-30 does not name.
+            # The assignment control constructs its array before the measured assignment.
+            # Require an O3c scan and flag an unpaid fill separately from the O3b excess.
+            if entry == 'gap_3':
+                scans = [l['cycles'] for l in lines if 'cycles' in l]
+                unpaid = [c for scan in scans for c in scan
+                          if c['function'] == f'gen@1/main/{entry}' and not c['prepaid']]
+                reports.append(dict(gap='O3c repeat initialization', shown=bool(scans) and not unpaid,
+                                    detail=f'{len(scans)} cycle scans, {len(unpaid)} unpaid fill cycles'))
             reports += [dict(gap=f'O3c in {entry}', shown=None, detail=f"step-free {c['kind']} in {c['function']}")
                         for l in lines for c in l.get('cycles', ())
                         if not c['prepaid'] and not core_source(c['function'])]

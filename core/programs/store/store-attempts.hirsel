@@ -277,7 +277,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
         }
         match state.stopped {
             None => return Ok(take looked),
-            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptPinLimit(problem)) => return Ok(Refused(Cache(problem), list.new())),
             Some(AttemptAllocation(problem)) => return Ok(Refused(Allocation(problem), list.new())),
             Some(AttemptFold(_)) => fail("store: a read attempt cannot wait for a fold"),
             Some(AttemptMiss(_)) => {

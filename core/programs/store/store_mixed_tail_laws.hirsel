@@ -295,13 +295,108 @@ fn mixed_staged_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, image_tiered: boo
     close(take db)
 }
 
-/// bug: an enclosing write lost under an inner layer, raw base rows compared under a replay overlay, or a side read through the other side's residency.
-/// oracle: the hand difference of image {10: A, 20: B, 30: C} and the run's view {10: A}, and the read log the tail's contract names, for image Tiered and head Memory, the reverse, and both Tiered.
+// L105's budget (§13.3 step 1): BLOB X only under the image, BLOB Y only
+// under the head, and BLOB Z under both. Each side alone fits the least
+// Reader partition; X and Y together do not.
+const MIXED_BUDGET_BYTES: u64 = 9000000
+
+const MIXED_SHARED_BYTES: u64 = 2000
+
+// Image {10: A, 20: Z, 30: X} with the source Tiered, then 30 becomes Y.
+fn mixed_budget_capture(directory: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[Image, Error] waits {
+    let mut db = open(tasks, directory, c, r, options)?
+    let fixture = mixed_fixture(mut db, Migrate)?
+    mixed_write(mut db, fixture.source, 10, Some(mixed_value(65, 1)))?
+    mixed_write(mut db, fixture.source, 20, Some(mixed_value(90, MIXED_SHARED_BYTES)))?
+    mixed_write(mut db, fixture.source, 30, Some(mixed_value(88, MIXED_BUDGET_BYTES)))?
+    set_residency(mut db, fixture.source.id, Tiered)?
+    project_until_idle(mut db, Limits(rows: 64, byte_limit: 65536))?
+    let image = tail_image_of(db, fixture.decl)?
+    mixed_write(mut db, fixture.source, 30, Some(mixed_value(89, MIXED_BUDGET_BYTES)))?
+    // The cut writes Y's leaf, so the reopened head reads it Cold and not
+    // from a replay overlay.
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    Ok(image)
+}
+
+// A side's source tree is one Cold leaf; its PAGE charge is its stored
+// length plus the 16-byte frame.
+fn mixed_leaf_charge(tree: pages.PageTree, id: u32) -> Result[u64, Error] {
+    let prefix = failure_result_from_rep(catalog.prefix(id))?
+    let Some((slot, _)) = std.page.collection_slot(tree.root, prefix) else {
+        fail("L105 budget: each side holds the source")
+    }
+    let ColdPage(ptr) = view slot else {
+        fail("L105 budget: each side's source root is Cold after reopen")
+    }
+    let len: u64 = int.widen(ptr.len)
+    Ok(len + 16)
+}
+
+// A BLOB's charge is 8 + its stored value length plus the 16-byte frame;
+// the stored value is the 2-byte schema tag and the source codec's encoding.
+fn mixed_blob_charge(len: u64) -> Result[u64, Error] {
+    let mut stored: Bytes = list.new()
+    let Ok(()) = std.codec.encode(std.codec.of_bytes(), mixed_value(0, len), mut stored) else {
+        fail("L105 budget: the value encodes")
+    }
+    Ok(8 + 2 + list.len(stored) + 16)
+}
+
+fn mixed_budget_look(db: Db, fixture: MixedFixture) -> Result[Capacity, Error] waits {
+    let input: (ProjectionDecl, Table[u64, Bytes]) = (clone(fixture.decl), clone(fixture.source))
+    let Refused(Cache(problem), _) = look(reader(db, READER_PIN_MIN)?, snapshot(db), Some(PROJECTOR_LAW_STEPS), input, mixed_one_page)? else {
+        fail("L105 budget: a look past the Reader partition is Looked.Refused(Cache)")
+    }
+    Ok(problem)
+}
+
+fn mixed_budget_run(mut db: Db, fixture: MixedFixture) -> Result[Capacity, Error] waits {
+    let partition = pager.replace_writer_pin_bytes(mut db.pager, READER_PIN_MIN)
+    let input: (ProjectionDecl, Table[u64, Bytes]) = (clone(fixture.decl), clone(fixture.source))
+    let ran = run(mut db, Some(PROJECTOR_LAW_STEPS), input, fn(mut tx, env) -> Result[MixedRows, Error] {
+        mixed_one_page(tx, env)
+    })
+    let _ = pager.replace_writer_pin_bytes(mut db.pager, partition)
+    let Refused(Cache(problem)) = ran? else {
+        fail("L105 budget: a run past the writer partition is Refused(Cache)")
+    }
+    Ok(problem)
+}
+
+fn mixed_budget_arm(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = l70_open_options(300000000)?
+    let image = mixed_budget_capture(directory, c, r, tasks, options)?
+    let (opened, fixture) = mixed_reopen(directory, c, r, tasks, options, image)?
+    let mut db = take opened
+    let s = snapshot(db)
+    let Some(held) = view s.bases else {
+        fail("L105 budget: the head carries its tail bases")
+    }
+    let Some(k) = pages.tail_base(held, fixture.decl.name, image.slot, image.position, s.branch) else {
+        fail("L105 budget: the image's base is held")
+    }
+    // Both leaves, Z once, X, then Y, whose touch passes the partition.
+    let requested = mixed_leaf_charge(held[k].roots.collections, fixture.source.id)? + mixed_leaf_charge(s.roots.collections, fixture.source.id)? + mixed_blob_charge(MIXED_SHARED_BYTES)? + 2 * mixed_blob_charge(MIXED_BUDGET_BYTES)?
+    // Cold, then warm with the pages, Z and X the first look delivered.
+    for problem in[mixed_budget_look(db, fixture)?, mixed_budget_look(db, fixture)?, mixed_budget_run(mut db, fixture)?] {
+        if problem.requested != requested || problem.available != READER_PIN_MIN {
+            fail("L105 budget: the refusal reports the hand-counted charges against the partition")
+        }
+    }
+    close(take db)
+}
+
+/// bug: an enclosing write lost under an inner layer, raw base rows compared under a replay overlay, a side read through the other side's residency, a look's cache refusal raised as Error(Full(Cache)) instead of Looked.Refused, a shared frame charged twice, or a refusal that depends on the cache.
+/// oracle: the hand difference of image {10: A, 20: B, 30: C} and the run's view {10: A}, and the read log the tail's contract names, for image Tiered and head Memory, the reverse, and both Tiered; and the §13.3 step 1 charges of both leaves, Z once, X and Y against READER_PIN_MIN.
 @test
 fn test_l105_mixed_tail_staged(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     mixed_staged_arm(d, c, r, tasks, true, false)?
     mixed_staged_arm(d, c, r, tasks, false, true)?
-    mixed_staged_arm(d, c, r, tasks, true, true)
+    mixed_staged_arm(d, c, r, tasks, true, true)?
+    mixed_budget_arm(d, c, r, tasks)
 }
 
 fn mixed_same_reads(a: List[Read], b: List[Read]) -> bool {

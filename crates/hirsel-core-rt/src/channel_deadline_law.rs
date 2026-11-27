@@ -101,7 +101,10 @@ unsafe fn expect(
         assert_eq!((got.kind, got.status, destination), (kind, 0, value));
         assert_eq!((*context).available(), available);
         assert!((*rx).receive_waiters.is_empty());
-        if let Some(clock) = ChannelClock::of(&*hirsel_core_capability_provider(context, clock)) {
+        if let Some(clock) = ChannelClock::of(
+            &*hirsel_core_capability_provider(context, clock),
+            crate::entry::hirsel_core_capability_handle(context, clock),
+        ) {
             assert!(clock.first().is_none());
         }
         assert!(!channel_deadline_registered());
@@ -165,8 +168,11 @@ unsafe extern "C" fn run(context: *mut Context, config: *const Config, _: *mut M
         assert_eq!((joined.kind, joined.status), (2, 0));
         crate::abi::hirsel_core_causes_drop(joined.causes);
         assert!((*q.receiver).receive_waiters.is_empty());
-        let clock_cell =
-            ChannelClock::of(&*hirsel_core_capability_provider(context, clock.value)).unwrap();
+        let clock_cell = ChannelClock::of(
+            &*hirsel_core_capability_provider(context, clock.value),
+            crate::entry::hirsel_core_capability_handle(context, clock.value),
+        )
+        .unwrap();
         assert!(
             clock_cell.first().is_none(),
             "the held clock still has a cancelled registration"

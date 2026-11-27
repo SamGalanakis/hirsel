@@ -80,7 +80,10 @@ pub unsafe extern "C" fn hirsel_core_secret_p256_key(
         if crate::provide::owns(provider) {
             let mut point = [0; PUBLIC_LEN];
             let document = p256_key::generate_virtual(
-                |draw| crate::provide::random::fill_virtual(provider, draw),
+                |draw| {
+                    let handle = crate::entry::hirsel_core_capability_handle(context, random);
+                    crate::provide::random::fill_virtual(provider, handle, draw)
+                },
                 &mut point,
             );
             let Ok(document) = document else {

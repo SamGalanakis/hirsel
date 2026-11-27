@@ -650,6 +650,9 @@ impl<'m> Host<'m> for WorldHost<'m> {
         m.host.sched.tasks[owner].refunds.push((l.clone(), n));
         true
     }
+    fn withdraw_cells(m: &mut Machine<'m, Self>, l: &Limit) {
+        m.withdraw_cells(l);
+    }
     fn hand_over(m: &mut Machine<'m, Self>, l: &Limit, parent: &Limit) {
         m.drain_refunds();
         let unused = l.0.cap - l.used();

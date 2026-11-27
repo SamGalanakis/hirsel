@@ -106,7 +106,10 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
             let point = &mut point[..group.public_len()];
             call.key = match KeyShare::from_draws(
                 group,
-                |draw| crate::provide::random::fill_virtual(provider, draw),
+                |draw| {
+                    let handle = crate::entry::hirsel_core_capability_handle(context, random);
+                    crate::provide::random::fill_virtual(provider, handle, draw)
+                },
                 point,
             ) {
                 Ok(key) => Some(key),

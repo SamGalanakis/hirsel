@@ -71,20 +71,21 @@ impl ClockCell {
     }
 }
 
-/// A provided clock pinned by a live run's capability registry.
+/// A provided clock pinned by a live run's capability registry, and the
+/// generation the deadline's designation carries.
 #[derive(Clone, Copy)]
-pub(crate) struct ChannelClock(*const Mutex<ClockCell>);
+pub(crate) struct ChannelClock(*const Mutex<ClockCell>, *mut u8, u64);
 
 impl ChannelClock {
     /// # Safety
     /// The provider is live and belongs to a Clock capability.
-    pub(crate) unsafe fn of(provider: &Provider) -> Option<Self> {
+    pub(crate) unsafe fn of(provider: &Provider, handle: u64) -> Option<Self> {
         if !owns(provider) {
             return None;
         }
         // SAFETY: a provided Clock pins the cell through its run.
         match unsafe { cell(provider.state) } {
-            Cell::Clock(clock) => Some(Self(clock)),
+            Cell::Clock(clock) => Some(Self(clock, provider.state, handle)),
             _ => unreachable!("a Clock designates a clock cell"),
         }
     }
@@ -95,7 +96,8 @@ impl ChannelClock {
         // SAFETY: this task pins the clock and its own timer slot.
         unsafe {
             let mut clock = lock(&*self.0);
-            if at <= clock.mono {
+            // A deadline on a withdrawn clock (MEM-24) has passed.
+            if at <= clock.mono || !live(self.1, self.2) {
                 if observed {
                     // The recorded observation was before this expiry.
                     // Arrange a wake, then make the next poll observe it.
@@ -147,10 +149,10 @@ pub unsafe extern "C" fn hirsel_core_clock_advance_to(
     context: *mut Context,
     hand: u64,
     mono: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { advance(context, hand, mono, None) }
+    unsafe { advance(context, hand, mono, None, site) }
 }
 
 /// Advances both elapsed readings before readying any monotonic timer.
@@ -162,19 +164,31 @@ pub unsafe extern "C" fn hirsel_core_clock_advance_to_with_boot(
     hand: u64,
     mono: u64,
     boot: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { advance(context, hand, mono, Some(boot)) }
+    unsafe { advance(context, hand, mono, Some(boot), site) }
 }
 
-unsafe fn advance(context: *mut Context, hand: u64, mono: u64, boot: Option<u64>) -> Outcome {
+unsafe fn advance(
+    context: *mut Context,
+    hand: u64,
+    mono: u64,
+    boot: Option<u64>,
+    site: u64,
+) -> Outcome {
     // SAFETY: forwarded.
-    let Cell::Clock(clock) = (unsafe { held(context, hand) }) else {
-        unreachable!("a ClockHand designates a clock cell")
+    let Some((Cell::Clock(clock), state, handle)) = (unsafe { held(context, hand) }) else {
+        // SAFETY: forwarded; a forgotten hand's cell was withdrawn.
+        return unsafe { withdrawn(context, site) };
     };
     let mut due = Vec::new();
     let mut clock = lock(clock);
+    if !live(state, handle) {
+        drop(clock);
+        // SAFETY: forwarded.
+        return unsafe { withdrawn(context, site) };
+    }
     let before = clock.mono;
     clock.mono = clock.mono.max(mono);
     clock.boot = match boot {
@@ -223,15 +237,21 @@ pub unsafe extern "C" fn hirsel_core_clock_set_wall(
     context: *mut Context,
     hand: u64,
     wall: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    let Cell::Clock(clock) = (unsafe { held(context, hand) }) else {
-        unreachable!("a ClockHand designates a clock cell")
+    let Some((Cell::Clock(clock), state, handle)) = (unsafe { held(context, hand) }) else {
+        // SAFETY: forwarded; a forgotten hand's cell was withdrawn.
+        return unsafe { withdrawn(context, site) };
     };
     let mut due = Vec::new();
     {
         let mut clock = lock(clock);
+        if !live(state, handle) {
+            drop(clock);
+            // SAFETY: forwarded.
+            return unsafe { withdrawn(context, site) };
+        }
         clock.wall = wall;
         clock.wall_timers.retain(|&(at, token)| {
             let reached = at <= wall;

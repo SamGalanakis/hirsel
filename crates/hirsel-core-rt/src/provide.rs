@@ -7,13 +7,16 @@
 //! program: `clock.advance_to`, `process.trigger`, or the scheduler's
 //! quiescence (`quiesce`). Host time never reaches a cell.
 //!
-//! Each cell admits `charge::PROVIDE_CELL` from the constructing payer, held
-//! until teardown with the cell, as a narrowed grant's rule storage (MEM-24):
-//! a capability is plain and copyable, so nothing earlier proves it gone.
+//! Each cell admits `charge::PROVIDE_CELL` from the limit current at its
+//! construction (MEM-24). A clock, random or process cell is withdrawn when
+//! that limit ends (`cells`); a port is held until teardown.
+mod cells;
 mod clock;
 mod net;
 mod payload;
 mod quiet;
+pub(crate) use cells::{Cells, RETIRED, pinned, withdraw_limit};
+use cells::{WITHDRAWN, cell, live};
 pub(crate) use quiet::Scope;
 use quiet::{IDLE, SERVERS, register};
 pub(crate) mod random;
@@ -49,7 +52,7 @@ enum Cell {
     Clock(Mutex<ClockCell>),
     Random(Mutex<RandomStream>),
     Process(Mutex<ProcessCell>),
-    Port(Mutex<Port>),
+    Port(Box<Mutex<Port>>),
 }
 
 #[derive(Default)]
@@ -571,31 +574,8 @@ fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
     }
 }
 
-/// The run's cells, each with the payer of its charge and the amount. Boxed
-/// so each provider's state pointer stays put.
-#[derive(Default)]
-pub(crate) struct Cells(Mutex<ManuallyDrop<Vec<(Box<Cell>, crate::limit::Payer, u64)>>>);
-// SAFETY: a payer designates a limit record the run pins until teardown,
-// which refunds it under the run's ownership.
-unsafe impl Send for Cells {}
-// SAFETY: as Send; every access goes through the mutex.
-unsafe impl Sync for Cells {}
-
-impl Drop for Cells {
-    fn drop(&mut self) {
-        if let Some(hooks) = SCHEDULER_HOOKS.get() {
-            (hooks.drop_cells)(self);
-        }
-    }
-}
-
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-unsafe fn cell<'a>(state: *mut u8) -> &'a Cell {
-    // SAFETY: the run pins every cell until teardown.
-    unsafe { &*state.cast::<Cell>() }
 }
 
 const PROVIDER: Provider = Provider {
@@ -651,7 +631,7 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
         (Cell::Clock(clock), SLEEP_UNTIL) => {
             let at = deadline(request);
             let mut clock = lock(clock);
-            if at <= clock.mono {
+            if at <= clock.mono || !live(state, request.handle) {
                 return Wait::default();
             }
             if !clock.timers.iter().any(|&(_, _, t)| t == token) {
@@ -663,7 +643,7 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
         (Cell::Clock(clock), SLEEP_UNTIL_WALL) => {
             let at = deadline(request);
             let mut clock = lock(clock);
-            if at <= clock.wall {
+            if at <= clock.wall || !live(state, request.handle) {
                 return Wait::default();
             }
             if !clock.wall_timers.iter().any(|&(_, t)| t == token) {
@@ -673,6 +653,9 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
         }
         (Cell::Clock(c), CLOCK_IDLE) => {
             let mut clock = lock(c);
+            if !live(state, request.handle) {
+                return Wait::default();
+            }
             if let Some(i) = clock.idle.iter().position(|&(t, _)| t == token) {
                 if clock.idle[i].1 {
                     clock.idle.remove(i);
@@ -686,7 +669,7 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
         }
         (Cell::Process(process), STOPPED) => {
             let mut process = lock(process);
-            if process.stopped {
+            if process.stopped || !live(state, request.handle) {
                 return Wait::default();
             }
             if !process.waiters.contains(&token) {
@@ -867,20 +850,48 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
     // SAFETY: as `wait`; RANDOM's buffer owns its spare capacity.
     let (cell, request) = unsafe { (cell(state), &mut *request) };
     let mut outcome = Outcome::default();
+    let handle = request.handle;
     match (cell, request.operation) {
-        (Cell::Clock(clock), MONO_NS) => outcome.value = lock(clock).mono,
-        (Cell::Clock(clock), BOOT_NS) => outcome.value = lock(clock).boot,
-        (Cell::Clock(clock), WALL_MS) => outcome.value = lock(clock).wall,
-        (Cell::Clock(clock), CLOCK_IDLE) => {
-            // The earliest deadline a task still waits on, if any.
-            if let Some(at) = lock(clock).next_deadline() {
-                outcome.value = at;
-                outcome.written = 1;
+        (Cell::Clock(clock), MONO_NS | BOOT_NS | WALL_MS | CLOCK_IDLE) => {
+            // A withdrawn cell's reads fail under the lock its withdrawal holds.
+            let clock = lock(clock);
+            if !live(state, handle) {
+                return done(WITHDRAWN);
+            }
+            match request.operation {
+                MONO_NS => outcome.value = clock.mono,
+                BOOT_NS => outcome.value = clock.boot,
+                WALL_MS => outcome.value = clock.wall,
+                // The earliest deadline a task still waits on, if any.
+                _ => {
+                    if let Some(at) = clock.next_deadline() {
+                        outcome.value = at;
+                        outcome.written = 1;
+                    }
+                }
             }
         }
         (Cell::Random(random), RANDOM) => {
+            let mut random = lock(random);
+            if !live(state, handle) {
+                return done(WITHDRAWN);
+            }
             // SAFETY: the request pins its exclusively writable spare.
-            outcome = unsafe { random::draw_request(&mut lock(random), &mut request.buffer) };
+            outcome = unsafe { random::draw_request(&mut random, &mut request.buffer) };
+        }
+        // A sleep or stop wait that ended because its cell was withdrawn. A
+        // dropped hand's close never fails.
+        (Cell::Clock(clock), SLEEP_UNTIL | SLEEP_UNTIL_WALL) => {
+            let _held = lock(clock);
+            if !live(state, handle) {
+                return done(WITHDRAWN);
+            }
+        }
+        (Cell::Process(process), STOPPED) => {
+            let _held = lock(process);
+            if !live(state, handle) {
+                return done(WITHDRAWN);
+            }
         }
         (Cell::Port(port), PORT_NEXT) => return next_step(state, port, token),
         (Cell::Port(port), RELEASE | CLOSE)
@@ -1084,37 +1095,13 @@ unsafe extern "C" fn deliver(_: *mut u8, request: *mut Request, outcome: Outcome
     outcome
 }
 
-impl Cells {
-    /// Admit a cell's charge and pin it, or answer the refusal: value 0 and
-    /// the available bytes in `written`, from which the caller raises Capacity.
-    unsafe fn add(
-        &self,
-        context: *mut Context,
-        make: impl FnOnce() -> Cell,
-        charge: u64,
-    ) -> Result<Provider, Outcome> {
-        // SAFETY: a running context has a current payer.
-        let payer = unsafe { (*context).payer() };
-        if let Err(capacity) = payer.admit_run_owned(Some(charge)) {
-            return Err(Outcome {
-                written: capacity.available,
-                ..Outcome::default()
-            });
-        }
-        SCHEDULER_HOOKS.get_or_init(|| SchedulerHooks {
-            wait: PROVIDER.wait,
-            quiesce: quiet::wake_quiescent,
-            forget: forget_cells,
-            drop_cells,
-        });
-        let cell = Box::new(make());
-        let mut cells = lock(&self.0);
-        cells.push((cell, payer, charge));
-        Ok(Provider {
-            state: (&raw const *cells.last().unwrap().0).cast_mut().cast(),
-            ..PROVIDER
-        })
-    }
+fn install_hooks() {
+    SCHEDULER_HOOKS.get_or_init(|| SchedulerHooks {
+        wait: PROVIDER.wait,
+        quiesce: quiet::wake_quiescent,
+        forget: cells::forget_cells,
+        drop_cells: cells::drop_cells,
+    });
 }
 
 unsafe fn files<'a>(context: *mut Context) -> &'a crate::host_file::Files {
@@ -1123,9 +1110,22 @@ unsafe fn files<'a>(context: *mut Context) -> &'a crate::host_file::Files {
 }
 
 /// The cell a live hand or trigger designates.
-unsafe fn held<'a>(context: *mut Context, key: u64) -> &'a Cell {
+/// The cell a live hand designates, its state and the hand's generation.
+/// None once a withdrawal forgot the hand.
+unsafe fn held<'a>(context: *mut Context, key: u64) -> Option<(&'a Cell, *mut u8, u64)> {
     // SAFETY: source typing supplies a live ClockHand or StopTrigger.
-    unsafe { cell(files(context).registry.file_provider(key).state) }
+    unsafe {
+        let registry = &files(context).registry;
+        let state = registry.file_provider(key).state;
+        (!state.is_null()).then(|| (cell(state), state, registry.file_handle(key)))
+    }
+}
+
+/// A hand's operation on a withdrawn cell fails with `Bounds` (MEM-24).
+unsafe fn withdrawn(context: *mut Context, site: u64) -> Outcome {
+    // SAFETY: a running context records the cause.
+    unsafe { causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site)) };
+    CANCELLED
 }
 
 /// `provide.clock(start_mono_ns, start_wall_ms) -> (Clock, ClockHand)`.
@@ -1158,11 +1158,11 @@ pub unsafe extern "C" fn hirsel_core_provide_clock(
         Ok(provider) => provider,
         Err(refused) => return refused,
     };
-    Outcome {
-        value: files.registry.grant(provider, 0),
-        written: files.registry.held(provider, 0, CLOSE_CELL),
-        ..Outcome::default()
-    }
+    files
+        .registry
+        .run_grants()
+        .cells
+        .designate(files, provider, Some(CLOSE_CELL))
 }
 
 /// `provide.random(seed) -> Random`.
@@ -1187,10 +1187,11 @@ pub unsafe extern "C" fn hirsel_core_provide_random(
         Ok(provider) => provider,
         Err(refused) => return refused,
     };
-    Outcome {
-        value: files.registry.grant(provider, 0),
-        ..Outcome::default()
-    }
+    files
+        .registry
+        .run_grants()
+        .cells
+        .designate(files, provider, None)
 }
 
 /// `provide.process() -> (Process, StopTrigger)`.
@@ -1211,11 +1212,11 @@ pub unsafe extern "C" fn hirsel_core_provide_process(context: *mut Context, _sit
         Ok(provider) => provider,
         Err(refused) => return refused,
     };
-    Outcome {
-        value: files.registry.grant(provider, 0),
-        written: files.registry.held(provider, 0, CLOSE_CELL),
-        ..Outcome::default()
-    }
+    files
+        .registry
+        .run_grants()
+        .cells
+        .designate(files, provider, Some(CLOSE_CELL))
 }
 
 /// `clock.idle(mut h) -> Option[u64] waits`: parks until the run is quiescent,
@@ -1234,7 +1235,7 @@ pub unsafe extern "C" fn hirsel_core_clock_idle(
         let mut request = Request {
             operation: CLOCK_IDLE,
             mode: 0,
-            handle: 0,
+            handle: files(context).registry.file_handle(hand),
             path: ptr::null(),
             path_len: 0,
             buffer: Buffer {
@@ -1256,16 +1257,25 @@ pub unsafe extern "C" fn hirsel_core_clock_idle(
 pub unsafe extern "C" fn hirsel_core_process_trigger(
     context: *mut Context,
     trigger: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     // SAFETY: forwarded; the trigger's carrier is consumed, never closed.
-    let (provider, _) = unsafe { files(context).registry.take_held(trigger) };
+    let (provider, handle) = unsafe { files(context).registry.take_held(trigger) };
+    if provider.state.is_null() {
+        // SAFETY: forwarded.
+        return unsafe { withdrawn(context, site) };
+    }
     // SAFETY: the run pins the cell.
     let Cell::Process(process) = (unsafe { cell(provider.state) }) else {
         unreachable!("a StopTrigger designates a process cell")
     };
     let waiters = {
         let mut process = lock(process);
+        if !live(provider.state, handle) {
+            drop(process);
+            // SAFETY: forwarded.
+            return unsafe { withdrawn(context, site) };
+        }
         process.stopped = true;
         std::mem::take(&mut process.waiters)
     };
@@ -1352,13 +1362,13 @@ unsafe fn provide_port(
     let charge = PROVIDE_CELL.saturating_add(n);
     // SAFETY: forwarded.
     let provider = match unsafe {
-        files
-            .registry
-            .run_grants()
-            .cells
-            .add(context, || Cell::Port(Mutex::new(port)), charge)
+        files.registry.run_grants().cells.add(
+            context,
+            || Cell::Port(Box::new(Mutex::new(port))),
+            charge,
+        )
     } {
-        Ok(provider) => provider,
+        Ok((provider, _)) => provider,
         Err(refused) => return refused,
     };
     Outcome {
@@ -1651,7 +1661,7 @@ pub unsafe extern "C" fn hirsel_core_port_fill(
         let mut p = lock(port);
         let vocab = p.vocab;
         let c = &p.calls[&id];
-        if !ptr::eq(own, port) || c.finished || c.answer.is_some() {
+        if !ptr::eq(&**own, port) || c.finished || c.answer.is_some() {
             return Outcome::default();
         }
         let bytes = request_bytes((*b).data, (*b).len);
@@ -1931,25 +1941,6 @@ pub(crate) fn forget(cells: &mut Cells) {
     if let Some(hooks) = SCHEDULER_HOOKS.get() {
         (hooks.forget)(cells);
     }
-}
-
-fn forget_cells(cells: &mut Cells) {
-    let cells = std::mem::take(&mut **cells.0.get_mut().unwrap_or_else(|e| e.into_inner()));
-    let states: Vec<usize> = cells
-        .iter()
-        .map(|(c, _, _)| &raw const **c as usize)
-        .collect();
-    lock(&IDLE).retain(|_, (cell, _)| !states.contains(cell));
-    lock(&SERVERS).retain(|_, (cell, _)| !states.contains(cell));
-    for (_, payer, charge) in cells {
-        payer.refund(charge);
-    }
-}
-
-fn drop_cells(cells: &mut Cells) {
-    // SAFETY: Cells owns the vector. Its Drop runs once, and its constructor
-    // installs this callback before putting any cell in the vector.
-    unsafe { ManuallyDrop::drop(cells.0.get_mut().unwrap_or_else(|e| e.into_inner())) };
 }
 
 #[cfg(test)]

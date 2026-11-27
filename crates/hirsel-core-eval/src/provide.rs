@@ -1,5 +1,107 @@
 use super::*;
 
+impl VirtualCell {
+    pub(super) fn port(
+        &mut self,
+    ) -> (
+        &mut BTreeMap<u64, PortCall>,
+        &mut BTreeMap<u64, PortHandle>,
+        &mut u64,
+        &mut u64,
+        Vocab,
+    ) {
+        let VirtualCell::Port {
+            calls,
+            handles,
+            used,
+            next,
+            vocab,
+            ..
+        } = self
+        else {
+            unreachable!("a port")
+        };
+        (calls, handles, used, next, *vocab)
+    }
+    /// The oldest queued call or Released notice.
+    pub(super) fn queued(&self) -> Option<Queued> {
+        let VirtualCell::Port { calls, handles, .. } = self else {
+            unreachable!("a port")
+        };
+        let call = calls
+            .iter()
+            .find(|(_, c)| !c.taken && !c.finished && c.answer.is_none())
+            .map(|(&id, _)| id);
+        let released = handles
+            .iter()
+            .flat_map(|(&h, r)| {
+                let read = match r.state {
+                    PortState::Released(at) => Some((at, h, false)),
+                    _ => None,
+                };
+                let write = match r.write {
+                    Some(PortState::Released(at)) => Some((at, h, true)),
+                    _ => None,
+                };
+                read.into_iter().chain(write)
+            })
+            .min();
+        match (call, released) {
+            (Some(c), Some((at, h, w))) if at < c => Some(Queued::Released(h, w)),
+            (Some(c), _) => Some(Queued::Call(c)),
+            (None, Some((_, h, w))) => Some(Queued::Released(h, w)),
+            (None, None) => None,
+        }
+    }
+    pub(super) fn free_staged(&mut self, id: u64) {
+        let (calls, _, used, _, _) = self.port();
+        if let Some(call) = calls.get_mut(&id) {
+            *used -= call.staged.len() as u64;
+            call.staged = Vec::new();
+        }
+    }
+    /// A Close call ends: a server that took it knows the file is gone; one
+    /// that never saw it learns by `Released`.
+    pub(super) fn closed_call(&mut self, id: u64) {
+        let (calls, handles, used, next, vocab) = self.port();
+        let Some(call) = calls.get(&id) else {
+            return;
+        };
+        if vocab != Vocab::Dir || call.words[0] != DirOp::Close.word() {
+            return;
+        }
+        let file = call.words[1];
+        if call.taken {
+            if handles.remove(&file).is_some() {
+                *used -= HANDLE_ROOM;
+            }
+        } else if let Some(h) = handles.get_mut(&file) {
+            h.state = PortState::Released(*next);
+            *next += 1;
+        }
+    }
+    /// Settle an unsettled call; returns its caller.
+    pub(super) fn settle(&mut self, id: u64, answer: Vec<u64>) -> Option<usize> {
+        let (calls, ..) = self.port();
+        let call = calls.get_mut(&id)?;
+        if call.answer.is_some() || call.finished {
+            return None;
+        }
+        call.answer = Some(answer);
+        let caller = call.caller;
+        self.free_staged(id);
+        self.closed_call(id);
+        Some(caller)
+    }
+    pub(super) fn prune(&mut self, id: u64) {
+        let (calls, ..) = self.port();
+        if calls.get(&id).is_some_and(|c| c.finished && !c.held) {
+            self.free_staged(id);
+            self.port().0.remove(&id);
+        }
+    }
+}
+
 impl Machine<'_> {
     pub(super) fn read_call_payload(
         &mut self,
@@ -189,10 +291,64 @@ impl Machine<'_> {
             return vec![charge, 1, 0, available];
         }
         let tape = RandomStream::tape(self.carrier_bytes(source).to_vec());
-        let handle = CELL_BASE + self.host.world.cells.len() as u64;
+        let cell = self.host.world.cells.len();
         self.host.world.cells.push(VirtualCell::Random(tape));
-        self.host.world.grant_charges.push((payer.clone(), charge));
-        vec![handle, 0, 0, 0]
+        let held = (payer.clone(), charge);
+        self.host.world.cell_charges.insert(cell, held);
+        vec![CELL_BASE + cell as u64, 0, 0, 0]
+    }
+
+    /// MEM-24: the limit `l` ends; withdraw the cells charged to it. Their
+    /// waits are readied: a deadline passes, a stop and an idle wake, and the
+    /// operation then fails with Bounds, as every later one on the cell does.
+    pub(super) fn withdraw_cells(&mut self, l: &Limit) {
+        let world = &mut self.host.world;
+        let ending: Vec<usize> = world
+            .cell_charges
+            .iter()
+            .filter(|(_, (payer, _))| Arc::ptr_eq(&payer.0, &l.0))
+            .map(|(&cell, _)| cell)
+            .collect();
+        for cell in ending {
+            let (payer, charge) = self.host.world.cell_charges.remove(&cell).unwrap();
+            self.host.world.withdrawn.insert(cell);
+            let mut ready = Vec::new();
+            let mut receivers = Vec::new();
+            match &mut self.host.world.cells[cell] {
+                VirtualCell::Clock {
+                    mono,
+                    boot,
+                    wall,
+                    timers,
+                    wall_timers,
+                    idle,
+                } => {
+                    (*mono, *boot, *wall) = (u64::MAX, u64::MAX, u64::MAX);
+                    receivers.extend(timers.drain(..).map(|(_, k)| k));
+                    ready.extend(wall_timers.drain(..).map(|(_, k)| k));
+                    idle.iter_mut().for_each(|(_, woken)| *woken = true);
+                    ready.extend(idle.iter().map(|&(k, _)| k));
+                }
+                VirtualCell::Random(stream) => *stream = RandomStream::tape(Vec::new()),
+                VirtualCell::Process { stopped, waiters } => {
+                    *stopped = true;
+                    ready.append(waiters);
+                }
+                VirtualCell::Port { .. } => unreachable!("a port keeps its run lifetime"),
+            }
+            for k in receivers {
+                if matches!(
+                    self.host.sched.tasks[k].state,
+                    State::Waiting(Condition::Receive(_))
+                ) {
+                    self.host.sched.wake_waiting(k);
+                } else {
+                    self.ready_provider(k);
+                }
+            }
+            ready.into_iter().for_each(|k| self.ready_provider(k));
+            self.refund(payer, charge);
+        }
     }
 
     pub(super) fn draw_virtual_random(&mut self, cell: usize, carrier: u64) -> X<Vec<u64>> {
@@ -221,14 +377,43 @@ impl Machine<'_> {
             op,
             HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
         ) {
-            // A cell holds PROVIDE_CELL until the run ends, as a narrowed grant
-            // (MEM-24); a refusal answers 0 with the available bytes.
+            // A cell holds PROVIDE_CELL until its limit ends (MEM-24); a
+            // refusal answers 0 with the available bytes.
             let payer = t.limits.last().unwrap();
             let charge = hirsel_core_layout::charge::PROVIDE_CELL;
             if let Err(available) = self.admit(payer, charge) {
                 return Some(Ok(ok(0, available)));
             }
-            self.host.world.grant_charges.push((payer.clone(), charge));
+            let held = (payer.clone(), charge);
+            self.host
+                .world
+                .cell_charges
+                .insert(self.host.world.cells.len(), held);
+        }
+        // An operation on a withdrawn cell fails with Bounds at issue, and so
+        // does a wait its withdrawal readied.
+        let on_cell = matches!(
+            op,
+            HostOp::ClockAdvance
+                | HostOp::ClockAdvanceBoot
+                | HostOp::ClockSetWall
+                | HostOp::ProcessTrigger
+                | HostOp::ClockIdle
+                | HostOp::WallMs
+                | HostOp::MonoNs
+                | HostOp::BootNs
+                | HostOp::SleepUntil
+                | HostOp::SleepUntilWall
+                | HostOp::Random
+                | HostOp::Stopped
+        );
+        let withdrawn = |m: &Self| {
+            on_cell
+                && m.cell(a[0])
+                    .is_some_and(|c| m.host.world.withdrawn.contains(&c))
+        };
+        if withdrawn(self) {
+            return Some(Err(Stop::Cause("Bounds")));
         }
         if matches!(
             op,
@@ -700,6 +885,9 @@ impl Machine<'_> {
             }
             _ => return None,
         };
+        if withdrawn(self) {
+            return Some(Err(Stop::Cause("Bounds")));
+        }
         Some(Ok(reply))
     }
 }

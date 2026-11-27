@@ -912,3 +912,32 @@ impl Funding {
         }
     }
 }
+
+impl Payer {
+    /// The record's identity, which keys the cells charged to it.
+    pub(crate) fn address(self) -> usize {
+        self.0.as_ptr().addr()
+    }
+    /// Refund a run-owned charge that is freed before the run ends.
+    pub(crate) fn refund_run_owned(self, bytes: u64) {
+        self.domain().run_owned.fetch_sub(bytes, Ordering::Relaxed);
+        self.refund(bytes);
+    }
+}
+
+impl Funding {
+    /// MEM-24: free the provide cells charged to this limit before its unused
+    /// bytes are counted; whether the limit is then whole and unshared.
+    #[cold]
+    pub(super) fn withdraw_cells(&mut self) -> bool {
+        let payer = self.payer.get();
+        if !crate::provide::withdraw_limit(payer) {
+            return false;
+        }
+        // SAFETY: the active context pins its canonical record exclusively.
+        unsafe {
+            (*payer.links()).refs == 1
+                && (*payer.local()).available == (*payer.links()).live.capacity
+        }
+    }
+}

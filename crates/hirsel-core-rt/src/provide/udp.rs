@@ -243,7 +243,8 @@ pub unsafe extern "C" fn hirsel_core_udp_fill_packets(
         };
         let mut p = lock(port);
         let call = &p.calls[&id];
-        if !ptr::eq(own, port) || call.finished || call.answer.is_some() || call.words[0] != RECV {
+        if !ptr::eq(&**own, port) || call.finished || call.answer.is_some() || call.words[0] != RECV
+        {
             return Outcome::default();
         }
         let take = (call.words[3] as usize - call.staged_packets.len()).min((*packets).len);

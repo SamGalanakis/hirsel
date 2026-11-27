@@ -1,4 +1,4 @@
-use super::{Cell, Context, cell, files, lock};
+use super::{Cell, Context, cell, files, live, lock};
 use crate::provider::{Buffer, IoError, Outcome, Provider};
 use hirsel_core_layout::charge::PROVIDE_CELL;
 use hirsel_core_net::random_stream::RandomStream;
@@ -6,13 +6,22 @@ use std::{slice, sync::Mutex};
 
 pub(crate) const TAPE_BOUNDS: u8 = 255;
 
+/// Fill `out` from a virtual Random designated with `handle`; a withdrawn
+/// cell (MEM-24) fails as an exhausted tape does, with `Bounds`.
 /// # Safety
 /// This provider is a run-pinned virtual Random cell.
-pub(crate) unsafe fn fill_virtual(provider: &Provider, out: &mut [u8]) -> Result<(), ()> {
+pub(crate) unsafe fn fill_virtual(
+    provider: &Provider,
+    handle: u64,
+    out: &mut [u8],
+) -> Result<(), ()> {
     let Cell::Random(random) = (unsafe { cell(provider.state) }) else {
         unreachable!("a Random cell");
     };
-    lock(random).fill(out).then_some(()).ok_or(())
+    let mut random = lock(random);
+    (live(provider.state, handle) && random.fill(out))
+        .then_some(())
+        .ok_or(())
 }
 
 /// # Safety
@@ -34,8 +43,8 @@ pub unsafe extern "C" fn hirsel_core_provide_random_tape(
             charge,
         )
     } {
-        Ok(provider) => Outcome {
-            value: files.registry.grant(provider, 0),
+        Ok((provider, generation)) => Outcome {
+            value: files.registry.grant(provider, generation),
             ..Outcome::default()
         },
         Err(mut refused) => {

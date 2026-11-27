@@ -41,7 +41,8 @@ in turn, on to its parent, up to the root. This
 surviving bytes as part of the reservation it gave. It covers everything the limit funded
 that outlives it: a bound scope's result and anything moved outward, the cause cells of a
 failure raised under it ([FAIL-10](failure.md#fail-10-cause-chain)), values in a queue, and a
-task's result. So the lexical end of a limit and the death of what it funded are separate,
+task's result. A virtual provider's Clock, Random or Process cell is not handed over: it is
+freed when the limit it was charged to ends (MEM-24). So the lexical end of a limit and the death of what it funded are separate,
 and the limit a block's record leads to is always live. Transferring or refunding across
 tasks is an event in the unit's event order ([CONC-10](tasks.md#conc-10-event-order)); one
 sent to another unit is an input of that unit ([CONC-15](tasks.md#conc-15-units)). An
@@ -149,7 +150,7 @@ is the most any build charges for the allocation (MEM-28):
 | `cell.new` node | `T`'s size, rounded up to 8, as a `Box[T]` node; the blocks `T` holds keep their own charges |
 | a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a flow stage | `m + size(X) + 320`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
-| a virtual provider's port or cell ([core](core.md#provide)) | a port: its room `n`, from the constructing task's limit, refunded when the port is gone; a cell: 32, from the current limit, held until the run ends as a narrowed grant's rule storage is, since its plain capability can be copied anywhere |
+| a virtual provider's port or cell ([core](core.md#provide)) | a port: its room `n`, from the constructing task's limit, refunded when the port is gone; a Clock, Random or Process cell: 32, from the current limit, refunded when that limit ends, by a fault too, which withdraws the cell: a copy of its plain capability that outlives the limit designates a withdrawn provider ([core](core.md#provide)) |
 | a packet key ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)) | the row TLS-8's charge table gives it: a `Schedule` 512, from the current limit at each constructor and `srtp`, refunded at drop; a `KeyShare` 64; a `Sealer` or `Opener` 1024; a `HeaderMask` 512; a registry entry 48; a ledger entry 16; `p256_key`'s document 176; the AAD scratch its span's length plus `extra`, refunded at the call's return |
 | `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |
 

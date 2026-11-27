@@ -496,7 +496,7 @@ unsafe fn channel_deadline(
             #[cfg(not(feature = "record"))]
             unreachable!("an untaped clock always has a provider");
         };
-        if let Some(clock) = crate::provide::ChannelClock::of(&provider) {
+        if let Some(clock) = crate::provide::ChannelClock::of(&provider, handle) {
             return Some(ChannelDeadline::Cell(clock, at));
         }
         if crate::os::owns(&provider) {

@@ -71,15 +71,8 @@ pub unsafe extern "C" fn hirsel_core_host_io(
         let provider = hirsel_core_capability_provider(context, handle);
         request.handle = hirsel_core_capability_handle(context, handle);
         let result = drive(context, provider, &mut request, None);
-        if op == crate::provider::RANDOM {
-            if result.error.tag == crate::provide::random::TAPE_BOUNDS {
-                use crate::causes::{self, Cause};
-                causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
-                return CANCELLED;
-            }
-            if request.buffer.len != buffer.len {
-                (*operand).len = request.buffer.len;
-            }
+        if op == crate::provider::RANDOM && request.buffer.len != buffer.len {
+            (*operand).len = request.buffer.len;
         }
         result
     }

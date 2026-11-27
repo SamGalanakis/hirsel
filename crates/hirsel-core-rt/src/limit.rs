@@ -944,6 +944,7 @@ impl Funding {
         if owner != crate::tasks::current_id() {
             crate::tasks::before_commit();
         }
+        crate::provide::withdraw_limit(self.payer.get());
         let (_, owner) = self.handover_destination();
         if owner == crate::tasks::current_id() {
             self.merge_with_parent();
@@ -969,6 +970,7 @@ impl Funding {
         crate::tape::units::reach(crate::tasks::current_group());
         self.drain();
         let child = self.payer.get();
+        crate::provide::withdraw_limit(child);
         let live = child.forest().record(child).live;
         let (_, owner) = self.handover_destination();
         if owner != live.owner {
@@ -1095,16 +1097,15 @@ impl Funding {
         // SAFETY: the active context pins its canonical record exclusively.
         let payer = self.payer.get();
         let links = unsafe { &*payer.links() };
-        let available = unsafe { (*payer.local()).available };
-        if links.refs != 1 || available != links.live.capacity {
+        let (available, parent) = (unsafe { (*payer.local()).available }, links.live.parent);
+        if (links.refs != 1 || available != links.live.capacity) && !self.withdraw_cells() {
             return self.exit_survivors();
         }
-        let parent = links.live.parent.unwrap();
         // SAFETY: lexical parent identities are untagged, retained slot pointers.
-        if unsafe { (*parent.links()).parent.is_some() } {
+        if unsafe { (*parent.unwrap().links()).parent.is_some() } {
             return self.exit_forwarded_parent();
         }
-        let unused = self.recycle_scope(parent);
+        let unused = self.recycle_scope(parent.unwrap());
         // SAFETY: the parent edge's existing pin becomes this context's pin.
         unsafe {
             #[cfg(feature = "prof")]

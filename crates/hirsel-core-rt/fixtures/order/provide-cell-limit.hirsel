@@ -1,0 +1,96 @@
+// expect: returned stdout=ticks=40,copy=1,hand=1,wait=1
+// MEM-24: a Clock, Random or Process cell is charged to the limit current at
+// its construction and freed when that limit ends, by a fault too, so MEM-19
+// holds: 40 faulting ticks that each build 40 cells inside `bound bytes` all
+// fit a parent with room for one tick (ticks=40; before the rule each tick
+// handed 40 * 32 bytes to the parent and the second was refused). A copy of a
+// Clock that outlives its bound fails its next read with Bounds (copy=1), as
+// does its hand's next advance (hand=1), and a sleep parked on the clock when
+// the bound ends is readied and fails the same way (wait=1).
+type Sleeper:send { clock: Clock, tx: Sender[u64] }
+fn faulting_tick() -> u64 {
+    for i in 0u64 .. 20 {
+        let _ = provide.random(i)
+        let _ = provide.process()
+    }
+    fail("after_provide")
+    0
+}
+// 1 when the primary cause is Bounds.
+fn bounds(causes: Causes) -> u64 {
+    for c in causes {
+        return match c.kind { Bounds => 1, _ => 2 }
+    }
+    3
+}
+fn copy_read() -> u64 {
+    let got = bound bytes 4096 {
+        let (c, take hand) = provide.clock(5, 0)
+        c
+    }
+    let c = match got { Ok(c) => c, Error(_) => return 4 }
+    match isolate(fn() -> u64 { host.mono_ns(c) }) {
+        Ok(Error(causes)) => bounds(causes),
+        _ => 5
+    }
+}
+type Hand:send { hand: ClockHand }
+fn advancer(take s: Hand) {
+    let Hand(hand: h) = take s
+    let mut hand = take h
+    clock.advance_to(mut hand, 10)
+}
+fn hand_advance(tasks: Tasks) -> u64 waits {
+    let got = bound bytes 4096 { provide.clock(5, 0) }
+    let (_, take hand) = match take got { Ok(take pair) => take pair, Error(_) => return 4 }
+    let h = task.spawn(tasks, bytes 4096, Hand(hand: take hand), advancer)
+    match task.join(take h) {
+        Error(Failed(causes)) => bounds(causes),
+        _ => 5
+    }
+}
+fn sleeper(take s: Sleeper) waits {
+    let Sleeper(clock: clock, tx: tx) = take s
+    result.unwrap(channel.send(tx, 1u64))
+    host.sleep_until(clock, 100u64)
+}
+fn parked_wait(tasks: Tasks) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let spawned = bound bytes 16384 {
+        let (c, take hand) = provide.clock(0, 0)
+        let h = task.spawn(tasks, bytes 4096, Sleeper(clock: c, tx: take tx), sleeper)
+        let _ = result.unwrap(channel.receive(rx))
+        h
+    }
+    match take spawned {
+        Ok(take h) => match task.join(take h) {
+            Error(Failed(causes)) => bounds(causes),
+            _ => 6
+        },
+        Error(_) => 7
+    }
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    // Each tick's bound fits its parent only while earlier ticks gave all
+    // their bytes back; one tick's 40 cells leaked would refuse the next.
+    let admitted = match (bound bytes 66560 {
+        let mut n = 0u64
+        for _ in 0u64 .. 40 {
+            match (bound bytes 65536 { isolate(fn() -> u64 { faulting_tick() }) }) {
+                Ok(_) => { n = n + 1 },
+                Error(_) => {}
+            }
+        }
+        n
+    }) { Ok(n) => n, Error(_) => 0 }
+    let mut s = string.from("ticks=")
+    string.push_u64(mut s, admitted)
+    string.push(mut s, ",copy=")
+    string.push_u64(mut s, copy_read())
+    string.push(mut s, ",hand=")
+    string.push_u64(mut s, hand_advance(tasks))
+    string.push(mut s, ",wait=")
+    string.push_u64(mut s, parked_wait(tasks))
+    result.unwrap(stdout.write(out, s))
+    Ok(())
+}

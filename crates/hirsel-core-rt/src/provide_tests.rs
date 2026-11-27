@@ -25,8 +25,8 @@ fn a_dir_port_refuses_every_handle_it_does_not_hold_live_for_the_op() {
     port.handles
         .insert(8, handle(Kind::File, State::Released(3)));
     port.next_id = 9;
-    let mut cell = Cell::Port(Mutex::new(port));
-    let state = (&raw mut cell).cast::<u8>();
+    let mut cell = cells::test_slot(Cell::Port(Box::new(Mutex::new(port))));
+    let state = (&raw mut *cell).cast::<u8>();
     let refused = [
         (OPEN, 99, "a forged id"),
         (READ, 99, "a forged id"),
@@ -45,7 +45,7 @@ fn a_dir_port_refuses_every_handle_it_does_not_hold_live_for_the_op() {
         assert_eq!(step.kind, STEP_DONE, "{what}: op {operation} on {id}");
         assert_eq!(step.outcome.error.tag, 2, "{what}: op {operation} on {id}");
     }
-    let Cell::Port(port) = &cell else {
+    let Cell::Port(port) = &cell.cell else {
         unreachable!()
     };
     assert!(
@@ -61,7 +61,7 @@ fn a_dir_port_refuses_every_handle_it_does_not_hold_live_for_the_op() {
         // SAFETY: as above; the queued call is cleared before the request ends.
         let step = unsafe { issue(state, &mut request, 100 + token as u64) };
         assert_eq!(step.kind, STEP_PENDING, "op {operation} on {id}");
-        let Cell::Port(port) = &cell else {
+        let Cell::Port(port) = &cell.cell else {
             unreachable!()
         };
         lock(port).calls.clear();

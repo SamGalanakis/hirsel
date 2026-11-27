@@ -361,13 +361,23 @@ unsafe fn admit<const RETURNABLE: bool>(
         if let Some(refusal) = authorize(&*provider, &mut *request) {
             return Some(refusal);
         }
-        if RETURNABLE {
+        let outcome = if RETURNABLE {
             crate::tasks::provider_operation_returnable(context, &*provider, request)
         } else {
             Some(crate::tasks::provider_operation(
                 context, &*provider, request, issued,
             ))
-        }
+        };
+        // An exhausted random tape or a withdrawn provide cell (MEM-24) fails
+        // with Bounds; a replay sees the recorded answer and fails alike.
+        outcome.map(|o| {
+            if o.error.tag == crate::provide::random::TAPE_BOUNDS {
+                causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
+                CANCELLED
+            } else {
+                o
+            }
+        })
     }
 }
 

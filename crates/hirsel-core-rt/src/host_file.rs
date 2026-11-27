@@ -1,6 +1,6 @@
 //! Provider-aware ownership of mechanical files and listings. The carrier is a u64
 //! run-local key; provider metadata is private and never read inline by emitters.
-use crate::{Context, provider::*};
+use crate::{Context, provide::RETIRED, provider::*};
 use std::{
     collections::BTreeMap,
     mem::ManuallyDrop,
@@ -159,6 +159,15 @@ pub(crate) struct Registry {
     #[cfg(feature = "record")]
     unit_grants: BTreeMap<u64, (usize, u64)>,
 }
+
+/// What a retired hand or trigger key designates (MEM-24).
+const RETIRED_FILE: File = File {
+    provider: RETIRED.0,
+    handle: 0,
+    mode: 0,
+    read_only_dir: false,
+    close_op: CLOSE,
+};
 
 /// Run-wide designations and their backing storage. Secret slots are released by
 /// their last holder (TLS-5); the rest live through the run.
@@ -325,18 +334,42 @@ impl Registry {
         id
     }
     fn file(&self, key: u64) -> File {
-        self.owned.lock().unwrap().live.as_ref().unwrap().values[&key]
+        let owned = self.owned.lock().unwrap();
+        owned
+            .live
+            .as_ref()
+            .and_then(|l| l.values.get(&key).copied())
+            .unwrap_or(RETIRED_FILE)
     }
     fn take_file(&self, key: u64) -> File {
-        self.owned
-            .lock()
-            .unwrap()
+        let mut owned = self.owned.lock().unwrap();
+        owned
             .live
             .as_mut()
-            .unwrap()
-            .values
-            .remove(&key)
-            .unwrap()
+            .and_then(|l| l.values.remove(&key))
+            .unwrap_or(RETIRED_FILE)
+    }
+    /// MEM-24: forget a withdrawn cell's grant word and, when this registry
+    /// holds it, its hand or trigger, if they still designate that cell.
+    pub(crate) fn retire(&self, word: u64, state: usize, generation: u64, held: Option<u64>) {
+        let ours = |p: &Provider, h: u64| p.state as usize == state && h == generation;
+        let mut d = self.run.designations.lock().unwrap();
+        if d.grants
+            .get(&word)
+            .is_some_and(|g| ours(&g.provider, g.handle))
+        {
+            d.grants.remove(&word);
+        }
+        drop(d);
+        if let Some(key) = held
+            && let Some(live) = self.owned.lock().unwrap().live.as_mut()
+            && live
+                .values
+                .get(&key)
+                .is_some_and(|f| ours(&f.provider, f.handle))
+        {
+            live.values.remove(&key);
+        }
     }
     pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
         self.grant_with_terminal(provider, handle, Terminal::No)
@@ -377,23 +410,30 @@ impl Registry {
         id
     }
     pub(crate) fn grant_terminal(&self, handle: u64) -> Terminal {
-        self.run.designations.lock().unwrap().grants[&handle].terminal
+        let d = self.run.designations.lock().unwrap();
+        d.grants.get(&handle).map_or(Terminal::No, |g| g.terminal)
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
         #[cfg(feature = "record")]
         if let Some(&(provider, _)) = self.unit_grants.get(&handle) {
             return provider as *const Provider;
         }
-        let file = Arc::as_ptr(&self.run.designations.lock().unwrap().grants[&handle]);
-        // SAFETY: grants stay pinned until teardown.
-        unsafe { &raw const (*file).provider }
+        let d = self.run.designations.lock().unwrap();
+        let Some(grant) = d.grants.get(&handle) else {
+            return &RETIRED.0;
+        };
+        // A cell's grant resolves to its slot's provider, so a withdrawal can
+        // forget the grant while a wait still holds the provider. Other
+        // grants stay pinned until teardown.
+        crate::provide::pinned(&grant.provider).unwrap_or(&raw const grant.provider)
     }
     pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
         #[cfg(feature = "record")]
         if let Some(&(_, unit)) = self.unit_grants.get(&handle) {
             return unit;
         }
-        self.run.designations.lock().unwrap().grants[&handle].handle
+        let d = self.run.designations.lock().unwrap();
+        d.grants.get(&handle).map_or(0, |g| g.handle)
     }
     /// A virtual provider's live resource: a ClockHand or StopTrigger
     /// (CLOSE_CELL, which closes nothing but itself), a `Served` end

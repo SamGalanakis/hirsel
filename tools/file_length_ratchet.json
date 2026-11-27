@@ -377,9 +377,9 @@
     "lines": 1051
   },
   "crates/hirsel-core-rt/src/limit.rs": {
-    "lines": 1306,
-    "raise_revision": 4,
-    "reason": "unit-tapes-u3c-2638"
+    "lines": 1307,
+    "raise_revision": 5,
+    "reason": "run-budget-grant-accounting-3203"
   },
   "crates/hirsel-core-rt/src/net.rs": {
     "lines": 1397,

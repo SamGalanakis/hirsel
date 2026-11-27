@@ -84,7 +84,7 @@ use hirsel_core_net::{
     Name, SecretGrant, SecretPolicy, SecretUse, random_stream::RandomStream,
     secret_aead::SecretBytes,
 };
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use zeroize::Zeroizing;
 
@@ -195,6 +195,10 @@ struct World {
     random: u8,
     network: Network,
     grant_charges: Vec<(Limit, u64)>,
+    /// Each Clock, Random or Process cell's charge by cell, freed when its
+    /// limit ends (MEM-24); and the cells so withdrawn.
+    cell_charges: BTreeMap<usize, (Limit, u64)>,
+    withdrawn: BTreeSet<usize>,
     /// Secret designations by key; a released one is `None` (TLS-5).
     secrets: Vec<Option<EvalSlot>>,
     media: Vec<Option<media::Media>>,
@@ -390,107 +394,6 @@ enum VirtualCell {
         room: u64,
         used: u64,
     },
-}
-impl VirtualCell {
-    fn port(
-        &mut self,
-    ) -> (
-        &mut BTreeMap<u64, PortCall>,
-        &mut BTreeMap<u64, PortHandle>,
-        &mut u64,
-        &mut u64,
-        Vocab,
-    ) {
-        let VirtualCell::Port {
-            calls,
-            handles,
-            used,
-            next,
-            vocab,
-            ..
-        } = self
-        else {
-            unreachable!("a port")
-        };
-        (calls, handles, used, next, *vocab)
-    }
-    /// The oldest queued call or Released notice.
-    fn queued(&self) -> Option<Queued> {
-        let VirtualCell::Port { calls, handles, .. } = self else {
-            unreachable!("a port")
-        };
-        let call = calls
-            .iter()
-            .find(|(_, c)| !c.taken && !c.finished && c.answer.is_none())
-            .map(|(&id, _)| id);
-        let released = handles
-            .iter()
-            .flat_map(|(&h, r)| {
-                let read = match r.state {
-                    PortState::Released(at) => Some((at, h, false)),
-                    _ => None,
-                };
-                let write = match r.write {
-                    Some(PortState::Released(at)) => Some((at, h, true)),
-                    _ => None,
-                };
-                read.into_iter().chain(write)
-            })
-            .min();
-        match (call, released) {
-            (Some(c), Some((at, h, w))) if at < c => Some(Queued::Released(h, w)),
-            (Some(c), _) => Some(Queued::Call(c)),
-            (None, Some((_, h, w))) => Some(Queued::Released(h, w)),
-            (None, None) => None,
-        }
-    }
-    fn free_staged(&mut self, id: u64) {
-        let (calls, _, used, _, _) = self.port();
-        if let Some(call) = calls.get_mut(&id) {
-            *used -= call.staged.len() as u64;
-            call.staged = Vec::new();
-        }
-    }
-    /// A Close call ends: a server that took it knows the file is gone; one
-    /// that never saw it learns by `Released`.
-    fn closed_call(&mut self, id: u64) {
-        let (calls, handles, used, next, vocab) = self.port();
-        let Some(call) = calls.get(&id) else {
-            return;
-        };
-        if vocab != Vocab::Dir || call.words[0] != DirOp::Close.word() {
-            return;
-        }
-        let file = call.words[1];
-        if call.taken {
-            if handles.remove(&file).is_some() {
-                *used -= HANDLE_ROOM;
-            }
-        } else if let Some(h) = handles.get_mut(&file) {
-            h.state = PortState::Released(*next);
-            *next += 1;
-        }
-    }
-    /// Settle an unsettled call; returns its caller.
-    fn settle(&mut self, id: u64, answer: Vec<u64>) -> Option<usize> {
-        let (calls, ..) = self.port();
-        let call = calls.get_mut(&id)?;
-        if call.answer.is_some() || call.finished {
-            return None;
-        }
-        call.answer = Some(answer);
-        let caller = call.caller;
-        self.free_staged(id);
-        self.closed_call(id);
-        Some(caller)
-    }
-    fn prune(&mut self, id: u64) {
-        let (calls, ..) = self.port();
-        if calls.get(&id).is_some_and(|c| c.finished && !c.held) {
-            self.free_staged(id);
-            self.port().0.remove(&id);
-        }
-    }
 }
 /// A sealed port's answer: `Closed`, or a Net's `Reset`.
 fn port_closed(vocab: Vocab, op: u64) -> [u64; 5] {
@@ -993,6 +896,8 @@ trait Host<'m>: Sized {
     /// MEM-20: fold an ended limit's unused reservation into `parent`, which
     /// another task owns or another task created the limit for.
     fn hand_over(m: &mut Machine<'m, Self>, l: &Limit, parent: &Limit);
+    /// MEM-24: free the provide cells charged to `l`, which ends.
+    fn withdraw_cells(_: &mut Machine<'m, Self>, _: &Limit) {}
     /// The running task used up its step slice.
     fn slice_end(m: &mut Machine<'m, Self>);
     /// A call enters with its host frame at `frame`.
@@ -1602,7 +1507,11 @@ fn run_world(
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
-    for (l, n) in std::mem::take(&mut mach.host.world.grant_charges) {
+    let cells = std::mem::take(&mut mach.host.world.cell_charges).into_values();
+    for (l, n) in std::mem::take(&mut mach.host.world.grant_charges)
+        .into_iter()
+        .chain(cells)
+    {
         l.find().subtract(n);
     }
     for slot in std::mem::take(&mut mach.host.world.secrets)
@@ -4130,6 +4039,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     /// MEM-20: the old owner folds before handing the limit to its parent.
     /// The recipient sees the unused reservation only upon its next event.
     fn end_limit(&mut self, l: Limit, creator: Option<usize>) {
+        H::withdraw_cells(self, &l);
         let current = self.host.current();
         let parent =
             l.0.state

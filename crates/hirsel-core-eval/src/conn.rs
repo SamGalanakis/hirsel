@@ -81,9 +81,13 @@ impl Machine<'_> {
     /// so each refunds there at its own retirement. The notices still queued
     /// at the helper follow, in order (native `end_take`).
     fn end_take(&mut self, unit: usize, i: usize) {
+        let lim = self.host.children[i]
+            .unit_limit
+            .take()
+            .expect("a helper's limit");
+        self.withdraw_cells(&lim);
         let c = &mut self.host.children[i];
         c.end_taken = true;
-        let lim = c.unit_limit.take().expect("a helper's limit");
         let survivors = lim.used();
         let result = c.crossed_result.as_ref().map_or(0, |item| item.charge);
         let r_size = c.charge - c.n - charge::TASK_RECORD - charge::CAUSE_CELL;

@@ -9,7 +9,7 @@
 #   engine_llvm <sha256> <size> <asset>  the compiler's libLLVM.so.23.1 (the tree's engine/),
 #                                        built from source_url by build-libllvm (README.md)
 #   darwin_llvm <sha256> <size> <asset>  a Mac host's tree: libLLVM.23.1.dylib, the ld.lld that
-#                                        loads it, llvm-config, llvm-ar, llvm-objdump and headers, built from source_url
+#                                        loads it, llvm-config, llvm-ar, llvm-objcopy, llvm-objdump and headers, built from source_url
 #                                        by build-libllvm-darwin (README.md)
 #   engine_llvm_guard <ratio>            warm build cost geomean against the apt.llvm.org deb
 #   engine_llvm_guard_deb <sha256> <size> <asset>   the reference deb, retained in asset_pool
@@ -31,7 +31,7 @@ bootstrap_llvm 54b75c91673445cd61fbe8a552ade35a73244da9d138ac8d6e8e8e10a2d313f4 
 bolt_tools b108a9575324c8989c9ba5ca85796feeb8f26b59c08ac4b7f4f04a3817ab8311 12513160 llvm-bolt-23.1.5-manylinux_2_28-x86_64.tar.xz
 static_lld b4b18b795ed21524950815860c7351ebbaf0ce4fd0ef4599d75b25ccc96904df 80753904 ld.lld-23.1.5-elf-macho-static-pie-manylinux_2_28-x86_64
 engine_llvm 79f22f6dfa99adb6681e5850356e64d48f7f7d5c8e4a1f7c0d73ba7d3db87ad5 137286992 libLLVM-23.1.5-engine-bolt-manylinux_2_28-x86_64.so
-darwin_llvm 70425e5dcfc7e94f5eb4d585164933d0a737e2aa4101b3ef79ac2b12d1e8fef7 22027708 llvm-23.1.5-darwin-tools-macos26.0-arm64.tar.xz
+darwin_llvm 0b85435bf6a88dd1763a6fac6d5f04d5158c8e6d96558e78b6bdecb767160a6a 22061236 llvm-23.1.5-darwin-tools-macos26.0-arm64-objcopy.tar.xz
 engine_llvm_guard 0.6470
 engine_llvm_guard_deb 3ac14e55c6349f3d7bf7ebc5fc6f753404c9fc592339306c1ddaa5683ca228a5 33737044 libllvm23_23.1.5.++20261028083854+a738f2737189-1.exp1.20261028203912.92_amd64.deb
 engine_llvm_guard_source 8b13c2585ac114773d28d7dcef8b43e3a131c026

@@ -1,0 +1,98 @@
+pub type Error = Transport | Http(u16) | MalformedDisclosure | MalformedResponse | WitnessAhead(u64) | SizeChanged(u64) | CandidateMismatch | ProofTooLong | Signature(note.NoteError)
+
+pub type HttpResponse: send {
+    status: u16,
+    content_type: String,
+    body: Bytes,
+}
+
+pub const ADD_CHECKPOINT_PATH: String = "/add-checkpoint"
+
+pub const MAX_RESPONSE_BYTES: u64 = note.MAX_NOTE_BYTES
+
+pub fn request(head: note.SignedHead, old: u64, proof: List[tlog.Hash]) -> Result[String, Error] {
+    let new = note.tree_size(head)
+    let n = list.len(proof)
+    if old > new || ((old == 0 || old == new) && n != 0) || (old != 0 && old < new && n == 0) {
+        return Error(CandidateMismatch)
+    }
+    if n > 63 {
+        return Error(ProofTooLong)
+    }
+    let mut out = string.from("old ")
+    string.push_u64(mut out, old)
+    string.push(mut out, "\n")
+    for hash in proof {
+        string.push(mut out, std.base64.encode_string(tlog.hash_bytes(hash)))
+        string.push(mut out, "\n")
+    }
+    string.push(mut out, "\n")
+    string.push(mut out, note.envelope(head))
+    Ok(take out)
+}
+
+fn disclosed_size(response: HttpResponse) -> Result[u64, Error] {
+    if !std.string.eq_ignore_case(response.content_type, "text/x.tlog.size") || list.len(response.body) > 21 {
+        return Error(MalformedDisclosure)
+    }
+    let Ok(body) = string.from_utf8(clone(response.body)) else {
+        return Error(MalformedDisclosure)
+    }
+    let Some(decimal) = std.string.strip_suffix(body, "\n") else {
+        return Error(MalformedDisclosure)
+    }
+    let Some(size) = note.parse_size(decimal) else {
+        return Error(MalformedDisclosure)
+    }
+    Ok(size)
+}
+
+/// Posts to a configured witness through the caller's HTTP transport.
+/// Retries a size disclosure once using the original signed checkpoint.
+/// Reads now_seconds after the response arrives.
+/// The caller reconciles a witness ahead of the candidate or a second conflict.
+pub fn submit(log: tlog.Log, head: note.SignedHead, key: note.VerifierKey, known_size: u64, now_seconds: scoped fn() -> u64, post: scoped fn(String, String) -> Result[HttpResponse, Error] waits) -> Result[note.Cosignature, Error] waits {
+    let new = note.tree_size(head)
+    let Some(root) = tlog.root_at(log, new) else {
+        return Error(CandidateMismatch)
+    }
+    if root != note.tree_root(head) {
+        return Error(CandidateMismatch)
+    }
+    if known_size > new {
+        return Error(WitnessAhead(known_size))
+    }
+    let mut old = known_size
+    let mut retried = false
+    loop {
+        let Some(proof) = tlog.consistency(log, old, new) else {
+            return Error(CandidateMismatch)
+        }
+        let body = request(head, old, proof)?
+        let response = post(ADD_CHECKPOINT_PATH, body)?
+        if response.status == 409 {
+            let disclosed = disclosed_size(response)?
+            if disclosed > new {
+                return Error(WitnessAhead(disclosed))
+            }
+            if retried || disclosed == old {
+                return Error(SizeChanged(disclosed))
+            }
+            old = disclosed
+            retried = true
+        } else if response.status == 200 {
+            if list.len(response.body) > MAX_RESPONSE_BYTES {
+                return Error(MalformedResponse)
+            }
+            let Ok(lines) = string.from_utf8(clone(response.body)) else {
+                return Error(MalformedResponse)
+            }
+            return match note.verify_cosignatures(head, key, now_seconds(), lines) {
+                Ok(take verified) => Ok(take verified),
+                Error(e) => Error(Signature(e)),
+            }
+        } else {
+            return Error(Http(response.status))
+        }
+    }
+}

@@ -1,0 +1,230 @@
+// RFC 6962 trees over the ASCII decimal entries "0" through "256". Independent
+// Python hashlib recursion and RFC 8032 test keys supply the wire vectors below.
+const ORIGIN: String = "pkg.example/log"
+
+const PROOF_255: String = "gLIZscoXZB2BcsSePbW13n7PXdHI9nzOoD4qvTN5IdE=\nKZ8/IHCBcanVLFw64pBsvcpTgwHmBz0HJbR2WmwFn/Y=\nIK7H34SDXKG8cadE7PdRAph7E4lCrq9kIAPCTgz354I=\nA7pmX2X1guXrBkHScszMRJ5OllWN3d1WOj9UwbPzcP4=\nw70pafaFG+Q4uR9o+PyB2D20VuZT91qE1lu6TUM7If0=\nkTymkmQVW6sOOgIpUulJpl7piPY+j8H2Swn0bcglnnk=\n4r7lanbVECT3kjWR52MXPHSUIQ419qbb5QFsK4Hf2JA=\nj1O5BAaflG2DM6euB1C1tcaza/XQXA4shaxtJbE0q84=\nl63CuumutxYsaA2IbweXN8SOvjUUZayxal/+fauOy2k=\nQq6Gp3ytEfJWXgXP+3NfRgJdQKN5pS66QgnCYnMTgAg=\n"
+
+const ROOT_256: String = "goUV0DPBnYyQHzfsy4rtkZZncDSG+NL/8c9wQDIcXbE="
+
+const LEAF_256: String = "Qq6Gp3ytEfJWXgXP+3NfRgJdQKN5pS66QgnCYnMTgAg="
+
+const LOG_KEY: String = "pkg.example/log+b2c65ed3+AddamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea"
+
+const WITNESS_KEY: String = "witness.example/a+1b8949fe+BD1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM"
+
+const HEAD: String = "pkg.example/log\n257\nHtoEmkNR2G92JSvX7At3Rq11t/oDFq1fVB29pFijEsQ=\n\n— pkg.example/log ssZe070hXOBFD4F3UM7YM1mSaOU2+exvyVI/G1BjN6zU5hegpCINEv+/NTZiCTC6QQukLvdQXSheiVLep7kRClpc9ww=\n"
+
+const FORK: String = "pkg.example/log\n257\nHGbmj9Cdw1R/RmrL2iddjVLP6yukeKHr6xwQdlMfwt8=\n\n— pkg.example/log ssZe09o6AOGHlVIaWrCkKYtcLagpTV7FAK0K3GEc4FQUQMrKG+/zcZEulATmrfXxKUQCOmDvCBCEIFg6Bt/4XSp0XA0=\n"
+
+const WITNESS_FIRST: String = "— witness.example/a G4lJ/gAAAABnHbSAe2yShoxxRV2OZxy0R5WFmtLK/HyXwAIeAfmZ4IwfcXMVy0RtKlELGKs1CIwKN2ijMbGFvlT/vaCUzzJOUcd1Aw==\n"
+
+const WITNESS_HEARTBEAT: String = "— witness.example/a G4lJ/gAAAABnHbSB757sEh3gYG017ULkFvIhuVPS/MZT2fmT04m/jsLVCW532T7FmRS98Xhz/bzGuxOKfnPljKxFVa6GFbGGlyAsBg==\n"
+
+fn b64(hash: tlog.Hash) -> String {
+    std.base64.encode_string(tlog.hash_bytes(hash))
+}
+
+fn has_tile(value: Option[tiles.Tile]) -> bool {
+    match value {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn tree_laws(log: tlog.Log) -> Result[(), String] {
+    let roots: Inline[(u64, String), 5] =[(0u64, "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="), (1u64, "2zQm6HgGjSjSabbIcXIyLOU3K2V1bQeJAB00g19gHAM="), (255u64, "Mvhbyqh9e80Fco8J6a66NQumovczgwCH8Fl2goSL5cs="), (256u64, ROOT_256), (257u64, "HtoEmkNR2G92JSvX7At3Rq11t/oDFq1fVB29pFijEsQ=")]
+    for (size, expected) in roots {
+        if b64(option.unwrap(tlog.root_at(log, size))) != expected {
+            return Error("RFC 6962 root")
+        }
+    }
+    let Some(full) = tiles.hash_tile(log, 257, 0, 0) else {
+        return Error("full leaf tile")
+    }
+    let Some(partial) = tiles.hash_tile(log, 255, 0, 0) else {
+        return Error("historical partial tile")
+    }
+    let Some(upper) = tiles.hash_tile(log, 256, 1, 0) else {
+        return Error("level 1 partial tile")
+    }
+    let Some(edge) = tiles.hash_tile(log, 257, 0, 1) else {
+        return Error("right-edge leaf tile")
+    }
+    if full.path != "tile/0/000" || list.len(full.body) != 8192 || b64(std.sha256.hash(full.body)) != "uXBKi/vuLGEYXOs4kEpJ8/cDyB4ZS1sszcJUwr2qpis=" {
+        return Error("full tile wire bytes")
+    }
+    if partial.path != "tile/0/000.p/255" || list.len(partial.body) != 8160 || b64(std.sha256.hash(partial.body)) != "nZvSgDvIkAUpuHHt0++RCdj0O559jVxyRVpJJuyiO78=" {
+        return Error("historical tile wire bytes")
+    }
+    if upper.path != "tile/1/000.p/1" || std.base64.encode_string(upper.body) != ROOT_256 || edge.path != "tile/0/001.p/1" || std.base64.encode_string(edge.body) != LEAF_256 {
+        return Error("tile rollover")
+    }
+    if has_tile(tiles.hash_tile(log, 255, 1, 0)) || has_tile(tiles.hash_tile(log, 0, 0, 0)) || has_tile(tiles.hash_tile(log, 257, 64, 0)) || has_tile(tiles.entry_bundle(log, 258, 0)) {
+        return Error("absent tile")
+    }
+    if option.unwrap(tiles.path(Hashes(0), 1234067, 19)) != "tile/0/x001/x234/067.p/19" {
+        return Error("grouped tile path")
+    }
+    let Some(full_bundle) = tiles.entry_bundle(log, 257, 0) else {
+        return Error("full entry bundle")
+    }
+    if full_bundle.path != "tile/entries/000" || list.len(full_bundle.body) != 1170 || b64(std.sha256.hash(full_bundle.body)) != "lGk9XG1qA1XsB7rIIUUWwc5qUQCwWI8ib9lfJlcRV9c=" {
+        return Error("full entry bundle wire bytes")
+    }
+    let Some(single) = tiles.entry_bundle(log, 1, 0) else {
+        return Error("historical bundle")
+    }
+    let Some(bundle) = tiles.entry_bundle(log, 257, 1) else {
+        return Error("right-edge bundle")
+    }
+    if single.path != "tile/entries/000.p/1" || single.body != b"\x00\x010" || bundle.path != "tile/entries/001.p/1" || bundle.body != b"\x00\x03256" {
+        return Error("u16 bundle framing")
+    }
+    let mut boundary = tlog.empty()
+    let mut entry: Bytes = list.new()
+    list.fill(mut entry, 65535, b'a')
+    drop(result.unwrap(tlog.append(mut boundary, take entry)))
+    let Some(max) = tiles.entry_bundle(boundary, 1, 0) else {
+        return Error("maximum entry bundle")
+    }
+    if list.len(max.body) != 65537 || max.body[0] != 255 || max.body[1] != 255 || max.body[65536] != b'a' {
+        return Error("maximum u16")
+    }
+    let mut oversized: Bytes = list.new()
+    list.fill(mut oversized, 65536, b'a')
+    if let Ok(_) = tlog.append(mut boundary, take oversized) {
+        return Error("oversized entry")
+    }
+    if tlog.size(boundary) != 1 {
+        return Error("oversized entry changed the log")
+    }
+    Ok(())
+}
+
+type WitnessState {
+    size: u64,
+    accepted: bool,
+    calls: u64,
+}
+
+fn simulated_witness(mut state: WitnessState, path: String, request: String) -> Result[witness.HttpResponse, witness.Error] {
+    if path != "/add-checkpoint" {
+        return Error(Transport)
+    }
+    state.calls += 1
+    let Some((old, tail)) = std.string.split_once(request, "\n") else {
+        return Error(Transport)
+    }
+    if (state.size == 255 && old != "old 255") || (state.size == 257 && old != "old 257") {
+        let body = if state.size == 255 {
+            b"255\n"
+        } else {
+            b"257\n"
+        }
+        return Ok(witness.HttpResponse(status: 409, content_type: "text/x.tlog.size", body: clone(body)))
+    }
+    let mut required = if state.size == 255 {
+        string.from(PROOF_255)
+    } else {
+        string.from("")
+    }
+    string.push(mut required, "\n")
+    string.push(mut required, HEAD)
+    if tail != required {
+        return Ok(witness.HttpResponse(status: 422, content_type: "text/plain", body: list.new()))
+    }
+    let signature = if state.accepted {
+        WITNESS_HEARTBEAT
+    } else {
+        WITNESS_FIRST
+    }
+    state.accepted = true
+    state.size = 257
+    Ok(witness.HttpResponse(status: 200, content_type: "text/plain", body: clone(string.as_bytes(signature))))
+}
+
+fn witness_laws(log: tlog.Log, random: Random) -> Result[(), String] waits {
+    let log_key = result.unwrap(note.verifier_key(LOG_KEY))
+    let witness_key = result.unwrap(note.verifier_key(WITNESS_KEY))
+    let pkcs8 = option.unwrap(std.hex.decode(b"302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"))
+    let key = result.unwrap(secret.seal(take pkcs8, "sign(ed25519)"))
+    let head = result.unwrap(note.sign(ORIGIN, 257, option.unwrap(tlog.root_at(log, 257)), log_key, key, random))
+    if note.envelope(head) != HEAD {
+        return Error("independent signed checkpoint vector")
+    }
+    let proof = option.unwrap(tlog.consistency(log, 256, 257))
+    if list.len(proof) != 1 || b64(proof[0]) != LEAF_256 || list.len(option.unwrap(tlog.consistency(log, 257, 257))) != 0 {
+        return Error("right-edge consistency proof")
+    }
+    let mut s = WitnessState(size: 255, accepted: false, calls: 0)
+    let first = result.unwrap(witness.submit(log, head, witness_key, 0, scoped fn() -> u64 {
+        1730000000
+    }, scoped fn(path: String, body: String) -> Result[witness.HttpResponse, witness.Error] {
+        simulated_witness(mut s, path, body)
+    }))
+    if s.calls != 2 || note.timestamp(first) != 1730000000 {
+        return Error("retry with disclosed old size and exact ordered proof")
+    }
+    let renewed = result.unwrap(witness.submit(log, head, witness_key, 256, scoped fn() -> u64 {
+        1730000001
+    }, scoped fn(path: String, body: String) -> Result[witness.HttpResponse, witness.Error] {
+        simulated_witness(mut s, path, body)
+    }))
+    if s.calls != 4 || note.timestamp(renewed) != 1730000001 {
+        return Error("repeat same signed head with empty proof")
+    }
+    let envelope = result.unwrap(note.attach(head, renewed))
+    let mut expected = string.from(HEAD)
+    string.push(mut expected, WITNESS_HEARTBEAT)
+    if note.envelope(envelope) != expected {
+        return Error("heartbeat envelope")
+    }
+    let parsed = result.unwrap(note.verify(ORIGIN, log_key, expected))
+    if note.envelope(parsed) != expected {
+        return Error("signed note with additional signature")
+    }
+    let attached = result.unwrap(note.attached_cosignature(parsed, witness_key, 1730086401))
+    if note.timestamp(attached) != 1730000001 {
+        return Error("24-hour freshness boundary")
+    }
+    if let Ok(_) = note.verify("pkg.example/status", log_key, expected) {
+        return Error("wrong origin")
+    }
+    let fork = result.unwrap(note.verify(ORIGIN, log_key, FORK))
+    let fork_request = result.unwrap(witness.request(fork, 257, list.new()))
+    let response = result.unwrap(simulated_witness(mut s, "/add-checkpoint", fork_request))
+    if response.status != 422 {
+        return Error("simulated witness accepted a conflicting root")
+    }
+    if let Ok(_) = note.verify(ORIGIN, log_key, "pkg.example/log\n257\nHGbmj9Cdw1R/RmrL2iddjVLP6yukeKHr6xwQdlMfwt8=\n\n— pkg.example/log ssZe070hXOBFD4F3UM7YM1mSaOU2+exvyVI/G1BjN6zU5hegpCINEv+/NTZiCTC6QQukLvdQXSheiVLep7kRClpc9ww=\n") {
+        return Error("log signature failed to bind the root")
+    }
+    if let Ok(_) = note.verify_cosignatures(fork, witness_key, 1730000001, WITNESS_HEARTBEAT) {
+        return Error("cosignature replay on split view")
+    }
+    if let Ok(_) = note.verify_cosignatures(head, witness_key, 1730086401, WITNESS_FIRST) {
+        return Error("expired cosignature")
+    }
+    if let Error(WitnessAhead(258)) = witness.submit(log, head, witness_key, 257, scoped fn() -> u64 {
+        1730000001
+    }, scoped fn(_path: String, _body: String) -> Result[witness.HttpResponse, witness.Error] {
+        Ok(witness.HttpResponse(status: 409, content_type: "text/x.tlog.size", body: clone(b"258\n")))
+    }) {
+        return Ok(())
+    }
+    Error("witness ahead requires reconciliation")
+}
+
+@test
+fn c2sp_interop(random: Random) -> Result[(), String] waits {
+    let mut log = tlog.empty()
+    for i in 0u64 .. 257 {
+        let mut entry = string.from("")
+        string.push_u64(mut entry, i)
+        if result.unwrap(tlog.append(mut log, clone(string.as_bytes(entry)))) != i {
+            return Error("append index")
+        }
+    }
+    tree_laws(log)?
+    witness_laws(log, random)
+}

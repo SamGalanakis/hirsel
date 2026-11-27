@@ -128,6 +128,12 @@ source = "member:store-crash"
 edges = ["hirsel.ai/jwtbind@1", "platform@1", "runner@1", "std@1", "store@1"]
 
 [[package]]
+id = "hirsel.ai/tlog@1"
+version = "1.0.0"
+source = "member:tlog"
+edges = ["std@1"]
+
+[[package]]
 id = "hirsel.ai/toml@1"
 version = "1.0.0"
 source = "member:toml"

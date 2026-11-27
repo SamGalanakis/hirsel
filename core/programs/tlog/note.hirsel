@@ -1,0 +1,320 @@
+pub type NoteError = Malformed | InvalidKey | WrongOrigin | MissingSignature | BadSignature | StaleCosignature | WrongCheckpoint | DuplicateSignature | Signing(KeyError)
+
+const LOG_ED25519: u8 = 1
+
+const WITNESS_ED25519: u8 = 4
+
+pub const MAX_NOTE_BYTES: u64 = 131072
+
+const MAX_SIGNATURES: u64 = 32
+
+pub opaque type VerifierKey: send {
+    name: String,
+    id: u32,
+    kind: u8,
+    public_key: Bytes,
+}
+
+type Signature: send {
+    name: String,
+    id: u32,
+    body: Bytes,
+}
+
+pub opaque type SignedHead: send {
+    size: u64,
+    root: tlog.Hash,
+    text: String,
+    wire: String,
+    signatures: List[Signature],
+}
+
+pub opaque type Cosignature: send {
+    text: String,
+    signature: Signature,
+    timestamp: u64,
+}
+
+fn valid_name(name: String) -> bool {
+    if name == "" {
+        return false
+    }
+    let mut at: u64 = 0
+    while let Some((scalar, next)) = string.next_scalar(name, at) {
+        if scalar == '+' || char.to_u32(scalar) < 32 || std.char.is_whitespace(scalar) {
+            return false
+        }
+        at = next
+    }
+    true
+}
+
+pub fn verifier_key(vkey: String) -> Result[VerifierKey, NoteError] {
+    let Some((name, tail)) = std.string.split_once(vkey, "+") else {
+        return Error(InvalidKey)
+    }
+    let Some((id, encoded)) = std.string.split_once(tail, "+") else {
+        return Error(InvalidKey)
+    }
+    if !valid_name(name) || list.len(string.as_bytes(id)) != 8 {
+        return Error(InvalidKey)
+    }
+    let Some(raw) = std.base64.decode(string.as_bytes(encoded)) else {
+        return Error(InvalidKey)
+    }
+    if list.len(raw) != 33 || (raw[0] != LOG_ED25519 && raw[0] != WITNESS_ED25519) {
+        return Error(InvalidKey)
+    }
+    let mut hash = std.sha256.start()
+    let name_bytes = string.as_bytes(name)
+    std.sha256.add(mut hash, name_bytes, 0, list.len(name_bytes))
+    std.sha256.add_byte(mut hash, 10)
+    std.sha256.add(mut hash, raw, 0, 33)
+    let digest = tlog.hash_bytes(std.sha256.finish(hash))
+    if std.hex.encode(list.slice(digest, 0, 4)) != id {
+        return Error(InvalidKey)
+    }
+    Ok(VerifierKey(name: string.from(name), id: list.word_be(digest, 0), kind: raw[0], public_key: clone(list.slice(raw, 1, 33))))
+}
+
+pub fn envelope(head: SignedHead) -> View[String] in head {
+    view head.wire
+}
+
+pub fn tree_size(head: SignedHead) -> u64 {
+    head.size
+}
+
+pub fn tree_root(head: SignedHead) -> tlog.Hash {
+    head.root
+}
+
+pub fn timestamp(signature: Cosignature) -> u64 {
+    signature.timestamp
+}
+
+pub fn parse_size(text: String) -> Option[u64] {
+    let raw = string.as_bytes(text)
+    let n = list.len(raw)
+    if n == 0 || n > 20 || (n != 1 && raw[0] == b'0') {
+        return None
+    }
+    for digit in raw {
+        if !int.is_ascii_digit(digit) {
+            return None
+        }
+    }
+    match (int.parse(text) : Result[u64, ParseError]) {
+        Ok(size) => Some(size),
+        Error(_) => None,
+    }
+}
+
+/// Checks the three-line registry checkpoint format before signing.
+pub fn checkpoint_text(origin: String, size: u64, root: tlog.Hash) -> Result[String, NoteError] {
+    if list.len(string.as_bytes(origin)) > 255 || !valid_name(origin) || (size == 0 && root != tlog.empty_root()) {
+        return Error(Malformed)
+    }
+    let mut out = string.from(origin)
+    string.push(mut out, "\n")
+    string.push_u64(mut out, size)
+    string.push(mut out, "\n")
+    string.push(mut out, std.base64.encode_string(tlog.hash_bytes(root)))
+    string.push(mut out, "\n")
+    Ok(take out)
+}
+
+fn push_signature(mut out: String, signature: Signature) {
+    string.push(mut out, "— ")
+    string.push(mut out, signature.name)
+    string.push(mut out, " ")
+    string.push(mut out, std.base64.encode_string(signature.body))
+    string.push(mut out, "\n")
+}
+
+/// Fixes the signed checkpoint before any witness request can be constructed.
+pub fn sign(origin: String, size: u64, root: tlog.Hash, log_key: VerifierKey, key: Secret, random: Random) -> Result[SignedHead, NoteError] {
+    if log_key.kind != LOG_ED25519 {
+        return Error(InvalidKey)
+    }
+    let text = checkpoint_text(origin, size, root)?
+    let mut sig: Bytes = list.with_capacity(64)
+    if let Error(e) = secret.sign(key, Ed25519, random, string.as_bytes(text), mut sig) {
+        return Error(Signing(e))
+    }
+    if !ed25519.verify(log_key.public_key, string.as_bytes(text), sig) {
+        return Error(InvalidKey)
+    }
+    let mut body: Bytes = list.with_capacity(68)
+    list.put_word_be(mut body, log_key.id)
+    list.append(mut body, sig)
+    let signature = Signature(name: string.from(log_key.name), id: log_key.id, body: take body)
+    let mut wire = string.from(text)
+    string.push(mut wire, "\n")
+    push_signature(mut wire, signature)
+    let mut signatures: List[Signature] = list.new()
+    list.push(mut signatures, take signature)
+    Ok(SignedHead(size: size, root: root, text: take text, wire: take wire, signatures: take signatures))
+}
+
+fn find_signature(signatures: List[Signature], key: VerifierKey) -> Option[View[Signature]] in signatures {
+    for i in 0 .. list.len(signatures) {
+        if signatures[i].id == key.id && signatures[i].name == key.name {
+            return list.get(signatures, i)
+        }
+    }
+    None
+}
+
+fn has_signature(signatures: List[Signature], name: String, id: u32) -> bool {
+    for signature in signatures {
+        if signature.id == id && signature.name == name {
+            return true
+        }
+    }
+    false
+}
+
+fn parse_signatures(wire: String) -> Result[List[Signature], NoteError] {
+    if wire == "" || list.len(string.as_bytes(wire)) > MAX_NOTE_BYTES {
+        return Error(Malformed)
+    }
+    let mut at: u64 = 0
+    let mut out: List[Signature] = list.new()
+    let end = list.len(string.as_bytes(wire))
+    while at < end {
+        let Some(nl) = std.string.find(wire, at, "\n") else {
+            return Error(Malformed)
+        }
+        if list.len(out) == MAX_SIGNATURES {
+            return Error(Malformed)
+        }
+        let Some(line) = std.string.strip_prefix(string.slice(wire, at, nl), "— ") else {
+            return Error(Malformed)
+        }
+        let Some((name, encoded)) = std.string.split_once(line, " ") else {
+            return Error(Malformed)
+        }
+        let Some(body) = std.base64.decode(string.as_bytes(encoded)) else {
+            return Error(Malformed)
+        }
+        if !valid_name(name) || list.len(body) < 4 {
+            return Error(Malformed)
+        }
+        let id: u32 = list.word_be(body, 0)
+        if has_signature(out, name, id) {
+            return Error(DuplicateSignature)
+        }
+        list.push(mut out, Signature(name: string.from(name), id: id, body: take body))
+        at = nl + 1
+    }
+    Ok(take out)
+}
+
+fn parse_checkpoint(head: String, origin: String) -> Result[(u64, tlog.Hash), NoteError] {
+    let Some((name, tail)) = std.string.split_once(head, "\n") else {
+        return Error(Malformed)
+    }
+    if name != origin {
+        return Error(WrongOrigin)
+    }
+    let Some((size, encoded)) = std.string.split_once(tail, "\n") else {
+        return Error(Malformed)
+    }
+    let Some(n) = parse_size(size) else {
+        return Error(Malformed)
+    }
+    let Some(raw) = std.base64.decode(string.as_bytes(encoded)) else {
+        return Error(Malformed)
+    }
+    if list.len(raw) != 32 || !valid_name(name) || list.len(string.as_bytes(name)) > 255 {
+        return Error(Malformed)
+    }
+    let mut root: tlog.Hash =[0; 32]
+    for i in 0u64 .. 32 {
+        root[i] = raw[i]
+    }
+    if n == 0 && root != tlog.empty_root() {
+        return Error(Malformed)
+    }
+    Ok((n, root))
+}
+
+pub fn verify(origin: String, key: VerifierKey, wire: String) -> Result[SignedHead, NoteError] {
+    if key.kind != LOG_ED25519 {
+        return Error(InvalidKey)
+    }
+    if list.len(string.as_bytes(wire)) > MAX_NOTE_BYTES {
+        return Error(Malformed)
+    }
+    let Some((unsigned, lines)) = std.string.split_once(wire, "\n\n") else {
+        return Error(Malformed)
+    }
+    let (size, root) = parse_checkpoint(unsigned, origin)?
+    let text = string.from(string.slice(wire, 0, list.len(string.as_bytes(unsigned)) + 1))
+    let signatures = parse_signatures(lines)?
+    {
+        let Some(sig) = find_signature(signatures, key) else {
+            return Error(MissingSignature)
+        }
+        if list.len(sig.body) != 68 || !ed25519.verify(key.public_key, string.as_bytes(text), list.slice(sig.body, 4, 68)) {
+            return Error(BadSignature)
+        }
+    }
+    Ok(SignedHead(size: size, root: root, text: take text, wire: string.from(wire), signatures: take signatures))
+}
+
+fn verified_cosignature(head: SignedHead, key: VerifierKey, now: u64, signatures: List[Signature]) -> Result[Cosignature, NoteError] {
+    if key.kind != WITNESS_ED25519 {
+        return Error(InvalidKey)
+    }
+    for sig in signatures {
+        if sig.name == key.name && sig.id == key.id {
+            if list.len(sig.body) != 76 {
+                return Error(BadSignature)
+            }
+            let time: u64 = list.word_be(sig.body, 4)
+            if time > now || now - time > 86400 {
+                return Error(StaleCosignature)
+            }
+            let mut message = string.from("cosignature/v1\ntime ")
+            string.push_u64(mut message, time)
+            string.push(mut message, "\n")
+            string.push(mut message, head.text)
+            if !ed25519.verify(key.public_key, string.as_bytes(message), list.slice(sig.body, 12, 76)) {
+                return Error(BadSignature)
+            }
+            return Ok(Cosignature(text: string.from(head.text), signature: clone(sig), timestamp: time))
+        }
+    }
+    Error(MissingSignature)
+}
+
+/// Verifies response signature lines against the pinned key and fixed head.
+pub fn verify_cosignatures(head: SignedHead, key: VerifierKey, now: u64, lines: String) -> Result[Cosignature, NoteError] {
+    let signatures = parse_signatures(lines)?
+    verified_cosignature(head, key, now, signatures)
+}
+
+/// Verifies a pinned witness already attached to a parsed checkpoint.
+pub fn attached_cosignature(head: SignedHead, key: VerifierKey, now: u64) -> Result[Cosignature, NoteError] {
+    verified_cosignature(head, key, now, head.signatures)
+}
+
+pub fn attach(head: SignedHead, cosignature: Cosignature) -> Result[SignedHead, NoteError] {
+    if head.text != cosignature.text {
+        return Error(WrongCheckpoint)
+    }
+    let signature = view cosignature.signature
+    if has_signature(head.signatures, signature.name, signature.id) {
+        return Error(DuplicateSignature)
+    }
+    let mut wire = string.from(head.wire)
+    push_signature(mut wire, signature)
+    if list.len(head.signatures) == MAX_SIGNATURES || list.len(string.as_bytes(wire)) > MAX_NOTE_BYTES {
+        return Error(Malformed)
+    }
+    let mut signatures: List[Signature] = clone(head.signatures)
+    list.push(mut signatures, clone(signature))
+    Ok(SignedHead(size: head.size, root: head.root, text: string.from(head.text), wire: take wire, signatures: take signatures))
+}

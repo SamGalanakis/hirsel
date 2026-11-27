@@ -1,0 +1,146 @@
+pub type Hash = Inline[u8, 32]
+
+pub type AppendError = EntryTooLong | Capacity(Capacity)
+
+pub opaque type Log: send {
+    entries: List[Bytes],
+    // Level h stores roots of the complete, aligned subtrees of 2^h entries.
+    levels: List[List[Hash]],
+}
+
+pub fn empty() -> Log {
+    let mut levels: List[List[Hash]] = list.with_capacity(64)
+    for _ in 0u64 .. 64 {
+        list.push(mut levels, list.new())
+    }
+    Log(entries: list.new(), levels: take levels)
+}
+
+pub fn size(log: Log) -> u64 {
+    list.len(log.entries)
+}
+
+pub fn entry_at(log: Log, index: u64) -> Option[View[Bytes]] in log {
+    list.get(log.entries, index)
+}
+
+pub fn hash_at(log: Log, height: u32, index: u64) -> Option[Hash] {
+    if height >= 64 {
+        return None
+    }
+    option.copied(list.get(log.levels[int.widen(height)], index))
+}
+
+pub fn hash_bytes(hash: Hash) -> Bytes {
+    let mut out: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut out, hash[i])
+    }
+    take out
+}
+
+pub fn empty_root() -> Hash {
+    std.sha256.finish(std.sha256.start())
+}
+
+pub fn leaf_hash(entry: Bytes) -> Hash {
+    let mut hash = std.sha256.start()
+    std.sha256.add_byte(mut hash, 0)
+    std.sha256.add(mut hash, entry, 0, list.len(entry))
+    std.sha256.finish(hash)
+}
+
+fn branch(left: Hash, right: Hash) -> Hash {
+    let mut hash = std.sha256.start()
+    std.sha256.add_byte(mut hash, 1)
+    for i in 0u64 .. 32 {
+        std.sha256.add_byte(mut hash, left[i])
+    }
+    for i in 0u64 .. 32 {
+        std.sha256.add_byte(mut hash, right[i])
+    }
+    std.sha256.finish(hash)
+}
+
+/// Appends an admitted entry and returns its zero-based index.
+pub fn append(mut log: Log, take entry: Bytes) -> Result[u64, AppendError] {
+    if list.len(entry) > 65535 {
+        return Error(EntryTooLong)
+    }
+    let index = size(log)
+    let top: u64 = int.widen(int.trailing_zeros(~index))
+    if let Error(e) = list.try_reserve(mut log.entries, 1) {
+        return Error(Capacity(e))
+    }
+    for h in 0 .. top + 1 {
+        if let Error(e) = list.try_reserve(mut log.levels[h], 1) {
+            return Error(Capacity(e))
+        }
+    }
+    let mut hash = leaf_hash(entry)
+    let mut at = index
+    for h in 0 .. top {
+        let left = log.levels[h][at - 1]
+        list.push(mut log.levels[h], hash)
+        hash = branch(left, hash)
+        at >>= 1
+    }
+    list.push(mut log.levels[top], hash)
+    list.push(mut log.entries, take entry)
+    Ok(index)
+}
+
+fn split(n: u64) -> u64 {
+    1u64 << int.widen(63u32 - int.leading_zeros(n - 1))
+}
+
+// Every visited range starts at a multiple of its largest power of two.
+fn range_root(log: Log, start: u64, n: u64) -> Hash {
+    let h = 63u32 - int.leading_zeros(n)
+    let width = 1u64 << int.widen(h)
+    let left = log.levels[int.widen(h)][start >> int.widen(h)]
+    if width == n {
+        return left
+    }
+    branch(left, range_root(log, start + width, n - width))
+}
+
+pub fn root_at(log: Log, tree_size: u64) -> Option[Hash] {
+    if tree_size > size(log) {
+        return None
+    }
+    if tree_size == 0 {
+        return Some(empty_root())
+    }
+    Some(range_root(log, 0, tree_size))
+}
+
+// RFC 6962 SUBPROOF. The supplied flag says the old root is already known
+// to the verifier. Right descent loses that property.
+fn subproof(log: Log, start: u64, old: u64, new: u64, supplied: bool, mut out: List[Hash]) {
+    if old == new {
+        if !supplied {
+            list.push(mut out, range_root(log, start, new))
+        }
+        return
+    }
+    let left = split(new)
+    if old <= left {
+        subproof(log, start, old, left, supplied, mut out)
+        list.push(mut out, range_root(log, start + left, new - left))
+    } else {
+        subproof(log, start + left, old - left, new - left, false, mut out)
+        list.push(mut out, range_root(log, start, left))
+    }
+}
+
+pub fn consistency(log: Log, old: u64, new: u64) -> Option[List[Hash]] {
+    if old > new || new > size(log) {
+        return None
+    }
+    let mut out: List[Hash] = list.new()
+    if old != 0 && old != new {
+        subproof(log, 0, old, new, true, mut out)
+    }
+    Some(take out)
+}

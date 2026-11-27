@@ -1,0 +1,95 @@
+pub type Kind = Hashes(u32) | Entries
+
+pub type Tile: send {
+    path: String,
+    body: Bytes,
+}
+
+pub const CONTENT_TYPE: String = "application/octet-stream"
+
+const WIDTH: u64 = 256
+
+fn push_index(mut out: String, index: u64) {
+    if index >= 1000 {
+        string.push(mut out, "x")
+        push_groups(mut out, index / 1000)
+        string.push(mut out, "/")
+    }
+    std.string.push_uint(mut out, index % 1000, 10, 3, '0')
+}
+
+fn push_groups(mut out: String, index: u64) {
+    if index >= 1000 {
+        push_groups(mut out, index / 1000)
+        string.push(mut out, "/x")
+    }
+    std.string.push_uint(mut out, index % 1000, 10, 3, '0')
+}
+
+/// Relative path beneath either registry log prefix.
+pub fn path(kind: Kind, index: u64, width: u64) -> Option[String] {
+    if width == 0 || width > WIDTH {
+        return None
+    }
+    let mut out = string.from("tile/")
+    match kind {
+        Entries => string.push(mut out, "entries"),
+        Hashes(level) => {
+            if level > 63 {
+                return None
+            }
+            string.push_u64(mut out, int.widen(level))
+        }
+    }
+    string.push(mut out, "/")
+    push_index(mut out, index)
+    if width < WIDTH {
+        string.push(mut out, ".p/")
+        string.push_u64(mut out, width)
+    }
+    Some(take out)
+}
+
+fn span(nodes: u64, index: u64) -> Option[(u64, u64)] {
+    if nodes == 0 || index > (nodes - 1) / WIDTH {
+        return None
+    }
+    let start = index * WIDTH
+    Some((start, order.min(WIDTH, nodes - start)))
+}
+
+/// Reads a full or partial tile of the specified historical tree.
+pub fn hash_tile(log: tlog.Log, size: u64, level: u32, index: u64) -> Option[Tile] {
+    if size > tlog.size(log) || level >= 8 {
+        return None
+    }
+    let height = level * 8
+    let Some((start, width)) = span(size >> int.widen(height), index) else {
+        return None
+    }
+    let mut body: Bytes = list.with_capacity(width * 32)
+    for i in start .. start + width {
+        let hash = option.unwrap(tlog.hash_at(log, height, i))
+        for j in 0u64 .. 32 {
+            list.push(mut body, hash[j])
+        }
+    }
+    Some(Tile(path: option.unwrap(path(Hashes(level), index, width)), body: take body))
+}
+
+/// Reads an entry bundle with canonical two-byte big-endian length frames.
+pub fn entry_bundle(log: tlog.Log, size: u64, index: u64) -> Option[Tile] {
+    if size > tlog.size(log) {
+        return None
+    }
+    let Some((start, width)) = span(size, index) else {
+        return None
+    }
+    let mut body: Bytes = list.new()
+    for i in start .. start + width {
+        let entry = option.unwrap(tlog.entry_at(log, i))
+        list.put_word_be(mut body, (int.truncate(list.len(entry)) : u16))
+        list.append(mut body, entry)
+    }
+    Some(Tile(path: option.unwrap(path(Entries, index, width)), body: take body))
+}

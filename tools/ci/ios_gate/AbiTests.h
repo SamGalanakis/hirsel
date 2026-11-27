@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include "Memory.h"
 #include <stdint.h>
 
 int32_t hirsel_embed_harness_manifest_fp(const uint8_t *manifest, size_t length, uint8_t *out);

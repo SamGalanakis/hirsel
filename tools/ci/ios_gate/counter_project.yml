@@ -9,7 +9,7 @@ targets:
   EmbedCounter:
     type: application
     platform: iOS
-    sources: [CounterHost.swift]
+    sources: [CounterHost.swift, Memory.h]
     dependencies:
       - package: CounterGate
     settings:
@@ -18,3 +18,4 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.hirsel.simulator-counter-embed
         SWIFT_VERSION: "6.0"
         CODE_SIGN_IDENTITY: "-"
+        SWIFT_OBJC_BRIDGING_HEADER: Memory.h

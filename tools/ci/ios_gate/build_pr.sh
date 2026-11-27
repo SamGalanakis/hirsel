@@ -67,9 +67,13 @@ TOML
   --grant Foreign=ios@1/ios/Ios --dir xdg-data:counter -o "$app/libpr_counter.a"
 
 mkdir "$output"
+cat > "$app/bridge.h" <<HEADER
+#include "$here/Memory.h"
+#include "$host/bridge/hirsel_ios_bridge.h"
+HEADER
 sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 xcrun --sdk iphonesimulator swiftc -O -D PR_COUNTER -target arm64-apple-ios26.0-simulator \
-  -sdk "$sdk" -import-objc-header "$host/bridge/hirsel_ios_bridge.h" \
+  -sdk "$sdk" -import-objc-header "$app/bridge.h" \
   "$here/CounterHost.swift" "$host/host/HirselProtocol.swift" "$app/libpr_counter.a" \
   -framework Security -framework CoreFoundation -o "$output/PRCounter"
 python3 - "$output" <<'PY'

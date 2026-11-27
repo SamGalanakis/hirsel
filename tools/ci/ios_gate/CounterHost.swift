@@ -72,17 +72,11 @@ struct CounterHost: App {
     private static func record(_ value: UInt64) {
         dispatchPrecondition(condition: .onQueue(.main))
         let tick = mach_absolute_time()
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
-        let status = withUnsafeMutablePointer(to: &info) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        precondition(status == KERN_SUCCESS)
+        let memory = hirsel_gate_memory_sample()
+        precondition(memory.status == KERN_SUCCESS)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         try! FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
         let output = documents.appendingPathComponent("comparison-sample.txt")
-        try! "\(value) \(tick) \(info.resident_size)\n".write(to: output, atomically: true, encoding: .utf8)
+        try! "\(value) \(tick) \(memory.resident)\n".write(to: output, atomically: true, encoding: .utf8)
     }
 }

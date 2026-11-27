@@ -61,6 +61,7 @@ def main():
         shutil.copyfile(HERE / "counter_project.yml", work / "project.yml")
         shutil.copyfile(HERE / "CounterHost.swift", work / "CounterHost.swift")
         run("xcodegen", "generate", cwd=work)
+        shutil.copyfile(HERE / "Memory.h", work / "Memory.h")
         build = work / "derived"
         run("xcodebuild", "build", "-project", work / "HirselCounterComparison.xcodeproj",
             "-scheme", "EmbedCounter", "-configuration", "Release",

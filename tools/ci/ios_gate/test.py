@@ -89,7 +89,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="hirsel-xctest-") as directory:
         work = Path(directory)
         for name in ("project.yml", "Host.swift", "Tests.swift", "AbiTests.swift", "AbiTests.h",
-                     "Workers.c", "TLSTests.swift"):
+                     "Workers.c", "Memory.h", "TLSTests.swift"):
             shutil.copyfile(HERE / name, work / name)
         (work / "SimGate").symlink_to((args.artifacts / "SimGate").resolve(), target_is_directory=True)
         resources = work / "TLS"

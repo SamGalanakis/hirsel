@@ -109,12 +109,12 @@ demotion's step installs the empty root under that overlay, leaving the child's 
 TLC runs with several workers, so `--save-traces` can write a different shortest trace on another
 run.
 
-## Pending model change: the build pin (STORE-SPEC v2.169)
+## Pending model change: the build pin (STORE-SPEC v2.169, amended v2.171)
 
 v2.169 (§13.10a "Hot Tiered builds") adds a holder that neither model has. It is an owner-3 pin of fresh Hot pages that is never promoted, emitted by its own cuts, and grafted onto main by one `ReplaceMain` cut that drops it. The abstraction above, where one Snapshot pin stands for every pin, does not cover it: the import pin's own graft is not modelled either. So under the standing rule, `StoreRetention.tla` changes before the M3b-S5b implementation lane starts (DESIGN-v2 §4.4a gate):
 - **Ops.**
-  - `build`: a cut whose only holder change sets the build pin to a root of fresh stamps it emits.
-  - `graft`: one cut that sets main's head to the pin's frames, drops the pin, and queues main's old Cold base as released roots.
+  - `build`: a cut whose only holder change sets the build pin to a root of fresh stamps it emits plus a subset of the previous pin's frames, since pin k + 1 is copy-on-write over pin k (v2.171, review 3228 F7).
+  - `graft`: one cut that sets main's head to the working map (a subset of the pin's frames plus fresh stamps the cut emits, v2.171, review 3228 F1), drops the pin, and queues main's old Cold base as released roots. Pin frames the graft leaves out (a replaced tail, a chain's intermediate collection, a scratch run) are in neither main nor a pin afterwards.
   - The crash then reopen drops an orphan pin at the first holder-free cut.
   - A second collection that the plan leaves untouched, so that a probe at a `build` cut can relocate it.
 - **Invariants.** The existing ones, unchanged: RetainReachable, SnapReadable, ImageComplete, AckedDurable, IdleReachesNoFrame, ProbeClaim, Progress, CellsListed, IdleProgress.
@@ -122,7 +122,9 @@ v2.169 (§13.10a "Hot Tiered builds") adds a holder that neither model has. It i
   - `graft_queues_pin`: the graft queues the pin's frames as released, so the drain retires frames main now names, which violates RetainReachable.
   - `graft_stale_root`: the graft publishes the untouched collection's staging-time root after a `build` cut's probe moved it, which violates RetainReachable.
   - `build_unlisted`: a `build` step writes its frames into a pack outside the cut's list (lane 3220's live `child_cut_tiered`). A crash then reopen removes the unlisted pack while the durable pin still names it, which violates RetainReachable.
+  - `build_replace_frees_shared`: a `build` that replaces the pin releases every frame of the old pin, including those the new pin still names, which violates RetainReachable (v2.171, review 3228 F7).
 - **`StoreCatchUp.tla` is unchanged.** The build pin exists only inside a hot `Migrate`, and the publish's lease step is `Drift`, so no catch-up round replays a hot build.
+- **Outside the model.** Hot pages and stamp counters are not modelled, so review 3228's F1 (a graft that drops the Hot tail) and F2 (split stamp counters) are L102 cases (`graft_installed_pin`, `plan_counter_rollback`), not mutants.
 - **Not a model case.** An orphan rule keyed on `import` alone keeps a crashed build's pin listed forever. That is a liveness failure, and the models check only safety, so L102 (c) catches it instead.
 
 ## What is abstracted

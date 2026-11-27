@@ -293,8 +293,7 @@ pub fn operate_sharded[G: send, H: shareable + inert + send, S: send](take made:
     operate_with_report(take made, take p, FromUnit(take stop), status, None, Some(take observer), None, false)
 }
 
-fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: StopInput, status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], take observer: Option[StatusObserver], report: Option[Stderr], registered: bool) -> Result[Ended, StartError] waits {
-    let launch = launch_env()
+fn operate_with_report_body[G: send, H: shareable + inert + send, S: send](launch: LaunchEnv, take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: StopInput, status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], take observer: Option[StatusObserver], report: Option[Stderr], registered: bool) -> Result[Ended, StartError] waits {
     let n_place = if launch.n_place_explicit {
         launch.n_place
     } else {
@@ -615,6 +614,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
             },
             StoreAccepted => if !place_online(phase) && !place_stopping(phase) {
                 publish_phase(status, watch, observer, mut current, Ready)?
+                embed_on_ready(launch)
                 phase = match phase {
                     DeferredStop(_) => DeferredStop(true),
                     _ => OnlinePlace

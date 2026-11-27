@@ -321,7 +321,7 @@ pub struct InboxH {
 }
 
 pub struct ClientH {
-    client: Client,
+    pub(crate) client: Client,
 }
 
 #[repr(C)]
@@ -375,11 +375,10 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             Ok(held) => held,
             Err(e) => return refused(e.available),
         };
-        let u = unit();
-        let owners = (*item).owners();
-        let (inbox, client) = u
-            .ctx
-            .conn_open(cap, logical, b, (*item).bytes as usize, owners);
+        let (u, owners, bytes) = (unit(), (*item).owners(), (*item).bytes as usize);
+        let (inbox, client) = u.ctx.conn_open(cap, logical, b, bytes, owners);
+        #[cfg(not(feature = "standalone"))]
+        crate::embed::maybe_capture_dialer(&client);
         let key = Arc::as_ptr(&inbox.0) as usize;
         let ih = Box::into_raw(Box::new(InboxH {
             files: (*context).host_files,

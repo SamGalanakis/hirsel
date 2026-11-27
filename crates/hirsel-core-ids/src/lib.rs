@@ -7,6 +7,7 @@
 pub mod cgroup;
 
 pub mod dir_port;
+pub mod embed;
 pub mod encoding;
 pub mod hex;
 pub mod host_op;

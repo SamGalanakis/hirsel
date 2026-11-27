@@ -171,6 +171,8 @@ pub struct Metadata {
     /// 3 `hirsel store repair`, 4 `hirsel tapes check`.
     store_op: u8,
     recorded_image: Option<[u8; 32]>,
+    /// Launch word 28: 1 when launched through the in-process embed ABI (EMB-3).
+    embedded: bool,
 }
 
 impl Metadata {
@@ -212,6 +214,7 @@ impl Metadata {
             move_envelope: Vec::new(),
             store_op: 0,
             recorded_image: None,
+            embedded: false,
         }
     }
 
@@ -226,6 +229,21 @@ impl Metadata {
             .map(Executable::Digest)
             .unwrap_or_else(|| Executable::Unavailable("no executable image supplied".into()));
         Self::with_image(Image::Ready(executable), target, n_place, describe)
+    }
+
+    /// Embedded in-process place launch metadata (EMB-3).
+    pub fn in_process_embed(digest: Option<[u8; 32]>, target: &str, n_place: u64) -> Self {
+        let executable = digest
+            .map(Executable::Digest)
+            .unwrap_or_else(|| Executable::Unavailable("embedded, not supplied".into()));
+        let mut meta = Self::with_image(Image::Ready(executable), target, n_place, false);
+        meta.n_place_explicit = true;
+        meta.embedded = true;
+        meta
+    }
+
+    pub fn is_embedded(&self) -> bool {
+        self.embedded
     }
 
     pub fn source(target: &str, n_place: u64, describe: bool) -> Self {
@@ -410,6 +428,7 @@ impl Metadata {
                 .recorded_image
                 .as_ref()
                 .map_or(0, |digest| byte(digest)),
+            28 => u64::from(self.embedded),
             _ => 0,
         }
     }

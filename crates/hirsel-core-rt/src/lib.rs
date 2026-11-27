@@ -28,6 +28,8 @@ mod crc;
 mod crc32c;
 pub mod cred;
 mod destination;
+#[cfg(not(feature = "standalone"))]
+pub mod embed;
 pub mod entry;
 mod env;
 #[path = "host/exec_grant.rs"]

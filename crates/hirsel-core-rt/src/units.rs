@@ -85,8 +85,15 @@ pub(crate) fn current() -> u32 {
 }
 
 pub(crate) fn spin() -> bool {
-    static SPIN: OnceLock<bool> = OnceLock::new();
-    *SPIN.get_or_init(|| std::env::var_os("HIRSEL_XSPIN").is_some())
+    #[cfg(not(feature = "standalone"))]
+    {
+        false
+    }
+    #[cfg(feature = "standalone")]
+    {
+        static SPIN: OnceLock<bool> = OnceLock::new();
+        *SPIN.get_or_init(|| std::env::var_os("HIRSEL_XSPIN").is_some())
+    }
 }
 
 // ================================================================== untied

@@ -1,0 +1,187 @@
+// Real Hirsel runner place fixture for Slice 2 embedded ABI laws
+// (M2 durability/crash/poison/corrupt, M3 accounting/SubEnd.ClientCapacity,
+// M4 dir_bases/Secret, M11 real n_place refusal, m2 target, Differential vs WS).
+
+type PutReq: codec + send {
+    key: u64,
+    val: Bytes,
+}
+
+type PlaceTables: shareable + send {
+    items: store.Table[u64, Bytes],
+}
+
+type PlaceSeed: send {
+    data: Dir,
+    cache: Dir,
+}
+
+type PlaceGrant: send = Call(Dir, Dir) | Bound
+
+fn place_schema(mut d: store.Declare) -> Result[PlaceTables, store.Error] {
+    let tbl = store.declare_table(mut d, "items", std.codec.key_u64(), std.codec.of_bytes())?
+    Ok(PlaceTables(items: store.finish(mut d, take tbl)?))
+}
+
+fn items_table(h: PlaceTables) -> store.Table[u64, Bytes] {
+    clone(h.items)
+}
+
+fn items_slots() -> Result[runner.Slots[PlaceTables], runner.RegisterError] {
+    runner.table_slot("items", code.describe(items_table))
+}
+
+fn put(mut tx: store.Tx, h: PlaceTables, _caller: store.Caller, take req: PutReq) -> Result[u64, u64] {
+    let PutReq(key: k, val: take v) = take req
+    match store.put(mut tx, h.items, k, take v) {
+        Ok(()) => Ok(k),
+        Error(_) => Error(1u64),
+    }
+}
+
+fn get(mut tx: store.Tx, h: PlaceTables, _caller: store.Caller, take key: u64) -> Result[Option[Bytes], u64] {
+    match store.fetch(tx, h.items, key) {
+        Ok(take found) => Ok(take found),
+        Error(_) => Error(1u64),
+    }
+}
+
+fn list_items(tx: store.Tx, h: PlaceTables, take _arg: ()) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("items", h.items, Unbounded, Unbounded)
+}
+
+fn chat(_tx: store.Tx, h: PlaceTables, _caller: store.Caller, take _arg: ()) -> Result[runner.Answer[runner.Grant], Capacity] {
+    let runner.Answer(value: _, covers: take cov) = runner.table_answer("items", h.items, Unbounded, Unbounded)?
+    Ok(runner.Answer(value: Join, covers: take cov))
+}
+
+fn write_dirs(g: PlaceGrant, _caller: store.Caller, take payload: Bytes) -> Result[u64, Capacity] waits {
+    let Call(data_dir, cache_dir) = view g else {
+        return Ok(0u64)
+    }
+    let n = list.len(payload)
+    let _ = std.file.write(data_dir, "state.bin", clone(payload))
+    let _ = std.file.write(cache_dir, "tmp.bin", take payload)
+    Ok(n)
+}
+
+fn read_data(g: PlaceGrant, _caller: store.Caller, take _arg: ()) -> Result[Bytes, Capacity] waits {
+    let Call(data_dir, _) = view g else {
+        return Ok(list.new())
+    }
+    match std.file.read(data_dir, "state.bin") {
+        Ok(take raw) => Ok(take raw),
+        Error(_) => Ok(list.new()),
+    }
+}
+
+fn mint_call(seed: PlaceSeed, _h: PlaceTables, _i: ()) -> Result[PlaceGrant, Capacity] {
+    Ok(Call(seed.data, seed.cache))
+}
+
+fn mint_bind(_seed: PlaceSeed, _h: PlaceTables, _i: ()) -> Result[PlaceGrant, Capacity] {
+    Ok(Bound)
+}
+
+fn bind_caller(_g: PlaceGrant, supplied: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    runner.ingress.caller((), supplied)
+}
+
+fn call_entries() -> runner.triggers.Entries {
+    let mut listed = runner.triggers.empty_entries()
+    result.unwrap(runner.triggers.allow(mut listed, result.unwrap(runner.triggers.granted(code.describe(write_dirs)))))
+    result.unwrap(runner.triggers.allow(mut listed, result.unwrap(runner.triggers.granted(code.describe(read_data)))))
+    take listed
+}
+
+fn place_registration(mut r: runner.Registry[PlaceGrant, PlaceTables]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(put), 131072u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(get), 131072u64, runner.DEFAULT_STEPS)?
+    runner.query(mut r, code.describe(list_items), items_slots()?, 262144u64, runner.DEFAULT_STEPS)?
+    runner.room(
+        mut r,
+        code.describe(chat),
+        items_slots()?,
+        std.codec.of_bytes(),
+        std.codec.of_bytes(),
+        runner.RoomBounds(peers: 4u32, state: 64u32, message: 64u32),
+        65536u64,
+        1024u64,
+        runner.DEFAULT_STEPS,
+    )?
+    runner.granted(mut r, code.describe(write_dirs), 131072u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(read_data), 131072u64, runner.DEFAULT_STEPS)
+}
+
+fn parse_port(text: String) -> u16 {
+    let mut acc: u64 = 0u64
+    let raw = string.as_bytes(text)
+    let mut i: u64 = 0u64
+    while i < list.len(raw) {
+        let b = raw[i]
+        if b >= 48u8 && b <= 57u8 {
+            acc = acc * 10u64 + int.widen(b - 48u8)
+        }
+        i = i + 1u64
+    }
+    int.truncate(acc)
+}
+
+pub fn main(
+    store_dir: Dir,
+    data_dir: Dir,
+    cache_dir: Dir,
+    api_key: Secret,
+    n: Net,
+    c: Clock,
+    random: Random,
+    tasks: Tasks,
+    a: Args,
+    process: Process,
+    errors: Stderr,
+) -> Result[(), Exit] waits {
+    let reg = code.describe(place_registration)
+    let schema = code.describe(place_schema)
+    runner.main(a, process, errors, tasks, c, reg, schema, scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let listen_port = match args.get(a, 0u64) {
+            Some(p) => parse_port(string.from(p)),
+            None => 0u16,
+        }
+        let call_mint = runner.CallMint(
+            mint: runner.Mint(seed: PlaceSeed(data: data_dir, cache: cache_dir), mint: mint_call, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS),
+            entries: call_entries(),
+        )
+        let grants: runner.Grants[PlaceGrant, PlaceTables, PlaceSeed] = runner.Grants(
+            attempt: None,
+            call: Some(take call_mint),
+            claim: None,
+            bind: Some(runner.Mint(seed: PlaceSeed(data: data_dir, cache: cache_dir), mint: mint_bind, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)),
+        )
+        let mut sess = runner.wire_defaults(131072u64)
+        sess.n_relay = 262144u64
+        let cfg: runner.PlaceConfig[PlaceGrant, PlaceTables, PlaceSeed] = runner.PlaceConfig(
+            backing: Disk(store_dir),
+            sizes: store.derived_sizes(),
+            selection: runner.launch_selection(a) ?=> Usage,
+            place: reg,
+            n_place: 16777216u64,
+            on_migrate: None,
+            schema: schema,
+            session: sess,
+            max_sessions: 4u64,
+            proxies: list.new(),
+            n_publisher: 8388608u64,
+            listen: Tcp(Addr(ip: V4(0x7f000001u32), port: listen_port)),
+            net: n,
+            tasks: tasks,
+            clock: c,
+            random: random,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64),
+            wire: Some(runner.wire(code.describe(bind_caller), 4096u64, 65536u64)),
+            grants: Some(take grants),
+            triggers: None,
+            idle: None,
+        )
+        Ok(runner.operate_report(take cfg, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start)
+    })
+}

@@ -93,6 +93,7 @@ impl OsProvider {
 
     pub(crate) fn from_streams(stdout: Option<OwnedFd>, stderr: Option<OwnedFd>) -> Self {
         let epoch = monotonic_ns();
+        #[cfg(feature = "standalone")]
         if std::env::var("HIRSEL_UDP_MEASURE_CLOCK").as_deref() == Ok("1") {
             eprintln!("UDP_CLOCK_EPOCH {epoch}");
         }

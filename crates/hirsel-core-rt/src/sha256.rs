@@ -30,6 +30,7 @@ enum Path {
 fn path() -> Path {
     static PATH: OnceLock<Path> = OnceLock::new();
     *PATH.get_or_init(|| {
+        #[cfg(feature = "standalone")]
         if std::env::var_os("HIRSEL_SHA256").is_some_and(|v| v == "portable") {
             return Path::Portable;
         }

@@ -141,15 +141,27 @@ fn insert_exported[G: send, H: shareable + inert + send](mut r: Registry[G, H], 
 // once and every session plans against it.
 fn placed[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[Registry[G, H], RegisterError] {
     let go = code.callable(place)
-    let built: Result[Result[Registry[G, H], RegisterError], Capacity] = bound bytes n_place {
-        let mut r: Registry[G, H] = registry()
-        match go(mut r) {
-            Ok(()) => Ok(take r),
-            Error(take e) => Error(take e),
+    let ran = isolate(scoped fn() -> Result[Result[Registry[G, H], RegisterError], Capacity] {
+        bound bytes n_place {
+            let mut r: Registry[G, H] = registry()
+            match go(mut r) {
+                Ok(()) => Ok(take r),
+                Error(take e) => Error(take e),
+            }
         }
-    }
-    match take built {
-        Ok(take x) => take x,
+    })
+    match take ran {
+        Ok(Ok(Ok(take x))) => take x,
+        Ok(Ok(Error(c))) => Error(Full(c)),
+        Ok(Error(causes)) => {
+            for cause in causes {
+                if let Capacity(c) = cause.kind {
+                    return Error(Full(c))
+                }
+                break
+            }
+            fail("runner: place registration failed")
+        },
         Error(c) => Error(Full(c)),
     }
 }

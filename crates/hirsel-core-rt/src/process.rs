@@ -221,6 +221,7 @@ pub unsafe extern "C" fn hirsel_core_describe_emit(
             && hirsel_core_launch_word(context, 15, 0) == 0
             && hirsel_core_launch_word(context, 20, 0) == 0
             && hirsel_core_launch_word(context, 21, 0) == 0
+            && hirsel_core_launch_word(context, 28, 0) == 0
         {
             return false;
         }
@@ -439,6 +440,25 @@ pub(crate) unsafe fn run_config_contained(
 ) -> Result<u8, crate::run_stop::EndReason> {
     // SAFETY: caller pinned config, entry, and entered GenerationScope.
     unsafe { run_config_inner(config, entry, run_plain) }
+}
+
+/// Contained (embedded) entry with checked foreign support (`waits` helper pool).
+///
+/// # Safety
+/// Caller pinned `config`, `entry`, and entered `GenerationScope`.
+#[cfg(not(feature = "standalone"))]
+pub(crate) unsafe fn run_config_contained_with_foreign(
+    config: &Config,
+    entry: Entry,
+    waits: bool,
+    _generation: &crate::run_stop::GenerationEnd,
+) -> Result<u8, crate::run_stop::EndReason> {
+    // SAFETY: caller pinned config, entry, and entered GenerationScope.
+    unsafe {
+        run_config_inner(config, entry, |context, main| {
+            with_foreign(context, main, waits)
+        })
+    }
 }
 
 unsafe fn run_config_inner(

@@ -78,3 +78,26 @@ def core_gates(out, call, Raw, libc_deps):
     out.append("\n" + call("hirsel_script_test", name="core-embed-stop-laws", script="tools/tests/core_embed_stop_laws.py",
         files_env={"HIRSEL_EMBED_STOP_FIXTURE": "//:core-embed-stop-fixture-pic"},
         data=Raw('glob(["crates/hirsel-core-rt/src/**/*.rs"]) + ["crates/hirsel-core-rt/testdata/embed_stop_wrap.c"]')))
+    out.append("\n" + call("hirsel_library", name="core-embed-abi-fixture",
+        crate="embed_abi_fixture", crate_root="crates/hirsel-core-rt/testdata/embed_abi_fixture.rs",
+        srcs=["crates/hirsel-core-rt/testdata/embed_abi_fixture.rs"], features=[],
+        deps=["//:hirsel-core-rt", "//:hirsel-core-ids", "//:hirsel-core-layout"] + libc_deps,
+        manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-embed-abi-fixture-pic", library=":core-embed-abi-fixture"))
+    out.append("\n" + call("hirsel_script_test", name="core-embed-abi-laws", script="tools/tests/core_embed_abi_laws.py",
+        bin_exes={"node": "//tools/buck2:sdk-node[bin/node]"},
+        files_env={"HIRSEL_EMBED_ABI_FIXTURE": "//:core-embed-abi-fixture-pic",
+                   "HIRSEL_NODE_EXE": "//tools/buck2:sdk-node[bin/node]"},
+        data=Raw('["crates/hirsel-core-ids/src/embed.rs", "crates/hirsel-core-rt/testdata/embed_abi_oom.c", "crates/hirsel-core-rt/testdata/embed_abi_vectors.c", "sdk/client/state.ts"]')))
+    # host: ASan shadow memory reservation requires unbounded RLIMIT_AS.
+    out.append("\n" + call("hirsel_script_test", name="core-embed-abi-asan", script="tools/tests/core_embed_abi_asan.py", host=True,
+        files_env={"HIRSEL_EMBED_ABI_FIXTURE": "//:core-embed-abi-fixture-pic"},
+        data=Raw('["crates/hirsel-core-ids/src/embed.rs", "crates/hirsel-core-rt/testdata/embed_abi_asan.c"]')))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-embed-runtime-pic", library=":hirsel-core-rt"))
+    # host: compiles and runs a real Hirsel runner place on disk with openat2, dir_bases, and durability crash tests.
+    out.append("\n" + call("hirsel_script_test", name="core-embed-place-laws", script="tools/tests/core_embed_place_laws.py", host=True,
+        args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-embed-place-laws/hirsel"],
+        bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
+        files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                   "HIRSEL_EMBED_RT_ARCHIVE": "//:core-embed-runtime-pic"},
+        data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/embed_place/**"]) + ["core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "crates/hirsel-core-ids/src/embed.rs", "crates/hirsel-core-rt/testdata/embed_place_host.c"]')))

@@ -3,12 +3,29 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <unistd.h>
 
+#ifdef __APPLE__
+#include <crt_externs.h>
+#define OBSERVE(name) observe_##name
+#define REAL(name, type) name
+#else
+#define OBSERVE(name) name
+#define REAL(name, type) ((type)dlsym(RTLD_NEXT, #name))
+#endif
+
 static bool install_process(void) {
+#ifdef __APPLE__
+    const char prefix[] = "--hirsel-install-predecessor=";
+    char **args = *_NSGetArgv();
+    for (int i = 1; i < *_NSGetArgc(); ++i)
+        if (strncmp(args[i], prefix, sizeof(prefix) - 1) == 0) return true;
+    return false;
+#else
     int fd = open("/proc/self/cmdline", O_RDONLY);
     char args[8192];
     if (fd < 0) return false;
@@ -16,6 +33,7 @@ static bool install_process(void) {
     close(fd);
     if (len <= 0) return false;
     return memmem(args, (size_t)len, "--hirsel-install-predecessor=", 29) != NULL;
+#endif
 }
 
 static void interrupt_at(const char *step) {
@@ -31,16 +49,16 @@ static void interrupt_at(const char *step) {
     for (;;) pause();
 }
 
-int flock(int fd, int operation) {
-    int (*next)(int, int) = dlsym(RTLD_NEXT, "flock");
+int OBSERVE(flock)(int fd, int operation) {
+    int (*next)(int, int) = REAL(flock, int (*)(int, int));
     int result = next(fd, operation);
     if (result == 0 && (operation & LOCK_EX) != 0 && install_process())
         interrupt_at("before");
     return result;
 }
 
-ssize_t write(int fd, const void *data, size_t len) {
-    ssize_t (*next)(int, const void *, size_t) = dlsym(RTLD_NEXT, "write");
+ssize_t OBSERVE(write)(int fd, const void *data, size_t len) {
+    ssize_t (*next)(int, const void *, size_t) = REAL(write, ssize_t (*)(int, const void *, size_t));
     // The install reply is the first output following store close.
     static const unsigned char installed[] = {5, 0, 0, 0};
     if (len == 13 && memcmp(data, installed, sizeof(installed)) == 0 && install_process())
@@ -48,10 +66,17 @@ ssize_t write(int fd, const void *data, size_t len) {
     return next(fd, data, len);
 }
 
-int rename(const char *from, const char *to) {
-    int (*next)(const char *, const char *) = dlsym(RTLD_NEXT, "rename");
+int OBSERVE(rename)(const char *from, const char *to) {
+    int (*next)(const char *, const char *) = REAL(rename, int (*)(const char *, const char *));
     const char *name = strrchr(to, '/');
     if (name && strcmp(name, "/state.json") == 0)
         interrupt_at("state");
     return next(from, to);
 }
+
+#ifdef __APPLE__
+__attribute__((used, section("__DATA,__interpose")))
+static const struct { const void *replacement, *original; } hooks[] = {
+    {observe_flock, flock}, {observe_write, write}, {observe_rename, rename},
+};
+#endif

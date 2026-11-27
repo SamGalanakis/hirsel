@@ -520,12 +520,16 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_io(
             .arg(&object),
     )
     .unwrap();
-    options.link = Link::Driver(appending_driver(
+    let scripted = root.join(std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_ARCHIVE").unwrap());
+    let (runtime, linker) = with_link_wrappers(
         dir.path(),
         "cc",
-        &format!("'{}' -Wl,--wrap=hirsel_core_host_io", object.display()),
-    ));
-    options.runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_ARCHIVE").unwrap());
+        &scripted,
+        &object,
+        &["hirsel_core_host_io"],
+    );
+    options.link = Link::Driver(linker);
+    options.runtime = runtime;
     options.optimize = true;
     options.instance_limit = DEFAULT_INSTANCE_LIMIT;
     options.root_limit = 16 << 20;
@@ -569,7 +573,7 @@ enum StdBuild {
 /// Assemble the entry with the selected std parts and imports.
 fn std_executable(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir: &Path) -> PathBuf {
     use crate::native::recipe_build::Publication;
-    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
     let code = crate::code_store::CodeStore::new(dir.join("code"));
     let dev = NativeOptions {
         backend: Backend::Cranelift,
@@ -640,7 +644,7 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
 fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     use crate::native::recipe_build::Publication;
     let dir = tempfile::tempdir().unwrap();
-    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
     let (name, source) = UNIT_PROGRAMS[2];
     let source = format!(
         r#"fn find_right(s: String) -> Option[u64] {{
@@ -785,7 +789,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
 fn the_engine_file_keys_the_std_side_but_not_elf_debug_aliases() {
     use object::{Object as _, ObjectSymbol as _};
     let dir = tempfile::tempdir().unwrap();
-    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
     let (name, source) = UNIT_PROGRAMS[2];
     let build = |stand_in: u8| {
         let library = dir.path().join(format!("libLLVM-{stand_in}.so"));

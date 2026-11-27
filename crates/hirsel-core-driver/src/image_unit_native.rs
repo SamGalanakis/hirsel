@@ -31,7 +31,7 @@ fn unit_build(
     separate: bool,
 ) -> (Vec<u8>, std::process::Output, Option<ImageUnitRead>) {
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
-    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
     let project = dir.join(project);
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(dir.join(cache)).unwrap();
@@ -202,7 +202,7 @@ fn tool_environment_child() {
     options.grant_mask = 1 << 4;
     UNIT.set(None);
     let built = product
-        .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
+        .build(&DefPath::from_full("local/app@1/main/main").unwrap(), &options)
         .unwrap();
     std::fs::copy(&built.executable, dir.join(format!("{step}.exe"))).unwrap();
     // A reused executable reads no unit: an empty file.

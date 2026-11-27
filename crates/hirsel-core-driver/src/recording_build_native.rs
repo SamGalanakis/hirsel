@@ -1027,21 +1027,23 @@ fn tape_http_replays_both_native_engines() {
             .arg(&observer_obj),
     )
     .unwrap();
-    let linker = appending_driver(
+    let (runtime, linker) = with_link_wrappers(
         dir.path(),
         "clang-observe-http",
-        &format!(
-            "'{}' -Wl,--wrap=hirsel_core_host_send_pair",
-            observer_obj.display().to_string().replace('\'', "'\\''")
-        ),
+        &env_record_runtime(),
+        &observer_obj,
+        &["hirsel_core_host_send_pair"],
     );
 
     // Each engine records under one Net reactor and replays under the other,
     // so the reactor choice is shown not to be a replay input in either
     // direction. `auto` picks io_uring wherever the host allows it.
+    let reactor = match crate::host::HOST_TARGET.os() {
+        hirsel_core_layout::Os::Linux => "epoll",
+        hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => "kqueue",
+    };
     for (engine, recorded_on, replayed_on) in
-        [("cranelift", "auto", "epoll"), ("llvm", "epoll", "auto")]
-    {
+        [("cranelift", "auto", reactor), ("llvm", reactor, "auto")] {
         std::fs::write(&main, fixture).unwrap();
         let tape = dir.path().join(format!("{engine}.tape"));
         let common = [
@@ -1049,7 +1051,7 @@ fn tape_http_replays_both_native_engines() {
             "--backend".to_owned(),
             engine.to_owned(),
             "--runtime".to_owned(),
-            env_record_runtime().display().to_string(),
+            runtime.display().to_string(),
             "--cc".to_owned(),
             linker.display().to_string(),
             "--libraries".to_owned(),
@@ -1332,25 +1334,20 @@ fn cli_tls_replay(with_secret: bool) {
             .arg(&observer_obj),
     )
     .unwrap();
-    let linker = appending_driver(
+    let scripted = root.join(std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE").expect("scripted recording runtime archive"));
+    let (runtime, linker) = with_link_wrappers(
         dir.path(),
         "clang-observe-tls",
-        &format!(
-            "'{}' -Wl,--wrap=hirsel_core_os_replay,--wrap=hirsel_core_host_io",
-            observer_obj.display().to_string().replace('\'', "'\\''")
-        ),
+        &scripted,
+        &observer_obj,
+        &["hirsel_core_os_replay", "hirsel_core_host_io"],
     );
     let common = [
         app.display().to_string(),
         "--backend".into(),
         "cranelift".into(),
         "--runtime".into(),
-        root.join(
-            std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE")
-                .expect("scripted recording runtime archive"),
-        )
-        .display()
-        .to_string(),
+        runtime.display().to_string(),
         "--cc".into(),
         linker.display().to_string(),
         "--libraries".into(),

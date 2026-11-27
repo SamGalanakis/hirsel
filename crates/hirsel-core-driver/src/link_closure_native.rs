@@ -11,6 +11,41 @@ fn appending_driver(dir: &Path, name: &str, extra: &str) -> PathBuf {
     cc
 }
 
+/// Add an observer to a test link. Mach-O has no GNU --wrap, so give the
+/// implementations in the private runtime archive the names its observer calls.
+fn with_link_wrappers(
+    dir: &Path,
+    name: &str,
+    runtime: &Path,
+    observer: &Path,
+    symbols: &[&str],
+) -> (PathBuf, PathBuf) {
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    let (runtime, args) = match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => {
+            let flags = symbols.iter().map(|symbol| format!(" -Wl,--wrap={symbol}")).collect::<String>();
+            (runtime.to_owned(), format!("{}{flags}", quote(observer)))
+        }
+        hirsel_core_layout::ObjectFormat::MachO => {
+            let cc = native_options(Backend::Cranelift, dir).link;
+            let objcopy = cc.driver().with_file_name("llvm-objcopy");
+            let rename = |input: &Path, output: &Path, from: &str, to: &str| {
+                let mut args = Command::new(&objcopy);
+                for symbol in symbols {
+                    args.arg(format!("--redefine-sym={from}{symbol}={to}{symbol}"));
+                }
+                command(args.arg(input).arg(output)).unwrap();
+            };
+            let wrapped = dir.join("wrapped-runtime.a");
+            let aliases = dir.join("wrapped-observer.o");
+            rename(runtime, &wrapped, "_", "___real_");
+            rename(observer, &aliases, "___wrap_", "_");
+            (wrapped, quote(&aliases))
+        }
+    };
+    (runtime, appending_driver(dir, name, &args))
+}
+
 /// An object defining `symbol` as `value`.
 fn marker_object(dir: &Path, path: &Path, symbol: &str, value: u32) {
     let original = native_options(Backend::Cranelift, dir).link;

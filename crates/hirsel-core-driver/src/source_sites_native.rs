@@ -290,7 +290,7 @@ fn failure_sites_relocated(backend: Backend) {
                 .map(|(prefix, _)| (line_number + 1, prefix.chars().count() + 1))
         })
         .expect("check_index must contain view xs[i]");
-    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
     let source = "pub fn main() -> Result[(), Exit] {\n    let mut xs: List[u64] = list.new()\n    let _ = list.remove(mut xs, 3)\n    Ok(())\n}\n";
     let build = |project: &str, cache: &str| {
         let project = dir.path().join(project);

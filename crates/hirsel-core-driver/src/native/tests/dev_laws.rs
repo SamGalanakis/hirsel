@@ -156,8 +156,12 @@ impl Fixture {
             .stdout(File::create(&output).unwrap())
             .stderr(File::create(&error).unwrap());
         if let Some((mode, marker)) = fault {
+            let preload = match crate::host::HOST_TARGET.object_format() {
+                hirsel_core_layout::ObjectFormat::Elf => "LD_PRELOAD",
+                hirsel_core_layout::ObjectFormat::MachO => "DYLD_INSERT_LIBRARIES",
+            };
             command
-                .env("LD_PRELOAD", self.law.path("fault.so"))
+                .env(preload, self.law.path("fault.so"))
                 .env("HIRSEL_TEST_DEV_FAULT", mode)
                 .env("HIRSEL_TEST_DEV_MARKER", marker);
         }

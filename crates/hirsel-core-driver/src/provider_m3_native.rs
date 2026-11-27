@@ -1,7 +1,6 @@
 mod provider_m3 {
     use super::*;
     use std::{
-        io::Write,
         os::unix::process::CommandExt,
         process::{Output, Stdio},
         time::{Duration, Instant},
@@ -40,13 +39,16 @@ mod provider_m3 {
         let cc = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
         let c = dir.path().join("provider.c");
         std::fs::write(&c, include_str!("provider_m3.c")).unwrap();
-        let linker = dir.path().join("cc");
-        let mut script = Vec::new();
-        // Paths are our generated scratch/toolchain paths, with POSIX single-quote escaping.
-        let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
-        writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_os_run_with_sources -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_send -Wl,--wrap=hirsel_core_cancel -Wl,--wrap=hirsel_core_host_io -Wl,--wrap=hirsel_core_host_clock -Wl,--wrap=hirsel_core_host_op", quote(&cc), quote(&c), quote(&root.join("crates/hirsel-core-rt/include"))).unwrap();
-        crate::executable::write(&linker, &script, 0o755).unwrap();
+        let object = dir.path().join("provider.o");
+        command(Command::new(&cc).args(["-c", "-I"]).arg(root.join("crates/hirsel-core-rt/include"))
+            .arg(&c).arg("-o").arg(&object)).unwrap();
         let mut options = native_options(backend, dir.path());
+        let (runtime, linker) = with_link_wrappers(dir.path(), "cc", &options.runtime, &object, &[
+            "hirsel_core_os_run_with_sources", "hirsel_core_spawn", "hirsel_core_receive",
+            "hirsel_core_send", "hirsel_core_cancel", "hirsel_core_host_io",
+            "hirsel_core_host_clock", "hirsel_core_host_op",
+        ]);
+        options.runtime = runtime;
         options.link = crate::native::Link::Driver(linker);
         options.root_limit = 1 << 20;
         options.grant_mask = (1 << 3) | (1 << 9) | (1 << 10);

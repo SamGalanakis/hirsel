@@ -421,7 +421,7 @@ fn a_user_package_named_runner_is_not_a_place() {
         result.unwrap(stderr.write(output, runner.note()))
         Ok(())
     }"#;
-    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
     let code = crate::code_store::CodeStore::new(dir.path().join("recipe-code"));
     // The package from a user and, as the control, from the toolchain.
     for toolchain in [false, true] {

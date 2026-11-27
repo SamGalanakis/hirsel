@@ -16,6 +16,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+DIST = ROOT / 'tools/toolchain-dist'
+sys.path.insert(0, str(DIST))
 SPEC = importlib.util.spec_from_file_location('notices', Path(os.environ.get('HIRSEL_DISTRIBUTION_NOTICES', ROOT / 'tools/toolchain-dist/notices.py')))
 notices = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(notices)
@@ -275,6 +277,76 @@ def distribution_build():
 
 
 class DistributionBuild(unittest.TestCase):
+    def test_darwin_prebuilt_runtime_roundtrip(self):
+        import darwin_host
+
+        target = 'aarch64-apple-darwin'
+        flavours = {
+            'runtime': ('none', False, False),
+            'recording-runtime': ('none', True, False),
+            'prof-runtime': ('prof', False, False),
+            'prof-recording-runtime': ('prof', True, False),
+            'observed-runtime': ('observed', False, False),
+            'observed-recording-runtime': ('observed', True, False),
+            'embed-runtime': ('none', False, True),
+        }
+        build = distribution_build()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            linux, mac, transfer, work = (root / name for name in ('linux', 'mac', 'transfer', 'work'))
+
+            def install(prefix, runtime_bytes):
+                rows = []
+                for index, (slot, (observation, record, embedded)) in enumerate(flavours.items()):
+                    relative = Path('runtime') / target / f'{index:064x}' / 'libhirsel_core_rt.a'
+                    archive = prefix / relative
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    archive.write_bytes(runtime_bytes[slot])
+                    rows.append(dict(target=target, observation=observation, record=record,
+                                     embedded=embedded, path=relative.as_posix()))
+                (prefix / 'hirsel-core-toolchain.json').write_text(json.dumps(dict(runtimes=rows)))
+                return [prefix / row['path'] for row in rows]
+
+            def product(*args):
+                return subprocess.run([sys.executable, DIST / 'product.py', *args],
+                                      capture_output=True, text=True)
+
+            original = {slot: slot.encode() for slot in flavours}
+            install(linux, original)
+            exported = product('export-runtimes', target, linux, transfer)
+            self.assertEqual(exported.returncode, 0, exported.stderr)
+
+            installed = []
+
+            def run(command, **options):
+                if command[:2] == ['cargo', 'rustc']:
+                    compiler = work / 'target/dist/hirsel'
+                    compiler.parent.mkdir(parents=True, exist_ok=True)
+                    compiler.touch()
+                elif command[1] == 'std-product':
+                    archives = {slot: Path(command[command.index(f'--{slot}') + 1]).read_bytes()
+                                for slot in flavours}
+                    installed.extend(install(mac, archives))
+
+            args = [str(DIST / 'build'), '--host', target, '--output', str(mac),
+                    '--work', str(work), '--runtime-archives', str(transfer)]
+            with (patch.object(sys, 'argv', args), patch.dict(os.environ, RELEASE_TAG='v0.0.0-test'),
+                  patch.object(darwin_host, 'require_host'), patch.object(darwin_host, 'run', side_effect=run),
+                  patch.object(darwin_host, 'link_kit_tree', return_value=work / 'kit'),
+                  patch.object(darwin_host, 'check'), patch.object(build, 'manifest')):
+                build.main()
+
+            compared = product('compare-runtimes', target, mac, transfer)
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+            for slot, archive in zip(flavours, installed, strict=True):
+                with self.subTest(slot=slot):
+                    self.assertEqual(archive.read_bytes(), original[slot])
+                    archive.write_bytes(b'wrong bytes')
+                    compared = product('compare-runtimes', target, mac, transfer)
+                    self.assertEqual(compared.returncode, 1, compared.stderr)
+                    self.assertIn(f'{slot}: runtime archive bytes differ', compared.stderr)
+                    archive.write_bytes(original[slot])
+
     def test_fresh_inventory_requires_embed_runtime_alongside_plain_runtime(self):
         build = distribution_build()
         target = 'aarch64-apple-darwin'

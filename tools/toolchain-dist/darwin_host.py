@@ -1,16 +1,13 @@
 """Build and check the distribution bundle natively on an Apple Silicon Mac.
 
-    tools/toolchain-dist/build --host aarch64-apple-darwin --output DIR [--work DIR]
+    tools/toolchain-dist/build --host aarch64-apple-darwin --output DIR --runtime-archives DIR [--work DIR]
     tools/toolchain-dist/build --host aarch64-apple-darwin --check-fresh PREFIX
 
-Buck2 does not run on macOS, so a Mac builds with Cargo what Buck2 builds on
-Linux, from the same pins and flags:
+The Mac builds the compiler and Exec helper with Cargo and packages:
 
 - the compiler, Cargo's `dist` profile against the pinned LLVM tree
   (tools/buck2/bootstrap_llvm.py), whose ld.lld and libLLVM.23.1.dylib ship;
-- the runtime archives, each a fat-LTO staticlib of hirsel-core-rt against
-  the trace-only std (tools/buck2/toolchains/raw_backtrace_std.py), with the
-  runtime profile of tools/buck2/profile.bzl;
+- the Darwin runtime archives exported from the Linux bundle;
 - the Darwin link kit, the text stubs link_kit.py makes from Hirsel's allowlists
   and the pinned Zig libSystem.tbd;
 - the core and std images, the toolchain packages and the helpers, installed by
@@ -22,8 +19,6 @@ shipped Mach-O's load commands by file class (macho_check), runs
 `codesign -v --strict` on it, then installs the bundle into an empty prefix and
 runs the fresh-machine sequence under `env -i`.
 """
-import ast
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -49,8 +44,6 @@ APPLE = AppleRecords((ROOT / SOURCE).read_text()).rows['macos']
 TARGET = APPLE['triple']
 FLOOR = APPLE['floor']
 PRODUCT = tomllib.loads(Path(__file__).with_name('product.toml').read_text())
-RUNTIMES = {slot: config['features'] for slot, config in PRODUCT['runtime_slots'].items()
-            if 'buck_suffix' in config}
 SYSTEM = {name: path for name, path in link_kit.DARWIN_LIBRARIES.items()}
 LIBSYSTEM = SYSTEM['libSystem']
 LIBCXX = '/usr/lib/libc++.1.dylib'
@@ -58,12 +51,6 @@ LIBZ = '/usr/lib/libz.1.dylib'
 LIBICONV = '/usr/lib/libiconv.2.dylib'
 LIBLLVM = PRODUCT['hosts'][TARGET]['llvm_library']
 LIBLLVM_ID = '@rpath/' + Path(LIBLLVM).name
-
-
-def bzl_list(path, name):
-    """A list constant of a Starlark file, which Python cannot import."""
-    match = re.search(rf'^{name} = (\[.*?\])$', path.read_text(), re.M | re.S)
-    return ast.literal_eval(match[1])
 
 
 def run(command, **options):
@@ -271,118 +258,6 @@ def cargo_env(work, llvm):
             'SOURCE_DATE_EPOCH': '0'}
 
 
-def trace_sysroot(work, env):
-    """Rustup's pinned sysroot with the trace-only std in place of its libstd."""
-    sysroot = Path(subprocess.check_output(['rustc', '--print', 'sysroot'], cwd=ROOT, env=env, text=True).strip())
-    libraries = Path('lib/rustlib') / TARGET / 'lib'
-    tree = work / 'sysroot'
-    raw_script = ROOT / 'tools/buck2/toolchains/raw_backtrace_std.py'
-    panic_rs = ROOT / 'tools/buck2/toolchains/panic_image_darwin.rs'
-    receipt = tree / '.hirsel-trace-std.json'
-    wanted = {
-        'target': TARGET,
-        'rustc': subprocess.check_output(['rustc', '-vV'], cwd=ROOT, env=env, text=True).strip(),
-        'raw_backtrace_std': hashlib.sha256(raw_script.read_bytes()).hexdigest(),
-        'panic_image_darwin': hashlib.sha256(panic_rs.read_bytes()).hexdigest(),
-    }
-    trace_rlib = tree / libraries / 'libstd-hirsel-trace.rlib'
-    try:
-        installed = json.loads(receipt.read_text())
-    except (OSError, json.JSONDecodeError):
-        installed = None
-    if (installed == wanted and trace_rlib.is_file()
-            and (tree / libraries).is_dir()
-            and all(entry.exists() for entry in (tree / libraries).iterdir())):
-        print(f'dist: trace-only std sysroot is current: {tree}', flush=True)
-        return tree
-    if not (sysroot / 'lib/rustlib/src/rust/library').is_dir():
-        run(['rustup', 'component', 'add', 'rust-src'], cwd=ROOT, env=env)
-    if tree.exists():
-        shutil.rmtree(tree)
-    (tree / libraries).mkdir(parents=True)
-    for library in (sysroot / libraries).iterdir():
-        if not library.name.startswith('libstd-'):
-            (tree / libraries / library.name).symlink_to(library)
-    run([sys.executable, raw_script, sysroot,
-         sysroot / 'lib/rustlib/src/rust/library', panic_rs,
-         TARGET, trace_rlib], cwd=ROOT, env=env)
-    receipt.write_text(json.dumps(wanted, indent=2, sort_keys=True) + '\n')
-    return tree
-
-
-def _clone_tree(source, destination):
-    """Copy a Cargo target directory using APFS copy-on-write when available."""
-    if destination.exists():
-        shutil.rmtree(destination)
-    cloned = subprocess.run(['/bin/cp', '-cR', source, destination], capture_output=True)
-    if cloned.returncode != 0:
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(source, destination)
-
-
-def runtimes(work, env):
-    """The runtime archives, with tools/buck2/profile.bzl's runtime flags."""
-    sysroot = trace_sysroot(work, env)
-    profile = 'profile.hirsel-runtime'
-    settings = [f'{profile}.inherits="release"', f'{profile}.opt-level=3', f'{profile}.debug=0',
-                f'{profile}.debug-assertions=false', f'{profile}.overflow-checks=false',
-                f'{profile}.codegen-units=1', f'{profile}.lto="fat"', f'{profile}.panic="abort"']
-    settings += [f'{profile}.package.{crate}.opt-level="s"'
-                 for crate in bzl_list(ROOT / 'tools/buck2/profile.bzl', 'COLD_RUNTIME_CRATES')]
-    base_env = dict(env, RUSTC_BOOTSTRAP='1',
-                    RUSTFLAGS=f'--sysroot {sysroot} -Cembed-bitcode=yes -Crelocation-model=pic')
-    config_args = [option for setting in settings for option in ('--config', setting)]
-    runtimes_root = work / 'runtimes'
-    if runtimes_root.exists():
-        shutil.rmtree(runtimes_root)
-    slots_root = work / 'runtime-slots'
-    if slots_root.exists():
-        shutil.rmtree(slots_root)
-
-    def build_slot(slot, features, target_dir, slot_env):
-        feature_args = ['--features', ','.join(features)] if features else []
-        run(['cargo', 'rustc', '--locked', '--lib', '-p', 'hirsel-core-rt', '--target', TARGET,
-             '--profile', 'hirsel-runtime', '--crate-type', 'staticlib', '--no-default-features', *feature_args,
-             *config_args,
-             '--', '--cfg', 'hirsel_runtime_size', '-Zcrate-attr=feature(optimize_attribute)'],
-            cwd=ROOT, env=slot_env)
-        archive = runtimes_root / slot / 'libhirsel_core_rt.a'
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(target_dir / TARGET / 'hirsel-runtime/libhirsel_core_rt.a', archive)
-        run(['/usr/bin/strip', '-S', archive])
-        return archive
-
-    # Build the slot with the widest dependency closure first into the shared
-    # target directory so all common runtime crates compile once and stay cached.
-    ordered = sorted(RUNTIMES, key=lambda name: (-len(RUNTIMES[name]), name))
-    seed_slot = 'prof-recording-runtime' if 'prof-recording-runtime' in RUNTIMES else ordered[0]
-    archives = {}
-    archives[seed_slot] = build_slot(seed_slot, RUNTIMES[seed_slot], work / 'target', base_env)
-
-    remaining = [slot for slot in RUNTIMES if slot != seed_slot]
-    if remaining:
-        slots_root.mkdir(parents=True, exist_ok=True)
-        workers = min(len(remaining), os.cpu_count() or 1)
-
-        def build_parallel(slot):
-            slot_target = slots_root / slot
-            _clone_tree(work / 'target', slot_target)
-            try:
-                slot_env = dict(base_env, CARGO_TARGET_DIR=str(slot_target), CARGO_BUILD_JOBS='1')
-                return slot, build_slot(slot, RUNTIMES[slot], slot_target, slot_env)
-            finally:
-                shutil.rmtree(slot_target, ignore_errors=True)
-
-        try:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                for slot, archive in pool.map(build_parallel, remaining):
-                    archives[slot] = archive
-        finally:
-            shutil.rmtree(slots_root, ignore_errors=True)
-    return {slot: archives[slot] for slot in RUNTIMES}
-
-
 def zig_libsystem(work):
     pin = json.loads((ROOT / 'tools/native-toolchain/native.lock.json').read_text())['link_kit']['libSystem-tbd']
     cache_dir = work / 'cache'
@@ -578,7 +453,7 @@ def _relink_with_host(relink_dir, host, destination, env):
         raise RuntimeError(f'relink did not produce {destination}')
 
 
-def build(output, work, release_tag):
+def build(output, work, release_tag, archives):
     require_host()
     work.mkdir(parents=True, exist_ok=True)
     llvm = work / 'llvm'
@@ -602,7 +477,6 @@ def build(output, work, release_tag):
          '--jobs', '8', '-p', helper, '--bin', helper], cwd=ROOT, env=env)
     helper_image = work / 'target' / TARGET / 'dist' / helper
     run(['/usr/bin/codesign', '--force', '--sign', '-', helper_image])
-    archives = runtimes(work, env)
     kit = link_kit_tree(work)
     compiler = work / 'target/dist/hirsel'
     scratch = work / 'install'

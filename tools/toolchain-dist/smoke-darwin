@@ -3,6 +3,7 @@ set -euo pipefail
 tag=$1
 release=$2
 witness=$3
+archives=${4:-}
 tools=$(cd "$(dirname "$0")" && pwd)
 
 os=$(uname -s)
@@ -26,8 +27,12 @@ unset HIRSEL_INSTALL_DIR SDKROOT DEVELOPER_DIR
 mkdir "$HOME"
 cd "$scratch"
 HIRSEL_VERSION=$tag HIRSEL_DOWNLOAD_BASE="file://$release" /bin/sh "$release/install.sh" --no-modify-path
-"$tools/smoke" "$tag" matched-runtime "$witness"
 prefix="$HOME/.hirsel/current"
+if [[ -n "$archives" ]]; then
+    target=$(python3 "$tools/product.py" target)
+    python3 "$tools/product.py" compare-runtimes "$target" "$prefix" "$archives"
+fi
+"$tools/smoke" "$tag" matched-runtime "$witness"
 llvm=$(python3 "$tools/product.py" llvm-path)
 codesign -v --strict "$prefix/hirsel" "$prefix/bin/ld.lld" "$prefix/$llvm" \
     "$prefix/libexec/hirsel/pin_reader" \

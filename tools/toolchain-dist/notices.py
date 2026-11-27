@@ -584,9 +584,11 @@ def collect(bundle, mode):
 
 
 def darwin_metadata():
-    from darwin_host import RUNTIMES, TARGET
+    from darwin_host import PRODUCT, TARGET
+    from product import runtime_slots
 
-    features = sorted({feature for runtime in RUNTIMES.values() for feature in runtime})
+    features = sorted({feature for slot in runtime_slots(PRODUCT, TARGET).values()
+                       for feature in slot['features']})
     return json.loads(subprocess.check_output([
         os.environ.get('CARGO', 'cargo'), 'metadata', '--locked', '--format-version', '1',
         '--filter-platform', TARGET, '--features', ','.join('hirsel-core-rt/' + feature for feature in features)],

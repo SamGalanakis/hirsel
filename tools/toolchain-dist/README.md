@@ -68,7 +68,7 @@ compiler is rewritten with `--bolt-info=0`: BOLT's note records its command line
 directories. Given one input and one profile, the rewrite is byte-identical.
 
 The release workflow starts with a fast `plan` job that resolves the version and
-host targets, then runs `build-linux` and `build-darwin` in parallel.
+host targets. `build-darwin` takes the Darwin runtime archives from `build-linux`.
 `build-linux` runs `--train-profile` once, then immediately runs `--pgo` and
 `--bolt` with those pinned profile hashes inside the same warmed container, runs
 the glibc and fresh-root gates, and publishes `<sha256>.profdata` and
@@ -155,18 +155,26 @@ the CRT and link-time libraries.
 
 ## The macOS bundle
 
-Buck2 does not run on macOS. On an Apple Silicon Mac with rustup, from a checkout
-of the commit:
+Buck2 produces the Darwin runtime archives as part of the Linux bundle. On Linux,
+export them from an unpacked bundle built at the same commit:
 
 ```sh
-RELEASE_TAG=v0.0.0-local tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/hirsel-darwin --work /tmp/hirsel-darwin-work
+python3 tools/toolchain-dist/product.py export-runtimes aarch64-apple-darwin \
+  /tmp/hirsel-linux /tmp/darwin-runtime-archives
 ```
 
-`darwin_host.py` builds with Cargo what Buck2 builds on Linux, from the same pins:
-the compiler in Cargo's `dist` profile against the pinned LLVM tree, the standalone
-and embed runtime archives (fat-LTO staticlibs of `hirsel-core-rt` against the trace-only std, with
-`tools/buck2/profile.bzl`'s runtime flags), and the Darwin link kit's text stubs. The
-bundle ships `hirsel`, the linker and archive tools, and `lib/libLLVM.23.1.dylib` from the pinned
+Copy that directory to an Apple Silicon Mac with rustup. From a checkout of the
+same commit, run:
+
+```sh
+RELEASE_TAG=v0.0.0-local tools/toolchain-dist/build --host aarch64-apple-darwin \
+  --runtime-archives /tmp/darwin-runtime-archives --output /tmp/hirsel-darwin
+```
+
+`darwin_host.py` builds the compiler and Exec helper in Cargo's `dist` profile
+against the pinned LLVM tree and generates the Darwin link kit's text stubs. It
+installs the six standalone runtime archives and the embedded archive from
+`--runtime-archives`. The bundle ships `hirsel`, the linker and archive tools, and `lib/libLLVM.23.1.dylib` from the pinned
 tree, the runtimes, Exec helper and link kit for `aarch64-apple-darwin` only, the core and std
 images, the toolchain packages and the helpers in `libexec/hirsel/`. The last two
 come from `toolchain_programs.py`, which Buck2's bundle runs too. Every Mach-O is
@@ -175,9 +183,10 @@ ad-hoc signature. The bundle includes `notices/` and `hirsel-build.json` with th
 compiler, core package and notice digests. Its crate notices cover the compiler,
 runtime and Exec helper's Darwin link inputs.
 
-Release smoke builds with the Mac bundle's own runtime. For the byte comparison,
-it also links the same demo using the Darwin runtime archive from the Linux
-bundle and compares that image with the Linux cross build.
+Release smoke compares every registered Darwin runtime archive in the Mac
+installation against the corresponding archive exported from the Linux bundle
+using `cmp`. It also links the same demo using the Darwin runtime archive from
+the Linux smoke job and compares that image with the Linux cross build.
 
 The build then checks the bundle, as
 `tools/toolchain-dist/build --host aarch64-apple-darwin --check-fresh PREFIX` does

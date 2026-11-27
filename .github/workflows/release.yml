@@ -1,6 +1,6 @@
 name: Release
 # Linux trains and builds from two pinned profiles in one warmed container.
-# macOS starts in parallel with Linux and builds from source without PGO or BOLT.
+# macOS builds the compiler without PGO or BOLT and packages Linux's Darwin runtimes.
 on:
   push:
     tags: ["v*"]
@@ -68,6 +68,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.plan.outputs.version }}
       TARGET: ${{ needs.plan.outputs.linux_target }}
+      DARWIN_TARGET: ${{ needs.plan.outputs.darwin_target }}
     steps:
       - uses: actions/checkout@v4
       - name: Free runner disk and pull manylinux image
@@ -110,7 +111,7 @@ jobs:
             linux-release-cargo-v1-
       - name: Train profiles, build from pinned profiles, and qualify Linux distribution
         run: |
-          mkdir -p "$RUNNER_TEMP/profiles" "$RUNNER_TEMP/release" \
+          mkdir -p "$RUNNER_TEMP/profiles" "$RUNNER_TEMP/release" "$RUNNER_TEMP/darwin" \
             "$RUNNER_TEMP/ci-cache/cargo" "$RUNNER_TEMP/ci-cache/rustup" \
             "$RUNNER_TEMP/ci-cache/bolt-tools" "$RUNNER_TEMP/ci-cache/xdg/hirsel/llvm-source"
           # shellcheck disable=SC2086 # DOCKER_OPTIONS is a word list.
@@ -118,14 +119,15 @@ jobs:
             -v "$GITHUB_WORKSPACE:/src" \
             -v "$RUNNER_TEMP/profiles:/profiles" \
             -v "$RUNNER_TEMP/release:/release" \
+            -v "$RUNNER_TEMP/darwin:/darwin" \
             -v "$RUNNER_TEMP/ci-cache:/cache" \
-            -e TARGET -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+            -e TARGET -e DARWIN_TARGET -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
             "$IMAGE" bash -euxo pipefail -c '
               cleanup() {
                 if [[ -x .buck2/bin/buck2 ]]; then
                   .buck2/bin/buck2 kill >/dev/null 2>&1 || true
                 fi
-                chown -R "$HOST_UID:$HOST_GID" /cache /profiles /release \
+                chown -R "$HOST_UID:$HOST_GID" /cache /profiles /release /darwin \
                   /src/.buck2 /src/tools/buck2/toolchains /src/tools/buck2/bin 2>/dev/null || true
               }
               trap cleanup EXIT
@@ -145,6 +147,8 @@ jobs:
               tools/toolchain-dist/build --check-fresh /tmp/hirsel-prefix
               asset=$(python3 tools/toolchain-dist/product.py asset "$RELEASE_TAG" "$TARGET")
               tar -czf "/release/$asset" -C /tmp/hirsel-prefix .
+              python3 tools/toolchain-dist/product.py export-runtimes "$DARWIN_TARGET" \
+                /tmp/hirsel-prefix /darwin/runtime-archives
               python3 tools/toolchain-dist/product.py installer > /release/install.sh
               cp "${profdata[0]}" "${fdata[0]}" /release/
             '
@@ -158,6 +162,12 @@ jobs:
           ls -l
           echo "profdata=${profdata%.profdata}" >> "$GITHUB_OUTPUT"
           echo "fdata=${fdata%.fdata}" >> "$GITHUB_OUTPUT"
+      - name: Upload the Darwin runtime archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-runtime-archives
+          path: ${{ runner.temp }}/darwin/runtime-archives
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ needs.plan.outputs.linux_target }}
@@ -166,7 +176,7 @@ jobs:
           if-no-files-found: error
 
   build-darwin:
-    needs: [plan]
+    needs: [plan, build-linux]
     runs-on: ${{ needs.plan.outputs.darwin_runner }}
     env:
       RELEASE_TAG: ${{ needs.plan.outputs.version }}
@@ -176,18 +186,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-runtime-archives
+          path: ${{ runner.temp }}/darwin-runtime-archives
       - name: Cache macOS pinned toolchains and downloads
         uses: actions/cache@v4
         with:
           path: |
             ~/.rustup/toolchains
             ${{ runner.temp }}/build-work/llvm
-            ${{ runner.temp }}/build-work/sysroot
             ${{ runner.temp }}/build-work/cache
             ${{ runner.temp }}/darwin-xdg/hirsel/llvm-source
-          key: darwin-release-tools-v1-${{ hashFiles('rust-toolchain.toml', 'tools/native-toolchain/llvm-23.lock', 'tools/native-toolchain/native.lock.json', 'tools/buck2/toolchains/raw_backtrace_std.py', 'tools/buck2/toolchains/panic_image_darwin.rs', 'tools/native-toolchain/apple-targets.json') }}
+          key: darwin-release-tools-v2-${{ hashFiles('rust-toolchain.toml', 'tools/native-toolchain/llvm-23.lock', 'tools/native-toolchain/native.lock.json', 'tools/native-toolchain/apple-targets.json') }}
           restore-keys: |
-            darwin-release-tools-v1-
+            darwin-release-tools-v2-
       - name: Cache macOS Cargo registry
         uses: actions/cache@v4
         with:
@@ -215,13 +228,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/darwin-xdg/hirsel/llvm-source"
           XDG_CACHE_HOME="$RUNNER_TEMP/darwin-xdg" \
             tools/toolchain-dist/build --host "$TARGET" \
+            --runtime-archives "$RUNNER_TEMP/darwin-runtime-archives" \
             --output "$RUNNER_TEMP/prefix" --work "$RUNNER_TEMP/build-work"
           mkdir -p "$RUNNER_TEMP/release"
           asset=$(python3 tools/toolchain-dist/product.py asset "$RELEASE_TAG" "$TARGET")
           tar -czf "$RUNNER_TEMP/release/$asset" -C "$RUNNER_TEMP/prefix" .
           rm -f "$RUNNER_TEMP/build-work/target/dist/hirsel" \
-            "$RUNNER_TEMP/build-work/target/dist/hirsel.d" \
-            "$RUNNER_TEMP/build-work/target/$TARGET/hirsel-runtime/libhirsel_core_rt."*
+            "$RUNNER_TEMP/build-work/target/dist/hirsel.d"
           du -sh "$RUNNER_TEMP/build-work/target" || true
       - uses: actions/upload-artifact@v4
         with:
@@ -295,7 +308,11 @@ jobs:
         with:
           name: linux-cross-witness
           path: ${{ runner.temp }}/witness
-      - name: Exercise the installer and compare the native and cross-built programs
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-runtime-archives
+          path: ${{ runner.temp }}/darwin-runtime-archives
+      - name: Exercise the installer and compare the runtime archives and linked programs
         env:
           HIRSEL_VERSION: ${{ needs.plan.outputs.version }}
         run: |
@@ -303,7 +320,8 @@ jobs:
           asset=$(python3 tools/toolchain-dist/product.py asset "$HIRSEL_VERSION")
           (cd "$RUNNER_TEMP/release" && shasum -a 256 "$asset" install.sh > SHA256SUMS)
           chmod +x "$RUNNER_TEMP/witness/app-mac"
-          tools/toolchain-dist/smoke-darwin "$HIRSEL_VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/witness"
+          tools/toolchain-dist/smoke-darwin "$HIRSEL_VERSION" "$RUNNER_TEMP/release" \
+            "$RUNNER_TEMP/witness" "$RUNNER_TEMP/darwin-runtime-archives"
 
   publish:
     needs: [plan, build-linux, build-darwin, smoke, smoke-darwin]

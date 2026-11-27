@@ -181,10 +181,20 @@ jobs:
           tools/toolchain-dist/build --local --num-threads 4 --output "$RUNNER_TEMP/prefix"
       - name: Build the Linux-to-Darwin corpus
         run: tools/ci/side.sh "$RUNNER_TEMP/prefix/hirsel" "$RUNNER_TEMP/linux-corpus"
+      - name: Export the Darwin runtime archives
+        run: |
+          python3 tools/toolchain-dist/product.py export-runtimes aarch64-apple-darwin \
+            "$RUNNER_TEMP/prefix" "$RUNNER_TEMP/darwin-runtime-archives"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-nightly-corpus
           path: ${{ runner.temp }}/linux-corpus
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-darwin-runtime-archives
+          path: ${{ runner.temp }}/darwin-runtime-archives
           if-no-files-found: error
           retention-days: 3
 
@@ -204,10 +214,16 @@ jobs:
         with:
           name: linux-nightly-corpus
           path: ${{ runner.temp }}/linux-corpus
+      - uses: actions/download-artifact@v4
+        with:
+          name: nightly-darwin-runtime-archives
+          path: ${{ runner.temp }}/darwin-runtime-archives
       - name: Build the native toolchain
         env:
           RELEASE_TAG: v0.0.0-nightly
-        run: tools/toolchain-dist/build --host aarch64-apple-darwin --output "$RUNNER_TEMP/prefix"
+        run: |
+          tools/toolchain-dist/build --host aarch64-apple-darwin \
+            --runtime-archives "$RUNNER_TEMP/darwin-runtime-archives" --output "$RUNNER_TEMP/prefix"
       - name: Compare cross-built and native Mach-O files
         run: |
           tools/ci/mac_scrub.sh tools/ci/side.sh "$RUNNER_TEMP/prefix/hirsel" "$RUNNER_TEMP/mac-corpus"

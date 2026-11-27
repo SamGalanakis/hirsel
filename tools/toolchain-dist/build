@@ -3,7 +3,7 @@
 
     tools/toolchain-dist/build --train-profile DIR [--llvm-profdata /path/to/llvm-profdata]
     tools/toolchain-dist/build --output /tmp/dist [--pgo DIR/<sha256>.profdata [--bolt DIR/<sha256>.fdata]]
-    tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/dist [--work DIR]
+    tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/dist --runtime-archives DIR [--work DIR]
 
 Both bundle builds and profile training require RELEASE_TAG. For an unpublished
 build, set RELEASE_TAG=v0.0.0-local.
@@ -14,7 +14,7 @@ refuses one whose bytes do not match its name. `--train-profile` writes both;
 the BOLT profile is trained on the PGO-use compiler built from the PGO profile
 beside it, the only binary it is valid for. Uses Buck2's remote pool, except
 `--host aarch64-apple-darwin`, which builds on an Apple Silicon Mac with Cargo
-(darwin_host.py). Training
+and packages runtime archives from a Linux bundle (`product.py export-runtimes`). Training
 uses one tools/capped command at a time. Keep output and work outside the
 repository; profiles are never committed.
 """
@@ -33,9 +33,9 @@ import struct
 import subprocess
 import sys
 import tempfile
-import tomllib
 
 import notices
+from product import load, prebuilt_runtimes, runtime_flavour, runtime_slots
 
 ROOT = Path(__file__).resolve().parents[2]
 BUCK = ROOT / '.buck2/bin/buck2'
@@ -43,7 +43,7 @@ PROFILE = Path(__file__).with_name('profile.profdata')
 BOLT_COMPILER = Path(__file__).with_name('hirsel.bolt')
 COMPILER_TARGET = '//:hirsel-core-driver-bin-hirsel'
 RUNTIME_TARGET = '//:hirsel-core-rt-archives'
-PRODUCT = tomllib.loads(Path(__file__).with_name('product.toml').read_text())
+PRODUCT = load()
 LINUX_LLVM = PRODUCT['hosts']['x86_64-unknown-linux-gnu']['llvm_library']
 
 
@@ -266,16 +266,13 @@ def accept_fresh(passed, prefix, targets):
     for slot, config in PRODUCT['runtime_slots'].items():
         if 'buck_suffix' not in config:
             continue
-        observation = config['observation']
-        record = 'record' in config['features']
-        embedded = 'standalone' not in config['features']
-        flavour = (observation, record, embedded)
+        flavour = runtime_flavour(config)
         if other := slots.get(flavour):
             raise ValueError(f'{slot} and {other} declare the same runtime flavour {flavour}')
         slots[flavour] = slot
     rows = registration['runtimes']
-    expected = {(target, *flavour) for target in targets for flavour, slot in slots.items()
-                if slot in PRODUCT['runtime_targets'][target].get('slots', PRODUCT['runtime_slots'])}
+    expected = {(target, *runtime_flavour(config))
+                for target in targets for config in runtime_slots(PRODUCT, target).values()}
     registered = {(row['target'], row['observation'], row['record'], row['embedded']) for row in rows}
     if registered != expected:
         raise ValueError(f'runtime target/flavour mismatch: missing {sorted(expected - registered)}, '
@@ -433,6 +430,8 @@ def main():
                         help='check the glibc floor on an existing bundle (requires readelf)')
     parser.add_argument('--host', choices=[darwin_host.TARGET],
                         help='build or check natively on this host instead of with Buck2 on Linux')
+    parser.add_argument('--runtime-archives', type=Path, metavar='DIR',
+                        help='for a Darwin build, use archives exported on Linux with product.py export-runtimes')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', type=Path, metavar='PROFILE',
                         help='use this pinned profile, named <sha256>.profdata (from --train-profile)')
@@ -450,23 +449,31 @@ def main():
         parser.error('--bolt requires --pgo: a BOLT profile is trained on the PGO-use compiler')
     if args.llvm_profdata and args.train_profile is None:
         parser.error('--llvm-profdata requires --train-profile')
+    if args.runtime_archives is not None and (args.host is None or args.output is None):
+        parser.error('--runtime-archives requires --host and --output')
     if args.output is not None or args.train_profile is not None:
         release_tag = os.environ.get('RELEASE_TAG', '').strip()
         if not release_tag.removeprefix('v').strip():
             parser.error('set RELEASE_TAG to the release tag or an explicit unpublished tag such as v0.0.0-local')
     if args.host is not None:
         if args.pgo or args.bolt or args.local or args.num_threads or args.train_profile or args.check_glibc:
-            parser.error('--host takes only --output or --check-fresh, and --work')
+            parser.error('--host takes --output with --runtime-archives, or --check-fresh, and optionally --work')
         def accept(passed, prefix):
             accept_fresh(passed, prefix, {darwin_host.TARGET})
         if args.check_fresh is not None:
             darwin_host.check(args.check_fresh.resolve(), FRESH_SEQUENCE, accept, relocation_witness)
             return
+        if args.runtime_archives is None:
+            parser.error('--host with --output requires --runtime-archives DIR (see product.py export-runtimes)')
+        try:
+            archives = prebuilt_runtimes(args.runtime_archives.resolve(), runtime_slots(PRODUCT, darwin_host.TARGET))
+        except ValueError as error:
+            parser.error(str(error))
         output = args.output.resolve()
         if output.exists() or output.is_relative_to(ROOT):
             parser.error('output must be a fresh directory outside the checkout')
         work = args.work.resolve() if args.work else output.with_name(output.name + '-work')
-        llvm = darwin_host.build(output, work, release_tag)
+        llvm = darwin_host.build(output, work, release_tag, archives)
         manifest(output, 'off', None, darwin_llvm=llvm)
         darwin_host.check(output, FRESH_SEQUENCE, accept, relocation_witness)
         return

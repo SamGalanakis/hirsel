@@ -1,0 +1,14 @@
+// CAP-1: no top-level constant holds a capability, at any depth of its type. A capability
+// inside an Option or a tuple is refused at the type, for a computed constant and a
+// literal one alike; a constant whose type holds none is accepted.
+// expect: refuse CAP-1 at 11:12
+// expect: refuse CAP-1 at 12:12
+// expect: refuse CAP-1 at 13:13
+// expect: message CAP-1 at 11:12 | a constant holds no capability: authority enters a program only through main's parameters
+fn none() -> Option[Dir] { None }
+fn count() -> u64 { 1 }
+
+const NOD: Option[Dir] = none()
+const NIL: Option[Clock] = None
+const PAIR: (u64, Option[Dir]) = (1, None)
+const N: u64 = count()

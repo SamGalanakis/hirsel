@@ -150,6 +150,7 @@ is the most any build charges for the allocation (MEM-28):
 | a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a flow stage | `m + size(X) + 320`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a virtual provider's port or cell ([core](core.md#provide)) | a port: its room `n`, from the constructing task's limit, refunded when the port is gone; a cell: 32, from the current limit, held until the run ends as a narrowed grant's rule storage is, since its plain capability can be copied anywhere |
+| a packet key ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)) | the row TLS-8's charge table gives it: a `Schedule` 512, from the current limit at each constructor and `srtp`, refunded at drop; a `KeyShare` 64; a `Sealer` or `Opener` 1024; a `HeaderMask` 512; a registry entry 48; a ledger entry 16; `p256_key`'s document 176; the AAD scratch its span's length plus `extra`, refunded at the call's return |
 | `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |
 
 `list.new`, `string.new`, `map.new`, `deque.new`, `heap.new`, `list.with_capacity(0)` and an empty span builder
@@ -536,6 +537,21 @@ The constant is refused, and its run ends, at the first of these:
   `isolate`'s entry, a resource literal or a `try_` operation (MEM-21);
 - an entry that would make a 4,097th activation.
 
+**The package budget.** A package's computed constants and assertions also share one
+**package comptime budget** of **33,554,432** steps (2^25), twice one constant's. Each
+constant whose run returns spends the steps that run took, counted as above, the entry
+included; a constant another one reads runs once, and its reader spends only its own steps,
+and a constant of a dependency is its own package's. Taken in the order the package declares
+them (module by module as its index lists them, each module's constants in source order),
+the first constant whose steps bring the total past the budget is refused, with `OutOfTime`
+as its cause, the same refusal as a step past its own root bound; each constant before it
+keeps its value. A constant whose steps depend on the target is counted per target, and the
+refusal names the first target past the budget when the constant it reaches differs between
+targets. A constant refused for any other cause spends nothing, since its package is refused
+already. The package budget, like the per-constant one, sets no value, so raising it turns
+only refusals into acceptances. Both budgets apply: no constant runs past its own 2^24
+steps, whatever its package has left.
+
 The refusal names `OutOfTime`, `Capacity` or the activation budget as its cause. It is not
 a failure of the run (FAIL-2): no scope and no `isolate` in the initialiser sees it, and no
 `Result` it returns holds it. A refusal by a bound the initialiser made itself, inside the
@@ -560,8 +576,8 @@ const SMALL: u64 = count(1000)            // 1000, in 1,002 steps: the entry, th
 const HUGE: u64 = count(16777216)         // refused: LANG-20, OutOfTime: 2^24 back edges and two steps more
 ```
 
-Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.1 C4 and §5; not
-yet built): the new rule. The numbers come from Phase 0's measurements, since nothing else
+Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.1 C4 and §5;
+built in `PureInput::constant`, `crates/hirsel-core-eval/src/pure.rs`): the new rule. The numbers come from Phase 0's measurements, since nothing else
 had been measured:
 - **Steps 16,777,216.** Measured by the reference count: `crc32.table()` takes 5,889 steps,
   and `regex.valid` of the 25-byte date pattern takes 80,853 (comptime-eval-split-2612 and
@@ -590,3 +606,14 @@ had been measured:
 Reversible before 1.0 in one direction only: raising a number turns refusals into
 acceptances and changes no accepted constant's value, while lowering one can refuse
 programs that were accepted.
+
+Version note (2026-11-27, capability-reachability-spec-3207; containment study 3202, H4): the
+package budget, built in `constant_refusals`, `crates/hirsel-core-driver/src/comptime.rs`.
+Before it, each constant had only its own budget, so a package's comptime work grew with its
+number of constants: ten constants of 5,000,000 steps each took 8.8 s to check, and were
+accepted. **2^25** is twice one constant's budget, so one constant may spend all of its own
+and the package still has as much again. Measured by the reference count with `hirsel check`
+on every package in `core/programs/` and the `std` they check against, the largest package
+total is `std`'s, 11,828 steps over 11 constants, about 1/2,800 of the budget; no program
+package passes 400. At the instruction rates above, the budget costs 41 to 105 billion host
+instructions at most per package. Reversible in the same one direction.

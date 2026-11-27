@@ -17,7 +17,14 @@ use crate::instances::{InstanceSet, Units};
 pub(crate) struct Value {
     pub value: StaticValue,
     pub hash: ContentHash,
+    /// The steps its run took, by the reference count (MEM-34): what it
+    /// spends of its package's comptime budget.
+    pub steps: u64,
 }
+
+/// MEM-34's package comptime budget: the steps all of a package's constants
+/// and assertions take together, 2^25, twice one constant's budget.
+pub(crate) const PACKAGE_STEPS: u64 = 1 << 25;
 
 /// An evaluation: the initialiser's code address on the target, when every
 /// instance it reaches has one, and its value or the cause that refused it.
@@ -233,7 +240,11 @@ fn run(units: &Units, root: &Identity) -> Result<Arc<Value>, Arc<str>> {
                     ],
                 ),
             };
-            return Ok(Arc::new(Value { value, hash }));
+            return Ok(Arc::new(Value {
+                value,
+                hash,
+                steps: run.steps,
+            }));
         }
         hirsel_core_eval::Outcome::Failed(chain) => {
             format!(
@@ -312,11 +323,35 @@ impl CheckProduct {
         constants: &[(DefPath, hirsel_core_resolve::Site)],
     ) -> Vec<hirsel_core_resolve::Refusal> {
         let mut out = Vec::new();
-        for (path, site) in constants {
+        let refuse = |path: &DefPath, site, cause: &str, target| hirsel_core_resolve::Refusal {
+            rule: "LANG-20".into(),
+            primary: site,
+            causal: vec![],
+            declared: None,
+            required: None,
+            message: refusal(path, cause, target),
+            unresolved: None,
+            detail: None,
+        };
+        // By package and target, the steps its accepted constants took so far,
+        // and the first constant past the package budget (MEM-34).
+        type Spent = ([u64; Target::ALL.len()], [Option<usize>; Target::ALL.len()]);
+        let mut packages: std::collections::BTreeMap<&hirsel_core_ids::PackageId, Spent> =
+            std::collections::BTreeMap::new();
+        for (at, (path, site)) in constants.iter().enumerate() {
+            let (spent, past) = packages.entry(&path.0.package).or_default();
             let runs: Vec<(Target, Evaluation)> = Target::ALL
                 .iter()
                 .map(|&t| (t, self.computed(path, t)))
                 .collect();
+            for (i, (_, e)) in runs.iter().enumerate() {
+                if let Ok(value) = &e.value {
+                    spent[i] = spent[i].saturating_add(value.steps);
+                    if spent[i] > PACKAGE_STEPS && past[i].is_none() {
+                        past[i] = Some(at);
+                    }
+                }
+            }
             let depends = runs.windows(2).any(|w| w[0].1.address != w[1].1.address);
             if runs.iter().any(|(_, e)| e.refused_elsewhere) {
                 continue;
@@ -327,16 +362,24 @@ impl CheckProduct {
             else {
                 continue;
             };
-            out.push(hirsel_core_resolve::Refusal {
-                rule: "LANG-20".into(),
-                primary: *site,
-                causal: vec![],
-                declared: None,
-                required: None,
-                message: refusal(path, &cause, depends.then_some(target)),
-                unresolved: None,
-                detail: None,
-            });
+            out.push(refuse(path, *site, &cause, depends.then_some(target)));
+        }
+        for (_, past) in packages.values() {
+            let Some(first) = past.iter().flatten().min().copied() else {
+                continue;
+            };
+            let (path, site) = &constants[first];
+            let target = past
+                .iter()
+                .position(|p| *p == Some(first))
+                .map(|i| Target::ALL[i]);
+            let depends = past.iter().any(|p| *p != Some(first));
+            out.push(refuse(
+                path,
+                *site,
+                "it exceeds its package's budget (OutOfTime, MEM-34)",
+                target.filter(|_| depends),
+            ));
         }
         out
     }

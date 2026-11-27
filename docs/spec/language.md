@@ -800,7 +800,10 @@ except these:
 refused here, at the type, `Bytes` included: a `Bytes` is a `List[u8]`, and no `List` is
 static ([core](core.md)), so the static byte type is `FrozenBytes`. The initialiser may
 build `List`, `Map` and `String` values while it runs. None of them survives, because a
-plain value holds no owned storage, so no check at run time is needed.
+plain value holds no owned storage, so no check at run time is needed. No constant,
+computed or manifest, has a type that holds a capability at any depth, such as
+`Option[Dir]` or `(u64, Clock)`: it is refused at the type as
+[CAP-1](capabilities.md#cap-1-authority-is-explicit), before its initialiser is checked.
 
 **Static values.** A `String` or `FrozenBytes` constant is a **static computed constant**.
 Only the bytes its initialiser returns survive the run: the toolchain stores them once, in
@@ -821,7 +824,7 @@ limit applies. A `String`'s bytes are UTF-8 because the run built a `String`.
 
 **Refusal.** A computed constant is refused when its run fails
 ([FAIL-2](failure.md#fail-2-causes)), reaches a function on the closed list or a foreign
-function, or exceeds its budget (MEM-34). The refusal names the constant, the cause (a
+function, or exceeds its budget or its package's (MEM-34). The refusal names the constant, the cause (a
 failure's primary cause with its message, the closed-list or foreign function, or the budget
 that ran out), and the chain of calls from the initialiser to the site, innermost first. An
 initialiser that reaches a body refused already, or reads a constant whose initialiser does,

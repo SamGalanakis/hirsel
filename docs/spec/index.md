@@ -61,7 +61,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30, MEM-33, MEM-34 |
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-15, CONC-17 |
-| [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
+| [Capabilities](capabilities.md) | CAP-1 to CAP-10 |
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
 | [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 to PROG-11 ([Map index](../internal/map-index.md) is an implementation document) |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
@@ -152,10 +152,11 @@ archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sq
 | tombstone | [SEM-10](semantics.md#sem-10-codecs) |
 | cancellation point | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
+| capability reachability | [CAP-10](capabilities.md#cap-10-reachability) |
 | claim function, keyed operation | [K-2](http.md#k-2-the-principal-and-the-key-come-from-application-code), [K-1](http.md#k-1-the-declaration) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |
 | computed constant, manifest constant, assertion | [LANG-20](language.md#lang-20-constants) |
-| constant budget | [MEM-34](budgets.md#mem-34-constant-budgets) |
+| constant budget, package comptime budget | [MEM-34](budgets.md#mem-34-constant-budgets) |
 | copyable | [OWN-3](ownership.md#own-3-kinds) |
 | current limit, limit | [MEM-19](budgets.md#mem-19-limits) |
 | event | [CONC-10](tasks.md#conc-10-event-order) |

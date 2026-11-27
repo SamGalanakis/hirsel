@@ -112,6 +112,22 @@ impl Program<'_> {
             if ty == ERROR {
                 continue;
             }
+            // CAP-1: no constant holds a capability, at any depth of its type.
+            if crate::decls::holds_components(&self.decls, &self.types, ty).0
+                & crate::decls::H_CAPABILITY
+                != 0
+            {
+                let item = self.item(at);
+                let kids = item.tree.children(item.root);
+                let site = self.site(at, kids[kids.len() - 2]);
+                self.refusals.push(refusal(
+                    "CAP-1",
+                    site,
+                    "a constant holds no capability: authority enters a program only through main's parameters",
+                ));
+                self.constants[i].ty = ERROR;
+                continue;
+            }
             if let Some(why) = self.constant_type_refusal(ty, string) {
                 let item = self.item(at);
                 let kids = item.tree.children(item.root);

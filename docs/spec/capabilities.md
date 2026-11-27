@@ -313,3 +313,49 @@ recording tool by what the run needs:
 | controlled network input and time | the model world's network and virtual clock, on the evaluator and natively |
 | recording a run and its scheduling, then replaying it with no host | a recording build and replay (above) |
 | a program's own record of its calls, for re-execution | ordinary code over the store, as the replay corpus (`core/corpus/m2b/replay`, `m2b.journal`) and the runner's durable replies do |
+
+### CAP-10: Reachability
+
+A value of capability type is reachable by a run's code only:
+- from `main`'s parameters, which the run's configuration grants (CAP-4);
+- from a `provide.*` call in code that runs at run time, which makes a capability of virtual
+  construction (CAP-2, [core](core.md#provide); `core/core/provide.hirsel`);
+- by attenuating a capability already reachable (CAP-7), which never permits more than its
+  source.
+
+Every other way a value reaches code, through a constant, a closure's environment, decoded
+bytes, a type argument or a constant's initialiser, carries no capability that did not come
+from one of these three. So a function's authority is what its arguments hold (CAP-3).
+
+Each rule below closes one path by which a capability could appear anywhere else. Each is
+checked before any code runs, at the cited checker:
+
+| rule | the path it closes | checker |
+|---|---|---|
+| [CAP-2](#cap-2-capabilities-are-opaque), [PROG-2](programs.md#prog-2-visibility) | building or opening a capability outside its module: a capability type is opaque | `crates/hirsel-core-front/src/body/values.rs:874`, `crates/hirsel-core-front/src/body/places.rs:588` |
+| [CAP-1](#cap-1-authority-is-explicit), calls | reaching the world without a capability: a call that leaves its capability argument out is refused | `crates/hirsel-core-front/src/body/calls.rs:373` |
+| CAP-1, constants | a capability in a top-level constant, which code could read without receiving it: a constant whose type holds a capability at any depth, `Option[Dir]` included, is refused at its type | `crates/hirsel-core-front/src/constants.rs:115` |
+| [PROG-3](programs.md#prog-3-entry) | authority entering at the entry other than by grant: `main`'s parameters are unmarked capability types or `Args` | `crates/hirsel-core-front/src/body/mod.rs:993` |
+| [LANG-14](language.md#lang-14-captures) | a callable value holding authority of its own: an owning closure that captures a value holding a capability is refused | `crates/hirsel-core-front/src/body/closures.rs:1671` |
+| [OWN-4](ownership.md#own-4-bounds) with OWN-2's holds sets | a capability hidden inside a type from the rules here: each type's holds set is computed from its fields, and a type parameter holds what its bounds allow, so a `T` without `inert` or `codec` may hold one and every check above sees it | `crates/hirsel-core-front/src/decls.rs:2170`, `crates/hirsel-core-front/src/decls.rs:109` |
+| the `codec` and `inert` bounds (OWN-4, [SEM-10](semantics.md#sem-10-codecs)) | a capability built from bytes: `codec` implies `inert`, an empty holds set, so no capability and no type holding one has a codec, a codec type's field that holds one is refused, and no decode (store, wire, tape or `via`) builds authority | `crates/hirsel-core-front/src/decls.rs:2349`, `crates/hirsel-core-front/src/decls.rs:2788` |
+| LANG-20's closed list ([language](language.md#lang-20-constants)) | a capability made at compile time: an initialiser has no parameter, so a call that needs a capability is refused by CAP-1, and reaching a `provide` function, or any other function on the closed list, stops the constant's run and refuses it | `crates/hirsel-core-ir/src/ir/closed.rs:6`, `crates/hirsel-core-eval/src/pure.rs:315` |
+
+`runtime.root_limit` (`core/core/runtime.hirsel:2`) is the named exception to CAP-6: it takes
+no capability and reads the run's root limit, a number the run's configuration sets. It
+returns a `u64`, never a capability, so it confers no authority and leaves the invariant
+whole. It is on the closed list, so no constant's value depends on it.
+
+The invariant binds the run's own code. Code behind a `Foreign[I]`
+([FFI-4](foreign.md#ffi-4-the-foreign-capability)) and a child an `Exec` grant starts
+([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them))
+are outside it: the grant confers what they can do.
+
+Version note (2026-11-27, capability-reachability-spec-3207; containment study 3202, R7): the
+invariant written down. About 70 probes found no capability escape, and each rule above was
+already in force except CAP-1 for constants, which accepted a capability nested in a type
+such as `Option[Dir]`; the checker now refuses it
+(`core/front/cases/rules/CAP-1-constant-capability.hirsel`). The argument is prose, not a
+mechanised model: authority flows only through the type checker, so a model would restate
+the typing rules and drift from them. A mechanised model is worth its cost if capabilities
+gain dynamic features such as revocation or membranes. Reversible: the text only.

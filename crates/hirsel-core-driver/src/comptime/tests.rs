@@ -78,6 +78,33 @@ fn assertions_are_numbered_across_a_module_files_in_index_order() {
     );
 }
 
+/// MEM-34's package budget: eleven constants, each well inside its own 2^24
+/// steps, share 2^25. By MEM-34's count, `count(n)` takes n + 2 steps (the entry,
+/// the call and n back edges), so each takes 3,100,002: ten take 31,000,020,
+/// within 33,554,432, and the eleventh brings 34,100,022, past it. Only K11 is
+/// refused, as a constant past its own step bound is.
+#[test]
+fn package_budget_refuses_the_constant_past_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut source =
+        String::from("fn count(n: u64) -> u64 { let mut i: u64 = 0; while i < n { i += 1 }; i }\n");
+    for k in 1..=11 {
+        source.push_str(&format!("const K{k}: u64 = count(3100000)\n"));
+    }
+    let product = Driver::default()
+        .check(request(&source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let messages: Vec<&str> = product
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        ["constant app@1/main/K11 is refused: it exceeds its package's budget (OutOfTime, MEM-34)"]
+    );
+}
+
 /// A closed-list function without a body, called through a function value, still
 /// stops the run that reaches it (LANG-20): its value adapter carries the mark.
 #[test]

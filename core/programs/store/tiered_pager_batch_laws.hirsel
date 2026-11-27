@@ -38,7 +38,7 @@ fn l84_bucket_pager_batch(model: BucketSim, tasks: Tasks, cache: Option[pager.Ob
     list.push(mut siblings, clone(first_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
-    let demand = pager.TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredBackward, paths: list.new(), siblings: take siblings, packs: take packs, next_stamp: 44, deadline: 0, grant: None)
+    let demand = pager.TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredBackward, paths: list.new(), siblings: take siblings, ahead: NoAhead, packs: take packs, next_stamp: 44, deadline: 0, grant: None)
     let mut input: pager.TieredPagerInput = PagerObjects(take client, BUCKET_LAW_OP_MS, pack_cache_directory(cache))
     let runs = if let None = cache {
         2u64
@@ -80,7 +80,7 @@ fn l84_bucket_pager_paths(model: BucketSim, tasks: Tasks) -> Result[(), Error] w
     list.push(mut paths, pager.TieredPath(target: clone(first_blobs[1u64]), key: types.key_word(41), values: ValuesNone))
     list.push(mut paths, pager.TieredPath(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone))
     list.push(mut paths, pager.TieredPath(target: clone(first_blobs[0u64]), key: types.key_word(40), values: ValuesNone))
-    let demand = pager.TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredForward, paths: take paths, siblings: list.new(), packs: take packs, next_stamp: 43, deadline: 0, grant: None)
+    let demand = pager.TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredForward, paths: take paths, siblings: list.new(), ahead: NoAhead, packs: take packs, next_stamp: 43, deadline: 0, grant: None)
     let mut input: pager.TieredPagerInput = PagerObjects(take client, BUCKET_LAW_OP_MS, None)
     let mut cache_state = pager.new_tiered_cache(1048576)
     let delivered = tiered_pager_point(mut input, mut cache_state, owner, demand)?
@@ -151,7 +151,7 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
         } else {
             TieredPoint
         }
-        let demand = pager.TieredPointDemand(target: TieredPage(clone(leaf)), key: types.key_word(2), values: clone(values), room: room, direction: direction, paths: list.new(), siblings: list.new(), packs: std.omap.snapshot(packs), next_stamp: 44, deadline: 0, grant: None)
+        let demand = pager.TieredPointDemand(target: TieredPage(clone(leaf)), key: types.key_word(2), values: clone(values), room: room, direction: direction, paths: list.new(), siblings: list.new(), ahead: NoAhead, packs: std.omap.snapshot(packs), next_stamp: 44, deadline: 0, grant: None)
         let delivered = tiered_pager_point(mut input, mut cache_state, owner, demand)?
         if let Some(_) = delivered.failure {
             fail("L84: every value's BLOB exists")

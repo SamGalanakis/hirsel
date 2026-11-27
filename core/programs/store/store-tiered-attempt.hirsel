@@ -9,6 +9,13 @@ pub type TieredSeek: send = SeekOperation | SeekKey(Bytes) | SeekUpper
 // key on in scan order. The pager reads them with the leaf that holds them.
 pub type TieredValues: send = ValuesNone | ValuesAt | ValuesFrom
 
+// A scan's read-ahead (§13.3): the window of leaves beyond the leaf the scan
+// reads next, under that leaf's parent, and whether the scan runs backward.
+// The attempt names them when it holds that parent; otherwise the pager names
+// them when its descent reads it. A point read, a plan and `fetch_many` read
+// no ahead.
+pub type TieredAhead: send = NoAhead | Ahead(u64, bool)
+
 // One first touch, committed by a single assignment (§13.3 "The intent").
 type TieredIntent: send {
     stamp: u64,
@@ -51,6 +58,7 @@ pub type TieredTouchSet: send {
     seek: TieredSeek,
     values: TieredValues,
     sibling_window: u64,
+    ahead: TieredAhead,
     siblings: List[format.TieredTarget],
     gather: TieredGather,
     stopped: Option[TieredAttemptStop],
@@ -58,7 +66,7 @@ pub type TieredTouchSet: send {
 }
 
 fn tiered_touch_set(partition: u64) -> TieredTouchSet {
-    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, values: ValuesNone, sibling_window: 0, siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), values: ValuesNone, paths: list.new()), stopped: None, intent: None)
+    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, values: ValuesNone, sibling_window: 0, ahead: NoAhead, siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), values: ValuesNone, paths: list.new()), stopped: None, intent: None)
 }
 
 pub fn tiered_attempt(partition: u64, window: u64) -> core.Cell[TieredTouchSet] {
@@ -258,6 +266,7 @@ fn tiered_seek_entry(mut a: TieredTouchSet, take seek: TieredSeek) {
     if let None = a.stopped {
         a.seek = take seek
         a.values = ValuesNone
+        a.ahead = NoAhead
     } else if a.gather.on {
         if let SeekKey(take key) = take seek {
             a.gather.seek = take key
@@ -285,10 +294,26 @@ pub fn tiered_reading(attempt: core.Cell[TieredTouchSet], take values: TieredVal
     cell.with(attempt, take values, tiered_values_entry)
 }
 
+fn tiered_scanning_entry(mut a: TieredTouchSet, take reverse: bool) {
+    tiered_settle(mut a)
+    if let None = a.stopped {
+        a.ahead = Ahead(a.sibling_window, reverse)
+    }
+}
+
+// Arms the read-ahead of the scan starting at its top edge, as the values
+// are named: a latched miss keeps the read-ahead it was latched under.
+pub fn tiered_scanning(attempt: core.Cell[TieredTouchSet], reverse: bool) {
+    cell.with(attempt, reverse, tiered_scanning_entry)
+}
+
 fn tiered_missed_page_entry(mut a: TieredTouchSet, take nothing: ()) -> Option[(std.page.PagePtr, u64)] {
     tiered_settle(mut a)
     match a.stopped {
-        Some(AttemptMiss(TieredPage(ptr))) => Some((clone(ptr), a.sibling_window)),
+        Some(AttemptMiss(TieredPage(ptr))) => Some((clone(ptr), match a.ahead {
+            Ahead(window, _) => window,
+            NoAhead => 0,
+        })),
         _ => None,
     }
 }

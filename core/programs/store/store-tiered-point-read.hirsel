@@ -29,7 +29,14 @@ pub fn tiered_miss_demand_raw(packs: std.omap.OMap[u64, pages.TieredPagerPack], 
         let (_, take problem) = option.unwrap(replace(mut pending, None))
         return Error(take problem)
     }
-    Ok(TieredPointDemand(target: clone(target), key: types.copied(sought)?, values: clone(state.values), room: int.saturating_sub(state.partition, state.touched_bytes), direction: direction, paths: clone(state.gather.paths), siblings: clone(state.siblings), packs: std.omap.snapshot(packs), next_stamp: next_stamp, deadline: deadline, grant: take grant))
+    // A scan's demand descends in the scan's direction, whichever driver
+    // serves it.
+    let descent = match state.ahead {
+        Ahead(_, true) => TieredBackward,
+        Ahead(_, false) => TieredForward,
+        NoAhead => direction,
+    }
+    Ok(TieredPointDemand(target: clone(target), key: types.copied(sought)?, values: clone(state.values), room: int.saturating_sub(state.partition, state.touched_bytes), direction: descent, paths: clone(state.gather.paths), siblings: clone(state.siblings), ahead: clone(state.ahead), packs: std.omap.snapshot(packs), next_stamp: next_stamp, deadline: deadline, grant: take grant))
 }
 
 // Installs a delivered batch in its order and records its failure. The

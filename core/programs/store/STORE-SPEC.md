@@ -1,4 +1,4 @@
-# Store spec v2.172
+# Store spec v2.173
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -4918,7 +4918,7 @@ A later touch of the same target in the same attempt finds it in the touched set
 - **Demands are root-deterministic batches.** A latched miss on target t demands, as one batch:
   - t itself;
   - the key-path continuation from t down to the leaf that holds the key the operation seeks. The demand carries that key, and the pager descends through the frames it delivers;
-  - for a scan's page, a sibling window of w_k = `prefetch` × 2^(k−1) frames beyond t, in the scan's direction under t's parent, where k − 1 counts the deliveries already installed in the pin map. A Reader's `Forward` and `Backward` reads and the scans of a `look`, `run` or `serve` body use the same window (v2.109). A point read has no window;
+  - for a scan, a sibling window of w_k = `prefetch` × 2^(k−1) leaves beyond the leaf the scan reads next, in the scan's direction under that leaf's parent, where k − 1 counts the deliveries already installed in the pin map (v2.173). Whoever first holds that parent names them: the attempt, when t is a leaf whose parent it holds; otherwise the pager, when its descent from t reads the parent, and the siblings join the leaf's batch. A miss at the root or on a branch therefore spends its window too, and a window is never made of branch pages. A scan's demand descends in its direction. A Reader's `Forward` and `Backward` reads and the scans of a `look`, `run` or `serve` body use the same window (v2.109). A point read, a plan and `fetch_many` have no window;
   - the values the read goes on to read, below.
 
   The pager serves each frame of the batch from its cache, from NVMe or with a GET, and delivers the batch as a whole.
@@ -4934,7 +4934,7 @@ A later touch of the same target in the same attempt finds it in the touched set
   A backward scan names no values. If the BLOBs added for **from** make the batch fail, the pager reads it again without them. A failed later value is recorded like a sibling's failure. Charging is unchanged, because a value counts when the body touches it.
 - **Installation is in logical demand order.** The delivered frames are installed in the order the batch names them, while the partition has room. An untouched pin is evicted newest-first to make room. A frame that does not fit is not installed and is demanded again by the attempt that needs it. A delivery that names anything after its path frames (another path, a sibling or a later value) leads with its path frames, values included, and holds them: once one is installed, the rest of the delivery never evicts it. So the content of the map at each attempt, and the deciding attempt's lookups, depend only on the root, the body and the Options.
 - **A root change starts an empty map.** Pins of a superseded root are released when the root changes, before the next attempt starts (below).
-- **Cost.** A scan of M Cold pages runs O(height + log M) attempts and O(M) total page visits, because the windows double. This holds in a Reader and in a `look`, `run` or `serve` body alike (v2.109). A warm cache shortens each delivery to a hit and changes no attempt count. A body that touches no Cold page runs once.
+- **Cost.** A scan of M Cold leaves under P leaf parents runs O(log M + P) attempts and O(M) total page visits, because the windows double and a window stays under one parent: the first delivery brings the path and w_1 leaves, and each parent the scan crosses into costs one miss, whose delivery brings that parent's path and its window (v2.173). For a root over L leaves that is the least d with d + 8 × (2^d − 1) ≥ L deliveries, plus one attempt. This holds in a Reader and in a `look`, `run` or `serve` body alike (v2.109). A warm cache shortens each delivery to a hit and changes no attempt count. A body that touches no Cold page runs once.
 - Hints from §13.2 enter the shared cache only and never the pin map, so they stay invisible to the body.
 
 **The miss latch (v2.59, astra 1990 #7).** A miss is latched in reserved attempt state that the body cannot reach, before anything the body can observe:

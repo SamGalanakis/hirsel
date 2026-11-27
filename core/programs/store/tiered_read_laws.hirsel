@@ -74,7 +74,7 @@ fn l62_deliver_branch(requests: Sender[pager.TieredPagerMessage], target: std.pa
         let (take next_packs, _) = std.omap.insert(mut ids, packs, ptr.pack, pages.TieredPagerPack(inventory: inventory, object: None))
         packs = take next_packs
     }
-    let demand = pager.TieredPointDemand(target: TieredPage(target), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), packs: take packs, next_stamp: 51, deadline: 0, grant: None)
+    let demand = pager.TieredPointDemand(target: TieredPage(target), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), ahead: NoAhead, packs: take packs, next_stamp: 51, deadline: 0, grant: None)
     let pager.TieredPointDelivery(frames: take path, ..) = failure_result_from_rep(pager.tiered_point_delivery(requests, take demand))?
     if list.len(path) != 2 || path[0u64].identity.stamp != 50 || path[1u64].identity.stamp != 49 {
         fail("L62: point batch must deliver the parent and selected leaf in order")

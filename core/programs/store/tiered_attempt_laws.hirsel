@@ -292,8 +292,8 @@ fn scan_rows_body(tx: Tx, t: Table[u64, u64]) -> Result[(u64, u64, u64), Error] 
     Ok(seen)
 }
 
-/// bug: a scan in a Tx body (look, run, serve) is given window 0 and pays one rerun per Cold page.
-/// oracle: hand-derived sums (values 3k over k < 4,096) and the same scan with window 0 and no value prefetch; the bound ceil(n/8) is the brief's.
+/// bug: a scan in a Tx body (look, run, serve) reads no siblings, or reads none on a root or interior miss, and pays reruns its window covers.
+/// oracle: hand-derived sums (values 3k over k < 4,096); the attempt bound is the §13.3 derivation for a root over n − 1 leaves (delivery 1 brings the root, the first leaf and 8 leaves beyond it, delivery k brings one leaf and 8 × 2^(k−1) beyond it), with the shape checked by the window-0 scan.
 @test
 fn test_tx_scan_sibling_window(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
@@ -312,12 +312,27 @@ fn test_tx_scan_sibling_window(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     if oracle? != expected || scanned? != expected {
         fail("scan window: the scan returns every row")
     }
-    // Without the window every Cold page is its own rerun.
-    if plain < pages {
-        fail("scan window: the oracle scan paid one attempt per page")
+    // Without the window the first delivery brings the root and the first
+    // leaf, and each later one a single page: one attempt per page exactly
+    // when the table is a root over pages − 1 leaves, the shape below.
+    if plain != pages {
+        fail("scan window: the table is one root over its leaves")
     }
-    if windowed > (pages + 7) / 8 {
-        fail("scan window: a cold forward scan of n pages takes at most ceil(n/8) attempts")
+    // §13.3: the root miss's delivery brings the root, the first leaf and the
+    // w_1 = 8 leaves beyond it, named when the pager reads the root; the k-th
+    // delivery brings the missed leaf and w_k = 8 × 2^(k−1) leaves beyond it.
+    // The scan ends one attempt after the last delivery.
+    let leaves = pages - 1
+    let mut reached = 0u64
+    let mut window = 8u64
+    let mut deliveries = 0u64
+    while reached < leaves {
+        reached += 1 + window
+        window *= 2
+        deliveries += 1
+    }
+    if windowed > deliveries + 1 {
+        fail("scan window: a cold forward scan reads ahead from its first delivery (§13.3)")
     }
     Ok(())
 }

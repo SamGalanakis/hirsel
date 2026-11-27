@@ -5,6 +5,11 @@ type TieredScanLeaf {
 }
 
 pub fn tiered_scan_edge(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], edge: std.page.Slot, expected: Option[u8], low: Bytes, high: Option[View[Bytes]], reverse: bool) -> Result[Option[TieredScanLeaf], types.Failure] {
+    // The scan's top edge arms its read-ahead, so a miss at any level names
+    // the scan's leaves (§13.3).
+    if let None = expected {
+        tiered_scanning(attempt, reverse)
+    }
     let page = tiered_point_page(attempt, visible, edge, expected)?
     let image = std.page.image_of(page)
     let n = std.page.count(image)
@@ -49,8 +54,9 @@ pub fn tiered_scan_edge(attempt: core.Cell[TieredTouchSet], visible: Map[TieredC
     Ok(None)
 }
 
-// Siblings are hints computed after the latch. A list that cannot be
-// reserved is dropped and never replaces the latched miss.
+// Siblings are hints computed after the latch, named here when the missed
+// page is a leaf whose parent the attempt holds. A miss above the leaves is
+// named by the pager when its descent reads the leaf's parent (§13.3).
 fn tiered_scan_siblings(attempt: core.Cell[TieredTouchSet], page: Arc[std.page.Page], edge: std.page.Slot, selected: u64, reverse: bool) {
     let Some((missing, window)) = tiered_missed_page(attempt) else {
         return
@@ -58,9 +64,16 @@ fn tiered_scan_siblings(attempt: core.Cell[TieredTouchSet], page: Arc[std.page.P
     let ColdPage(wanted) = view edge else {
         return
     }
-    if missing != wanted || window == 0 {
+    if missing != wanted || std.page.level(std.page.image_of(page)) != 1 {
         return
     }
+    tiered_set_siblings(attempt, tiered_ahead_siblings(page, selected, window, reverse))
+}
+
+// The Cold leaves of a scan's window: up to `window` children of the leaf
+// parent `page` beyond slot `selected`, in the scan's direction. A list that
+// cannot be reserved is empty: a prefetch never fails the read.
+pub fn tiered_ahead_siblings(page: Arc[std.page.Page], selected: u64, window: u64, reverse: bool) -> List[format.TieredTarget] {
     let n = std.page.count(std.page.image_of(page))
     let remaining = if reverse {
         selected
@@ -70,7 +83,7 @@ fn tiered_scan_siblings(attempt: core.Cell[TieredTouchSet], page: Arc[std.page.P
     let limit = order.min(window, remaining)
     let mut found: List[format.TieredTarget] = list.new()
     if let Error(_) = list.try_reserve(mut found, limit) {
-        return
+        return found
     }
     for distance in 1u64 .. limit + 1 {
         let slot = if reverse {
@@ -82,7 +95,7 @@ fn tiered_scan_siblings(attempt: core.Cell[TieredTouchSet], page: Arc[std.page.P
             list.push(mut found, TieredPage(ptr))
         }
     }
-    tiered_set_siblings(attempt, take found)
+    found
 }
 
 fn tiered_scan_overlay(edits: Arc[pages.ReplayOverlay], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Arc[Bytes])] {

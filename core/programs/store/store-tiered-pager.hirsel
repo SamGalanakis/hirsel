@@ -20,8 +20,10 @@ pub type TieredPageSource {
 
 // A latched miss's batch: the target and its key, the values the read at the
 // key goes on to read, `paths` more key paths gathered by `fetch_many`, and a
-// scan's sibling window. `room` bounds the bytes of the scan's later values
-// the pager adds: the attempt's partition less what it touched.
+// scan's read-ahead: `siblings` when the attempt named them, else `ahead`,
+// which the pager spends when its descent reads the leaf's parent. `room`
+// bounds the bytes of the scan's later values the pager adds: the attempt's
+// partition less what it touched.
 pub type TieredPointDemand: send {
     target: format.TieredTarget,
     key: Bytes,
@@ -30,6 +32,7 @@ pub type TieredPointDemand: send {
     direction: TieredDirection,
     paths: List[TieredPath],
     siblings: List[format.TieredTarget],
+    ahead: TieredAhead,
     packs: std.omap.OMap[u64, pages.TieredPagerPack],
     next_stamp: u64,
     deadline: u64,
@@ -108,27 +111,52 @@ pub fn tiered_point_continuation(frame: format.TieredFrame, key: Bytes, directio
             return Error(format.disk_fault(manifest.paged_pack_path(frame.identity.pack)?, frame.identity.offset, Malformed))
         }
     }
-    let Some(sought) = std.page.descend(image, key) else {
+    let Some(slot) = tiered_continuation_slot(page, key, direction) else {
         return Ok(None)
-    }
-    let slot = if direction == TieredBackward {
-        if list.len(key) == 0 {
-            std.page.count(image) - 1
-        } else {
-            let (_, equal) = std.page.search(image, key)
-            if equal {
-                sought - 1
-            } else {
-                sought
-            }
-        }
-    } else {
-        sought
     }
     let Some(ColdPage(child)) = std.page.child_slot(page, slot) else {
         fail("store: verified PAGE path has no Cold child")
     }
     Ok(Some((TieredPage(child), height - 1)))
+}
+
+// The child slot a demand descends to from a branch page.
+fn tiered_continuation_slot(page: Arc[std.page.Page], key: Bytes, direction: TieredDirection) -> Option[u64] {
+    let image = std.page.image_of(page)
+    let Some(sought) = std.page.descend(image, key) else {
+        return None
+    }
+    if direction != TieredBackward {
+        return Some(sought)
+    }
+    if list.len(key) == 0 {
+        return Some(std.page.count(image) - 1)
+    }
+    let (_, equal) = std.page.search(image, key)
+    Some(if equal {
+        sought - 1
+    } else {
+        sought
+    })
+}
+
+// The leaves a scan's demand reads ahead when the pager's descent reads the
+// parent of the leaf it descends to (§13.3): the window beyond that leaf. A
+// frame above the leaves' parents, or a demand with no read-ahead, names none.
+pub fn tiered_descent_ahead(frame: format.TieredFrame, key: Bytes, direction: TieredDirection, ahead: TieredAhead) -> List[format.TieredTarget] {
+    let Ahead(window, reverse) = ahead else {
+        return list.new()
+    }
+    let TieredImage(page) = view frame.payload else {
+        return list.new()
+    }
+    if std.page.level(std.page.image_of(page)) != 1 {
+        return list.new()
+    }
+    let Some(slot) = tiered_continuation_slot(page, key, direction) else {
+        return list.new()
+    }
+    tiered_ahead_siblings(page, slot, window, reverse)
 }
 
 // One live key path of a demand: the path's index (0 is the target's), the

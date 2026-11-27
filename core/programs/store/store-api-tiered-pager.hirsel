@@ -111,10 +111,13 @@ fn tiered_pager_point(mut input: pager.TieredPagerInput, mut private_cache: page
         }
         list.push(mut walking, pager.TieredDescent(path: path, edge: take edge, level: None))
     }
+    // The scan's read-ahead: the attempt's siblings join the first round;
+    // siblings the descent names at the leaf's parent join the leaf's round.
     let mut siblings: List[Result[Arc[format.TieredFrame], Error]] = list.new()
-    let mut round = 0u64
+    let mut named: List[format.TieredTarget] = clone(demand.siblings)
+    let mut queued: List[format.TieredTarget] = clone(demand.siblings)
     while list.len(walking) != 0 {
-        // This round's distinct edges; the first round adds the siblings.
+        // This round's distinct edges, then the siblings queued for it.
         let mut edges: List[format.TieredTarget] = list.new()
         let mut slot_of: Map[pager.TieredCacheKey, u64] = map.new()
         let mut slots: List[u64] = list.new()
@@ -138,12 +141,11 @@ fn tiered_pager_point(mut input: pager.TieredPagerInput, mut private_cache: page
             }
         }
         let distinct = list.len(edges)
-        if round == 0 {
-            failure_result_from_rep(types.capacity(list.try_reserve(mut edges, list.len(demand.siblings))))?
-            for sibling in demand.siblings {
-                list.push(mut edges, clone(sibling))
-            }
+        failure_result_from_rep(types.capacity(list.try_reserve(mut edges, list.len(queued))))?
+        for take sibling in take queued {
+            list.push(mut edges, take sibling)
         }
+        queued = list.new()
         let mut read: List[Result[Arc[format.TieredFrame], Error]] = list.new()
         failure_result_from_rep(types.capacity(list.try_reserve(mut read, distinct)))?
         for take item in tiered_pager_read_edges(mut input, mut private_cache, owner, demand, edges)? {
@@ -168,6 +170,13 @@ fn tiered_pager_point(mut input: pager.TieredPagerInput, mut private_cache: page
                 },
             }
             let following = failure_result_from_rep(pager.tiered_point_continuation(frame, pager.tiered_demand_key(demand, path), demand.direction, depth))
+            if path == 0 {
+                let ahead = pager.tiered_descent_ahead(frame, demand.key, demand.direction, demand.ahead)
+                if list.len(ahead) != 0 {
+                    named = clone(ahead)
+                    queued = take ahead
+                }
+            }
             failure_result_from_rep(types.capacity(list.try_reserve(mut found[path], 1)))?
             list.push(mut found[path], take frame)
             match take following {
@@ -182,7 +191,6 @@ fn tiered_pager_point(mut input: pager.TieredPagerInput, mut private_cache: page
             }
         }
         walking = take deeper
-        round += 1
     }
     // The values round (§13.3 "Values"). The BLOB a path's read goes on to
     // read joins that path's frames. A forward scan's later values, from its
@@ -300,7 +308,7 @@ fn tiered_pager_point(mut input: pager.TieredPagerInput, mut private_cache: page
                     list.push(mut frames, take frame)
                 },
                 Error(take problem) => {
-                    failure = Some((clone(demand.siblings[slot]), failure_to_rep(take problem)))
+                    failure = Some((clone(named[slot]), failure_to_rep(take problem)))
                     break
                 },
             }

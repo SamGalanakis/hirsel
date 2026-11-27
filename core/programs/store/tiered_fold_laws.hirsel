@@ -149,7 +149,7 @@ fn l79_cut_emits_folded_tree(source: pager.TieredPageSource, base: std.page.Page
 fn l64_fold_with_writer_pin(source: pager.TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr) -> Result[(), Error] waits {
     // The fixture's leaf frame occupies all writer room:
     // 16 + 24 + 7 + 3 * (2 + 1 + 1 + 2 + 6 + 2) = 89.
-    let demand = pager.TieredPointDemand(target: TieredPage(base), key: types.key_word(2), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
+    let demand = pager.TieredPointDemand(target: TieredPage(base), key: types.key_word(2), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), ahead: NoAhead, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
     let held = failure_result_from_rep(pager.tiered_point_delivery(source.pager, take demand))?
     l79_fold_checks(source, base)?
     let empty = std.page.empty(0, 0, Collection)

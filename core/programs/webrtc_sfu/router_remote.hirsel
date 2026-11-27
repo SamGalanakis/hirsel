@@ -310,9 +310,12 @@ fn keyframe(mut r: Router, now: u64, pi: u64, encoding: u8, why: rtp.loss.Why, m
         post_bare(mut r, home, Key(room: room, publication: id, encoding: encoding, why: why))
         return Ok(())
     }
+    let ssrc = r.publications[pi].encodings[e].ssrc
     let fir = why == Switch && r.publications[pi].fir
     if !fir && !r.publications[pi].pli {
-        r.counts.unrequested += 1
+        if ssrc != 0 {
+            r.counts.unrequested += 1
+        }
         return Ok(())
     }
     if let Remote(via: v) = r.publications[pi].origin {
@@ -330,7 +333,6 @@ fn keyframe(mut r: Router, now: u64, pi: u64, encoding: u8, why: rtp.loss.Why, m
         return Ok(())
     }
     // No stream yet: nothing to ask about until its first packet names the SSRC.
-    let ssrc = r.publications[pi].encodings[e].ssrc
     if ssrc == 0 {
         return Ok(())
     }

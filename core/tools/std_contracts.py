@@ -333,3 +333,19 @@ def native_meter(invoke, validate, environment, report_path, initial, reference)
         return json.loads(report_path.read_text())
 
     return check_metering(run, first=json.loads(initial), reference=reference)
+
+
+def contract_dir_fixture(case_name, host, scratch):
+    """The scripted links a Dir contract reads."""
+    if case_name == 'dir:walkdir_preorder':
+        (host / 'link').symlink_to('a', target_is_directory=True)
+        return
+    if not case_name.startswith('containment:'):
+        return
+    (scratch / 'secret.txt').write_text('secret')
+    (host / 'sub').mkdir()
+    (host / 'inside.txt').write_text('inside')
+    (host / 'sub/inside.txt').write_text('inside')
+    (host / 'link').symlink_to('../secret.txt')
+    (host / 'dirlink').symlink_to('..', target_is_directory=True)
+    (host / 'abslink').symlink_to('/etc/passwd')

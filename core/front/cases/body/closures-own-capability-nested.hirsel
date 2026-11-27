@@ -1,0 +1,76 @@
+// CAP-3/LANG-14 (docs/spec/capabilities.md, docs/spec/language.md): authority enters
+// only as arguments, so an owning closure captures no capability at any depth of
+// its environment. Direct Dir capture and Log[Dir] formation already have cases;
+// these are the 3202 pcap probe's aggregate, generic and counted forms.
+// expect: refuse LANG-14 at 22:27
+// expect: refuse LANG-14 at 28:36
+// expect: refuse LANG-14 at 33:35
+// expect: refuse LANG-14 at 38:35
+// expect: refuse LANG-14 at 43:35
+// expect: refuse LANG-14 at 48:35
+// expect: refuse LANG-14 at 54:35
+// expect: refuse LANG-14 at 59:35
+// expect: refuse LANG-14 at 63:27
+// expect: refuse LANG-14 at 67:29
+// expect: refuse LANG-14 at 71:29
+// expect: refuse LANG-14 at 75:27
+type HoldsDir { d: Dir }
+type Wrap[T: plain] { item: T }
+
+fn tuple_capture(d: Dir) {
+    let pair = (1u64, d)
+    let _ = fn() -> u64 { pair.0 }
+}
+
+fn list_capture(d: Dir) {
+    let mut xs: List[Dir] = list.new()
+    list.push(mut xs, d)
+    let _ = fn() -> u64 { list.len(xs) }
+}
+
+fn record_capture(d: Dir) {
+    let held = HoldsDir(d: d)
+    let _ = fn() -> u64 { let _ = held; 1 }
+}
+
+fn option_capture(d: Dir) {
+    let held: Option[Dir] = Some(d)
+    let _ = fn() -> u64 { let _ = held; 1 }
+}
+
+fn box_capture(d: Dir) {
+    let held = box.new(d)
+    let _ = fn() -> u64 { let _ = held; 1 }
+}
+
+fn generic_capture(d: Dir) {
+    let held = Wrap(item: d)
+    let _ = fn() -> u64 { let _ = held; 1 }
+}
+
+fn map_capture(d: Dir) {
+    let mut xs: Map[u64, Dir] = map.new()
+    map.insert(mut xs, 1u64, d)
+    let _ = fn() -> u64 { map.len(xs) }
+}
+
+fn rc_capture(d: Dir) {
+    let held = rc.new(d)
+    let _ = fn() -> u64 { let _ = held; 1 }
+}
+
+fn net_capture(n: Net) {
+    let _ = fn() -> Net { n }
+}
+
+fn clock_capture(c: Clock) {
+    let _ = fn() -> Clock { c }
+}
+
+fn tasks_capture(tasks: Tasks) {
+    let _ = fn() -> Tasks { tasks }
+}
+
+fn env_capture(e: Env) {
+    let _ = fn() -> Env { e }
+}

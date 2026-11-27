@@ -26,7 +26,7 @@ import time
 import tomllib
 
 from std_contracts import (Contract, discover, evaluator_meter, host_parameter, matches_filter,
-                           native_meter, reached_sites, test_module)
+                           native_meter, reached_sites, test_module, contract_dir_fixture)
 from case_progress import Case
 # library_sources and wait_load are re-exported for the bench scripts.
 from contract_exec import Evaluator, first_stop, library_sources, native_build, source_manifest, wait_load  # noqa: F401
@@ -514,8 +514,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 scratch.mkdir()
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
-                if case.name == 'dir:walkdir_preorder':
-                    (host / 'link').symlink_to('a', target_is_directory=True)
+                contract_dir_fixture(case.name, host, scratch)
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
                 source = original + fixture_source(case.file)

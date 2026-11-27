@@ -1,0 +1,155 @@
+// Containment oracles from the 3202 assurance probes. Each expected result is
+// derived from the specification cited in its comment, not from an observed run.
+// The native runner supplies this Dir with sub/inside.txt and inside.txt inside
+// it, secret.txt beside it, link -> ../secret.txt, dirlink -> .. and
+// abslink -> /etc/passwd.
+fn denied[T](r: Result[T, IoError]) -> bool {
+    match r {
+        Error(Denied) => true,
+        _ => false,
+    }
+}
+
+// HOST-1/CAP-7 (docs/spec/capabilities.md, docs/spec/core.md): a Dir path is
+// relative, non-empty, has no dot component or NUL, and no traversal or symlink
+// may escape its root. Invalid or escaping paths are Denied with no host effect.
+// The 3202 pdir probe's escape forms. `file.hirsel`'s uniform-path law already
+// covers NUL and ordinary dot components; read-only write denials are covered by
+// dir.hirsel's read_only_dir_denies_writes, so those forms are not repeated here.
+// expect: run dir_escape_refusals(dir) = true
+fn dir_escape_refusals(d: Dir) -> bool waits {
+    // Direct lexical escapes and absolute paths.
+    if !denied(host.open(d, "..", Read)) {
+        return false
+    }
+    if !denied(host.open(d, "/etc/passwd", Read)) {
+        return false
+    }
+    if !denied(host.open(d, "sub/../..", Read)) {
+        return false
+    }
+    // A dot-dot component is invalid even when lexical resolution would stay inside.
+    if !denied(host.open(d, "sub/../inside.txt", Read)) {
+        return false
+    }
+    // Symlink resolution is confined at every intermediate component.
+    if !denied(host.open(d, "link", Read)) {
+        return false
+    }
+    if !denied(host.open(d, "dirlink/secret.txt", Read)) {
+        return false
+    }
+    if !denied(host.open(d, "abslink", Read)) {
+        return false
+    }
+    // Directory handles, metadata and listings obey the same rule. stat does not follow a final link, so the escaping link itself is not a stat escape.
+    if !denied(host.open_dir(d, "..")) {
+        return false
+    }
+    if !denied(host.open_dir(d, "dirlink")) {
+        return false
+    }
+    if !denied(host.stat(d, "..")) {
+        return false
+    }
+    if !denied(host.entries(d, Some(".."))) {
+        return false
+    }
+    if !denied(host.entries(d, Some("dirlink"))) {
+        return false
+    }
+    // Creation, removal and renaming name no object outside the root.
+    if !denied(host.mkdir(d, "../made")) {
+        return false
+    }
+    if !denied(host.mkdir(d, "/tmp/hirsel-containment-made")) {
+        return false
+    }
+    if !denied(host.mkdir(d, "sub/../made")) {
+        return false
+    }
+    if !denied(host.remove(d, "../secret.txt")) {
+        return false
+    }
+    if !denied(host.remove(d, "dirlink/secret.txt")) {
+        return false
+    }
+    if !denied(host.rename(d, "inside.txt", "../moved.txt")) {
+        return false
+    }
+    if !denied(host.rename(d, "inside.txt", "dirlink/moved.txt")) {
+        return false
+    }
+    if !denied(host.rename(d, "dirlink/secret.txt", "copied.txt")) {
+        return false
+    }
+    // No object was created inside the root through an escaping source path.
+    match host.open(d, "copied.txt", Read) {
+        Error(NotFound) => true,
+        _ => false,
+    }
+}
+
+// MEM-28/MEM-30 (docs/spec/budgets.md): an inner byte or step bound may not
+// exceed the unspent outer allowance. The admission fails at entry, before the
+// inner body runs. The 3202 pb probe's inner-bound cases; the per-constructor
+// byte refusals themselves are already covered by list/string/map/channel laws.
+// expect: run nested_bound_does_not_widen() = true
+fn nested_bound_does_not_widen() -> bool {
+    let ran = bound bytes 32 {
+        let inner = bound bytes 64 {
+            let mut xs: Bytes = list.with_capacity(64)
+            list.fill(mut xs, 64, 1)
+            list.len(xs)
+        }
+        match inner {
+            Error(_) => true,
+            Ok(_) => false,
+        }
+    }
+    let steps = bound steps 8 {
+        let inner = bound steps 16 {
+            7u64
+        }
+        match inner {
+            Error(_) => true,
+            Ok(_) => false,
+        }
+    }
+    match (ran, steps) {
+        (Ok(true), Ok(true)) => true,
+        _ => false,
+    }
+}
+
+type Chain: key + ordered = Nil | Link(u64, Box[Chain])
+
+fn chain(k: u64) -> Chain {
+    let mut c: Chain = Nil
+    let mut i: u64 = 0
+    while i < k {
+        let prev = take c
+        c = Link(i, box.new(take prev))
+        i += 1
+    }
+    c
+}
+
+// FAIL-15/FAIL-16 and MEM-30 depth steps (docs/spec/failure.md,
+// docs/spec/budgets.md): generated value walks end in OutOfTime before input
+// can reach a stack run stop. work_steps.hirsel already covers ==, ordering and
+// hashing; this adds the 3202 pdeep probe's clone walk, the E2 regression.
+// expect: run deep_clone_stops_before_stack() = true
+fn deep_clone_stops_before_stack() -> bool {
+    let a = chain(1000000)
+    let cloned = isolate(fn() -> Result[u64, OutOfTime] {
+        bound steps 1000 {
+            let b: Chain = clone(a)
+            1u64
+        }
+    })
+    match cloned {
+        Ok(Ok(Error(OutOfTime(steps: 1000)))) => true,
+        _ => false,
+    }
+}

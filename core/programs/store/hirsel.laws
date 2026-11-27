@@ -356,7 +356,7 @@ store@1/store/test_l68_trim_preserves_untouched_cold_slots src=2d6d3d62dba4c861 
 store@1/store/test_l69_cut_files_replaced_cold_frames src=78617c3c162712fb sig=2b18a9a23ddf91b1 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l69_lineage_last_holder_ghost_and_adopt src=46de15a52b2926d6 sig=9d80a1006b4f275d run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l69_pin_after_its_pack_retires src=bdbf787aa356274e sig=8b9ee63cb4ae3188 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-store@1/store/test_l69_random_arm src=f53fae42c89b2b35 sig=c0840ff12c18393a run=ccc71412effed0bb bug=- oracle=- rows=pending
+store@1/store/test_l69_random_arm src=3e014202d21d8a31 sig=c0840ff12c18393a run=ccc71412effed0bb bug=- oracle=- rows=pending
 store@1/store/test_l70_cache_overlap src=19db28160e126205 sig=2c0f3e97e4d1aa6a run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_dirty_admission src=061527f69f66b0ab sig=fc302c20016b22e2 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_pager_admits_cache_backing src=5fe20bca39d47548 sig=51c8f657f59bf1be run=722e0e8306f441ca bug=- oracle=- rows=pending

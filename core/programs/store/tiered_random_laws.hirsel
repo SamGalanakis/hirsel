@@ -524,7 +524,8 @@ fn random_refused_cut(mut db: Db) -> Result[Bytes, Error] waits {
         }))?
     }) {
         Error(Full(Allocation(_))) => (),
-        _ => fail("L69 random: the refused seal fails the cut before its rename"),
+        Error(take problem) => return Error(take problem),
+        Ok(_) => fail("L69 random: the refused seal fails the cut before its rename"),
     }
     let mut published = log.finish(take sealed)
     if list.len(published) == 0 {

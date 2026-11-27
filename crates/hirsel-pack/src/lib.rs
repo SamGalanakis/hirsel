@@ -19,12 +19,13 @@ hirsel_guard::install!();
 #[cfg(test)]
 mod tests;
 
-/// A loader configuration for this host image: this build's runtime ABI and policy,
-/// its row addresses, no prelinked images and the default batch and retired budget.
-pub fn config(mask: Mask, band_bytes: usize, installed_bytes: u64) -> Config {
+/// A loader configuration for this host image: this build's runtime ABI, its row
+/// addresses, no prelinked images and the default batch and retired budget. `policy` is
+/// the pool's policy bits (PACK-2): a module loads only when its own are equal.
+pub fn config(policy: u64, mask: Mask, band_bytes: usize, installed_bytes: u64) -> Config {
     Config {
         abi: hirsel_mod::abi(),
-        policy: hirsel_mod::POLICY,
+        policy,
         mask,
         band_bytes,
         installed_bytes,

@@ -45,7 +45,7 @@ fn alone() -> std::sync::MutexGuard<'static, ()> {
 
 fn loader() -> &'static Loader {
     static LOADER: OnceLock<&'static Loader> = OnceLock::new();
-    LOADER.get_or_init(|| start(config(Mask::PURE, 16 << 20, 1 << 20)).unwrap())
+    LOADER.get_or_init(|| start(config(0, Mask::PURE, 16 << 20, 1 << 20)).unwrap())
 }
 
 fn x86() -> bool {
@@ -129,7 +129,7 @@ fn module(
         header: Header {
             target: hirsel_code::TARGET,
             backend: Backend::Cranelift,
-            policy: hirsel_mod::POLICY,
+            policy: 0,
             abi: hirsel_mod::abi(),
             compiler: ContentHash([2; 32]),
             coreir: ContentHash([seed; 32]),

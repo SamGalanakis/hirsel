@@ -58,7 +58,7 @@ struct CounterHost: App {
         HirselEvents.sendLifecycle(read ? 1 : 0)
         #else
         Task.detached {
-            let runtime = try Runtime.start(grants: "Clock\nRandom\nTasks")
+            let runtime = try Runtime.start(grants: "Clock\nRandom\nTasks\nStderr\nNet=Connect 127.0.0.1/32 1-1")
             let session = try runtime.open()
             let result = try await session.api.call.main.counter_step(read ? 0 : 1, deadline: 0)
             if case .returned(let value) = result {

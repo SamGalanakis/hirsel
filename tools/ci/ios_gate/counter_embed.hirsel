@@ -9,8 +9,21 @@ fn place(mut registry: runner.Registry[(), store.Table[u64, u64]]) -> Result[(),
     runner.transact(mut registry, code.describe(counter_step), 65536u64, runner.DEFAULT_STEPS)
 }
 
-pub fn main(args: Args, clock: Clock, random: Random, tasks: Tasks) -> Result[(), Exit] waits {
-    runner.launch_server(args, clock, code.describe(place), code.describe(counter.schema), scoped fn() -> Result[(), Exit] {
-        Ok(())
+pub fn main(store_dir: Dir, args: Args, process: Process, errors: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), Exit] waits {
+    let register = code.describe(place)
+    let declare = code.describe(counter.schema)
+    runner.main(args, process, errors, tasks, clock, register, declare, scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let mut session = runner.wire_defaults(65536u64)
+        session.n_pool = 4194304u64
+        session.n_relay = 262144u64
+        let config: runner.PlaceConfig[(), store.Table[u64, u64], ()] = runner.PlaceConfig(
+            backing: Disk(store_dir), sizes: store.derived_sizes(), selection: runner.launch_selection(args) ?=> Usage,
+            place: register, n_place: 16777216u64, on_migrate: None, schema: declare,
+            session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
+            listen: Tcp(Addr(ip: V4(2130706433u32), port: 0u16)), net: net, tasks: tasks, clock: clock, random: random,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64),
+            wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None,
+        )
+        Ok(runner.operate_report(take config, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start)
     })
 }

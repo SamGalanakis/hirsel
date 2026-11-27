@@ -84,7 +84,7 @@ final class TLSTests: XCTestCase {
                 rules.append("Tls hirsel-ci.test,wrong.test \(port)-\(port) System")
                 rules.append("Tls hirsel-ci.test,wrong.test \(port)-\(port) Roots=sha256:\(pin)")
             }
-            return "Clock\nRandom\nTasks\nNet=" + rules.joined(separator: ";")
+            return "Clock\nRandom\nTasks\nStderr\nNet=" + rules.joined(separator: ";")
         }
     }
 }

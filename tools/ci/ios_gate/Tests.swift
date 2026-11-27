@@ -4,7 +4,7 @@ import XCTest
 import SimGateCore
 @testable import SimGate
 
-let baseGrants = "Clock\nRandom\nTasks\nNet=Connect 127.0.0.1/32 1-1"
+let baseGrants = "Clock\nRandom\nTasks\nStderr\nNet=Connect 127.0.0.1/32 1-1"
 
 func withRuntime<Value>(_ grants: String = baseGrants,
                         _ body: (Runtime) async throws -> Value) async throws -> Value {

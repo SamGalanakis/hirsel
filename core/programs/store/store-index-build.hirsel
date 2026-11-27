@@ -44,6 +44,17 @@ fn table_is_tiered(tree: pages.PageTree, table_id: u32) -> Result[bool, Error] {
     Ok(false)
 }
 
+// A collection's row count from its descriptor, 0 when the map has no entry.
+fn collection_rows(tree: pages.PageTree, id: u32) -> u64 {
+    let Ok(key) = catalog.prefix(id) else {
+        return 0
+    }
+    match pages.collection_by_key(tree, key) {
+        Some(found) => found.rows,
+        None => 0,
+    }
+}
+
 // The same rows on main's head when the table is Tiered: each is read
 // through the pager under a reader's pin extractor, as a snapshot scan reads.
 fn tiered_rows_after(db: Db, table_id: u32, cursor: Option[Bytes], limit: u64) -> Result[(List[(Bytes, Bytes)], bool), Error] waits {
@@ -556,9 +567,6 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
     }
     let mut proposed = take record
     let owner_tiered = table_is_tiered(plan.schema.roots.collections, t.id)?
-    if let Some(_) = plan.preview {
-        refuse_hot_tiered_build(plan, owner_tiered || (!new_index && table_is_tiered(plan.schema.roots.collections, proposed.id)?))?
-    }
     // A hot build draws a Tiered target's two scratch ids with it (§13.10a).
     let hot = !plan.schema.defer_tiered
     let mut scratch = 0u32
@@ -608,7 +616,7 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         let preview_slot: Option[u64] = if let Some(mut backfills) = plan.preview {
             let slot = list.len(backfills)
             let table_name = failure_result_from_rep(catalog.catalog_collection_name(t.catalog_key, 1u8))?
-            list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), cause: Some(take cause), read: 0, written: 0, outcome: Filled))
+            list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), cause: Some(take cause), read: 0, written: 0, outcome: Deferred(collection_rows(plan.schema.roots.collections, t.id))))
             Some(slot)
         } else {
             None
@@ -752,9 +760,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         return Error(Limit(Value))
     }
     let tiered = table_is_tiered(plan.schema.roots.collections, from.id)?
-    if let Some(_) = plan.preview {
-        refuse_hot_tiered_build(plan, tiered)?
-    }
+    let source_rows = collection_rows(plan.schema.roots.collections, from.id)
     let olds = index_catalog_in(plan.schema.roots.catalog, from.id)?
     let id = plan.schema.next_table
     plan.step_drift = true
@@ -809,7 +815,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         record_migrate_source(mut plan, from.id, id)?
         let preview_slot: Option[u64] = if let Some(mut backfills) = plan.preview {
             let slot = list.len(backfills)
-            list.push(mut backfills, MigrationBackfill(table: failure_result_from_rep(catalog.named(to_name))?, index: None, cause: None, read: 0, written: 0, outcome: Filled))
+            list.push(mut backfills, MigrationBackfill(table: failure_result_from_rep(catalog.named(to_name))?, index: None, cause: None, read: 0, written: 0, outcome: Deferred(source_rows)))
             Some(slot)
         } else {
             None

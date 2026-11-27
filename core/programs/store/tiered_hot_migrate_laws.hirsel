@@ -1,6 +1,6 @@
-// M3b-S5 (§13.10a "Lifts"): a hot Migrate on a Tiered log@1 store lifts
-// everything except a Tiered build, which refuses `Tiered(Migrate)` until
-// lane 3224 gives it a mechanism. Fixture: log@1, table `rows` u64 -> u64
+// L102 (§13.10a "Hot Tiered builds"): a hot Migrate on a Tiered log@1 store
+// builds each Tiered target through writer cuts under the build pin and
+// publishes it in one schema commit. Fixture: log@1, table `rows` u64 -> u64
 // seeded with `k % 97`, then `set_residency(Tiered)`.
 fn hot_options(dirty: u64) -> Result[Options, Error] {
     let mut overrides = derived_sizes()
@@ -892,8 +892,8 @@ fn l70_noop(mut _phase: Migration) -> Result[(), Error] {
     Ok(())
 }
 
-// L70 revised (§13.10a "Lifts", v2.169): on log@1, a hot Migrate that needs
-// no Tiered build, export and install of a Tiered store succeed; objects@1
+// L70 revised (§13.10a "Lifts", v2.169): on log@1, a hot Migrate, export and
+// install of a Tiered store succeed; objects@1
 // `set_residency` stays `Tiered(Install)`. Red on main before M3b-S5: every
 // step here was `Tiered(Migrate)` or `Tiered(Install)`.
 @test

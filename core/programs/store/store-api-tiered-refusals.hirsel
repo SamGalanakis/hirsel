@@ -1,9 +1,8 @@
-pub type TieredRefusal: shareable + cross = Memory | Migrate | Export | Install | Authority | Tail
+pub type TieredRefusal: shareable + cross = Memory | Export | Install | Authority | Tail
 
 pub fn tiered_refusal_text(reason: TieredRefusal) -> String {
     string.from(match reason {
         Memory => "a memory store cannot use Tiered residency",
-        Migrate => "a hot Migrate cannot build a Tiered table or index; prepare and install the release",
         Export => "a store with Tiered collections cannot export",
         Install => "a store with Tiered collections cannot install a release",
         Authority => "archival requires a bucket authority",
@@ -23,17 +22,6 @@ fn store_has_tiered(db: Db) -> bool {
         }
     }
     false
-}
-
-// A hot Migrate has no Tiered build yet (§13.10a "Hot Tiered builds",
-// M3b-S5b): a step that would queue a DeferredMigrate or a deferred Tiered
-// index build refuses before it changes the plan. Only the prepare child,
-// which cuts the build, defers one.
-fn refuse_hot_tiered_build(plan: SchemaPlan, tiered: bool) -> Result[(), Error] {
-    if tiered && !plan.schema.defer_tiered {
-        return Error(Tiered(Migrate))
-    }
-    Ok(())
 }
 
 fn require_tiered_storage(db: Db) -> Result[(), Error] {

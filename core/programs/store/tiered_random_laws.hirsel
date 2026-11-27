@@ -246,8 +246,7 @@ fn random_residency_round_trip(mut db: Db, rows: Table[u64, Bytes], model: Rando
 
 // L69's two tables: `rows`, a Tiered table of RANDOM_ROWS rows emitted Cold
 // into one pack as compact_cold_table_of builds it, and `marks`, a Memory
-// table of MARK_ROWS rows. Both are declared before `rows` turns Tiered,
-// since a Tiered store refuses a schema change (§13.10, Tiered(Migrate)).
+// table of MARK_ROWS rows. Both are declared before `rows` turns Tiered.
 fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[(Table[u64, Bytes], Table[u64, Bytes]), Error] waits {
     let mut db = open(tasks, d, c, r, clone(options))?
     let (take rows, take marks) = law_pair(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes(), "marks", std.codec.key_u64(), std.codec.of_bytes())?

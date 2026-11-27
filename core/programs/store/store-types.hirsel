@@ -41,7 +41,7 @@ pub type HostStreamIdRep: shareable + cross {
     lo: u64
 }
 
-pub type TieredRefusalRep: shareable + cross = Memory | Migrate | Export | Install | Authority | Tail
+pub type TieredRefusalRep: shareable + cross = Memory | Export | Install | Authority | Tail
 
 pub type StreamRefusalRep: shareable + cross = WeakLevels | Overlap | Bound(StreamFieldRep)
 

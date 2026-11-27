@@ -1,6 +1,5 @@
-// L102 (g) (§13.10a "Hot Tiered builds", v2.171 F3): a `Backfilling` Memory
-// index on a table made Tiered, rebuilt by a hot Migrate whose source read
-// goes through the pager. The shared fixtures are in tiered_hot_migrate_laws.
+// L102 (g) and the preview of hot Tiered builds (§13.10a "Hot Tiered
+// builds"). The shared fixtures are in tiered_hot_migrate_laws.
 // L102 (g) fixture: `wide` holds L102_G_ROWS values of L102_G_VALUE bytes,
 // so its rows alone pass the Tiered Memory room L102_G_ROOM.
 const L102_G_ROWS: u64 = 20000
@@ -154,4 +153,68 @@ fn test_l102_hot_memory_index(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     l102_g_index(again, reopened_wide, string.from("by_w"), false)?
     l102_stamps(both, again, reopened_wide.id)?
     close(take again)
+}
+
+// The preview's release: `rows` moved to `moved` (from `hot_migrate`).
+fn l102_preview_moved(mut decl: Declare) -> Result[(), Error] {
+    let moved_decl = declare_table(mut decl, "moved", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take moved_decl)?
+    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other_decl)?
+    Ok(())
+}
+
+// The preview's release: `by_v` added on the Tiered `rows`.
+fn l102_preview_indexed(mut decl: Declare) -> Result[(), Error] {
+    let mut rows_decl = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = index(mut decl, mut rows_decl, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let _ = finish(mut decl, take rows_decl)?
+    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other_decl)?
+    Ok(())
+}
+
+// The one backfill a hot Tiered build previews: `Deferred` with the 500
+// seeded source rows, nothing read or written, and no failure.
+fn l102_deferred(preview: MigrationPreview, name: String, ix: Option[String]) -> bool {
+    if let Some(_) = preview.failure {
+        return false
+    }
+    if list.len(preview.backfills) != 1 {
+        return false
+    }
+    let backfill = preview.backfills[0]
+    let Deferred(rows) = backfill.outcome else {
+        return false
+    }
+    rows == 500u64 && backfill.read == 0u64 && backfill.written == 0u64 && backfill.table == name && backfill.index == ix
+}
+
+// §13.10a "Hot Tiered builds" (ruling 1, closing 3224 open question 1):
+// `preview_migration` cannot cut, so a step that needs a hot Tiered build, a
+// `migrate_table` from the Tiered `rows` or a new index on it, previews as
+// `Deferred` carrying the source's 500 rows from its collection descriptor,
+// with read and written 0. Neither preview moves the head, lists an owner-3
+// pin or changes a file, and `rows` still holds its model rows. Red on main:
+// both previews fail `Tiered(Migrate)`.
+@test
+fn test_l102_preview_deferred(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut db = open(tasks, directory, c, r, hot_options(0)?)?
+    let _ = hot_seed(mut db, 500)?
+    let before = refusal_directory(directory)
+    let head = version(snapshot(db))
+    let moved = preview_migration(db, tasks, Some(code.describe(hot_migrate)), code.describe(l102_preview_moved))?
+    if !l102_deferred(moved, string.from("moved"), None) {
+        fail("L102 preview: the Tiered migrate_table is not one Deferred(500) backfill")
+    }
+    let indexed = preview_migration(db, tasks, None, code.describe(l102_preview_indexed))?
+    if !l102_deferred(indexed, string.from("rows"), Some(string.from("by_v"))) {
+        fail("L102 preview: the index on the Tiered table is not one Deferred(500) backfill")
+    }
+    if head != version(snapshot(db)) || l102_owner3_pin(db) || !refusal_directory_unchanged(directory, before) {
+        fail("L102 preview: a preview changed the store")
+    }
+    hot_rows(mut db, string.from("rows"), 500)?
+    close(take db)
 }

@@ -121,7 +121,7 @@ store@1/store/diff_leaves_oracle src=a3839c7eb8d3b5dc sig=36f11090d56559d6 run=c
 store@1/store/directory_grant_covers_journal_worker src=dc5f7bbc0f701f52 sig=459fc57abbeb8f16 run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/directory_writer_need_is_sizing_boundary src=570306b3f78e1ec2 sig=c49266384d3aeb34 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_pack_bound src=357b99ec74c26b9c sig=2989cd1b0f884b5a run=aa75ab2775f5e821 bug=- oracle=- rows=pending
-store@1/store/disk_test_activation_rewrites src=966ef256cc0e5f8e sig=d9e63af9a4b995e1 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/disk_test_activation_rewrites src=966ef256cc0e5f8e sig=403eb5469711845b run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_blob_threshold src=8fbb1166ff31a2e8 sig=ca04932109b87d82 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_branches src=c00698a063770516 sig=5566043fbd1ba4e4 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_db src=ce405cbe0484560e sig=4843bc7072d338bc run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -280,7 +280,7 @@ store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=d39f6aeeda46e14c ru
 store@1/store/test_frame_size src=2015f8b5d9792d13 sig=6db4d6a5097865a4 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=6b5e46ccc29cf8f5 sig=7b7766de29be383c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frozen_format_corpus src=86790b3f8db54565 sig=2fe4fd485f647ed4 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-store@1/store/test_index_build_law src=1b5c6343ba158df3 sig=724fb5198dfee453 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_index_build_law src=1b5c6343ba158df3 sig=c40da64bf9a3c2cc run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_catch_up_law src=31a39e484001d053 sig=1682f5bf57ddba10 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_declaration_laws src=a01b23afc5a3b813 sig=105d4557be12a49d run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_drift_counted src=87f3ce1d9896db00 sig=a5b851efae694c73 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
@@ -309,6 +309,7 @@ store@1/store/test_l102_hot_migrate_identity src=9b6a817513a5b585 sig=cdbfc6c6f5
 store@1/store/test_l102_hot_migrate_merge src=5b8f3e3c1f11a124 sig=cdbfc6c6f596318c run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_migrate_untouched src=5403a4fe09226db0 sig=a7efb7b2f71c17a8 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_unique_conflict src=5ee7c8aea0203a57 sig=48124e2e8c1766ee run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/test_l102_preview_deferred src=5dbc8be98ca1bbf3 sig=504f2e143176b056 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l62_attempt_touch_order src=946681123adf6327 sig=c8738979bd930d6e run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l62_batch_error_follows_touch src=b133212ee023536f sig=9f763c2bc0cc2d31 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_initial_change_pages_resolve_tiered_rows src=7d815f779bfe6d31 sig=8c7d81399e8de1b9 run=a6b003f729117be3 bug=- oracle=- rows=pending
@@ -453,7 +454,7 @@ store@1/store/test_memory_identity src=41c1ba7d6c7bf800 sig=2d5f56aba1443d62 run
 store@1/store/test_memory_no_frame_limit src=ce095ddf58d86fd0 sig=d30221b4028b4fd5 run=ad14684581476a83 bug=- oracle=- rows=pending
 store@1/store/test_migrate src=1e560de7814c68e3 sig=4d98f504b9305015 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_migration_list_collections src=90697768dd1da7af sig=ccb6bdbd2efdeeaf run=c9049a952ba23a49 bug=- oracle=- rows=pending
-store@1/store/test_migration_preview_conflict src=cfa247ace9f3330b sig=1b1efb5eb800677f run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/test_migration_preview_conflict src=cfa247ace9f3330b sig=8e0b68d0e658bc9a run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_model src=75badd533e187d89 sig=06cdfa146bbc0de6 run=579dcac8588fe904 bug=- oracle=- rows=pending
 store@1/store/test_node_ids src=eb3c38e2a8dd0c99 sig=f572aba34092fcc2 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_overwrite_account src=8a6d3cd5dc9b835b sig=14fe4d506cce15f0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
@@ -509,7 +510,7 @@ store@1/store/test_typed_read_laws src=60c360775225a835 sig=90153b5e8eba1e02 run
 store@1/store/test_typed_resident src=d79de0b48325fc1b sig=fd8d9280e5f16419 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_snapshot_task src=64478ff6b46e55a2 sig=123e073e9ff3d00e run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_unique_conflict_atomic src=e122f192900ed384 sig=2b083a5fa8cd2ffe run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/tiered_l70_refusals src=9c1b5980d4f3a0b6 sig=063cbbb2b3dc4a10 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/tiered_l70_refusals src=9c1b5980d4f3a0b6 sig=db1d75ba976f8130 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/trim_and_table_frame src=3276ab6c505d6f93 sig=3437ab56eddcf61f run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/tx_pop_and_range_oracle src=25f78287225be270 sig=9c905ffd3eabc2ee run=e0b7a0a702e2cf42 bug=- oracle=- rows=pending
 store@1/store/tx_pop_linear_steps src=f8b39cc172c04d27 sig=22523be7b144eb5f run=aff7b6b8625190d8 bug=- oracle=- rows=pending

@@ -36,9 +36,10 @@ pub type SchemaPlan: send {
     retained: bool,
     changed: bool,
     superseded: List[u32],
-    // Whether a Tiered build may be queued: only in the prepare child, whose
-    // write_prepared and run_deferred_migrates cut it (§13.10a). A hot
-    // Migrate has no Tiered build (lane 3224) and refuses Tiered(Migrate).
+    // Whether Tiered builds are deferred, set only by `declare_export`: the
+    // prepare child cuts them in `write_prepared` and `run_deferred_migrates`;
+    // a hot Migrate builds them through writer cuts under the build pin
+    // (§13.10a "Hot Tiered builds").
     defer_tiered: bool,
     // Each declared Log's retention, in declaration order (§14.4a). Only a
     // whole declaration's install (`seal`, an activation) binds it.

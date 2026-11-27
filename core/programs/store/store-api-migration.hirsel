@@ -150,7 +150,10 @@ pub type ConflictKeys: send {
     second: Bytes
 }
 
-pub type BackfillOutcome: send = Filled | Conflict(ConflictKeys)
+// `Deferred(rows)`: a hot Tiered build (§13.10a), which the preview cannot
+// run because only writer cuts build it; `rows` is the source's row count from
+// its collection descriptor, and the backfill's read and written stay 0.
+pub type BackfillOutcome: send = Filled | Conflict(ConflictKeys) | Deferred(u64)
 
 pub type MigrationBackfill: send {
     table: String,

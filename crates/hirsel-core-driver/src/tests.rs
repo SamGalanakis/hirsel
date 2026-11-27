@@ -3084,17 +3084,16 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     const TUPLE: &str = "fn pair() -> (u64, u64) { (1u64, 2u64) }\n";
     let libraries = tempfile::tempdir().unwrap();
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
-    let without = |maker: &str, next: char| {
+    let without = |maker: &str| {
         let copy = libraries.path().join(maker);
         copy_libraries(&shipped, &copy, &|text| {
-            let text = text.replace(
-                &format!("pub fn {maker}{next}"),
-                &format!("pub fn {maker}_renamed{next}"),
-            );
+            // Keep explicit calls bound while removing the implicit lookup name.
+            let renamed = format!("{maker}_renamed");
+            let text = text
+                .replace(&format!("fn {maker}["), &format!("fn {renamed}["))
+                .replace(&format!("{maker}("), &format!("{renamed}("));
             if maker == "of_list" {
-                // The simulation trace still needs its List[A] codec. Name
-                // the renamed maker directly so this fixture can isolate the
-                // automatic lookup used when lowering the test's List body.
+                // Give the simulation trace its List[A] codec explicitly.
                 text.replace(
                     "codec.of() : codec.Codec[List[A]]",
                     "codec.of_list_renamed() : codec.Codec[List[A]]",
@@ -3105,9 +3104,9 @@ fn program_inputs_rebuild_bodies_like_fresh() {
         });
         copy
     };
-    let renamed = without("of_u64", '(');
-    let no_list = without("of_list", '[');
-    let no_schema = without("schema_of", '[');
+    let renamed = without("of_u64");
+    let no_list = without("of_list");
+    let no_schema = without("schema_of");
     let cases = [
         ("std's u64 maker leaves", CODEC, &shipped, &renamed, false),
         ("std's u64 maker returns", CODEC, &renamed, &shipped, true),

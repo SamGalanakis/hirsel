@@ -1,0 +1,54 @@
+// Shape 0 parks one empty helper per Unit. Shape 1 keeps 1024 payload bytes
+// live across the receive. Shape 2 holds a registered compute Place per list
+// entry. All dormant Places share the same code and have never run a call.
+fn parked(take live: bool) -> u64 waits {
+    let mut state: Bytes = list.new()
+    if live {
+        list.fill(mut state, 1024u64, 1u8)
+    }
+    let (keep, inbox): (Client[u8], Inbox[u8]) = result.unwrap(conn.new(1u64, bytes 0u64))
+    let got = conn.receive(inbox)
+    let _ = conn.try_send(keep, 0u8)
+    let base: u64 = if live { int.widen(state[0]) } else { 0u64 }
+    match got {
+        Ok(v) => base + int.widen(v),
+        Error(_) => base,
+    }
+}
+
+fn entry(take x: u64) -> Result[u64, Capacity] {
+    Ok(x)
+}
+
+fn await_sample(input: Stdin, out: Stdout) waits {
+    result.unwrap(stdout.write(out, "ready\n"))
+    let mut release: Bytes = list.with_capacity(1u64)
+    let _ = stdin.read(input, mut release, Never)
+}
+
+pub fn main(tasks: Tasks, input: Stdin, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(ss) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let Some(ns) = args.get(argv, 1) else { return Error(Exit(status: 2)) }
+    let shape = result.unwrap(std.int.parse_uint(ss, 10u32))
+    let n = result.unwrap(std.int.parse_uint(ns, 10u32))
+    if shape == 2u64 {
+        let mut places: List[runner.Registry[(), ()]] = list.with_capacity(n)
+        for _ in 0u64 .. n {
+            let mut place: runner.Registry[(), ()] = runner.registry()
+            result.unwrap(runner.compute(mut place, code.describe(entry), 4096u64, runner.DEFAULT_STEPS))
+            list.push(mut places, take place)
+        }
+        await_sample(input, out)
+        if list.len(places) != n { return Error(Exit(status: 1)) }
+    } else {
+        let unit_bytes = if shape == 1u64 { 4096u64 } else { 1024u64 }
+        let mut handles: List[Task[u64]] = list.with_capacity(n)
+        for _ in 0u64 .. n {
+            let handle = result.unwrap(task.spawn_unit(tasks, bytes unit_bytes, shape == 1u64, parked))
+            list.push(mut handles, take handle)
+        }
+        await_sample(input, out)
+        if list.len(handles) != n { return Error(Exit(status: 1)) }
+    }
+    Ok(())
+}

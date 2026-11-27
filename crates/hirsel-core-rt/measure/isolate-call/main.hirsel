@@ -44,7 +44,7 @@ fn cause_number(cs: Causes) -> u32 {
             Unwrap => 4u32,
             Fail(_) => 5u32,
             Cancelled => 6u32,
-            Capacity => 7u32,
+            Capacity(_) => 7u32,
             OutOfTime => 8u32,
         }
     }
@@ -99,11 +99,7 @@ fn key_of[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Co
 pub fn register[A, R](mut r: Registry, f: StaticFn[fn(take A) -> Result[R, Capacity]], take ca: std.codec.Codec[A], take cr: std.codec.Codec[R]) -> Result[(), std.codec.EncodeError] {
     let (take key, take d) = key_of(f, ca, cr)?
     let made = fn(arg: Bytes, budget: u64) -> Outcome { adapt(f, ca, cr, arg, budget) }
-    let run = match made {
-        Ok(take g) => take g,
-        Error((c, _)) => return Error(c),
-    }
-    map.insert(mut r.slots, take key, Slot(run: take run))
+    map.insert(mut r.slots, take key, Slot(run: take made))
     list.push(mut r.described, take d)
     Ok(())
 }
@@ -122,6 +118,24 @@ pub fn call(r: Registry, key: Bytes, arg: Bytes, budget: u64) -> Outcome {
 
 fn set(take x: u64) -> Result[bool, Capacity] {
     Ok(x % 2u64 == 1u64)
+}
+
+fn null_body(take x: u64) -> u64 {
+    x
+}
+
+// P2's typed contained-call shape: one typed argument and result, no codec,
+// inside byte and step bounds and isolate. The body is null so the row is the
+// containment machinery, not user work.
+fn typed_contained(x: u64) -> u64 {
+    match (bound bytes 4096u64 {
+        bound steps 64u64 {
+            isolate(scoped fn() -> u64 { null_body(x) })
+        }
+    }) {
+        Ok(Ok(Ok(Ok(v)))) => v,
+        _ => 18446744073709551615u64,
+    }
 }
 
 type Req: send { key: Bytes, arg: Bytes }
@@ -183,6 +197,10 @@ pub fn main(tasks: Tasks, argv: Args) -> Result[(), Exit] waits {
                 _ => return Error(Exit(status: 5)),
             }
         }
+    } else if mode == 4u64 {
+        for i in 0u64 .. n {
+            if typed_contained(i) == i { trues += 1u64 }
+        }
     } else {
         let q: (Sender[Req], Receiver[Req]) = channel.new(64u64)
         let (qtx, qrx) = take q
@@ -201,5 +219,6 @@ pub fn main(tasks: Tasks, argv: Args) -> Result[(), Exit] waits {
         match channel.send(qtx, Req(key: list.new(), arg: list.new())) { Ok(()) => (), Error(_) => return Error(Exit(status: 9)) }
         let _ = task.join(take h)
     }
-    if trues == n / 2u64 { Ok(()) } else { Error(Exit(status: 1)) }
+    let expected = if mode == 4u64 { n } else { n / 2u64 }
+    if trues == expected { Ok(()) } else { Error(Exit(status: 1)) }
 }

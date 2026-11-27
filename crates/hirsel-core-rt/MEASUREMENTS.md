@@ -217,3 +217,19 @@ One local entry call: decode the argument, call the entry and encode the result 
 | the cell's charge returns at its handover | 1,532 | 3,018.5 |
 
 1e866455 added +57 per call: the parent-scope pin (+13 in `isolate_enter`, the price of the rule that a reservation keeps its parent scope alive) and a refund that ran after the handover, so it went through `settle`'s slow path on a merged record (+101 in `settle`, −41 in `Cell::drop`, −16 in `end_id`). That order only chose the limit that receives the cell's 32 bytes. Now the handover itself returns them: the record is its own root until then and the cell is its only charge, so `end_id` hands them to the live limit with the unused bytes (MEM-20), and no `settle` runs. **Line: LLVM at or under 1,540 and Cranelift at or under 3,034 per call (+0.5%).** `python3 crates/hirsel-core-rt/measure-isolate-call.py --hirsel <hirsel> --runtime <archive>` measures both and exits 1 over a line.
+
+## P0 in-process packing baseline
+
+On Linux, use a release Hirsel driver and the shipping runtime archive for both backends.
+
+```sh
+python3 crates/hirsel-core-rt/measure-isolate-call.py \
+  --hirsel <hirsel> --runtime <libhirsel_core_rt.a> \
+  --items calls metering parked layout codebytes --json-out packing-p0.json
+```
+
+The default `--items calls` runs the standing codec guard and the typed call.
+The full run also measures four loops with and without a step bound, samples
+minimal parked Units, Units with 1 KiB of live state, and dormant compute
+Registries, and records runtime layouts and incremental image bytes per
+registered compute entry. The JSON includes the host, revision, and sample loads.

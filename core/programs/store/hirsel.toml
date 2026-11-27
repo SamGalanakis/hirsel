@@ -954,7 +954,13 @@ limit = 536870912
 [tests.runs."store@1/store/test_l102_hot_migrate_untouched"]
 limit = 536870912
 
-[tests.runs."store@1/store/tiered_hot_index_build_refused"]
+[tests.runs."store@1/store/test_l102_hot_index_build"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l102_hot_unique_conflict"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l102_hot_chain"]
 limit = 536870912
 
 [tests.runs."store@1/store/tiered_l70_refusals"]

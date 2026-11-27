@@ -533,6 +533,28 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
             _ => Error(Exit(status: 76u8)),
         }
     }
+    if scenario == "hot-index-build" {
+        if phase == "init" {
+            l102_crash_init(d, c, r, tasks) ?=> |_| Exit(status: 77u8)
+            return Ok(())
+        }
+        if phase == "write" {
+            return match l102_index_crash_write(d, c, r, tasks) {
+                Ok(()) => {
+                    let _ = stdout.write(out, "DONE");
+                    Ok(())
+                },
+                Error(Io(_)) => Ok(()),
+                Error(Poisoned(_)) => Ok(()),
+                Error(_) => Error(Exit(status: 78u8)),
+            }
+        }
+        let required_new = option.unwrap(args.get(argv, 2u64)) == "new"
+        return match l102_index_crash_read(d, c, r, tasks, required_new) {
+            Ok(true) => Ok(()),
+            _ => Error(Exit(status: 79u8)),
+        }
+    }
     if scenario == "index-build" {
         if phase == "init" {
             index_build_init(d, c, r, tasks) ?=> |_| Exit(status: 71u8)

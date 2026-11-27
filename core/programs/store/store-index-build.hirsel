@@ -226,20 +226,34 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
         let mut rows = byte_cursor(plan.schema.roots.collections, Included(failure_result_from_rep(catalog.prefix(record.owner))?), failure_result_from_rep(catalog.prefix(record.owner + 1))?)?
         while let Some((take logical, raw)) = failure_result_from_rep(catalog.next_bytes(mut rows))? {
             read += 1
-            let primary = list.slice(logical, 4, list.len(logical))
-            let values = (extractor.extract)(raw, primary)?
-            for row in values.keys {
-                if list.len(row) > 4096 {
-                    return Error(Limit(Key))
-                }
-                let charge = entry(row, values.payload)
-                workspace = int.saturating_add(workspace, charge + 8)
-                failure_result_from_rep(catalog.over_ceiling(workspace, plan.schema.ceiling))?
-                failure_result_from_rep(types.capacity(list.try_reserve(mut extracted, 1)))?
-                list.push(mut extracted, std.page.Row(key: failure_result_from_rep(types.copied(list.slice(row, 4, list.len(row))))?, value: failure_result_from_rep(types.copied(values.payload))?, charge: charge))
-            }
+            extract_entries(mut extracted, mut workspace, plan.schema.ceiling, extractor, logical, raw)?
         }
     }
+    bulk_declared_index(mut plan, key, record, unique, take extracted, read, preview)
+}
+
+// One row's entries for a bottom-up build, each charged to `workspace` as it
+// is kept.
+fn extract_entries(mut extracted: List[std.page.Row], mut workspace: u64, ceiling: u64, extractor: RegisteredIndex, logical: Bytes, raw: Bytes) -> Result[(), Error] {
+    let primary = list.slice(logical, 4, list.len(logical))
+    let values = (extractor.extract)(raw, primary)?
+    for row in values.keys {
+        if list.len(row) > 4096 {
+            return Error(Limit(Key))
+        }
+        let charge = entry(row, values.payload)
+        workspace = int.saturating_add(workspace, charge + 8)
+        failure_result_from_rep(catalog.over_ceiling(workspace, ceiling))?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut extracted, 1)))?
+        list.push(mut extracted, std.page.Row(key: failure_result_from_rep(types.copied(list.slice(row, 4, list.len(row))))?, value: failure_result_from_rep(types.copied(values.payload))?, charge: charge))
+    }
+    Ok(())
+}
+
+// Sorts the extracted entries and builds the collection from them, which
+// replaces the one the record had (AP13).
+fn bulk_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, unique: bool, take found: List[std.page.Row], read: u64, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
+    let mut extracted = take found
     // The sort keeps rows of one key in primary order, so the first is the
     // owner the chunked builder kept. The pair reported is the one a scan in
     // primary order meets first: the least repeating primary key.
@@ -542,15 +556,26 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
     }
     let mut proposed = take record
     let owner_tiered = table_is_tiered(plan.schema.roots.collections, t.id)?
-    refuse_hot_tiered_build(plan, owner_tiered || (!new_index && table_is_tiered(plan.schema.roots.collections, proposed.id)?))?
+    if let Some(_) = plan.preview {
+        refuse_hot_tiered_build(plan, owner_tiered || (!new_index && table_is_tiered(plan.schema.roots.collections, proposed.id)?))?
+    }
+    // A hot build draws a Tiered target's two scratch ids with it (§13.10a).
+    let hot = !plan.schema.defer_tiered
+    let mut scratch = 0u32
     if new_index {
         let mut meta = catalog_entry_in(plan.schema.roots.catalog, t.catalog_key)?
         if meta.id != t.id {
             return Error(Stale(t.id))
         }
-        let Some(next_table) = int.checked_add(proposed.id, 1u32) else {
+        let drawn = if owner_tiered && hot {
+            3u32
+        } else {
+            1u32
+        }
+        let Some(next_table) = int.checked_add(proposed.id, drawn) else {
             return Error(Limit(Ids))
         }
+        scratch = proposed.id + 1u32
         set_index_state(mut proposed, Backfilling(None))?
         let raw = encode_catalog(proposed)?
         let mut live_bytes = int.saturating_add(126, catalog_recharge(plan.schema.live, plan.schema.roots, key, raw, plan.schema.retained))
@@ -572,6 +597,13 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
     }
     let current = catalog_entry_in(plan.schema.roots.catalog, key)?
     let target_tiered = table_is_tiered(plan.schema.roots.collections, current.id)?
+    if target_tiered && hot && !new_index {
+        scratch = plan.schema.next_table
+        let Some(next_table) = int.checked_add(scratch, 2u32) else {
+            return Error(Limit(Ids))
+        }
+        plan.schema.next_table = next_table
+    }
     if owner_tiered || target_tiered {
         let preview_slot: Option[u64] = if let Some(mut backfills) = plan.preview {
             let slot = list.len(backfills)
@@ -582,8 +614,10 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
             None
         }
         failure_result_from_rep(types.capacity(list.try_reserve(mut plan.pending_indexes, 1)))?
-        list.push(mut plan.pending_indexes, DeferredIndexBuild(catalog_key: failure_result_from_rep(types.copied(key))?, name: failure_result_from_rep(catalog.named(name))?, record_raw: encode_catalog(current)?, preview_slot: preview_slot))
+        list.push(mut plan.pending_indexes, DeferredIndexBuild(catalog_key: failure_result_from_rep(types.copied(key))?, name: failure_result_from_rep(catalog.named(name))?, record_raw: encode_catalog(current)?, scratch: scratch, preview_slot: preview_slot))
         plan.step_drift = true
+        // A queued build publishes even when it resumes an unchanged record.
+        plan.schema.changed = true
         return Ok(())
     }
     let preview = if let Some(_) = plan.preview {

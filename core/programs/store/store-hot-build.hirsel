@@ -15,19 +15,31 @@ type HotBuild {
     workspace: u64,
 }
 
+// A source's share of W₀: its `row_bytes` + 8 × `rows` on main's head. A
+// source this call builds (a migrate target) is not on the head; its own
+// source was counted.
+fn hot_source_bytes(head: Arc[std.page.Page], id: u32) -> Result[u64, Error] {
+    let Some(raw) = std.page.lookup(head, failure_result_from_rep(catalog.prefix(id))?) else {
+        return Ok(0u64)
+    }
+    let fields = pages.collection_descriptor(raw)
+    Ok(int.saturating_add(fields.row_bytes, int.saturating_mul(8u64, fields.rows)))
+}
+
 // F5: admits W₀ = 126 × (built descriptors) + min(`dirty_bytes`, Σ over the
 // sources of (`row_bytes` + 8 × `rows`)) on top of the plan's live bytes,
 // against the writer's resident admission, before any build draw.
-fn hot_admit(db: Db, plan: SchemaPlan) -> Result[(u64, u64), Error] {
+fn hot_admit(db: Db, plan: SchemaPlan, indexes: List[DeferredIndexBuild]) -> Result[(u64, u64), Error] {
     let head = pages.holder_heads(db.holders)[0u64].roots.collections.root
     let mut sources = 0u64
     for job in plan.pending_migrates {
-        if let Some(raw) = std.page.lookup(head, failure_result_from_rep(catalog.prefix(job.from_id))?) {
-            let fields = pages.collection_descriptor(raw)
-            sources = int.saturating_add(sources, int.saturating_add(fields.row_bytes, int.saturating_mul(8u64, fields.rows)))
-        }
+        sources = int.saturating_add(sources, hot_source_bytes(head, job.from_id)?)
     }
-    let base = int.saturating_add(plan.schema.live, int.saturating_mul(126u64, list.len(plan.pending_migrates)))
+    for job in indexes {
+        sources = int.saturating_add(sources, hot_source_bytes(head, decode_catalog(job.record_raw)?.owner)?)
+    }
+    let descriptors = list.len(plan.pending_migrates) + list.len(indexes)
+    let base = int.saturating_add(plan.schema.live, int.saturating_mul(126u64, descriptors))
     let workspace = order.min(disk_state(db).options.dirty_bytes, sources)
     failure_result_from_rep(catalog.over_ceiling(int.saturating_add(base, workspace), available_resident(db)))?
     Ok((base, workspace))
@@ -46,7 +58,20 @@ fn hot_grow(db: Db, mut work: HotBuild, charge: u64) -> Result[(), Error] {
 // Runs the plan's hot Tiered builds and grafts them into the plan. Returns the
 // listed build pin's slot, which the publish cut drops.
 fn run_hot_builds(mut db: Db, mut plan: SchemaPlan) -> Result[Option[u64], Error] waits {
-    let (base, workspace) = hot_admit(db, plan)?
+    // AP13 builds each Memory index on a Tiered owner in the plan first,
+    // before the stamp handover and the first build cut (v2.171 F3).
+    let mut tiered_indexes: List[DeferredIndexBuild] = list.new()
+    for take job in replace(mut plan.pending_indexes, list.new()) {
+        if table_is_tiered(plan.schema.roots.collections, decode_catalog(job.record_raw)?.id)? {
+            list.push(mut tiered_indexes, take job)
+        } else {
+            hot_memory_index(mut db, mut plan, take job)?
+        }
+    }
+    list.sort(mut tiered_indexes, fn(a: DeferredIndexBuild, b: DeferredIndexBuild) -> Order {
+        list.compare_bytes(a.catalog_key, b.catalog_key)
+    })
+    let (base, workspace) = hot_admit(db, plan, tiered_indexes)?
     // F2: the writer takes the plan's stamp counter before the first build
     // draw. No writer draw runs during staging, so the plan's is the larger.
     if plan.schema.next_node > pages.holder_next_node(db.holders) {
@@ -57,6 +82,9 @@ fn run_hot_builds(mut db: Db, mut plan: SchemaPlan) -> Result[Option[u64], Error
     let pending = replace(mut plan.pending_migrates, list.new())
     for take job in take pending {
         hot_build_migrate(mut db, mut work, mut plan, take job)?
+    }
+    for take job in take tiered_indexes {
+        hot_build_index(mut db, mut work, mut plan, take job)?
     }
     hot_graft(mut db, mut plan, work)?
     plan.schema.next_node = pages.holder_next_node(db.holders)
@@ -108,27 +136,72 @@ fn hot_put(mut db: Db, mut builder: StreamBuilder, mut map: pages.PageTree, id: 
     Ok(())
 }
 
+// What two rows of one key in a target mean (§13.10a): a migrate target's
+// duplicate is `Exists(target name)`; an entry index keeps the first, and a
+// `Unique` index whose two rows name different owners is `Conflict(name)`;
+// an aggregate's equal group keys combine, as `merged_groups` combines them.
+type HotKeys = MigrateKeys | EntryKeys(bool) | GroupKeys
+
+// The row kept for a key met twice, or the refusal.
+fn hot_combine(keys: HotKeys, name: String, take kept: Bytes, again: Bytes) -> Result[Bytes, Error] {
+    match keys {
+        MigrateKeys => Error(Exists(failure_result_from_rep(catalog.named(name))?)),
+        EntryKeys(unique) => {
+            if unique && list.slice(kept, 4, unique_owner_end(kept)?) != list.slice(again, 4, unique_owner_end(again)?) {
+                return Error(Conflict(failure_result_from_rep(catalog.named(name))?))
+            }
+            Ok(take kept)
+        },
+        GroupKeys => {
+            let (members, sum) = group_totals(kept)?
+            let (more, part) = group_totals(again)?
+            let Some(total) = int.checked_add(sum, part) else {
+                return Error(Limit(Value))
+            }
+            totals_bytes(members + more, total)
+        },
+    }
+}
+
 // One Tiered target under build (§13.10a "sorted runs, then bottom up").
 // While each run's first key is above the last key streamed, runs stream
 // straight into `builder`. The first run that is not turns the build to the
 // merge: the tree built so far moves to the second scratch id as run 0, and
 // every later run is appended to the first scratch id, keyed by run number
-// (u32 big-endian) then key, through `scratch`.
+// (u32 big-endian) then key, through `scratch`. The two scratch ids,
+// `scratch_id` and the one after it, were drawn at staging.
 type HotTarget {
     id: u32,
+    scratch_id: u32,
     name: String,
+    keys: HotKeys,
     builder: StreamBuilder,
     last_key: Option[Bytes],
     scratch: Option[StreamBuilder],
     runs: u32,
 }
 
-fn hot_target(db: Db, map: pages.PageTree, id: u32, kind: u8, name: String) -> HotTarget {
-    HotTarget(id: id, name: clone(name), builder: new_stream_builder(id, kind, map.inline, disk_state(db).options.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN)), last_key: None, scratch: None, runs: 0u32)
+fn hot_target(db: Db, map: pages.PageTree, id: u32, scratch_id: u32, kind: u8, name: String, keys: HotKeys) -> HotTarget {
+    HotTarget(id: id, scratch_id: scratch_id, name: clone(name), keys: keys, builder: new_stream_builder(id, kind, map.inline, disk_state(db).options.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN)), last_key: None, scratch: None, runs: 0u32)
 }
 
-fn hot_duplicate(name: String) -> Result[(), Error] {
-    Error(Exists(failure_result_from_rep(catalog.named(name))?))
+// Sorts one run and settles its rows of one key by the target's rule.
+fn hot_settle(take pending: List[std.page.Row], keys: HotKeys, name: String) -> Result[List[std.page.Row], Error] {
+    let mut rows = take pending
+    sort_bulk_rows(mut rows)?
+    let mut kept: List[std.page.Row] = list.new()
+    failure_result_from_rep(types.capacity(list.try_reserve(mut kept, list.len(rows))))?
+    for take row in take rows {
+        let std.page.Row(key: take key, value: take value, charge: charge) = take row
+        let n = list.len(kept)
+        if n > 0 && kept[n - 1u64].key == key {
+            let held = replace(mut kept[n - 1u64].value, list.new())
+            kept[n - 1u64].value = hot_combine(keys, name, take held, value)?
+            continue
+        }
+        list.push(mut kept, std.page.Row(key: take key, value: take value, charge: charge))
+    }
+    Ok(take kept)
 }
 
 // Sorts one run and streams it into the target, or appends it to the
@@ -137,13 +210,7 @@ fn hot_run(mut db: Db, mut map: pages.PageTree, mut target: HotTarget, mut pendi
     if list.len(pending) == 0 {
         return Ok(())
     }
-    let mut rows = replace(mut pending, list.new())
-    sort_bulk_rows(mut rows)?
-    for i in 1u64 .. list.len(rows) {
-        if rows[i - 1u64].key == rows[i].key {
-            return hot_duplicate(target.name)
-        }
-    }
+    let mut rows = hot_settle(replace(mut pending, list.new()), target.keys, target.name)?
     let ordered = match target.last_key {
         Some(previous) => rows[0u64].key > previous,
         None => true,
@@ -159,10 +226,10 @@ fn hot_run(mut db: Db, mut map: pages.PageTree, mut target: HotTarget, mut pendi
         // The turn to the merge: the tree so far becomes run 0.
         let reset = new_stream_builder(target.id, target.builder.kind, map.inline, target.builder.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN))
         let mut prefix_run = replace(mut target.builder, take reset)
-        prefix_run.id = target.id + 2u32
-        hot_put(mut db, mut prefix_run, mut map, target.id + 2u32)?
+        prefix_run.id = target.scratch_id + 1u32
+        hot_put(mut db, mut prefix_run, mut map, target.scratch_id + 1u32)?
         failure_result_from_rep(pages.canonical_tree(mut map))?
-        target.scratch = Some(new_stream_builder(target.id + 1u32, 1u8, map.inline, target.builder.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN)))
+        target.scratch = Some(new_stream_builder(target.scratch_id, 1u8, map.inline, target.builder.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN)))
         target.runs = 1u32
     }
     let Some(scratch0) = replace(mut target.scratch, None) else {
@@ -242,13 +309,31 @@ fn hot_advance(db: Db, map: pages.PageTree, mut source: HotSource) -> Result[(),
     Ok(())
 }
 
-// Merges `sources` in key order into `out`, each key prefixed by `number`
-// when `out` is the scratch builder. Equal keys are a duplicate.
-fn hot_merge(mut db: Db, mut map: pages.PageTree, id: u32, name: String, mut sources: List[HotSource], mut out: StreamBuilder, number: Option[u32]) -> Result[(), Error] waits {
+// Pushes one merged row into `out`, its key prefixed by `number` when `out`
+// is the scratch builder.
+fn hot_emit(mut db: Db, mut map: pages.PageTree, id: u32, mut out: StreamBuilder, number: Option[u32], take key: Bytes, take value: Bytes) -> Result[(), Error] waits {
+    let mut full = failure_result_from_rep(catalog.prefix(id))?
+    list.append(mut full, key)
+    let charge = entry(full, value)
+    let keyed = match number {
+        Some(n) => {
+            let mut run_key: Bytes = list.with_capacity(4 + list.len(key))
+            list.put_word_be(mut run_key, n)
+            list.append(mut run_key, key)
+            take run_key
+        },
+        None => take key,
+    }
+    hot_push(mut db, mut out, mut map, std.page.Row(key: take keyed, value: take value, charge: charge))
+}
+
+// Merges `sources` in key order into `out`. Rows of one key are settled by
+// `keys` before the row is pushed, so a group spanning runs combines once.
+fn hot_merge(mut db: Db, mut map: pages.PageTree, id: u32, name: String, keys: HotKeys, mut sources: List[HotSource], mut out: StreamBuilder, number: Option[u32]) -> Result[(), Error] waits {
     for i in 0u64 .. list.len(sources) {
         hot_advance(db, map, mut sources[i])?
     }
-    let mut merged_last: Option[Bytes] = None
+    let mut held: Option[(Bytes, Bytes)] = None
     loop {
         let mut least: Option[u64] = None
         for i in 0u64 .. list.len(sources) {
@@ -266,32 +351,25 @@ fn hot_merge(mut db: Db, mut map: pages.PageTree, id: u32, name: String, mut sou
             }
         }
         let Some(i) = least else {
-            return Ok(())
+            break
         }
         let Some((take key, take value)) = replace(mut sources[i].head, None) else {
-            return Ok(())
+            break
         }
-        if let Some(previous) = merged_last {
-            if previous == key {
-                return hot_duplicate(name)
-            }
-        }
-        merged_last = Some(failure_result_from_rep(types.copied(key))?)
-        let mut full = failure_result_from_rep(catalog.prefix(id))?
-        list.append(mut full, key)
-        let charge = entry(full, value)
-        let keyed = match number {
-            Some(n) => {
-                let mut run_key: Bytes = list.with_capacity(4 + list.len(key))
-                list.put_word_be(mut run_key, n)
-                list.append(mut run_key, key)
-                take run_key
-            },
-            None => take key,
-        }
-        hot_push(mut db, mut out, mut map, std.page.Row(key: take keyed, value: take value, charge: charge))?
         hot_advance(db, map, mut sources[i])?
+        if let Some((take kept_key, take kept_value)) = take held {
+            if kept_key == key {
+                held = Some((take kept_key, hot_combine(keys, name, take kept_value, value)?))
+                continue
+            }
+            hot_emit(mut db, mut map, id, mut out, number, take kept_key, take kept_value)?
+        }
+        held = Some((take key, take value))
     }
+    if let Some((take key, take value)) = take held {
+        hot_emit(mut db, mut map, id, mut out, number, take key, take value)?
+    }
+    Ok(())
 }
 
 // Ends the target: puts its streamed tree, or merges its runs into it. When
@@ -306,20 +384,20 @@ fn hot_finish(mut db: Db, mut work: HotBuild, take target0: HotTarget) -> Result
         return Ok(())
     }
     let mut scratch = scratch0
-    hot_put(mut db, mut scratch, mut work.map, target.id + 1u32)?
+    hot_put(mut db, mut scratch, mut work.map, target.scratch_id)?
     let height = list.len(scratch.levels) + 1u64
     let fan_in = order.max(2u64, int.saturating_sub(disk_state(db).options.writer_pin_bytes, VALUE_LIMIT) / (height * 16384u64))
     let mut queue: List[HotSource] = list.new()
-    list.push(mut queue, hot_source(failure_result_from_rep(catalog.prefix(target.id + 2u32))?, failure_result_from_rep(catalog.prefix(target.id + 3u32))?, 4u64))
+    list.push(mut queue, hot_source(failure_result_from_rep(catalog.prefix(target.scratch_id + 1u32))?, failure_result_from_rep(catalog.prefix(target.scratch_id + 2u32))?, 4u64))
     for number in 1u32 .. target.runs {
-        let (take low, take high) = run_bounds(target.id + 1u32, number)?
+        let (take low, take high) = run_bounds(target.scratch_id, number)?
         list.push(mut queue, hot_source(take low, take high, 8u64))
     }
     // A pass merges every group of F runs into one output run of a fresh
     // scratch builder; the old scratch tree stays in the working map, and
     // pinned, until the pass puts the new one in its place.
     while list.len(queue) > fan_in {
-        let mut out = new_stream_builder(target.id + 1u32, 1u8, work.map.inline, scratch.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN))
+        let mut out = new_stream_builder(target.scratch_id, 1u8, work.map.inline, scratch.dirty_bytes, 1u64, 0u64, string.from(BUILD_PIN))
         let mut rest: List[HotSource] = list.new()
         let mut group: List[HotSource] = list.new()
         let total = list.len(queue)
@@ -329,24 +407,24 @@ fn hot_finish(mut db: Db, mut work: HotBuild, take target0: HotTarget) -> Result
             seen = seen + 1u64
             if list.len(group) == fan_in || seen == total {
                 let number = target.runs
-                hot_merge(mut db, mut work.map, target.id, target.name, mut group, mut out, Some(number))?
+                hot_merge(mut db, mut work.map, target.id, target.name, target.keys, mut group, mut out, Some(number))?
                 group = list.new()
                 target.runs = number + 1u32
-                let (take low, take high) = run_bounds(target.id + 1u32, number)?
+                let (take low, take high) = run_bounds(target.scratch_id, number)?
                 list.push(mut rest, hot_source(take low, take high, 8u64))
             }
         }
-        hot_put(mut db, mut out, mut work.map, target.id + 1u32)?
+        hot_put(mut db, mut out, mut work.map, target.scratch_id)?
         queue = take rest
     }
     let mut last_builder = replace(mut target.builder, new_stream_builder(target.id, 1u8, work.map.inline, 0u64, 1u64, 0u64, string.from(BUILD_PIN)))
-    hot_merge(mut db, mut work.map, target.id, target.name, mut queue, mut last_builder, None)?
+    hot_merge(mut db, mut work.map, target.id, target.name, target.keys, mut queue, mut last_builder, None)?
     hot_put(mut db, mut last_builder, mut work.map, target.id)?
     let mut draw = pages.holder_next_node(db.holders)
-    for gone in 1u32 .. 3u32 {
+    for gone in 0u32 .. 2u32 {
         let private_from = failure_result_from_rep(catalog.stamp_after(draw))?
         let mut drawn = private_from
-        let _ = failure_result_from_rep(catalog.drop_collection(mut work.map, target.id + gone, private_from, mut drawn))?
+        let _ = failure_result_from_rep(catalog.drop_collection(mut work.map, target.scratch_id + gone, private_from, mut drawn))?
         draw = drawn - 1
     }
     failure_result_from_rep(pages.canonical_tree(mut work.map))?
@@ -361,12 +439,25 @@ fn hot_finish(mut db: Db, mut work: HotBuild, take target0: HotTarget) -> Result
 fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take job: DeferredMigrate) -> Result[(), Error] waits {
     let dirty = disk_state(db).options.dirty_bytes
     let target_prefix = failure_result_from_rep(catalog.prefix(job.to_id))?
-    let mut target = hot_target(db, work.map, job.to_id, 1u8, job.to_name)
+    let mut target = hot_target(db, work.map, job.to_id, job.to_id + 1u32, 1u8, job.to_name, MigrateKeys)
     let mut kept: List[std.page.Row] = list.new()
     let mut charge = 0u64
-    let mut cursor: Option[Bytes] = None
+    // A source this call built (the middle of a chain A -> B -> C) is read
+    // from the working map; any other from main's head (F1).
+    let from_work = list.contains(work.built, job.from_id)
+    let low = failure_result_from_rep(catalog.prefix(job.from_id))?
+    let high = failure_result_from_rep(catalog.prefix(job.from_id + 1u32))?
+    let mut previous: Option[Bytes] = None
     loop {
-        let (take rows, done) = tiered_rows_after(db, job.from_id, cursor, INDEX_CHUNK)?
+        let (take rows, done) = if from_work {
+            work_rows(db, work.map, low, high, clone(previous), INDEX_CHUNK)?
+        } else {
+            let cursor: Option[Bytes] = match previous {
+                Some(seen) => Some(failure_result_from_rep(types.copied(list.slice(seen, 4, list.len(seen))))?),
+                None => None,
+            }
+            tiered_rows_after(db, job.from_id, cursor, INDEX_CHUNK)?
+        }
         for (logical, raw) in rows {
             let suffix = failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?
             if let Some((take key, take value)) = (job.convert)(suffix, raw)? {
@@ -381,7 +472,7 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
                     charge = 0
                 }
             }
-            cursor = Some(take suffix)
+            previous = Some(failure_result_from_rep(types.copied(logical))?)
         }
         if done {
             break
@@ -389,6 +480,13 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
     }
     hot_run(mut db, mut work.map, mut target, mut kept)?
     hot_finish(mut db, mut work, take target)?
+    // A chain's middle table is consumed: the graft never publishes it.
+    if from_work {
+        let consumed = job.from_id
+        list.retain(mut work.built, fn(id: u32) -> bool {
+            id != consumed
+        })
+    }
     // The source and its retired indexes leave the plan's map; the graft
     // supersedes them.
     let mut ids = pages.holder_next_node(db.holders)
@@ -404,6 +502,142 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
         }
     }
     pages.set_next_node(mut db.holders, ids)
+    Ok(())
+}
+
+// One Tiered index build, in catalog-key order after every migrate. The
+// owner's rows are read from the working map when this call built the owner
+// (an index on a migrate target), else from main's head as the last cut
+// published it, one chunk at a time. Each row's entries go into runs of at
+// most `dirty_bytes` of charge, built into the working map at the record's
+// id. An aggregate is rebuilt from an empty tree, each part a group row of
+// one member; a rebuilt index's old id is superseded.
+fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take job: DeferredIndexBuild) -> Result[(), Error] waits {
+    let record = decode_catalog(job.record_raw)?
+    let bindings = replace(mut plan.bindings, list.new())
+    let slot = find_binding_index(bindings, record.owner, record.id)?
+    let keys = match catalog_index(record)?.shape {
+        Entries(Unique) => EntryKeys(true),
+        Entries(Many) => EntryKeys(false),
+        Sums => GroupKeys,
+    }
+    let dirty = disk_state(db).options.dirty_bytes
+    let mut target = hot_target(db, work.map, record.id, job.scratch, 2u8, job.name, keys)
+    let from_work = list.contains(work.built, record.owner)
+    let low = failure_result_from_rep(catalog.prefix(record.owner))?
+    let high = failure_result_from_rep(catalog.prefix(record.owner + 1u32))?
+    let mut previous: Option[Bytes] = None
+    let mut kept: List[std.page.Row] = list.new()
+    let mut charge = 0u64
+    loop {
+        let (take rows, done) = if from_work {
+            work_rows(db, work.map, low, high, clone(previous), INDEX_CHUNK)?
+        } else {
+            let cursor: Option[Bytes] = match previous {
+                Some(seen) => Some(failure_result_from_rep(types.copied(list.slice(seen, 4, list.len(seen))))?),
+                None => None,
+            }
+            tiered_rows_after(db, record.owner, cursor, INDEX_CHUNK)?
+        }
+        for (logical, raw) in rows {
+            let primary = list.slice(logical, 4, list.len(logical))
+            let IndexValue(keys: take entry_keys, payload: take payload, sums: sums) = (bindings[slot].index.extract)(raw, primary)?
+            let mut part = 0u64
+            for take entry_key in take entry_keys {
+                if list.len(entry_key) > 4096 {
+                    return Error(Limit(Key))
+                }
+                let value = if let GroupKeys = keys {
+                    totals_bytes(1u64, sums[part])?
+                } else {
+                    failure_result_from_rep(types.copied(payload))?
+                }
+                part += 1
+                let row_charge = entry(entry_key, value)
+                charge = int.saturating_add(charge, row_charge + 8u64)
+                hot_grow(db, mut work, charge)?
+                list.push(mut kept, std.page.Row(key: failure_result_from_rep(types.copied(list.slice(entry_key, 4, list.len(entry_key))))?, value: take value, charge: row_charge))
+                if charge >= dirty {
+                    hot_run(mut db, mut work.map, mut target, mut kept)?
+                    charge = 0
+                }
+            }
+            previous = Some(failure_result_from_rep(types.copied(logical))?)
+        }
+        if done {
+            break
+        }
+    }
+    hot_run(mut db, mut work.map, mut target, mut kept)?
+    hot_finish(mut db, mut work, take target)?
+    plan.bindings = take bindings
+    let mut published = copied_record(record)?
+    set_index_state(mut published, Public)?
+    plan.schema.next_node = pages.holder_next_node(db.holders)
+    put_index_record(mut plan, job.catalog_key, published)?
+    pages.set_next_node(mut db.holders, plan.schema.next_node)
+    if let Some(_) = std.page.collection_slot(plan.staged_map.root, failure_result_from_rep(catalog.prefix(record.id))?) {
+        if !list.contains(plan.schema.superseded, record.id) {
+            failure_result_from_rep(types.capacity(list.try_reserve(mut plan.schema.superseded, 1)))?
+            list.push(mut plan.schema.superseded, record.id)
+        }
+    }
+    Ok(())
+}
+
+// A Memory index on a Tiered owner (§13.10a; a `Backfilling` Memory index
+// D-D7-2 kept on a table later made Tiered). AP13 rebuilds it whole in the
+// plan: its source is read through the pager one chunk at a time at main's
+// head, which no build cut has moved yet. An entry index is built bottom up;
+// an aggregate chunk by chunk from an empty tree.
+fn hot_memory_index(mut db: Db, mut plan: SchemaPlan, take job: DeferredIndexBuild) -> Result[(), Error] waits {
+    let _ = demote_index(mut plan, job.catalog_key)?
+    let record = catalog_entry_in(plan.schema.roots.catalog, job.catalog_key)?
+    let bindings = replace(mut plan.bindings, list.new())
+    let slot = find_binding_index(bindings, record.owner, record.id)?
+    let shape = catalog_index(record)?.shape
+    let mut cursor: Option[Bytes] = None
+    if let Sums = shape {
+        loop {
+            let current = catalog_entry_in(plan.schema.roots.catalog, job.catalog_key)?
+            if let Public = catalog_index(current)?.state {
+                break
+            }
+            let (take rows, done) = tiered_rows_after(db, record.owner, cursor, INDEX_CHUNK)?
+            if let Some((seen, _)) = list.last(rows) {
+                cursor = Some(failure_result_from_rep(types.copied(list.slice(seen, 4, list.len(seen))))?)
+            }
+            if let Some(_) = index_chunk(mut plan, job.catalog_key, take current, bindings[slot].index, rows, done, false, false)? {
+                return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
+            }
+        }
+        plan.bindings = take bindings
+        return Ok(())
+    }
+    let unique = if let Entries(Unique) = shape {
+        true
+    } else {
+        false
+    }
+    let mut extracted: List[std.page.Row] = list.new()
+    let mut workspace = plan.schema.live
+    let mut read = 0u64
+    loop {
+        let (take rows, done) = tiered_rows_after(db, record.owner, cursor, INDEX_CHUNK)?
+        for (logical, raw) in rows {
+            read += 1
+            extract_entries(mut extracted, mut workspace, plan.schema.ceiling, bindings[slot].index, logical, raw)?
+            cursor = Some(failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?)
+        }
+        if done {
+            break
+        }
+    }
+    let (take duplicate, _, _) = bulk_declared_index(mut plan, job.catalog_key, record, unique, take extracted, read, false)?
+    plan.bindings = take bindings
+    if let Some(_) = duplicate {
+        return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
+    }
     Ok(())
 }
 

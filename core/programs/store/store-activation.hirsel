@@ -233,8 +233,10 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     }
     let StagedMigration(plan: take staged_plan, declared: declared, projectors: take registered, ..) = take working_staged
     let mut plan = take staged_plan
+    // A declaration's publish registers its bindings into an empty registry
+    // after any hot Tiered index build has read its extractor (§13.10a).
     let registration = if declared {
-        Some((declared_index_registry(replace(mut plan.bindings, list.new())), replace(mut plan.schema.retention, list.new())))
+        Some((replace(mut db.indexes, empty_index_registry()), replace(mut plan.schema.retention, list.new())))
     } else {
         None
     }
@@ -245,14 +247,16 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     }
     match publish_schema_plan_binding(mut db, take plan, activation, None) {
         Ok(_) => {
-            if let Some((take registry, take retained)) = take registration {
-                db.indexes = take registry
+            if let Some((_, take retained)) = take registration {
                 db.projectors = take registered
                 bind_retention(mut db, take retained)
             }
             Ok(())
         },
         Error(take problem) => {
+            if let Some((take former, _)) = take registration {
+                db.indexes = take former
+            }
             catalog.restore_fence(mut db.schema, old_fence);
             Error(take problem)
         }

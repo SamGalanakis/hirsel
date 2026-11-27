@@ -42,6 +42,9 @@ type DeferredIndexBuild: send {
     catalog_key: Bytes,
     name: String,
     record_raw: Bytes,
+    // A hot Tiered target's first scratch id; the second follows it
+    // (§13.10a). Drawn only for a hot build; the prepare child uses none.
+    scratch: u32,
     preview_slot: Option[u64]
 }
 

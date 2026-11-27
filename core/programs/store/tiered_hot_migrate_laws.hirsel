@@ -396,35 +396,374 @@ fn l102_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool
     Ok(good)
 }
 
-// A new index on a Tiered table would build through seal's child cut on the
-// live directory. Red on a663f742: past `dirty_bytes` the build's packs
-// collided with the publishing cut's, and reopen was `Corrupt` p-6.
+// L102 (b): the declaration that adds `by_v`, a `Many` index over `k % 97`.
+// Its entries `(k % 97, k)` are not in primary order, so the build's runs
+// overlap and it merges them.
+// It also adds `by_band`, an aggregate of `k` grouped by `k / 1000`: groups
+// arrive in primary order, so a group split across runs streams in order
+// and its parts are combined where its runs meet.
+fn l102_declare(mut db: Db, mode: Mode) -> Result[(Index[u64, u64, u64, ()], Aggregate[u64]), Error] waits {
+    let mut decl = declare(db, mode)?
+    let mut rows_decl = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = index(mut decl, mut rows_decl, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let bands = aggregate(mut decl, mut rows_decl, "by_band", code.describe(l102_band), std.codec.key_u64())?
+    let _ = finish(mut decl, take rows_decl)?
+    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other_decl)?
+    let _ = seal(mut db, take decl)?
+    Ok((ix, bands))
+}
+
+fn l102_band(k: u64, _v: u64) -> Result[List[(u64, u64)], Capacity] {
+    let mut parts: List[(u64, u64)] = list.new()
+    list.push(mut parts, (k / 1000u64, k))
+    Ok(take parts)
+}
+
+// L102 (b) oracle for `by_band`: each group's count and sum of `k`, summed
+// here from the model keys 0..n.
+fn l102_bands(db: Db, bands: Aggregate[u64], n: u64) -> Result[(), Error] waits {
+    let Public = lix_state(db, "by_band")? else {
+        fail("L102 (b): by_band is not Public")
+    }
+    let mut expected: List[Totals] = list.new()
+    for k in 0u64 .. n {
+        let g = k / 1000u64
+        if g == list.len(expected) {
+            list.push(mut expected, Totals(count: 0, sum: 0))
+        }
+        expected[g].count += 1
+        expected[g].sum += k
+    }
+    let Seen(Seen(value: Ok(true), ..)) = look(reader(db, READER_PIN_MIN)?, snapshot(db), Some(100000000u64), (copy_env(bands), take expected), fn(tx: Tx, input: (Aggregate[u64], List[Totals])) -> Result[bool, Error] {
+        for g in 0u64 .. list.len(input.1) + 1u64 {
+            let seen = totals(tx, input.0, g)?
+            let (members, total) = if g < list.len(input.1) {
+                (input.1[g].count, input.1[g].sum)
+            } else {
+                (0u64, 0u64)
+            }
+            if seen.count != members || seen.sum != total {
+                return Ok(false)
+            }
+        }
+        Ok(true)
+    })? else {
+        fail("L102 (b): by_band differs from the model's totals")
+    }
+    Ok(())
+}
+
+// L102 (b) oracle: `by_v` is Public and holds exactly `(k % 97, k)` for the
+// model keys 0..n, derived from the seed rather than read from the table.
+fn l102_by_v(db: Db, ix: Index[u64, u64, u64, ()], n: u64) -> Result[(), Error] waits {
+    let Public = lix_state(db, "by_v")? else {
+        fail("L102 (b): by_v is not Public")
+    }
+    let mut model: List[(u64, u64)] = list.with_capacity(n)
+    for k in 0u64 .. n {
+        list.push(mut model, (k % 97, k))
+    }
+    let Seen(Seen(value: Ok(true), ..)) = look(reader(db, READER_PIN_MIN)?, snapshot(db), Some(100000000u64), (copy_env(ix), take model), fn(tx: Tx, input: (Index[u64, u64, u64, ()], List[(u64, u64)])) -> Result[bool, Error] {
+        exact_index_entries(tx, input.0, clone(input.1))
+    })? else {
+        fail("L102 (b): by_v differs from the model's extraction")
+    }
+    Ok(())
+}
+
+// L102 (b): every pack the store lists is on disk, and every `p-*` file on
+// disk is listed.
+fn l102_packs(d: Dir, db: Db) -> Result[(), Error] waits {
+    let mut names: List[String] = list.new()
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
+    while let Some((seq, _)) = std.omap.next(mut inventory) {
+        list.push(mut names, failure_result_from_rep(manifest.paged_pack_path(seq))?)
+    }
+    let present = result.unwrap(std.dir.list(d, None))
+    for name in names {
+        let mut found = false
+        for listed in present {
+            if listed.name == name {
+                found = true
+            }
+        }
+        if !found {
+            fail("L102 (b): a listed pack is not on disk")
+        }
+    }
+    for listed in present {
+        if string.starts_with(listed.name, "p-") && !list.contains(names, listed.name) {
+            fail("L102 (b): a pack file on disk is not listed")
+        }
+    }
+    Ok(())
+}
+
+// L102 (b): a Migrate declaration adds `by_v` on the Tiered table `rows`.
+// Past `dirty_bytes` (6000 rows at 65536) the build cuts and merges; the
+// index equals the model's extraction before and after reopen, with every
+// pack file listed and the stamps published. F4: each entry is charged
+// entry(20, 0) = 62 + 24 = 86 bytes, at least its page bytes, so B ≤
+// 6000 × 86 = 516000 and one merge pass allows 2 × ⌈516000 ÷ 65536⌉ + 2 = 18
+// build cuts. Then `rebuild_index` leaves `by_v` Backfilling over an empty
+// Tiered tree and a second Migrate declaration rebuilds it at its own id
+// past its first build cut (F3). Under `dirty_bytes` (500 rows) no build cut
+// runs and no pin is held. Red on main: `Tiered(Migrate)` at `index`.
 @test
-fn tiered_hot_index_build_refused(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut db = open(tasks, d, c, r, hot_options(65536)?)?
+fn test_l102_hot_index_build(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let big = disk_test_directory(d)
+    let mut db = open(tasks, big, c, r, hot_options(65536)?)?
     let _ = hot_seed(mut db, 6000)?
-    let before = refusal_directory(d)
+    let before = db.checkpointed
+    let (ix, ix_bands) = l102_declare(mut db, Migrate)?
+    let cuts = db.checkpointed - before
+    if cuts < 2 {
+        fail("L102 (b): the fixture must run a build cut before its publish")
+    }
+    if cuts > 18 {
+        fail("L102 (b): the build cut more than one merge pass allows (F4)")
+    }
+    l102_by_v(db, ix, 6000)?
+    l102_bands(db, ix_bands, 6000)?
+    if l102_owner3_pin(db) {
+        fail("L102 (b): an owner-3 pin is listed after the publish")
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let mut again = open(tasks, big, c, r, hot_options(65536)?)?
+    let (reopened, reopened_bands) = l102_declare(mut again, Open)?
+    l102_by_v(again, reopened, 6000)?
+    l102_bands(again, reopened_bands, 6000)?
+    l102_packs(big, again)?
+    l102_stamps(big, again, reopened.id)?
+    rebuild_index(mut again, reopened)?
+    let Backfilling(None) = lix_state(again, "by_v")? else {
+        fail("L102 (b): the fixture must leave by_v Backfilling")
+    }
+    let rebuilt_from = again.checkpointed
+    let (rebuilt, rebuilt_bands) = l102_declare(mut again, Migrate)?
+    if again.checkpointed - rebuilt_from < 2 {
+        fail("L102 (b): the rebuild must run a build cut before its publish")
+    }
+    if rebuilt.id != reopened.id {
+        fail("L102 (b): a Backfilling index is rebuilt at its own id")
+    }
+    l102_by_v(again, rebuilt, 6000)?
+    l102_bands(again, rebuilt_bands, 6000)?
+    let _ = checkpoint(mut again)?
+    close(take again)?
+    let mut third = open(tasks, big, c, r, hot_options(65536)?)?
+    let (final_ix, final_ix_bands) = l102_declare(mut third, Open)?
+    l102_by_v(third, final_ix, 6000)?
+    l102_bands(third, final_ix_bands, 6000)?
+    l102_packs(big, third)?
+    l102_stamps(big, third, final_ix.id)?
+    close(take third)?
+    let small = disk_test_directory(d)
+    let mut under = open(tasks, small, c, r, hot_options(0)?)?
+    let _ = hot_seed(mut under, 500)?
+    let (small_ix, small_ix_bands) = l102_declare(mut under, Migrate)?
+    l102_by_v(under, small_ix, 500)?
+    l102_bands(under, small_ix_bands, 500)?
+    if l102_owner3_pin(under) {
+        fail("L102 (b): an owner-3 pin is listed without a build cut")
+    }
+    close(take under)?
+    let mut small_again = open(tasks, small, c, r, hot_options(0)?)?
+    let (small_reopened, small_reopened_bands) = l102_declare(mut small_again, Open)?
+    l102_by_v(small_again, small_reopened, 500)?
+    l102_bands(small_again, small_reopened_bands, 500)?
+    l102_packs(small, small_again)?
+    close(take small_again)
+}
+
+// L102 (e): `by_u` maps each key to itself except the last, which repeats
+// key 0, so the duplicate is met only in the build's final chunk.
+fn l102_unique_key(k: u64, _v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    if k == 5999u64 {
+        list.push(mut keys, 0u64)
+    } else {
+        list.push(mut keys, k)
+    }
+    Ok(take keys)
+}
+
+fn l102_lists(db: Db, name: String) -> Result[bool, Error] {
+    let seen = attention(db)?
+    Ok(std.list.any(seen.indexes, fn(report: IndexReport) -> bool {
+        report.index == name
+    }))
+}
+
+// L102 (e): a Migrate declaration adds the `Unique` index `by_u` on the
+// Tiered table, whose duplicate key is met past the first build cut. Seal
+// refuses `Conflict("by_u")` with main's head and catalog unchanged: `by_u`
+// is not listed and `rows` holds the model. One holder-free cut drops the
+// build pin, and a further write and cut reopen clean (F2). Red on main:
+// `Tiered(Migrate)` at `index`.
+@test
+fn test_l102_hot_unique_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, hot_options(65536)?)?
+    let rows = hot_seed(mut db, 6000)?
+    let head = pages.holder_heads(db.holders)[0u64].head
+    let before = db.checkpointed
     let mut decl = declare(db, Migrate)?
     let mut rows_decl = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if let Error(Tiered(Migrate)) = index(mut decl, mut rows_decl, "by_v", Many, code.describe(crash_value), std.codec.key_u64()) {} else {
-        fail("hot migrate: a new index on a Tiered table was not Tiered(Migrate)")
+    let _ = index(mut decl, mut rows_decl, "by_u", Unique, code.describe(l102_unique_key), std.codec.key_u64())?
+    let _ = finish(mut decl, take rows_decl)?
+    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other_decl)?
+    match seal(mut db, take decl) {
+        Error(Conflict(name)) if name == "by_u" => (),
+        _ => fail("L102 (e): the duplicate past the first build cut was not Conflict(by_u)"),
     }
-    let _ = take rows_decl
-    let _ = take decl
-    if !refusal_directory_unchanged(d, before) {
-        fail("hot migrate: the refused index changed the store directory")
+    // Fixture guard: the build cut before it met the duplicate.
+    if db.checkpointed == before || !l102_owner3_pin(db) {
+        fail("L102 (e): the fixture refused before any build cut")
+    }
+    if pages.holder_heads(db.holders)[0u64].head != head {
+        fail("L102 (e): the refusal moved main's head")
+    }
+    if l102_lists(db, string.from("by_u"))? {
+        fail("L102 (e): the refused index is listed")
+    }
+    hot_rows(mut db, string.from("rows"), 6000)?
+    let _ = checkpoint(mut db)?
+    if l102_owner3_pin(db) {
+        fail("L102 (e): a build pin outlived a holder-free cut after the refusal")
+    }
+    let Committed(_) = run(mut db, Some(100000000u64), copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        put(mut tx, t, 6000u64, 6000u64 % 97u64)
+    })? else {
+        fail("L102 (e): the write after the refusal did not commit")
     }
     let _ = checkpoint(mut db)?
     close(take db)?
     let mut again = open(tasks, d, c, r, hot_options(65536)?)?
-    hot_rows(mut again, string.from("rows"), 6000)?
-    let mut check = declare(again, Open)?
-    let rows_decl2 = declare_table(mut check, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let _ = finish(mut check, take rows_decl2)?
-    let other_decl = declare_table(mut check, "other", std.codec.key_u64(), std.codec.of_u64())?
-    let _ = finish(mut check, take other_decl)?
-    let _ = seal(mut again, take check)?
+    hot_rows(mut again, string.from("rows"), 6001)?
+    if l102_lists(again, string.from("by_u"))? {
+        fail("L102 (e): the refused index is listed after reopen")
+    }
+    l102_stamps(d, again, rows.id)?
     close(take again)
+}
+
+fn l102_chain(mut phase: Migration) -> Result[(), Error] {
+    migrate_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64(), "mid", std.codec.key_u64(), std.codec.of_u64(), fn(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+        Ok(Some((k, v)))
+    })?
+    migrate_table(mut phase, "mid", std.codec.key_u64(), std.codec.of_u64(), "last", std.codec.key_u64(), std.codec.of_u64(), fn(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+        Ok(Some((k, v)))
+    })
+}
+
+fn l102_chain_declare(mut decl: Declare) -> Result[Index[u64, u64, u64, ()], Error] {
+    let mut last_decl = declare_table(mut decl, "last", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = index(mut decl, mut last_decl, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let _ = finish(mut decl, take last_decl)?
+    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other_decl)?
+    Ok(ix)
+}
+
+// L102 (f): one Migration migrates rows -> mid -> last, identity each, and
+// its declaration adds `by_v` on `last`. Past `dirty_bytes` (6000 rows at
+// 65536) `mid` builds through build cuts and ends with a partial run, and
+// `last` reads it from the working map, not main's head. `last` and `by_v`
+// equal the model before and after reopen; `rows` and `mid` are gone. Red
+// on main: `Tiered(Migrate)` at the first `migrate_table`.
+@test
+fn test_l102_hot_chain(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, hot_options(65536)?)?
+    let _ = hot_seed(mut db, 6000)?
+    let before = db.checkpointed
+    let mut decl = declare_migration(db, tasks, code.describe(l102_chain))?
+    let ix = l102_chain_declare(mut decl)?
+    let staged = finish_migration(db, take decl)?
+    install_activation(mut db, take staged)?
+    if db.checkpointed - before < 2 {
+        fail("L102 (f): the fixture must run a build cut before its publish")
+    }
+    hot_rows(mut db, string.from("last"), 6000)?
+    for gone in["rows", "mid"] {
+        if let Ok(_) = table(mut db, gone, std.codec.key_u64(), std.codec.of_u64()) {
+            fail("L102 (f): a chain source is still listed")
+        }
+    }
+    l102_by_v(db, ix, 6000)?
+    if l102_owner3_pin(db) {
+        fail("L102 (f): an owner-3 pin is listed after the publish")
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let mut again = open(tasks, d, c, r, hot_options(65536)?)?
+    let mut reopened_decl = declare(again, Open)?
+    let reopened = l102_chain_declare(mut reopened_decl)?
+    let _ = seal(mut again, take reopened_decl)?
+    hot_rows(mut again, string.from("last"), 6000)?
+    l102_by_v(again, reopened, 6000)?
+    l102_packs(d, again)?
+    let final_table = table(mut again, "last", std.codec.key_u64(), std.codec.of_u64())?
+    l102_stamps(d, again, final_table.id)?
+    l102_stamps(d, again, reopened.id)?
+    close(take again)
+}
+
+// L102 (c) for the index build: crash scenario `hot-index-build` cuts W2 at
+// every boundary of (b)'s declaration on 3000 rows at the crash sizing.
+fn l102_index_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l102_crash_options()?)?
+    let _ = l102_declare(mut db, Migrate)?
+    close(take db)
+}
+
+// The recovered state is exactly OLD (neither index listed, `rows` holds the
+// model) or exactly NEW (`by_v` and `by_band` Public and equal to the
+// model); `required_new` demands NEW. After one holder-free cut no owner-3
+// pin is listed and the stamps are published (F2); a further write and cut
+// reopen to the same state.
+fn l102_index_crash_state(d: Dir, mut db: Db, old: bool, n: u64) -> Result[bool, Error] waits {
+    if l102_owner3_pin(db) {
+        return Ok(false)
+    }
+    hot_rows(mut db, string.from("rows"), n)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    l102_stamps(d, db, rows.id)?
+    if old {
+        return Ok(!l102_lists(db, string.from("by_v"))? && !l102_lists(db, string.from("by_band"))?)
+    }
+    let (ix, bands) = l102_declare(mut db, Open)?
+    l102_by_v(db, ix, n)?
+    l102_bands(db, bands, n)?
+    l102_stamps(d, db, ix.id)?
+    Ok(true)
+}
+
+fn l102_index_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
+    let mut db = open(tasks, d, c, r, l102_crash_options()?)?
+    trust_store(mut db)?
+    let old = !l102_lists(db, string.from("by_v"))?
+    if old && required_new {
+        return Ok(false)
+    }
+    let _ = checkpoint(mut db)?
+    if !l102_index_crash_state(d, mut db, old, 3000)? {
+        return Ok(false)
+    }
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(_) = run(mut db, Some(100000000u64), copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        put(mut tx, t, 3000u64, 3000u64 % 97u64)
+    })? else {
+        return Ok(false)
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let mut again = open(tasks, d, c, r, l102_crash_options()?)?
+    let good = l102_index_crash_state(d, mut again, old, 3001)?
+    close(take again)?
+    Ok(good)
 }
 
 fn l70_rename(mut phase: Migration) -> Result[(), Error] {

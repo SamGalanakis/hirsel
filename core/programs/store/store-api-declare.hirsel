@@ -457,7 +457,6 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
     match take existing {
         None => {
             if let Migrate = d.mode {
-                refuse_hot_tiered_build(d.plan, table_is_tiered(d.plan.schema.roots.collections, proposed.owner)?)?
                 Ok(Some(string.from("new index")))
             } else {
                 Error(Missing(failure_result_from_rep(catalog.named(name))?))
@@ -473,7 +472,6 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
             }
             if schemas_changed || code_changed {
                 if let Migrate = d.mode {
-                    refuse_hot_tiered_build(d.plan, table_is_tiered(d.plan.schema.roots.collections, old.owner)? || table_is_tiered(d.plan.schema.roots.collections, old.id)?)?
                     let cause = rebuild_cause(old, proposed, ends)?
                     remove_declared_index(mut d.plan, lookup_key, old)?
                     Ok(Some(take cause))
@@ -603,16 +601,24 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
     complete_declaration(d)?
     let Declare(plan: take candidate, projectors: take registered, ..) = take d
     let mut proposal = take candidate
-    let registry = declared_index_registry(replace(mut proposal.bindings, list.new()))
     let retained = replace(mut proposal.schema.retention, list.new())
     if proposal.schema.changed {
-        let committed = publish_schema_plan(mut db, take proposal)?
-        db.indexes = take registry
+        // The publish registers the declaration's bindings into an empty
+        // registry after any hot Tiered index build has read its extractor
+        // from them (§13.10a).
+        let former = replace(mut db.indexes, empty_index_registry())
+        let committed = match publish_schema_plan(mut db, take proposal) {
+            Ok(sealed) => sealed,
+            Error(take problem) => {
+                db.indexes = take former
+                return Error(take problem)
+            },
+        }
         bind_retention(mut db, take retained)
         db.projectors = take registered
         return Ok(committed)
     }
-    db.indexes = take registry
+    db.indexes = declared_index_registry(replace(mut proposal.bindings, list.new()))
     bind_retention(mut db, take retained)
     db.projectors = take registered
     Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, pages.holder_heads(db.holders)[0].head)))

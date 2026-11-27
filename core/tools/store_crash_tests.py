@@ -15,7 +15,7 @@ SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'b
 # A Tiered store's floor (cache, cut pins, dirty and pager task inside
 # `resident_limit`) does not fit the 64 MiB process limit, so these scenarios
 # run in their own binary.
-TIERED_SCENARIOS = ('hot-migrate',)
+TIERED_SCENARIOS = ('hot-migrate', 'hot-index-build')
 CRASH_LIMIT = 64 * 1024 * 1024
 TIERED_CRASH_LIMIT = 512 * 1024 * 1024
 WINDOW_FAILURES = ('window-chunk-failure', 'window-sync-failure')

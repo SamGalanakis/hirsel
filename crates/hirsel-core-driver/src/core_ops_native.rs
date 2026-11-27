@@ -4,15 +4,14 @@
 fn core_ops_options(backend: Backend, root: &Path, dir: &Path) -> NativeOptions {
     let runtime =
         root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive"));
-    let link = Link::Driver(
-        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-    );
+    let target = crate::host::HOST_TARGET.triple();
+    let link = crate::host::test_link(&runtime);
     NativeOptions {
         backend,
         cas: dir.join("cas"),
         root_limit: 1_048_576,
         instance_limit: 64,
-        ..NativeOptions::development(TARGET.into(), runtime, link, dir.join("program"))
+        ..NativeOptions::development(target.into(), runtime, link, dir.join("program"))
     }
 }
 
@@ -564,10 +563,6 @@ pub fn proof_clone_run() -> u64 {
         .unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
-        link: crate::native::Link::Driver(
-            PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-        ),
-        target: TARGET.into(),
         instance_limit: 64,
         ..crate::native::tests::native_options(backend, dir.path())
     };

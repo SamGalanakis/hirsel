@@ -2,6 +2,86 @@
 use super::*;
 use hirsel_core_ir::RtOp;
 
+// Arity of the compiler kernels below, including the delegated collection kernels.
+// The selected core sources declare the call's signature, so they can disagree
+// with these operand layouts even after the call has passed type checking.
+fn builtin_arity(module: &str, name: &str) -> Option<(usize, usize)> {
+    Some(match (module, name) {
+        ("list" | "deque" | "heap", "slots_empty") => (1, 0),
+        (
+            "list" | "deque" | "heap",
+            "slots_new" | "slots_needs_drop" | "slots_free" | "slots_finish_list",
+        ) => (1, 1),
+        (
+            "list" | "deque" | "heap",
+            "slots_unmark_spare"
+            | "slots_publish_spare"
+            | "slots_take"
+            | "slots_view"
+            | "slots_list_view"
+            | "slots_forget_ring",
+        ) => (1, 2),
+        ("list" | "deque" | "heap", "slots_put" | "slots_shift") => (1, 3),
+        ("list" | "deque" | "heap", "slots_move" | "slots_list_move") => (1, 5),
+        ("int" | "string" | "list" | "deque", "work_steps") => (0, 2),
+        ("bytebuf", "append_inline") => (1, 4),
+        ("bytebuf", "freeze" | "as_bytes" | "with_tail") => (0, 1),
+        ("bytebuf", "from_tail") => (0, 2),
+        ("bytebuf", "try_reserve_hint") => (0, 3),
+        ("map", "new") => (2, 0),
+        ("map", "hash" | "place" | "strong") => (1, 1),
+        (
+            "map",
+            "len" | "compact" | "advance" | "strong_empty" | "set_strong_empty" | "mode"
+            | "group_mask" | "set_strong" | "clear_index" | "fast_class" | "slots" | "capacity",
+        ) => (2, 1),
+        (
+            "map",
+            "group_empty" | "group_vacant" | "bucket_entry" | "erase" | "regrow" | "try_regrow"
+            | "take_entry" | "kill" | "slot_meta" | "slot_key" | "slot_value",
+        ) => (2, 2),
+        ("map", "push_entry" | "group_match" | "swap_value") => (2, 3),
+        ("map", "copy_entry" | "install") => (2, 4),
+        ("map", "with_value") => (3, 3),
+        ("list" | "columns", "new") => (1, 0),
+        ("list" | "columns", "len" | "capacity" | "pop" | "clear" | "with_capacity") => (1, 1),
+        ("list" | "columns", "truncate" | "push" | "reserve" | "try_reserve" | "get") => (1, 2),
+        ("list" | "columns", "fill" | "set") => (1, 3),
+        ("columns", "swap_remove") => (1, 2),
+        ("list", "compare_bytes") => (0, 2),
+        (
+            "list",
+            "word_le"
+            | "word_be"
+            | "put_word_le"
+            | "put_word_be"
+            | "append"
+            | "with_capacity_aligned",
+        ) => (1, 2),
+        ("list", "set_word_le" | "set_word_be" | "slice" | "swap" | "copy_from_slice") => (1, 3),
+        ("list", "copy_within" | "fill_slice") => (1, 4),
+        ("list" | "inline", "prefetch") | ("order", "compare") => (1, 2),
+        ("inline", "word_le" | "word_be") => (2, 2),
+        ("inline", "set_word_le" | "set_word_be") => (2, 3),
+        ("inline", "copy_within" | "copy_from_slice") => (1, 4),
+        ("check", "xxh3_short") => (0, 1),
+        ("check", "xxh3_short_inline") => (0, 2),
+        ("check", "xxh3_stripe" | "xxh3_stripes") => (0, 4),
+        ("crc32c" | "crc64nvme", "update") => (0, 2),
+        ("crc32c" | "crc64nvme", "combine") => (0, 3),
+        ("sha1", "blocks") | ("sha1" | "sha256" | "sha512", "block") => (0, 2),
+        ("sha256" | "sha512", "blocks") | ("sha1" | "sha256" | "sha512", "compress") => (0, 4),
+        ("argon2", "id") => (0, 7),
+        ("ed25519" | "p256" | "p384", "verify") | ("p256" | "p384", "verify_der") => (0, 3),
+        ("rsa", "verify_pkcs1_sha256" | "verify_pss_sha256") => (0, 4),
+        ("core", "replace") => (1, 2),
+        ("core", "site_word") => (0, 1),
+        ("option", "unwrap") => (1, 1),
+        ("result", "unwrap") => (2, 1),
+        _ => return None,
+    })
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// None means this operation needs a different kernel. Some(None) is a handled
     /// operation with a unit result or an already reported emission gap.
@@ -19,6 +99,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let module = g.path.0.modules.as_slice();
         let name = g.path.0.name.as_str();
+        let [kernel_module] = module else { return None };
+        let required = builtin_arity(kernel_module, name)?;
+        let declared = (types.len(), g.params.len());
+        if declared != required || vals.len() != required.1 {
+            self.refuse_builtin_arity(&g.path, declared, required, n);
+            return Some(None);
+        }
         if matches!(module, [m] if matches!(m.as_str(), "list" | "deque" | "heap"))
             && name.starts_with("slots_")
         {
@@ -212,6 +299,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
+    fn refuse_builtin_arity(
+        &mut self,
+        builtin: impl std::fmt::Display,
+        declared: (usize, usize),
+        required: (usize, usize),
+        n: NodeId,
+    ) {
+        let describe =
+            |(types, values)| format!("{types} type arguments, {values} value arguments");
+        self.refuse_compared(
+            "LANG-8",
+            n,
+            describe(declared),
+            describe(required),
+            format!(
+                "incompatible core sources for builtin `{builtin}`. Use the core libraries bundled with this compiler or rebuild the compiler for the selected --libraries sources"
+            ),
+        );
+    }
+
     fn verify_signature<const N: usize>(
         &mut self,
         op: RtOp,
@@ -251,6 +358,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
+        // String calls also reach this kernel without going through core_value.
+        if let Some((_, required)) = builtin_arity("list", name)
+            && vals.len() != required
+        {
+            let builtin = match name {
+                "len" => "core@1/string/byte_len",
+                "append" => "core@1/string/push",
+                "reserve" => "core@1/string/reserve",
+                "new" => "core@1/string/new",
+                _ => name,
+            };
+            self.refuse_builtin_arity(builtin, (0, vals.len()), (0, required), n);
+            return Some(None);
+        }
         match name {
             "new" => return Some(self.list_new(item, result, n)),
             "slice" => return Some(self.list_slice(item, vals[0]?, vals[1]?, vals[2]?, result, n)),

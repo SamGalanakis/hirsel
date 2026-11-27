@@ -135,7 +135,6 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
 /// 0 when absent. Arguments and results are read at the emitted signature's types, so a
 /// case writes values, not bits. A run that returns has refunded every admission
 /// (MEM-23) except what it states: a caught failure keeps its cause cell (FAIL-16).
-
 #[test]
 fn layout_names_keep_nested_views() {
     let (index, modules) = program_inputs("fn named(a:Option[u64], b:Option[View[u64]]) {}");
@@ -746,6 +745,7 @@ fn emission_halts_but_typing_continues() {
     assert!(check.function.is_none());
 }
 
+mod builtin_compatibility_tests;
 #[path = "core_ops_tests.rs"]
 mod core_ops_tests;
 

@@ -31,6 +31,10 @@ class BuckClient(unittest.TestCase):
                      'llvm-cxx-headers-lock.json'):
             if (SCRIPTS / name).exists():
                 shutil.copy(SCRIPTS / name, scripts / name)
+        dist = scripts.parent / 'toolchain-dist'
+        dist.mkdir()
+        for name in ('product.py', 'product.toml'):
+            shutil.copy(SCRIPTS.parent / 'toolchain-dist' / name, dist / name)
         # The fake client records exactly when Buck itself was reached.
         binary = '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/called"\nexit 17\n'
         state = self.root / '.buck2'
@@ -66,7 +70,9 @@ class BuckClient(unittest.TestCase):
             file.parent.mkdir(parents=True, exist_ok=True)
             file.touch()
         wanted = bootstrap_llvm.identity()
-        (llvm / bootstrap_llvm.RECEIPT).write_text(json.dumps(wanted))
+        self.llvm = llvm
+        self.receipt = llvm / bootstrap_llvm.RECEIPT
+        self.receipt.write_text(json.dumps(wanted))
         # identity() reads this lock relative to the copied checkout.
         lock = self.root / 'tools/native-toolchain/llvm-23.lock'
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -114,14 +120,31 @@ class BuckClient(unittest.TestCase):
             self.assertIn('python3 tools/buck2/prepare.py', result.stderr)
             self.assertFalse(self.called.exists())
 
-    def test_missing_headers_name_prepare(self):
-        header = self.root / 'tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13/vector'
-        header.unlink()
-        result = self.run_client('test', '//:target')
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn('python3 tools/buck2/prepare.py', result.stderr)
-        self.assertEqual(len(result.stderr.splitlines()), 1)
-        self.assertFalse(self.called.exists())
+    def test_bootstrap_failure_names_the_path_or_pin(self):
+        import bootstrap_llvm
+
+        required = self.llvm / bootstrap_llvm.REQUIRED[0]
+        wanted = json.loads(self.receipt.read_text())
+        actual_hash = '0' * 64
+        for problem, diagnostic in (
+            ('missing path', f'missing required LLVM path {required}'),
+            ('mismatch', f"lock_sha256 mismatch (expected {wanted['lock_sha256']}, actual {actual_hash})"),
+            ('malformed', f'malformed LLVM receipt {self.receipt}'),
+        ):
+            with self.subTest(problem=problem):
+                if problem == 'missing path':
+                    required.unlink()
+                elif problem == 'mismatch':
+                    required.touch()
+                    self.receipt.write_text(json.dumps({**wanted, 'lock_sha256': actual_hash}))
+                else:
+                    self.receipt.write_text('{')
+                result = self.run_client('test', '//:target')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(diagnostic, result.stderr)
+                self.assertIn('python3 tools/buck2/prepare.py', result.stderr)
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+                self.assertFalse(self.called.exists())
 
 
 class PrivateLlvmTree(unittest.TestCase):

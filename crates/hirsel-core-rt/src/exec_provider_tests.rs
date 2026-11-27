@@ -418,13 +418,15 @@ fn exec_provider_refuses_post_launch_modification_replacement_and_symlink_swap()
 
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
+    // TAG is volatile: Apple clang folds `TAG[0]` of a plain const array even
+    // at -O0 and drops the string, and the law rewrites the marker in place.
     let compile = |name: &str, tag: &str, code: u8| {
         let source = root.join(format!("{name}.c"));
         let binary = root.join(name);
         std::fs::write(
             &source,
             format!(
-                "#include <stdio.h>\nstatic const char TAG[] = \"{tag}\";\nint main(void) {{ return TAG[0] == 'H' ? {code} : 1; }}\n"
+                "#include <stdio.h>\nstatic const volatile char TAG[] = \"{tag}\";\nint main(void) {{ return TAG[0] == 'H' ? {code} : 1; }}\n"
             ),
         )
         .unwrap();

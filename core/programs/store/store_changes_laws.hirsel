@@ -374,14 +374,19 @@ fn test_close_follow(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-// L2: an aborted body needs no COMMIT allocation. Encoding after Error turns
-// this abort into Refused at the 80-byte Log/Log/isolate admission boundary.
+// The read log (24), issued-id cell (8), info-observed cell (8) and isolate
+// cause cell (32) are live alongside the Option[TxView] cell (136).
+const LAW_ISOLATE_ENTRY_BYTES: u64 = 24 + 8 + 8 + 32
+
+const LAW_EMPTY_DRAFT_BYTES: u64 = LAW_ISOLATE_ENTRY_BYTES + 136
+
+// L2: an aborted body needs no COMMIT allocation once its draft fits.
 pub fn law_abort_budget(c: Clock) -> bool {
     let mut db = test_db(c, 1073741824)
     let values: Inline[u64, 2] =[7, 19]
     for i in 0u64 .. 2 {
         let value = values[i]
-        let outcome = result.unwrap(bound bytes 80 {
+        let outcome = result.unwrap(bound bytes LAW_EMPTY_DRAFT_BYTES {
             execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), u64] {
                 let _ = info(mut tx)
                 Error(value)
@@ -538,9 +543,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
         } else {
             19u64
         }
-        // The read log's node (24), the issued cell's node (8) and the
-        // isolate's cause cell (32) are 64 bytes; one fewer refuses the cell.
-        let observed = result.unwrap(result.unwrap(bound bytes 64 {
+        let observed = result.unwrap(result.unwrap(bound bytes LAW_EMPTY_DRAFT_BYTES {
             look(read, s, None, expected, fn(tx, call_env) -> u64 {
                 call_env
             })
@@ -552,7 +555,8 @@ pub fn law_look_faults(c: Clock) -> bool waits {
             _ => return false
         }
     }
-    let refused_query = result.unwrap(bound bytes 63 {
+    // One byte below the isolate's entry cost refuses its cause cell.
+    let refused_query = result.unwrap(bound bytes (LAW_ISOLATE_ENTRY_BYTES - 1) {
         look(read, s, None, (), fn(tx, unused_env) -> u64 {
             7u64
         })

@@ -28,7 +28,8 @@ final class AbiTests: XCTestCase {
             let session = try observer.open(runtime)
             let status = await Task.detached { hirsel_embed_v1_close(session) }.value
             XCTAssertEqual(status, HIRSEL_OK)
-            XCTAssertEqual(observer.ended.wait(timeout: .now()), .success)
+            let closed = await observe(observer.ended, timeout: .now())
+            XCTAssertEqual(closed, .success)
             XCTAssertEqual(hirsel_embed_v1_close(session), HIRSEL_STOPPED)
         }
     }
@@ -41,7 +42,8 @@ final class AbiTests: XCTestCase {
                 observer.setStatus(hirsel_embed_v1_close(session))
             }
             try issue(session, id: 1)
-            XCTAssertEqual(observer.ended.wait(timeout: .now() + 5), .success)
+            let closed = await observe(observer.ended, timeout: .now() + 5)
+            XCTAssertEqual(closed, .success)
             XCTAssertEqual(observer.status, HIRSEL_DEFERRED)
         }
     }
@@ -58,14 +60,16 @@ final class AbiTests: XCTestCase {
                 _ = release.wait(timeout: .now() + 5)
             }
             try issue(session, id: 1)
-            let entered = callback.wait(timeout: .now() + 5)
+            let entered = await observe(callback, timeout: .now() + 5)
             XCTAssertEqual(entered, .success)
             XCTAssertEqual(observer.status, HIRSEL_DEFERRED)
-            XCTAssertEqual(observer.ended.wait(timeout: .now()), .timedOut)
+            let stillDraining = await observe(observer.ended, timeout: .now())
+            XCTAssertEqual(stillDraining, .timedOut)
             let other = hirsel_embed_v1_close(session)
             release.signal()
             XCTAssertEqual(other, HIRSEL_STOPPED)
-            XCTAssertEqual(observer.ended.wait(timeout: .now() + 5), .success)
+            let closed = await observe(observer.ended, timeout: .now() + 5)
+            XCTAssertEqual(closed, .success)
         }
     }
 
@@ -80,13 +84,22 @@ final class AbiTests: XCTestCase {
                 _ = release.wait(timeout: .now() + 5)
             }
             try issue(session, id: 1)
-            XCTAssertEqual(callback.wait(timeout: .now() + 5), .success)
+            let entered = await observe(callback, timeout: .now() + 5)
+            XCTAssertEqual(entered, .success)
             try issue(session, id: 2)
             XCTAssertEqual(hirsel_embed_v1_abandon(session, 2), HIRSEL_OK)
             XCTAssertEqual(hirsel_embed_v1_abandon(session, 2), HIRSEL_NOT_LIVE)
             release.signal()
             XCTAssertEqual(hirsel_embed_v1_close(session), HIRSEL_OK)
             XCTAssertEqual(observer.ids, [1])
+        }
+    }
+
+    private func observe(_ signal: DispatchSemaphore, timeout: DispatchTime) async -> DispatchTimeoutResult {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning: signal.wait(timeout: timeout))
+            }
         }
     }
 

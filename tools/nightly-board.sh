@@ -90,6 +90,8 @@ record
 python3 tools/tests/fresh_worktree.py >>"$run/run.log" 2>&1 ||
   printf 'Fresh worktree bootstrap exited %s.\n' "$?" >>"$run/run.log"
 checkout=$PWD
+# Keep the Cargo shim first and make the rustup Cargo it delegates to visible.
+export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
 boat_status=0
 step="Boat screen"
 record

@@ -40,12 +40,12 @@ fn accounts() -> std.codec.Codec[Account] {
 fn bucket(a: Account) -> Result[u64, Capacity] {
     Ok(a.id % 4)
 }
+
 fn account_buckets(key: u64, account: Account) -> Result[List[u64], Capacity] {
     let mut keys: List[u64] = list.new()
     list.push(mut keys, bucket(account)?)
     Ok(take keys)
 }
-
 
 fn save(mut db: store.Db, t: store.Table[u64, Account], k: u64, balance: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, None, (copy_env(balance), copy_env(k), copy_env(t)), fn(mut tx, call_env) -> Result[u64, store.Error] {

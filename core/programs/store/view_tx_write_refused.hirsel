@@ -1,6 +1,8 @@
 // L38: a live byte view freezes its transaction.
 pub fn rejected(mut tx: store.Tx, t: store.Table[u64, u64]) -> Result[bool, store.Error] {
-    let Some(raw) = store.fetch_bytes(tx, t, 1)? else { return Ok(false) }
+    let Some(raw) = store.fetch_bytes(tx, t, 1)? else {
+        return Ok(false)
+    }
     store.put(mut tx, t, 1, 2)?
     Ok(list.len(raw) != 0)
 }

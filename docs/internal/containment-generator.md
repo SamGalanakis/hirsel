@@ -183,10 +183,9 @@ fn g1(tasks: Tasks) -> u64 waits {
   Groce et al. 2012). A policy is a random subset of the productions, plus weights and a size
   class. This lets rare combinations, such as deep recursion with a nested `isolate` and a
   spawn, come up often instead of being diluted by every other form.
-- **Seed ranges.** Nightly ranges come from the same SQLite ledger that the VOPR campaign uses
-  (`tools/sim-campaign`'s `allocate`), under the campaign name `containment-gen`, so nights
-  never repeat a range. Seeds that were red on an earlier night are replayed first, as
-  `reds_first` does for laws.
+- **Seed ranges.** A night's seeds start at the board's start time in seconds (`--base-seed`)
+  and count up, so nights never repeat a range. There is no seed ledger and no replay of an
+  earlier night's reds: a red that is still open shows again on new seeds.
 
 ### Sizes
 
@@ -539,7 +538,7 @@ status, `tools/board-freshness.py` is unchanged, and so are the systemd units
 | a row per build pair | `engines_agree` in `std_native.py` | adopt its row format for O2 |
 | the evaluator's report and meter | `Report.steps`, `step_floor` and `step_refusal`, and `StepMeter`, in `crates/hirsel-core-eval` | add the O3b tally beside `take_work` in `metering.rs`, behind `HIRSEL_TEST_WORK_TALLY` |
 | native step report and ceiling | `hirsel_core_test_step_report` and `HIRSEL_TEST_WORK_CEILING` in `crates/hirsel-core-rt/src/steps.rs` | none |
-| seed ledger, replaying earlier reds first, the timeout cap | `tools/sim-campaign` | allocate under the campaign name `containment-gen` |
+| the timeout cap | `SEED_TIMEOUT_SECONDS` in `tools/sim-campaign` | none: the same 300 s per run |
 | real memory against charge | `crates/hirsel-core-rt/src/peak.rs` | none |
 
 The Core IR differential in `crates/hirsel-cranelift/tests/support/providers.rs` is **not**

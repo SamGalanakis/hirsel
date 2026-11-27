@@ -428,7 +428,7 @@ def alert_lines(args, results, controls, budget_end):
             fields = dict(minimised=False, reason='CPU budget spent')
         tail = (f"minimised {fields['path']} (size {fields['size']} on {fields['build']}, {fields['runs']} runs)"
                 if fields['minimised'] else f"not minimised ({fields['reason']}); package {r['package']}")
-        lines.append(f'containment {key}: {len(hits)} runs; {where}; {tail}')
+        lines.append(f'{key}: {len(hits)} runs; {where}; {tail}')
     lines += [f"containment gap-silent: {c['gap']}: {c['detail']}" for c in controls if c['shown'] is False]
     return lines
 

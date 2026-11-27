@@ -94,82 +94,7 @@ type AttemptObservation = object_request.AttemptObservation
 
 type LaneCounts = object_request.LaneCounts
 
-type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
-
-type Decision: key = Accept | Retry | Throttle | Resolve | AlreadyExists | Missing | Changed | Refresh | CorrectSkew | Reject
-
-fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bool, pinned: bool) -> Decision {
-    if op == S3PutIf {
-        if phase == BeforeRequest || status == 409 || (status == 400 && code == string.as_bytes("RequestTimeout")) {
-            return Retry
-        }
-        if status == 412 {
-            return AlreadyExists
-        }
-        if status == 0 || status == 429 || (status >= 500 && status < 600) {
-            return Resolve
-        }
-        return Reject
-    }
-    let conditional = op == S3PutConditional || op == S3CompleteConditional
-    let uncertain = conditional || op == S3Complete
-    if phase == BeforeRequest {
-        return Retry
-    }
-    if status == 0 {
-        if uncertain && (phase == RequestSent || phase == ResponseBody) {
-            return Resolve
-        }
-        return Retry
-    }
-    if (status == 400 || status == 200) && code == string.as_bytes("RequestTimeout") {
-        return Retry
-    }
-    if (status == 400 || status == 200) && code == string.as_bytes("RequestTimeTooSkewed") {
-        return CorrectSkew
-    }
-    if (status == 403 || status == 200) && code == string.as_bytes("ExpiredToken") {
-        return Refresh
-    }
-    if status == 304 || status == 412 {
-        if conditional {
-            return if resolving {
-                Resolve
-            } else {
-                AlreadyExists
-            }
-        }
-        return Changed
-    }
-    if status == 404 {
-        return if op == S3Erase || op == S3Abort {
-            Accept
-        } else {
-            Missing
-        }
-    }
-    if status == 409 && pinned && object_request.payload_read(op) {
-        return Retry
-    }
-    if status == 429 || status == 503 || code == string.as_bytes("SlowDown") {
-        return if uncertain {
-            Resolve
-        } else {
-            Throttle
-        }
-    }
-    if status == 500 || status == 502 || status == 504 || code == string.as_bytes("InternalError") {
-        return if uncertain {
-            Resolve
-        } else {
-            Retry
-        }
-    }
-    if status >= 200 && status < 300 && list.len(code) == 0 {
-        return Accept
-    }
-    Reject
-}
+type Phase = object_request.Phase
 
 fn ascii(b: u8) -> char {
     option.unwrap(char.from_u32(int.widen(b)))
@@ -204,31 +129,10 @@ fn copy_bytes(b: Bytes) -> Bytes {
     take out
 }
 
-fn header(head: http_client.ResponseHead, name: String) -> Option[View[Bytes]] in head {
-    let key = string.as_bytes(name)
-    for i in 0u64 .. http_client.field_count(head) {
-        let (field, value) = option.unwrap(http_client.field_at(head, i))
-        if http1.equal_ascii(field, key) {
-            return Some(value)
-        }
-    }
-    None
-}
-
 fn size_or(n: Option[u64], fallback: u64) -> u64 {
     match n {
         Some(value) => value,
         None => fallback,
-    }
-}
-
-fn content_length(head: http_client.ResponseHead) -> Option[u64] {
-    let Some(value) = header(head, "content-length") else {
-        return None
-    }
-    match int.parse_decimal_span(value, 0, list.len(value), MAX_U64) {
-        Ok(n) => Some(n),
-        Error(_) => None,
     }
 }
 
@@ -324,13 +228,13 @@ fn tag_bytes(tag: ETag) -> Bytes {
 fn read_meta(head: http_client.ResponseHead, size: u64) -> Result[Meta, Error] {
     let mut out = new_meta()
     out.size = size
-    if let Some(value) = header(head, "etag") {
+    if let Some(value) = object_request.header(head, "etag") {
         out.etag = etag(value)?
     }
-    if let Some(value) = header(head, "x-amz-meta-hirsel-put-id") {
+    if let Some(value) = object_request.header(head, "x-amz-meta-hirsel-put-id") {
         out.put_id = object_request.decode_id(value)
     }
-    if let Some(value) = header(head, "x-amz-checksum-crc64nvme") {
+    if let Some(value) = object_request.header(head, "x-amz-checksum-crc64nvme") {
         if let Some(raw) = base64.decode(value) {
             if list.len(raw) == 8 {
                 let mut n = 0u64
@@ -508,22 +412,6 @@ fn wire_buffers() -> WireBuffers {
     WireBuffers(values: take values, headers: list.with_capacity(FIELD_COUNT), signing: list.with_capacity(16384), target: string.with_capacity(8192), range_text: string.with_capacity(64))
 }
 
-fn field_name(index: u64) -> String {
-    match index {
-        0 => "host",
-        1 => "if-match",
-        2 => "if-none-match",
-        3 => "range",
-        4 => "x-amz-checksum-crc32c",
-        5 => "x-amz-content-sha256",
-        6 => "x-amz-date",
-        7 => "x-amz-meta-hirsel-put-id",
-        8 => "x-amz-security-token",
-        9 => "authorization",
-        _ => fail("unknown signed field"),
-    }
-}
-
 fn value_buffer(mut slots: List[Bytes], index: u64) -> Bytes {
     let mut out = list.set(mut slots, index, list.new())
     list.clear(mut out)
@@ -531,7 +419,7 @@ fn value_buffer(mut slots: List[Bytes], index: u64) -> Bytes {
 }
 
 fn set_header(mut headers: List[http_client.Header], index: u64, take value: Bytes) {
-    list.push(mut headers, http_client.Header(name: field_name(index), value: Public(take value)))
+    list.push(mut headers, http_client.Header(name: object_request.field_name(index), value: Public(take value)))
 }
 
 fn copy_header(mut headers: List[http_client.Header], mut slots: List[Bytes], index: u64, from: Bytes) {
@@ -546,7 +434,7 @@ fn reclaim_header(mut slots: List[Bytes], take h: http_client.Header) {
         fail("object signing returned a protected header")
     }
     for i in 0u64 .. FIELD_COUNT {
-        if name == field_name(i) {
+        if name == object_request.field_name(i) {
             let _ = list.set(mut slots, i, take data)
             return
         }
@@ -1002,7 +890,7 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
     let (found, expected) = {
         let head = http_client.head(c)
         if status == 206 {
-            let Some(field) = header(head, "content-range") else {
+            let Some(field) = object_request.header(head, "content-range") else {
                 return Invalid(Fatal(Malformed))
             }
             let range = match content_range(field) {
@@ -1018,14 +906,14 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
                 }
             }
             let n = range.hi - range.lo
-            if let Some(field_n) = content_length(head) {
+            if let Some(field_n) = object_request.content_length(head) {
                 if field_n != n {
                     return Invalid(Fatal(Malformed))
                 }
             }
             (read_meta(head, range.size), Some(n))
         } else if status == 200 && lo == 0 && hi == MAX_U64 {
-            let size = content_length(head)
+            let size = object_request.content_length(head)
             (read_meta(head, size_or(size, 0)), size)
         } else {
             return Invalid(Fatal(Malformed))
@@ -1071,14 +959,14 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
 // that `range_span(want, size)` gives at the object size it names, and a Content-Length,
 // if any, of that span; a 200 is the whole object and needs its length.
 fn open_part(head: http_client.ResponseHead, want: Want, status: u16) -> Exchange {
-    let tag = match header(head, "etag") {
+    let tag = match object_request.header(head, "etag") {
         Some(value) => match etag(value) {
             Ok(found) => found,
             Error(take e) => return Invalid(take e),
         },
         None => empty_tag(),
     }
-    let length = content_length(head)
+    let length = object_request.content_length(head)
     if status == 200 {
         let Some(size) = length else {
             return Invalid(Fatal(Malformed))
@@ -1088,7 +976,7 @@ fn open_part(head: http_client.ResponseHead, want: Want, status: u16) -> Exchang
     if status != 206 || want == Whole {
         return Invalid(Fatal(Malformed))
     }
-    let Some(field) = header(head, "content-range") else {
+    let Some(field) = object_request.header(head, "content-range") else {
         return Invalid(Fatal(Malformed))
     }
     let range = match content_range(field) {
@@ -1161,7 +1049,7 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
     }
     let head = http_client.head(c)
     let mut info = match read_meta(head, if op == S3Head {
-        size_or(content_length(head), 0)
+        size_or(object_request.content_length(head), 0)
     } else {
         octets
     }) {
@@ -1861,7 +1749,7 @@ fn exchange_once(mut lane: Lane, mut job: Job, op: Operation, mut progress: Read
 }
 
 fn proven_answer(head: http_client.ResponseHead, wire: http_client.Request, key: Secret) -> bool {
-    let Some(text) = header(head, sim.s3.PROOF_FIELD) else {
+    let Some(text) = object_request.header(head, sim.s3.PROOF_FIELD) else {
         return false
     }
     if list.len(text) != 64 {
@@ -1962,7 +1850,7 @@ fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress, retrying:
             }
         },
         Refused(f) => {
-            match classify(S3Head, f.phase, f.status, f.code, false, false) {
+            match object_request.classify(S3Head, f.phase, f.status, f.code, false, false) {
                 Missing => Reissue,
                 Retry => Undecided,
                 Throttle => Undecided,
@@ -2041,7 +1929,7 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
                             Error(Retriable(take reason))
                         }
                     }
-                    let decision = classify(op, phase, status, code, ambiguous, progress.tag.len != 0)
+                    let decision = object_request.classify(op, phase, status, code, ambiguous, progress.tag.len != 0)
                     last = take reason
                     match decision {
                         Accept => return Ok(Object(new_meta())),
@@ -2727,24 +2615,130 @@ pub fn store_if_retry(mut c: Client, key: String, pre: Precondition, take body: 
 pub fn store_if_issue(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> Result[PendingStore, (Bytes, Error)] waits {
     let mut request = conditional_job(mut c, key, pre, take body, deadline_ns)?
     request.retry_uncertain = true
-    let (tx, rx): (Sender[LaneEvent], Receiver[LaneEvent]) = channel.new(1)
     let index = next_lane(mut c)
-    match channel.send(c.requests.lanes[index], Work(take request, Some(take tx))) {
-        Ok(()) => Ok(PendingStore(output: take rx)),
-        Error(Closed(Work(take returned, _))) => {
+    match issue_with_reply(c.requests.lanes[index], take request) {
+        Ok(take output) => Ok(PendingStore(output: take output)),
+        Error(take returned) => {
             let Job(path: take path, data: take data, ..) = take returned
             c.requests.path = take path
             Error((take data, Retriable(Cancelled)))
         },
+    }
+}
+
+fn issue_with_reply(input: Sender[LaneMessage], take request: Job) -> Result[Receiver[LaneEvent], Job] waits {
+    let (tx, rx): (Sender[LaneEvent], Receiver[LaneEvent]) = channel.new(1)
+    match channel.send(input, Work(take request, Some(take tx))) {
+        Ok(()) => Ok(take rx),
+        Error(Closed(Work(take returned, _))) => Error(take returned),
         Error(_) => fail("object client submitted an invalid lane message"),
     }
+}
+
+/// Storage for the one-element reply channel of an isolated call.
+pub const ISOLATED_REPLY_BYTES: u64 = 64 + bytes[LaneEvent]
+
+/// A pre-encoded object path with request-owned storage. Use with the client
+/// that built it. A completed call returns the storage. A deadline after
+/// handoff leaves the storage with the lane and expires this request.
+pub opaque type IsolatedRequest {
+    path: String
+}
+
+pub fn isolated_request(c: Client, prefix: String, key: String) -> IsolatedRequest {
+    let bucket = view c.requests.bucket
+    let mut path = string.with_capacity(2 + 3 * (string.byte_len(bucket.bucket) + string.byte_len(prefix) + string.byte_len(key)))
+    string.push_char(mut path, '/')
+    if bucket.style == Path {
+        object_request.percent_encode(mut path, string.as_bytes(bucket.bucket), false)
+        string.push_char(mut path, '/')
+    }
+    object_request.percent_encode(mut path, string.as_bytes(prefix), true)
+    object_request.percent_encode(mut path, string.as_bytes(key), true)
+    IsolatedRequest(path: take path)
+}
+
+fn isolated_admit(input: Sender[LaneMessage], take pending: Job, c: Clock) -> Result[Receiver[LaneEvent], (Job, Error)] waits {
+    let (tx, rx): (Sender[LaneEvent], Receiver[LaneEvent]) = channel.new(1)
+    let deadline = pending.deadline
+    let mut job = take pending
+    loop {
+        let now = host.mono_ns(c)
+        if now >= deadline {
+            return Error((take job, Retriable(Deadline)))
+        }
+        match channel.try_send(input, Work(take job, Some(channel.sender(tx)))) {
+            Ok(()) => return Ok(take rx),
+            Error(Full(Work(take returned, _))) => {
+                job = take returned
+                host.sleep_until(c, order.min(deadline, int.saturating_add(now, 1000000)))
+            },
+            Error(Closed(Work(take returned, _))) => return Error((take returned, Retriable(Cancelled))),
+            Error(_) => fail("object client submitted an invalid isolated lane message"),
+        }
+    }
+}
+
+fn run_isolated(mut c: Client, mut isolated: IsolatedRequest, take request: Job) -> Reply waits {
+    let index = next_lane(mut c)
+    let deadline = request.deadline
+    let put = request.op == S3PutIf
+    let mut reply = match isolated_admit(c.requests.lanes[index], take request, c.requests.clock) {
+        Ok(take output) => match channel.receive_until(output, At(c.requests.clock, deadline)) {
+            Ok(Finished(take arrived)) => take arrived,
+            other => {
+                let why: Reason = match other {
+                    Error(Empty) => Deadline,
+                    _ => Cancelled,
+                }
+                let problem: Error = if put {
+                    Uncertain(take why)
+                } else {
+                    Retriable(take why)
+                }
+                Reply(lane: index, ticket: 0, path: string.new(), result: Error(take problem), data: list.new(), entries: list.new())
+            },
+        },
+        Error((take returned, take problem)) => {
+            let Job(ticket, path: take path, data: take data, entries: take entries, ..) = take returned
+            Reply(lane: index, ticket, path: take path, result: Error(take problem), data: take data, entries: take entries)
+        },
+    }
+    isolated.path = replace(mut reply.path, string.new())
+    take reply
+}
+
+/// A GET with a private reply, usable during cancellation cleanup.
+pub fn fetch_isolated(mut c: Client, mut isolated: IsolatedRequest, take into: Bytes, deadline: u64) -> (Result[Meta, Error], Bytes) waits {
+    if string.byte_len(isolated.path) == 0 {
+        return (Error(Precondition), take into)
+    }
+    let request = new_job(S3Fetch, replace(mut isolated.path, string.new()), take into, deadline)
+    let Reply(result: take result, data: take data, ..) = run_isolated(mut c, mut isolated, take request)
+    (as_meta(take result), take data)
+}
+
+/// A conditional PUT with a private reply. Uncertain outcomes are returned
+/// to the caller without retry on possible delivery.
+pub fn store_if_isolated(mut c: Client, mut isolated: IsolatedRequest, pre: Precondition, take body: Bytes, deadline: u64) -> (Result[Conditional, Error], Bytes) waits {
+    if string.byte_len(isolated.path) == 0 {
+        return (Error(Precondition), take body)
+    }
+    let tag = match pre {
+        Match(value) if strong_tag(value) => value,
+        Match(_) => return (Error(Precondition), take body),
+        Absent => empty_tag(),
+    }
+    let mut request = new_job(S3PutIf, replace(mut isolated.path, string.new()), take body, deadline)
+    request.tag = tag
+    conditional_reply(run_isolated(mut c, mut isolated, take request))
 }
 
 /// Waits for the issued PUT's result and returns its body to the caller.
 /// Use the issuing client to reclaim its path buffer.
 pub fn store_if_finish(mut c: Client, take pending: PendingStore) -> (Result[Conditional, Error], Bytes) waits {
     let mut reply = receive(pending.output)
-    c.requests.path = replace(mut reply.path, string.from(""))
+    c.requests.path = replace(mut reply.path, string.new())
     conditional_reply(take reply)
 }
 

@@ -99,6 +99,22 @@ pub fn method(op: Operation) -> String {
     }
 }
 
+pub fn field_name(index: u64) -> String {
+    match index {
+        0 => "host",
+        1 => "if-match",
+        2 => "if-none-match",
+        3 => "range",
+        4 => "x-amz-checksum-crc32c",
+        5 => "x-amz-content-sha256",
+        6 => "x-amz-date",
+        7 => "x-amz-meta-hirsel-put-id",
+        8 => "x-amz-security-token",
+        9 => "authorization",
+        _ => fail("unknown signed field"),
+    }
+}
+
 pub fn uploads_body(op: Operation) -> bool {
     op == S3Put || op == S3PutConditional || op == S3PutIf || op == S3Part || op == S3Complete || op == S3CompleteConditional
 }
@@ -168,4 +184,102 @@ pub fn start_request(mut c: http_client.Connection, wire: http_client.Request, d
     let started = http_client.start(mut c, wire, deadline)
     seen.started = http_client.request_started(c)
     started
+}
+
+pub type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
+
+pub type Decision: key = Accept | Retry | Throttle | Resolve | AlreadyExists | Missing | Changed | Refresh | CorrectSkew | Reject
+
+pub fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bool, pinned: bool) -> Decision {
+    if op == S3PutIf {
+        if phase == BeforeRequest || status == 409 || (status == 400 && code == string.as_bytes("RequestTimeout")) {
+            return Retry
+        }
+        if status == 412 {
+            return AlreadyExists
+        }
+        if status == 0 || status == 429 || (status >= 500 && status < 600) {
+            return Resolve
+        }
+        return Reject
+    }
+    let conditional = op == S3PutConditional || op == S3CompleteConditional
+    let uncertain = conditional || op == S3Complete
+    if phase == BeforeRequest {
+        return Retry
+    }
+    if status == 0 {
+        if uncertain && (phase == RequestSent || phase == ResponseBody) {
+            return Resolve
+        }
+        return Retry
+    }
+    if (status == 400 || status == 200) && code == string.as_bytes("RequestTimeout") {
+        return Retry
+    }
+    if (status == 400 || status == 200) && code == string.as_bytes("RequestTimeTooSkewed") {
+        return CorrectSkew
+    }
+    if (status == 403 || status == 200) && code == string.as_bytes("ExpiredToken") {
+        return Refresh
+    }
+    if status == 304 || status == 412 {
+        if conditional {
+            return if resolving {
+                Resolve
+            } else {
+                AlreadyExists
+            }
+        }
+        return Changed
+    }
+    if status == 404 {
+        return if op == S3Erase || op == S3Abort {
+            Accept
+        } else {
+            Missing
+        }
+    }
+    if status == 409 && pinned && payload_read(op) {
+        return Retry
+    }
+    if status == 429 || status == 503 || code == string.as_bytes("SlowDown") {
+        return if uncertain {
+            Resolve
+        } else {
+            Throttle
+        }
+    }
+    if status == 500 || status == 502 || status == 504 || code == string.as_bytes("InternalError") {
+        return if uncertain {
+            Resolve
+        } else {
+            Retry
+        }
+    }
+    if status >= 200 && status < 300 && list.len(code) == 0 {
+        return Accept
+    }
+    Reject
+}
+
+pub fn header(head: http_client.ResponseHead, name: String) -> Option[View[Bytes]] in head {
+    let key = string.as_bytes(name)
+    for i in 0u64 .. http_client.field_count(head) {
+        let (field, value) = option.unwrap(http_client.field_at(head, i))
+        if http1.equal_ascii(field, key) {
+            return Some(value)
+        }
+    }
+    None
+}
+
+pub fn content_length(head: http_client.ResponseHead) -> Option[u64] {
+    let Some(value) = header(head, "content-length") else {
+        return None
+    }
+    match int.parse_decimal_span(value, 0, list.len(value), 18446744073709551615u64) {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
 }

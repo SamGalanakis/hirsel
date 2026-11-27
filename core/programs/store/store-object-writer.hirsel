@@ -129,9 +129,13 @@ type ObjectWriterOpen {
     link: Option[host_stream.SlotLink]
 }
 
-fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, c: Clock, r: Random, options: Options, level_name: String, op_ms: u64, sim: Option[(List[String], LevelSync)], authority_kind: u8, stream: Option[JournalSlot]) -> Result[ObjectWriterOpen, Error] waits {
+fn prepare_object_writer(tasks: Tasks, mut opening: Option[history.ObjectPackRead], c: Clock, r: Random, options: Options, level_name: String, op_ms: u64, sim: Option[(List[String], LevelSync)], authority_kind: u8, stream: Option[JournalSlot]) -> Result[ObjectWriterOpen, Error] waits {
     let group_room: u64 = int.widen(options.group_bytes)
-    if authority_kind == 2 && !std.object.simulated(read_source.client) {
+    let simulated = match opening {
+        Some(source) => std.object.simulated(source.client),
+        None => fail("object writer requires a source"),
+    }
+    if authority_kind == 2 && !simulated {
         return Error(Endpoint(NotSimulator))
     }
     let name_count = match sim {
@@ -149,7 +153,11 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, 
             }
         }
         list.push(mut names_in_order, string.from(level_name))
-        Ok(history.HistoryConfig(place: std.object.bucket_config(read_source.client), levels: take names_in_order))
+        let place = match opening {
+            Some(source) => std.object.bucket_config(source.client),
+            None => fail("object writer requires a source"),
+        }
+        Ok(history.HistoryConfig(place: take place, levels: take names_in_order))
     })?
     let genesis_authority = failure_result_from_rep(history.history_config_bytes(declaration))?
     let mut workspace = failure_result_from_rep(history.history_buffers(object_writer_entry_room(group_room)))?
@@ -207,7 +215,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, 
     let held_options = disk_allocation(scoped fn() -> Result[Options, Error] {
         Ok(clone(options))
     })?
-    let (take register, take opened, take started, take metadata) = history_open_with(mut read_source, c, r, options, declaration.levels, authority_kind, take genesis_authority, mut workspace, op_ms, mut link, scoped fn(id: StoreId, replay: pager.JournalReplay) -> Result[Db, Error] {
+    let (take register, take opened, take started, take metadata) = history_open_with(mut opening, c, r, options, declaration.levels, authority_kind, take genesis_authority, mut workspace, op_ms, mut link, scoped fn(id: StoreId, replay: pager.JournalReplay) -> Result[Db, Error] {
         check_stream_quota(replay.state.tips[0u64].roots.streams, options.streams_max)?
         let state = failure_result_from_rep(host_stream.copy_follow_state(replay.state))?
         let mut prepared = disk_allocation(scoped fn() -> Result[Db, Error] {
@@ -232,10 +240,18 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, 
     }
     // The journaled forks after the checkpoint wait for the next cut's rows.
     let pager.JournalReplay(forked: take forked, ..) = take opened
-    if let Some(mut admitted) = read_source.admitted_base {
-        history.set_open_base_forks(mut admitted, take forked)
-    } else {
-        history.set_open_base_forks(mut blank, take forked)
+    let uninstalled: Option[List[manifest.LineageFork]] = match opening {
+        Some(mut source) => match source.admitted_base {
+            Some(mut admitted) => {
+                history.set_open_base_forks(mut admitted, take forked)
+                None
+            },
+            None => Some(take forked),
+        },
+        None => fail("object writer requires a source"),
+    }
+    if let Some(take forks) = take uninstalled {
+        history.set_open_base_forks(mut blank, take forks)
     }
     let history.HistoryConfig(levels: take names_in_order, ..) = take declaration
     Ok(ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, options: take held_options, levels: take names_in_order, weak: take weak, link: take link))
@@ -257,9 +273,12 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         return Error(Refusal(error: Unsupported(0), authority: wrap_object_authority(take config, authority_kind)))
     }
     let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache) = take config
-    let mut read_source = history.history_reader(take client, 0)
-    read_source.cache = cache
-    let prepared = match prepare_object_writer(tasks, mut read_source, c, r, options, level_name, op_ms, sim, authority_kind, stream) {
+    let mut initial_source = history.history_reader(take client, 0)
+    initial_source.cache = cache
+    let mut opening = Some(take initial_source)
+    let outcome = prepare_object_writer(tasks, mut opening, c, r, options, level_name, op_ms, sim, authority_kind, stream)
+    let read_source = option.unwrap(take opening)
+    let prepared = match take outcome {
         Ok(take ready) => take ready,
         Error(take problem) => {
             let history.ObjectPackRead(client: take returned, ..) = take read_source

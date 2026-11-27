@@ -81,8 +81,7 @@ pub type TailScan {
 pub type ClaimStream {
     lane: StreamLane,
     buffers: TailBuffers,
-    granted: Option[(u64, u64)],
-    token: Option[types.StoreKey]
+    granted: Option[(u64, u64)]
 }
 
 // Runs `body` with the client's prefix at the bucket's top, where the stream
@@ -92,15 +91,4 @@ pub fn stream_at_root[R, E](mut client: std.object.Client, body: scoped fn(mut s
     let result = body(mut client)
     let _ = std.object.set_prefix(mut client, take place)
     take result
-}
-
-// Rule (e): the claimant marks its own row Abandoned, only when it will
-// never send H for it. A failed mark leaves the row Held for rule (a).
-pub fn stream_claim_abandon(mut client: std.object.Client, mut side: ClaimStream, deadline: u64) waits {
-    let Some(token) = replace(mut side.token, None) else {
-        return
-    }
-    let _ = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[RegWrite, types.Failure] waits {
-        stream_reg_write(mut side.lane, mut c, Abandon(token), deadline)
-    })
 }

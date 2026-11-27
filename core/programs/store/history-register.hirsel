@@ -376,15 +376,42 @@ pub fn prepare_register_head(mut raw: Bytes, head: HistoryHead, authority: Bytes
 
 pub type RegisterClaimWrite = RegisterClaimApplied(HistoryRegister) | RegisterClaimConflict | RegisterClaimRefused(std.object.Error) | RegisterClaimUndecided
 
-pub fn write_prepared_register(mut client: std.object.Client, precondition: std.object.Precondition, take prepared: PreparedRegisterHead, mut body: Bytes, mut witness: Bytes, deadline: u64) -> RegisterClaimWrite waits {
-    let PreparedRegisterHead(head, attach: take attach, raw: take encoded) = take prepared
-    body = take encoded
-    let issued = history_write_head_issue(mut client, precondition, mut body, deadline)
-    match history_write_head_finish(mut client, take issued, mut body, mut witness, deadline) {
+pub fn return_prepared_body(take prepared: PreparedRegisterHead, mut body: Bytes) {
+    let PreparedRegisterHead(raw: take raw, ..) = take prepared
+    body = take raw
+}
+
+pub opaque type IssuedRegisterHead {
+    head: HistoryHead,
+    attach: Option[format.Attach],
+    pending: std.object.PendingStore
+}
+
+pub fn issue_prepared_register(mut client: std.object.Client, precondition: std.object.Precondition, take prepared: PreparedRegisterHead, deadline: u64) -> Result[IssuedRegisterHead, (PreparedRegisterHead, std.object.Error)] waits {
+    let PreparedRegisterHead(head, attach: take attach, raw: take raw) = take prepared
+    match std.object.store_if_issue(mut client, "head", precondition, take raw, deadline) {
+        Ok(take pending) => Ok(IssuedRegisterHead(head, attach: take attach, pending: take pending)),
+        Error((take encoded, take problem)) => Error((PreparedRegisterHead(head, attach: take attach, raw: take encoded), take problem)),
+    }
+}
+
+pub fn finish_prepared_register(mut client: std.object.Client, take issued: IssuedRegisterHead, mut body: Bytes, mut witness: Bytes, deadline: u64) -> RegisterClaimWrite waits {
+    let IssuedRegisterHead(head, attach: take attach, pending: take pending) = take issued
+    match history_write_head_finish(mut client, Ok(take pending), mut body, mut witness, deadline) {
         HistoryApplied(tag) => RegisterClaimApplied(HistoryRegister(head, tag, terminal: None, attach: take attach)),
         HistoryConflict(_) => RegisterClaimConflict,
         HistoryRefused(take problem) => RegisterClaimRefused(take problem),
         HistoryUndecided => RegisterClaimUndecided,
+    }
+}
+
+pub fn write_prepared_register(mut client: std.object.Client, precondition: std.object.Precondition, take prepared: PreparedRegisterHead, mut body: Bytes, mut witness: Bytes, deadline: u64) -> RegisterClaimWrite waits {
+    match issue_prepared_register(mut client, precondition, take prepared, deadline) {
+        Ok(take issued) => finish_prepared_register(mut client, take issued, mut body, mut witness, deadline),
+        Error((PreparedRegisterHead(raw: take raw, ..), take problem)) => {
+            body = take raw
+            RegisterClaimRefused(take problem)
+        },
     }
 }
 

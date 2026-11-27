@@ -1812,7 +1812,7 @@ stream_tail_prescan_xindex	store-stream-claim.hirsel	host_stream	store	-	push-up
 stream_no_hold_scan	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
 ClaimStream	store-stream-claim.hirsel	host_stream	host_stream	L8
 stream_at_root	store-stream-claim.hirsel	host_stream	host_stream	L8
-stream_claim_abandon	store-stream-claim.hirsel	host_stream	host_stream	L8
+hold_abandon	host-stream-hold.hirsel	host_stream	host_stream	L8	HoldGuard consumes the token on explicit cleanup
 stream_open_attached	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> object_writer (refs at layer 8); push-up object_writer -> store (refs at layer 12)
 stream_apply_sealed_tail	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
 stream_load_settled	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)

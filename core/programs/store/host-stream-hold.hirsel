@@ -1,0 +1,400 @@
+const HOLD_REGISTER_ROOM: u64 = format.REG_LIMIT + 88 + format.BINDING_BYTES
+
+const HOLD_REGISTER_ROWS: u64 = (format.REG_LIMIT - format.REG_FIXED_BYTES) / format.REG_ROW_BYTES
+
+// Up to two 1,209-byte reply channels per register attempt. A lane can
+// still own its sender when a reply arrives. Add 40 bytes for the frame
+// binding and 8 for a fault key. The grant syntax requires a literal.
+type AbandonScratch {
+    prefix: String,
+    io: std.object.IsolatedRequest,
+    explicit_prefix: String,
+    explicit_io: std.object.IsolatedRequest,
+    sid: types.HostStreamIdRep,
+    authority_kind: u8,
+    read: Bytes,
+    body: Bytes,
+    rows: List[format.RegRow]
+}
+
+pub opaque resource type HoldGuard grant bytes 19392 {
+    client: std.object.Client,
+    lane: StreamLane,
+    buffers: TailBuffers,
+    token: types.StoreKey,
+    against: u64,
+    cleanup: AbandonScratch,
+    cleanup_ms: u64
+} drop(guard) {
+    let deadline = std.object.deadline_after_ms(guard.client, guard.cleanup_ms)
+    let _ = abandon_prepared(mut guard.client, mut guard.cleanup.prefix, mut guard.cleanup.io, mut guard.cleanup.read, mut guard.cleanup.rows, guard.cleanup.sid, guard.cleanup.authority_kind, guard.token, deadline)
+}
+
+type HoldIssue = Held(u64) | Superseded(u64) | Refused(types.Failure) | Unknown(types.Failure)
+
+type AbandonResult = Abandoned | AbandonFailed(types.Failure)
+
+type Released = ReleaseSuperseded | ReleaseRefused
+
+fn hold_begin(take client: std.object.Client, take lane: StreamLane, take buffers: TailBuffers, token: types.StoreKey, against: u64, cleanup_ms: u64) -> Result[HoldGuard, (std.object.Client, StreamLane, TailBuffers, types.Failure)] {
+    let scratch = manifest.disk_allocation(scoped fn() -> Result[AbandonScratch, types.Failure] {
+        Ok(AbandonScratch(prefix: string.from(lane.dir), io: std.object.isolated_request(client, lane.dir, "reg"), explicit_prefix: string.from(lane.dir), explicit_io: std.object.isolated_request(client, lane.dir, "reg"), sid: lane.sid, authority_kind: lane.authority_kind, read: list.with_capacity(HOLD_REGISTER_ROOM), body: list.with_capacity(HOLD_REGISTER_ROOM), rows: list.with_capacity(HOLD_REGISTER_ROWS)))
+    })
+    let cleanup = match take scratch {
+        Ok(take reserved) => take reserved,
+        Error(take problem) => return Error((take client, take lane, take buffers, take problem)),
+    }
+    match HoldGuard(client: take client, lane: take lane, buffers: take buffers, token, against, cleanup: take cleanup, cleanup_ms) {
+        Ok(take guard) => Ok(take guard),
+        Error((available, (take back_client, take back_lane, take back_buffers, _, _, _, _))) => Error((take back_client, take back_lane, take back_buffers, Full(Allocation(available)))),
+    }
+}
+
+fn hold_observed(guard: HoldGuard, take failure: types.Failure) -> HoldIssue {
+    if let Some(rev) = stream_hold_rev(guard.lane.reg, guard.token) {
+        return Held(rev)
+    }
+    if guard.lane.reg.inc > guard.against {
+        return Superseded(guard.lane.reg.inc)
+    }
+    Unknown(take failure)
+}
+
+fn hold_issue(mut guard: HoldGuard, store: types.StoreKey, epoch: u64, deadline: u64) -> HoldIssue waits {
+    let token = guard.token
+    let against = guard.against
+    let row = format.RegRow(store, epoch, token, rev_hold: 0, abandoned: false)
+    let place = std.object.set_prefix(mut guard.client, string.new())
+    let issue = stream_reg_write(mut guard.lane, mut guard.client, Hold(row, against), deadline)
+    let _ = std.object.set_prefix(mut guard.client, take place)
+    match take issue {
+        Ok(_) => hold_observed(guard, Undecided),
+        Error(Full(Register(room))) => Refused(Full(Register(room))),
+        Error(take failure) => Unknown(take failure),
+    }
+}
+
+fn hold_reconcile(mut guard: HoldGuard, deadline: u64) -> HoldIssue waits {
+    let place = std.object.set_prefix(mut guard.client, string.new())
+    let fetched = stream_reg_read(mut guard.lane, mut guard.client, deadline)
+    let _ = std.object.set_prefix(mut guard.client, take place)
+    match take fetched {
+        Ok(()) => hold_observed(guard, Undecided),
+        Error(take failure) => Unknown(take failure),
+    }
+}
+
+fn hold_release(take guard: HoldGuard, proof: Released) -> (std.object.Client, StreamLane, TailBuffers) {
+    let HoldGuard(client: take client, lane: take lane, buffers: take buffers, ..) = take guard
+    (take client, take lane, take buffers)
+}
+
+fn hold_abandon(take guard: HoldGuard) -> (std.object.Client, StreamLane, TailBuffers, AbandonResult) waits {
+    let mut armed = take guard
+    let deadline = std.object.deadline_after_ms(armed.client, armed.cleanup_ms)
+    let done = abandon_prepared(mut armed.client, mut armed.cleanup.explicit_prefix, mut armed.cleanup.explicit_io, mut armed.cleanup.body, mut armed.cleanup.rows, armed.cleanup.sid, armed.cleanup.authority_kind, armed.token, deadline)
+    let HoldGuard(client: take client, lane: take lane, buffers: take buffers, ..) = take armed
+    (take client, take lane, take buffers, take done)
+}
+
+fn abandon_prepared(mut client: std.object.Client, mut prefix: String, mut io: std.object.IsolatedRequest, mut raw: Bytes, mut rows: List[format.RegRow], sid: types.HostStreamIdRep, authority_kind: u8, token: types.StoreKey, deadline: u64) -> AbandonResult waits {
+    let place = std.object.set_prefix(mut client, replace(mut prefix, string.new()))
+    let outcome = abandon_register(mut client, mut io, mut raw, mut rows, sid, authority_kind, token, deadline)
+    prefix = std.object.set_prefix(mut client, take place)
+    match take outcome {
+        Ok(()) => Abandoned,
+        Error(take problem) => AbandonFailed(take problem),
+    }
+}
+
+fn abandon_register(mut client: std.object.Client, mut io: std.object.IsolatedRequest, mut raw: Bytes, mut rows: List[format.RegRow], sid: types.HostStreamIdRep, authority_kind: u8, token: types.StoreKey, deadline: u64) -> Result[(), types.Failure] waits {
+    for attempt in 0u64 .. STREAM_REG_ATTEMPTS {
+        if std.object.deadline_after_ms(client, 0) >= deadline {
+            break
+        }
+        list.clear(mut raw)
+        let (take received, take read) = std.object.fetch_isolated(mut client, mut io, replace(mut raw, list.new()), deadline)
+        raw = take read
+        let meta = received ?=> |problem| Remote(problem)
+        if meta.size != list.len(raw) || meta.etag.len == 0 {
+            return Error(Remote(Fatal(Malformed)))
+        }
+        let mut reg = manifest.stream_register_decode_reuse(raw, sid, 0, mut rows)?
+        let mut changed = false
+        for i in 0u64 .. list.len(reg.rows) {
+            if reg.rows[i].token == token && !reg.rows[i].abandoned {
+                reg.rows[i].abandoned = true
+                changed = true
+            }
+        }
+        if !changed {
+            rows = replace(mut reg.rows, list.new())
+            return Ok(())
+        }
+        reg.rev += 1
+        let encoded = format.stream_register_encode(mut raw, reg, authority_kind)
+        rows = replace(mut reg.rows, list.new())
+        encoded?
+        let (take result, take body) = std.object.store_if_isolated(mut client, mut io, Match(meta.etag), replace(mut raw, list.new()), deadline)
+        raw = take body
+        match take result {
+            Ok(Applied(_)) => return Ok(()),
+            Ok(Mismatch) => (),
+            Error(Uncertain(_)) => (),
+            Error(Retriable(_)) => (),
+            Error(take problem) => return Error(Remote(take problem)),
+        }
+        if attempt + 1 < STREAM_REG_ATTEMPTS {
+            std.object.pause_retry(mut client, attempt, deadline)
+        }
+    }
+    Error(Undecided)
+}
+
+type Armed = Guarded(HoldGuard) | Unguarded(std.object.Client, StreamLane, TailBuffers)
+
+type Disarmed {
+    client: std.object.Client,
+    lane: StreamLane,
+    buffers: TailBuffers,
+    hold: Option[(types.StoreKey, AbandonScratch, u64)]
+}
+
+type Handoff = Issued(Disarmed, history.IssuedRegisterHead) | NotIssued(Armed, history.PreparedRegisterHead, types.Failure)
+
+fn hold_handoff(take armed: Armed, tag: std.object.ETag, take candidate: history.PreparedRegisterHead, deadline: u64) -> Handoff waits {
+    match take armed {
+        Guarded(take guard) => {
+            let mut held = take guard
+            match history.issue_prepared_register(mut held.client, Match(tag), take candidate, deadline) {
+                Ok(take pending) => {
+                    let HoldGuard(client: take client, lane: take lane, buffers: take buffers, token, cleanup: take cleanup, cleanup_ms, ..) = take held
+                    Issued(Disarmed(client: take client, lane: take lane, buffers: take buffers, hold: Some((token, take cleanup, cleanup_ms))), take pending)
+                },
+                Error((take returned, take why)) => {
+                    NotIssued(Guarded(take held), take returned, Remote(take why))
+                },
+            }
+        },
+        Unguarded(take client, take lane, take buffers) => {
+            let mut transport = take client
+            match history.issue_prepared_register(mut transport, Match(tag), take candidate, deadline) {
+                Ok(take pending) => Issued(Disarmed(client: take transport, lane: take lane, buffers: take buffers, hold: None), take pending),
+                Error((take returned, take why)) => {
+                    NotIssued(Unguarded(take transport, take lane, take buffers), take returned, Remote(take why))
+                },
+            }
+        },
+    }
+}
+
+fn hold_conflict_abandon(mut disarmed: Disarmed) -> AbandonResult waits {
+    let Some((token, take scratch, cleanup_ms)) = replace(mut disarmed.hold, None) else {
+        return Abandoned
+    }
+    let mut cleanup = take scratch
+    let deadline = std.object.deadline_after_ms(disarmed.client, cleanup_ms)
+    abandon_prepared(mut disarmed.client, mut cleanup.prefix, mut cleanup.io, mut cleanup.read, mut cleanup.rows, cleanup.sid, cleanup.authority_kind, token, deadline)
+}
+
+type ClaimPublished[T] {
+    reg: history.HistoryRegister,
+    head: history.HistoryHead,
+    live: Option[format.StreamRef],
+    authority: Bytes,
+    replay: pager.JournalReplay,
+    admitted: T
+}
+
+type ClaimPhase[T] = Init | Acquiring(HoldGuard) | Held(HoldGuard, u64) | NoHold(std.object.Client, StreamLane, TailBuffers) | ReadyToBuild(Armed, Option[u64]) | HIssued(Disarmed, history.IssuedRegisterHead, history.HistoryHead, Option[format.StreamRef], Bytes, pager.JournalReplay, T) | HeadPublished(ClaimPublished[T]) | Claimed | FailedPreH(types.Failure, Option[AbandonResult]) | HAmbiguous(Option[types.StoreKey], types.Failure) | FailedPostH(types.Failure)
+
+pub opaque resource type ClaimMachine[T] {
+    phase: ClaimPhase[T]
+} drop(machine) {}
+
+pub type ClaimStep[T] = ClaimRestart | ClaimConflict | ClaimFailed(types.Failure) | ClaimDone(history.HistoryRegister, pager.JournalReplay, T, Bytes)
+
+fn claim_pre_h_failure[T](mut machine: ClaimMachine[T], take armed: Armed, take problem: types.Failure) -> (std.object.Client, StreamLane, TailBuffers, ClaimStep[T]) waits {
+    let (take client, take lane, take buffers, take abandon) = match take armed {
+        Guarded(take guard) => {
+            let (take transport, take reg, take scratch, take outcome) = hold_abandon(take guard)
+            (take transport, take reg, take scratch, Some(take outcome))
+        },
+        Unguarded(take client, take lane, take buffers) => (take client, take lane, take buffers, None),
+    }
+    machine.phase = FailedPreH(clone(problem), take abandon)
+    (take client, take lane, take buffers, ClaimFailed(take problem))
+}
+
+fn claim_restart[T](take armed: Armed) -> (std.object.Client, StreamLane, TailBuffers, ClaimStep[T]) waits {
+    match take armed {
+        Guarded(take guard) => {
+            let (take client, take lane, take buffers, _) = hold_abandon(take guard)
+            (take client, take lane, take buffers, ClaimRestart)
+        },
+        Unguarded(take client, take lane, take buffers) => (take client, take lane, take buffers, ClaimRestart),
+    }
+}
+
+fn claim_acquire[T](mut machine: ClaimMachine[T], take client: std.object.Client, take lane: StreamLane, take buffers: TailBuffers, token: types.StoreKey, store: types.StoreKey, epoch: u64, inc: u64, cleanup_ms: u64, deadline: u64) -> Result[(), (std.object.Client, StreamLane, TailBuffers, ClaimStep[T])] waits {
+    let guard = match hold_begin(take client, take lane, take buffers, token, inc, cleanup_ms) {
+        Ok(take armed) => take armed,
+        Error((take back_client, take back_lane, take back_buffers, take why)) => {
+            machine.phase = FailedPreH(clone(why), None)
+            return Error((take back_client, take back_lane, take back_buffers, ClaimFailed(take why)))
+        },
+    }
+    machine.phase = Acquiring(take guard)
+    let outcome = match machine.phase {
+        Acquiring(mut active) => claim_wait_for_hold(mut active, store, epoch, deadline),
+        _ => fail("claim lost the acquiring phase"),
+    }
+    let Acquiring(take settled) = replace(mut machine.phase, Init) else {
+        fail("claim lost the acquiring phase")
+    }
+    match take outcome {
+        Held(rev) => {
+            machine.phase = Held(take settled, rev)
+        },
+        Superseded(_) => {
+            let (take transport, take register_lane, take tail) = hold_release(take settled, ReleaseSuperseded)
+            machine.phase = NoHold(take transport, take register_lane, take tail)
+        },
+        Refused(take why) => {
+            let (take transport, take register_lane, take tail) = hold_release(take settled, ReleaseRefused)
+            machine.phase = FailedPreH(clone(why), None)
+            return Error((take transport, take register_lane, take tail, ClaimFailed(take why)))
+        },
+        Unknown(take why) => return Error(claim_pre_h_failure(mut machine, Guarded(take settled), take why)),
+    }
+    Ok(())
+}
+
+fn claim_wait_for_hold(mut guard: HoldGuard, store: types.StoreKey, epoch: u64, deadline: u64) -> HoldIssue waits {
+    let attempted = hold_issue(mut guard, store, epoch, deadline)
+    hold_resolve(mut guard, take attempted, deadline)
+}
+
+fn hold_resolve(mut guard: HoldGuard, take attempted: HoldIssue, deadline: u64) -> HoldIssue waits {
+    let why = match take attempted {
+        Unknown(take problem) => take problem,
+        other => return take other,
+    }
+    while std.object.deadline_after_ms(guard.client, 0) < deadline {
+        let observed = hold_reconcile(mut guard, deadline)
+        if let Unknown(_) = observed {
+            std.object.pause_retry(mut guard.client, 0, deadline)
+        } else {
+            return take observed
+        }
+    }
+    Unknown(take why)
+}
+
+pub fn stream_claim_live[T](take client: std.object.Client, take side: ClaimStream, store: types.StoreKey, epoch: u64, inc: u64, no_hold: bool, token: types.StoreKey, cleanup_ms: u64, deadline: u64, take replay: pager.JournalReplay, mut link: SlotLink, archive_on: u64, group_bytes: u64, group_commits: u64, mut work: history.HistoryBuffers, build: scoped fn(mut std.object.Client, mut StreamLane, mut TailBuffers, Option[u64], mut pager.JournalReplay, mut history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits) -> (std.object.Client, ClaimStream, ClaimStep[T]) waits {
+    let ClaimStream(lane: take lane, buffers: take buffers, granted) = take side
+    let created: Result[ClaimMachine[T], (Capacity, ClaimPhase[T])] = ClaimMachine(phase: Init)
+    let mut machine = match take created {
+        Ok(take state) => take state,
+        Error((problem, _)) => return (take client, ClaimStream(lane: take lane, buffers: take buffers, granted), ClaimFailed(Full(Allocation(problem)))),
+    }
+    if no_hold {
+        machine.phase = NoHold(take client, take lane, take buffers)
+    } else if let Error((take transport, take register_lane, take scratch, take step)) = claim_acquire(mut machine, take client, take lane, take buffers, token, store, epoch, inc, cleanup_ms, deadline) {
+        return (take transport, ClaimStream(lane: take register_lane, buffers: take scratch, granted), take step)
+    }
+    let (take transport, take register_lane, take scratch, take step) = claim_build_and_publish(mut machine, take replay, mut link, archive_on, cleanup_ms, group_bytes, group_commits, deadline, mut work, build)
+    (take transport, ClaimStream(lane: take register_lane, buffers: take scratch, granted), take step)
+}
+
+fn claim_build_and_publish[T](mut machine: ClaimMachine[T], take replay: pager.JournalReplay, mut link: SlotLink, archive_on: u64, op_ms: u64, group_bytes: u64, group_commits: u64, deadline: u64, mut work: history.HistoryBuffers, build: scoped fn(mut std.object.Client, mut StreamLane, mut TailBuffers, Option[u64], mut pager.JournalReplay, mut history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits) -> (std.object.Client, StreamLane, TailBuffers, ClaimStep[T]) waits {
+    let next: ClaimPhase[T] = match replace(mut machine.phase, Init) {
+        Held(take guard, rev_hold) => ReadyToBuild(Guarded(take guard), Some(rev_hold)),
+        NoHold(take client, take lane, take buffers) => ReadyToBuild(Unguarded(take client, take lane, take buffers), None),
+        _ => fail("claim reached build without a decision on the hold"),
+    }
+    machine.phase = take next
+    let mut recovered = take replay
+    let built = match machine.phase {
+        ReadyToBuild(Guarded(mut guard), stop) => build(mut guard.client, mut guard.lane, mut guard.buffers, stop, mut recovered, mut work),
+        ReadyToBuild(Unguarded(mut client, mut lane, mut buffers), stop) => build(mut client, mut lane, mut buffers, stop, mut recovered, mut work),
+        _ => fail("claim lost the ready phase"),
+    }
+    let ReadyToBuild(take armed, _) = replace(mut machine.phase, Init) else {
+        fail("claim lost the ready phase")
+    }
+    let (tag, head, live, take prepared, take authority, take admitted) = match take built {
+        Ok(Some(take candidate)) => take candidate,
+        Ok(None) => return claim_restart(take armed),
+        Error(take problem) => return claim_pre_h_failure(mut machine, take armed, take problem),
+    }
+    match hold_handoff(take armed, tag, take prepared, deadline) {
+        Issued(take disarmed, take pending) => {
+            machine.phase = HIssued(take disarmed, take pending, head, live, take authority, take recovered, take admitted)
+        },
+        NotIssued(take still_armed, take returned, take why) => {
+            history.return_prepared_body(take returned, mut work.body)
+            return claim_pre_h_failure(mut machine, take still_armed, take why)
+        },
+    }
+    let HIssued(take disarmed, take pending, saved_head, saved_live, take saved_authority, take saved_replay, take saved_admitted) = replace(mut machine.phase, Init) else {
+        fail("claim lost the issued phase")
+    }
+    let mut transport = take disarmed
+    let outcome = history.finish_prepared_register(mut transport.client, take pending, mut work.body, mut work.witness, deadline)
+    match take outcome {
+        RegisterClaimApplied(take reg) => {
+            machine.phase = HeadPublished(ClaimPublished(reg: take reg, head: saved_head, live: saved_live, authority: take saved_authority, replay: take saved_replay, admitted: take saved_admitted))
+        },
+        RegisterClaimConflict => {
+            let _ = hold_conflict_abandon(mut transport)
+            let Disarmed(client: take client, lane: take lane, buffers: take buffers, ..) = take transport
+            return (take client, take lane, take buffers, ClaimConflict)
+        },
+        RegisterClaimRefused(take problem) => return claim_ambiguous(mut machine, take transport, Remote(take problem)),
+        RegisterClaimUndecided => return claim_ambiguous(mut machine, take transport, Undecided),
+    }
+    let Disarmed(client: take returned, lane: take lane, buffers: take buffers, ..) = take transport
+    let mut client = take returned
+    let completed = match machine.phase {
+        HeadPublished(mut published) => claim_publish(mut client, mut published, mut link, archive_on, op_ms, group_bytes, group_commits, deadline, mut work),
+        _ => fail("claim lost the published phase"),
+    }
+    if let Error(take problem) = take completed {
+        machine.phase = FailedPostH(clone(problem))
+        return (take client, take lane, take buffers, ClaimFailed(take problem))
+    }
+    let HeadPublished(ClaimPublished(reg: take reg, replay: take result_replay, admitted: take result_writer, authority: take result_authority, ..)) = replace(mut machine.phase, Claimed) else {
+        fail("claim lost the published phase")
+    }
+    (take client, take lane, take buffers, ClaimDone(take reg, take result_replay, take result_writer, take result_authority))
+}
+
+fn claim_ambiguous[T](mut machine: ClaimMachine[T], take transport: Disarmed, take problem: types.Failure) -> (std.object.Client, StreamLane, TailBuffers, ClaimStep[T]) {
+    let token = match transport.hold {
+        Some((token, _, _)) => Some(token),
+        None => None,
+    }
+    machine.phase = HAmbiguous(token, clone(problem))
+    let Disarmed(client: take client, lane: take lane, buffers: take buffers, ..) = take transport
+    (take client, take lane, take buffers, ClaimFailed(take problem))
+}
+
+fn claim_publish[T](mut client: std.object.Client, mut published: ClaimPublished[T], mut link: SlotLink, archive_on: u64, op_ms: u64, group_bytes: u64, group_commits: u64, deadline: u64, mut work: history.HistoryBuffers) -> Result[(), types.Failure] waits {
+    if let Some(_) = published.live {
+        slot_claim_frame(mut work.packet, published.head.pair.epoch, published.head.pair.holder)
+        slot_send(link, work.packet, 0)?
+        return match slot_wait(mut link, 0) {
+            Error(Fenced(_)) => Error(Lost),
+            other => take other,
+        }
+    }
+    if archive_on != 0 {
+        match stream_settle_sealed_core(mut client, mut published.reg, published.authority, mut work, link.root, op_ms, group_bytes, group_commits)? {
+            SettleApplied => (),
+            SettleFenced(_, _) => return Error(Lost),
+            SettleNotApplied => return Error(Undecided),
+        }
+    }
+    history_advance_claim(mut client, mut published.reg, published.authority, mut work, deadline)
+}

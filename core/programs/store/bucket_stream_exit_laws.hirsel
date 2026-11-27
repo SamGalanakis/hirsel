@@ -321,3 +321,51 @@ fn exit_l90_e_crash_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[StoreId
     close_journal_service(take svc)?
     Ok(p4_store)
 }
+
+type PausedStreamCancel: send {
+    journal: Sender[JournalMsg],
+    through: u64
+}
+
+fn exit_cancelled_settle(take input: PausedStreamCancel) -> Result[(), Error] waits {
+    let PausedStreamCancel(journal: take journal, through) = take input
+    let (take handover, take paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (take resume, take resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    result.unwrap(channel.send(journal, ObjectPause(take handover, take resuming)))
+    let active = object_journal_begin(result.unwrap(channel.receive(paused)))
+    let (take settled, take outcome) = stream_settle(take active, through, through + 1, false, 65536, 1)
+    return_object_journal(take settled, resume)?
+    let _ = outcome?
+    fail("the paused settle returned before cancellation")
+}
+
+@test
+fn bucket_stream_cancelled_settle_joins_worker(c: Clock, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut batch_name = string.with_capacity(48)
+    format.stream_batch_key(mut batch_name, 1, 2)
+    let batch_key = stream_service_key(take batch_name)
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: string.from(batch_key), from: 1, count: 1, until: Requested("GET", "settle-cancel-release", 1), then: Apply))
+    let sim = bucket_law_sim_holds(tasks, c, 3267, None, list.new(), take holds, std.sim.world.plan(3267))
+    let mut service = stream_unhold_service(sim, tasks, r, 4)?
+    stream_unhold_make_place(sim, tasks, r)?
+    let mut place = stream_unhold_open_attached(sim, tasks, r, mut service, 85)?
+    let acknowledged = stream_unhold_commit_ticket(mut place, 1)?
+    durable(mut place, acknowledged)?
+    let job = PausedStreamCancel(journal: channel.sender(object_sender(disk_state(place))), through: 2)
+    let mut waiter = task.spawn(tasks, bytes 16777216, take job, exit_cancelled_settle)
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", batch_key, 1))
+    task.cancel(mut waiter)
+    let Error(Cancelled(_)) = task.join(take waiter) else {
+        fail("the foreground settle did not unwind")
+    }
+    stream_service_marker(sim, tasks, string.from("settle-cancel-release"))?
+    let Db(disk: take disk, ..) = take place
+    let Some(DiskState(backend: ObjectBackend(ObjectJournalQueue(writer: take worker, ..)), ..)) = take disk else {
+        fail("the attached Place did not have an Object worker")
+    }
+    result.unwrap(task.join(take worker))?
+    close_journal_service(take service)?
+    let _ = bucket_law_report(take sim)
+    Ok(())
+}

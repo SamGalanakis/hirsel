@@ -1,0 +1,3 @@
+fn forge(take client: std.object.Client) {
+    let _ = store.host_stream.HoldGuard(client: take client)
+}

@@ -192,3 +192,71 @@ fn bucket_stream_set_prefix_listing(c: Clock, r: Random, tasks: Tasks) -> Result
     }
     Ok(())
 }
+
+@test
+fn bucket_stream_claim_reuses_grant_after_conflict(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg_key = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p1/head"), from: 5, count: 1, until: Requested("GET", "conflict-release", 1), then: Apply))
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from(reg_key), from: 5, count: 1, until: Requested("GET", "retry-release", 1), then: Apply))
+    let sim = bucket_law_sim_holds(tasks, c, 3267, None, list.new(), take holds, std.sim.world.plan(3267))
+    let mut service = stream_unhold_service(sim, tasks, r, 4)?
+    stream_unhold_make_place(sim, tasks, r)?
+    let mut incumbent = stream_unhold_open_attached(sim, tasks, r, mut service, 85)?
+    bucket_law_commit(mut incumbent, 1)?
+    let slot = journal_slot(mut service)?
+    let job = UnholdClaimant(endpoint: sim.endpoint, clock: sim.time, tasks, r, slot: take slot, seed: 241, expect_rows: Some(1), close_after: true)
+    let challenger = task.spawn(tasks, bytes 33554432, take job, stream_unhold_claim_task)
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "p1/head", 5))
+    let token = stream_q4_one(stream_q4_rows(sim, tasks, reg_key)?, false, string.from("the first claim did not have a Held token"))?
+    stream_claim_advance_same_pair(sim, tasks)?
+    stream_service_marker(sim, tasks, string.from("conflict-release"))?
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", reg_key, 5))
+    let rows = stream_q4_rows(sim, tasks, reg_key)?
+    let mut abandoned = false
+    for row in rows {
+        if row.token == store_key_to_rep(token) && row.abandoned {
+            abandoned = true
+        }
+    }
+    if !abandoned {
+        fail("the first same-open attempt did not abandon its token")
+    }
+    stream_service_marker(sim, tasks, string.from("retry-release"))?
+    result.unwrap(task.join(take challenger))?
+    let _ = close(take incumbent)
+    close_journal_service(take service)?
+    let report = bucket_law_report(take sim)
+    let mut conflicts = 0u64
+    for request in report.requests {
+        if request.method == "PUT" && request.key == "p1/head" && request.status == 412 {
+            conflicts += 1
+        }
+    }
+    if conflicts != 1 {
+        fail("the first claim did not receive the same-pair Conflict")
+    }
+    Ok(())
+}
+
+// Publish a valid same-pair settle while the claimant waits on its old tag.
+fn stream_claim_advance_same_pair(sim: BucketSim, tasks: Tasks) -> Result[(), Error] waits {
+    let mut client = stream_service_client(sim, tasks, 242, "p1/", "us-east-1")?
+    let due = std.object.deadline_after_ms(client, UNHOLD_OP_MS)
+    let mut witness: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let tag = history.history_fetch_head(mut client, mut witness, due) ?=> |problem| Remote(problem)
+    let (take observed, take previous) = failure_result_from_rep(history.history_decode_head_attach(witness))?
+    let Some(take attach) = take previous else {
+        fail("the incumbent was not attached")
+    }
+    let mut advanced = take attach
+    advanced.settles += 1
+    let authority_end = failure_result_from_rep(history.history_authority_end(witness))?
+    let mut raw: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let candidate = failure_result_from_rep(history.prepare_register_head(mut raw, observed.head, list.slice(witness, 240, authority_end), Some(take advanced)))?
+    if let RegisterClaimApplied(_) = history.write_prepared_register(mut client, Match(tag), take candidate, mut raw, mut witness, due) {
+        Ok(())
+    } else {
+        fail("the incumbent's same-pair head write did not apply")
+    }
+}

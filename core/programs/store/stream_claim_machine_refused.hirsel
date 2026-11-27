@@ -1,0 +1,3 @@
+fn forge() {
+    let _ = store.host_stream.ClaimMachine(phase: ())
+}

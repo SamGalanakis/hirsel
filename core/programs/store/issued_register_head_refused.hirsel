@@ -1,0 +1,3 @@
+fn forge(head: store.history.HistoryHead, take pending: std.object.PendingStore) -> store.history.IssuedRegisterHead {
+    store.history.IssuedRegisterHead(head, attach: None, pending: take pending)
+}

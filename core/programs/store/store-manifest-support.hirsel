@@ -49,6 +49,11 @@ pub fn stream_read_header(key: String, raw: Bytes, sid: types.HostStreamIdRep, r
 // Decodes `reg`. `seen_rev` is the highest rev this reader has seen: a lower
 // one is an old body seen again (§12.11.3 rule 1).
 pub fn stream_register_decode(raw: Bytes, sid: types.HostStreamIdRep, seen_rev: u64) -> Result[format.StreamRegister, types.Failure] {
+    let mut rows: List[format.RegRow] = list.new()
+    stream_register_decode_reuse(raw, sid, seen_rev, mut rows)
+}
+
+pub fn stream_register_decode_reuse(raw: Bytes, sid: types.HostStreamIdRep, seen_rev: u64, mut rows: List[format.RegRow]) -> Result[format.StreamRegister, types.Failure] {
     let head = stream_read_header("reg", raw, sid, format.ROLE_REGISTER)?
     if head.ctx.seq != 0 {
         return Error(format.disk_fault("reg", 0, Header))
@@ -85,9 +90,12 @@ pub fn stream_register_decode(raw: Bytes, sid: types.HostStreamIdRep, seen_rev: 
         }
         None
     }
-    let mut rows: List[format.RegRow] = types.capacity(bound bytes (64 * n + 64) {
-        list.with_capacity(n)
-    })?
+    list.clear(mut rows)
+    if list.capacity(rows) < n {
+        rows = types.capacity(bound bytes (bytes[format.RegRow] * n + 64) {
+            list.with_capacity(n)
+        })?
+    }
     let mut cursor = format.REG_FIXED_BYTES
     for _ in 0u64 .. n {
         let state = p[cursor + 48]
@@ -97,7 +105,7 @@ pub fn stream_register_decode(raw: Bytes, sid: types.HostStreamIdRep, seen_rev: 
         list.push(mut rows, format.RegRow(store: types.StoreKey(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8)), epoch: format.read_le(p, cursor + 16, 8), token: types.StoreKey(hi: format.read_le(p, cursor + 24, 8), lo: format.read_le(p, cursor + 32, 8)), rev_hold: format.read_le(p, cursor + 40, 8), abandoned: state == 1))
         cursor += format.REG_ROW_BYTES
     }
-    Ok(format.StreamRegister(rev, sid: reg_sid, inc, holder: types.StoreKey(hi: format.read_le(p, 32, 8), lo: format.read_le(p, 40, 8)), collecting: p[48] == 1, low_inc: format.read_le(p, 49, 8), low_seq: format.read_le(p, 57, 8), index: reg_index, rows: take rows))
+    Ok(format.StreamRegister(rev, sid: reg_sid, inc, holder: types.StoreKey(hi: format.read_le(p, 32, 8), lo: format.read_le(p, 40, 8)), collecting: p[48] == 1, low_inc: format.read_le(p, 49, 8), low_seq: format.read_le(p, 57, 8), index: reg_index, rows: replace(mut rows, list.new())))
 }
 
 // Decodes what a batch key holds from its first bytes: INDEX (which needs

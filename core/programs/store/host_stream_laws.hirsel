@@ -38,26 +38,34 @@ pub fn stream_reap_pending_settle(take client: std.object.Client, c: Clock, task
     Ok(())
 }
 
-fn report_law_client(c: Clock, tasks: Tasks, r: Random) -> Result[(std.object.Client, Task[std.sim.s3.Report]), types.Failure] waits {
+fn report_law_server(c: Clock, tasks: Tasks, take holds: List[std.sim.s3.Hold]) -> (std.sim.s3.Endpoint, Task[std.sim.s3.Report]) {
     let address = Addr(ip: V4(2130706433), port: 8080)
     let mut network = std.sim.net.new(std.sim.net.defaults())
     let mut addresses: List[Ip] = list.with_capacity(1)
     list.push(mut addresses, address.ip)
     std.sim.net.resolve_as(mut network, string.from("bucket.s3.test"), take addresses)
-    let key = result.unwrap(secret.seal(string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")), "kdf"))
     let derived: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
     let mut signing: Bytes = list.with_capacity(32)
     for i in 0u64 .. 32 {
         list.push(mut signing, derived[i])
     }
     let verify = result.unwrap(secret.narrow(result.unwrap(secret.seal(take signing, "mac")), "verify"))
-    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: list.new(), holds: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
-    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(3134), c, 1048576, 4194304)
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: list.new(), holds: take holds, exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+    std.sim.s3.start_service(tasks, take config, std.sim.world.plan(3134), c, 1048576, 4194304)
+}
+
+fn report_law_open(endpoint: std.sim.s3.Endpoint, c: Clock, tasks: Tasks, r: Random, prefix: String) -> Result[std.object.Client, types.Failure] waits {
+    let key = result.unwrap(secret.seal(string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")), "kdf"))
     let credentials = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take key, "")
-    let bucket = std.object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
+    let bucket = std.object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(prefix), style: Virtual)
     let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
     let deadline = std.clock.deadline_after_ms(host.mono_ns(c), 2000)
-    let client = std.object.start_simulated(endpoint, tasks, take bucket, take credentials, c, r, lanes, deadline) ?=> |problem| Remote(problem)
+    Ok(std.object.start_simulated(endpoint, tasks, take bucket, take credentials, c, r, lanes, deadline) ?=> |problem| Remote(problem))
+}
+
+fn report_law_client(c: Clock, tasks: Tasks, r: Random) -> Result[(std.object.Client, Task[std.sim.s3.Report]), types.Failure] waits {
+    let (endpoint, take server) = report_law_server(c, tasks, list.new())
+    let client = report_law_open(endpoint, c, tasks, r, "")?
     Ok((take client, take server))
 }
 
@@ -119,4 +127,358 @@ fn bucket_stream_ignore_other_store_reports(c: Clock, tasks: Tasks, r: Random) -
 pub fn rewire_law_slot(mut link: SlotLink, take client: Client[journal.SlotAck], take inbox: Inbox[journal.SlotAck]) {
     link.answer_client = Some(take client)
     link.answers = Some(take inbox)
+}
+
+const HOLD_LAW_TOKEN: types.StoreKey = types.StoreKey(hi: 3134, lo: 8)
+
+type HoldCancelPoint: key + send = ReadingHead | WaitingToIssue | HIssued
+
+type HoldLawChild: send {
+    endpoint: std.sim.s3.Endpoint,
+    c: Clock,
+    tasks: Tasks,
+    r: Random,
+    ready: Sender[Result[(), types.Failure]],
+    point: HoldCancelPoint,
+    tag: std.object.ETag
+}
+
+fn hold_law_sid() -> types.HostStreamIdRep {
+    types.HostStreamIdRep(hi: 3134, lo: 7)
+}
+
+fn hold_law_dir() -> String {
+    stream_key("streams/", stream_dir(hold_law_sid()))
+}
+
+fn hold_law_install(mut client: std.object.Client, rows: List[format.RegRow]) -> Result[(String, std.object.ETag), types.Failure] waits {
+    let key = stream_key(hold_law_dir(), "reg")
+    let mut encoded: Bytes = list.with_capacity(1048576)
+    let register = format.StreamRegister(rev: 1, sid: hold_law_sid(), inc: 1, holder: types.StoreKey(hi: 3134, lo: 3), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: clone(rows))
+    format.stream_register_encode(mut encoded, register, 1)?
+    let due = std.object.deadline_after_ms(client, 2000)
+    let (take written, _) = std.object.store_if(mut client, key, Absent, take encoded, due)
+    match take written {
+        Ok(Applied(meta)) => Ok((take key, meta.etag)),
+        _ => fail("the register fixture did not install"),
+    }
+}
+
+fn hold_law_start(take input: HoldLawChild) -> Result[(), types.Failure] waits {
+    let HoldLawChild(endpoint, c, tasks, r, ready: take ready, point, tag) = take input
+    let mut transport = report_law_open(endpoint, c, tasks, r, "p1/")?
+    let mut lane = stream_lane(hold_law_sid(), 1, 8, types.StoreKey(hi: 3134, lo: 3))?
+    lane.dir = hold_law_dir()
+    let deadline = std.object.deadline_after_ms(transport, 2000)
+    let place = std.object.set_prefix(mut transport, string.new())
+    stream_reg_read(mut lane, mut transport, deadline)?
+    let _ = std.object.set_prefix(mut transport, take place)
+    let buffers = stream_tail_buffers()?
+    let mut guard = match hold_begin(take transport, take lane, take buffers, HOLD_LAW_TOKEN, 1, 1000) {
+        Ok(take armed) => take armed,
+        Error((_, _, _, take why)) => {
+            let _ = channel.send(ready, Error(clone(why)))
+            return Error(take why)
+        },
+    }
+    let Held(_) = hold_issue(mut guard, types.StoreKey(hi: 3134, lo: 9), 1, deadline) else {
+        fail("the cancellation fixture did not acquire its hold")
+    }
+    if point != ReadingHead {
+        let reference = pages.HistoryRef(seq: 1, epoch: 1, len: 0, digest: 0)
+        let pair = history.HistoryPair(epoch: 2, holder: HOLD_LAW_TOKEN)
+        let head = history.HistoryHead(authority_kind: 1, store: types.StoreKey(hi: 3134, lo: 9), pair, activation: 0, entry: reference, checkpoint: reference, floor: 0, binding:[0u8; 32], origin: None)
+        let mut body: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+        let mut witness: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+        let candidate = history.prepare_register_head(mut body, head, list.new(), None)?
+        let mut blockers: List[std.object.PendingStore] = list.new()
+        if point == WaitingToIssue {
+            blockers = list.with_capacity(3)
+            for _ in 0u64 .. 3 {
+                let pending = std.object.store_if_issue(mut guard.client, "block", Absent, list.new(), deadline) ?=> |(_, take problem)| Remote(take problem)
+                list.push(mut blockers, take pending)
+            }
+        }
+        result.unwrap(channel.send(ready, Ok(())))
+        let Issued(take issued_transport, take pending) = hold_handoff(Guarded(take guard), tag, take candidate, deadline) else {
+            fail("the cancellation fixture could not issue H")
+        }
+        let mut transport_h = take issued_transport
+        let _ = history.finish_prepared_register(mut transport_h.client, take pending, mut body, mut witness, deadline)
+        let _ = take blockers
+    } else {
+        result.unwrap(channel.send(ready, Ok(())))
+        let mut head: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+        let _ = history.history_fetch_head(mut guard.client, mut head, deadline)
+    }
+    fail("the cancellation fixture reached its normal continuation")
+}
+
+@test
+fn bucket_stream_cancelled_head_read_abandons_hold(c: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    hold_law_cancellation(c, tasks, r, ReadingHead)
+}
+
+@test
+fn bucket_stream_cancelled_issued_head_keeps_hold(c: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    hold_law_cancellation(c, tasks, r, HIssued)
+}
+
+@test
+fn bucket_stream_cancelled_full_lane_abandons_hold(c: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    hold_law_cancellation(c, tasks, r, WaitingToIssue)
+}
+
+type HoldLawClock: send {
+    world: std.sim.world.World,
+    real: Clock,
+    stop: Receiver[()]
+}
+
+fn hold_law_drive(take input: HoldLawClock) waits {
+    let HoldLawClock(world: take plan, real, stop: take stop) = take input
+    let mut world = take plan
+    loop {
+        if !std.sim.world.step(mut world) {
+            if let Ok(()) = channel.try_receive(stop) {
+                return
+            }
+            std.clock.sleep_ns(real, 1000000)
+        }
+    }
+}
+
+fn hold_law_cancellation(real: Clock, tasks: Tasks, r: Random, point: HoldCancelPoint) -> Result[(), types.Failure] waits {
+    let (take world, c) = std.sim.world.new(3134, 0, 1369353600000)
+    let (take stop, take stopping): (Sender[()], Receiver[()]) = channel.new(1)
+    let clock_driver = task.spawn(tasks, bytes 65536, HoldLawClock(world: take world, real, stop: take stopping), hold_law_drive)
+    let (method, key_held, request, then): (String, String, u64, std.sim.s3.Then) = match point {
+        ReadingHead => (string.from("GET"), string.from("p1/head"), 1u64, Apply),
+        WaitingToIssue => (string.from("PUT"), string.from("p1/block"), 1u64, Apply),
+        HIssued => (string.from("PUT"), string.from("p1/head"), 2u64, Drop),
+    }
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: string.from(method), key: string.from(key_held), from: request, count: 1, until: Requested("GET", "release", 1), then))
+    let (endpoint, take server) = report_law_server(c, tasks, take holds)
+    let mut observer = report_law_open(endpoint, c, tasks, r, "")?
+    let (take key, _) = hold_law_install(mut observer, list.new())?
+    let deadline = std.object.deadline_after_ms(observer, 2000)
+    let (take written, _) = std.object.store_if(mut observer, "p1/head", Absent, string.into_bytes(string.from("place head")), deadline)
+    let Ok(Applied(meta)) = written else {
+        fail("the place-head fixture did not install")
+    }
+    let (take ready, take started): (Sender[Result[(), types.Failure]], Receiver[Result[(), types.Failure]]) = channel.new(1)
+    let data = HoldLawChild(endpoint, c, tasks, r, ready: take ready, point, tag: meta.etag)
+    let mut running = task.spawn(tasks, bytes 16777216, take data, hold_law_start)
+    result.unwrap(channel.receive(started))?
+    result.unwrap(std.sim.s3.requested(endpoint, method, key_held, request))
+    task.cancel(mut running)
+    let due = std.object.deadline_after_ms(observer, 2000)
+    let (take marker, _) = std.object.fetch(mut observer, "release", list.new(), due)
+    if let Error(NotFound) = marker {} else {
+        fail("the release marker unexpectedly existed")
+    }
+    let Error(Cancelled(causes)) = task.join(take running) else {
+        fail("the claimant did not unwind at the parked handoff")
+    }
+    for cause in causes {
+        if let Cancelled = cause.kind {} else {
+            fail("the claimant finalizer added a failure")
+        }
+    }
+    let mut rows: List[format.RegRow] = list.new()
+    let (take read, take buffer) = std.object.fetch(mut observer, key, list.with_capacity(1024), due)
+    let _ = read ?=> |problem| Remote(problem)
+    let reg = manifest.stream_register_decode_reuse(buffer, hold_law_sid(), 0, mut rows)?
+    if list.len(reg.rows) != 1 || reg.rows[0u64].token != HOLD_LAW_TOKEN || reg.rows[0u64].abandoned == (point == HIssued) {
+        fail("cancellation disposed of the wrong register token")
+    }
+    let _ = take observer
+    result.unwrap(channel.send(stop, ()))
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take clock_driver))
+    if point != HIssued {
+        let mut attempted = 0u64
+        for request_seen in report.requests {
+            if request_seen.method == "PUT" && request_seen.key == "p1/head" {
+                attempted += 1
+            }
+        }
+        if attempted != 1 {
+            fail("a cancellation before handoff let H reach the provider")
+        }
+    }
+    Ok(())
+}
+
+fn hold_law_arm(take client: std.object.Client, take lane: StreamLane, take buffers: TailBuffers) -> Result[HoldGuard, types.Failure] {
+    match hold_begin(take client, take lane, take buffers, HOLD_LAW_TOKEN, 1, 2000) {
+        Ok(take guard) => Ok(take guard),
+        Error((_, _, _, take problem)) => Error(take problem),
+    }
+}
+
+@test
+fn bucket_stream_hold_cleanup_admission(c: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    if 2 * STREAM_REG_ATTEMPTS * std.object.ISOLATED_REPLY_BYTES + format.round8(format.BINDING_BYTES) + 8 != 19392 {
+        fail("the HoldGuard grant no longer covers its request types")
+    }
+    let (take client, take server) = report_law_client(c, tasks, r)?
+    let lane = stream_lane(hold_law_sid(), 1, 8, types.StoreKey(hi: 3134, lo: 3))?
+    let buffers = stream_tail_buffers()?
+    let attempted = (bound bytes 1048576 {
+        hold_begin(take client, take lane, take buffers, HOLD_LAW_TOKEN, 1, 2000)
+    }) ?=> |problem| Full(Allocation(problem))
+    let Error((take returned, _, _, Full(Allocation(_)))) = take attempted else {
+        fail("hold admission succeeded without room for register cleanup")
+    }
+    let request_monitor = std.object.request_monitor(returned)
+    let counts = std.object.request_counts(request_monitor, ObjectRequest(S3PutIf))
+    if counts.attempts != 0 {
+        fail("hold admission issued a PUT before reserving cleanup")
+    }
+    let _ = (take returned, take server)
+    Ok(())
+}
+
+@test
+fn bucket_stream_hold_requires_evidence(real: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    let (take world, c) = std.sim.world.new(3134, 0, 1369353600000)
+    let (take stop, take stopping): (Sender[()], Receiver[()]) = channel.new(1)
+    let clock_driver = task.spawn(tasks, bytes 65536, HoldLawClock(world: take world, real, stop: take stopping), hold_law_drive)
+    let (endpoint, take server) = report_law_server(c, tasks, list.new())
+    let mut observer = report_law_open(endpoint, c, tasks, r, "")?
+    let mut rows: List[format.RegRow] = list.with_capacity(1)
+    list.push(mut rows, format.RegRow(store: HOLD_LAW_TOKEN, epoch: 1, token: types.StoreKey(hi: 3134, lo: 9), rev_hold: 1, abandoned: false))
+    let (take key, _) = hold_law_install(mut observer, rows)?
+    let mut lane = stream_lane(hold_law_sid(), 1, 1, types.StoreKey(hi: 3134, lo: 3))?
+    lane.dir = hold_law_dir()
+    let due = std.object.deadline_after_ms(observer, 2000)
+    stream_reg_read(mut lane, mut observer, due)?
+    let guard = hold_law_arm(take observer, take lane, stream_tail_buffers()?)?
+    let mut claimant = take guard
+    if let Unknown(Undecided) = hold_reconcile(mut claimant, due) {} else {
+        fail("a same-incarnation absence released a prospective hold")
+    }
+    if let Refused(Full(Register(_))) = hold_issue(mut claimant, HOLD_LAW_TOKEN, 1, due) {} else {
+        fail("a full register did not definitively refuse a new hold")
+    }
+    let (take returned, _, _) = hold_release(take claimant, ReleaseRefused)
+    let _ = take returned
+    result.unwrap(channel.send(stop, ()))
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take clock_driver))
+    for request in report.requests {
+        if request.method == "PUT" && request.key != key {
+            fail("a full register let the claimant attempt TERM or H")
+        }
+    }
+    let Some(register) = map.get(report.objects, key) else {
+        fail("the fixture register disappeared")
+    }
+    let final = manifest.stream_register_decode(register.data, hold_law_sid(), 1)?
+    if final.rev != 1 || list.len(final.rows) != 1 {
+        fail("a refused Hold changed a full register")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_stream_ambiguous_hold_is_abandoned(real: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    let (take world, c) = std.sim.world.new(3134, 0, 1369353600000)
+    let (take stop, take stopping): (Sender[()], Receiver[()]) = channel.new(1)
+    let clock_driver = task.spawn(tasks, bytes 65536, HoldLawClock(world: take world, real, stop: take stopping), hold_law_drive)
+    let dir = hold_law_dir()
+    let key = stream_key(dir, "reg")
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    // The Hold applies but its reply drops immediately. The following register
+    // reads wait past the claim deadline, but inside the cleanup deadline.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from(key), from: 2, count: 1, until: At(1000000), then: ApplyLoseReply))
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: string.from(key), from: 2, count: 8, until: At(2500000000), then: Apply))
+    let (endpoint, take server) = report_law_server(c, tasks, take holds)
+    let mut initial = report_law_open(endpoint, c, tasks, r, "")?
+    let _ = hold_law_install(mut initial, list.new())?
+    let mut lane = stream_lane(hold_law_sid(), 1, 8, types.StoreKey(hi: 3134, lo: 3))?
+    lane.dir = take dir
+    let deadline = std.object.deadline_after_ms(initial, 2000)
+    stream_reg_read(mut lane, mut initial, deadline)?
+    let _ = std.object.set_prefix(mut initial, string.from("p1/"))
+    let created: Result[ClaimMachine[()], (Capacity, ClaimPhase[()])] = ClaimMachine(phase: Init)
+    let mut machine = result.unwrap(take created)
+    let Error((take fresh, _, _, ClaimFailed(_))) = claim_acquire(mut machine, take initial, take lane, stream_tail_buffers()?, HOLD_LAW_TOKEN, HOLD_LAW_TOKEN, 1, 1, 2000, deadline) else {
+        fail("the ambiguous Hold escaped into the claim path")
+    }
+    let _ = take fresh
+    result.unwrap(channel.send(stop, ()))
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take clock_driver))
+    let Some(register) = map.get(report.objects, key) else {
+        fail("the fixture register disappeared")
+    }
+    let final = manifest.stream_register_decode(register.data, hold_law_sid(), 1)?
+    if final.rev != 3 || list.len(final.rows) != 1 || final.rows[0u64].token != HOLD_LAW_TOKEN || !final.rows[0u64].abandoned {
+        fail("cleanup missed the Hold that installed before its reply was lost")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_stream_delayed_hold_stays_unknown(real: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    let (take world, c) = std.sim.world.new(3134, 0, 1369353600000)
+    let (take stop, take stopping): (Sender[()], Receiver[()]) = channel.new(1)
+    let clock_driver = task.spawn(tasks, bytes 65536, HoldLawClock(world: take world, real, stop: take stopping), hold_law_drive)
+    let dir = hold_law_dir()
+    let key = stream_key(dir, "reg")
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from(key), from: 2, count: 1, until: Requested("GET", "late-hold", 1), then: Apply))
+    let (endpoint, take server) = report_law_server(c, tasks, take holds)
+    let mut witness = report_law_open(endpoint, c, tasks, r, "")?
+    let (_, tag) = hold_law_install(mut witness, list.new())?
+    let deadline = std.object.deadline_after_ms(witness, 2000)
+    let mut lane = stream_lane(hold_law_sid(), 1, 8, types.StoreKey(hi: 3134, lo: 3))?
+    lane.dir = take dir
+    stream_reg_read(mut lane, mut witness, deadline)?
+    let _ = std.object.set_prefix(mut witness, string.from("p1/"))
+    let mut dispatched = report_law_open(endpoint, c, tasks, r, "")?
+    let mut pending_body: Bytes = list.with_capacity(HOLD_REGISTER_ROOM)
+    let mut delayed: format.StreamRegister = clone(lane.reg)
+    delayed.rev += 1
+    list.push(mut delayed.rows, format.RegRow(store: HOLD_LAW_TOKEN, epoch: 1, token: HOLD_LAW_TOKEN, rev_hold: 2, abandoned: false))
+    format.stream_register_encode(mut pending_body, delayed, 1)?
+    let pending = std.object.store_if_issue(mut dispatched, key, Match(tag), take pending_body, deadline) ?=> |(_, take problem)| Remote(take problem)
+    result.unwrap(std.sim.s3.requested(endpoint, "PUT", key, 2))
+    let guard = hold_law_arm(take witness, take lane, stream_tail_buffers()?)?
+    let mut claimant = take guard
+    let short = std.object.deadline_after_ms(claimant.client, 100)
+    if let Unknown(_) = hold_resolve(mut claimant, Unknown(Undecided), short) {} else {
+        fail("the pending Hold was treated as resolved at the same incarnation")
+    }
+    let (take returned, _, _, _) = hold_abandon(take claimant)
+    let mut release = take returned
+    let _ = std.object.set_prefix(mut release, string.new())
+    let (take marker, _) = std.object.fetch(mut release, "late-hold", list.new(), deadline)
+    if let Error(NotFound) = marker {} else {
+        fail("the release marker unexpectedly existed")
+    }
+    let (take written, _) = std.object.store_if_finish(mut dispatched, take pending)
+    if let Ok(Applied(_)) = written {} else {
+        fail("the delayed Hold did not apply")
+    }
+    let _ = (take dispatched, take release)
+    result.unwrap(channel.send(stop, ()))
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take clock_driver))
+    let Some(register) = map.get(report.objects, key) else {
+        fail("the fixture register disappeared")
+    }
+    let observed = manifest.stream_register_decode(register.data, hold_law_sid(), 1)?
+    if list.len(observed.rows) != 1 || observed.rows[0u64].token != HOLD_LAW_TOKEN {
+        fail("the delayed Hold was not visible at the real register key")
+    }
+    for request in report.requests {
+        if request.method == "PUT" && request.key != key {
+            fail("a claimant attempted TERM or H without release evidence")
+        }
+    }
+    Ok(())
 }

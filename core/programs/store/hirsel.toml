@@ -152,6 +152,7 @@ std = { major = 1 }
 "host-stream-poll.hirsel" = "host_stream"
 "store-stream-claim.hirsel" = "store"
 "host-stream-claim.hirsel" = "host_stream"
+"host-stream-hold.hirsel" = "host_stream"
 "store-stream-settle.hirsel" = "store"
 "host-stream-settle.hirsel" = "host_stream"
 "store-stream-gc.hirsel" = "host_stream"
@@ -989,3 +990,9 @@ limit = 536870912
 
 [tests.runs."store@1/store/test_l97_tiered_install"]
 limit = 536870912
+
+[tests.runs."store@1/store/bucket_stream_cancelled_settle_joins_worker"]
+limit = 268435456
+
+[tests.runs."store@1/store/bucket_stream_claim_reuses_grant_after_conflict"]
+limit = 402653184

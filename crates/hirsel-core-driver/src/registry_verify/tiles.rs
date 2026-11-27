@@ -184,16 +184,16 @@ pub(super) fn consistent(
     size: u64,
     root: Hash,
     read: &mut impl FnMut(&str) -> Result<Vec<u8>, Error>,
-) -> bool {
+) -> Result<bool, Error> {
     if old_size == 0 {
-        return true;
+        return Ok(true);
     }
     let mut tiles = Tiles {
         size,
         read,
         loaded: BTreeMap::new(),
     };
-    tiles.consistency(0, old_size, size, Some(old_root)) == Ok((old_root, root))
+    Ok(tiles.consistency(0, old_size, size, Some(old_root))? == (old_root, root))
 }
 
 pub(super) fn included_entry(
@@ -205,7 +205,17 @@ pub(super) fn included_entry(
     if index >= size {
         return Err(Error::ReleaseClaim);
     }
-    let bundle = index / WIDTH;
+    let bytes = included_bundle(size, root, index / WIDTH, read)?;
+    let entries = bundle_entries(&bytes, size, index / WIDTH)?;
+    Ok(entries[(index % WIDTH) as usize].into())
+}
+
+pub(super) fn included_bundle(
+    size: u64,
+    root: Hash,
+    bundle: u64,
+    read: &mut impl FnMut(&str) -> Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Error> {
     let bytes = read_bundle(size, bundle, read)?;
     let entries = bundle_entries(&bytes, size, bundle)?;
     let hashes: Vec<_> = entries.iter().map(|entry| leaf(entry)).collect();
@@ -224,7 +234,7 @@ pub(super) fn included_entry(
     if calculated != root {
         return Err(Error::MerkleRoot);
     }
-    Ok(entries[(index % WIDTH) as usize].into())
+    Ok(bytes)
 }
 
 /// One complete subtree for each set bit of the prefix size.

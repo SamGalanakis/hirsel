@@ -5,13 +5,13 @@ use crate::package_manifest::name::Version;
 use crate::package_store::Transport;
 use crate::registry_route::{Route, Routes};
 use crate::registry_verify::notes::{Checkpoint, Log, Trust};
-use crate::registry_verify::status::StatusReplay;
+use crate::registry_verify::status::{Disposition, StatusReplay};
 use crate::registry_verify::{Error, Hash, Release, ReleaseClaim};
 use sha2::{Digest, Sha256};
-use std::borrow::Borrow;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 type Result<T, E = Failure> = std::result::Result<T, E>;
@@ -25,6 +25,14 @@ pub(crate) struct Client<'a> {
     route: &'a Route,
     transport: &'a Transport,
     cache: &'a Path,
+}
+
+pub(crate) fn now() -> Result<u64> {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("HIRSEL_TEST_REGISTRY_SECONDS") {
+        return Ok(value.parse()?);
+    }
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
 impl<'a> Client<'a> {
@@ -48,10 +56,22 @@ impl<'a> Client<'a> {
 
     pub(crate) fn frame(
         &self,
+        status: &StatusReplay,
         id: &Id,
         root: Root,
         mut receive: impl FnMut(usize) -> io::Result<()>,
     ) -> Result<Library> {
+        if !status
+            .checkpoint()
+            .is_some_and(|head| self.route.trust(Log::Status).owns(head))
+        {
+            return Err(Error::Trust.into());
+        }
+        if let Some(Disposition::TakenDown { reason, message }) =
+            status.state(root).map(|s| &s.disposition)
+        {
+            return Err(format!("{id} {root} is taken down ({reason}: {message})").into());
+        }
         let path = format!("c/{}.zst", hex(&root.0));
         let mut body = self
             .get(&path)?
@@ -76,38 +96,57 @@ impl<'a> Client<'a> {
         Ok(library)
     }
 
-    pub(crate) fn hints(&self, name: &str) -> Result<Vec<Hint>> {
+    pub(crate) fn verified_hints(
+        &self,
+        head: &Checkpoint,
+        name: &str,
+    ) -> Result<Vec<(Hint, Release)>> {
         self.require_name(name)?;
-        let path = format!("versions/{name}");
-        let log = self.log(Log::Release);
-        let missing = || format!("no version hints for {name} at {}", self.route.origin());
+        let log = self.release_log(head)?;
+        let cache_key = format!("versions/{}", hex(&Sha256::digest(name)));
         let offline = self.transport.is_offline();
         let bytes = if offline {
-            log.cached(&path, EVIDENCE_LIMIT)?
+            log.cached(&cache_key, EVIDENCE_LIMIT)?
         } else {
-            self.read(&path, EVIDENCE_LIMIT)?
+            self.read(&format!("versions/{name}"), EVIDENCE_LIMIT)?
         }
-        .ok_or_else(missing)?;
-        let hints: Vec<(String, u64, u64)> = serde_json::from_slice(&bytes)?;
-        let bad_hint = || format!("invalid version hint for {name}");
-        let hints = hints
-            .into_iter()
-            .map(|(version, index, covering_size)| {
-                let version = Version::parse(&version).ok_or_else(bad_hint)?;
-                if index >= covering_size {
-                    return Err(bad_hint());
+        .ok_or_else(|| format!("no version hints for {name} at {}", self.route.origin()))?;
+        let rows: Vec<(String, String, String)> = serde_json::from_slice(&bytes)?;
+        let invalid = || format!("invalid version hint for {name}");
+        if serde_json::to_vec(&rows)? != bytes {
+            return Err(invalid().into());
+        }
+        let mut verified = std::collections::BTreeMap::new();
+        let mut accepted = Vec::new();
+        for row in rows {
+            let version = Version::parse(&row.0).ok_or_else(invalid)?;
+            let index = crate::registry_verify::decimal(&row.1).ok_or_else(invalid)?;
+            let covering_size = crate::registry_verify::decimal(&row.2).ok_or_else(invalid)?;
+            if index >= covering_size || covering_size > head.size() {
+                continue;
+            }
+            let hint = Hint {
+                version,
+                index,
+                covering_size,
+            };
+            match self.release_from_hint(head, name, &hint) {
+                Ok(leaf) => {
+                    if let Some((prior, _)) = verified.insert(hint.version.clone(), (hint, leaf))
+                        && prior.index != index
+                    {
+                        return Err(format!("conflicting release rows for {name}").into());
+                    }
+                    accepted.push(row);
                 }
-                Ok(Hint {
-                    version,
-                    index,
-                    covering_size,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if !offline {
-            log.store_object(&path, &bytes)?;
+                Err(e) if e.downcast_ref::<Error>() == Some(&Error::ReleaseClaim) => {}
+                Err(e) => return Err(e),
+            }
         }
-        Ok(hints)
+        if !offline && !accepted.is_empty() {
+            log.store_object(&cache_key, &serde_json::to_vec(&accepted)?)?;
+        }
+        Ok(verified.into_values().collect())
     }
 
     pub(crate) fn release_checkpoint(&self, now: u64) -> Result<Checkpoint> {
@@ -218,10 +257,10 @@ impl<'a> Client<'a> {
         Ok(release.time().max(times[0]).max(times[1]))
     }
 
-    pub(crate) fn status_replay<R: Borrow<Release>>(
+    pub(crate) fn status_replay(
         &self,
         now: u64,
-        mut release: impl FnMut(Root, &[u8]) -> Result<R, Error>,
+        release_head: Option<&Checkpoint>,
     ) -> Result<StatusReplay> {
         let log = self.log(Log::Status);
         let _guard = if self.transport.is_offline() {
@@ -229,9 +268,15 @@ impl<'a> Client<'a> {
         } else {
             Some(log.lock()?)
         };
-        let mut replay = match log.saved()? {
-            None => StatusReplay::default(),
-            Some((head, snapshot)) => StatusReplay::restore(head, &snapshot)?,
+        // Old snapshots could contain takedowns accepted without the legal signature.
+        // Keep their authenticated checkpoint as the consistency anchor during replay.
+        const VERIFIED: &[u8] = b"hirsel-status-legal-v1\0";
+        let saved = log.saved()?;
+        let mut replay = match &saved {
+            Some((head, snapshot)) if snapshot.starts_with(VERIFIED) => {
+                StatusReplay::restore(head.clone(), &snapshot[VERIFIED.len()..])?
+            }
+            _ => StatusReplay::default(),
         };
         if self.transport.is_offline() {
             replay
@@ -240,42 +285,67 @@ impl<'a> Client<'a> {
                 .check_fresh(now)?;
             return Ok(replay);
         }
-        let head = log.current(replay.checkpoint(), now)?;
+        let head = log.current(saved.as_ref().map(|(h, _)| h), now)?;
         if replay
             .checkpoint()
             .is_some_and(|prior| prior.note() == head.note())
         {
             return Ok(replay);
         }
+        let mut release_head = release_head.cloned();
         let result = log.prove(|objects| {
             replay.advance(
                 &head,
                 now,
                 |path| objects.read(path),
+                self.route.legal_key(),
                 |root, digest| {
                     let bytes = self
                         .evidence(digest, 1 << 20)
                         .map_err(|_| Error::MissingEvidence)?;
-                    let release = release(root, &bytes)?;
-                    let verified = release.borrow();
-                    let route = self
-                        .routes
-                        .for_name(&verified.id().name)
-                        .map_err(|_| Error::Trust)?;
-                    if route.origin() != self.route.origin()
-                        || route.trust_digest() != self.route.trust_digest()
-                        || !self.route.trust(Log::Release).owns(verified.checkpoint())
-                    {
-                        return Err(Error::Trust);
+                    if release_head.is_none() {
+                        release_head =
+                            Some(self.release_checkpoint(now).map_err(verification_error)?);
                     }
-                    verified.checkpoint().check_fresh(now)?;
+                    let release_head = release_head.as_ref().unwrap();
+                    release_head.check_fresh(now)?;
+                    let release = self.evidence_release(release_head, root, &bytes)?;
                     Ok((release, bytes))
                 },
             )
         });
-        log.record_conflict(result)?;
-        log.save(&head, &replay.snapshot()?)?;
+        result?;
+        let mut snapshot = VERIFIED.to_vec();
+        snapshot.extend(replay.snapshot()?);
+        log.save(&head, &snapshot)?;
         Ok(replay)
+    }
+
+    fn evidence_release(
+        &self,
+        head: &Checkpoint,
+        root: Root,
+        evidence: &[u8],
+    ) -> Result<Release, Error> {
+        let log = self.release_log(head).map_err(verification_error)?;
+        // OSV package names can accelerate lookup. A lagging, missing or foreign
+        // hint has no bearing on the authenticated release log.
+        let doc: serde_json::Value = serde_json::from_slice(evidence).map_err(|_| Error::Entry)?;
+        if let Some(items) = doc["affected"].as_array() {
+            for item in items {
+                if item["package"]["ecosystem"] == "Hirsel"
+                    && let Some(name) = item["package"]["name"].as_str()
+                    && let Ok(hints) = self.verified_hints(head, name)
+                    && let Some((_, leaf)) = hints.into_iter().find(|(_, r)| r.root() == root)
+                {
+                    return Ok(leaf);
+                }
+            }
+        }
+        let release = log.prove(|objects| head.release_by_root(root, |path| objects.read(path)))?;
+        self.require_name(&release.id().name)
+            .map_err(|_| Error::Trust)?;
+        Ok(release)
     }
 
     pub(crate) fn evidence(&self, digest: Hash, limit: usize) -> Result<Vec<u8>> {
@@ -554,6 +624,12 @@ impl Objects<'_> {
             (bytes, _) => Ok(bytes),
         }
     }
+}
+
+fn verification_error(error: Failure) -> Error {
+    error
+        .downcast::<Error>()
+        .map_or(Error::MissingObject, |error| *error)
 }
 
 fn hex(bytes: &[u8]) -> String {

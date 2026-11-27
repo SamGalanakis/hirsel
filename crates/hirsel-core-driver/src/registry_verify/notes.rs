@@ -308,7 +308,7 @@ impl Checkpoint {
                 self.size,
                 self.root,
                 &mut read_tile,
-            )
+            )?
         {
             return Err(conflict(previous, self));
         }

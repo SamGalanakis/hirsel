@@ -98,6 +98,101 @@ pub(crate) fn auth() -> serde_json::Value {
     ])
 }
 
+pub(crate) fn signed_takedown(
+    authority: &str,
+    scope: &str,
+    root: Root,
+    previous: serde_json::Value,
+    message: &str,
+    seed: u8,
+) -> (serde_json::Value, Vec<u8>) {
+    let key = signer(seed);
+    let intent = serde_json::to_vec(&json!([
+        "hirsel-intent-v1",
+        format!("https://{authority}"),
+        "takedown",
+        scope,
+        "0",
+        hex(&root.0),
+        [previous, ["legal", message]]
+    ]))
+    .unwrap();
+    let auth = json!([
+        ["ed25519", b64(key.public_key().as_ref())],
+        hex(&Sha256::digest(&intent)),
+        null,
+        b64(key.sign(&intent).as_ref())
+    ]);
+    (
+        json!([
+            "takedown",
+            hex(&root.0),
+            previous,
+            "legal",
+            message,
+            "30",
+            auth
+        ]),
+        intent,
+    )
+}
+
+#[test]
+fn legal_takedown_requires_pinned_signature_and_exact_intent() {
+    let routes = Routes::parse(&route("*", ALPHA, true, 3)).unwrap();
+    let server = Server::start();
+    let transport = server.transport();
+    serve_target_release(&server, Root([3; 32]));
+    for case in [
+        "wrong key",
+        "invalid signature",
+        "missing intent",
+        "wrong digest",
+        "different event",
+        "valid",
+    ] {
+        let cache = tempfile::tempdir().unwrap();
+        let client = Client::new(
+            &routes,
+            routes.for_name(TARGET).unwrap(),
+            &transport,
+            cache.path(),
+        );
+        let (mut row, mut intent) = signed_takedown(
+            ALPHA,
+            "fixture.test/tenant",
+            Root([3; 32]),
+            json!(null),
+            "removed",
+            if case == "wrong key" { 4 } else { 3 },
+        );
+        if case == "invalid signature" {
+            row[6][3] = json!(b64(&[0; 64]));
+        }
+        if case == "different event" {
+            row[4] = json!("other");
+        }
+        if case == "wrong digest" {
+            intent.push(b' ');
+        }
+        let path = format!("/e/{}", row[6][1].as_str().unwrap());
+        if case == "missing intent" {
+            server.missing(ALPHA, &path);
+        } else {
+            server.serve(ALPHA, &path, intent);
+        }
+        let rows = [serde_json::to_vec(&row).unwrap()];
+        server.serve(
+            ALPHA,
+            "/status/checkpoint",
+            note(ALPHA, Log::Status, 1, merkle(&rows), None),
+        );
+        server.serve(ALPHA, "/status/tile/entries/000.p/1", bundle(&rows));
+        let result = client.status_replay(NOW, None);
+        assert_eq!(result.is_ok(), case == "valid", "{case}: {result:?}");
+    }
+}
+
 fn release_row(root: Root) -> Vec<u8> {
     serde_json::to_vec(&json!([
         "release",
@@ -113,6 +208,16 @@ fn release_row(root: Root) -> Vec<u8> {
         auth()
     ]))
     .unwrap()
+}
+
+fn serve_target_release(server: &Server, root: Root) {
+    let rows = [release_row(root)];
+    server.serve(
+        ALPHA,
+        "/log/checkpoint",
+        note(ALPHA, Log::Release, 1, merkle(&rows), None),
+    );
+    server.serve(ALPHA, "/log/tile/entries/000.p/1", bundle(&rows));
 }
 
 fn retire(root: Root) -> Vec<u8> {
@@ -216,7 +321,7 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
     server.serve(
         ALPHA,
         "/versions/fixture.test/tenant/wrap",
-        br#"[["1.2.3",256,257]]"#.to_vec(),
+        br#"[["1.2.3","256","257"]]"#.to_vec(),
     );
     let mut full_tile = vec![0; 256 * 32];
     full_tile[..32].copy_from_slice(&merkle(&log[..256]));
@@ -226,9 +331,10 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
 
     let preview_client = client(&preview, &online, cache);
     let preview_head = preview_client.release_checkpoint(NOW).unwrap();
-    let hints = preview_client.hints(TARGET).unwrap();
-    let found = preview_client
-        .release_from_hint(&preview_head, TARGET, &hints[0])
+    let [(hint, found)]: [_; 1] = preview_client
+        .verified_hints(&preview_head, TARGET)
+        .unwrap()
+        .try_into()
         .unwrap();
     assert_eq!(found.root(), target);
     assert_eq!(
@@ -265,11 +371,11 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
     let head = witnessed_client.release_checkpoint(NOW).unwrap();
     assert!(
         client(&witnessed, &offline, cache)
-            .release_from_hint(&head, TARGET, &hints[0])
+            .release_from_hint(&head, TARGET, &hint)
             .is_err()
     );
     let found = witnessed_client
-        .release_from_hint(&head, TARGET, &hints[0])
+        .release_from_hint(&head, TARGET, &hint)
         .unwrap();
     assert_eq!(
         witnessed_client
@@ -286,7 +392,7 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
     assert_eq!(reloaded.note(), current);
     assert_eq!(
         local
-            .release_from_hint(&reloaded, TARGET, &hints[0])
+            .release_from_hint(&reloaded, TARGET, &hint)
             .unwrap()
             .root(),
         target
@@ -298,7 +404,7 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
     );
     assert!(
         client(&changed, &offline, cache)
-            .release_from_hint(&head, TARGET, &hints[0])
+            .release_from_hint(&head, TARGET, &hint)
             .is_err()
     );
     server.serve(
@@ -308,10 +414,7 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
     );
     let beta = client(&other, &online, cache);
     let beta_head = beta.release_checkpoint(NOW).unwrap();
-    assert!(
-        beta.release_from_hint(&beta_head, TARGET, &hints[0])
-            .is_err()
-    );
+    assert!(beta.release_from_hint(&beta_head, TARGET, &hint).is_err());
     assert_eq!(
         server.take().0,
         [
@@ -335,13 +438,7 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
             .collect(),
     );
     server.serve(ALPHA, "/status/checkpoint", first);
-    fn no_advisories(
-        _: Root,
-        _: &[u8],
-    ) -> Result<&'static crate::registry_verify::Release, crate::registry_verify::Error> {
-        panic!("retirements need no OSV evidence")
-    }
-    let replay = witnessed_client.status_replay(NOW, no_advisories).unwrap();
+    let replay = witnessed_client.status_replay(NOW, None).unwrap();
     assert!(matches!(
         replay.state(target).unwrap().disposition,
         Disposition::Retired { .. }
@@ -349,7 +446,7 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
     assert!(replay.state(second).is_none());
     drop(replay);
     server.serve(ALPHA, "/status/checkpoint", next.clone());
-    let replay = witnessed_client.status_replay(NOW, no_advisories).unwrap();
+    let replay = witnessed_client.status_replay(NOW, None).unwrap();
     assert!(matches!(
         replay.state(second).unwrap().disposition,
         Disposition::Retired { .. }
@@ -366,7 +463,7 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
     server.serve(ALPHA, "/status/checkpoint", conflict.clone());
     assert!(
         witnessed_client
-            .status_replay(NOW, no_advisories)
+            .status_replay(NOW, None)
             .unwrap_err()
             .to_string()
             .contains("does not extend")
@@ -389,10 +486,10 @@ fn proofs(server: &Server, cache: &Path, target: Root) {
         &evidence[36..],
         [next.as_slice(), conflict.as_slice()].concat()
     );
-    assert_eq!(local.status_replay(NOW, no_advisories).unwrap(), replay);
+    assert_eq!(local.status_replay(NOW, None).unwrap(), replay);
     assert!(
         client(&changed, &offline, cache)
-            .status_replay(NOW, no_advisories)
+            .status_replay(NOW, None)
             .is_err()
     );
 }
@@ -513,6 +610,38 @@ fn builds(server: &Server, dir: &Path, target: Root, child: Root, target_c: &[u8
     let parent_path = frame_path(target);
     let child_path = frame_path(child);
     server.take();
+    serve_target_release(server, target);
+    let (row, intent) = signed_takedown(
+        ALPHA,
+        "fixture.test/tenant",
+        target,
+        json!(null),
+        "removed",
+        3,
+    );
+    let rows = [serde_json::to_vec(&row).unwrap()];
+    server.serve(
+        ALPHA,
+        &format!("/e/{}", hex(&Sha256::digest(&intent))),
+        intent,
+    );
+    server.serve(
+        ALPHA,
+        "/status/checkpoint",
+        note(ALPHA, Log::Status, 1, merkle(&rows), None),
+    );
+    server.serve(ALPHA, "/status/tile/entries/000.p/1", bundle(&rows));
+    server.serve(ALPHA, &parent_path, first.clone());
+    let (status, _, error) = run(&["fetch", "app"], &empty);
+    assert_eq!(status, Some(2), "{error}");
+    assert!(error.contains("taken down"), "{error}");
+    assert!(!cached_path(&empty, target).exists());
+    assert!(!server.take().0.contains(&format!("{ALPHA}{parent_path}")));
+    server.serve(
+        ALPHA,
+        "/status/checkpoint",
+        note(ALPHA, Log::Status, 0, merkle(&[]), None),
+    );
     server.redirect(
         ALPHA,
         &parent_path,
@@ -522,7 +651,13 @@ fn builds(server: &Server, dir: &Path, target: Root, child: Root, target_c: &[u8
     let (status, _, error) = run(&["fetch", "app"], &store);
     assert_eq!(status, Some(2), "{error}");
     assert!(error.contains("HTTP 302"), "{error}");
-    assert_eq!(server.take().0, [format!("{ALPHA}{parent_path}")]);
+    assert_eq!(
+        server.take().0,
+        [
+            format!("{ALPHA}/status/checkpoint"),
+            format!("{ALPHA}{parent_path}")
+        ]
+    );
     assert!(!project.join("hirsel.lock").exists());
 
     server.serve(ALPHA, &parent_path, first);
@@ -533,6 +668,7 @@ fn builds(server: &Server, dir: &Path, target: Root, child: Root, target_c: &[u8
     assert_eq!(
         requests,
         [
+            format!("{ALPHA}/status/checkpoint"),
             format!("{ALPHA}{parent_path}"),
             format!("{ALPHA}{child_path}")
         ]
@@ -549,7 +685,13 @@ fn builds(server: &Server, dir: &Path, target: Root, child: Root, target_c: &[u8
     fs::remove_file(cached_path(&store, child)).unwrap();
     let (status, _, error) = run(&["fetch", "app", "--locked"], &store);
     assert_eq!(status, Some(0), "{error}");
-    assert_eq!(server.take().0, [format!("{ALPHA}{child_path}")]);
+    assert_eq!(
+        server.take().0,
+        [
+            format!("{ALPHA}/status/checkpoint"),
+            format!("{ALPHA}{child_path}")
+        ]
+    );
 
     let frozen = |resident: bool| {
         let output = if resident {
@@ -677,6 +819,14 @@ impl Server {
             .unwrap()
             .objects
             .insert(format!("{host}{path}"), Response::Ok(bytes));
+    }
+
+    fn missing(&self, host: &str, path: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .objects
+            .remove(&format!("{host}{path}"));
     }
 
     fn redirect(&self, host: &str, path: &str, location: String) {

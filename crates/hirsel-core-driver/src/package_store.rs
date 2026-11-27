@@ -4,19 +4,21 @@ use crate::package_content::{
 use crate::package_files::{FileId, open_directory, walk};
 use crate::package_manifest::SourceLocation;
 use crate::registry_route::{Origin, Routes};
+use crate::registry_verify::status::StatusReplay;
 use bytes::BytesMut;
 use rustix::fs::{Mode, OFlags, mkdirat, openat};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone)]
 pub(crate) struct PackageStore {
     path: PathBuf,
     pub(crate) transport: Transport,
     routes: Arc<OnceLock<Result<Routes, String>>>,
+    statuses: Arc<Mutex<BTreeMap<Origin, Arc<StatusReplay>>>>,
     /// The commits this command has fetched (GIT-6).
     pub(crate) session: crate::package_git::Session,
 }
@@ -36,6 +38,7 @@ impl PackageStore {
         Self {
             transport,
             routes: Arc::new(OnceLock::new()),
+            statuses: Default::default(),
             path: path.unwrap_or_else(|| {
                 crate::PackageProduct::default_cache().with_file_name("packages")
             }),
@@ -172,6 +175,24 @@ impl PackageStore {
         ))
     }
 
+    /// This store and its clones belong to one resolver request. Frame workers
+    /// share one accepted status head per serving route, including exact children.
+    pub(crate) fn status_for(
+        &self,
+        client: &crate::registry_fetch::Client<'_>,
+        now: u64,
+        release: Option<&crate::registry_verify::notes::Checkpoint>,
+    ) -> Result<Arc<StatusReplay>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut statuses = self.statuses.lock().expect("registry status lock");
+        let origin = client.route().origin();
+        if let Some(replay) = statuses.get(origin) {
+            return Ok(replay.clone());
+        }
+        let replay = Arc::new(client.status_replay(now, release)?);
+        statuses.insert(origin.clone(), replay.clone());
+        Ok(replay)
+    }
+
     pub(crate) fn registry_frame(
         &self,
         frame: &crate::package_resolve::Frame<'_>,
@@ -188,7 +209,8 @@ impl PackageStore {
         } else {
             &carrier
         };
-        let library = client.frame(frame.id, frame.root, receive)?;
+        let replay = self.status_for(client, crate::registry_fetch::now()?, None)?;
+        let library = client.frame(&replay, frame.id, frame.root, receive)?;
         Ok((library, format!("registry:{}", client.route().origin())))
     }
 
@@ -254,8 +276,16 @@ impl PackageStore {
             }
             SourceLocation::Registry(origin) => {
                 let client = self.registry(&id.name, Some(origin))?;
+                let replay = self
+                    .status_for(
+                        &client,
+                        crate::registry_fetch::now()
+                            .map_err(|e| -> Box<dyn std::error::Error> { e })?,
+                        None,
+                    )
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 let library = client
-                    .frame(id, pin, |_| Ok(()))
+                    .frame(&replay, id, pin, |_| Ok(()))
                     .map_err(|error| -> Box<dyn std::error::Error> { error })?;
                 (
                     PackageArchive {

@@ -72,10 +72,11 @@ impl Catalog<'_> {
         let index = self.rows.len();
         self.rows.push(serde_json::to_vec(&row).unwrap());
         let size = self.rows.len();
-        self.hints
-            .entry(name.into())
-            .or_default()
-            .push(json!([version.to_string(), index, size]));
+        self.hints.entry(name.into()).or_default().push(json!([
+            version.to_string(),
+            index.to_string(),
+            size.to_string()
+        ]));
         self.server.serve(
             HOST,
             &format!("/versions/{name}"),
@@ -207,6 +208,14 @@ fn g6_cli_named_add_update_audit() {
     serve_log(&server, Log::Status, &status, true);
     assert!(run(&["audit"], 2).contains("retired (security: incorrect input validation)"));
     let error = run(&["update"], 2);
+    let fix_hex = hex(&fix.0);
+    assert!(
+        !dir.join("packages")
+            .join(&fix_hex[..2])
+            .join(&fix_hex[2..])
+            .exists(),
+        "refused young frame was installed"
+    );
     assert!(error.contains("j 0.3.0 is retired (security: incorrect input validation).\nj 0.3.1 was published 2 h ago, inside the 72 h wait.\nTo take it now: hirsel update j@0.3.1"),"{error}");
     assert_eq!(snapshot(dir), pinned);
     run(&["update", "j@0.4.0"], 2);
@@ -243,6 +252,8 @@ fn g6_cli_named_add_update_audit() {
             .unwrap()
             .contains(&fix.to_string())
     );
+
+    run(&["update"], 0);
 
     let osv = "OSV-HIRSEL-123";
     let mut document = json!({"affected":[{"package":{"ecosystem":"Hirsel","name":NAME},"versions":["0.3.1"]}],
@@ -327,6 +338,8 @@ fn g6_cli_named_add_update_audit() {
     let exact = run(&["add", "fixture.test/json@1.1.0-rc.1", "--as", "next"], 0);
     assert!(exact.contains(&pre.to_string()), "{exact}");
 
+    run(&["update", "next"], 0);
+
     // Only a transitive floor names this identity. The requested release has
     // never been a manifest row or the tested root of an edge.
     let child_name = "fixture.test/child";
@@ -350,6 +363,45 @@ fn g6_cli_named_add_update_audit() {
     .into();
     catalog.publish("fixture.test/reader", "1.0.0", LIB, NOW - WAIT, floors);
     run(&["add", "fixture.test/reader@1.0.0"], 0);
+    let retired_child = serde_json::to_vec(&json!([
+        "retire",
+        hex(&tested.0),
+        null,
+        "security",
+        "replace child",
+        "25",
+        auth()
+    ]))
+    .unwrap();
+    let predecessor = hex(&merkle(std::slice::from_ref(&retired_child)));
+    status.push(retired_child);
+    serve_log(&server, Log::Status, &status, true);
+    let before = snapshot(dir);
+    let refusal = run(&["update", child_name], 2);
+    assert!(
+        refusal.contains("To take it now: hirsel update fixture.test/child@0.3.2"),
+        "{refusal}"
+    );
+    let young_frame = hex(&selected.0);
+    assert!(
+        !dir.join("packages")
+            .join(&young_frame[..2])
+            .join(&young_frame[2..])
+            .exists()
+    );
+    assert_eq!(snapshot(dir), before);
+    status.push(
+        serde_json::to_vec(&json!([
+            "reinstate",
+            hex(&tested.0),
+            predecessor,
+            "reviewed",
+            "26",
+            auth()
+        ]))
+        .unwrap(),
+    );
+    serve_log(&server, Log::Status, &status, true);
     let with_floor = snapshot(dir);
     let crossing = run(&["update", "fixture.test/child@0.4.0"], 2);
     assert!(
@@ -367,16 +419,20 @@ fn g6_cli_named_add_update_audit() {
     config(dir, true);
     let preview = run(&["audit"], 0);
     assert!(preview.contains("preview (quorum 0)"), "{preview}");
-    let head = serde_json::to_vec(&json!([
-        "takedown",
-        hex(&fix.0),
+    let (row, intent) = crate::registry_route::laws::signed_takedown(
+        HOST,
+        "fixture.test",
+        fix,
         prior,
-        "legal",
         "fixture removal",
-        "30",
-        auth()
-    ]))
-    .unwrap();
+        3,
+    );
+    server.serve(
+        HOST,
+        &format!("/e/{}", hex(&Sha256::digest(&intent))),
+        intent,
+    );
+    let head = serde_json::to_vec(&row).unwrap();
     status.push(head);
     serve_log(&server, Log::Status, &status, true);
     let audit = run(&["audit"], 2);
@@ -384,4 +440,61 @@ fn g6_cli_named_add_update_audit() {
         audit.contains("taken down (legal: fixture removal)"),
         "{audit}"
     );
+    let fix_hex = hex(&fix.0);
+    let cached = dir.join("packages").join(&fix_hex[..2]).join(&fix_hex[2..]);
+    fs::remove_file(&cached).unwrap();
+    server.take();
+    let refused = run(&["fetch"], 2);
+    assert!(refused.contains("taken down"), "{refused}");
+    assert!(!cached.exists());
+    assert!(
+        !server
+            .take()
+            .0
+            .contains(&format!("{HOST}{}", frame_path(fix)))
+    );
+}
+
+#[test]
+fn decimal_hints_skip_skew_and_unrelated_advisory_lag() {
+    let server = Server::start();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
+    config(dir, false);
+    fs::write(dir.join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n").unwrap();
+    fs::write(dir.join("main.hirsel"), APP).unwrap();
+    let mut catalog = Catalog {
+        server: &server,
+        rows: vec![],
+        hints: BTreeMap::new(),
+    };
+    let nested = "fixture.test/json/other";
+    let root = catalog.publish(nested, "1.0.0", LIB, NOW - WAIT, BTreeMap::new());
+    catalog.publish(NAME, "1.0.0", LIB, NOW - WAIT, BTreeMap::new());
+    let nested_path = format!("/versions/{nested}");
+    server.serve(HOST, &nested_path, b"[]".to_vec());
+    let doc = serde_json::to_vec(&json!({"id":"OSV-LAG","modified":"2026-01-01","affected":[{"package":{"name":nested,"ecosystem":"Hirsel"},"versions":["1.0.0"]}]})).unwrap();
+    let digest = hex(&Sha256::digest(&doc));
+    server.serve(HOST, &format!("/e/{digest}"), doc);
+    let rows = [serde_json::to_vec(&json!([
+        "advise",
+        hex(&root.0),
+        null,
+        "OSV-LAG",
+        digest,
+        "24",
+        auth()
+    ]))
+    .unwrap()];
+    serve_log(&server, Log::Status, &rows, true);
+    server.serve(
+        HOST,
+        &format!("/versions/{NAME}"),
+        br#"[["4.0.0","8","9"],["3.0.0","1","4"],["2.0.0","0","1"],["1.0.0","1","2"]]"#.to_vec(),
+    );
+    invoke(&server, dir, NOW, &["add", NAME], 0);
+    server.serve(HOST, &nested_path, br#"[["1.0.0","0","1"]]"#.to_vec());
+    invoke(&server, dir, NOW, &["add", nested], 0);
+    let audit = invoke(&server, dir, NOW, &["audit", "--frozen"], 2);
+    assert!(audit.contains("OSV-LAG"), "{audit}");
 }

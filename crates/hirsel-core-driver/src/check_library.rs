@@ -491,56 +491,16 @@ fn parse_scoped_id(text: &str) -> Option<Id> {
     })
 }
 
+#[test]
+fn history_accepts_canonical_single_label_registry_origin() {
+    assert!(valid_origin("https://registry:8443"));
+    assert!(!valid_origin("https://registry:443"));
+}
+
 /// `registry.md` §1: HTTPS origin with lowercase DNS host, no userinfo, path,
 /// query or fragment, and default port (443) omitted.
 fn valid_origin(origin: &str) -> bool {
-    let Some(authority) = origin.strip_prefix("https://") else {
-        return false;
-    };
-    if authority.is_empty()
-        || authority.contains('/')
-        || authority.contains('?')
-        || authority.contains('#')
-        || authority.contains('@')
-    {
-        return false;
-    }
-    let (host, port) = match authority.split_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (authority, None),
-    };
-    if !valid_dns_host(host) {
-        return false;
-    }
-    if let Some(port) = port {
-        if port.is_empty() || port.starts_with('0') || !port.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-        let Ok(number) = port.parse::<u16>() else {
-            return false;
-        };
-        if number == 0 || number == 443 {
-            return false;
-        }
-    }
-    true
-}
-
-fn valid_dns_host(host: &str) -> bool {
-    let labels: Vec<_> = host.split('.').collect();
-    host.len() <= 253
-        && (2..=127).contains(&labels.len())
-        && labels.iter().all(|label| {
-            (1..=63).contains(&label.len())
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
-        && !labels
-            .last()
-            .is_some_and(|label| label.bytes().all(|b| b.is_ascii_digit()))
+    crate::registry_route::Origin::parse(origin).is_ok_and(|parsed| parsed.to_string() == origin)
 }
 
 fn worker_store_path() -> Result<PathBuf, Failure> {

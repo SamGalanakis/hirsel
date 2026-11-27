@@ -351,6 +351,18 @@ fn consistency_and_split_view_preserve_original_notes() {
     );
 }
 
+#[test]
+fn unavailable_consistency_tile_preserves_fetch_error() {
+    let rows = [vec![1], vec![2]];
+    let trust = policy(Log::Release);
+    let old = trust.authenticate(&note(RELEASE, &rows[..1], NOW)).unwrap();
+    let next = trust.authenticate(&note(RELEASE, &rows, NOW)).unwrap();
+    assert_eq!(
+        next.extends(&old, |_| Err(Error::MissingObject)),
+        Err(Error::MissingObject)
+    );
+}
+
 fn witness_quorum_freshness_and_heartbeats_are_per_log() {
     for (log, signer) in [(Log::Release, RELEASE), (Log::Status, STATUS)] {
         let trust = policy(log);
@@ -498,12 +510,30 @@ fn full_and_incremental_status_replay_refuse_omission() {
         rows.last(),
         &[json!("other"), json!("final retirement")],
     ));
-    rows.push(status_row(
-        "takedown",
+    let (row, intent) = crate::registry_route::laws::signed_takedown(
+        AUTHORITY,
+        "fixture.test",
         other,
-        None,
-        &[json!("legal"), json!("removed")],
-    ));
+        Value::Null,
+        "removed",
+        FIRST.seed,
+    );
+    rows.push(serde_json::to_vec(&row).unwrap());
+    let legal_key = ed25519_public(&FIRST.private()).unwrap();
+    let releases = [release_entry("fixture.test/json@1", other, [3; 32])];
+    let release_head = policy(Log::Release)
+        .authenticate(&note(RELEASE, &releases, NOW))
+        .unwrap();
+    let release = release_head
+        .locate_release(0, "fixture.test/json@1", "1.2.3", |path| {
+            Objects(&releases).read(path)
+        })
+        .unwrap();
+    let evidence = |root, digest| {
+        assert_eq!(root, other);
+        assert_eq!(digest, Hash::from(Sha256::digest(&intent)));
+        Ok((&release, intent.clone()))
+    };
     let trust = policy(Log::Status);
     let head = trust
         .accept(&note(STATUS, &rows, NOW), None, NOW, |_| panic!())
@@ -514,7 +544,7 @@ fn full_and_incremental_status_replay_refuse_omission() {
     let full = Objects(&rows);
     let mut contiguous = StatusReplay::default();
     contiguous
-        .advance::<&Release>(&head, NOW, |path| full.read(path), |_, _| panic!())
+        .advance::<&Release>(&head, NOW, |path| full.read(path), legal_key, evidence)
         .unwrap();
     assert_eq!(
         contiguous.state(root).unwrap().disposition,
@@ -541,7 +571,8 @@ fn full_and_incremental_status_replay_refuse_omission() {
                 }
                 panic!("unexpected prefix path {path}");
             },
-            |_, _| panic!(),
+            legal_key,
+            evidence,
         )
         .unwrap();
     let next = trust
@@ -579,14 +610,15 @@ fn full_and_incremental_status_replay_refuse_omission() {
                 }
                 Ok(bytes)
             },
-            |_, _| panic!(),
+            legal_key,
+            evidence,
         );
         assert_eq!(result.unwrap_err(), expected, "{change}");
         assert_eq!(incremental.checkpoint().unwrap().size(), 255);
         assert!(incremental.state(other).is_none());
     }
     incremental
-        .advance::<&Release>(&next, NOW, |path| full.read(path), |_, _| panic!())
+        .advance::<&Release>(&next, NOW, |path| full.read(path), legal_key, evidence)
         .unwrap();
     assert_eq!(incremental, contiguous);
 }
@@ -645,6 +677,7 @@ fn status_advisory_is_bound_to_release_and_withdrawal_keeps_other_advisories() {
                 &status,
                 NOW,
                 |path| Objects(&rows).read(path),
+                [0; 32],
                 |_, _| Err(Error::MissingEvidence)
             )
             .unwrap_err(),
@@ -656,6 +689,7 @@ fn status_advisory_is_bound_to_release_and_withdrawal_keeps_other_advisories() {
             &status,
             NOW,
             |path| Objects(&rows).read(path),
+            [0; 32],
             |target, hash| {
                 assert_eq!(target, root);
                 Ok((&release, docs[&hash].to_vec()))

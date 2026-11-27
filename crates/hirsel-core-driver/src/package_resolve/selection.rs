@@ -1,14 +1,16 @@
 use super::*;
+use crate::package_add::registry_select::YoungTrials;
 
 pub(crate) fn select(
     workspace: &Workspace,
     store: &PackageStore,
-    cached: Libraries,
+    trial: (Libraries, YoungTrials),
     requested: Option<(&Id, &Version)>,
     fetched: &mut BTreeSet<String>,
     registry: &mut crate::package_add::registry_select::Registry,
     named: impl Fn(&Id) -> bool,
-) -> Result<(Selections, Libraries), Failure> {
+) -> Result<(Selections, Libraries, YoungTrials), Failure> {
+    let (cached, direct_trials) = trial;
     let manifest = workspace.directory.join(crate::package_dir::MANIFEST);
     let mut selections = Selections::new();
     let graph = Graph {
@@ -32,6 +34,7 @@ pub(crate) fn select(
         };
         let paths = best_paths(&graph, &libraries);
         let mut next = Selections::new();
+        let mut young = direct_trials.clone();
         let logged = logged_floors(&graph, &libraries, &declared, &paths);
         let mut new_candidates = false;
         let mut refusal = None;
@@ -68,11 +71,11 @@ pub(crate) fn select(
                         Some((&origin, current, &id.name)),
                         |root, v| edges.iter().all(|e| e.accepts(root, v)),
                     )?;
+                    let selected = selected.for_trial(store, &mut young)?;
                     let root = selected.root;
                     if version.is_some() {
                         matched = true;
                     }
-                    store.install_entry(root, &selected.library.encoded)?;
                     libraries.insert(root, selected.library);
                     check_versions(
                         &id,
@@ -109,7 +112,7 @@ pub(crate) fn select(
                         ..graph
                     };
                     let (captured, _) =
-                        acquire(&tested_graph, store, false, Libraries::new(), &mut fetch)?;
+                        acquire(&tested_graph, store, false, young.inputs()?, &mut fetch)?;
                     libraries.extend(captured);
                     if !libraries.contains_key(root) {
                         return Err(format!("{id} tested root {root} is unavailable").into());
@@ -167,7 +170,7 @@ pub(crate) fn select(
             {
                 return Err(format!("no edge names {id} version {version}").into());
             }
-            return Ok((next, libraries));
+            return Ok((next, libraries, young));
         }
         let roots: Vec<_> = next
             .iter()
@@ -182,7 +185,7 @@ pub(crate) fn select(
                 ..graph
             };
             let (reached, sources) =
-                acquire(&next_graph, store, false, Libraries::new(), &mut fetch)?;
+                acquire(&next_graph, store, false, young.inputs()?, &mut fetch)?;
             libraries.extend(reached);
             declared.extend(sources);
         }

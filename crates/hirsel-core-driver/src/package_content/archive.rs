@@ -221,7 +221,7 @@ fn entry(
         return Err("entries inflate past 512 MiB".into());
     }
 
-    let mut encoded = Vec::with_capacity(size);
+    let mut encoded = frame_buffer(size);
     let frame_len = len.map(|len| len - header.len() + normalized.len());
     let normalized_len = normalized.len();
     let mut compressed = BufReader::new(io::Cursor::new(normalized).chain(frame));
@@ -336,4 +336,14 @@ fn frame_header(header: &[u8]) -> Result<(usize, Vec<u8>), String> {
     normalized.extend_from_slice(&header[dict_start..dict_end]);
     normalized.extend_from_slice(&header[dict_end + size_len..]);
     Ok((size as usize, normalized))
+}
+
+fn frame_buffer(size: usize) -> Vec<u8> {
+    Vec::with_capacity(size.min(64 << 10))
+}
+
+#[test]
+fn frame_buffer_reserves_at_most_64_kib_before_decoding() {
+    assert!(frame_buffer(CONTENT_LIMIT).capacity() <= 64 << 10);
+    assert_eq!(frame_buffer(19).capacity(), 19);
 }

@@ -34,6 +34,7 @@ pub(crate) enum Error {
     Entry,
     ReleaseClaim,
     StatusTransition,
+    TakedownSignature,
     MissingEvidence,
     Advisory,
 }
@@ -56,6 +57,7 @@ impl fmt::Display for Error {
             Self::MerkleRoot => "registry objects do not match the checkpoint root",
             Self::Entry => "invalid registry log entry",
             Self::ReleaseClaim => "registry release entry does not match the request",
+            Self::TakedownSignature => "invalid registry legal takedown signature",
             Self::StatusTransition => "invalid registry status transition",
             Self::MissingEvidence => "required registry status evidence unavailable",
             Self::Advisory => "invalid registry advisory evidence",
@@ -146,6 +148,38 @@ impl Checkpoint {
         }
         let entry = tiles::included_entry(self.size(), self.root(), index, &mut read)?;
         let row = entry_json(&entry)?;
+        if row[0] != "release" || row[1] != expected_id || row[2] != expected_version {
+            return Err(Error::ReleaseClaim);
+        }
+        self.parse_release(index, &row)
+    }
+
+    /// Recover a locator from authenticated history when a derived hint is absent.
+    pub(crate) fn release_by_root(
+        &self,
+        root: Root,
+        mut read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<Release, Error> {
+        if self.log() != Log::Release {
+            return Err(Error::Origin);
+        }
+        let wanted = hirsel_core_ids::hex::encode(&root.0);
+        for bundle in 0..self.size().div_ceil(tiles::WIDTH) {
+            let bytes = tiles::included_bundle(self.size(), self.root(), bundle, &mut read)?;
+            for (offset, entry) in tiles::bundle_entries(&bytes, self.size(), bundle)?
+                .into_iter()
+                .enumerate()
+            {
+                let row = entry_json(entry)?;
+                if row[0] == "release" && row[3] == wanted {
+                    return self.parse_release(bundle * tiles::WIDTH + offset as u64, &row);
+                }
+            }
+        }
+        Err(Error::ReleaseClaim)
+    }
+
+    fn parse_release(&self, index: u64, row: &Value) -> Result<Release, Error> {
         let [
             tag,
             identity,
@@ -180,9 +214,6 @@ impl Checkpoint {
         {
             return Err(Error::Entry);
         }
-        if expected_id != identity || expected_version != version_text {
-            return Err(Error::ReleaseClaim);
-        }
         Ok(Release {
             authority: self.authority().into(),
             checkpoint: self.clone(),
@@ -206,7 +237,7 @@ fn git_object_name(text: &str) -> bool {
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
-fn decimal(text: &str) -> Option<u64> {
+pub(crate) fn decimal(text: &str) -> Option<u64> {
     if text.is_empty()
         || (text.len() > 1 && text.starts_with('0'))
         || !text.bytes().all(|b| b.is_ascii_digit())

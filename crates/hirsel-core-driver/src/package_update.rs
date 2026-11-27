@@ -1,4 +1,5 @@
 use crate::cli::{Request, UpdateOption};
+use crate::package_add::registry_select::YoungTrials;
 use crate::package_add::{acquire_any, current_scope, edit, git, lock_scope, options::Source};
 use crate::package_content::{Id, Root};
 use crate::package_dir::MANIFEST;
@@ -157,6 +158,7 @@ impl Refresh<'_> {
         target: &Target<'_>,
         shared: bool,
         alias_scope: bool,
+        young: &mut YoungTrials,
     ) -> Result<(), Failure> {
         for (alias, dependency) in deps {
             let Dependency::Published(id, before, Some(source), _) = dependency else {
@@ -188,14 +190,13 @@ impl Refresh<'_> {
                     Some((origin, *before, if alias_scope { alias } else { &id.name })),
                     |r, v| self.constraints.accepts(id, r, v),
                 )?;
+                let choice = choice.for_trial(self.store, young)?;
                 self.choices
                     .entry(id.clone())
                     .or_default()
                     .insert(choice.root);
                 self.editable
                     .insert((file.relative.clone(), alias.clone(), shared));
-                self.store
-                    .install_entry(choice.root, &choice.library.encoded)?;
                 self.libraries.insert(choice.root, choice.library);
                 (choice.root, source.clone())
             } else {
@@ -346,13 +347,20 @@ fn run_at(
         None
     };
     let mut tried = BTreeSet::new();
-    let (mut edits, rebound) = loop {
+    let (mut edits, rebound, young) = loop {
         refresh.choices.clear();
         refresh.rebound.clear();
-        refresh.registry.young_fix = None;
+        let mut young = YoungTrials::default();
         let mut root = Edit::new(&workspace, scope.try_clone()?, PathBuf::new())?;
         if let Some(shared) = &config.workspace {
-            refresh.rows(&mut root, &shared.dependencies, &target, true, inherited)?;
+            refresh.rows(
+                &mut root,
+                &shared.dependencies,
+                &target,
+                true,
+                inherited,
+                &mut young,
+            )?;
         }
         let mut edits = Vec::new();
         for (id, member) in &workspace.members {
@@ -364,6 +372,7 @@ fn run_at(
                     &target,
                     false,
                     alias_scope,
+                    &mut young,
                 )?;
             } else {
                 let dir = directory(&workspace, &member.directory)?;
@@ -374,6 +383,7 @@ fn run_at(
                     &target,
                     false,
                     alias_scope,
+                    &mut young,
                 )?;
                 if edit.changed() {
                     edits.push(edit);
@@ -384,7 +394,7 @@ fn run_at(
 
         let rebound = overlay(&workspace, cwd, &edits)?;
         if refresh.choices.is_empty() {
-            break (edits, rebound);
+            break (edits, rebound, young);
         }
         let libs = crate::package_resolve::registry_inputs(
             &rebound,
@@ -418,8 +428,8 @@ fn run_at(
             })
         });
         refresh.libraries = libs;
-        if fits && !(tried.is_empty() && refresh.registry.young_fix.is_some()) {
-            break (edits, rebound);
+        if fits && (!tried.is_empty() || young.is_empty()) {
+            break (edits, rebound, young);
         }
         if !tried.insert(refresh.choices.clone()) {
             return Err("no compatible registry selection settles the dependency graph".into());
@@ -433,10 +443,10 @@ fn run_at(
         refresh.choices.contains_key(id)
             && !rebound.members.values().any(|m| m.edges.contains_key(id))
     };
-    let (selections, libraries) = select(
+    let (selections, libraries, young) = select(
         &rebound,
         &store,
-        refresh.libraries,
+        (refresh.libraries, young),
         requested.filter(|(id, _)| !unused(id)),
         &mut refresh.fetched,
         &mut refresh.registry,
@@ -484,7 +494,10 @@ fn run_at(
                     )
                 })
             {
-                let (unused, authority) = refresh.registry.unbound(id, *root, origin, *mask)?;
+                let (unused, authority) =
+                    refresh
+                        .registry
+                        .unbound(id, *root, origin, *mask, young.library(*root)?)?;
                 findings.extend(unused);
                 checked.authority.extend(authority);
             }
@@ -519,7 +532,7 @@ fn run_at(
         report.print(json, dry_run, "refused");
         return Err(checked.authority.join("\nhirsel: ").into());
     }
-    if let Some(hint) = refresh.registry.young_fix {
+    if let Some(hint) = young.reason() {
         return Err(hint.into());
     }
     let result = if edits.iter().any(Edit::changed) {

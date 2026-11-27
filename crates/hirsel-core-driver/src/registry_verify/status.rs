@@ -79,14 +79,15 @@ impl StatusReplay {
     }
 
     /// Replays every entry through the accepted status checkpoint. The evidence
-    /// callback supplies a verified release from this registry and its OSV document.
+    /// callback supplies the release and the cited OSV document or takedown intent.
     /// Retains the prior frontier, statuses and note on every refusal.
     pub(crate) fn advance<R: Borrow<Release>>(
         &mut self,
         head: &Checkpoint,
         now: u64,
         mut read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
-        mut advisory: impl FnMut(Root, Hash) -> Result<(R, Vec<u8>), Error>,
+        legal_key: Hash,
+        mut evidence: impl FnMut(Root, Hash) -> Result<(R, Vec<u8>), Error>,
     ) -> Result<(), Error> {
         if head.log() != Log::Status {
             return Err(Error::Origin);
@@ -114,8 +115,8 @@ impl StatusReplay {
                 .skip(skip)
             {
                 let hash = tiles::leaf(entry);
-                let event = entry_json(entry)?;
-                let event = Event::parse(&event).ok_or(Error::Entry)?;
+                let row = entry_json(entry)?;
+                let event = Event::parse(&row).ok_or(Error::Entry)?;
                 let status = changes
                     .entry(event.root)
                     .or_insert_with(|| self.states.get(&event.root).cloned().unwrap_or_default());
@@ -139,12 +140,16 @@ impl StatusReplay {
                         status.disposition = Disposition::Active;
                     }
                     Action::Takedown(reason, message) => {
+                        let digest = json_digest(&row[6][1]).ok_or(Error::Entry)?;
+                        pending.push((event.root, digest, Proof::Takedown(row.clone())));
                         status.disposition = Disposition::TakenDown {
                             reason: reason.into(),
                             message: message.into(),
                         };
                     }
-                    Action::Advise(id, digest) => pending.push((event.root, id.to_owned(), digest)),
+                    Action::Advise(id, digest) => {
+                        pending.push((event.root, digest, Proof::Advisory(id.to_owned())))
+                    }
                     _ => return Err(Error::StatusTransition),
                 }
                 status.last = Some(hash);
@@ -154,8 +159,8 @@ impl StatusReplay {
         if frontier.root() != head.root() {
             return Err(Error::MerkleRoot);
         }
-        for (root, id, digest) in pending {
-            let (release, bytes) = advisory(root, digest)?;
+        for (root, digest, proof) in pending {
+            let (release, bytes) = evidence(root, digest)?;
             let release = release.borrow();
             if release.root() != root
                 || release.authority != head.authority()
@@ -163,6 +168,13 @@ impl StatusReplay {
             {
                 return Err(Error::Advisory);
             }
+            let id = match proof {
+                Proof::Takedown(row) => {
+                    verify_takedown(&row, release, &bytes, legal_key)?;
+                    continue;
+                }
+                Proof::Advisory(id) => id,
+            };
             let withdrawn = verify_osv(&bytes, &id, release).ok_or(Error::Advisory)?;
             let advisories = &mut changes
                 .get_mut(&root)
@@ -179,6 +191,47 @@ impl StatusReplay {
         self.head = Some(head.clone());
         Ok(())
     }
+}
+
+enum Proof {
+    Takedown(Value),
+    Advisory(String),
+}
+
+fn verify_takedown(row: &Value, release: &Release, bytes: &[u8], key: Hash) -> Result<(), Error> {
+    let auth = &row[6];
+    let subject = auth[0][1]
+        .as_str()
+        .and_then(super::decode_base64)
+        .ok_or(Error::Entry)?;
+    let signature = auth[3]
+        .as_str()
+        .and_then(super::decode_base64)
+        .ok_or(Error::Entry)?;
+    if subject != key {
+        return Err(Error::Trust);
+    }
+    let (scope, _) = release
+        .id()
+        .name
+        .rsplit_once('/')
+        .ok_or(Error::ReleaseClaim)?;
+    let intent = serde_json::json!([
+        "hirsel-intent-v1",
+        format!("https://{}", release.authority),
+        "takedown",
+        scope,
+        "0",
+        row[1],
+        [row[2], [row[3], row[4]]]
+    ]);
+    if serde_json::to_vec(&intent).map_err(|_| Error::Entry)? != bytes {
+        return Err(Error::Entry);
+    }
+    if !hirsel_core_net::verify_ed25519(&key, bytes, &signature) {
+        return Err(Error::TakedownSignature);
+    }
+    Ok(())
 }
 
 struct Event<'a> {

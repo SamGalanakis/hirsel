@@ -4,15 +4,13 @@ use crate::package_manifest::{SourceLocation, name::Version};
 use crate::package_resolve::{Libraries, Resolution};
 use crate::package_store::{Entry, PackageStore};
 use crate::package_workspace::{Edge, Workspace};
-use crate::registry_fetch::Client;
 use crate::registry_route::Origin;
+use crate::registry_verify::Release;
 use crate::registry_verify::notes::Checkpoint;
 use crate::registry_verify::status::{Disposition, Status, StatusReplay};
-use crate::registry_verify::{Error, Release};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 type Failure = Box<dyn std::error::Error>;
 const WAIT: u64 = 72 * 3600;
@@ -65,7 +63,7 @@ impl Query {
 
 struct LogState {
     release: Checkpoint,
-    statuses: StatusReplay,
+    statuses: std::sync::Arc<StatusReplay>,
 }
 struct Candidate {
     leaf: Release,
@@ -117,8 +115,74 @@ pub(crate) struct Registry {
     now: u64,
     logs: BTreeMap<Origin, LogState>,
     names: BTreeMap<String, BTreeMap<Version, Candidate>>,
-    pub(crate) young_fix: Option<String>,
     denied: BTreeSet<Root>,
+}
+
+/// Young replacements participate in graph and authority checks in memory.
+#[derive(Default, Clone)]
+pub(crate) struct YoungTrials(BTreeMap<Root, YoungRelease>);
+
+#[derive(Clone)]
+struct YoungRelease {
+    reason: String,
+    encoded: bytes::Bytes,
+}
+
+impl YoungRelease {
+    fn library(&self) -> Result<Library, Failure> {
+        Ok(Library {
+            content: crate::package_content::Content::decode_as(&self.encoded, false)?,
+            encoded: self.encoded.clone(),
+        })
+    }
+}
+
+impl YoungTrials {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn reason(self) -> Option<String> {
+        self.0.into_values().next().map(|release| release.reason)
+    }
+
+    pub(crate) fn library(&self, root: Root) -> Result<Option<Library>, Failure> {
+        self.0.get(&root).map(YoungRelease::library).transpose()
+    }
+
+    pub(crate) fn inputs(&self) -> Result<Libraries, Failure> {
+        self.0
+            .iter()
+            .map(|(root, release)| Ok((*root, release.library()?)))
+            .collect()
+    }
+}
+
+pub(crate) enum Selection {
+    Eligible(Selected),
+    YoungOnly { trial: Selected, reason: String },
+}
+
+impl Selection {
+    pub(crate) fn for_trial(
+        self,
+        store: &PackageStore,
+        young: &mut YoungTrials,
+    ) -> Result<Selected, Failure> {
+        match self {
+            Self::Eligible(choice) => {
+                store.install_entry(choice.root, &choice.library.encoded)?;
+                Ok(choice)
+            }
+            Self::YoungOnly { trial, reason } => {
+                young.0.entry(trial.root).or_insert_with(|| YoungRelease {
+                    reason,
+                    encoded: trial.library.encoded.clone(),
+                });
+                Ok(trial)
+            }
+        }
+    }
 }
 
 pub(crate) struct Selected {
@@ -127,49 +191,14 @@ pub(crate) struct Selected {
     pub(crate) origin: Origin,
 }
 
-fn advisory_release(
-    client: &Client<'_>,
-    head: &Checkpoint,
-    root: Root,
-    bytes: &[u8],
-) -> Result<Release, Error> {
-    let document: Value = serde_json::from_slice(bytes).map_err(|_| Error::Advisory)?;
-    for item in document["affected"].as_array().ok_or(Error::Advisory)? {
-        if item["package"]["ecosystem"] != "Hirsel" {
-            continue;
-        }
-        let name = item["package"]["name"].as_str().ok_or(Error::Advisory)?;
-        // An OSV document can name several packages, including packages on other routes.
-        let Ok(hints) = client.hints(name) else {
-            continue;
-        };
-        for hint in hints {
-            let leaf = client
-                .release_from_hint(head, name, &hint)
-                .map_err(|_| Error::ReleaseClaim)?;
-            if leaf.root() == root {
-                return Ok(leaf);
-            }
-        }
-    }
-    Err(Error::Advisory)
-}
-
 impl Registry {
     pub(crate) fn new(store: &PackageStore) -> Result<Self, Failure> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        #[cfg(test)]
-        let now = std::env::var("HIRSEL_TEST_REGISTRY_SECONDS")
-            .ok()
-            .map(|n| n.parse())
-            .transpose()?
-            .unwrap_or(now);
+        let now = crate::registry_fetch::now().map_err(boxed)?;
         Ok(Self {
             store: store.clone(),
             now,
             logs: BTreeMap::new(),
             names: BTreeMap::new(),
-            young_fix: None,
             denied: BTreeSet::new(),
         })
     }
@@ -184,10 +213,9 @@ impl Registry {
                     "--frozen cannot verify checkpoint freshness for preview (quorum 0)".into(),
                 );
             }
-            let statuses = client
-                .status_replay(self.now, |root, bytes| {
-                    advisory_release(&client, &release, root, bytes)
-                })
+            let statuses = self
+                .store
+                .status_for(&client, self.now, Some(&release))
                 .map_err(boxed)?;
             self.logs
                 .insert(origin.clone(), LogState { release, statuses });
@@ -199,20 +227,17 @@ impl Registry {
         if !self.names.contains_key(name) {
             let client = self.store.registry(name, Some(origin))?;
             let mut versions = BTreeMap::new();
-            for hint in client.hints(name).map_err(boxed)? {
-                let leaf = client
-                    .release_from_hint(&self.logs[origin].release, name, &hint)
-                    .map_err(boxed)?;
-                if let Some(old) = versions.insert(
+            for (hint, leaf) in client
+                .verified_hints(&self.logs[origin].release, name)
+                .map_err(boxed)?
+            {
+                versions.insert(
                     hint.version,
                     Candidate {
                         leaf,
                         covering: hint.covering_size,
                     },
-                ) && old.leaf.index() != hint.index
-                {
-                    return Err(format!("conflicting release rows for {name}").into());
-                }
+                );
             }
             self.names.insert(name.into(), versions);
         }
@@ -224,7 +249,7 @@ impl Registry {
         query: &Query,
         pin: Option<(&Origin, Root, &str)>,
         accepts: impl Fn(Root, &Version) -> bool,
-    ) -> Result<Selected, Failure> {
+    ) -> Result<Selection, Failure> {
         let name = &query.name;
         let origin = self.open(name, pin.map(|p| p.0))?;
         self.candidates(name, &origin)?;
@@ -245,11 +270,12 @@ impl Registry {
         let mut young = Vec::new();
         let mut selected = None;
         for (v, candidate) in versions.iter().rev() {
+            let current = pin.is_some_and(|(_, root, _)| candidate.leaf.root() == root);
             if query.major.is_some_and(|major| major != v.major)
                 || query
                     .exact
                     .as_ref()
-                    .map_or(!v.pre.is_empty(), |exact| exact != v)
+                    .map_or(!current && !v.pre.is_empty(), |exact| exact != v)
                 || before
                     .is_some_and(|(old, _, _)| v < old || (old.major == 0 && old.minor != v.minor))
                 || self.denied.contains(&candidate.leaf.root())
@@ -260,7 +286,7 @@ impl Registry {
             {
                 continue;
             }
-            if query.exact.is_none() {
+            if query.exact.is_none() && !current {
                 let published = client
                     .publication_time(&candidate.leaf, Some(candidate.covering), self.now)
                     .map_err(boxed)?;
@@ -273,7 +299,7 @@ impl Registry {
             selected = Some(candidate);
             break;
         }
-        if selected.is_none()
+        let reason = if selected.is_none()
             && let Some((
                 old,
                 Some(Status {
@@ -299,15 +325,17 @@ impl Registry {
                     "{alias} {old} is retired ({reason}: {message}). No eligible release is outside the 72 h wait."
                 )
             };
-            self.young_fix.get_or_insert(hint);
             selected = Some(candidate);
-        }
+            Some(hint)
+        } else {
+            None
+        };
         let candidate = selected.ok_or_else(|| NoEligible(name.clone()))?;
         let root = candidate.leaf.root();
         let library = match self.store.read(root)? {
             Entry::Present(lib) => lib,
             _ => client
-                .frame(candidate.leaf.id(), root, |_| Ok(()))
+                .frame(statuses, candidate.leaf.id(), root, |_| Ok(()))
                 .map_err(boxed)?,
         };
         if library.content.id != *candidate.leaf.id()
@@ -315,10 +343,14 @@ impl Registry {
         {
             return Err(format!("{name} {root}: registry release differs from its content").into());
         }
-        Ok(Selected {
+        let trial = Selected {
             root,
             library,
             origin,
+        };
+        Ok(match reason {
+            Some(reason) => Selection::YoungOnly { trial, reason },
+            None => Selection::Eligible(trial),
         })
     }
 
@@ -349,7 +381,7 @@ impl Registry {
                             Some(crate::package_manifest::Dependency::Inherited)
                         )))
         });
-        self.select(query, None, |r, v| {
+        match self.select(query, None, |r, v| {
             constraints.accepts(
                 &Id {
                     name: query.name.clone(),
@@ -358,7 +390,10 @@ impl Registry {
                 r,
                 v,
             )
-        })
+        })? {
+            Selection::Eligible(selected) => Ok(selected),
+            Selection::YoungOnly { .. } => Err(NoEligible(query.name.clone()).into()),
+        }
     }
 
     pub(crate) fn check_add(
@@ -387,7 +422,7 @@ impl Registry {
                 Some(Dependency::Published(_, _, _, mask)) => *mask,
                 _ => 0,
             };
-            let (unused, authority) = self.unbound(id, root, origin, ceiling)?;
+            let (unused, authority) = self.unbound(id, root, origin, ceiling, None)?;
             findings.extend(unused);
             checked.authority.extend(authority);
         }
@@ -404,6 +439,7 @@ impl Registry {
         root: Root,
         origin: &Origin,
         ceiling: u16,
+        trial: Option<Library>,
     ) -> Result<(BTreeMap<Id, Finding>, Vec<String>), Failure> {
         // The workspace lock omits unused shared rows. Resolve this declaration with
         // the same carrier walk and compiler checks as a member inheriting the row.
@@ -420,7 +456,14 @@ impl Registry {
         )?;
         let workspace = Workspace::discover_for(dir.path(), true)?
             .ok_or("missing declaration check workspace")?;
-        let res = Resolution::resolve(workspace, self.store.clone(), false)?;
+        let cached = trial.into_iter().map(|lib| (root, lib)).collect();
+        let res = Resolution::resolve_cached(
+            workspace,
+            self.store.clone(),
+            false,
+            cached,
+            &mut BTreeSet::new(),
+        )?;
         let findings = self.graph(&res, None)?;
         require_active(&findings)?;
         let checked = crate::package_audit::check(&res, None)?;

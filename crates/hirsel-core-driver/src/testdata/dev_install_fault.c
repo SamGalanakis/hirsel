@@ -46,7 +46,16 @@ static void interrupt_at(const char *step) {
     if (fd < 0) _exit(120);
     close(fd);
     if (!hold) _exit(121);
+#ifdef __APPLE__
+    // Darwin has no PR_SET_PDEATHSIG; match Linux parent-death termination
+    // when the test SIGKILLs the supervising `hirsel dev` process.
+    pid_t parent = getppid();
+    if (parent <= 1) _exit(121);
+    while (getppid() == parent) usleep(10000);
+    _exit(121);
+#else
     for (;;) pause();
+#endif
 }
 
 int OBSERVE(flock)(int fd, int operation) {

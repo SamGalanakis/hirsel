@@ -117,10 +117,7 @@ fn spin(take job: SpinJob) -> u64 waits {
     n
 }
 
-fn wake(take client: Socket) waits {
-    let (read, write) = net.split(take client)
-    let _ = take read
-    let mut w = take write
+fn wake(mut w: WriteHalf) waits {
     let _ = result.unwrap(host.send_pair(mut w, string.as_bytes("a"), string.as_bytes(""), Never))
 }
 
@@ -129,21 +126,27 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let mut listener = take listening
     let free_client = result.unwrap(host.connect(n, addr, Never))
     let free_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(free_client)), Never))
-    let bounded_client = result.unwrap(host.connect(n, addr, Never))
-    let bounded_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(bounded_client)), Never))
+    let (free_r, free_w_val) = net.split(take free_client)
+    let mut free_w = take free_w_val
     let free = task.spawn(tasks, bytes 65536, SpinJob(socket: take free_socket), spin)
-    let spawned = bound steps 100 {
-        task.spawn(tasks, bytes 65536, SpinJob(socket: take bounded_socket), spin)
-    }
-    let bounded = result.unwrap(take spawned)
-    wake(take free_client)
-    wake(take bounded_client)
+    wake(mut free_w)
     let mut line = string.new()
     match task.join(take free) {
         Ok(v) => string.push_uint(mut line, v, 10u32, 0, ' '),
         Error(_) => {},
     }
+    let _ = take free_r
+    let _ = take free_w
     result.unwrap(stdout.write(out, line));
+    let bounded_client = result.unwrap(host.connect(n, addr, Never))
+    let bounded_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(bounded_client)), Never))
+    let (bounded_r, bounded_w_val) = net.split(take bounded_client)
+    let mut bounded_w = take bounded_w_val
+    let spawned = bound steps 100 {
+        task.spawn(tasks, bytes 65536, SpinJob(socket: take bounded_socket), spin)
+    }
+    let bounded = result.unwrap(take spawned)
+    wake(mut bounded_w)
     let stopped = match task.join(take bounded) {
         Error(Failed(causes)) => {
             let mut kind = " other"
@@ -158,6 +161,8 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
         },
         _ => " finished",
     }
+    let _ = take bounded_r
+    let _ = take bounded_w
     result.unwrap(stdout.write(out, stopped));
     Ok(())
 }

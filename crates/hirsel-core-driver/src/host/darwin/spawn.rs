@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 
 use crate::launcher::spawn::{Prepared, pointers};
 
+#[cfg(test)]
+pub(crate) const PENDING_EXEC: bool = false;
+
 pub(crate) const IMAGE_FD: RawFd = 6;
 
 const POSIX_SPAWN_SETSID: libc::c_int = 0x0400;

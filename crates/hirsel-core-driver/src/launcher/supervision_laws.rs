@@ -100,6 +100,17 @@ fn slow_exec_does_not_block_unrelated_start() {
     launcher.handle(start_req(g_slow, 0, work, Mode::Serving(1, serve(1, None))));
     launcher.handle(start_req(g_fast, 1, work, Mode::Serving(1, serve(1, None))));
 
+    // Darwin's posix_spawn has already acknowledged both execs when handle returns.
+    if !crate::host::launch::PENDING_EXEC {
+        assert_eq!(
+            launcher.take_events(),
+            [
+                Event::Launched(slow_child, Phase::Started),
+                Event::Launched(fast_child, Phase::Started),
+            ]
+        );
+        return;
+    }
     let mut launched_order = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     while launched_order.len() < 2 {
@@ -152,17 +163,19 @@ fn exec_failure_releases_store_claim_and_rearms_listener() {
         work,
         Mode::Serving(1, serve(1, None)),
     ));
-    // While c1 is still pending exec, its store-holder claim blocks c2.
-    launcher.handle(start_req(
-        g.clone(),
-        1,
-        work,
-        Mode::Serving(2, serve(2, None)),
-    ));
-    assert_eq!(
-        launcher.take_events(),
-        vec![Event::Refused(c2, Refusal::Held)]
-    );
+    if crate::host::launch::PENDING_EXEC {
+        // While c1 is pending exec, its store-holder claim blocks c2.
+        launcher.handle(start_req(
+            g.clone(),
+            1,
+            work,
+            Mode::Serving(2, serve(2, None)),
+        ));
+        assert_eq!(
+            launcher.take_events(),
+            vec![Event::Refused(c2.clone(), Refusal::Held)]
+        );
+    }
 
     // Wait for c1's exec pipe failure.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -208,6 +221,17 @@ fn exec_failure_releases_store_claim_and_rearms_listener() {
             .take_events()
             .contains(&Event::Launched(c3.clone(), Phase::Started));
     }
+    if !crate::host::launch::PENDING_EXEC {
+        // The failed posix_spawn released its claim immediately. The successful
+        // start holds the same store until exit.
+        launcher.handle(start_req(
+            c2.group.clone(),
+            1,
+            work,
+            Mode::Serving(2, serve(2, None)),
+        ));
+        assert_eq!(launcher.take_events(), [Event::Refused(c2, Refusal::Held)]);
+    }
 }
 
 /// Never a double `Started`: duplicate `Start` while a child is pending exec coalesces
@@ -231,6 +255,25 @@ fn duplicate_start_and_hello_while_pending_never_double_started() {
     let req = start_req(g.clone(), 0, work, Mode::Serving(1, serve(1, None)));
     let c1 = serving_child(g.clone(), 1);
     launcher.handle(req.clone());
+    if !crate::host::launch::PENDING_EXEC {
+        let started = Event::Launched(c1.clone(), Phase::Started);
+        assert_eq!(launcher.take_events(), [started.clone()]);
+        // A retry after synchronous exec replays the acknowledgement. Hello
+        // must inventory just the one running child.
+        launcher.handle(req);
+        assert_eq!(launcher.take_events(), [started]);
+        launcher.handle(Request::Hello);
+        let events = launcher.take_events();
+        let [Event::Inventory(children, cold, attempts)] = events.as_slice() else {
+            panic!("{events:?}")
+        };
+        assert!(cold.is_empty() && attempts.is_empty());
+        let [state] = children.as_slice() else {
+            panic!("{children:?}")
+        };
+        assert_eq!((&state.child, &state.phase), (&c1, &Phase::Started));
+        return;
+    }
     // Duplicate Start while pending exec must coalesce.
     launcher.handle(req);
     assert!(launcher.take_events().is_empty());

@@ -12,6 +12,9 @@ use std::path::Path;
 use crate::launcher::spawn::{Prepared, pointers};
 use crate::launcher::{above_launch_slots, wait_pid};
 
+#[cfg(test)]
+pub(crate) const PENDING_EXEC: bool = true;
+
 pub(crate) const IMAGE_FD: RawFd = 6;
 
 /// A started child, pinned by its pidfd until it is reaped.

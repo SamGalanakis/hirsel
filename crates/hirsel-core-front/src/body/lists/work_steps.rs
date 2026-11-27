@@ -4,6 +4,12 @@ use hirsel_core_ids::work_steps::Work;
 use hirsel_core_ir::RtOp;
 
 impl Cx<'_, '_, '_> {
+    pub(in crate::body) fn source_step(&mut self, n: NodeId) {
+        if self.steps_in_source && self.live() {
+            let fail = self.fail_to(n);
+            self.inst(Inst::Step { fail }, n);
+        }
+    }
     pub(in crate::body) fn complete_iteration(&mut self, n: NodeId) {
         self.source_step(n);
         if self.steps_in_source {

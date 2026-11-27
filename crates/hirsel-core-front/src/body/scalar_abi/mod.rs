@@ -511,9 +511,10 @@ use views::{scalar_copies, scalar_views};
 mod numeric;
 pub use numeric::Site as NumericSite;
 
-/// Key recipes use the same scalar instruction stream in closed and generic code.
-pub(super) fn inline_keys(module: &Module, body: &mut Body) {
-    if key_glue::inline_ordered(module, body) {
+/// Compact closed bodies just as specialization does after inlining a key
+/// recipe or consuming a work-table code as a compile-time operand.
+pub(super) fn finish_closed(module: &Module, body: &mut Body, has_work_code: bool) {
+    if key_glue::inline_ordered(module, body) || has_work_code {
         let aliases = (0..body.values.len())
             .map(|v| ValueId(v as u32))
             .collect::<Vec<_>>();

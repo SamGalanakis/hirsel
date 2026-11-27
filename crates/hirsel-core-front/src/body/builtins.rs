@@ -66,6 +66,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.gap(n, "core.work_steps needs a constant table code");
                 return Some(None);
             };
+            self.has_work_code = true;
             self.charge_work(work, vals[1]?, n)?;
             return Some(None);
         }

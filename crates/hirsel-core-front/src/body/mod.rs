@@ -1233,6 +1233,7 @@ struct Cx<'c, 'a, 'e> {
     step_scopes: Vec<(u32, u32)>,
     copies: Vec<CopySize>,
     allocations: Vec<AllocationLayout>,
+    has_work_code: bool,
     numeric_sites: Vec<scalar_abi::NumericSite>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     generated_ordinals: [HashMap<NodeId, usize>; 3],
@@ -1413,6 +1414,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             step_scopes: vec![],
             copies: vec![],
             allocations: vec![],
+            has_work_code: false,
             numeric_sites: vec![],
             nested: Default::default(),
             generated_ordinals: Default::default(),
@@ -1942,12 +1944,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             }
             self.open.push(i);
             self.open_anchors.push(self.anchor(n));
-        }
-    }
-    pub(super) fn source_step(&mut self, n: NodeId) {
-        if self.steps_in_source && self.live() {
-            let fail = self.fail_to(n);
-            self.inst(Inst::Step { fail }, n);
         }
     }
     pub(super) fn callback_step_to(&mut self, n: NodeId, fail: Option<BlockId>) {
@@ -2510,7 +2506,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             self.install_entry_setup();
             self.block_order();
             if self.fd.generics.is_empty() {
-                scalar_abi::inline_keys(&self.e.module, &mut self.b);
+                scalar_abi::finish_closed(&self.e.module, &mut self.b, self.has_work_code);
             }
             let function = &mut self.e.module.functions[f.index()];
             function.versioned |= self.versioned;

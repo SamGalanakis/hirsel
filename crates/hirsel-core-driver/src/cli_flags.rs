@@ -3,6 +3,14 @@ use super::{Flag, Switch, Value};
 
 flags! {
     Context ["--context"] "NAME|/FILE" => "Select a trusted workstation context or absolute job pin file.";
+    PublishWorkspace ["--workspace"] => "Publish all workspace members, dependency-first.";
+    PublishKey ["--signing-key"] "FILE" => "Sign release intents with this Ed25519 PKCS#8 DER key.";
+    PublishWorkload ["--oidc-subject"] "FILE" => "Read the OIDC subject array from this JSON file.";
+    PublishTokenCommand ["--oidc-token-command"] "FILE" => "Run this executable with the intent audience as its sole argument to obtain a compact JWS.";
+    PublishGeneration ["--generation"] "N" => "Use the scope's current signing generation (default 1).";
+    PublishEnroll ["--enroll"] "FILE" => "Read the sorted initial subject set. The first release of each scope uses generation zero.";
+    PublishDescription ["--description"] "TEXT" => "Include this description in each release intent.";
+    PublishSourceCommit ["--source-commit"] "HEX" => "Include this Git object name in each release intent.";
     AddRoot ["--root"] "sha256:HEX" => "Require this archive head root.";
     AddAs ["--as"] "ALIAS" => "Bind the dependency under this alias.";
     AddWorkspace ["--workspace"] => "Declare the binding in the workspace root's [workspace.dependencies].";

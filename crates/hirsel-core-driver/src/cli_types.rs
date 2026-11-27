@@ -33,6 +33,7 @@ pub enum Invocation {
     Compiler(Request<CompilerOption>),
     Simple(Request<NoOption>),
     Lsp(Request<NoOption>),
+    RegistryPublish(Request<RegistryPublishOption>),
     Add(Request<AddOption>),
     Update(Request<UpdateOption>),
     Audit(Request<AuditOption>),

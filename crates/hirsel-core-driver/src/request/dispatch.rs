@@ -25,11 +25,16 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
             let name = args
                 .iter()
                 .take_while(|arg| !arg.starts_with('-'))
-                .take(if args.first().is_some_and(|arg| arg == "op") {
-                    2
-                } else {
-                    1
-                })
+                .take(
+                    if args
+                        .first()
+                        .is_some_and(|arg| matches!(arg.as_str(), "op" | "registry"))
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                )
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -62,6 +67,10 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
         }
         Invocation::Coverage(request) => conclude(crate::coverage::cli::run(request)?),
         Invocation::Lean(request) => conclude(lean::run(request).map(|()| Outcome::Exit(0))?),
+        Invocation::RegistryPublish(request) => {
+            crate::registry_publish::run(request, check_registry_member)?;
+            conclude(Outcome::Exit(0))
+        }
         Invocation::Add(request) => conclude(Outcome::Exit(crate::package_add::run(request)?)),
         Invocation::Update(request) => {
             conclude(Outcome::Exit(crate::package_update::run(request)?))
@@ -236,6 +245,44 @@ pub fn main(mut args: Vec<String>) -> ! {
         Err(e) => e,
     };
     std::process::exit(report_request_error(error.as_ref()))
+}
+
+fn check_registry_member(
+    resolution: &crate::package_resolve::Resolution,
+    id: &crate::package_content::Id,
+    libraries: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = &resolution.workspace.members[id].manifest_path;
+    let check = crate::cli::COMMANDS
+        .iter()
+        .find(|spec| spec.name == "check")
+        .unwrap();
+    let invocation = Request {
+        command: check,
+        positional: Some(manifest.parent().unwrap().to_string_lossy().into_owned()),
+        options: libraries
+            .map(|path| Opt::Libraries(path.to_owned()))
+            .into_iter()
+            .collect(),
+        arguments: Vec::new(),
+    };
+    let app = crate::package_dir::PackageDir::from_resolution(resolution, id, true)?;
+    match run_compiler_request(
+        invocation,
+        check.name,
+        OutputKind::Executable,
+        None,
+        PackageInput::Captured(app),
+        None,
+    ) {
+        Ok(Outcome::Exit(0)) => Ok(()),
+        other => {
+            if let Err(error) = other {
+                report_request_error(error.as_ref());
+            }
+            Err(format!("registry publish: {} does not check", manifest.display()).into())
+        }
+    }
 }
 
 fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::error::Error>> {

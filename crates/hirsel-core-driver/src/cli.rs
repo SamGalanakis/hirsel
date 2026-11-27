@@ -114,6 +114,12 @@ commands! {
         Update(UpdateOption), One: AddDryRun, PackageStore, Locked, Frozen, HELP, Json;
     "audit", "audit [DIR] [--frozen] [--package-store DIR] [--json]", "Report the authority reached by dependencies.";
         Audit(AuditOption), One: PackageStore, Frozen, HELP, Json;
+    "registry", "registry <publish>", "Publish packages to a routed registry.";
+        Simple(NoOption), None: HELP;
+    "registry publish", "registry publish [package-dir] [--workspace] [options]", "Check and upload library content to its routed registry.";
+        RegistryPublish(RegistryPublishOption), One:
+            PublishWorkspace, PublishKey, PublishWorkload, PublishTokenCommand, PublishGeneration, PublishEnroll,
+            PublishDescription, PublishSourceCommit, PackageStore, Libraries, HELP;
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP, Output;
     "build", "build [package-dir | --recipe HASH] [options]", "Build a native executable or static library from a release recipe.";

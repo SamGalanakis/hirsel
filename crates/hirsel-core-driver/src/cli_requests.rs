@@ -12,6 +12,20 @@ pub enum OpGetOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegistryPublishOption {
+    PublishWorkspace,
+    PublishKey(String),
+    PublishWorkload(String),
+    PublishTokenCommand(String),
+    PublishGeneration(String),
+    PublishEnroll(String),
+    PublishDescription(String),
+    PublishSourceCommit(String),
+    PackageStore(String),
+    Libraries(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddOption {
     AddDryRun,
     AddRoot(String),

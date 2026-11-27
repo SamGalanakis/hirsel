@@ -72,6 +72,7 @@ mod package_workspace;
 mod prebuild;
 mod prof_command;
 mod registry_fetch;
+mod registry_publish;
 mod registry_route;
 mod registry_verify;
 mod release_manifest;
@@ -119,9 +120,8 @@ pub use reuse::DefinitionKey;
 use reuse::{Keys, compiler_identity};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{io, sync::Arc};
 pub use store::Store;
 pub use tool_inputs::link_driver;
 #[cfg(test)]

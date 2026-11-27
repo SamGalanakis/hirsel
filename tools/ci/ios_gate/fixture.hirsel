@@ -17,13 +17,6 @@ fn write(mut tx: store.Tx, h: Handles, _author: runner.Caller, take n: u64) -> R
     }
 }
 
-fn counter_step(mut tx: store.Tx, h: Handles, _author: runner.Caller, take delta: u64) -> Result[u64, u32] {
-    match counter.step(mut tx, h.counter, delta) {
-        Ok(value) => Ok(value),
-        Error(_) => Error(1u32),
-    }
-}
-
 fn counter_table(h: Handles) -> store.Table[u64, u64] {
     clone(h.counter)
 }
@@ -80,7 +73,6 @@ fn tls_status(n: Net, take socket: Socket, name: String, take roots: Option[Byte
 fn place(mut registry: runner.Registry[Net, Handles]) -> Result[(), runner.RegisterError] {
     runner.compute(mut registry, code.describe(answer), 1024u64, runner.DEFAULT_STEPS)?
     runner.transact(mut registry, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
-    runner.transact(mut registry, code.describe(counter_step), 65536u64, runner.DEFAULT_STEPS)?
     runner.granted(mut registry, code.describe(handshake), 1048576u64, runner.DEFAULT_STEPS)?
     runner.query(mut registry, code.describe(rows), slots()?, 65536u64, runner.DEFAULT_STEPS)?
     let codec: std.codec.Codec[u64] = std.codec.of()

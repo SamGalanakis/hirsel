@@ -39,7 +39,12 @@ def export(compiler, kit, output):
         fixture = (HERE / "fixture.hirsel").read_text()
         alternate = fixture.replace("n + 7u64", "n + 8u64")
         assert fixture != alternate
-        for package, source in (("SimGate", fixture), ("SimGateAlternate", alternate)):
+        counter = (HERE / "counter_embed.hirsel").read_text()
+        for package, source, name in (
+            ("SimGate", fixture, "sim_gate"),
+            ("SimGateAlternate", alternate, "sim_gate"),
+            ("CounterGate", counter, "counter_gate"),
+        ):
             workspace = work / package
             libraries = workspace / "libraries"
             programs = libraries / "programs"
@@ -56,7 +61,7 @@ def export(compiler, kit, output):
 
             app = workspace / "app"
             app.mkdir()
-            (app / "hirsel.toml").write_text(PACKAGE)
+            (app / "hirsel.toml").write_text(PACKAGE.replace('name = "sim_gate"', f'name = "{name}"'))
             (app / "fixture.hirsel").write_text(source)
             shutil.copyfile(HERE / "counter.hirsel", app / "counter.hirsel")
             subprocess.run(

@@ -3,15 +3,15 @@ options:
   deploymentTarget:
     iOS: "26.0"
 packages:
-  SimGate:
-    path: SimGate
+  CounterGate:
+    path: CounterGate
 targets:
   EmbedCounter:
     type: application
     platform: iOS
     sources: [CounterHost.swift]
     dependencies:
-      - package: SimGate
+      - package: CounterGate
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES

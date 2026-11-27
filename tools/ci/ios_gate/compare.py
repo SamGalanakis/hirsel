@@ -57,7 +57,7 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="hirsel-counter-comparison-") as directory:
         work = Path(directory)
-        (work / "SimGate").symlink_to((args.artifacts / "SimGate").resolve(), target_is_directory=True)
+        (work / "CounterGate").symlink_to((args.artifacts / "CounterGate").resolve(), target_is_directory=True)
         shutil.copyfile(HERE / "counter_project.yml", work / "project.yml")
         shutil.copyfile(HERE / "CounterHost.swift", work / "CounterHost.swift")
         run("xcodegen", "generate", cwd=work)

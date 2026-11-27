@@ -1,0 +1,16 @@
+fn counter_step(mut tx: store.Tx, table: store.Table[u64, u64], _author: runner.Caller, take delta: u64) -> Result[u64, u32] {
+    match counter.step(mut tx, table, delta) {
+        Ok(value) => Ok(value),
+        Error(_) => Error(1u32),
+    }
+}
+
+fn place(mut registry: runner.Registry[(), store.Table[u64, u64]]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut registry, code.describe(counter_step), 65536u64, runner.DEFAULT_STEPS)
+}
+
+pub fn main(args: Args, clock: Clock, random: Random, tasks: Tasks) -> Result[(), Exit] waits {
+    runner.launch_server(args, clock, code.describe(place), code.describe(counter.schema), scoped fn() -> Result[(), Exit] {
+        Ok(())
+    })
+}

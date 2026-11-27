@@ -1,0 +1,111 @@
+{
+  "name": "hirsel",
+  "displayName": "Hirsel",
+  "description": "Syntax highlighting and language server support for Hirsel",
+  "version": "0.1.0",
+  "publisher": "hirsel",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SamGalanakis/hirsel.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./dist/src/extension.js",
+  "files": [
+    "dist/src",
+    "dist/grammar",
+    "language-configuration.json",
+    "README.md"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "hirsel",
+        "aliases": [
+          "Hirsel"
+        ],
+        "extensions": [
+          ".hirsel"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "Hirsel",
+      "properties": {
+        "hirsel.executable": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Path to the installed Hirsel executable. Leave empty to use hirsel from PATH."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "[hirsel]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
+    "semanticTokenTypes": [
+      {
+        "id": "hirselCharacter",
+        "superType": "string",
+        "description": "Character or byte literal"
+      },
+      {
+        "id": "hirselBracket",
+        "description": "Bracket"
+      },
+      {
+        "id": "hirselDelimiter",
+        "description": "Delimiter"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "hirsel",
+        "scopes": {
+          "decorator": [
+            "storage.type.annotation"
+          ],
+          "hirselCharacter": [
+            "constant.character"
+          ],
+          "hirselBracket": [
+            "punctuation.bracket"
+          ],
+          "hirselDelimiter": [
+            "punctuation.separator"
+          ],
+          "label": [
+            "entity.name.label"
+          ]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node scripts/build-grammar.mjs && tsc",
+    "test": "npm run build && node --test dist/test/extension.test.js",
+    "test:editor": "node test/run-editor.mjs",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1",
+    "web-tree-sitter": "0.25.10"
+  },
+  "devDependencies": {
+    "@types/emscripten": "1.41.5",
+    "@types/node": "20.19.30",
+    "@types/vscode": "1.90.0",
+    "@vscode/test-electron": "2.5.2",
+    "tree-sitter-cli": "0.25.10",
+    "typescript": "5.9.3"
+  }
+}

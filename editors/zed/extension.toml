@@ -1,0 +1,16 @@
+id = "hirsel"
+name = "Hirsel"
+description = "Syntax highlighting and language server support for Hirsel"
+version = "0.1.0"
+schema_version = 1
+authors = ["Samuel Galanakis"]
+repository = "https://github.com/SamGalanakis/hirsel"
+
+[language_servers.hirsel]
+name = "Hirsel"
+languages = ["Hirsel"]
+
+[grammars.hirsel]
+repository = "https://github.com/SamGalanakis/hirsel"
+rev = "e8a3c970a40a911fc29368380ada2863a3f1f061"
+path = "editors/tree-sitter-hirsel"

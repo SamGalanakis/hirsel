@@ -5,7 +5,7 @@
 //! ordinary variant rows, one per instantiation).
 
 use crate::Program;
-use crate::decls::{DeclBody, Repr, Role};
+use crate::decls::{DeclBody, LayoutKinds, Repr, Role};
 use crate::types::*;
 use hirsel_core_layout::{
     Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Recipe, RecipeRow,
@@ -83,8 +83,8 @@ pub(crate) fn intern_shape(
     hirsel_core_layout::intern_shape(shapes, names, shape.name.clone(), Row::new(shape))
 }
 
-/// A shape table being extended: rows are keyed by canonical text, which is also the
-/// row's name, so one closed type has one row whichever body names it.
+/// A shape table being extended. A module publishes canonical row names. A temporary
+/// table used only for recipes names rows by the interned types in its arena.
 pub(crate) struct Shapes<'p, T: TyRead> {
     pub decls: &'p crate::Rows<crate::decls::TypeDecl>,
     pub types: &'p mut T,
@@ -101,6 +101,7 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     /// Closed codec tuples get their hook even when no source call requests it.
     pub tuple_codecs: Vec<(TypeRef, TyId)>,
     pub key_codecs: Vec<(TypeRef, TyId)>,
+    pub kinds: LayoutKinds,
 }
 
 /// A row's declared function: its finalizer (`Shape::finalizer`), its clone body
@@ -113,6 +114,19 @@ pub(crate) enum Hook {
 }
 
 impl<T: TyRead> Shapes<'_, T> {
+    fn with_name<R>(&self, ty: TyId, read: impl FnOnce(std::borrow::Cow<'_, str>) -> R) -> R {
+        if self.module {
+            return crate::decls::with_layout_name(self.decls, &*self.types, ty, read);
+        }
+        // Keep declaration names for layout diagnostics. Structural rows are internal
+        // to this table, and expanding their spelling would unfold the type DAG.
+        let name = match self.types.kind(ty) {
+            TyKind::Adt(d, args) if args.is_empty() => self.decls[d.index()].path.to_string(),
+            _ => format!("#{}", ty.0),
+        };
+        read(std::borrow::Cow::Owned(name))
+    }
+
     /// The codec hook of the row `r` of the closed type `ty`, `d` at `args`, when `d` is
     /// a core type whose maker is std's (List, Map, Option, Result) and `ty` is `codec`:
     /// that maker at `args`, named by the caller ([`Self::hooks`]), so `of` through a
@@ -153,7 +167,12 @@ impl<T: TyRead> Shapes<'_, T> {
     /// field type for some part of it (recorded as a gap by the caller).
     pub fn shape(&mut self, ty: TyId) -> Option<TypeRef> {
         crate::cost_scope!("query", "shape lookup");
-        let name = match crate::decls::with_layout_name(self.decls, &*self.types, ty, |name| {
+        // A view is held as its type's own bytes (FORM #56); an anchor only bounds where
+        // a value may go.
+        if let TyKind::Anchored(x, _) | TyKind::View(x) = *self.types.kind(ty) {
+            return self.shape(x);
+        }
+        let name = match self.with_name(ty, |name| {
             self.of
                 .get(name.as_ref())
                 .copied()
@@ -162,11 +181,6 @@ impl<T: TyRead> Shapes<'_, T> {
             Ok(row) => return Some(row),
             Err(name) => name,
         };
-        // A view is held as its type's own bytes (FORM #56); an anchor only bounds where
-        // a value may go.
-        if let TyKind::Anchored(x, _) | TyKind::View(x) = *self.types.kind(ty) {
-            return self.shape(x);
-        }
         // Reserve the index first: a field reaching this type through an indirection
         // (`List[Tree]` in `Tree`) names it before its body is known.
         let (r, _) = intern_shape(
@@ -258,7 +272,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     });
                 }
                 (
-                    if crate::decls::kind(self.decls, self.types, ty, &[]) == crate::Kind::Scoped {
+                    if self.kinds.get(self.decls, self.types, ty) == crate::Kind::Scoped {
                         LRepr::Scoped
                     } else {
                         LRepr::Own
@@ -428,8 +442,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     Repr::Own
                         if decl.structural
                             && args.iter().any(|&a| {
-                                crate::decls::kind(self.decls, &*self.types, a, &[])
-                                    == crate::decls::Kind::Scoped
+                                self.kinds.get(self.decls, self.types, a) == crate::Kind::Scoped
                             }) =>
                     {
                         LRepr::Scoped
@@ -466,10 +479,7 @@ impl<T: TyRead> Shapes<'_, T> {
     /// The compact row of the compact type `ty` (FORM #65), named
     /// `compact <canonical>`: its fields encoded in the blob (MEM-9).
     fn compact(&mut self, ty: TyId) -> Option<TypeRef> {
-        let name = format!(
-            "compact {}",
-            crate::decls::layout_name(self.decls, &*self.types, ty)
-        );
+        let name = self.with_name(ty, |name| format!("compact {name}"));
         if let Some(&r) = self.of.get(&name) {
             return Some(r);
         }
@@ -602,10 +612,14 @@ impl<T: TyRead> Shapes<'_, T> {
     /// which is charged round8(24 + 8 count)). Hash, equality and order read the
     /// row: the located sequence, and the count it determines.
     fn seq_index_block(&mut self, ty: TyId, elem: TyId) -> Option<TypeRef> {
-        let name = format!(
-            "{} block",
-            crate::decls::canonical(self.decls, &*self.types, ty)
-        );
+        let name = if self.module {
+            format!(
+                "{} block",
+                crate::decls::canonical(self.decls, &*self.types, ty)
+            )
+        } else {
+            self.with_name(ty, |name| format!("{name} block"))
+        };
         if let Some(&r) = self.of.get(&name) {
             return Some(r);
         }
@@ -733,10 +747,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 // A body template's parameter is bounded at its instance, whose array
                 // row and holders' fields are then the same (FORM #109).
                 if !matches!(
-                    (
-                        crate::decls::kind(self.decls, self.types, *x, &[]),
-                        self.module
-                    ),
+                    (self.kinds.get(self.decls, self.types, *x), self.module),
                     (crate::Kind::Plain | crate::Kind::Own, _) | (crate::Kind::Generic, true)
                 ) {
                     return None;
@@ -850,21 +861,51 @@ fn record(fields: Vec<(&str, FieldTy)>) -> Body {
     )
 }
 
+/// The logical charge of a closed value. A size query needs no module rows or hooks.
+pub(crate) fn logical_size(
+    decls: &crate::Rows<crate::TypeDecl>,
+    types: &mut impl TyRead,
+    ty: TyId,
+) -> Option<u64> {
+    match carried(decls, types, ty)? {
+        Carried::Nothing => return Some(0),
+        Carried::Value(Ty::Scalar(s)) => return Some(s.size()),
+        Carried::Value(Ty::Vector(v)) => return Some(v.size()),
+        Carried::Value(Ty::Ptr) => return Some(hirsel_core_layout::POINTER),
+        Carried::Address => {}
+    }
+    let mut shapes = vec![];
+    let row = temporary_shapes(decls, types, &mut shapes, &mut ShapeNames::default()).shape(ty)?;
+    let recipes = compute(&shapes).ok()?;
+    hirsel_core_layout::charge::held(shapes[row.index()].repr, &recipes[row.index()])
+}
+
+fn temporary_shapes<'a, T: TyRead>(
+    decls: &'a crate::Rows<crate::TypeDecl>,
+    types: &'a mut T,
+    shapes: &'a mut Vec<Row>,
+    of: &'a mut ShapeNames,
+) -> Shapes<'a, T> {
+    static NO_CODECS: crate::StructuralCodecs = crate::StructuralCodecs::NONE;
+    Shapes {
+        decls,
+        types,
+        shapes,
+        of,
+        module: false,
+        hooks: vec![],
+        codecs: &NO_CODECS,
+        tuple_codecs: vec![],
+        key_codecs: vec![],
+        kinds: LayoutKinds::default(),
+    }
+}
+
 /// Recipes for every declaration without parameters whose fields all map.
 pub(crate) fn recipes(p: &mut Program) {
     let Program { decls, types, .. } = p;
     let (mut shapes, mut of) = (vec![], HashMap::default());
-    let mut s = Shapes {
-        decls,
-        types,
-        shapes: &mut shapes,
-        of: &mut of,
-        module: false,
-        hooks: vec![],
-        codecs: &crate::StructuralCodecs::NONE,
-        tuple_codecs: vec![],
-        key_codecs: vec![],
-    };
+    let mut s = temporary_shapes(decls, types, &mut shapes, &mut of);
     let mut roots = vec![];
     for (i, decl) in s.decls.own_iter().enumerate() {
         let d = s.decls.base_len() + i;
@@ -951,61 +992,4 @@ pub(crate) fn recipes(p: &mut Program) {
     }
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use hirsel_core_ids::published::{Descriptor, Provider, Table, bind};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    struct Prefix {
-        row: crate::TypeDecl,
-        reads: Arc<AtomicUsize>,
-    }
-    impl Provider<crate::TypeDecl> for Prefix {
-        fn row(&self, _: u32) -> std::io::Result<crate::TypeDecl> {
-            self.reads.fetch_add(1, Ordering::Relaxed);
-            Ok(self.row.clone())
-        }
-    }
-    #[test]
-    fn recipes_skip_undemanded_published_prefix() {
-        let (index, modules) = crate::tests::program_inputs("type Local { n: u64 }\n");
-        let mut p = Program::declare(&index, &modules);
-        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
-        let mut local = p
-            .decls
-            .iter()
-            .find(|d| d.path.0.name == "Local")
-            .unwrap()
-            .clone();
-        local.summary.recipe = None;
-        let reads = Arc::new(AtomicUsize::new(0));
-        let descriptor = Descriptor {
-            namespace: hirsel_core_ids::ContentHash::of_bytes(b"layout-prefix-test"),
-            table: 0,
-            len: 128,
-        };
-        let prefix = Table::published(bind(
-            descriptor,
-            Arc::new(Prefix {
-                row: local.clone(),
-                reads: Arc::clone(&reads),
-            }),
-        ));
-        p.decls = crate::Rows::overlay(Arc::new(prefix));
-        p.decls.push(local);
-        recipes(&mut p);
-        assert_eq!(
-            reads.load(Ordering::Relaxed),
-            0,
-            "unrelated library declarations were decoded"
-        );
-        let recipe = p.decls[128].summary.recipe.as_ref().unwrap();
-        let hirsel_core_layout::Layout::Fixed(fixed) = &recipe.layout else {
-            panic!("fixed u64 record")
-        };
-        assert_eq!((fixed.size, fixed.align), (8, 8));
-    }
-}
+mod tests;

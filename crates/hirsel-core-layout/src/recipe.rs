@@ -7,6 +7,8 @@
 //! of MEM-9..12 with constant or relative field positions.
 
 use std::cmp::Reverse;
+mod zero_sizes;
+use zero_sizes::ZeroSizes;
 
 use crate::shape::{
     Body, Carried, Field, FieldTy, FuncRef, Handle, Repr, Row, Scalar, Shape, Ty, TypeRef, Width,
@@ -497,12 +499,14 @@ struct Effects {
     pending: Vec<(TypeRef, usize)>,
     targets: Vec<TypeRef>,
     send: Sendable,
+    zero: ZeroSizes,
 }
 
 impl Effects {
     fn truncate(&mut self, len: usize) {
         self.rows.truncate(len);
         self.send.rows.truncate(len);
+        self.zero.truncate(len);
     }
 
     /// Whether cleaning a value of row `root` can observe the order of its steps
@@ -518,6 +522,7 @@ impl Effects {
             pending,
             targets,
             send,
+            ..
         } = self;
         if rows.len() < shapes.len() {
             rows.resize(shapes.len(), 0);
@@ -1510,35 +1515,16 @@ pub fn column_strides(shapes: &[Row], recipes: &[RecipeRow], row: &FieldTy) -> V
 /// SEM-4: a `List` of a zero-sized element has no element storage (its capacity is
 /// 2^64 - 1 from creation and nothing is admitted), so it has nothing to clean.
 pub fn storage_free(shapes: &[Row], ty: &FieldTy) -> bool {
-    matches!(ty, FieldTy::Seq(e) | FieldTy::Columns(e) if zero_sized(shapes, e, &mut vec![]))
-}
-
-/// Whether a field of type `ty` has size 0, read from the shapes alone (a list's
-/// element need not be computed before its holder): a record whose fields all have
-/// size 0, or an array of none or of such. A variant has a tag; anything else holds
-/// a scalar, a pointer or a carrier.
-fn zero_sized(shapes: &[Row], ty: &FieldTy, seen: &mut Vec<TypeRef>) -> bool {
-    match ty {
-        FieldTy::Inline(t) => {
-            let shape = &shapes[t.index()];
-            if seen.contains(t) || matches!(shape.repr, Repr::Resource | Repr::Compact(_)) {
-                return false;
-            }
-            let Body::Record(fields) = &shape.body else {
-                return false;
-            };
-            seen.push(*t);
-            let zero = fields.iter().all(|f| zero_sized(shapes, &f.ty, seen));
-            seen.pop();
-            zero
-        }
-        FieldTy::Array(e, n) => *n == 0 || zero_sized(shapes, e, seen),
-        _ => false,
-    }
+    matches!(ty, FieldTy::Seq(e) | FieldTy::Columns(e) if ZeroSizes::default().field(shapes, e))
 }
 
 fn needs_drop(shapes: &[Row], ty: &FieldTy, out: &Computed<'_>) -> bool {
-    drops(shapes, ty, &|t| done(out, t).drop.is_some())
+    drops(
+        shapes,
+        ty,
+        &|t| done(out, t).drop.is_some(),
+        &mut out.effects.borrow_mut().zero,
+    )
 }
 
 /// How the block an owning edge points at is cleaned, which fixes the native prefix it
@@ -1572,6 +1558,7 @@ pub fn terminal(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> bool {
 /// keys and values need none. Derived, never stored.
 pub fn cleanup_class(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> Option<Cleanup> {
     let drop = |t: TypeRef| recipes[t.index()].drop.is_some();
+    let mut zero = ZeroSizes::default();
     Some(match edge {
         FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
             if shapes[t.index()].repr == Repr::Resource {
@@ -1583,8 +1570,12 @@ pub fn cleanup_class(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> O
             }
         }
         FieldTy::FrozenBytes => Cleanup::Terminal,
-        FieldTy::Seq(e) | FieldTy::Columns(e) if !drops(shapes, e, &drop) => Cleanup::Terminal,
-        FieldTy::Map(k, v) if !drops(shapes, k, &drop) && !drops(shapes, v, &drop) => {
+        FieldTy::Seq(e) | FieldTy::Columns(e) if !drops(shapes, e, &drop, &mut zero) => {
+            Cleanup::Terminal
+        }
+        FieldTy::Map(k, v)
+            if !drops(shapes, k, &drop, &mut zero) && !drops(shapes, v, &drop, &mut zero) =>
+        {
             Cleanup::Terminal
         }
         FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) => Cleanup::Dynamic,
@@ -1594,9 +1585,14 @@ pub fn cleanup_class(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> O
 }
 
 /// Whether a value of `ty` has anything to drop, given which rows have a recipe.
-fn drops(shapes: &[Row], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
+fn drops(
+    shapes: &[Row],
+    ty: &FieldTy,
+    drop: &dyn Fn(TypeRef) -> bool,
+    zero: &mut ZeroSizes,
+) -> bool {
     match ty {
-        FieldTy::Seq(e) | FieldTy::Columns(e) => !zero_sized(shapes, e, &mut vec![]),
+        FieldTy::Seq(e) | FieldTy::Columns(e) => !zero.field(shapes, e),
         FieldTy::FrozenBytes => true,
         FieldTy::Inline(t) => !matches!(shapes[t.index()].repr, Repr::Compact(_)) && drop(*t),
         FieldTy::Handle(Handle::Capability) => false,
@@ -1607,7 +1603,7 @@ fn drops(shapes: &[Row], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
         | FieldTy::Map(..)
         | FieldTy::OwnFn
         | FieldTy::Handle(_) => true,
-        FieldTy::Array(e, n) => *n > 0 && drops(shapes, e, drop),
+        FieldTy::Array(e, n) => *n > 0 && drops(shapes, e, drop, zero),
         _ => false,
     }
 }

@@ -592,6 +592,7 @@ impl Emitter {
             codecs: p.structural_codecs(),
             tuple_codecs: vec![],
             key_codecs: vec![],
+            kinds: Default::default(),
         };
         let r = f(&mut s);
         if r.is_none() {
@@ -2881,13 +2882,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.expr_into_field(c[0], expect(ty), address, fresh)
             }
             NodeKind::Literal => self.literal(n, want, false),
-            NodeKind::BytesOf => {
-                let ty = self.ty(c[0]);
-                if mentions_error(&self.t, ty) {
-                    return (ERROR, None);
-                }
-                (scalar(Scalar::U64), self.layout_size(ty, true, n))
-            }
+            NodeKind::BytesOf => self.bytes_of(n, c[0]),
             NodeKind::Unit => (UNIT, None),
             NodeKind::Path => self.path(n, want),
             NodeKind::Block => self.block(n, want),

@@ -10,6 +10,22 @@ pub(super) struct OwnedAllocation {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn bytes_of(&mut self, n: NodeId, operand: NodeId) -> (TyId, Option<ValueId>) {
+        let ty = self.ty(operand);
+        if mentions_error(&self.t, ty) {
+            return (ERROR, None);
+        }
+        let value = if has_param(&self.t, ty) {
+            self.layout_size(ty, true, n)
+        } else if let Some(size) = crate::layout::logical_size(&self.p.decls, &mut self.t, ty) {
+            self.konst(Ty::Scalar(Scalar::U64), size, n)
+        } else {
+            self.gap(n, "values of this type are not built");
+            None
+        };
+        (scalar(Scalar::U64), value)
+    }
+
     /// `ty` as a field of the edge an allocation names (FORM #89): a list's or
     /// map's storage is `Seq`/`Map` of these.
     pub(super) fn edge_field(&mut self, ty: TyId, n: NodeId) -> Option<FieldTy> {

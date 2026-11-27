@@ -90,7 +90,14 @@ pub(super) fn replay_boundary_for(task: *mut Task, provider_entry: bool) {
                 // A FIFO record takes an input only where its task leaves the
                 // processor by itself (poll_event), so this task runs on to that
                 // point; an event first passes the input's position and diverges.
-                Turn::Wake(_) | Turn::Cancel(_) | Turn::Done(_) | Turn::Retired(_)
+                // A TURN is the dispatch after that point: a provider operation
+                // that parks with no event of its own reaches it at its park,
+                // after this entry, so it never pauses the running task.
+                Turn::Wake(_)
+                | Turn::Cancel(_)
+                | Turn::Done(_)
+                | Turn::Retired(_)
+                | Turn::Dispatch(_)
                     if group.fifo() =>
                 {
                     return;
@@ -121,6 +128,8 @@ fn tape_boundary(group: Group, ending: bool) {
         loop {
             match group.turn() {
                 Turn::Fifo | Turn::Event(None | Some(0)) | Turn::Take => return,
+                // As in replay_boundary_for: a FIFO TURN waits for the dispatch.
+                Turn::Dispatch(_) if group.fifo() => return,
                 Turn::Grant if !ending => return,
                 Turn::Finish | Turn::Deadlock => return,
                 Turn::Grant => {
@@ -215,8 +224,9 @@ impl Scheduler {
     }
 
     /// Whether the replay's wanted `target` starts its turn now. A due `TURN`
-    /// is consumed here and must name a task that shares a step account;
-    /// another due frame starts a sharing task only inside a paused turn.
+    /// is consumed here, at the dispatch, and must name a task that shares a
+    /// step account; another due frame starts a sharing task only inside a
+    /// paused turn. Under FIFO no boundary pauses a task for a due `TURN`.
     pub(super) unsafe fn takes_turn(
         &self,
         group: Group,

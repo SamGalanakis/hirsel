@@ -681,6 +681,12 @@ starts such a task only at a due `TURN` that names it: a `TURN` that names a tas
 does not have ready, or one that shares no bound, is `Diverged(Schedule)`, and so is a
 dispatch that would start a sharing task with no `TURN` due. A task that resumes in place,
 with no other task chosen between, writes none. A run with no shared bound writes no `TURN`.
+A due `TURN` never pauses the running task under the FIFO chooser: the recording chose the
+next task only where the running one left the processor by itself (a park, a slice end, its
+end), and a replay reaches that same point and takes the `TURN` at the dispatch that follows.
+A provider operation that parks with no event of its own, such as a call to a served port,
+so parks first even when the `TURN` is due at its entry; a task that commits an event before
+it leaves has passed the `TURN`'s position, which is `Diverged(Schedule)`.
 
 A helper's grant is the step bound its entry holds. Its `END` and its owner's helper-end
 `TAKE` both carry its **residual**, the steps of the grant it left unused (0 when it received

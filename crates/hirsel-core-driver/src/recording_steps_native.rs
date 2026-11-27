@@ -35,6 +35,44 @@ pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
 }
 "#;
 
+/// Two children share the parent's account and each first writes to a served
+/// `Stdout`, so each parks on the port with no event of its own: the recorded
+/// `TURN` of the second child falls where the first parked, at the first
+/// child's provider entry. The parent answers the oldest call first, so a
+/// replay that parked the children in the other order wakes the wrong one.
+const STEPS_PARK: &str = r#"
+fn say(take o: Stdout) -> u64 waits {
+    result.unwrap(stdout.write(o, "w"))
+    1
+}
+
+fn serve(mut s: Served[StreamOp]) waits {
+    let Some(take call) = provide.next(mut s) else { fail("no call") }
+    let _ = provide.reply(mut s, take call, provide.stream_reply(Done))
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let done = bound steps 2000000 {
+        let (o, port) = provide.stdout(bytes 64, None)
+        let mut s = take port
+        let a = task.spawn(tasks, bytes 4096, o, say)
+        let b = task.spawn(tasks, bytes 4096, o, say)
+        serve(mut s)
+        serve(mut s)
+        match (task.join(take a), task.join(take b)) {
+            (Ok(x), Ok(y)) => x + y,
+            _ => 0,
+        }
+    }
+    let said = match done {
+        Ok(2) => "served",
+        _ => "wrong",
+    }
+    result.unwrap(stdout.write(out, said))
+    Ok(())
+}
+"#;
+
 /// A helper takes half of its donor's 400,000 and spends about 1,000; the
 /// owner's continuation of 300,000 iterations fits only with the helper's
 /// residual back.
@@ -151,6 +189,19 @@ fn steps_shared_turns_replay() {
                 "{backend:?} {budget}: {err}"
             );
         }
+        // The second child's TURN falls at the first child's provider entry,
+        // where the recording dispatched it only after the first child parked.
+        let program = steps_build(dir.path(), STEPS_PARK, "park", backend);
+        let path = dir.path().join(format!("park-{backend:?}.tape"));
+        let (code, out, err) = tape_run(&program, &[], Some(&path));
+        assert_eq!((code, out.as_str()), (Some(0), "served"), "{backend:?} park: {err}");
+        let (code, out, err) = u4_replay(&program, &path, None);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (Some(0), "", ""),
+            "{backend:?} park: {:#?}",
+            unit_streams(&path, &format!("{backend:?}"), &["root"])[0].1
+        );
     }
 }
 

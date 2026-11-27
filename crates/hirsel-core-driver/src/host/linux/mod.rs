@@ -28,16 +28,8 @@ pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::T
 #[cfg(target_arch = "aarch64")]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::Target::Aarch64Linux;
 
-#[cfg(test)]
-pub(crate) fn test_link(_runtime: &Path) -> crate::native::Link {
-    crate::native::Link::Driver(
-        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn test_compiler(_runtime: &Path) -> PathBuf {
-    std::env::current_exe().unwrap()
+pub(crate) fn link_sdk(_target: hirsel_core_layout::Target) -> Option<std::ffi::OsString> {
+    None
 }
 
 /// The kit's Linux linker has both the ELF and Mach-O ports.

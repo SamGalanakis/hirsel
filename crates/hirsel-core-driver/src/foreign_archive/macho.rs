@@ -652,6 +652,8 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
             files: vec![recorded(&llvm.join("ld.lld")), recorded(&stub)],
             source_files: vec![],
             absent: vec![],
+            directories: vec![],
+            binaries: vec![stub.clone()],
             identity: ContentHash::default(),
         };
         let link = |extra: &str| {

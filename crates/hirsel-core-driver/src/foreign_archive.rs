@@ -409,20 +409,13 @@ impl ForeignDefinitions<'_> {
     }
 }
 
-/// The toolchain's own link inputs a recipe names: the libc and system
-/// libraries of an ELF recipe's closure, or a Mach-O recipe's text stubs,
-/// which are its files besides the linker.
+/// The binary inputs of the toolchain's recipe.
 pub(crate) fn recipe_binaries(
     recipe: &crate::tool_inputs::LinkRecipe,
     macho: bool,
 ) -> std::io::Result<Vec<PathBuf>> {
     Ok(if macho {
-        recipe
-            .files
-            .iter()
-            .map(|file| file.path.clone())
-            .filter(|path| *path != recipe.linker)
-            .collect()
+        recipe.binaries.clone()
     } else {
         crate::link_closure::closure(&recipe.args, crate::tool_inputs::INPUT_MARKER, true)?.binaries
     })
@@ -435,6 +428,7 @@ pub(crate) fn input_definitions(
     bytes: &[u8],
     defined: &mut dyn FnMut(&[u8]) -> Result<(), AdmissionError>,
 ) -> Option<Result<(), AdmissionError>> {
+    let bytes = crate::link_closure::arm64_slice(bytes)?;
     if bytes.starts_with(AR) {
         let archive = ArchiveFile::parse(bytes).ok()?;
         for member in archive.members() {

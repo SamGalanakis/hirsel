@@ -652,6 +652,8 @@ mod tests {
             files: vec![],
             source_files: vec![],
             absent: vec![],
+            directories: vec![],
+            binaries: vec![],
             identity: ContentHash([0; 32]),
         };
         let link = Link::Driver(Path::new("clang").into());

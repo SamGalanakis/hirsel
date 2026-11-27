@@ -217,6 +217,8 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
         files: vec![],
         source_files: vec![],
         absent: vec![],
+        directories: vec![],
+        binaries: vec![],
         identity: ContentHash::default(),
     };
     let mut laws = vec![fixture.path().join("laws.o")];
@@ -660,7 +662,7 @@ fn a_recipe_links_with_the_editor_its_own_path_selects() {
 /// The key a capture through `cc` under this process's environment
 /// names its records with.
 fn capture_key(cc: &Path) -> String {
-    let environment = CaptureEnvironment::new(&search()).unwrap();
+    let environment = CaptureEnvironment::new(&search(), Target::X86_64Linux).unwrap();
     environment.key(&driver_file_key(cc).unwrap()).unwrap()
 }
 
@@ -673,8 +675,73 @@ fn recipe(input: &Path) -> LinkRecipe {
         files: vec![recipe_file(input).unwrap()],
         source_files: vec![],
         absent: vec![],
+        directories: vec![],
+        binaries: vec![],
         identity: ContentHash::of_bytes(b"recipe"),
     }
 }
 
 mod stat_trust;
+
+#[test]
+fn macho_recipe_closes_over_sdk_libraries_and_frameworks() {
+    let dir = tempfile::tempdir().unwrap();
+    let sdk = dir.path().join("SDK");
+    let local = dir.path().join("local");
+    let rooted = sdk.join(local.strip_prefix("/").unwrap());
+    let libraries = sdk.join("usr/lib");
+    let frameworks = sdk.join("System/Library/Frameworks");
+    let example = frameworks.join("Example.framework");
+    for directory in [&local, &rooted, &libraries, &example] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let lib = libraries.join("libSystem.tbd");
+    let fw = example.join("Example.tbd");
+    let dep = libraries.join("libDependency.tbd");
+    let archive = local.join("libLocal.a");
+    let stub = "--- !tapi-tbd\ntbd-version: 4\n";
+    std::fs::write(&lib, stub).unwrap();
+    std::fs::write(&dep, stub).unwrap();
+    std::fs::write(&archive, b"!<arch>\n").unwrap();
+    std::fs::write(
+        &fw,
+        format!(
+            "{stub}reexported-libraries:\n  - targets: [ arm64-macos ]\n    libraries: [ '/usr/lib/libDependency.dylib' ]\n"
+        ),
+    )
+    .unwrap();
+    let args = [
+        "-platform_version",
+        "macos",
+        "15.0",
+        "26.0",
+        "-syslibroot",
+        sdk.to_str().unwrap(),
+        INPUT_MARKER,
+        "-lSystem",
+        "-framework",
+        "Example",
+    ];
+    let closure =
+        |args: &[String]| crate::link_closure::for_format(ObjectFormat::MachO, args, INPUT_MARKER);
+    let mut args = args.map(str::to_owned).to_vec();
+    let observed = closure(&args).unwrap();
+    assert_eq!(observed.binaries, [fw, dep, lib]);
+    args.extend([
+        "-L".to_owned(),
+        local.display().to_string(),
+        "-lLocal".to_owned(),
+    ]);
+    assert_eq!(closure(&args).unwrap_err().kind(), io::ErrorKind::NotFound);
+    let rooted_archive = rooted.join("libLocal.a");
+    std::fs::rename(archive, &rooted_archive).unwrap();
+    let observed = closure(&args).unwrap();
+    assert!(observed.binaries.contains(&rooted_archive));
+    for ext in ["tbd", "dylib", "so"] {
+        assert!(
+            observed
+                .absent
+                .contains(&rooted_archive.with_extension(ext))
+        );
+    }
+}

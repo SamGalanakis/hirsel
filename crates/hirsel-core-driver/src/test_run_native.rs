@@ -910,7 +910,7 @@ void hfl_done(void) {}
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let bytes = std::fs::read(law.path("native.o")).unwrap();
     let object = object::File::parse(bytes.as_slice()).unwrap();
-    let section = object.section_by_name(".hirsel_abi").unwrap();
+    let section = object.section_by_name(match crate::host::HOST_TARGET.object_format() { hirsel_core_layout::ObjectFormat::Elf => ".hirsel_abi", hirsel_core_layout::ObjectFormat::MachO => "__hirsel_abi" }).unwrap();
     assert_eq!(
         section.data().unwrap(),
         b"hfl_create stack () -> new ffi_laws@1/laws/Obj\n\
@@ -941,7 +941,7 @@ void hfl_free(void *p) { (void)p; }
             "hfl_free waits (take app@1/main/Obj) -> ()\n"
 __attribute__((used, section(".hirsel_abi")))
 static const char abi[sizeof(ABI) - 1] = ABI;
-"#);
+"#.replace(".hirsel_abi", fixture_abi_section()));
     let compile = Command::new(&cc).current_dir(law.path("app"))
         .args(["-std=c11", "-fPIC", "-c", "native.c", "-o", "native.o"]).output().unwrap();
     assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
@@ -958,8 +958,8 @@ static const char abi[sizeof(ABI) - 1] = ABI;
 
 [foreign.native]
 symbols = "hfl_"
-archives = [{{ target = "x86_64-unknown-linux-gnu", file = "native.a", sha256 = "{pin_text}" }}]
-"#));
+archives = [{{ target = "{target}", file = "native.a", sha256 = "{pin_text}" }}]
+"#, target = options.target));
     law.write("app/native.hirsel", "\
 pub fn value(f: Foreign[main.I]) -> u64\n\
 pub fn make(f: Foreign[main.I]) -> Option[foreign.Ptr[main.Obj]]\n\
@@ -1058,12 +1058,10 @@ impl PackageLaw {
         if matches!(arguments[0], "build" | "publish") {
             args.extend(["--code-store".into(), self.path("code-store").to_str().unwrap().into()]);
         }
-        let plain = native_options(Backend::Cranelift, self.dir.path()).runtime;
         if matches!(arguments[0], "run" | "test" | "build") {
-            let runtime = if arguments.iter().any(|arg| matches!(*arg, "--laws" | "--write-laws" | "--laws-baseline")) { env_record_runtime() } else { plain.clone() };
+            let runtime = if arguments.iter().any(|arg| matches!(*arg, "--laws" | "--write-laws" | "--laws-baseline")) { env_record_runtime() } else { native_options(Backend::Cranelift, self.dir.path()).runtime };
             args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
         }
-        // No --cc: the child links as the host's compiler does by default.
         let mut command = process::tape_request_command(&args, self.dir.path());
         command.env("XDG_CACHE_HOME", self.path("cache"));
         command
@@ -2421,7 +2419,7 @@ uint64_t PING(void) { return UINT64_C(1); }
 #define ABI TEXT(PING) " stack () -> u64\n"
 __attribute__((used, section(".hirsel_abi")))
 static const char abi[sizeof(ABI) - 1] = ABI;
-"#);
+"#.replace(".hirsel_abi", fixture_abi_section()));
     std::fs::create_dir_all(law.path("work/math/native")).unwrap();
     let archive = |prefix: &str| {
         let compiled = Command::new(&cc).current_dir(law.dir.path()).args([
@@ -2463,8 +2461,8 @@ pub fn ping(f: Foreign[Math]) -> u64 { native.ping(f) }
 [foreign.native]
 symbols = "{symbols}"
 archives = [
-  {{ target = "x86_64-unknown-linux-gnu", file = "native/{symbols}.a", sha256 = "{pin}" }},
-"#));
+  {{ target = "{target}", file = "native/{symbols}.a", sha256 = "{pin}" }},
+"#, target = runtime.target));
             if arm {
                 manifest.push_str(r#"  { target = "aarch64-unknown-linux-gnu", file = "native/arm.a", sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },"#);
             }

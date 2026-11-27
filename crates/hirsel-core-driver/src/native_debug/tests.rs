@@ -923,6 +923,8 @@ fn link_macho(
         files: Vec::new(),
         source_files: Vec::new(),
         absent: Vec::new(),
+        directories: vec![],
+        binaries: vec![],
         identity: hirsel_core_ids::ContentHash::of_bytes(b"recipe"),
     };
     crate::native::direct_link(

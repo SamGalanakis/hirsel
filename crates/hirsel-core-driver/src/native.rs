@@ -1958,7 +1958,7 @@ pub(crate) mod tests {
             optimize: false,
             debug_lines: false,
             target: crate::host::HOST_TARGET.triple().into(),
-            link: crate::host::test_link(&runtime),
+            link: crate::host::test_link(),
             runtime,
             cas: dir.join("cas"),
             output: dir.join("program"),

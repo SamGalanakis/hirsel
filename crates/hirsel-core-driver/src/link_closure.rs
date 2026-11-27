@@ -16,10 +16,27 @@
 //! holds nothing. Each path a search tried before its match is recorded as
 //! absent: a file that later appears there would be read instead, so the
 //! recipe is stale once one does.
+use hirsel_core_layout::ObjectFormat;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-/// How an option uses its operand.
+mod macho;
+mod macho_stub;
+
+pub(crate) use macho::arm64_slice;
+
+pub(crate) fn for_format(
+    format: ObjectFormat,
+    args: &[String],
+    marker: &str,
+) -> io::Result<Closure> {
+    match format {
+        ObjectFormat::Elf => closure(args, marker, false),
+        ObjectFormat::MachO => macho::closure(args, marker),
+    }
+}
+
+/// How an ELF option uses its operand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     /// No operand.
@@ -141,6 +158,7 @@ pub(crate) struct Closure {
     /// The binary inputs, including those named by a linker script.
     pub binaries: Vec<PathBuf>,
     pub absent: Vec<PathBuf>,
+    pub directories: Vec<PathBuf>,
 }
 
 /// The closure of `args`. The input marker stands for the request's own inputs.
@@ -280,6 +298,7 @@ pub(crate) fn closure(
         files: walk.files,
         binaries: walk.binaries,
         absent: walk.absent,
+        directories: Vec::new(),
     })
 }
 

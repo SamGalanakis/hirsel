@@ -3,7 +3,10 @@ fn appending_driver(dir: &Path, name: &str, extra: &str) -> PathBuf {
     let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
     let original = native_options(Backend::Cranelift, dir).link;
     let cc = dir.join(name);
-    let script = format!("#!/bin/sh\nexec {} \"$@\" {extra}\n", quote(original.driver()));
+    let script = format!(
+        "#!/bin/sh\nexec {} \"$@\" {extra}\n",
+        quote(original.driver())
+    );
     crate::executable::write(&cc, script.as_bytes(), 0o755).unwrap();
     cc
 }
@@ -13,7 +16,14 @@ fn marker_object(dir: &Path, path: &Path, symbol: &str, value: u32) {
     let original = native_options(Backend::Cranelift, dir).link;
     let c = dir.join("marker.c");
     std::fs::write(&c, format!("int {symbol} = {value};\n")).unwrap();
-    command(Command::new(original.driver()).arg("-c").arg(&c).arg("-o").arg(path)).unwrap();
+    command(
+        Command::new(original.driver())
+            .arg("-c")
+            .arg(&c)
+            .arg("-o")
+            .arg(path),
+    )
+    .unwrap();
 }
 
 /// After each change to a file the link reads, a build against the primed
@@ -32,20 +42,46 @@ fn a_file_the_link_reads_keys_the_executable() {
     let second = dir.path().join("second");
     std::fs::create_dir_all(&first).unwrap();
     std::fs::create_dir_all(&second).unwrap();
-    let version = dir.path().join("version.map");
+    let format = crate::host::HOST_TARGET.object_format();
+    use hirsel_core_layout::ObjectFormat::{Elf, MachO};
+    let data = dir.path().join("link-data");
     let script = dir.path().join("extra.ld");
-    std::fs::write(&version, "V1 { global: *; };\n").unwrap();
-    std::fs::write(&script, "INPUT(-l:marker.o)\n").unwrap();
-    marker_object(dir.path(), &second.join("marker.o"), "hirsel_link_marker", 1);
+    let list = dir.path().join("extra.list");
+    let base = second.join("fixed.o");
+    marker_object(dir.path(), &base, "hirsel_link_fixed", 0);
+    marker_object(
+        dir.path(),
+        &second.join("marker.o"),
+        "hirsel_link_marker",
+        1,
+    );
+    let path_option = match format {
+        Elf => {
+            std::fs::write(&data, "V1 { global: *; };\n").unwrap();
+            std::fs::write(&script, "INPUT(-l:marker.o)\n").unwrap();
+            format!(
+                "-Wl,--export-dynamic,--version-script={},{}",
+                data.display(),
+                script.display()
+            )
+        }
+        MachO => {
+            std::fs::write(&data, b"before").unwrap();
+            std::fs::write(&list, format!("{}\n", base.display())).unwrap();
+            format!(
+                "-Wl,-sectcreate,__TEXT,__hirsel_law,{},-filelist,{},-lmarker.o",
+                data.display(),
+                list.display()
+            )
+        }
+    };
     let cc = appending_driver(
         dir.path(),
         "cc",
         &format!(
-            "-Wl,--export-dynamic,--version-script={},-L{},-L{},{}",
-            version.display(),
+            "-Wl,-L{},-L{} {path_option}",
             first.display(),
-            second.display(),
-            script.display()
+            second.display()
         ),
     );
     let mut options = native_options(Backend::Cranelift, dir.path());
@@ -68,19 +104,30 @@ fn a_file_the_link_reads_keys_the_executable() {
             "{route}: the primed store linked another executable than an empty one"
         );
     };
-    // A flag's attached operand.
-    std::fs::write(&version, "V2 { global: main; local: *; };\n").unwrap();
-    same("version script");
-    // A positional linker script's library, found in the second directory.
-    marker_object(dir.path(), &second.join("marker.o"), "hirsel_link_marker", 2);
-    same("library a script names");
-    // A file appearing where the search tried before its match.
+    let edited_data = match format {
+        Elf => "V2 { global: main; local: *; };\n",
+        MachO => "after",
+    };
+    std::fs::write(&data, edited_data).unwrap();
+    same("file named by an option");
+    marker_object(
+        dir.path(),
+        &second.join("marker.o"),
+        "hirsel_link_marker",
+        2,
+    );
+    same("library");
     marker_object(dir.path(), &first.join("marker.o"), "hirsel_link_marker", 3);
     same("earlier search directory");
-    // The script itself.
-    std::fs::write(&script, "INPUT(-l:marker.o)\nINPUT(-l:other.o)\n").unwrap();
-    marker_object(dir.path(), &second.join("other.o"), "hirsel_link_other", 4);
-    same("linker script");
+    let other = second.join("other.o");
+    marker_object(dir.path(), &other, "hirsel_link_other", 4);
+    match format {
+        Elf => std::fs::write(&script, "INPUT(-l:marker.o)\nINPUT(-l:other.o)\n").unwrap(),
+        MachO => {
+            std::fs::write(&list, format!("{}\n{}\n", base.display(), other.display())).unwrap()
+        }
+    }
+    same("file naming other link inputs");
 
     // A response file's words are not argv the table can parse: refused.
     let words = dir.path().join("words.rsp");
@@ -122,4 +169,11 @@ fn a_driver_copy_is_the_same_toolchain() {
     assert_eq!(image, first_image, "a driver copy changed the executable key");
     assert!(!linked, "a driver copy relinked");
     assert!(first == second, "a driver copy linked other bytes");
+}
+
+fn fixture_abi_section() -> &'static str {
+    match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => ".hirsel_abi",
+        hirsel_core_layout::ObjectFormat::MachO => "__TEXT,__hirsel_abi",
+    }
 }

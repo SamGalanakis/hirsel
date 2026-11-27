@@ -19,9 +19,6 @@ use std::{
 mod install;
 pub(crate) mod spawn;
 
-#[cfg(test)]
-pub(crate) use install::{test_compiler, test_link};
-
 pub(crate) use install::{
     INSTALLED_LINKER_LIBRARY, installation_linker, installed_executable, loaded_libraries,
 };
@@ -42,6 +39,22 @@ pub(super) fn runtime_root(_uid: libc::uid_t) -> Option<PathBuf> {
 
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
     hirsel_core_layout::Target::Aarch64Darwin;
+
+pub(crate) fn link_sdk(target: hirsel_core_layout::Target) -> Option<OsString> {
+    use hirsel_core_layout::Target;
+    let sdk = match target {
+        Target::Aarch64Darwin => "macosx",
+        Target::Aarch64Ios => "iphoneos",
+        Target::Aarch64IosSim => "iphonesimulator",
+        Target::Aarch64Linux | Target::X86_64Linux => return None,
+    };
+    let output = Command::new("/usr/bin/xcrun")
+        .args(["--sdk", sdk, "--show-sdk-path"])
+        .output()
+        .ok()?;
+    let path = PathBuf::from(std::str::from_utf8(&output.stdout).ok()?.trim());
+    (output.status.success() && path.is_absolute() && path.is_dir()).then(|| path.into_os_string())
+}
 
 /// Darwin has no cgroups: the launcher runs without a delegated subtree.
 pub(crate) const CGROUPS: bool = false;

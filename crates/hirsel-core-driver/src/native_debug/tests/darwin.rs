@@ -103,6 +103,8 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
         files: vec![recorded(&linker), recorded(&stub)],
         source_files: vec![],
         absent: vec![],
+        directories: vec![],
+        binaries: vec![],
         identity: ContentHash::of_bytes(b"recipe"),
     };
     let entry = std::fs::read(compile(

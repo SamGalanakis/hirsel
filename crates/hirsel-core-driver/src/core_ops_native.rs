@@ -5,7 +5,7 @@ fn core_ops_options(backend: Backend, root: &Path, dir: &Path) -> NativeOptions 
     let runtime =
         root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive"));
     let target = crate::host::HOST_TARGET.triple();
-    let link = crate::host::test_link(&runtime);
+    let link = crate::host::test_link();
     NativeOptions {
         backend,
         cas: dir.join("cas"),

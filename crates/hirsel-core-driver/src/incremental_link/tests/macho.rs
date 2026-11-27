@@ -63,6 +63,8 @@ fn lld(dir: &Path, objects: &[&[u8]]) -> Vec<u8> {
         files: Vec::new(),
         source_files: Vec::new(),
         absent: Vec::new(),
+        directories: vec![],
+        binaries: vec![],
         identity: ContentHash::of_bytes(b"recipe"),
     };
     let image = dir.join("image");

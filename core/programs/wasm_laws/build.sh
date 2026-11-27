@@ -10,8 +10,8 @@ wasm_ld=${WASM_LD:?set WASM_LD to LLVM 21 wasm-ld}
 objcopy=${LLVM_OBJCOPY:?set LLVM_OBJCOPY to LLVM 21 llvm-objcopy}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
-"$compiler" inspect . --foreign-header wasm_laws@1/native "$@" > "$stage/native.h"
-"$compiler" inspect . --foreign-abi wasm_laws@1/native "$@" > "$stage/abi.txt"
+"$compiler" inspect . --foreign-header hirsel.ai/wasm_laws@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-abi hirsel.ai/wasm_laws@1/native "$@" > "$stage/abi.txt"
 "$clang" --target=wasm32-unknown-unknown -nostdlib -O2 -fno-ident -fno-builtin \
     -ffile-prefix-map="$PWD"=. -I "$stage" -c box.c -o "$stage/box.o"
 "$clang" --target=wasm32-unknown-unknown -c box_traps.s -o "$stage/box_traps.o"

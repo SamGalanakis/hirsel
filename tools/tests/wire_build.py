@@ -48,7 +48,7 @@ def main():
         stem = f'{name}-{args.backend}'
         command = [str(args.compiler.resolve()), 'build', str(libraries / 'programs/wire'),
                    '--libraries', str(libraries), '--source-core', '--store', str(output / 'store'),
-                   '--entry', 'wire@1/' + entry, '--backend', args.backend,
+                   '--entry', 'hirsel.ai/wire@1/' + entry, '--backend', args.backend,
                    '--runtime', str(args.runtime.resolve()), '--limit', str(limit),
                    '--grant', 'Clock', '--grant', net, '--json', '-o', str(output / stem)]
         if name in ('main', 'idle_probe', 'session', 'session-idle', 'admission'):

@@ -1,9 +1,9 @@
 # Core driver
 
 `hirsel check <package-dir> --libraries core --store <private-store>` reads
-new-language `.hirsel` sources. Relative file paths name modules in `app@1`;
+new-language `.hirsel` sources. Relative file paths name modules in `local/app@1`;
 `core/core` and `core/std` name `core@1` and `std@1`. `--inputs <json>` instead accepts
-an explicit resolver `CorpusManifest`. Directory checks select `app@1/main/main` as
+an explicit resolver `CorpusManifest`. Directory checks select `local/app@1/main/main` as
 the entry; `--entry <full-definition-path>` selects another. Library manifests have
 no implicit entry. Entry selection is a cache input because main is always waits.
 
@@ -432,7 +432,7 @@ capabilities, no `Args` or type parameters, and return `Result[(), E]`; only
 other tests may refer to them. A test retains normal access to its module's
 private helpers. `--filter <substring>` matches any full definition path
 containing the substring. `--exact <definition>` matches the complete path,
-such as `app@1/main/smoke`. Repeat `--exact` to select multiple paths.
+such as `local/app@1/main/smoke`. Repeat `--exact` to select multiple paths.
 The selectors are mutually exclusive. The driver visits matching paths in
 lexical order. No matching test exits 2.
 

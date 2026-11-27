@@ -1,16 +1,16 @@
 [package]
-name = "image_pipeline"
-major = 1
+name = "hirsel.ai/image_pipeline"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-image_core = { major = 1, path = "../image_core" }
-image_jpeg = { major = 1, path = "../image_jpeg" }
-image_webp = { major = 1, path = "../image_webp" }
-av1 = { major = 1, path = "../av1" }
-media_bits = { major = 1, path = "../media_bits" }
-video_yuv = { major = 1, path = "../video_yuv" }
+image_core = { package = "hirsel.ai/image_core", major = 1, path = "../image_core" }
+image_jpeg = { package = "hirsel.ai/image_jpeg", major = 1, path = "../image_jpeg" }
+image_webp = { package = "hirsel.ai/image_webp", major = 1, path = "../image_webp" }
+av1 = { package = "hirsel.ai/av1", major = 1, path = "../av1" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
+video_yuv = { package = "hirsel.ai/video_yuv", major = 1, path = "../video_yuv" }
 
 [sources]
 "pipeline.hirsel" = "pipeline"
@@ -22,7 +22,7 @@ video_yuv = { major = 1, path = "../video_yuv" }
 
 [tests]
 limit = 268435456
-grants = ["Foreign=image_jpeg@1/image_jpeg/Jpeg", "Foreign=image_webp@1/webp/Webp", "Foreign=av1@1/av1/DecoderCodec", "Foreign=av1@1/av1/EncoderCodec", "Foreign=video_yuv@1/video_yuv/Yuv"]
+grants = ["Foreign=hirsel.ai/image_jpeg@1/image_jpeg/Jpeg", "Foreign=hirsel.ai/image_webp@1/webp/Webp", "Foreign=hirsel.ai/av1@1/av1/DecoderCodec", "Foreign=hirsel.ai/av1@1/av1/EncoderCodec", "Foreign=hirsel.ai/video_yuv@1/video_yuv/Yuv"]
 
 [tests.sources]
 "pipeline_law.hirsel" = "tests"

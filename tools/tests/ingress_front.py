@@ -35,7 +35,7 @@ def build(compiler, runtime, work):
                           ('listener', ['Stdout', 'Clock', 'Net=Listen 127.0.0.1/32 0-65535'])]:
         command = [str(compiler), 'build', str(ROOT / 'core/programs/wire'), '--libraries', str(ROOT / 'core'),
                    '--source-core', '--store', str(work / 'store'),
-                   '--entry', 'wire@1/front/' + entry, '--backend', 'cranelift', '--runtime', str(runtime),
+                   '--entry', 'hirsel.ai/wire@1/front/' + entry, '--backend', 'cranelift', '--runtime', str(runtime),
                    '--limit', '268435456', '--cc', str(CC), '-o', str(work / entry)]
         for grant in grants:
             command += ['--grant', grant]

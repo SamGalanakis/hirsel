@@ -2,6 +2,7 @@ use hirsel_core_ids::published::{Map, Publisher, Table};
 use hirsel_core_ids::{DefPath, ItemPath, PackageId};
 use hirsel_core_syntax::{Diagnostic, Item, NodeId, NodeKind, Span, Symbol, Symbols};
 use std::sync::Arc;
+mod packages;
 macro_rules! ids { ($($name:ident),*) => {$(
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize)]
     pub struct $name(pub u32);
@@ -266,6 +267,9 @@ pub struct Module {
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Package {
     pub name: Symbol,
+    /// The last `/` component of the name: the name of the package's root
+    /// module (packages.md section 1).
+    pub short: Symbol,
     pub version: Symbol,
     pub root: ModuleId,
     dependencies: Rows,
@@ -287,7 +291,9 @@ pub struct NameIndex {
     sources: u32,
     children: Map<(ModuleId, Symbol), ModuleId>,
     package_ids: Map<(Symbol, Symbol), PackageKey>,
-    dependencies: Table<PackageKey>,
+    /// Each dependency row with the alias that names it in the depending package's
+    /// source.
+    dependencies: Table<(Symbol, PackageKey)>,
     member_names: Table<Symbol>,
     variants: Vec<(Symbol, DefinitionId)>,
     published_variants: Map<Symbol, Vec<DefinitionId>>,
@@ -353,52 +359,6 @@ impl NameIndex {
             foreign_modules: vec![],
             diagnostics: vec![],
         }
-    }
-    pub fn add_package(&mut self, name: Symbol, version: Symbol, toolchain: bool) -> PackageKey {
-        if let Some(&p) = self.package_ids.get(&(name, version)) {
-            return p;
-        }
-        let id = PackageKey(self.packages.len() as u32);
-        let root = ModuleId(self.modules.len() as u32);
-        self.modules.push(Module {
-            package: id,
-            parent: None,
-            name,
-            depth: 0,
-            merge: Rows::default(),
-        });
-        self.packages.push(Package {
-            name,
-            version,
-            root,
-            dependencies: Rows::default(),
-            toolchain,
-        });
-        self.package_ids.insert((name, version), id);
-        id
-    }
-    pub fn package(&self, name: Symbol, version: Symbol) -> Option<PackageKey> {
-        self.package_ids.get(&(name, version)).copied()
-    }
-    /// Whether the installed toolchain supplied `package` to this compilation.
-    pub fn supplied_by_toolchain(&self, package: &hirsel_core_ids::PackageId) -> bool {
-        let Some((name, version)) = self
-            .symbols
-            .find(&package.name)
-            .zip(self.symbols.find(&package.version))
-        else {
-            return false;
-        };
-        self.package(name, version)
-            .is_some_and(|key| self.packages[key.0 as usize].toolchain)
-    }
-    pub fn set_dependencies(&mut self, p: PackageKey, ds: impl IntoIterator<Item = PackageKey>) {
-        let start = self.dependencies.len() as u32;
-        self.dependencies.extend(ds);
-        self.packages[p.0 as usize].dependencies = Rows {
-            start,
-            end: self.dependencies.len() as u32,
-        };
     }
     pub fn add_module(&mut self, package: PackageKey, path: &[Symbol]) -> ModuleId {
         let mut parent = self.packages[package.0 as usize].root;
@@ -477,10 +437,10 @@ impl NameIndex {
             return None;
         }
         let package = self.packages[row.package.0 as usize];
-        (module == package.root || row.name == package.name).then_some(package)
+        (module == package.root || row.name == package.short).then_some(package)
     }
     pub(crate) fn root_module(&self, package: Package) -> Option<ModuleId> {
-        self.child(package.root, package.name)
+        self.child(package.root, package.short)
     }
     fn refuse_root_member(&mut self, site: Site, name: Symbol, conflict: ModuleId) {
         let mut refusal = Refusal::new(
@@ -534,7 +494,8 @@ impl NameIndex {
             || self.packages[own.0 as usize]
                 .dependencies
                 .slice(&self.dependencies)
-                .contains(&package)
+                .iter()
+                .any(|&(_, d)| d == package)
     }
     pub fn core_module(&self, name: Symbol) -> Option<ModuleId> {
         self.child(self.packages[self.core?.0 as usize].root, name)
@@ -557,7 +518,7 @@ impl NameIndex {
             module = root;
             if let Some(second) = segments.next() {
                 let name = self.symbols.find(second)?;
-                if name == package.name {
+                if name == package.short {
                     return None;
                 }
                 module = self
@@ -577,9 +538,8 @@ impl NameIndex {
                 p.dependencies
                     .slice(&self.dependencies)
                     .iter()
-                    .find_map(|d| {
-                        let p = &self.packages[d.0 as usize];
-                        (p.name == name).then_some(p.root)
+                    .find_map(|&(alias, d)| {
+                        (alias == name).then_some(self.packages[d.0 as usize].root)
                     })
             })
             .or_else(|| self.core_module(name))

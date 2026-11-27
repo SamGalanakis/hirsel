@@ -66,6 +66,6 @@ fn fl5_immutable_slice(f: Foreign[Laws]) -> Result[(), ()] {
     if len == 4 && sum == 22 { Ok(()) } else { Error(()) }
 }
 
-// expect: call fl5_mutable_loan ffi_laws@1/native/mark_w
-// expect: call fl5_immutable_slice ffi_laws@1/native/loan_length
-// expect: call fl5_immutable_slice ffi_laws@1/native/loan_sum
+// expect: call fl5_mutable_loan local/ffi_laws@1/native/mark_w
+// expect: call fl5_immutable_slice local/ffi_laws@1/native/loan_length
+// expect: call fl5_immutable_slice local/ffi_laws@1/native/loan_sum

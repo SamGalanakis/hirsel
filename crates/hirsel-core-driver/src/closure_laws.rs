@@ -100,10 +100,10 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let product = check(FIELDS, dir.path(), &mut Driver::default());
     let reached = product
-        .reachable(&DefPath::from_full("app@1/main/root").unwrap(), 64)
+        .reachable(&DefPath::from_full("local/app@1/main/root").unwrap(), 64)
         .unwrap();
     assert!(reached.accepted(), "{:?}", reached.instances);
-    let keep = DefPath::from_full("app@1/main/keep").unwrap();
+    let keep = DefPath::from_full("local/app@1/main/keep").unwrap();
     let key = reached
         .instances
         .as_ref()
@@ -250,7 +250,7 @@ fn reordered_declarations_argue_the_same_identities() {
     let other = tempfile::tempdir().unwrap();
     let second = check(&reordered, other.path(), &mut Driver::default());
     let ids = |p: &CheckProduct| {
-        snapshot(p, "app@1/main/root")
+        snapshot(p, "local/app@1/main/root")
             .into_keys()
             .collect::<Vec<_>>()
     };
@@ -265,10 +265,10 @@ fn a_generic_finalizer_binds_its_scalar_argument() {
     let dir = tempfile::tempdir().unwrap();
     let product = check(FIELDS, dir.path(), &mut Driver::default());
     let reached = product
-        .reachable(&DefPath::from_full("app@1/main/root").unwrap(), 64)
+        .reachable(&DefPath::from_full("local/app@1/main/root").unwrap(), 64)
         .unwrap();
     assert!(reached.accepted(), "{:?}", reached.instances);
-    let keep = DefPath::from_full("app@1/main/keep").unwrap();
+    let keep = DefPath::from_full("local/app@1/main/keep").unwrap();
     let keys = reached.instances.as_ref().unwrap();
     let key = keys.iter().find(|k| k.definition == keep).unwrap();
     let body = reached.materialized.get(key);
@@ -285,7 +285,7 @@ fn a_generic_finalizer_binds_its_scalar_argument() {
     };
     assert_eq!(closure.rows[p as usize].shape.name, "u64");
     let expect = Identity {
-        definition: DefPath::from_full("app@1/main/Guard").unwrap(),
+        definition: DefPath::from_full("local/app@1/main/Guard").unwrap(),
         dictionaries: vec![],
         closures: vec![module.closure(u64_row).hash],
     };
@@ -303,10 +303,10 @@ fn hold[T](take g: Guard[T]) -> u64 { 1u64 }\n\
 fn root(take g: Guard[u64]) -> u64 { hold(take g) }\n";
     let product = check(source, dir.path(), &mut Driver::default());
     let reached = product
-        .reachable(&DefPath::from_full("app@1/main/root").unwrap(), 64)
+        .reachable(&DefPath::from_full("local/app@1/main/root").unwrap(), 64)
         .unwrap();
     assert!(reached.accepted(), "{:?}", reached.instances);
-    let hold = DefPath::from_full("app@1/main/hold").unwrap();
+    let hold = DefPath::from_full("local/app@1/main/hold").unwrap();
     let template = product.definitions[&hold].ir().unwrap();
     let rigid = row(template, |name| {
         name.contains("Guard[") && name.contains('$')
@@ -353,7 +353,7 @@ fn a_resident_driver_builds_each_universe_like_a_fresh_one() {
             let dir = tempfile::tempdir().unwrap();
             snapshot(
                 &check(&source, dir.path(), &mut Driver::default()),
-                "app@1/main/root",
+                "local/app@1/main/root",
             )
         })
         .join()
@@ -368,20 +368,24 @@ fn a_resident_driver_builds_each_universe_like_a_fresh_one() {
     let dir = tempfile::tempdir().unwrap();
     let mut driver = Driver::default();
     let a = check(UNIVERSE, dir.path(), &mut driver);
-    assert_eq!(snapshot(&a, "app@1/main/root"), fresh_a, "A");
+    assert_eq!(snapshot(&a, "local/app@1/main/root"), fresh_a, "A");
     let b = check(&edited, dir.path(), &mut driver);
-    assert_eq!(snapshot(&b, "app@1/main/root"), fresh_b, "B after A");
+    assert_eq!(snapshot(&b, "local/app@1/main/root"), fresh_b, "B after A");
     let again = check(UNIVERSE, dir.path(), &mut driver);
-    assert_eq!(snapshot(&again, "app@1/main/root"), fresh_a, "A after B");
-    assert_eq!(snapshot(&a, "app@1/main/root"), fresh_a, "retained A");
-    assert_eq!(snapshot(&b, "app@1/main/root"), fresh_b, "retained B");
+    assert_eq!(
+        snapshot(&again, "local/app@1/main/root"),
+        fresh_a,
+        "A after B"
+    );
+    assert_eq!(snapshot(&a, "local/app@1/main/root"), fresh_a, "retained A");
+    assert_eq!(snapshot(&b, "local/app@1/main/root"), fresh_b, "retained B");
 }
 
 #[test]
 fn a_resident_recipe_reaches_added_and_removed_calls_like_a_fresh_walk() {
     let dir = tempfile::tempdir().unwrap();
     let mut driver = Driver::default();
-    let entry = DefPath::from_full("app@1/main/root").unwrap();
+    let entry = DefPath::from_full("local/app@1/main/root").unwrap();
     let mut record = None;
     let mut previous = None;
     for (body, bodies, reuse) in [
@@ -449,7 +453,7 @@ fn a_copied_row_closure_is_the_fresh_build() {
     let mut hooked = false;
     for body in CODEC_BODIES {
         let name = body[3..body.find('(').unwrap()].to_owned();
-        let path = DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
+        let path = DefPath::from_full(&format!("local/app@1/main/{name}")).unwrap();
         let alone_dir = tempfile::tempdir().unwrap();
         let alone = check(
             &format!("{CODEC_TYPES}{body}"),

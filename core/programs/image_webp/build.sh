@@ -16,7 +16,7 @@ if [ -n "$darwin" ]; then
     darwin_compilers
     archive=libhirsel_webp-aarch64-apple-darwin.a
 fi
-"$compiler" inspect . --foreign-header image_webp@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-header hirsel.ai/image_webp@1/native "$@" > "$stage/native.h"
 cp hirsel_webp.c "$stage"
 (
     cd "$stage"

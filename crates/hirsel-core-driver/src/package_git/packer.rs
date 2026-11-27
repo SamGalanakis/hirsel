@@ -344,6 +344,7 @@ impl Graph<'_> {
         // The reached set, from the package along `path` bindings.
         let mut drafts: BTreeMap<Id, Draft> = BTreeMap::new();
         let mut edges_by_member = BTreeMap::new();
+        let mut aliases_by_member = BTreeMap::new();
         let mut queue = VecDeque::from([package_dir.clone()]);
         let mut reached: Vec<Dir> = Vec::new();
         while let Some(dir) = queue.pop_front() {
@@ -404,6 +405,7 @@ impl Graph<'_> {
             }
             let from = relative(&dir);
             let mut edges = BTreeMap::new();
+            let mut aliases = BTreeMap::new();
             let mut targets = Vec::new();
             for (name, dependency) in &package.dependencies {
                 let (dependency, from, start) = match dependency {
@@ -463,10 +465,20 @@ impl Graph<'_> {
                         (id, Edge::Published(*pin, source))
                     }
                 };
-                edges.insert(expected.clone(), edge);
+                if edges
+                    .insert(expected.clone(), edge.clone())
+                    .is_some_and(|earlier| earlier != edge)
+                {
+                    return Err(format!(
+                        "{}: dependencies.{name}: bindings of {expected} differ",
+                        manifest_path.display()
+                    ));
+                }
+                aliases.insert(name.clone(), expected.clone());
             }
             queue.extend(targets);
             edges_by_member.insert(package.id.clone(), edges);
+            aliases_by_member.insert(package.id.clone(), aliases);
             drafts.insert(
                 package.id.clone(),
                 Draft {
@@ -535,11 +547,13 @@ impl Graph<'_> {
             }
             let content = Content {
                 id: member_id.clone(),
+                version: draft.package.version.clone(),
                 bindings: BTreeMap::new(),
                 files,
                 foreign,
             };
             let edges = edges_by_member.remove(&member_id).unwrap();
+            let aliases = aliases_by_member.remove(&member_id).unwrap();
             members.insert(
                 member_id,
                 Member {
@@ -547,6 +561,7 @@ impl Graph<'_> {
                     manifest_path: draft.manifest_path,
                     package: draft.package,
                     edges,
+                    aliases,
                     content,
                     tests: BTreeMap::new(),
                 },

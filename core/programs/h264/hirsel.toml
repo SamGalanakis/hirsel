@@ -1,10 +1,10 @@
 [package]
-name = "h264"
-major = 1
+name = "hirsel.ai/h264"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
-media_bits = { major = 1, path = "../media_bits" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
 std = { major = 1 }
 
 [sources]
@@ -20,7 +20,7 @@ archives = [
 
 [tests]
 limit = 536870912
-grants = ["Foreign=h264@1/h264/H264"]
+grants = ["Foreign=hirsel.ai/h264@1/h264/H264"]
 
 [tests.sources]
 "bounds.hirsel" = "tests"

@@ -56,7 +56,7 @@ def phase_linker(cc, out, flavor):
 
 def program(directory, dependencies):
     manifest = tomllib.loads((directory / "hirsel.toml").read_text())
-    return dict(package=dict(name=manifest["package"]["name"], version=str(manifest["package"]["major"])),
+    return dict(package=dict(name=manifest["package"]["name"], version=str(manifest["package"]["version"].split(".")[0])),
                 dependencies=dependencies,
                 sources=[dict(file=str(directory / f), modules=m.split("/"), signatures=False)
                          for f, m in manifest["sources"].items()])

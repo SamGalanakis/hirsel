@@ -2,7 +2,7 @@ use crate::package_content::{Id, Root};
 use crate::package_manifest::SourceLocation;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
-type Fields = [(&'static str, Option<Value>); 10];
+type Fields = [(&'static str, Option<Value>); 11];
 
 /// What a binding names beside its major.
 pub(super) enum Form<'a> {
@@ -21,7 +21,13 @@ fn published(id: &Id, form: &Form<'_>) -> Fields {
         Some(SourceLocation::Git(git)) => Some(git),
         _ => None,
     };
+    // A toolchain binding is the one form without a package (packages.md section 2).
+    let package = match form {
+        Form::Toolchain => None,
+        _ => Some(Value::from(id.name.as_str())),
+    };
     [
+        ("package", package),
         ("major", Some(Value::from(i64::from(id.major)))),
         ("root", root.map(|root| Value::from(root.to_string()))),
         (
@@ -56,6 +62,7 @@ fn published(id: &Id, form: &Form<'_>) -> Fields {
 
 fn inherited() -> Fields {
     [
+        ("package", None),
         ("major", None),
         ("root", None),
         ("url", None),
@@ -109,10 +116,15 @@ fn place(dependencies: &mut dyn TableLike, name: &str, fields: Fields) {
     }
 }
 
-/// Binds `id` in the manifest's own `[dependencies]`.
-pub(super) fn binding(input: &[u8], id: &Id, form: &Form<'_>) -> Result<String, super::Failure> {
+/// Binds `id` under `alias` in the manifest's own `[dependencies]`.
+pub(super) fn binding(
+    input: &[u8],
+    alias: &str,
+    id: &Id,
+    form: &Form<'_>,
+) -> Result<String, super::Failure> {
     let mut document = document(input)?;
-    place(dependencies(&mut document)?, &id.name, published(id, form));
+    place(dependencies(&mut document)?, alias, published(id, form));
     Ok(document.to_string())
 }
 
@@ -121,6 +133,7 @@ pub(super) fn binding(input: &[u8], id: &Id, form: &Form<'_>) -> Result<String, 
 /// package's own `[dependencies]` as `{ workspace = true }`.
 pub(super) fn shared(
     input: &[u8],
+    alias: &str,
     id: &Id,
     form: &Form<'_>,
     inherit: bool,
@@ -140,17 +153,17 @@ pub(super) fn shared(
         .get_mut("dependencies")
         .and_then(Item::as_table_like_mut)
         .ok_or("workspace.dependencies is not a table")?;
-    place(declared, &id.name, published(id, form));
+    place(declared, alias, published(id, form));
     if inherit {
-        place(dependencies(&mut document)?, &id.name, inherited());
+        place(dependencies(&mut document)?, alias, inherited());
     }
     Ok(document.to_string())
 }
 
-/// Binds `name` in the manifest's `[dependencies]` as `{ workspace = true }`.
-pub(super) fn inherit(input: &[u8], name: &str) -> Result<String, super::Failure> {
+/// Binds `alias` in the manifest's `[dependencies]` as `{ workspace = true }`.
+pub(super) fn inherit(input: &[u8], alias: &str) -> Result<String, super::Failure> {
     let mut document = document(input)?;
-    place(dependencies(&mut document)?, name, inherited());
+    place(dependencies(&mut document)?, alias, inherited());
     Ok(document.to_string())
 }
 

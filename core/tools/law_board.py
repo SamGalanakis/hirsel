@@ -23,16 +23,16 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "core" / "programs"
 FOREIGN_GRANTS = {
-    "ffi_laws": ("Foreign=ffi_laws@1/laws/Laws",),
-    "h264": ("Foreign=h264@1/h264/H264",),
+    "ffi_laws": ("Foreign=hirsel.ai/ffi_laws@1/laws/Laws",),
+    "h264": ("Foreign=hirsel.ai/h264@1/h264/H264",),
     "image_pipeline": (
-        "Foreign=image_jpeg@1/image_jpeg/Jpeg",
-        "Foreign=image_webp@1/webp/Webp",
-        "Foreign=av1@1/av1/DecoderCodec",
-        "Foreign=av1@1/av1/EncoderCodec",
-        "Foreign=video_yuv@1/video_yuv/Yuv",
+        "Foreign=hirsel.ai/image_jpeg@1/image_jpeg/Jpeg",
+        "Foreign=hirsel.ai/image_webp@1/webp/Webp",
+        "Foreign=hirsel.ai/av1@1/av1/DecoderCodec",
+        "Foreign=hirsel.ai/av1@1/av1/EncoderCodec",
+        "Foreign=hirsel.ai/video_yuv@1/video_yuv/Yuv",
     ),
-    "sqlite": ("Foreign=sqlite@1/sqlite/Sqlite",),
+    "sqlite": ("Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite",),
 }
 # A full check is about 400 s cold, so a general compiler change does not select
 # everything; only the code that computes the lock columns does. A compiler change

@@ -129,7 +129,7 @@ fn l34_locked_builds_use_the_commit() {
     locked(&server);
     assert_eq!(server.log(), only_c1);
 
-    // 4. W without X: X is refilled from the commit through wrap@1's source.
+    // 4. W without X: X is refilled from the commit through fixture.test/wrap@1's source.
     let x = law.path(&format!("s/{}", PACKAGE_X.strip_prefix("sha256:").unwrap()));
     if x.is_dir() {
         fs::remove_dir_all(&x).unwrap();
@@ -151,7 +151,7 @@ fn l34_locked_builds_use_the_commit() {
     empty(&law, "s");
     PackageLaw::refuse(
         server.run(&law, &["check", "app", "--locked"], "s"),
-        "wrap@1: fetching git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap failed: the server would not send commit 32e212a4b69a9f3b39893b29f4e4f1e935626a2b",
+        "fixture.test/wrap@1: fetching git:https://alpha.test/r1#77cbe52623fcc3479739eb37e89ddbe5c4626077/wrap failed: the server would not send commit 77cbe52623fcc3479739eb37e89ddbe5c4626077",
     );
     server.with(|served| served.hook = None);
     server.log();
@@ -160,7 +160,7 @@ fn l34_locked_builds_use_the_commit() {
     empty(&law, "s");
     PackageLaw::refuse(
         server.run(&law, &["check", "app", "--frozen"], "s"),
-        "wrap@1 sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap)",
+        "fixture.test/wrap@1 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5 is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#77cbe52623fcc3479739eb37e89ddbe5c4626077/wrap)",
     );
     assert_eq!(server.log(), Vec::<String>::new());
 
@@ -186,14 +186,14 @@ fn l34_locked_builds_use_the_commit() {
     empty(&law, "s");
     PackageLaw::refuse(
         server.run(&law, &["check", "app", "--locked"], "s"),
-        &format!("wrap@1: fetching {source} failed: the server answered 302"),
+        &format!("fixture.test/wrap@1: fetching {source} failed: the server answered 302"),
     );
     server.hook(redirect("http://beta.test/r1/info/refs?service=git-upload-pack", false));
     empty(&law, "s");
     PackageLaw::refuse(
         server.run(&law, &["check", "app", "--locked"], "s"),
         &format!(
-            "wrap@1: fetching {source} failed: redirected to http://beta.test/r1/info/refs?service=git-upload-pack, which is not https"
+            "fixture.test/wrap@1: fetching {source} failed: redirected to http://beta.test/r1/info/refs?service=git-upload-pack, which is not https"
         ),
     );
 }

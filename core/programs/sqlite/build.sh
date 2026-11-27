@@ -11,7 +11,7 @@ llvm=${LLVM_SYS_231_PREFIX:?set LLVM_SYS_231_PREFIX to the pinned LLVM tree}
 stage=$(mktemp -d)
 test_dir=
 trap 'rm -rf "$stage" ${test_dir:+"$test_dir"}' EXIT
-"$compiler" inspect . --foreign-header sqlite@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-header hirsel.ai/sqlite@1/native "$@" > "$stage/native.h"
 # The laws need only sqlite3.h. SQLITE_HEADER names a pinned copy of 3.54.1's
 # (Buck's //tools/buck2:sqlite-header); without it the amalgamation is fetched.
 if [ -n "$test_root" ] && [ -n "${SQLITE_HEADER:-}" ]; then

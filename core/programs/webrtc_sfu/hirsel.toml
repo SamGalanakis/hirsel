@@ -1,22 +1,22 @@
 [package]
 name = "webrtc_sfu"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-dtls = { major = 1, path = "../dtls" }
-media_bits = { major = 1, path = "../media_bits" }
-rtp = { major = 1, path = "../rtp" }
-srtp = { major = 1, path = "../srtp" }
-stun_ice = { major = 1, path = "../stun_ice" }
-turn = { major = 1, path = "../turn" }
-runner = { major = 1, path = "../runner" }
-store = { major = 1, path = "../store" }
-quic = { major = 1, path = "../quic" }
-moq = { major = 1, path = "../moq" }
-webtransport = { major = 1, path = "../webtransport" }
-rtp_jitter = { major = 1, path = "../rtp_jitter" }
+dtls = { package = "dtls", major = 1, path = "../dtls" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
+rtp = { package = "rtp", major = 1, path = "../rtp" }
+srtp = { package = "srtp", major = 1, path = "../srtp" }
+stun_ice = { package = "stun_ice", major = 1, path = "../stun_ice" }
+turn = { package = "turn", major = 1, path = "../turn" }
+runner = { package = "runner", major = 1, path = "../runner" }
+store = { package = "store", major = 1, path = "../store" }
+quic = { package = "quic", major = 1, path = "../quic" }
+moq = { package = "moq", major = 1, path = "../moq" }
+webtransport = { package = "webtransport", major = 1, path = "../webtransport" }
+rtp_jitter = { package = "rtp_jitter", major = 1, path = "../rtp_jitter" }
 
 [sources]
 "sdp.hirsel" = "sdp"

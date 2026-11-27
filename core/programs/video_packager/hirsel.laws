@@ -1,4 +1,4 @@
 hirsel.laws 1
-video_packager@1/tests/dash_segment_timeline src=c6eebd7295d108df sig=a9302c2c9e75b4b0 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-video_packager@1/tests/hls_cmaf src=cafeb5491e302016 sig=8703eb1e6d2b54ea run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-video_packager@1/tests/ll_hls_part_timing src=67e644db1190367d sig=0322f7b6ae4770cf run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/video_packager@1/tests/dash_segment_timeline src=a792703a94e3f4b4 sig=df4454bb7d0e3e8b run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/video_packager@1/tests/hls_cmaf src=91d69837d8d59182 sig=9eb017f81cf15daa run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/video_packager@1/tests/ll_hls_part_timing src=4cbcf062b0e2645c sig=cf570a5a59539caf run=acdd7fe37d41c86f bug=- oracle=- rows=pending

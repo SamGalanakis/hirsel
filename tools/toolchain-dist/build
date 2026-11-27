@@ -257,7 +257,7 @@ FRESH_SEQUENCE = ('hirsel --version && hirsel inspect --std --interface && '
 def accept_fresh(passed, prefix, targets):
     """Check a fresh-machine run of FRESH_SEQUENCE against the bundle's registration,
     which must hold every runtime flavour for exactly `targets`."""
-    if passed.returncode or passed.stderr or 'pass executed app@1/tests/test_twice' not in passed.stdout:
+    if passed.returncode or passed.stderr or 'pass executed local/app@1/tests/test_twice' not in passed.stdout:
         raise ValueError(f'fresh root acceptance failed ({passed.returncode})\n'
                          f'{passed.stdout}{passed.stderr}')
     registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())

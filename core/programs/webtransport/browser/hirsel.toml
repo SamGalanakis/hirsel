@@ -1,12 +1,12 @@
 [package]
-name = "webtransport_browser_echo"
-major = 1
+name = "hirsel.ai/webtransport_browser_echo"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-quic = { major = 1, path = "../../quic" }
-webtransport = { major = 1, path = ".." }
+quic = { package = "quic", major = 1, path = "../../quic" }
+webtransport = { package = "webtransport", major = 1, path = ".." }
 
 [sources]
 "echo.hirsel" = "main"

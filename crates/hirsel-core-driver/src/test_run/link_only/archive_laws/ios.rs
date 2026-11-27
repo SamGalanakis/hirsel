@@ -146,14 +146,14 @@ fn ios_system_archives_carry_the_target_platform_and_floor() {
             fixture.program.join("hirsel.toml"),
             format!(
                 r#"[package]
-name = "embed_place"
-major = 1
+name = "local/embed_place"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = {{ major = 1 }}
-store = {{ major = 1, path = "../store" }}
-runner = {{ major = 1, path = "../runner" }}
+store = {{ package = "store", major = 1, path = "../store" }}
+runner = {{ package = "runner", major = 1, path = "../runner" }}
 
 [sources]
 "embed_place.hirsel" = "main"
@@ -178,7 +178,7 @@ archives = [{{ target = "{}", file = "laws.a", sha256 = "{pin}" }}]
                 .args(["--emit", "staticlib", "--target", target.triple()])
                 .arg("--libraries")
                 .arg(&fixture.libraries)
-                .args(["--grant", "Foreign=embed_place@1/laws/Laws"])
+                .args(["--grant", "Foreign=local/embed_place@1/laws/Laws"])
                 .arg("--store")
                 .arg(&fixture.store)
                 .args(["--limit", "1073741824", "-o"])

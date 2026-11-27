@@ -1,12 +1,12 @@
 [package]
 name = "rtp_jitter"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-media_bits = { major = 1, path = "../media_bits" }
-rtp = { major = 1, path = "../rtp" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
+rtp = { package = "rtp", major = 1, path = "../rtp" }
 
 [sources]
 "depack.hirsel" = "depack"

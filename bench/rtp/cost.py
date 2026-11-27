@@ -82,7 +82,7 @@ def build(out):
     manifest = tomllib.loads((source_package / "hirsel.toml").read_text())
     core = dict(name="core", version="1")
     std = dict(name="std", version="1")
-    rtp = dict(name="rtp", version=str(manifest["package"]["major"]))
+    rtp = dict(name="rtp", version=str(manifest["package"]["version"].split(".")[0]))
     app = dict(name="rtp_cost", version="1")
     document = dict(core=core, packages=[
         dict(package=core, dependencies=[], sources=library_sources(ROOT / "core/core", True)),

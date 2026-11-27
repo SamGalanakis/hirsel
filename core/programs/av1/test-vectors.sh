@@ -10,5 +10,5 @@ mkdir -p "$work"
 shift 2
 cp "$codec"/*.hirsel "$codec"/*.a "$work"/
 python3 "$codec/vectors/prepare.py" "$work" "$reference"
-"$compiler" test "$work" --exact av1@1/tests/codec_vectors \
-    --grant Foreign=av1@1/av1/DecoderCodec --grant Foreign=av1@1/av1/EncoderCodec "$@"
+"$compiler" test "$work" --exact hirsel.ai/av1@1/tests/codec_vectors \
+    --grant Foreign=hirsel.ai/av1@1/av1/DecoderCodec --grant Foreign=hirsel.ai/av1@1/av1/EncoderCodec "$@"

@@ -68,7 +68,7 @@ pub(crate) fn prepare(
     if !has_limit {
         kept.push(Opt::Limit("536870912".to_owned()));
     }
-    kept.push(Opt::Entry("fleet@1/fleet_sim/main".to_owned()));
+    kept.push(Opt::Entry("hirsel.ai/fleet@1/fleet_sim/main".to_owned()));
     for grant in ["Clock", "Tasks", "Stdout", "Stderr"] {
         kept.push(Opt::Grant(grant.to_owned()));
     }

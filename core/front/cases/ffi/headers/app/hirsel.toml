@@ -1,10 +1,10 @@
 [package]
-name = "app"
-major = 1
+name = "local/app"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
-ffi_laws = { major = 1, path = "../ffi_laws" }
+ffi_laws = { package = "local/ffi_laws", major = 1, path = "../ffi_laws" }
 
 [sources]
 "main.hirsel" = "main"

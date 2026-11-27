@@ -481,8 +481,8 @@ def render(program):
 
 
 MANIFEST = '''[package]
-name = "gen"
-major = 1
+name = "local/gen"
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]

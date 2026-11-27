@@ -1,12 +1,12 @@
 [package]
-name = "jwtbind"
-major = 1
+name = "hirsel.ai/jwtbind"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { major = 1, path = "../store" }
-runner = { major = 1, path = "../runner" }
+store = { package = "store", major = 1, path = "../store" }
+runner = { package = "runner", major = 1, path = "../runner" }
 
 [sources]
 "jwtbind.hirsel" = "jwtbind"
@@ -19,8 +19,8 @@ dirs = ["."]
 [tests.sources]
 "jwtbind_laws.hirsel" = "jwtbind"
 
-[tests.runs."jwtbind@1/jwtbind/jwt_default_place"]
+[tests.runs."hirsel.ai/jwtbind@1/jwtbind/jwt_default_place"]
 limit = 1342177280
 
-[tests.runs."jwtbind@1/jwtbind/jwt_hmac_bind"]
+[tests.runs."hirsel.ai/jwtbind@1/jwtbind/jwt_hmac_bind"]
 limit = 1342177280

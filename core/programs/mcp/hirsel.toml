@@ -1,6 +1,6 @@
 [package]
 name = "mcp"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]

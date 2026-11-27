@@ -22,6 +22,8 @@ pub(crate) struct Member {
     pub(crate) manifest_path: PathBuf,
     pub(crate) package: Package,
     pub(crate) edges: BTreeMap<Id, Edge>,
+    /// Each dependency's alias, after inherited declarations are expanded.
+    pub(crate) aliases: BTreeMap<String, Id>,
     pub(crate) content: Content,
     pub(crate) tests: BTreeMap<String, Source>,
 }
@@ -374,6 +376,7 @@ impl Workspace {
             .into());
         }
         let mut edges_by_member = BTreeMap::new();
+        let mut aliases_by_member = BTreeMap::new();
         for (id, (_, relative, manifest, package)) in &drafts {
             if package.inherit_charge
                 && workspace
@@ -388,6 +391,7 @@ impl Workspace {
                 .into());
             }
             let mut edges = BTreeMap::new();
+            let mut aliases = BTreeMap::new();
             for (name, dependency) in &package.dependencies {
                 let (dependency, from) = match dependency {
                     Dependency::Inherited => (
@@ -441,9 +445,20 @@ impl Workspace {
                         (id, Edge::Published(*root, source))
                     }
                 };
-                edges.insert(expected.clone(), edge);
+                if edges
+                    .insert(expected.clone(), edge.clone())
+                    .is_some_and(|earlier| earlier != edge)
+                {
+                    return Err(format!(
+                        "{}: dependencies.{name}: bindings of {expected} differ",
+                        manifest.display()
+                    )
+                    .into());
+                }
+                aliases.insert(name.clone(), expected.clone());
             }
             edges_by_member.insert(id.clone(), edges);
+            aliases_by_member.insert(id.clone(), aliases);
         }
         cycles(&edges_by_member)?;
         let mut members = BTreeMap::new();
@@ -501,11 +516,13 @@ impl Workspace {
             }
             let content = Content {
                 id: id.clone(),
+                version: package.version.clone(),
                 bindings: BTreeMap::new(),
                 files,
                 foreign,
             };
             let edges = edges_by_member.remove(&id).unwrap();
+            let aliases = aliases_by_member.remove(&id).unwrap();
             members.insert(
                 id,
                 Member {
@@ -513,6 +530,7 @@ impl Workspace {
                     manifest_path,
                     package,
                     edges,
+                    aliases,
                     content,
                     tests,
                 },
@@ -546,6 +564,29 @@ impl Workspace {
 
     pub(crate) fn record_input(&mut self, identity: FileId) {
         self.inputs.insert(identity);
+    }
+
+    /// The selected member, which `pack` publishes with every member it reaches: a local
+    /// name never is (packages.md sections 1 and 6, `pack, local`).
+    pub(crate) fn packed(&self) -> Result<&Id, String> {
+        let selected = self.selected()?;
+        let mut reached = BTreeSet::from([selected]);
+        let mut pending = vec![selected];
+        while let Some(id) = pending.pop() {
+            if crate::package_manifest::name::local(&id.name) {
+                return Err(format!(
+                    "{}: {} is a local name and is never packed; give it a scoped name to publish it",
+                    self.members[id].manifest_path.display(),
+                    id.name
+                ));
+            }
+            for (next, edge) in &self.members[id].edges {
+                if *edge == Edge::Member && reached.insert(next) {
+                    pending.push(next);
+                }
+            }
+        }
+        Ok(selected)
     }
 
     pub(crate) fn selected(&self) -> Result<&Id, String> {

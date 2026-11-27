@@ -17,7 +17,7 @@ from std_native import ROOT, discover, run
 
 
 def ffi_laws(args, root, backend):
-    grant = 'Foreign=ffi_laws@1/laws/Laws'
+    grant = 'Foreign=hirsel.ai/ffi_laws@1/laws/Laws'
     with tempfile.TemporaryDirectory(prefix='hirsel-ffi-laws-') as store:
         fixture = Path(store) / 'core/programs/ffi_laws'
         shutil.copytree(root / 'core/programs/ffi_laws', fixture)
@@ -69,7 +69,7 @@ def sqlite_laws(args, root, backend):
             '--runtime', str(args.runtime.resolve()), '--cc', str(args.cc.resolve()),
             '--libraries', str(root / 'core'), '--source-core', '--source-std',
             '--store', str(Path(store) / 'build'), '-o', str(Path(store) / 'tests'),
-            '--grant', 'Foreign=sqlite@1/sqlite/Sqlite', '--test-timeout', '20', '--json',
+            '--grant', 'Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite', '--test-timeout', '20', '--json',
         ]
         env = os.environ | {'XDG_CACHE_HOME': str(Path(store) / 'cache')}
 

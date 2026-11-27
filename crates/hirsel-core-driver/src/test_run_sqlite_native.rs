@@ -130,9 +130,9 @@ int fsync(int fd) {
         fs::create_dir(law.path("data")).unwrap();
         let exe = law.path(if backend == "llvm" { "sqlite-llvm" } else { "sqlite-cl" });
         PackageLaw::pass(law.run(&[
-            "build", "core/programs/sqlite", "--entry", "sqlite@1/boundary/main",
+            "build", "core/programs/sqlite", "--entry", "hirsel.ai/sqlite@1/boundary/main",
             "--backend", backend, "--source-core", "--source-std", "--limit", "67108864",
-            "--grant", "Foreign=sqlite@1/sqlite/Sqlite", "--grant", "Stdin", "--grant", "Stdout",
+            "--grant", "Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite", "--grant", "Stdin", "--grant", "Stdout",
             "--dir", law.path("data").to_str().unwrap(), "-o", exe.to_str().unwrap(),
         ]));
         let child = |mode: &str| {

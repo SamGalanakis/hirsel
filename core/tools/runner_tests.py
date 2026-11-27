@@ -368,7 +368,7 @@ def host_law(args, root, work, engine, name):
 
     def publish(n_place, root_limit=268435456):
         command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
-                   '--entry', f'store_crash@1/runner_crash/{entry}',
+                   '--entry', f'hirsel.ai/store_crash@1/runner_crash/{entry}',
                    '--backend', engine,
                    '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
                    '--limit', str(root_limit), '--n-place', str(n_place), '--dir', 'live',
@@ -536,15 +536,15 @@ def host_law(args, root, work, engine, name):
             return bytes([len(value)]) + value.encode()
 
         entry = 'app@1/main/main'
-        callee = 'ffi_laws@1/native/touch'
+        callee = 'hirsel.ai/ffi_laws@1/native/touch'
         target = 'x86_64-unknown-linux-gnu'
         reason = f'FFI-8: a recording build cannot reach foreign code: {entry} reaches {callee}'
         recipe_prefix = (publish_store / 'recipes' / old_recipe).read_bytes()[:13]
         # A complete envelope with an archive object absent from both stores.
         archive = hashlib.sha256(b'abc').digest() + b'\x03'
         frame = (recipe_prefix + text(entry) + b'\0\0' + bytes(32) + b'\0\0\x01'
-                 + text('ffi_laws@1/native') + text('hfl_') + b'\x01' + text(target) + archive
-                 + b'\x01' + text(callee) + b'\0\0' + text('(core@1/core/Foreign[ffi_laws@1/laws/Laws])->i32')
+                 + text('hirsel.ai/ffi_laws@1/native') + text('hfl_') + b'\x01' + text(target) + archive
+                 + b'\x01' + text(callee) + b'\0\0' + text('(core@1/core/Foreign[hirsel.ai/ffi_laws@1/laws/Laws])->i32')
                  + b'\x01' + archive + b'\0' + bytes([engine == 'llvm']) + text(target) + bytes(18))
         foreign = framed_hash('hirsel.release-recipe.v3', frame)
         (publish_store / 'recipes' / foreign.hex()).write_bytes(frame)
@@ -773,7 +773,7 @@ def crashes(args, root, work, engine, name):
     build = work / f'crash_{name}'
     build.mkdir()
     rows = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
-                       entry='store_crash@1/runner_crash/main', scenarios=CRASHES, environment=env,
+                       entry='hirsel.ai/store_crash@1/runner_crash/main', scenarios=CRASHES, environment=env,
                        adapter='runner_crash.c')
     checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env, engine=engine)
     return rows

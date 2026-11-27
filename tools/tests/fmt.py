@@ -229,8 +229,8 @@ sys.exit(index.read_text() != 'current')
     def test_modified_foreign_source_is_checked_in_signature_mode(self):
         path = 'core/programs/av1/native.hirsel'
         self.write('core/programs/av1/hirsel.toml', '''[package]
-name = "av1"
-major = 1
+name = "hirsel.ai/av1"
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]

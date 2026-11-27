@@ -1,6 +1,6 @@
 [package]
-name = "yaml"
-major = 1
+name = "hirsel.ai/yaml"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]

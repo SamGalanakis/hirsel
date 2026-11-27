@@ -440,7 +440,7 @@ class StoreNoSync(unittest.TestCase):
                 "build",
                 source,
                 "--entry",
-                "app@1/main/main",
+                "local/app@1/main/main",
                 "--backend",
                 "cranelift",
                 "--runtime",

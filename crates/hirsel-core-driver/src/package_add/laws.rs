@@ -1,4 +1,6 @@
-use super::{PACKAGE_W, PACKAGE_X, PACKAGE_Y, PackageLaw, package_bundle, process};
+use super::{
+    PACKAGE_W, PACKAGE_X, PACKAGE_Y, PACKAGE_Y_SOURCE, PackageLaw, package_bundle, process,
+};
 use crate::package_add::{Checkpoint, run_at};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -62,12 +64,12 @@ fn copy(law: &PackageLaw, from: &str, to: &str) {
 
 fn wrap(law: &PackageLaw, out: &str) {
     fs::create_dir_all(law.path(out).parent().unwrap()).unwrap();
-    law.library("wrap", "wrap", 1, "pub fn one() -> u64 { 1u64 }\n",
-        &format!("[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"jx.hpkg\" }}\n"));
+    law.library("wrap", "fixture.test/wrap", "1.0.0", "pub fn one() -> u64 { 1u64 }\n",
+        &format!("[dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"jx.hpkg\" }}\n"));
     copy(law, "vendor/jx.hpkg", "wrap/jx.hpkg");
     assert_eq!(
         law.fixture("wrap", out),
-        format!("wrap@1 {PACKAGE_W}\njson@1 {PACKAGE_X}\n")
+        format!("fixture.test/wrap@1 1.0.0 {PACKAGE_W}\nfixture.test/json@1 1.0.0 {PACKAGE_X}\n")
     );
 }
 
@@ -80,11 +82,11 @@ fn refusal_keeps_workspace_and_checks_full_closure() {
         "[workspace]\nmembers = [\"app\", \"a\"]\n",
     );
     copy(&law, "vendor/jy.hpkg", "work/a/jy.hpkg");
-    law.library("work/a", "a", 1, "pub fn one() -> u64 { 1u64 }\n",
-        &format!("[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_Y}\", archive = \"jy.hpkg\" }}\n"));
+    law.library("work/a", "local/a", "1.0.0", "pub fn one() -> u64 { 1u64 }\n",
+        &format!("[dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_Y}\", archive = \"jy.hpkg\" }}\n"));
     law.app(
         "work/app",
-        "[dependencies]\na = { major = 1, path = \"../a\" }\n",
+        "[dependencies]\na = { package = \"local/a\", major = 1, path = \"../a\" }\n",
     );
     PackageLaw::pass(law.run(&["lock", "work/app"]));
     let manifests = [
@@ -198,7 +200,7 @@ fn archive_capture_and_offline_build() {
     );
     assert!(!law.path(&format!("packages/{}", &PACKAGE_Y[7..])).exists());
     let expected = before.replace("# Standard library", &format!(
-        "json = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"../../vendor/pkg.hpkg\" }}\n# Standard library"
+        "json = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"../../vendor/pkg.hpkg\" }}\n# Standard library"
     ));
     assert_eq!(fs::read_to_string(&manifest).unwrap(), expected);
     PackageLaw::pass(law.run(&["build", "work/apps/ui", "--frozen"]));
@@ -390,7 +392,7 @@ fn url_capture_pins_and_caps() {
             assert_eq!(json["source"], format!("url:{url}"));
             assert_eq!(
                 json["closure"][0],
-                serde_json::json!({"id":"json@1","root":PACKAGE_X,"new":true})
+                serde_json::json!({"id":"fixture.test/json@1","root":PACKAGE_X,"new":true})
             );
             let before = fs::read(law.path("app/hirsel.toml")).unwrap();
             let lock = fs::read(law.path("app/hirsel.lock")).unwrap();
@@ -494,21 +496,25 @@ fn archive_memory_limits() {
         output.extend_from_slice(field.as_bytes());
     }
 
+    /// `C` v3 (packages.md section 1) up to the one file's bytes: version 1.0.0, each child
+    /// bound exactly (tag 1) under its short name, one file `source.hirsel` of module `source`.
     fn prefix(name: &str, bindings: &[(String, [u8; 32], Vec<u8>)], len: usize) -> Vec<u8> {
-        let mut bytes = vec![1];
-        text(name, &mut bytes);
-        bytes.push(1);
+        let mut bytes = vec![3];
+        text(&format!("fixture.test/{name}"), &mut bytes);
+        bytes.extend_from_slice(&[1, 0, 0]);
+        text("", &mut bytes);
         text("charge-v1", &mut bytes);
         number(bindings.len(), &mut bytes);
         for (child, root, _) in bindings {
             text(child, &mut bytes);
+            text(&format!("fixture.test/{child}"), &mut bytes);
             bytes.extend_from_slice(&[1, 1]);
             bytes.extend_from_slice(root);
         }
         bytes.push(1);
         text("source.hirsel", &mut bytes);
         bytes.push(1);
-        text(name, &mut bytes);
+        text("source", &mut bytes);
         number(len, &mut bytes);
         bytes
     }
@@ -654,7 +660,7 @@ fn store_source_and_post_commit_failure() {
     );
     let manifest = fs::read_to_string(law.path("app/hirsel.toml")).unwrap();
     assert!(
-        manifest.contains(&format!("json = {{ major = 1, root = \"{PACKAGE_X}\" }}")),
+        manifest.contains(&format!("json = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\" }}")),
         "{manifest}"
     );
     fs::remove_dir(law.path("app/hirsel.lock")).unwrap();
@@ -674,10 +680,10 @@ fn forms_that_fetch_nothing() {
         "work/hirsel.toml",
         "[workspace]\nmembers = [\"apps/ui\", \"libs/a\"]\n",
     );
-    law.library("work/libs/a", "a", 1, "pub fn one() -> u64 { 1u64 }\n", "");
+    law.library("work/libs/a", "local/a", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "");
     law.write(
         "work/vendor/hirsel.toml",
-        "[package]\nname = \"v\"\nmajor = 1\n",
+        "[package]\nname = \"fixture.test/v\"\nversion = \"1.0.0\"\n",
     );
     law.app("work/apps/ui", "[dependencies]\n");
     law.write(
@@ -707,7 +713,7 @@ fn forms_that_fetch_nothing() {
     PackageLaw::pass(invoke(&law, "work/apps/ui/sub", &["../../../libs/a"]));
     let expected = before.replace(
         "[dependencies]\n",
-        "[dependencies]\na = { major = 1, path = \"../../libs/a\" }\nstd = { major = 1 }\n",
+        "[dependencies]\na = { package = \"local/a\", major = 1, path = \"../../libs/a\" }\nstd = { major = 1 }\n",
     );
     assert_eq!(fs::read_to_string(&manifest).unwrap(), expected);
     let again: serde_json::Value = serde_json::from_str(&PackageLaw::pass(invoke(
@@ -792,4 +798,48 @@ fn s6_add_protocol() {
     crash_repair_and_concurrent_adds();
     store_source_and_post_commit_failure();
     archive_memory_limits();
+}
+
+/// L1b's roots (packages.md section 13). The floor head is written byte for byte from the
+/// spec, `wrap` bound to `jx` by a floor at 1.0.0, since `pack` never writes a floor; and
+/// `jz` is `jy`'s files under version 1.0.0, a second content for one version.
+#[test]
+fn package_l1b_floor_roots() {
+    use crate::package_content::{Binding, Content, Root};
+
+    let wfloor: Vec<u8> = "03 11 666978747572652e746573742f77726170 01 00 00 00 09 6368617267652d7631
+        01 04 6a736f6e 11 666978747572652e746573742f6a736f6e 01
+        02 9158205f94d44b9e04d00980842459973c2ea442a48b183097ad9d46fe13a7f7 00 00
+        01 0b 777261702e68697273656c 01 04 77726170
+        1d 70756220666e206f6e652829202d3e20753634207b2031753634207d0a 00"
+        .split_whitespace()
+        .flat_map(|group| {
+            (0..group.len())
+                .step_by(2)
+                .map(move |at| u8::from_str_radix(&group[at..at + 2], 16).unwrap())
+        })
+        .collect();
+    assert_eq!(wfloor.len(), 143);
+    assert_eq!(
+        Root::of(&wfloor).to_string(),
+        "sha256:0a8784b0a67e8789914b019e1d8ae502540cd71fb3bd63d7cea77ff7d6084c7a"
+    );
+    let content = Content::decode(&wfloor).unwrap();
+    let (id, binding) = &content.bindings["json"];
+    assert_eq!(id.to_string(), "fixture.test/json@1");
+    assert_eq!(
+        *binding,
+        Binding::Floor {
+            tested: Root::parse(PACKAGE_X).unwrap(),
+            minor: 0,
+            patch: 0
+        }
+    );
+
+    let law = PackageLaw::new();
+    law.library("jz", "fixture.test/json", "1.0.0", PACKAGE_Y_SOURCE, "");
+    assert_eq!(
+        law.fixture("jz", "jz.hpkg"),
+        "fixture.test/json@1 1.0.0 sha256:1ad0b7636d8b0df47998006c9c53324001ceba7c99cbdd1d7658f2adb191107b\n"
+    );
 }

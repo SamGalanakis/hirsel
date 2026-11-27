@@ -16,8 +16,8 @@ fn foreign_deploy_and_recording_registration_refuse_before_payloads() {
     use crate::code_store::CodeStore;
     use std::{fs, os::unix::net::UnixStream, time::Duration};
 
-    const GRANT: &str = "Foreign=ffi_laws@1/laws/Laws";
-    const REFUSAL: &str = "FFI-8: a recording build cannot reach foreign code: ffi_laws@1/main/main reaches ffi_laws@1/native/touch";
+    const GRANT: &str = "Foreign=hirsel.ai/ffi_laws@1/laws/Laws";
+    const REFUSAL: &str = "FFI-8: a recording build cannot reach foreign code: hirsel.ai/ffi_laws@1/main/main reaches hirsel.ai/ffi_laws@1/native/touch";
 
     let law = PackageLaw::new();
     for file in [
@@ -115,7 +115,7 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
                     deadline,
                 )
             });
-            let approved = BTreeSet::from(["ffi_laws@1/laws/Laws".to_owned()]);
+            let approved = BTreeSet::from(["hirsel.ai/ffi_laws@1/laws/Laws".to_owned()]);
             let admission = AdmissionStore::open(&code, 1 << 20).unwrap();
             let mut peer = ControlConnection::local(peer);
             match admission.admit_for_runtime(

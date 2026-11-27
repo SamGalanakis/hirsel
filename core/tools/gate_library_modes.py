@@ -321,7 +321,7 @@ def main():
             with tempfile.TemporaryDirectory(prefix='hirsel-srtp-consumer-') as temporary:
                 app = Path(temporary)
                 (app / 'hirsel.toml').write_text(
-                    '[package]\nname = "srtp_consumer"\nmajor = 1\ncharge = "charge-v1"\n\n'
+                    '[package]\nname = "local/srtp_consumer"\nversion = "1.0.0"\ncharge = "charge-v1"\n\n'
                     '[dependencies]\nstd = { major = 1 }\nsrtp = { major = 1 }\n\n'
                     '[sources]\n"main.hirsel" = "main"\n')
                 (app / 'main.hirsel').write_text(
@@ -360,7 +360,7 @@ def main():
                 app = work / 'call'
                 app.mkdir()
                 (app / 'hirsel.toml').write_text(
-                    '[package]\nname = "call"\nmajor = 1\ncharge = "charge-v1"\n\n'
+                    '[package]\nname = "local/call"\nversion = "1.0.0"\ncharge = "charge-v1"\n\n'
                     '[dependencies]\nstd = { major = 1 }\nwebrtc_sfu = { major = 1 }\nturn = { major = 1 }\n'
                     'platform = { major = 1 }\nsearch = { major = 1 }\nmcp = { major = 1 }\n'
                     'sframe = { major = 1 }\nmedia_record = { major = 1 }\ncli = { major = 1 }\n\n'

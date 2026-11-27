@@ -18,7 +18,7 @@ if [ -n "$darwin" ]; then
     darwin_compilers
     archive=libhirsel_jpeg-aarch64-apple-darwin.a
 fi
-"$compiler" inspect . --foreign-header image_jpeg@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-header hirsel.ai/image_jpeg@1/native "$@" > "$stage/native.h"
 cp hirsel_jpeg.c "$stage"
 (
     cd "$stage"

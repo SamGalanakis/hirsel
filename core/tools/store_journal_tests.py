@@ -162,7 +162,7 @@ def main():
                 platform_work = work / 'platform'
                 platform_work.mkdir(exist_ok=True)
                 platform_cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
-                                           manifest, platform_work, engine, entry='store_crash@1/platform_crash/platform_crash_main',
+                                           manifest, platform_work, engine, entry='hirsel.ai/store_crash@1/platform_crash/platform_crash_main',
                                            scenarios=('platform-turn',), environment=env, count_only=('poison-segment',))
                 rows.append(dict(engine=engine, passed=True, platform_cuts=platform_cuts))
             except RuntimeError as error:

@@ -751,13 +751,13 @@ impl<'a> Resolver<'a, '_> {
             && let Some(root) = self.index.root_module(p)
         {
             let second = tail.clone().next().unwrap();
-            if self.name(second) == p.name {
+            if self.name(second) == p.short {
                 let mut site = self.site(n);
                 site.span = self.item.token_span(second);
                 self.out.diagnostics.push(Refusal::new(
                     "LANG-7",
                     site,
-                    format!("name `{}` was not found", self.index.symbols.text(p.name)),
+                    format!("name `{}` was not found", self.index.symbols.text(p.short)),
                 ));
                 return Target::Missing;
             }
@@ -969,23 +969,19 @@ impl<'a> Resolver<'a, '_> {
                     }
                     None if self.lost => Target::Missing,
                     None => {
-                        let message = if self.index.packages[self.package.0 as usize].name == name {
+                        let own = self.index.packages[self.package.0 as usize].short;
+                        let head = self.index.symbols.text(name);
+                        let message = if own == name {
                             let bare = rest
                                 .map(|t| self.index.symbols.text(self.name(t)))
                                 .collect::<Vec<_>>()
                                 .join(".");
-                            format!(
-                                "`{}` is this package; name its module bare: `{bare}`",
-                                self.index.symbols.text(name)
-                            )
+                            format!("`{head}` is this package; name its module bare: `{bare}`")
                         } else {
-                            format!(
-                                "`{}` is not a local, module, package or constant",
-                                self.index.symbols.text(name)
-                            )
+                            format!("`{head}` is not a local, module, package or constant")
                         };
                         let mut diagnostic = Refusal::new("LANG-7", self.site(n), message);
-                        if self.index.packages[self.package.0 as usize].name != name {
+                        if own != name {
                             let modules = std::iter::once(head_token)
                                 .chain(parts.take_while(|&token| token != last))
                                 .map(|token| self.index.symbols.text(self.name(token)).to_owned())

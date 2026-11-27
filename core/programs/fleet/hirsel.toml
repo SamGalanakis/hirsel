@@ -1,13 +1,13 @@
 [package]
-name = "fleet"
-major = 1
+name = "hirsel.ai/fleet"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-compute = { major = 1, path = "../compute" }
-store = { major = 1, path = "../store" }
-runner = { major = 1, path = "../runner" }
+compute = { package = "hirsel.ai/compute", major = 1, path = "../compute" }
+store = { package = "store", major = 1, path = "../store" }
+runner = { package = "runner", major = 1, path = "../runner" }
 
 [sources]
 "types.hirsel" = "move_kernel"
@@ -31,8 +31,8 @@ grants = ["Clock", "Random", "Tasks"]
 "directory_laws.hirsel" = "laws"
 "scale_sim_laws.hirsel" = "laws"
 
-[tests.runs."fleet@1/laws/sim_fleet_scale_1000_hosts"]
+[tests.runs."hirsel.ai/fleet@1/laws/sim_fleet_scale_1000_hosts"]
 limit = 536870912
 
-[tests.runs."fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf"]
+[tests.runs."hirsel.ai/fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf"]
 grants = ["Stdout"]

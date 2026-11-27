@@ -1,6 +1,6 @@
 [package]
-name = "video_yuv"
-major = 1
+name = "hirsel.ai/video_yuv"
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]

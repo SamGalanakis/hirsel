@@ -1,2 +1,2 @@
 hirsel.laws 1
-video_thumb@1/tests/sparse_posters_and_sprite_cues src=2910710eedcbdeaa sig=d62189bce09f9e01 run=ce557a8fc0638151 bug=413a3e4c03b47a87 oracle=4c1dea43315203b1 rows=pending
+hirsel.ai/video_thumb@1/tests/sparse_posters_and_sprite_cues src=4c65286f9f93314b sig=843fd29c461c2d05 run=87eb15fd13613f47 bug=413a3e4c03b47a87 oracle=4c1dea43315203b1 rows=pending

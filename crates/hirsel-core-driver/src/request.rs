@@ -97,7 +97,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         )?
         .ok_or_else(|| format!("{directory} has no workspace manifest"))?;
         let selected = (command == "pack")
-            .then(|| workspace.selected().cloned())
+            .then(|| workspace.packed().cloned())
             .transpose()?;
         let mut resolved = crate::package_resolve::Resolution::resolve(
             workspace,
@@ -112,10 +112,11 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             lock.commit(&resolved.workspace)?;
             resolved.store.install(&archive)?;
             output.write(&bytes)?;
-            println!("{selected} {}", archive.head);
+            let head = &archive.entries[&archive.head].content;
+            println!("{} {} {}", head.id, head.version, archive.head);
             for (root, library) in &archive.entries {
                 if *root != archive.head {
-                    println!("{} {root}", library.content.id);
+                    println!("{} {} {root}", library.content.id, library.content.version);
                 }
             }
         } else {
@@ -250,7 +251,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         .as_deref()
         .filter(|_| inspection.is_some())
         .and_then(Path::to_str)
-        .filter(|name| crate::package_dir::package_name(name) && !Path::new(name).exists());
+        .filter(|name| crate::package_manifest::name::alias(name) && !Path::new(name).exists());
     let app_directory = if let Some(archive) = archive {
         archive
             .parent()
@@ -277,7 +278,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         package_mode.require_workspace(if name == "core" { "--core" } else { "--std" })?;
     } else if let Some(path) = archive {
         package_mode.require_workspace("an archive path")?;
-        let archive = crate::package_content::PackageArchive::open(path)?;
+        let archive = crate::package_content::PackageArchive::open(path, false)?;
         if let Some((module, _)) = inspect_foreign {
             foreign_symbols = Some(crate::foreign_header::symbol_prefix(
                 archive.entries.values().map(|library| &library.content),
@@ -296,9 +297,8 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 let member = workspace.selected()?;
                 let selected = if let Some(name) = dependency {
                     workspace.members[member]
-                        .edges
-                        .keys()
-                        .find(|id| id.name == name)
+                        .aliases
+                        .get(name)
                         .ok_or_else(|| format!("{member} has no dependency named {name}"))?
                 } else {
                     member

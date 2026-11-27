@@ -13,7 +13,7 @@ fn schema(mut d: store.Declare) -> Result[H, store.Error] {
 
 fn schema_descriptor() -> StaticFn[fn(mut store.Declare) -> Result[H, store.Error]] {
     let descriptor = code.describe(schema)
-    if code.identity(descriptor) != b"\x01wire@1/admission/schema(mut store@1/store/Declare)->core@1/core/Result[wire@1/admission/H,store@1/store/Error]" {
+    if code.identity(descriptor) != b"\x01hirsel.ai/wire@1/admission/schema(mut store@1/store/Declare)->core@1/core/Result[hirsel.ai/wire@1/admission/H,store@1/store/Error]" {
         fail("wire admission: schema descriptor changed")
     }
     descriptor
@@ -68,7 +68,7 @@ fn query_table(h: H) -> store.Table[u64, u32] {
 
 fn query_slots() -> Result[runner.Slots[H], runner.RegisterError] {
     let selector = code.describe(query_table)
-    if code.identity(selector) != b"\x01wire@1/admission/query_table(wire@1/admission/H)->store@1/store/Table[u64,u32]" {
+    if code.identity(selector) != b"\x01hirsel.ai/wire@1/admission/query_table(hirsel.ai/wire@1/admission/H)->store@1/store/Table[u64,u32]" {
         fail("wire admission: table selector descriptor changed")
     }
     runner.table_slot("data", selector)

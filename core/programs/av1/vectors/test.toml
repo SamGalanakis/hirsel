@@ -3,7 +3,7 @@ std = { major = 1 }
 
 [tests]
 limit = 268435456
-grants = ["Foreign=av1@1/av1/DecoderCodec", "Foreign=av1@1/av1/EncoderCodec"]
+grants = ["Foreign=hirsel.ai/av1@1/av1/DecoderCodec", "Foreign=hirsel.ai/av1@1/av1/EncoderCodec"]
 dirs = ["fixtures"]
 
 [tests.sources]

@@ -1,16 +1,16 @@
 [package]
-name = "video_transcode"
-major = 1
+name = "hirsel.ai/video_transcode"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-av1 = { major = 1, path = "../av1" }
-h264 = { major = 1, path = "../h264" }
-media_bits = { major = 1, path = "../media_bits" }
-media_container = { major = 1, path = "../media_container" }
-video_packager = { major = 1, path = "../video_packager" }
-video_yuv = { major = 1, path = "../video_yuv" }
+av1 = { package = "hirsel.ai/av1", major = 1, path = "../av1" }
+h264 = { package = "hirsel.ai/h264", major = 1, path = "../h264" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
+media_container = { package = "media_container", major = 1, path = "../media_container" }
+video_packager = { package = "hirsel.ai/video_packager", major = 1, path = "../video_packager" }
+video_yuv = { package = "hirsel.ai/video_yuv", major = 1, path = "../video_yuv" }
 
 [sources]
 "split.hirsel" = "split"

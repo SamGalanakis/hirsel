@@ -92,7 +92,7 @@ raise SystemExit(not linked)
             [('archive', 'cranelift', False), ('archive', 'llvm', False),
              ('image_core', 'cranelift', True), ('image_core', 'llvm', True)],
         )
-        self.assertIn('archive@1/tests/law: undefined symbol _fixture', result.stdout)
+        self.assertIn('hirsel.ai/archive@1/tests/law: undefined symbol _fixture', result.stdout)
         self.assertIn('| image_core | llvm | 1/1 |', result.stdout)
 
     def test_debug_lines_choice_reaches_the_build_request(self):

@@ -83,8 +83,8 @@ fn foreign_source_replay_refuses_before_reading_tape() {
         "hirsel.toml",
         r#"
 [package]
-name = "app"
-major = 1
+name = "local/app"
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]
@@ -138,7 +138,7 @@ fn touches(f: Foreign[Law]) -> Result[(), ()] {
         argv.extend(args.iter().map(|s| (*s).to_owned()));
         process::tape_request(&argv, dir.path())
     };
-    let expected_main = "FFI-8: a recording build cannot reach foreign code: app@1/main/main reaches app@1/native/alpha";
+    let expected_main = "FFI-8: a recording build cannot reach foreign code: local/app@1/main/main reaches local/app@1/native/alpha";
     let (code, _, error) = run("replay", &["--tape", "missing.tape"]);
     assert_eq!(code, Some(2), "{error}");
     let expected_replay = format!("replay: refused: {expected_main}");
@@ -160,7 +160,7 @@ fn touches(f: Foreign[Law]) -> Result[(), ()] {
     );
     let (code, output, error) = run("test", &["--replay", "--limit", "67108864"]);
     assert_eq!(code, Some(1), "{output}\n{error}");
-    assert!(output.lines().any(|line| line.ends_with("refused: FFI-8: a recording build cannot reach foreign code: app@1/main/touches reaches app@1/native/alpha")), "{output}\n{error}");
+    assert!(output.lines().any(|line| line.ends_with("refused: FFI-8: a recording build cannot reach foreign code: local/app@1/main/touches reaches local/app@1/native/alpha")), "{output}\n{error}");
     assert!(!dir.path().join("program").exists());
 }
 
@@ -2490,29 +2490,29 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
         interface,
         serde_json::json!({
             "version": 1,
-            "package": {"name": "app", "version": "1"},
+            "package": {"name": "local/app", "version": "1"},
             "modules": [{"path": ["main"], "extends_core": false, "items": [
-                {"definition": "app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
-                {"definition": "app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
-                {"definition": "app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
+                {"definition": "local/app@1/main/Token", "name": "Token", "kind": "type", "signature": "pub opaque type Token"},
+                {"definition": "local/app@1/main/echo", "name": "echo", "kind": "function", "signature": "pub fn echo[T: plain](x: T, output: Stdout) -> T waits"},
+                {"definition": "local/app@1/main/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"}
             ]}],
         })
     );
     assert_eq!(
         inspect(&["--dependents", "main/base"]),
-        "app@1/main/middle\n"
+        "local/app@1/main/middle\n"
     );
     assert_eq!(
-        inspect(&["--dependents", "app@1/main/base", "--transitive"]),
-        "app@1/main/from_base\napp@1/main/middle\n",
+        inspect(&["--dependents", "local/app@1/main/base", "--transitive"]),
+        "local/app@1/main/from_base\nlocal/app@1/main/middle\n",
     );
     assert_eq!(
         inspect(&["--unused"]),
-        "app@1/main/Token\napp@1/main/echo\napp@1/main/orphan\n",
+        "local/app@1/main/Token\nlocal/app@1/main/echo\nlocal/app@1/main/orphan\n",
     );
     let library = inspect(&["--unused", "--library"]);
-    assert!(library.lines().any(|line| line == "app@1/main/orphan"));
-    assert!(!library.lines().any(|line| line == "app@1/main/echo"));
+    assert!(library.lines().any(|line| line == "local/app@1/main/orphan"));
+    assert!(!library.lines().any(|line| line == "local/app@1/main/echo"));
 
     let executed = || {
         let clang = llvm.join("bin/clang");
@@ -2541,20 +2541,20 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     assert_eq!(
         executed(),
         [
-            "app@1/main/from_base",
-            "app@1/main/from_constant",
-            "app@1/main/independent"
+            "local/app@1/main/from_base",
+            "local/app@1/main/from_constant",
+            "local/app@1/main/independent"
         ]
     );
 
     let affected = inspect(&["--affected-tests", "main/base"]);
-    assert_eq!(affected, "app@1/main/from_base\n");
+    assert_eq!(affected, "local/app@1/main/from_base\n");
     let edited = source.replace("7u64 }", "8u64 }");
     std::fs::write(&file, &edited).unwrap();
     assert_eq!(executed(), affected.lines().collect::<Vec<_>>());
 
     let affected = inspect(&["--affected-tests", "main/ANSWER"]);
-    assert_eq!(affected, "app@1/main/from_constant\n");
+    assert_eq!(affected, "local/app@1/main/from_constant\n");
     std::fs::write(&file, edited.replace("= 11u64", "= 12u64")).unwrap();
     assert_eq!(executed(), affected.lines().collect::<Vec<_>>());
 
@@ -2563,8 +2563,8 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     std::fs::write(
         manifest_app.join("hirsel.toml"),
         r#"[package]
-name = "counter"
-major = 2
+name = "local/counter"
+version = "2.0.0"
 charge = "charge-v1"
 
 [sources]
@@ -2608,17 +2608,17 @@ pub fn spare() -> u64 { 0u64 }
             "version": 1,
             "package": {"name": "counter", "version": "2"},
             "modules": [{"path": ["counter"], "extends_core": false, "items": [
-                {"definition": "counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
-                {"definition": "counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},
-                {"definition": "counter@2/counter/spare", "name": "spare", "kind": "function", "signature": "pub fn spare() -> u64"}
+                {"definition": "local/counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
+                {"definition": "local/counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},
+                {"definition": "local/counter@2/counter/spare", "name": "spare", "kind": "function", "signature": "pub fn spare() -> u64"}
             ]}],
         })
     );
     assert_eq!(
         inspect(&["--affected-tests", "counter/start"]),
-        "counter@2/counter/counts\n",
+        "local/counter@2/counter/counts\n",
     );
-    assert_eq!(inspect(&["--unused"]), "counter@2/counter/spare\n");
+    assert_eq!(inspect(&["--unused"]), "local/counter@2/counter/spare\n");
 }
 
 fn test_pass_cache_cli() {
@@ -2691,8 +2691,8 @@ fn rejected() -> Result[(), ()] { Error(()) }
             .collect::<String>()
     };
 
-    let executed = "pass executed app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1: error: ()\n";
-    let cached = "pass cached app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1: error: ()\n";
+    let executed = "pass executed local/app@1/main/good\nfail executed local/app@1/main/rejected: returned an error, exit status 1: error: ()\n";
+    let cached = "pass cached local/app@1/main/good\nfail executed local/app@1/main/rejected: returned an error, exit status 1: error: ()\n";
     assert_eq!(run(&["-j", "1"], 1), executed);
     assert_eq!(run(&["-j", "2"], 1), cached);
     assert_eq!(run(&["--rerun"], 1), executed);
@@ -2708,24 +2708,24 @@ fn rejected() -> Result[(), ()] { Error(()) }
         serde_json::json!({
             "passed": false,
             "tests": [
-                {"definition":"app@1/main/good","passed":true,"source":"cached","status":0,"stdout":"","stderr":"","timed_out":false,"wall_ms":null},
-                {"definition":"app@1/main/rejected","passed":false,"source":"executed","status":1,"stdout":"","stderr":"error: ()\n","timed_out":false}
+                {"definition":"local/app@1/main/good","passed":true,"source":"cached","status":0,"stdout":"","stderr":"","timed_out":false,"wall_ms":null},
+                {"definition":"local/app@1/main/rejected","passed":false,"source":"executed","status":1,"stdout":"","stderr":"error: ()\n","timed_out":false}
             ]
         })
     );
 
     let good = ["--filter", "/good"];
-    assert_eq!(run(&good, 0), "pass cached app@1/main/good\n");
+    assert_eq!(run(&good, 0), "pass cached local/app@1/main/good\n");
     assert_eq!(run(&["--filter", "/absent"], 2), "");
     let with_grant = ["--filter", "/good", "--grant", "Stdout"];
-    assert_eq!(run(&with_grant, 0), "pass cached app@1/main/good\n");
+    assert_eq!(run(&with_grant, 0), "pass cached local/app@1/main/good\n");
     let missing = dir.path().join("absent-dir");
     let with_dir = ["--filter", "/good", "--dir", missing.to_str().unwrap()];
-    assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
+    assert_eq!(run(&with_dir, 0), "pass cached local/app@1/main/good\n");
     let mut rerun_with_dir = with_dir.to_vec();
     rerun_with_dir.push("--rerun");
-    assert_eq!(run(&rerun_with_dir, 0), "pass executed app@1/main/good\n");
-    assert_eq!(run(&with_dir, 0), "pass cached app@1/main/good\n");
+    assert_eq!(run(&rerun_with_dir, 0), "pass executed local/app@1/main/good\n");
+    assert_eq!(run(&with_dir, 0), "pass cached local/app@1/main/good\n");
     assert!(!missing.exists());
 }
 

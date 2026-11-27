@@ -14,10 +14,19 @@ use std::path::{Component, Path, PathBuf};
 
 pub(crate) const MANIFEST: &str = "hirsel.toml";
 
+/// A decoded `C`'s bindings as `(alias, identity, root)`.
+fn content_bindings(content: &Content) -> Vec<(&str, &Id, Option<Root>)> {
+    content
+        .bindings
+        .iter()
+        .map(|(alias, (id, binding))| (alias.as_str(), id, binding.root()))
+        .collect()
+}
+
 pub(crate) fn scaffold_manifest(sources: impl Iterator<Item = &'static str>) -> String {
     use std::fmt::Write;
     let mut manifest = String::from(
-        "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[dependencies]\nstd = { major = 1 }\n\n[sources]\n",
+        "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[dependencies]\nstd = { major = 1 }\n\n[sources]\n",
     );
     for file in sources {
         let module = file.strip_suffix(".hirsel").unwrap();
@@ -209,13 +218,6 @@ struct RunFile {
     dirs: Option<Vec<String>>,
 }
 
-pub(crate) fn package_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    name.len() <= 64
-        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
-        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-}
-
 pub(crate) fn module_path(module: &str) -> Option<Vec<String>> {
     let mut symbols = hirsel_core_syntax::Symbols::default();
     let names: Vec<_> = module.split('.').collect();
@@ -355,14 +357,14 @@ impl PackageDir {
     }
 
     pub(crate) fn convention(dir: &Path) -> io::Result<Self> {
-        let mut package = PackageManifest::directory(dir, crate::package("app"), false)?;
+        let mut package = PackageManifest::directory(dir, crate::package("local/app"), false)?;
         package
             .dependencies
             .extend([crate::package("core"), crate::package("std")]);
         Ok(Self {
             package,
             dependencies: Vec::new(),
-            entry: DefPath::from_full("app@1/main/main").unwrap(),
+            entry: DefPath::from_full("local/app@1/main/main").unwrap(),
             manifest: None,
             tests: None,
             program: None,
@@ -427,14 +429,14 @@ impl PackageDir {
                     ));
                 }
                 let bindings = member
-                    .edges
+                    .aliases
                     .iter()
-                    .map(|(id, edge)| {
-                        let pin = match edge {
+                    .map(|(alias, id)| {
+                        let pin = match &member.edges[id] {
                             Edge::Published(root, _) => Some(*root),
                             _ => None,
                         };
-                        (id, pin)
+                        (alias.as_str(), id, pin)
                     })
                     .collect::<Vec<_>>();
                 (&member.content, bindings)
@@ -446,16 +448,9 @@ impl PackageDir {
                 } else {
                     &resolution.libraries[&root.unwrap()].content
                 };
-                (
-                    content,
-                    content
-                        .bindings
-                        .iter()
-                        .map(|(id, pin)| (id, *pin))
-                        .collect(),
-                )
+                (content, content_bindings(content))
             };
-            pending.extend(bindings.iter().map(|(id, _)| (**id).clone()));
+            pending.extend(bindings.iter().map(|(_, id, _)| (**id).clone()));
             let tests = if include_tests && &id == selected {
                 selected_member.map(|member| &member.tests)
             } else {
@@ -523,7 +518,7 @@ impl PackageDir {
                 content,
                 &head.id,
                 Some(root),
-                content.bindings.iter().map(|(id, pin)| (id, *pin)),
+                content_bindings(content),
                 None,
             )
         };
@@ -534,8 +529,8 @@ impl PackageDir {
             let content = &library.content;
             bound.extend(
                 content
-                    .bindings
-                    .iter()
+                    .edges()
+                    .into_iter()
                     .filter_map(|(id, root)| root.is_none().then_some(id)),
             );
             if let Some(previous) = roots.insert(&content.id, root) {
@@ -548,7 +543,7 @@ impl PackageDir {
                 dependencies.push(manifest(content, *root));
             }
         }
-        for id in crate::package_content::toolchain_closure(bound) {
+        for id in crate::package_content::toolchain_closure(&bound) {
             if roots.contains_key(&id) {
                 return Err(io::Error::other(format!(
                     "{id} is bound both to the toolchain and to a published library"
@@ -559,7 +554,7 @@ impl PackageDir {
                 &supplied,
                 &head.id,
                 None,
-                supplied.bindings.iter().map(|(id, pin)| (id, *pin)),
+                content_bindings(&supplied),
                 None,
             );
             package.toolchain = true;
@@ -576,11 +571,12 @@ impl PackageDir {
         })
     }
 
+    /// `bindings` are `(alias, identity, pin)`, with a pin for each published binding.
     fn manifest_from_content<'a>(
         content: &Content,
         selected: &Id,
         root: Option<Root>,
-        bindings: impl IntoIterator<Item = (&'a Id, Option<Root>)>,
+        bindings: impl IntoIterator<Item = (&'a str, &'a Id, Option<Root>)>,
         tests: Option<&BTreeMap<String, Source>>,
     ) -> PackageManifest {
         use hirsel_core_ids::ContentHash;
@@ -619,12 +615,17 @@ impl PackageDir {
             .collect();
         let mut dependencies = vec![crate::package("core")];
         let mut published_bindings = BTreeMap::new();
-        for (id, pin) in bindings {
+        let mut aliases = BTreeMap::new();
+        for (alias, id, pin) in bindings {
             let id = id.compiler_id();
             if let Some(pin) = pin {
                 published_bindings.insert(id.clone(), ContentHash(pin.0));
             }
-            dependencies.push(id);
+            aliases.insert(alias.to_owned(), id.clone());
+            // Two aliases of one identity name one package (section 1).
+            if !dependencies.contains(&id) {
+                dependencies.push(id);
+            }
         }
         PackageManifest {
             namespace: Some(PackageNamespace {
@@ -632,6 +633,7 @@ impl PackageDir {
                 foreign: content.foreign_stamp(),
                 foreign_inputs: content.foreign.clone(),
                 published_bindings,
+                aliases,
             }),
             package: content.id.compiler_id(),
             dependencies,

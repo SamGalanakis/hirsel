@@ -1,18 +1,18 @@
 [package]
-name = "video_thumb"
-major = 1
+name = "hirsel.ai/video_thumb"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-av1 = { major = 1, path = "../av1" }
-h264 = { major = 1, path = "../h264" }
-image_core = { major = 1, path = "../image_core" }
-image_pipeline = { major = 1, path = "../image_pipeline" }
-image_webp = { major = 1, path = "../image_webp" }
-media_bits = { major = 1, path = "../media_bits" }
-media_container = { major = 1, path = "../media_container" }
-video_yuv = { major = 1, path = "../video_yuv" }
+av1 = { package = "hirsel.ai/av1", major = 1, path = "../av1" }
+h264 = { package = "hirsel.ai/h264", major = 1, path = "../h264" }
+image_core = { package = "hirsel.ai/image_core", major = 1, path = "../image_core" }
+image_pipeline = { package = "hirsel.ai/image_pipeline", major = 1, path = "../image_pipeline" }
+image_webp = { package = "hirsel.ai/image_webp", major = 1, path = "../image_webp" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
+media_container = { package = "media_container", major = 1, path = "../media_container" }
+video_yuv = { package = "hirsel.ai/video_yuv", major = 1, path = "../video_yuv" }
 
 [sources]
 "index.hirsel" = "thumb"

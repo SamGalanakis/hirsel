@@ -156,10 +156,7 @@ fn shaped() -> Result[(), ()] { if shapes(1u64)? == 1u64 { Ok(()) } else { Error
 fn coverage_tool_diffs_merges_and_reads_raw_files() {
     use crate::coverage::{Profile, SiteMap};
     let law = PackageLaw::new();
-    law.manifest(
-        "app",
-        "app",
-        1,
+    law.manifest("app", "local/app", "1.0.0",
         "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\n",
     );
     let (a, b) = (law.path("a.json"), law.path("b.json"));
@@ -187,10 +184,10 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
         let (head, ordinal) = head.rsplit_once('.').unwrap();
         let (function, range) = head.rsplit_once('@').unwrap();
         let (start, end) = range.split_once('-').unwrap();
-        if ["app@1/main/small", "app@1/main/shapes", "app@1/main/shaped"].contains(&function) {
+        if ["local/app@1/main/small", "local/app@1/main/shapes", "local/app@1/main/shaped"].contains(&function) {
             let length = end.parse::<u64>().unwrap() - start.parse::<u64>().unwrap();
             let shape = row["shape"].as_str().map(str::to_owned);
-            shaped.push((function["app@1/main/".len()..].to_owned(), length, ordinal.parse().unwrap(), arm.to_owned(), shape));
+            shaped.push((function["local/app@1/main/".len()..].to_owned(), length, ordinal.parse().unwrap(), arm.to_owned(), shape));
         }
     }
     shaped.sort();
@@ -211,7 +208,7 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
     ]);
     let item = &PICKS[PICKS.find("fn classify").unwrap()..];
     let start = item.find("s == 1u64").unwrap();
-    let decision = format!("app@1/main/classify@{start}-{}.0", start + "s == 1u64".len());
+    let decision = format!("local/app@1/main/classify@{start}-{}.0", start + "s == 1u64".len());
     let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
 
     let (status, stdout, stderr) = law.tool(&["coverage", "diff", a, b, "--json"]);
@@ -219,14 +216,14 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
     let diff: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(diff["gained"], serde_json::json!([format!("{decision}:yes")]));
     assert_eq!(diff["lost"], serde_json::json!([format!("{decision}:no")]));
-    assert_eq!(diff["changed_functions"], serde_json::json!(["app@1/main/picks"]));
+    assert_eq!(diff["changed_functions"], serde_json::json!(["local/app@1/main/picks"]));
     assert_eq!((&diff["reached"]["before"], &diff["reached"]["after"], &diff["selection_changed"]), (&2.into(), &2.into(), &false.into()));
     let (status, stdout, _) = law.tool(&["coverage", "diff", a, b]);
     assert_eq!((status, stdout.lines().next()), (Some(0), Some("since base  +1 sites, -1   1 functions changed")));
 
     let (status, stdout, stderr) = law.tool(&["coverage", "merge", a, b]);
     assert_eq!(status, Some(1), "{stdout}\n{stderr}");
-    assert!(stderr.contains("app@1/main/picks has source") && stderr.ends_with("they are builds of different sources\n"), "{stderr}");
+    assert!(stderr.contains("local/app@1/main/picks has source") && stderr.ends_with("they are builds of different sources\n"), "{stderr}");
     let read = |path: &str| Profile::from_json(&serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()).unwrap();
     let merged = law.path("merged.json");
     let (status, stdout, stderr) = law.tool(&["coverage", "merge", a, "--json", "-o", merged.to_str().unwrap()]);
@@ -248,11 +245,11 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
         }
     }
     let read_map = |path: &std::path::PathBuf| SiteMap::from_json(&serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()).unwrap();
-    let map_path = maps.iter().find(|path| read_map(path).test == "app@1/main/picks").unwrap_or_else(|| panic!("{maps:?}"));
+    let map_path = maps.iter().find(|path| read_map(path).test == "local/app@1/main/picks").unwrap_or_else(|| panic!("{maps:?}"));
     let map = read_map(map_path);
-    let (id, sites) = map.records.iter().find(|(_, sites)| sites[0].0 == "app@1/main/classify#e").unwrap();
+    let (id, sites) = map.records.iter().find(|(_, sites)| sites[0].0 == "local/app@1/main/classify#e").unwrap();
     let keys: Vec<&str> = sites.iter().map(|(key, _)| key.as_str()).collect();
-    assert_eq!(keys, ["app@1/main/classify#e".to_owned(), format!("{decision}:no"), format!("{decision}:yes")]);
+    assert_eq!(keys, ["local/app@1/main/classify#e".to_owned(), format!("{decision}:no"), format!("{decision}:yes")]);
     for (key, site) in &sites[1..] {
         let place = &site.place;
         assert_eq!((place.file.as_deref(), place.line, place.col, place.end_line, place.end_col), (Some("main.hirsel"), Some(4), Some(8), Some(4), Some(17)), "{key}");
@@ -271,17 +268,17 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
     let profile: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let test = &profile["tests"][0];
-    assert_eq!((&test["definition"], &test["seeds"], &test["runs"], &test["failed_runs"]), (&"app@1/main/picks".into(), &serde_json::json!([[7, 7]]), &1.into(), &0.into()));
+    assert_eq!((&test["definition"], &test["seeds"], &test["runs"], &test["failed_runs"]), (&"local/app@1/main/picks".into(), &serde_json::json!([[7, 7]]), &1.into(), &0.into()));
     let passed: BTreeMap<&str, u64> = profile["sites"]
         .as_array()
         .unwrap()
         .iter()
         .map(|r| (r["site"].as_str().unwrap(), r["passed_runs"].as_u64().unwrap()))
-        .filter(|(key, _)| key.starts_with("app@1/main/classify"))
+        .filter(|(key, _)| key.starts_with("local/app@1/main/classify"))
         .collect();
     let yes = format!("{decision}:yes");
     let no = format!("{decision}:no");
-    assert_eq!(passed, BTreeMap::from([("app@1/main/classify#e", 1), (no.as_str(), 0), (yes.as_str(), 1)]));
+    assert_eq!(passed, BTreeMap::from([("local/app@1/main/classify#e", 1), (no.as_str(), 0), (yes.as_str(), 1)]));
     let (status, _, stderr) = law.tool(&["coverage", "merge", raw_path.to_str().unwrap()]);
     assert_eq!((status, stderr.ends_with("a raw file needs --map\n")), (Some(1), true), "{stderr}");
 
@@ -303,10 +300,10 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|r| r["site"].as_str().unwrap().starts_with("app@1/main/classify"))
+            .filter(|r| r["site"].as_str().unwrap().starts_with("local/app@1/main/classify"))
             .map(|r| (r["site"].as_str().unwrap(), &r["reached_by"]))
             .collect();
-        let seeds = |range: [u64; 2]| serde_json::json!([{"definition": "app@1/main/picks", "build": 0, "seeds": [range]}]);
-        assert_eq!(by, BTreeMap::from([("app@1/main/classify#e", &seeds([7, 8])), (no.as_str(), &seeds([8, 8])), (yes.as_str(), &seeds([7, 7]))]), "{input}");
+        let seeds = |range: [u64; 2]| serde_json::json!([{"definition": "local/app@1/main/picks", "build": 0, "seeds": [range]}]);
+        assert_eq!(by, BTreeMap::from([("local/app@1/main/classify#e", &seeds([7, 8])), (no.as_str(), &seeds([8, 8])), (yes.as_str(), &seeds([7, 7]))]), "{input}");
     }
 }

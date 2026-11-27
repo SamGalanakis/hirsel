@@ -229,7 +229,7 @@ def main():
         destination = Path(directory)
         prepare(args.suite, destination, args.inventory)
         return subprocess.call([args.hirsel, "test", directory, "--libraries", str(LIBRARIES),
-                                "--exact", "xml@1/tests/xmlconf", "--test-timeout", "300", "--replay"])
+                                "--exact", "hirsel.ai/xml@1/tests/xmlconf", "--test-timeout", "300", "--replay"])
 
 
 if __name__ == "__main__":

@@ -3691,7 +3691,7 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
         .unwrap();
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let reached = product
-        .reachable(&DefPath::from_full("app@1/main/main").unwrap(), 4096)
+        .reachable(&DefPath::from_full("local/app@1/main/main").unwrap(), 4096)
         .unwrap();
     let keys = reached.instances.as_ref().unwrap();
     for (definition, types) in [
@@ -3711,7 +3711,7 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
             "{definition}: no cold call\n{ir}"
         );
     }
-    let key = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/lens").unwrap());
+    let key = hirsel_core_ir::Identity::plain(DefPath::from_full("local/app@1/main/lens").unwrap());
     let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir().unwrap()).unwrap();
     let ranges: Vec<_> = ir
         .lines()

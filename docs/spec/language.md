@@ -54,10 +54,12 @@ read as `m.ORIGIN.x`. A module wins over a constant of its name. A function is n
 head of a path: a head that names only a function, or nothing, is refused here, at the
 head, and is never rebound.
 
-A package's **root module** is its module whose path is the package's name: module `store`
-of package `store`, module `core` of the core library. A package name is the head of a path
-into that package, and `.b` after it selects a member of its root module or a module of
-the package: `store.fetch(..)` calls the root module's `fetch`, `store.Tx` names its type, and
+A package's **root module** is its module whose path is the last component of the
+package's name: module `store` of package `store`, module `json` of package `b.test/json`,
+module `core` of the core library. A dependency's alias (packages.md section 1), and a
+package's own last name component inside it, is the head of a path into that package, and
+`.b` after it selects a member of its root module or a module of the package, so
+`bjson.version()` calls the root module `json` of the package an alias `bjson` binds: `store.fetch(..)` calls the root module's `fetch`, `store.Tx` names its type, and
 `store.wal.append(..)` calls a member of module `wal`. The root module is reached only that
 way, so `store.store.fetch` names nothing and is refused here, at the second `store`. Inside
 the package the head `store` is the root module itself, as a module of the current package,

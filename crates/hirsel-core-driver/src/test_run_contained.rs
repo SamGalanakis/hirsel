@@ -130,7 +130,7 @@ fn contained_modules_are_admitted_before_anything_compiles() {
 
     const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    const MODULE: &str = "FFI-11: module box.wasm of wasm_laws@1/native";
+    const MODULE: &str = "FFI-11: module box.wasm of hirsel.ai/wasm_laws@1/native";
     const I32: u8 = 0x7f;
     const I64: u8 = 0x7e;
 
@@ -161,7 +161,7 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
             "--libraries", law.libraries.to_str().unwrap(),
             "--store", law.path("build").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(), "-o", "image",
-            "--grant", "Foreign=wasm_laws@1/laws/Box",
+            "--grant", "Foreign=hirsel.ai/wasm_laws@1/laws/Box",
         ].into_iter().chain(execution.link_args(&execution.runtime)).map(str::to_owned).collect::<Vec<_>>();
         process::tape_request(&request, law.dir.path())
     };
@@ -306,7 +306,7 @@ fn contained_calls_run_in_the_tasks_own_instance() {
             "--libraries", law.libraries.to_str().unwrap(),
             "--store", law.path("build").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(), "-o", image.to_str().unwrap(),
-            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Tasks", "--grant", "Stdout",
+            "--grant", "Foreign=hirsel.ai/wasm_laws@1/laws/Box", "--grant", "Tasks", "--grant", "Stdout",
             "--limit", "268435456",
         ].into_iter().chain(execution.link_args(&execution.runtime)).map(str::to_owned).collect::<Vec<_>>();
         let (status, output, error) = process::tape_request(&request, law.dir.path());
@@ -395,7 +395,7 @@ pub fn main(f: Foreign[laws.Box], tasks: Tasks, argv: Args, out: Stdout) -> Resu
             "--libraries", law.libraries.to_str().unwrap(), "--runtime", runtime.to_str().unwrap(),
             "--store", law.path("build").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(), "-o", image.to_str().unwrap(),
-            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Stdout", "--grant", "Tasks",
+            "--grant", "Foreign=hirsel.ai/wasm_laws@1/laws/Box", "--grant", "Stdout", "--grant", "Tasks",
             "--limit", "268435456",
         ].map(str::to_owned);
         let (status, output, error) = process::tape_request(&request, law.dir.path());
@@ -451,7 +451,7 @@ fn contained_tests_record_and_replay() {
     law.write("wasm_laws/hirsel.toml", format!(
         "{}\n[foreign.other]\nsymbols = \"hwo_\"\narchives = []\n\n[tests]\nlimit = 268435456\n{}\n",
         manifest.replace("\"main.hirsel\" = \"main\"", "\"main.hirsel\" = \"main\"\n\"other.hirsel\" = \"other\""),
-        r#"grants = ["Foreign=wasm_laws@1/laws/Box", "Foreign=wasm_laws@1/laws/Other", "Tasks", "Stdout"]"#,
+        r#"grants = ["Foreign=hirsel.ai/wasm_laws@1/laws/Box", "Foreign=hirsel.ai/wasm_laws@1/laws/Other", "Tasks", "Stdout"]"#,
     ));
     law.write("wasm_laws/other.hirsel", "pub fn poke(f: Foreign[laws.Other]) -> i32\n");
     law.write("wasm_laws/laws.hirsel", format!(
@@ -471,7 +471,7 @@ fn contained_tests_record_and_replay() {
             "--libraries", law.libraries.to_str().unwrap(),
             "--store", law.path("store").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(),
-            "--grant", "Foreign=wasm_laws@1/laws/Other",
+            "--grant", "Foreign=hirsel.ai/wasm_laws@1/laws/Other",
         ].into_iter().chain(execution.link_args(runtime)).map(str::to_owned).collect::<Vec<_>>();
         if let crate::Runner::Qemu { emulator, sysroot } = &execution.runner {
             argv.extend(["--emulator", emulator.to_str().unwrap(), "--sysroot", sysroot.to_str().unwrap()].map(str::to_owned));
@@ -483,7 +483,7 @@ fn contained_tests_record_and_replay() {
     };
     let replay = ["--replay", "--expect-verdict", "Sealed"];
     let engine = ContainedExecution::engines()[0];
-    let (code, out, err) = test(&["--backend", engine, "--exact", "wasm_laws@1/main/fw17_contained_replays"]);
+    let (code, out, err) = test(&["--backend", engine, "--exact", "hirsel.ai/wasm_laws@1/main/fw17_contained_replays"]);
     assert_eq!(code, Some(0), "unreplayed: {out}\n{err}");
     assert!(!err.lines().any(|line| line.starts_with("foreign: ")), "{err}");
     for (engine, name) in ContainedExecution::engines()
@@ -491,7 +491,7 @@ fn contained_tests_record_and_replay() {
         .flat_map(|&e| ["fw17_contained_replays", "fw27_overflow_replays"].map(|n| (e, n)))
     {
         for _ in 0..2 {
-            let exact = format!("wasm_laws@1/main/{name}");
+            let exact = format!("hirsel.ai/wasm_laws@1/main/{name}");
             let (code, out, err) = test(&[&replay[..], &["--backend", engine, "--exact", &exact]].concat());
             assert_eq!(code, Some(0), "{engine} {name}: {out}\n{err}");
             let report: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -500,9 +500,9 @@ fn contained_tests_record_and_replay() {
             assert_eq!((&tests[0]["source"], &tests[0]["passed"]), (&"executed".into(), &true.into()), "{report}");
         }
     }
-    let (code, out, err) = test(&[&replay[..], &["--backend", engine, "--exact", "wasm_laws@1/main/fl7_both"]].concat());
+    let (code, out, err) = test(&[&replay[..], &["--backend", engine, "--exact", "hirsel.ai/wasm_laws@1/main/fl7_both"]].concat());
     assert_eq!(code, Some(1), "{out}\n{err}");
-    assert!(out.contains("refused: FFI-8: a recording build cannot reach foreign code: wasm_laws@1/main/fl7_both reaches wasm_laws@1/other/poke"), "{out}\n{err}");
+    assert!(out.contains("refused: FFI-8: a recording build cannot reach foreign code: hirsel.ai/wasm_laws@1/main/fl7_both reaches hirsel.ai/wasm_laws@1/other/poke"), "{out}\n{err}");
 }
 
 const CONTAINED_REPLAY: &str = r#"
@@ -616,7 +616,7 @@ fn contained_recipes_pin_their_module() {
             law.write("wasm_laws/main.hirsel", CONTAINED_RECIPE);
             let root = PackageLaw::pass(law.run(&[
                 "publish", "wasm_laws", "--backend", engine, "--target", execution.target,
-                "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Stdout",
+                "--grant", "Foreign=hirsel.ai/wasm_laws@1/laws/Box", "--grant", "Stdout",
             ])).trim().to_owned();
             std::fs::remove_dir_all(law.path("wasm_laws")).unwrap();
             PackageLaw::pass(build(&root));

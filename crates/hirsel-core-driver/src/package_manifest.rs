@@ -1,6 +1,8 @@
 use crate::package_content::{Id, PathTree, Root, parse_digest, symbol_prefix, target_name};
-use crate::package_dir::{ProgramRun, TestFile, module_path, package_name, path_rule};
+use crate::package_dir::{ProgramRun, TestFile, module_path, path_rule};
+pub(crate) mod name;
 use hirsel_core_ids::DefPath;
+use name::{self as names, Version};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -25,7 +27,7 @@ struct Document {
 #[derive(Deserialize)]
 struct PackageTable {
     name: String,
-    major: u32,
+    version: String,
     charge: Charge,
 }
 
@@ -47,6 +49,7 @@ struct Program {
 
 #[derive(Deserialize)]
 struct DependencyTable {
+    package: Option<String>,
     major: Option<u32>,
     path: Option<String>,
     root: Option<String>,
@@ -215,6 +218,7 @@ pub(crate) struct Foreign {
 
 pub(crate) struct Package {
     pub(crate) id: Id,
+    pub(crate) version: Version,
     pub(crate) inherit_charge: bool,
     pub(crate) sources: BTreeMap<String, Vec<String>>,
     pub(crate) test_sources: BTreeMap<String, Vec<String>>,
@@ -326,21 +330,24 @@ impl Manifest {
                 workspace,
             });
         };
-        if !package_name(&package.name) {
+        // A bare name is a toolchain package's, in the toolchain's own manifests (section 2).
+        let toolchain = package.name != "std"
+            && crate::package_content::toolchain_major(&package.name).is_some();
+        if !(names::scoped(&package.name) || names::local(&package.name) || toolchain) {
             return Err(format!(
-                "package.name: {:?} is not [a-z][a-z0-9_]* with at most 64 bytes",
+                "package.name: {:?} is not a scoped or local name",
                 package.name
             ));
         }
-        if matches!(package.name.as_str(), "core" | "std") {
-            return Err(format!(
-                "package.name: {:?} is reserved for the toolchain",
-                package.name
-            ));
-        }
+        let version = Version::parse(&package.version).ok_or_else(|| {
+            format!(
+                "package.version: {:?} is not MAJOR.MINOR.PATCH[-PRE]",
+                package.version
+            )
+        })?;
         let id = Id {
             name: package.name,
-            major: package.major,
+            major: version.major,
         };
         let inherit_charge = match package.charge {
             Charge::Inherit { workspace: true } => true,
@@ -462,6 +469,7 @@ impl Manifest {
         Ok(Self {
             package: Some(Package {
                 id,
+                version,
                 inherit_charge,
                 sources,
                 test_sources,
@@ -533,20 +541,30 @@ fn dependencies(
 ) -> Result<BTreeMap<String, Dependency>, String> {
     input
         .into_iter()
-        .map(|(name, binding)| {
-            let field = format!("{container}.{name}");
-            if !package_name(&name) {
-                return Err(format!(
-                    "{field}: {name:?} is not [a-z][a-z0-9_]* with at most 64 bytes"
-                ));
-            }
-            if name == "core" {
+        .map(|(alias, binding)| {
+            let field = format!("{container}.{alias}");
+            if alias == "core" {
                 return Err(format!(
                     "{field}: core@1 is bound in every package and is not declared"
                 ));
             }
+            if !names::alias(&alias) {
+                return Err(format!(
+                    "{field}: {alias:?} is not an alias: [a-z][a-z0-9_]* with at most 64 bytes"
+                ));
+            }
             let bad_form = || {
                 format!("{field}: give exactly one of path, root, workspace or a toolchain major")
+            };
+            let toolchain = crate::package_content::toolchain_major(&alias);
+            // The member and published forms name their package; the toolchain form never does.
+            let package = |binding: &DependencyTable| -> Result<String, String> {
+                binding.package.clone().ok_or_else(|| match toolchain {
+                    Some(_) => format!("{field}: a member or published binding gives package"),
+                    None => format!(
+                        "{field}: {alias:?} is not a toolchain package; give package = \"<scoped name>\""
+                    ),
+                })
             };
             let located = [
                 &binding.url,
@@ -560,36 +578,61 @@ fn dependencies(
             .any(|field| field.is_some());
             let edge = match (
                 binding.major,
-                binding.path,
-                binding.root,
+                &binding.path,
+                &binding.root,
                 binding.workspace,
                 located,
             ) {
-                (None, None, None, Some(true), false) if allow_inherited => Dependency::Inherited,
+                (None, None, None, Some(true), false)
+                    if allow_inherited && binding.package.is_none() =>
+                {
+                    Dependency::Inherited
+                }
                 (Some(major), None, None, None, false) => {
-                    let supplied =
-                        crate::package_content::toolchain_major(&name).ok_or_else(bad_form)?;
+                    let Some(supplied) = toolchain else {
+                        package(&binding)?;
+                        return Err(bad_form());
+                    };
+                    if binding.package.is_some() {
+                        return Err(format!("{field}: a toolchain binding takes no package"));
+                    }
                     if major != supplied {
                         return Err(format!(
-                            "{field}: the toolchain has {name}@{supplied}, not {name}@{major}"
+                            "{field}: the toolchain has {alias}@{supplied}, not {alias}@{major}"
                         ));
                     }
                     Dependency::Toolchain(Id {
-                        name: name.clone(),
+                        name: alias.clone(),
                         major,
                     })
                 }
-                (Some(major), Some(path), None, None, false) if name != "std" => {
-                    Dependency::Member(
-                        Id {
-                            name: name.clone(),
-                            major,
-                        },
-                        path,
-                    )
+                (Some(major), Some(path), None, None, false) => {
+                    let name = package(&binding)?;
+                    let bare = names::identifier(&name);
+                    if !(names::scoped(&name) || names::local(&name) || bare) {
+                        return Err(format!(
+                            "{field}.package: {name:?} is not a scoped or local name"
+                        ));
+                    }
+                    // A toolchain package's alias is always its bare name (section 2).
+                    if bare && name != alias {
+                        return Err(format!(
+                            "{field}: {name} is a toolchain package's name, bound only as {name}"
+                        ));
+                    }
+                    Dependency::Member(Id { name, major }, path.clone())
                 }
-                (Some(major), None, Some(root), None, _) if name != "std" => {
-                    let root = Root::parse(&root).ok_or_else(|| {
+                (Some(major), None, Some(root), None, _) => {
+                    let name = package(&binding)?;
+                    if names::local(&name) {
+                        return Err(format!(
+                            "{field}: {name} is a local name, which only a workspace member has"
+                        ));
+                    }
+                    if !names::scoped(&name) {
+                        return Err(format!("{field}.package: {name:?} is not a scoped name"));
+                    }
+                    let root = Root::parse(root).ok_or_else(|| {
                         format!("{field}.root: expected sha256: and 64 lower-case hex digits")
                     })?;
                     let sources = [&binding.url, &binding.archive, &binding.git];
@@ -640,18 +683,11 @@ fn dependencies(
                         }
                         (None, None, None) => None,
                     };
-                    Dependency::Published(
-                        Id {
-                            name: name.clone(),
-                            major,
-                        },
-                        root,
-                        source,
-                    )
+                    Dependency::Published(Id { name, major }, root, source)
                 }
                 _ => return Err(bad_form()),
             };
-            Ok((name, edge))
+            Ok((alias, edge))
         })
         .collect()
 }
@@ -699,12 +735,12 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
             (Module, "module") => Wasm,
             (Workspace, "package") => WorkspacePackage,
             (Manifest, "sources" | "tool")
-            | (Package, "name" | "major")
+            | (Package, "name" | "version")
             | (Charge, "workspace")
             | (
                 Dependency,
-                "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref" | "dir"
-                | "workspace",
+                "package" | "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref"
+                | "dir" | "workspace",
             )
             | (Program, "module" | "function" | "limit" | "grants" | "dirs")
             | (Tests, "sources" | "limit" | "grants" | "dirs")

@@ -524,7 +524,7 @@ it into a `.hprof` file:
 hirsel prof run . --release --limit 67108864 --grant Stdout --pmu cycles,branch-misses --out run1.hprof -- ARGS
 hirsel prof top run1.hprof --limit 10            # hottest functions, per event
 hirsel prof annotate run1.hprof main.hirsel:42   # periods and compiler remarks for one line
-hirsel prof callers run1.hprof app@1/main/work   # who calls one definition (package@major/module/fn)
+hirsel prof callers run1.hprof local/app@1/main/work   # who calls one definition (package@major/module/fn)
 hirsel prof diff run1.hprof run2.hprof           # what a change moved
 ```
 

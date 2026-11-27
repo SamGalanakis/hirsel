@@ -415,7 +415,7 @@ fn a_user_package_named_runner_is_not_a_place() {
         result.unwrap(stderr.write(output, runner.note()))
         Ok(())
     }"#;
-    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
     let code = crate::code_store::CodeStore::new(dir.path().join("recipe-code"));
     // The package from a user and, as the control, from the toolchain.
     for toolchain in [false, true] {
@@ -490,13 +490,13 @@ fn a_user_package_named_runner_is_not_a_place() {
     for (member, manifest, file, text) in [
         (
             "app",
-            "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[dependencies]\nrunner = { major = 1, path = \"../runner\" }\n\n[sources]\n\"main.hirsel\" = \"main\"\n",
+            "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[dependencies]\nrunner = { package = \"runner\", major = 1, path = \"../runner\" }\n\n[sources]\n\"main.hirsel\" = \"main\"\n",
             "main.hirsel",
             source,
         ),
         (
             "runner",
-            "[package]\nname = \"runner\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"runner.hirsel\" = \"runner\"\n",
+            "[package]\nname = \"runner\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"runner.hirsel\" = \"runner\"\n",
             "runner.hirsel",
             "pub fn note() -> String { \"plain program entered\\n\" }\n",
         ),

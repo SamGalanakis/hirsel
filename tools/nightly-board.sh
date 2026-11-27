@@ -259,7 +259,7 @@ if (( toolchain_status == 0 )); then
   mkdir -p "$run/laws/fleet-sm1-trace"
   {
     "$checkout/$compiler/hirsel" test core/programs/fleet --libraries core \
-        --exact fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf --json --rerun \
+        --exact hirsel.ai/fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf --json --rerun \
         --test-timeout 300 --store "$run/fleet-sm1-trace" \
         >"$run/laws/fleet-sm1-trace/tests.json" &&
     python3 proofs/fleet/check_proofs.py --only trace \

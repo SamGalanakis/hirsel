@@ -248,11 +248,11 @@ impl Installed {
         let path = installed
             .cache()
             .join(format!("{}-{}.hpkg", id.name, id.major));
-        let mut archive = PackageArchive::open(&path)
+        let mut archive = PackageArchive::open(&path, true)
             .map_err(|error| io::Error::other(format!("installed {id}: {error}")))?;
         let content = archive.entries.remove(&archive.head).unwrap().content;
         check_identity(id, archive.head, &content.id).map_err(io::Error::other)?;
-        if content.bindings != expected {
+        if content.edges() != expected {
             let names: Vec<String> = expected.keys().map(ToString::to_string).collect();
             return Err(io::Error::other(format!(
                 "installed {id} must bind {}",

@@ -78,15 +78,12 @@ fn prog4_published_test_marker_and_edits_keep_reference_restrictions() {
 fn default_check_resolves_frozen_foreign_handles() {
     let law = PackageLaw::new();
     law.write("hirsel.toml", "[workspace]\nmembers = [\"codec\", \"app\"]\n");
-    law.app("app", "[dependencies]\ncodec = { major = 1, path = \"../codec\" }\n");
+    law.app("app", "[dependencies]\ncodec = { package = \"local/codec\", major = 1, path = \"../codec\" }\n");
     law.write(
         "app/main.hirsel",
         "pub fn open(f: Foreign[codec.Codec]) waits { codec.open(f) }\n",
     );
-    law.manifest(
-        "codec",
-        "codec",
-        1,
+    law.manifest("codec", "local/codec", "1.0.0",
         r#"
 [sources]
 "codec.hirsel" = "codec"
@@ -181,10 +178,7 @@ fn pure() -> Result[(), ()] { Ok(()) }
 fn default_test_store_rebuilds_when_named_grants_change() {
     let law = PackageLaw::new();
     let configure = |variable| {
-        law.manifest(
-            "app",
-            "app",
-            1,
+        law.manifest("app", "local/app", "1.0.0",
             &format!(
                 r#"[sources]
 "main.hirsel" = "main"
@@ -192,7 +186,7 @@ fn default_test_store_rebuilds_when_named_grants_change() {
 [tests]
 limit = 1048576
 
-[tests.runs."app@1/main/reads_env"]
+[tests.runs."local/app@1/main/reads_env"]
 grants = ["Stdout", "Env={variable}"]
 "#,
             ),
@@ -284,7 +278,7 @@ const PROGRAM_GRANTED: &str = "pub fn main(out: Stdout, clock: Clock) -> Result[
 #[test]
 fn program_manifest_grants_build_an_executable_that_starts() {
     let law = PackageLaw::new();
-    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\nlimit = 1048576\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\nlimit = 1048576\ngrants = [\"Stdout\", \"Clock\"]\n");
     law.write("app/main.hirsel", PROGRAM_GRANTED);
     let (status, stdout, stderr) = law.run(&["build", "app", "--output", "program"]);
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
@@ -300,7 +294,7 @@ fn program_manifest_grants_build_an_executable_that_starts() {
 #[test]
 fn program_manifest_grants_refuse_command_line_grants() {
     let law = PackageLaw::new();
-    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
     law.write("app/main.hirsel", PROGRAM_GRANTED);
     let reason = "this package declares [program] grants in hirsel.toml. Set limit, dirs and grants there";
     for flags in [&["--dir", "data"][..], &["--grant", "Stdout"], &["--limit", "1048576"]] {
@@ -320,9 +314,9 @@ fn program_manifest_grants_refuse_command_line_grants() {
 fn program_grants_of_a_dependency_are_never_applied() {
     let law = PackageLaw::new();
     law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\", \"util\"]\n");
-    law.manifest("work/app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nutil = { major = 1, path = \"../util\" }\n");
+    law.manifest("work/app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nutil = { package = \"local/util\", major = 1, path = \"../util\" }\n");
     law.write("work/app/main.hirsel", PROGRAM_GRANTED);
-    law.library("work/util", "util", 1, "pub fn one() -> u64 { 1u64 }\n", "[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.library("work/util", "local/util", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
     let (status, stdout, stderr) = law.run(&["build", "work/app", "--output", "program"]);
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
     assert_eq!(ungranted_warnings(&stderr), [ungranted("out"), ungranted("clock")]);
@@ -335,7 +329,7 @@ fn program_grants_of_a_dependency_are_never_applied() {
 #[test]
 fn program_build_warns_for_each_ungranted_parameter_in_order() {
     let law = PackageLaw::new();
-    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ndirs = [\"data\"]\ngrants = [\"Clock\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ndirs = [\"data\"]\ngrants = [\"Clock\"]\n");
     law.write(
         "app/main.hirsel",
         "pub fn main(err: Stderr, dir: Dir, clock: Clock, out: Stdout) -> Result[(), Exit] waits {\n    let _ = host.mono_ns(clock)\n    result.unwrap(stdout.write(out, \"x\"))\n    result.unwrap(stderr.write(err, \"x\"))\n    Ok(())\n}\n",
@@ -414,11 +408,8 @@ fn stop_resident(runtime: &Path, directory: &Path, mut server: std::process::Chi
 #[test]
 fn resident_test_session_gives_the_one_shot_run() {
     let law = PackageLaw::new();
-    law.manifest(
-        "app",
-        "app",
-        1,
-        "[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 1048576\n\n[tests.runs.\"app@1/main/reads_pwd\"]\ngrants = [\"Stdout\", \"Env=PWD\"]\n",
+    law.manifest("app", "local/app", "1.0.0",
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 1048576\n\n[tests.runs.\"local/app@1/main/reads_pwd\"]\ngrants = [\"Stdout\", \"Env=PWD\"]\n",
     );
     law.write(
         "app/main.hirsel",
@@ -494,9 +485,9 @@ fn error() -> Result[(), ()] { Error(()) }
     let rows = one_shot.1["tests"].as_array().unwrap();
     let row = |name: &str| rows.iter().find(|row| row["definition"] == name).unwrap();
     assert_eq!(one_shot.0, Some(1), "{}", one_shot.3);
-    assert_eq!(row("app@1/main/reads_pwd")["stdout"], client.to_str().unwrap());
-    assert_eq!(row("app@1/main/error")["passed"], false);
-    assert_eq!(row("app@1/main/determined")["passed"], true);
+    assert_eq!(row("local/app@1/main/reads_pwd")["stdout"], client.to_str().unwrap());
+    assert_eq!(row("local/app@1/main/error")["passed"], false);
+    assert_eq!(row("local/app@1/main/determined")["passed"], true);
     assert!(!one_shot.2.is_empty(), "the determined pass is stored");
     assert!(!one_shot.3.contains("hirsel-request-phases"), "{}", one_shot.3);
     std::fs::remove_dir_all(&results).unwrap();
@@ -523,7 +514,7 @@ fn error() -> Result[(), ()] { Error(()) }
 fn resident_server_answers_every_directory_and_contains_a_panic() {
     let law = PackageLaw::new();
     for side in ["one", "two"] {
-        law.manifest(&format!("{side}/app"), "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+        law.manifest(&format!("{side}/app"), "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
         law.write(
             &format!("{side}/app/main.hirsel"),
             format!("pub fn main(out: Stdout) -> Result[(), Exit] waits {{\n    result.unwrap(stdout.write(out, \"{side}\\n\"))\n    Ok(())\n}}\n"),
@@ -605,7 +596,7 @@ fn resident_server_answers_every_directory_and_contains_a_panic() {
 #[test]
 fn resident_server_stops_a_request_over_its_budget_and_serves_the_others() {
     let law = PackageLaw::new();
-    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
     law.write(
         "app/main.hirsel",
         "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n    result.unwrap(stdout.write(out, \"small\\n\"))\n    Ok(())\n}\n",
@@ -682,7 +673,7 @@ fn resident_server_stops_a_request_over_its_budget_and_serves_the_others() {
 #[test]
 fn resident_server_keeps_the_served_set_over_its_memory_cap() {
     let law = PackageLaw::new();
-    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
     let source = |text: &str| {
         law.write(
             "app/main.hirsel",
@@ -768,7 +759,7 @@ fn resident_server_peak_over_distinct_packages_is_the_largest_alone() {
     let law = PackageLaw::new();
     for k in 0..PACKAGES {
         let name = format!("p{k}");
-        law.manifest(&name, &name, 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+        law.manifest(&name, &format!("local/{name}"), "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
         let mut source = String::new();
         for i in 0..FUNCTIONS {
             writeln!(source, "fn f{i}(x: u64) -> u64 {{\n    x * {}u64 + {k}u64\n}}", i + k * 100_000).unwrap();

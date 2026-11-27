@@ -1,11 +1,11 @@
 [package]
-name = "spatial"
-major = 1
+name = "hirsel.ai/spatial"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { major = 1, path = "../store" }
+store = { package = "store", major = 1, path = "../store" }
 
 [sources]
 "spatial.hirsel" = "spatial"

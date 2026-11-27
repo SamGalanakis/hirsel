@@ -248,7 +248,7 @@ def bucket_processes(work, engine, compiler, runtime, cc, manifest_path, limit):
     native = (['--runtime', str(runtime.resolve())] if runtime else []) + (['--cc', str(cc.resolve())] if cc else [])
     command = [compiler, 'build', '--inputs', str(manifest_path), '--source-core', '--source-std',
                '--backend', engine, *native, '--store', str(work / 'publish-cache'),
-               '--entry', 'store_crash@1/runner_crash/bucket_main', '--limit', str(limit),
+               '--entry', 'hirsel.ai/store_crash@1/runner_crash/bucket_main', '--limit', str(limit),
                '--grant', 'Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
                '--grant', 'Secret:key=env:HIRSEL_BUCKET_T1_KEY kdf', '-o', str(executable)]
     for capability in ('Clock', 'Random', 'Tasks', 'Process', 'Stderr', 'Stdin', 'Stdout'):

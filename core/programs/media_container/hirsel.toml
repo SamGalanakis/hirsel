@@ -1,11 +1,11 @@
 [package]
 name = "media_container"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-media_bits = { major = 1, path = "../media_bits" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
 
 [sources]
 "track.hirsel" = "track"

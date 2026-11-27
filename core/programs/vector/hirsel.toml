@@ -1,11 +1,11 @@
 [package]
-name = "vector"
-major = 1
+name = "hirsel.ai/vector"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { major = 1, path = "../store" }
+store = { package = "store", major = 1, path = "../store" }
 
 [sources]
 "vector.hirsel" = "vector"
@@ -21,14 +21,14 @@ grants = ["Clock", "Random", "Tasks"]
 "tests-charges.hirsel" = "tests"
 "tests-tail.hirsel" = "tests"
 
-[tests.runs."vector@1/tests/ivf_tiered_source"]
+[tests.runs."hirsel.ai/vector@1/tests/ivf_tiered_source"]
 limit = 268435456
 dirs = ["."]
 
-[tests.runs."vector@1/tests/ivf_tiered_blocks"]
+[tests.runs."hirsel.ai/vector@1/tests/ivf_tiered_blocks"]
 limit = 268435456
 dirs = ["."]
 
-[tests.runs."vector@1/tests/ivf_demoted_source"]
+[tests.runs."hirsel.ai/vector@1/tests/ivf_demoted_source"]
 limit = 268435456
 dirs = ["."]

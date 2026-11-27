@@ -1,4 +1,5 @@
-use crate::package_dir::{module_path, package_name, path_rule};
+use crate::package_dir::{module_path, path_rule};
+use crate::package_manifest::name::{self as names, Version};
 use crate::product::bundled::TOOLCHAIN;
 use bytes::Bytes;
 use hirsel_core_ids::{ContentHash, PackageId};
@@ -107,9 +108,34 @@ pub(crate) fn parse_digest(text: &str) -> Option<[u8; 32]> {
     hirsel_core_ids::hex::decode(text)?.try_into().ok()
 }
 
-/// Canonical library content's encoding version (packages section 1). Version 2
-/// adds the containment tag after each foreign module's symbol prefix (FFI-10).
-const CONTENT_VERSION: u64 = 2;
+/// Canonical library content's encoding version (packages section 1). Version 3
+/// adds the package's version and binds each dependency by alias, exactly or by floor.
+const CONTENT_VERSION: u64 = 3;
+
+/// How a binding of `C` binds its dependency (packages section 1, item 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Binding {
+    /// Tag 0: the toolchain supplies the package.
+    Toolchain,
+    /// Tag 1: exactly this root.
+    Exact(Root),
+    /// Tag 2: this tested root, or a root of the identity at least `MAJOR.minor.patch`.
+    Floor {
+        tested: Root,
+        minor: u32,
+        patch: u32,
+    },
+}
+
+impl Binding {
+    /// The root the binding was checked against; none for a toolchain package.
+    pub(crate) fn root(&self) -> Option<Root> {
+        match *self {
+            Self::Toolchain => None,
+            Self::Exact(root) | Self::Floor { tested: root, .. } => Some(root),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Source {
@@ -148,7 +174,9 @@ impl std::io::Write for Sha256Writer {
 #[derive(Clone)]
 pub(crate) struct Content {
     pub(crate) id: Id,
-    pub(crate) bindings: BTreeMap<Id, Option<Root>>,
+    pub(crate) version: Version,
+    /// Each binding by its alias.
+    pub(crate) bindings: BTreeMap<String, (Id, Binding)>,
     pub(crate) files: BTreeMap<String, Source>,
     pub(crate) foreign: BTreeMap<Vec<String>, ForeignModule>,
 }
@@ -156,6 +184,15 @@ pub(crate) struct Content {
 pub(crate) struct ContentInventory<'a>(&'a Content);
 
 impl Content {
+    /// The identities the bindings bind, each with the root it was checked against. Two
+    /// aliases of one identity are one edge.
+    pub(crate) fn edges(&self) -> BTreeMap<Id, Option<Root>> {
+        self.bindings
+            .values()
+            .map(|(id, binding)| (id.clone(), binding.root()))
+            .collect()
+    }
+
     pub(crate) fn inventory(&self) -> Result<ContentInventory<'_>, String> {
         let mut count = source_count(self.files.len())?;
         for module in self.foreign.values() {
@@ -199,42 +236,85 @@ impl Content {
         .unwrap()
     }
 
+    /// Decodes a published `C` (packages section 1), whose own name is scoped.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
+        Self::decode_as(bytes, false)
+    }
+
+    /// Decodes `C`, admitting a toolchain package's own bare name when `toolchain` is set:
+    /// the toolchain's installed archives and `hirsel pack` of a toolchain package's
+    /// manifest, which section 2 lets carry a bare name.
+    pub(crate) fn decode_as(bytes: &[u8], toolchain: bool) -> Result<Self, String> {
         let mut input = Reader::new(bytes, CONTENT_LIMIT)?;
         let version = input.number(u64::MAX)?;
         if version != CONTENT_VERSION {
             return Err(format!("unknown version {version}"));
         }
-        let id = input.id()?;
-        if matches!(id.name.as_str(), "core" | "std") {
-            return Err(format!("bad package name {:?}", id.name));
+        let name = input.text()?.to_owned();
+        if !(names::scoped(&name) || toolchain && toolchain_major(&name).is_some()) {
+            return Err(format!("bad package name {name:?}"));
         }
+        let major = input.number(u32::MAX as u64)? as u32;
+        let minor = input.number(u32::MAX as u64)? as u32;
+        let patch = input.number(u32::MAX as u64)? as u32;
+        let pre = input.text()?.to_owned();
+        let version = Version {
+            major,
+            minor,
+            patch,
+            pre,
+        };
+        if !version.pre.is_empty() && !names::prerelease(&version.pre) {
+            return Err(format!("bad version {:?}", version.to_string()));
+        }
+        let id = Id { name, major };
         let charge = input.text()?;
         if charge != CHARGE {
             return Err(format!("unknown charge policy {charge:?}"));
         }
-        let mut bindings = BTreeMap::new();
-        let mut names = BTreeSet::new();
+        let mut bindings: BTreeMap<String, (Id, Binding)> = BTreeMap::new();
+        let mut identities: BTreeMap<Id, Binding> = BTreeMap::new();
         for _ in 0..input.count()? {
-            let binding = input.id()?;
-            let tag = input.number(u64::MAX)?;
-            let root = match tag {
-                0 if toolchain_major(&binding.name) == Some(binding.major) => None,
-                1 if !matches!(binding.name.as_str(), "core" | "std") => {
-                    Some(Root(input.digest()?))
-                }
-                _ => return Err(format!("bad binding {binding}")),
-            };
-            if !names.insert(binding.name.clone()) {
-                return Err(format!("two bindings of {}", binding.name));
+            let alias = input.text()?.to_owned();
+            if !names::alias(&alias) {
+                return Err(format!("bad alias {alias:?}"));
             }
             ordered(
                 bindings.last_key_value().map(|(key, _)| key),
-                &binding,
+                &alias,
                 "bindings",
-                &binding,
+                &alias,
             )?;
-            bindings.insert(binding, root);
+            let name = input.text()?.to_owned();
+            if name != "core" && !names::scoped(&name) && toolchain_major(&name).is_none() {
+                return Err(format!("bad package name {name:?}"));
+            }
+            let bound = Id {
+                name,
+                major: input.number(u32::MAX as u64)? as u32,
+            };
+            let refused = || format!("bad binding {alias} = {bound}");
+            let bare = !names::scoped(&bound.name);
+            if bound.name == "core" || bound == id {
+                return Err(refused());
+            }
+            let binding = match input.number(u64::MAX)? {
+                0 if toolchain_major(&bound.name) == Some(bound.major) => Binding::Toolchain,
+                1 if !bare => Binding::Exact(Root(input.digest()?)),
+                2 if !bare => Binding::Floor {
+                    tested: Root(input.digest()?),
+                    minor: input.number(u32::MAX as u64)? as u32,
+                    patch: input.number(u32::MAX as u64)? as u32,
+                },
+                _ => return Err(refused()),
+            };
+            if identities
+                .insert(bound.clone(), binding)
+                .is_some_and(|earlier| earlier != binding)
+            {
+                return Err(format!("bindings of {bound} differ"));
+            }
+            bindings.insert(alias, (bound, binding));
         }
         let mut files = BTreeMap::new();
         let mut paths = PathTree::default();
@@ -325,6 +405,7 @@ impl Content {
         input.end()?;
         Ok(Self {
             id,
+            version,
             bindings,
             files,
             foreign,
@@ -338,17 +419,31 @@ impl ContentInventory<'_> {
         let mut out = Writer::new(CONTENT_LIMIT);
         out.number(CONTENT_VERSION as usize);
         out.text(&content.id.name);
-        out.number(content.id.major as usize);
+        out.number(content.version.major as usize);
+        out.number(content.version.minor as usize);
+        out.number(content.version.patch as usize);
+        out.text(&content.version.pre);
         out.text(CHARGE);
         out.number(content.bindings.len());
-        for (binding, root) in &content.bindings {
-            out.text(&binding.name);
-            out.number(binding.major as usize);
-            match root {
-                None => out.number(0),
-                Some(root) => {
+        for (alias, (bound, binding)) in &content.bindings {
+            out.text(alias);
+            out.text(&bound.name);
+            out.number(bound.major as usize);
+            match binding {
+                Binding::Toolchain => out.number(0),
+                Binding::Exact(root) => {
                     out.number(1);
                     out.raw(&root.0);
+                }
+                Binding::Floor {
+                    tested,
+                    minor,
+                    patch,
+                } => {
+                    out.number(2);
+                    out.raw(&tested.0);
+                    out.number(*minor as usize);
+                    out.number(*patch as usize);
                 }
             }
         }
@@ -595,15 +690,6 @@ impl<'a> Reader<'a> {
         std::str::from_utf8(bytes).map_err(|_| format!("bad text at byte {start}"))
     }
 
-    fn id(&mut self) -> Result<Id, String> {
-        let name = self.text()?.to_owned();
-        if !package_name(&name) {
-            return Err(format!("bad package name {name:?}"));
-        }
-        let major = self.number(u32::MAX as u64)? as u32;
-        Ok(Id { name, major })
-    }
-
     fn module(&mut self) -> Result<Vec<String>, String> {
         let mut parts = Vec::new();
         for _ in 0..self.count()? {
@@ -639,7 +725,12 @@ pub(crate) struct PackageArchive {
 }
 
 impl PackageArchive {
-    pub(crate) fn open(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Opens the package archive at `path`; `toolchain` admits a toolchain package's own
+    /// bare name, as [`Content::decode_as`] does.
+    pub(crate) fn open(
+        path: &std::path::Path,
+        toolchain: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
 
@@ -654,7 +745,7 @@ impl PackageArchive {
             let mut bytes = Vec::new();
             file.take(ARCHIVE_LIMIT as u64 + 1)
                 .read_to_end(&mut bytes)?;
-            let archive = Self::decode(bytes.into())?;
+            let archive = Self::decode_as(bytes.into(), toolchain)?;
             let id = &archive.entries[&archive.head].content.id;
             archive.verify(id, archive.head, "archive")?;
             Ok(archive)
@@ -679,6 +770,12 @@ impl PackageArchive {
     }
 
     pub(crate) fn decode(bytes: Bytes) -> Result<Self, String> {
+        Self::decode_as(bytes, false)
+    }
+
+    /// Decodes an archive whose head may be a toolchain package (see [`Content::decode_as`]).
+    /// Every other entry is a published library.
+    pub(crate) fn decode_as(bytes: Bytes, toolchain: bool) -> Result<Self, String> {
         let mut input = Reader::new(&bytes, ARCHIVE_LIMIT)?;
         if input.text()? != ARCHIVE_TAG {
             return Err("unknown package archive tag".into());
@@ -695,7 +792,7 @@ impl PackageArchive {
         let mut entries = BTreeMap::new();
         for _ in 0..count {
             let encoded = input.frame()?;
-            let content = Content::decode(encoded)?;
+            let content = Content::decode_as(encoded, toolchain && head.is_none())?;
             let root = Root::of(encoded);
             if let Some(head) = head {
                 if root == head {
@@ -738,8 +835,11 @@ impl PackageArchive {
                 continue;
             }
             let binder = &self.entries[&root].content;
-            for (id, root) in &binder.bindings {
-                let Some(root) = root else { continue };
+            for (id, binding) in binder.bindings.values() {
+                let Some(root) = binding.root() else {
+                    continue;
+                };
+                let root = &root;
                 match self.entries.get(root) {
                     Some(entry) if entry.content.id == *id => queued.push(*root),
                     Some(entry) => {

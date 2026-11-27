@@ -152,7 +152,7 @@ commands! {
         Store(StoreOption), Pair: HELP;
     "fleet", "fleet <sim>", "Run deterministic Fleet and Directory[K] simulations.";
         Simple(NoOption), One: HELP;
-    "fleet sim", "fleet sim [package-dir] [--hosts N] [--seed S] [--rounds R] [--places P] [--partitions K] [--json] [options]", "Drive the fleet@1 move kernel and Directory[K] in std.sim with seeded faults and check invariants and SM1 traces.";
+    "fleet sim", "fleet sim [package-dir] [--hosts N] [--seed S] [--rounds R] [--places P] [--partitions K] [--json] [options]", "Drive the hirsel.ai/fleet@1 move kernel and Directory[K] in std.sim with seeded faults and check invariants and SM1 traces.";
         Compiler(CompilerOption), One:
             HELP, Json, SimSeed, FleetHosts, FleetRounds, FleetPlaces, FleetPartitions, FleetPlacement,
             Release, Backend, Runtime, Limit, Libraries, Store;

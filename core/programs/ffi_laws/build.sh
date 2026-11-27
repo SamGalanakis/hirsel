@@ -10,7 +10,7 @@ compiler=${HIRSEL:-hirsel}
 llvm=${LLVM_SYS_231_PREFIX:?set LLVM_SYS_231_PREFIX to the pinned LLVM tree}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
-"$compiler" inspect . --foreign-header ffi_laws@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-header hirsel.ai/ffi_laws@1/native "$@" > "$stage/native.h"
 if [ "$target" = aarch64-apple-darwin ]; then
     ../../../tools/native-toolchain/darwin/foreign-cc.sh -std=c11 -O2 -fPIC \
         -I "$stage" -c laws.c -o "$stage/laws.o"

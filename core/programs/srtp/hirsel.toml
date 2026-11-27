@@ -1,11 +1,11 @@
 [package]
 name = "srtp"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-rtp = { major = 1, path = "../rtp" }
+rtp = { package = "rtp", major = 1, path = "../rtp" }
 
 [sources]
 "session.hirsel" = "srtp"

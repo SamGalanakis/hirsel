@@ -1,168 +1,279 @@
 # hirsel.lock: written by hirsel; do not edit.
-version = 1
-
-[[package]]
-id = "archive@1"
-source = "member:archive"
-edges = ["std@1"]
-
-[[package]]
-id = "av1@1"
-source = "member:av1"
-edges = []
-
-[[package]]
-id = "checkbox@1"
-source = "member:checkbox"
-edges = ["runner@1", "std@1", "store@1"]
+version = 2
 
 [[package]]
 id = "cli@1"
+version = "1.0.0"
 source = "member:cli"
 edges = ["std@1"]
 
 [[package]]
-id = "compute@1"
-source = "member:compute"
-edges = ["std@1"]
-
-[[package]]
 id = "dtls@1"
+version = "1.0.0"
 source = "member:dtls"
 edges = ["std@1"]
 
 [[package]]
-id = "ffi_laws@1"
+id = "hirsel.ai/archive@1"
+version = "1.0.0"
+source = "member:archive"
+edges = ["std@1"]
+
+[[package]]
+id = "hirsel.ai/av1@1"
+version = "1.0.0"
+source = "member:av1"
+edges = []
+
+[[package]]
+id = "hirsel.ai/checkbox@1"
+version = "1.0.0"
+source = "member:checkbox"
+edges = ["runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "hirsel.ai/compute@1"
+version = "1.0.0"
+source = "member:compute"
+edges = ["std@1"]
+
+[[package]]
+id = "hirsel.ai/ffi_laws@1"
+version = "1.0.0"
 source = "member:ffi_laws"
 edges = []
 
 [[package]]
-id = "fleet@1"
+id = "hirsel.ai/fleet@1"
+version = "1.0.0"
 source = "member:fleet"
-edges = ["compute@1", "runner@1", "std@1", "store@1"]
+edges = ["hirsel.ai/compute@1", "runner@1", "std@1", "store@1"]
 
 [[package]]
-id = "h264@1"
+id = "hirsel.ai/h264@1"
+version = "1.0.0"
 source = "member:h264"
 edges = ["media_bits@1", "std@1"]
 
 [[package]]
-id = "hybrid@1"
+id = "hirsel.ai/hybrid@1"
+version = "1.0.0"
 source = "member:hybrid"
 edges = ["std@1"]
 
 [[package]]
-id = "image_core@1"
+id = "hirsel.ai/image_core@1"
+version = "1.0.0"
 source = "member:image_core"
 edges = ["media_bits@1", "media_container@1", "std@1"]
 
 [[package]]
-id = "image_jpeg@1"
+id = "hirsel.ai/image_jpeg@1"
+version = "1.0.0"
 source = "member:image_jpeg"
-edges = ["image_core@1"]
+edges = ["hirsel.ai/image_core@1"]
 
 [[package]]
-id = "image_pipeline@1"
+id = "hirsel.ai/image_pipeline@1"
+version = "1.0.0"
 source = "member:image_pipeline"
-edges = ["av1@1", "image_core@1", "image_jpeg@1", "image_webp@1", "media_bits@1", "std@1", "video_yuv@1"]
+edges = ["hirsel.ai/av1@1", "hirsel.ai/image_core@1", "hirsel.ai/image_jpeg@1", "hirsel.ai/image_webp@1", "hirsel.ai/video_yuv@1", "media_bits@1", "std@1"]
 
 [[package]]
-id = "image_webp@1"
+id = "hirsel.ai/image_webp@1"
+version = "1.0.0"
 source = "member:image_webp"
-edges = ["image_core@1"]
+edges = ["hirsel.ai/image_core@1"]
 
 [[package]]
-id = "jwtbind@1"
+id = "hirsel.ai/jwtbind@1"
+version = "1.0.0"
 source = "member:jwtbind"
 edges = ["runner@1", "std@1", "store@1"]
 
 [[package]]
+id = "hirsel.ai/opus@1"
+version = "1.0.0"
+source = "member:opus"
+edges = []
+
+[[package]]
+id = "hirsel.ai/postgres@1"
+version = "1.0.0"
+source = "member:postgres"
+edges = ["std@1"]
+
+[[package]]
+id = "hirsel.ai/replay_receive_laws@1"
+version = "1.0.0"
+source = "member:replay_receive_laws"
+edges = ["dtls@1", "rtp@1", "sframe@1", "srtp@1", "std@1"]
+
+[[package]]
+id = "hirsel.ai/spatial@1"
+version = "1.0.0"
+source = "member:spatial"
+edges = ["std@1", "store@1"]
+
+[[package]]
+id = "hirsel.ai/sqlite@1"
+version = "1.0.0"
+source = "member:sqlite"
+edges = []
+
+[[package]]
+id = "hirsel.ai/store_crash@1"
+version = "1.0.0"
+source = "member:store-crash"
+edges = ["hirsel.ai/jwtbind@1", "platform@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "hirsel.ai/toml@1"
+version = "1.0.0"
+source = "member:toml"
+edges = ["std@1"]
+
+[[package]]
+id = "hirsel.ai/tz@1"
+version = "1.0.0"
+source = "member:tz"
+edges = ["std@1"]
+
+[[package]]
+id = "hirsel.ai/vector@1"
+version = "1.0.0"
+source = "member:vector"
+edges = ["std@1", "store@1"]
+
+[[package]]
+id = "hirsel.ai/video_packager@1"
+version = "1.0.0"
+source = "member:video_packager"
+edges = ["media_bits@1", "media_container@1", "std@1"]
+
+[[package]]
+id = "hirsel.ai/video_thumb@1"
+version = "1.0.0"
+source = "member:video_thumb"
+edges = ["hirsel.ai/av1@1", "hirsel.ai/h264@1", "hirsel.ai/image_core@1", "hirsel.ai/image_pipeline@1", "hirsel.ai/image_webp@1", "hirsel.ai/video_yuv@1", "media_bits@1", "media_container@1", "std@1"]
+
+[[package]]
+id = "hirsel.ai/video_transcode@1"
+version = "1.0.0"
+source = "member:video_transcode"
+edges = ["hirsel.ai/av1@1", "hirsel.ai/h264@1", "hirsel.ai/video_packager@1", "hirsel.ai/video_yuv@1", "media_bits@1", "media_container@1", "std@1"]
+
+[[package]]
+id = "hirsel.ai/video_yuv@1"
+version = "1.0.0"
+source = "member:video_yuv"
+edges = []
+
+[[package]]
+id = "hirsel.ai/wasm_laws@1"
+version = "1.0.0"
+source = "member:wasm_laws"
+edges = []
+
+[[package]]
+id = "hirsel.ai/webtransport_browser_echo@1"
+version = "1.0.0"
+source = "member:webtransport/browser"
+edges = ["quic@1", "std@1", "webtransport@1"]
+
+[[package]]
+id = "hirsel.ai/wire@1"
+version = "1.0.0"
+source = "member:wire"
+edges = ["platform@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "hirsel.ai/xml@1"
+version = "1.0.0"
+source = "member:xml"
+edges = []
+
+[[package]]
+id = "hirsel.ai/yaml@1"
+version = "1.0.0"
+source = "member:yaml"
+edges = ["std@1"]
+
+[[package]]
 id = "mcp@1"
+version = "1.0.0"
 source = "member:mcp"
 edges = ["std@1"]
 
 [[package]]
 id = "media_bits@1"
+version = "1.0.0"
 source = "member:media_bits"
 edges = ["std@1"]
 
 [[package]]
 id = "media_container@1"
+version = "1.0.0"
 source = "member:media_container"
 edges = ["media_bits@1", "std@1"]
 
 [[package]]
 id = "media_record@1"
+version = "1.0.0"
 source = "member:media_record"
 edges = ["media_bits@1", "media_container@1", "rtp@1", "rtp_jitter@1", "std@1", "webrtc_sfu@1"]
 
 [[package]]
 id = "moq@1"
+version = "1.0.0"
 source = "member:moq"
 edges = ["quic@1", "sframe@1", "std@1", "webtransport@1"]
 
 [[package]]
-id = "opus@1"
-source = "member:opus"
-edges = []
-
-[[package]]
 id = "platform@1"
+version = "1.0.0"
 source = "member:platform"
 edges = ["runner@1", "std@1", "store@1"]
 
 [[package]]
-id = "postgres@1"
-source = "member:postgres"
-edges = ["std@1"]
-
-[[package]]
 id = "quic@1"
+version = "1.0.0"
 source = "member:quic"
 edges = ["std@1"]
 
 [[package]]
-id = "replay_receive_laws@1"
-source = "member:replay_receive_laws"
-edges = ["dtls@1", "rtp@1", "sframe@1", "srtp@1", "std@1"]
-
-[[package]]
 id = "rtp@1"
+version = "1.0.0"
 source = "member:rtp"
 edges = ["std@1"]
 
 [[package]]
 id = "rtp_jitter@1"
+version = "1.0.0"
 source = "member:rtp_jitter"
 edges = ["media_bits@1", "rtp@1", "std@1"]
 
 [[package]]
 id = "runner@1"
+version = "1.0.0"
 source = "member:runner"
 edges = ["std@1", "store@1"]
 
 [[package]]
 id = "search@1"
+version = "1.0.0"
 source = "member:search"
 edges = ["std@1", "store@1"]
 
 [[package]]
 id = "sframe@1"
+version = "1.0.0"
 source = "member:sframe"
 edges = ["media_bits@1", "std@1"]
 
 [[package]]
-id = "spatial@1"
-source = "member:spatial"
-edges = ["std@1", "store@1"]
-
-[[package]]
-id = "sqlite@1"
-source = "member:sqlite"
-edges = []
-
-[[package]]
 id = "srtp@1"
+version = "1.0.0"
 source = "member:srtp"
 edges = ["rtp@1", "std@1"]
 
@@ -173,90 +284,30 @@ edges = []
 
 [[package]]
 id = "store@1"
+version = "1.0.0"
 source = "member:store"
 edges = ["std@1"]
 
 [[package]]
-id = "store_crash@1"
-source = "member:store-crash"
-edges = ["jwtbind@1", "platform@1", "runner@1", "std@1", "store@1"]
-
-[[package]]
 id = "stun_ice@1"
+version = "1.0.0"
 source = "member:stun_ice"
 edges = ["std@1"]
 
 [[package]]
-id = "toml@1"
-source = "member:toml"
-edges = ["std@1"]
-
-[[package]]
 id = "turn@1"
+version = "1.0.0"
 source = "member:turn"
 edges = ["std@1", "stun_ice@1"]
 
 [[package]]
-id = "tz@1"
-source = "member:tz"
-edges = ["std@1"]
-
-[[package]]
-id = "vector@1"
-source = "member:vector"
-edges = ["std@1", "store@1"]
-
-[[package]]
-id = "video_packager@1"
-source = "member:video_packager"
-edges = ["media_bits@1", "media_container@1", "std@1"]
-
-[[package]]
-id = "video_thumb@1"
-source = "member:video_thumb"
-edges = ["av1@1", "h264@1", "image_core@1", "image_pipeline@1", "image_webp@1", "media_bits@1", "media_container@1", "std@1", "video_yuv@1"]
-
-[[package]]
-id = "video_transcode@1"
-source = "member:video_transcode"
-edges = ["av1@1", "h264@1", "media_bits@1", "media_container@1", "std@1", "video_packager@1", "video_yuv@1"]
-
-[[package]]
-id = "video_yuv@1"
-source = "member:video_yuv"
-edges = []
-
-[[package]]
-id = "wasm_laws@1"
-source = "member:wasm_laws"
-edges = []
-
-[[package]]
 id = "webrtc_sfu@1"
+version = "1.0.0"
 source = "member:webrtc_sfu"
 edges = ["dtls@1", "media_bits@1", "moq@1", "quic@1", "rtp@1", "rtp_jitter@1", "runner@1", "srtp@1", "std@1", "store@1", "stun_ice@1", "turn@1", "webtransport@1"]
 
 [[package]]
 id = "webtransport@1"
+version = "1.0.0"
 source = "member:webtransport"
 edges = ["quic@1", "std@1"]
-
-[[package]]
-id = "webtransport_browser_echo@1"
-source = "member:webtransport/browser"
-edges = ["quic@1", "std@1", "webtransport@1"]
-
-[[package]]
-id = "wire@1"
-source = "member:wire"
-edges = ["platform@1", "runner@1", "std@1", "store@1"]
-
-[[package]]
-id = "xml@1"
-source = "member:xml"
-edges = []
-
-[[package]]
-id = "yaml@1"
-source = "member:yaml"
-edges = ["std@1"]

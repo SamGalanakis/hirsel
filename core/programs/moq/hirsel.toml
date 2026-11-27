@@ -1,13 +1,13 @@
 [package]
 name = "moq"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-quic = { major = 1, path = "../quic" }
-webtransport = { major = 1, path = "../webtransport" }
-sframe = { major = 1, path = "../sframe" }
+quic = { package = "quic", major = 1, path = "../quic" }
+webtransport = { package = "webtransport", major = 1, path = "../webtransport" }
+sframe = { package = "sframe", major = 1, path = "../sframe" }
 
 [sources]
 "wire.hirsel" = "codec"

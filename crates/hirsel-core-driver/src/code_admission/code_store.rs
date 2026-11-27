@@ -342,7 +342,7 @@ fn release_requires_a_root_limit_and_development_defaults() {
         admitted_limit(&["--release", "--limit", "1048576"]),
         1_048_576
     );
-    fs::write(path.join("hirsel.toml"), "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[program]\nlimit = 2097152\n").unwrap();
+    fs::write(path.join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[program]\nlimit = 2097152\n").unwrap();
     assert_eq!(admitted_limit(&["--release"]), 2_097_152);
 }
 

@@ -5,7 +5,7 @@ compiler=${HIRSEL:-hirsel}
 llvm=${LLVM_SYS_231_PREFIX:?set LLVM_SYS_231_PREFIX to the pinned LLVM tree}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
-"$compiler" inspect . --foreign-header opus@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-header hirsel.ai/opus@1/native "$@" > "$stage/native.h"
 cp hirsel_opus.c "$stage"
 (
     cd "$stage"

@@ -231,7 +231,7 @@ in the package and runs each execution in its own process. A package whose
 mandatory and is each test run's root limit; `--dir` and `--grant` configure
 capabilities as for `run`. A test receives only the grants its parameters take.
 `--filter TEXT` selects tests whose full definition path contains TEXT.
-`--exact DEFINITION` matches a full path such as `app@1/main/smoke`. Repeat
+`--exact DEFINITION` matches a full path such as `local/app@1/main/smoke`. Repeat
 `--exact` to select multiple paths. The two selectors are mutually exclusive.
 `--test-timeout SECONDS` bounds each test's execution. An earlier failure does
 not stop later tests, and no matching test exits 2.

@@ -35,7 +35,7 @@ if [ "$system" = Darwin ]; then
     cxx="$stage/darwin-cxx"
     archive=libhirsel_yuv-aarch64-apple-darwin.a
 fi
-"$compiler" inspect . --foreign-header video_yuv@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-header hirsel.ai/video_yuv@1/native "$@" > "$stage/native.h"
 cp hirsel_yuv.c "$stage"
 if [ -n "${YUV_REFERENCE_DIR:-}" ]; then
     mkdir -p "$YUV_REFERENCE_DIR"

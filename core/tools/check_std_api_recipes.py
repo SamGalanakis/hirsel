@@ -139,7 +139,7 @@ def write_consumer(work, found):
             raise ValueError(f"{error} (fence line {_line})") from None
         (package / filename).write_text(text)
         entries.append(f'"{filename}" = "{name}"')
-    manifest = "[package]\nname = \"std_api_recipes\"\nmajor = 1\ncharge = \"charge-v1\"\n\n"
+    manifest = "[package]\nname = \"local/std_api_recipes\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n"
     manifest += "[dependencies]\nstd = { major = 1 }\n\n[sources]\n" + "\n".join(entries) + "\n"
     (package / "hirsel.toml").write_text(manifest)
     return package

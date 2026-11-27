@@ -67,7 +67,7 @@ def no_jwt_at_rest(args, work, engine, selection, row):
     directory.mkdir()
     binary = work / f'{name}-{engine}'
     command = [str(args.compiler.resolve()), 'build', '--inputs', str(selection), '--source-core',
-               '--source-std', '--entry', 'store_crash@1/runner_crash/no_jwt_at_rest', '--backend', engine,
+               '--source-std', '--entry', 'hirsel.ai/store_crash@1/runner_crash/no_jwt_at_rest', '--backend', engine,
                '--runtime', str(args.runtime.resolve()), '--store', str(work / f'l68-objects-{engine}'),
                '--limit', str(64 * 1024 * 1024), '--dir', str(directory), '-o', str(binary),
                '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
@@ -93,7 +93,7 @@ def no_secret_at_rest(args, work, engine, selection, row):
     directory.mkdir()
     binary = work / f'{name}-{engine}'
     command = [str(args.compiler.resolve()), 'build', '--inputs', str(selection), '--source-core',
-               '--source-std', '--entry', 'store_crash@1/runner_crash/no_secret_at_rest', '--backend', engine,
+               '--source-std', '--entry', 'hirsel.ai/store_crash@1/runner_crash/no_secret_at_rest', '--backend', engine,
                '--runtime', str(args.runtime.resolve()), '--store', str(work / f'l31-objects-{engine}'),
                '--limit', str(64 * 1024 * 1024), '--dir', str(directory), '-o', str(binary),
                '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
@@ -115,8 +115,8 @@ def crash_part(args, root, work, engine, name, inputs_path, stop_cases, part):
     build = work / name
     build.mkdir()
     cases = {
-        'deadline': ('store_crash@1/runner_crash/stop_main', (), (args.stop_case,) if args.stop_case else stop_cases),
-        'activation': ('store_crash@1/runner_crash/main', ('runner-activation', 'runner-activation-genesis'),
+        'deadline': ('hirsel.ai/store_crash@1/runner_crash/stop_main', (), (args.stop_case,) if args.stop_case else stop_cases),
+        'activation': ('hirsel.ai/store_crash@1/runner_crash/main', ('runner-activation', 'runner-activation-genesis'),
                        ('runner-unavailable-genesis', 'runner-unavailable-install')),
         'l61-crash': ('runner@1/runner/staged_crash_main', (), ('l61-before-release', 'l61-before-flush')),
     }

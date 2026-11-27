@@ -188,7 +188,7 @@ fn l37_bounds_hold_before_memory() {
     let bad = |failure: &str| {
         PackageLaw::refuse(
             server.run(&law, &["check", "app"], "packages"),
-            &format!("wrap@1: {source} sent a bad pack: {failure}"),
+            &format!("fixture.test/wrap@1: {source} sent a bad pack: {failure}"),
         );
         law.empty_store();
     };
@@ -217,7 +217,7 @@ fn l37_bounds_hold_before_memory() {
     PackageLaw::refuse(
         server.run(&law, &["check", "app"], "packages"),
         &format!(
-            "wrap@1: fetching {source} failed: the response is over the limit of 512 MiB; hirsel fetches the whole commit, so a repository whose commit is larger cannot be a git source"
+            "fixture.test/wrap@1: fetching {source} failed: the response is over the limit of 512 MiB; hirsel fetches the whole commit, so a repository whose commit is larger cannot be a git source"
         ),
     );
     law.empty_store();
@@ -349,7 +349,8 @@ fn fetch_chain(law: &PackageLaw, server: &GitServer) {
     for n in (0..257).rev() {
         let binding = next.as_ref().map_or(String::new(), |rev| {
             format!(
-                "\n[dependencies]\nn{} = {{ major = 1, root = \"{PACKAGE_X}\", git = \"https://alpha.test/n{}\", rev = \"{rev}\" }}\n",
+                "\n[dependencies]\nn{} = {{ package = \"fixture.test/n{}\", major = 1, root = \"{PACKAGE_X}\", git = \"https://alpha.test/n{}\", rev = \"{rev}\" }}\n",
+                n + 1,
                 n + 1,
                 n + 1
             )
@@ -357,7 +358,7 @@ fn fetch_chain(law: &PackageLaw, server: &GitServer) {
         let tree = Tree::default()
             .file(
                 "hirsel.toml",
-                format!("[package]\nname = \"n{n}\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"n.hirsel\" = \"n\"\n{binding}"),
+                format!("[package]\nname = \"fixture.test/n{n}\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"n.hirsel\" = \"n\"\n{binding}"),
             )
             .file("n.hirsel", "pub fn one() -> u64 { 1u64 }\n");
         let (repo, commit) = built(tree);
@@ -372,7 +373,7 @@ fn fetch_chain(law: &PackageLaw, server: &GitServer) {
     assert_eq!(status, Some(2), "{stderr}");
     assert_eq!(
         stderr,
-        format!("hirsel: n0@1: git:https://alpha.test/n0#{first} causes more than 256 fetches\n")
+        format!("hirsel: fixture.test/n0@1: git:https://alpha.test/n0#{first} causes more than 256 fetches\n")
     );
     assert_eq!(manifest_text(law, "chain"), before);
     let log = server.log();

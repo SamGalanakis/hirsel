@@ -1,2 +1,2 @@
 hirsel.laws 1
-video_yuv@1/tests/direct_libyuv_vectors src=9933e0e0727068a9 sig=5d4806ac7798bd55 run=1c4d6316fe75dbd4 bug=- oracle=- rows=pending
+hirsel.ai/video_yuv@1/tests/direct_libyuv_vectors src=a7732a4caec887c3 sig=b53d08991a649e30 run=9da9bb83581d84e4 bug=- oracle=- rows=pending

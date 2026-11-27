@@ -1,6 +1,6 @@
 [package]
-name = "place_density"
-major = 1
+name = "local/place_density"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]

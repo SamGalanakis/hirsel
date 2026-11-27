@@ -1,11 +1,11 @@
 [package]
 name = "search"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { major = 1, path = "../store" }
+store = { package = "store", major = 1, path = "../store" }
 
 [sources]
 "search.hirsel" = "search"

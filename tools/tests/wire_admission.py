@@ -53,12 +53,12 @@ READ_RESULT_FP = crc64(
 # PROG-9 encodes the entire function signature, including the transaction's
 # Caller parameter. RUNNER-SPEC rule 3 puts those identity bytes in the key.
 ENTRIES = {
-    'put': (b'\x01wire@1/admission/put(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[u64,u32]', fingerprint(5), fingerprint(17, 6, 5)),
-    'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
+    'put': (b'\x01wire@1/admission/put(mut store@1/store/Tx,hirsel.ai/wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[u64,u32]', fingerprint(5), fingerprint(17, 6, 5)),
+    'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,hirsel.ai/wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
     'big': (b'\x01wire@1/admission/big(take u32)->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]', fingerprint(5), fingerprint(14, 3)),
-    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', fingerprint(5), READ_RESULT_FP),
-    'stream_q': (b'\x01wire@1/admission/stream_q(store@1/store/Tx,wire@1/admission/H,take store@1/store/StreamId)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', 0x206fba08206543bf, READ_RESULT_FP),
-    'stamps_q': (b'\x01wire@1/admission/stamps_q(store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take core@1/core/List[store@1/store/ExportStamp])->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', 0x84237020b835b8d7, READ_RESULT_FP),
+    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,hirsel.ai/wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', fingerprint(5), READ_RESULT_FP),
+    'stream_q': (b'\x01wire@1/admission/stream_q(store@1/store/Tx,hirsel.ai/wire@1/admission/H,take store@1/store/StreamId)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', 0x206fba08206543bf, READ_RESULT_FP),
+    'stamps_q': (b'\x01wire@1/admission/stamps_q(store@1/store/Tx,hirsel.ai/wire@1/admission/H,store@1/store/Caller,take core@1/core/List[store@1/store/ExportStamp])->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', 0x84237020b835b8d7, READ_RESULT_FP),
     'gone': (b'retired', 0, 0),
     'unknown': (b'unknown', 0, 0),
 }
@@ -510,10 +510,10 @@ def cli_dev_restores_subscription():
         server.mkdir()
         (work / 'hirsel.toml').write_text('[workspace]\nmembers = ["board", "store", "runner"]\n')
         (server / 'hirsel.toml').write_text(
-            '[package]\nname = "board"\nmajor = 1\ncharge = "charge-v1"\n'
+            '[package]\nname = "local/board"\nversion = "1.0.0"\ncharge = "charge-v1"\n'
             '[dependencies]\nstd = { major = 1 }\n'
-            'store = { major = 1, path = "../store" }\n'
-            'runner = { major = 1, path = "../runner" }\n'
+            'store = { package = "store", major = 1, path = "../store" }\n'
+            'runner = { package = "runner", major = 1, path = "../runner" }\n'
             '[sources]\n"main.hirsel" = "main"\n[program]\nmodule = "main"\nfunction = "main"\n')
         for package in ('store', 'runner'):
             original = root / 'core/programs' / package

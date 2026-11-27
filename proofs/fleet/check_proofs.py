@@ -23,7 +23,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 TOOLS = Path(os.environ.get("FORMAL_TOOLS", Path.home() / ".local" / "opt" / "fleet-formal"))
 VEIL_DIR = Path(os.environ.get("VEIL_DIR", "/tmp/ref-veil"))
-TRACE_TEST = "fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf"
+TRACE_TEST = "hirsel.ai/fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf"
 
 
 def run(cmd, cwd):

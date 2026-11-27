@@ -2,7 +2,7 @@
 // of laws_git.rs, included after it.
 
 /// The L23 binding, copied from the spec's text block: W (section 6) and C1 (Git 2.43.0).
-const L23_BINDING: &str = "wrap = { major = 1, root = \"sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b\", git = \"https://github.com/o/r\", rev = \"32e212a4b69a9f3b39893b29f4e4f1e935626a2b\", ref = \"refs/tags/v1\", dir = \"wrap\" }";
+const L23_BINDING: &str = "wrap = { package = \"fixture.test/wrap\", major = 1, root = \"sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5\", git = \"https://github.com/o/r\", rev = \"77cbe52623fcc3479739eb37e89ddbe5c4626077\", ref = \"refs/tags/v1\", dir = \"wrap\" }";
 
 /// Moves `name` of the repository at `key` to `commit`.
 fn point(server: &GitServer, key: &str, name: &str, commit: &str) {
@@ -126,15 +126,15 @@ fn l35_moved_tag_is_reported() {
     PackageLaw::refuse(
         server.add(&law, "app", &[tagged]),
         "https://alpha.test/r1 refs/tags/v1 moved:
-  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b
-  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302
+  bound: 77cbe52623fcc3479739eb37e89ddbe5c4626077 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
+  fetched: 0944e001a1bd66c618ca9bb9770617490946b4bc sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
 pass --update to accept it",
     );
     assert_eq!(manifest_text(&law, "app"), manifest);
     assert_eq!(fs::read(law.path("app/hirsel.lock")).unwrap(), lock);
     assert_eq!(stored(&law, "packages"), roots(&[PACKAGE_X, PACKAGE_W]));
 
-    let updated = format!("hirsel: updated wrap@1 {PACKAGE_W} -> {PACKAGE_W2} in ");
+    let updated = format!("hirsel: updated fixture.test/wrap@1 {PACKAGE_W} -> {PACKAGE_W2} in ");
     let stdout = PackageLaw::pass(server.add(&law, "app", &[tagged, "--update"]));
     assert!(stdout.starts_with(&updated), "{stdout}");
     let binding = wrap_binding("https://alpha.test/r1", C2, PACKAGE_W2, Some("refs/tags/v1"));
@@ -149,8 +149,8 @@ pass --update to accept it",
     PackageLaw::refuse(
         server.add(&law, "branch", &[branch]),
         "https://alpha.test/r1 refs/heads/main now names another commit:
-  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b
-  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302
+  bound: 77cbe52623fcc3479739eb37e89ddbe5c4626077 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
+  fetched: 0944e001a1bd66c618ca9bb9770617490946b4bc sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
 pass --update to accept it",
     );
     point(&server, "alpha.test/r1", "refs/heads/main", C1);

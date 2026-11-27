@@ -4,7 +4,7 @@ std = { major = 1 }
 
 [tests]
 limit = 268435456
-grants = ["Foreign=opus@1/opus/Opus", "Stdout"]
+grants = ["Foreign=hirsel.ai/opus@1/opus/Opus", "Stdout"]
 dirs = ["fixtures"]
 
 [tests.sources]

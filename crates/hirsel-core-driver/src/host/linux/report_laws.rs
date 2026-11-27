@@ -14,7 +14,7 @@ fn json_test_report_refuses_a_full_output_file() {
     let app = directory.path();
     fs::write(
         app.join("hirsel.toml"),
-        "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 67108864\n\n[tests.sources]\n\"test.hirsel\" = \"tests\"\n",
+        "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 67108864\n\n[tests.sources]\n\"test.hirsel\" = \"tests\"\n",
     )
     .unwrap();
     fs::write(

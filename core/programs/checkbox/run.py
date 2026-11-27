@@ -10,7 +10,7 @@ import webbrowser
 
 PROGRAM = Path(__file__).resolve().parent
 ROOT = PROGRAM.parents[2]
-ENTRY = "checkbox@1/main"
+ENTRY = "hirsel.ai/checkbox@1/main"
 N_PLACE = "1048576"
 
 

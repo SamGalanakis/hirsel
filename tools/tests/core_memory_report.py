@@ -74,7 +74,7 @@ pub fn caught() -> Result[(), Exit] {
                         archive_env = 'HIRSEL_CORE_RT_OBSERVED_ARCHIVES' if observed else 'HIRSEL_CORE_RT_DEFAULT_ARCHIVES'
                         archive = Path(os.environ[archive_env]).resolve() / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
                         binary, report_path = scratch / key, scratch / (key + '.json')
-                        args = [str(compiler), 'build', str(source), '--entry', 'app@1/main/' + entry,
+                        args = [str(compiler), 'build', str(source), '--entry', 'local/app@1/main/' + entry,
                                 '--backend', engine, '--limit', str(limit), '--runtime', str(archive),
                                 '--cc', str(cc), '--store', str(scratch / 'store'), '--json', '-o', str(binary)]
                         if engine == 'llvm':
@@ -134,7 +134,7 @@ pub fn caught() -> Result[(), Exit] {
             (source / 'main.hirsel').write_text('pub fn main() -> Result[(), Exit] { Error(Exit(status:7)) }\n')
             for name in ['one', 'two']:
                 binary, report_path = scratch / name, scratch / (name + '.json')
-                build = subprocess.run([str(compiler), 'build', str(source), '--entry', 'app@1/main/main',
+                build = subprocess.run([str(compiler), 'build', str(source), '--entry', 'local/app@1/main/main',
                                         '--backend', 'cranelift', '--runtime', str(archive), '--cc', str(cc),
                                         '--store', str(scratch / 'store'), '--json', '-o', str(binary),
                                         '--logical-charge-report', str(report_path)], capture_output=True, text=True)

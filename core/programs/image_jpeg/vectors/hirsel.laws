@@ -1,3 +1,3 @@
 hirsel.laws 1
-image_jpeg@1/tests/decode_rgb_strips src=195b6d69037e6496 sig=37b82eb04cac364e run=b7105f31855aade5 bug=- oracle=- rows=pending
-image_jpeg@1/tests/libjpeg_vectors src=73faa7b426c5112e sig=4991f737c15f78bc run=b7105f31855aade5 bug=- oracle=- rows=pending
+hirsel.ai/image_jpeg@1/tests/decode_rgb_strips src=d917ecc9db15ea71 sig=10f09304d0d7b2cf run=d6c78851a50aab16 bug=- oracle=- rows=pending
+hirsel.ai/image_jpeg@1/tests/libjpeg_vectors src=61d621d51c510d85 sig=84aeb2513e3e176f run=d6c78851a50aab16 bug=- oracle=- rows=pending

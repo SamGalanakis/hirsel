@@ -1,4 +1,4 @@
-use crate::package_content::{Id, Library, PackageArchive, Root, check_identity};
+use crate::package_content::{Binding, Id, Library, PackageArchive, Root, check_identity};
 use crate::package_manifest::SourceLocation;
 use crate::package_store::{Entry, PackageStore};
 use crate::package_workspace::{Edge, Member, Workspace};
@@ -74,27 +74,28 @@ fn best_paths(members: &Members, libraries: &Libraries) -> Paths {
         if paths.contains_key(&node) {
             continue;
         }
-        let outgoing: Vec<_> =
-            match &node {
-                Node::Member(id) => members[id]
-                    .edges
-                    .iter()
-                    .filter_map(|(id, edge)| match edge {
-                        Edge::Toolchain => None,
-                        Edge::Member => Some(Node::Member(id.clone())),
-                        Edge::Published(root, _) => Some(Node::Published(id.clone(), *root)),
-                    })
-                    .collect(),
-                Node::Published(_, root) => libraries
-                    .get(root)
-                    .into_iter()
-                    .flat_map(|library| {
-                        library.content.bindings.iter().filter_map(|(id, root)| {
-                            root.map(|root| Node::Published(id.clone(), root))
-                        })
-                    })
-                    .collect(),
-            };
+        let outgoing: Vec<_> = match &node {
+            Node::Member(id) => members[id]
+                .edges
+                .iter()
+                .filter_map(|(id, edge)| match edge {
+                    Edge::Toolchain => None,
+                    Edge::Member => Some(Node::Member(id.clone())),
+                    Edge::Published(root, _) => Some(Node::Published(id.clone(), *root)),
+                })
+                .collect(),
+            Node::Published(_, root) => libraries
+                .get(root)
+                .into_iter()
+                .flat_map(|library| {
+                    library
+                        .content
+                        .edges()
+                        .into_iter()
+                        .filter_map(|(id, root)| root.map(|root| Node::Published(id, root)))
+                })
+                .collect(),
+        };
         for child in outgoing {
             if !paths.contains_key(&child) {
                 let mut child_path = path.clone();
@@ -120,9 +121,9 @@ fn incoming(members: &Members, libraries: &Libraries) -> BTreeSet<(Id, Root)> {
     let transitive = libraries.values().flat_map(|library| {
         library
             .content
-            .bindings
-            .iter()
-            .filter_map(|(id, root)| root.map(|root| (id.clone(), root)))
+            .edges()
+            .into_iter()
+            .filter_map(|(id, root)| root.map(|root| (id, root)))
     });
     direct.chain(transitive).collect()
 }
@@ -133,7 +134,7 @@ fn via(libraries: &Libraries, root: Root) -> Option<&Id> {
         .filter(|library| {
             library
                 .content
-                .bindings
+                .edges()
                 .values()
                 .any(|bound| *bound == Some(root))
         })
@@ -166,7 +167,7 @@ fn carrier(
                 !visited.contains(root)
                     && library
                         .content
-                        .bindings
+                        .edges()
                         .values()
                         .any(|child| child.is_some_and(|child| frontier.contains(&child)))
             })
@@ -294,22 +295,23 @@ fn settle(
     encoded: &mut Encoded,
 ) -> Result<(BTreeSet<Id>, BTreeMap<Id, Root>), Failure> {
     let paths = best_paths(members, libraries);
-    let bound = members
+    let bound: Vec<Id> = members
         .values()
         .flat_map(|member| {
             member
                 .edges
                 .iter()
-                .filter_map(|(id, edge)| matches!(edge, Edge::Toolchain).then_some(id))
+                .filter_map(|(id, edge)| matches!(edge, Edge::Toolchain).then(|| id.clone()))
         })
         .chain(libraries.values().flat_map(|library| {
             library
                 .content
-                .bindings
-                .iter()
+                .edges()
+                .into_iter()
                 .filter_map(|(id, root)| root.is_none().then_some(id))
-        }));
-    let toolchain = crate::package_content::toolchain_closure(bound);
+        }))
+        .collect();
+    let toolchain = crate::package_content::toolchain_closure(&bound);
     let incoming = incoming(members, libraries);
     if let Some(id) = toolchain
         .iter()
@@ -374,16 +376,21 @@ fn member_root(members: &Members, encoded: &mut Encoded, id: &Id) -> Result<Root
         }
         member.check_pins()?;
         let mut content = member.content.clone();
+        // `pack` writes every binding as exact (section 1). A member with a bare name is a
+        // toolchain package under development, which the toolchain supplies.
         content.bindings = member
-            .edges
+            .aliases
             .iter()
-            .map(|(id, edge)| {
-                let root = match edge {
-                    Edge::Toolchain => None,
-                    Edge::Member => Some(encoded[id].0),
-                    Edge::Published(pin, _) => Some(*pin),
+            .map(|(alias, id)| {
+                let binding = match &member.edges[id] {
+                    Edge::Toolchain => Binding::Toolchain,
+                    Edge::Member if crate::package_manifest::name::identifier(&id.name) => {
+                        Binding::Toolchain
+                    }
+                    Edge::Member => Binding::Exact(encoded[id].0),
+                    Edge::Published(pin, _) => Binding::Exact(*pin),
                 };
-                (id.clone(), root)
+                (alias.clone(), (id.clone(), binding))
             })
             .collect();
         let (root, bytes) = content.inventory()?.encode()?;
@@ -424,7 +431,7 @@ fn assemble(
             .get(&root)
             .copied()
             .unwrap_or_else(|| &libraries[&root]);
-        pending.extend(content.content.bindings.values().flatten().copied());
+        pending.extend(content.content.edges().into_values().flatten());
         reached.insert(
             root,
             Library {
@@ -434,7 +441,10 @@ fn assemble(
         );
     }
     let bytes = Bytes::from(PackageArchive::encode(head, &reached)?);
-    let decoded = PackageArchive::decode(bytes.clone())?;
+    // A toolchain package's manifest may carry its bare name (section 2), so its pack
+    // decodes as the toolchain's archives do.
+    let toolchain = crate::package_manifest::name::identifier(&id.name);
+    let decoded = PackageArchive::decode_as(bytes.clone(), toolchain)?;
     Ok((bytes, decoded))
 }
 

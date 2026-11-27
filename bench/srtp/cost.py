@@ -66,7 +66,7 @@ def build(out, mode):
     manifest = tomllib.loads((source_package / "hirsel.toml").read_text())
     core = dict(name="core", version="1")
     std = dict(name="std", version="1")
-    srtp = dict(name="srtp", version=str(manifest["package"]["major"]))
+    srtp = dict(name="srtp", version=str(manifest["package"]["version"].split(".")[0]))
     app = dict(name="srtp_cost", version="1")
     document = dict(core=core, packages=[
         dict(package=core, dependencies=[], sources=library_sources(ROOT / "core/core", True)),

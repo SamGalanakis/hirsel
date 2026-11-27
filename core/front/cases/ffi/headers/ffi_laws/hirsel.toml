@@ -1,6 +1,6 @@
 [package]
-name = "ffi_laws"
-major = 1
+name = "local/ffi_laws"
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]

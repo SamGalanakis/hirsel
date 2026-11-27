@@ -1,11 +1,11 @@
 [package]
 name = "turn"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-stun_ice = { major = 1, path = "../stun_ice" }
+stun_ice = { package = "stun_ice", major = 1, path = "../stun_ice" }
 
 [sources]
 "types.hirsel" = "turn"

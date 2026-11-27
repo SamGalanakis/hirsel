@@ -16,7 +16,7 @@ if [ "$mode" = bench ]; then
 else
     python3 -I "$package/vectors/prepare.py" "$work" law
 fi
-(cd "$work" && "$compiler" test video_transcode --exact video_transcode@1/tests/ladder \
-    --grant Foreign=av1@1/av1/DecoderCodec --grant Foreign=av1@1/av1/EncoderCodec \
-    --grant Foreign=h264@1/h264/H264 --grant Foreign=video_yuv@1/video_yuv/Yuv "$@")
+(cd "$work" && "$compiler" test video_transcode --exact hirsel.ai/video_transcode@1/tests/ladder \
+    --grant Foreign=hirsel.ai/av1@1/av1/DecoderCodec --grant Foreign=hirsel.ai/av1@1/av1/EncoderCodec \
+    --grant Foreign=hirsel.ai/h264@1/h264/H264 --grant Foreign=hirsel.ai/video_yuv@1/video_yuv/Yuv "$@")
 python3 -I "$package/vectors/validate.py" "$work"

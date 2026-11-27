@@ -4,7 +4,7 @@ std = { major = 1 }
 
 [tests]
 limit = 16777216
-grants = ["Foreign=video_yuv@1/video_yuv/Yuv"]
+grants = ["Foreign=hirsel.ai/video_yuv@1/video_yuv/Yuv"]
 dirs = ["fixtures"]
 
 [tests.sources]

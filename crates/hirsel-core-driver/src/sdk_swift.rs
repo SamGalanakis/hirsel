@@ -53,16 +53,18 @@ pub(crate) fn run(request: Request<SdkOption>) -> Result<(), Error> {
             .0
             .package
             .name;
-        if !crate::package_dir::package_name(&name) {
+        if !crate::package_manifest::name::any(&name) {
             return Err(format!("bad package name {name:?}").into());
         }
-        name
+        hirsel_core_resolve::short_name(&name).to_owned()
     } else {
         if !options.program.is_dir() {
             return Err("sdk swift requires a program directory".into());
         }
         match crate::package_workspace::Workspace::discover(&options.program)? {
-            Some(workspace) => workspace.selected()?.name.clone(),
+            Some(workspace) => {
+                hirsel_core_resolve::short_name(&workspace.selected()?.name).to_owned()
+            }
             None => "app".into(),
         }
     };

@@ -23,8 +23,8 @@ fn two_members(law: &PackageLaw) {
     for name in ["ui", "api"] {
         law.library(
             &format!("work/apps/{name}"),
-            name,
-            1,
+            &format!("local/{name}"),
+            "1.0.0",
             "pub fn one() -> u64 { 1u64 }\n",
             "[dependencies]\n",
         );
@@ -35,7 +35,7 @@ fn two_members(law: &PackageLaw) {
 
 fn declared(root: &str, archive: &str) -> String {
     format!(
-        "[workspace]\nmembers = [\"apps/ui\", \"apps/api\"]\n\n[workspace.dependencies]\njson = {{ major = 1, root = \"{root}\", archive = \"{archive}\" }}\n"
+        "[workspace]\nmembers = [\"apps/ui\", \"apps/api\"]\n\n[workspace.dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{root}\", archive = \"{archive}\" }}\n"
     )
 }
 
@@ -133,7 +133,7 @@ fn members_share_one_binding() {
             "work/apps/ui",
             &["../../vendor/jy.hpkg", "--workspace"],
         ),
-        "the workspace binds json@1 for api@1; pass --update to change it",
+        "the workspace binds fixture.test/json@1 for local/api@1; pass --update to change it",
     );
     assert_eq!(
         text(&law, "work/hirsel.toml"),
@@ -186,7 +186,7 @@ fn virtual_root_declares_only() {
     let law = PackageLaw::new();
     law.fixture_json();
     law.write("v/hirsel.toml", "[workspace]\nmembers = [\"m\"]\n");
-    law.library("v/m", "m", 1, "pub fn one() -> u64 { 1u64 }\n", "");
+    law.library("v/m", "local/m", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "");
     copy(&law, "vendor/jx.hpkg", "v/vendor/pkg.hpkg");
     PackageLaw::pass(law.run(&["lock", "v/m"]));
     let lock = fs::read(law.path("v/hirsel.lock")).unwrap();
@@ -201,7 +201,7 @@ fn virtual_root_declares_only() {
     assert_eq!(
         fs::read_to_string(law.path("v/hirsel.toml")).unwrap(),
         format!(
-            "[workspace]\nmembers = [\"m\"]\n\n[workspace.dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"vendor/pkg.hpkg\" }}\n"
+            "[workspace]\nmembers = [\"m\"]\n\n[workspace.dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"vendor/pkg.hpkg\" }}\n"
         )
     );
     assert_eq!(fs::read(law.path("v/hirsel.lock")).unwrap(), lock);
@@ -320,7 +320,7 @@ fn partial_completion() {
     );
     assert_eq!(status, Some(2), "{stderr}");
     assert!(
-        stderr.contains("json@1 is bound to more than one root"),
+        stderr.contains("fixture.test/json@1 is bound to more than one root"),
         "{stderr}"
     );
     for (path, bytes) in files {

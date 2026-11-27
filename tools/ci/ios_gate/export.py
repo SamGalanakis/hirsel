@@ -17,14 +17,14 @@ MAC_EMBED = "root//:hirsel-core-rt-embed-archives[aarch64-apple-darwin]"
 IOS_EMBED = "root//:hirsel-core-rt-ios-embed-archives"
 KIT = "root//tools/buck2/native-toolchain:kit"
 PACKAGE = """[package]
-name = "sim_gate"
-major = 1
+name = "local/sim_gate"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { major = 1, path = "../store" }
-runner = { major = 1, path = "../runner" }
+store = { package = "store", major = 1, path = "../store" }
+runner = { package = "runner", major = 1, path = "../runner" }
 
 [sources]
 "fixture.hirsel" = "main"

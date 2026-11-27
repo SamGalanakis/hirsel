@@ -970,7 +970,7 @@ fn launch_options(
     {
         return Err(NativeStop::ForeignRecording {
             reason,
-            site: recipe.entry.definition.definition_identity(),
+            site: recipe.entry.definition.to_string(),
         });
     }
     let mut options = options.clone();

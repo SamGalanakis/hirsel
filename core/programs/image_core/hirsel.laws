@@ -1,8 +1,8 @@
 hirsel.laws 1
-image_core@1/tests/gif_and_avif_reference src=15cc85eb54dceb64 sig=80492baf906b9614 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/icc_color_and_inflate_limit src=09a35ca5324c1b0e sig=e7a2390ec5c316ea run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/png_and_qoi_reference_pixels src=5ddab7c7b453d869 sig=f4fa52c968b2fe24 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/probe_headers_and_bombs src=1ca7b95a23ee180a sig=031cc7454340a80e run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/resize_and_geometry_reference src=98c345d4c8dcd519 sig=082423b41db4874c run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/simd_filters_and_resize_reference src=e6825b2110348009 sig=318a3da1e89cebf5 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/thumbhash_and_dhash_reference src=1409a4425178ca61 sig=dcf390091aae024c run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/image_core@1/tests/gif_and_avif_reference src=7fead05261c8febb sig=56e531ea84204f54 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/image_core@1/tests/icc_color_and_inflate_limit src=b06bd1cd988c46d6 sig=bf4afdf294d6a124 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/image_core@1/tests/png_and_qoi_reference_pixels src=d62a165d5932a197 sig=07d431118cde320a run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/image_core@1/tests/probe_headers_and_bombs src=58120802a2b0083b sig=9b24f8b33090f811 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/image_core@1/tests/resize_and_geometry_reference src=a6ab5ed547db8398 sig=102c8e0d44b13a5c run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/image_core@1/tests/simd_filters_and_resize_reference src=1eaa7b500396eae4 sig=c9646424ccfa7096 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+hirsel.ai/image_core@1/tests/thumbhash_and_dhash_reference src=fd3f6dab8594159b sig=31ca00286b61a6e9 run=acdd7fe37d41c86f bug=- oracle=- rows=pending

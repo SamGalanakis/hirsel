@@ -1,2 +1,2 @@
 hirsel.laws 1
-h264@1/tests/conformance src=d25baec4ffb77ad1 sig=1a9cc4327fb83215 run=f2d5932b80e81eb6 bug=b745681003f269f2 oracle=013f7d56a5d672f9 rows=pending
+hirsel.ai/h264@1/tests/conformance src=7712ce936ff78226 sig=ec04c0a2f3e5b408 run=60f5c464d59a7d75 bug=b745681003f269f2 oracle=013f7d56a5d672f9 rows=pending

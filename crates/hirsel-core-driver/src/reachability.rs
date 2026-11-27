@@ -117,7 +117,7 @@ impl Reachable<'_> {
         else {
             return Ok(None);
         };
-        let reason = recording_refusal(entry, function.definition_identity());
+        let reason = recording_refusal(entry, function);
         // Reach records decide the refusal. Read the checked bodies for its
         // site only, so cached call sites never outlive the current source.
         let fresh = if self.reach.is_some() || !self.materialized.hits.is_empty() {
@@ -180,7 +180,7 @@ impl Reachable<'_> {
             }
         }
         // An implicit release can contribute a slot without a source call.
-        Ok(function.definition_identity())
+        Ok(function.to_string())
     }
 
     pub(crate) fn require_native(
@@ -982,12 +982,12 @@ pub(crate) fn foreign_recording_refusal(
         .filter(|leaf| leaf.wasm().is_none());
     let functions = native.flat_map(|leaf| &leaf.functions);
     let function = functions
-        .map(|f| f.identity.definition.definition_identity())
-        .min()?;
+        .map(|f| &f.identity.definition)
+        .min_by_key(|path| path.definition_identity())?;
     Some(recording_refusal(&recipe.entry.definition, function))
 }
 
 fn recording_refusal(entry: &DefPath, function: impl std::fmt::Display) -> String {
-    let entry = entry.definition_identity();
+    let entry = entry.to_string();
     format!("FFI-8: a recording build cannot reach foreign code: {entry} reaches {function}")
 }

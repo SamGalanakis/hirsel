@@ -41,7 +41,7 @@ fn l30_git_package_with_sibling_path() {
     }
     assert_eq!(
         law.fixture("checkout/wrap", "w.hpkg"),
-        format!("wrap@1 {PACKAGE_W}\njson@1 {PACKAGE_X}\n")
+        format!("fixture.test/wrap@1 1.0.0 {PACKAGE_W}\nfixture.test/json@1 1.0.0 {PACKAGE_X}\n")
     );
 
     let fresh = |name: &str| {
@@ -79,8 +79,8 @@ fn l30_git_package_with_sibling_path() {
         .file(
             "wrap/hirsel.toml",
             WRAP_MANIFEST.replace(
-                "json = { major = 1, path = \"../json\" }",
-                &format!("json = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"../vendor/jx.hpkg\" }}"),
+                "json = { package = \"fixture.test/json\", major = 1, path = \"../json\" }",
+                &format!("json = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"../vendor/jx.hpkg\" }}"),
             ),
         )
         .file("vendor/jx.hpkg", fs::read(law.path("vendor/jx.hpkg")).unwrap());
@@ -139,8 +139,8 @@ fn nested_wrap(server: &GitServer, key: &str, j: &str, pin: &str) -> String {
     ).file(
         "wrap/hirsel.toml",
         WRAP_MANIFEST.replace(
-            "json = { major = 1, path = \"../json\" }",
-            &format!("json = {{ major = 1, root = \"{pin}\", git = \"https://alpha.test/rj\", rev = \"{j}\" }}"),
+            "json = { package = \"fixture.test/json\", major = 1, path = \"../json\" }",
+            &format!("json = {{ package = \"fixture.test/json\", major = 1, root = \"{pin}\", git = \"https://alpha.test/rj\", rev = \"{j}\" }}"),
         ),
     );
     let commit = objects.commit(&tree, None, 1_700_000_000, "v1");
@@ -203,7 +203,7 @@ fn r5() -> Repo {
     )
 }
 
-const R6_MANIFEST: &str = "[package]\nname = \"demo\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"api.hirsel\" = \"api\"\n\"aa.hirsel\" = \"aa\"\n\"b.hirsel\" = \"b\"\n\n[foreign.aa]\nsymbols = \"ha_\"\narchives = [\n  { target = \"x86_64-unknown-linux-gnu\", file = \"native/aa-x86.a\", sha256 = \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\" },\n  { target = \"aarch64-unknown-linux-gnu\", file = \"native/aa-arm.a\", sha256 = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\" },\n]\n\n[foreign.b]\nsymbols = \"hb_\"\narchives = [{ target = \"x86_64-unknown-linux-gnu\", file = \"native/b.a\", sha256 = \"3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d\" }]\n";
+const R6_MANIFEST: &str = "[package]\nname = \"fixture.test/demo\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"api.hirsel\" = \"api\"\n\"aa.hirsel\" = \"aa\"\n\"b.hirsel\" = \"b\"\n\n[foreign.aa]\nsymbols = \"ha_\"\narchives = [\n  { target = \"x86_64-unknown-linux-gnu\", file = \"native/aa-x86.a\", sha256 = \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\" },\n  { target = \"aarch64-unknown-linux-gnu\", file = \"native/aa-arm.a\", sha256 = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\" },\n]\n\n[foreign.b]\nsymbols = \"hb_\"\narchives = [{ target = \"x86_64-unknown-linux-gnu\", file = \"native/b.a\", sha256 = \"3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d\" }]\n";
 
 fn r6() -> Repo {
     variant(
@@ -252,7 +252,7 @@ fn fetch_answers(pack: Vec<u8>) -> impl FnMut(&Request) -> Option<Reply> + Send 
 
 fn hand_binding(root: &str) -> String {
     format!(
-        "[dependencies]\nwrap = {{ major = 1, root = \"{root}\", git = \"https://alpha.test/r1\", rev = \"{C1}\", dir = \"wrap\" }}\n"
+        "[dependencies]\nwrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{root}\", git = \"https://alpha.test/r1\", rev = \"{C1}\", dir = \"wrap\" }}\n"
     )
 }
 
@@ -270,7 +270,7 @@ fn l31_tampered_commit_keeps_nothing() {
     law.app("app", &hand_binding(PACKAGE_X));
     PackageLaw::refuse(
         server.run(&law, &["check", "app"], "packages"),
-        &format!("wrap@1: {source} holds {PACKAGE_W}, but the binding pins {PACKAGE_X}"),
+        &format!("fixture.test/wrap@1: {source} holds {PACKAGE_W}, but the binding pins {PACKAGE_X}"),
     );
     law.empty_store();
 
@@ -281,7 +281,7 @@ fn l31_tampered_commit_keeps_nothing() {
         server.hook(fetch_answers(pack));
         PackageLaw::refuse(
             server.run(&law, &["check", "app"], "packages"),
-            &format!("wrap@1: {source} sent a bad pack: {failure}"),
+            &format!("fixture.test/wrap@1: {source} sent a bad pack: {failure}"),
         );
         law.empty_store();
     };
@@ -336,13 +336,13 @@ fn l31_tampered_commit_keeps_nothing() {
     let commit = nested_wrap(&server, "alpha.test/rn", &j, PACKAGE_X);
     law.app(
         "app",
-        &format!("[dependencies]\nwrap = {{ major = 1, root = \"{PACKAGE_X}\", git = \"https://alpha.test/rn\", rev = \"{commit}\", dir = \"wrap\" }}\n"),
+        &format!("[dependencies]\nwrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{PACKAGE_X}\", git = \"https://alpha.test/rn\", rev = \"{commit}\", dir = \"wrap\" }}\n"),
     );
     let (status, _, stderr) = server.run(&law, &["check", "app"], "packages");
     assert_eq!(status, Some(2), "{stderr}");
     assert!(
         stderr.starts_with(&format!(
-            "hirsel: wrap@1: git:https://alpha.test/rn#{commit}/wrap holds {PACKAGE_W}, but the binding pins {PACKAGE_X}"
+            "hirsel: fixture.test/wrap@1: git:https://alpha.test/rn#{commit}/wrap holds {PACKAGE_W}, but the binding pins {PACKAGE_X}"
         )),
         "{stderr}"
     );
@@ -387,7 +387,7 @@ fn l32_link_that_leaves_the_package() {
         let binding = wrap_binding(&format!("https://alpha.test/{repo}"), rev, PACKAGE_W, Some("refs/tags/v1"));
         assert!(manifest_text(&law, name).contains(&binding), "{}", manifest_text(&law, name));
         let lock = fs::read_to_string(law.path(&format!("{name}/hirsel.lock"))).unwrap();
-        assert!(lock.contains(&format!("id = \"json@1\"\nroot = \"{PACKAGE_X}\"")), "{lock}");
+        assert!(lock.contains(&format!("id = \"fixture.test/json@1\"\nversion = \"1.0.0\"\nroot = \"{PACKAGE_X}\"")), "{lock}");
     };
     writes_w("control", "r3", R3);
 
@@ -437,13 +437,13 @@ fn l32_link_that_leaves_the_package() {
             .file("ws/hirsel.toml", "[workspace]\nmembers = [\"client\", \"lib\"]\n")
             .file(
                 "ws/client/hirsel.toml",
-                "[package]\nname = \"client\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"client.hirsel\" = \"client\"\n\n[dependencies]\nlib = { major = 1, path = \"../lib\" }\n",
+                "[package]\nname = \"fixture.test/client\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"client.hirsel\" = \"client\"\n\n[dependencies]\nlib = { package = \"fixture.test/lib\", major = 1, path = \"../lib\" }\n",
             )
             .file("ws/client/client.hirsel", WRAP_V1)
             .link("ws/lib", "../elsewhere/lib")
             .file(
                 "elsewhere/lib/hirsel.toml",
-                "[package]\nname = \"lib\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"lib.hirsel\" = \"lib\"\n",
+                "[package]\nname = \"fixture.test/lib\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"lib.hirsel\" = \"lib\"\n",
             )
             .file("elsewhere/lib/lib.hirsel", PACKAGE_X_SOURCE),
     );

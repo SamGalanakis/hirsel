@@ -1,10 +1,10 @@
 [package]
-name = "image_webp"
-major = 1
+name = "hirsel.ai/image_webp"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
-image_core = { major = 1, path = "../image_core" }
+image_core = { package = "hirsel.ai/image_core", major = 1, path = "../image_core" }
 
 [sources]
 "webp.hirsel" = "webp"

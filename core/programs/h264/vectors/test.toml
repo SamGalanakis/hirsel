@@ -1,7 +1,7 @@
 
 [tests]
 limit = 536870912
-grants = ["Foreign=h264@1/h264/H264", "Stdout"]
+grants = ["Foreign=hirsel.ai/h264@1/h264/H264", "Stdout"]
 dirs = ["fixtures"]
 
 [tests.sources]

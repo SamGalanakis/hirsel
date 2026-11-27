@@ -5,24 +5,24 @@
 // Git 2.43.0 computed over the same bytes, so a writer bug fails the fixture, not the law.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use super::{PACKAGE_X_SOURCE, PACKAGE_Y_SOURCE};
+use super::PACKAGE_X_SOURCE;
 use std::sync::Mutex;
 
-const C1: &str = "32e212a4b69a9f3b39893b29f4e4f1e935626a2b";
-const C2: &str = "0b8c48e76c8462464b5ce67fd884449440d57844";
-const C1_TREE: &str = "f437e62ea2472c628183ef6ac6aad55bd0a9f7d9";
+const C1: &str = "77cbe52623fcc3479739eb37e89ddbe5c4626077";
+const C2: &str = "0944e001a1bd66c618ca9bb9770617490946b4bc";
+const C1_TREE: &str = "dacb7c152a2668836bfbbc493e001beda1eba1dd";
 const C1_WRAP_BLOB: &str = "b8b63ee2ea62f1ec73509eedeed52c7206deaffe";
-const R2: &str = "f9ae88b99451269b8b6b0d7d37bac85c316f44f7";
-const R3: &str = "da14b90edd082f0beed3c0f09fc23aaad0a60849";
-const R4: &str = "859eddd90bb3d572224eafa424b8fe05ccff88cf";
-const R5: &str = "1ec6268ebb01745682597da6ad7e90ec97c89a85";
-const R6: &str = "068a6be0a352dea1d8d7faf1e80eb05040387670";
+const R2: &str = "982a782edca378653976803415e0da35a90e4cb3";
+const R3: &str = "1a7464347304d4598aaa6a7757f609e3b886af68";
+const R4: &str = "d757e66ef28c660c4c93ec4e7a7685b3292edc7d";
+const R5: &str = "7d2e1669ccd4a9b703489b662187438d170bacf8";
+const R6: &str = "ad85c4f6d43cd1c95f68016171f623e36b27681e";
 const PACKAGE_W2: &str =
-    "sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302";
+    "sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5";
 
 const JSON_MANIFEST: &str =
-    "[package]\nname = \"json\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"json.hirsel\" = \"json\"\n";
-const WRAP_MANIFEST: &str = "[package]\nname = \"wrap\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"wrap.hirsel\" = \"wrap\"\n\n[dependencies]\njson = { major = 1, path = \"../json\" }\n";
+    "[package]\nname = \"fixture.test/json\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"json.hirsel\" = \"json\"\n";
+const WRAP_MANIFEST: &str = "[package]\nname = \"fixture.test/wrap\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"wrap.hirsel\" = \"wrap\"\n\n[dependencies]\njson = { package = \"fixture.test/json\", major = 1, path = \"../json\" }\n";
 const WRAP_V1: &str = "pub fn one() -> u64 { 1u64 }\n";
 const WRAP_V2: &str = "pub fn one() -> u64 { 2u64 }\n";
 
@@ -881,7 +881,7 @@ fn roots(list: &[&str]) -> BTreeSet<String> {
 fn wrap_binding(git: &str, rev: &str, root: &str, reference: Option<&str>) -> String {
     let reference = reference.map_or(String::new(), |r| format!(", ref = \"{r}\""));
     format!(
-        "wrap = {{ major = 1, root = \"{root}\", git = \"{git}\", rev = \"{rev}\"{reference}, dir = \"wrap\" }}"
+        "wrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{root}\", git = \"{git}\", rev = \"{rev}\"{reference}, dir = \"wrap\" }}"
     )
 }
 
@@ -908,22 +908,25 @@ fn fetching(host: &str, repo: &str, want: &str) -> String {
 }
 
 const L30_LOCK: &str = "# hirsel.lock: written by hirsel; do not edit.
-version = 1
+version = 2
 
 [[package]]
-id = \"app@1\"
-source = \"member:.\"
-edges = [\"wrap@1\"]
-
-[[package]]
-id = \"json@1\"
-root = \"sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44\"
-source = \"via:wrap@1\"
+id = \"fixture.test/json@1\"
+version = \"1.0.0\"
+root = \"sha256:9158205f94d44b9e04d00980842459973c2ea442a48b183097ad9d46fe13a7f7\"
+source = \"via:fixture.test/wrap@1\"
 edges = []
 
 [[package]]
-id = \"wrap@1\"
-root = \"sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b\"
-source = \"git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap\"
-edges = [\"json@1\"]
+id = \"fixture.test/wrap@1\"
+version = \"1.0.0\"
+root = \"sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5\"
+source = \"git:https://alpha.test/r1#77cbe52623fcc3479739eb37e89ddbe5c4626077/wrap\"
+edges = [\"fixture.test/json@1\"]
+
+[[package]]
+id = \"local/app@1\"
+version = \"1.0.0\"
+source = \"member:.\"
+edges = [\"fixture.test/wrap@1\"]
 ";

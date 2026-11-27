@@ -1,6 +1,6 @@
 [package]
-name = "compute"
-major = 1
+name = "hirsel.ai/compute"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]

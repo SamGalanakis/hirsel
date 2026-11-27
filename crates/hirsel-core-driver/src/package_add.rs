@@ -603,9 +603,17 @@ pub(crate) fn run_at(
         check_source(&workspace, source, root)?;
     }
 
-    let prior = member.and_then(|member| member.package.dependencies.get(&id.name));
-    let bound =
-        member.and_then(|member| member.edges.iter().find(|(bound, _)| bound.name == id.name));
+    // A head with a local name is refused: only a workspace member has one (packages.md section 7).
+    if local.is_none() && crate::package_manifest::name::local(&id.name) {
+        return Err(format!("{id} has a local name; only a workspace member can have one").into());
+    }
+    // The alias is the last component of the package name (packages.md section 7).
+    let alias = hirsel_core_resolve::short_name(&id.name);
+    let prior = member.and_then(|member| member.package.dependencies.get(alias));
+    let bound = member.and_then(|member| {
+        let bound = member.aliases.get(alias)?;
+        member.edges.get_key_value(bound)
+    });
     let bound_root = bound.and_then(|(_, edge)| match edge {
         Edge::Published(root, _) => Some(*root),
         _ => None,
@@ -621,7 +629,7 @@ pub(crate) fn run_at(
     let mut writes = Vec::new();
     let (updated, previous_root, needs_package);
     if let Some(shared) = &shared {
-        let entry = shared.dependencies.get(&id.name);
+        let entry = shared.dependencies.get(alias);
         let same = match (entry, &edge) {
             (Some(Dependency::Published(declared, old_root, old_source)), Edge::Published(..)) => {
                 *declared == id
@@ -639,7 +647,7 @@ pub(crate) fn run_at(
             return Err(format!(
                 "{}: dependencies.{} is bound here and in the workspace; pass --update to replace the local binding with {{ workspace = true }}\n  {} = {}\n  {} = {}",
                 member.manifest_path.display(),
-                id.name,
+                alias,
                 member.manifest_path.display(),
                 spelling(name, old),
                 root_manifest.display(),
@@ -657,7 +665,7 @@ pub(crate) fn run_at(
                 .filter(|(other, sibling)| {
                     Some(*other) != selected.as_ref()
                         && matches!(
-                            sibling.package.dependencies.get(&id.name),
+                            sibling.package.dependencies.get(alias),
                             Some(Dependency::Inherited)
                         )
                 })
@@ -668,7 +676,7 @@ pub(crate) fn run_at(
                     Dependency::Toolchain(declared)
                     | Dependency::Member(declared, _)
                     | Dependency::Published(declared, ..) => declared.to_string(),
-                    Dependency::Inherited => id.name.clone(),
+                    Dependency::Inherited => alias.to_owned(),
                 };
                 return Err(format!(
                     "the workspace binds {declared} for {}; pass --update to change it",
@@ -685,6 +693,7 @@ pub(crate) fn run_at(
             Captured {
                 bytes: edit::shared(
                     &root_captured.bytes,
+                    alias,
                     &id,
                     &form(path.as_deref(), root, locator.as_ref()),
                     root_package,
@@ -711,7 +720,7 @@ pub(crate) fn run_at(
                 before.clone()
             } else {
                 Captured {
-                    bytes: edit::inherit(&before.bytes, &id.name)?.into_bytes().into(),
+                    bytes: edit::inherit(&before.bytes, alias)?.into_bytes().into(),
                     identity: before.identity,
                 }
             };
@@ -753,7 +762,7 @@ pub(crate) fn run_at(
             return Err(format!(
                 "{}: dependencies.{} inherits the workspace binding; pass --workspace to change it for the workspace, or --update to bind it here",
                 member.manifest_path.display(),
-                id.name
+                alias
             )
             .into());
         }
@@ -767,6 +776,7 @@ pub(crate) fn run_at(
             Captured {
                 bytes: edit::binding(
                     &before.bytes,
+                    alias,
                     &id,
                     &form(path.as_deref(), root, declared.as_ref()),
                 )?

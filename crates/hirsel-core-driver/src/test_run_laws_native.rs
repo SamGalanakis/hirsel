@@ -92,7 +92,7 @@ fn t4() -> Result[(), ()] {
         rows.collect::<Vec<_>>(),
         [
             "model.conforms#1:conforms:4;model.conforms_check#1:conforms:4",
-            "model.conforms@app@1/main/conforms_states_cap#1:incomplete:1",
+            "model.conforms@local/app@1/main/conforms_states_cap#1:incomplete:1",
         ],
         "{lock}"
     );
@@ -116,7 +116,7 @@ fn t4() -> Result[(), ()] {
     );
     assert_eq!(
         report["law_regressions"],
-        serde_json::json!(["app@1/main/t1 model.conforms#1: incomplete 1 below conforms 4"])
+        serde_json::json!(["local/app@1/main/t1 model.conforms#1: incomplete 1 below conforms 4"])
     );
 }
 
@@ -161,8 +161,8 @@ fn c3() -> Result[(), ()] {
     assert_eq!(
         rows.collect::<Vec<_>>(),
         [
-            "model.check@app@1/main/explore_counter_closed#1:closed:3/3/2;model.explore#1:closed:3/3/2;model.explore@app@1/main/explore_counter_closed#1:closed:3/3/2",
-            "model.explore@app@1/main/explore_counter_depth#1:to-depth:1",
+            "model.check@local/app@1/main/explore_counter_closed#1:closed:3/3/2;model.explore#1:closed:3/3/2;model.explore@local/app@1/main/explore_counter_closed#1:closed:3/3/2",
+            "model.explore@local/app@1/main/explore_counter_depth#1:to-depth:1",
         ],
         "{lock}"
     );
@@ -189,7 +189,7 @@ fn c3() -> Result[(), ()] {
     );
     assert_eq!(
         report["law_regressions"],
-        serde_json::json!(["app@1/main/c1 model.explore#1: to depth 1 below closed 3/3/2"])
+        serde_json::json!(["local/app@1/main/c1 model.explore#1: to depth 1 below closed 3/3/2"])
     );
 }
 

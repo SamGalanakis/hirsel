@@ -88,7 +88,7 @@ def seeded_package_laws(package, probes=None):
     """A package test opts in with its simulation-specific Env parameter."""
     directory = ROOT / 'core/programs' / package
     manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
-    version = manifest['package']['major']
+    version = manifest['package']['version'].split('.')[0]
     laws = {}
     for file, module in manifest.get('tests', {}).get('sources', {}).items():
         path = directory / file
@@ -96,7 +96,7 @@ def seeded_package_laws(package, probes=None):
         definitions = []
         for name, parameters in SEEDED_TEST.findall(source):
             if re.search(r'(^|,)\s*seed_grant\s*:\s*Env\s*(,|$)', parameters):
-                definition = f'{package}@{version}/{module.replace(".", "/")}/{name}'
+                definition = f'{manifest["package"]["name"]}@{version}/{module.replace(".", "/")}/{name}'
                 laws[definition] = definition
                 definitions.append(definition)
         if probes is not None and (declared := source_probes(source, path, definitions)):
@@ -115,7 +115,7 @@ def seeded_package_inventory(probes=None):
 
 
 def selected_laws(skips=None, probes=None):
-    laws = {'postgres': {f'postgres@1/sim_tests/{name}': name for name in POSTGRES}}
+    laws = {'postgres': {f'hirsel.ai/postgres@1/sim_tests/{name}': name for name in POSTGRES}}
     direct = set()
     for case in std_native.discover(ROOT, []):
         if case.name in DIRECT or std_native.simulated_network_case(case):

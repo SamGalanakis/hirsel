@@ -524,6 +524,7 @@ fn source_package_image_uses_the_captured_text_and_name() {
             foreign: ContentHash::of_bytes(b"changed foreign stamp"),
             published_bindings: BTreeMap::new(),
             foreign_inputs: BTreeMap::new(),
+            aliases: BTreeMap::new(),
         })
     ));
 }

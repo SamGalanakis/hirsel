@@ -134,7 +134,7 @@ fn source_publishes_with_the_normal_checker() {
     fs::create_dir_all(&app).unwrap();
     fs::write(
         app.join("hirsel.toml"),
-        "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n",
+        "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n",
     )
     .unwrap();
     let main = |body: &str| {
@@ -313,9 +313,9 @@ fn source_publishes_with_the_normal_checker() {
     let answered = admit(&mut rig, 6, tree());
     assert!(
         matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Exhausted(text))]
-            if *a == attempt(6) && text.contains("app@1/main/main")
+            if *a == attempt(6) && text.contains("local/app@1/main/main")
                 && text.contains("reached (HIRSEL_MEMORY_LIMIT)")),
-        "a capped compile did not report exhaustion for app@1/main/main: {answered:?}"
+        "a capped compile did not report exhaustion for local/app@1/main/main: {answered:?}"
     );
     assert_eq!(recipes(), before, "an exhausted compile recorded a recipe");
 
@@ -399,7 +399,7 @@ fn source_publishes_with_the_normal_checker() {
     let answered = admit(&mut rig, 5, ffi_source.encode());
     assert!(
         matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Uncompiled(text))]
-            if *a == attempt(5) && text.contains("not granted: Foreign[ffi_laws@1/laws/Laws]")),
+            if *a == attempt(5) && text.contains("not granted: Foreign[hirsel.ai/ffi_laws@1/laws/Laws]")),
         "Foreign source without a grant was not refused: {answered:?}"
     );
     assert_eq!(recipes(), before, "refused source recorded a recipe");
@@ -559,7 +559,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         fs::write(
             app.join("hirsel.toml"),
             format!(
-                "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 67108864\n{tests}\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n"
+                "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 67108864\n{tests}\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n"
             ),
         )
         .unwrap();
@@ -669,7 +669,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     let answered = admit(&mut rig, &failing, true);
     assert!(
         matches!(answered.as_slice(), [Event::AdmissionFailed(_, Failure::Red(rows))]
-            if rows.len() == 1 && rows[0].contains("app@1/tests/bad") && rows[0].contains("status 1")),
+            if rows.len() == 1 && rows[0].contains("local/app@1/tests/bad") && rows[0].contains("status 1")),
         "a failing test was not red: {answered:?}"
     );
     assert_eq!(recipes(), before, "a red gate recorded a recipe");
@@ -732,7 +732,7 @@ fn source_links_only_its_groups_package_roots() {
     let root = |byte: u8| format!("sha256:{}", format!("{byte:02x}").repeat(32));
     let lock = |pinned: &str| {
         format!(
-            "# hirsel.lock: written by hirsel; do not edit.\nversion = 1\n\n[[package]]\nid = \"app@1\"\nsource = \"member:.\"\nedges = [\"json@1\"]\n\n[[package]]\nid = \"json@1\"\nroot = \"{pinned}\"\nsource = \"archive:vendor/json.hpkg\"\nedges = []\n"
+            "# hirsel.lock: written by hirsel; do not edit.\nversion = 2\n\n[[package]]\nid = \"local/app@1\"\nversion = \"1.0.0\"\nsource = \"member:.\"\nedges = [\"fixture.test/json@1\"]\n\n[[package]]\nid = \"fixture.test/json@1\"\nversion = \"1.0.0\"\nroot = \"{pinned}\"\nsource = \"archive:vendor/json.hpkg\"\nedges = []\n"
         )
     };
     let tree = |lock: &str| Tree {
@@ -745,15 +745,15 @@ fn source_links_only_its_groups_package_roots() {
     let pinned = tree(&lock(&root(0xab)));
     assert!(
         matches!(allowed(&pinned, &[[0xcd; 32]]), Err(Failure::Invalid(text))
-            if text.contains("json@1") && text.contains(&root(0xab))),
+            if text.contains("fixture.test/json@1") && text.contains(&root(0xab))),
         "a root outside the group's list was linked"
     );
     assert_eq!(allowed(&pinned, &[[0xcd; 32], [0xab; 32]]), Ok(()));
-    let unpinned = tree("# hirsel.lock: written by hirsel; do not edit.\nversion = 1\n");
+    let unpinned = tree("# hirsel.lock: written by hirsel; do not edit.\nversion = 2\n");
     assert_eq!(allowed(&unpinned, &[]), Ok(()));
     assert!(
         matches!(
-            allowed(&tree("version = 2\n"), &[]),
+            allowed(&tree("version = 1\n"), &[]),
             Err(Failure::Invalid(_))
         ),
         "an unreadable lock was not refused"

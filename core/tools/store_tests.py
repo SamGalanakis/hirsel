@@ -64,7 +64,7 @@ def inputs(root, tests=False, package='store', with_tests=()):
         if (tests and selected) or manifest['package']['name'] in with_tests:
             listed.update(manifest.get('tests', {}).get('sources', {}))
         packages.append({
-            'package': {'name': manifest['package']['name'], 'version': str(manifest['package']['major'])},
+            'package': {'name': manifest['package']['name'], 'version': str(manifest['package']['version'].split('.')[0])},
             'dependencies': [{'name': 'core', 'version': '1'}] +
                             [{'name': name, 'version': str(dep['major'])}
                              for name, dep in manifest['dependencies'].items()],

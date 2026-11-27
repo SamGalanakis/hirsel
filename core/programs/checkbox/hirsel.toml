@@ -1,12 +1,12 @@
 [package]
-name = "checkbox"
-major = 1
+name = "hirsel.ai/checkbox"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { major = 1, path = "../store" }
-runner = { major = 1, path = "../runner" }
+store = { package = "store", major = 1, path = "../store" }
+runner = { package = "runner", major = 1, path = "../runner" }
 
 [sources]
 "main.hirsel" = "main"

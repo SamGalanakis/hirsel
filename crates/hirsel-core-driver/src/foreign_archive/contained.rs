@@ -177,7 +177,7 @@ fn admit_checked<'a>(
                 params,
                 results,
                 abi.contained_line(&symbol),
-                function.identity.definition.definition_identity(),
+                function.identity.definition.to_string(),
                 loans,
             ))
         })
@@ -197,7 +197,7 @@ fn admit_checked<'a>(
         bytes,
         pin,
         path,
-        &leaf.module.definition_identity(),
+        &leaf.module.to_string(),
         &leaf.symbols,
         &reached,
         loans,

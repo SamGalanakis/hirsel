@@ -72,6 +72,11 @@ pub struct PackageNamespace {
     pub root: Option<hirsel_core_ids::ContentHash>,
     pub foreign: hirsel_core_ids::ContentHash,
     pub published_bindings: std::collections::BTreeMap<PackageId, hirsel_core_ids::ContentHash>,
+    /// Each alias this package's source names a dependency by (packages.md
+    /// section 2); two aliases may name one dependency. A dependency no alias
+    /// names is named by the last `/` component of its package name.
+    #[serde(default)]
+    pub aliases: std::collections::BTreeMap<String, PackageId>,
 
     #[serde(skip)]
     pub foreign_inputs: std::collections::BTreeMap<Vec<String>, ForeignModuleCapture>,
@@ -272,12 +277,38 @@ impl PackageManifest {
     }
 }
 
+/// The name of a package's root module: the last `/` component of its name.
+pub fn short_name(package: &str) -> &str {
+    package.rsplit('/').next().unwrap_or(package)
+}
+
 impl PackageManifest {
+    /// The names `dependency` has in this package's source: its aliases when the
+    /// manifest gives any, else the last `/` component of its package name.
+    pub fn aliases<'a>(&'a self, dependency: &'a PackageId) -> Vec<&'a str> {
+        let aliases: Vec<&str> = self
+            .namespace
+            .iter()
+            .flat_map(|namespace| &namespace.aliases)
+            .filter(|(_, bound)| *bound == dependency)
+            .map(|(alias, _)| alias.as_str())
+            .collect();
+        if aliases.is_empty() {
+            vec![short_name(&dependency.name)]
+        } else {
+            aliases
+        }
+    }
+
     pub fn intern(&self, symbols: &mut Symbols) {
         symbols.intern(&self.package.name);
+        symbols.intern(short_name(&self.package.name));
         symbols.intern(&self.package.version);
         for d in &self.dependencies {
             symbols.intern(&d.name);
+            for alias in self.aliases(d) {
+                symbols.intern(alias);
+            }
             symbols.intern(&d.version);
         }
         for s in &self.sources {
@@ -295,6 +326,7 @@ impl NameIndex {
             .map(|m| {
                 self.add_package(
                     self.symbols.find(&m.package.name).unwrap(),
+                    self.symbols.find(short_name(&m.package.name)).unwrap(),
                     self.symbols.find(&m.package.version).unwrap(),
                     m.toolchain,
                 )
@@ -304,13 +336,16 @@ impl NameIndex {
             let deps = m
                 .dependencies
                 .iter()
-                .map(|d| {
-                    self.package(
-                        self.symbols.find(&d.name).unwrap(),
-                        self.symbols.find(&d.version).unwrap(),
-                    )
-                    .unwrap()
+                .flat_map(|d| {
+                    let key = self
+                        .package(
+                            self.symbols.find(&d.name).unwrap(),
+                            self.symbols.find(&d.version).unwrap(),
+                        )
+                        .unwrap();
+                    m.aliases(d).into_iter().map(move |alias| (alias, key))
                 })
+                .map(|(alias, key)| (self.symbols.find(alias).unwrap(), key))
                 .collect::<Vec<_>>();
             self.set_dependencies(p, deps);
         }

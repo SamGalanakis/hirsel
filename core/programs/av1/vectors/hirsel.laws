@@ -1,2 +1,2 @@
 hirsel.laws 1
-av1@1/tests/codec_vectors src=6c5811f7e10880d6 sig=af9fd9c7d5ff121d run=9d1be7756a446b68 bug=- oracle=- rows=pending
+hirsel.ai/av1@1/tests/codec_vectors src=4abaf2741506d14f sig=ff39b954804e0636 run=361844c67ef24032 bug=- oracle=- rows=pending

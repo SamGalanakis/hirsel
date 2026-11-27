@@ -1,15 +1,15 @@
 [package]
 name = "media_record"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-media_bits = { major = 1, path = "../media_bits" }
-media_container = { major = 1, path = "../media_container" }
-rtp = { major = 1, path = "../rtp" }
-rtp_jitter = { major = 1, path = "../rtp_jitter" }
-webrtc_sfu = { major = 1, path = "../webrtc_sfu" }
+media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
+media_container = { package = "media_container", major = 1, path = "../media_container" }
+rtp = { package = "rtp", major = 1, path = "../rtp" }
+rtp_jitter = { package = "rtp_jitter", major = 1, path = "../rtp_jitter" }
+webrtc_sfu = { package = "webrtc_sfu", major = 1, path = "../webrtc_sfu" }
 
 [sources]
 "files.hirsel" = "files"

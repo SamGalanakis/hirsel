@@ -70,7 +70,7 @@ def build_inputs(scratch):
                 deps.append(visit(directory / dep['path']))
             else:
                 deps.append({'name': name, 'version': str(dep['major'])})
-        pkg = {'name': manifest['package']['name'], 'version': str(manifest['package']['major'])}
+        pkg = {'name': manifest['package']['name'], 'version': str(manifest['package']['version'].split('.')[0])}
         packages.append({
             'package': pkg,
             'dependencies': deps,

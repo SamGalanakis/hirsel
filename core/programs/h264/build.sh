@@ -14,7 +14,7 @@ if [ -n "$darwin" ]; then
     . ../../../tools/native-toolchain/darwin/foreign-archive.sh
     darwin_compilers
 fi
-"$compiler" inspect . --foreign-header h264@1/native "$@" > "$stage/native.h"
+"$compiler" inspect . --foreign-header hirsel.ai/h264@1/native "$@" > "$stage/native.h"
 cp hirsel_h264.cpp decoder-allocation.patch "$stage"
 (
     cd "$stage"

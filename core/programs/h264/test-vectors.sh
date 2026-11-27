@@ -9,4 +9,4 @@ reference=$2
 tarball=$3
 shift 3
 python3 -I "$codec/vectors/prepare.py" "$work" "$reference" "$tarball"
-"$compiler" test "$work/h264" --exact h264@1/tests/conformance --grant Foreign=h264@1/h264/H264 "$@"
+"$compiler" test "$work/h264" --exact hirsel.ai/h264@1/tests/conformance --grant Foreign=hirsel.ai/h264@1/h264/H264 "$@"

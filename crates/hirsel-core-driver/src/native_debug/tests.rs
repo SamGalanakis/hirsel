@@ -265,7 +265,7 @@ fn native_fiber_boundary_has_no_caller() {
     let product = Driver::default()
         .check(request, &mut Meter::new(false))
         .unwrap();
-    let entry = hirsel_core_ids::DefPath::from_full("app@1/main/main").unwrap();
+    let entry = hirsel_core_ids::DefPath::from_full("local/app@1/main/main").unwrap();
     let options = native_options(crate::native::Backend::Llvm, app);
     let built = product.build(&entry, &options).unwrap();
     let bytes = std::fs::read(built.executable).unwrap();

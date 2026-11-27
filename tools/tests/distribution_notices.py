@@ -362,7 +362,7 @@ class DistributionBuild(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
             prefix = Path(raw)
             lines = ['hirsel 0.0.0-test', 'compiler ' + 'a' * 64,
-                     'std@1/sim/fs/serve\tfn', 'pass executed app@1/tests/test_twice']
+                     'std@1/sim/fs/serve\tfn', 'pass executed local/app@1/tests/test_twice']
             rows = []
             for i, (label, observation, record, embedded) in enumerate(flavours):
                 content = f'{i:064x}'

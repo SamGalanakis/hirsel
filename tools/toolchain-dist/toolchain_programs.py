@@ -19,9 +19,10 @@ def place(source, destination):
     installed = destination / manifest.name
     installed.unlink()
     installed.write_text(re.sub(
-        r'^([a-z_]+) = \{ major = ([0-9]+), path = "[^"]*" \}$',
+        r'^([a-z_]+) = \{ package = "\1", major = ([0-9]+), path = "[^"]*" \}$',
         r'\1 = { major = \2 }', text, flags=re.M))
-    return package
+    # The identity's major is the version's MAJOR (packages.md section 1).
+    return dict(package, major=package['version'].split('.')[0])
 
 
 def pack(compiler, sources, output, work, names):

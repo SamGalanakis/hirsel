@@ -384,8 +384,8 @@ A package is a directory with a `hirsel.toml`. `hirsel new app` writes this one:
 
 ```text
 [package]
-name = "app"
-major = 1
+name = "local/app"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]

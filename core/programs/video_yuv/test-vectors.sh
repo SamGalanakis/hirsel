@@ -25,5 +25,5 @@ PYTHON
 "$llvm/bin/clang" -O2 -std=c11 -Wall -Wextra -Werror -I "$reference/include" \
     "$codec/vectors/reference.c" "$reference/libyuv.a" -o "$work/reference"
 (cd "$work/fixtures" && ../reference)
-"$compiler" test "$work" --exact video_yuv@1/tests/direct_libyuv_vectors \
-    --grant Foreign=video_yuv@1/video_yuv/Yuv "$@"
+"$compiler" test "$work" --exact hirsel.ai/video_yuv@1/tests/direct_libyuv_vectors \
+    --grant Foreign=hirsel.ai/video_yuv@1/video_yuv/Yuv "$@"

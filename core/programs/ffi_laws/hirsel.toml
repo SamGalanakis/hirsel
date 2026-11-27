@@ -1,6 +1,6 @@
 [package]
-name = "ffi_laws"
-major = 1
+name = "hirsel.ai/ffi_laws"
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]
@@ -11,13 +11,13 @@ charge = "charge-v1"
 [foreign.native]
 symbols = "hfl_"
 archives = [
-  { target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "e537a8063c12efba7ee5c56c24306e4673de16fe53fe9b1340e3b254f0f50af6" },
-  { target = "aarch64-apple-darwin", file = "libffi_laws-aarch64-apple-darwin.a", sha256 = "ff9e14b56de53c21d71d7305e93eb69474a10186fd1e8774304dd40b1887c1c9" },
+  { target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "8cf28137f7cca16f2d5dd8f1dec8b08b0690cce125e8b5891cb64029c20eef04" },
+  { target = "aarch64-apple-darwin", file = "libffi_laws-aarch64-apple-darwin.a", sha256 = "8d9c0c35fd2c98ea67d745dc881d0af32fd96382bd5838fe84b0aa2c457d7131" },
 ]
 
 [tests]
 limit = 67108864
-grants = ["Foreign=ffi_laws@1/laws/Laws", "Tasks"]
+grants = ["Foreign=hirsel.ai/ffi_laws@1/laws/Laws", "Tasks"]
 
 [tests.sources]
 "tests.hirsel" = "tests"

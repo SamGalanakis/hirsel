@@ -77,7 +77,13 @@ fn toolchain_packages(programs: &Path, generated: &mut String) {
             "{}",
             path.display()
         );
-        let major = u32::try_from(package["major"].as_integer().unwrap()).unwrap();
+        // The identity's major is the version's MAJOR (packages.md section 1).
+        let version = package["version"].as_str().unwrap();
+        let major: u32 = version
+            .split(['.', '-'])
+            .next()
+            .and_then(|major| major.parse().ok())
+            .unwrap_or_else(|| panic!("{}: bad version {version:?}", path.display()));
         let mut bindings = Vec::new();
         if let Some(dependencies) = document.get("dependencies") {
             for (dependency, binding) in dependencies.as_table().unwrap() {
@@ -88,6 +94,12 @@ fn toolchain_packages(programs: &Path, generated: &mut String) {
                     .unwrap_or_else(|| {
                         panic!("{}: {dependency} must declare a major", path.display())
                     });
+                // A toolchain package binds only toolchain packages, each under its bare name.
+                let bound = binding
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(dependency);
+                assert_eq!(bound, dependency, "{}", path.display());
                 bindings.push((dependency, major));
             }
         }

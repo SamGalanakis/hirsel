@@ -9,7 +9,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) const NAME: &str = "hirsel.lock";
-const PREFIX: &str = "# hirsel.lock: written by hirsel; do not edit.\nversion = 1\n";
+const PREFIX: &str = "# hirsel.lock: written by hirsel; do not edit.\nversion = 2\n";
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) enum Mode {
@@ -38,9 +38,13 @@ impl Mode {
 
 #[derive(Eq, PartialEq)]
 struct Row {
+    /// None on a toolchain row.
+    version: Option<String>,
     root: Option<Root>,
     source: String,
     edges: Vec<Id>,
+    /// `<name@major> <tested root>` for each edge whose recorded root is not the resolved one.
+    tested: Vec<String>,
 }
 
 type Rows = BTreeMap<Id, Row>;
@@ -54,9 +58,11 @@ fn std_row(rows: &mut Rows) {
         rows.insert(
             toolchain,
             Row {
+                version: None,
                 root: None,
                 source: "toolchain".into(),
                 edges: Vec::new(),
+                tested: Vec::new(),
             },
         );
     }
@@ -73,9 +79,11 @@ fn make_rows(resolution: &Resolution) -> Rows {
         rows.insert(
             id.clone(),
             Row {
+                version: Some(member.package.version.to_string()),
                 root: resolution.published.get(id).copied(),
                 source: format!("member:{dir}"),
                 edges: member.edges.keys().cloned().collect(),
+                tested: Vec::new(),
             },
         );
     }
@@ -83,17 +91,24 @@ fn make_rows(resolution: &Resolution) -> Rows {
         if rows.contains_key(id) {
             continue;
         }
+        let content = &resolution.libraries[root].content;
+        let edges = content.edges();
+        let tested = edges
+            .iter()
+            .filter_map(|(id, recorded)| {
+                let recorded = (*recorded)?;
+                (resolution.published.get(id) != Some(&recorded))
+                    .then(|| format!("{id} {recorded}"))
+            })
+            .collect();
         rows.insert(
             id.clone(),
             Row {
+                version: Some(content.version.to_string()),
                 root: Some(*root),
                 source: resolution.source(*root),
-                edges: resolution.libraries[root]
-                    .content
-                    .bindings
-                    .keys()
-                    .cloned()
-                    .collect(),
+                edges: edges.into_keys().collect(),
+                tested,
             },
         );
     }
@@ -101,12 +116,14 @@ fn make_rows(resolution: &Resolution) -> Rows {
         rows.insert(
             id.clone(),
             Row {
+                version: None,
                 root: None,
                 source: "toolchain".into(),
                 edges: crate::package_content::toolchain_bindings(id)
                     .expect("a resolved toolchain package is supplied")
                     .into_keys()
                     .collect(),
+                tested: Vec::new(),
             },
         );
     }
@@ -129,8 +146,8 @@ fn string(text: &str) -> String {
     out
 }
 
-fn edges_text(edges: &[Id]) -> String {
-    let items: Vec<_> = edges.iter().map(|id| string(&id.to_string())).collect();
+fn list_text<T: ToString>(items: &[T]) -> String {
+    let items: Vec<_> = items.iter().map(|item| string(&item.to_string())).collect();
     format!("[{}]", items.join(", "))
 }
 
@@ -138,6 +155,9 @@ fn encode(rows: &Rows) -> String {
     let mut bytes = PREFIX.to_owned();
     for (id, row) in rows {
         writeln!(bytes, "\n[[package]]\nid = {}", string(&id.to_string())).unwrap();
+        if let Some(version) = &row.version {
+            writeln!(bytes, "version = {}", string(version)).unwrap();
+        }
         if let Some(root) = row.root {
             writeln!(bytes, "root = {}", string(&root.to_string())).unwrap();
         }
@@ -145,9 +165,12 @@ fn encode(rows: &Rows) -> String {
             bytes,
             "source = {}\nedges = {}",
             string(&row.source),
-            edges_text(&row.edges)
+            list_text(&row.edges)
         )
         .unwrap();
+        if !row.tested.is_empty() {
+            writeln!(bytes, "tested = {}", list_text(&row.tested)).unwrap();
+        }
     }
     bytes
 }
@@ -155,16 +178,18 @@ fn encode(rows: &Rows) -> String {
 pub(crate) fn scaffold() -> String {
     let mut rows = BTreeMap::from([(
         Id {
-            name: "app".into(),
+            name: "local/app".into(),
             major: 1,
         },
         Row {
+            version: Some("1.0.0".into()),
             root: None,
             source: "member:.".into(),
             edges: vec![Id {
                 name: "std".into(),
                 major: 1,
             }],
+            tested: Vec::new(),
         },
     )]);
     std_row(&mut rows);
@@ -183,14 +208,16 @@ struct OldLock {
 #[serde(deny_unknown_fields)]
 struct OldRow {
     id: String,
+    version: Option<String>,
     root: Option<String>,
     source: String,
     edges: Vec<String>,
+    tested: Option<Vec<String>>,
 }
 
 fn id(text: &str) -> Option<Id> {
     let (name, major) = text.split_once('@')?;
-    if !crate::package_dir::package_name(name) || name == "core" {
+    if !crate::package_manifest::name::any(name) || name == "core" {
         return None;
     }
     Some(Id {
@@ -201,7 +228,7 @@ fn id(text: &str) -> Option<Id> {
 
 fn old_rows(bytes: &[u8]) -> Option<Rows> {
     let old = toml::from_str::<OldLock>(std::str::from_utf8(bytes).ok()?).ok()?;
-    if old.version != 1 {
+    if old.version != 2 {
         return None;
     }
     let mut rows = BTreeMap::new();
@@ -216,13 +243,22 @@ fn old_rows(bytes: &[u8]) -> Option<Rows> {
             .iter()
             .map(|edge| self::id(edge))
             .collect::<Option<Vec<_>>>()?;
+        if row.tested.as_ref().is_some_and(Vec::is_empty)
+            || row.version.as_deref().is_some_and(|version| {
+                crate::package_manifest::name::Version::parse(version).is_none()
+            })
+        {
+            return None;
+        }
         if rows
             .insert(
                 id,
                 Row {
+                    version: row.version,
                     root,
                     source: row.source,
                     edges,
+                    tested: row.tested.unwrap_or_default(),
                 },
             )
             .is_some()
@@ -234,7 +270,7 @@ fn old_rows(bytes: &[u8]) -> Option<Rows> {
 }
 
 /// Each package a lock file pins to a content root, as `(id, root, source)`; `None` when
-/// the bytes are no version 1 lock.
+/// the bytes are no version 2 lock.
 pub(crate) fn pinned_roots(bytes: &[u8]) -> Option<Vec<(String, Root, String)>> {
     Some(
         old_rows(bytes)?
@@ -255,6 +291,16 @@ fn differences(old: &[u8], now: &Rows) -> Vec<String> {
                 (None, Some(_)) => out.push(format!("  {id}: added")),
                 (Some(_), None) => out.push(format!("  {id}: removed")),
                 (Some(old), Some(new)) => {
+                    if old.version != new.version {
+                        let text = |version: &Option<String>| {
+                            version.clone().unwrap_or_else(|| "none".into())
+                        };
+                        out.push(format!(
+                            "  {id}: version {} -> {}",
+                            text(&old.version),
+                            text(&new.version)
+                        ));
+                    }
                     if old.root != new.root {
                         out.push(format!(
                             "  {id}: root {} -> {}",
@@ -268,8 +314,15 @@ fn differences(old: &[u8], now: &Rows) -> Vec<String> {
                     if old.edges != new.edges {
                         out.push(format!(
                             "  {id}: edges {} -> {}",
-                            edges_text(&old.edges),
-                            edges_text(&new.edges)
+                            list_text(&old.edges),
+                            list_text(&new.edges)
+                        ));
+                    }
+                    if old.tested != new.tested {
+                        out.push(format!(
+                            "  {id}: tested {} -> {}",
+                            list_text(&old.tested),
+                            list_text(&new.tested)
                         ));
                     }
                 }

@@ -1,6 +1,6 @@
 [package]
-name = "archive"
-major = 1
+name = "hirsel.ai/archive"
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]

@@ -8,5 +8,5 @@ work=$1
 reference=$2
 shift 2
 python3 "$codec/vectors/prepare.py" "$work" "$reference"
-"$compiler" test "$work" --exact opus@1/tests/rfc_vectors \
-    --exact opus@1/tests/decode_stereo_frame --grant Foreign=opus@1/opus/Opus "$@"
+"$compiler" test "$work" --exact hirsel.ai/opus@1/tests/rfc_vectors \
+    --exact hirsel.ai/opus@1/tests/decode_stereo_frame --grant Foreign=hirsel.ai/opus@1/opus/Opus "$@"

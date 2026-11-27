@@ -1,6 +1,6 @@
 [package]
-name = "wasm_laws"
-major = 1
+name = "hirsel.ai/wasm_laws"
+version = "1.0.0"
 charge = "charge-v1"
 
 [sources]
@@ -11,4 +11,4 @@ charge = "charge-v1"
 [foreign.native]
 symbols = "hwl_"
 containment = "wasm"
-module = { file = "box.wasm", sha256 = "315595a028f5a6782aafab6ec0317604e09e10e9a447222a733b2d643b57e2df" }
+module = { file = "box.wasm", sha256 = "4a89264abd81f8b326b048d88d894a679076b4520cf79bd3f6057cab02f9811c" }

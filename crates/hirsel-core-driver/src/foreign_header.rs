@@ -184,7 +184,8 @@ impl<'a> Abi<'a> {
                 let shape = &module.types[ty.index()];
                 shape.name.strip_prefix("core@1/core/Option[")
                     .and_then(|name| name.strip_suffix(']'))
-                    .and_then(handle_kind) == Some(kind)
+                    .and_then(handle_kind)
+                    .is_some_and(|row| names_kind(row, kind))
                     && shape.carried == Carried::Address
                     && shape.repr == Repr::Own
                     && shape.finalizer.is_none()
@@ -192,7 +193,7 @@ impl<'a> Abi<'a> {
                         [none, some] if none.name == "None" && none.fields.is_empty()
                             && some.name == "Some"
                             && matches!(some.fields.as_slice(), [field] if matches!(field.ty,
-                                FieldTy::Inline(row) if hirsel_core_layout::foreign_kind(&module.types[row.index()]) == Some(kind)))))
+                                FieldTy::Inline(row) if hirsel_core_layout::foreign_kind(&module.types[row.index()]).is_some_and(|row| names_kind(row, kind))))))
             }),
         }
     }
@@ -218,6 +219,12 @@ fn argument_kind(text: &str) -> Option<Argument<'_>> {
 
 fn ffi_scalar(text: &str) -> Option<Scalar> {
     Scalar::from_name(text).filter(|s| !matches!(s, Scalar::Bool | Scalar::Char))
+}
+
+/// Whether a layout row's kind, spelled as `Display` writes a path, is the header's kind,
+/// spelled as PROG-9's identity text.
+fn names_kind(row: &str, kind: &str) -> bool {
+    DefPath::from_full(row).is_some_and(|path| path.definition_identity() == kind)
 }
 
 fn handle_kind(text: &str) -> Option<&str> {

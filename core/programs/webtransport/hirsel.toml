@@ -1,11 +1,11 @@
 [package]
 name = "webtransport"
-major = 1
+version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-quic = { major = 1, path = "../quic" }
+quic = { package = "quic", major = 1, path = "../quic" }
 
 [sources]
 "h3_wire.hirsel" = "h3_wire"

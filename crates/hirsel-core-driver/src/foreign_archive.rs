@@ -80,7 +80,7 @@ pub(crate) fn select<'a>(
         };
         AdmissionError::Refused(format!(
             "FFI-3: {} has no archive for target {target}; its archives are for {targets}",
-            module.definition_identity()
+            module
         ))
     })
 }
@@ -248,7 +248,7 @@ impl ArchiveOrigin<'_> {
         format!(
             "archive {} of {}",
             archive_name(self.object, self.path),
-            self.module.definition_identity()
+            self.module
         )
     }
 }
@@ -538,10 +538,7 @@ fn archive_name(archive: ObjectRef, path: Option<&str>) -> String {
 
 fn context(archive: ObjectRef, module: &DefPath, target: &str, path: Option<&str>) -> String {
     let file = archive_name(archive, path);
-    format!(
-        "archive {file} of {} for {target}",
-        module.definition_identity(),
-    )
+    format!("archive {file} of {} for {target}", module,)
 }
 
 impl SealedArchive {
@@ -702,7 +699,7 @@ impl SealedArchive {
                 .get(format!("{mangle}{symbol}").as_bytes())
                 .is_some_and(|row| row.definition_matches == Some(true));
             if !defines {
-                let site = function.identity.definition.definition_identity();
+                let site = function.identity.definition.to_string();
                 return Err(refuse(
                     &context,
                     format!(" does not define {symbol}, declared at {site}"),
@@ -759,7 +756,7 @@ impl SealedArchive {
                 _ => "missing",
             };
             if actual != expected {
-                let site = function.identity.definition.definition_identity();
+                let site = function.identity.definition.to_string();
                 return Err(refuse(
                     &context,
                     format!(

@@ -1786,7 +1786,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.patterns.selection = selection;
         self.end_owners(cond, None, false, c[1]);
         self.depth -= 1;
-        self.source_step(n);
+        self.complete_iteration(n);
         if let Some(h) = header {
             self.jump(h, &[], c[1]);
         }

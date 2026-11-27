@@ -63,6 +63,7 @@ pub(super) fn results<'a>(inst: &'a Inst, body: &'a Body) -> impl Iterator<Item 
         | Inst::RegionClose { .. }
         | Inst::Trim { .. }
         | Inst::BuiltinUse { .. }
+        | Inst::LoopIteration
         | Inst::LimitExit
         | Inst::Drop { .. }
         | Inst::Share { .. }

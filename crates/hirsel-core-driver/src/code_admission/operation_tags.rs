@@ -40,6 +40,7 @@ fn runtime_probes() -> Module {
         RtOp::StepEnter,
         RtOp::StepLeave,
         RtOp::StepCatch,
+        RtOp::WorkSteps,
         RtOp::RootLimit,
         RtOp::Argon2id,
         RtOp::LaunchWord,

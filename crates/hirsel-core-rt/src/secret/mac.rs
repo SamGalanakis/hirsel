@@ -121,7 +121,7 @@ unsafe fn mac(
         }
         let data = crate::tls::bytes(&*data);
         let algorithm = profile.algorithm();
-        if !crate::steps::take_many(context, algorithm.work().steps(data.len() as u64), site) {
+        if !crate::steps::take_work(context, algorithm.work(), &[data.len() as u64], site) {
             return crate::provider::CANCELLED;
         }
         let args = MacRequest {

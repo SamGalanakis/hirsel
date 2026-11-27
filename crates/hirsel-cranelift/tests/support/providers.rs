@@ -8,6 +8,7 @@ struct Run {
     argv: Vec<String>,
     limit: u64,
     injection: Option<(usize, bool)>,
+    step_limit: Option<u64>,
     report: eval::Report,
     matrix: Option<(HostOp, bool)>,
 }
@@ -57,14 +58,23 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
     source.push_str(include_str!("providers.c"));
     declare_functions(&mut source, module, &c::source::module_sites(module));
     let mut main = String::from(
-        "int main(void) { HirselCoreProvider provider={&world,world_wait,issue,world_resume,world_abort,deliver};\n",
+        "int main(void) { HirselCoreProvider provider={&world,world_wait,issue,world_resume,world_abort,deliver};\nfor (int repeat=0;repeat<3;repeat++) {\n",
     );
     let mut want = Vec::new();
     for (i, run) in runs.iter().enumerate() {
-        expected(run, &mut want);
+        let mut output = Vec::new();
+        expected(run, &mut output);
+        want.push(output);
         let f = &module.functions[run.function.index()];
         let sig = &module.signatures[f.signature.index()];
         writeln!(source,"static uint8_t entry{i}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {{ world.ctx=ctx; world.limit=UINT64_C({}); hirsel_core_test_reset_limit(ctx,world.limit);",run.limit).unwrap();
+        writeln!(
+            source,
+            "hirsel_core_test_step_observe(ctx,{},UINT64_C({}));",
+            u8::from(run.step_limit.is_some()),
+            run.step_limit.unwrap_or(0)
+        )
+        .unwrap();
         if let Some((n, later)) = run.injection {
             writeln!(
                 source,
@@ -216,9 +226,36 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
         }
         main.push_str("}\n");
     }
-    main.push_str("return 0; }\n");
+    main.push_str("} return 0; }\n");
     source.push_str(&main);
-    assert_eq!(link_run(&scratch, &source), want, "optimize={optimize}");
+    let output = link_run(&scratch, &source);
+    let mut output = output.as_slice();
+    let mut metering = vec![None; runs.len()];
+    for _ in 0..3 {
+        for (i, (run, want)) in runs.iter().zip(&want).enumerate() {
+            let (actual, rest) = output.split_at(want.len());
+            assert_eq!(actual, want, "case {i}, optimize={optimize}");
+            output = rest;
+            if matches!(run.report.outcome, Outcome::Stopped(_)) {
+                continue;
+            }
+            let (&[steps, refusal], rest) = output.split_first_chunk::<2>().unwrap();
+            output = rest;
+            assert!(
+                steps >= run.report.step_floor,
+                "case {i}, optimize={optimize}"
+            );
+            if run.step_limit.is_some() {
+                assert_ne!(refusal, 0, "case {i} must refuse at a source point");
+            }
+            assert_eq!(
+                *metering[i].get_or_insert((steps, refusal)),
+                (steps, refusal),
+                "case {i} varies within optimize={optimize}"
+            );
+        }
+    }
+    assert!(output.is_empty());
 }
 
 #[test]
@@ -243,6 +280,35 @@ fn whole_sample_in_dev_and_speed_matches_evaluator() {
             .unwrap();
         let borrowed = argv.iter().map(String::as_str).collect::<Vec<_>>();
         let report = eval::run_args(&module, f, &args, limit, &borrowed);
+        let counts = [report.steps, report.step_floor];
+        for _ in 1..3 {
+            let again = eval::run_args(&module, f, &args, limit, &borrowed);
+            assert_eq!(counts, [again.steps, again.step_floor]);
+        }
+        assert!(report.steps >= report.step_floor);
+        if f == FuncId(3) {
+            assert_eq!(report.step_floor, args[1]);
+            let meter = Some(eval::StepMeter { allowance: Some(1) });
+            let refusal = eval::run_args_with_meter(&module, f, &args, limit, &borrowed, meter);
+            for _ in 1..3 {
+                let again = eval::run_args_with_meter(&module, f, &args, limit, &borrowed, meter);
+                assert_eq!(
+                    (again.steps, again.step_refusal),
+                    (refusal.steps, refusal.step_refusal)
+                );
+            }
+            assert!(refusal.step_refusal.is_some());
+            runs.push(Run {
+                function: f,
+                args: args.clone(),
+                argv: argv.clone(),
+                limit,
+                injection: None,
+                step_limit: Some(1),
+                report: refusal,
+                matrix: None,
+            });
+        }
         let admissions = report.admissions;
         runs.push(Run {
             function: f,
@@ -250,6 +316,7 @@ fn whole_sample_in_dev_and_speed_matches_evaluator() {
             argv,
             limit,
             injection: None,
+            step_limit: None,
             report,
             matrix: None,
         });
@@ -262,6 +329,7 @@ fn whole_sample_in_dev_and_speed_matches_evaluator() {
                     argv: vec![],
                     limit,
                     injection,
+                    step_limit: None,
                     report: eval::run_injected(&module, f, &args, limit, injection),
                     matrix: None,
                 });
@@ -278,6 +346,7 @@ fn whole_sample_in_dev_and_speed_matches_evaluator() {
             argv: argv.into_iter().map(str::to_owned).collect(),
             limit: 1000,
             injection: None,
+            step_limit: None,
             report,
             matrix: None,
         });
@@ -422,7 +491,11 @@ fn every_host_row_preserves_c_fields_and_status() {
                 argv: vec![],
                 limit: 1000,
                 injection: None,
+                step_limit: None,
                 report: eval::Report {
+                    steps: 0,
+                    step_floor: 0,
+                    step_refusal: None,
                     outcome,
                     used: 0,
                     peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.

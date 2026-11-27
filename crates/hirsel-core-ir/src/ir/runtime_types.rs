@@ -202,6 +202,7 @@ impl RtOp {
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
             RtOp::StepEnter => (vec![V(u64_)], vec![bool_]),
+            RtOp::WorkSteps => (vec![V(u64_), V(u64_), V(u64_)], vec![]),
             RtOp::StepLeave | RtOp::IsolateLeave | RtOp::Closed(_) => (vec![], vec![]),
             RtOp::StepCatch => (vec![], vec![bool_]),
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
@@ -290,6 +291,7 @@ impl RtOp {
             | RtOp::StepEnter
             | RtOp::StepLeave
             | RtOp::StepCatch
+            | RtOp::WorkSteps
             | RtOp::Closed(_) => vec![],
         }
     }
@@ -303,6 +305,7 @@ impl RtOp {
                 | RtOp::Spawn { .. }
                 | RtOp::CheckCancel
                 | RtOp::Argon2id
+                | RtOp::WorkSteps
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }

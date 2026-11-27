@@ -2221,10 +2221,10 @@ impl FunctionEmitter<'_> {
                 let home = Value::from(Local::Slot(slot.index()));
                 self.runtime_void("llvm.lifetime.start.p0", &[ptr(home)]);
             }
-            // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::BuiltinUse { .. }
+            | Inst::LoopIteration
             | Inst::Mark { .. }
             | Inst::Unmark { .. } => {}
             Inst::UpdateMask {

@@ -43,7 +43,10 @@
 ; run limit 1000: f2(7, 40) -> 2, 3 | used 0
 ; run limit 1000: f2(7, 32) -> 2, 3 | used 0
 ; run limit 1000: f2(7, 31) -> fail Bounds | used 0
+; run: f3(0, 5) -> 5
+; run: f3(0, 65537) -> 65537     ; both sides of a native step window
 core v1
+item i0 = samples@0/providers/counted
 type t0 = own "String" { bytes: seq u8 }
 static d0 = align 1 hex 6c6f67
 static d1 = align 1 hex 6869
@@ -56,9 +59,14 @@ sig g4 = (u64) -> (u8, u64, u64, u64)
 sig g5 = (u64, ptr, u8) -> (u64, u8, u32, u64)
 sig g6 = (u64) -> (u64, u8, u32, u64)
 sig g7 = (u64, u64) -> (u64, u8)
+sig g8 = (u64, u64) -> (u64)
+sig g9 = (u64) -> (bool)
+sig g10 = () -> ()
+sig g11 = () -> (bool)
 inst n0 = samples@0/providers/echo [] []
 inst n1 = samples@0/providers/files [] []
 inst n2 = samples@0/providers/temp [] []
+inst n3 = samples@0/providers/counted [] []
 fn f0 = n0 g0 {
 b0(v0: u64, v1: u64, v2: u64):
   v3: u64 = call rt.args_len g1 (v0)
@@ -211,4 +219,31 @@ b2:
   propagate
 b3:
   raise unwrap
+}
+
+fn f3 = n3 g8 {
+b0(v0: u64, v1: u64):
+  v2: u64 = const 0
+  v3: u64 = const 1
+  v4: u64 = const 18446744073709551615
+  v5: bool = call rt.step_enter g9 (v4) at i0 1..2
+  branch v5, b1(v2), b5
+b1(v6: u64):
+  v7: bool = lt v6, v1
+  branch v7, b2, b3
+b2:
+  step fail b4 at i0 2..3
+  loop_iteration
+  v8: u64 = add v6, v3 fail b4
+  jump b1(v8)
+b3:
+  call rt.step_leave g10 ()
+  return v6
+b4:
+  v9: bool = call rt.step_catch g11 ()
+  branch v9, b5, b6
+b5:
+  return v2
+b6:
+  propagate
 }

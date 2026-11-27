@@ -256,3 +256,80 @@ def host_parameter(case):
             name = 'native_' + argument
             return name + ':' + kind, name
     return '', ''
+
+
+# The bodies whose arms decide on the bucket index of a Map. A map places each
+# key by `hash`, `place` or `strong`, which the runtime keys per process from
+# getrandom (`map_hash_key`), so which groups a walk visits, whether a group
+# has a match or an empty lane, and whether a 7-bit tag match is the key are
+# not functions of the program. Their entries are still compared, except
+# more_groups', which a walk calls only past a group with no empty lane. The
+# Crowded path (probe_staged and put_absent arms, commit_crowded, promote)
+# depends on the seed only when eight groups are full, and stays compared.
+SEEDED_ARMS = ('core@1/map/probe@', 'core@1/map/vacancy@', 'core@1/map/reprobe_crowded@', 'core@1/map/more_groups@',
+               'core@1/map/more_groups#e')
+
+
+def reached_sites(profile_path):
+    """Each site key of a written coverage profile, with whether a run reached
+    it, less the arms whose reach depends on the map hash seed."""
+    profile = json.loads(profile_path.read_text())
+    return {row['site']: bool(row['passed_runs'] or row['failed_runs']) for row in profile['sites']
+            if not row['site'].startswith(SEEDED_ARMS)}
+
+
+METER_REPEATS = 3
+
+
+def check_metering(run, *, first=None, reference=None):
+    samples = [run(None) if first is None else first]
+    samples.extend(run(None) for _ in range(METER_REPEATS - 1))
+    floor = samples[0]['step_floor'] if reference is None else reference['floor']
+    counts = [sample['steps'] for sample in samples]
+    if len(set(counts)) != 1:
+        raise ValueError(f'step count differs within one build: {counts}')
+    if counts[0] < floor:
+        raise ValueError(f'{counts[0]} steps below the MEM-30 floor of {floor}')
+    used = max(sample['used'] for sample in samples)
+    if reference is not None and used > reference['used']:
+        raise ValueError(f"{used} native bytes exceed {reference['used']} evaluator bytes")
+    sites = []
+    if counts[0]:
+        limit = counts[0] // 2
+        refused = [run(limit) for _ in range(METER_REPEATS)]
+        if any(sample['steps'] > limit for sample in refused):
+            raise ValueError(f'injected step limit of {limit} was exceeded')
+        sites = [sample['refusal_site'] for sample in refused]
+    if sites and (not sites[0] or any(site != sites[0] for site in sites[1:])):
+        raise ValueError(f'injected step limit did not consistently refuse at one source point: {sites}')
+    return dict(steps=counts, floor=floor, used=used, refusal_sites=sites)
+
+
+def evaluator_meter(resident, inputs, entry, case, progress, observation):
+    def run(limit):
+        result = resident.evaluate(inputs, entry, instructions=case.evaluator_instructions,
+                                   progress=progress, meter=True, meter_limit=limit, root_limit=case.root_limit)
+        report = json.loads(result.stdout)
+        if limit is None:
+            _, cause = observation(case, result)
+            if cause:
+                raise ValueError(cause)
+        return report
+
+    return check_metering(run)
+
+
+def native_meter(invoke, validate, environment, report_path, initial, reference):
+    def run(limit):
+        report_path.unlink(missing_ok=True)
+        env = environment.copy()
+        if limit is not None:
+            env[b'HIRSEL_TEST_METER_LIMIT'] = str(limit).encode()
+        result = invoke(env)
+        if limit is None and (cause := validate(result)):
+            raise ValueError(cause)
+        if not report_path.exists():
+            raise ValueError('native runtime produced no step report (use the testing runtime archive)')
+        return json.loads(report_path.read_text())
+
+    return check_metering(run, first=json.loads(initial), reference=reference)

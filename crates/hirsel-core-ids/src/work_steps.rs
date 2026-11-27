@@ -1,8 +1,8 @@
 //! MEM-30's work charge (docs/spec/budgets.md, "Work steps"): the further steps
 //! an operation takes, before any of its work, for the units it processes and
 //! the fixed weight of an asymmetric operation. This table is the one source of
-//! every operation's quantum and weight; each engine emits the same count from
-//! it, so the evaluator, Cranelift and LLVM agree.
+//! every operation's quantum and weight. The evaluator and native runtime
+//! compute the charge from the same row.
 
 /// One row of the work table: `units` cost `ceil(units / 2^shift) + weight`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +14,14 @@ pub struct Work {
 }
 
 impl Work {
+    /// Decode the quantum exponent and fixed weight carried in Core IR.
+    pub fn from_operands(shift: u64, weight: u64) -> Self {
+        Self {
+            shift: (shift & 63) as u32,
+            weight,
+        }
+    }
+
     const fn per(shift: u32) -> Self {
         Self { shift, weight: 0 }
     }
@@ -36,11 +44,30 @@ impl Work {
     /// Steps for the exact sum of `units`, as [`Work::steps`].
     pub fn steps_sum(self, units: &[u64]) -> u64 {
         let total: u128 = units.iter().map(|&u| u128::from(u)).sum();
-        let bulk = total.div_ceil(1u128 << self.shift);
+        let mask = (1u128 << self.shift) - 1;
+        let bulk = (total >> self.shift) + u128::from(total & mask != 0);
         u64::try_from(bulk)
             .ok()
             .and_then(|bulk| bulk.checked_add(self.weight))
             .unwrap_or(u64::MAX)
+    }
+
+    /// Check the completed charge against the work admitted by the operation.
+    #[track_caller]
+    pub fn assert_ceiling(self, units: &[u64], charged: u64) {
+        let total: u128 = units.iter().map(|&n| u128::from(n)).sum();
+        let covered = u128::from(charged) * u128::from(self.quantum());
+        assert!(
+            total <= covered,
+            "MEM-30: {total} units exceed {charged} steps at quantum {}",
+            self.quantum()
+        );
+    }
+
+    /// Enable the work ceiling in the corpus runners.
+    pub fn check_ceiling() -> bool {
+        static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CHECK.get_or_init(|| std::env::var_os("HIRSEL_TEST_WORK_CEILING").is_some())
     }
 }
 

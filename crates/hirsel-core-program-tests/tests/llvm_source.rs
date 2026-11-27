@@ -273,9 +273,9 @@ fn exercise(budget: u64, count: u64) -> u64 {
     assert!(!body("other").contains(instruction), "{}", body("other"));
 
     let function = names["exercise"];
-    // Capacity and push take two steps. The third appends count zeros
-    // after the 65 prefix, including when count is zero.
-    let inputs = [(2, 3, 9002), (2, 0, 9002), (3, 0, 6501), (3, 3, 6504)];
+    // Capacity, push and fill take three call steps. A nonempty fill also pays
+    // one COPY step for 24 bytes, before appending zeros after the 65 prefix.
+    let inputs = [(2, 0, 9002), (3, 0, 6501), (3, 3, 9003), (4, 3, 6504)];
     let cases = inputs.map(|(steps, count, _)| Case {
         function,
         args: vec![steps, count],

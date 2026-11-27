@@ -110,6 +110,7 @@ pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
         | Inst::BuiltinUse { .. }
+        | Inst::LoopIteration
         | Inst::LimitExit
         | Inst::Step { .. }
         | Inst::StackCheck { .. } => {}

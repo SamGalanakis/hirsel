@@ -13,7 +13,6 @@
 //! declares its own copy, `clone[..](x: T) { .. }` (`Shape::clone`): the row's `$clone` is its
 //! byte copy and then that body, at any depth, never a walk of its fields.
 use super::key_glue::{Code, Derive, KeyOp};
-use super::lists::work_steps::take_work;
 use super::*;
 use hirsel_core_ids::work_steps::table;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
@@ -262,6 +261,23 @@ impl Derive<'_> {
         }
         Ok(())
     }
+    fn clone_work(
+        &mut self,
+        c: &mut Code,
+        work: hirsel_core_ids::work_steps::Work,
+        units: ValueId,
+        fail: BlockId,
+    ) {
+        let shift = c.constant(u64::from(work.shift));
+        let weight = c.constant(work.weight);
+        self.runtime_with_failure(
+            c,
+            hirsel_core_ir::RtOp::WorkSteps,
+            &[units, shift, weight],
+            Some(fail),
+        );
+    }
+
     fn clone_field(
         &mut self,
         c: &mut Code,
@@ -281,7 +297,7 @@ impl Derive<'_> {
                 let t = TypeId(t.0);
                 // MEM-30 work steps: a node is one clone item, charged alone.
                 let one = c.constant(1);
-                take_work(c, table::CLONE_ITEM, one, fail);
+                self.clone_work(c, table::CLONE_ITEM, one, fail);
                 let charge = self.box_charge(t);
                 let charged = c.constant(charge);
                 let size = c.field_size(&FieldTy::Inline(TypeRef(t.0)));
@@ -370,9 +386,9 @@ impl Derive<'_> {
                     hirsel_core_layout::field_size(&self.module.types, &self.recipes, item).2;
                 let logical = c.constant(logical);
                 let units = c.mul(len, logical);
-                take_work(c, table::COPY, units, fail);
+                self.clone_work(c, table::COPY, units, fail);
                 if self.owns(item, &mut vec![]) {
-                    take_work(c, table::CLONE_ITEM, len, fail);
+                    self.clone_work(c, table::CLONE_ITEM, len, fail);
                 }
                 let k = c.field_size(item);
                 let bytes = c.mul(len, k);
@@ -438,7 +454,7 @@ impl Derive<'_> {
                     hirsel_core_layout::field_size(&self.module.types, &self.recipes, row).2;
                 let logical = c.constant(logical);
                 let units = c.mul(len, logical);
-                take_work(c, table::COPY, units, fail);
+                self.clone_work(c, table::COPY, units, fail);
                 let charge = self.seq_charge(c, row, len);
                 let kind = AllocKind::own(field.clone());
                 let block = alloc_kind(c, kind, charge, bytes, fail);

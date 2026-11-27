@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """Run core and std source contract oracles on native engines and the evaluator.
-
 Example: std_native.py --compiler PATH --runtime PATH --filter file --backend both
 Confined filesystem cases run on the host, which needs openat2 (Linux >= 5.6).
-
---engines-agree runs each selected law on Cranelift, LLVM dev and LLVM release
-with --coverage, and for each determined law requires the three profiles to
-reach the same sites (docs/coverage.md, "Engines agree").
+--engines-agree checks coverage and MEM-30 on Cranelift, LLVM dev and LLVM release.
 """
 import argparse
 import base64
@@ -30,7 +26,8 @@ import threading
 import time
 import tomllib
 
-from std_contracts import Contract, discover, host_parameter, matches_filter, test_module
+from std_contracts import (Contract, discover, evaluator_meter, host_parameter, matches_filter,
+                           native_meter, reached_sites, test_module)
 from case_progress import Case
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -279,13 +276,15 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, events=False, progress=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, events=False, progress=None, meter=False, meter_limit=None, root_limit=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
         if events:
             # CONC-10 events are recorded only on request (22f95498).
             request["events"] = True
         if instructions is not None:
             request["instructions"] = instructions
+        if meter:
+            request.update(meter=True, meter_limit=meter_limit, root_limit=root_limit)
         if sdk_out is not None:
             request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
         with (contextlib.nullcontext(progress) if progress else Case(entry, 'evaluator')) as active:
@@ -321,7 +320,7 @@ class Evaluator:
         self.errors.close()
 
 
-def wrapper(case, port=None):
+def wrapper(case, port=None, metering=False):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
     call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
@@ -342,6 +341,11 @@ def wrapper(case, port=None):
         body = f'let _ = {call}\nOk(())'
     else:
         body = f'if {call} == {case.expected} {{Ok(())}} else {{Error(())}}'
+    if metering:
+        body = ('let native_contract_meter_scope = bound steps 18446744073709551615u64 {\n'
+                + 'let native_contract_meter_value: Result[(),()] = {\n' + body
+                + '\n}\nnative_contract_meter_value\n}\nmatch native_contract_meter_scope {'
+                + ' Ok(native_contract_meter_result) => native_contract_meter_result, Error(_) => Error(()) }')
     return f'\n@test\npub fn native_contract({parameters})->Result[(),()]{effect} {{\n{body}\n}}\n'
 
 
@@ -515,26 +519,6 @@ def determined(case):
             and not any(word in case.call for word in ('tasks', 'clock', '(https)', '(exec', '(unix', '(granted')))
 
 
-# The bodies whose arms decide on the bucket index of a Map. A map places each
-# key by `hash`, `place` or `strong`, which the runtime keys per process from
-# getrandom (`map_hash_key`), so which groups a walk visits, whether a group
-# has a match or an empty lane, and whether a 7-bit tag match is the key are
-# not functions of the program. Their entries are still compared, except
-# more_groups', which a walk calls only past a group with no empty lane. The
-# Crowded path (probe_staged and put_absent arms, commit_crowded, promote)
-# depends on the seed only when eight groups are full, and stays compared.
-SEEDED_ARMS = ('core@1/map/probe@', 'core@1/map/vacancy@', 'core@1/map/reprobe_crowded@', 'core@1/map/more_groups@',
-               'core@1/map/more_groups#e')
-
-
-def reached_sites(profile_path):
-    """Each site key of a written coverage profile, with whether a run reached
-    it, less the arms whose reach depends on the map hash seed."""
-    profile = json.loads(profile_path.read_text())
-    return {row['site']: bool(row['passed_runs'] or row['failed_runs']) for row in profile['sites']
-            if not row['site'].startswith(SEEDED_ARMS)}
-
-
 def engines_agree(agree, rows, output):
     """One row per determined law and LLVM build: its reached sites equal Cranelift's."""
     reference = AGREE_BUILDS[0]
@@ -571,6 +555,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
     engines = list(engines)
     # Each determined law's reached sites, by (test, file) and build.
     profiles = {}
+    evaluator_meters = {}
     typescript_override = typescript
     typescript = typescript or root / 'crates/hirsel-core-driver/src/sdk_codec.js'
     frame_codegen = typescript_override is None and any(c.package == 'runner' and c.call.startswith('ts_frame_') for c in contracts)
@@ -578,7 +563,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
         raise ValueError('Frame codec laws require --evaluator to derive runner.Frame')
     if any(c.evaluator_only for c in contracts) and 'evaluator' not in engines:
         engines.insert(0, 'evaluator')
-    if 'evaluator' in engines and evaluator is None:
+    if ('evaluator' in engines or agree) and evaluator is None:
         raise ValueError('evaluator laws require --evaluator <hirsel-core-contract-eval>')
     # Private stores are shared across cases only for immutable checked/native products.
     # Each case's host state is fresh and its executable is removed after observation.
@@ -586,7 +571,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
           contextlib.ExitStack() as processes, contextlib.ExitStack() as active):
         work = Path(temporary)
         protocol_codec = None
-        resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines or frame_codegen else None
+        resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines or frame_codegen or agree else None
         builds = AGREE_BUILDS if agree else [(e, None if e == 'evaluator' else llvm_profile if e == 'llvm' else 'dev') for e in engines]
         for engine, profile in builds:
             started = time.monotonic()
@@ -631,6 +616,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     save_row(rows, row, output)
                     continue
                 evaluating = engine == 'evaluator'
+                metering = (agree and determined(case) and not case.native_only
+                            and not case.expected.startswith(('stop ', 'fault '))
+                            and not host_parameter(case)[0])
                 progress = active.enter_context(Case(case.name, engine))
                 scratch = work / f'{engine}-{profile}-{index}'
                 scratch.mkdir()
@@ -736,7 +724,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if simulated:
                     source_rows, entry = simulated_case(root, case, source, adapted, scratch)
                 else:
-                    adapted.write_text(source + wrapper(case, port if https else None))
+                    adapted.write_text(source + wrapper(case, port if https else None, metering))
                     source_rows = manifest(root, case, adapted)
                     entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 inputs = scratch / 'inputs.json'
@@ -811,6 +799,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 coverage_out = scratch / 'coverage.json' if agree and determined(case) else None
                 if coverage_out:
                     command.extend(['--coverage-out', str(coverage_out)])
+                if metering:
+                    command.append('--rerun')
                 # All engines read this manifest's checkout sources, as the
                 # resident evaluator does, including temporary @test bodies.
                 command.append('--source-core')
@@ -881,8 +871,16 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--cc', str(linker)])
                 if case.argv is not None:
                     command.extend(['--', *case.argv])
+                if metering:
+                    meter_out = scratch / 'meter.json'
+                    environment = {**(os.environb if environment is None else environment),
+                                   b'XDG_CACHE_HOME': os.fsencode(work / 'cache'),
+                                   b'HIRSEL_TEST_METER_OUT': os.fsencode(meter_out)}
+                    environment.pop(b'HIRSEL_TEST_METER_LIMIT', None)
                 result = progress.run(command, cwd=host, capture_output=True, env=environment,
                                       on_start=client.set_result if https else None)
+                if metering:
+                    initial_meter = meter_out.read_text() if meter_out.exists() else None
                 if https:
                     row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
                 elif case.argv is not None:
@@ -902,6 +900,22 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     profiles.setdefault((row['test'], row['file']), {})[(engine, profile)] = reached_sites(coverage_out)
                 elif coverage_out and row['passed']:
                     profiles.setdefault((row['test'], row['file']), {})
+                if metering and row['passed']:
+                    key = (row['test'], row['file'])
+                    try:
+                        if key not in evaluator_meters:
+                            evaluator_meters[key] = evaluator_meter(resident, inputs, entry, case, progress, evaluator_observation)
+                        reference = evaluator_meters[key]
+                        if initial_meter is None:
+                            raise ValueError('native runtime produced no step report (use the testing runtime archive)')
+
+                        invoke = lambda env: progress.run(command, cwd=host, capture_output=True, env=env)
+                        validate = lambda result: test_observation(case, result, entry)[1]
+                        row['metering'] = native_meter(invoke, validate, environment, meter_out,
+                                                       initial_meter, reference)
+                        row['metering']['evaluator'] = reference
+                    except (ValueError, KeyError) as error:
+                        row.update(passed=False, cause=f'metering differential: {error}')
                 if replay and row['passed']:
                     row['replay'] = 'Sealed'
                 if row['cause']:
@@ -932,7 +946,7 @@ def main():
     parser.add_argument('--backend', choices=['all', 'evaluator', 'both', 'cranelift', 'llvm'], default='both')
     parser.add_argument('--llvm-profile', choices=['dev', 'release'], default='release')
     parser.add_argument('--engines-agree', action='store_true',
-                        help='run on Cranelift, LLVM dev and LLVM release with coverage; determined laws must reach the same sites')
+                        help='check coverage and MEM-30 on all native builds with --evaluator and a testing runtime')
     parser.add_argument('--filter', action='append', default=[])
     parser.add_argument('--report', type=Path)
     parser.add_argument('--typescript', type=Path, help='generated codec.js ES module; run its codec corpus partner')
@@ -953,6 +967,8 @@ def main():
         parser.error('native backends require --compiler and --runtime')
     if args.engines_agree and (args.replay or args.backend in ('all', 'evaluator')):
         parser.error('--engines-agree runs the native engines without --replay')
+    if args.engines_agree and args.evaluator is None:
+        parser.error('--engines-agree requires --evaluator for the MEM-30 floor and byte bound')
     if args.replay:
         if args.backend in ('all', 'evaluator') or args.record_runtime is None or not args.filter:
             parser.error('--replay requires a native backend, --record-runtime and a filter')

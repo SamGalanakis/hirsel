@@ -257,6 +257,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::StackCheck { .. }
                 | Inst::PromoteFrame { .. }
                 | Inst::BuiltinUse { .. }
+                | Inst::LoopIteration
                 | Inst::LimitExit
                 | Inst::Drop { .. }
                 | Inst::Mark { .. }
@@ -416,6 +417,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::Step { .. }
                 | Inst::StackCheck { .. }
                 | Inst::BuiltinUse { .. }
+                | Inst::LoopIteration
                 | Inst::LimitExit
                 | Inst::Share { .. }
                 | Inst::Release { .. }

@@ -20,8 +20,10 @@ const INSTRUCTIONS: u64 = 1_000_000_000;
 /// What one law's run is given: its budget, whether it records events and its launch identity.
 struct Setting {
     instructions: u64,
+    root_limit: u64,
     events: bool,
     launch: Option<Metadata>,
+    meter: Option<eval::StepMeter>,
 }
 
 fn evaluate(
@@ -110,11 +112,11 @@ fn run(
         Some(sources) => sources.item_sites(&module.items)?,
         None => Vec::new(),
     };
-    let (report, checked) = eval::run_entry(
+    let (report, checked) = eval::run_entry_with_meter(
         module,
         function,
         &handles,
-        u64::MAX,
+        setting.root_limit,
         eval::Nans::Scrambled,
         destination.as_deref_mut(),
         setting.instructions,
@@ -123,6 +125,7 @@ fn run(
         &sites,
         setting.launch.as_ref(),
         None,
+        setting.meter,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -148,20 +151,22 @@ fn run(
         eval::Outcome::Stopped(name) => json!({"kind":"stopped", "name":name}),
     };
     let positions = std::cell::OnceCell::new();
+    let position = |site: Option<hirsel_core_ir::Anchor>| {
+        let site = site?;
+        let sources = sources.as_ref()?;
+        let (file, line, column) = positions
+            .get_or_init(|| sources.positions())
+            .position(&module.items[site.item.index()], site.start)?;
+        Some((&file.path, line, column))
+    };
     let sites = report
         .sites
         .iter()
-        .map(|site| {
-            let site = (*site)?;
-            let sources = sources.as_ref()?;
-            let (file, line, column) = positions
-                .get_or_init(|| sources.positions())
-                .position(&module.items[site.item.index()], site.start)?;
-            Some((&file.path, line, column))
-        })
+        .map(|site| position(*site))
         .collect::<Vec<_>>();
     Ok(
         json!({"outcome":outcome, "used":report.used, "cause_sites":sites,
+        "steps":report.steps, "step_floor":report.step_floor, "refusal_site":position(report.step_refusal),
         "stdout":report.stdout, "stderr":report.stderr,
         "events":report.events.iter().map(|e| [u64::from(e.kind), e.task, e.object, e.value]).collect::<Vec<_>>(),
         "event_sources":report.events.iter().map(|e| e.source.map(|s| module.items[s.item.index()].to_string())).collect::<Vec<_>>(),
@@ -208,9 +213,16 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 input["program_entry"].as_bool().unwrap_or(false),
                 Setting {
                     instructions: input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
+                    root_limit: input["root_limit"].as_u64().unwrap_or(u64::MAX),
                     launch,
                     // CONC-10 events only for a law that reads them: a flood makes millions.
                     events: input["events"].as_bool().unwrap_or(false),
+                    meter: input["meter"]
+                        .as_bool()
+                        .filter(|&enabled| enabled)
+                        .map(|_| eval::StepMeter {
+                            allowance: input["meter_limit"].as_u64(),
+                        }),
                 },
             )
         };

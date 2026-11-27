@@ -243,6 +243,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         | Inst::StackCheck { .. }
         | Inst::PromoteFrame { .. }
         | Inst::BuiltinUse { .. }
+        | Inst::LoopIteration
         | Inst::LimitExit
         | Inst::Drop { .. } => {}
         Inst::Mark { count, .. } | Inst::Unmark { count, .. } => f(count),

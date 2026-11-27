@@ -434,6 +434,8 @@ impl FunctionEmitter<'_> {
             RtOp::Join { .. }
                 | RtOp::CheckCancel
                 | RtOp::Argon2id
+                | RtOp::StepEnter
+                | RtOp::WorkSteps
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
@@ -467,9 +469,16 @@ impl FunctionEmitter<'_> {
                     u(&at),
                 ],
             ),
-            RtOp::StepEnter => {
-                self.native_call("hirsel_core_step_enter", &[B], &[ptr(CONTEXT), u(&args[0])])
-            }
+            RtOp::StepEnter => self.native_call(
+                "hirsel_core_step_enter_at",
+                &[B],
+                &[ptr(CONTEXT), u(&args[0]), u(&at)],
+            ),
+            RtOp::WorkSteps => self.native_call(
+                "hirsel_core_work_steps",
+                &[K],
+                &[ptr(CONTEXT), u(&args[0]), u(&args[1]), u(&args[2]), u(&at)],
+            ),
             RtOp::StepLeave => self.native_call("hirsel_core_step_leave", &[], &[ptr(CONTEXT)]),
             RtOp::Closed(_) => Vec::new(),
             RtOp::StepCatch => self.native_call("hirsel_core_step_catch", &[B], &[ptr(CONTEXT)]),

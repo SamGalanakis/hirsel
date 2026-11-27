@@ -471,7 +471,17 @@ unsafe fn run_config_inner(
 ) -> Result<u8, crate::run_stop::EndReason> {
     // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
-        let key = match map_hash_key() {
+        #[cfg(feature = "testing")]
+        let meter_output = std::env::var_os("HIRSEL_TEST_METER_OUT");
+        #[cfg(feature = "testing")]
+        let key = if meter_output.is_some() {
+            Ok([0; 16])
+        } else {
+            map_hash_key()
+        };
+        #[cfg(not(feature = "testing"))]
+        let key = map_hash_key();
+        let key = match key {
             Ok(key) => key,
             Err(error) => {
                 diagnostic(
@@ -488,6 +498,13 @@ unsafe fn run_config_inner(
         #[cfg(feature = "prof")]
         let _worker_profile = crate::prof::Worker::enter();
         let mut context = Context::with_unit_heap(config.root_limit);
+        #[cfg(feature = "testing")]
+        if meter_output.is_some() {
+            let inject = std::env::var("HIRSEL_TEST_METER_LIMIT")
+                .ok()
+                .map(|limit| limit.parse().expect("a test step limit"));
+            context.step_observation = Some(crate::steps::Observation::new(inject));
+        }
         #[cfg(feature = "prof")]
         crate::mem_prof::root(context.limit_record().addr(), context.available());
         context.run = config;
@@ -634,9 +651,26 @@ unsafe fn run_config_inner(
         };
         drop(text);
         files.close_all(&mut context);
+        #[cfg(feature = "testing")]
+        let meter =
+            meter_output
+                .zip(context.step_observation.as_ref())
+                .map(|(path, observation)| {
+                    (path, observation.report(&context), context.current.clone())
+                });
         drop(context);
         if let Some(close) = config.close_grants {
             close(config.state);
+        }
+        #[cfg(feature = "testing")]
+        if let Some((path, (steps, refusal), funding)) = meter {
+            let bytes = config.root_limit - funding.available();
+            let site = refusal.map_or("null".to_string(), |site| site.to_string());
+            std::fs::write(
+                path,
+                format!(r#"{{"steps":{steps},"used":{bytes},"refusal_site":{site}}}"#),
+            )
+            .expect("write test metering report");
         }
         Ok(status)
     }

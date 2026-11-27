@@ -302,7 +302,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 let at = first + k as u32;
                 let op = match *inst {
                     // A builtin's use marks the code it came from; it does not run.
-                    Inst::BuiltinUse { .. } => continue,
+                    Inst::BuiltinUse { .. } | Inst::LoopIteration => continue,
                     Inst::Call { call } => {
                         let site = &b.calls[call.index()];
                         let args = l.args.len() as u32;

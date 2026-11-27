@@ -97,5 +97,6 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::StepEnter => "rt.step_enter".into(),
         RtOp::StepLeave => "rt.step_leave".into(),
         RtOp::StepCatch => "rt.step_catch".into(),
+        RtOp::WorkSteps => "rt.work_steps".into(),
     }
 }

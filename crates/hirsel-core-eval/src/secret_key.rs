@@ -214,7 +214,7 @@ impl Machine<'_> {
                     return Ok(fail(KeyFailure::Denied));
                 }
                 let len = s.bytes.len() as u64;
-                self.take_steps(t, table::AEAD.steps(len))?;
+                self.take_work(t, table::AEAD, &[len])?;
                 let s = self.secret(a[1]).unwrap();
                 let blob = key_wrap::wrap_with_salt(
                     &key.bytes,
@@ -234,7 +234,7 @@ impl Machine<'_> {
                 if alg == SignAlg::P256 && source == SigningRandom::Virtual && key.opaque {
                     return Ok(fail(KeyFailure::Denied));
                 }
-                self.take_steps(t, alg.work().steps(self.load(a[3] + 8, 8)))?;
+                self.take_work(t, alg.work(), &[self.load(a[3] + 8, 8)])?;
                 (
                     key_wrap::sign(alg, &key.bytes, self.carrier_bytes(a[3]), source),
                     a[4],
@@ -248,7 +248,7 @@ impl Machine<'_> {
                 else {
                     return Ok(fail(KeyFailure::Invalid));
                 };
-                self.take_steps(t, table::AEAD.steps(self.load(a[1] + 8, 8)))?;
+                self.take_work(t, table::AEAD, &[self.load(a[1] + 8, 8)])?;
                 let blob = self.carrier_bytes(a[1]).to_vec();
                 let len = key_wrap::unwrapped_len(&blob).unwrap_or(0) as u64;
                 let size = SecretGrant::logical_size(requested.send(), len);
@@ -329,8 +329,8 @@ impl Machine<'_> {
                 return Ok(vec![requested as u64, 4, 0, available as u64]);
             }
         };
-        let steps = table::AEAD.steps_sum(&[self.load(a[3] + 8, 8), self.load(a[4] + 8, 8)]);
-        self.take_steps(t, steps)?;
+        let units = [self.load(a[3] + 8, 8), self.load(a[4] + 8, 8)];
+        self.take_work(t, table::AEAD, &units)?;
         let apply = |machine: &Self, spare| {
             let input = AeadInput {
                 alg,
@@ -389,7 +389,7 @@ impl Machine<'_> {
             }
             _ => unreachable!(),
         };
-        self.take_steps(t, alg.work().steps(self.load(a[1] + 8, 8)))?;
+        self.take_work(t, alg.work(), &[self.load(a[1] + 8, 8)])?;
         let secret = self.secret(a[0]).unwrap();
         let data = self.carrier_bytes(a[1]);
         let jws = matches!(op, HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify);

@@ -1,6 +1,7 @@
 //! Mechanical `key` glue. Generic calls retain a type recipe until the ordinary
 //! instance materializer substitutes it; no source body is checked again.
 use super::*;
+mod runtime;
 use hirsel_core_ir::RtOp;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
@@ -750,24 +751,6 @@ impl Derive<'_> {
         let call = CallId(c.body.calls.len() as u32);
         c.body.calls.push(CallSite {
             callee: Callee::Direct(f),
-            signature,
-            args,
-            results,
-            fail: None,
-            cold: false,
-        });
-        c.inst(Inst::Call { call });
-        result
-    }
-    pub(super) fn runtime(&mut self, c: &mut Code, op: RtOp, args: &[ValueId]) -> Option<ValueId> {
-        let sig = op.signature();
-        let result = sig.results.first().map(|&ty| c.value(ty));
-        let signature = signature_id(self.module, sig);
-        let args = PoolRange::push(&mut c.body.pools.args, args.iter().copied().map(Arg::Value));
-        let results = PoolRange::push(&mut c.body.pools.values, result);
-        let call = CallId(c.body.calls.len() as u32);
-        c.body.calls.push(CallSite {
-            callee: Callee::Runtime(op),
             signature,
             args,
             results,

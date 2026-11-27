@@ -110,6 +110,8 @@ impl Function<'_, '_, '_> {
             RtOp::Host(_)
             | RtOp::Returnable(_)
             | RtOp::CheckCancel
+            | RtOp::WorkSteps
+            | RtOp::StepEnter
             | RtOp::Join { .. }
             | RtOp::ChannelNew { .. }
             | RtOp::Send { .. }
@@ -140,12 +142,22 @@ impl Function<'_, '_, '_> {
             }
             RtOp::StepEnter => {
                 outputs[0] = self.c_call(
-                    "hirsel_core_step_enter",
-                    &[P, U],
+                    "hirsel_core_step_enter_at",
+                    &[P, U, U],
                     &[B],
-                    &[self.context, args[0]],
+                    &[self.context, args[0], site],
                 )?[0];
                 1
+            }
+            RtOp::WorkSteps => {
+                let status = self.c_call(
+                    "hirsel_core_work_steps",
+                    &[P, U, U, U, U],
+                    &[K],
+                    &[self.context, args[0], args[1], args[2], site],
+                )?[0];
+                self.call_failure(status, call.fail)?;
+                0
             }
             RtOp::StepLeave => {
                 self.c_call("hirsel_core_step_leave", &[P], &[], &[self.context])?;

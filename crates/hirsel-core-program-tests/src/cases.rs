@@ -14,6 +14,7 @@ use std::{borrow::Cow, collections::HashMap};
 #[path = "../../../core/front/support/cases.rs"]
 mod case_source;
 mod engines;
+mod ordered_cost;
 mod targets;
 use case_source::DiagnosticExpectation;
 
@@ -367,66 +368,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         assert_eq!(checked, 4);
     }
     if path.file_stem().is_some_and(|x| x == "ordered-cost") {
-        let find = |name: &str, generic: bool| {
-            unit_modules
-                .iter()
-                .find_map(|unit| {
-                    let module = unit.module;
-                    let f = &module.functions[unit.function.index()];
-                    let key = &module.instances[f.instance.index()];
-                    (key.definition.0.name == name
-                        && if generic {
-                            module.argument_names(key) == ["u64"]
-                        } else {
-                            key.arguments.is_empty()
-                        })
-                    .then_some((module, f))
-                })
-                .unwrap()
-        };
-        for (generic, closed) in [("less", "closed_less"), ("min", "closed_scalar")] {
-            let (am, a) = find(generic, true);
-            let (bm, b) = find(closed, false);
-            let mut types = HashMap::new();
-            let mut canonical = |module: &Module, signature: &hirsel_core_ir::Signature| {
-                let mut signature = signature.clone();
-                let mut ty = |t: &mut hirsel_core_ir::TypeId| {
-                    let next = hirsel_core_ir::TypeId(types.len() as u32);
-                    *t = *types.entry(module.closure(*t).hash).or_insert(next);
-                };
-                for parameter in &mut signature.params {
-                    if let Param::Address {
-                        place: hirsel_core_ir::PlaceTy::Declared(t),
-                        ..
-                    } = parameter
-                    {
-                        ty(t);
-                    }
-                }
-                if let Some(t) = &mut signature.dest {
-                    ty(t);
-                }
-                signature
-            };
-            assert_eq!(
-                canonical(am, &am.signatures[a.signature.index()]),
-                canonical(bm, &bm.signatures[b.signature.index()])
-            );
-            let a = a.body.as_ref().unwrap();
-            let b = b.body.as_ref().unwrap();
-            assert_eq!(
-                a.insts
-                    .iter()
-                    .map(std::mem::discriminant)
-                    .collect::<Vec<_>>(),
-                b.insts
-                    .iter()
-                    .map(std::mem::discriminant)
-                    .collect::<Vec<_>>(),
-                "{generic}"
-            );
-            assert_eq!(a.slots.len(), b.slots.len(), "{generic}");
-        }
+        ordered_cost::check(&unit_modules);
     }
     let mut want_refusals = vec![];
     // PROG-7: every refusal with causal sites, or with compared facts, states them.

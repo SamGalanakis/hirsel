@@ -1,5 +1,6 @@
 //! MEM-30 step budgets and slice counters belong to one task.
 use crate::{Context, causes};
+use hirsel_core_ids::work_steps::Work;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const UNBOUNDED: i64 = 1 << 62;
@@ -24,6 +25,65 @@ pub(crate) struct Bound {
     left: u64,
 }
 
+#[cfg(feature = "testing")]
+pub(crate) struct Observation {
+    pub(crate) inject: Option<u64>,
+    window: Option<u64>,
+    steps: u64,
+    refusal: Option<u64>,
+}
+
+#[cfg(feature = "testing")]
+impl Observation {
+    pub(crate) fn new(inject: Option<u64>) -> Self {
+        Self {
+            inject,
+            window: None,
+            steps: 0,
+            refusal: None,
+        }
+    }
+
+    pub(crate) fn report(&self, context: &Context) -> (u64, Option<u64>) {
+        (self.spent(window_left(context)), self.refusal)
+    }
+
+    fn spent(&self, window_left: u64) -> u64 {
+        self.steps
+            .saturating_add(self.window.map_or(0, |start| start - window_left))
+    }
+}
+
+/// Start observing this context before a native fixture enters its bound.
+///
+/// # Safety
+/// The fixture owns an exclusive live context.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_step_observe(
+    context: *mut Context,
+    inject: bool,
+    limit: u64,
+) {
+    unsafe { (*context).step_observation = Some(Observation::new(inject.then_some(limit))) };
+}
+
+/// Read the steps and first refusal of a native fixture's context.
+///
+/// # Safety
+/// The fixture owns the live context and a writable refusal-site output.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_step_report(
+    context: *const Context,
+    refusal: *mut u64,
+) -> u64 {
+    let context = unsafe { &*context };
+    let (steps, first) = context.step_observation.as_ref().unwrap().report(context);
+    unsafe { refusal.write(first.unwrap_or(0)) };
+    steps
+}
+
 fn bound(left: u64) -> Bound {
     let id = NEXT
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
@@ -38,6 +98,13 @@ fn window_left(context: &Context) -> u64 {
 }
 
 fn install_window(context: &mut Context, slice: u64) {
+    #[cfg(feature = "testing")]
+    {
+        let left = window_left(context);
+        if let Some(obs) = &mut context.step_observation {
+            obs.steps = obs.spent(left);
+        }
+    }
     if let Some(current) = context.step_bounds.last_mut() {
         let window = current.left.min(slice);
         current.left -= window;
@@ -46,6 +113,10 @@ fn install_window(context: &mut Context, slice: u64) {
     } else {
         context.step_slice_tail = slice;
         context.steps = initial_unbounded_steps();
+    }
+    #[cfg(feature = "testing")]
+    if let Some(obs) = &mut context.step_observation {
+        obs.window = (!context.step_bounds.is_empty()).then_some(context.steps as u64);
     }
 }
 
@@ -90,13 +161,34 @@ fn leave(context: &mut Context) {
 /// The current task owns context exclusively; its native counter is flushed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_step_enter(context: *mut Context, steps: u64) -> bool {
+    unsafe { hirsel_core_step_enter_at(context, steps, 0) }
+}
+
+/// # Safety
+/// The current task owns context exclusively; its native counter is flushed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_step_enter_at(
+    context: *mut Context,
+    steps: u64,
+    _site: u64,
+) -> bool {
     // SAFETY: the caller provides its live exclusive task context.
     let context = unsafe { &mut *context };
+    #[cfg(feature = "testing")]
+    let steps = context
+        .step_observation
+        .as_mut()
+        .and_then(|obs| obs.inject.take())
+        .unwrap_or(steps);
     let window = window_left(context);
     let mut slice = context.step_slice_tail;
     if let Some(current) = context.step_bounds.last_mut() {
         let left = current.left + window;
         if left < steps {
+            #[cfg(feature = "testing")]
+            if let Some(obs) = &mut context.step_observation {
+                obs.refusal.get_or_insert(_site);
+            }
             #[cfg(feature = "prof")]
             {
                 crate::mem_prof::step_remaining(left);
@@ -174,6 +266,42 @@ pub(crate) unsafe fn take_many(context: *mut Context, mut count: u64, site: u64)
     true
 }
 
+/// Charge a work-table row before carrying out its operation.
+pub(crate) unsafe fn take_work(
+    context: *mut Context,
+    work: Work,
+    units: &[u64],
+    site: u64,
+) -> bool {
+    if unsafe { (*context).step_bounds.is_empty() } {
+        return true;
+    }
+    let check = Work::check_ceiling();
+    let before = check.then(|| remaining(unsafe { &*context })).flatten();
+    let count = work.steps_sum(units);
+    if !unsafe { take_many(context, count, site) } {
+        return false;
+    }
+    if let Some(before) = before {
+        let after = remaining(unsafe { &*context }).expect("work keeps its step bound");
+        work.assert_ceiling(units, before - after);
+    }
+    true
+}
+
+/// # Safety
+/// The current task owns the context and has flushed its native step counter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_work_steps(
+    context: *mut Context,
+    units: u64,
+    shift: u64,
+    weight: u64,
+    site: u64,
+) -> u8 {
+    u8::from(!unsafe { take_work(context, Work::from_operands(shift, weight), &[units], site) })
+}
+
 /// # Safety
 /// Called immediately after a source Step decremented the flushed window to <= 0.
 #[unsafe(no_mangle)]
@@ -195,6 +323,10 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
     if ctx.steps < 0
         && let Some(current) = ctx.step_bounds.last()
     {
+        #[cfg(feature = "testing")]
+        if let Some(obs) = &mut ctx.step_observation {
+            obs.refusal.get_or_insert(site);
+        }
         #[cfg(feature = "prof")]
         crate::mem_prof::step_refused();
         ctx.steps = 0;

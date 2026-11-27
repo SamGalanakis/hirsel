@@ -1300,7 +1300,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(available, Ty::Scalar(Scalar::U64))?;
             c.is(bytes, Ty::Scalar(Scalar::U64))
         }
-        Inst::LimitExit => Ok(()),
+        Inst::LimitExit | Inst::LoopIteration => Ok(()),
         Inst::BuiltinUse { ref definition } => {
             need(crate::is_versioned_builtin(definition), || {
                 "unknown builtin use".into()

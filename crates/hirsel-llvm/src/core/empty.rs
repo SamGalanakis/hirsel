@@ -158,6 +158,7 @@ fn pure(body: &Body, constants: &[Option<u64>], inst: &Inst) -> bool {
         | Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
         | Inst::BuiltinUse { .. }
+        | Inst::LoopIteration
         | Inst::Mark { .. }
         | Inst::Unmark { .. }
         | Inst::UpdateMask { .. }

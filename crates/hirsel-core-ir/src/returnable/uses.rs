@@ -19,6 +19,7 @@ pub(super) fn map_uses(inst: &Inst, f: &mut impl FnMut(ValueId) -> ValueId) -> I
         | Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
         | Inst::BuiltinUse { .. }
+        | Inst::LoopIteration
         | Inst::LimitExit
         | Inst::Step { .. }
         | Inst::StackCheck { .. }

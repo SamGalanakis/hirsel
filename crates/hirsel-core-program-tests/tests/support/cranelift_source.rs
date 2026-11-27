@@ -228,6 +228,9 @@ fn cancelled(tasks: Tasks) -> u64 waits {
         let evaluator = eval::run(&module, names["cancelled"], &[0], 1_000_000);
         assert_eq!(evaluator.used, 0);
         let expected = eval::Report {
+            steps: 0,
+            step_floor: 0,
+            step_refusal: None,
             outcome: Outcome::Returned(vec![1]),
             used: 0,
             peak_reserved: 0,

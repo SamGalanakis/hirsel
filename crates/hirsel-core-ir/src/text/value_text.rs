@@ -18,3 +18,15 @@ pub(super) fn static_value(value: &StaticValue) -> String {
         }
     }
 }
+
+/// A constant's bits as text: decimal for integers, bool and char; hex bits for floats.
+pub(super) fn constant(t: Ty, bits: u64) -> String {
+    match t {
+        Ty::Scalar(Scalar::Bool) => (if bits == 0 { "false" } else { "true" }).into(),
+        Ty::Scalar(Scalar::F32 | Scalar::F64) | Ty::Ptr => format!("{bits:#x}"),
+        t => match t.int() {
+            Some((true, w)) => (((bits << (64 - w)) as i64) >> (64 - w)).to_string(),
+            _ => bits.to_string(),
+        },
+    }
+}

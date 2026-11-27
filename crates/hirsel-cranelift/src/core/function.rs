@@ -707,6 +707,7 @@ impl Function<'_, '_, '_> {
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::BuiltinUse { .. }
+            | Inst::LoopIteration
             | Inst::Prefetch { .. }
             | Inst::Mark { .. }
             | Inst::Unmark { .. } => {}

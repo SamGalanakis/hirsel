@@ -923,6 +923,7 @@ impl<'a> Seal<'a> {
             | Inst::StorageDead { .. }
             | Inst::RegionOpen { .. }
             | Inst::BuiltinUse { .. }
+            | Inst::LoopIteration
             | Inst::LimitExit
             | Inst::Step { .. }
             | Inst::StackCheck { .. } => {}

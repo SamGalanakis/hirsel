@@ -27,6 +27,7 @@ mod descriptor_text;
 mod runtime;
 mod value_text;
 use runtime::rt;
+use value_text::constant;
 use value_text::static_value;
 
 use crate::ir::*;
@@ -211,18 +212,6 @@ fn shape(s: &Shape) -> String {
 }
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
     items.into_iter().map(f).collect::<Vec<_>>().join(", ")
-}
-
-/// A constant's bits as text: decimal for integers, bool and char; hex bits for floats.
-fn constant(t: Ty, bits: u64) -> String {
-    match t {
-        Ty::Scalar(Scalar::Bool) => (if bits == 0 { "false" } else { "true" }).into(),
-        Ty::Scalar(Scalar::F32 | Scalar::F64) | Ty::Ptr => format!("{bits:#x}"),
-        t => match t.int() {
-            Some((true, w)) => (((bits << (64 - w)) as i64) >> (64 - w)).to_string(),
-            _ => bits.to_string(),
-        },
-    }
 }
 
 impl Printer {
@@ -695,6 +684,7 @@ impl Printer {
                     ),
                     Inst::LimitExit => "limit_exit".into(),
                     Inst::BuiltinUse { definition } => format!("builtin_use {definition}"),
+                    Inst::LoopIteration => "loop_iteration".into(),
                     Inst::Step { fail: f } => format!("step{}", fail(*f)),
                     Inst::StackCheck { fail: f } => format!("stack_check{}", fail(*f)),
                     Inst::Drop {
@@ -1403,6 +1393,10 @@ impl BodyParser {
                 l.next()?;
                 return Ok(Inst::StackCheck { fail: l.fail()? });
             }
+            Some("loop_iteration") => {
+                l.next()?;
+                return Ok(Inst::LoopIteration);
+            }
             Some("builtin_use") => {
                 l.next()?;
                 let definition = DefPath::from_full(l.next()?).ok_or("bad builtin definition")?;
@@ -1849,6 +1843,7 @@ impl BodyParser {
                 "step_enter" => RtOp::StepEnter,
                 "step_leave" => RtOp::StepLeave,
                 "step_catch" => RtOp::StepCatch,
+                "work_steps" => RtOp::WorkSteps,
                 name if let Some(op) = hirsel_core_layout::flow::Op::ALL
                     .iter()
                     .copied()

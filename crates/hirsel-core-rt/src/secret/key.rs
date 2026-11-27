@@ -221,7 +221,7 @@ pub unsafe extern "C" fn hirsel_core_secret_wrap(
             return key_error(KEY_DENIED);
         }
         let len = secret.bytes.as_deref().map_or(0, |bytes| bytes.len()) as u64;
-        if !crate::steps::take_many(context, table::AEAD.steps(len), site) {
+        if !crate::steps::take_work(context, table::AEAD, &[len], site) {
             return crate::provider::CANCELLED;
         }
         let args = KeyRequest {
@@ -254,7 +254,7 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
             return key_error(KEY_INVALID);
         };
         let blob = crate::tls::bytes(&*blob);
-        if !crate::steps::take_many(context, table::AEAD.steps(blob.len() as u64), site) {
+        if !crate::steps::take_work(context, table::AEAD, &[blob.len() as u64], site) {
             return crate::provider::CANCELLED;
         }
         let len = hirsel_core_net::key_wrap::unwrapped_len(blob).unwrap_or(0);
@@ -345,7 +345,7 @@ pub unsafe extern "C" fn hirsel_core_secret_sign(
             return key_error(KEY_DENIED);
         }
         let msg_len = (*msg).len as u64;
-        if !crate::steps::take_many(context, alg.work().steps(msg_len), site) {
+        if !crate::steps::take_work(context, alg.work(), &[msg_len], site) {
             return crate::provider::CANCELLED;
         }
         #[cfg(feature = "record")]
@@ -403,8 +403,8 @@ unsafe fn secret_aead(
                 available,
             }) => return key_capacity(requested, available),
         };
-        let steps = table::AEAD.steps_sum(&[(*aad).len as u64, (*bytes).len as u64]);
-        if !crate::steps::take_many(context, steps, site) {
+        let units = [(*aad).len as u64, (*bytes).len as u64];
+        if !crate::steps::take_work(context, table::AEAD, &units, site) {
             return crate::provider::CANCELLED;
         }
         let input = AeadInput {

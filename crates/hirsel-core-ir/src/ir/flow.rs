@@ -80,3 +80,18 @@ pub(crate) fn for_each_successor(b: &Body, bi: usize, mut visit: impl FnMut(Bloc
         Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
     }
 }
+
+impl Body {
+    /// The storage addresses with a lexical frame obligation in this body.
+    pub fn frame_obligations(&self) -> std::collections::BTreeSet<AddressId> {
+        self.insts
+            .iter()
+            .filter_map(|inst| match *inst {
+                Inst::FrameAdmit { storage, .. }
+                | Inst::FrameActive { storage, .. }
+                | Inst::FrameRefund { storage } => Some(storage),
+                _ => None,
+            })
+            .collect()
+    }
+}

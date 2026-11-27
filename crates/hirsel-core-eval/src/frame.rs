@@ -113,7 +113,14 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     }
 
     /// `f`'s activation's site record, popped when it ends.
-    pub(super) fn enter_frame(&self, t: &mut Task, f: FuncId) {
+    pub(super) fn enter_frame(&mut self, t: &mut Task, f: FuncId) {
+        if !t.step_bounds.is_empty() && t.at.iter().any(|here| here.f == f) {
+            let definition =
+                &self.m.instances[self.m.functions[f.index()].instance.index()].definition;
+            if !definition.package_is("core", "1") {
+                self.step_floor += 1;
+            }
+        }
         t.at.push(Here {
             f,
             at: Pos::Entry,
@@ -156,6 +163,10 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             vectors.unpack(b, &mut vals, pool(blk.params), &incoming);
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
+                if matches!(inst, Inst::LoopIteration) {
+                    self.step_floor += u64::from(!t.step_bounds.is_empty());
+                    continue;
+                }
                 if matches!(inst, Inst::BuiltinUse { .. }) {
                     #[cfg(feature = "map-observation")]
                     if let Inst::BuiltinUse { definition } = inst

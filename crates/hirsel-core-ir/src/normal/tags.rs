@@ -299,6 +299,7 @@ tags!(Inst {
     47 => FrameRefund { storage },
     48 => Prefetch { data, offset },
     49 => StackCheck { fail },
+    50 => LoopIteration,
 });
 
 tags!(LayoutQuery {
@@ -412,6 +413,7 @@ tags!(RtOp {
     82 => Sha1Compress,
     83 => Closed(part0),
     84 => ReceiveUntil { item },
+    85 => WorkSteps,
 });
 
 tags!(Wait {

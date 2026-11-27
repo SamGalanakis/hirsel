@@ -243,7 +243,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         // Stepped before the unwind: a failed step cleans each owner the unwind would,
         // once (FAIL-9), and the unwind changes no owner's state.
-        self.source_step(n);
+        self.complete_iteration(n);
         self.unwind(self.frames[i].owners, self.frames[i].scopes, n);
         if let Some(h) = self.frames[i].header {
             self.jump(h, &[], n);

@@ -119,6 +119,8 @@ static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,Hirsel
 }
 static void diagnostic(void *s,const uint8_t *p,size_t n) { fwrite(p,1,n,stderr); abort(); }
 static void put(uint64_t n) { require(fwrite(&n,8,1,stdout)==1); }
+extern void hirsel_core_test_step_observe(HirselCoreContext *,bool,uint64_t);
+extern uint64_t hirsel_core_test_step_report(const HirselCoreContext *,uint64_t *);
 static void emit(HirselCoreContext *ctx,uint8_t status,const uint64_t *values,size_t n) {
     put(status!=0);
     HirselCoreCauseCell *causes=NULL;
@@ -133,6 +135,9 @@ static void emit(HirselCoreContext *ctx,uint8_t status,const uint64_t *values,si
     put(hirsel_core_test_attempts(ctx));
     put(world.out_len); for(size_t i=0;i<world.out_len;i++) put(world.out[i]);
     put(world.err_len); for(size_t i=0;i<world.err_len;i++) put(world.err[i]);
+    uint64_t refusal=0;
+    put(hirsel_core_test_step_report(ctx,&refusal));
+    put(refusal);
     require(world.issues==world.deliveries);
     hirsel_core_causes_drop(causes);
     if(world.matrix) world.matrix=2;

@@ -26,6 +26,8 @@ mod convert;
 use convert::convert;
 mod crc;
 mod field_steps;
+mod metering;
+pub use metering::{StepMeter, run_args, run_args_with_meter, run_entry, run_entry_with_meter};
 mod flat;
 mod footprint;
 mod frame;
@@ -99,6 +101,12 @@ pub enum Outcome {
 
 pub struct Report {
     pub outcome: Outcome,
+    /// Successful step charges across every task in the run.
+    pub steps: u64,
+    /// Loop iterations and recursive entries observed while a bound was current.
+    pub step_floor: u64,
+    /// First step refusal in a metering run, including a refusal caught by its bound.
+    pub step_refusal: Option<Anchor>,
     /// The root limit's `used` at the observation boundary (MEM-19).
     /// A host call observes the live task. An entry run retires the root task.
     pub used: u64,
@@ -802,6 +810,10 @@ struct Machine<'m, H = WorldHost<'m>> {
     /// What a flat run that outran `instructions` still owes ([`flat`]).
     owed: u64,
     steps: u64,
+    step_floor: u64,
+    observe_steps: bool,
+    step_injection: Option<u64>,
+    step_refusal: Option<Anchor>,
     injection: Option<(usize, bool)>,
     /// The `view` places of the calls running now, as (block, offset, size).
     frozen: Vec<(usize, usize, usize)>,
@@ -1188,62 +1200,6 @@ pub fn run_nans_into(
     )
 }
 
-/// Run an entry with the root task's startup charge and teardown, as the native
-/// process entry does. The limit must cover startup. May record CONC-10 events.
-/// A cause's site word is `sites[item] + start` (`SourceMap::item_sites` over the
-/// module's items); an empty `sites` means the module's own (`source::module_sites`).
-/// With `error_text`, a returned `Error(e)` is rendered as PROG-3 says.
-#[allow(clippy::too_many_arguments)]
-pub fn run_entry(
-    m: &Module,
-    f: FuncId,
-    args: &[u64],
-    limit: u64,
-    nans: Nans,
-    destination: Option<&mut [u8]>,
-    instructions: u64,
-    revisions: &Revisions,
-    events: bool,
-    sites: &[u64],
-    launch: Option<&hirsel_core_ids::launch::Metadata>,
-    error_text: Option<ErrorText<'_>>,
-) -> (Report, Checked) {
-    run_world(
-        m,
-        f,
-        args,
-        limit,
-        WorldInput {
-            core: Core {
-                nans,
-                instructions,
-                sites,
-                ..Core::default()
-            },
-            destination,
-            revisions: Some(revisions),
-            events,
-            process_entry: true,
-            launch,
-            error_text,
-            ..WorldInput::default()
-        },
-    )
-}
-/// A run whose `Args` table holds `argv`.
-pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) -> Report {
-    run_world(
-        m,
-        f,
-        args,
-        limit,
-        WorldInput {
-            argv,
-            ..WorldInput::default()
-        },
-    )
-    .0
-}
 /// Launch an evaluator with an artifact or embedder identity captured before entry.
 pub fn run_launch(
     m: &Module,
@@ -1393,6 +1349,7 @@ struct WorldInput<'a> {
 /// What a run of the pure core is set up with, whatever host it sits on.
 struct Core<'a> {
     map_hash_key: Option<[u8; 16]>,
+    meter: Option<StepMeter>,
     #[cfg(feature = "map-observation")]
     observe_maps: bool,
     injection: Option<(usize, bool)>,
@@ -1413,6 +1370,7 @@ impl Default for Core<'_> {
     fn default() -> Self {
         Self {
             map_hash_key: None,
+            meter: None,
             #[cfg(feature = "map-observation")]
             observe_maps: false,
             injection: None,
@@ -1556,6 +1514,9 @@ fn run_world(
     };
     let report = Report {
         outcome,
+        steps: mach.steps,
+        step_floor: mach.step_floor,
+        step_refusal: mach.step_refusal,
         used: mach.root().used(),
         peak_reserved: mach.peak_reserved,
         trace: mach.trace,
@@ -1784,6 +1745,10 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             instructions: input.instructions,
             owed: 0,
             steps: 0,
+            step_floor: 0,
+            observe_steps: input.meter.is_some(),
+            step_injection: input.meter.and_then(|meter| meter.allowance),
+            step_refusal: None,
             injection: input.injection,
             frozen: Vec::new(),
             loans: 0,
@@ -1985,6 +1950,10 @@ impl<'m> Machine<'m> {
             instructions: 0,
             owed: 0,
             steps: 0,
+            step_floor: 0,
+            observe_steps: false,
+            step_injection: None,
+            step_refusal: None,
             injection: None,
             frozen: Vec::new(),
             loans: 0,
@@ -4480,61 +4449,22 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             self.free_as(node, charge, None, "a shared node");
         }
     }
-    fn take_steps(&mut self, t: &mut Task, mut count: u64) -> X<()> {
-        while count != 0 {
-            let Some(bound) = t.step_bounds.last_mut() else {
-                self.steps = self.steps.saturating_add(count);
-                break;
-            };
-            if bound.left == 0 {
-                let id = bound.id;
-                pure::root_steps_out(id);
-                let site = self.site(t);
-                self.record(
-                    t,
-                    Cause {
-                        kind: "OutOfTime",
-                        message: [id, 0, 0],
-                        site,
-                    },
-                );
-                return Err(Stop::Chained);
-            }
-            let amount = count.min(bound.left).min(65_536 - t.slice_steps);
-            bound.left -= amount;
-            count -= amount;
-            t.slice_steps += amount;
-            self.steps = self.steps.saturating_add(amount);
-            if t.slice_steps == 65_536 {
-                t.slice_steps = 0;
-                H::slice_end(self);
-            }
-        }
-        Ok(())
-    }
-
-    fn step_bound(&mut self, left: u64) -> StepBound {
-        let id = self.next_step_bound;
-        self.next_step_bound += 1;
-        StepBound { id, left }
-    }
-
-    fn step_leave(t: &mut Task) -> StepBound {
-        let bound = t.step_bounds.pop().expect("an open step scope");
-        if let Some(parent) = t.step_bounds.last_mut() {
-            parent.left += bound.left;
-        }
-        bound
-    }
-
     // ---- engine operations (CONC-3..6)
     fn rt(&mut self, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>> {
         let cur = t.limits.last().unwrap();
         Ok(match op {
+            RtOp::WorkSteps => {
+                let work = hirsel_core_ids::work_steps::Work::from_operands(a[1], a[2]);
+                self.take_work(t, work, &a[..1])?;
+                vec![]
+            }
             RtOp::StepEnter => {
-                let n = a[0];
+                let n = self.step_injection.take().unwrap_or(a[0]);
                 if let Some(parent) = t.step_bounds.last().filter(|p| p.left < n) {
                     pure::root_steps_out(parent.id);
+                    if self.observe_steps && self.step_refusal.is_none() {
+                        self.step_refusal = self.site(t);
+                    }
                     vec![0]
                 } else {
                     if let Some(parent) = t.step_bounds.last_mut() {
@@ -5674,7 +5604,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);
             }
             // A read hint has no observable effect (core.md, Prefetch).
-            Inst::BuiltinUse { .. } | Inst::Prefetch { .. } => {}
+            Inst::BuiltinUse { .. } | Inst::LoopIteration | Inst::Prefetch { .. } => {}
             Inst::LimitExit => {
                 let l = t.limits.pop().unwrap();
                 self.end_limit(l, None);

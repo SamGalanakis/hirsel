@@ -163,6 +163,8 @@ pub struct Context {
     pub(crate) host_files: *mut host_file::Files,
     pub(crate) isolates: Vec<crate::isolate::Reservation>,
     pub(crate) step_bounds: Vec<steps::Bound>,
+    #[cfg(feature = "testing")]
+    pub(crate) step_observation: Option<steps::Observation>,
     pub(crate) step_slice_tail: u64,
     pub(crate) regions: region::RegionCache,
     pub(crate) heap: std::cell::OnceCell<std::sync::Arc<task_heap::Heap>>,
@@ -238,6 +240,8 @@ impl Context {
             events: 0,
             steps: steps::initial_unbounded_steps(),
             step_bounds: Vec::new(),
+            #[cfg(feature = "testing")]
+            step_observation: None,
             step_slice_tail: steps::SLICE,
             regions: region::RegionCache::default(),
             heap: std::cell::OnceCell::new(),

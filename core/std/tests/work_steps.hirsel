@@ -532,6 +532,26 @@ fn clone_steps() -> bool {
     }
 }
 
+// The loop, clone calls and len calls take only 900 steps before clone work.
+// The first 500,000-element copy alone takes ceil(4,000,000 / 4,096) = 977.
+// expect: run repeated_list_clone_refuses() = true
+fn repeated_list_clone_refuses() -> bool {
+    let mut xs: List[u64] = list.with_capacity(500000)
+    list.fill(mut xs, 500000, 9)
+    let copied = bound steps 1000 {
+        let mut total: u64 = 0
+        for _ in 0u64 .. 300 {
+            let next: List[u64] = clone(xs)
+            total += list.len(next)
+        }
+        total
+    }
+    match copied {
+        Error(OutOfTime(steps: 1000)) => true,
+        _ => false,
+    }
+}
+
 // The quanta are set so a step stands for a bounded time whatever the operation. The
 // bound, not a count, is the oracle: int.parse, the slowest per byte, may take at most
 // 8 times as long per step as memmove does. Parsing 4 × 1 MiB takes 262,144 steps;

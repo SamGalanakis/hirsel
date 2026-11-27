@@ -711,6 +711,8 @@ pub enum Inst {
     BuiltinUse {
         definition: Box<DefPath>,
     },
+    /// Completion of a user loop iteration. This marker has no runtime effect.
+    LoopIteration,
     /// Copy `bytes` bytes from the place `from` to the place `to` as if through a
     /// temporary buffer, so the two ranges may overlap (memmove). Plain bytes only;
     /// it moves no ownership. Last, so no stored variant index moves (FORM #112).
@@ -905,6 +907,9 @@ pub enum RtOp {
     StepLeave,
     /// Close a failed step scope, catching only its own OutOfTime causes.
     StepCatch,
+    /// Charge MEM-30's logical units. The low six bits of the second operand
+    /// name the quantum's exponent. The third operand is the fixed weight.
+    WorkSteps,
     /// The current task's original allowance.
     RootLimit,
     /// Private immutable launch metadata: `(field, index) -> word`.
@@ -1137,21 +1142,6 @@ pub struct Body {
     /// The blobs this body roots (MEM-4): each root's type, as a place row, and
     /// the `W` its blob records.
     pub compact_roots: Vec<CompactRoot>,
-}
-
-impl Body {
-    /// The storage addresses with a lexical frame obligation in this body.
-    pub fn frame_obligations(&self) -> std::collections::BTreeSet<AddressId> {
-        self.insts
-            .iter()
-            .filter_map(|inst| match *inst {
-                Inst::FrameAdmit { storage, .. }
-                | Inst::FrameActive { storage, .. }
-                | Inst::FrameRefund { storage } => Some(storage),
-                _ => None,
-            })
-            .collect()
-    }
 }
 
 /// One blob root a body creates: `build_in` or `build_stream_in` of `ty`, whose

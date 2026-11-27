@@ -112,7 +112,15 @@ def build_driver(destination):
     env = os.environ.copy()
     harness = cargo_executable(["cargo", "test", *options, "--lib", "--no-run"], env, test=True)
     compiler = cargo_executable(["cargo", "build", *options, "--bin", "hirsel"], env, test=False)
-    destination.write_text(json.dumps({"harness": harness, "compiler": compiler}) + "\n")
+    subprocess.run(
+        ["cargo", "rustc", "--locked", "--profile", "checked", "-p", "hirsel-core-rt", "--lib",
+         "--features", "testing,memcheck,charge-observation,record", "--crate-type", "staticlib"],
+        check=True, env=env,
+    )
+    scripted_record = Path(compiler).with_name("libhirsel_core_rt.a").resolve(strict=True)
+    destination.write_text(json.dumps({
+        "harness": harness, "compiler": compiler, "scripted_record": str(scripted_record),
+    }) + "\n")
 
 
 def seed_dev_cache(compiler, cache, env):
@@ -187,8 +195,10 @@ def run_driver(source, inputs):
     inputs = inputs.resolve()
     kit = inputs / "kit"
     (kit / "manifest.json").resolve(strict=True)
+    scripted_record = Path(binaries["scripted_record"]).resolve(strict=True)
     env = dict(os.environ, HIRSEL_JOBS="1", HIRSEL_LINK_KIT=str(kit),
-               HIRSEL_DEV_TEST_DRIVER=binaries["compiler"])
+               HIRSEL_DEV_TEST_DRIVER=binaries["compiler"],
+               HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE=str(scripted_record))
     for variable, name in DRIVER_RUNTIMES.items():
         env[variable] = str((inputs / f"{name}.a").resolve(strict=True))
     cases = driver_cases(binaries["harness"], env)

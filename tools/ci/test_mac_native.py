@@ -27,6 +27,7 @@ else:
     assert flag == "--exact" and threads == "--test-threads=1"
     assert case in ("first", "second")
     assert os.environ["HIRSEL_JOBS"] == "1"
+    assert os.path.isfile(os.environ["HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE"])
     passed = int(case != os.environ.get("SKIP_CASE"))
     print(f"test result: ok. {passed} passed; 0 failed; {1 - passed} ignored; "
           "0 measured; 2 filtered out; finished in 0.00s")
@@ -40,7 +41,13 @@ class NativeDriverTest(unittest.TestCase):
         self.harness.write_text(f"#!{sys.executable}\n{HARNESS}")
         self.harness.chmod(0o755)
         self.binaries = work / "binaries.json"
-        self.binaries.write_text(json.dumps({"harness": str(self.harness), "compiler": "/hirsel"}))
+        self.scripted_record = work / "libhirsel_core_rt.a"
+        self.scripted_record.touch()
+        self.binaries.write_text(json.dumps({
+            "harness": str(self.harness),
+            "compiler": str(work / "hirsel"),
+            "scripted_record": str(self.scripted_record),
+        }))
         self.inputs = work / "inputs"
         self.inputs.mkdir()
         (self.inputs / "kit").mkdir()
@@ -64,6 +71,12 @@ class NativeDriverTest(unittest.TestCase):
             self.assertTrue(mac_native.run_driver(self.binaries, self.inputs))
         self.assertIn("FAIL first (exit 0)", self.output.getvalue())
         self.assertIn("1/2 default driver tests passed.", self.output.getvalue())
+
+    def test_absent_scripted_record_runtime_fails_before_running_tests(self):
+        self.scripted_record.unlink()
+        with self.assertRaises(FileNotFoundError):
+            mac_native.run_driver(self.binaries, self.inputs)
+        self.assertEqual(self.output.getvalue(), "")
 
     def test_list_count_must_match_the_parsed_cases(self):
         with patch.object(mac_native.subprocess, "check_output",

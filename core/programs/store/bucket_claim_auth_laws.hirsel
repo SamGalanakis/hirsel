@@ -297,7 +297,7 @@ fn race_c_janitor_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error
 }
 
 // Negative test: reusing `attempt` as `holder` makes the two-writer law go red
-// because history_write_head resolves Mismatch by exact byte equality.
+// because history_write_head_finish resolves Mismatch by exact byte equality.
 // Fresh random `holder` per physical open (production behavior) keeps it green.
 @test
 fn bucket_claim_auth_attempt_as_holder_negative(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
@@ -349,10 +349,12 @@ fn two_claimants_run(s: BucketSim, tasks: Tasks, holder1: StoreId, holder2: Stor
     history_encode_register_head(mut b1.body, cand1, list.slice(b1.witness, 240, auth_end1), None)?
     history_encode_register_head(mut b2.body, cand2, list.slice(b2.witness, 240, auth_end2), None)?
     let mut winners = 0u64
-    if let HistoryApplied(_) = history_write_head(mut c1, Match(m1.etag), mut b1.body, mut b1.witness, due) {
+    let issued_head = history_write_head_issue(mut c1, Match(m1.etag), mut b1.body, due)
+    if let HistoryApplied(_) = history_write_head_finish(mut c1, take issued_head, mut b1.body, mut b1.witness, due) {
         winners += 1
     }
-    if let HistoryApplied(_) = history_write_head(mut c2, Match(m2.etag), mut b2.body, mut b2.witness, due) {
+    let issued_second = history_write_head_issue(mut c2, Match(m2.etag), mut b2.body, due)
+    if let HistoryApplied(_) = history_write_head_finish(mut c2, take issued_second, mut b2.body, mut b2.witness, due) {
         winners += 1
     }
     let _ = take c0
@@ -510,7 +512,8 @@ fn permit_h_then_crash(s: BucketSim, tasks: Tasks, r: Random, take expect: Claim
     let candidate = history_claim_head(captured.head, holder, ClaimAuth(expect: Some(take expect), attempt: take attempt, class: Permit))?
     let authority_end = history_authority_end(buffers.witness)?
     history_encode_register_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end), None)?
-    let _ = history_write_head(mut client, Match(fetched.etag), mut buffers.body, mut buffers.witness, due)
+    let issued_head = history_write_head_issue(mut client, Match(fetched.etag), mut buffers.body, due)
+    let _ = history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, due)
     let _ = take client
     Ok(())
 }

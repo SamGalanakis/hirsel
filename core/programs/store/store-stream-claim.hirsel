@@ -466,7 +466,8 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         let authority_end = history_authority_end(workspace.witness)?
         let authority = copied(list.slice(workspace.witness, 240, authority_end))?
         history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach)))?
-        let written = history_write_head(mut read_source.client, Match(tag), mut workspace.body, mut workspace.witness, deadline)
+        let issued_head = history_write_head_issue(mut read_source.client, Match(tag), mut workspace.body, deadline)
+        let written = history_write_head_finish(mut read_source.client, take issued_head, mut workspace.body, mut workspace.witness, deadline)
         let applied_tag = match take written {
             HistoryApplied(t) => t,
             HistoryConflict(_) => {
@@ -600,7 +601,8 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         },
     }
     let next_live = attach_next.live
-    let written = history_write_head(mut read_source.client, Match(tag), mut workspace.body, mut workspace.witness, deadline)
+    let issued_head = history_write_head_issue(mut read_source.client, Match(tag), mut workspace.body, deadline)
+    let written = history_write_head_finish(mut read_source.client, take issued_head, mut workspace.body, mut workspace.witness, deadline)
     let applied_tag = match take written {
         HistoryApplied(t) => t,
         HistoryConflict(_) => {

@@ -450,7 +450,8 @@ fn bucket_m2_retry_budget_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Result
     let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
     let start = host.mono_ns(sim.time)
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let outcome = history_write_head(mut client, Absent, mut body, mut witness, due)
+    let issued_head = history_write_head_issue(mut client, Absent, mut body, due)
+    let outcome = history_write_head_finish(mut client, take issued_head, mut body, mut witness, due)
     let elapsed = host.mono_ns(sim.time) - start
     let _ = take client
     let report = bucket_law_finish(take sim)

@@ -789,7 +789,8 @@ fn object_conflict_budget(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] 
     history_encode_head(mut scratch.body, candidate, metadata)?
     let proposed: Bytes = clone(scratch.body)
     let start = host.mono_ns(sim.time)
-    let refused = history_write_head(mut client, Match(genesis.tag), mut scratch.body, mut scratch.witness, due)
+    let issued_head = history_write_head_issue(mut client, Match(genesis.tag), mut scratch.body, due)
+    let refused = history_write_head_finish(mut client, take issued_head, mut scratch.body, mut scratch.witness, due)
     if let HistoryRefused(Retriable(Status(409, code))) = refused {
         if code != string.as_bytes("ConditionalRequestConflict") {
             fail("Q5: 409 carried the wrong S3 error code")
@@ -801,7 +802,8 @@ fn object_conflict_budget(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] 
         fail("Q5: 409 retries skipped backoff or changed the submitted body")
     }
     // One ambiguous error must share the budget and survive later 409s.
-    if let HistoryUndecided = history_write_head(mut client, Match(genesis.tag), mut scratch.body, mut scratch.witness, due) {} else {
+    let issued_lost = history_write_head_issue(mut client, Match(genesis.tag), mut scratch.body, due)
+    if let HistoryUndecided = history_write_head_finish(mut client, take issued_lost, mut scratch.body, mut scratch.witness, due) {} else {
         fail("Q5: the mixed 503 and 409 budget did not preserve uncertainty")
     }
     Ok(take original)

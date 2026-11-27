@@ -3787,13 +3787,15 @@ pub type Conditional = Applied(Meta) | Mismatch
 pub type Precondition = Match(ETag) | Absent
 pub fn store_if(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits
 pub fn store_if_retry(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits
+pub fn store_if_issue(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> Result[PendingStore, (Bytes, Error)] waits
+pub fn store_if_finish(mut c: Client, take pending: PendingStore) -> (Result[Conditional, Error], Bytes) waits
 pub fn endpoint_secure(c: Client) -> bool                                     // https
 pub fn bucket_location(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits     // GetBucketLocation's LocationConstraint
 ```
 
 `store_if` retries only three things: what cannot have been delivered (no request byte committed), 409, and 400 `RequestTimeout`. Every other outcome after delivery may have started is returned as it is: `Applied`, `Mismatch` (412), or `Uncertain(reason)` (timeout, reset after the body, 5xx, 503 `SlowDown`, 429). It never resolves by HEAD or by put id, because the store's Q5 rule (§12.3) is the only resolver. `store_no_clobber`'s resolving path stays for callers outside the authority. `complete` gains the 200-with-`Error` and `NoSuchUpload` distinctions above.
 
-The authority uses `store_if_retry`. It resends uncertain requests within the same client attempt and deadline budget as transport retries. It returns `Applied` or `Mismatch` when either arrives, and preserves `Uncertain` on a failure after possible delivery. The authority inspects the register on `Mismatch`.
+The authority issues head PUTs with `store_if_issue` and receives their replies with `store_if_finish`. Successful issue hands the request to the lane and returns without another wait. For other retrying PUTs the authority uses `store_if_retry`, which composes these operations. The lane resends uncertain requests within the same attempt and deadline budget as transport retries. It returns `Applied` or `Mismatch` when either arrives, and preserves `Uncertain` on a failure after possible delivery. The authority inspects the register on `Mismatch`.
 
 ### 12.3 Claim, advance and the head poll
 

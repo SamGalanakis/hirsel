@@ -786,7 +786,8 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
     let cfg = object_history_config(std.object.bucket_config(source.client), "bucket")
     let authority = history_config_bytes(cfg)?
     history_encode_head(mut workspace.body, head, authority)?
-    let HistoryApplied(tag) = history_write_head(mut source.client, Absent, mut workspace.body, mut workspace.witness, source.deadline) else {
+    let issued_head = history_write_head_issue(mut source.client, Absent, mut workspace.body, source.deadline)
+    let HistoryApplied(tag) = history_write_head_finish(mut source.client, take issued_head, mut workspace.body, mut workspace.witness, source.deadline) else {
         fail("could not publish the checkpoint fixture")
     }
     let mut incumbent = HistoryRegister(head, tag, terminal: None, attach: None)

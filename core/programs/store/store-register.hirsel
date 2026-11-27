@@ -11,8 +11,21 @@ fn history_fetch_head(mut client: std.object.Client, mut raw_bytes: Bytes, deadl
     Ok(meta.etag)
 }
 
-fn history_write_head(mut client: std.object.Client, precondition: std.object.Precondition, mut raw_bytes: Bytes, mut witness: Bytes, deadline: u64) -> HistoryWrite waits {
-    let (take outcome, take buffer) = std.object.store_if_retry(mut client, "head", precondition, replace(mut raw_bytes, list.new()), deadline)
+fn history_write_head_issue(mut client: std.object.Client, precondition: std.object.Precondition, mut raw_bytes: Bytes, deadline: u64) -> Result[std.object.PendingStore, std.object.Error] waits {
+    match std.object.store_if_issue(mut client, "head", precondition, replace(mut raw_bytes, list.new()), deadline) {
+        Ok(take pending) => Ok(take pending),
+        Error((take buffer, take problem)) => {
+            raw_bytes = take buffer
+            Error(take problem)
+        },
+    }
+}
+
+fn history_write_head_finish(mut client: std.object.Client, take issued: Result[std.object.PendingStore, std.object.Error], mut raw_bytes: Bytes, mut witness: Bytes, deadline: u64) -> HistoryWrite waits {
+    let (take outcome, take buffer) = match take issued {
+        Ok(take pending) => std.object.store_if_finish(mut client, take pending),
+        Error(take problem) => return HistoryRefused(take problem),
+    }
     raw_bytes = take buffer
     match take outcome {
         Ok(Applied(meta)) => HistoryApplied(meta.etag),
@@ -145,7 +158,8 @@ fn history_register_publish(mut client: std.object.Client, mut register: History
         return Error(take problem)
     }
     entry_created(candidate.entry.seq)
-    match history_write_head(mut client, Match(register.tag), mut buffers.body, mut buffers.witness, deadline) {
+    let issued_head = history_write_head_issue(mut client, Match(register.tag), mut buffers.body, deadline)
+    match history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, deadline) {
         HistoryApplied(tag) => {
             register.head = candidate
             register.tag = tag
@@ -252,7 +266,8 @@ fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: Stor
     }
     let head = HistoryHead(authority_kind: kind, store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
     history_encode_register_head(mut buffers.body, head, authority, attach)?
-    match history_write_head(mut client, Absent, mut buffers.body, mut buffers.witness, deadline) {
+    let issued_head = history_write_head_issue(mut client, Absent, mut buffers.body, deadline)
+    match history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, deadline) {
         HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None, attach: take attach)),
         HistoryConflict(_) => Error(Exists("head")),
         HistoryRefused(take problem) => Error(Remote(take problem)),
@@ -349,7 +364,8 @@ fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, h
     if !history_claim_same(list.slice(buffers.body, 0, standalone_end), saved, saved_origin, buffers.witness) {
         return history_claim_changed(admitted, buffers.witness, false)
     }
-    match history_write_head(mut client, Match(observed.etag), mut buffers.body, mut buffers.witness, deadline) {
+    let issued_head = history_write_head_issue(mut client, Match(observed.etag), mut buffers.body, deadline)
+    match history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, deadline) {
         HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None, attach: clone(attach)))),
         HistoryConflict(_) => history_claim_changed(admitted, buffers.witness, true),
         HistoryRefused(take problem) => Error(Remote(take problem)),

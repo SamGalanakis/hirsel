@@ -175,31 +175,16 @@ fn ascii(b: u8) -> char {
     option.unwrap(char.from_u32(int.widen(b)))
 }
 
-// S3 canonical paths preserve every slash and escape all octets outside the
-// unreserved set, including characters that RFC 3986 allows in path segments.
-fn encode(mut out: String, raw: Bytes, keep_slash: bool) {
-    for b in raw {
-        if int.is_ascii_alpha(b) || int.is_ascii_digit(b) || b == b'-' || b == b'_' || b == b'.' || b == b'~' || keep_slash && b == b'/' {
-            string.push_char(mut out, ascii(b))
-        } else {
-            let (hi, lo) = hex.encode_byte(b, true)
-            string.push_char(mut out, '%')
-            string.push_char(mut out, ascii(hi))
-            string.push_char(mut out, ascii(lo))
-        }
-    }
-}
-
 fn make_path(mut out: String, bucket: Bucket, key: String, bucket_only: bool) {
     string.clear(mut out)
     string.push_char(mut out, '/')
     if bucket.style == Path {
-        encode(mut out, string.as_bytes(bucket.bucket), false)
+        object_request.percent_encode(mut out, string.as_bytes(bucket.bucket), false)
         string.push_char(mut out, '/')
     }
     if !bucket_only {
-        encode(mut out, string.as_bytes(bucket.prefix), true)
-        encode(mut out, string.as_bytes(key), true)
+        object_request.percent_encode(mut out, string.as_bytes(bucket.prefix), true)
+        object_request.percent_encode(mut out, string.as_bytes(key), true)
     }
 }
 
@@ -343,7 +328,7 @@ fn read_meta(head: http_client.ResponseHead, size: u64) -> Result[Meta, Error] {
         out.etag = etag(value)?
     }
     if let Some(value) = header(head, "x-amz-meta-hirsel-put-id") {
-        out.put_id = decode_id(value)
+        out.put_id = object_request.decode_id(value)
     }
     if let Some(value) = header(head, "x-amz-checksum-crc64nvme") {
         if let Some(raw) = base64.decode(value) {
@@ -357,44 +342,6 @@ fn read_meta(head: http_client.ResponseHead, size: u64) -> Result[Meta, Error] {
         }
     }
     Ok(take out)
-}
-
-fn encode_checksum(mut out: Bytes, crc: u32) {
-    let abc = string.as_bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
-    for shift in 0u32 .. 5 {
-        list.push(mut out, abc[int.widen((crc >> (26 - shift * 6)) & 63)])
-    }
-    list.push(mut out, abc[int.widen((crc & 3) << 4)])
-    list.append(mut out, string.as_bytes("=="))
-}
-
-fn fresh_id(random: Random, mut raw: Bytes) -> Inline[u8, 16] {
-    list.clear(mut raw)
-    host.random(random, mut raw)
-    let mut id: Inline[u8, 16] =[0; 16]
-    for i in 0u64 .. 16 {
-        id[i] = raw[i]
-    }
-    id
-}
-
-fn decode_id(data: Bytes) -> Option[Inline[u8, 16]] {
-    if list.len(data) != 32 {
-        return None
-    }
-    let mut id: Inline[u8, 16] =[0; 16]
-    for i in 0u64 .. 16 {
-        let a = hex.digit(data[i * 2])
-        if a == 255 {
-            return None
-        }
-        let b = hex.digit(data[i * 2 + 1])
-        if b == 255 {
-            return None
-        }
-        id[i] = a * 16 + b
-    }
-    Some(id)
 }
 
 type Endpoint: send {
@@ -682,7 +629,7 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
     let valid_crc = object_request.uploads_body(op) && crc != None
     if valid_crc {
         let mut field = value_buffer(mut w.values, CHECKSUM_FIELD)
-        encode_checksum(mut field, option.unwrap(crc))
+        object_request.encode_checksum(mut field, option.unwrap(crc))
         set_header(mut headers, CHECKSUM_FIELD, take field)
     }
     copy_header(mut headers, mut w.values, PAYLOAD_FIELD, string.as_bytes("UNSIGNED-PAYLOAD"))
@@ -1531,7 +1478,7 @@ fn pool_loop(take setup: Pool) waits {
     let _ = task.cancel_join(take resolver)
 }
 
-type LaneMessage: send = Work(Job) | Ask(Job, Sender[Result[Value, Error]]) | Reap
+type LaneMessage: send = Work(Job, Option[Sender[LaneEvent]]) | Ask(Job, Sender[Result[Value, Error]]) | Reap
 
 type LaneEvent: send = Finished(Reply) | LaneFailed
 
@@ -2225,12 +2172,15 @@ fn lane_loop(take setup: Lane) waits {
                 // any connection the answer holds; the lane goes on.
                 let _ = channel.send(reply, take result)
             },
-            Work(take pending) => {
+            Work(take pending, take answer) => {
                 let mut job = take pending
                 let result = retry(mut lane, mut job)
                 arm_idle(lane, arm, mut armed)
                 let Job(ticket, path: take path, data: take data, entries: take entries, ..) = take job
-                if let Error(_) = channel.send(lane.output.tx, Finished(Reply(lane: lane.index, ticket, path: take path, result: take result, data: take data, entries: take entries))) {
+                let finished = Finished(Reply(lane: lane.index, ticket, path: take path, result: take result, data: take data, entries: take entries))
+                if let Some(tx) = answer {
+                    let _ = channel.try_send(tx, take finished)
+                } else if let Error(_) = channel.send(lane.output.tx, take finished) {
                     break
                 }
             },
@@ -2275,6 +2225,10 @@ pub opaque type Workers {
 pub opaque type Client {
     requests: Requests,
     workers: Option[Workers]
+}
+
+pub opaque type PendingStore {
+    output: Receiver[LaneEvent]
 }
 
 /// Observes the client after its request endpoint has moved to another task.
@@ -2550,9 +2504,9 @@ fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) ->
 }
 
 fn submit(input: Sender[LaneMessage], index: u64, take request: Job) -> Option[Reply] waits {
-    match channel.send(input, Work(take request)) {
+    match channel.send(input, Work(take request, None)) {
         Ok(()) => None,
-        Error(Closed(Work(take returned))) => {
+        Error(Closed(Work(take returned, _))) => {
             let Job(ticket, path: take path, data: take data, entries: take entries, ..) = take returned
             Some(Reply(lane: index, ticket, path: take path, result: Error(Retriable(Cancelled)), data: take data, entries: take entries))
         },
@@ -2567,9 +2521,14 @@ fn receive(output: Receiver[LaneEvent]) -> Reply waits {
     }
 }
 
-fn run(mut c: Client, take request: Job) -> Reply waits {
+fn next_lane(mut c: Client) -> u64 {
     let index = c.requests.next
     c.requests.next = (index + 1) % list.len(c.requests.lanes)
+    index
+}
+
+fn run(mut c: Client, take request: Job) -> Reply waits {
+    let index = next_lane(mut c)
     let mut reply = match submit(c.requests.lanes[index], index, take request) {
         Some(take result) => take result,
         None => receive(c.requests.output),
@@ -2732,14 +2691,14 @@ pub fn fetch_ranges(mut c: Client, take ranges: List[GetRange], streams: u64) ->
 
 pub fn store(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
     let mut request = object_job(mut c, S3Put, key, take body, deadline_ns)
-    request.id = Some(fresh_id(c.requests.random, mut c.requests.entropy))
+    request.id = Some(object_request.fresh_id(c.requests.random, mut c.requests.entropy))
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_meta(take result), take data)
 }
 
 pub fn store_no_clobber(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Created, Error], Bytes) waits {
     let mut request = object_job(mut c, S3PutConditional, key, take body, deadline_ns)
-    request.id = Some(fresh_id(c.requests.random, mut c.requests.entropy))
+    request.id = Some(object_request.fresh_id(c.requests.random, mut c.requests.entropy))
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_created(take result), take data)
 }
@@ -2747,26 +2706,61 @@ pub fn store_no_clobber(mut c: Client, key: String, take body: Bytes, deadline_n
 /// Conditional PUT. The caller resolves an Uncertain outcome using its own
 /// protocol. The client returns the unmodified body so it can resend it.
 pub fn store_if(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits {
-    store_conditional(mut c, key, pre, take body, deadline_ns, false)
+    match conditional_job(mut c, key, pre, take body, deadline_ns) {
+        Ok(take request) => conditional_reply(run(mut c, take request)),
+        Error((take returned, take problem)) => (Error(take problem), take returned),
+    }
 }
 
 /// Conditional PUT with a single retry budget for transport failures and
 /// uncertain responses. Every retry uses the original body and precondition.
 /// The caller inspects the object to resolve Mismatch.
 pub fn store_if_retry(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits {
-    store_conditional(mut c, key, pre, take body, deadline_ns, true)
+    match store_if_issue(mut c, key, pre, take body, deadline_ns) {
+        Ok(take pending) => store_if_finish(mut c, take pending),
+        Error((take returned, take problem)) => (Error(take problem), take returned),
+    }
 }
 
-fn store_conditional(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64, retry_uncertain: bool) -> (Result[Conditional, Error], Bytes) waits {
+/// Builds and admits a retrying conditional PUT before sending it. A
+/// successful send hands ownership to the lane and issue returns without waiting again.
+pub fn store_if_issue(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> Result[PendingStore, (Bytes, Error)] waits {
+    let mut request = conditional_job(mut c, key, pre, take body, deadline_ns)?
+    request.retry_uncertain = true
+    let (tx, rx): (Sender[LaneEvent], Receiver[LaneEvent]) = channel.new(1)
+    let index = next_lane(mut c)
+    match channel.send(c.requests.lanes[index], Work(take request, Some(take tx))) {
+        Ok(()) => Ok(PendingStore(output: take rx)),
+        Error(Closed(Work(take returned, _))) => {
+            let Job(path: take path, data: take data, ..) = take returned
+            c.requests.path = take path
+            Error((take data, Retriable(Cancelled)))
+        },
+        Error(_) => fail("object client submitted an invalid lane message"),
+    }
+}
+
+/// Waits for the issued PUT's result and returns its body to the caller.
+/// Use the issuing client to reclaim its path buffer.
+pub fn store_if_finish(mut c: Client, take pending: PendingStore) -> (Result[Conditional, Error], Bytes) waits {
+    let mut reply = receive(pending.output)
+    c.requests.path = replace(mut reply.path, string.from(""))
+    conditional_reply(take reply)
+}
+
+fn conditional_job(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> Result[Job, (Bytes, Error)] {
     let tag = match pre {
         Match(value) if strong_tag(value) => value,
-        Match(_) => return (Error(Precondition), take body),
+        Match(_) => return Error((take body, Precondition)),
         Absent => empty_tag(),
     }
     let mut request = object_job(mut c, S3PutIf, key, take body, deadline_ns)
     request.tag = tag
-    request.retry_uncertain = retry_uncertain
-    let Reply(result: take result, data: take data, ..) = run(mut c, take request)
+    Ok(take request)
+}
+
+fn conditional_reply(take reply: Reply) -> (Result[Conditional, Error], Bytes) {
+    let Reply(result: take result, data: take data, ..) = take reply
     let outcome: Result[Conditional, Error] = match take result {
         Ok(Object(take meta)) => Ok(Applied(take meta)),
         Ok(Existing) => Ok(Mismatch),
@@ -2795,12 +2789,12 @@ pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry],
     let mut query = string.from("list-type=2&max-keys=")
     string.push_u64(mut query, room)
     string.push(mut query, "&prefix=")
-    encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
-    encode(mut query, string.as_bytes(prefix), false)
+    object_request.percent_encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
+    object_request.percent_encode(mut query, string.as_bytes(prefix), false)
     if after != "" {
         string.push(mut query, "&start-after=")
-        encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
-        encode(mut query, string.as_bytes(after), false)
+        object_request.percent_encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
+        object_request.percent_encode(mut query, string.as_bytes(after), false)
     }
     request.query = take query
     request.entries = replace(mut into, list.new())
@@ -2816,7 +2810,7 @@ pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry],
 pub fn upload(mut c: Client, key: String, mode: Mode, deadline_ns: u64) -> Result[Upload, Error] waits {
     let path = request_path(c.requests.bucket, key, false)
     let mut request = new_job(S3Upload, clone(path), list.new(), deadline_ns)
-    let id = fresh_id(c.requests.random, mut c.requests.entropy)
+    let id = object_request.fresh_id(c.requests.random, mut c.requests.entropy)
     request.id = Some(id)
     request.query = string.from("uploads=")
     let Reply(result: take result, ..) = run(mut c, take request)
@@ -2846,17 +2840,17 @@ fn upload_listing(mut c: Client, prefix: String, after: Option[UploadCursor], de
     let mut query = string.new()
     if let Some(marker) = after {
         string.push(mut query, "key-marker=")
-        encode(mut query, string.as_bytes(marker.key), false)
+        object_request.percent_encode(mut query, string.as_bytes(marker.key), false)
         string.push_char(mut query, '&')
     }
     string.push(mut query, "max-uploads=")
     string.push_u64(mut query, PENDING_PAGE)
     string.push(mut query, "&prefix=")
-    encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
-    encode(mut query, string.as_bytes(prefix), false)
+    object_request.percent_encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
+    object_request.percent_encode(mut query, string.as_bytes(prefix), false)
     if let Some(marker) = after {
         string.push(mut query, "&upload-id-marker=")
-        encode(mut query, string.as_bytes(marker.id), false)
+        object_request.percent_encode(mut query, string.as_bytes(marker.id), false)
     }
     string.push(mut query, "&uploads=")
     request.query = take query
@@ -2866,7 +2860,7 @@ fn upload_listing(mut c: Client, prefix: String, after: Option[UploadCursor], de
 
 fn pending_handle(mut c: Client, key: String, take id: String) -> Upload {
     let path = request_path(c.requests.bucket, key, false)
-    let put_id = fresh_id(c.requests.random, mut c.requests.entropy)
+    let put_id = object_request.fresh_id(c.requests.random, mut c.requests.entropy)
     Upload(path: take path, upload_id: take id, put_id, mode: Overwrite, parts: list.new())
 }
 
@@ -2920,7 +2914,7 @@ fn upload_query(u: Upload, number: u64) -> String {
         string.push_char(mut query, '&')
     }
     string.push(mut query, "uploadId=")
-    encode(mut query, string.as_bytes(u.upload_id), false)
+    object_request.percent_encode(mut query, string.as_bytes(u.upload_id), false)
     take query
 }
 

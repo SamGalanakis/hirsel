@@ -107,6 +107,63 @@ pub fn payload_read(op: Operation) -> bool {
     op == S3Fetch || op == S3FetchRange || op == S3FetchChanged
 }
 
+fn ascii(b: u8) -> char {
+    option.unwrap(char.from_u32(int.widen(b)))
+}
+
+// S3 canonical paths preserve every slash and escape all octets outside the
+// unreserved set, including characters that RFC 3986 allows in path segments.
+pub fn percent_encode(mut out: String, raw: Bytes, keep_slash: bool) {
+    for b in raw {
+        if int.is_ascii_alpha(b) || int.is_ascii_digit(b) || b == b'-' || b == b'_' || b == b'.' || b == b'~' || keep_slash && b == b'/' {
+            string.push_char(mut out, ascii(b))
+        } else {
+            let (hi, lo) = hex.encode_byte(b, true)
+            string.push_char(mut out, '%')
+            string.push_char(mut out, ascii(hi))
+            string.push_char(mut out, ascii(lo))
+        }
+    }
+}
+
+pub fn encode_checksum(mut out: Bytes, crc: u32) {
+    let abc = string.as_bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    for shift in 0u32 .. 5 {
+        list.push(mut out, abc[int.widen((crc >> (26 - shift * 6)) & 63)])
+    }
+    list.push(mut out, abc[int.widen((crc & 3) << 4)])
+    list.append(mut out, string.as_bytes("=="))
+}
+
+pub fn fresh_id(random: Random, mut raw: Bytes) -> Inline[u8, 16] {
+    list.clear(mut raw)
+    host.random(random, mut raw)
+    let mut id: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        id[i] = raw[i]
+    }
+    id
+}
+
+pub fn decode_id(data: Bytes) -> Option[Inline[u8, 16]] {
+    if list.len(data) != 32 {
+        return None
+    }
+    let mut id: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        let a = hex.digit(data[i * 2])
+        if a == 255 {
+            return None
+        }
+        let b = hex.digit(data[i * 2 + 1])
+        if b == 255 {
+            return None
+        }
+        id[i] = a * 16 + b
+    }
+    Some(id)
+}
+
 pub fn start_request(mut c: http_client.Connection, wire: http_client.Request, deadline: u64, mut seen: AttemptObservation) -> Result[(), http_client.Error] waits {
     let started = http_client.start(mut c, wire, deadline)
     seen.started = http_client.request_started(c)

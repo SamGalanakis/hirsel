@@ -480,7 +480,8 @@ fn stream_crash_after_h_before_claim(c: Clock, r: Random, tasks: Tasks) -> Resul
     let mut out_head: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
     history_encode_register_head(mut out_head, claimed, authority, Some(take new_attach))?
     let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    match history_write_head(mut raw_client, Match(tag), mut out_head, mut witness, due) {
+    let issued_head = history_write_head_issue(mut raw_client, Match(tag), mut out_head, due)
+    match history_write_head_finish(mut raw_client, take issued_head, mut out_head, mut witness, due) {
         HistoryApplied(_) => (),
         _ => fail("L90-X(step 6): simulated B's H did not apply"),
     }

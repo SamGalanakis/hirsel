@@ -17,7 +17,8 @@ fn stream_sealed_publish(mut client: std.object.Client, mut register: HistoryReg
         history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline)?
     }
     history_encode_register_head(mut buffers.body, candidate, authority, next_attach)?
-    match history_write_head(mut client, Match(register.tag), mut buffers.body, mut buffers.witness, deadline) {
+    let issued_head = history_write_head_issue(mut client, Match(register.tag), mut buffers.body, deadline)
+    match history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, deadline) {
         HistoryApplied(tag) => {
             register.head = candidate
             register.tag = tag

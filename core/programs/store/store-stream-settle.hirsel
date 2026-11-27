@@ -47,7 +47,8 @@ fn stream_settle_publish(mut lane: ObjectJournalSession, sid: HostStreamId, inc:
         history_create(mut lane.client, lane.buffers.key, mut lane.buffers.packet, mut lane.buffers.compare, deadline)?
     }
     history_encode_register_head(mut lane.buffers.body, candidate, lane.authority, next_attach)?
-    match history_write_head(mut lane.client, Match(lane.register.tag), mut lane.buffers.body, mut lane.buffers.witness, deadline) {
+    let issued_head = history_write_head_issue(mut lane.client, Match(lane.register.tag), mut lane.buffers.body, deadline)
+    match history_write_head_finish(mut lane.client, take issued_head, mut lane.buffers.body, mut lane.buffers.witness, deadline) {
         HistoryApplied(tag) => {
             lane.register.head = candidate
             lane.register.tag = tag

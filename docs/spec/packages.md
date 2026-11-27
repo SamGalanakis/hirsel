@@ -13,9 +13,10 @@ or a fetch. A package's name is scoped by the DNS name of its owner (`acme.dev/j
 command proceeds.
 
 The files are `hirsel.toml`, the **manifest** of a package or a workspace, and `hirsel.lock`,
-the workspace's **lock**. There is no registry. A dependency is either another package of the
+the workspace's **lock**. A dependency is either another package of the
 same local workspace or a published library fixed by its root, whose content comes from the
-package store, a package archive, a URL or a git commit. Git is a transport only: a commit is
+package store, a package archive, a URL, a git commit or its scope's registry.
+[Registry](registry.md) specifies Phase 1 named selection, logged status and publication. Git is a transport only: a commit is
 packed into canonical content and verified against the root before anything else sees it
 (section 7, GIT-1 to GIT-12). The canonical library content
 (section 1) is separate from the checked package image and from the executable release root R
@@ -117,7 +118,7 @@ workspace select one. A floor's tested root has the bound version as its own ver
 writes every binding to a published library as an exact binding, because a Git commit, a URL
 or an archive is an unlogged source that can call itself any version: nothing but the bytes
 the binding pins stands behind it. A floor binding is written only from a release that a
-registry has logged under that version, which is outside this chapter; a decoder accepts both
+registry has logged under that version ([registry admission](registry.md#2-compiler-admission)); a decoder accepts both
 tags from any source, and resolution treats them as section 5 says.
 
 **Inventory.** The files of `C` are exactly the package's `[sources]` (section 2), with their
@@ -336,7 +337,7 @@ and one package never needs to know what its dependencies' other dependents call
 - `{ package, major, path }` binds a member of the same workspace (section 4). The path is
   relative to this manifest's directory and must resolve to a member's directory, whose
   `[package]` has this name and a version of this major.
-- `{ package, major, root }`, with at most one of `url`, `archive` or `git`, binds a published
+- `{ package, major, root }`, with at most one of `url`, `archive`, `git` or `registry`, binds a published
   library, whose name is never a local name.
   `root` pins its content. `url` is an `https://` URL of a package archive (section 7). `git`
   is a repository URL, and it comes with `rev`, the commit, and may come with `dir`, the
@@ -348,8 +349,9 @@ and one package never needs to know what its dependencies' other dependents call
   as text, without looking at the file system. The result must have no `..` left, so it lies
   inside the workspace root, and it is the archive's one spelling: the lock writes it, and a
   fetch opens exactly that path from the root's directory handle under the reading rule of
-  section 1, so a link on the way cannot make one spelling name two files. With none of
-  `url`, `archive` or `git`, the root must already be in the package store. The source says where content may come from, and the root
+  section 1, so a link on the way cannot make one spelling name two files. A Phase 1
+  `registry` is the canonical HTTPS origin chosen by the user's scope routing configuration.
+  Check it against the route before contacting it. With no locator, the root must already be in the package store. The source says where content may come from, and the root
   says what it must be: the root enters the package's own `C` and the source never does.
 - `{ workspace = true }` alone inherits the workspace's declaration of this alias (section 4).
 
@@ -490,7 +492,7 @@ member, and its bindings are roots, so published content forms no cycle either.
 workspace's choice of one exact root for an identity that the closure binds to more than one
 root. A single-package workspace's root is its one manifest. Each key is an identity
 `name@major` with a scoped name, and each value is `{ root }` with at most one of `url`,
-`archive` or `git` (with `rev` and optionally `dir`), under the rules of the published form of
+`archive`, `registry` or `git` (with `rev` and optionally `dir`), under the rules of the published form of
 section 2: the source says where the selected content may come from, and the root says what it
 must be. A selection has no alias and no `authority`, because it binds no source name: every
 edge to that identity, from any package of the closure, is bound to the selected root instead
@@ -518,18 +520,20 @@ refusal stops it:
    only a displaced root carried are dropped. A **pending** root is one reached and not yet decoded, and pending roots are taken
    in order of the `name@major` their edges expect, and then of root. In each round:
    1. each pending root whose store entry is present and undamaged is opened from the store;
-   2. each pending root left that has a declared source, a `url`, `archive` or `git` in a
+   2. each pending root left that has a declared source, a `url`, `archive`, `registry` or `git` in a
       declaration that binds it, is fetched from its lock source (section 8), the first such
       declaration in identity order of the declaring packages. Only that source is tried, and
-      its failure is the refusal. A fetched source puts every entry of its bundle in the store
+      its failure is the refusal. A registry supplies one frame per root. A bundled source puts every entry of its bundle in the store
       (section 7), so it can satisfy other pending roots;
    3. only when the first two steps have nothing left to do, each pending root left is
       fetched from the declared source of its nearest **carrier**: follow the bindings back
       from the root, through published packages whose `C` binds it and then their binders,
       to the first published root that has a declared source, taking the least path in the
-      order of section 5's refusal paths. That root's bundle holds its whole closure, so it
+      order of section 5's refusal paths. For a bundled source, that bundle holds its whole closure, so it
       holds the pending root, and it is fetched even when that root itself came from the
       store;
+      For a registry carrier fetch the selected child's frame directly, using its own scope
+      route for a logged floor, or the carrier for an exact pin (registry §5).
    4. a root still pending is refused as `no source`, the least first.
 
    Each `C` opened is decoded (section 1) once per root, and its bindings join the walk. Then,
@@ -635,7 +639,9 @@ that this toolchain accepted. Then it computes the member's root:
   resolved to (section 5), which is the root the check above used.
 - A binding supplied by the toolchain is encoded as a toolchain binding.
 
-Each binding keeps its alias. A packed binding is never a floor (section 1). The member's
+Each binding keeps its alias. Offline `pack` writes exact pins.
+Registry publication may encode an authenticated tested dependency as a floor before
+computing the member's root ([registry client](registry.md#5-client-selection-and-transport)). The member's
 closure must have no displaced edge: when a selection or a member's root displaces the root
 that a published package of the member's closure records, `pack` refuses (`pack, displaced
 edge`, section 9), because the archive could not hold both the displaced root its edge pins
@@ -702,7 +708,7 @@ allocate more than the limits above. Compression is the encoder's choice: two ar
 library may differ byte for byte, and both verify to the same roots. `pack` compresses each
 entry as one frame at a fixed level; the level is not part of any root.
 
-**Sources.** A v1 source is one of:
+**Sources.** A source is one of:
 
 - a workspace member's path;
 - an `archive` path to a package archive on the local file system;
@@ -710,11 +716,11 @@ entry as one frame at a fixed level; the level is not part of any root.
   URLs, with the response body capped at the archive limit;
 - a `git` repository and `rev`, a commit fetched over Git's smart HTTP protocol and packed
   by the tool (GIT-1 to GIT-12);
-- the package store, for a root with no `url`, `archive` or `git`, or one a bundle brought in.
+- a `registry` origin, for an exact package frame at `c/<64hex>.zst` under the
+  [Phase 1 wire and trust rules](registry.md);
+- the package store, for a root with no locator, or one a bundle brought in.
 
-There is no registry, no version range and no search.
-
-**Transport.** One command uses one HTTPS client for every `url` and `git` request it makes:
+**Transport.** One command uses one HTTPS client for its URL, git and registry requests:
 one connection pool, shared by up to 8 worker threads, so a fetch of several sources reuses
 connections to one host and fetches up to 8 sources at once. A `url` body is decompressed and
 hashed as it arrives: each entry's frame is decompressed into its `C` and SHA-256 runs over
@@ -726,7 +732,7 @@ one in section 5's order, the least failing source's refusal being the one shown
 another refusal made unnecessary may still have put verified entries in the store, which
 section 9 allows.
 
-**Bundles.** What a fetch yields is a **bundle**: a head `C` and the `C` of every package the
+**Bundles.** What an archive, URL or git fetch yields is a **bundle**: a head `C` and the `C` of every package the
 head's bindings reach, other than toolchain packages. An archive's bundle is its entries. A git
 source's bundle is the content the tool packs from the commit (GIT-2). Whenever `hirsel pack`
 succeeds for that package in a checkout of that commit, on a file system that keeps every name
@@ -1092,6 +1098,7 @@ then by major numerically. `core@1` has no row and appears in no edge list. A ro
   - `member:<dir>`, the member's directory relative to the root, or `.` for the root;
   - `archive:<path>`, relative to the root;
   - `url:<url>`;
+  - `registry:<origin>`, for an explicitly routed registry declaration;
   - `git:<git>#<rev>` or `git:<git>#<rev>/<dir>`, the source spelling of GIT-1;
   - `store`;
   - `via:<id>`;
@@ -1103,7 +1110,7 @@ then by major numerically. `core@1` has no row and appears in no edge list. A ro
   than what it was published against, and a change of selection changes the lock.
 
 A published row's source comes from the manifests and the `C`s alone, never from what the
-store happened to hold or which archive was opened. It is the first `url`, `archive` or `git`
+store happened to hold or which archive was opened. It is the first `url`, `archive`, `registry` or `git`
 among the declarations that bind that root, taking declaring packages in identity order; a
 declaration with `root` alone names no source. With no such declaration, it is `via:<id>`, the first
 published package, in identity order, whose `C` binds that root. With neither, it is
@@ -1253,7 +1260,7 @@ Roots are always written in full.
 | local published | `hirsel: <manifest>: dependencies.<alias>: <name> is a local name, which only a workspace member has` |
 | bad authority | `hirsel: <manifest>: dependencies.<alias>.authority: "<kind>" is not a capability kind`, or `names <kind> twice`, or `a toolchain binding takes no authority` |
 | bad selection | `hirsel: <manifest>: selections: <what is wrong>`: `only the workspace root's manifest selects`, `"<id>" is not a scoped identity`, `<id> is a member of this workspace`, or a published-form refusal of this table in its words |
-| two sources | `hirsel: <manifest>: dependencies.<alias>: give at most one of url, archive or git` |
+| two sources | `hirsel: <manifest>: dependencies.<alias>: give at most one of url, archive, git or registry` |
 | git fields | `hirsel: <manifest>: dependencies.<alias>: <field> needs git`, for `rev`, `ref` or `dir` without `git`, and `git needs rev` |
 | bad git field | `hirsel: <manifest>: dependencies.<alias>.<field>: <what is wrong>`: for `git`, `"<url>" is not an https:// URL`, `has user information`, `has a query` or `has a fragment`; for `rev`, `"<r>" is not a full commit id of 40 or 64 lower-case hex digits`; for `ref`, `"<r>" is not refs/heads/<name> or refs/tags/<name>`; for `dir`, `"<d>" breaks the path rules: <which rule>` |
 | git package missing | `hirsel: <manifest>: dependencies.<alias>: <source> has no hirsel.toml`, or `<source> is a workspace root, not a package` |
@@ -1435,9 +1442,10 @@ its launch grants and its parameters, and a package that passes this check gains
 answers a reviewer's question before anything runs: which kinds of effect can this
 dependency's own code perform, whoever passes it the capability.
 
-**Kinds.** The vocabulary is the fifteen launch grant kinds, without parameters: `Dir`, `Net`,
+**Kinds.** The launch grant kinds, without parameters, are `Dir`, `Net`,
 `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks`, `Args`, `Secret`,
-`Foreign`, `Exec` and `Cred`. A list names each kind at most once, in any order; any other
+`Foreign`, `Exec` and `Cred`. Phase 1 adds `Compiler` for the explicit PACK-3 capability; its
+check operation charges that kind, including when called through a library. A list names each kind at most once, in any order; any other
 string is refused (`bad authority`, section 9). A list never narrows a parameter: `Dir` covers
 every directory the code is given, and `Foreign` every foreign interface.
 
@@ -1527,7 +1535,8 @@ manifest edit the user makes.
 |---|---|
 | `hirsel lock [DIR]` | resolves the workspace and writes the lock |
 | `hirsel fetch [DIR]` | resolves the workspace and fills the store with every published root of the closure, building nothing |
-| `hirsel pack [DIR] --output FILE` | publishes the member at DIR (section 6) |
+| `hirsel pack [DIR] --output FILE` | makes the checked offline archive of the member at DIR (section 6) |
+| `hirsel registry publish [--workspace]`<!-- doc-ref: planned --> | uploads a checked member, or all members dependency-first, to their routed registries ([registry §5](registry.md#5-client-selection-and-transport)) |
 | `hirsel inspect DIR\|ARCHIVE.hpkg\|DEPENDENCY` | prints the selected package's public interface by default |
 | `hirsel new NAME` | writes `NAME/hirsel.toml`, its sources, its tests and its first lock |
 | `hirsel add SOURCE` | binds one dependency in a manifest and updates the lock |
@@ -1543,13 +1552,13 @@ package directory; section 8's input modes say what each does without one. `hirs
 writing it, which is the CI freshness check. `hirsel fetch --locked` followed by a later
 `--frozen` build over the same store is the offline build. `hirsel publish` keeps its meaning:
 it prints an executable's R ([launch](launch.md#release-recipe-and-host-assembly)), and a
-library is published by `pack`.
+library can be packed offline or published to its scope registry.
 
 ### Adding a dependency
 
 `hirsel add` edits a manifest and updates its lock. It accepts HTTPS URLs, git sources
 (`git+https://` and `github:`), `.hpkg` paths, package-store roots, toolchain names and member
-directories, in a member's own table or, with `--workspace`, in the workspace's. `github:`
+directories and Phase 1 scoped registry names, in a member's own table or, with `--workspace`, in the workspace's. `github:`
 names a repository commit, never a release asset (below).
 
 `hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
@@ -1561,6 +1570,7 @@ names a repository commit, never a release asset (below).
 | `github:OWNER/REPO[/DIR][@REF]` | exactly what `git+https://github.com/OWNER/REPO?dir=DIR#REF` fetches | the same, with `git = "https://github.com/OWNER/REPO"` |
 | a path ending `.hpkg` | a read confined to its directory descriptor | `alias = { package, major, root, archive = "<relative to the declaring manifest>" }` |
 | `sha256:HEX` | nothing; the root must be in the package store | `alias = { package, major, root }` |
+| a scoped name with optional `@MAJOR` or exact `@VERSION` | verifies the routed registry's release inclusion and full status replay, then fetches selected frames | `alias = { package, major, root, registry = "<origin>" }` |
 | `NAME@MAJOR`, a bare toolchain name | nothing; the toolchain must provide it | `name = { major }` |
 | a directory holding `hirsel.toml` | nothing; it must be a listed member | `alias = { package, major, path = "<relative to the declaring manifest>" }` |
 
@@ -1578,6 +1588,11 @@ object. `--locked` and `--frozen` refuse.
 
 **Which manifest.** The nearest `hirsel.toml` with a `[package]`, walking up from the working
 directory, or the workspace root when it has none (then `--workspace`<!-- doc-ref: planned --> is required).
+
+For a registry name, the source key is (routed origin, identity). In the transaction below
+replace bundle acquisition with the [registry selection](registry.md#5-client-selection-and-transport)
+and verified frame walk. Check the edited workspace on the overlay before any manifest
+rename. A version inside the default 72-hour wait requires its exact SemVer.
 
 **Bindings already present.** `add` binds what it is given and never moves a binding it was
 not given. The same URL or archive already bound to another root is refused, printing both
@@ -1658,7 +1673,7 @@ The edit preserves the file's formatting and comments. A new key goes in sorted 
 its table is sorted, and last otherwise; a missing `[dependencies]` is created after
 `[package]`. The URL written is the canonical locator (as typed, or the constructed GitHub
 repository URL), never a redirect target. A binding's keys are written in the order
-`package`, `major`, `root`, then the source keys (`url`, `archive`, or `git`, `rev`, `ref`,
+`package`, `major`, `root`, then the source keys (`url`, `archive`, `registry`, or `git`, `rev`, `ref`,
 `dir`), then `authority` when the row has one. `add` writes no `authority`: a new row is pure
 until the user writes its list, so binding a package that reaches a capability refuses with
 `authority exceeded` and the list the user would have to write.
@@ -1723,14 +1738,16 @@ rename at a time, the lock derived from committed manifests).
 1. **Re-read the named rows.** With no argument, every published row of the workspace; with
    an alias, that row of the nearest member (or of the workspace table); with an identity,
    every row that binds it. A git row re-resolves its `ref` (GIT-11) and a URL or archive row
-   reads its bytes again; a row whose source now yields another root is rebound to it and its
+   reads its bytes again. A registry row obtains witnessed candidates and complete status
+   under the [registry selection rules](registry.md#5-client-selection-and-transport). A row whose source now yields another root is rebound to it and its
    `rev` with it. A row with `root` alone has nothing to re-read. Each new bundle is captured
    and verified as `add`'s step 4.
 2. **Select.** For every identity whose edges in the new closure do not all accept one root
-   (section 5), the candidates are the roots those edges name, members aside. The selected root
+   (section 5), the candidates are the roots those edges name plus eligible verified releases for registry rows, members aside. The selected root
    is the candidate of highest version that every edge accepts; for major 0 it stays within the
    least minor any floor names, unless `ID@VERSION` names another version exactly. `ID@VERSION`
-   selects the candidate of that version, and is refused when no edge names one. No candidate
+   selects the candidate of that version, and is refused when no eligible candidate has that version. An exact version bypasses only the registry age wait.
+   A retired pin with a sole otherwise eligible young fix refuses and prints its exact upgrade command. No candidate
    accepted by every edge is the `diamond` refusal, naming the exact edges whose binders must
    be republished. An identity a member provides is never selected: the member is its root.
 3. **Write selections.** A row of `[selections]` is written for each identity whose selected
@@ -1757,7 +1774,10 @@ diff. Exit statuses are `add`'s.
 and prints, for every package of the closure other than toolchain packages: its identity,
 version, root and source; the row that binds it and that row's `authority`; every edge whose
 recorded root differs from the effective one, as `tested` in the lock shows it (section 8);
-and its card (section 11). It fetches nothing that `check` would not, and writes no manifest.
+and its card (section 11). For registry sources, verify release inclusion and replay status
+through the witnessed head, including transitively bound roots. Report retirements,
+reinstatements, takedowns and OSV advisories as [registry §5](registry.md#5-client-selection-and-transport)
+specifies. Audit writes no manifest or lock.
 A package whose reached kinds exceed a row's list is reported in its card and makes the exit
 status 2, so `audit` and `check` refuse the same workspaces.
 

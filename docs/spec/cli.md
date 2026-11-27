@@ -309,6 +309,16 @@ different sources) and 2 on usage errors.
 `hirsel laws` stays static and about the lock: `check` and `write` run no test, and it has
 no coverage option. Coverage never enters a law row or `hirsel.laws`.
 
+## Registry publication and routing
+
+Phase 1 routes each scoped package by longest whole-component prefix in the invoking user's
+`hirsel/config.toml`. A route pins its HTTPS origin, both log keys and independent witnesses.
+The default origin is `https://pkg.hirsel.ai`. The command
+`hirsel registry publish [--workspace]`<!-- doc-ref: planned --> checks and uploads the member.
+The workspace form publishes dependencies first and reports which members committed if a
+later member fails. A retry resumes by verifying those releases. `hirsel publish` keeps
+its executable recipe meaning. [Registry protocol and client](registry.md)
+
 ## Adding a dependency
 
 `hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
@@ -318,7 +328,7 @@ holds the package's scoped name, major, root and source. `SOURCE` is an
 `https://` URL (one archive), a git source `git+https://HOST/PATH[?dir=DIR][#REF]` or its
 shorthand `github:OWNER/REPO[/DIR][@REF]` (a commit, bound by `git` and `rev`; untagged, the
 default branch's tip), a `.hpkg` path, a `sha256:` root already in the package store, a toolchain
-`NAME@MAJOR` (a bare name), or a listed member's directory. `add` never moves a root already
+`NAME@MAJOR` (a bare name), a listed member's directory, or a scoped registry name with optional major or exact version. `add` never moves a root already
 bound to the same source; that is `hirsel update`<!-- doc-ref: planned -->. `--workspace` declares it in the root's
 `[workspace.dependencies]` and binds the member with `{ workspace = true }`, one manifest at a
 time. It verifies any archive and resolves the workspace before publishing the manifest. It
@@ -334,7 +344,10 @@ agree on one root, selects the highest root every edge accepts and writes it to 
 manifest's `[selections]`. It checks the edited workspace on an overlay first and writes
 nothing when the check fails. It prints each changed package's versions and roots, each
 library now built against another version than it was published with, and each package's
-per-export authority diff. It refuses `--locked` and `--frozen`, and its exit statuses are
+per-export authority diff. Named registry selection verifies inclusion and replays the witnessed
+status log. Unqualified add and update wait 72 hours. An exact version bypasses age only. A
+retired pin whose sole fix is younger makes update refuse and print the exact upgrade command.
+Update refuses `--locked` and `--frozen`, and its exit statuses are
 `add`'s. [Packages](packages.md#updating-dependencies)
 
 ## Auditing dependencies
@@ -343,7 +356,9 @@ per-export authority diff. It refuses `--locked` and `--frozen`, and its exit st
 workspace's closure but the toolchain's, its version, root, source and binding row, every edge
 whose effective root differs from the one its publisher tested, and its authority card:
 carried authority, reached kinds and verdict. It exits 2 when a row's `authority` does not
-cover what its package reaches, as `check` does. [Packages](packages.md#auditing-dependencies)
+cover what its package reaches. For registry roots it checks both logs and reports retirement,
+takedown and active OSV advisories. Failure to verify a fresh complete status prefix refuses
+the audit. [Registry verification](registry.md#3-the-two-logs) [Packages](packages.md#auditing-dependencies)
 
 ## CPU profiles
 

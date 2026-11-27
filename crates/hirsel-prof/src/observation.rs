@@ -77,6 +77,13 @@ pub(crate) enum RecordKind {
         truncated: bool,
         pcs: Vec<u64>,
     },
+    /// The loaded-code frames of the sample before it on the same thread: each
+    /// frame's index in the sample's addresses, its offset in its image's text
+    /// and the first 16 bytes of the image's module digest (PACK-9).
+    CodeFrames {
+        tid: u32,
+        frames: Vec<(u32, u32, [u8; 16])>,
+    },
     Memory {
         event: MemoryEvent,
         stack: Vec<u8>,
@@ -174,6 +181,22 @@ impl RecordKind {
                     pcs: pcs.to_vec(),
                 }
             }
+            (14, &[tid, ref frames @ ..], true)
+                if !frames.is_empty() && frames.len().is_multiple_of(4) =>
+            {
+                Self::CodeFrames {
+                    tid: u32::try_from(tid)?,
+                    frames: frames
+                        .chunks_exact(4)
+                        .map(|frame| {
+                            let mut digest = [0; 16];
+                            digest[..8].copy_from_slice(&frame[2].to_le_bytes());
+                            digest[8..].copy_from_slice(&frame[3].to_le_bytes());
+                            Ok((u32::try_from(frame[0])?, u32::try_from(frame[1])?, digest))
+                        })
+                        .collect::<Result<_>>()?,
+                }
+            }
             (16..=21, _, _) | (22..=23, _, true) => Self::Memory {
                 event: MemoryEvent::decode(kind, words)?,
                 stack: bytes,
@@ -184,7 +207,7 @@ impl RecordKind {
                 memory_emitted,
             },
             (END | LOSS, _, _) => return Err("invalid runtime observation footer".into()),
-            (1..=13, _, _) => {
+            (1..=14, _, _) => {
                 return Err(format!("invalid runtime observation payload for kind {kind}").into());
             }
             _ => {
@@ -299,7 +322,9 @@ impl Observation {
                     .filter(|record| {
                         !matches!(
                             record.kind,
-                            RecordKind::Mapping(_) | RecordKind::CpuSample { .. }
+                            RecordKind::Mapping(_)
+                                | RecordKind::CpuSample { .. }
+                                | RecordKind::CodeFrames { .. }
                         )
                     })
                     .count() as u64,
@@ -546,6 +571,7 @@ impl<'a> Import<'a> {
             }
             RecordKind::Mapping(_)
             | RecordKind::CpuSample { .. }
+            | RecordKind::CodeFrames { .. }
             | RecordKind::Memory { .. }
             | RecordKind::End
             | RecordKind::Loss { .. } => {}

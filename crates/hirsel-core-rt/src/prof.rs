@@ -33,6 +33,10 @@ pub(crate) enum Kind {
     /// A sampled thread's stack: its thread id, the period in nanoseconds,
     /// flags (bit 0: truncated), the interrupted PC and each return address.
     CpuSample = 13,
+    /// The loaded-code frames of the sample before it (PACK-9): its thread id, then
+    /// for each frame an image owns, its index in the sample's addresses, its offset
+    /// in the image's text and the two words of the image's digest prefix.
+    CodeFrames = 14,
     Alloc = 16,
     Peak = 17,
     BudgetScope = 18,
@@ -206,7 +210,9 @@ pub(crate) fn now_ns() -> u64 {
 pub(crate) fn append(kind: Kind, words: &[u64], bytes: &[u8]) {
     WRITER.with(|slot| {
         if let Some(writer) = slot.borrow_mut().as_mut()
-            && (writer.tasks || matches!(kind, Kind::CpuSample) || kind as u16 >= 16)
+            && (writer.tasks
+                || matches!(kind, Kind::CpuSample | Kind::CodeFrames)
+                || kind as u16 >= 16)
         {
             writer.append(kind, words, bytes);
         }
@@ -304,6 +310,7 @@ fn sample_cpu(hz: u64, stop: &AtomicBool) {
         pcs: [0; Stack::DEPTH],
     });
     let mut words = vec![0u64; 3 + Stack::DEPTH];
+    let mut frames = Vec::with_capacity(1 + 4 * Stack::DEPTH);
     let mut last = now_ns();
     while !stop.load(Ordering::Acquire) {
         thread::sleep(interval);
@@ -316,6 +323,13 @@ fn sample_cpu(hz: u64, stop: &AtomicBool) {
             words[2] = u64::from(stack.truncated);
             words[3..3 + stack.len].copy_from_slice(&stack.pcs[..stack.len]);
             append(Kind::CpuSample, &words[..3 + stack.len], &[]);
+            // The pair the PC table gives now: the image may be gone when the
+            // profile is read.
+            frames.clear();
+            frames.push(words[0]);
+            if crate::code::frames(&stack.pcs[..stack.len], &mut frames) > 0 {
+                append(Kind::CodeFrames, &frames, &[]);
+            }
         });
     }
 }

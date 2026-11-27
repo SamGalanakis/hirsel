@@ -102,6 +102,8 @@ pub struct Execution {
     contained: bool,
     len: AtomicU8,
     bytes: [AtomicU8; MAX_STOP_BYTES],
+    /// The first hardware fault in loaded code (PACK-9).
+    pub(crate) code_fault: crate::code::Record,
 }
 
 impl Execution {
@@ -114,7 +116,14 @@ impl Execution {
             contained,
             len: AtomicU8::new(0),
             bytes: [const { AtomicU8::new(0) }; MAX_STOP_BYTES],
+            code_fault: crate::code::Record::new(),
         }
+    }
+
+    /// The hardware fault in loaded code that stopped this execution with `Code`, for
+    /// the reporter to read after the pool has stopped (PACK-9).
+    pub fn code_fault(&self) -> Option<crate::code::Fault> {
+        self.code_fault.get()
     }
 
     pub const fn contained() -> Self {

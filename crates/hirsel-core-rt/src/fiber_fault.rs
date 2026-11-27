@@ -7,14 +7,28 @@ use std::{
     ptr,
     sync::{
         Mutex,
-        atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
+        atomic::{AtomicPtr, AtomicUsize, Ordering},
     },
 };
 
-/// The signals a touch of an inaccessible stack page raises, delegated to the
-/// runtime's host seam (`host::sys::FAULT_SIGNALS`).
-const FAULTS: &[libc::c_int] = &crate::host::sys::FAULT_SIGNALS;
-const FAULT_COUNT: usize = crate::host::sys::FAULT_SIGNALS.len();
+/// The signals the handler takes: first those a touch of an inaccessible stack page
+/// raises (`host::sys::FAULT_SIGNALS`), then the others a fault or a trap in loaded code
+/// raises (`host::sys::CODE_SIGNALS`), which only a process with a code band arms.
+const STACK_COUNT: usize = crate::host::sys::FAULT_SIGNALS.len();
+const FAULT_COUNT: usize = STACK_COUNT + crate::host::sys::CODE_SIGNALS.len();
+const FAULTS: [libc::c_int; FAULT_COUNT] = {
+    let mut all = [0; FAULT_COUNT];
+    let mut i = 0;
+    while i < FAULT_COUNT {
+        all[i] = if i < STACK_COUNT {
+            crate::host::sys::FAULT_SIGNALS[i]
+        } else {
+            crate::host::sys::CODE_SIGNALS[i - STACK_COUNT]
+        };
+        i += 1;
+    }
+    all
+};
 
 const _: () = assert!(libc::SIG_DFL == 0);
 
@@ -41,7 +55,8 @@ static PREVIOUS_SLOT: [AtomicPtr<libc::sigaction>; FAULT_COUNT] =
     [const { AtomicPtr::new(ptr::null_mut()) }; FAULT_COUNT];
 
 static ARM_LOCK: Mutex<()> = Mutex::new(());
-static ARMED: AtomicBool = AtomicBool::new(false);
+/// How many of `FAULTS`, from the front, have Hirsel's handler.
+static ARMED: AtomicUsize = AtomicUsize::new(0);
 
 /// Diagnostic counters for the room-check laws (EMB-3).
 static GUARD_HITS: AtomicUsize = AtomicUsize::new(0);
@@ -99,18 +114,29 @@ fn is_hirsel_handler(action: &libc::sigaction) -> bool {
 ///
 /// Never touches the calling thread's alternate signal stack (EMB-3).
 pub fn arm_embedded() -> Result<(), ArmError> {
+    arm_through(STACK_COUNT)
+}
+
+/// As [`arm_embedded`], and also for the signals a fault or a trap in loaded code
+/// raises (PACK-9). A process arms these when it registers a code band.
+pub(crate) fn arm_code() -> Result<(), ArmError> {
+    arm_through(FAULT_COUNT)
+}
+
+fn arm_through(count: usize) -> Result<(), ArmError> {
     let _guard = ARM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if ARMED.load(Ordering::Acquire) {
-        for &signal in FAULTS {
-            // SAFETY: querying current disposition without modifying it.
-            let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
-            if unsafe { libc::sigaction(signal, ptr::null(), &mut current) } != 0 {
-                return Err(ArmError::SignalStack);
-            }
-            if !is_hirsel_handler(&current) {
-                return Err(ArmError::FaultHandlerReplaced);
-            }
+    let armed = ARMED.load(Ordering::Acquire);
+    for &signal in &FAULTS[..armed] {
+        // SAFETY: querying current disposition without modifying it.
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(signal, ptr::null(), &mut current) } != 0 {
+            return Err(ArmError::SignalStack);
         }
+        if !is_hirsel_handler(&current) {
+            return Err(ArmError::FaultHandlerReplaced);
+        }
+    }
+    if count <= armed {
         return Ok(());
     }
 
@@ -121,7 +147,7 @@ pub fn arm_embedded() -> Result<(), ArmError> {
         action.sa_sigaction = fault as *const () as usize;
         libc::sigemptyset(&mut action.sa_mask);
 
-        for (i, &signal) in FAULTS.iter().enumerate() {
+        for (i, &signal) in FAULTS.iter().enumerate().take(count).skip(armed) {
             let mut current: libc::sigaction = std::mem::zeroed();
             if libc::sigaction(signal, ptr::null(), &mut current) != 0 {
                 return Err(ArmError::SignalStack);
@@ -141,9 +167,9 @@ pub fn arm_embedded() -> Result<(), ArmError> {
                 SAVED_REPLACED[i].0.get().write(replaced);
                 PREVIOUS_SLOT[i].store(SAVED_REPLACED[i].0.get(), Ordering::Release);
             }
+            ARMED.store(i + 1, Ordering::Release);
         }
     }
-    ARMED.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -322,9 +348,10 @@ unsafe fn chain_previous(
             if previous.sa_sigaction == libc::SIG_DFL || previous.sa_sigaction == libc::SIG_IGN {
                 let dfl = SAVED_DFL.0.get();
                 libc::sigaction(signal, dfl, ptr::null_mut());
-                if !hardware_fault {
-                    // Software-raised signal has no faulting instruction to
-                    // repeat: unblock and re-raise on the current thread.
+                if !hardware_fault || signal == libc::SIGTRAP {
+                    // A software-raised signal has no faulting instruction to
+                    // repeat, and a breakpoint trap may resume after its own:
+                    // unblock and re-raise on the current thread.
                     let mut set: libc::sigset_t = std::mem::zeroed();
                     libc::sigemptyset(&mut set);
                     libc::sigaddset(&mut set, signal);
@@ -435,6 +462,23 @@ pub(super) unsafe extern "C" fn fault(
                         return;
                     }
                 }
+            }
+        }
+        // A fault whose PC is in the code band is a fault in loaded code (PACK-9).
+        // SAFETY: `context` is the kernel's live ucontext for this fault.
+        if kind == StackKind::Recoverable
+            && let Some(pc) = unsafe { crate::host::sys::fault_pc(signal, context) }
+        {
+            let generation = slot.generation.load(Ordering::Acquire);
+            if let Some(hit) = crate::code::locate(pc)
+                && !generation.is_null()
+            {
+                // SAFETY: ExecutionScope pins `generation` while its slot names it.
+                unsafe {
+                    (*generation).code_fault.set(crate::code::Fault { pc, hit });
+                    redirect_recoverable_stop(slot, context, b"Code");
+                }
+                return;
             }
         }
     }

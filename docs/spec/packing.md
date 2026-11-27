@@ -399,11 +399,36 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
    link register on aarch64), the pair `(digest, text offset)` the table gives at capture.
    A consumer thread fetches `spans`, `names` and `cfi` by digest and uses the CFI to
    decide whether the PC was in a prologue or epilogue, where the candidate is the caller.
-6. **Faults.** A hardware fault whose PC the table resolves is a fault in loaded code. The
-   pool stops, the report names the module digest, text offset and span name, and the
-   digest is **quarantined**: this host refuses to load it again (`Quarantined`). The
-   handler resolves the PC; the quarantine and the span name, which is read from the
-   module by digest, are the reporter's work outside the handler.
+
+   The runtime's sampler writes the pairs as one `CodeFrames` record (kind 14) directly
+   after the sample's `CpuSample` record, and only when the table gave at least one. Its
+   words are the thread id, then four words for each address an image owns: the address's
+   index in the sample, its text offset, and the digest prefix as two little-endian words.
+6. **Faults.** A hardware fault whose PC is in the text band, taken while a task of an
+   execution runs, is a fault in loaded code. Its execution stops with the run stop `Code`
+   ([FAIL-15](failure.md#fail-15-run-stops)): the pool stops and the process goes on. The
+   report names the module digest, text offset and span name, and the digest is
+   **quarantined**: this host refuses to load it again (`Quarantined`). The handler
+   resolves the PC and records the first such fault on the execution; the quarantine and
+   the span name, which is read from the module by digest, are the reporter's work outside
+   the handler, after the pool has stopped.
+
+   - **Signals.** A process that has a loader takes `SIGSEGV`, `SIGBUS`, `SIGILL`,
+     `SIGTRAP` and `SIGFPE` through the runtime's one fault handler, under the rules of
+     [EMB-3](embed.md#emb-3-embedded-launch): a signal that is not a fault in loaded code
+     goes to the action the handler replaced. The PC of an x86-64 breakpoint trap is the
+     address of the trap byte, one less than the address the kernel reports.
+   - **A stale address.** A PC in the text band that no row owns is in the text of a dead
+     image (PACK-4 step 5). The execution stops with `Code` all the same, the report names
+     no image and nothing is quarantined: the fault is its caller's, which kept an address
+     past its `Code[F]`.
+   - **A stack fault first.** A fault on a task stack's guard or growth pages keeps its
+     own meaning (`Stack`, `HostMemory`, growth) wherever its PC is.
+   - **The join.** The runtime does not link the loader. A pack host registers its
+     loader's text band and PC lookup with the runtime once per process, and takes the
+     row addresses its loader binds imports to from its own image. A row the image lacks
+     (the law and measurement rows) has no address, and a module that imports one is
+     refused as `Import(row)`.
 7. **Causes** never point into text. A cause that outlives its image keeps the image's
    site and literal data alive, not its code (slice P2 defines the owner word).
 
@@ -417,7 +442,7 @@ ends the host.
 | `NotAdmitted` | the host holds no admission binding this module's key to its digest |
 | `Malformed(what)` | the bytes are not a well-formed version 1 module |
 | `Mismatch(field)` | `target`, `abi` or `policy` differs from the loader's |
-| `Import(row)` | an import's class is outside the mask |
+| `Import(row)` | an import's class is outside the mask, or the host image lacks the row |
 | `Unbound(instance)` | the host image lacks a kind 1 import |
 | `Fixup(index)` | a fixup is refused by PACK-2; the text table's records count first |
 | `NoEntry` | the module has no entry with the requested identity and signature |

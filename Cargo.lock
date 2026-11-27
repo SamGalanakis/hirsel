@@ -1273,6 +1273,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-pack"
+version = "0.1.0"
+dependencies = [
+ "hirsel-code",
+ "hirsel-core-ids",
+ "hirsel-core-layout",
+ "hirsel-core-rt",
+ "hirsel-guard",
+ "hirsel-mod",
+]
+
+[[package]]
 name = "hirsel-prof"
 version = "0.1.0"
 dependencies = [

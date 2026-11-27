@@ -1,0 +1,17 @@
+[package]
+name = "hirsel-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-code = { path = "../hirsel-code" }
+hirsel-core-ids = { path = "../hirsel-core-ids" }
+hirsel-core-rt = { path = "../hirsel-core-rt" }
+hirsel-mod = { path = "../hirsel-mod" }
+
+[dev-dependencies]
+hirsel-core-layout = { path = "../hirsel-core-layout" }
+hirsel-guard = { path = "../hirsel-guard" }

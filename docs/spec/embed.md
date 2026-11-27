@@ -219,7 +219,11 @@ slot**. It is built from the same runtime crates without the `standalone` featur
 
 - It uses the host's allocator (the C library's `malloc`), never its own global allocator.
 - It installs one process-wide signal action, for `SIGSEGV` (and `SIGBUS` on Darwin), and
-  nothing else process-wide ("Faults and signal stacks" below).
+  nothing else process-wide ("Faults and signal stacks" below). A process that makes a
+  loader takes the same action for `SIGILL`, `SIGTRAP`, `SIGBUS` and `SIGFPE` as well
+  ([PACK-9](packing.md#pack-9-frame-information-and-the-pc-table)), under the same rules;
+  a breakpoint trap that reaches the default action is raised again, so the process ends
+  with `SIGTRAP`.
 - It never calls `exit` or `_exit`. Every startup refusal (including baseline-safe x86-64
   ISA detection, which returns `UnsupportedCpu` instead of calling `std::process::exit`),
   every run stop (including refused stack growth), a place's `Fail`, a stop by the host and

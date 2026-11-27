@@ -466,6 +466,40 @@ pub(crate) fn mappings() -> Option<Vec<u8>> {
 /// Fault signals raised by touching an inaccessible stack page on Linux.
 pub(crate) const FAULT_SIGNALS: [libc::c_int; 1] = [libc::SIGSEGV];
 
+/// The other signals a fault or a trap in loaded code raises (PACK-9).
+pub(crate) const CODE_SIGNALS: [libc::c_int; 4] =
+    [libc::SIGILL, libc::SIGTRAP, libc::SIGBUS, libc::SIGFPE];
+
+/// The address of the instruction that raised `signal`, from a Linux `ucontext_t`.
+///
+/// # Safety
+/// `context` is the live `ucontext_t` passed by the kernel.
+pub(crate) unsafe fn fault_pc(signal: libc::c_int, context: *mut libc::c_void) -> Option<usize> {
+    if context.is_null() {
+        return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: Linux x86_64 ucontext_t layout.
+    unsafe {
+        let uc = &*context.cast::<libc::ucontext_t>();
+        let pc = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as usize;
+        // A breakpoint trap reports the address after its one byte.
+        Some(pc - usize::from(signal == libc::SIGTRAP))
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: Linux aarch64 ucontext_t layout.
+    unsafe {
+        let uc = &*context.cast::<libc::ucontext_t>();
+        let _ = signal;
+        Some(uc.uc_mcontext.pc as usize)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = signal;
+        None
+    }
+}
+
 /// Distinguish synchronous kernel faults (`si_code > 0`) from software-raised
 /// signals (`si_code <= 0`: `SI_USER`, `SI_QUEUE`, `SI_TKILL`) on Linux.
 pub(crate) fn is_hardware_fault(_signal: libc::c_int, info: *const libc::siginfo_t) -> bool {

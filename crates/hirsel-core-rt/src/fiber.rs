@@ -24,6 +24,7 @@ use std::{
 
 #[path = "fiber_fault.rs"]
 mod fault;
+pub(crate) use fault::arm_code;
 #[cfg(test)]
 pub(self) use fault::fault;
 pub use fault::{

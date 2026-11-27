@@ -433,6 +433,11 @@ impl Loader {
         self.0.slab.lock().unwrap().quarantined.insert(digest);
     }
 
+    /// The text band `[low, high)`: every loaded code address is in it.
+    pub fn text_band(&self) -> (usize, usize) {
+        (self.0.base, self.0.base + self.0.config.band_bytes)
+    }
+
     /// The image whose text holds the code address `pc` and the address's offset in
     /// that text (PACK-9). Async-signal-safe: a fault or a sampling handler calls it.
     pub fn resolve(&self, pc: usize) -> Option<Hit> {

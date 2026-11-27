@@ -723,6 +723,30 @@ pub(crate) fn exit_with_parent(_: libc::pid_t) -> io::Result<()> {
 /// Fault signals raised by touching an inaccessible stack page on Darwin/iOS.
 pub(crate) const FAULT_SIGNALS: [libc::c_int; 2] = [libc::SIGSEGV, libc::SIGBUS];
 
+/// The other signals a fault or a trap in loaded code raises (PACK-9).
+pub(crate) const CODE_SIGNALS: [libc::c_int; 3] = [libc::SIGILL, libc::SIGTRAP, libc::SIGFPE];
+
+/// The address of the instruction that raised a signal, from a Darwin `ucontext_t`.
+///
+/// # Safety
+/// `context` is the live `ucontext_t` passed by the kernel.
+pub(crate) unsafe fn fault_pc(_signal: libc::c_int, context: *mut libc::c_void) -> Option<usize> {
+    if context.is_null() {
+        return None;
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: Darwin aarch64 ucontext_t / mcontext64 layout.
+    unsafe {
+        let uc = &*context.cast::<libc::ucontext_t>();
+        if uc.uc_mcontext.is_null() {
+            return None;
+        }
+        Some((*uc.uc_mcontext).__ss.__pc as usize)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    None
+}
+
 /// Distinguish synchronous kernel faults from software-raised signals on Darwin.
 pub(crate) fn is_hardware_fault(signal: libc::c_int, info: *const libc::siginfo_t) -> bool {
     if info.is_null() {
@@ -740,6 +764,8 @@ pub(crate) fn is_hardware_fault(signal: libc::c_int, info: *const libc::siginfo_
     match signal {
         libc::SIGSEGV => matches!(code, SEGV_MAPERR | SEGV_ACCERR),
         libc::SIGBUS => matches!(code, BUS_ADRALN | BUS_ADRERR | BUS_OBJERR),
+        // The kernel gives each of these a positive code; a raised one has zero.
+        libc::SIGILL | libc::SIGTRAP | libc::SIGFPE => code > 0,
         _ => false,
     }
 }

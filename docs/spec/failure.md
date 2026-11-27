@@ -250,6 +250,7 @@ ends its runtime generation, and the stop's name is reported to the embedder:
 | a `Latest` root's handles would pass `2^64 − 1` | `LatestHandles` |
 | an engine counter would pass `2^64 − 1`: task ids, host handles and provider operation tokens, temporary names, runs in the process, destination identities ([MEM-4](memory.md#mem-4-sized-destinations)), step account identities ([PACK-11](packing.md#pack-11-the-context-line)) | `TaskIds`, `HostHandles`, `HostNames`, `ActiveRuns`, `DestinationIds`, `StepIds` |
 | the host refuses memory the engine needs | `HostMemory` |
+| a hardware fault in loaded code, in a process that has a loader ([PACK-9](packing.md#pack-9-frame-information-and-the-pc-table)) | `Code` |
 | the host refuses the signal stack, a signal action, the clock or the page size | `SignalStack`, `Signal`, `Clock`, `PageSize` |
 | a host provider lacks one of its five callbacks when the run installs it, before `main`, or answers a `wait` or step kind outside the provider ABI | `Provider` |
 | a unit's spawn, result or connection send attempts to transfer a socket half, a TLS socket, or a socket or listener owned by a virtual `Net` provider ([CONC-15](tasks.md#conc-15-units), [CONC-17](tasks.md#conc-17-connections)) | `UnitSocket` |

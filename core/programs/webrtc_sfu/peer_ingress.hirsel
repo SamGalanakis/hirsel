@@ -168,12 +168,24 @@ fn new_inbound(ssrc: u32, section: u8, encoding: u8, repair: bool, index: u64, t
     Ok(Inbound(ssrc: ssrc, section: section, encoding: encoding, repair: repair, bound_at: index, highest: index, ts: wide, stats: rtp.stats.received(clock, index, wide, now), nack: nack, losses: take losses, received: take received))
 }
 
+type DecodedRtp {
+    header: rtp.header.Header,
+    payload_at: u64,
+    payload_len: u64
+}
+
+fn parse_rtp_packet(pkt: Bytes) -> Result[DecodedRtp, rtp.header.Error] {
+    let h = rtp.header.parse(pkt)?
+    let (payload_at, payload_len) = rtp.header.payload(h, pkt)?
+    Ok(DecodedRtp(header: h, payload_at: payload_at, payload_len: payload_len))
+}
+
 fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
     if list.len(slot) < 12 {
         p.drops.short_rtp += 1
         return Ok(Nothing)
     }
-    // Authentication before state: SRTP's open is the first stateful step.
+    // Authentication before state: SRTP's open is the first stateful step, outside `isolate`.
     let opened = match open_rtp(mut p, mut slot) {
         None => {
             p.drops.early += 1
@@ -186,13 +198,31 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
         },
     }
     list.truncate(mut slot, opened.length)
-    let Ok(h) = rtp.header.parse(slot) else {
-        p.drops.malformed += 1
-        return Ok(Nothing)
+    let decoded = {
+        let input = view slot
+        isolate(fn() -> Result[DecodedRtp, rtp.header.Error] {
+            parse_rtp_packet(input)
+        })
     }
-    let Ok((payload_at, payload_len)) = rtp.header.payload(h, slot) else {
-        p.drops.malformed += 1
-        return Ok(Nothing)
+    finish_rtp_in(mut p, now, opened, slot, take decoded, mut out)
+}
+
+fn finish_rtp_in(mut p: PeerSession, now: u64, opened: srtp.Opened, slot: Bytes, take outcome: Result[Result[Result[DecodedRtp, rtp.header.Error], Causes], Capacity], mut out: Outbox) -> Result[Input, PeerError] {
+    let DecodedRtp(header: h, payload_at: payload_at, payload_len: payload_len) = match take outcome {
+        Ok(Ok(Ok(d))) => d,
+        Ok(Ok(Error(_))) => {
+            p.drops.malformed += 1
+            return Ok(Nothing)
+        },
+        Ok(Error(take causes)) => {
+            p.ingress_failure = Some(take causes)
+            p.drops.ingress_failure += 1
+            return Error(IngressFailure)
+        },
+        Error(c) => {
+            p.drops.capacity += 1
+            return Error(Capacity(c))
+        },
     }
     collide(mut p, now, h.ssrc, mut out)?
     // MID is bundle-wide, so any receiving section's map reads it; every other kind
@@ -347,7 +377,7 @@ fn extras_in(f: Option[rtp.ext.Found], pkt: Bytes, h: rtp.header.Header) -> (Opt
 // Stream `s` is active when it has an active spatial layer; its planned rate is
 // its top layer's at its top temporal layer.
 fn plan_of(a: rtp.ext.Allocation) -> Plan {
-    let mut p = Plan(stream: a.stream, active: 0, kbps:[0u32; 4])
+    let mut p = Plan(stream: a.stream, active: 0, kbps: [0u32; 4])
     for s in 0u64 .. 4 {
         if a.masks[s] == 0 {
             continue

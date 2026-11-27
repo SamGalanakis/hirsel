@@ -1,0 +1,127 @@
+pub type IngressRow: key = BOnly | ValidMedia | BadAuthAndReplay | TypedParseRefusal | NoCell | CountedNoCell | Checked | NoSteps | CancelDecode
+
+fn fixture_increment(n: u64) -> u64 {
+    n + 1
+}
+
+fn overflow_site(causes: Causes) -> Site {
+    for cause in causes {
+        if let Overflow = cause.kind {
+            return cause.site
+        }
+        break
+    }
+    fail("expected checked RTP decoder overflow")
+}
+
+// Establish the checked-operation site before each schedule. Its payer now funds the
+// task's primary cell, so a later FAIL-16 cell replacement stays with that same payer.
+pub fn ingress_overflow_site() -> Site {
+    let Ok(Error(take causes)) = isolate(fn() -> u64 {
+        fixture_increment(0xffffffffffffffffu64)
+    }) else {
+        fail("missing reference site")
+    }
+    overflow_site(causes)
+}
+
+// Run the real SRTP open, pure RTP decode inside `isolate`, and `finish_rtp_in` owner
+// commit while counting post-auth decoder body entries and exercising boundary controls.
+pub fn ingress_fixture_rtp(mut p: PeerSession, now: u64, mut slot: Bytes, row: IngressRow, expected_site: Site, mut out: Outbox) -> u64 {
+    let Some(Ok(opened)) = open_rtp(mut p, mut slot) else {
+        fail("fixture RTP packet failed SRTP authentication")
+    }
+    list.truncate(mut slot, opened.length)
+    let entered = cell.new(0u64)
+    let budget = if row == CountedNoCell {
+        0u64
+    } else {
+        2048u64
+    }
+    let before_drops = p.drops
+    let before_control = p.control
+    let before_inbound = list.len(p.inbound)
+    let before_pkts = list.len(out.pkts)
+    let result = bound bytes budget {
+        let input = view slot
+        bound steps 512 {
+            isolate(fn() -> Result[DecodedRtp, rtp.header.Error] {
+                cell.set(entered, cell.get(entered) + 1)
+                let parsed = parse_rtp_packet(input)
+                if row == TypedParseRefusal {
+                    return parsed
+                }
+                let d = parsed?
+                let scratch: Bytes = list.with_capacity(128)
+                if row == NoSteps {
+                    loop {}
+                }
+                let _ = fixture_increment(0xffffffffffffffffu64 - list.len(scratch))
+                Ok(d)
+            })
+        }
+    }
+    match take result {
+        Ok(Ok(take outcome)) => {
+            let done = finish_rtp_in(mut p, now, opened, slot, take outcome, mut out)
+            match row {
+                TypedParseRefusal => {
+                    let Ok(Nothing) = done else {
+                        fail("typed post-auth RTP refusal did not return Ok(Nothing)")
+                    }
+                    if p.drops.malformed != before_drops.malformed + 1 || p.drops.srtp != before_drops.srtp || p.drops.ingress_failure != before_drops.ingress_failure || p.drops.capacity != before_drops.capacity {
+                        fail("typed post-auth RTP refusal moved the wrong drop counter")
+                    }
+                    if let Some(_) = take_ingress_failure(mut p) {
+                        fail("typed post-auth RTP refusal stored an internal failure diagnostic")
+                    }
+                },
+                CountedNoCell => {
+                    let Error(Capacity(_)) = done else {
+                        fail("entry refusal did not return Capacity")
+                    }
+                    if p.drops.capacity != before_drops.capacity + 1 || p.drops.malformed != before_drops.malformed || p.drops.srtp != before_drops.srtp || p.drops.ingress_failure != before_drops.ingress_failure {
+                        fail("entry refusal moved the wrong drop counter")
+                    }
+                    if let Some(_) = take_ingress_failure(mut p) {
+                        fail("entry refusal stored an internal failure diagnostic")
+                    }
+                },
+                Checked => {
+                    let Error(IngressFailure) = done else {
+                        fail("caught decoder failure did not return IngressFailure")
+                    }
+                    if p.drops.ingress_failure != before_drops.ingress_failure + 1 || p.drops.malformed != before_drops.malformed || p.drops.srtp != before_drops.srtp || p.drops.capacity != before_drops.capacity {
+                        fail("caught decoder failure moved the wrong drop counter")
+                    }
+                    let Some(take causes) = take_ingress_failure(mut p) else {
+                        fail("missing session RTP ingress failure diagnostic")
+                    }
+                    if overflow_site(causes) != expected_site {
+                        fail("wrong RTP decoder failure site")
+                    }
+                    if let Some(_) = take_ingress_failure(mut p) {
+                        fail("session retained RTP ingress failure after take")
+                    }
+                },
+                _ => fail("unexpected fixture row completed"),
+            }
+        },
+        Ok(Error(OutOfTime(steps: 512))) => {
+            if row != NoSteps {
+                fail("unexpected request step timeout")
+            }
+            if p.drops != before_drops {
+                fail("timed-out RTP decode mutated drop counters")
+            }
+            if let Some(_) = take_ingress_failure(mut p) {
+                fail("timed-out RTP decode stored a diagnostic")
+            }
+        },
+        _ => fail("request byte scope refused"),
+    }
+    if p.control != before_control || list.len(p.inbound) != before_inbound || list.len(out.pkts) != before_pkts {
+        fail("refused or failed RTP decode mutated collision, bindings or outbox")
+    }
+    cell.get(entered)
+}

@@ -252,3 +252,321 @@ fn browser_feedback_reaches_bwe() -> Result[(), peer.PeerError] {
     dropped(mut b, now, client_addr(), compound_only, MALFORMED, "standalone feedback taken without rtcp-rsize")
     Ok(())
 }
+
+// ---- S3 pure-ingress isolate containment law ----
+fn ingress_room() -> u64 {
+    match (bound bytes 0xffffffffffffffffu64 {
+        ()
+    }) {
+        Error(c) => c.available,
+        Ok(()) => fail("payer admitted an unbounded reservation"),
+    }
+}
+
+fn sfu_cancellable_decode(take started: Sender[()]) {
+    let _ = isolate(fn() {
+        result.unwrap(channel.try_send(started, ()))
+        loop {
+            task.check_cancel()
+        }
+    })
+    fail("isolate returned after cancellation")
+}
+
+fn cancel_sfu_ingress(tasks: Tasks) waits {
+    let (tx, rx): (Sender[()], Receiver[()]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, take tx, sfu_cancellable_decode)
+    result.unwrap(channel.receive(rx))
+    if let Error(Cancelled(causes)) = std.task.cancel_join(take h) {
+        for cause in causes {
+            if let Cancelled = cause.kind {
+                return
+            }
+            break
+        }
+    }
+    fail("RTP decoder cancellation did not reach the joiner")
+}
+
+// Build an SRTP-authenticated RTP packet with V=2, P=1 and padding byte 0 (RFC 3550 §5.1).
+// SRTP authenticates and decrypts it cleanly; post-auth `rtp.header.payload` refuses `Padding`.
+fn authenticated_bad_padding(mut cs: srtp.Session, ssrc: u32, seq: u16, pt: u8) -> Bytes {
+    let mut b: Bytes = list.with_capacity(64)
+    list.push(mut b, 0xa0u8)
+    list.push(mut b, 0x80u8 | (pt & 0x7fu8))
+    list.put_word_be(mut b, seq)
+    let wide: u32 = int.widen(seq)
+    list.put_word_be(mut b, 3000u32 * wide)
+    list.put_word_be(mut b, ssrc)
+    list.push(mut b, 0u8)
+    let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
+    take b
+}
+
+fn peer_a_addr() -> Addr {
+    Addr(ip: V4(0xc0000215u32), port: 41001u16)
+}
+
+fn peer_b_addr() -> Addr {
+    Addr(ip: V4(0xc0000216u32), port: 41002u16)
+}
+
+type PeerSnapshot {
+    emitted_pkts: u64,
+    emitted_bytes: Bytes,
+    emitted_seq: u16,
+    emitted_payload: Bytes,
+    drops: peer.Drops,
+    bindings: List[peer.Binding],
+    target_bps: u64,
+    available: u64
+}
+
+fn same_peer_snapshot(a: PeerSnapshot, b: PeerSnapshot) -> bool {
+    a.emitted_pkts == b.emitted_pkts && same(a.emitted_bytes, b.emitted_bytes) && a.emitted_seq == b.emitted_seq && same(a.emitted_payload, b.emitted_payload) && a.drops == b.drops && a.bindings == b.bindings && a.target_bps == b.target_bps && a.available == b.available
+}
+
+// Receive one authenticated packet on peer B, forward it on B's down-track, and open
+// the emitted SRTP packet with B's independent client SRTP session.
+fn deliver_peer_b(mut b: Rig, track: u16, step: u64, now: u64) -> (u64, Bytes, u16, Bytes) {
+    let seq: u16 = int.narrow(200u64 + step)
+    let expected_body: Bytes = if step == 0 {
+        b"\x10\x00\x9d\x01\x2a\x00\x00\x01"
+    } else {
+        b"\x10\x00\x9d\x01\x2a\x00\x00\x02"
+    }
+    let wire = media_carrying(mut b.cs, MEDIA_SSRC, seq, 3000u32 * int.widen(seq), b"a", 96, expected_body)
+    let mut slot = copy_of(wire)
+    peer.clear_outbox(mut b.out)
+    let m = match peer.receive(mut b.p, now, peer_b_addr(), mut slot, mut b.out) {
+        Ok(Media(take m)) => take m,
+        _ => fail("peer B did not accept authenticated media"),
+    }
+    if m.section != 0 || m.index != int.widen(seq) || !same(list.slice(slot, m.payload_at, m.payload_at + m.payload_len), expected_body) {
+        fail("peer B decoded unexpected RTP media")
+    }
+    let none = result.unwrap(rtp.red.ring(0))
+    let u = rtp.rewrite.Unit(start: true, end: true, keyframe: step == 0, needs: 1, switches: 0xffffffff, frame: 0)
+    let leg = peer.Leg(src: Gen(id: 2, epoch: 1), handle: step, source: 2, index: m.index, ts: m.wide, marker: m.marker, codec: Vp8, padding_only: false, unit: u, level: None, voice: false, from: m.payload_at, len: m.payload_len, closes: 0, dd_at: 0, dd_len: 0, orientation: None, capture: None)
+    if result.unwrap(peer.forward(mut b.p, now, track, leg, slot, none, mut b.out)) != OnMedia {
+        fail("peer B did not emit forwarded media")
+    }
+    let emitted_pkts = list.len(b.out.pkts)
+    if emitted_pkts != 1 {
+        fail("peer B emitted unexpected packet count")
+    }
+    let UdpTx(to: sent_to, at: at, len: len, ecn: _) = b.out.pkts[0]
+    if sent_to != peer_b_addr() {
+        fail("peer B emitted to the wrong address")
+    }
+    let emitted_bytes = copy_of(list.slice(b.out.data, at, at + len))
+    let mut opened_buf = copy_of(emitted_bytes)
+    let opened = result.unwrap(srtp.unprotect_rtp(mut b.cs, mut opened_buf))
+    list.truncate(mut opened_buf, opened.length)
+    let h = result.unwrap(rtp.header.parse(opened_buf))
+    let (pat, plen) = result.unwrap(rtp.header.payload(h, opened_buf))
+    let emitted_payload = copy_of(list.slice(opened_buf, pat, pat + plen))
+    if !same(emitted_payload, expected_body) {
+        fail("peer B emitted payload differs from input")
+    }
+    (emitted_pkts, take emitted_bytes, h.seq, take emitted_payload)
+}
+
+fn snapshot_peer_b(b: Rig, take emitted: (u64, Bytes, u16, Bytes)) -> PeerSnapshot {
+    let (pkts, take wire, seq, take payload) = take emitted
+    PeerSnapshot(emitted_pkts: pkts, emitted_bytes: take wire, emitted_seq: seq, emitted_payload: take payload, drops: peer.drops(b.p), bindings: peer.bindings(b.p), target_bps: peer.target_bps(b.p), available: ingress_room())
+}
+
+// Exercise peer A with an independent SRTP session and return its witnessed post-auth parse count.
+fn run_peer_a_row(row: peer.IngressRow, expected_site: Site) -> u64 {
+    let who_a = peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7))
+    let mut a = established_on(3482, session_offer(), who_a, peer_a_addr())
+    let now = 30 * MS
+    let mut parses = 0u64
+    match row {
+        ValidMedia => {
+            let body: Bytes = b"\x10\x00\x9d\x01\x2a\x00\x00\xaa"
+            let pkt1 = media_carrying(mut a.cs, 0x44440001u32, 10, 30000, b"a", 96, body)
+            let pkt2 = media_carrying(mut a.cs, 0x44440001u32, 11, 33000, b"a", 96, body)
+            let mut s1 = copy_of(pkt1)
+            let mut s2 = copy_of(pkt2)
+            match peer.receive(mut a.p, now, peer_a_addr(), mut s1, mut a.out) {
+                Ok(Media(m)) if m.index == 10 && m.section == 0 && same(list.slice(s1, m.payload_at, m.payload_at + m.payload_len), body) => {
+                    parses += 1
+                },
+                _ => fail("peer A valid media packet 1 failed"),
+            }
+            match peer.receive(mut a.p, now + MS, peer_a_addr(), mut s2, mut a.out) {
+                Ok(Media(m)) if m.index == 11 && m.section == 0 => {
+                    parses += 1
+                },
+                _ => fail("peer A valid media packet 2 failed"),
+            }
+            let d = peer.drops(a.p)
+            if d.srtp != 0 || d.malformed != 0 || d.capacity != 0 || d.ingress_failure != 0 || list.len(a.out.pkts) != 0 {
+                fail("peer A valid media raised drops or unexpected output")
+            }
+        },
+        BadAuthAndReplay => {
+            let valid1 = media(mut a.cs, 0x44440002u32, 1000, b"a", 96)
+            let valid2 = media(mut a.cs, 0x44440002u32, 1001, b"a", 96)
+            let mut s1 = copy_of(valid1)
+            match peer.receive(mut a.p, now, peer_a_addr(), mut s1, mut a.out) {
+                Ok(Media(m)) if m.index == 1000 => {
+                    parses += 1
+                },
+                _ => fail("peer A warm-up packet failed"),
+            }
+            let tampered = flip(valid2, list.len(valid2) - 1)
+            dropped(mut a, now + MS, peer_a_addr(), tampered, BAD_SRTP, "tampered tag not dropped as SRTP")
+            dropped(mut a, now + 2 * MS, peer_a_addr(), valid1, BAD_SRTP, "replayed packet not dropped as SRTP")
+            let mut s2 = copy_of(valid2)
+            match peer.receive(mut a.p, now + 3 * MS, peer_a_addr(), mut s2, mut a.out) {
+                Ok(Media(m)) if m.index == 1001 => {
+                    parses += 1
+                },
+                _ => fail("peer A valid continuation after auth/replay drops failed"),
+            }
+            let d = peer.drops(a.p)
+            if d.srtp != 2 || d.malformed != 0 || d.ingress_failure != 0 || list.len(a.out.pkts) != 0 {
+                fail("peer A auth/replay accounting drifted")
+            }
+        },
+        TypedParseRefusal => {
+            // Use A's own control SSRC: collision handling must not run on a post-auth parse refusal.
+            let ctrl = peer.control_ssrc(a.p)
+            let bad1 = authenticated_bad_padding(mut a.cs, ctrl, 20, 96)
+            let bad2 = authenticated_bad_padding(mut a.cs, ctrl, 21, 96)
+            let mut s1 = copy_of(bad1)
+            match peer.receive(mut a.p, now, peer_a_addr(), mut s1, mut a.out) {
+                Ok(Nothing) => (),
+                _ => fail("post-auth bad padding was not dropped cleanly"),
+            }
+            let d1 = peer.drops(a.p)
+            if d1.srtp != 0 || d1.malformed != 1 || d1.ingress_failure != 0 || d1.capacity != 0 || peer.control_ssrc(a.p) != ctrl || list.len(peer.bindings(a.p)) != 0 || list.len(a.out.pkts) != 0 {
+                fail("post-auth bad padding did not pass SRTP and stop before collision/publication")
+            }
+            // Replaying the exact same sealed packet must now hit SRTP's replay window,
+            // proving packet 1 passed authentication before the parse refusal.
+            dropped(mut a, now + MS, peer_a_addr(), bad1, BAD_SRTP, "post-auth bad padding did not commit SRTP replay window")
+            let mut s2 = copy_of(bad2)
+            parses += peer.ingress_fixture_rtp(mut a.p, now + 2 * MS, mut s2, TypedParseRefusal, expected_site, mut a.out)
+            let d2 = peer.drops(a.p)
+            if d2.srtp != 1 || d2.malformed != 2 || d2.ingress_failure != 0 || peer.control_ssrc(a.p) != ctrl || list.len(a.out.pkts) != 0 {
+                fail("counted post-auth parse refusal accounting drifted")
+            }
+        },
+        NoCell => {
+            let warm = media(mut a.cs, 0x44440003u32, 30, b"a", 96)
+            let blocked = media(mut a.cs, 0x44440003u32, 31, b"a", 96)
+            let after = media(mut a.cs, 0x44440003u32, 32, b"a", 96)
+            let mut sw = copy_of(warm)
+            match peer.receive(mut a.p, now, peer_a_addr(), mut sw, mut a.out) {
+                Ok(Media(m)) if m.index == 30 => {
+                    parses += 1
+                },
+                _ => fail("NoCell warm-up packet failed"),
+            }
+            let mut sb = copy_of(blocked)
+            let refused = result.unwrap(bound bytes 0 {
+                peer.receive(mut a.p, now + MS, peer_a_addr(), mut sb, mut a.out)
+            })
+            let Error(Capacity(_)) = refused else {
+                fail("rtp_in ran without isolate entry admission under zero-byte bound")
+            }
+            let d1 = peer.drops(a.p)
+            if d1.capacity != 1 || d1.malformed != 0 || d1.srtp != 0 || d1.ingress_failure != 0 || list.len(a.out.pkts) != 0 {
+                fail("zero-byte entry refusal moved wrong counters or published output")
+            }
+            // Replaying seq 31 proves SRTP opened and committed replay outside isolate before entry refusal.
+            dropped(mut a, now + 2 * MS, peer_a_addr(), blocked, BAD_SRTP, "entry refusal did not preserve SRTP open ordering")
+            let mut sa = copy_of(after)
+            match peer.receive(mut a.p, now + 3 * MS, peer_a_addr(), mut sa, mut a.out) {
+                Ok(Media(m)) if m.index == 32 => {
+                    parses += 1
+                },
+                _ => fail("peer A did not recover for next valid packet after entry refusal"),
+            }
+        },
+        CountedNoCell => {
+            let ctrl = peer.control_ssrc(a.p)
+            let pkt = media(mut a.cs, ctrl, 40, b"a", 96)
+            let mut s = copy_of(pkt)
+            parses += peer.ingress_fixture_rtp(mut a.p, now, mut s, row, expected_site, mut a.out)
+        },
+        Checked => {
+            let ctrl = peer.control_ssrc(a.p)
+            let pkt = media(mut a.cs, ctrl, 40, b"a", 96)
+            let mut s = copy_of(pkt)
+            parses += peer.ingress_fixture_rtp(mut a.p, now, mut s, row, expected_site, mut a.out)
+        },
+        NoSteps => {
+            let ctrl = peer.control_ssrc(a.p)
+            let pkt = media(mut a.cs, ctrl, 40, b"a", 96)
+            let mut s = copy_of(pkt)
+            parses += peer.ingress_fixture_rtp(mut a.p, now, mut s, row, expected_site, mut a.out)
+        },
+        _ => (),
+    }
+    if let Some(_) = peer.take_ingress_failure(mut a.p) {
+        fail("peer A retained an unclaimed ingress diagnostic")
+    }
+    parses
+}
+
+fn sfu_peer_schedule(tasks: Tasks, row: peer.IngressRow) -> (PeerSnapshot, PeerSnapshot, u64) waits {
+    let expected_site = peer.ingress_overflow_site()
+    let who_b = peer.Participant(gen: Gen(id: 2, epoch: 1), room: RoomId(7))
+    let mut b = established_on(3382, session_offer(), who_b, peer_b_addr())
+    let track_b = result.unwrap(peer.add_track(mut b.p, 2, 100, 0))
+    result.unwrap(peer.set_target(mut b.p, track_b, Layer(source: 2, target: 0)))
+    let first_out = deliver_peer_b(mut b, track_b, 0, 20 * MS)
+    let before = ingress_room()
+    let parses = match row {
+        BOnly => 0u64,
+        CancelDecode => {
+            cancel_sfu_ingress(tasks)
+            0u64
+        },
+        _ => result.unwrap(bound bytes 8388608 {
+            run_peer_a_row(row, expected_site)
+        }),
+    }
+    if ingress_room() != before {
+        fail("peer A changed the live peer payer at quiescence")
+    }
+    let first = snapshot_peer_b(b, take first_out)
+    let second_out = deliver_peer_b(mut b, track_b, 1, 40 * MS)
+    let second = snapshot_peer_b(b, take second_out)
+    (take first, take second, parses)
+}
+
+/// bug: RTP ingress runs without isolate admission, lets a post-auth parse refusal or caught
+/// internal failure mutate collision/routing state, leak payer bytes, or disturb an unrelated peer.
+/// oracle: FAIL-16 and S3: independent fixture SRTP sessions for peers A and B compared against
+/// a B-only control on B's emitted SRTP bytes, decrypted sequence and payload, drop/binding/BWE
+/// counters and exact quiescent payer bytes through B's next valid packet, with nonzero post-auth
+/// parse counts on parse-refusal and fault rows and zero body entries on entry-capacity refusal.
+@test
+fn two_peers_preserve_authenticated_ingress(tasks: Tasks) -> Result[(), peer.PeerError] waits {
+    let (take ctrl_first, take ctrl_second, _) = result.unwrap(bound bytes 33554432 {
+        sfu_peer_schedule(tasks, BOnly)
+    })
+    let rows: Inline[peer.IngressRow, 8] =[ValidMedia, BadAuthAndReplay, TypedParseRefusal, NoCell, CountedNoCell, Checked, NoSteps, CancelDecode]
+    for row in rows {
+        let (take actual_first, take actual_second, parses) = result.unwrap(bound bytes 33554432 {
+            sfu_peer_schedule(tasks, row)
+        })
+        if !same_peer_snapshot(actual_first, ctrl_first) || !same_peer_snapshot(actual_second, ctrl_second) {
+            fail("peer B emitted packet bytes/sequence, counters or quiescent payer differ from B-only control")
+        }
+        let need_nonzero = row == ValidMedia || row == BadAuthAndReplay || row == TypedParseRefusal || row == NoCell || row == Checked || row == NoSteps
+        if need_nonzero && parses == 0 {
+            fail("expected nonzero post-auth parse count")
+        }
+        if row == CountedNoCell && parses != 0 {
+            fail("entry-capacity refusal entered decoder body")
+        }
+    }
+    Ok(())
+}

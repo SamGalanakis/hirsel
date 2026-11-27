@@ -143,7 +143,7 @@ fn red_hand_distance(k: u64) -> u64 {
 }
 
 /// bug: Allocate per packet to read, keep or rebuild RED, send RED before any report asks for it, raise only on a later report, let a sample between a level's hold and its rise fail to hold it, never step down or step down without the dwell, tag a rebuilt block with the publisher's payload type, carry a block from the wrong index or with the wrong offset, forward the publisher's RED to a leg that did not agree RED, or send a RED payload on the Opus payload type.
-/// oracle: RTP-13 by hand (`hand_distance`): rise to 2 at a 26/256 report, hold at >= 3/256 (the 5/256 report at 4.01 s), step down one after 2 s with no holding report, so 2 until 6.01 s, 1 until 8.01 s, and a leg clean from 4.01 s carries no redundancy from 8.01 s; payloads by RFC 2198 by hand (`red_of`) on the subscriber's own 109 and 120, and frame k alone on 111 for the plain leg; a zero-byte bound around one distance-2 packet, as W18.
+/// oracle: RTP-13 by hand (`hand_distance`): rise to 2 at a 26/256 report, hold at >= 3/256 (the 5/256 report at 4.01 s), step down one after 2 s with no holding report, so 2 until 6.01 s, 1 until 8.01 s, and a leg clean from 4.01 s carries no redundancy from 8.01 s; payloads by RFC 2198 by hand (`red_of`) on the subscriber's own 109 and 120, and frame k alone on 111 for the plain leg; a 32-byte FAIL-16 cause-cell bound with 0 net bytes retained around one distance-2 packet, as W18.
 @test
 fn red_steps_down_on_a_clean_leg() -> Result[(), router.RouterError] {
     let mut room = red_room(2652)
@@ -166,14 +166,19 @@ fn red_steps_down_on_a_clean_leg() -> Result[(), router.RouterError] {
         let packet = red_published(mut room.publisher.cs, k)
         if k == 200 {
             // W18 for audio: reading a RED payload, keeping its primary and rebuilding
-            // RED at distance 2 for one leg and the primary for another allocate nothing.
+            // RED at distance 2 for one leg and the primary for another allocate nothing
+            // beyond `rtp_in`'s refunded 32-byte FAIL-16 `isolate` cause cell.
             let mut slot = packet
-            let attempt = bound bytes 0 {
+            let before = ingress_room()
+            let attempt = bound bytes 32 {
                 router.receive(mut room.r, now, room_id(), room.publisher.who, room.publisher.at, mut slot, mut out)
             }
             match attempt {
                 Ok(verdict) => verdict?,
                 Error(_) => fail("forwarding RED at distance 2 allocated"),
+            }
+            if ingress_room() != before {
+                fail("forwarding RED at distance 2 retained bytes")
             }
         } else {
             feed(mut room.r, now, room.publisher.who, room.publisher.at, packet, mut out)

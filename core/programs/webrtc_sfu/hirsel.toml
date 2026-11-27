@@ -72,6 +72,7 @@ limit = 67108864
 grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
 
 [tests.sources]
+"ingress_fixture.hirsel" = "peer"
 "laws.hirsel" = "laws"
 "sdp_wire_laws.hirsel" = "laws"
 "sdp_opus_laws.hirsel" = "laws"

@@ -317,9 +317,10 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
 
 /// bug: allocate on the forwarding path (a header buffer, an outbox slot, a ring
 /// copy, a counter or history entry per packet), or pass the bound by dropping traffic.
-/// oracle: W18 as RTC-5 states it: after warm-up one publisher packet to 8 down-tracks
-/// on one unit runs under `bound bytes 0` and leaves exactly 8 packets, each of which
-/// its subscriber's own SRTP session opens to the publisher's payload.
+/// oracle: W18 as RTC-5 states it with FAIL-16 `isolate` at `rtp_in`: after warm-up one
+/// publisher packet to 8 down-tracks on one unit runs under `bound bytes 32` (exactly the
+/// refunded FAIL-16 cause cell), leaves 0 net bytes allocated and emits 8 packets, each of
+/// which its subscriber's own SRTP session opens to the publisher's payload.
 @test
 fn forward_allocates_nothing() -> Result[(), router.RouterError] {
     let mut r = router.router(provide.random(80))
@@ -356,12 +357,16 @@ fn forward_allocates_nothing() -> Result[(), router.RouterError] {
         now += MS
     }
     let mut slot: Bytes = clone(wire[4])
-    let attempt = bound bytes 0 {
+    let before = ingress_room()
+    let attempt = bound bytes 32 {
         router.receive(mut r, now, room, pub_.who, pub_.at, mut slot, mut out)
     }
     match attempt {
         Ok(verdict) => verdict?,
         Error(_) => fail("forwarding to 8 down-tracks allocated"),
+    }
+    if ingress_room() != before {
+        fail("forwarding to 8 down-tracks retained bytes")
     }
     if list.len(out.pkts) != 8 {
         fail("the measured packet does not reach all 8 down-tracks")

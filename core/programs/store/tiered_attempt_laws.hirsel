@@ -188,10 +188,10 @@ fn fetch_many_body(tx: Tx, env: (Table[u64, u64], bool)) -> Result[List[Option[u
 // the attempts and demands are look's own; without it every attempt has
 // window 0 and every demand reads no value, which is the oracle's read.
 fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, prefetch: bool) -> Result[(u64, u64, R), Error] waits {
-    let Some(pool) = view r.pool else {
+    let Some(grant) = read.reader_grant(r.inner) else {
         fail("cold look: the reader has a pool")
     }
-    let partition = pool.grant.pin_bytes
+    let partition = grant.pin_bytes
     let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
         Some(inventory) => inventory.generation,
         None => 0,
@@ -222,9 +222,9 @@ fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, 
                 let SeekKey(sought) = view state.seek else {
                     fail("cold look: a miss seeks its key")
                 }
-                let pager_link: Option[View[Sender[pager.TieredPagerMessage]]] = Some(view pool.requests)
+                let pager_link = read.reader_requests(r.inner)
                 let source = failure_result_from_rep(pager.tx_page_source(pager_link, s.roots.collections))?
-                failure_result_from_rep(object_writer.serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(pool.grant)), mut pins, mut pending))?
+                failure_result_from_rep(object_writer.serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(grant)), mut pins, mut pending))?
             },
             _ => fail("cold look: only misses stop the body"),
         }

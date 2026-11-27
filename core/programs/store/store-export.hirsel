@@ -94,7 +94,7 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
     // install replacement is Drift, never silently emptied on replay).
     let mut superseded: List[u32] = list.with_capacity(list.len(main.superseded))
     for id in main.superseded {
-        if !list_contains_u32(ids, id) {
+        if !read.list_contains_u32(ids, id) {
             return Some(StepDrift)
         }
         let id_key = match failure_result_from_rep(catalog.prefix(id)) {
@@ -108,7 +108,7 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
         if rows_after != 0 {
             return Some(StepDrift)
         }
-        if !list_contains_u32(superseded, id) {
+        if !read.list_contains_u32(superseded, id) {
             list.push(mut superseded, id)
         }
     }
@@ -119,10 +119,10 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
             return Some(StepDrift)
         }
         let owner: u32 = list.word_be(op.key, 0)
-        if !list_contains_u32(ids, owner) || list_contains_u32(superseded, owner) {
+        if !read.list_contains_u32(ids, owner) || read.list_contains_u32(superseded, owner) {
             return Some(StepDrift)
         }
-        if !list_contains_u32(row_owners, owner) {
+        if !read.list_contains_u32(row_owners, owner) {
             list.push(mut row_owners, owner)
         }
         let key_copy = match failure_result_from_rep(types.copied(op.key)) {
@@ -146,21 +146,12 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
     Some(StepReady(ExportStep(version: main.head, catalog: take catalog_rows, superseded: take superseded, rows: take rows)))
 }
 
-fn list_contains_u32(items: List[u32], target: u32) -> bool {
-    for item in items {
-        if item == target {
-            return true
-        }
-    }
-    false
-}
-
 fn step_collections_covered(before: pages.PageTree, after: pages.PageTree, ids: List[u32], superseded: List[u32], row_owners: List[u32]) -> bool {
     if pages.tree_stamp(before) == pages.tree_stamp(after) {
         return true
     }
-    let mut left = start_diff(Some(view before.root), None)
-    let mut right = start_diff(Some(view after.root), None)
+    let mut left = read.start_diff(Some(view before.root), None)
+    let mut right = read.start_diff(Some(view after.root), None)
     while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, None) {
         let id: u32 = list.word_be(key, 0)
         let changed = if comparison != Equal {
@@ -174,14 +165,14 @@ fn step_collections_covered(before: pages.PageTree, after: pages.PageTree, ids: 
             }
         }
         if changed {
-            if !list_contains_u32(ids, id) {
+            if !read.list_contains_u32(ids, id) {
                 return false
             }
-            if !list_contains_u32(superseded, id) && !list_contains_u32(row_owners, id) {
+            if !read.list_contains_u32(superseded, id) && !read.list_contains_u32(row_owners, id) {
                 return false
             }
         }
-        diff_advance(mut left, mut right, comparison)
+        read.diff_advance(mut left, mut right, comparison)
     }
     true
 }

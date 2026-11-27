@@ -43,9 +43,10 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
     }
     let high = failure_result_from_rep(catalog.prefix(source.id + 1))?
     let mut out = change_output(Some(l))
+    let input = read.TieredReadInput(attempt: tx.attempt, pins: tx.pins, below: view tx.below, ops: view tx.ops)
     if low < high {
         if failure_result_from_rep(catalog.tiered_source(tx.roots, source.id))? {
-            read_tiered_tail(tx, base.roots.collections, tx.roots.collections, source.id, low, high, mut out)?
+            failure_result_from_rep(read.read_tiered_tail(input, base.roots.collections, tx.roots.collections, source.id, low, high, mut out))?
         } else {
             let after = if pages.data_row_count(tx.ops.rows) == 0 && list.len(tx.below) == 0 {
                 pages.share_page_tree(tx.roots.collections)
@@ -54,7 +55,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
             }
             walk_page_changes(mut out, Some(view base.roots.collections), after, Some(clone(low)), Some(clone(high)))?
             if let Some(_) = out.deferred {
-                read_tiered_tail(tx, base.roots.collections, after, source.id, low, high, mut out)?
+                failure_result_from_rep(read.read_tiered_tail(input, base.roots.collections, after, source.id, low, high, mut out))?
             }
         }
     }
@@ -66,7 +67,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
         None => take high,
     }
     note_read(tx, Span(take low, take span_end))?
-    let ChangeOutput(rows: take found, next: take resume_at, ..) = take out
+    let read.ChangeOutput(rows: take found, next: take resume_at, ..) = take out
     let mut rows: List[(K, Option[V])] = list.with_capacity(list.len(found))
     for change in found {
         let raw_key = list.slice(change.tree_key, 4, list.len(change.tree_key))

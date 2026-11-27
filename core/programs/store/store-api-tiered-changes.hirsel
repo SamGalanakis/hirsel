@@ -14,7 +14,7 @@ fn snapshot_changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Erro
         return Ok(Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()))
     }
     let out = tiered_changes(r, a, b, None, None, None)?
-    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out
+    let read.ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out
     Ok(Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds))
 }
 
@@ -31,13 +31,13 @@ fn tiered_changes(r: Reader, a: Snapshot, b: Snapshot, take lo: Option[Bytes], h
     let mut low = take lo
     loop {
         let part = disk_allocation(scoped fn() -> Result[ChangeOutput, Error] {
-            let mut part = change_output(out.limits)
+            let mut part = read.change_output(out.limits, change_row, trimmed_span)
             part.remaining = out.remaining
             part.carried = out.carried + list.len(out.rows) + list.len(out.trimmed) + list.len(out.bounds)
             walk_page_changes(mut part, Some(view a.roots.collections), b.roots.collections, clone(low), clone(hi))?
             Ok(take part)
         })?
-        let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, remaining, next: take resume, deferred: take deferred, ..) = take part
+        let read.ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, remaining, next: take resume, deferred: take deferred, ..) = take part
         failure_result_from_rep(types.capacity(list.try_reserve(mut out.rows, list.len(rows))))?
         for take row in take rows {
             list.push(mut out.rows, take row)
@@ -174,8 +174,8 @@ fn tiered_diff_spans(r: Reader, a: Snapshot, b: Snapshot, diff: pager.TieredRowD
     for edge in right {
         failure_result_from_rep(pager.tiered_diff_add_span(mut spans, diff.id, edge, low, high))?
     }
-    tiered_diff_overlay_spans(mut spans, a.roots.collections, diff.id, low, high)?
-    tiered_diff_overlay_spans(mut spans, b.roots.collections, diff.id, low, high)?
+    failure_result_from_rep(read.tiered_diff_overlay_spans(mut spans, a.roots.collections, diff.id, low, high))?
+    failure_result_from_rep(read.tiered_diff_overlay_spans(mut spans, b.roots.collections, diff.id, low, high))?
     let (_, before_descriptor) = option.unwrap(std.page.collection_slot(a.roots.collections.root, key))
     let (_, after_descriptor) = option.unwrap(std.page.collection_slot(b.roots.collections.root, key))
     if pages.collection_descriptor(before_descriptor).kind == LogCollection && pages.collection_descriptor(after_descriptor).kind == LogCollection {
@@ -246,23 +246,6 @@ fn tiered_diff_expand(r: Reader, s: Snapshot, take edges: List[pager.TieredDiffE
         }
         Ok(take out)
     })
-}
-
-// Each replayed key of collection `id` at `s`, as the span of that one key.
-fn tiered_diff_overlay_spans(mut spans: List[(Bytes, Bytes)], tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> Result[(), Error] {
-    let Some(replay) = view tree.replay else {
-        return Ok(())
-    }
-    let Some(overlay) = std.omap.get(replay.collections, id) else {
-        return Ok(())
-    }
-    let mut cursor = std.omap.range(overlay.entries, Included(failure_result_from_rep(types.copied(low))?), Excluded(failure_result_from_rep(types.copied(high))?))
-    while let Some((take key, _)) = std.omap.next(mut cursor) {
-        let mut after = failure_result_from_rep(types.copied(key))?
-        list.push(mut after, 0u8)
-        failure_result_from_rep(pager.tiered_diff_push(mut spans, take key, take after, low, high))?
-    }
-    Ok(())
 }
 
 fn tiered_diff_fill(r: Reader, s: Snapshot, id: u32, mut side: pager.TieredDiffSide, high: Bytes) -> Result[(), Error] waits {

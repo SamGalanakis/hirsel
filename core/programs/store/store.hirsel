@@ -1386,34 +1386,8 @@ type PageRows[K, V]: send {
     decoder: RowDecoder[K, V]
 }
 
-type RowDecoder[K, V]: send {
-    table: u32,
-    key: std.codec.Key[K],
-    readers: Arc[Readers[V]],
-    unique: bool,
-    skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError]]
-}
-
 pub fn row_schemas[K, V](t: Table[K, V]) -> Arc[RowSchemas] {
     arc.share(t.readers.schemas)
-}
-
-fn row_value[V](r: Readers[V], id: u32, raw: Bytes) -> Result[V, Error] {
-    if list.len(raw) < 2 {
-        return Error(Decode(Truncated(0)))
-    }
-    let number: u16 = int.truncate(format.read_le(raw, 0, 2))
-    if number == r.current {
-        return failure_result_from_rep(catalog.decoded(std.codec.decode_at(r.codec, raw, 2)))
-    }
-    let n: u64 = int.widen(number)
-    if n >= list.len(r.older) {
-        return Error(Stale(id))
-    }
-    match r.older[n] {
-        Some(old) => failure_result_from_rep(catalog.decoded(std.codec.read_at(old, raw, 2))),
-        None => Error(Stale(id))
-    }
 }
 
 fn typed_bound[K](k: std.codec.Key[K], limit: Bound[K]) -> Result[Bound[Bytes], Error] {
@@ -1502,7 +1476,7 @@ fn index_decoder[J, K, V, P](ix: Index[J, K, V, P]) -> RowDecoder[K, V] {
         let _ = std.codec.take_key_with(raw, mut at, k)?
         Ok(())
     }
-    RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), unique: (ix.kind == Unique), skip: Some(take skip))
+    read.RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), unique: (ix.kind == Unique), skip: Some(take skip))
 }
 
 fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -> Result[Bytes, Error] {
@@ -2236,8 +2210,8 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
         initial.immutable = true
         let replay = capture_scan(id, take walk, take initial)?
         failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(replay))?, options.resident_limit))?
-        let main = view replay.state.tips[0u64]
-        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: pages.share_roots(main.roots), watermark: failure_result_from_rep(catalog.stamp_after(replay.next_node))?, bases: failure_result_from_rep(manifest.capture_tail_bases(replay.state.pins))?)))
+        let inner = failure_result_from_rep(read.read_only_state(store, replay))?
+        return Ok(ReadOnly(inner: take inner))
     }
 }
 

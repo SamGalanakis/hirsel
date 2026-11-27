@@ -162,11 +162,6 @@ fn cell_page_row(tree: pages.PageTree, key: Bytes) -> Option[View[Bytes]] in tre
     std.page.lookup(root, list.new())
 }
 
-fn cell_walk_value(walking: std.page_walk.Walk) -> Option[Arc[Bytes]] {
-    let descriptor = option.unwrap(std.page_walk.value(walking))
-    pages.owned_cell(std.page_walk.collection(walking), descriptor)
-}
-
 fn apply_cell(mut tree: pages.PageTree, key: Bytes, raw: Option[View[Bytes]], shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), Error] {
     let mut root = {
         let Some(empty) = view tree.empty_collection else {

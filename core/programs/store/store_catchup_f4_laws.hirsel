@@ -118,7 +118,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let steps = read_steps(exported.dir, new_stamp)?
         let mut saw_superseded = false
         for step in steps {
-            if list_contains_u32(step.superseded, by_v.id) {
+            if read.list_contains_u32(step.superseded, by_v.id) {
                 saw_superseded = true
             }
         }
@@ -131,7 +131,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let mut initial = deploy_result(failure_result_from_rep(pager.journal_replay(take state, pages.holder_next_node(child.db.holders), limits_to_rep(child.db.limits))))?
         initial.tiered.total = child.db.tiered
         let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?
-        if !list_contains_u32(replayed.superseded, by_v.id) {
+        if !read.list_contains_u32(replayed.superseded, by_v.id) {
             fail("F4 case B1: replay must record superseded by_v.id")
         }
         if list.len(replayed.deferred_frees) == 0 {

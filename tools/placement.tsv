@@ -318,9 +318,9 @@ fold_cell_edits	store-cell.hirsel	txn	txn	L12
 seal_cell_edits	store-cell.hirsel	txn	txn	L12
 published_cell	store-cell.hirsel	store	store	-
 diff_advance	store-changes.hirsel	read	read	L11
-ChangeOutput	store-changes.hirsel	read	store	-	L5 public root type ruling
-change_output	store-changes.hirsel	read	store	-	L5 public root type ruling
-admit_change	store-changes.hirsel	read	store	-	L5 public root type ruling
+ChangeOutput	store-changes.hirsel	read	read	L11	L11 neutral input: generic change and trim values
+change_output	store-changes.hirsel	read	read	L11	L11 neutral input: plain row and byte limits, generic change and trim constructors
+admit_change	store-changes.hirsel	read	read	L11	L11 neutral input: generic change sink
 page_change_rows	store-changes.hirsel	read	read	L11
 page_change_cell	store-changes.hirsel	read	read	L11
 start_diff	store-changes.hirsel	read	read	L11
@@ -1505,7 +1505,7 @@ remove_pin	store-projector.hirsel	store	store	-
 page_limits	store-read-pages.hirsel	read	read	L11
 scan_page	store-read-pages.hirsel	store	store	-
 find_page	store-read-pages.hirsel	store	store	-
-resume_here	store-read-pages.hirsel	read	read	L11
+resume_here	store-read-pages.hirsel	read	store	-	L11 standing ruling: root Snapshot, Limits and Resume
 scan_next	store-read-pages.hirsel	store	store	-
 find_next	store-read-pages.hirsel	store	store	-
 read_snapshot_collection_page	store-read-pages.hirsel	read	read	L11
@@ -1533,15 +1533,15 @@ next_span_change	store-read.hirsel	store	store	-
 memory_span_step	store-read.hirsel	read	read	L11
 span_changes	store-read.hirsel	store	store	-
 Rows	store-read.hirsel	store	store	-
-table_decoder	store-read.hirsel	read	read	L11
+table_decoder	store-read.hirsel	read	store	-	L11 standing ruling: root Table and Readers
 snapshot_pager	store-read.hirsel	read	read	L11
 snapshot_point	store-read.hirsel	read	read	L11
 get	store-read.hirsel	store	store	-
 count_at	store-read.hirsel	store	store	-
 decode_row_key	store-read.hirsel	read	read	L11
 advance_rows	store-read.hirsel	read	read	L11
-finish_row	store-read.hirsel	read	store	-	L5 public root type ruling
-open_scan	store-read.hirsel	read	read	L11
+finish_row	store-read.hirsel	read	read	L11	L11 neutral input: generic row decoder and neutral failure
+open_scan	store-read.hirsel	read	store	-	L11 standing ruling: root Reader, Snapshot, Table, Bound and Rows
 open_snapshot_rows	store-read.hirsel	read	read	L11
 collection_is_tiered	store-read.hirsel	read	read	L11
 scan	store-read.hirsel	store	store	-
@@ -1553,7 +1553,7 @@ decode_snapshot_next	store-read.hirsel	read	read	L11
 next	store-read.hirsel	store	store	-
 next_memory_snapshot	store-read.hirsel	read	read	L11
 decode_table_row	store-read.hirsel	read	read	L11
-scan_raw	store-read.hirsel	read	read	L11
+scan_raw	store-read.hirsel	read	store	-	L11 standing ruling: root Snapshot and Bound
 range	store-read.hirsel	store	store	-
 range_reverse	store-read.hirsel	store	store	-
 check_table_read	store-read.hirsel	store	store	-
@@ -1563,8 +1563,8 @@ count	store-read.hirsel	store	store	-
 open_range_bounds	store-read.hirsel	store	store	-
 TxRows	store-read.hirsel	store	store	-
 next_in	store-read.hirsel	store	store	-
-next_tx_page	store-read.hirsel	read	read	L11
-note_tx_row	store-read.hirsel	read	read	L11
+next_tx_page	store-read.hirsel	read	store	-	L11 standing ruling: root Read log and Error
+note_tx_row	store-read.hirsel	read	store	-	L11 standing ruling: root Read log and Error
 prefix_limits	store-read.hirsel	read	read	L11
 IndexRows	store-read.hirsel	store	store	-
 IndexEntries	store-read.hirsel	store	store	-
@@ -2110,7 +2110,7 @@ admit_existing	store-streams.hirsel	store	store	-
 admit_next	store-streams.hirsel	store	store	-
 admit_commit	store-streams.hirsel	store	store	-
 lower_bytes	store-streams.hirsel	txn	read	L11	pull-down txn -> read (used by open_scan)
-byte_cursor	store-streams.hirsel	txn	store	-	Root types at the catalog boundary (L3)
+byte_cursor	store-streams.hirsel	txn	read	L11	L11 neutral input: neutral byte bounds
 reverse_byte_cursor	store-streams.hirsel	txn	read	L11	pull-down txn -> read (used by resume_data)
 next_bytes	store-streams.hirsel	txn	catalog	L3	pull-down txn -> catalog (used by complete_declaration)
 stream_live	store-streams.hirsel	store	store	-
@@ -2218,7 +2218,7 @@ tiered_diff_deepen	store-tiered-changes.hirsel	pager	store	-	push-up pager -> st
 tiered_diff_expand	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
 tiered_diff_push	store-tiered-changes.hirsel	pager	pager	L5
 tiered_diff_add_span	store-tiered-changes.hirsel	pager	pager	L5
-tiered_diff_overlay_spans	store-tiered-changes.hirsel	pager	store	-	L5 public root type ruling
+tiered_diff_overlay_spans	store-tiered-changes.hirsel	pager	read	L11	L11 neutral input: shared snapshot and tail replay overlay walk
 tiered_diff_window_span	store-tiered-changes.hirsel	pager	pager	L5
 TieredDiffSide	store-tiered-changes.hirsel	pager	pager	L5
 tiered_diff_fill	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
@@ -2424,11 +2424,11 @@ planned_freed	store-tiered-plan.hirsel	pager	pager	L5
 plan_tiered_edits	store-tiered-plan.hirsel	pager	pager	L5
 tiered_replayed_row	store-tiered-point-read.hirsel	pager	pager	L5
 TieredPageBackend	store-tiered-point-read.hirsel	pager	pager	L5
-read_tiered_point	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
+read_tiered_point	store-tiered-point-read.hirsel	pager	read	L11	L11 neutral input: neutral row callback
 read_tiered_point_direct	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
-read_tiered_point_with	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
-retry_tiered_read	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
-retry_tiered_read_with	store-tiered-point-read.hirsel	pager	store	-	L9 standing ruling: public Snapshot or root read callback
+read_tiered_point_with	store-tiered-point-read.hirsel	pager	read	L11	L11 neutral input: neutral row callback
+retry_tiered_read	store-tiered-point-read.hirsel	pager	read	L11	L11 neutral input: neutral failure and callback
+retry_tiered_read_with	store-tiered-point-read.hirsel	pager	read	L11	L11 neutral input: neutral failure and callback
 serve_tiered_miss	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
 serve_tiered_miss_with	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
 tiered_miss_demand	store-tiered-point-read.hirsel	pager	pager	L5
@@ -2553,12 +2553,12 @@ snapshot_tiered_span	store-tiered-span.hirsel	pager	store	-	push-up pager -> sto
 TxTieredRows	store-tiered-tx-read.hirsel	txn	txn	L12
 TxIndexTiered	store-tiered-tx-read.hirsel	store	store	-
 tx_tiered_descriptor	store-tiered-tx-read.hirsel	txn	txn	L12
-tx_tiered_staged	store-tiered-tx-read.hirsel	txn	txn	L12
-tx_tiered_stage_rows	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_staged	store-tiered-tx-read.hirsel	txn	read	L11	L11 neutral input: shared Tx and committed tail cursor
+tx_tiered_stage_rows	store-tiered-tx-read.hirsel	txn	read	L11	L11 neutral input: shared Tx and committed tail cursor
 tx_tiered_rows	store-tiered-tx-read.hirsel	txn	txn	L12
 tx_index_tiered	store-tiered-tx-read.hirsel	txn	txn	L12
-tx_tiered_stopped	store-tiered-tx-read.hirsel	txn	txn	L12
-next_tiered_in	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_stopped	store-tiered-tx-read.hirsel	txn	read	L11	L11 neutral input: neutral attempt failure
+next_tiered_in	store-tiered-tx-read.hirsel	txn	read	L11	L11 neutral input: shared Tx and committed tail cursor
 tx_tiered_count	store-tiered-tx-read.hirsel	txn	txn	L12
 tx_tiered_index_row	store-tiered-tx-read.hirsel	txn	txn	L12
 fetch_many	store-tiered-tx-read.hirsel	store	store	-
@@ -2828,7 +2828,7 @@ Table	store.hirsel	store	store	-
 IndexKind	store.hirsel	store	store	-
 Index	store.hirsel	store	store	-
 PageRows	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
-RowDecoder	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
+RowDecoder	store.hirsel	catalog	read	L11	L11 neutral input: generic readers parameter
 row_schemas	store.hirsel	store	store	-
 decoded	store.hirsel	catalog	catalog	L3
 read_le	store.hirsel	format	format	L1
@@ -3097,3 +3097,22 @@ PublishedCut	object-writer-cut.hirsel	object_writer	object_writer	L9	L9 Object w
 with_object_settle	object-writer-settle.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
 settle_object_stream	object-writer-settle.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
 settle_worker_sealed	object-writer-archive.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
+ReaderState	store-read.hirsel	read	read	L11	L11 read implementation
+ReaderInput	store-read.hirsel	read	read	L11	L11 read implementation
+ReadOnlyState	store-read.hirsel	read	read	L11	L11 read implementation
+read_tiered_tail	store-read-tail.hirsel	read	read	L11	L11 read implementation
+next_tail_row	store-read-tail.hirsel	read	read	L11	L11 read implementation
+tail_spans	store-read-tail.hirsel	read	read	L11	L11 read implementation
+tail_deepen	store-read-tail.hirsel	read	read	L11	L11 read implementation
+next_tiered_index_row	store-tiered-tx-read.hirsel	read	read	L11	L11 read implementation
+TieredReadInput	store-read-entry.hirsel	read	read	L11	L11 read implementation
+EntryCursor	store-read-entry.hirsel	read	read	L11	L11 read implementation
+step_entry	store-read-entry.hirsel	read	read	L11	L11 read implementation
+entry_parts	store-read-entry.hirsel	read	read	L11	L11 read implementation
+lends_i8_rows	store-read-entry.hirsel	read	read	L11	L11 read implementation
+lends_codes	store-read-entry.hirsel	read	read	L11	L11 read implementation
+catch_up_compare_collections	store-changes.hirsel	read	read	L11	L11 read implementation
+defer_replay_overlays	store-changes.hirsel	read	read	L11	L11 read implementation
+list_contains_u32	store-export.hirsel	read	read	L11	L11 read implementation
+SnapshotPage	store-read-pages.hirsel	read	read	L11	L11 read implementation
+ByteLimit	store-read.hirsel	read	read	L11	L11 read implementation

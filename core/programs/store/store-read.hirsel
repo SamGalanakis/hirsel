@@ -1,11 +1,7 @@
-pub fn table_identity[K, V](t: Table[K, V]) -> (StoreId, u32) {
-    (t.store, t.id)
-}
-
-type ReadAccess {
-    store: StoreId,
+pub type ReaderInput {
+    store: types.StoreKey,
     opened: u64,
-    check: fn(StoreId, u64, Snapshot) -> Result[(), Error] waits
+    pin_bytes: u64
 }
 
 type ReaderPool: send {
@@ -13,118 +9,110 @@ type ReaderPool: send {
     grant: Arc[pager.TieredReaderGrant]
 }
 
-pub opaque resource type Reader: send {
+pub opaque type ReaderState: send {
     access: ReadAccess,
     pool: Option[ReaderPool]
-} drop(owned_reader) {}
+}
 
-fn hot_read_access(id: StoreId, opened: u64, captured: Snapshot) -> Result[(), Error] {
-    if !types.same(id.hi, id.lo, captured.store.hi, captured.store.lo) || opened != captured.open {
+type ReadAccess {
+    store: types.StoreKey,
+    opened: u64,
+    check: fn(types.StoreKey, u64, types.StoreKey, u64) -> Result[(), types.Failure] waits
+}
+
+pub fn open_reader(input: ReaderInput, requests_in: Option[Sender[pager.TieredPagerMessage]]) -> Result[ReaderState, types.Failure] waits {
+    let pool: Option[ReaderPool] = match requests_in {
+        Some(requests) => {
+            let grant = pager.pager_reader_grant(requests, input.pin_bytes)?
+            Some(ReaderPool(requests: channel.sender(requests), grant: take grant))
+        },
+        None => None,
+    }
+    Ok(make_reader(input.store, input.opened, take pool))
+}
+
+fn make_reader(store: types.StoreKey, opened: u64, take pool: Option[ReaderPool]) -> ReaderState {
+    ReaderState(access: ReadAccess(store: store, opened: opened, check: hot_read_access), pool: take pool)
+}
+
+fn hot_read_access(id: types.StoreKey, opened: u64, captured: types.StoreKey, capture_open: u64) -> Result[(), types.Failure] {
+    if id != captured || opened != capture_open {
         return Error(Foreign)
     }
     Ok(())
 }
 
-fn make_reader(id: StoreId, opened: u64, take pool: Option[ReaderPool]) -> Result[Reader, Error] {
-    let access = ReadAccess(store: id, opened: opened, check: hot_read_access)
-    match Reader(access: access, pool: take pool) {
-        Ok(take opened_reader) => Ok(take opened_reader),
-        Error((problem, _)) => Error(Full(Allocation(problem))),
-    }
+pub fn read_access(r: ReaderState, store: types.StoreKey, opened: u64) -> Result[(), types.Failure] waits {
+    (r.access.check)(r.access.store, r.access.opened, store, opened)
 }
 
-fn open_reader(id: StoreId, opened: u64, pager_sender: Option[Sender[pager.TieredPagerMessage]], pin_bytes: u64) -> Result[Reader, Error] waits {
-    let pool: Option[ReaderPool] = match pager_sender {
-        Some(requests) => {
-            let grant = failure_result_from_rep(pager.pager_reader_grant(requests, pin_bytes))?
-            Some(ReaderPool(requests: channel.sender(requests), grant: take grant))
+pub fn snapshot_pager(r: ReaderState, inventory: pages.TieredReadInventory, opened: u64, branch: u32, root_stamp: u64) -> Result[(pager.TieredPageSource, Arc[pager.TieredReaderGrant], pager.TieredPinRoot), types.Failure] {
+    let Some(pool) = view r.pool else {
+        return Error(Io(Closed))
+    }
+    let source = pager.TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
+    let root = pager.TieredPinRoot(domain: opened, branch, generation: inventory.generation, root_stamp)
+    Ok((take source, arc.share(pool.grant), root))
+}
+
+pub scoped type ByteLimit = NoLimit | IncludeKey(View[Bytes]) | ExcludeKey(View[Bytes])
+
+pub fn lower_bytes(id: u32, limit: ByteLimit, high: bool) -> Result[Bytes, types.Failure] {
+    match limit {
+        NoLimit => catalog.prefix(if high {
+            id + 1
+        } else {
+            id
+        }),
+        IncludeKey(k) => {
+            let mut p = catalog.logical_key(id, k)?
+            if high {
+                list.push(mut p, 0u8)
+            }
+            Ok(take p)
         },
-        None => None,
-    }
-    make_reader(id, opened, take pool)
-}
-
-pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] waits {
-    open_reader(db.store, open_number(db), pager.pager_requests(db.pager), pin_bytes)
-}
-
-pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error] waits {
-    open_reader(store_key_from_rep(f.capture.store), f.open, f.pager, pin_bytes)
-}
-
-pub fn read_only_reader(source: ReadOnly, pin_bytes: u64) -> Result[Reader, Error] waits {
-    open_reader(source.snapshot.store, source.snapshot.open, None, pin_bytes)
-}
-
-pub fn staged_reader(source: Preparation, pin_bytes: u64) -> Result[Reader, Error] waits {
-    reader(source.db, pin_bytes)
-}
-
-fn read_access(r: Reader, s: Snapshot) -> Result[(), Error] waits {
-    (r.access.check)(r.access.store, r.access.opened, s)
-}
-
-pub fn copy_env[E: inert](env: E) -> E {
-    clone(env)
-}
-
-pub opaque type SpanRows: send {
-    capture: Snapshot,
-    low: Bytes,
-    high: Bytes,
-    cursor: Option[pages.PageRange],
-    last: Option[Bytes],
-    done: bool
-}
-
-pub fn open_span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[SpanRows, Error] waits {
-    read_access(r, s)?
-    disk_allocation(scoped fn() -> Result[SpanRows, Error] {
-        let captured: Snapshot = clone(s)
-        Ok(SpanRows(capture: take captured, low: failure_result_from_rep(types.copied(lo))?, high: failure_result_from_rep(types.copied(hi))?, cursor: None, last: None, done: hi <= lo))
-    })
-}
-
-pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change], Error] waits {
-    read_access(r, rows.capture)?
-    if rows.done {
-        return Ok(None)
-    }
-    let selected = if let Some(inventory) = view rows.capture.roots.collections.paging {
-        snapshot_tiered_span_step(r, rows.capture, inventory, rows.low, rows.high, rows.last)?
-    } else {
-        memory_span_step(mut rows.cursor, rows.capture.roots.collections, rows.low, rows.high, rows.last)?
-    }
-    match take selected {
-        Some((take key, take value, take resume)) => {
-            rows.last = Some(take resume)
-            Ok(Some(Change(tree_key: take key, value: Some(take value))))
-        },
-        None => {
-            rows.done = true
-            Ok(None)
-        },
+        ExcludeKey(k) => {
+            let mut p = catalog.logical_key(id, k)?
+            if !high {
+                list.push(mut p, 0u8)
+            }
+            Ok(take p)
+        }
     }
 }
 
-fn memory_span_step(mut cursor: Option[pages.PageRange], tree: pages.PageTree, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+pub fn byte_cursor(data: pages.PageTree, take low: std.omap.Bound[Bytes], high: Bytes) -> Result[pages.PageRange, types.Failure] {
+    let empty: Bytes = list.new()
+    let (take start, inclusive) = match take low {
+        Unbounded => (take empty, true),
+        Included(take key) => (take key, true),
+        Excluded(take key) => (take key, false),
+    }
+    pages.open_page_range(data, Some(take start), inclusive, false, Some(types.copied(high)?))
+}
+
+pub fn reverse_byte_cursor(data: pages.PageTree, low: Bytes, high: Bytes) -> Result[pages.PageRange, types.Failure] {
+    pages.open_page_range(data, Some(types.copied(high)?), false, true, Some(types.copied(low)?))
+}
+
+pub fn memory_span_step(mut cursor: Option[pages.PageRange], tree: pages.PageTree, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], types.Failure] {
     // The allocation scope can only view its captures. The cell transfers the
     // cursor through the scope. A refusal discards it, so the next call resumes
     // after the last key actually returned.
-    let exchange = disk_allocation(scoped fn() -> Result[core.Cell[Option[pages.PageRange]], Error] {
+    let exchange = manifest.disk_allocation(scoped fn() -> Result[core.Cell[Option[pages.PageRange]], types.Failure] {
         Ok(cell.new(None))
     })?
     cell.set(exchange, replace(mut cursor, None))
-    let selected = disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+    let selected = manifest.disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], types.Failure] {
         let mut walk = match cell.replace(exchange, None) {
             Some(take active) => take active,
             None => resume_data(tree, low, high, previous, false)?,
         }
-        let found = failure_result_from_rep(catalog.next_bytes(mut walk))?
+        let found = catalog.next_bytes(mut walk)?
         let Some((take key, take value)) = take found else {
             return Ok(None)
         }
-        let resume = failure_result_from_rep(types.copied(key))?
+        let resume = types.copied(key)?
         cell.set(exchange, Some(take walk))
         Ok(Some((take key, take value, take resume)))
     })
@@ -137,532 +125,34 @@ fn memory_span_step(mut cursor: Option[pages.PageRange], tree: pages.PageTree, l
     }
 }
 
-pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] waits {
-    read_access(r, s)?
-    let mut out: List[Change] = list.new()
-    if hi <= lo {
-        return Ok(take out)
-    }
-    if let Some(inventory) = view s.roots.collections.paging {
-        return snapshot_tiered_span(r, s, inventory, lo, hi)
-    }
-    let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(types.copied(lo))?), hi)?
-    while let Some((take key, take value)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
-        list.push(mut out, Change(tree_key: take key, value: Some(take value)))
-    }
-    Ok(take out)
-}
-
-pub opaque type Rows[K, V]: send {
-    capture: Snapshot,
-    source: u32,
-    cursor: Option[pages.CollectionCursor],
-    fault: Option[Error],
-    low: Bytes,
-    high: Bytes,
-    last: Option[Bytes],
-    reverse: bool,
-    done: bool,
-    decoder: RowDecoder[K, V]
-}
-
-fn table_decoder[K, V](t: Table[K, V]) -> RowDecoder[K, V] {
-    RowDecoder(table: t.id, key: t.key, readers: arc.share(t.readers), unique: false, skip: None)
-}
-
-fn snapshot_pager(r: Reader, s: Snapshot, inventory: pages.TieredReadInventory) -> Result[(pager.TieredPageSource, Arc[pager.TieredReaderGrant], pager.TieredPinRoot), Error] {
-    let Some(pool) = view r.pool else {
-        return Error(Io(Closed))
-    }
-    let source = pager.TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
-    let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: pages.tree_stamp(s.roots.collections))
-    Ok((take source, arc.share(pool.grant), root))
-}
-
-fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
-    let tree = view s.roots.collections
-    if let Some(inventory) = view tree.paging {
-        if let Some((_, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) {
-            if pages.collection_descriptor(descriptor).residency == ResidentTiered {
-                let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
-                return read_tiered_point(source, grant, root, tree, logical, decode_row)
-            }
-        }
-    }
-    decode_row(pages.get_page_row(tree, logical))
-}
-
-pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[V], Error] waits {
-    read_access(r, s)?
-    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
-    let mut key = failure_result_from_rep(catalog.prefixed(t.id, 8, false))?
-    std.codec.encode_key(t.key, k, mut key)
-    snapshot_point(r, s, key, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[V], Error] {
-        match stored {
-            Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
-            None => Ok(None),
-        }
-    })
-}
-
-pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] waits {
-    read_access(r, s)?
-    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let tree = view s.roots.collections
-    if let Some(inventory) = view tree.paging {
-        let id = failure_result_from_rep(catalog.prefix(t.id))?
-        if let Some((edge, descriptor)) = std.page.collection_slot(tree.root, id) {
-            let fields = pages.collection_descriptor(descriptor)
-            if fields.residency == ResidentTiered {
-                if high <= low {
-                    return Ok(0u64)
-                }
-                if low == id && list.slice(high, 0, 4) != id {
-                    return Ok(fields.rows)
-                }
-                let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
-                return read_tiered_count(source, grant, root, tree, edge, descriptor, id, low, high)
-            }
-        }
-    }
-    failure_result_from_rep(catalog.count_page_rows(s.roots.collections, t.id, low, high))
-}
-
-fn decode_row_key[K, V](r: RowDecoder[K, V], row_key: Bytes, raw: Bytes) -> Result[(K, Option[Bytes]), Error] {
-    let mut at: u64 = 4
-    if let Some(skip) = r.skip {
-        match (skip)(row_key, mut at) {
-            Ok(()) => {},
-            Error(e) => return Error(Decode(e))
-        }
-    }
-    let key = if r.unique {
-        list.slice(raw, 4, failure_result_from_rep(indexes.unique_owner_end(raw))?)
-    } else {
-        list.slice(row_key, at, list.len(row_key))
-    }
-    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(r.key, key)))?
-    let primary = if let Some(_) = r.skip {
-        Some(failure_result_from_rep(catalog.logical_key(r.table, key))?)
-    } else {
-        None
-    }
-    Ok((take k, take primary))
-}
-
-fn advance_rows[K, V](r: RowDecoder[K, V], data: pages.PageTree, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
-    let (take k, take owner) = decode_row_key(r, row_key, raw)?
-    if let Some(primary) = view owner {
-        match pages.get_page_row(data, primary) {
-            Some(value) => finish_row(r, take k, primary, value, remaining, seen),
-            None => Error(Stale(r.table))
-        }
-    } else {
-        finish_row(r, take k, row_key, raw, remaining, seen)
-    }
-}
-
-fn finish_row[K, V](r: RowDecoder[K, V], take key: K, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
-    let size = list.len(row_key) + list.len(raw)
-    if let Some(left) = remaining {
-        if size > left {
-            return Ok(None)
-        }
-    }
-    let value = row_value(r.readers, r.table, raw)?
-    seen(row_key)?
-    Ok(Some(((take key, take value), size)))
-}
-
-fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[Rows[K, V], Error] waits {
-    read_access(r, s)?
-    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    open_snapshot_rows(s, t.id, take low, take high, reverse, table_decoder(t))
-}
-
-fn open_snapshot_rows[K, V](s: Snapshot, source: u32, take low: Bytes, take high: Bytes, reverse: bool, take decoder: RowDecoder[K, V]) -> Result[Rows[K, V], Error] {
-    let captured: Snapshot = clone(s)
-    let data = view s.roots.collections
-    let tiered = if let Some(_) = data.paging {
-        let source_tiered = collection_is_tiered(data, failure_result_from_rep(catalog.prefix(source))?)
-        source_tiered || (source != decoder.table && collection_is_tiered(data, failure_result_from_rep(catalog.prefix(decoder.table))?))
-    } else {
-        false
-    }
-    let cursor: Option[pages.CollectionCursor] = if tiered {
-        None
-    } else {
-        failure_result_from_rep(catalog.collection_cursor(data, source, low, high, reverse))?
-    }
-    let done = if let None = cursor {
-        !tiered || list.len(low) < 4
-    } else {
-        false
-    }
-    Ok(Rows(capture: take captured, source: source, cursor: take cursor, fault: None, low: take low, high: take high, last: None, reverse: reverse, done: done, decoder: take decoder))
-}
-
-fn collection_is_tiered(data: pages.PageTree, key: Bytes) -> bool {
-    match std.page.lookup(data.root, key) {
-        Some(descriptor) => pages.collection_descriptor(descriptor).residency == ResidentTiered,
-        None => false,
-    }
-}
-
-pub fn scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] waits {
-    open_scan(r, s, t, lo, hi, false)
-}
-
-pub fn scan_reverse[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] waits {
-    open_scan(r, s, t, lo, hi, true)
-}
-
-pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] waits {
-    read_access(r, s)?
-    if !types.same(s.store.hi, s.store.lo, ix.store.hi, ix.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
-    let low = index_bound(ix.id, ix.key, lo, false)?
-    let high = index_bound(ix.id, ix.key, hi, true)?
-    open_snapshot_rows(s, ix.id, take low, take high, false, index_decoder(ix))
-}
-
-fn resume_data(data: pages.PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes], reverse: bool) -> Result[pages.PageRange, Error] {
+pub fn resume_data(data: pages.PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes], reverse: bool) -> Result[pages.PageRange, types.Failure] {
     if reverse {
         return match final_item {
             Some(previous) => reverse_byte_cursor(data, low, previous),
             None => reverse_byte_cursor(data, low, high),
         }
     }
-    let start = match final_item {
-        Some(previous) => Excluded(failure_result_from_rep(types.copied(previous))?),
-        None => Included(failure_result_from_rep(types.copied(low))?),
+    let start: std.omap.Bound[Bytes] = match final_item {
+        Some(previous) => Excluded(types.copied(previous)?),
+        None => Included(types.copied(low)?),
     }
     byte_cursor(data, take start, high)
 }
 
-fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: pages.PageTree, inventory: pages.TieredReadInventory, edge: std.page.Slot, descriptor: Bytes) -> Result[Option[(Bytes, (K, V))], Error] waits {
-    let mut start = failure_result_from_rep(types.copied(rows.low))?
-    let mut stop = failure_result_from_rep(types.copied(rows.high))?
-    if let Some(previous) = view rows.last {
-        if rows.reverse {
-            stop = failure_result_from_rep(types.copied(previous))?
-        } else {
-            start = failure_result_from_rep(types.copied(previous))?
-            list.push(mut start, 0u8)
-        }
-    }
-    let (take source, take grant, root) = snapshot_pager(r, rows.capture, inventory)?
-    read_tiered_scan(source, grant, root, tree, edge, descriptor, rows.source, take start, take stop, rows.reverse, rows.decoder)
-}
-
-fn decode_snapshot_next[K, V](r: Reader, s: Snapshot, decoder: RowDecoder[K, V], key: Bytes, raw: Bytes) -> Result[(K, V), Error] waits {
-    let (take row_key, take owner) = decode_row_key(decoder, key, raw)?
-    let value = if let Some(primary) = view owner {
-        snapshot_point(r, s, primary, scoped fn(stored: Option[View[Bytes]]) -> Result[V, Error] {
-            let Some(row) = stored else {
-                return Error(Stale(decoder.table))
-            }
-            row_value(decoder.readers, decoder.table, row)
-        })?
-    } else {
-        row_value(decoder.readers, decoder.table, raw)?
-    }
-    Ok((take row_key, take value))
-}
-
-pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Error] waits {
-    read_access(r, rows.capture)?
-    if rows.done {
-        return Ok(None)
-    }
-    if let Some(problem) = rows.fault {
-        return Error(clone(problem))
-    }
-    if let Some(mut cursor) = rows.cursor {
-        let found = next_memory_snapshot(mut cursor.walk, cursor.leading, rows.decoder, rows.capture.roots.collections)
-        match take found {
-            Some(Ok(take row)) => return Ok(Some(take row)),
-            Some(Error(take problem)) => {
-                // An immutable snapshot would decode the same row again.
-                rows.fault = Some(clone(problem))
-                return Error(take problem)
-            },
-            None => {
-                rows.done = true
-                return Ok(None)
-            },
-        }
-    }
-    let selected = {
-        let data = view rows.capture.roots.collections
-        if let Some(inventory) = view data.paging {
-            if let Some((edge, descriptor)) = std.page.collection_slot(data.root, failure_result_from_rep(catalog.prefix(rows.source))?) {
-                if pages.collection_descriptor(descriptor).residency == ResidentTiered {
-                    let Some((take key, take result)) = snapshot_scan_step(r, rows, data, inventory, edge, descriptor)? else {
-                        rows.done = true
-                        return Ok(None)
-                    }
-                    rows.last = Some(take key)
-                    return Ok(Some(take result))
-                }
-            }
-        }
-        let mut cursor = resume_data(data, rows.low, rows.high, rows.last, rows.reverse)?
-        let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? else {
-            rows.done = true
-            return Ok(None)
-        }
-        let result = decode_snapshot_next(r, rows.capture, rows.decoder, key, raw)?
-        (take key, take result)
-    }
-    let (take key, take result) = take selected
-    rows.last = Some(take key)
-    Ok(Some(take result))
-}
-
-fn next_memory_snapshot[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], data: pages.PageTree) -> Option[Result[(K, V), Error]] {
-    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[(K, V), Error] {
-        if let None = decoder.skip {
-            return decode_table_row(decoder, suffix, raw)
-        }
-        let key = pages.collection_row_key(leading, suffix)
-        let (take row_key, take owner) = decode_row_key(decoder, key, raw)?
-        let value = if let Some(primary) = view owner {
-            let Some(stored) = pages.get_page_row(data, primary) else {
-                return Error(Stale(decoder.table))
-            }
-            row_value(decoder.readers, decoder.table, stored)?
-        } else {
-            row_value(decoder.readers, decoder.table, raw)?
-        }
-        Ok((take row_key, take value))
-    })
-}
-
-fn decode_table_row[K, V](decoder: RowDecoder[K, V], suffix: Bytes, raw: Bytes) -> Result[(K, V), Error] {
-    let key = failure_result_from_rep(catalog.decoded(std.codec.decode_key(decoder.key, suffix)))?
-    Ok((take key, row_value(decoder.readers, decoder.table, raw)?))
-}
-
-fn scan_raw(s: Snapshot, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[pages.PageRange, Error] {
-    byte_cursor(s.roots.collections, Included(lower_bytes(id, lo, false)?), lower_bytes(id, hi, true)?)
-}
-
-pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error] in tx {
-    open_range(tx, t, lo, hi, false)
-}
-
-pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error] in tx {
-    open_range(tx, t, lo, hi, true)
-}
-
-fn check_table_read[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
-    if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.readable(tx.roots, t.catalog_key, t.catalog_page, t.id))
-}
-
-fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[TxRows[K, V], Error] in tx {
-    check_table_read(tx, t)?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    open_range_bounds(tx, t, take low, take high, reverse)
-}
-
-pub fn range_prefix[K, V, Q](tx: Tx, t: Table[K, V], q: Q, take key: std.codec.Key[Q]) -> Result[TxRows[K, V], Error] in tx {
-    check_table_read(tx, t)?
-    let (take low, take high) = prefix_limits(t.id, t.key, key, q)?
-    open_range_bounds(tx, t, take low, take high, false)
-}
-
-pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] {
-    check_table_read(tx, t)?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let n = if tx_tiered_descriptor(tx, t.id)? {
-        tx_tiered_count(tx, t.id, low, high)?
-    } else {
-        let data = transaction_collection_pages(tx)?
-        failure_result_from_rep(catalog.count_page_rows(data, t.id, low, high))?
-    }
-    note_read(tx, Span(take low, take high))?
-    Ok(n)
-}
-
-fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: Bytes, reverse: bool) -> Result[TxRows[K, V], Error] in tx {
-    let tree = transaction_collection_pages(tx)?
-    let tiered = tx_tiered_rows(tx, t.id, low, high, true)?
-    let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
-        None
-    } else {
-        failure_result_from_rep(catalog.collection_cursor(tree, t.id, low, high, reverse))?
-    }
-    Ok(TxRows(cursor: take cursor, decoder: table_decoder(t), owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: reverse, log_tail: None, tiered: take tiered))
-}
-
-pub opaque scoped type TxRows[K, V] {
-    cursor: Option[pages.CollectionCursor],
-    decoder: RowDecoder[K, V],
-    owner: CallId,
-    depth: u64,
-    reads: View[core.Log[Read]],
-    low: Bytes,
-    high: Bytes,
-    reverse: bool,
-    log_tail: Option[LogRangeTail],
-    tiered: Option[TxTieredRows]
-}
-
-// Before decoding an attempted row, record it and the gap traversed to find it.
-// Exhaustion records the remainder once. An unused cursor observes no keys.
-pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Error] {
-    if !types.same(tx.store.hi, tx.store.lo, r.owner.store.hi, r.owner.store.lo) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
-        return Error(Foreign)
-    }
-    if let Some(mut cursor) = r.cursor {
-        let found = next_tx_page(mut cursor.walk, cursor.leading, r.decoder, r.reads, r.low, r.high, r.reverse)
-        if let Some(take row) = take found {
-            let (take boundary, take decoded_row) = take row
-            if r.reverse {
-                r.high = take boundary
-            } else {
-                r.low = take boundary
-            }
-            return Ok(Some(decoded_row?))
-        }
-    }
-    let mut found = match r.tiered {
-        Some(mut tiered) => next_tiered_in(tx.roots.collections, tx.attempt, tx.pins, tiered.collection, tiered.staged, mut tiered.from, mut tiered.to, r.reverse)?,
-        None => None,
-    }
-    if let None = found {
-        if let Some(mut tail) = r.log_tail {
-            found = next_log_range_tail(tx, mut tail)?
-        }
-    }
-    match take found {
-        Some((key, raw)) => {
-            note_tx_row(r.reads, mut r.low, mut r.high, r.reverse, key)?
-            Ok(Some(decode_table_row(r.decoder, list.slice(key, 4, list.len(key)), raw)?))
-        },
-        None => {
-            if r.low < r.high {
-                let low = replace(mut r.low, list.new())
-                let high = replace(mut r.high, list.new())
-                log.append(r.reads, Span(take low, take high))
-            }
-            Ok(None)
-        },
+pub fn collection_is_tiered(data: pages.PageTree, key: Bytes) -> bool {
+    match std.page.lookup(data.root, key) {
+        Some(descriptor) => pages.collection_descriptor(descriptor).residency == ResidentTiered,
+        None => false,
     }
 }
 
-fn next_tx_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], reads: View[core.Log[Read]], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Result[(K, V), Error])] {
-    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> (Bytes, Result[(K, V), Error]) {
-        let mut key = pages.collection_row_key(leading, suffix)
-        if reverse {
-            log.append(reads, Span(clone(key), clone(high)))
-        } else {
-            list.push(mut key, 0u8)
-            log.append(reads, Span(clone(low), clone(key)))
-        }
-        (take key, decode_table_row(decoder, suffix, raw))
-    })
-}
-
-fn note_tx_row(reads: View[core.Log[Read]], mut low: Bytes, mut high: Bytes, reverse: bool, key: Bytes) -> Result[(), Error] {
-    if reverse {
-        let new_high = failure_result_from_rep(types.copied(key))?
-        let end = replace(mut high, take new_high)
-        log.append(reads, Span(failure_result_from_rep(types.copied(key))?, take end))
-    } else {
-        let mut end = failure_result_from_rep(pager.scan_page_after(key))?
-        let start = replace(mut low, failure_result_from_rep(types.copied(end))?)
-        log.append(reads, Span(take start, take end))
-    }
-    Ok(())
-}
-
-// RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
-// gives the Span a fully consumed range over the same bounds covers.
-fn prefix_limits[K, Q](id: u32, full: std.codec.Key[K], leading: std.codec.Key[Q], q: Q) -> Result[(Bytes, Bytes), Error] {
-    let matches = std.key_prefix.matches(full, leading) ?=> |_| Schema(0)
-    if !matches {
-        return Error(Schema(0))
-    }
-    let low = failure_result_from_rep(catalog.logical_key(id, failure_result_from_rep(catalog.encode_key(leading, q))?))?
-    let high = failure_result_from_rep(catalog.prefix_after(low))?
-    Ok((take low, take high))
-}
-
-pub scoped type IndexRows[K, V] {
-    rows: PageRows[K, V],
-    reads: View[core.Log[Read]],
-    low: Bytes,
-    high: Bytes,
-    tiered: Option[TxIndexTiered],
-    tiered_index: Option[u32]
-}
-
-/// The key codec of the index's table. Rows rank in the order of the bytes
-/// it writes, which is the order a package breaks ties in.
-pub fn primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> std.codec.Key[K] {
-    ix.primary
-}
-
-fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Error] {
-    if !types.same(tx.store.hi, tx.store.lo, ix.store.hi, ix.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.index_readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))
-}
-
-pub fn lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
-    check_index_read(tx, ix)?
-    let low = index_bound(ix.id, ix.key, lo, false)?
-    let high = index_bound(ix.id, ix.key, hi, true)?
-    open_lookup(tx, ix, take low, take high)
-}
-
-pub fn lookup_prefix[J, K, V, P, Q](tx: Tx, ix: Index[J, K, V, P], q: Q, take key: std.codec.Key[Q]) -> Result[IndexRows[K, V], Error] in tx {
-    check_index_read(tx, ix)?
-    let (take low, take high) = prefix_limits(ix.id, ix.key, key, q)?
-    open_lookup(tx, ix, take low, take high)
-}
-
-fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take high: Bytes) -> Result[IndexRows[K, V], Error] in tx {
-    let tree = transaction_collection_pages(tx)?
-    let (take cursor, cold) = open_index_cursor(tree, ix.id, low, high)?
-    let rows = PageRows(cursor: take cursor, data: take tree, decoder: index_decoder(ix))
-    Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high, tiered: tx_index_tiered(tx)?, tiered_index: if cold {
-        Some(ix.id)
-    } else {
-        None
-    }))
-}
-
-fn open_index_cursor(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> Result[(Option[pages.CollectionCursor], bool), Error] {
+pub fn open_index_cursor(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> Result[(Option[pages.CollectionCursor], bool), types.Failure] {
     if low >= high {
         return Ok((None, false))
     }
     // Below `high`, `low` starts with the index's prefix: `prefix_after` only
     // leaves it at or past the next id, and `high` never passes that id.
-    let leading = failure_result_from_rep(catalog.prefix(id))?
+    let leading = catalog.prefix(id)?
     let Some((edge, residency)) = std.page.collection_residency(tree.root, leading) else {
         return Ok((None, false))
     }
@@ -672,9 +162,9 @@ fn open_index_cursor(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> 
     let HotPage(root) = edge else {
         fail("store: a Memory index has a Cold root")
     }
-    let start = Some(failure_result_from_rep(types.copied(list.slice(low, 4, list.len(low))))?)
+    let start = Some(types.copied(list.slice(low, 4, list.len(low)))?)
     let stop = if list.len(high) >= 4 && list.slice(high, 0, 4) == leading {
-        Some(failure_result_from_rep(types.copied(list.slice(high, 4, list.len(high))))?)
+        Some(types.copied(list.slice(high, 4, list.len(high)))?)
     } else {
         None
     }
@@ -682,263 +172,203 @@ fn open_index_cursor(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> 
     Ok((Some(pages.CollectionCursor(walk: take walk, leading: take leading)), false))
 }
 
-// Index entry scans (STORE-SPEC §1.3): one collection cursor per `entries` call, opened on
-// the first step, with no probe and no reopen. Each step records the span the copying
-// range scan recorded and lends the row's key and value bytes from the page.
-type EntryCursor: send = Unopened(pages.PageTree) | Open(pages.CollectionCursor) | OpenTiered(pages.PageTree, std.omap.OMap[Bytes, Option[Arc[Bytes]]]) | Exhausted
-
-scoped type EntryRead {
-    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
-    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
-    below: View[List[Arc[pages.Staged]]],
-    ops: View[pages.DataOps]
+// RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
+// gives the Span a fully consumed range over the same bounds covers.
+pub fn prefix_limits[K, Q](id: u32, full: std.codec.Key[K], leading: std.codec.Key[Q], q: Q) -> Result[(Bytes, Bytes), types.Failure] {
+    let matches = std.key_prefix.matches(full, leading) ?=> |_| Schema(0)
+    if !matches {
+        return Error(Schema(0))
+    }
+    let low = catalog.logical_key(id, catalog.encode_key(leading, q)?)?
+    let high = catalog.prefix_after(low)?
+    Ok((take low, take high))
 }
 
-pub opaque scoped type IndexEntries[J, K, P] {
-    cursor: EntryCursor,
-    read: EntryRead,
-    reads: View[core.Log[Read]],
-    low: Bytes,
-    high: Bytes,
-    id: u32,
-    kind: IndexKind,
-    key: std.codec.Key[J],
-    primary: std.codec.Key[K],
-    payload: Option[Arc[Readers[P]]],
-    payload_codec: std.codec.Codec[P],
-    lendable: bool
+pub type RowDecoder[K, R: shareable + send]: send {
+    table: u32,
+    key: std.codec.Key[K],
+    readers: Arc[R],
+    unique: bool,
+    skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError]]
 }
 
-/// A signed-byte code a `next_i8_entry` step passes on: lent from the page when the row
-/// holds the current schema's built-in `List[i8]` encoding, decoded otherwise.
-pub scoped type I8Code = Lent(View[Bytes]) | Owned(List[i8])
-
-pub fn entries[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexEntries[J, K, P], Error] in tx {
-    check_index_read(tx, ix)?
-    let low = index_bound(ix.id, ix.key, lo, false)?
-    let high = index_bound(ix.id, ix.key, hi, true)?
-    let tree = transaction_collection_pages(tx)?
-    let read = EntryRead(attempt: tx.attempt, pins: tx.pins, below: view tx.below, ops: view tx.ops)
-    Ok(IndexEntries(cursor: Unopened(take tree), read: take read, reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec, lendable: ix.lendable))
+pub fn decode_value[V](codec: std.codec.Codec[V], current: u16, older: List[Option[std.codec.Reader[V]]], id: u32, raw: Bytes) -> Result[V, types.Failure] {
+    if list.len(raw) < 2 {
+        return Error(Decode(Truncated(0)))
+    }
+    let number: u16 = int.truncate(format.read_le(raw, 0, 2))
+    if number == current {
+        return catalog.decoded(std.codec.decode_at(codec, raw, 2))
+    }
+    let n: u64 = int.widen(number)
+    if n >= list.len(older) {
+        return Error(Stale(id))
+    }
+    match older[n] {
+        Some(old) => catalog.decoded(std.codec.read_at(old, raw, 2)),
+        None => Error(Stale(id))
+    }
 }
 
-// One step: `visit` gets the row's full index key (`id ‖ suffix`), value and payload readers. The span up
-// to `key ‖ 0x00` is recorded before an error from `visit` is returned.
-fn step_entry[P, T](mut cursor: EntryCursor, read: EntryRead, reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, id: u32, payload: Option[Arc[Readers[P]]], visit: scoped[view] fn(Bytes, Bytes, Option[Arc[Readers[P]]]) -> Result[T, Error]) -> Result[Option[T], Error] {
-    if let Unopened(_) = cursor {
-        if let Unopened(take tree) = replace(mut cursor, Exhausted) {
-            let (take opened, cold) = open_index_cursor(tree, id, low, high)?
-            if cold {
-                let staged = tx_tiered_staged(tree, read.below, read.ops, Some(id))?
-                cursor = OpenTiered(take tree, take staged)
-            } else if let Some(take walk) = take opened {
-                cursor = Open(take walk)
-            }
+pub fn decode_row_key[K, R: shareable + send](r: RowDecoder[K, R], row_key: Bytes, raw: Bytes) -> Result[(K, Option[Bytes]), types.Failure] {
+    let mut at: u64 = 4
+    if let Some(skip) = r.skip {
+        match (skip)(row_key, mut at) {
+            Ok(()) => {},
+            Error(e) => return Error(Decode(e))
         }
     }
-    let stepped = match cursor {
-        Open(mut walking) => std.page.cursor_read(mut walking.walk, scoped fn(suffix: Bytes, raw: Bytes) -> (Bytes, Result[T, Error]) {
-            let mut after: Bytes = list.with_capacity(5 + list.len(suffix))
-            list.put_word_be(mut after, id)
-            list.append(mut after, suffix)
-            list.push(mut after, 0u8)
-            let value = visit(list.slice(after, 0, list.len(after) - 1), raw, payload)
-            (take after, take value)
-        }),
-        OpenTiered(tree, staged) => {
-            if let Some((key, raw)) = next_tiered_index_row(tree, read.attempt, read.pins, staged, id, low, high)? {
-                note_index_step(reads, mut low, high, Some(view key))?
-                return Ok(Some(visit(key, raw, payload)?))
-            }
-            None
-        },
-        _ => None,
-    }
-    match take stepped {
-        Some((take after, take value)) => {
-            if low < high {
-                let start = replace(mut low, clone(after))
-                log.append(reads, Span(take start, take after))
-            }
-            Ok(Some(value?))
-        },
-        None => {
-            cursor = Exhausted
-            note_index_step(reads, mut low, high, None)?
-            Ok(None)
-        },
-    }
-}
-
-// The index key and primary key of an entry, and where its payload starts in `raw`.
-fn entry_parts[J, K](kind: IndexKind, index_key: std.codec.Key[J], primary_codec: std.codec.Key[K], key: Bytes, raw: Bytes) -> Result[(J, K, u64), Error] {
-    let mut at = 4u64
-    let j = failure_result_from_rep(catalog.decoded(std.codec.take_key_with(key, mut at, index_key)))?
-    let payload_start = if let Unique = kind {
-        if at != list.len(key) {
-            return Error(failure_from_rep(pages.malformed(at)))
-        }
-        failure_result_from_rep(indexes.unique_owner_end(raw))?
+    let key = if r.unique {
+        list.slice(raw, 4, indexes.unique_owner_end(raw)?)
     } else {
-        0u64
+        list.slice(row_key, at, list.len(row_key))
     }
-    let primary = if let Unique = kind {
-        list.slice(raw, 4, payload_start)
+    let k = catalog.decoded(std.codec.decode_key(r.key, key))?
+    let primary = if let Some(_) = r.skip {
+        Some(catalog.logical_key(r.table, key)?)
     } else {
-        list.slice(key, at, list.len(key))
+        None
     }
-    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(primary_codec, primary)))?
-    Ok((take j, take k, payload_start))
+    Ok((take k, take primary))
 }
 
-pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error] {
-    let (id, kind, index_key, primary, payload_codec) = (r.id, r.kind, r.key, r.primary, r.payload_codec)
-    step_entry(mut r.cursor, r.read, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[P]]]) -> Result[(J, K, P), Error] {
-        let (take j, take k, start) = entry_parts(kind, index_key, primary, key, raw)?
-        let payload = list.slice(raw, start, list.len(raw))
-        let value = match row_readers {
-            Some(registered) => row_value(registered, id, payload)?,
-            None => failure_result_from_rep(catalog.decoded(std.codec.decode(payload_codec, payload)))?,
+pub fn advance_rows[K, V, R: shareable + send](r: RowDecoder[K, R], data: pages.PageTree, row_key: Bytes, raw: Bytes, remaining: Option[u64], decode: fn(R, u32, Bytes) -> Result[V, types.Failure], seen: scoped[view] fn(Bytes) -> Result[(), types.Failure]) -> Result[Option[((K, V), u64)], types.Failure] {
+    let (take k, take owner) = decode_row_key(r, row_key, raw)?
+    if let Some(primary) = view owner {
+        match pages.get_page_row(data, primary) {
+            Some(value) => finish_row(r, take k, primary, value, remaining, decode, seen),
+            None => Error(Stale(r.table))
         }
-        Ok((take j, take k, take value))
-    })
-}
-
-// Whether an index's current payload rows decode with the built-in `List[i8]` decoder
-// (PROG-9 identity: no allocation, with or without revisions).
-fn lends_i8_rows[P](payload: Option[Arc[Readers[P]]]) -> bool {
-    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
-    match payload {
-        Some(registered) => std.codec.same_decoder(registered.codec, codes),
-        None => false,
+    } else {
+        finish_row(r, take k, row_key, raw, remaining, decode, seen)
     }
 }
 
-// Whether `payload` is a well-formed current-schema `List[i8]` row: the schema number,
-// a u32 count and exactly that many bytes. Any other row goes through `row_value`, which
-// returns the same value or error the copying scan returns.
-fn lends_codes(registered: Readers[List[i8]], payload: Bytes) -> bool {
-    let n = list.len(payload)
-    if n < 6 || format.read_le(payload, 0, 2) != int.widen(registered.current) {
-        return false
-    }
-    format.read_le(payload, 2, 4) == n - 6
-}
-
-/// The next entry of an index whose payload is `List[i8]`, passed to `visit` with its
-/// primary key. Records, refuses and orders exactly as `next_entry`; a current-schema row
-/// of the built-in `List[i8]` codec is lent from the page instead of copied.
-pub fn next_i8_entry[K, T](mut r: IndexEntries[(), K, List[i8]], visit: scoped[view] fn(take K, I8Code) -> T) -> Result[Option[T], Error] {
-    let (id, kind, index_key, primary, payload_codec, lendable) = (r.id, r.kind, r.key, r.primary, r.payload_codec, r.lendable)
-    step_entry(mut r.cursor, r.read, r.reads, mut r.low, r.high, id, r.payload, scoped fn(key: Bytes, raw: Bytes, row_readers: Option[Arc[Readers[List[i8]]]]) -> Result[T, Error] {
-        let (_, take k, start) = entry_parts(kind, index_key, primary, key, raw)?
-        let payload = list.slice(raw, start, list.len(raw))
-        match row_readers {
-            Some(registered) => {
-                if lendable && lends_codes(registered, payload) {
-                    return Ok(visit(take k, Lent(list.slice(payload, 6, list.len(payload)))))
-                }
-                Ok(visit(take k, Owned(row_value(registered, id, payload)?)))
-            },
-            None => Ok(visit(take k, Owned(failure_result_from_rep(catalog.decoded(std.codec.decode(payload_codec, payload)))?))),
-        }
-    })
-}
-
-fn note_index_step(reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, last_key: Option[View[Bytes]]) -> Result[(), Error] {
-    if low >= high {
-        return Ok(())
-    }
-    let end = match last_key {
-        Some(key) => {
-            let mut after = failure_result_from_rep(types.copied(key))?
-            list.push(mut after, 0u8)
-            take after
-        },
-        None => failure_result_from_rep(types.copied(high))?,
-    }
-    let start = replace(mut low, failure_result_from_rep(types.copied(end))?)
-    log.append(reads, Span(take start, take end))
-    Ok(())
-}
-
-pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error] {
-    if let Some(mut cursor) = r.rows.cursor {
-        let stepped = next_index_page(mut cursor.walk, cursor.leading, r.rows.decoder, r.rows.data, r.tiered, r.reads, r.low, r.high)
-        if let Some(take step) = take stepped {
-            let (take boundary, take value) = step?
-            r.low = take boundary
-            return take value
+pub fn finish_row[K, V, R: shareable + send](r: RowDecoder[K, R], take key: K, row_key: Bytes, raw: Bytes, remaining: Option[u64], decode: fn(R, u32, Bytes) -> Result[V, types.Failure], seen: scoped[view] fn(Bytes) -> Result[(), types.Failure]) -> Result[Option[((K, V), u64)], types.Failure] {
+    let size = list.len(row_key) + list.len(raw)
+    if let Some(left) = remaining {
+        if size > left {
+            return Ok(None)
         }
     }
-    if let Some(index_id) = r.tiered_index {
-        let stepped = {
-            let Some(context) = view r.tiered else {
-                fail("store: a Tiered index read without an attempt")
-            }
-            if let Some((key, raw)) = next_tiered_index_row(r.rows.data, context.attempt, context.pins, context.staged, index_id, r.low, r.high)? {
-                let mut boundary = failure_result_from_rep(types.copied(r.low))?
-                note_index_step(r.reads, mut boundary, r.high, Some(view key))?
-                let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
-                    log.append(r.reads, Point(failure_result_from_rep(types.copied(observed))?))
-                    Ok(())
-                }
-                let row = tx_tiered_index_row(context, r.rows.decoder, r.rows.data, key, raw, seen)
-                Some((take boundary, take row))
-            } else {
-                None
-            }
-        }
-        if let Some((take boundary, take row)) = take stepped {
-            r.low = take boundary
-            return Ok(match row? {
-                Some((take value, _)) => Some(take value),
-                None => None,
-            })
-        }
-        r.tiered_index = None
-    }
-    note_index_step(r.reads, mut r.low, r.high, None)?
-    Ok(None)
+    let value = decode(r.readers, r.table, raw)?
+    seen(row_key)?
+    Ok(Some(((take key, take value), size)))
 }
 
-fn next_index_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], data: pages.PageTree, tiered: Option[TxIndexTiered], reads: View[core.Log[Read]], low: Bytes, high: Bytes) -> Option[Result[(Bytes, Result[Option[(K, V)], Error]), Error]] {
-    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[(Bytes, Result[Option[(K, V)], Error]), Error] {
+pub fn next_memory_snapshot[K, V, R: shareable + send](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, R], data: pages.PageTree, decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Option[Result[(K, V), types.Failure]] {
+    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[(K, V), types.Failure] {
+        if let None = decoder.skip {
+            return decode_table_row(decoder, suffix, raw, decode)
+        }
         let key = pages.collection_row_key(leading, suffix)
-        let mut boundary: Bytes = clone(low)
-        note_index_step(reads, mut boundary, high, Some(view key))?
-        let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
-            log.append(reads, Point(failure_result_from_rep(types.copied(observed))?))
-            Ok(())
+        let (take row_key, take owner) = decode_row_key(decoder, key, raw)?
+        let value = if let Some(primary) = view owner {
+            let Some(stored) = pages.get_page_row(data, primary) else {
+                return Error(Stale(decoder.table))
+            }
+            decode(decoder.readers, decoder.table, stored)?
+        } else {
+            decode(decoder.readers, decoder.table, raw)?
         }
-        let row = match tiered {
-            Some(attempt) => tx_tiered_index_row(attempt, decoder, data, key, raw, seen),
-            None => advance_rows(decoder, data, key, raw, None, seen),
-        }
-        let value: Result[Option[(K, V)], Error] = match take row {
-            Ok(Some((take found, _))) => Ok(Some(take found)),
-            Ok(None) => Ok(None),
-            Error(take problem) => Error(take problem),
-        }
-        Ok((take boundary, take value))
+        Ok((take row_key, take value))
     })
 }
 
-/// The main-branch snapshot recovered by a read-only open.
-pub opaque type ReadOnly: shareable + send {
-    snapshot: Snapshot
+pub fn decode_table_row[K, V, R: shareable + send](decoder: RowDecoder[K, R], suffix: Bytes, raw: Bytes, decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[(K, V), types.Failure] {
+    let key = catalog.decoded(std.codec.decode_key(decoder.key, suffix))?
+    Ok((take key, decode(decoder.readers, decoder.table, raw)?))
 }
 
-pub fn read_only_table[K, V](read_source: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    let s = view read_source.snapshot
-    let handle = catalog_handle(s.store, s.roots.catalog, take name, take key, take value)?
-    Ok(clone(handle))
+pub fn snapshot_point[R](r: ReaderState, tree: pages.PageTree, opened: u64, branch: u32, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
+    if let Some(inventory) = view tree.paging {
+        if let Some((_, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) {
+            if pages.collection_descriptor(descriptor).residency == ResidentTiered {
+                let (take source, take grant, root) = snapshot_pager(r, inventory, opened, branch, pages.tree_stamp(tree))?
+                return read_tiered_point(source, grant, root, tree, logical, decode_row)
+            }
+        }
+    }
+    decode_row(pages.get_page_row(tree, logical))
 }
 
-pub fn read_only_get[K, V](read_source: ReadOnly, t: Table[K, V], key: K) -> Result[Option[V], Error] waits {
-    get(read_only_reader(read_source, 0)?, read_source.snapshot, t, key)
+pub fn open_snapshot_rows(data: pages.PageTree, source: u32, table: u32, low: Bytes, high: Bytes, reverse: bool) -> Result[(Option[pages.CollectionCursor], bool), types.Failure] {
+    let tiered = if let Some(_) = data.paging {
+        let source_tiered = collection_is_tiered(data, catalog.prefix(source)?)
+        source_tiered || (source != table && collection_is_tiered(data, catalog.prefix(table)?))
+    } else {
+        false
+    }
+    let cursor: Option[pages.CollectionCursor] = if tiered {
+        None
+    } else {
+        catalog.collection_cursor(data, source, low, high, reverse)?
+    }
+    let done = if let None = cursor {
+        !tiered || list.len(low) < 4
+    } else {
+        false
+    }
+    Ok((take cursor, done))
 }
 
-pub fn read_only_snapshot(read_source: ReadOnly) -> Snapshot {
-    Snapshot(store: read_source.snapshot.store, open: read_source.snapshot.open, branch: read_source.snapshot.branch, head: read_source.snapshot.head, roots: pages.share_roots(read_source.snapshot.roots), watermark: read_source.snapshot.watermark, bases: pages.share_tail_bases(read_source.snapshot.bases))
+pub fn plain_reader(store: types.StoreKey, opened: u64) -> ReaderState {
+    make_reader(store, opened, None)
+}
+
+pub fn reader_grant(r: ReaderState) -> Option[View[Arc[pager.TieredReaderGrant]]] in r {
+    match view r.pool {
+        Some(pool) => Some(view pool.grant),
+        None => None,
+    }
+}
+
+pub fn reader_requests(r: ReaderState) -> Option[View[Sender[pager.TieredPagerMessage]]] in r {
+    match view r.pool {
+        Some(pool) => Some(view pool.requests),
+        None => None,
+    }
+}
+
+pub fn decode_snapshot_next[K, V, R: shareable + send](r: ReaderState, tree: pages.PageTree, opened: u64, branch: u32, decoder: RowDecoder[K, R], key: Bytes, raw: Bytes, decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[(K, V), types.Failure] waits {
+    let (take row_key, take owner) = decode_row_key(decoder, key, raw)?
+    let value = if let Some(primary) = view owner {
+        snapshot_point(r, tree, opened, branch, primary, scoped fn(stored: Option[View[Bytes]]) -> Result[V, types.Failure] {
+            let Some(row) = stored else {
+                return Error(Stale(decoder.table))
+            }
+            decode(decoder.readers, decoder.table, row)
+        })?
+    } else {
+        decode(decoder.readers, decoder.table, raw)?
+    }
+    Ok((take row_key, take value))
+}
+
+pub opaque type ReadOnlyState: shareable + send {
+    store: types.StoreKey,
+    head: u64,
+    roots: pages.Roots,
+    watermark: u64,
+    bases: pages.TailBases
+}
+
+pub fn read_only_state(store: types.StoreKey, replay: pager.JournalReplay) -> Result[ReadOnlyState, types.Failure] {
+    let main = view replay.state.tips[0u64]
+    let roots = pages.share_roots(main.roots)
+    let watermark = catalog.stamp_after(replay.next_node)?
+    let bases = manifest.capture_tail_bases(replay.state.pins)?
+    Ok(ReadOnlyState(store: store, head: main.head, roots: take roots, watermark: watermark, bases: take bases))
+}
+
+pub fn read_only_identity(source: ReadOnlyState) -> (types.StoreKey, u64, u64) {
+    (source.store, source.head, source.watermark)
+}
+
+pub fn read_only_roots(source: ReadOnlyState) -> View[pages.Roots] in source {
+    view source.roots
+}
+
+pub fn read_only_bases(source: ReadOnlyState) -> View[pages.TailBases] in source {
+    view source.bases
 }

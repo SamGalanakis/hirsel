@@ -261,7 +261,7 @@ pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)]
 }
 
 fn log_decoder[V](l: Log[V]) -> RowDecoder[u64, V] {
-    RowDecoder(table: l.binding.id, key: std.codec.key_u64(), readers: arc.share(l.binding.readers), unique: false, skip: None)
+    read.RowDecoder(table: l.binding.id, key: std.codec.key_u64(), readers: arc.share(l.binding.readers), unique: false, skip: None)
 }
 
 pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[Rows[u64, V], Error] waits {
@@ -594,12 +594,12 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
     window_insertions(r, mut out, b, id, new.first, order.min(new.next, old.first))?
     if a.branch != b.branch && overlap_first < overlap_next && !shared_cold_window(mut out, a.roots.collections, b.roots.collections, id, overlap_first, overlap_next)? {
         let key = failure_result_from_rep(catalog.prefix(id))?
-        let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(types.key_word(overlap_first)))
-        let mut current = start_diff(std.page.collection_child(b.roots.collections.root, key), Some(types.key_word(overlap_first)))
+        let mut previous = read.start_diff(std.page.collection_child(a.roots.collections.root, key), Some(types.key_word(overlap_first)))
+        let mut current = read.start_diff(std.page.collection_child(b.roots.collections.root, key), Some(types.key_word(overlap_first)))
         let _ = page_change_rows(mut out, id, mut previous, mut current, Some(types.key_word(overlap_next)))?
     }
     window_deletions(mut out, id, order.max(old.first, new.next), old.next)?
     window_insertions(r, mut out, b, id, order.max(new.first, old.next), new.next)?
-    let ChangeOutput(rows: take items, ..) = take out
+    let read.ChangeOutput(rows: take items, ..) = take out
     Ok(take items)
 }

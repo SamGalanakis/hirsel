@@ -51,8 +51,8 @@ fn diff_oracle_pair(seed: u64) -> Result[(), Error] {
     let mut resume: Option[Bytes] = Some(clone(low))
     let mut seen = 0u64
     loop {
-        let mut left = start_diff(Some(view a), resume)
-        let mut right = start_diff(Some(view b), resume)
+        let mut left = read.start_diff(Some(view a), resume)
+        let mut right = read.start_diff(Some(view b), resume)
         let mut output = change_output(Some(Limits(rows: 256, byte_limit: 1048576)))
         let _ = page_change_rows(mut output, 1, mut left, mut right, Some(clone(high)))?
         for change in output.rows {

@@ -272,7 +272,7 @@ pub fn projection_row(tx: Tx, decl: ProjectionDecl) -> Result[Projection, Error]
 // no pager pool (§1.14 "The row").
 fn read_projection(db: Db, decl: ProjectionDecl) -> Result[Projection, Error] waits {
     let current = snapshot(db)
-    match get(make_reader(db.store, open_number(db), None)?, current, decl.rows, decl.name)? {
+    match get(plain_reader(db.store, open_number(db))?, current, decl.rows, decl.name)? {
         Some(take row) => Ok(take row),
         None => Ok(projection_empty()),
     }

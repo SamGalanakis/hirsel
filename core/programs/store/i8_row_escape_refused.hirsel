@@ -1,0 +1,17 @@
+fn visit_in_scope[R](visit: scoped[view] fn() -> R) -> R {
+    visit()
+}
+
+fn lent_bytes(row: store.I8Code) -> Option[View[Bytes]] in row {
+    match row {
+        Lent(raw) => Some(raw),
+        Owned(_) => None,
+    }
+}
+
+pub fn rejected(row: store.I8Code) -> bool {
+    let _ = visit_in_scope(fn() -> Option[View[Bytes]] in row {
+        lent_bytes(row)
+    })
+    false
+}

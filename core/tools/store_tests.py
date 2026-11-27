@@ -103,7 +103,9 @@ DEPENDENT_CONTROLS = ('journal_input_refused', 'holder_table_refused', 'declare_
                       'object_worker_open_refused', 'object_cut_published_refused',
                       'object_journal_start_refused', 'object_journal_session_refused',
                       'index_owner_refused', 'index_bindings_refused', 'index_registry_refused',
-                      'index_registration_refused', 'registered_index_refused')
+                      'index_registration_refused', 'registered_index_refused',
+                      'reader_state_refused', 'read_only_state_refused', 'entry_cursor_refused',
+                      'i8_row_escape_refused')
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
                     'view_tx_write_refused', *DEPENDENT_CONTROLS)
@@ -167,6 +169,10 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             'index_registry_refused': [('PROG-2', '`store@1/indexes/IndexRegistry` is private or opaque')],
             'index_registration_refused': [('PROG-2', '`store@1/indexes/IndexRegistration` is private or opaque')],
             'registered_index_refused': [('PROG-2', '`store@1/indexes/RegisteredIndex` is private or opaque')],
+            'reader_state_refused': [('PROG-2', '`store@1/read/ReaderState` is private or opaque')],
+            'read_only_state_refused': [('PROG-2', '`store@1/read/ReadOnlyState` is private or opaque')],
+            'entry_cursor_refused': [('PROG-2', '`store@1/read/EntryCursor` is private or opaque')],
+            'i8_row_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'declare_state_refused': [('PROG-2', '`store@1/catalog/DeclareState` is private or opaque')],
             'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],

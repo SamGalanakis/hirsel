@@ -84,7 +84,7 @@ fn disk_crash_live_read_write(d: Dir, c: Clock, tasks: Tasks, out: Stdout, scena
     let _ = stdout.write_bytes(out, message)
     if read_only {
         let captured = open_read_only(d, c, disk_crash_options("checkpoint"))?
-        let published = version(captured.snapshot)
+        let published = version(read_only_snapshot(captured))
         if published != wanted {
             fail("the staged writer COMMIT did not reach the read-only open")
         }
@@ -399,7 +399,7 @@ fn disk_crash_creation_read(d: Dir, c: Clock, out: Stdout, id: StoreId, seq: u64
     }
     let _ = stdout.write_bytes(out, message)
     let captured = open_read_only(d, c, disk_crash_options("checkpoint"))?
-    if version(captured.snapshot) != head {
+    if version(read_only_snapshot(captured)) != head {
         fail("a read across a creation and a cut missed the recovered head")
     }
     Ok(head)

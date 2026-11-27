@@ -1,0 +1,149 @@
+pub fn read_tiered_point[R](source: pager.TieredPageSource, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
+    read_tiered_point_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, tree, logical, decode_row)
+}
+
+pub fn read_tiered_point_with[R](take backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
+    if list.len(logical) < 4 {
+        return decode_row(None)
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) else {
+        return decode_row(None)
+    }
+    if pages.collection_descriptor(descriptor).kind == LogCollection {
+        if list.len(logical) != 12 {
+            return decode_row(None)
+        }
+        let sequence: u64 = list.word_be(logical, 4)
+        let window = pager.descriptor_bounds(descriptor)
+        if sequence < window.first || sequence >= window.next {
+            return decode_row(None)
+        }
+    }
+    if let Some(row) = pager.tiered_replayed_row(tree, logical) {
+        let stored: Option[View[Bytes]] = match row.now {
+            ReplayPut(value) => Some(view value),
+            ReplayAbsent => None,
+        }
+        return decode_row(stored)
+    }
+    let key = list.slice(logical, 4, list.len(logical))
+    retry_tiered_read_with(take backend, packs, next_stamp, deadline, root_grant, root, key, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, types.Failure] {
+        pager.tiered_reading(attempt, ValuesAt)
+        let backing = pager.TieredBorrowedRoot(edge: view edge, pins: view visible)
+        let stored = pager.tiered_point_bytes(attempt, backing, key)?
+        decode_row(stored)
+    })
+}
+
+pub fn retry_tiered_read[R](source: pager.TieredPageSource, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: pager.TieredDirection, read: scoped[view] fn(core.Cell[pager.TieredTouchSet], Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
+    retry_tiered_read_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, key, upper, direction, read)
+}
+
+pub fn retry_tiered_read_with[R](take backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: pager.TieredDirection, read: scoped[view] fn(core.Cell[pager.TieredTouchSet], Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
+    let mut pins = pager.empty_tiered_pins(root, root_grant.pin_bytes)
+    let mut pending: Option[(format.TieredTarget, types.Failure)] = None
+    loop {
+        // The attempt lives outside the body's isolation, so a stop that
+        // escapes the body still leaves its touches and latch readable.
+        let window = if direction == TieredPoint {
+            0u64
+        } else {
+            pager.tiered_window(pins)
+        }
+        let attempt = pager.tiered_attempt(root_grant.pin_bytes, window)
+        let isolated = manifest.disk_allocation(scoped fn() -> Result[Result[R, types.Failure], types.Failure] {
+            Ok(read(attempt, pins.frames))
+        })
+        // The latch is read first: a latched attempt reruns however the
+        // body ended, an isolated failure included.
+        let state = pager.tiered_finish(take attempt)
+        match state.stopped {
+            Some(AttemptMiss(_)) => {
+                let sought = match state.seek {
+                    SeekKey(secondary) => view secondary,
+                    SeekUpper => option.unwrap(upper),
+                    SeekOperation => view key,
+                }
+                object_writer.serve_tiered_miss_with(backend, packs, next_stamp, deadline, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending)?
+            },
+            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
+            Some(AttemptFold(_)) => fail("store: a read attempt cannot wait for a fold"),
+            None => {
+                let observed = (take isolated)?
+                return take observed
+            },
+        }
+    }
+}
+
+pub fn tiered_snapshot_row[K, V, R: shareable + send](attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, decoder: RowDecoder[K, R], row_key: Bytes, raw: Bytes, remaining: Option[u64], decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[Option[((K, V), u64)], types.Failure] {
+    let (take key, take owner) = decode_row_key(decoder, row_key, raw)?
+    let keep = fn(observed: Bytes) -> Result[(), types.Failure] {
+        Ok(())
+    }
+    if let Some(primary) = view owner {
+        let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(primary, 0, 4)) else {
+            return Error(Stale(decoder.table))
+        }
+        if pages.collection_descriptor(descriptor).residency == ResidentMemory {
+            let Some(value) = pages.get_page_row(tree, primary) else {
+                return Error(Stale(decoder.table))
+            }
+            return finish_row(decoder, take key, primary, value, remaining, decode, keep)
+        }
+        let value = pager.tiered_snapshot_primary(attempt, visible, tree, edge, primary, decoder.table)?
+        finish_row(decoder, take key, primary, value, remaining, decode, keep)
+    } else {
+        finish_row(decoder, take key, row_key, raw, remaining, decode, keep)
+    }
+}
+
+pub fn read_tiered_scan[K, V, R: shareable + send](source: pager.TieredPageSource, grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, edge: std.page.Slot, descriptor: Bytes, collection: u32, take low: Bytes, take high: Bytes, reverse: bool, decoder: RowDecoder[K, R], decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[Option[(Bytes, (K, V))], types.Failure] waits {
+    let (take start, take stop) = pager.tiered_scan_bounds(descriptor, collection, take low, take high)?
+    if start >= stop {
+        return Ok(None)
+    }
+    let overlay = match tree.replay {
+        Some(replay) => std.omap.get(replay.collections, collection),
+        None => None,
+    }
+    let hint = if reverse {
+        view stop
+    } else {
+        view start
+    }
+    let direction: pager.TieredDirection = if reverse {
+        TieredBackward
+    } else {
+        TieredForward
+    }
+    retry_tiered_read(source, grant, root, list.slice(hint, 4, list.len(hint)), None, direction, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Option[(Bytes, (K, V))], types.Failure] {
+        pager.tiered_reading(attempt, if reverse {
+            ValuesNone
+        } else {
+            ValuesFrom
+        })
+        let Some((take key, take raw)) = pager.tiered_scan_row(attempt, visible, edge, collection, overlay, start, stop, reverse)? else {
+            return Ok(None)
+        }
+        let result = tiered_snapshot_row(attempt, visible, tree, decoder, key, raw, None, decode)?
+        let (take selected, _) = option.unwrap(take result)
+        Ok(Some((take key, take selected)))
+    })
+}
+
+pub fn snapshot_scan_step[K, V, R: shareable + send](r: ReaderState, tree: pages.PageTree, inventory: pages.TieredReadInventory, opened: u64, branch: u32, edge: std.page.Slot, descriptor: Bytes, collection: u32, low: Bytes, high: Bytes, previous_key: Option[Bytes], reverse: bool, decoder: RowDecoder[K, R], decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[Option[(Bytes, (K, V))], types.Failure] waits {
+    let mut start = types.copied(low)?
+    let mut stop = types.copied(high)?
+    if let Some(previous) = previous_key {
+        if reverse {
+            stop = types.copied(previous)?
+        } else {
+            start = types.copied(previous)?
+            list.push(mut start, 0u8)
+        }
+    }
+    let (take source, take grant, root) = snapshot_pager(r, inventory, opened, branch, pages.tree_stamp(tree))?
+    read_tiered_scan(source, grant, root, tree, edge, descriptor, collection, take start, take stop, reverse, decoder, decode)
+}

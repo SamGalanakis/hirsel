@@ -1,0 +1,71 @@
+pub fn scan_page[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] waits {
+    read_access(read_handle, s)?
+    page_limits(l)?
+    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
+        return Error(Foreign)
+    }
+    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    let start = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    read_snapshot_collection_page(read_handle, s, t.id, table_decoder(t), Included(take start), take high, l)
+}
+
+pub fn find_page[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] waits {
+    read_access(read_handle, s)?
+    page_limits(l)?
+    if !types.same(s.store.hi, s.store.lo, ix.store.hi, ix.store.lo) {
+        return Error(Foreign)
+    }
+    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
+    let high = index_bound(ix.id, ix.key, hi, true)?
+    let start = index_bound(ix.id, ix.key, lo, false)?
+    read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Included(take start), take high, l)
+}
+
+fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
+    if !types.same(s.store.hi, s.store.lo, store.hi, store.lo) {
+        return Error(Foreign)
+    }
+    if !types.same(s.store.hi, s.store.lo, r.store.hi, r.store.lo) || s.open != r.open || s.branch != r.branch || s.head != r.version {
+        return Ok(false)
+    }
+    if id != r.source {
+        return Error(Stale(r.source))
+    }
+    page_limits(limits)?
+    failure_result_from_rep(catalog.readable(s.roots, catalog_key, seen, id))?
+    Ok(true)
+}
+
+pub fn scan_next[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
+    read_access(read_handle, s)?
+    if !resume_here(s, t.store, t.id, t.catalog_key, t.catalog_page, r, l)? {
+        return Ok(Moved(s.head))
+    }
+    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
+    Ok(Paged(read_snapshot_collection_page(read_handle, s, t.id, table_decoder(t), Excluded(take final_item), take high, l)?))
+}
+
+pub fn find_next[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V, P], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
+    read_access(read_handle, s)?
+    if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
+        return Ok(Moved(s.head))
+    }
+    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
+    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
+    Ok(Paged(read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Excluded(take final_item), take high, l)?))
+}
+
+fn page_limits(limits: Limits) -> Result[(), Error] {
+    failure_result_from_rep(read.page_limits(limits.rows, limits.byte_limit))
+}
+
+fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, decoder: RowDecoder[K, V], take low: Bound[Bytes], take high: Bytes, limits: Limits) -> Result[Page[K, V], Error] waits {
+    let page = failure_result_from_rep(read.read_snapshot_collection_page(r.inner, s.roots.collections, s.open, s.branch, source, decoder, read_byte_bound(take low), take high, limits.rows, limits.byte_limit, read_row_value))?
+    let read.SnapshotPage(rows: take rows, byte_count: byte_count, next: take continuation) = take page
+    let resume = match take continuation {
+        Some((take upper, take final_key)) => Some(Resume(store: s.store, open: s.open, branch: s.branch, version: s.head, source: source, high: take upper, last: take final_key)),
+        None => None,
+    }
+    Ok(Page(rows: take rows, byte_count: byte_count, next: take resume))
+}

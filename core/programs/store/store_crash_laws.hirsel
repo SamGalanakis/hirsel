@@ -629,7 +629,7 @@ fn disk_crash_read_only(d: Dir, c: Clock, torn: bool) -> Result[(), Error] waits
     let read_source = opened?
     trust_directory(d)?
     let rows = read_only_table(read_source, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if version(read_source.snapshot) != 161 {
+    if version(read_only_snapshot(read_source)) != 161 {
         fail("read-only open recovered the wrong journal prefix")
     }
     for k in 0u64 .. 96 {
@@ -662,7 +662,7 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     close(take db)?
     let saved = open_read_only(child, c, result.unwrap(sized(Directory, 2147483648u64)))?
     let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
+    if version(read_only_snapshot(saved)) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
         fail("read-only open missed a durable journal row")
     }
     let mut again = open(tasks, child, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
@@ -673,7 +673,7 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     checkpoint(mut again)?
     close(take again)?
     let newer = open_read_only(child, c, result.unwrap(sized(Directory, 2147483648u64)))?
-    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(newer.snapshot) != 3 || read_only_get(newer, rows, 7)? != Some(71u64) {
+    if version(read_only_snapshot(saved)) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(read_only_snapshot(newer)) != 3 || read_only_get(newer, rows, 7)? != Some(71u64) {
         fail("read-only reads changed after the writer replaced the row")
     }
     Ok(())

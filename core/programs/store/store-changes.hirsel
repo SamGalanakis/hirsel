@@ -1,4 +1,9 @@
-fn diff_advance(mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, comparison: Order) {
+fn cell_walk_value(walking: std.page_walk.Walk) -> Option[Arc[Bytes]] {
+    let descriptor = option.unwrap(std.page_walk.value(walking))
+    pages.owned_cell(std.page_walk.collection(walking), descriptor)
+}
+
+pub fn diff_advance(mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, comparison: Order) {
     if comparison != Greater {
         std.page_walk.next(mut left)
     }
@@ -7,32 +12,44 @@ fn diff_advance(mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, com
     }
 }
 
-type ChangeOutput {
-    rows: List[Change],
-    trimmed: List[Trimmed],
-    bounds: List[Bytes],
-    remaining: u64,
-    limits: Option[Limits],
-    next: Option[Bytes],
-    // Items an earlier part of the same page already admitted.
-    carried: u64,
-    // A collection whose rows `walk_page_changes` left for a Tiered read.
-    deferred: Option[pager.TieredRowDiff]
-}
-
-fn change_output(limits: Option[Limits]) -> ChangeOutput {
-    let remaining = match limits {
-        Some(l) => l.byte_limit,
-        None => 0u64
+pub fn start_diff(root: Option[View[Arc[std.page.Page]]], low: Option[Bytes]) -> std.page_walk.Walk {
+    let Some(page) = root else {
+        return std.page_walk.empty()
     }
-    ChangeOutput(rows: list.new(), trimmed: list.new(), bounds: list.new(), remaining, limits, next: None, carried: 0, deferred: None)
+    match low {
+        None => std.page_walk.begin(page),
+        Some(key) => std.page_walk.seek(page, key),
+    }
 }
 
-fn admit_change(mut out: ChangeOutput, key: Bytes, width: u64) -> Result[bool, Error] {
-    if let Some(limits) = out.limits {
+pub fn diff_bound(boundary: Option[Bytes], collection: Bytes) -> Option[Bytes] {
+    if let Some(key) = boundary {
+        if list.len(key) > 4 && list.slice(key, 0, 4) == collection {
+            return Some(clone(list.slice(key, 4, list.len(key))))
+        }
+    }
+    None
+}
+
+pub fn change_in_range(key: Bytes, low: Option[Bytes], high: Option[Bytes]) -> bool {
+    if let Some(lower) = low {
+        if key < lower {
+            return false
+        }
+    }
+    if let Some(upper) = high {
+        if key >= upper {
+            return false
+        }
+    }
+    true
+}
+
+pub fn admit_change[C, T](mut out: ChangeOutput[C, T], key: Bytes, width: u64) -> Result[bool, types.Failure] {
+    if let Some((rows, _)) = out.limits {
         let filled = out.carried + list.len(out.rows) + list.len(out.trimmed) + list.len(out.bounds)
-        if filled == limits.rows || (filled != 0 && width > out.remaining) {
-            out.next = Some(failure_result_from_rep(types.copied(key))?)
+        if filled == rows || (filled != 0 && width > out.remaining) {
+            out.next = Some(types.copied(key)?)
             return Ok(false)
         }
         out.remaining = int.saturating_sub(out.remaining, width)
@@ -40,9 +57,9 @@ fn admit_change(mut out: ChangeOutput, key: Bytes, width: u64) -> Result[bool, E
     Ok(true)
 }
 
-fn page_change_rows(mut out: ChangeOutput, id: u32, mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, high: Option[Bytes]) -> Result[bool, Error] {
+pub fn page_change_rows[C, T](mut out: ChangeOutput[C, T], id: u32, mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, high: Option[Bytes]) -> Result[bool, types.Failure] {
     while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, high) {
-        let logical = failure_result_from_rep(catalog.logical_key(id, key))?
+        let logical = catalog.logical_key(id, key)?
         let value_width = if comparison == Less {
             0u64
         } else {
@@ -56,13 +73,13 @@ fn page_change_rows(mut out: ChangeOutput, id: u32, mut left: std.page_walk.Walk
         } else {
             std.page_walk.owned_value(right)
         }
-        list.push(mut out.rows, Change(tree_key: take logical, value: take replacement))
+        list.push(mut out.rows, (out.row)(take logical, take replacement))
         diff_advance(mut left, mut right, comparison)
     }
     Ok(true)
 }
 
-fn page_change_cell(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, low: Option[Bytes]) -> Result[bool, Error] {
+fn page_change_cell[C, T](mut out: ChangeOutput[C, T], key: Bytes, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, low: Option[Bytes]) -> Result[bool, types.Failure] {
     if let Some(lower) = low {
         if key < lower {
             return Ok(true)
@@ -88,50 +105,17 @@ fn page_change_cell(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk,
     if !admit_change(mut out, key, 4 + width)? {
         return Ok(false)
     }
-    list.push(mut out.rows, Change(tree_key: failure_result_from_rep(types.copied(key))?, value: take after))
+    list.push(mut out.rows, (out.row)(types.copied(key)?, take after))
     Ok(true)
 }
 
-fn start_diff(root: Option[View[Arc[std.page.Page]]], low: Option[Bytes]) -> std.page_walk.Walk {
-    let Some(page) = root else {
-        return std.page_walk.empty()
-    }
-    match low {
-        None => std.page_walk.begin(page),
-        Some(key) => std.page_walk.seek(page, key),
-    }
-}
-
-fn diff_bound(boundary: Option[Bytes], collection: Bytes) -> Option[Bytes] {
-    if let Some(key) = boundary {
-        if list.len(key) > 4 && list.slice(key, 0, 4) == collection {
-            return Some(clone(list.slice(key, 4, list.len(key))))
-        }
-    }
-    None
-}
-
-fn change_in_range(key: Bytes, low: Option[Bytes], high: Option[Bytes]) -> bool {
-    if let Some(lower) = low {
-        if key < lower {
-            return false
-        }
-    }
-    if let Some(upper) = high {
-        if key >= upper {
-            return false
-        }
-    }
-    true
-}
-
-fn page_change_trim(mut out: ChangeOutput, take first: Bytes, take end: Bytes, low: Option[Bytes], high: Option[Bytes]) -> Result[bool, Error] {
+fn page_change_trim[C, T](mut out: ChangeOutput[C, T], take first: Bytes, take end: Bytes, low: Option[Bytes], high: Option[Bytes]) -> Result[bool, types.Failure] {
     let lo = match low {
-        Some(edge) if first < edge => failure_result_from_rep(types.copied(edge))?,
+        Some(edge) if first < edge => types.copied(edge)?,
         _ => take first
     }
     let hi = match high {
-        Some(edge) if edge < end => failure_result_from_rep(types.copied(edge))?,
+        Some(edge) if edge < end => types.copied(edge)?,
         _ => take end
     }
     if hi <= lo {
@@ -140,11 +124,11 @@ fn page_change_trim(mut out: ChangeOutput, take first: Bytes, take end: Bytes, l
     if !admit_change(mut out, lo, list.len(lo) + list.len(hi))? {
         return Ok(false)
     }
-    list.push(mut out.trimmed, Trimmed(lo: take lo, hi: take hi))
+    list.push(mut out.trimmed, (out.trim)(take lo, take hi))
     Ok(true)
 }
 
-fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, low: Option[Bytes], high: Option[Bytes]) -> Result[bool, Error] {
+fn page_change_log[C, T](mut out: ChangeOutput[C, T], key: Bytes, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, low: Option[Bytes], high: Option[Bytes]) -> Result[bool, types.Failure] {
     let before: Option[View[Bytes]] = if comparison == Greater {
         None
     } else {
@@ -171,7 +155,7 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, 
         if !admit_change(mut out, key, 4)? {
             return Ok(false)
         }
-        list.push(mut out.bounds, failure_result_from_rep(types.copied(key))?)
+        list.push(mut out.bounds, types.copied(key)?)
     }
     if let (Some(a), Some(b)) = (before, after) {
         let old_stamp: u64 = list.word_le(a, 28)
@@ -188,7 +172,7 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, 
             None => old.next
         }
         if old.first < end {
-            if !page_change_trim(mut out, failure_result_from_rep(pager.log_key(id, old.first))?, failure_result_from_rep(pager.log_key(id, end))?, low, high)? {
+            if !page_change_trim(mut out, pager.log_key(id, old.first)?, pager.log_key(id, end)?, low, high)? {
                 return Ok(false)
             }
             let suffix = types.key_word(end)
@@ -209,7 +193,7 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, 
     collection_row_changes(mut out, id, left, right, comparison, start, stop)
 }
 
-fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, start: Option[Bytes], stop: Option[Bytes]) -> Result[bool, Error] {
+fn collection_row_changes[C, T](mut out: ChangeOutput[C, T], id: u32, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, start: Option[Bytes], stop: Option[Bytes]) -> Result[bool, types.Failure] {
     // A Tiered side's Cold pages need the pager, which waits, so the walk
     // stops here and `tiered_changes` diffs these rows outside it.
     let before = comparison != Greater
@@ -233,7 +217,7 @@ fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page_walk.Wa
     page_change_rows(mut out, id, mut from, mut until, stop)
 }
 
-fn walk_page_changes(mut out: ChangeOutput, before: Option[View[pages.PageTree]], after: pages.PageTree, low: Option[Bytes], high: Option[Bytes]) -> Result[(), Error] {
+pub fn walk_page_changes[C, T](mut out: ChangeOutput[C, T], before: Option[View[pages.PageTree]], after: pages.PageTree, low: Option[Bytes], high: Option[Bytes]) -> Result[(), types.Failure] {
     let low_id: Option[Bytes] = match low {
         None => None,
         Some(key) => Some(clone(list.slice(key, 0, order.min(4, list.len(key))))),
@@ -269,48 +253,36 @@ fn walk_page_changes(mut out: ChangeOutput, before: Option[View[pages.PageTree]]
     Ok(())
 }
 
-fn compare_page_collections(before: pages.PageTree, after: pages.PageTree) -> Result[Changes, Error] {
-    if pages.tree_stamp(before) == pages.tree_stamp(after) {
-        return Ok(Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()))
-    }
-    let mut out = change_output(None)
-    walk_page_changes(mut out, Some(view before), after, None, None)?
-    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out
-    Ok(Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds))
+pub type ChangeOutput[C, T] {
+    rows: List[C],
+    trimmed: List[T],
+    bounds: List[Bytes],
+    remaining: u64,
+    limits: Option[(u64, u64)],
+    next: Option[Bytes],
+    // Items an earlier part of the same page already admitted.
+    carried: u64,
+    // A collection whose rows the page walk left for a Tiered read.
+    deferred: Option[pager.TieredRowDiff],
+    row: fn(take Bytes, take Option[Arc[Bytes]]) -> C,
+    trim: fn(take Bytes, take Bytes) -> T
 }
 
-fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32], mut deferred: List[pager.TieredRowDiff]) -> Result[(), Error] {
-    let Some(overlays) = view tree.replay else {
-        return Ok(())
+pub fn change_output[C, T](limits: Option[(u64, u64)], row: fn(take Bytes, take Option[Arc[Bytes]]) -> C, trim: fn(take Bytes, take Bytes) -> T) -> ChangeOutput[C, T] {
+    let remaining = match limits {
+        Some((_, limit)) => limit,
+        None => 0u64
     }
-    let mut cursor = std.omap.range(overlays.collections, Unbounded, Unbounded)
-    while let Some((id, _)) = std.omap.next(mut cursor) {
-        if list_contains_u32(skip_ids, id) {
-            continue
-        }
-        let mut already = false
-        for item in deferred {
-            if item.id == id {
-                already = true
-            }
-        }
-        if already {
-            continue
-        }
-        let key = failure_result_from_rep(catalog.prefix(id))?
-        let has_before = match std.page.lookup(before.root, key) {
-            Some(_) => true,
-            None => false,
-        }
-        let has_after = match std.page.lookup(after.root, key) {
-            Some(_) => true,
-            None => false,
-        }
-        if has_before || has_after {
-            list.push(mut deferred, pager.TieredRowDiff(id: id, start: None, stop: None, before: has_before, after: has_after))
-        }
+    ChangeOutput(rows: list.new(), trimmed: list.new(), bounds: list.new(), remaining: remaining, limits: limits, next: None, carried: 0, deferred: None, row: row, trim: trim)
+}
+
+pub fn compare_page_collections[C, T](before: pages.PageTree, after: pages.PageTree, row: fn(take Bytes, take Option[Arc[Bytes]]) -> C, trim: fn(take Bytes, take Bytes) -> T) -> Result[ChangeOutput[C, T], types.Failure] {
+    if pages.tree_stamp(before) == pages.tree_stamp(after) {
+        return Ok(change_output(None, row, trim))
     }
-    Ok(())
+    let mut out = change_output(None, row, trim)
+    walk_page_changes(mut out, Some(view before), after, None, None)?
+    Ok(take out)
 }
 
 // Catch-up diff (§3.5a, §13.10a, 3177 F4): walks every collection, skips every
@@ -318,7 +290,7 @@ fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pa
 // inline, and collects every Tiered collection (including replay-overlaid
 // Tiered collections whose base descriptor did not move) into `deferred`
 // without stopping at the first Tiered collection.
-fn catch_up_compare_collections(before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32]) -> Result[(Changes, List[pager.TieredRowDiff]), Error] {
+pub fn catch_up_compare_collections[C, T](before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32], row: fn(take Bytes, take Option[Arc[Bytes]]) -> C, trim: fn(take Bytes, take Bytes) -> T) -> Result[(ChangeOutput[C, T], List[pager.TieredRowDiff]), types.Failure] {
     let has_replay = (if let Some(_) = view before.replay {
         true
     } else {
@@ -329,9 +301,9 @@ fn catch_up_compare_collections(before: pages.PageTree, after: pages.PageTree, s
         false
     })
     if pages.tree_stamp(before) == pages.tree_stamp(after) && !has_replay {
-        return Ok((Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()), list.new()))
+        return Ok((change_output(None, row, trim), list.new()))
     }
-    let mut out = change_output(None)
+    let mut out = change_output(None, row, trim)
     let mut deferred: List[pager.TieredRowDiff] = list.new()
     let mut left = start_diff(Some(view before.root), None)
     let mut right = start_diff(Some(view after.root), None)
@@ -367,59 +339,48 @@ fn catch_up_compare_collections(before: pages.PageTree, after: pages.PageTree, s
     }
     defer_replay_overlays(before, before, after, skip_ids, mut deferred)?
     defer_replay_overlays(after, before, after, skip_ids, mut deferred)?
-    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out
-    Ok((Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds), take deferred))
+    Ok((take out, take deferred))
 }
 
-pub type Trimmed {
-    lo: Bytes,
-    hi: Bytes
-}
-
-pub type Changes {
-    rows: List[Change],
-    trimmed: List[Trimmed],
-    bounds: List[Bytes]
-}
-
-pub type ChangePage {
-    changes: List[Change],
-    trimmed: List[Trimmed],
-    bounds: List[Bytes],
-    next: Option[Bytes]
-}
-
-pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error] waits {
-    read_access(r, b)?
-    if let Some(before) = a {
-        read_access(r, before)?
+fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32], mut deferred: List[pager.TieredRowDiff]) -> Result[(), types.Failure] {
+    let Some(overlays) = view tree.replay else {
+        return Ok(())
     }
-    page_limits(l)?
-    if let Some(base) = a {
-        if !types.same(base.store.hi, base.store.lo, b.store.hi, b.store.lo) || base.open != b.open {
-            return Error(Foreign)
+    let mut cursor = std.omap.range(overlays.collections, Unbounded, Unbounded)
+    while let Some((id, _)) = std.omap.next(mut cursor) {
+        if list_contains_u32(skip_ids, id) {
+            continue
         }
-        if snapshot_paged(base) || snapshot_paged(b) {
-            let out = tiered_changes(r, base, b, Some(clone(lo)), Some(clone(hi)), Some(l))?
-            let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
-            return Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
-        }
-    } else if lo < hi {
-        if let Some(inventory) = view b.roots.collections.paging {
-            return snapshot_tiered_initial_changes(r, b, inventory, lo, hi, l)
-        }
-    }
-    disk_allocation(scoped fn() -> Result[ChangePage, Error] {
-        let mut out = change_output(Some(l))
-        if lo < hi {
-            let low: Option[Bytes] = Some(clone(lo))
-            let high: Option[Bytes] = Some(clone(hi))
-            match a {
-                None => walk_page_changes(mut out, None, b.roots.collections, low, high)?,
-                Some(base) => walk_page_changes(mut out, Some(view base.roots.collections), b.roots.collections, low, high)?,
+        let mut already = false
+        for item in deferred {
+            if item.id == id {
+                already = true
             }
         }
-        let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
-        Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
-    })
+        if already {
+            continue
+        }
+        let key = catalog.prefix(id)?
+        let has_before = match std.page.lookup(before.root, key) {
+            Some(_) => true,
+            None => false,
+        }
+        let has_after = match std.page.lookup(after.root, key) {
+            Some(_) => true,
+            None => false,
+        }
+        if has_before || has_after {
+            list.push(mut deferred, pager.TieredRowDiff(id: id, start: None, stop: None, before: has_before, after: has_after))
+        }
+    }
+    Ok(())
+}
+
+pub fn list_contains_u32(items: List[u32], target: u32) -> bool {
+    for item in items {
+        if item == target {
+            return true
+        }
+    }
+    false
 }

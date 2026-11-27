@@ -1,110 +1,51 @@
-fn page_limits(limits: Limits) -> Result[(), Error] {
-    if limits.rows == 0 {
+pub fn page_limits(rows: u64, byte_limit: u64) -> Result[(), types.Failure] {
+    if rows == 0 {
         return Error(Missing("rows"))
     }
-    if limits.byte_limit == 0 {
+    if byte_limit == 0 {
         return Error(Missing("bytes"))
     }
     Ok(())
 }
 
-pub fn scan_page[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] waits {
-    read_access(read_handle, s)?
-    page_limits(l)?
-    if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let start = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    read_snapshot_collection_page(read_handle, s, t.id, table_decoder(t), Included(take start), take high, l)
-}
-
-pub fn find_page[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] waits {
-    read_access(read_handle, s)?
-    page_limits(l)?
-    if !types.same(s.store.hi, s.store.lo, ix.store.hi, ix.store.lo) {
-        return Error(Foreign)
-    }
-    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
-    let high = index_bound(ix.id, ix.key, hi, true)?
-    let start = index_bound(ix.id, ix.key, lo, false)?
-    read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Included(take start), take high, l)
-}
-
-fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
-    if !types.same(s.store.hi, s.store.lo, store.hi, store.lo) {
-        return Error(Foreign)
-    }
-    if !types.same(s.store.hi, s.store.lo, r.store.hi, r.store.lo) || s.open != r.open || s.branch != r.branch || s.head != r.version {
-        return Ok(false)
-    }
-    if id != r.source {
-        return Error(Stale(r.source))
-    }
-    page_limits(limits)?
-    failure_result_from_rep(catalog.readable(s.roots, catalog_key, seen, id))?
-    Ok(true)
-}
-
-pub fn scan_next[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
-    read_access(read_handle, s)?
-    if !resume_here(s, t.store, t.id, t.catalog_key, t.catalog_page, r, l)? {
-        return Ok(Moved(s.head))
-    }
-    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
-    Ok(Paged(read_snapshot_collection_page(read_handle, s, t.id, table_decoder(t), Excluded(take final_item), take high, l)?))
-}
-
-pub fn find_next[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V, P], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
-    read_access(read_handle, s)?
-    if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
-        return Ok(Moved(s.head))
-    }
-    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
-    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
-    Ok(Paged(read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Excluded(take final_item), take high, l)?))
-}
-
-fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, decoder: RowDecoder[K, V], take low: Bound[Bytes], take high: Bytes, limits: Limits) -> Result[Page[K, V], Error] waits {
-    let data = view s.roots.collections
+pub fn read_snapshot_collection_page[K, V, R: shareable + send](r: ReaderState, data: pages.PageTree, opened: u64, branch: u32, source: u32, decoder: RowDecoder[K, R], take low: std.omap.Bound[Bytes], take high: Bytes, row_limit: u64, byte_limit: u64, decode: fn(R, u32, Bytes) -> Result[V, types.Failure]) -> Result[SnapshotPage[K, V], types.Failure] waits {
     if let Some(inventory) = view data.paging {
-        let id = failure_result_from_rep(catalog.prefix(source))?
+        let id = catalog.prefix(source)?
         if let Some((edge, descriptor)) = std.page.collection_slot(data.root, id) {
             let tiered_rows = pages.collection_descriptor(descriptor).residency == ResidentTiered
             let tiered_owner = if source == decoder.table {
                 false
             } else {
-                let owner = std.page.lookup(data.root, failure_result_from_rep(catalog.prefix(decoder.table))?)
+                let owner = std.page.lookup(data.root, catalog.prefix(decoder.table)?)
                 match owner {
                     Some(record) => pages.collection_descriptor(record).residency == ResidentTiered,
                     None => false
                 }
             }
             if tiered_rows || tiered_owner {
-                let (take input, take grant, root) = snapshot_pager(r, s, inventory)?
+                let (take input, take grant, root) = snapshot_pager(r, inventory, opened, branch, pages.tree_stamp(data))?
                 let start = scan_page_start(low, id)?
                 if list.len(start) < 4 || start >= high {
-                    return Ok(Page(rows: list.new(), byte_count: 0, next: None))
+                    return Ok(SnapshotPage(rows: list.new(), byte_count: 0, next: None))
                 }
                 let hint = list.slice(start, 4, list.len(start))
                 let edits = match data.replay {
                     Some(replay) => std.omap.get(replay.collections, source),
                     None => None,
                 }
-                return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Page[K, V], Error] {
+                return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[SnapshotPage[K, V], types.Failure] {
                     let mut walk = ()
-                    read_snapshot_page(s, source, failure_result_from_rep(types.copied(high))?, limits, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
+                    read_snapshot_page(types.copied(high)?, row_limit, byte_limit, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], types.Failure] {
                         let found = if tiered_rows {
                             if let Some(last_key) = previous {
-                                let after = failure_result_from_rep(pager.scan_page_after(last_key))?
-                                failure_result_from_rep(pager.tiered_scan_row(attempt, visible, edge, source, edits, after, high, false))?
+                                let after = pager.scan_page_after(last_key)?
+                                pager.tiered_scan_row(attempt, visible, edge, source, edits, after, high, false)?
                             } else {
-                                failure_result_from_rep(pager.tiered_scan_row(attempt, visible, edge, source, edits, start, high, false))?
+                                pager.tiered_scan_row(attempt, visible, edge, source, edits, start, high, false)?
                             }
                         } else {
                             let mut cursor = resume_data(data, start, high, previous, false)?
-                            failure_result_from_rep(catalog.next_bytes(mut cursor))?
+                            catalog.next_bytes(mut cursor)?
                         }
                         let Some((take key, raw)) = take found else {
                             return Ok(PageEnd)
@@ -112,26 +53,26 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                         if full {
                             return Ok(PageLimit)
                         }
-                        let row = tiered_snapshot_row(attempt, visible, data, decoder, key, raw, remaining)?
+                        let row = tiered_snapshot_row(attempt, visible, data, decoder, key, raw, remaining, decode)?
                         Ok(snapshot_page_step(take key, take row))
                     })
                 })
             }
         }
     }
-    let start = scan_page_start(low, failure_result_from_rep(catalog.prefix(source))?)?
-    let Some(take opened) = failure_result_from_rep(catalog.collection_cursor(data, source, start, high, false))? else {
-        return Ok(Page(rows: list.new(), byte_count: 0, next: None))
+    let start = scan_page_start(low, catalog.prefix(source)?)?
+    let Some(take initial) = catalog.collection_cursor(data, source, start, high, false)? else {
+        return Ok(SnapshotPage(rows: list.new(), byte_count: 0, next: None))
     }
-    let mut cursor = take opened
-    let leading = failure_result_from_rep(catalog.prefix(source))?
-    read_snapshot_page(s, source, take high, limits, mut cursor, scoped fn(mut current: pages.CollectionCursor, previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
-        let stepped = std.page.cursor_read(mut current.walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[SnapshotPageStep[K, V], Error] {
+    let mut cursor = take initial
+    let leading = catalog.prefix(source)?
+    read_snapshot_page(take high, row_limit, byte_limit, mut cursor, scoped fn(mut current: pages.CollectionCursor, previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], types.Failure] {
+        let stepped = std.page.cursor_read(mut current.walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[SnapshotPageStep[K, V], types.Failure] {
             if full {
                 return Ok(PageLimit)
             }
             let key = pages.collection_row_key(leading, suffix)
-            let row = advance_rows(decoder, data, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] {
+            let row = advance_rows(decoder, data, key, raw, remaining, decode, fn(observed: Bytes) -> Result[(), types.Failure] {
                 Ok(())
             })?
             Ok(snapshot_page_step(take key, take row))
@@ -143,11 +84,11 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
     })
 }
 
-fn scan_page_start(low: Bound[Bytes], id: Bytes) -> Result[Bytes, Error] {
+fn scan_page_start(low: std.omap.Bound[Bytes], id: Bytes) -> Result[Bytes, types.Failure] {
     match low {
-        Included(key) => failure_result_from_rep(types.copied(key)),
-        Excluded(key) => failure_result_from_rep(pager.scan_page_after(key)),
-        Unbounded => failure_result_from_rep(types.copied(id)),
+        Included(key) => types.copied(key),
+        Excluded(key) => pager.scan_page_after(key),
+        Unbounded => types.copied(id),
     }
 }
 
@@ -160,19 +101,19 @@ fn snapshot_page_step[K, V](take key: Bytes, take row: Option[((K, V), u64)]) ->
     }
 }
 
-fn read_snapshot_page[K, V, W](s: Snapshot, source: u32, take high: Bytes, limits: Limits, mut walk: W, advance: scoped[view] fn(mut W, Option[Bytes], bool, Option[u64]) -> Result[SnapshotPageStep[K, V], Error]) -> Result[Page[K, V], Error] {
+fn read_snapshot_page[K, V, W](take high: Bytes, row_limit: u64, byte_limit: u64, mut walk: W, advance: scoped[view] fn(mut W, Option[Bytes], bool, Option[u64]) -> Result[SnapshotPageStep[K, V], types.Failure]) -> Result[SnapshotPage[K, V], types.Failure] {
     let mut page: List[(K, V)] = list.new()
     let mut byte_count = 0u64
     let mut final_item: Option[Bytes] = None
     while true {
-        let full = list.len(page) == limits.rows
+        let full = list.len(page) == row_limit
         let remaining: Option[u64] = if list.len(page) == 0 {
             None
         } else {
-            Some(int.saturating_sub(limits.byte_limit, byte_count))
+            Some(int.saturating_sub(byte_limit, byte_count))
         }
         match advance(mut walk, final_item, full, remaining)? {
-            PageEnd => return Ok(Page(rows: take page, byte_count: byte_count, next: None)),
+            PageEnd => return Ok(SnapshotPage(rows: take page, byte_count: byte_count, next: None)),
             PageLimit => break,
             PageValue(take key, take value, size) => {
                 list.push(mut page, take value)
@@ -182,8 +123,14 @@ fn read_snapshot_page[K, V, W](s: Snapshot, source: u32, take high: Bytes, limit
         }
     }
     let resume = match take final_item {
-        Some(take key) => Some(Resume(store: s.store, open: s.open, branch: s.branch, version: s.head, source: source, high: take high, last: take key)),
+        Some(take key) => Some((take high, take key)),
         None => None
     }
-    Ok(Page(rows: take page, byte_count: byte_count, next: take resume))
+    Ok(SnapshotPage(rows: take page, byte_count: byte_count, next: take resume))
+}
+
+pub type SnapshotPage[K, V] {
+    rows: List[(K, V)],
+    byte_count: u64,
+    next: Option[(Bytes, Bytes)]
 }

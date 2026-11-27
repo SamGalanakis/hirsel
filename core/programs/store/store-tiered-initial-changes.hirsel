@@ -38,7 +38,7 @@ fn tiered_initial_changes(attempt: core.Cell[pager.TieredTouchSet], visible: Map
             break
         }
     }
-    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
+    let read.ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
     Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
 }
 

@@ -1,0 +1,122 @@
+// Index entry scans (STORE-SPEC §1.3): one collection cursor per `entries` call, opened on
+// the first step, with no probe and no reopen. Each step records the span the copying
+// range scan recorded and lends the row's key and value bytes from the page.
+pub opaque type EntryCursor: send = Unopened(pages.PageTree) | Open(pages.CollectionCursor) | OpenTiered(pages.PageTree, std.omap.OMap[Bytes, Option[Arc[Bytes]]]) | Exhausted
+
+pub fn entry_cursor(take tree: pages.PageTree) -> EntryCursor {
+    Unopened(take tree)
+}
+
+pub scoped type TieredReadInput {
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
+    below: View[List[Arc[pages.Staged]]],
+    ops: View[pages.DataOps]
+}
+
+// One step: `visit` gets the row's full index key (`id ‖ suffix`), and value bytes. The span up
+// to `key ‖ 0x00` is recorded before an error from `visit` is returned.
+pub fn step_entry[T, E](mut cursor: EntryCursor, input: TieredReadInput, note_span: scoped[view] fn(take Bytes, take Bytes), mut low: Bytes, high: Bytes, id: u32, visit: scoped[view] fn(Bytes, Bytes) -> Result[T, E]) -> Result[Option[Result[T, E]], types.Failure] {
+    if let Unopened(_) = cursor {
+        if let Unopened(take tree) = replace(mut cursor, Exhausted) {
+            let (take opened, cold) = open_index_cursor(tree, id, low, high)?
+            if cold {
+                let staged = tx_tiered_staged(tree, input.below, input.ops, Some(id))?
+                cursor = OpenTiered(take tree, take staged)
+            } else if let Some(take walk) = take opened {
+                cursor = Open(take walk)
+            }
+        }
+    }
+    let stepped = match cursor {
+        Open(mut walking) => std.page.cursor_read(mut walking.walk, scoped fn(suffix: Bytes, raw: Bytes) -> (Bytes, Result[T, E]) {
+            let mut after: Bytes = list.with_capacity(5 + list.len(suffix))
+            list.put_word_be(mut after, id)
+            list.append(mut after, suffix)
+            list.push(mut after, 0u8)
+            let value = visit(list.slice(after, 0, list.len(after) - 1), raw)
+            (take after, take value)
+        }),
+        OpenTiered(tree, staged) => {
+            if let Some((key, raw)) = next_tiered_index_row(tree, input.attempt, input.pins, staged, id, low, high)? {
+                note_index_step(note_span, mut low, high, Some(view key))?
+                return Ok(Some(visit(key, raw)))
+            }
+            None
+        },
+        _ => None,
+    }
+    match take stepped {
+        Some((take after, take value)) => {
+            if low < high {
+                let start = replace(mut low, clone(after))
+                note_span(take start, take after)
+            }
+            Ok(Some(take value))
+        },
+        None => {
+            cursor = Exhausted
+            note_index_step(note_span, mut low, high, None)?
+            Ok(None)
+        },
+    }
+}
+
+// The index key and primary key of an entry, and where its payload starts in `raw`.
+pub fn entry_parts[J, K](unique: bool, index_key: std.codec.Key[J], primary_codec: std.codec.Key[K], key: Bytes, raw: Bytes) -> Result[(J, K, u64), types.Failure] {
+    let mut at = 4u64
+    let j = catalog.decoded(std.codec.take_key_with(key, mut at, index_key))?
+    let payload_start = if unique {
+        if at != list.len(key) {
+            return Error(pages.malformed(at))
+        }
+        indexes.unique_owner_end(raw)?
+    } else {
+        0u64
+    }
+    let primary = if unique {
+        list.slice(raw, 4, payload_start)
+    } else {
+        list.slice(key, at, list.len(key))
+    }
+    let k = catalog.decoded(std.codec.decode_key(primary_codec, primary))?
+    Ok((take j, take k, payload_start))
+}
+
+// Whether an index's current payload rows decode with the built-in `List[i8]` decoder
+// (PROG-9 identity: no allocation, with or without revisions).
+pub fn lends_i8_rows[P](codec: Option[std.codec.Codec[P]]) -> bool {
+    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
+    match codec {
+        Some(registered) => std.codec.same_decoder(registered, codes),
+        None => false,
+    }
+}
+
+// Whether `payload` is a well-formed current-schema `List[i8]` row: the schema number,
+// a u32 count and exactly that many bytes. Any other row goes through `row_value`, which
+// returns the same value or error the copying scan returns.
+pub fn lends_codes(schema: u16, payload: Bytes) -> bool {
+    let n = list.len(payload)
+    if n < 6 || format.read_le(payload, 0, 2) != int.widen(schema) {
+        return false
+    }
+    format.read_le(payload, 2, 4) == n - 6
+}
+
+pub fn note_index_step(note_span: scoped[view] fn(take Bytes, take Bytes), mut low: Bytes, high: Bytes, last_key: Option[View[Bytes]]) -> Result[(), types.Failure] {
+    if low >= high {
+        return Ok(())
+    }
+    let end = match last_key {
+        Some(key) => {
+            let mut after = types.copied(key)?
+            list.push(mut after, 0u8)
+            take after
+        },
+        None => types.copied(high)?,
+    }
+    let start = replace(mut low, types.copied(end)?)
+    note_span(take start, take end)
+    Ok(())
+}

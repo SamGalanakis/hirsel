@@ -120,13 +120,14 @@ pub fn has_table(snap: Snapshot, name: String) -> Result[bool, Error] {
 }
 
 fn read_only_base(source: ReadOnly) -> catalog.DeclarationBase {
-    let snap = view source.snapshot
-    catalog.DeclarationBase(store: types.StoreKey(hi: snap.store.hi, lo: snap.store.lo), opened: snap.open, version: snap.head, stamp: snap.watermark, changes: 0u64, live: 0u64)
+    let (store, captured_head, stamp) = read.read_only_identity(source.inner)
+    catalog.DeclarationBase(store: store, opened: 0, version: captured_head, stamp: stamp, changes: 0u64, live: 0u64)
 }
 
 pub fn declare_read_only(source: ReadOnly) -> Declare {
-    let snap = view source.snapshot
-    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(snap.roots), snap.watermark, 0u32, 0u64, 0u64, false, VALUE_LIMIT), store: snap.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(snap.roots.collections))
+    let (store, _, stamp) = read.read_only_identity(source.inner)
+    let roots = read.read_only_roots(source.inner)
+    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(roots), stamp, 0u32, 0u64, 0u64, false, VALUE_LIMIT), store: store_key_from_rep(store), bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(roots.collections))
     new_declaration(Follower, read_only_base(source), take plan, true)
 }
 

@@ -519,7 +519,7 @@ fn each_runtime_archive_keys_its_own_toolchain_identity() {
 #[test]
 fn a_relocated_installation_keys_the_same_toolchain() {
     let work = tempfile::tempdir().unwrap();
-    let target = "x86_64-unknown-linux-gnu";
+    let target = crate::host::HOST_TARGET.triple();
     let keyed = |root: &str| {
         let root = work.path().join(root);
         let recipe = root.join("link/link.json");
@@ -533,6 +533,9 @@ fn a_relocated_installation_keys_the_same_toolchain() {
         std::fs::write(crt_file, b"\x7fELFcrt").unwrap();
         std::fs::write(&linker, b"linker").unwrap();
         std::fs::write(&runtime, b"runtime").unwrap();
+        if let Some(library) = crate::host::INSTALLED_LINKER_LIBRARY {
+            std::fs::write(root.join(library), b"linker library").unwrap();
+        }
         let installed = InstalledRecipe {
             schema: INSTALLED_RECIPE_SCHEMA,
             target: target.into(),

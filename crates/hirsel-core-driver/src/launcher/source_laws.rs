@@ -381,6 +381,7 @@ fn source_publishes_with_the_normal_checker() {
         "laws.hirsel",
         "native.hirsel",
         "libffi_laws.a",
+        "libffi_laws-aarch64-apple-darwin.a",
     ] {
         fs::copy(ffi.join(file), app.join(file)).unwrap();
         names.push(file);

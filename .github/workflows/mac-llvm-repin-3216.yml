@@ -1,0 +1,39 @@
+name: Build Darwin LLVM asset
+on:
+  push:
+    branches: [ci/mac-llvm-repin-3216]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and verify the LLVM archive
+        shell: bash
+        run: |
+          tools/ci/mac_assert.sh
+          command -v cmake ninja
+          work="$RUNNER_TEMP/darwin-llvm"
+          JOBS=$(sysctl -n hw.logicalcpu) tools/native-toolchain/build-libllvm-darwin "$work" || {
+            cat "$work/cmake.log" 2>/dev/null || true
+            tail -120 "$work/ninja.log" 2>/dev/null || true
+            exit 1
+          }
+          tar -tf "$work/llvm-darwin.tar.xz" > "$work/members.txt"
+          grep -Fx bin/llvm-objcopy "$work/members.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-llvm-3216
+          path: ${{ runner.temp }}/darwin-llvm/llvm-darwin.tar.xz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14

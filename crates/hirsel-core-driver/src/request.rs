@@ -6,20 +6,24 @@ use crate::cli::{CompilerOption as Opt, ExplainOption, FmtOption, Invocation, Ne
 use crate::code_store::CodeStore;
 use crate::native::recipe_build::Publication;
 use crate::product::ProductLibraries;
+use crate::store::remote::Remote;
 use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
     NativeOptions, operator_cli,
 };
 use hirsel_core_layout::OutputKind;
 use hirsel_core_resolve::CorpusManifest;
+use packages::{PackageInput, PackageStages};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 mod dispatch;
 mod flags;
 pub use dispatch::main;
 mod lean;
 mod output;
 use output::{admit_target, output_kind};
+mod packages;
 mod release;
 use flags::CompilerFlags;
 pub(crate) use release::local_admission_limits;
@@ -69,64 +73,32 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
     {
         return conclude(Outcome::Exit(operator_cli::replay(invocation)?));
     }
-    let mut package_mode = crate::package_lock::Mode::default();
-    let mut package_store = None;
-    let mut pack_out = None;
-    for option in invocation.options.extract_if(.., |option| {
-        matches!(option, Opt::Locked | Opt::Frozen | Opt::PackageStore(_))
-            || (command == "pack" && matches!(option, Opt::Output(_)))
-    }) {
-        match option {
-            Opt::Locked if package_mode != crate::package_lock::Mode::Frozen => {
-                package_mode = crate::package_lock::Mode::Locked
-            }
-            Opt::Frozen => package_mode = crate::package_lock::Mode::Frozen,
-            Opt::PackageStore(value) => package_store = Some(PathBuf::from(value)),
-            Opt::Output(value) => pack_out = Some(PathBuf::from(value)),
-            _ => {}
-        }
-    }
+    let (package_mode, package_store, pack_out) = packages::options(&mut invocation, command);
     let transport = package_mode.transport();
     let remote = crate::store::remote::for_request(&transport)?;
-    let conclude = |outcome| launch::conclude_with_remote(outcome, remote.as_deref());
-    let package_store =
-        crate::package_store::PackageStore::with_transport(package_store, transport);
-    let package_command = matches!(command, "lock" | "fetch" | "pack");
-    if package_command {
-        let directory = invocation.positional.as_deref().unwrap_or(".");
-        let workspace = crate::package_workspace::Workspace::discover_for(
-            Path::new(directory),
-            command == "pack",
-        )?
-        .ok_or_else(|| format!("{directory} has no workspace manifest"))?;
-        let selected = (command == "pack")
-            .then(|| workspace.packed().cloned())
-            .transpose()?;
-        let mut resolved = crate::package_resolve::Resolution::resolve(
-            workspace,
-            package_store,
-            package_mode == crate::package_lock::Mode::Frozen,
-        )?;
-        let lock = crate::package_lock::Lock::compare(&resolved, package_mode)?;
-        if let Some(selected) = selected {
-            let out = pack_out.ok_or("pack requires --output FILE")?;
-            let (bytes, archive) = resolved.checked_archive(&selected, Path::new(directory))?;
-            let output = crate::package_lock::PackOutput::stage(&resolved, &archive, &lock, &out)?;
-            lock.commit(&resolved.workspace)?;
-            resolved.store.install(&archive)?;
-            output.write(&bytes)?;
-            let head = &archive.entries[&archive.head].content;
-            println!("{} {} {}", head.id, head.version, archive.head);
-            for (root, library) in &archive.entries {
-                if *root != archive.head {
-                    println!("{} {} {root}", library.content.id, library.content.version);
-                }
-            }
-        } else {
-            lock.commit(&resolved.workspace)?;
-        }
-        return conclude(Outcome::Exit(0));
+    let store = crate::package_store::PackageStore::with_transport(package_store, transport);
+    if matches!(command, "lock" | "fetch" | "pack") {
+        return packages::run(invocation, store, package_mode, pack_out, remote);
     }
+    run_compiler_request(
+        invocation,
+        command,
+        output_kind,
+        profile,
+        PackageInput::Discover(package_mode, store),
+        remote,
+    )
+}
+
+fn run_compiler_request(
+    mut invocation: Request<Opt>,
+    command: &str,
+    output_kind: OutputKind,
+    profile: Option<crate::prof_command::Run>,
+    package_input: PackageInput,
+    remote: Option<Arc<Remote>>,
+) -> Result<Outcome, Box<dyn std::error::Error>> {
+    let conclude = |outcome| launch::conclude_with_remote(outcome, remote.as_deref());
     let replay_command = command == "replay";
     let inspection = (command == "inspect")
         .then(|| crate::inspect::Inspection::read(&mut invocation))
@@ -271,7 +243,12 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             && (static_laws || matches!(command, "check" | "build" | "publish" | "run" | "test")))
         .then(|| PathBuf::from("."))
     });
-    let mut workspace_app = None;
+    let (package_mode, package_store, mut workspace_app) = match package_input {
+        PackageInput::Discover(mode, store) => (mode, Some(store), None),
+        PackageInput::Captured(app) => (Default::default(), None, Some(app)),
+    };
+    let pack_check = workspace_app.is_some();
+    let mut package_stages = PackageStages::new(metrics.is_some());
     let mut foreign_symbols = None;
     if manifest.is_some() {
         package_mode.require_workspace("--inputs")?;
@@ -289,14 +266,17 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             )?);
         }
         workspace_app = Some(crate::package_dir::PackageDir::from_archive(&archive)?);
-    } else if static_laws
-        || matches!(
-            command,
-            "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
-        )
+    } else if let Some(package_store) = package_store
+        && (static_laws
+            || matches!(
+                command,
+                "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
+            ))
     {
         if let Some(directory) = &app_directory {
-            if let Some(workspace) = crate::package_workspace::Workspace::discover(directory)? {
+            if let Some(workspace) = package_stages.measure("workspace", || {
+                crate::package_workspace::Workspace::discover(directory)
+            })? {
                 let member = workspace.selected()?;
                 let selected = if let Some(name) = dependency {
                     workspace.members[member]
@@ -307,11 +287,13 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                     member
                 }
                 .clone();
-                let resolved = crate::package_resolve::Resolution::resolve(
-                    workspace,
-                    package_store,
-                    package_mode == crate::package_lock::Mode::Frozen,
-                )?;
+                let resolved = package_stages.measure("resolution", || {
+                    crate::package_resolve::Resolution::resolve(
+                        workspace,
+                        package_store,
+                        package_mode == crate::package_lock::Mode::Frozen,
+                    )
+                })?;
                 if let Some((path, _)) = inspect_foreign {
                     foreign_symbols = Some(crate::foreign_header::symbol_prefix(
                         resolved
@@ -324,8 +306,11 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                     )?);
                 }
                 if !static_laws || package_mode.flag().is_some() {
-                    crate::package_lock::Lock::compare(&resolved, package_mode)?
-                        .commit(&resolved.workspace)?;
+                    package_stages.measure("lock", || {
+                        crate::package_lock::Lock::compare(&resolved, package_mode)?
+                            .commit(&resolved.workspace)?;
+                        Ok::<(), Box<dyn std::error::Error>>(())
+                    })?;
                 }
                 let include_tests = static_laws
                     || matches!(command, "check" | "test")
@@ -336,11 +321,15 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                     inspect_library = Some("std");
                     source_core = true;
                 } else {
-                    workspace_app = Some(crate::package_dir::PackageDir::from_resolution(
-                        &resolved,
-                        &selected,
-                        include_tests,
-                    )?);
+                    workspace_app = Some(package_stages.measure("package inputs", || {
+                        let app = crate::package_dir::PackageDir::from_resolution(
+                            &resolved,
+                            &selected,
+                            include_tests,
+                        );
+                        drop(resolved);
+                        app
+                    })?);
                 }
             } else {
                 if let Some(name) = dependency {
@@ -485,6 +474,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         return Err("--profile-front requires --metrics".into());
     }
     let mut meter = Meter::new(metrics.is_some());
+    meter.result.package_layer = package_stages.into_stages();
     if profile_front {
         meter.profile_image_index();
     }
@@ -907,6 +897,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
     // that error where it always has.
     let record = match &mut prepared {
         _ if command == "image"
+            || pack_check
             || test_command
             || static_laws
             || recipe_command
@@ -936,31 +927,30 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         let (product, image) = driver.produce_image(request, &mut meter)?;
         (crate::Checked::Product(product, None), image)
     } else {
-        (
-            if !source_core
-                && !(source_tree && source_std)
-                && (native_command || core_product.is_some())
-            {
-                let root = core_product.unwrap_or_else(crate::PackageProduct::default_cache);
-                let libraries = if source_tree {
-                    ProductLibraries::SourceTree
-                } else if source_std {
-                    ProductLibraries::Core
-                } else {
-                    ProductLibraries::BundledStd
-                };
-                driver.check_package_product(
-                    request,
-                    &root,
-                    &mut meter,
-                    (native_command, libraries),
-                    record.as_ref(),
-                )?
+        let checked = if !source_core
+            && !(source_tree && source_std)
+            && (native_command || core_product.is_some())
+        {
+            let root = core_product.unwrap_or_else(crate::PackageProduct::default_cache);
+            let libraries = if source_tree {
+                ProductLibraries::SourceTree
+            } else if source_std {
+                ProductLibraries::Core
             } else {
-                driver.check_recorded(request, &mut meter, record.as_ref())?
-            },
-            None,
-        )
+                ProductLibraries::BundledStd
+            };
+            driver.check_package_product(
+                request,
+                &root,
+                &mut meter,
+                (native_command, libraries),
+                record.as_ref(),
+            )
+        } else {
+            driver.check_recorded(request, &mut meter, record.as_ref())
+        };
+        let checked = output::check_result(checked, &sources, command == "check" && !json)?;
+        (checked, None)
     };
     let (product, key) = match checked {
         crate::Checked::Product(product, key) => (product, key),
@@ -984,6 +974,9 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             );
         }
     };
+    if pack_check {
+        return packages::answer_check(&product, &sources);
+    }
     let grant_lines = command == "run" && !grants.foreign.is_empty();
     let use_recipe = recipe_command
         || grant_lines

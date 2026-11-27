@@ -15,6 +15,9 @@ pub struct Stage {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Measurements {
     pub stages: Vec<Stage>,
+    /// Wall time spent acquiring the package inputs before compiler measurement starts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub package_layer: Vec<Stage>,
     pub instructions: Option<u64>,
     pub counter_refusal: Option<String>,
     /// Library selection for this request: an installed image or source check,

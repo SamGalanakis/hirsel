@@ -65,6 +65,17 @@ fn file_error(path: &Path, field: &str, file: &str, error: &WalkError) -> String
 
 type Manifests = BTreeMap<FileId, Option<Captured>>;
 
+fn refuse_local(id: &Id, manifest: &Path) -> Result<(), String> {
+    if crate::package_manifest::name::local(&id.name) {
+        return Err(format!(
+            "{}: {} is a local name and is never packed; give it a scoped name to publish it",
+            manifest.display(),
+            id.name
+        ));
+    }
+    Ok(())
+}
+
 fn capture_manifest(
     manifests: &mut Manifests,
     directory: &File,
@@ -184,7 +195,11 @@ impl Workspace {
         dir: &Path,
         needs_package: bool,
     ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
-        Self::discover_with(dir, needs_package, BTreeMap::new())
+        Self::discover_with(dir, needs_package, false, BTreeMap::new())
+    }
+
+    pub(crate) fn discover_pack(dir: &Path) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        Self::discover_with(dir, true, true, BTreeMap::new())
     }
 
     pub(crate) fn scope(dir: &Path) -> Result<File, Box<dyn std::error::Error>> {
@@ -203,12 +218,13 @@ impl Workspace {
         for (target, manifest) in edits {
             manifests.insert(identity(target)?, Some((*manifest).clone()));
         }
-        Self::discover_with(dir, needs_package, manifests)
+        Self::discover_with(dir, needs_package, false, manifests)
     }
 
     fn discover_with(
         dir: &Path,
         needs_package: bool,
+        packing: bool,
         mut manifests: Manifests,
     ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let Some((root, selected)) = discover(dir, &mut manifests)? else {
@@ -224,6 +240,19 @@ impl Workspace {
             let same = selected_config.take().unwrap()?;
             root_config.selections = root_config.selections.or(same.selections);
             root_config.package = root_config.package.or(same.package);
+        }
+        if packing {
+            let package = if root_id == selected_id {
+                root_config.package.as_ref()
+            } else {
+                selected_config
+                    .as_ref()
+                    .and_then(|manifest| manifest.as_ref().ok())
+                    .and_then(|manifest| manifest.package.as_ref())
+            };
+            if let Some(package) = package {
+                refuse_local(&package.id, &selected_manifest)?;
+            }
         }
         if needs_package && root_id == selected_id && root_config.package.is_none() {
             return Err(format!(
@@ -485,6 +514,21 @@ impl Workspace {
             policies.insert(id.clone(), (aliases, ceilings));
         }
         cycles(&edges_by_member)?;
+        let mut packed_members = BTreeSet::new();
+        if packing && let Some(selected) = &member {
+            let mut pending = vec![selected];
+            while let Some(id) = pending.pop() {
+                if !packed_members.insert(id.clone()) {
+                    continue;
+                }
+                refuse_local(id, &drafts[id].2)?;
+                pending.extend(
+                    edges_by_member[id]
+                        .iter()
+                        .filter_map(|(id, edge)| (*edge == Edge::Member).then_some(id)),
+                );
+            }
+        }
         let mut members = BTreeMap::new();
         for (id, (dir, directory, manifest_path, package)) in drafts {
             let mut read = |file: &str, field: &str| {
@@ -545,6 +589,9 @@ impl Workspace {
                 files,
                 foreign,
             };
+            if packed_members.contains(&id) {
+                content.inventory()?;
+            }
             let edges = edges_by_member.remove(&id).unwrap();
             let (aliases, ceilings) = policies.remove(&id).unwrap();
             members.insert(
@@ -590,29 +637,6 @@ impl Workspace {
 
     pub(crate) fn record_input(&mut self, identity: FileId) {
         self.inputs.insert(identity);
-    }
-
-    /// The selected member, which `pack` publishes with every member it reaches: a local
-    /// name never is (packages.md sections 1 and 6, `pack, local`).
-    pub(crate) fn packed(&self) -> Result<&Id, String> {
-        let selected = self.selected()?;
-        let mut reached = BTreeSet::from([selected]);
-        let mut pending = vec![selected];
-        while let Some(id) = pending.pop() {
-            if crate::package_manifest::name::local(&id.name) {
-                return Err(format!(
-                    "{}: {} is a local name and is never packed; give it a scoped name to publish it",
-                    self.members[id].manifest_path.display(),
-                    id.name
-                ));
-            }
-            for (next, edge) in &self.members[id].edges {
-                if *edge == Edge::Member && reached.insert(next) {
-                    pending.push(next);
-                }
-            }
-        }
-        Ok(selected)
     }
 
     pub(crate) fn selected(&self) -> Result<&Id, String> {

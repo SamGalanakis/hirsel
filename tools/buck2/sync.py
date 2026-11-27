@@ -544,7 +544,8 @@ def first_party(meta: dict) -> str:
             unguarded.append(relative(pathlib.Path(lib["src_path"])))
         for target in package["targets"]:
             kind = target["kind"][0]
-            if kind not in ("bin", "test", "example"):
+            if (kind not in ("bin", "test", "example", "bench")
+                    or kind == "bench" and not set(target.get("required-features", ())) <= set(features)):
                 continue
             src = pathlib.Path(target["src_path"])
             if not guarded(src):
@@ -561,12 +562,12 @@ def first_party(meta: dict) -> str:
                 if target.get("test", True) and f"{name}-bin-{target['name']}-unittest" not in EMPTY_UNIT_HARNESSES:
                     out.append("\n" + call("hirsel_test", name=f"{name}-bin-{target['name']}-unittest", deps=own + test_deps,
                                              **test_attrs(f"{name}-bin-{target['name']}-unittest", src), **attrs))
-            elif kind == "example":
+            elif kind in ("example", "bench"):
                 example_lib = own
                 if name == "hirsel-core-rt" and target["name"] == "tape_cost":
                     example_lib = ["//:hirsel-core-rt-record"]
                     attrs["features"] = sorted(set(features) | {"record"})
-                out.append("\n" + call("hirsel_binary", name=f"{name}-example-{target['name']}", bin_name=target["name"], deps=example_lib + test_deps, **attrs))
+                out.append("\n" + call("hirsel_binary", name=f"{name}-{kind}-{target['name']}", bin_name=target["name"], deps=example_lib + test_deps, **attrs))
             else:
                 binaries = {
                     t["name"]: f"//:{name}-bin-{t['name']}"

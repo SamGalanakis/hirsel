@@ -70,6 +70,42 @@ impl Graph<'_> {
             Node::Published(id.clone(), root)
         }
     }
+
+    fn children(&self, node: &Node, libraries: &Libraries) -> Vec<Node> {
+        match node {
+            Node::Member(id) => self.members[id]
+                .edges
+                .iter()
+                .filter_map(|(id, edge)| match edge {
+                    Edge::Toolchain => None,
+                    Edge::Member => Some(Node::Member(id.clone())),
+                    Edge::Published(root, _) => Some(self.destination(id, *root)),
+                })
+                .collect(),
+            Node::Published(_, root) => libraries
+                .get(root)
+                .into_iter()
+                .flat_map(|library| {
+                    library
+                        .content
+                        .edges()
+                        .into_iter()
+                        .filter_map(|(id, root)| root.map(|root| self.destination(&id, root)))
+                })
+                .collect(),
+        }
+    }
+
+    fn closure(&self, head: &Id, libraries: &Libraries) -> BTreeSet<Node> {
+        let mut reached = BTreeSet::new();
+        let mut pending = vec![Node::Member(head.clone())];
+        while let Some(node) = pending.pop() {
+            if reached.insert(node.clone()) {
+                pending.extend(self.children(&node, libraries));
+            }
+        }
+        reached
+    }
 }
 
 fn best_paths(graph: &Graph, libraries: &Libraries) -> Paths {
@@ -93,29 +129,7 @@ fn best_paths(graph: &Graph, libraries: &Libraries) -> Paths {
         if paths.contains_key(&node) {
             continue;
         }
-        let outgoing: Vec<_> = match &node {
-            Node::Member(id) => members[id]
-                .edges
-                .iter()
-                .filter_map(|(id, edge)| match edge {
-                    Edge::Toolchain => None,
-                    Edge::Member => Some(Node::Member(id.clone())),
-                    Edge::Published(root, _) => Some(graph.destination(id, *root)),
-                })
-                .collect(),
-            Node::Published(_, root) => libraries
-                .get(root)
-                .into_iter()
-                .flat_map(|library| {
-                    library
-                        .content
-                        .edges()
-                        .into_iter()
-                        .filter_map(|(id, root)| root.map(|root| graph.destination(&id, root)))
-                })
-                .collect(),
-        };
-        for child in outgoing {
+        for child in graph.children(&node, libraries) {
             if !paths.contains_key(&child) {
                 let mut child_path = path.clone();
                 child_path.push(child.id().clone());
@@ -330,9 +344,11 @@ fn settle(
     graph: &Graph,
     libraries: &Libraries,
     encoded: &mut Encoded,
+    packing: Option<&Id>,
 ) -> Result<(BTreeSet<Id>, BTreeMap<Id, Root>), Failure> {
     let members = graph.members;
     let paths = best_paths(graph, libraries);
+    let packed = packing.map(|id| graph.closure(id, libraries));
     let bound: Vec<Id> = members
         .values()
         .flat_map(|member| {
@@ -386,6 +402,9 @@ fn settle(
                     path,
                     binding,
                     root,
+                    packed: packed
+                        .as_ref()
+                        .is_some_and(|closure| closure.contains(node)),
                 });
             }
         }
@@ -431,6 +450,7 @@ struct Requirement {
     path: Vec<Id>,
     binding: Binding,
     root: Root,
+    packed: bool,
 }
 
 impl Requirement {
@@ -531,6 +551,10 @@ fn bind(
                 )
                 .into());
             }
+            if edge.packed {
+                let binder = &edge.path[edge.path.len() - 2];
+                return Err(pack_displaced(binder, id, edge.root, root).into());
+            }
             return Err(format!(
                 "{id} is bound to {root} ({by}), but {path} pins {} exactly",
                 edge.root
@@ -577,6 +601,12 @@ fn bind(
         ));
     }
     Err(refusal.into())
+}
+
+fn pack_displaced(binder: &Id, id: &Id, recorded: Root, effective: Root) -> String {
+    format!(
+        "pack: {binder} binds {id} {recorded} exactly, but this workspace builds it with {effective}; republish {binder} against {effective} or select {recorded}"
+    )
 }
 
 /// A member's root by section 6: its member bindings encoded as their roots, after them.
@@ -659,9 +689,11 @@ fn assemble(
                 if let Some(effective) = published.get(&id)
                     && *effective != recorded
                 {
-                    let binder = &content.content.id;
-                    return Err(format!(
-                        "pack: {binder} binds {id} {recorded} exactly, but this workspace builds it with {effective}; republish {binder} against {effective} or select {recorded}"
+                    return Err(pack_displaced(
+                        &content.content.id,
+                        &id,
+                        recorded,
+                        *effective,
                     ));
                 }
                 pending.push_back(recorded);
@@ -701,7 +733,7 @@ pub(crate) fn pack_members(
     };
     let (libraries, _) = acquire(&graph, store, false, BTreeMap::new(), fetch)?;
     let mut encoded = BTreeMap::new();
-    let (_, published) = settle(&graph, &libraries, &mut encoded)?;
+    let (_, published) = settle(&graph, &libraries, &mut encoded, None)?;
     Ok(assemble(&published, members, &mut encoded, &libraries, id)?)
 }
 
@@ -721,11 +753,38 @@ impl Resolution {
     }
 
     pub(crate) fn resolve_cached(
+        workspace: Workspace,
+        store: PackageStore,
+        frozen: bool,
+        cached: Libraries,
+        fetched: &mut BTreeSet<String>,
+    ) -> Result<Self, Failure> {
+        Self::resolve_with(workspace, store, frozen, cached, fetched, None)
+    }
+
+    pub(crate) fn resolve_pack(
+        workspace: Workspace,
+        store: PackageStore,
+        frozen: bool,
+        selected: &Id,
+    ) -> Result<Self, Failure> {
+        Self::resolve_with(
+            workspace,
+            store,
+            frozen,
+            BTreeMap::new(),
+            &mut BTreeSet::new(),
+            Some(selected),
+        )
+    }
+
+    fn resolve_with(
         mut workspace: Workspace,
         store: PackageStore,
         frozen: bool,
         cached: Libraries,
         fetched: &mut BTreeSet<String>,
+        packing: Option<&Id>,
     ) -> Result<Self, Failure> {
         let manifest = workspace.directory.join(crate::package_dir::MANIFEST);
         let graph = Graph {
@@ -744,7 +803,7 @@ impl Resolution {
             acquire(&graph, &store, frozen, cached, &mut fetch)?
         };
         let mut encoded = BTreeMap::new();
-        let (toolchain, published) = settle(&graph, &libraries, &mut encoded)?;
+        let (toolchain, published) = settle(&graph, &libraries, &mut encoded, packing)?;
         for identity in inputs {
             workspace.record_input(identity);
         }
@@ -763,32 +822,41 @@ impl Resolution {
         source(&self.declarations, &self.libraries, root)
     }
 
+    /// The selected member first, then each workspace member that reaches it.
+    pub(crate) fn pack_checks<'a>(&'a self, selected: &'a Id) -> Vec<&'a Id> {
+        let members = &self.workspace.members;
+        let mut dependents: BTreeMap<&Id, Vec<&Id>> = BTreeMap::new();
+        for (id, member) in members {
+            for dependency in member.edges.keys() {
+                dependents.entry(dependency).or_default().push(id);
+            }
+        }
+        for (id, root) in &self.published {
+            if members.contains_key(id) {
+                continue;
+            }
+            for (dependency, _) in self.libraries[root].content.bindings.values() {
+                dependents.entry(dependency).or_default().push(id);
+            }
+        }
+        let mut reached = BTreeSet::new();
+        let mut pending = vec![selected];
+        while let Some(id) = pending.pop() {
+            if reached.insert(id)
+                && let Some(parents) = dependents.get(id)
+            {
+                pending.extend(parents);
+            }
+        }
+        reached.remove(selected);
+        std::iter::once(selected)
+            .chain(reached.into_iter().filter(|id| members.contains_key(*id)))
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn member_root(&mut self, id: &Id) -> Result<Root, String> {
         member_root(&self.workspace.members, &mut self.encoded, id)
-    }
-
-    pub(crate) fn checked_archive(
-        &mut self,
-        id: &Id,
-        directory: &std::path::Path,
-    ) -> Result<(Bytes, PackageArchive), Failure> {
-        if self
-            .workspace
-            .members
-            .values()
-            .any(|member| !member.ceilings.is_empty())
-        {
-            let app = crate::package_dir::PackageDir::from_resolution(self, id, true)?;
-            let store = crate::store::default_path(directory);
-            let request = crate::CheckRequest::from_app(app, None, &store)?;
-            crate::Driver::default().check_with_product(
-                request,
-                &crate::PackageProduct::default_cache(),
-                &mut crate::Meter::new(false),
-            )?;
-        }
-        Ok(self.make_archive(id)?)
     }
 
     pub(crate) fn make_archive(&mut self, id: &Id) -> Result<(Bytes, PackageArchive), String> {

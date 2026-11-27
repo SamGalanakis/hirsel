@@ -1,11 +1,13 @@
 //! One core-only request path from an immutable source snapshot to published products.
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
 pub mod call;
+mod checked;
 pub mod cli;
 pub mod cli_tools;
 pub mod code_admission;
 pub mod code_store;
 pub mod describe;
+use checked::{Checked, RejectedCheck};
 mod diagnostics;
 mod entry_show;
 mod exec_launch;
@@ -1151,7 +1153,10 @@ impl Driver {
             layer.finish(&store, layer_record.as_deref())?;
         }
         meter.finish("publish/declared layer");
-        result.authority = reachability::authority::collect(&result, &resolution_inputs)?;
+        match reachability::authority::collect(&result, &resolution_inputs) {
+            Ok(facts) => result.authority = facts,
+            Err(error) => return Err(RejectedCheck::with_product(result, error)),
+        }
         let result = Arc::new(result);
         meter.finish("publish/commit and Arc move");
         drop(index);
@@ -1161,22 +1166,6 @@ impl Driver {
         drop(request);
         meter.finish("publish/scratch cleanup");
         Ok(Checked::Product(result, record.map(|(_, key)| key)))
-    }
-}
-/// A request's check: its product with the key of its request record, or
-/// the record's answer.
-pub(crate) enum Checked {
-    Product(Arc<CheckProduct>, Option<ContentHash>),
-    Hit(request_record::Hit),
-}
-impl Checked {
-    fn product(self) -> io::Result<Arc<CheckProduct>> {
-        match self {
-            Self::Product(product, _) => Ok(product),
-            Self::Hit(_) => Err(io::Error::other(
-                "internal error: a request record answered a request that names none",
-            )),
-        }
     }
 }
 fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {

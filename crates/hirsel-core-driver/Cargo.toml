@@ -15,6 +15,10 @@ name = "comptime_g1"
 harness = false
 required-features = ["comptime-g1"]
 
+[[bench]]
+name = "package_layer"
+harness = false
+
 [features]
 # The opt-in comptime G1 measurement.
 comptime-g1 = ["hirsel-core-eval/host-instructions"]

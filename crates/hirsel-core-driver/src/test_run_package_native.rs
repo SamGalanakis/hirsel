@@ -1,6 +1,158 @@
 // Package walk laws L4, L5 and L12 (packages.md section 13), split from test_run_native.rs.
 
 #[test]
+fn package_l40_pack_checks_before_publishing() {
+    let law = PackageLaw::new();
+    law.write(
+        "work/hirsel.toml",
+        "[workspace]\nmembers = [\"lib\", \"middle\", \"app\"]\n",
+    );
+    law.library(
+        "work/lib",
+        "fixture.test/json",
+        "1.0.0",
+        "pub fn f() -> u64 { true }\n",
+        "",
+    );
+    law.library("work/middle", "fixture.test/middle", "1.0.0", "pub fn value() -> u64 { json.version() }\n",
+        "[dependencies]\njson = { package = \"fixture.test/json\", major = 1, path = \"../lib\" }\n");
+    let app_source = "pub fn answer() -> u64 { middle.value() }\n";
+    law.library("work/app", "local/app", "1.0.0", app_source,
+        "[dependencies]\nmiddle = { package = \"fixture.test/middle\", major = 1, path = \"../middle\" }\n");
+    let pack = || law.run(&["pack", "work/lib", "--output", "out.hpkg"]);
+    let refused = |member: &str, file: &str| {
+        let (status, stdout, stderr) = pack();
+        assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(
+            stderr.contains(file) && stderr.contains("bool") && stderr.contains("u64"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.ends_with(&format!(
+                "hirsel: pack: work/{member}/hirsel.toml does not check; nothing was written\n"
+            )),
+            "{stderr}"
+        );
+        assert!(!law.path("out.hpkg").exists());
+        assert!(!law.path("work/hirsel.lock").exists());
+        law.empty_store();
+    };
+    refused("lib", "json.hirsel");
+
+    law.write("work/lib/json.hirsel", PACKAGE_X_SOURCE);
+    law.write("work/app/app.hirsel", "pub fn answer() -> u64 { true }\n");
+    refused("app", "app.hirsel");
+    law.write("work/app/app.hirsel", app_source);
+    assert_eq!(
+        PackageLaw::pass(pack()),
+        format!("fixture.test/json@1 1.0.0 {PACKAGE_X}\n")
+    );
+    assert!(law.path("out.hpkg").is_file());
+    assert!(law.path(&package_entry("packages", PACKAGE_X)).is_file());
+
+    law.manifest(
+        "local",
+        "local/lib",
+        "1.0.0",
+        "[sources]\n\"missing.hirsel\" = \"lib\"\n",
+    );
+    PackageLaw::refuse(
+        law.run(&["pack", "local", "--output", "local.hpkg"]),
+        "local/hirsel.toml: local/lib is a local name and is never packed; give it a scoped name to publish it",
+    );
+    assert!(!law.path("local.hpkg").exists());
+
+    law.fixture_json();
+    let binding = |name: &str, root: &str, archive: &str| {
+        format!(
+            "[dependencies]\n{name} = {{ package = \"fixture.test/{name}\", major = 1, root = \"{root}\", archive = \"{archive}\" }}\n"
+        )
+    };
+    let body = "pub fn answer() -> u64 { 42 }\n";
+    law.library(
+        "binder",
+        "fixture.test/binder",
+        "1.0.0",
+        body,
+        &binding("json", PACKAGE_X, "jx.hpkg"),
+    );
+    law.write(
+        "binder/jx.hpkg",
+        std::fs::read(law.path("vendor/jx.hpkg")).unwrap(),
+    );
+    let packed = law.fixture("binder", "binder.hpkg");
+    let binder_root = packed
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .last()
+        .unwrap();
+    law.write(
+        "displaced/hirsel.toml",
+        "[workspace]\nmembers = [\"lib\", \"json\"]\n",
+    );
+    law.library(
+        "displaced/json",
+        "fixture.test/json",
+        "1.0.1",
+        PACKAGE_Y_SOURCE,
+        "",
+    );
+    law.library(
+        "displaced/lib",
+        "fixture.test/lib",
+        "1.0.0",
+        body,
+        &binding("binder", binder_root, "binder.hpkg"),
+    );
+    law.write(
+        "displaced/lib/binder.hpkg",
+        std::fs::read(law.path("binder.hpkg")).unwrap(),
+    );
+    PackageLaw::refuse(
+        law.run(&["pack", "displaced/lib", "--output", "displaced.hpkg"]),
+        &format!(
+            "pack: fixture.test/binder@1 binds fixture.test/json@1 {PACKAGE_X} exactly, but this workspace builds it with {PACKAGE_Y}; republish fixture.test/binder@1 against {PACKAGE_Y} or select {PACKAGE_X}"
+        ),
+    );
+    assert!(!law.path("displaced.hpkg").exists());
+    assert!(!law.path("displaced/hirsel.lock").exists());
+
+    law.library(
+        "netpkg", "fixture.test/netpkg", "1.0.0",
+        "pub fn ping(n: Net, addr: Addr) -> Result[Socket, NetError] waits { host.connect(n, addr, Never) }\n",
+        "[dependencies]\nstd = { major = 1 }\n",
+    );
+    let network = law.fixture("netpkg", "netpkg.hpkg");
+    let root = network.split_whitespace().last().unwrap();
+    law.library(
+        "network",
+        "fixture.test/network",
+        "1.0.0",
+        body,
+        &binding("netpkg", root, "netpkg.hpkg"),
+    );
+    law.write(
+        "network/netpkg.hpkg",
+        std::fs::read(law.path("netpkg.hpkg")).unwrap(),
+    );
+    let (status, stdout, stderr) = law.run(&["pack", "network", "--output", "network.hpkg"]);
+    assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("dependencies.netpkg: fixture.test/netpkg@1 reaches Net"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.ends_with("hirsel: pack: network/hirsel.toml does not check; nothing was written\n"),
+        "{stderr}"
+    );
+    assert!(!law.path("network.hpkg").exists());
+    assert!(!law.path("network/hirsel.lock").exists());
+}
+
+#[test]
 fn package_l4_symlink_escape() {
     let law = PackageLaw::new();
     law.manifest("p", "fixture.test/p", "1.0.0", "[sources]\n\"a.hirsel\" = \"a\"\n");

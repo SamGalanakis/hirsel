@@ -130,6 +130,32 @@ pub(super) fn conclude_with_remote(
     }
 }
 
+pub(super) fn render_diagnostics(
+    sources: &crate::SourceFiles,
+    diagnostics: &[crate::Diagnostic<'_>],
+    incomplete: &[crate::IncompleteDiagnostic<'_>],
+    resources: &[crate::ResourceDiagnostic<'_>],
+) {
+    for d in diagnostics {
+        eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
+        for cause in &d.causal {
+            eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
+        }
+        for suggestion in crate::diagnostics::render_suggestions(&d.fixes, &d.available_members) {
+            eprintln!("  {suggestion}");
+        }
+    }
+    for g in incomplete {
+        eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
+        for cause in &g.causal {
+            eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
+        }
+    }
+    for r in resources {
+        eprintln!("{}: resource {}", sources.render(&r.primary), r.message);
+    }
+}
+
 /// Print `output`, run a `run` request's executable, and exit with the
 /// request's status.
 #[allow(clippy::too_many_arguments)]
@@ -151,25 +177,12 @@ pub(super) fn finish(
     if json {
         println!("{}", serde_json::to_string(output)?);
     } else {
-        for d in &output.diagnostics {
-            eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
-            for cause in &d.causal {
-                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
-            }
-            for suggestion in crate::diagnostics::render_suggestions(&d.fixes, &d.available_members)
-            {
-                eprintln!("  {suggestion}");
-            }
-        }
-        for g in &output.incomplete {
-            eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
-            for cause in &g.causal {
-                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
-            }
-        }
-        for r in &output.resources {
-            eprintln!("{}: resource {}", sources.render(&r.primary), r.message);
-        }
+        render_diagnostics(
+            sources,
+            &output.diagnostics,
+            &output.incomplete,
+            &output.resources,
+        );
         // Behind a printed refusal an instance stop is its consequence.
         if let Some(stop) = &output.stopped
             && (output.diagnostics.is_empty() && output.incomplete.is_empty()

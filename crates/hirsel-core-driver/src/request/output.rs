@@ -3,6 +3,35 @@ use super::{Meter, Outcome, Output, Path, PathBuf, ReachableOutput};
 use crate::installation::Flavour;
 use hirsel_core_layout::{OutputKind, Target};
 
+pub(super) fn render_check_diagnostics(
+    product: &crate::CheckProduct,
+    sources: &crate::SourceFiles,
+) -> std::io::Result<()> {
+    super::launch::render_diagnostics(
+        sources,
+        &product.machine_diagnostics()?,
+        &product.machine_incomplete()?,
+        &product.machine_resources()?,
+    );
+    Ok(())
+}
+
+pub(super) fn check_result(
+    checked: std::io::Result<crate::Checked>,
+    sources: &crate::SourceFiles,
+    render: bool,
+) -> std::io::Result<crate::Checked> {
+    if render
+        && let Err(error) = &checked
+        && let Some(refusal) = error
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<crate::RejectedCheck>())
+    {
+        render_check_diagnostics(&refusal.product, sources)?;
+    }
+    checked
+}
+
 pub(super) fn output_kind(command: &str, emit: Option<&str>) -> Result<OutputKind, String> {
     if command == "sdk swift" && emit.is_some() {
         return Err("sdk swift refuses --emit".into());

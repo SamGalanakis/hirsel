@@ -398,7 +398,8 @@ fn rl9_result_crosses_with_its_handles() {
         let end = [
             vec![4, g + 3, 0],
             result(&[g + 4, g + 5], g + 1),
-            vec![0],
+            // Residual 0 (no step bound), no survivors.
+            vec![0, 0],
         ]
         .concat();
         let item = [vec![0, g + 1, 8, 5], vec![0; 7], vec![0]].concat();
@@ -411,7 +412,9 @@ fn rl9_result_crosses_with_its_handles() {
                 _ => None,
             })
             .expect("the helper's END");
-        assert_eq!(ending, result(&[], g + 1), "{backend:?}: END");
+        // The result, then the residual: 0, as the helper had no bound.
+        let unbounded = [result(&[], g + 1), vec![0]].concat();
+        assert_eq!(ending, unbounded, "{backend:?}: END");
         let draws: Vec<_> = root
             .iter()
             .filter_map(|f| match f {
@@ -890,7 +893,7 @@ fn rl9_helper_secret_charges_survive_by_designation() {
             .iter()
             .filter_map(|f| match f {
                 Frame::Take { body, .. } => match body.arrival() {
-                    Arrival::HelperEnd(_, _, survivors) => Some(survivors),
+                    Arrival::HelperEnd(_, _, _, survivors) => Some(survivors),
                     _ => None,
                 },
                 _ => None,

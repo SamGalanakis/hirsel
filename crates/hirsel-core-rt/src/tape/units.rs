@@ -928,7 +928,12 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                     .ending
                     .outcome()
                     .map(|_| result.expect("a written result"));
-                TakeBody::encode(&format::Arrival::HelperEnd(ordinal, outcome, named))
+                TakeBody::encode(&format::Arrival::HelperEnd(
+                    ordinal,
+                    outcome,
+                    end.ending.residual(),
+                    named,
+                ))
             }
             Arrival::LastRelease(conn) => {
                 let Some((stream, ordinal, header, retained)) = conns(|c| {

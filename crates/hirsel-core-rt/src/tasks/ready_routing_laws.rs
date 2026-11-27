@@ -117,6 +117,8 @@ fn ready_routes_one_and_work_is_independent_of_parked_count() {
                     replay: false,
                     #[cfg(feature = "record")]
                     latest_pair: false,
+                    #[cfg(feature = "record")]
+                    owns_turn: false,
                     polls_left: POLLS_PER_TURN,
                     context: &mut context,
                     owned_context: None,

@@ -263,7 +263,7 @@ const EDGES: [u64; 7] = [0, 1, 127, 128, 16_383, 16_384, u64::MAX];
 /// survivor as kind `u8`, origin kind `u8` for kinds 2 and 7, stream `u32`,
 /// ordinal `varint` and amount `u64`.
 fn helper_end_body(survivors: &[(u8, Option<u8>, u32, u64, u64)]) -> Vec<u8> {
-    let mut body = vec![4, 3, 0, 0, 0];
+    let mut body = vec![4, 3, 0, 0, 0, 0];
     put_varint(&mut body, survivors.len() as u64);
     for &(kind, origin, stream, ordinal, amount) in survivors {
         body.push(kind);
@@ -302,7 +302,7 @@ fn generated_survivors_name_their_spec_fields() {
         }
         let body = TakeBody::decode(helper_end_body(&expected))
             .unwrap_or_else(|err| panic!("seed {seed}: a spec survivor list gave {err:?}"));
-        let Arrival::HelperEnd(3, _, survivors) = body.arrival() else {
+        let Arrival::HelperEnd(3, _, _, survivors) = body.arrival() else {
             panic!("seed {seed}: a helper end decoded as another arrival")
         };
         let found = survivors
@@ -503,7 +503,7 @@ fn helper_header(parent: u32, spawn: u64) -> Vec<u8> {
 fn helper_end_frame() -> Frame {
     Frame::HelperEnd {
         gap: 0,
-        ending: HelperEnding::decode(END_RETURNED, vec![0, 0]).unwrap(),
+        ending: HelperEnding::decode(END_RETURNED, vec![0, 0, 0]).unwrap(),
     }
 }
 

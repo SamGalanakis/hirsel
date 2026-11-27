@@ -80,9 +80,16 @@ fn isolate_stop() -> u64 {
 // expect: reference run finalizer(2) = 7 trace 7
 // expect: reference run glue(0) = 7
 // expect: reference run glue(100) = 7
-// Spawns are the second and fourth parent steps, leaving copies of 16 and 14.
-// After each entry, 15 steps give eight sends and 13 steps give seven sends.
-// expect: reference run copy_spawn_budget(0) = 15
+// MEM-30 conservation: both children share the parent's 18 steps. Two sender
+// copies, two spawns and the first join leave 13. The first child's entry
+// leaves 12: six sends and latches. The second child and the parent's second
+// join then find none left, so all three together send 6, never 18 or more.
+// expect: reference run shared_spawn_budget(0) = 6
+// Two children needing sharply unequal shares and a parent continuing with a
+// charged loop before either join complete when their aggregate work fits,
+// and fail together when it does not, though each alone would fit.
+// expect: reference run unequal_shares(0,1100) = 960
+// expect: reference run unequal_shares(0,950) = 0
 // expect: reference run mixed(0) = fail Division,OutOfTime trace 0
 // Catching a used root primary retains its replacement cell (FAIL-16).
 // expect: reference run isolated_mixed(0) = 12 trace 0 used 32
@@ -185,7 +192,7 @@ fn glue(n: u64) -> u64 {
 fn worker(take tx: Sender[u64]) {
     loop { let _ = channel.try_send(tx, 1u64) }
 }
-fn copy_spawn_budget(tasks: Tasks) -> u64 waits {
+fn shared_spawn_budget(tasks: Tasks) -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(32)
     let _ = bound steps 18 {
         let a = channel.sender(tx)
@@ -198,6 +205,19 @@ fn copy_spawn_budget(tasks: Tasks) -> u64 waits {
     let mut count = 0u64
     while let Ok(_) = channel.try_receive(rx) { count += 1 }
     count
+}
+fn crunch(take n: u64) -> u64 { spin_to(n) }
+fn unequal_shares(tasks: Tasks, budget: u64) -> u64 waits {
+    let done = bound steps budget {
+        let big = task.spawn(tasks, bytes 4096, 900u64, crunch)
+        let small = task.spawn(tasks, bytes 4096, 10u64, crunch)
+        let mine = spin_to(50)
+        match (task.join(take big), task.join(take small)) {
+            (Ok(b), Ok(s)) => b + s + mine,
+            _ => 0,
+        }
+    }
+    match done { Ok(v) => v, Error(_) => 0 }
 }
 resource type Failing { d: u64 } drop(f) { let _ = 1u64 / f.d }
 fn mixed(d: u64) {
@@ -259,11 +279,11 @@ fn sort_callback(k: u64) -> u64 {
         Error(e) => e.steps,
     }
 }
-// S1, S2, S6 and S7: five loop forms send 3 each. The children send 8 and 7.
-// hand-derived try-send: 30
+// S1, S2, S6 and S7: five loop forms send 3 each. The children send 6 in all.
+// hand-derived try-send: 21
 pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
     if callback_both(3) != 133 || callback_both(4) != 33 { return Error(Exit(status: 2)) }
-    if loop_count(5, 0) == 3 && loop_count(5, 1) == 3 && loop_count(5, 2) == 3 && loop_count(5, 3) == 3 && loop_count(5, 4) == 3 && callback(1) == 7 && core_callback(1) == 1 && core_callback(2) == 7 && finalizer(1) == 1 && finalizer(2) == 7 && glue(0) == 7 && glue(100) == 7 && sort_callback(1) == 1 && sort_callback(2) == 7 && isolate_stop() == 50 && optimized_spin() == 1000 && chunk_range(8, 3) == 3 && chunk_range(8, 8) == 7 && chunk_range(100000, 65536) == 65536 && chunk_list(3) == 3 && merged_calls(1) == 1 && merged_calls(2) == 7 && chunk_nested(1, 9) == 9 && chunk_nested(1, 10) == 7 && chunk_nested(7000, 65536) == 65536 && copy_spawn_budget(tasks) == 15 && isolated_mixed(0) == 12 && mixed_chain(tasks) && partial_sweep() {
+    if loop_count(5, 0) == 3 && loop_count(5, 1) == 3 && loop_count(5, 2) == 3 && loop_count(5, 3) == 3 && loop_count(5, 4) == 3 && callback(1) == 7 && core_callback(1) == 1 && core_callback(2) == 7 && finalizer(1) == 1 && finalizer(2) == 7 && glue(0) == 7 && glue(100) == 7 && sort_callback(1) == 1 && sort_callback(2) == 7 && isolate_stop() == 50 && optimized_spin() == 1000 && chunk_range(8, 3) == 3 && chunk_range(8, 8) == 7 && chunk_range(100000, 65536) == 65536 && chunk_list(3) == 3 && merged_calls(1) == 1 && merged_calls(2) == 7 && chunk_nested(1, 9) == 9 && chunk_nested(1, 10) == 7 && chunk_nested(7000, 65536) == 65536 && shared_spawn_budget(tasks) == 6 && unequal_shares(tasks, 1100) == 960 && unequal_shares(tasks, 950) == 0 && isolated_mixed(0) == 12 && mixed_chain(tasks) && partial_sweep() {
         Ok(())
     } else { Error(Exit(status: 1)) }
 }
@@ -388,9 +408,10 @@ fn drain(rx: Receiver[u64]) -> u64 {
 }
 fn burst_task(take tx: Sender[u64]) { let _ = burst(tx, 20) }
 // A loop trip is a send and a latch, so r Steps left at burst's loop send
-// ceil(r/2) times. The sender copy and the spawn take two of eleven, so the
-// child copies nine. Its entry and the call to burst leave seven: four sends.
-// expect: reference run route_spawn(0) = 2004
+// ceil(r/2) times. The sender copy, the spawn and the join take three of the
+// eleven the child shares. Its entry and the call to burst leave six: three
+// sends.
+// expect: reference run route_spawn(0) = 2003
 fn route_spawn(tasks: Tasks) -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64)
     let a = channel.sender(tx)
@@ -461,10 +482,11 @@ fn gate_round(tasks: Tasks, tx: Sender[u64]) waits {
     let _ = channel.try_send(go, 1u64)
     let _ = task.join(take h)
 }
-// The call to gate_round, its three core calls and the spawn take five of
-// sixteen. The child's entry, ready send, receive and call to burst leave seven
-// of its eleven: four sends after it resumes.
-// expect: reference run route_resumed(0) = 2004
+// The call to gate_round, its three core calls and the spawn take five of the
+// sixteen both share. The parent's receive, the child's entry, ready send and
+// receive, the parent's go send and join, and the call to burst leave four:
+// two sends after the child resumes.
+// expect: reference run route_resumed(0) = 2002
 fn route_resumed(tasks: Tasks) -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64)
     gate_round(tasks, tx)

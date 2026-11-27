@@ -1,4 +1,4 @@
-"""Independent oracle for the tape laws (REPLAY-SPEC sections 4 and 5, tape format 17).
+"""Independent oracle for the tape laws (REPLAY-SPEC sections 4 and 5, tape format 18).
 
 Imports no compiler or runtime code: it encodes the spec's byte format by hand
 and checks blocks with the system libxxhash. Run from anywhere:
@@ -50,7 +50,7 @@ def block(seq, flags, payload):
     return head + payload + struct.pack('<Q', xxh3(TAPE_ID + head + payload))
 
 # Header: Call tape (no header grants).
-header = (struct.pack('<HB', 17, 2) + TAPE_ID + lb(b'app@1/main/run') + BUILD
+header = (struct.pack('<HB', 18, 2) + TAPE_ID + lb(b'app@1/main/run') + BUILD
           + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + vi(0))
 
 # Op tags (provider.rs) and grant kinds (entry.rs).
@@ -138,7 +138,7 @@ g.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9000), value=17)
 
 # The two-clock model places GRANT at open, with a delta of zero.
 TAPE_ID = bytes(range(16))
-model_header = (struct.pack('<HB', 17, 2) + TAPE_ID + lb(b'pkg/charge#0001')
+model_header = (struct.pack('<HB', 18, 2) + TAPE_ID + lb(b'pkg/charge#0001')
                 + bytes(range(32)) + struct.pack('<IQQ', 1, 1024, 0) + b'\0'
                 + lb(b'arg-7') + vi(0))
 first_clock = bytes([0x13, 0, MONO_NS, 1, 0, 0]) + vi(zz(1_000_000_123))
@@ -158,7 +158,7 @@ loopback = 0x7f000001
 listen_rule = struct.pack('<BBQQBHH', 1, 0, 0, loopback, 32, 0, 65535)
 connect_rule = struct.pack('<BBQQBHH', 0, 1, 0, 1, 128, 1, 65535)
 grants = bytes([NET]) + vi(3) + listen_rule + connect_rule + listen_rule
-header = (struct.pack('<HB', 17, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
+header = (struct.pack('<HB', 18, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
           + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + lb(grants))
 net = Tape()
 net.grant(NET)

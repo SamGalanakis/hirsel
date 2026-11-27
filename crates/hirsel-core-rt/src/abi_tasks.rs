@@ -22,8 +22,8 @@ pub(crate) fn task_child(
         context.share_heap(heap.clone());
     }
     context.primary = Some(crate::causes::Cell::prepaid(primary));
-    // SAFETY: the running parent owns its flushed step counter.
-    crate::steps::inherit(&mut context, unsafe { &*parent });
+    // SAFETY: the running parent owns its step accounts (MEM-30: shared).
+    crate::steps::share(&mut context, unsafe { &*parent });
     // SAFETY: spawner and child share the same run-owned provider configuration.
     context.run = unsafe { (*parent).run };
     // SAFETY: the immutable key was set before the parent started.

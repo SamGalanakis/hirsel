@@ -457,7 +457,7 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         let mut stage = crate::tasks::private_flow_step(|| crate::Context::new(charge.working));
         stage.primary = Some(crate::causes::Cell::startup(stage.payer()));
         stage.run = context.run;
-        crate::steps::inherit(&mut stage, context);
+        crate::steps::copy(&mut stage, context);
         self.stages.push(Stage {
             input,
             output,

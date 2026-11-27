@@ -95,7 +95,10 @@ pub(super) fn replay_boundary_for(task: *mut Task, provider_entry: bool) {
                 {
                     return;
                 }
-                _ => checkpoint(),
+                _ => {
+                    (*task).owns_turn = true;
+                    checkpoint();
+                }
             }
         }
     }
@@ -124,7 +127,10 @@ fn tape_boundary(group: Group, ending: bool) {
                     group.fail();
                     return;
                 }
-                _ => checkpoint(),
+                _ => {
+                    (*task).owns_turn = true;
+                    checkpoint();
+                }
             }
         }
     }
@@ -168,6 +174,146 @@ pub(crate) fn detach_tape(group: Group) {
 }
 
 impl Scheduler {
+    pub(super) unsafe fn live_group_tasks(
+        &self,
+        group: crate::tape::schedule::Group,
+    ) -> Vec<(u64, *mut Task)> {
+        let mut live = Vec::new();
+        let mut task = self.all;
+        // SAFETY: the dispatcher owns the creation list.
+        unsafe {
+            while !task.is_null() {
+                if (*task).state != State::Ended
+                    && let Some(member) = (*task).group
+                    && member.same(group)
+                {
+                    live.push((member.task, task));
+                }
+                task = (*task).all;
+            }
+        }
+        live.sort_unstable_by_key(|&(id, _)| id);
+        live
+    }
+
+    pub(super) unsafe fn group_task(
+        &self,
+        group: crate::tape::schedule::Group,
+        id: u64,
+    ) -> *mut Task {
+        let mut task = self.all;
+        // SAFETY: scheduler owns the creation list; retired tasks are unlinked.
+        unsafe {
+            while !task.is_null() {
+                if (*task).group.is_some_and(|g| g.same(group) && g.task == id) {
+                    return task;
+                }
+                task = (*task).all;
+            }
+        }
+        ptr::null_mut()
+    }
+
+    /// Whether the replay's wanted `target` starts its turn now. A due `TURN`
+    /// is consumed here and must name a task that shares a step account;
+    /// another due frame starts a sharing task only inside a paused turn.
+    pub(super) unsafe fn takes_turn(
+        &self,
+        group: Group,
+        target: *mut Task,
+        turn: &crate::tape::schedule::Turn,
+    ) -> bool {
+        // SAFETY: the idle scheduler owns the Ready `target`.
+        unsafe {
+            if let crate::tape::schedule::Turn::Dispatch(_) = turn {
+                if !self.shares_steps(target) {
+                    group.fail();
+                }
+                group.consume_input();
+            } else if self.turn_gated(target) {
+                return false;
+            }
+            (*target).owns_turn = false;
+            true
+        }
+    }
+
+    /// Whether `task` holds a step account another live task of its tape
+    /// group also holds (MEM-30): then the order of its turns against the
+    /// others' decides who spends the account's last steps.
+    pub(super) unsafe fn shares_steps(&self, task: *mut Task) -> bool {
+        // SAFETY: the idle scheduler owns the creation list and each live
+        // task's context.
+        unsafe {
+            let Some(group) = (*task).group else {
+                return false;
+            };
+            let context = &*(*task).context;
+            if context.step_bounds.is_empty() {
+                return false;
+            }
+            let mut at = self.all;
+            while !at.is_null() {
+                if at != task
+                    && (*at).state != State::Ended
+                    && (*at).group.is_some_and(|g| g.same(group))
+                    && crate::steps::shares(context, &*(*at).context)
+                {
+                    return true;
+                }
+                at = (*at).all;
+            }
+            false
+        }
+    }
+
+    /// A replayed task that shares a step account starts a turn only at its
+    /// recorded `TURN`, unless it resumes the turn a tape boundary paused.
+    pub(super) unsafe fn turn_gated(&self, task: *mut Task) -> bool {
+        // SAFETY: as for shares_steps.
+        unsafe { (*task).replay && !(*task).owns_turn && self.shares_steps(task) }
+    }
+
+    /// `selected`, or else the first ready task in queue order that a
+    /// recorded `TURN` does not gate. With none, the replay has diverged.
+    pub(super) unsafe fn ungated(&mut self, selected: *mut Task) -> *mut Task {
+        // SAFETY: idle owns both ready queues; each holds Ready tasks.
+        unsafe {
+            let mut found = selected;
+            if self.turn_gated(selected) {
+                found = ptr::null_mut();
+                'queues: for mut at in [self.head, self.deferred] {
+                    while !at.is_null() {
+                        if !self.turn_gated(at) {
+                            found = at;
+                            break 'queues;
+                        }
+                        at = (*at).ready;
+                    }
+                }
+                if found.is_null() {
+                    (*selected).group.unwrap().fail();
+                    found = selected;
+                }
+            }
+            (*found).owns_turn = false;
+            found
+        }
+    }
+
+    /// A recording records each dispatch of a task sharing a step account.
+    pub(super) unsafe fn record_turn(&self, task: *mut Task) {
+        // SAFETY: the dispatcher owns the task until it switches to it.
+        unsafe {
+            if !(*task).replay
+                && let Some(group) = (*task).group
+                && self.shares_steps(task)
+            {
+                group.dispatch();
+            }
+        }
+    }
+
     /// Record writes a turn's inputs in two places: CANCEL before its
     /// cancels, then WAKE and DONE at its readiness. Replay takes each at the
     /// same place: `readiness` false takes only CANCEL, true takes the rest.

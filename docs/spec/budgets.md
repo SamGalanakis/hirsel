@@ -514,11 +514,27 @@ is core's plain record `{ steps: u64 }`.
   are independent and nest in either order; a step bound admits nothing and charges
   nothing. A core call outside the work-step table is one step, so a step bound bounds its
   time only together with the limits that bound the sizes it works on.
-  A task spawned while a bound is current runs under its own root bound of what that bound has left at the
-  spawn; the spawner's bound is not reduced, and no steps return. No two tasks share a bound, so where a
-  bound stops a task follows from that task's build, source and values alone. The steps a run takes under a bound
-  of `n` are at most `n` for each task spawned under it, and the limits that admit those tasks bound how
-  many there are. `main` and a task spawned with no bound current take steps under none.
+  A task spawned by `task.spawn` or `task.try_spawn` while a bound is current **shares** that bound:
+  its root bound is the spawner's current bound itself, not a copy, so its steps and the spawner's
+  use one count, and every bound enclosing that one counts them too. The steps all the tasks sharing
+  a bound of `n` take are at most `n`, so a spawn-then-continue whose aggregate work fits completes,
+  and one whose work does not fit fails `OutOfTime` in whichever sharing task would take the step
+  past the bound. One worker runs a unit's tasks ([CONC-10](tasks.md#conc-10-event-order)), so one
+  task spends at a time. Before a task runs it reserves at most what is left of its slice and of the
+  bound, and before any other task of the unit runs, and before it waits, ends or changes its
+  current bound, it returns what it did not spend. A task that is not running holds none of a
+  shared bound's steps, and no bound is overrun, not even by one step. Which task runs next is the
+  scheduler's choice (CONC-10), so which sharing task spends the last step, and fails, follows the
+  unit's event order: with the same build, inputs and scheduler choices it is the same task at the
+  same step, and another schedule may stop another task.
+  A helper started by `task.spawn_unit` while a bound is current is another unit and shares nothing
+  ([CONC-15](tasks.md#conc-15-units)). Once the spawn is admitted, the helper's root bound is
+  **granted** half of what the current bound has left, rounded down (possibly zero), and the
+  spawner's bound keeps the rest. When the helper's handle is joined, or cleaned unjoined, the
+  steps the helper left unused, its **residual**, return once to the bound that granted them,
+  whether the helper returned, failed or was cancelled. A helper's end that arrives earlier gives
+  the spawner nothing to spend, and a refused `spawn_unit` takes no steps. `main` and a task
+  spawned with no bound current take steps under none.
   A flow stage ([CONC-14](tasks.md#conc-14-flows)) copies the owner's remaining steps at
   `flow.stage`. Each item uses a fresh bound of `k` within that copy. The copy refuses
   entry when fewer than `k` remain. The stage state is an input value of this bound.
@@ -529,7 +545,7 @@ is core's plain record `{ steps: u64 }`.
   bound that computes for long does not keep the tasks it does not wait for from running.
 - **Determinism.** A step bound is a fuel and termination bound. Which steps a run takes,
   where a bound stops it and where its slices end depend only on its build, its source and
-  the values at its replay point, so every run of one build stops at the same step
+  the values at its replay point, the scheduler's choices among them, so every run of one build stops at the same step
   ([SEM-8](semantics.md#sem-8-determinism)). They are not the same across builds: an engine
   or optimisation level may take fewer or more steps than the reference count, for example
   by inlining a call or merging loop heads, so no program or test may rely on an exact count

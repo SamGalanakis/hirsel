@@ -593,7 +593,7 @@ changes no program observation ([Laws](#laws)). Its body is one of:
 | close | the inbox's ordinal (its last client was cleaned in another unit) |
 | seal answer | the ordinal of the connection whose inbox this unit cleaned. When it comes depends on how many sends other units had accepted before the seal, so the replaying unit takes the recorded answer and makes none of its own |
 | settlement of a waiting send | the send's issue position in this stream; `Accepted`, `Closed` with the returned item in full, or `Withdrawn` |
-| helper end | the helper handle's ordinal; the result in full with its handle snapshots, or the causes; and each survivor charge the owner keeps ([units](spec/tasks.md#conc-15-units)): every open connection, `Shared` node, held `Secret` designation, held sealed bytes, live key object or unretired agreement registry entry ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), and unretired `UdpSocket` pool or group queue the helper paid for, each with its ordinal and amount |
+| helper end | the helper handle's ordinal; the result in full with its handle snapshots, or the causes; the helper's residual steps (Step accounts, below); and each survivor charge the owner keeps ([units](spec/tasks.md#conc-15-units)): every open connection, `Shared` node, held `Secret` designation, held sealed bytes, live key object or unretired agreement registry entry ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), and unretired `UdpSocket` pool or group queue the helper paid for, each with its ordinal and amount |
 | last release | the connection's making stream and its ordinal there, its retained header and its unused room |
 | shared release | the `Shared` node's home stream and its ordinal there |
 | cancel | nothing: a cancellation request for this unit's root |
@@ -668,9 +668,27 @@ supplied from the stream:
 | `CLOSE` of a client or inbox | the ordinal and part, as for every dropped host handle | the outcome |
 
 A refused `spawn_unit` is no frame: its admissions are against the spawner's own limits,
-and replay recomputes them. The helper's step bound is not checked: it is the spawner's
-remaining steps, which another build may count differently ([Another build](#replay)), and
-the helper's stream holds the bound it received.
+and replay recomputes them. The helper's step bound is not checked: it is half the spawner's
+remaining steps ([MEM-30](spec/budgets.md#mem-30-step-bounds)), which another build may count
+differently ([Another build](#replay)), and the helper's stream holds the bound it received.
+
+**Step accounts.** A same-unit spawn shares its spawner's step bound
+([MEM-30](spec/budgets.md#mem-30-step-bounds)), so the order of the sharing tasks' turns
+decides which of them spends the bound's last step. Each dispatch that starts or resumes a
+task that shares a step bound with another live task of the unit, chosen from the ready
+queue, writes a `TURN` naming that task, at the dispatch and before the task runs. A replay
+starts such a task only at a due `TURN` that names it: a `TURN` that names a task the unit
+does not have ready, or one that shares no bound, is `Diverged(Schedule)`, and so is a
+dispatch that would start a sharing task with no `TURN` due. A task that resumes in place,
+with no other task chosen between, writes none. A run with no shared bound writes no `TURN`.
+
+A helper's grant is the step bound its entry holds. Its `END` and its owner's helper-end
+`TAKE` both carry its **residual**, the steps of the grant it left unused (0 when it received
+no bound, and for `Deadlock`). The owner returns the residual from its own `TAKE` to the bound
+that granted it, at the join or the cleaning of the handle, so a replay of the owner alone
+needs no other stream. A residual greater than the grant the owner's replay took is
+`Diverged(Take)` at the `TAKE`. The helper's replay recomputes its residual, and its `END`
+check compares it with the recorded one, as it compares the outcome.
 
 A send is an output, so its item is checked, not stored: 16 bytes or fewer literally,
 longer as a digest, as every sent buffer is. Whether a send is accepted at once, and whether
@@ -811,7 +829,7 @@ or a byte string with bytes left after its last field is `Corrupt`.
 The head is 20 bytes. The check covers the stream number, so a
 block moved between streams fails its check. Each stream's block 0 is its **header block**,
 with flags 0; its later blocks hold frames. The
-root's header block payload holds the current format tag (`0x0011`) and the tape id every check
+root's header block payload holds the current format tag (`0x0012`) and the tape id every check
 uses.
 
 **Helper stream header.** A helper stream's header block payload is:
@@ -918,8 +936,10 @@ from a delivery position and the two members of a sealer pair. An agreement's sh
 operand uses origin kind 2 and the receiving ordinal `u64`. This applies even if the
 object was constructed virtually. A refused send keeps its sending unit's name. A key object made outside a recorded unit has no origin to write and cuts the recording that encounters it.
 
-The format tag is `0x0011` because a `Client` snapshot carries its connection's item layout,
-which an arriving client's replay rebuilds (format `0x0010` gave a `Fail` cause its message's
+The format tag is `0x0012` because a helper's `END` and its owner's helper-end `TAKE` carry
+the helper's residual steps, and a `TURN` frame records each turn of a task that shares a step
+bound (format `0x0011` gave a `Client` snapshot its connection's item layout, which an arriving
+client's replay rebuilds; format `0x0010` gave a `Fail` cause its message's
 capacity, which the join charges; format `0x000f` gave the media origin a charge ordinal and the SFrame
 schedule snapshot its sending block).
 
@@ -954,7 +974,7 @@ task bit is 0, because a take names no task. Then:
 | 1 | close | inbox ordinal `varint` |
 | 2 | seal answer | connection ordinal `varint` |
 | 3 | settlement | the send's `ISSUE` position `varint`; outcome `u8`: 0 `Accepted` and nothing, 1 `Closed` and the returned item as a value, 2 `Withdrawn` and nothing |
-| 4 | helper end | helper ordinal `varint`; outcome `u8`: 0 a result and the result as a value, 1 `Failed` and its causes, 2 `Cancelled` and its causes; survivor count `varint`, then the survivors in ascending (kind, origin kind, stream, ordinal, amount) order |
+| 4 | helper end | helper ordinal `varint`; outcome `u8`: 0 a result and the result as a value, 1 `Failed` and its causes, 2 `Cancelled` and its causes; residual `varint`, at most the grant the owner took; survivor count `varint`, then the survivors in ascending (kind, origin kind, stream, ordinal, amount) order |
 | 6 | last release | making stream `u32`; connection ordinal `varint` in that stream; retained header `u64`; unused room `u64` |
 | 7 | shared release | home stream `u32`; node ordinal `varint` |
 | 8 | cancel | nothing |
@@ -996,6 +1016,10 @@ task bit is 0, because a take names no task. Then:
   outstanding. The settlement completes it, as a `DONE` would, and its task may issue
   again. Any other position is `Corrupt`.
 
+**`TURN` frames.** `TURN` is frame kind 15. Its head is `0x1F` (kind 15 with the task bit),
+then the gap `varint`, as a `WAKE`'s, and the task `varint`: the stable unit-local identity
+of the task the dispatch starts. A `TURN` adds no scheduler event.
+
 **Unit operations.** `UNIT_SPAWN`, `CONN_SEND`, `CONN_TRY_SEND` and `UNIT_CANCEL` are
 operation codes 164, 165, 166 and 167 of `ISSUE`, `DONE` and `OP`, in
 `hirsel_core_ids::host_op`, whose table refuses a duplicate code (162 and 163 are
@@ -1028,7 +1052,7 @@ other than 0) is head `0x0A`, the gap `varint`, the status `u8` 0, the kind `u8`
 (`Returned` 0, `Failed` 1, `Cancelled` 2, `Deadlock` 3), then a carrier holding, for
 `Returned`, the result in canonical form (the owner's helper-end take holds it as a
 value, with the owner's ordinals); for `Failed` and `Cancelled`, the causes; for `Deadlock`,
-the event count `varint`. In either kind of stream, the block that holds the frame
+the event count `varint`; and after it, in the same carrier, the residual `varint`. In either kind of stream, the block that holds the frame
 completing the `END`, the `END` itself or its last `DATA` frame, is flagged `END` and holds
 no frame after it.
 
@@ -1096,7 +1120,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00 00 00 00                stream 0
 00 00 00 00 00 00 00 00    seq 0
 4b 00 00 00                len 75
-11 00                      format version
+12 00                      format version
 01                         kind Run
 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f   tape id
 00                         identity: empty bytes
@@ -1107,7 +1131,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00                         chooser FIFO
 00                         arg: empty bytes
 00                         grants: empty bytes
-9a 37 65 e5 a4 96 df 59    check
+dc d0 35 8d 4b 5f eb 19    check
 ```
 
 Block 1 (stream 0, seq 1, flags `END`, 25-byte payload), 53 bytes:

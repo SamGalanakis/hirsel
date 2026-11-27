@@ -25,6 +25,7 @@ impl std::fmt::Display for FrameEvidence<'_> {
             Frame::Wait { gap, task }
             | Frame::Done { gap, task, .. }
             | Frame::Wake { gap, task }
+            | Frame::Turn { gap, task }
             | Frame::Cancel { gap, task }
             | Frame::Retired { gap, task, .. } => write!(f, "task={task} gap={gap}"),
             Frame::Op {
@@ -71,6 +72,7 @@ impl FrameEvidence<'_> {
             Frame::Done { .. } => "DONE",
             Frame::Op { .. } => "OP",
             Frame::Wake { .. } => "WAKE",
+            Frame::Turn { .. } => "TURN",
             Frame::Cancel { .. } => "CANCEL",
             Frame::Retired { .. } => "RETIRED",
             Frame::Choose { .. } => "CHOOSE",

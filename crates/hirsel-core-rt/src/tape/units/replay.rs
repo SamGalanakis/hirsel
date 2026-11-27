@@ -301,12 +301,12 @@ pub(crate) struct DueCause {
 
 /// What a recorded `TAKE` delivers now.
 pub(crate) enum Due {
-    /// A helper's end: the handle's key, its result packed for the
-    /// handle's result type or the causes it failed or was cancelled with,
-    /// and the survivor charges its owner keeps.
+    /// A helper's end: the handle's key, its packed result or its causes,
+    /// its unused step grant, and the survivor charges its owner keeps.
     End {
         key: usize,
         outcome: Result<Vec<u8>, Vec<DueCause>>,
+        residual: u64,
         survivors: Vec<format::Survivor>,
     },
     /// A cancellation request for the unit's root.
@@ -429,17 +429,14 @@ pub(crate) fn due(
         };
         live.schedule.last = events;
         live.takes.position = rep.taken;
-        let (ordinal, value, survivors) = match body.arrival() {
-            Arrival::HelperEnd(ordinal, HelperOutcome::Returned(value), survivors) => {
-                (ordinal, Ok(value.bytes().to_vec()), survivors)
-            }
-            Arrival::HelperEnd(
-                ordinal,
-                HelperOutcome::Failed(causes) | HelperOutcome::Cancelled(causes),
-                survivors,
-            ) => (ordinal, Err(due_causes(&causes)), survivors),
-            Arrival::HelperEnd(_, HelperOutcome::Deadlock(_), _) => {
-                unreachable!("HelperEnd arrival rejects Deadlock")
+        let (ordinal, value, residual, survivors) = match body.arrival() {
+            Arrival::HelperEnd(ordinal, outcome, residual, survivors) => {
+                let value = match outcome {
+                    HelperOutcome::Returned(value) => Ok(value.bytes().to_vec()),
+                    HelperOutcome::Failed(c) | HelperOutcome::Cancelled(c) => Err(due_causes(&c)),
+                    HelperOutcome::Deadlock(_) => unreachable!("decoding rejects it"),
+                };
+                (ordinal, value, residual, survivors)
             }
             Arrival::Cancel => return Some(Due::Cancel),
             Arrival::Item(ordinal, value) => {
@@ -618,6 +615,7 @@ pub(crate) fn due(
                 Some(Due::End {
                     key,
                     outcome,
+                    residual,
                     survivors,
                 })
             }

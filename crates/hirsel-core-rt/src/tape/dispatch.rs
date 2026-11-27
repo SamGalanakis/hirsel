@@ -16,6 +16,7 @@ pub(super) trait Hooks: Sync {
     fn event(&self, group: Group, index: &dyn Fn() -> u64, ended: bool);
     fn turn(&self, group: Group) -> Turn;
     fn choose(&self, group: Group, task: u64);
+    fn dispatch(&self, group: Group);
     fn replaying(&self, group: Group) -> bool;
     fn fail(&self, group: Group, ready: Option<usize>);
     fn wake(&self, group: Group, request: *mut Request);
@@ -87,6 +88,10 @@ impl Group {
     pub fn choose(self, task: u64) {
         self.cell.hooks.choose(self, task);
     }
+    /// Record the dispatch of this task, which shares a step account.
+    pub fn dispatch(self) {
+        self.cell.hooks.dispatch(self);
+    }
     pub fn replaying(self) -> bool {
         self.cell.hooks.replaying(self)
     }
@@ -132,6 +137,8 @@ pub(crate) enum Turn {
     /// A unit's `TAKE` at a scheduler pump (point kind 1) is due: the
     /// scheduler pumps the unit instead of waiting.
     Take,
+    /// A `TURN` is due: the scheduler dispatches this task (MEM-30).
+    Dispatch(u64),
 }
 
 const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;

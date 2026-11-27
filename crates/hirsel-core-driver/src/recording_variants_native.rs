@@ -167,7 +167,7 @@ fn rl9_helper_key_object_survives_by_name() {
             .iter()
             .filter_map(|f| match f {
                 Frame::Take { body, .. } => match body.arrival() {
-                    Arrival::HelperEnd(_, _, survivors) => Some(survivors),
+                    Arrival::HelperEnd(_, _, _, survivors) => Some(survivors),
                     _ => None,
                 },
                 _ => None,
@@ -428,7 +428,7 @@ fn rl9_key_objects_cross_as_snapshots() {
             .iter()
             .find_map(|f| match f {
                 Frame::Take { body, .. } => match body.arrival() {
-                    Arrival::HelperEnd(_, HelperOutcome::Returned(value), survivors) => {
+                    Arrival::HelperEnd(_, HelperOutcome::Returned(value), _, survivors) => {
                         Some((value, survivors))
                     }
                     _ => None,

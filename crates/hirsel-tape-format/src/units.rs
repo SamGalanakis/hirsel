@@ -30,7 +30,9 @@ pub enum Arrival<'a> {
     Close(u64),
     SealAnswer(u64),
     Settlement(u64, Settlement<'a>),
-    HelperEnd(u64, HelperOutcome<'a>, Vec<Survivor>),
+    /// The helper's ordinal, its outcome, its unused step grant (MEM-30)
+    /// and its survivors.
+    HelperEnd(u64, HelperOutcome<'a>, u64, Vec<Survivor>),
     /// Making stream, connection ordinal there, retained header, unused room.
     LastRelease(u32, u64, u64, u64),
     /// Home stream and node ordinal there.
@@ -548,10 +550,11 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
             let ordinal = c.varint()?;
             let kind = tag(c, 2)?;
             let outcome = outcome(c, kind, read_value)?;
+            let residual = c.varint()?;
             let survivors = (0..c.varint()?)
                 .map(|_| Survivor::read(c))
                 .collect::<Result<_, Corrupt>>()?;
-            Arrival::HelperEnd(ordinal, outcome, survivors)
+            Arrival::HelperEnd(ordinal, outcome, residual, survivors)
         }
         6 => Arrival::LastRelease(c.u32()?, c.varint()?, c.u64()?, c.u64()?),
         7 => Arrival::SharedRelease(c.u32()?, c.varint()?),
@@ -607,11 +610,12 @@ impl TakeBody {
                     Settlement::Withdrawn => out.push(2),
                 }
             }
-            Arrival::HelperEnd(ordinal, outcome, survivors) => {
+            Arrival::HelperEnd(ordinal, outcome, residual, survivors) => {
                 out.push(4);
                 put_varint(&mut out, *ordinal);
                 out.push(outcome.kind());
                 outcome.put(&mut out, |v| v.bytes());
+                put_varint(&mut out, *residual);
                 let mut survivors = survivors.clone();
                 survivors.sort_unstable();
                 put_varint(&mut out, survivors.len() as u64);
@@ -663,14 +667,17 @@ impl TakeBody {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HelperEnding {
     kind: u8,
+    /// The outcome, then the unused step grant as a varint.
     body: Vec<u8>,
 }
 
 impl HelperEnding {
-    /// The `END` of a helper whose outcome is `outcome`.
-    pub fn encode(outcome: &HelperOutcome<'_, CanonicalValue<'_>>) -> Self {
+    /// The `END` of a helper whose outcome is `outcome` and whose step grant
+    /// has `residual` unused (MEM-30; 0 for an unbounded helper).
+    pub fn encode(outcome: &HelperOutcome<'_, CanonicalValue<'_>>, residual: u64) -> Self {
         let mut body = Vec::new();
         outcome.put(&mut body, |v| v.bytes());
+        put_varint(&mut body, residual);
         Self {
             kind: outcome.kind(),
             body,
@@ -678,8 +685,22 @@ impl HelperEnding {
     }
 
     pub fn decode(kind: u8, body: Vec<u8>) -> Result<Self, Corrupt> {
-        decode(&body, |c| outcome(c, kind, read_canonical_value))?;
+        decode(&body, |c| {
+            let outcome = outcome(c, kind, read_canonical_value)?;
+            c.varint()?;
+            Ok(outcome)
+        })?;
         Ok(Self { kind, body })
+    }
+
+    /// The helper's unused step grant.
+    pub fn residual(&self) -> u64 {
+        decode(&self.body, |c| {
+            outcome(c, self.kind, read_canonical_value)?;
+            c.varint()
+        })
+        .ok()
+        .expect("a checked helper END")
     }
 
     pub fn kind(&self) -> u8 {
@@ -691,9 +712,13 @@ impl HelperEnding {
     }
 
     pub fn outcome(&self) -> HelperOutcome<'_, CanonicalValue<'_>> {
-        decode(&self.body, |c| outcome(c, self.kind, read_canonical_value))
-            .ok()
-            .expect("a checked helper END")
+        decode(&self.body, |c| {
+            let outcome = outcome(c, self.kind, read_canonical_value)?;
+            c.varint()?;
+            Ok(outcome)
+        })
+        .ok()
+        .expect("a checked helper END")
     }
 }
 

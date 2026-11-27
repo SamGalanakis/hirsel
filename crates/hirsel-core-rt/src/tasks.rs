@@ -163,6 +163,9 @@ pub struct Task {
     replay: bool,
     #[cfg(feature = "record")]
     latest_pair: bool,
+    /// Replay paused this task's turn at a tape boundary; it resumes with no `TURN`.
+    #[cfg(feature = "record")]
+    owns_turn: bool,
     polls_left: u32,
     context: *mut Context,
     owned_context: Option<Context>,
@@ -476,7 +479,12 @@ unsafe fn trim_run_heap(root: *mut Task) {
 
 unsafe fn switch_to_idle(task: *mut Task) {
     // SAFETY: the running task is pinned here; only its run's dispatcher owns the idle stack.
-    unsafe { hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle) }
+    unsafe {
+        // MEM-30: a fiber off the CPU holds no step credit; it draws again at
+        // its next charged step.
+        crate::steps::suspend(&mut *(*task).context);
+        hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle)
+    }
 }
 
 /// Return what ended tasks left resident: retained task-heap pages and this
@@ -664,15 +672,19 @@ impl Scheduler {
             for entry in &self.tapes.live {
                 let group = entry.group;
                 use crate::tape::schedule::Turn;
-                let wanted = match group.turn() {
-                    Turn::Wait(id) | Turn::Event(Some(id)) => Some(id),
+                let turn = group.turn();
+                let wanted = match turn {
+                    Turn::Wait(id) | Turn::Event(Some(id)) | Turn::Dispatch(id) => Some(id),
                     Turn::Retired(id) if !group.fifo() => Some(id),
                     Turn::Grant | Turn::Finish => Some(0),
                     _ => None,
                 };
                 if let Some(id) = wanted {
                     let target = self.group_task(group, id);
-                    if !target.is_null() && (*target).state == State::Ready {
+                    if !target.is_null()
+                        && (*target).state == State::Ready
+                        && self.takes_turn(group, target, &turn)
+                    {
                         return self.unlink_ready(target);
                     }
                 }
@@ -700,9 +712,14 @@ impl Scheduler {
             #[cfg(any(test, feature = "testing"))]
             if let Some(script) = self.script.clone() {
                 let selected = self.scripted_task(&script);
+                #[cfg(feature = "record")]
+                let selected = self.ungated(selected);
                 return self.unlink_ready(selected);
             }
-            self.unlink_ready(self.head)
+            let selected = self.head;
+            #[cfg(feature = "record")]
+            let selected = self.ungated(selected);
+            self.unlink_ready(selected)
         }
     }
 
@@ -754,44 +771,6 @@ impl Scheduler {
                 script.choose_task(crate::schedule_script::UNTAPED, runnable.len(), &indices);
             runnable[selected]
         }
-    }
-
-    #[cfg(feature = "record")]
-    unsafe fn live_group_tasks(
-        &self,
-        group: crate::tape::schedule::Group,
-    ) -> Vec<(u64, *mut Task)> {
-        let mut live = Vec::new();
-        let mut task = self.all;
-        // SAFETY: the dispatcher owns the creation list.
-        unsafe {
-            while !task.is_null() {
-                if (*task).state != State::Ended
-                    && let Some(member) = (*task).group
-                    && member.same(group)
-                {
-                    live.push((member.task, task));
-                }
-                task = (*task).all;
-            }
-        }
-        live.sort_unstable_by_key(|&(id, _)| id);
-        live
-    }
-
-    #[cfg(feature = "record")]
-    unsafe fn group_task(&self, group: crate::tape::schedule::Group, id: u64) -> *mut Task {
-        let mut task = self.all;
-        // SAFETY: scheduler owns the creation list; retired tasks are unlinked.
-        unsafe {
-            while !task.is_null() {
-                if (*task).group.is_some_and(|g| g.same(group) && g.task == id) {
-                    return task;
-                }
-                task = (*task).all;
-            }
-        }
-        ptr::null_mut()
     }
 
     unsafe fn unlink_ready(&mut self, task: *mut Task) -> *mut Task {
@@ -3540,6 +3519,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             block.release(&*(*task).context);
         }
         crate::foreign::contained::end_task((*task).context);
+        crate::steps::end(&mut *(*task).context);
         if (*task).record.is_some() {
             abi::task_handover((*task).context);
         }
@@ -3701,6 +3681,8 @@ unsafe fn run_root_scheduler(
         replay: false,
         #[cfg(feature = "record")]
         latest_pair: false,
+        #[cfg(feature = "record")]
+        owns_turn: false,
         polls_left: POLLS_PER_TURN,
         context,
         owned_context: None,
@@ -3821,6 +3803,8 @@ impl RunPtr {
                 if (*root).state == State::Ended || crate::run_stop::is_ended() {
                     break;
                 }
+                #[cfg(feature = "record")]
+                let popped = direct.is_null();
                 let task = if direct.is_null() {
                     // An idle native run can collect readiness in its wait.
                     // Ready tokens are still applied before any expired timer.
@@ -3890,6 +3874,10 @@ impl RunPtr {
                     && let Some(group) = (*task).group
                 {
                     group.wake_deadline();
+                }
+                #[cfg(feature = "record")]
+                if popped {
+                    (*run).record_turn(task);
                 }
                 CURRENT.set(task);
                 (*task).state = State::Running;
@@ -3975,6 +3963,8 @@ unsafe fn spawn_in(
             replay: false,
             #[cfg(feature = "record")]
             latest_pair: false,
+            #[cfg(feature = "record")]
+            owns_turn: false,
             polls_left: POLLS_PER_TURN,
             context: ptr::null_mut(),
             owned_context: Some(child_context),

@@ -155,9 +155,10 @@ fn rl7_helpers_record_their_own_streams() {
             let Some(Frame::HelperEnd { ending, .. }) = frames.last() else {
                 panic!("{backend:?} root.{spawn}: {frames:?}");
             };
+            // The result, then the residual: 0, as the helper had no bound.
             assert_eq!(
                 (ending.kind(), ending.body()),
-                (0, r.as_slice()),
+                (0, [r.as_slice(), &[0]].concat().as_slice()),
                 "{backend:?}"
             );
         }
@@ -519,7 +520,7 @@ fn rl9_shared_crosses_into_a_helper() {
             unreachable!()
         };
         match body.arrival() {
-            Arrival::HelperEnd(ordinal, HelperOutcome::Returned(v), survivors) => {
+            Arrival::HelperEnd(ordinal, HelperOutcome::Returned(v), _, survivors) => {
                 assert_eq!(ordinal, g as u64 + 2, "{backend:?}: helper ordinal");
                 assert_eq!(v.bytes(), [8, 7, 0, 0, 0, 0, 0, 0, 0, 0], "{backend:?}");
                 assert!(survivors.is_empty(), "{backend:?}: {survivors:?}");
@@ -711,7 +712,8 @@ fn rl9_shared_survives_its_helper() {
         let end = [
             vec![4, g + 3, 0, 8, 7],
             vec![0; 7],
-            vec![0, 1, 1, 1, 0, 0, 0, 2, 48],
+            // No parts, residual 0 (no step bound), then one survivor.
+            vec![0, 0, 1, 1, 1, 0, 0, 0, 2, 48],
             vec![0; 7],
         ]
         .concat();
@@ -965,3 +967,5 @@ include!("recording_replay_capacity_native.rs");
 include!("recording_unit_clients_native.rs");
 // Replay of items whose content lies past their flat bytes.
 include!("recording_unit_kinds_native.rs");
+// MEM-30 step accounts: shared turns and helper residuals.
+include!("recording_steps_native.rs");

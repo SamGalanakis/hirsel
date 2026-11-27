@@ -239,6 +239,7 @@ pub(super) fn ended(rep: &mut Replayer, expected: &Frame) -> Result<(), Fault> {
         }
         Frame::HelperEnd { .. } => None,
         Frame::Wake { .. }
+        | Frame::Turn { .. }
         | Frame::Cancel { .. }
         | Frame::Retired { .. }
         | Frame::Done { .. }

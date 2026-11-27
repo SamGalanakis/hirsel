@@ -123,6 +123,8 @@ OPENAT2_TEST_CASES = {
         "native::tests::u5_failed_and_cancelled_helper_ends_replay",
         "native::tests::u5_items_replay_from_their_takes",
         "native::tests::u5_clients_cross_and_drop_in_another_unit",
+        "native::tests::steps_shared_turns_replay",
+        "native::tests::steps_helper_residual_replays",
         "native::tests::u5_items_with_sequences_replay_by_case",
         "native::tests::u5_capabilities_replay_where_they_arrive",
         "native::tests::u5_survivors_and_refunds_replay",

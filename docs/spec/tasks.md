@@ -62,8 +62,10 @@ that runs `f(take x)`, where `x: X`, `X` and `R` are `send`, and `f: fn(take X) 
 is a plain callable, which captures nothing ([LANG-13](language.md#lang-13-callables)).
 Everything the child owns arrives as `x`. Spawn admits the task charge
 ([MEM-24](budgets.md#mem-24-logical-charges)), which includes `n`, against the spawner's
-current limit, and the child's root limit is `n` ([MEM-19](budgets.md#mem-19-limits)). A child spawned while a step bound is current draws its
-steps from that bound ([MEM-30](budgets.md#mem-30-step-bounds)). Admission is the
+current limit, and the child's root limit is `n` ([MEM-19](budgets.md#mem-19-limits)). A child spawned while a step bound is current shares
+that bound with the spawner: its steps and theirs use one count, and which of them spends the
+bound's last step follows the event order ([MEM-30](budgets.md#mem-30-step-bounds)). A spawner
+that keeps computing while its child runs therefore needs a bound that covers both. Admission is the
 commit point; a refused one raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)) and
 has not taken `x` ([T7.1](ownership.md#own-26-the-transition-table)).
 `task.try_spawn(tasks, bytes n, take x, f) -> Result[Task[R], (Capacity, X)]` is the same
@@ -237,7 +239,10 @@ visible.
 The order is chosen by the scheduler provider at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); with the same inputs and the same
 recorded choices, every task of the unit behaves identically
-([SEM-8](semantics.md#sem-8-determinism)). One worker runs a unit's tasks at a time, so a
+([SEM-8](semantics.md#sem-8-determinism)). Which task runs next is one of those choices.
+When the task chosen shares a step bound with another live task of the unit
+([MEM-30](budgets.md#mem-30-step-bounds)), the choice also decides which of them spends the
+bound's steps, so it is made before that task runs any code. One worker runs a unit's tasks at a time, so a
 unit's events need no sequencing across threads. There is no order across units: units share
 no mutable memory, each takes what reaches it from other units as its inputs (CONC-15), and
 parallel work inside a unit runs in flows, whose results do not depend on the schedule
@@ -462,9 +467,11 @@ length × element size rounded up to 8; a `Shared` holder's payload is not part 
 + `n` ([MEM-24](budgets.md#mem-24-logical-charges)), against the spawner's current limit,
 and then admits `x`'s content charge against `n`. Either refusal returns `Error((c, x))`,
 where `c` gives that admission's requested and available bytes, and leaves `x` as it was.
-Otherwise `x`'s content is charged to the helper's root limit of `n`. The helper starts
-with its own root step bound equal to the spawner's remaining steps at the spawn, if a
-bound is current ([MEM-30](budgets.md#mem-30-step-bounds)). An `X` or `R` that is not
+Otherwise `x`'s content is charged to the helper's root limit of `n`. If a step bound is
+current, the helper's root step bound is granted half of what that bound has left, rounded
+down, and the spawner's bound keeps the rest. The steps the helper leaves unused return to
+the bound that granted them once, when its handle is joined or cleaned, whatever its outcome
+([MEM-30](budgets.md#mem-30-step-bounds)). An `X` or `R` that is not
 `cross` is refused at the call.
 
 The helper's `Task[R]` is a task handle (CONC-1). `task.join` waits for the helper to end and

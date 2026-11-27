@@ -163,10 +163,8 @@ fn pure_root(
     mach.install_descriptors(None);
     let mut t = mach.root_task(0);
     if let Some(left) = input.steps {
-        t.step_bounds.push(StepBound {
-            id: ROOT_STEPS,
-            left,
-        });
+        let id = mach.open_steps(Some(ROOT_STEPS), left, None);
+        t.step_bounds.push(StepBound { id });
     }
     let destination = mach.destination(f, None);
     let arguments: Vec<u64> = destination

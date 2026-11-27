@@ -9,12 +9,12 @@ const ID: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 fn root_header() -> Vec<u8> {
     // The published example, including the published check.
     [
-        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x11\0\x01".as_slice(),
+        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x12\0\x01".as_slice(),
         &ID,
         &[0; 37],
         b"\0\0\x01\0\0\0\0\0",
         &[0; 11],
-        b"\x9a\x37\x65\xe5\xa4\x96\xdf\x59",
+        b"\xdc\xd0\x35\x8d\x4b\x5f\xeb\x19",
     ]
     .concat()
 }
@@ -196,10 +196,10 @@ fn take_cases() {
         (&[7, 5, 0, 0, 0, 6], Arrival::SharedRelease(5, 6)),
         (
             // Helper 3 Failed: a Fail at site 5 saying "no", then a Capacity at
-            // site 6 asking 64 with 16 available; no survivors.
+            // site 6 asking 64 with 16 available; residual 0; no survivors.
             &[
                 4, 3, 1, 2, 4, 5, 0, 0, 0, 0, 0, 0, 0, 2, b'n', b'o', 8, 6, 6, 0, 0, 0, 0, 0, 0, 0,
-                64, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0,
+                64, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
             Arrival::HelperEnd(
                 3,
@@ -221,6 +221,7 @@ fn take_cases() {
                         },
                     },
                 ]),
+                0,
                 vec![],
             ),
         ),
@@ -303,7 +304,7 @@ fn take_cases() {
         // Tag 5 (credits) was removed: no unit takes one.
         b"\x05\0",
         b"\0\x07\0\x01\x01\x0d\0",
-        b"\x04\0\0\0\0\x01\x08\0\0\0\0\0\0\0\0\0",
+        b"\x04\0\0\0\0\0\x01\x08\0\0\0\0\0\0\0\0\0",
         // Cause kind 9 is past Stack.
         b"\x04\x03\x01\x01\x09\0\0\0\0\0\0\0\0\0",
     ] {
@@ -332,8 +333,9 @@ fn take_cases() {
     assert_eq!(decoder.block(&continuation, false), Err(Corrupt));
 
     // Each survivor names its stream before its ordinal, so one kept from a
-    // grandchild (stream 5) differs from the helper's own ordinal 4.
-    let mut survivor = vec![4, 3, 0, 0, 0, 3];
+    // grandchild (stream 5) differs from the helper's own ordinal 4. The
+    // byte before the survivor count is the residual.
+    let mut survivor = vec![4, 3, 0, 0, 0, 0, 3];
     for (kind, origin, stream) in [(2, Some(1), 3u32), (7, Some(2), 3), (1, None, 5)] {
         survivor.push(kind);
         survivor.extend(origin);
@@ -347,7 +349,7 @@ fn take_cases() {
     let Frame::Take { body, .. } = &decoded[0] else {
         panic!("{decoded:?}")
     };
-    let Arrival::HelperEnd(3, HelperOutcome::Returned(value), survivors) = body.arrival() else {
+    let Arrival::HelperEnd(3, HelperOutcome::Returned(value), _, survivors) = body.arrival() else {
         panic!("{body:?}");
     };
     assert_eq!(value.bytes(), &[0, 0]);
@@ -368,7 +370,7 @@ fn take_cases() {
             (1, None, 5, 4, 48)
         ]
     );
-    survivor[7] = 7;
+    survivor[8] = 7;
     assert_eq!(
         Decoder::default().block(&take(0, &survivor), false),
         Err(Corrupt)
@@ -507,12 +509,12 @@ fn designation_and_returned_value() {
     assert_eq!(Value::decode(&full).unwrap().canonical(), canonical);
     assert_ne!(canonical, sealed);
 
-    let body = [vec![4, 3, 0], full.clone(), vec![0]].concat();
+    let body = [vec![4, 3, 0], full.clone(), vec![0, 0]].concat();
     let taken = Decoder::default().block(&take(1, &body), false).unwrap();
     let Frame::Take { body, .. } = &taken[0] else {
         panic!("{taken:?}")
     };
-    let Arrival::HelperEnd(_, HelperOutcome::Returned(result), _) = body.arrival() else {
+    let Arrival::HelperEnd(_, HelperOutcome::Returned(result), _, _) = body.arrival() else {
         panic!("{body:?}")
     };
     assert_eq!(result.bytes(), full);
@@ -547,13 +549,15 @@ fn entry_and_end() {
     canonical.extend(8u64.to_le_bytes());
     canonical.extend(8u64.to_le_bytes());
     canonical.push(0);
+    // The END body is the returned value, then the residual (0).
+    let ending = [canonical.as_slice(), &[0]].concat();
     let mut first_end = vec![10, 0, 0, 0];
-    first_end.extend(varint(canonical.len()));
+    first_end.extend(varint(ending.len()));
     first_end.extend(varint(65536));
-    first_end.extend(&canonical[..65536]);
+    first_end.extend(&ending[..65536]);
     let end_seq = chunks.len() as u64;
     tape.push(wire(3, end_seq, 0, &first_end));
-    let end_chunks: Vec<_> = canonical[65536..].chunks(65536).collect();
+    let end_chunks: Vec<_> = ending[65536..].chunks(65536).collect();
     tape.extend(continued(3, end_seq + 1, &end_chunks, 2));
     // The writer writes the root's END block last.
     tape.push(EXAMPLE_END.to_vec());
@@ -597,7 +601,7 @@ fn entry_and_end() {
 }
 
 #[test]
-fn format_17_bytes_rl6() {
+fn format_18_bytes_rl6() {
     let root = root_header();
     let source = [root.clone(), EXAMPLE_END.to_vec()].concat();
     let (mut index, header) = Index::open(read(&source)).unwrap();

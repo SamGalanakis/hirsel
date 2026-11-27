@@ -49,6 +49,8 @@ fn spawn_entries_start_each_helper_as_its_spawn_does() {
             let Some(Frame::HelperEnd { ending, .. }) = frames.last() else {
                 panic!("{backend:?} root.{spawn}: {frames:?}");
             };
+            // The result, then the residual: 0, as the helper had no bound.
+            let r = [r.as_slice(), &[0]].concat();
             assert_eq!(ending.body(), r.as_slice(), "{backend:?} root.{spawn}");
         }
     }

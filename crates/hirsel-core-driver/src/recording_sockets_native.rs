@@ -151,7 +151,7 @@ fn rl9_accepted_socket_crosses() {
             takes,
             [
                 [vec![0, g + 6], socket(&peer, g + 8)].concat(),
-                [vec![4, g + 9, 0, 8, 2], vec![0; 7], vec![0, 0]].concat(),
+                [vec![4, g + 9, 0, 8, 2], vec![0; 7], vec![0, 0, 0]].concat(),
             ],
             "{backend:?}: the item take names g+8; the end take keeps no survivor"
         );

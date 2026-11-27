@@ -120,11 +120,11 @@ impl Encoder {
                 args.encode(out);
                 o.encode(*op, out, rest);
             }
-            Frame::Wake { gap, task } | Frame::Cancel { gap, task } => {
-                out.push(if matches!(f, Frame::Wake { .. }) {
-                    F_WAKE
-                } else {
-                    F_CANCEL
+            Frame::Wake { gap, task } | Frame::Cancel { gap, task } | Frame::Turn { gap, task } => {
+                out.push(match f {
+                    Frame::Wake { .. } => F_WAKE,
+                    Frame::Turn { .. } => F_TURN,
+                    _ => F_CANCEL,
                 });
                 put_varint(out, *gap);
                 self.task(out, start, *task);
@@ -341,7 +341,7 @@ impl Decoder {
             }
             let has_task = matches!(
                 kind,
-                F_ISSUE | F_DONE | F_OP | F_WAKE | F_CANCEL | F_WAIT | F_RETIRED
+                F_ISSUE | F_DONE | F_OP | F_WAKE | F_CANCEL | F_WAIT | F_RETIRED | F_TURN
             );
             if head & T != 0 && !has_task {
                 return Err(Corrupt);
@@ -380,6 +380,10 @@ impl Decoder {
             }
             let frame = match kind {
                 F_WAIT => Frame::Wait {
+                    gap: c.varint()?,
+                    task: self.task(head, &mut c)?,
+                },
+                F_TURN => Frame::Turn {
                     gap: c.varint()?,
                     task: self.task(head, &mut c)?,
                 },

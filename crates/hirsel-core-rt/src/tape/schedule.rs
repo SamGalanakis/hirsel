@@ -95,6 +95,16 @@ impl Hooks for TapeHooks {
             live.schedule.selected = Some(task);
         });
     }
+    fn dispatch(&self, group: Group) {
+        group.with(|live| {
+            if live.mode == Mode::Record {
+                live.write_input(Frame::Turn {
+                    gap: 0,
+                    task: group.task,
+                });
+            }
+        });
+    }
     fn replaying(&self, group: Group) -> bool {
         group
             .with(|live| live.mode == Mode::Replay)
@@ -310,6 +320,7 @@ impl Live {
         let (gap, turn) = match rep.peek() {
             Ok(frame) => match *frame {
                 Frame::Wait { gap, task } => (gap, Turn::Wait(task)),
+                Frame::Turn { gap, task } => (gap, Turn::Dispatch(task)),
                 Frame::Grant { gap, .. } => (gap, Turn::Grant),
                 Frame::End { gap, ref ending } => {
                     let turn = if ending.kind == END_DEADLOCK {
@@ -393,6 +404,7 @@ impl Live {
         let gap = self.schedule.events - self.schedule.last;
         match &mut frame {
             Frame::Wait { gap: g, .. }
+            | Frame::Turn { gap: g, .. }
             | Frame::Grant { gap: g, .. }
             | Frame::Wake { gap: g, .. }
             | Frame::Cancel { gap: g, .. }

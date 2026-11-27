@@ -86,12 +86,15 @@ impl Machine<'_> {
                 }
                 let rb = self.block(self.held(r), None, 0, None);
                 // The child's primary cell is part of the spawn's charge to `cur`.
-                let inherited = t
-                    .step_bounds
-                    .last()
-                    .map(|bound| self.step_bound(bound.left));
+                // MEM-30: a same-unit child shares the spawner's account; a
+                // helper takes a private grant of half of it.
+                let (step_bounds, steps) = if unit {
+                    self.grant_steps(t)
+                } else {
+                    (self.share_steps(t), None)
+                };
                 let mut child = Task {
-                    step_bounds: inherited.into_iter().collect(),
+                    step_bounds,
                     slice_steps: 0,
                     limits: vec![lim],
                     chain: Vec::new(),
@@ -136,6 +139,7 @@ impl Machine<'_> {
                     cells: Vec::new(),
                     chain: Vec::new(),
                     primary: None,
+                    steps,
                 });
                 // CONC-3: the child is readied at the tail and the parent goes on.
                 child.k = i + 1;
@@ -607,7 +611,11 @@ impl Machine<'_> {
         let l = c.limit.take().unwrap();
         let cells = std::mem::take(&mut c.cells);
         let primary = c.primary.take();
+        let steps = c.steps.take();
         self.refund(l, n);
+        if let Some(grant) = steps {
+            self.settle_steps(grant);
+        }
         if let Some(p) = primary {
             self.refund(p.limit, p.amount);
         }

@@ -1067,6 +1067,7 @@ impl Tape {
                             Frame::End { .. } => Mismatch::Missing,
                             Frame::Grant { kind: k, .. } if k == kind => Mismatch::Schedule,
                             Frame::Wake { .. }
+                            | Frame::Turn { .. }
                             | Frame::Cancel { .. }
                             | Frame::Retired { .. }
                             | Frame::Done { .. }
@@ -1238,6 +1239,7 @@ fn finish(
                     || matches!(
                         frame,
                         Frame::Wake { .. }
+                            | Frame::Turn { .. }
                             | Frame::Cancel { .. }
                             | Frame::Retired { .. }
                             | Frame::Done { .. }

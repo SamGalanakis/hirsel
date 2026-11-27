@@ -24,6 +24,7 @@ fn frame(value: Frame) -> Value {
     match value {
         Frame::Wait { gap, task } => json!({"type":"WAIT","gap":gap,"task":task}),
         Frame::Wake { gap, task } => json!({"type":"WAKE","gap":gap,"task":task}),
+        Frame::Turn { gap, task } => json!({"type":"TURN","gap":gap,"task":task}),
         Frame::Cancel { gap, task } => json!({"type":"CANCEL","gap":gap,"task":task}),
         Frame::Retired {
             gap,
@@ -72,7 +73,7 @@ fn frame(value: Frame) -> Value {
             json!({"type":"END","gap":gap,"kind":ending.kind,"outcome":args(&ending.outcome)})
         }
         Frame::HelperEnd { gap, ending } => {
-            json!({"type":"END","gap":gap,"kind":ending.kind(),"body_hex":encode(ending.body())})
+            json!({"type":"END","gap":gap,"kind":ending.kind(),"body_hex":encode(ending.body()),"residual":ending.residual()})
         }
     }
 }

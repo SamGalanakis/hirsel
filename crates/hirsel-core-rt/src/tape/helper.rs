@@ -95,7 +95,8 @@ impl Helper {
     /// causes. Its scheduler has stopped, so no other frame follows. Returns
     /// the outcome for the parent's end `TAKE`, or why it has none. The
     /// result's capabilities and `Secret` words resolve through `context`, the
-    /// helper's, and its registry.
+    /// helper's, and its registry. `residual` is its step grant's unused
+    /// part (MEM-30), which the owner's take carries back to the donor.
     /// # Safety
     /// `result` holds an initialized `R` of `bytes` bytes, with `owners`,
     /// when `failed` is false; `context` and its host files are live.
@@ -108,6 +109,7 @@ impl Helper {
         owners: &[[u64; 4]],
         context: *const crate::Context,
         sockets: Option<&CrossingSockets>,
+        residual: u64,
     ) -> Result<EndTake, &'static str> {
         let mut handles = Vec::new();
         let mut grants = Vec::new();
@@ -164,7 +166,7 @@ impl Helper {
                     }
                 }
             };
-            Ok((HelperEnding::encode(&outcome), written))
+            Ok((HelperEnding::encode(&outcome, residual), written))
         });
         let take = |ending, written| EndTake {
             ending,
@@ -258,7 +260,7 @@ pub(crate) struct EndTake {
 pub(super) fn deadlock(gap: u64, events: u64) -> Frame {
     Frame::HelperEnd {
         gap,
-        ending: HelperEnding::encode(&HelperOutcome::Deadlock(events)),
+        ending: HelperEnding::encode(&HelperOutcome::Deadlock(events), 0),
     }
 }
 

@@ -897,6 +897,9 @@ pub struct HelperH {
     charge: Option<Held>,
     r_size: u64,
     result: ValueOut,
+    /// MEM-30: the account that granted the helper its steps, kept open until
+    /// the handle settles and the helper's residual goes back to it.
+    steps: Option<(Arc<crate::steps::Account>, u64)>,
     /// The owner's host files, whose registry designates a capability the
     /// helper's result hands back.
     #[cfg(feature = "record")]
@@ -922,6 +925,8 @@ struct Ended {
     /// Live charges for Secret designations and UDP pools paid by this helper.
     /// Its owner pays them from the end take on.
     charges: crate::secret::HandedOver,
+    /// MEM-30: the unused part of its step grant, returned to the donor.
+    residual: u64,
     /// Its outcome as the owner's end `TAKE` holds it, when it is recorded:
     /// the kind and body, or why it has none.
     #[cfg(feature = "record")]
@@ -999,7 +1004,8 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         tasks::before_commit();
         let u = unit();
         let (k, hctx) = u.ctx.spawn_unit();
-        let steps = crate::steps::remaining(&*context);
+        // MEM-30: the helper's private grant, debited now that it is admitted.
+        let (donor, steps) = crate::steps::grant(&mut *context).unzip();
         // The entry writes each socket as it leaves: detached first.
         let sockets = detach_sockets(context, input, socket_offsets(&xl));
         #[cfg(feature = "record")]
@@ -1018,6 +1024,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             port: hctx.port.clone(),
             charge: Some(held),
             r_size,
+            steps: donor.zip(steps),
             result: ValueOut {
                 bytes: rx.bytes,
                 owners: rx.owned(),
@@ -1134,7 +1141,7 @@ fn helper_main(
     unsafe {
         // The task record and primary cell are the owner's (outside n).
         let mut context = Context::with_unit_heap(n + 256 + 32);
-        crate::steps::install_inherited(&mut context, steps);
+        let grant = crate::steps::install_grant(&mut context, steps);
         context.run = run;
         context.foreign = foreign;
         context.set_map_keys(map_keys);
@@ -1195,6 +1202,7 @@ fn helper_main(
             .chain(lu.homed.drain())
             .collect();
         let charges = files.registry.run_grants().hand_over(context.payer());
+        let residual = grant.as_deref().map_or(0, crate::steps::residual);
         let rl = live_rows(result.as_ptr(), if failed == 0 { &ro } else { &[] });
         // The END writes each socket in the result as it leaves: detached first.
         let sockets = if failed == 0 {
@@ -1214,6 +1222,7 @@ fn helper_main(
             run_grants: context.payer().run_owned()
                 + lu.run_grants.drain(..).map(|held| held.bytes).sum::<u64>(),
             charges,
+            residual,
             #[cfg(feature = "record")]
             tape_end: tape.as_ref().map(|tape| {
                 let causes: Vec<_> = context.causes.iter().collect();
@@ -1225,6 +1234,7 @@ fn helper_main(
                     &ro,
                     &raw const context,
                     sockets.as_ref(),
+                    residual,
                 )
             }),
             #[cfg(feature = "record")]
@@ -1266,6 +1276,9 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: Option<*mut u8>)
                 crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitLedger"))
             });
         let ret = u.ctx.consume_helper(hb.k, false);
+        if let Some((donor, _)) = hb.steps.take() {
+            crate::steps::settle(donor, ended.residual);
+        }
         let mut held = hb.charge.take().unwrap();
         let mut chain = Causes::default();
         if !ended.failed {

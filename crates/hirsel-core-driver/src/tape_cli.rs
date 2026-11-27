@@ -215,6 +215,7 @@ fn write_text(writer: &mut impl Write, record: Record) -> io::Result<()> {
                     )?;
                 }
                 Frame::Wake { gap, task } => writeln!(writer, "WAKE gap={gap} task={task}")?,
+                Frame::Turn { gap, task } => writeln!(writer, "TURN gap={gap} task={task}")?,
                 Frame::Cancel { gap, task } => writeln!(writer, "CANCEL gap={gap} task={task}")?,
                 Frame::Choose { gap, index } => writeln!(writer, "CHOOSE gap={gap} index={index}")?,
                 Frame::Grant { gap, kind, args } => {
@@ -260,9 +261,10 @@ fn write_text(writer: &mut impl Write, record: Record) -> io::Result<()> {
                 )?,
                 Frame::HelperEnd { gap, ending } => writeln!(
                     writer,
-                    "END gap={gap} kind={} outcome={:?}",
+                    "END gap={gap} kind={} outcome={:?} residual={}",
                     ending.kind(),
-                    ending.outcome()
+                    ending.outcome(),
+                    ending.residual()
                 )?,
                 Frame::End { gap, ending } => writeln!(
                     writer,

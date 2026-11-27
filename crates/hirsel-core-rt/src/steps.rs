@@ -1,7 +1,28 @@
-//! MEM-30 step budgets and slice counters belong to one task.
+//! MEM-30 step accounts and per-task slice counters.
+//!
+//! `bound steps n` opens an account funded with n from the current one. A
+//! same-unit spawn makes the child a participant of the spawner's innermost
+//! account by identity (tasks.md CONC-10/15): no fuel moves. CONC-10 runs one
+//! task of a unit at a time, so one fiber spends an account at a time. A
+//! running fiber holds a prepaid window, `Context::steps`, of at most its slice
+//! remainder and the account's available credit; it returns the unspent part at
+//! every switch to idle, lexical bound switch and end, and draws again at its
+//! next charged step. No participant can spend credit another holds, and none
+//! overshoots by a step.
+//!
+//! An account closes when its last interest goes: the entering task's lexical
+//! exit, each participant's end, each nested account's close and each helper
+//! grant's settlement. On close its unused credit goes once to its funder. A
+//! helper (`spawn_unit`) gets a private root of floor(R / 2) of the donor's
+//! available R; the donor's unused-credit refund waits for the owner to consume
+//! or abandon the handle (`settle`).
+//!
+//! The first refused step latches the account exhausted. Late credit still
+//! accumulates for settlement at close, but cannot fund another step.
 use crate::{Context, causes};
 use hirsel_core_ids::work_steps::Work;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const UNBOUNDED: i64 = 1 << 62;
 /// EMB-3: in contained/embed mode, tasks without an explicit `bound steps`
@@ -20,15 +41,32 @@ pub(crate) fn initial_unbounded_steps() -> i64 {
     }
 }
 
-pub(crate) struct Bound {
+pub(crate) struct Account {
     id: u64,
-    left: u64,
+    /// The account this one returns its credit to; a helper's root has none.
+    parent: Option<Arc<Account>>,
+    state: Mutex<State>,
 }
 
+struct State {
+    left: u64,
+    interest: u32,
+    exhausted: bool,
+}
+
+impl State {
+    fn available(&self) -> u64 {
+        if self.exhausted { 0 } else { self.left }
+    }
+}
+
+/// A native fixture's view of the steps its context spends and its first
+/// refusal site.
 #[cfg(feature = "testing")]
 pub(crate) struct Observation {
     pub(crate) inject: Option<u64>,
-    window: Option<u64>,
+    /// `Context::steps` when the current window was drawn.
+    window: Option<i64>,
     steps: u64,
     refusal: Option<u64>,
 }
@@ -45,12 +83,13 @@ impl Observation {
     }
 
     pub(crate) fn report(&self, context: &Context) -> (u64, Option<u64>) {
-        (self.spent(window_left(context)), self.refusal)
+        (self.spent(context.steps), self.refusal)
     }
 
-    fn spent(&self, window_left: u64) -> u64 {
-        self.steps
-            .saturating_add(self.window.map_or(0, |start| start - window_left))
+    /// A step that outran its window and was paid by the next draw counts.
+    fn spent(&self, steps: i64) -> u64 {
+        let open = self.window.map_or(0, |start| (start - steps).max(0) as u64);
+        self.steps.saturating_add(open)
     }
 }
 
@@ -84,77 +123,206 @@ pub unsafe extern "C" fn hirsel_core_test_step_report(
     steps
 }
 
-fn bound(left: u64) -> Bound {
-    let id = NEXT
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .unwrap_or_else(|_| crate::run_stop::raise(crate::run_stop::Stop::from_static(b"StepIds")));
-    Bound { id, left }
+impl Account {
+    fn open(left: u64, parent: Option<Arc<Account>>) -> Arc<Self> {
+        let id = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .unwrap_or_else(|_| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"StepIds"))
+            });
+        Arc::new(Self {
+            id,
+            parent,
+            state: Mutex::new(State {
+                left,
+                interest: 1,
+                exhausted: false,
+            }),
+        })
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
-// The active bound and slice hold the tails beyond the emitter's common window.
-// Switching tasks leaves all three words intact.
+/// Drop one interest in `account`; the last closes it and passes its credit
+/// to its funder. Returns a closed root's unused credit.
+fn release(account: &Arc<Account>) -> Option<u64> {
+    let mut account = account.clone();
+    loop {
+        let left = {
+            let mut s = account.state();
+            s.interest -= 1;
+            if s.interest != 0 {
+                return None;
+            }
+            s.left
+        };
+        let Some(parent) = account.parent.clone() else {
+            return Some(left);
+        };
+        parent.state().left += left;
+        account = parent;
+    }
+}
+
+/// One participation in an account.
+pub(crate) struct Bound(Arc<Account>);
+
 fn window_left(context: &Context) -> u64 {
     context.steps.max(0) as u64
 }
 
-fn install_window(context: &mut Context, slice: u64) {
-    #[cfg(feature = "testing")]
-    {
-        let left = window_left(context);
-        if let Some(obs) = &mut context.step_observation {
-            obs.steps = obs.spent(left);
-        }
-    }
-    if let Some(current) = context.step_bounds.last_mut() {
-        let window = current.left.min(slice);
-        current.left -= window;
-        context.step_slice_tail = slice - window;
-        context.steps = window as i64;
-    } else {
-        context.step_slice_tail = slice;
-        context.steps = initial_unbounded_steps();
-    }
+/// Change the window, keeping a fixture's observation of what it spent.
+#[inline(always)]
+fn rewindow(context: &mut Context, change: impl FnOnce(&mut Context)) {
     #[cfg(feature = "testing")]
     if let Some(obs) = &mut context.step_observation {
-        obs.window = (!context.step_bounds.is_empty()).then_some(context.steps as u64);
+        obs.steps = obs.spent(context.steps);
+        obs.window = None;
+    }
+    change(context);
+    #[cfg(feature = "testing")]
+    if let Some(obs) = &mut context.step_observation {
+        obs.window = (!context.step_bounds.is_empty()).then_some(context.steps);
     }
 }
 
-pub(crate) fn inherit(child: &mut Context, parent: &Context) {
-    install_inherited(child, remaining(parent));
+/// Return the unspent window to the innermost account, keeping slice phase.
+fn flush(context: &mut Context) {
+    rewindow(context, |context| {
+        if let Some(current) = context.step_bounds.last() {
+            let window = window_left(context);
+            current.0.state().left += window;
+            context.step_slice_tail += window;
+            context.steps -= window as i64;
+        }
+    });
+}
+
+/// Lend the running fiber the rest of its slice the innermost account funds.
+fn draw(context: &mut Context) -> u64 {
+    let current = context.step_bounds.last().expect("a step account");
+    let mut s = current.0.state();
+    let window = s.available().min(context.step_slice_tail);
+    s.left -= window;
+    drop(s);
+    rewindow(context, |context| {
+        context.step_slice_tail -= window;
+        context.steps += window as i64;
+    });
+    window
+}
+
+/// The fiber is leaving the CPU: it holds no credit while it does not run.
+pub(crate) fn suspend(context: &mut Context) {
+    flush(context);
 }
 
 pub(crate) fn remaining(context: &Context) -> Option<u64> {
     context
         .step_bounds
         .last()
-        .map(|current| current.left + window_left(context))
+        .map(|current| current.0.state().available() + window_left(context))
 }
 
-pub(crate) fn install_inherited(child: &mut Context, remaining: Option<u64>) {
-    if let Some(remaining) = remaining {
-        child.step_bounds.push(bound(remaining));
-        install_window(child, SLICE);
+/// A same-unit child participates in the spawner's innermost account.
+pub(crate) fn share(child: &mut Context, parent: &Context) {
+    if let Some(current) = parent.step_bounds.last() {
+        current.0.state().interest += 1;
+        child.step_bounds.push(Bound(current.0.clone()));
+        child.step_slice_tail = SLICE;
+        child.steps = 0;
     }
 }
 
+/// A flow stage's private copy of the wiring task's remaining steps (MEM-30).
+pub(crate) fn copy(stage: &mut Context, parent: &Context) {
+    if let Some(left) = remaining(parent) {
+        stage.step_bounds.push(Bound(Account::open(left, None)));
+        stage.step_slice_tail = SLICE;
+        stage.steps = 0;
+        draw(stage);
+    }
+}
+
+/// A helper's grant: floor(R / 2) of the spawner's available R, and the donor
+/// account the handle keeps open until it settles.
+pub(crate) fn grant(context: &mut Context) -> Option<(Arc<Account>, u64)> {
+    flush(context);
+    let donor = context.step_bounds.last()?.0.clone();
+    let grant = {
+        let mut s = donor.state();
+        let grant = s.available() / 2;
+        s.left -= grant;
+        s.interest += 1;
+        grant
+    };
+    draw(context);
+    Some((donor, grant))
+}
+
+/// A helper's root context starts with its private grant, the account
+/// returned to read its residual once the helper's unit is done.
+pub(crate) fn install_grant(context: &mut Context, grant: Option<u64>) -> Option<Arc<Account>> {
+    let account = Account::open(grant?, None);
+    context.step_bounds.push(Bound(account.clone()));
+    context.step_slice_tail = SLICE;
+    context.steps = 0;
+    draw(context);
+    Some(account)
+}
+
+/// A helper root's unused credit once every participant has ended; credit
+/// a participant still holds is not returned.
+pub(crate) fn residual(root: &Account) -> u64 {
+    let s = root.state();
+    if s.interest == 0 { s.left } else { 0 }
+}
+
+/// The owner consumed or abandoned a helper's handle: its residual goes to the
+/// donor once, and the handle's interest goes.
+pub(crate) fn settle(donor: Arc<Account>, residual: u64) {
+    donor.state().left += residual;
+    release(&donor);
+}
+
+/// A task ended: its interest in each account still on its stack.
+pub(crate) fn end(context: &mut Context) {
+    flush(context);
+    while let Some(Bound(account)) = context.step_bounds.pop() {
+        release(&account);
+    }
+    context.steps = initial_unbounded_steps();
+}
+
+/// Whether two tasks hold a common account.
+#[cfg(feature = "record")]
+pub(crate) fn shares(a: &Context, b: &Context) -> bool {
+    a.step_bounds
+        .iter()
+        .any(|x| b.step_bounds.iter().any(|y| Arc::ptr_eq(&x.0, &y.0)))
+}
+
 pub(crate) fn is_active(context: &Context, id: u64) -> bool {
-    context.step_bounds.iter().any(|bound| bound.id == id)
+    context.step_bounds.iter().any(|bound| bound.0.id == id)
 }
 
 fn leave(context: &mut Context) {
-    let window = window_left(context);
     #[cfg(feature = "prof")]
     if let Some(left) = remaining(context) {
         crate::mem_prof::step_remaining(left);
         crate::mem_prof::scope_exit(1);
     }
-    let left = context.step_bounds.pop().expect("an open step scope").left + window;
-    if let Some(parent) = context.step_bounds.last_mut() {
-        parent.left += left;
+    flush(context);
+    let Bound(account) = context.step_bounds.pop().expect("an open step scope");
+    release(&account);
+    if context.step_bounds.is_empty() {
+        context.steps = initial_unbounded_steps();
+    } else {
+        draw(context);
     }
-    let slice = context.step_slice_tail + window;
-    install_window(context, slice);
 }
 
 /// # Safety
@@ -180,29 +348,35 @@ pub unsafe extern "C" fn hirsel_core_step_enter_at(
         .as_mut()
         .and_then(|obs| obs.inject.take())
         .unwrap_or(steps);
-    let window = window_left(context);
-    let mut slice = context.step_slice_tail;
-    if let Some(current) = context.step_bounds.last_mut() {
-        let left = current.left + window;
-        if left < steps {
+    let parent = context.step_bounds.last().map(|b| b.0.clone());
+    if let Some(current) = &parent {
+        flush(context);
+        let mut s = current.state();
+        if s.available() < steps {
             #[cfg(feature = "testing")]
             if let Some(obs) = &mut context.step_observation {
                 obs.refusal.get_or_insert(_site);
             }
             #[cfg(feature = "prof")]
             {
-                crate::mem_prof::step_remaining(left);
+                crate::mem_prof::step_remaining(s.available());
                 crate::mem_prof::scope_enter(1, 0, steps, true);
             }
+            drop(s);
+            draw(context);
             return false;
         }
-        current.left = left - steps;
+        s.left -= steps;
+        s.interest += 1;
         #[cfg(feature = "prof")]
-        crate::mem_prof::step_remaining(current.left);
-        slice += window;
+        crate::mem_prof::step_remaining(s.left);
+    } else {
+        context.steps = 0;
     }
-    context.step_bounds.push(bound(steps));
-    install_window(context, slice);
+    context
+        .step_bounds
+        .push(Bound(Account::open(steps, parent)));
+    draw(context);
     #[cfg(feature = "prof")]
     crate::mem_prof::scope_enter(1, 0, steps, false);
     true
@@ -222,7 +396,7 @@ pub unsafe extern "C" fn hirsel_core_step_leave(context: *mut Context) {
 pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
     // SAFETY: the caller owns this task and an entered scope.
     let context = unsafe { &mut *context };
-    let id = context.step_bounds.last().expect("an open step scope").id;
+    let id = context.step_bounds.last().expect("an open step scope").0.id;
     let caught = context.causes.iter().next().is_some()
         && context
             .causes
@@ -320,34 +494,39 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
     if crate::run_stop::is_ended() {
         crate::run_stop::leave_on_ended();
     }
-    if ctx.steps < 0
-        && let Some(current) = ctx.step_bounds.last()
-    {
+    // The window is spent (0) or a step outran it (< 0): end a full slice,
+    // then draw for any unpaid step and the rest of the slice.
+    while ctx.steps <= 0 {
+        if ctx.step_slice_tail == 0 {
+            ctx.step_slice_tail = SLICE;
+            crate::tasks::before_commit();
+            crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
+            // SAFETY: the window is flushed at the switch; no borrow spans it.
+            unsafe { crate::tasks::step_checkpoint() };
+            continue;
+        }
+        if draw(ctx) != 0 {
+            continue;
+        }
+        if ctx.steps == 0 {
+            // Nothing left to lend: the next step is refused here.
+            return 0;
+        }
         #[cfg(feature = "testing")]
         if let Some(obs) = &mut ctx.step_observation {
             obs.refusal.get_or_insert(site);
         }
+        let current = ctx.step_bounds.last().unwrap();
+        current.0.state().exhausted = true;
+        let id = current.0.id;
         #[cfg(feature = "prof")]
         crate::mem_prof::step_refused();
         ctx.steps = 0;
         let mut cause = causes::Cause::new(causes::OUT_OF_TIME, site);
-        cause.message.data = std::ptr::without_provenance_mut(current.id as usize);
+        cause.message.data = std::ptr::without_provenance_mut(id as usize);
         // SAFETY: the failed step owns the active obligation's primary cell.
         unsafe { causes::record(ctx, cause) };
         return 1;
-    }
-    let slice_end = ctx.step_slice_tail == 0;
-    let slice = if slice_end {
-        SLICE
-    } else {
-        ctx.step_slice_tail
-    };
-    install_window(ctx, slice);
-    if slice_end {
-        crate::tasks::before_commit();
-        crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
-        // SAFETY: the step window is installed and no borrow spans the switch.
-        unsafe { crate::tasks::step_checkpoint() };
     }
     0
 }

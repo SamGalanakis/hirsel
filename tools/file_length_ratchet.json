@@ -405,9 +405,9 @@
     "reason": "macos-mac-day-2809"
   },
   "crates/hirsel-core-rt/src/tape/mod.rs": {
-    "lines": 1868,
-    "raise_revision": 5,
-    "reason": "cli-s4-secret-2713"
+    "lines": 1870,
+    "raise_revision": 6,
+    "reason": "run-budget-grant-accounting-3203: TURN frames and helper residuals"
   },
   "crates/hirsel-core-rt/src/tape/schedule_cases.rs": {
     "lines": 1750
@@ -445,9 +445,9 @@
     "reason": "coverage-c2-runner-2577"
   },
   "crates/hirsel-core-rt/src/units_lang.rs": {
-    "lines": 1383,
-    "raise_revision": 2,
-    "reason": "unit-tapes-u4b-root-2841: unit replay of the root's stream"
+    "lines": 1369,
+    "raise_revision": 4,
+    "reason": "run-budget-grant-accounting-3203: TURN frames and helper residuals"
   },
   "crates/hirsel-core-rt/src/units_ledger.rs": {
     "lines": 1655,

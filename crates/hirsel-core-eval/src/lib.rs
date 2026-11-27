@@ -54,6 +54,7 @@ use sha256::sha256_blocks;
 mod sha512;
 mod signature;
 mod simd;
+mod step_accounts;
 mod world_ops;
 
 pub use map::run_map_hash;
@@ -689,9 +690,10 @@ struct Reservation {
     chain: Vec<Cause>,
     cells: Vec<(Limit, u64)>,
 }
+/// A participation in a MEM-30 step account (`step_accounts`).
+#[derive(Clone, Copy)]
 struct StepBound {
     id: u64,
-    left: u64,
 }
 struct Task {
     step_bounds: Vec<StepBound>,
@@ -752,6 +754,9 @@ struct Child {
     primary: Option<Cell>,
     /// Its causes, primary first, while no `Causes` holds them.
     chain: Vec<Cause>,
+    /// A helper's step grant: its donor account and private root, settled
+    /// when the handle is consumed or abandoned (`step_accounts`).
+    steps: Option<(u64, u64)>,
 }
 impl Machine<'_> {
     fn next_id(&mut self) -> u64 {
@@ -793,7 +798,7 @@ struct Machine<'m, H = WorldHost<'m>> {
     recipes: std::borrow::Cow<'m, [RecipeRow]>,
     mem: Blocks,
     root: Option<Limit>,
-    next_step_bound: u64,
+    step_book: step_accounts::StepBook,
     peak_reserved: u64,
     regions: Vec<Vec<usize>>,
     /// Each live delivered `Causes`, by its head cell: the charged cells it owns.
@@ -1729,7 +1734,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             ..MapKeys::new(input.map_hash_key.unwrap_or_else(map::fresh_key))
         };
         Self {
-            next_step_bound: 1,
+            step_book: step_accounts::StepBook::default(),
             m,
             recipes,
             mem: Blocks::default(),
@@ -1934,7 +1939,7 @@ impl<'m> Machine<'m> {
     /// What a parked task's slot holds while its baton runs elsewhere.
     fn shell(&self) -> Machine<'m> {
         Machine {
-            next_step_bound: 1,
+            step_book: step_accounts::StepBook::default(),
             m: self.m,
             recipes: std::borrow::Cow::Borrowed(&[]),
             mem: Blocks::default(),
@@ -2947,6 +2952,7 @@ impl Machine<'_> {
         c.cells = std::mem::take(&mut t.cells);
         c.chain = std::mem::take(&mut t.chain);
         c.primary = t.obligations[0].take();
+        self.end_steps(t);
         let id = self.host.sched.tasks[t.k].id;
         self.event(END, id, u64::from(status != 0));
         self.host.sched.tasks[t.k].state = State::Ended;
@@ -4301,32 +4307,17 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 self.take_work(t, work, &a[..1])?;
                 vec![]
             }
-            RtOp::StepEnter => {
-                let n = self.step_injection.take().unwrap_or(a[0]);
-                if let Some(parent) = t.step_bounds.last().filter(|p| p.left < n) {
-                    pure::root_steps_out(parent.id);
-                    if self.observe_steps && self.step_refusal.is_none() {
-                        self.step_refusal = self.site(t);
-                    }
-                    vec![0]
-                } else {
-                    if let Some(parent) = t.step_bounds.last_mut() {
-                        parent.left -= n;
-                    }
-                    t.step_bounds.push(self.step_bound(n));
-                    vec![1]
-                }
-            }
+            RtOp::StepEnter => vec![u64::from(self.step_enter(t, a[0]))],
             RtOp::StepLeave => {
-                Self::step_leave(t);
+                self.step_leave(t);
                 vec![]
             }
             RtOp::StepCatch => {
-                let bound = Self::step_leave(t);
+                let id = self.step_leave(t);
                 let caught = !t.chain.is_empty()
                     && t.chain
                         .iter()
-                        .all(|c| c.kind == "OutOfTime" && c.message[0] == bound.id);
+                        .all(|c| c.kind == "OutOfTime" && c.message[0] == id);
                 if caught {
                     t.chain.clear();
                     let mut cells = std::mem::take(&mut t.cells).into_iter();

@@ -117,7 +117,7 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
     let due = tape::due(Some(group), u.pumping, layout, registry);
     // SAFETY: `u.files` lives with the unit.
     unsafe { install_arrived_sockets(Some(group), u.files) };
-    let (key, outcome, survivors) = match due {
+    let (key, outcome, residual, survivors) = match due {
         None => return false,
         Some(tape::Due::Cancel) => {
             if !u.root.is_null() {
@@ -129,8 +129,9 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
         Some(tape::Due::End {
             key,
             outcome,
+            residual,
             survivors,
-        }) => (key, outcome, survivors),
+        }) => (key, outcome, residual, survivors),
         Some(tape::Due::Item { conn, mut flat }) => {
             let Some(&ih) = u.inboxes.get(&conn) else {
                 tape::refuse_take(Some(group), "an item for a dropped inbox");
@@ -212,13 +213,22 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
     };
     let h = u.helpers[&key];
     // SAFETY: `h` is a registered helper handle of this unit.
-    let (r_size, held_bytes, result_owners) = unsafe {
+    let (r_size, held_bytes, result_owners, grant) = unsafe {
         (
             (*h).r_size,
             (*h).charge.as_ref().map_or(0, |c| c.bytes),
             &(*h).result.owners,
+            (*h).steps.as_ref().map_or(0, |&(_, grant)| grant),
         )
     };
+    // MEM-30: a helper returns at most the grant this owner debited for it.
+    if residual > grant {
+        tape::diverged_take(
+            Some(group),
+            "a helper end returns more steps than its grant",
+        );
+        return false;
+    }
     let mut ret = Value::empty();
     let ended = match outcome {
         Ok(packed) => {
@@ -232,6 +242,7 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
                 survivors: Vec::new(),
                 run_grants: 0,
                 charges: Vec::new(),
+                residual,
                 tape_end: None,
                 replay_survivors: survivors,
             }
@@ -243,6 +254,7 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
             survivors: Vec::new(),
             run_grants: 0,
             charges: Vec::new(),
+            residual,
             tape_end: None,
             replay_survivors: survivors,
         },

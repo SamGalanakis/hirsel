@@ -36,7 +36,7 @@ pub use units::{
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 17;
+pub const FORMAT: u16 = 18;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -79,6 +79,9 @@ pub const F_WAIT: u8 = 11;
 pub const F_REPEAT: u8 = 12;
 pub const F_RETIRED: u8 = 13;
 pub const F_TAKE: u8 = 14;
+/// The scheduler dispatched a task that shares a step account with another
+/// live task of its unit (MEM-30): the next fiber to spend it.
+pub const F_TURN: u8 = 15;
 /// The head bit saying a task varint follows.
 pub const T: u8 = 0x10;
 
@@ -511,6 +514,11 @@ pub enum Frame {
         out: Out,
     },
     Wake {
+        gap: u64,
+        task: u64,
+    },
+    /// The dispatch of a task sharing a step account with another live task.
+    Turn {
         gap: u64,
         task: u64,
     },

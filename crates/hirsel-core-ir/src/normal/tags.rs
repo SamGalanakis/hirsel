@@ -414,6 +414,10 @@ tags!(RtOp {
     83 => Closed(part0),
     84 => ReceiveUntil { item },
     85 => WorkSteps,
+    86 => GlueMark,
+    87 => GluePush,
+    88 => GluePop,
+    89 => GlueCut,
 });
 
 tags!(Wait {

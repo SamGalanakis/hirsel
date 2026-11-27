@@ -617,6 +617,24 @@ impl FunctionEmitter<'_> {
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),
+            RtOp::GlueMark => self.native_call("hirsel_core_glue_mark", &[U], &[ptr(CONTEXT)]),
+            RtOp::GluePush => self.native_call(
+                "hirsel_core_glue_push",
+                &[],
+                &[
+                    ptr(CONTEXT),
+                    p(&args[0]),
+                    p(&args[1]),
+                    u(&args[2]),
+                    u(&args[3]),
+                ],
+            ),
+            RtOp::GluePop => {
+                self.native_call("hirsel_core_glue_pop", &[P], &[ptr(CONTEXT), u(&args[0])])
+            }
+            RtOp::GlueCut => {
+                self.native_call("hirsel_core_glue_cut", &[], &[ptr(CONTEXT), u(&args[0])])
+            }
             RtOp::Sha256Blocks => self.native_call(
                 "hirsel_core_sha256_blocks",
                 &[],

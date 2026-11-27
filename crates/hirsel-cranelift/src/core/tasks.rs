@@ -1,5 +1,6 @@
 //! Closed runtime rows bind the published task and provider C ABI.
 mod argon2;
+mod glue;
 mod host;
 mod map_placement;
 mod signature;
@@ -670,6 +671,9 @@ impl Function<'_, '_, '_> {
             RtOp::ZeroBytes => {
                 self.c_call("hirsel_core_zero_bytes", &[P, P, U], &[], &args[..3])?;
                 0
+            }
+            RtOp::GlueMark | RtOp::GluePush | RtOp::GluePop | RtOp::GlueCut => {
+                self.glue_worklist(op, &args, &mut outputs)?
             }
             RtOp::Crc32c => {
                 outputs[0] = self.c_call("hirsel_core_crc32c", &[W, P, U], &[W], &args[..3])?[0];

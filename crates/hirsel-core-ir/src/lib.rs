@@ -506,6 +506,24 @@
 //! zero. Engines map it to `void hirsel_core_zero_bytes(uint8_t *, uint8_t *,
 //! uint64_t)`, with no context or status.
 //!
+//! # Glue worklist
+//!
+//! FAIL-17: generated glue uses an amount of stack set by its type alone. The
+//! equality, ordering and hash glue of a recursive type walks the type's
+//! recursive component in one body. Each place it has to come back to, the rest
+//! of a record or the next element of a sequence, is one worklist entry of four
+//! words `(place, place, resume, index)`; it then goes on into the child in the
+//! same frame. A child in last position needs no entry, so a chain whose
+//! recursion is its last field never touches the worklist. `rt.glue_mark() ->
+//! u64` is the task's worklist depth at a walk's entry, `rt.glue_push(a, b, k,
+//! i)` pushes an entry, `rt.glue_pop(mark) -> ptr` pops the top entry above
+//! `mark` (a pointer to its four words, valid until the next push; null at the
+//! mark) and `rt.glue_cut(mark)` truncates to `mark`, which every early exit
+//! does. The worklist is engine bookkeeping: it admits nothing, takes no step
+//! and never fails; the host refusing to grow it is the run stop `HostMemory`.
+//! Engines map the rows to `hirsel_core_glue_mark`, `_push`, `_pop` and `_cut`,
+//! each taking the context first.
+//!
 //! # Identities
 //!
 //! `rt.dest_id` is the run's one counter of fresh `u64` identities: a

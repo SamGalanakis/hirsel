@@ -140,6 +140,10 @@ impl RtOp {
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha1Blocks | RtOp::Sha1Compress => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::ZeroBytes => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::GlueMark => (vec![], vec![u64_]),
+            RtOp::GluePush => (vec![V(p), V(p), V(u64_), V(u64_)], vec![]),
+            RtOp::GluePop => (vec![V(u64_)], vec![p]),
+            RtOp::GlueCut => (vec![V(u64_)], vec![]),
             RtOp::Sha256Blocks | RtOp::Sha512Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Crc32c => {
                 let u32_ = Ty::Scalar(Scalar::U32);
@@ -259,6 +263,10 @@ impl RtOp {
             | RtOp::Sha1Blocks
             | RtOp::Sha1Compress
             | RtOp::ZeroBytes
+            | RtOp::GlueMark
+            | RtOp::GluePush
+            | RtOp::GluePop
+            | RtOp::GlueCut
             | RtOp::Sha256Blocks
             | RtOp::Sha512Blocks
             | RtOp::Crc32c

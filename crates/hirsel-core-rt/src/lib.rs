@@ -61,6 +61,7 @@ mod os_resolve;
 mod os_tls;
 use host::unix_api as os_unix;
 pub use os_tls::packet_cipher::PacketCipher;
+pub mod glue;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;
@@ -176,6 +177,8 @@ pub struct Context {
     pub(crate) root_limit: u64,
     /// The cause in `causes` that the root limit refused, if any (PROG-3).
     pub(crate) root_refusal: *const causes::Cause,
+    /// FAIL-17's glue worklist ([`glue`]).
+    pub(crate) glue: Vec<[u64; 4]>,
 }
 
 const _: () = {
@@ -268,6 +271,7 @@ impl Context {
             contained: Default::default(),
             root_limit,
             root_refusal: std::ptr::null(),
+            glue: Vec::new(),
         }
     }
 

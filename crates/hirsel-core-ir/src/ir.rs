@@ -984,6 +984,16 @@ pub enum RtOp {
     },
     /// SHA-1 compression of complete blocks, without padding.
     Sha1Compress,
+    /// FAIL-17 glue worklist (crate docs, "Glue worklist"): the running task's
+    /// worklist depth, the mark a walk truncates back to.
+    GlueMark,
+    /// Push one four-word entry `(place, place, resume, index)` on the worklist.
+    GluePush,
+    /// Pop the top entry above the mark operand: a pointer to its four words, valid
+    /// until the next push, or null when the worklist is at the mark.
+    GluePop,
+    /// Truncate the worklist to the mark operand.
+    GlueCut,
     /// A function on LANG-20's closed list is reached; [`CLOSED`] names it by
     /// index. It does nothing at run time. A constant's initialiser that
     /// reaches it stops there, and the constant is refused.

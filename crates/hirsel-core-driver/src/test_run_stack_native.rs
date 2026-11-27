@@ -3,7 +3,8 @@
 // law holds in main on a task stack, and a 10 MiB
 // chain of non-recursive frames fails a spawned task with `Stack` (its join is an
 // error) or is caught by an isolate inside it, and an uncaught `Stack` in main ends
-// the run with status 101 and a `Stack at` cause line (PROG-3). Oracle: FAIL-17.
+// the run with status 101 and a `Stack at` cause line (PROG-3). The walk laws compare
+// and hash values a million levels deep. Oracle: FAIL-17.
 const FAIL17_TESTS: &str = r#"
 @test
 fn fiber_caught(tasks: Tasks) -> Result[(), Exit] waits {
@@ -23,6 +24,14 @@ fn fiber_uncaught(tasks: Tasks) -> Result[(), Exit] waits {
 }
 @test
 fn main_uncaught() -> Result[(), ()] { let _ = c01(0u64); Ok(()) }
+@test
+fn walk_laws() -> Result[(), Exit] {
+    if tail_walks(1000000u64) != 1u64 { return Error(Exit(status: 20)) }
+    if head_walks(1000000u64) != 1u64 { return Error(Exit(status: 21)) }
+    if kids_walk(300000u64) != 1u64 { return Error(Exit(status: 22)) }
+    if grid_walk(150000u64) != 1u64 { return Error(Exit(status: 23)) }
+    Ok(())
+}
 @test
 fn main_laws() -> Result[(), Exit] {
     if recursion_caught() != 1u64 { return Error(Exit(status: 10)) }
@@ -46,11 +55,18 @@ fn fail17_stack_laws(backend: Backend) {
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
     let test = |name: &str| DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
     let mut options = native_options(backend, dir.path());
-    options.root_limit = 1 << 20;
     options.grant_mask = 1 << grant_kind("Tasks").unwrap();
     for optimize in [false, true] {
         options.optimize = optimize;
-        for (name, code) in [("main_laws", 0), ("fiber_caught", 0), ("fiber_uncaught", 0), ("main_uncaught", 101)] {
+        // The walk laws hold two values a million levels deep at once.
+        for (name, code, limit) in [
+            ("main_laws", 0, 1 << 20),
+            ("walk_laws", 0, 1 << 28),
+            ("fiber_caught", 0, 1 << 20),
+            ("fiber_uncaught", 0, 1 << 20),
+            ("main_uncaught", 101, 1 << 20),
+        ] {
+            options.root_limit = limit;
             options.output = dir.path().join(format!("{name}-{optimize}"));
             let outcome = product.run_test(&test(name), &options).unwrap();
             let stderr = String::from_utf8_lossy(&outcome.output.stderr);

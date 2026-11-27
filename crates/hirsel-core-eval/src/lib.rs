@@ -810,6 +810,10 @@ struct Machine<'m, H = WorldHost<'m>> {
     trace: Vec<u64>,
     /// The last destination identity handed out (`rt.dest_id`).
     dests: u64,
+    /// FAIL-17's glue worklist (`rt.glue_push`), and the fixed block `rt.glue_pop`
+    /// copies the popped entry into (0 until the first pop).
+    glue: Vec<[u64; 4]>,
+    glue_entry: u64,
     admissions: usize,
     instructions: u64,
     /// What a flat run that outran `instructions` still owes ([`flat`]).
@@ -1746,6 +1750,8 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             array_steps: Vec::new(),
             trace: Vec::new(),
             dests: 0,
+            glue: Vec::new(),
+            glue_entry: 0,
             admissions: 0,
             instructions: input.instructions,
             owed: 0,
@@ -1951,6 +1957,8 @@ impl<'m> Machine<'m> {
             array_steps: Vec::new(),
             trace: Vec::new(),
             dests: 0,
+            glue: Vec::new(),
+            glue_entry: 0,
             admissions: 0,
             instructions: 0,
             owed: 0,
@@ -4554,6 +4562,30 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 if a[2] != 0 {
                     self.put(a[1], &vec![0; a[2] as usize]);
                 }
+                vec![]
+            }
+            RtOp::GlueMark => vec![self.glue.len() as u64],
+            RtOp::GluePush => {
+                self.glue.push([a[0], a[1], a[2], a[3]]);
+                vec![]
+            }
+            RtOp::GluePop => {
+                if self.glue.len() as u64 <= a[0] {
+                    return Ok(vec![0]);
+                }
+                let entry = self.glue.pop().unwrap();
+                if self.glue_entry == 0 {
+                    self.glue_entry = self.block(32, None, 0, None);
+                    self.mem[split(self.glue_entry).0].fixed = true;
+                }
+                let bytes = &mut self.mem[split(self.glue_entry).0].bytes;
+                for (i, word) in entry.into_iter().enumerate() {
+                    bytes[i * 8..i * 8 + 8].copy_from_slice(&word.to_le_bytes());
+                }
+                vec![self.glue_entry]
+            }
+            RtOp::GlueCut => {
+                self.glue.truncate(a[0] as usize);
                 vec![]
             }
             RtOp::Sha256Blocks => {

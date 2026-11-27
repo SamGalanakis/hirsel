@@ -439,10 +439,12 @@ functions.
   it works on a recursive type of any depth: a `Box` chain, a tree, a nested `List`.
   - Drop and `clone` need no worklist: a drop walks and frees the value, and a `clone`
     links each copied node through the copy it is building.
-  - Equality, ordering and hashing walk with a worklist of at most one word for each level
-    of nesting below the current node. The nodes on that path are already charged, so the
-    worklist is engine bookkeeping like drop flags (MEM-19), and `==` never fails with
-    `Capacity`. The host refusing it is the run stop `HostMemory`.
+  - Equality, ordering and hashing walk with a worklist that holds one entry of four words
+    for each field still to visit on the path to the current node; a node's last field is
+    visited without an entry. The nodes on that path are already charged, so the worklist
+    is engine bookkeeping like drop flags (MEM-19), and `==` never fails with `Capacity`.
+    The host refusing it is the run stop `HostMemory`. A failure inside the walk, such as
+    its depth step under a bound (MEM-30), leaves the worklist as it was before the walk.
   - Mechanical release still never fails (FAIL-13), and glue that admits still fails only
     with `Capacity` (MEM-21).
 - **Determinism.** Where an activation is refused depends on the build's frame sizes. Every

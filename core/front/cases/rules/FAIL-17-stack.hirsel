@@ -2,7 +2,9 @@
 // cause `Stack`. Only `isolate` catches it; `bound bytes` and `bound steps` do not, so it
 // passes through them to the enclosing isolate. A refusal releases the cleanup margin, so
 // finalizers of the unwinding frames run without a second `Stack`. A frame larger than
-// the allowance is refused when the function is built. Oracle: FAIL-17's text; each law
+// the allowance is refused when the function is built. Equality, ordering and hashing of
+// a recursive value walk it on the glue worklist, so a deep value never runs out of
+// stack in them. Oracle: FAIL-17's text; each law
 // answers 1 when it holds. These are reference runs: the native source runners call from
 // a C thread with no task stack, so Cranelift and LLVM run every law here on task stacks
 // through test_run_native.rs (`fail17_stack_laws`).
@@ -12,7 +14,11 @@
 // expect: reference run chain_caught() = 1 used 32
 // expect: reference run finalizer_within_margin() = 1 used 32
 // expect: reference run continues() = 1 used 32
-// expect: refuse FAIL-17 at 352:1
+// expect: reference run tail_walks(2000) = 1 used 0
+// expect: reference run head_walks(2000) = 1 used 0
+// expect: reference run kids_walk(2000) = 1 used 0
+// expect: reference run grid_walk(2000) = 1 used 0
+// expect: refuse FAIL-17 at 518:1
 
 // A 4 KiB frame per level: a million levels are far past the 7.5 MiB allowance.
 fn deep(n: u64) -> u64 {
@@ -347,6 +353,165 @@ fn continues() -> u64 {
     let first = recursion_caught()
     let second = recursion_caught()
     if first == 1u64 && second == 1u64 && deep(100u64) == 100u64 { 1u64 } else { 0u64 }
+}
+
+// Recursive key glue walks its value in constant stack: `==`, `<` and hashing of a
+// value a million levels deep finish inside the allowance, whatever field the
+// recursion goes through. Box last: no continuation per level.
+type Tail: key + ordered = End | Link(u64, Box[Tail])
+// Box first: every level leaves the scalar after it for later.
+type Head: key + ordered = Stop(u64) | Node(Box[Head], u64)
+// A list of boxes per level, the deep one first.
+type Kids: key + ordered = Leaf(u64) | Kids(List[Box[Kids]])
+// A list of lists of boxes per level.
+type Grid: key + ordered = Cell(u64) | Rows(List[List[Box[Grid]]])
+
+fn tail(n: u64, bottom: u64) -> Tail {
+    let mut c: Tail = Link(bottom, box.new(End))
+    let mut i = 0u64
+    while i < n {
+        let prev = take c
+        c = Link(i, box.new(take prev))
+        i += 1u64
+    }
+    c
+}
+
+fn head(n: u64, bottom: u64, top: u64) -> Head {
+    let mut c: Head = Stop(bottom)
+    let mut i = 0u64
+    while i < n {
+        let prev = take c
+        c = Node(box.new(take prev), i)
+        i += 1u64
+    }
+    Node(box.new(take c), top)
+}
+
+fn kids(n: u64, bottom: u64) -> Kids {
+    let mut c: Kids = Leaf(bottom)
+    let mut i = 0u64
+    while i < n {
+        let prev = take c
+        let mut xs: List[Box[Kids]] = list.new()
+        list.push(mut xs, box.new(take prev))
+        list.push(mut xs, box.new(Leaf(i)))
+        c = Kids(take xs)
+        i += 1u64
+    }
+    c
+}
+
+fn grid(n: u64, bottom: u64) -> Grid {
+    let mut c: Grid = Cell(bottom)
+    let mut i = 0u64
+    while i < n {
+        let prev = take c
+        let mut down: List[Box[Grid]] = list.new()
+        list.push(mut down, box.new(take prev))
+        let mut flat: List[Box[Grid]] = list.new()
+        list.push(mut flat, box.new(Cell(i)))
+        let mut rows: List[List[Box[Grid]]] = list.new()
+        list.push(mut rows, take down)
+        list.push(mut rows, take flat)
+        c = Rows(take rows)
+        i += 1u64
+    }
+    c
+}
+
+fn answer(take r: Result[Result[u64, Causes], Capacity]) -> u64 {
+    match take r {
+        Ok(Ok(v)) => v,
+        Ok(Error(_)) => 3u64,
+        Error(_) => 4u64,
+    }
+}
+
+fn found[K: key](take a: K, b: K) -> bool {
+    let mut m: Map[K, u64] = map.new()
+    map.insert(mut m, take a, 1u64)
+    match map.get(m, b) { Some(_) => true, None => false }
+}
+
+// Each law holds at most two values `n` levels deep at once. The evaluator runs them
+// shallower than the native engines (test_run_stack_native.rs) to save time.
+// Equal values compare equal and find each other in a map.
+fn tail_equal(n: u64) -> bool {
+    let a = tail(n, 7u64)
+    let b = tail(n, 7u64)
+    a == b && !(a < b) && !(b < a) && found(take a, b)
+}
+
+// A value differing at the bottom compares by that difference.
+fn tail_differs(n: u64) -> bool {
+    let a = tail(n, 7u64)
+    let c = tail(n, 8u64)
+    a != c && a < c && !(c < a) && !found(take a, c)
+}
+
+fn head_equal(n: u64) -> bool {
+    let a = head(n, 1u64, 9u64)
+    let b = head(n, 1u64, 9u64)
+    a == b && !(a < b) && !(b < a) && found(take a, b)
+}
+
+// The bottom decides before the top scalar after it, with a million continuations
+// left; a walk straight after that early answer starts clean.
+fn head_bottom_first(n: u64) -> bool {
+    let a = head(n, 1u64, 9u64)
+    let c = head(n, 2u64, 0u64)
+    let first = a < c
+    first && c == c && !(c < a) && a != c && !found(take a, c)
+}
+
+// A top scalar decides after the whole equal depth.
+fn head_top_last(n: u64) -> bool {
+    let a = head(n, 1u64, 9u64)
+    let d = head(n, 1u64, 10u64)
+    a < d && !(d < a) && a != d && !found(take a, d)
+}
+
+fn kids_equal(n: u64) -> bool {
+    let a = kids(n, 7u64)
+    let b = kids(n, 7u64)
+    a == b && !(a < b) && found(take a, b)
+}
+
+fn kids_differs(n: u64) -> bool {
+    let a = kids(n, 7u64)
+    let c = kids(n, 8u64)
+    a != c && a < c && !(c < a) && !found(take a, c)
+}
+
+fn grid_equal(n: u64) -> bool {
+    let a = grid(n, 7u64)
+    let b = grid(n, 7u64)
+    a == b && !(a < b) && found(take a, b)
+}
+
+fn grid_differs(n: u64) -> bool {
+    let a = grid(n, 7u64)
+    let c = grid(n, 8u64)
+    a != c && a < c && !(c < a) && !found(take a, c)
+}
+
+fn holds(ok: bool) -> u64 { if ok { 1u64 } else { 2u64 } }
+
+fn tail_walks(n: u64) -> u64 {
+    answer(isolate(fn() -> u64 { holds(tail_equal(n) && tail_differs(n)) }))
+}
+
+fn head_walks(n: u64) -> u64 {
+    answer(isolate(fn() -> u64 { holds(head_equal(n) && head_bottom_first(n) && head_top_last(n)) }))
+}
+
+fn kids_walk(n: u64) -> u64 {
+    answer(isolate(fn() -> u64 { holds(kids_equal(n) && kids_differs(n)) }))
+}
+
+fn grid_walk(n: u64) -> u64 {
+    answer(isolate(fn() -> u64 { holds(grid_equal(n) && grid_differs(n)) }))
 }
 
 // An 8 MiB frame is past the single-frame ceiling (the allowance).

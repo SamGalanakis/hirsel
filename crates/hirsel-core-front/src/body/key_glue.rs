@@ -5,6 +5,8 @@ mod runtime;
 use hirsel_core_ir::RtOp;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
+mod walk;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum KeyOp {
     Hash,
@@ -613,11 +615,18 @@ impl Derive<'_> {
             return Ok(row);
         }
         let mut ps = c.params(BlockId(0));
+        let raw = ps;
+        // A recursive type's predicates and fold walk its component in one body on the
+        // glue worklist (FAIL-17); `walk` reads region places itself.
+        let walks = matches!(
+            op,
+            KeyOp::Equal | KeyOp::Order | KeyOp::Fold | KeyOp::Ordered(_)
+        ) && !walk::component(self.module, ty).is_empty();
         // A key operation's value parameter is the place of the value as held (FORM
         // #115): a region value's place holds its block pointer, and its fields are in
         // the block (MEM-5). Reading it here, not at the caller, makes a generic body's
         // rigid `T` and a concrete caller pass the same thing.
-        if self.module.types[ty.index()].repr == LRepr::Region {
+        if self.module.types[ty.index()].repr == LRepr::Region && !walks {
             let values = match op {
                 KeyOp::Fold => 1,
                 KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_) => 2,
@@ -627,7 +636,9 @@ impl Derive<'_> {
                 *p = c.read(*p, Ty::Ptr);
             }
         }
-        self.depth_step(&mut c, op, ty);
+        if !walks {
+            self.depth_step(&mut c, op, ty);
+        }
         if op == KeyOp::Clone {
             self.clone_function(&mut c, ty, ps[0], ps[1])?;
             order_instructions(&mut c.body);
@@ -651,6 +662,15 @@ impl Derive<'_> {
         }
         let result = match op {
             KeyOp::NeedsDrop | KeyOp::Class => unreachable!("type properties return above"),
+            KeyOp::Equal | KeyOp::Order | KeyOp::Fold if walks => self.walk(&mut c, ty, op, raw)?,
+            KeyOp::Ordered(op) if walks => {
+                let f = self.function(ty, KeyOp::Order)?;
+                let x = c.address(raw[0], PlaceTy::Declared(ty));
+                let y = c.address(raw[1], PlaceTy::Declared(ty));
+                let order = self.call(&mut c, f, &[Arg::Address(x), Arg::Address(y)]);
+                let zero = c.typed_constant(Scalar::I8, 0);
+                Some(c.compare(op, order, zero))
+            }
             KeyOp::Hash | KeyOp::Place | KeyOp::Strong => {
                 Some(self.hash_type(&mut c, ty, ps[0], op)?)
             }
@@ -754,7 +774,7 @@ impl Derive<'_> {
             signature,
             args,
             results,
-            fail: None,
+            fail: c.unwind,
             cold: false,
         });
         c.inst(Inst::Call { call });
@@ -1985,6 +2005,8 @@ pub(super) struct Code {
     pub(super) body: Body,
     current: BlockId,
     open: Vec<Inst>,
+    /// Where a glue call's failure continues; a walk sets it to cut its worklist.
+    pub(super) unwind: Option<BlockId>,
 }
 impl Code {
     pub(super) fn new(params: &[Ty]) -> Self {
@@ -1992,6 +2014,7 @@ impl Code {
             body: Body::default(),
             current: BlockId(0),
             open: vec![],
+            unwind: None,
         };
         c.block(params);
         c
@@ -2570,6 +2593,23 @@ mod tests {
                 vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
                 None,
                 0x957b376efb4ab749,
+            ),
+            // A recursive type hashes in the order its fields are visited, depth first:
+            // Link(7, End(5)) is the words 1, 7, 0, 5; Node(Stop(5), 9), whose box comes
+            // first, is 1, 0, 5, 9 (the walk resumes the scalar after the box).
+            (
+                "type t0 = own \"chain\" | End { m:u64 } | Link { n:u64, next:box t0 }",
+                "static d0 = align 8 hex 05000000000000000000000000000000",
+                vec![(0, "u64", "const 7"), (8, "ptr", "static d0")],
+                Some(1),
+                0x1b75674e896b8286,
+            ),
+            (
+                "type t0 = own \"head\" | Stop { m:u64 } | Node { next:box t0, n:u64 }",
+                "static d0 = align 8 hex 00000000000000000500000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 9")],
+                Some(1),
+                0x3937cf5c1e896bd3,
             ),
         ];
         for (types, statics, fields, case, want) in vectors {

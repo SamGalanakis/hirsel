@@ -218,9 +218,9 @@
     "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-eval/src/lib.rs": {
-    "lines": 5981,
-    "raise_revision": 13,
-    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
+    "lines": 5777,
+    "raise_revision": 14,
+    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2596,
@@ -239,9 +239,9 @@
     "reason": "cli-s4-secret-2713"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
-    "lines": 2851,
-    "raise_revision": 4,
-    "reason": "comptime-eval-split-2612"
+    "lines": 2874,
+    "raise_revision": 5,
+    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
     "lines": 2295,
@@ -304,13 +304,13 @@
   },
   "crates/hirsel-core-ir/src/ir.rs": {
     "lines": 1533,
-    "raise_revision": 17,
-    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
+    "raise_revision": 18,
+    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
-    "lines": 1140,
-    "raise_revision": 4,
-    "reason": "macos-s9-target-consts-2508"
+    "lines": 1158,
+    "raise_revision": 5,
+    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
     "lines": 1171,
@@ -323,9 +323,9 @@
     "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2334,
-    "raise_revision": 13,
-    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
+    "lines": 2333,
+    "raise_revision": 14,
+    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1845,

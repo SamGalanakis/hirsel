@@ -250,8 +250,8 @@ commands! {
         New(NewOption), One: HELP, Lib;
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
         Compiler(CompilerOption), None: HELP, Json, CoreProduct, Runtime, Target;
-    "fmt", "fmt [--check] [--signatures] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
-        Fmt(FmtOption), One: FmtCheck, FmtStdin, Signatures, HELP;
+    "fmt", "fmt [--check] [--signatures|--data] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
+        Fmt(FmtOption), One: FmtCheck, FmtStdin, FmtData, Signatures, HELP;
     "explain", "explain RULE|MODULE|debug-lines|primer | explain --list [--json]", "Explain specification rules and find library declarations.";
         Explain(ExplainOption), One: ListRules, HELP, Json;
     "primer", "primer", "Print the Hirsel primer: the language in one page.";

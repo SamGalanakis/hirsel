@@ -1,0 +1,34 @@
+pub type Admission {
+    recipe_bytes: u64,
+    closure_objects: u64,
+    object_bytes: u64,
+    decoded_bytes: u64,
+    members: u64,
+    edges: u64,
+}
+
+pub type Group {
+    name: String,
+    tenant: String,
+    listen: String,
+    store: String,
+    workdir: String,
+    trusted: bool,
+    memory_bytes: Option[u64],
+    grants: List[Grant],
+    package_roots: List[String],
+    args: List[String],
+    front: Option[Front],
+    recording: Option[bool],
+    retention: Option[u64],
+}
+
+pub type Front = Http | Stream
+
+pub type Decision {
+    plan: String,
+    all: Option[Fate],
+    entries: Map[String, Fate],
+}
+
+pub type Fate = Release | Cancel

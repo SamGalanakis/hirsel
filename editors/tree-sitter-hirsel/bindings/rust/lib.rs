@@ -2,11 +2,14 @@
 use tree_sitter_language::LanguageFn;
 
 extern "C" {
+    fn tree_sitter_hirsel_data() -> *const ();
     fn tree_sitter_hirsel() -> *const ();
 }
 
 /// Pass to `tree_sitter::Parser::set_language` after converting into a `Language`.
 pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_hirsel) };
+
+pub const DATA_LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_hirsel_data) };
 
 pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");
 pub const LOCALS_QUERY: &str = include_str!("../../queries/locals.scm");

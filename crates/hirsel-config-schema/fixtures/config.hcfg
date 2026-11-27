@@ -1,0 +1,9 @@
+user_v1.Config(
+    contexts: [("lab", Host(
+        state: "/srv/hirsel/lab",
+        catalog_id: "94ca5f976fff4830bf575ca41a870fc6",
+        principal: Uid(1001),
+    ))],
+    default_context: Some("lab"),
+    routes: [],
+)

@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/SamGalanakis/hirsel"
 build = "bindings/rust/build.rs"
-include = ["bindings/rust/*", "grammar.js", "queries/*", "src/**", "tree-sitter.json"]
+include = ["bindings/rust/*", "grammar.js", "rules.js", "data/**", "queries/*", "src/**", "tree-sitter.json"]
 
 [workspace]
 

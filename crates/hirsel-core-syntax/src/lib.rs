@@ -15,7 +15,7 @@ pub use derive::{
 };
 pub use format::{format, format_verified};
 pub use lexer::{LexOutput, lex};
-pub use literals::{byte_value, character_value};
+pub use literals::{byte_value, character_value, quoted_bytes};
 pub use package_format::{FormatAction, FormatRefusal, FormatReport, format_files, format_package};
 pub use parser::{
     PARSER_NESTING_LIMIT, ParseMode, ParseOutput, ResourceRefusal, parse, parse_bytes,

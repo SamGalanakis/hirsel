@@ -1,0 +1,19 @@
+pub type Site: codec {
+    banner: String,
+    timeout: Duration,
+    residency: Residency,
+    grants: List[Grant],
+    labels: Map[String, String],
+    credential: Option[Credential],
+    retries: u64 = 3,
+}
+
+pub type Duration: codec = Sec(u64)
+
+pub type Residency: codec = Tiered(cache: Size)
+
+pub type Size: codec = MiB(u64)
+
+pub type Grant: codec = Dir(String) | Clock
+
+pub type Credential: codec = Binding(String)

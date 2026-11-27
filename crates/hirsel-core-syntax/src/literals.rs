@@ -70,3 +70,55 @@ fn quoted_scalar(body: &str, hex: bool) -> Option<char> {
     };
     chars.next().is_none().then_some(value)
 }
+
+/// The bytes a quoted literal denotes (syntax.md): `".."`, `r#".."#`, and with `bytes`
+/// `b".."`, `br#".."#`. Escapes are `\n \t \r \0 \\ \" \'` and `\xNN` (any byte in
+/// byte strings), and in strings `\u{..}` as UTF-8; a raw body is its source bytes. The
+/// lexer has refused every malformed spelling; None marks one anyway.
+pub fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
+    let spelling = if bytes {
+        spelling.strip_prefix('b')?
+    } else {
+        spelling
+    };
+    if let Some(raw) = spelling.strip_prefix('r') {
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
+        let body = raw[hashes..].strip_prefix('"')?;
+        let body = body.strip_suffix(&raw[..hashes])?.strip_suffix('"')?;
+        return Some(body.as_bytes().to_vec());
+    }
+    let body = spelling.strip_prefix('"')?.strip_suffix('"')?.as_bytes();
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if body[i] != b'\\' {
+            out.push(body[i]);
+            i += 1;
+            continue;
+        }
+        let b = match *body.get(i + 1)? {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'0' => 0,
+            c @ (b'\\' | b'"' | b'\'') => c,
+            b'x' => {
+                let hex = std::str::from_utf8(body.get(i + 2..i + 4)?).ok()?;
+                i += 2;
+                u8::from_str_radix(hex, 16).ok()?
+            }
+            b'u' if !bytes => {
+                let close = i + body[i..].iter().position(|&c| c == b'}')?;
+                let hex = std::str::from_utf8(body.get(i + 3..close)?).ok()?;
+                let c = char::from_u32(u32::from_str_radix(hex, 16).ok()?)?;
+                out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+                i = close + 1;
+                continue;
+            }
+            _ => return None,
+        };
+        out.push(b);
+        i += 2;
+    }
+    Some(out)
+}

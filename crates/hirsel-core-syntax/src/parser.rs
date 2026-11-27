@@ -1,6 +1,7 @@
 //! Recovery, significant-token cursor, precedence climbing and item-local arena/origin
 //! mechanics adapted from hirsel-parser. Every grammar visitor is for the new language.
 mod budget;
+mod document;
 mod recovery;
 mod subject;
 
@@ -24,6 +25,7 @@ pub enum ParseMode {
     Source,
     Signatures,
     Foreign,
+    Data,
 }
 /// Incomplete compiler outcome, never a source-language diagnostic (ARCH front end).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,72 +155,7 @@ pub(crate) fn parse_derived(
         resource: None,
         mode,
     };
-    let mut syntax = SyntaxFile::default();
-    let mut owned = 0;
-    let mut byte_owned = 0;
-    while !p.eof() && p.resource.is_none() {
-        if p.eat(sym::SEMICOLON) {
-            continue;
-        }
-        let start = p.pos;
-        p.delimiter_pos = start;
-        p.clear_delimiters();
-        let diagnostic_start = p.diagnostics.len();
-        let file_offset = p.tokens[p.current_index].span.start;
-        p.base = file_offset;
-        let nodes_start = p.tree.nodes.len() as u32;
-        p.resolution_size = ResolutionSize::default();
-        let root = match p.item() {
-            Ok(root) => {
-                if p.end(false).is_err() {
-                    p.recover(start, true);
-                }
-                root
-            }
-            Err(()) => {
-                p.recover(start, true);
-                p.node(start, NodeKind::Error, None, &[])
-            }
-        };
-        let mut end = p.index();
-        let consumed = p
-            .significant
-            .get(p.pos.saturating_sub(1))
-            .copied()
-            .map_or(owned, |i| i + 1);
-        let mut byte_end = p.tokens[end].span.start;
-        // Split the first line break after the item, retaining following documentation.
-        // Whitespace occupies source gaps instead of rows in the token table.
-        for i in consumed..=end {
-            let gap_start = if i == 0 { 0 } else { p.tokens[i - 1].span.end } as usize;
-            let next_start = p.tokens[i].span.start as usize;
-            if let Some(newline) = text[gap_start..next_start].find('\n') {
-                end = i;
-                byte_end = (gap_start + newline + 1) as u32;
-                break;
-            }
-        }
-        let has_errors = p.resource.is_some()
-            || p.diagnostics.len() != diagnostic_start
-            || p.diagnostics[..lexical_diagnostics].iter().any(|d| {
-                d.primary.start >= byte_owned
-                    && (d.primary.start < byte_end
-                        || byte_end as usize == text.len() && d.primary.start == byte_end)
-            });
-        syntax.items.push(ItemRange {
-            resolution_size: p.resolution_size,
-            has_errors,
-            owned: byte_owned..byte_end,
-            file_offset,
-            end: byte_end,
-            tokens: owned as u32..end as u32,
-            nodes: nodes_start..p.tree.nodes.len() as u32,
-            root,
-        });
-        owned = end;
-        byte_owned = byte_end;
-    }
-    syntax.trailing_start = byte_owned;
+    let mut syntax = document::items(&mut p, text, lexical_diagnostics);
     syntax.source = text.to_owned();
     p.tree.tokens = p.tokens;
     syntax.tree = p.tree;

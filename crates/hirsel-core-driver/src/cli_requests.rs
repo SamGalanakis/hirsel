@@ -222,6 +222,7 @@ pub enum NewOption {
 pub enum FmtOption {
     FmtCheck,
     FmtStdin,
+    FmtData,
     Signatures,
 }
 

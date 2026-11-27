@@ -1,0 +1,8 @@
+pub type Config {
+    runs: Map[String, Run],
+}
+
+pub type Run {
+    module: String,
+    grants: List[Grant],
+}

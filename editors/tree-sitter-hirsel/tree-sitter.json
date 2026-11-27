@@ -11,6 +11,13 @@
       "injections": "queries/injections.scm",
       "locals": "queries/locals.scm",
       "tags": "queries/tags.scm"
+    },
+    {
+      "name": "hirsel_data",
+      "camelcase": "HirselData",
+      "scope": "source.hirsel.data",
+      "path": "data",
+      "file-types": ["hcfg"]
     }
   ],
   "metadata": {

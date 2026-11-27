@@ -59,6 +59,7 @@ flags! {
     IncludeCredentials ["--include-credentials"] => "Allow tape output that may contain credentials.";
     Diagnose ["--diagnose"] => "Allow a changed revision and report its first divergence; never resume live.";
     FmtCheck ["--check"] => "Exit 1 on differences without writing. For files, list paths that differ.";
+    FmtData ["--data"] => "Format a qualified data document.";
     FmtStdin ["--stdin"] => "Read source from standard input and write the formatted bytes to standard output.";
     Signatures ["--signatures"] => "Allow core declaration headers without bodies.";
     ListRules ["--list"] => "List every rule in the current specification.";

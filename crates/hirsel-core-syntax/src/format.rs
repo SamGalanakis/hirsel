@@ -128,6 +128,7 @@ struct Role {
     unary: bool,
     attach: bool,
     spaced_colon: bool,
+    labelled_list: bool,
     inline_semicolon: bool,
 }
 
@@ -172,6 +173,11 @@ fn item_text(item: &Item, roles: &mut [Role]) -> String {
             }
             NodeKind::Attribute => roles[range.end - 1].line_after = true,
             NodeKind::Parameters => roles[range.start].attach = true,
+            NodeKind::LabelledArgument => {
+                let value = tree.node(children[0]);
+                roles[value.origin.tokens.start as usize].labelled_list =
+                    matches!(value.kind, NodeKind::Array | NodeKind::RepeatArray);
+            }
             NodeKind::Ascription => roles[node.token.unwrap().0 as usize].spaced_colon = true,
             NodeKind::BytesOf => {
                 let open = (range.start + 1..range.end)
@@ -344,7 +350,7 @@ fn space(a: TokenKind, before: Role, b: TokenKind, role: Role) -> bool {
         return false;
     }
     if b == LBracket {
-        return false;
+        return role.labelled_list;
     }
     if before.unary && a.is_punctuation() {
         return false;

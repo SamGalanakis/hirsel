@@ -1,0 +1,3 @@
+pkg_v1.Workspace(
+    members: ["app", "ffi_laws"],
+)

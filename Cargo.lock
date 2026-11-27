@@ -922,6 +922,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-config-schema"
+version = "0.1.0"
+dependencies = [
+ "hirsel-data",
+ "hirsel-guard",
+ "serde_json",
+]
+
+[[package]]
 name = "hirsel-core-contained"
 version = "0.1.0"
 dependencies = [
@@ -1031,6 +1040,7 @@ name = "hirsel-core-front"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
+ "hirsel-config-schema",
  "hirsel-core-eval",
  "hirsel-core-ids",
  "hirsel-core-ir",
@@ -1038,6 +1048,7 @@ dependencies = [
  "hirsel-core-net",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
+ "hirsel-data",
  "hirsel-guard",
  "rustc-hash",
  "serde",
@@ -1210,6 +1221,17 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "tempfile",
+]
+
+[[package]]
+name = "hirsel-data"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-syntax",
+ "hirsel-guard",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]

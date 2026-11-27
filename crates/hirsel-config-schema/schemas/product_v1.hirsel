@@ -1,0 +1,38 @@
+pub type Product {
+    hosts: Map[String, Host],
+    runtime_targets: Map[String, Target],
+    runtime_slots: Map[String, Slot],
+    sockets: Sockets,
+    helpers: Map[String, Helper],
+}
+
+pub type Host {
+    platform: String,
+    runner: String,
+    llvm_library: String,
+    llvm_engine_dir: Option[String],
+}
+
+pub type Target: codec {
+    platform: String,
+    exec_helper: bool = false,
+    slots: Option[List[String]],
+}
+
+pub type Slot {
+    buck_suffix: String,
+    crate_name: Option[String],
+    features: List[String],
+    observation: String,
+}
+
+pub type Sockets {
+    launcher: String,
+    operator: String,
+}
+
+pub type Helper: codec {
+    entry: String,
+    embedded: bool = false,
+    grants: List[Grant],
+}

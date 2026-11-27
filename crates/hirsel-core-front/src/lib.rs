@@ -15,6 +15,7 @@ pub mod codec_decls;
 mod constants;
 mod recursion_decls;
 pub use constants::{ConstData, ConstValue, Constant};
+mod data_descriptor;
 mod decls;
 mod defaults;
 mod element;

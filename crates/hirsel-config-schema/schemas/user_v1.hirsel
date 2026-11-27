@@ -1,0 +1,32 @@
+pub type Config {
+    contexts: Map[String, Context],
+    default_context: Option[String],
+    routes: List[Route],
+    cache: Option[Remote],
+}
+
+pub type Context = Host(state: String, catalog_id: String, principal: Principal)
+
+pub type Principal = Uid(u32) | Key(String)
+
+pub type Remote {
+    url: String,
+    trusted: List[String],
+    signing_key: Option[String],
+    record_bytes: u64,
+    blob_bytes: u64,
+    work_bytes: u64,
+}
+
+pub type Route {
+    prefix: Prefix,
+    url: String,
+    release_key: String,
+    status_key: String,
+    legal_key: String,
+    quorum: Quorum,
+}
+
+pub type Prefix = Global | HostPrefix(String) | Tenant(host: String, tenant: String)
+
+pub type Quorum = Preview | Witnessed(first: String, second: String)

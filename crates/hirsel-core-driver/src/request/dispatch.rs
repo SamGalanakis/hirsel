@@ -116,7 +116,24 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
             } else {
                 FormatAction::Write
             };
-            let mode = if request.options.contains(&FmtOption::Signatures) {
+            let explicit_data = request.options.contains(&FmtOption::FmtData);
+            let data_file = request
+                .positional
+                .as_deref()
+                .is_some_and(|p| Path::new(p).extension().is_some_and(|ext| ext == "hcfg"));
+            let mode = if explicit_data || data_file {
+                if request.options.contains(&FmtOption::Signatures) {
+                    return Err("data and signature modes are mutually exclusive".into());
+                }
+                if request
+                    .positional
+                    .as_deref()
+                    .is_some_and(|p| Path::new(p).is_dir())
+                {
+                    return Err("data formatting requires a file or --stdin".into());
+                }
+                ParseMode::Data
+            } else if request.options.contains(&FmtOption::Signatures) {
                 ParseMode::Signatures
             } else {
                 ParseMode::Source

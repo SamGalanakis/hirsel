@@ -1,0 +1,60 @@
+pub type Package {
+    name: String,
+    version: String,
+    charge: Charge,
+    sources: Map[String, String],
+    dependencies: Map[String, Dependency],
+    program: Option[Program],
+    tests: Option[Tests],
+    foreign: Option[Map[String, ForeignModule]],
+    selections: Option[Map[String, Dependency]],
+}
+
+pub type Workspace {
+    members: List[String],
+    charge: Option[Charge],
+    dependencies: Option[Map[String, Dependency]],
+    root_package: Option[Package],
+    selections: Option[Map[String, Dependency]],
+}
+
+pub type Charge = ChargeV1 | WorkspaceCharge
+
+pub type Dependency = Toolchain(package: String, major: u32, authority: List[Capability]) | Path(package: String, major: u32, path: String, authority: List[Capability]) | Published(package: String, major: u32, root: String, locator: Locator, authority: List[Capability]) | Inherit
+
+pub type Locator = Store | Archive(String) | Url(String) | Git(url: String, rev: String, reference: Option[String], dir: Option[String]) | Registry(String)
+
+pub type Capability = Clock | Random | Tasks | Stdin | Stdout | Stderr | Dir | Net | Exec | Foreign | Secret | Cred | Env | Process
+
+pub type Program {
+    module: Option[String],
+    function: Option[String],
+    limit: Option[u64],
+    grants: Option[List[Grant]],
+}
+
+pub type Tests {
+    sources: Map[String, String],
+    limit: u64,
+    grants: List[Grant],
+    runs: Map[String, TestRun],
+}
+
+pub type TestRun {
+    limit: Option[u64],
+    grant_change: Option[GrantChange],
+}
+
+pub type GrantChange = ReplaceAll(List[Grant]) | ReplaceDirs(List[Directory]) | ReplaceNonDir(List[NonDirGrant])
+
+pub type ForeignModule = Native(symbols: String, archives: List[ArchiveFile]) | Contained(symbols: String, file: String, sha256: String)
+
+pub type ArchiveFile {
+    target: String,
+    file: String,
+    sha256: String,
+}
+
+pub type Directory = Dir(String)
+
+pub type NonDirGrant = Clock | Random | Tasks | Stdin | Stdout | Stderr | Process | Net(NetRule) | Env(List[String]) | Secret(parameter: String, source: Binding, policy: String) | Cred(parameter: String, source: String, policy: String) | Foreign(String) | Exec(policy: String, profiles: List[String])

@@ -40,9 +40,9 @@ DOC_SYNTAX_REFUSALS = {
 }
 
 
-def load_parser(library):
+def load_parser(library, language_name="hirsel"):
     grammar = ctypes.CDLL(str(library))
-    entry = grammar.tree_sitter_hirsel
+    entry = getattr(grammar, "tree_sitter_" + language_name)
     entry.restype = ctypes.c_void_p
     capsule = ctypes.pythonapi.PyCapsule_New
     capsule.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p)
@@ -176,6 +176,17 @@ def run(library):
     return bool(issues)
 
 
+def check_data(library):
+    _grammar, parser, _comments = load_parser(library, "hirsel_data")
+    cases = [(b"// cfg\npkg_v1.Package(sources: [(\"main.hirsel\", \"main\")],)", True),
+             (b"a.B()", True), (b"a.type()", False), (b"pub.B()", False),
+             (b"a.B() a.C()", False), (b"B()", False), (b"const x: T = T()", False)]
+    for source, valid in cases:
+        root = parser.parse(source).root_node
+        if (root.type == "data_document" and not root.has_error) != valid:
+            raise ValueError(f"unexpected data parse for {source!r}: {root}")
+
+
 def main():
     options = argparse.ArgumentParser(description=__doc__)
     options.add_argument("--parser", type=Path, help="use an already built Tree-sitter shared library")
@@ -187,6 +198,9 @@ def main():
         # The CLI locks by grammar name, even when builds use different output paths.
         env = dict(os.environ, XDG_CACHE_HOME=temp)
         subprocess.run(["tree-sitter", "build", "-o", str(library)], cwd=GRAMMAR, env=env, check=True)
+        data = Path(temp) / "hirsel_data.so"
+        subprocess.run(["tree-sitter", "build", "-o", str(data)], cwd=GRAMMAR / "data", env=env, check=True)
+        check_data(data)
         return run(library)
 
 

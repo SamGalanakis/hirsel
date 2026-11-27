@@ -30,7 +30,7 @@ fn root() -> PathBuf {
 }
 
 /// The one core package, as every program checks against it.
-fn core_dir() -> PathBuf {
+pub(super) fn core_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core")
 }
 
@@ -50,9 +50,9 @@ fn inputs_with_core(source: &str, core_dir: &Path) -> (NameIndex, Vec<ModuleInpu
     inputs_in(source, core_dir, "main")
 }
 
-fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<ModuleInput>) {
+pub(super) fn inputs_in(source: &str, dir: &Path, module: &str) -> (NameIndex, Vec<ModuleInput>) {
     let mut symbols = Symbols::default();
-    let core = PackageManifest::directory(core_dir, package("core"), true).unwrap();
+    let core = PackageManifest::directory(dir, package("core"), true).unwrap();
     let app = PackageManifest {
         namespace: None,
         package: package("app"),

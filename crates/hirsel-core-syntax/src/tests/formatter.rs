@@ -61,3 +61,33 @@ fn formatter_equivalence_refuses_candidate_that_changes_syntax_or_trivia() {
         );
     }
 }
+
+#[test]
+fn data_document_requires_one_qualified_constructor_and_formats_labelled_lists() {
+    let data = ParseMode::Data;
+    let input = "// head\npkg . Package (sources:[1,2], // sources\n)";
+    assert_eq!(
+        formatted(input, data),
+        "// head\npkg.Package(\n    sources: [1, 2], // sources\n)\n"
+    );
+    assert_eq!(
+        formatted("fn f(a:List[u8]){g(sources:[a[0]])}", ParseMode::Source),
+        "fn f(a: List[u8]) {\n    g(sources: [a[0]])\n}\n"
+    );
+    for invalid in [
+        "",
+        "// empty",
+        ";pkg.Package()",
+        "pkg.Package();",
+        "Package()",
+        "a.b.C()",
+        "a.B",
+        "a.B()\na.B()",
+        "const x: A = A()",
+    ] {
+        assert!(!parse(invalid, data).diagnostics.is_empty(), "{invalid}");
+    }
+    for mode in [ParseMode::Source, ParseMode::Signatures, ParseMode::Foreign] {
+        assert!(!parse(input, mode).diagnostics.is_empty());
+    }
+}

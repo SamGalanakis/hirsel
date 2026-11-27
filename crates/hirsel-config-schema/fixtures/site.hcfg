@@ -1,0 +1,8 @@
+orders_v1.Site(
+    banner: "orders ready",
+    timeout: Sec(2),
+    residency: Tiered(cache: MiB(64)),
+    grants: [Dir("data"), Clock],
+    labels: [("region", "eu"), ("role", "writer")],
+    credential: Some(Binding("orders_api")),
+)

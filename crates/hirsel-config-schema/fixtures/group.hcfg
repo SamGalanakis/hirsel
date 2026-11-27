@@ -1,0 +1,12 @@
+host_v1.Group(
+    name: "orders",
+    tenant: "sales",
+    listen: "127.0.0.1:8400",
+    store: "/srv/orders/store",
+    workdir: "/srv/orders",
+    trusted: false,
+    memory_bytes: Some(268435456),
+    grants: [Clock],
+    package_roots: [],
+    args: [],
+)

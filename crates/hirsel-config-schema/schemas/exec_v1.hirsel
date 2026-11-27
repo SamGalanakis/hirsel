@@ -1,0 +1,16 @@
+pub type Policy {
+    profiles: Map[String, Profile],
+}
+
+pub type Profile {
+    image: String,
+    sha256: String,
+    argv0: String,
+    args: List[List[Arg]],
+    env: Map[String, EnvValue],
+    dirs: Map[String, String],
+}
+
+pub type Arg = Lit(String) | Any | Rest
+
+pub type EnvValue = Fixed(String) | Caller

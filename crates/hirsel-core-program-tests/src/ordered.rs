@@ -1,5 +1,5 @@
 use hirsel_core_front::Program;
-use hirsel_core_ir::{FuncId, Inst};
+use hirsel_core_ir::{Callee, FuncId, Inst, RtOp};
 #[test]
 fn scalar_order_instances_are_direct_predicates() {
     let source = r#"
@@ -32,25 +32,49 @@ fn text()->bool { let a="a"; let b="b"; less(view a,view b) }
             )
         {
             if let Some(body) = &f.body {
-                let calls = body
-                    .insts
-                    .iter()
-                    .filter(|i| matches!(i, Inst::Call { .. }))
-                    .count();
+                let mut key_calls = 0;
+                let mut step_charges = 0;
+                let mut other_calls = 0;
+                for inst in &body.insts {
+                    let Inst::Call { call } = inst else {
+                        continue;
+                    };
+                    match body.calls[call.index()].callee {
+                        Callee::Runtime(RtOp::WorkSteps) => step_charges += 1,
+                        Callee::Direct(f) => {
+                            let callee =
+                                &module.instances[module.functions[f.index()].instance.index()];
+                            if callee.definition.0.package.name == "core"
+                                && matches!(
+                                    callee.definition.0.modules.as_slice(),
+                                    [module] if module == "map" || module == "order"
+                                )
+                                && callee.definition.0.name.starts_with('$')
+                            {
+                                key_calls += 1;
+                            } else {
+                                other_calls += 1;
+                            }
+                        }
+                        _ => other_calls += 1,
+                    }
+                }
                 let comparisons = body
                     .insts
                     .iter()
                     .filter(|i| matches!(i, Inst::Compare { .. }))
                     .count();
                 eprintln!(
-                    "ORDER COST {:?}: {} insts, {comparisons} compares, {calls} calls",
+                    "ORDER COST {:?}: {} insts, {comparisons} compares, {key_calls} key calls, {step_charges} step charges, {other_calls} other calls",
                     key,
                     body.insts.len()
                 );
                 if module.argument_names(key) == ["u64"]
                     && matches!(key.definition.0.name.as_str(), "less" | "equal")
                 {
-                    assert_eq!(calls, 0);
+                    assert_eq!(key_calls, 0);
+                    assert_eq!(other_calls, 0);
+                    assert_eq!(step_charges, 1);
                     assert_eq!(comparisons, 1);
                 }
             }

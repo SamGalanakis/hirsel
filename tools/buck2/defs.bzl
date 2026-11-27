@@ -47,6 +47,9 @@ RELEASE_VERSION = read_root_config("hirsel", "release_version", "")
 DIST_BOLT = read_root_config("hirsel", "dist_bolt", "off")
 if DIST_BOLT not in ["off", "link", "use"]:
     fail("hirsel.dist_bolt must be off, link or use")
+DIST_BUNDLE_JOBS = int(read_root_config("hirsel", "dist_bundle_jobs", "1"))
+if DIST_BUNDLE_JOBS < 1:
+    fail("hirsel.dist_bundle_jobs must be positive")
 
 def _request(binary):
     return [str(field) for field in test_request(binary)]
@@ -680,6 +683,7 @@ def _toolchain_bundle_impl(ctx):
         runtimes.append(triple)
         for dep in ctx.attrs.runtimes.values():
             runtimes.append(dep[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
+    bundle_memory = "6G" if DIST_BUNDLE_JOBS > 1 else PRODUCT_MEMORY_LIMIT
     ctx.actions.run(
         cmd_args("/bin/sh", script, compiler, bundle.as_output(), scratch.as_output(),
                  ctx.attrs._link_kit[DefaultInfo].default_outputs[0],
@@ -687,7 +691,7 @@ def _toolchain_bundle_impl(ctx):
                  platform_sources, ctx.attrs._programs, ctx.attrs._product,
                  cmd_args(ctx.attrs._clang[DefaultInfo].default_outputs[0], format = "{}/bin/llvm-objcopy"), runtimes,
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
-        env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
+        env = {"HIRSEL_MEMORY_LIMIT": bundle_memory, "HIRSEL_JOBS": str(DIST_BUNDLE_JOBS)},
         category = "toolchain_bundle",
     )
     return [

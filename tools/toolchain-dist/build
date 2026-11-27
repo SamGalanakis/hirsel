@@ -19,6 +19,7 @@ uses one tools/capped command at a time. Keep output and work outside the
 repository; profiles are never committed.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -53,19 +54,27 @@ def check_glibc(prefix):
     required = {'hirsel', LINUX_LLVM, 'bin/ld.lld'}
     seen = set()
     failures = []
+    elfs = []
     for path in sorted(prefix.rglob('*')):
         if not path.is_file():
             continue
         with path.open('rb') as candidate:
-            if candidate.read(4) != b'\x7fELF':
-                continue
-        relative = path.relative_to(prefix).as_posix()
-        seen.add(relative)
+            if candidate.read(4) == b'\x7fELF':
+                elfs.append((path.relative_to(prefix).as_posix(), path))
+    env = dict(os.environ, LC_ALL='C')
+
+    def read_versions(item):
+        relative, path = item
         versions = subprocess.check_output(
-            ['readelf', '--wide', '--version-info', path],
-            env=dict(os.environ, LC_ALL='C'), text=True,
+            ['readelf', '--wide', '--version-info', path], env=env, text=True,
         ).partition('Version needs section')[2]
-        names = set(re.findall(r'\bName: (GLIBC_\S+)', versions))
+        return relative, set(re.findall(r'\bName: (GLIBC_\S+)', versions))
+
+    workers = min(8, os.cpu_count() or 1)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        inspected = list(pool.map(read_versions, elfs))
+    for relative, names in inspected:
+        seen.add(relative)
         highest = (0, 0, 0)
         for name in sorted(names):
             if name == 'GLIBC_ABI_DT_RELR':
@@ -308,7 +317,31 @@ def pin(path, output, suffix):
     print(pinned, flush=True)
 
 
-def train(output, work, options, cpu, profdata):
+def build_training_prefix(output, options, work, jobs):
+    """Install only the x86_64 host compiler, core, and std needed by tools/toolchain-dist/train."""
+    compiler, runtimes, kit = build_targets(
+        'generate', options, COMPILER_TARGET, RUNTIME_TARGET, '//tools/buck2/native-toolchain:kit')
+    runtime = runtimes / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
+    scratch = work / 'train-install'
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    scratch.mkdir(parents=True)
+    # Keep profile counters from prefix setup out of the training raw directory and checkout.
+    install_env = dict(os.environ, TMPDIR=str(scratch), XDG_CACHE_HOME=str(scratch / 'cache'),
+                       HIRSEL_JOBS=str(jobs), HIRSEL_MEMORY_LIMIT='6G',
+                       LLVM_PROFILE_FILE=str(scratch / 'install-%m-%p.profraw'))
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run([compiler, 'core-product', '--install', output],
+                       cwd=ROOT, env=install_env, stdout=subprocess.DEVNULL, check=True)
+        subprocess.run([compiler, 'std-product', '--install', output,
+                        '--link-kit', kit, '--target', 'x86_64-unknown-linux-gnu', '--runtime', runtime],
+                       cwd=ROOT, env=install_env, stdout=subprocess.DEVNULL, check=True)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def train(output, work, options, cpu, profdata, jobs):
     """Train both profiles once: write `output/<sha256>.profdata`, then build the
     PGO-use compiler from it, train BOLT on that binary and write
     `output/<sha256>.fdata`."""
@@ -319,7 +352,7 @@ def train(output, work, options, cpu, profdata):
     raw = work / 'raw'
     if raw.exists():
         raise SystemExit(f'{raw} exists: use a fresh work directory to avoid stale profiles')
-    build('generate', instrumented, options, work)
+    build_training_prefix(instrumented, options, work, jobs)
     subprocess.run([str(ROOT / 'tools/toolchain-dist/train'), '--toolchain', str(instrumented),
                     '--work', str(work / 'corpus'), '--raw', str(raw), '--cpu', str(cpu)], cwd=ROOT, check=True)
     profiles = sorted(raw.glob('*.profraw'))
@@ -446,10 +479,15 @@ def main():
         options.append('--no-remote-cache')
     if args.num_threads is not None:
         options.extend(['--num-threads', str(args.num_threads)])
+    bundle_jobs = 1
+    if args.local and args.num_threads and args.num_threads > 1:
+        bundle_jobs = min(args.num_threads, len(os.sched_getaffinity(0)))
+        if bundle_jobs > 1:
+            options.extend(['-c', f'hirsel.dist_bundle_jobs={bundle_jobs}'])
     subprocess.run(prepare, cwd=ROOT, check=True)
     if args.train_profile is not None:
         with profile_lock():
-            train(output, work, options, args.cpu, args.llvm_profdata)
+            train(output, work, options, args.cpu, args.llvm_profdata, bundle_jobs)
         return
     if profile is None:
         build('off', output, options, work)

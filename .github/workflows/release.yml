@@ -1,5 +1,6 @@
 name: Release
-# Linux builds from two pinned profiles. The Mac builds from source without PGO or BOLT.
+# Linux trains and builds from two pinned profiles in one warmed container.
+# macOS starts in parallel with Linux and builds from source without PGO or BOLT.
 on:
   push:
     tags: ["v*"]
@@ -14,25 +15,26 @@ permissions:
 env:
   # Bubblewrap needs an unmasked /proc to mount a fresh copy.
   DOCKER_OPTIONS: >-
-    --rm --cpus 4 --memory 8g --memory-swap 8g
+    --rm --cpus 4 --memory 14g --memory-swap 14g
     --cap-add SYS_ADMIN --security-opt seccomp=unconfined
     --security-opt apparmor=unconfined --security-opt systempaths=unconfined
     -w /src -e RELEASE_TAG
   IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:55a36963bc0504cdf004011001c1072306402f0b8b83be5a5eba7068f93eec53
 jobs:
-  train:
+  plan:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-      profdata: ${{ steps.profiles.outputs.profdata }}
-      fdata: ${{ steps.profiles.outputs.fdata }}
+      linux_target: ${{ steps.hosts.outputs.linux_target }}
+      linux_runner: ${{ steps.hosts.outputs.linux_runner }}
+      darwin_target: ${{ steps.hosts.outputs.darwin_target }}
+      darwin_runner: ${{ steps.hosts.outputs.darwin_runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Choose the version
         id: version
         shell: bash
         run: |
-          # The version is compiled into the BOLT input, so both jobs use this one value.
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             version=$GITHUB_REF_NAME
           else
@@ -40,20 +42,114 @@ jobs:
           fi
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Free runner disk for the instrumented and PGO-use build trees
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - name: Train the PGO and BOLT profiles
-        env:
-          RELEASE_TAG: ${{ steps.version.outputs.version }}
+      - name: Resolve host targets and runners
+        id: hosts
         run: |
-          mkdir "$RUNNER_TEMP/profiles"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, subprocess
+          entries = json.loads(subprocess.check_output(['python3', 'tools/toolchain-dist/product.py', 'matrix'], text=True))['include']
+          by_target = {row['target']: row['runner'] for row in entries}
+          linux = next(t for t in by_target if 'linux' in t)
+          darwin = next(t for t in by_target if 'darwin' in t)
+          print(f'linux_target={linux}')
+          print(f'linux_runner={by_target[linux]}')
+          print(f'darwin_target={darwin}')
+          print(f'darwin_runner={by_target[darwin]}')
+          PY
+      - name: Check installer release resolution
+        run: dash tools/toolchain-dist/check-installer
+
+  build-linux:
+    needs: [plan]
+    runs-on: ${{ needs.plan.outputs.linux_runner }}
+    outputs:
+      profdata: ${{ steps.profiles.outputs.profdata }}
+      fdata: ${{ steps.profiles.outputs.fdata }}
+    env:
+      RELEASE_TAG: ${{ needs.plan.outputs.version }}
+      TARGET: ${{ needs.plan.outputs.linux_target }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free runner disk and pull manylinux image
+        run: |
+          docker pull "$IMAGE" &
+          pull_pid=$!
+          sudo rm -rf /usr/share/dotnet &
+          rm1=$!
+          sudo rm -rf /usr/local/lib/android &
+          rm2=$!
+          sudo rm -rf /opt/ghc &
+          rm3=$!
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          rm4=$!
+          wait "$pull_pid" "$rm1" "$rm2" "$rm3" "$rm4"
+      - name: Cache Linux pinned toolchains and bootstrap inputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            .buck2/bin
+            .buck2/prelude
+            .buck2/dist-llvm-tools
+            tools/buck2/toolchains/rust-files
+            tools/buck2/toolchains/llvm-files
+            tools/buck2/bin
+            ${{ runner.temp }}/ci-cache/rustup
+            ${{ runner.temp }}/ci-cache/bolt-tools
+            ${{ runner.temp }}/ci-cache/xdg/hirsel/llvm-source
+          key: linux-release-tools-v1-${{ hashFiles('tools/buck2/pins.json', 'tools/buck2/toolchain-lock.json', 'tools/buck2/reindeer-lock.json', 'tools/buck2/llvm-cxx-headers-lock.json', 'tools/native-toolchain/llvm-23.lock', 'rust-toolchain.toml', 'tools/toolchain-dist/profile-tools') }}
+          restore-keys: |
+            linux-release-tools-v1-
+      - name: Cache Linux Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/ci-cache/cargo/registry/index
+            ${{ runner.temp }}/ci-cache/cargo/registry/cache
+          key: linux-release-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            linux-release-cargo-v1-
+      - name: Train profiles, build from pinned profiles, and qualify Linux distribution
+        run: |
+          mkdir -p "$RUNNER_TEMP/profiles" "$RUNNER_TEMP/release" \
+            "$RUNNER_TEMP/ci-cache/cargo" "$RUNNER_TEMP/ci-cache/rustup" \
+            "$RUNNER_TEMP/ci-cache/bolt-tools" "$RUNNER_TEMP/ci-cache/xdg/hirsel/llvm-source"
+          HOST_UID=$(id -u)
+          HOST_GID=$(id -g)
           # shellcheck disable=SC2086 # DOCKER_OPTIONS is a word list.
-          docker run $DOCKER_OPTIONS -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/profiles:/profiles" \
+          docker run $DOCKER_OPTIONS \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -v "$RUNNER_TEMP/profiles:/profiles" \
+            -v "$RUNNER_TEMP/release:/release" \
+            -v "$RUNNER_TEMP/ci-cache:/cache" \
+            -e TARGET -e HOST_UID -e HOST_GID \
             "$IMAGE" bash -euxo pipefail -c '
-            . tools/toolchain-dist/linux-release-setup.sh
-            tools/toolchain-dist/build --train-profile /profiles --work /tmp/train-work \
-              --cpu 3 --local --num-threads 4
-          '
+              cleanup() {
+                if [[ -x .buck2/bin/buck2 ]]; then
+                  .buck2/bin/buck2 kill >/dev/null 2>&1 || true
+                fi
+                chown -R "$HOST_UID:$HOST_GID" /cache /profiles /release \
+                  /src/.buck2 /src/tools/buck2/toolchains /src/tools/buck2/bin 2>/dev/null || true
+              }
+              trap cleanup EXIT
+              export CARGO_HOME=/cache/cargo
+              export RUSTUP_HOME=/cache/rustup
+              export HIRSEL_BOLT_TOOLS_DIR=/cache/bolt-tools
+              export XDG_CACHE_HOME=/cache/xdg
+              . tools/toolchain-dist/linux-release-setup.sh
+              tools/toolchain-dist/build --train-profile /profiles --work /tmp/train-work \
+                --cpu 3 --local --num-threads 4
+              rm -rf /tmp/train-work
+              profdata=(/profiles/*.profdata)
+              fdata=(/profiles/*.fdata)
+              [[ ${#profdata[@]} == 1 && ${#fdata[@]} == 1 ]]
+              tools/toolchain-dist/build --pgo "${profdata[0]}" --bolt "${fdata[0]}" \
+                --local --num-threads 4 --output /tmp/hirsel-prefix
+              tools/toolchain-dist/build --check-fresh /tmp/hirsel-prefix
+              asset=$(python3 tools/toolchain-dist/product.py asset "$RELEASE_TAG" "$TARGET")
+              tar -czf "/release/$asset" -C /tmp/hirsel-prefix .
+              python3 tools/toolchain-dist/product.py installer > /release/install.sh
+              cp "${profdata[0]}" "${fdata[0]}" /release/
+            '
       - name: Name the profiles by hash
         id: profiles
         working-directory: ${{ runner.temp }}/profiles
@@ -66,84 +162,78 @@ jobs:
           echo "fdata=${fdata%.fdata}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: profiles
-          path: ${{ runner.temp }}/profiles
+          name: release-${{ needs.plan.outputs.linux_target }}
+          path: ${{ runner.temp }}/release
           compression-level: 0
+          if-no-files-found: error
 
-  hosts:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.hosts.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: hosts
-        run: echo "matrix=$(python3 tools/toolchain-dist/product.py matrix)" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: [train, hosts]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.hosts.outputs.matrix) }}
-    runs-on: ${{ matrix.runner }}
+  build-darwin:
+    needs: [plan]
+    runs-on: ${{ needs.plan.outputs.darwin_runner }}
     env:
-      RELEASE_TAG: ${{ needs.train.outputs.version }}
-      TARGET: ${{ matrix.target }}
+      RELEASE_TAG: ${{ needs.plan.outputs.version }}
+      TARGET: ${{ needs.plan.outputs.darwin_target }}
     steps:
       - uses: actions/checkout@v4
-      - if: runner.os == 'Linux'
-        name: Check installer release resolution
-        run: dash tools/toolchain-dist/check-installer
-      - if: runner.os == 'Linux'
-        uses: actions/download-artifact@v4
-        with:
-          name: profiles
-          path: ${{ runner.temp }}/profiles
-      - if: runner.os == 'Linux'
-        name: Free runner disk
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - if: runner.os == 'Linux'
-        name: Build from the pinned profiles and qualify the Linux distribution
-        env:
-          PROFDATA: ${{ needs.train.outputs.profdata }}
-          FDATA: ${{ needs.train.outputs.fdata }}
-        run: |
-          mkdir "$RUNNER_TEMP/release"
-          # shellcheck disable=SC2086 # DOCKER_OPTIONS is a word list.
-          docker run $DOCKER_OPTIONS -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/profiles:/profiles:ro" \
-            -v "$RUNNER_TEMP/release:/release" -e PROFDATA -e FDATA -e TARGET "$IMAGE" bash -euxo pipefail -c '
-            . tools/toolchain-dist/linux-release-setup.sh
-            tools/toolchain-dist/build --pgo "/profiles/$PROFDATA.profdata" --bolt "/profiles/$FDATA.fdata" \
-              --local --num-threads 4 --output /tmp/hirsel-prefix
-            tools/toolchain-dist/build --check-fresh /tmp/hirsel-prefix
-            asset=$(python3 tools/toolchain-dist/product.py asset "$RELEASE_TAG" "$TARGET")
-            tar -czf "/release/$asset" -C /tmp/hirsel-prefix .
-            python3 tools/toolchain-dist/product.py installer > /release/install.sh
-            cp "/profiles/$PROFDATA.profdata" "/profiles/$FDATA.fdata" /release/
-          '
-      - if: runner.os == 'macOS'
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - if: runner.os == 'macOS'
-        name: Build and package the macOS distribution
-        env:
-          CARGO_BUILD_JOBS: 4
+      - name: Cache macOS pinned toolchains and downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ${{ runner.temp }}/build-work/llvm
+            ${{ runner.temp }}/build-work/sysroot
+            ${{ runner.temp }}/build-work/cache
+            ${{ runner.temp }}/darwin-xdg/hirsel/llvm-source
+          key: darwin-release-tools-v1-${{ hashFiles('rust-toolchain.toml', 'tools/native-toolchain/llvm-23.lock', 'tools/native-toolchain/native.lock.json', 'tools/buck2/toolchains/raw_backtrace_std.py', 'tools/buck2/toolchains/panic_image_darwin.rs', 'tools/native-toolchain/apple-targets.json') }}
+          restore-keys: |
+            darwin-release-tools-v1-
+      - name: Cache macOS Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: darwin-release-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            darwin-release-cargo-v1-
+      - name: Cache macOS Cargo build target
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/build-work/target
+          key: darwin-release-target-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'tools/native-toolchain/llvm-23.lock', 'tools/buck2/profile.bzl', 'tools/native-toolchain/apple-targets.json', 'tools/toolchain-dist/darwin_host.py') }}-${{ github.sha }}
+          restore-keys: |
+            darwin-release-target-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'tools/native-toolchain/llvm-23.lock', 'tools/buck2/profile.bzl', 'tools/native-toolchain/apple-targets.json', 'tools/toolchain-dist/darwin_host.py') }}-
+            darwin-release-target-v1-
+      - name: Build and package the macOS distribution
         run: |
-          rustup toolchain install --no-self-update
-          tools/toolchain-dist/build --host "$TARGET" \
+          echo "macOS runner CPUs: $(sysctl -n hw.ncpu)"
+          if ! rustc --version >/dev/null 2>&1; then
+            rustup toolchain install --no-self-update
+          fi
+          mkdir -p "$RUNNER_TEMP/darwin-xdg/hirsel/llvm-source"
+          XDG_CACHE_HOME="$RUNNER_TEMP/darwin-xdg" \
+            tools/toolchain-dist/build --host "$TARGET" \
             --output "$RUNNER_TEMP/prefix" --work "$RUNNER_TEMP/build-work"
-          mkdir "$RUNNER_TEMP/release"
+          mkdir -p "$RUNNER_TEMP/release"
           asset=$(python3 tools/toolchain-dist/product.py asset "$RELEASE_TAG" "$TARGET")
           tar -czf "$RUNNER_TEMP/release/$asset" -C "$RUNNER_TEMP/prefix" .
+          rm -f "$RUNNER_TEMP/build-work/target/dist/hirsel" \
+            "$RUNNER_TEMP/build-work/target/dist/hirsel.d" \
+            "$RUNNER_TEMP/build-work/target/$TARGET/hirsel-runtime/libhirsel_core_rt."*
+          du -sh "$RUNNER_TEMP/build-work/target" || true
       - uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.target }}
+          name: release-${{ needs.plan.outputs.darwin_target }}
           path: ${{ runner.temp }}/release
           compression-level: 0
           if-no-files-found: error
 
   smoke:
-    needs: [train, build]
+    needs: [plan, build-linux]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -159,7 +249,7 @@ jobs:
           path: ${{ runner.temp }}/release
       - name: Exercise the installer on ${{ matrix.image }}
         env:
-          HIRSEL_VERSION: ${{ needs.train.outputs.version }}
+          HIRSEL_VERSION: ${{ needs.plan.outputs.version }}
           IMAGE: ${{ matrix.image }}
         run: |
           mkdir "$RUNNER_TEMP/witness"
@@ -193,7 +283,7 @@ jobs:
           if-no-files-found: error
 
   smoke-darwin:
-    needs: [train, build, smoke]
+    needs: [plan, build-darwin, smoke]
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
@@ -209,7 +299,7 @@ jobs:
           path: ${{ runner.temp }}/witness
       - name: Exercise the installer and compare the native and cross-built programs
         env:
-          HIRSEL_VERSION: ${{ needs.train.outputs.version }}
+          HIRSEL_VERSION: ${{ needs.plan.outputs.version }}
         run: |
           python3 tools/toolchain-dist/product.py installer > "$RUNNER_TEMP/release/install.sh"
           asset=$(python3 tools/toolchain-dist/product.py asset "$HIRSEL_VERSION")
@@ -218,7 +308,7 @@ jobs:
           tools/toolchain-dist/smoke-darwin "$HIRSEL_VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/witness"
 
   publish:
-    needs: [train, build, smoke, smoke-darwin]
+    needs: [plan, build-linux, build-darwin, smoke, smoke-darwin]
     # A dispatch publishes only when asked, and never from a branch.
     if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-24.04
@@ -237,9 +327,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.train.outputs.version }}
-          PROFDATA: ${{ needs.train.outputs.profdata }}
-          FDATA: ${{ needs.train.outputs.fdata }}
+          RELEASE_TAG: ${{ needs.plan.outputs.version }}
+          PROFDATA: ${{ needs.build-linux.outputs.profdata }}
+          FDATA: ${{ needs.build-linux.outputs.fdata }}
         working-directory: ${{ runner.temp }}/release
         shell: bash
         run: |

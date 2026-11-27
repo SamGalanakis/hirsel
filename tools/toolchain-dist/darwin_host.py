@@ -23,17 +23,18 @@ shipped Mach-O's load commands by file class (macho_check), runs
 runs the fresh-machine sequence under `env -i`.
 """
 import ast
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import shutil
 import struct
 import subprocess
 import sys
-import tarfile
 import tempfile
 import tomllib
 import urllib.request
@@ -264,18 +265,52 @@ def cargo_env(work, llvm):
 
 def trace_sysroot(work, env):
     """Rustup's pinned sysroot with the trace-only std in place of its libstd."""
-    run(['rustup', 'component', 'add', 'rust-src'], cwd=ROOT, env=env)
     sysroot = Path(subprocess.check_output(['rustc', '--print', 'sysroot'], cwd=ROOT, env=env, text=True).strip())
     libraries = Path('lib/rustlib') / TARGET / 'lib'
     tree = work / 'sysroot'
+    raw_script = ROOT / 'tools/buck2/toolchains/raw_backtrace_std.py'
+    panic_rs = ROOT / 'tools/buck2/toolchains/panic_image_darwin.rs'
+    receipt = tree / '.hirsel-trace-std.json'
+    wanted = {
+        'target': TARGET,
+        'rustc': subprocess.check_output(['rustc', '-vV'], cwd=ROOT, env=env, text=True).strip(),
+        'raw_backtrace_std': hashlib.sha256(raw_script.read_bytes()).hexdigest(),
+        'panic_image_darwin': hashlib.sha256(panic_rs.read_bytes()).hexdigest(),
+    }
+    trace_rlib = tree / libraries / 'libstd-hirsel-trace.rlib'
+    try:
+        installed = json.loads(receipt.read_text())
+    except (OSError, json.JSONDecodeError):
+        installed = None
+    if (installed == wanted and trace_rlib.is_file()
+            and (tree / libraries).is_dir()
+            and all(entry.exists() for entry in (tree / libraries).iterdir())):
+        print(f'dist: trace-only std sysroot is current: {tree}', flush=True)
+        return tree
+    if not (sysroot / 'lib/rustlib/src/rust/library').is_dir():
+        run(['rustup', 'component', 'add', 'rust-src'], cwd=ROOT, env=env)
+    if tree.exists():
+        shutil.rmtree(tree)
     (tree / libraries).mkdir(parents=True)
     for library in (sysroot / libraries).iterdir():
         if not library.name.startswith('libstd-'):
             (tree / libraries / library.name).symlink_to(library)
-    run([sys.executable, ROOT / 'tools/buck2/toolchains/raw_backtrace_std.py', sysroot,
-         sysroot / 'lib/rustlib/src/rust/library', ROOT / 'tools/buck2/toolchains/panic_image_darwin.rs',
-         TARGET, tree / libraries / 'libstd-hirsel-trace.rlib'], cwd=ROOT, env=env)
+    run([sys.executable, raw_script, sysroot,
+         sysroot / 'lib/rustlib/src/rust/library', panic_rs,
+         TARGET, trace_rlib], cwd=ROOT, env=env)
+    receipt.write_text(json.dumps(wanted, indent=2, sort_keys=True) + '\n')
     return tree
+
+
+def _clone_tree(source, destination):
+    """Copy a Cargo target directory using APFS copy-on-write when available."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    cloned = subprocess.run(['/bin/cp', '-cR', source, destination], capture_output=True)
+    if cloned.returncode != 0:
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
 
 
 def runtimes(work, env):
@@ -287,41 +322,248 @@ def runtimes(work, env):
                 f'{profile}.codegen-units=1', f'{profile}.lto="fat"', f'{profile}.panic="abort"']
     settings += [f'{profile}.package.{crate}.opt-level="s"'
                  for crate in bzl_list(ROOT / 'tools/buck2/profile.bzl', 'COLD_RUNTIME_CRATES')]
-    env = dict(env, RUSTC_BOOTSTRAP='1',
-               RUSTFLAGS=f'--sysroot {sysroot} -Cembed-bitcode=yes -Crelocation-model=pic')
-    archives = {}
-    for slot, features in RUNTIMES.items():
+    base_env = dict(env, RUSTC_BOOTSTRAP='1',
+                    RUSTFLAGS=f'--sysroot {sysroot} -Cembed-bitcode=yes -Crelocation-model=pic')
+    config_args = [option for setting in settings for option in ('--config', setting)]
+    runtimes_root = work / 'runtimes'
+    if runtimes_root.exists():
+        shutil.rmtree(runtimes_root)
+    slots_root = work / 'runtime-slots'
+    if slots_root.exists():
+        shutil.rmtree(slots_root)
+
+    def build_slot(slot, features, target_dir, slot_env):
         run(['cargo', 'rustc', '--locked', '--lib', '-p', 'hirsel-core-rt', '--target', TARGET,
              '--profile', 'hirsel-runtime', '--crate-type', 'staticlib', '--features', ','.join(features),
-             *[option for setting in settings for option in ('--config', setting)],
+             *config_args,
              '--', '--cfg', 'hirsel_runtime_size', '-Zcrate-attr=feature(optimize_attribute)'],
-            cwd=ROOT, env=env)
-        archive = work / 'runtimes' / slot / 'libhirsel_core_rt.a'
-        archive.parent.mkdir(parents=True)
-        shutil.copyfile(work / 'target' / TARGET / 'hirsel-runtime/libhirsel_core_rt.a', archive)
+            cwd=ROOT, env=slot_env)
+        archive = runtimes_root / slot / 'libhirsel_core_rt.a'
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(target_dir / TARGET / 'hirsel-runtime/libhirsel_core_rt.a', archive)
         run(['/usr/bin/strip', '-S', archive])
-        archives[slot] = archive
-    return archives
+        return archive
+
+    # Build the slot with the widest dependency closure first into the shared
+    # target directory so all common runtime crates compile once and stay cached.
+    ordered = sorted(RUNTIMES, key=lambda name: (-len(RUNTIMES[name]), name))
+    seed_slot = 'prof-recording-runtime' if 'prof-recording-runtime' in RUNTIMES else ordered[0]
+    archives = {}
+    archives[seed_slot] = build_slot(seed_slot, RUNTIMES[seed_slot], work / 'target', base_env)
+
+    remaining = [slot for slot in RUNTIMES if slot != seed_slot]
+    if remaining:
+        slots_root.mkdir(parents=True, exist_ok=True)
+        workers = min(len(remaining), os.cpu_count() or 1)
+
+        def build_parallel(slot):
+            slot_target = slots_root / slot
+            _clone_tree(work / 'target', slot_target)
+            try:
+                slot_env = dict(base_env, CARGO_TARGET_DIR=str(slot_target), CARGO_BUILD_JOBS='1')
+                return slot, build_slot(slot, RUNTIMES[slot], slot_target, slot_env)
+            finally:
+                shutil.rmtree(slot_target, ignore_errors=True)
+
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for slot, archive in pool.map(build_parallel, remaining):
+                    archives[slot] = archive
+        finally:
+            shutil.rmtree(slots_root, ignore_errors=True)
+    return {slot: archives[slot] for slot in RUNTIMES}
 
 
 def zig_libsystem(work):
     pin = json.loads((ROOT / 'tools/native-toolchain/native.lock.json').read_text())['link_kit']['libSystem-tbd']
+    cache_dir = work / 'cache'
+    cached = cache_dir / f"{pin['sha256']}.libSystem.tbd"
+    if cached.is_file():
+        data = cached.read_bytes()
+        if len(data) == pin['size'] and hashlib.sha256(data).hexdigest() == pin['sha256']:
+            return data.decode()
     with urllib.request.urlopen(urllib.request.Request(pin['url'], headers={'User-Agent': 'hirsel-dist'}),
                                 timeout=120) as response:
         data = response.read()
     if len(data) != pin['size'] or hashlib.sha256(data).hexdigest() != pin['sha256']:
         raise SystemExit(f"{pin['url']}: size or SHA-256 differs from native.lock.json")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp = cached.with_suffix('.tmp')
+    tmp.write_bytes(data)
+    tmp.replace(cached)
     return data.decode()
 
 
 def link_kit_tree(work):
     kit = work / 'kit'
-    kit.mkdir()
+    if kit.exists():
+        shutil.rmtree(kit)
+    kit.mkdir(parents=True)
     allowlists = {library: ROOT / f'tools/native-toolchain/darwin/{library}.symbols'
                   for library in link_kit.DARWIN_LIBRARIES}
     row = link_kit.darwin_kit(kit, allowlists, zig_libsystem(work), APPLE)
     link_kit.write_manifest(kit, {'targets': {TARGET: row}})
     return kit
+
+
+_RELINK_WRAPPER = """#!{python}
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+
+relink = Path(os.environ['HIRSEL_RELINK_DIR']).resolve()
+raw_tmp = os.environ['HIRSEL_RUSTC_TMP']
+tmp = Path(raw_tmp).resolve()
+args = sys.argv[1:]
+saved_tmp = relink / 'tmp'
+saved_objs = relink / 'objs'
+if saved_tmp.exists():
+    shutil.rmtree(saved_tmp)
+if saved_objs.exists():
+    shutil.rmtree(saved_objs)
+if tmp.exists():
+    shutil.copytree(tmp, saved_tmp)
+else:
+    saved_tmp.mkdir(parents=True)
+saved_objs.mkdir(parents=True)
+
+tmp_prefixes = tuple(dict.fromkeys([str(tmp), raw_tmp]))
+saved_tmp_str = str(saved_tmp)
+copied = {{}}
+
+
+def rewrite_tmp(text):
+    for prefix in tmp_prefixes:
+        if prefix in text:
+            text = text.replace(prefix, saved_tmp_str)
+    return text
+
+
+def preserve(path_text):
+    rewritten = rewrite_tmp(path_text)
+    if rewritten != path_text:
+        return rewritten
+    if path_text in copied:
+        return copied[path_text]
+    candidate = Path(path_text)
+    if candidate.suffix == '.o' and candidate.is_file():
+        target = saved_objs / f'{{len(copied)}}-' / candidate.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidate, target)
+        copied[path_text] = str(target)
+        return copied[path_text]
+    return path_text
+
+
+def save_aux_file(path):
+    rewritten = rewrite_tmp(str(path))
+    if rewritten != str(path):
+        return Path(rewritten)
+    key = str(path)
+    if key in copied:
+        return Path(copied[key])
+    saved = saved_objs / f'aux-{{len(copied)}}-' / path.name
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, saved)
+    copied[key] = str(saved)
+    return saved
+
+
+def rewrite_filelist(path):
+    lines = path.read_text(encoding='utf-8').splitlines()
+    path.write_text('\\n'.join(preserve(line) for line in lines) + ('\\n' if lines else ''), encoding='utf-8')
+
+
+def rewrite_response_file(path):
+    raw = path.read_text(encoding='utf-8')
+    tokens = shlex.split(raw)
+    rewritten = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == '-filelist' and index + 1 < len(tokens):
+            saved = save_aux_file(Path(tokens[index + 1]))
+            if saved.is_file():
+                rewrite_filelist(saved)
+            rewritten.extend([token, str(saved)])
+            index += 2
+            continue
+        if token.startswith('-Wl,-filelist,'):
+            saved = save_aux_file(Path(token.split(',', 2)[2]))
+            if saved.is_file():
+                rewrite_filelist(saved)
+            rewritten.append('-Wl,-filelist,' + str(saved))
+            index += 1
+            continue
+        rewritten.append(preserve(token))
+        index += 1
+    path.write_text('\\n'.join(shlex.quote(token) for token in rewritten) + '\\n', encoding='utf-8')
+
+
+rewritten_args = []
+for arg in args:
+    if arg.startswith('@'):
+        saved_resp = save_aux_file(Path(arg[1:]))
+        if saved_resp.is_file():
+            rewrite_response_file(saved_resp)
+        rewritten_args.append('@' + str(saved_resp))
+    elif arg.startswith('-Wl,@'):
+        saved_resp = save_aux_file(Path(arg[5:]))
+        if saved_resp.is_file():
+            rewrite_response_file(saved_resp)
+        rewritten_args.append('-Wl,@' + str(saved_resp))
+    elif arg.startswith('-Wl,-filelist,'):
+        saved_list = save_aux_file(Path(arg.split(',', 2)[2]))
+        if saved_list.is_file():
+            rewrite_filelist(saved_list)
+        rewritten_args.append('-Wl,-filelist,' + str(saved_list))
+    else:
+        rewritten_args.append(preserve(arg))
+
+(relink / 'link.json').write_text(
+    json.dumps({{'argv': rewritten_args, 'cwd': os.getcwd()}}, indent=2) + '\\n',
+    encoding='utf-8',
+)
+raise SystemExit(subprocess.run(['cc', *args]).returncode)
+"""
+
+
+def _replace_output_arg(argv, destination):
+    """Replace `-o <path>` in argv (or inside an @response file) and return the new argv."""
+    result = list(argv)
+    for index, token in enumerate(result):
+        if token == '-o' and index + 1 < len(result):
+            result[index + 1] = str(destination)
+            return result
+        if token.startswith('-o') and len(token) > 2:
+            result[index] = '-o' + str(destination)
+            return result
+    for index, token in enumerate(result):
+        if not token.startswith('@'):
+            continue
+        resp = Path(token[1:])
+        tokens = shlex.split(resp.read_text(encoding='utf-8'))
+        for inner, item in enumerate(tokens):
+            if item == '-o' and inner + 1 < len(tokens):
+                tokens[inner + 1] = str(destination)
+                patched = resp.with_name(resp.name + '.relink')
+                patched.write_text('\n'.join(shlex.quote(t) for t in tokens) + '\n', encoding='utf-8')
+                result[index] = '@' + str(patched)
+                return result
+    raise ValueError('captured linker command had no -o output argument')
+
+
+def _relink_with_host(relink_dir, host, destination, env):
+    record = json.loads((relink_dir / 'link.json').read_text(encoding='utf-8'))
+    argv = _replace_output_arg(record['argv'], destination)
+    argv.extend(['-Wl,-sectcreate,__TEXT,__hirsel_host', '-Xlinker', str(host)])
+    run(['cc', *argv], cwd=record['cwd'], env=env)
+    if not destination.is_file():
+        raise RuntimeError(f'relink did not produce {destination}')
 
 
 def build(output, work, release_tag):
@@ -331,13 +573,27 @@ def build(output, work, release_tag):
     run([sys.executable, ROOT / 'tools/buck2/bootstrap_llvm.py', '--output', llvm], cwd=ROOT)
     env = dict(cargo_env(work, llvm), HIRSEL_RELEASE_VERSION=release_tag)
     driver = ['--locked', '--profile', 'dist', '-p', 'hirsel-core-driver', '--bin', 'hirsel']
-    run(['cargo', 'build', *driver], cwd=ROOT, env=env)
+    relink_dir = (work / 'relink').resolve()
+    rustc_tmp = (work / 'rustc-tmp').resolve()
+    for path in (relink_dir, rustc_tmp):
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True)
+    wrapper = relink_dir / 'hirsel-cc-wrapper'
+    wrapper.write_text(_RELINK_WRAPPER.format(python=sys.executable), encoding='utf-8')
+    wrapper.chmod(0o755)
+    driver_env = dict(env, TMPDIR=str(rustc_tmp), HIRSEL_RELINK_DIR=str(relink_dir),
+                      HIRSEL_RUSTC_TMP=str(rustc_tmp))
+    run(['cargo', 'rustc', *driver, '--', '-C', f'linker={wrapper}'], cwd=ROOT, env=driver_env)
     archives = runtimes(work, env)
     kit = link_kit_tree(work)
     compiler = work / 'target/dist/hirsel'
     scratch = work / 'install'
-    scratch.mkdir()
-    install = dict(env, TMPDIR=str(scratch), HIRSEL_JOBS='1')
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    scratch.mkdir(parents=True)
+    jobs = os.environ.get('HIRSEL_JOBS') or str(os.cpu_count() or 1)
+    install = dict(env, TMPDIR=str(scratch), XDG_CACHE_HOME=str(scratch / 'cache'), HIRSEL_JOBS=jobs)
     run([compiler, 'core-product', '--install', output], env=install, stdout=subprocess.DEVNULL)
     run([compiler, 'std-product', '--install', output,
          *[option for slot, archive in archives.items() for option in (f'--{slot}', archive)],
@@ -350,11 +606,18 @@ def build(output, work, release_tag):
     run([sys.executable, programs, 'helpers', Path(__file__).with_name('product.toml'),
          output, ROOT / 'core/programs/platform', scratch, host], env=install)
     run(['/usr/bin/codesign', '-v', '--strict', host])
-    # Link the host into the signed image. All compiler libraries are already
-    # built by the first invocation, which supplies hirsel for the host build.
-    run(['cargo', 'rustc', *driver, '--', '-C', 'link-arg=-Wl,-sectcreate,__TEXT,__hirsel_host',
-         '-C', 'link-arg=-Xlinker', '-C', f'link-arg={host}'], cwd=ROOT, env=env)
-    shutil.copy2(compiler, output / 'hirsel')
+    # Embed the platform host into the signed compiler image. Reuse the
+    # captured link inputs from the first pass to avoid a second fat-LTO pass.
+    if (relink_dir / 'link.json').is_file():
+        relinked = relink_dir / 'hirsel'
+        _relink_with_host(relink_dir, host, relinked, env)
+        shutil.copy2(relinked, output / 'hirsel')
+    else:
+        run(['cargo', 'rustc', *driver, '--', '-C', 'link-arg=-Wl,-sectcreate,__TEXT,__hirsel_host',
+             '-C', 'link-arg=-Xlinker', '-C', f'link-arg={host}'], cwd=ROOT, env=env)
+        shutil.copy2(compiler, output / 'hirsel')
+    shutil.rmtree(relink_dir, ignore_errors=True)
+    shutil.rmtree(rustc_tmp, ignore_errors=True)
     return llvm
 
 
@@ -371,12 +634,10 @@ def check(prefix, sequence=None, accept=None, relocation=None):
     with tempfile.TemporaryDirectory(prefix='hirsel-fresh-') as raw:
         scratch = Path(raw)
         bundle = scratch / 'bundle.tar'
-        with tarfile.open(bundle, 'w') as archive:
-            archive.add(prefix, arcname='.')
+        run(['/usr/bin/tar', '-cf', bundle, '-C', prefix, '.'])
         fresh = scratch / 'prefix'
         fresh.mkdir()
-        with tarfile.open(bundle) as archive:
-            archive.extractall(fresh, filter='tar')
+        run(['/usr/bin/tar', '-xf', bundle, '-C', fresh])
         bundle.unlink()
         work = scratch / 'work'
         work.mkdir()

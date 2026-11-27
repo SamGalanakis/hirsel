@@ -60,12 +60,16 @@ compiler; the benchmarks page in the separate hirsel-site repository says so. Th
 compiler is rewritten with `--bolt-info=0`: BOLT's note records its command line, which names temporary
 directories. Given one input and one profile, the rewrite is byte-identical.
 
-The release workflow has two stages. `train` runs `--train-profile` once and
-uploads both profiles; `build` takes them by hash, builds, runs the glibc and
-fresh-root gates, and the release publishes `<sha256>.profdata` and
-`<sha256>.fdata` beside the archive, so anyone can rebuild the compiler bit for
-bit at the tag. A `workflow_dispatch` run builds a `v0.0.0-dispatch.<run id>`
-version and publishes nothing unless dispatched on a `v*` tag with `publish`.
+The release workflow starts with a fast `plan` job that resolves the version and
+host targets, then runs `build-linux` and `build-darwin` in parallel.
+`build-linux` runs `--train-profile` once, then immediately runs `--pgo` and
+`--bolt` with those pinned profile hashes inside the same warmed container, runs
+the glibc and fresh-root gates, and publishes `<sha256>.profdata` and
+`<sha256>.fdata` beside the archive; `release-validate.yml` (`repro`) separately
+rebuilds from those published profiles in clean checkouts at different paths to
+verify bit-for-bit reproducibility. A `workflow_dispatch` run builds a
+`v0.0.0-dispatch.<run id>` version and publishes nothing unless dispatched on a
+`v*` tag with `publish`.
 
 `NOTICES.md` at the repository root is the distribution's notice inventory. It is
 generated, never edited: `tools/toolchain-dist/notices.py --write [--bundle DIR]`

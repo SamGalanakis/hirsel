@@ -20,6 +20,13 @@ NIGHTLY_DIR = Path(os.environ.get("HIRSEL_BRIEFS", "/workspace/code/hirsel-brief
 KEEP_RUNS = 3
 RUN_NAME = r"[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}"
 RUN_REFERENCE = re.compile(rf"(?<![\w.-])runs/({RUN_NAME})(?![\w.-])")
+AUXILIARY_STAGES = {
+    "boat": "Boat", "vopr": "VOPR", "law": "Laws", "media": "Media vectors",
+    "bootstrap": "Fresh worktree bootstrap", "toolchain": "Toolchain build",
+    "cgroup": "Launcher cgroup law", "containment": "Containment generator",
+    "w2": "W2 damage sweep", "n1": "N1 browser_room",
+}
+DEFERRED_STAGES = {"vopr", "w2"}
 
 
 def read_report(path):
@@ -104,20 +111,59 @@ def attempt_order(run):
 
 
 def latest_attempt(base):
+    startup = read_report(base / "startup-failure.json")
     for run in sorted(base.glob("runs/*"), key=attempt_order, reverse=True):
         report = read_report(run / "board" / "board.json")
-        if attempt := read_report(run / "attempt.json"):
-            return attempt, report
-        if report:
+        attempt = read_report(run / "attempt.json")
+        if not attempt and report:
             started = datetime.strptime(run.name.split("-", 1)[0], "%Y%m%dT%H%M%SZ")
             status = report.get("exit_status")
             failures = ", ".join(report.get("failures", {}))
-            return {
+            attempt = {
                 "started": started.replace(tzinfo=timezone.utc).timestamp(),
                 "commit": report.get("commit"), "status": status,
                 "step": failures or ("board comparison" if status in (2, 3) else "board"),
-            }, report
-    return None, {}
+            }
+        if attempt:
+            if startup and startup["started"] > attempt["started"]:
+                break
+            attempt["run"] = run.name
+            return attempt, report
+    return startup or None, {}
+
+
+def auxiliary_exits(attempt):
+    for stage, label in AUXILIARY_STAGES.items():
+        if (status := attempt.get(f"{stage}_status")) is not None:
+            yield label, status, status == 75 and stage in DEFERRED_STAGES
+
+
+def attempt_alerts(attempt):
+    if attempt is None:
+        return
+    if attempt.get("service_failure"):
+        yield f"BOARD-FAILED {attempt['step']} ({attempt['service_failure']})"
+    elif attempt["step"] == "board comparison" and attempt["status"] == 2:
+        yield "BOARD-REFUSED board comparison (exit 2)"
+    elif attempt["status"]:
+        yield f"BOARD-FAILED {attempt['step']} (exit {attempt['status']})"
+    for label, status, deferred in auxiliary_exits(attempt):
+        if status and not deferred:
+            yield f"BOARD-AUX-FAILED {label} (exit {status})"
+
+
+def print_new_attempt_alerts(base, attempt):
+    if not (alerts := list(attempt_alerts(attempt))):
+        return
+    path = base / "round-alerts.json"
+    previous = read_report(path)
+    key = attempt.get("run", attempt["started"])
+    shown = set(previous.get("alerts", ())) if previous.get("attempt") == key else set()
+    for alert in alerts:
+        if alert not in shown:
+            print(alert)
+    if set(alerts) - shown:
+        atomic_write(path, json.dumps({"attempt": key, "alerts": sorted(shown.union(alerts))}) + "\n")
 
 
 def metadata_pins(base):
@@ -205,19 +251,21 @@ def render(base, attempt, report, complete, now, nightly=None):
     else:
         status = attempt["status"]
         step = attempt["step"]
-        if status is None:
+        exits = list(auxiliary_exits(attempt))
+        if attempt.get("service_failure"):
+            outcome = f"Failed · {step} ({attempt['service_failure']})"
+        elif status is None:
             outcome = f"Running auxiliary checks · {step}" if board_status is not None else f"Running · {step}"
         elif status == 0:
-            outcome = f"Finished · {step} (exit 0)"
+            outcome = ("Finished with auxiliary failures" if any(code and not deferred for _, code, deferred in exits)
+                       else f"Finished · {step} (exit 0)")
         else:
             comparison = {2: "Refused", 3: "Regression"} if step == "board comparison" else {}
             outcome = f"{comparison.get(status, 'Failed')} · {step} (exit {status})"
         commit = attempt["commit"] or "commit unavailable"
         lines.append(f"**Latest attempt** · `{commit}` · {timestamp(attempt['started'])} · {outcome}")
-        auxiliary = [f"{label} exit {attempt[field]}" for field, label in
-                     (("boat_status", "Boat"), ("vopr_status", "VOPR"), ("law_status", "Laws"),
-                     ("media_status", "Media vectors"))
-                     if attempt.get(field) is not None]
+        auxiliary = [f"{label} exit {status}" + (" (deferred)" if deferred else " (failed)" if status else "")
+                     for label, status, deferred in exits]
         if auxiliary:
             lines += ["", " · ".join(auxiliary)]
     lines.append("")
@@ -246,8 +294,9 @@ def atomic_write(path, content):
 def service_failure(base, followups, tier="nightly"):
     now = datetime.now(timezone.utc)
     status = os.environ.get("MONITOR_EXIT_STATUS", "")
-    if os.environ.get("MONITOR_EXIT_CODE") == "exited" and status in ("1", "2", "3"):
-        outcome = {"1": "incomplete", "2": "refused", "3": "regressed"}[status]
+    exited = os.environ.get("MONITOR_EXIT_CODE") == "exited"
+    if exited and status in ("1", "2", "3", "4"):
+        outcome = {"1": "incomplete", "2": "refused", "3": "regressed", "4": "auxiliary checks failed"}[status]
         detail = f"{outcome} (exit {status})"
     else:
         result = os.environ.get("MONITOR_SERVICE_RESULT", "unknown")
@@ -263,6 +312,18 @@ def service_failure(base, followups, tier="nightly"):
         detail = f"failed (exit {status})" if status else detail
     else:
         subject = f"{tier} board"
+    if not vopr and tier == "nightly":
+        raw_detail = f"exit {status}" if exited and status else detail
+        attempt = record_service_failure(base, invocation, now.timestamp(), raw_detail)
+        if attempt.get("service_failure"):
+            detail = f"failed at {attempt['step']} ({raw_detail})"
+        else:
+            if attempt["status"] and attempt["step"] != "board comparison":
+                detail = f"failed at {attempt['step']} ({raw_detail})"
+            failures = [f"{label} (exit {code})" for label, code, deferred in auxiliary_exits(attempt)
+                        if code and not deferred]
+            if failures:
+                detail += ". " + " · ".join(failures)
     line = f"{timestamp(now.timestamp())} Hirsel {subject} {detail}. See `{journal}`."
     alerts = base / "alerts"
     alerts.mkdir(exist_ok=True)
@@ -271,13 +332,30 @@ def service_failure(base, followups, tier="nightly"):
     with followups.open("a") as stream:
         stream.write(f"\n- {line}\n")
     print(line)
+    return not vopr and tier == "nightly"
+
+
+def record_service_failure(base, invocation, now, detail):
+    if invocation:
+        for path in base.glob("runs/*/attempt.json"):
+            attempt = read_report(path)
+            if attempt.get("invocation") == invocation:
+                if attempt["status"] is None:
+                    attempt.update(status=1, service_failure=detail)
+                    atomic_write(path, json.dumps(attempt) + "\n")
+                return attempt
+    # Startup can fail before the script creates even its first attempt record.
+    attempt = {"started": now, "commit": None, "step": "service startup", "status": 1,
+               "service_failure": detail}
+    atomic_write(base / "startup-failure.json", json.dumps(attempt) + "\n")
+    return attempt
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--current", type=Path)
-    parser.add_argument("--alert", action="store_true")
+    parser.add_argument("--alert", action="store_true", help="print new attempt failures and current staleness")
     parser.add_argument("--nightly-dir", type=Path, default=NIGHTLY_DIR)
     parser.add_argument("--service-failure", type=Path, metavar="FOLLOWUPS",
                         help="record the failing systemd invocation")
@@ -289,10 +367,8 @@ def main():
     parser.add_argument("--commit")
     parser.add_argument("--step")
     parser.add_argument("--status", type=int, help="exit status, omitted while running")
-    parser.add_argument("--boat-status", type=int)
-    parser.add_argument("--vopr-status", type=int)
-    parser.add_argument("--law-status", type=int)
-    parser.add_argument("--media-status", type=int)
+    for stage in AUXILIARY_STAGES:
+        parser.add_argument(f"--{stage}-status", type=int)
     args = parser.parse_args()
     if args.service_failure_tier and not args.service_failure:
         parser.error("--service-failure-tier requires --service-failure")
@@ -306,8 +382,9 @@ def main():
                 print(f"Pruned board run {run}")
             return
         if args.service_failure:
-            service_failure(args.base, args.service_failure, args.service_failure_tier or "nightly")
-            return
+            if not service_failure(args.base, args.service_failure, args.service_failure_tier or "nightly"):
+                return
+            args.current = args.current or args.service_failure.with_name("CURRENT-BOARD.md")
         if args.record:
             if args.started is None or not args.step:
                 parser.error("--record requires --started and --step")
@@ -316,8 +393,8 @@ def main():
                 args.step = ", ".join(report.get("failures", {})) or args.step
             attempt = {"started": args.started, "commit": args.commit,
                        "step": args.step, "status": args.status,
-                       "boat_status": args.boat_status, "vopr_status": args.vopr_status,
-                       "law_status": args.law_status, "media_status": args.media_status}
+                       "invocation": os.environ.get("INVOCATION_ID")}
+            attempt.update((f"{stage}_status", getattr(args, f"{stage}_status")) for stage in AUXILIARY_STAGES)
             atomic_write(args.record / "attempt.json", json.dumps(attempt) + "\n")
         if args.last_complete_commit and (accepted := last_complete(args.base, accepted_only=True)):
             print(accepted[1])
@@ -325,10 +402,11 @@ def main():
             complete = last_complete(args.base)
             now = time.time()
             nightly = nightly_alert(args.nightly_dir, now)
+            attempt, report = latest_attempt(args.base)
             if args.current:
-                attempt, report = latest_attempt(args.base)
                 atomic_write(args.current, render(args.base, attempt, report, complete, now, nightly))
             if args.alert:
+                print_new_attempt_alerts(args.base, attempt)
                 for alert in (board_alert(complete, now), nightly):
                     if alert:
                         print(alert)

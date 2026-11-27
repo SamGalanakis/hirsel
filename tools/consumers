@@ -191,6 +191,7 @@ def main():
     parser.add_argument('--reasons', action='store_true', help='print target/reason columns on stdout')
     parser.add_argument('--limit', type=int, default=LIMIT,
                         help=f'keep the nearest N affected targets (default {LIMIT}; 0 keeps all)')
+    parser.add_argument('--allow-empty', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         paths = []
@@ -221,7 +222,7 @@ def main():
         inventories = {}
         reasons, cut = {}, []
         selected = select(ROOT, paths, graph, inventories, direct_owners(ROOT, paths), reasons, args.limit, cut)
-        if not selected:
+        if not selected and not args.allow_empty:
             raise ValueError('no consumers found for ' + ', '.join(paths))
         for target in selected:
             label = target.removeprefix('root')

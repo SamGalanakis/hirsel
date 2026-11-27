@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Exercise the nightly wrapper and the missed-run check against a fixture board."""
 import json
 import os
@@ -12,6 +13,13 @@ import time
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1]
+
+
+def without_host_mise(base):
+    # The wrapper fixtures exercise board stages. Tool discovery has its own fixture.
+    mise = base / "mise"
+    mise.write_text("#!/bin/sh\nexit 1\n")
+    mise.chmod(0o755)
 
 
 class BoardFreshnessTest(unittest.TestCase):
@@ -189,6 +197,7 @@ exit 2
     def test_locks_release_with_a_live_build_daemon(self):
         with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as listener:
             base = Path(directory)
+            without_host_mise(base)
             main = base / "main"
             subprocess.run(["git", "init", "-q", main], check=True)
             subprocess.run(["git", "-C", main, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
@@ -235,9 +244,10 @@ esac
                 self.assertEqual(lock_statuses, {"nightly.lock": 0, "baseline.lock": 0})
                 self.assertEqual((base / "aux-baseline-status").read_text().strip(), "0")
 
-    def test_laws_and_vopr_run_after_board_and_preserve_its_verdict(self):
+    def test_auxiliary_reds_fail_the_service_and_preserve_the_performance_verdict(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
+            without_host_mise(base)
             main = base / "main"
             main.mkdir()
             subprocess.run(["git", "init", "-q", main], check=True)
@@ -309,6 +319,7 @@ esac
                     commit = subprocess.check_output(["git", "-C", main, "rev-parse", "HEAD"], text=True).strip()
                     snapshot = base / "baselines" / f"{commit}.json"
                     snapshot.unlink(missing_ok=True)
+                    invocation = f"{board_status:02x}{prepare_status:02x}{batch_status:028x}"
                     result = subprocess.run(
                         [TOOLS / "nightly-board.sh", "--locked", "--fetched"], capture_output=True, text=True,
                         env=os.environ | {"HIRSEL_BOARD_BASE": str(base),
@@ -318,15 +329,29 @@ esac
                                           "FIXTURE_PREPARE_STATUS": str(prepare_status),
                                           "FIXTURE_VOPR_STATUS": str(batch_status),
                                           "FIXTURE_PREVIOUS": previous,
+                                          "INVOCATION_ID": invocation,
                                           "PYTHONPATH": str(TOOLS.parent / "bench/awfy"),
                                           "PATH": f"{base}:{os.environ['PATH']}"},
                     )
-                    self.assertEqual(result.returncode, board_status, result.stderr)
+                    self.assertEqual(result.returncode, board_status or 4, result.stderr)
                     current = (base / "CURRENT-BOARD.md").read_text()
                     self.assertIn(f"**Passed** · {'yes' if board_status == 0 else 'no'}", current)
                     boat_status = 0 if campaign_status == 0 else 7
-                    self.assertIn(f"Boat exit {boat_status} · VOPR exit {campaign_status}", current)
-                    self.assertIn("Laws exit 1", current)
+                    self.assertIn(f"Boat exit {boat_status}", current)
+                    self.assertIn(f"VOPR exit {campaign_status}", current)
+                    self.assertIn("Laws exit 1 (failed)", current)
+                    round_check = [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--alert",
+                                   "--nightly-dir", base / "nightly"]
+                    first = subprocess.check_output(round_check, text=True).splitlines()
+                    self.assertIn("BOARD-AUX-FAILED Laws (exit 1)", first)
+                    self.assertIn("W2 damage sweep", current)
+                    self.assertEqual(sum("BOARD-AUX-FAILED Laws" in alert for alert in first), 1)
+                    self.assertEqual("BOARD-AUX-FAILED VOPR (exit 1)" in first, campaign_status == 1)
+                    self.assertNotIn("BOARD-AUX-FAILED VOPR (exit 75)", first)
+                    if board_status == 2:
+                        self.assertEqual(first[0], "BOARD-REFUSED board comparison (exit 2)")
+                    again = subprocess.check_output(round_check, text=True)
+                    self.assertNotIn("BOARD-AUX-FAILED", again)
                     run = Path(result.stdout.strip())
                     log = (run / "run.log").read_text()
                     if board_status == 2:
@@ -345,6 +370,17 @@ esac
                         self.assertIn("VOPR batch exited 0 after partial preparation", log)
                     if campaign_status == 75:
                         self.assertIn("VOPR deferred", log)
+                    if board_status == 0:
+                        self.assertIn("Finished with auxiliary failures", current)
+                        hook = subprocess.check_output(
+                            [sys.executable, TOOLS / "board-freshness.py", "--base", base,
+                             "--service-failure", base / "followups.md"],
+                            env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": "4",
+                                              "MONITOR_INVOCATION_ID": invocation}, text=True,
+                        )
+                        self.assertIn("auxiliary checks failed (exit 4)", hook)
+                        self.assertIn("Laws (exit 1)", hook)
+                        self.assertNotIn("service startup", hook)
 
     def test_service_failure_writes_dated_alert_and_followup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -358,10 +394,17 @@ esac
                     with path.open("a") as alert:
                         alert.write(culprit)
                     expected[path] += culprit
+                invocation = str(status) * 32
+                run = base / f"runs/20261124T02000{status}Z-test00"
+                run.mkdir(parents=True)
+                (run / "attempt.json").write_text(json.dumps({
+                    "started": time.time(), "status": status, "step": "board comparison",
+                    "commit": "scheduled-commit", "invocation": invocation,
+                }))
                 result = subprocess.check_output(
                     [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups],
                     env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": str(status),
-                                      "MONITOR_INVOCATION_ID": "a" * 32},
+                                      "MONITOR_INVOCATION_ID": invocation},
                     text=True,
                 )
                 self.assertRegex(result, r"^\d{4}-\d{2}-\d{2} .* UTC Hirsel nightly board ")
@@ -396,9 +439,36 @@ esac
             self.assertIn("- " + vopr, followups.read_text())
             self.assertTrue(followups.read_text().startswith("Existing entry\n"))
 
+    def test_failure_hook_publishes_startup_failure_ahead_of_staleness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            board = base / "previous.json"
+            board.write_text(json.dumps({"complete": True, "commit": "last-good", "exit_status": 0}))
+            board.with_suffix(".md").write_text("Previous complete board\n")
+            old = time.time() - 27 * 3600
+            os.utime(board, (old, old))
+            (base / "last-complete.json").symlink_to(board)
+            freshness = [sys.executable, TOOLS / "board-freshness.py", "--base", base]
+            hook = subprocess.check_output(
+                [*freshness, "--service-failure", base / "followups.md"],
+                env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": "2",
+                                  "MONITOR_INVOCATION_ID": "b" * 32}, text=True,
+            )
+            self.assertIn("failed at service startup (exit 2)", hook)
+            self.assertEqual((base / "last-complete.json").resolve(), board)
+            current = (base / "CURRENT-BOARD.md").read_text()
+            self.assertIn("Failed · service startup (exit 2)", current)
+            self.assertIn("Previous complete board", current)
+            check = [*freshness, "--alert", "--nightly-dir", base / "nightly"]
+            alerts = subprocess.check_output(check, text=True).splitlines()
+            self.assertEqual(alerts[0], "BOARD-FAILED service startup (exit 2)")
+            self.assertTrue(alerts[1].startswith("BOARD-STALE"))
+            self.assertTrue(subprocess.check_output(check, text=True).startswith("BOARD-STALE"))
+
     def test_failed_fetch_preserves_last_complete_and_alerts_when_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
+            without_host_mise(base)
             main = base / "main"
             main.mkdir()
 
@@ -439,7 +509,7 @@ esac
 
             recent = time.time() - 25 * 3600
             os.utime(board, (recent, recent))
-            self.assertEqual(alert(), "")
+            self.assertNotIn("BOARD-STALE", alert())
             old = time.time() - 27 * 3600
             os.utime(board, (old, old))
             self.assertIn("BOARD-STALE 27.0 h old", alert())
@@ -499,7 +569,7 @@ esac
                     [sys.executable, TOOLS / "board-freshness.py", "--base", base,
                      "--current", current, "--alert", "--nightly-dir", nightly], text=True,
                 )
-                self.assertEqual(alert, "")
+                self.assertEqual(alert, "" if recovered else "BOARD-REFUSED board comparison (exit 2)\n")
                 shown = current.read_text()
                 fields = ("**Fresh** · yes", "**Complete** · yes", "**Passed** · no",
                           "**Refused** · yes", f"**Recovered** · {'yes' if recovered else 'no'}")

@@ -6,14 +6,25 @@
     tools/affected --dry-run  # print the plan only
 
 Changed paths are the committed, staged, unstaged and untracked files since the
-base. They go to `tools/consumers`, whose targets run in one `buck2 test`.
+base. `tools/consumers` selects tests. Changes to package inputs also build the
+package action unless a selected test already builds it.
 """
 import argparse
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+BUCK2 = ROOT / '.buck2/bin/buck2'
+PACKAGE_LIST = 'core/programs/toolchain-packages.toml'
+PACKAGE_GATE = '//:toolchain-packages'
+PACK_INPUTS = {
+    PACKAGE_LIST, 'tools/toolchain-dist/toolchain_programs.py', 'tools/toolchain-dist/BUCK',
+    'tools/buck2/compiler_source.py', 'tools/buck2/defs.bzl', 'tools/buck2/distribution_gates.py',
+    'crates/hirsel-core-driver/src/host/linux/install.rs', 'crates/hirsel-core-driver/src/request.rs',
+    'crates/hirsel-core-driver/src/request/packages.rs', 'crates/hirsel-core-driver/src/std_release.rs',
+}
 
 
 def git(*args):
@@ -21,30 +32,74 @@ def git(*args):
 
 
 def changed(base):
-    paths = set(git('diff', '--name-only', '--no-renames', base).split())
-    paths |= set(git('ls-files', '--others', '--exclude-standard').split())
-    return sorted(path for path in paths if (ROOT / path).exists())
+    paths = set(git('diff', '--name-only', '--no-renames', '-z', base, '--').split('\0'))
+    paths.update(git('ls-files', '--others', '--exclude-standard', '-z').split('\0'))
+    return sorted(paths - {''})
+
+
+def packages_changed(paths):
+    if PACK_INPUTS.intersection(paths) or any(path.startswith((
+            'crates/hirsel-core-driver/src/installation',
+            'crates/hirsel-core-driver/src/package_',
+    )) for path in paths):
+        return True
+    packages = set(tomllib.loads((ROOT / PACKAGE_LIST).read_text())['packages'])
+    for path in paths:
+        parts = Path(path).parts
+        if parts[:2] == ('core', 'programs') and len(parts) > 3 and parts[2] in packages:
+            if parts[-1] == 'hirsel.toml' or path.endswith('.hirsel'):
+                return True
+    return False
+
+
+def tests_build_packages(targets):
+    if not targets:
+        return False
+    query = f'set({PACKAGE_GATE}) intersect deps(set({" ".join(targets)}))'
+    result = subprocess.run([str(BUCK2), 'uquery', query],
+                            cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE)
+    return bool(result.stdout.strip())
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--base', help='revision to compare with (default: merge-base with origin/main)')
-    parser.add_argument('--dry-run', action='store_true', help='print the targets only')
+    parser.add_argument('--dry-run', action='store_true', help='print the build command and test targets')
     args = parser.parse_args()
     base = args.base or git('merge-base', 'HEAD', 'origin/main').strip()
     paths = changed(base)
     if not paths:
         print('affected: no changes since ' + base[:12], file=sys.stderr)
         return 0
-    found = subprocess.run([str(ROOT / 'tools/consumers'), *paths], cwd=ROOT, stdout=subprocess.PIPE, text=True)
-    if found.returncode:
-        return found.returncode
-    targets = found.stdout.split()
+    package_gate = packages_changed(paths)
+    live = [path for path in paths if (ROOT / path).is_file()]
+    targets = []
+    if live:
+        command = [str(ROOT / 'tools/consumers'), *live]
+        if package_gate:
+            command.append('--allow-empty')
+        found = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, text=True)
+        if found.returncode:
+            return found.returncode
+        targets = found.stdout.split()
+    build = package_gate and not tests_build_packages(targets)
     print(f'affected: {len(paths)} changed paths; {len(targets)} targets', file=sys.stderr)
+    build_args = ['build', PACKAGE_GATE, '--materializations', 'none']
     if args.dry_run:
-        print('\n'.join(targets))
+        if build:
+            print('buck2 ' + ' '.join(build_args))
+        if targets:
+            print('\n'.join(targets))
         return 0
-    return subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'test', *targets], cwd=ROOT).returncode
+    if build:
+        if not BUCK2.is_file():
+            status = subprocess.run([sys.executable, str(ROOT / 'tools/buck2/prepare.py')], cwd=ROOT).returncode
+            if status:
+                return status
+        status = subprocess.run([str(BUCK2), *build_args], cwd=ROOT).returncode
+        if status:
+            return status
+    return subprocess.run([str(BUCK2), 'test', *targets], cwd=ROOT).returncode if targets else 0
 
 
 if __name__ == '__main__':

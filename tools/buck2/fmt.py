@@ -11,7 +11,9 @@ Changed source files must fit
 their line limits, production sources must keep test code out, and platform decisions
 must be exhaustive on the target with host `cfg`s only in host seams. A Rust change
 must pass the Apple target checks (tools/apple_check.py). The Darwin runtime
-must link against the shipped link kit. The editor parser checks the core and
+must link against the shipped link kit when archive or link-kit inputs change.
+Use `--darwin-import-law` to run that check by itself during a lint fallback.
+The editor parser checks the core and
 spec corpus. Explicit
 expectation comments exclude refusal/gap fixtures to preserve diagnostic coordinates.
 """
@@ -42,6 +44,18 @@ SOURCE_ROOTS = ('core/core', 'core/std', 'core/front/cases', 'core/programs/m1',
 PROGRAM_ROOT = 'core/programs'
 BYTE_SENSITIVE_FIXTURES = {'core/front/fixtures/slots-needs-drop.hirsel'}
 FIXTURE_EXPECTATION = re.compile(r'^\s*//\s*expect:\s*(?:refuse|gap|resource)\b', re.MULTILINE)
+DARWIN_IMPORT_INPUTS = (
+    '*.rs', '*.c', '*.cc', '*.cpp', '*.cxx', '*.h', '*.hh', '*.hpp', '*.S', '*.s', '*.inc',
+    '*.a', 'Cargo.toml', '**/Cargo.toml', 'Cargo.lock', '.cargo', 'rust-toolchain.toml',
+    'BUCK', '**/BUCK', '*.bzl', '.buckconfig', '.buckroot',
+    'tools/native-toolchain/darwin', 'tools/native-toolchain/apple-targets.json',
+    'tools/native-toolchain/llvm-23.lock', 'tools/buck2/native-toolchain', 'tools/buck2/toolchains',
+    'tools/buck2/runtime_parts.py', 'tools/buck2/build_script_inputs.py', 'tools/buck2/cargo_units.py',
+    'tools/buck2/sync.py', 'tools/buck2/distribution_gates.py', 'tools/buck2/production-features.json',
+    'tools/buck2/pins.json', 'tools/buck2/toolchain-lock.json', 'tools/buck2/llvm-cxx-headers-lock.json',
+    'tools/buck2/prelude_overlay.py', 'tools/toolchain-dist/product.toml',
+    ':(exclude)*.md',
+)
 
 
 def is_refusal_fixture(path):
@@ -57,6 +71,16 @@ def under(path, root):
 
 def git_output(*args):
     return subprocess.check_output(['git', *args], cwd=ROOT).decode('utf-8', 'surrogateescape')
+
+
+def check_darwin_import_law():
+    base = git_output('merge-base', 'HEAD', 'origin/main').strip()
+    changed = (git_output('diff', '--name-only', '--no-renames', '-z', base, '--', *DARWIN_IMPORT_INPUTS)
+               or git_output('ls-files', '--others', '--exclude-standard', '-z', '--', *DARWIN_IMPORT_INPUTS))
+    if not changed:
+        return 0
+    return subprocess.run(
+        [str(BUCK2), 'test', '//:hirsel-core-rt-archives-darwin-import-law'], cwd=ROOT).returncode
 
 
 def manifest_paths():
@@ -141,14 +165,14 @@ def check_cases(paths):
 
 
 def main():
+    if sys.argv[1:] == ['--darwin-import-law']:
+        return check_darwin_import_law()
     if not check_file_lengths(ROOT) or not check_boundaries(ROOT) or not check_target(ROOT):
         return 1
     if apple_check.rust_changed() and apple_check.check():
         return 1
-    imports = subprocess.run(
-        [str(BUCK2), 'test', '//:hirsel-core-rt-archives-darwin-import-law'], cwd=ROOT)
-    if imports.returncode:
-        return imports.returncode
+    if status := check_darwin_import_law():
+        return status
     rustfmt_flags = sys.argv[1:]
     query = 'kind("^rust_(library|binary)$", root//:)'
     attributes = json.loads(subprocess.run(

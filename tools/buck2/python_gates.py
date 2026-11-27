@@ -3,6 +3,12 @@
 
 def python_gates(out, call, Raw):
     product = ["//tools/toolchain-dist:product.py", "//tools/toolchain-dist:product.toml"]
+    out.append("\n" + call("hirsel_script_test", name="test-affected", script="tools/tests/affected.py", host=True,
+                           data=["tools/affected"]))
+    out.append("\n" + call("hirsel_script_test", name="test-board-freshness",
+                           script="tools/tests/test_board_freshness.py", host=True,
+                           data=["tools/board-environment.sh", "tools/board-freshness.py", "tools/hirsel-board.service",
+                                 "tools/hirsel-board-alert.service", "tools/nightly-board.sh"]))
     out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", host=True,
                            data=["//tools/buck2:fmt.py"],
                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))

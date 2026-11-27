@@ -17,28 +17,35 @@ started=$(date +%s)
 run=$(mktemp -d "$base/runs/$(date -u -d "@$started" +%Y%m%dT%H%M%SZ)-XXXXXX")
 commit=$(git -C "$base/main" rev-parse --verify origin/main 2>/dev/null) || commit=
 step="fetch origin/main"
+bootstrap_status=
 boat_status=
+toolchain_status=
+cgroup_status=
+containment_status=
 vopr_status=
 law_status=
 media_status=
+w2_status=
+n1_status=
 record() {
-  local auxiliary=()
-  if [[ -n "$boat_status" ]]; then auxiliary+=(--boat-status "$boat_status"); fi
-  if [[ -n "$vopr_status" ]]; then auxiliary+=(--vopr-status "$vopr_status"); fi
-  if [[ -n "$law_status" ]]; then auxiliary+=(--law-status "$law_status"); fi
-  if [[ -n "$media_status" ]]; then auxiliary+=(--media-status "$media_status"); fi
+  local auxiliary=() stage field
+  for stage in bootstrap boat toolchain cgroup containment vopr law media w2 n1; do
+    field=${stage}_status
+    if [[ -n "${!field}" ]]; then auxiliary+=("--${stage}-status" "${!field}"); fi
+  done
   python3 "$tools/board-freshness.py" --base "$base" --current "$current" \
     --record "$run" --started "$started" --commit "$commit" --step "$step" "${auxiliary[@]}" "$@"
 }
 # shellcheck disable=SC2317 # Invoked by the EXIT trap.
 finish() {
-  local status=$?
+  local exit_status=$? status
+  status=${performance_status:-$exit_status}
   if (( status != 0 )); then
     printf 'Nightly board failed at %s (exit %s). See %s\n' "$step" "$status" "$run" >&2
   fi
   local recorded=0
   record --status "$status" || {
-    if (( status == 0 )); then
+    if (( exit_status == 0 )); then
       exit 1
     fi
     recorded=1
@@ -87,10 +94,14 @@ if [[ -n "$checkout_status" ]]; then
 fi
 step="Fresh worktree bootstrap"
 record
-python3 tools/tests/fresh_worktree.py >>"$run/run.log" 2>&1 ||
-  printf 'Fresh worktree bootstrap exited %s.\n' "$?" >>"$run/run.log"
+bootstrap_status=0
+python3 tools/tests/fresh_worktree.py >>"$run/run.log" 2>&1 || {
+  bootstrap_status=$?
+  printf 'Fresh worktree bootstrap exited %s.\n' "$bootstrap_status" >>"$run/run.log"
+}
 checkout=$PWD
 # Keep the shims first and make the tools they delegate to visible.
+step="prepare board environment"
 source "$tools/board-environment.sh"
 board_environment
 boat_status=0
@@ -177,7 +188,7 @@ elif (( status == 2 )); then
 elif (( status == 3 )); then
   step="board comparison"
 fi
-record
+performance_step=$step
 
 build_toolchain() {
   local output
@@ -210,16 +221,22 @@ run_vopr() (
   return "$batch_status"
 )
 
+step="Toolchain build"
+record
 toolchain_status=0
 compiler=$(build_toolchain 2>>"$run/run.log") || toolchain_status=$?
-cgroup_status=0
 if (( toolchain_status == 0 )); then
+  step="Launcher cgroup law"
+  record
+  cgroup_status=0
   .buck2/bin/buck2 test -j4 //:core-driver-cgroup >>"$run/run.log" 2>&1 || cgroup_status=$?
 fi
 if (( cgroup_status != 0 )); then
   printf 'Launcher cgroup law exited %s. See %s/run.log.\n' "$cgroup_status" "$run" >>"$run/run.log"
 fi
 if (( toolchain_status == 0 )); then
+  step="Law board"
+  record
   # Build stores and caches go to disk under the run; each law's working files stay on
   # tmpfs. With both on the shared /dev/shm, a night's stores filled it beside other lanes
   # and stopped 197 laws with ENOSPC or SIGBUS (run 20261126T031505Z-YivHTQ).
@@ -262,16 +279,14 @@ if (( toolchain_status == 0 )); then
     printf 'Fleet law red (SM1 trace check exit %s). See %s/laws/fleet-sm1-trace/tests.json.\n' "$trace_status" "$run" >>"$run/run.log"
     law_status=${law_status:-$trace_status}
   }
-elif [[ -z "$law_status" ]]; then
-  law_status=$toolchain_status
+  law_status=${law_status:-0}
 fi
-law_status=${law_status:-0}
 if (( law_status != 0 )); then
   printf 'Law board exited %s. See %s/run.log.\n' "$law_status" "$run" >>"$run/run.log"
 fi
 # Containment generator (docs/internal/containment-generator.md, "Hook"): random programs on
 # the evaluator and every native build for one CPU-hour of child CPU. A red adds one line to
-# the day's alert file (seed and minimised package); it never changes the board's exit.
+# the day's alert file (seed and minimised package).
 run_containment() (
   local output compiler runtime meter evaluator
   output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-core-driver-bin-hirsel \
@@ -285,15 +300,19 @@ run_containment() (
     --out "$run/containment" --alert "$run/containment/alert.txt"
 )
 
-containment_status=$toolchain_status
-if (( containment_status == 0 )); then
+if (( toolchain_status == 0 )); then
+  step="Containment generator"
+  record
+  containment_status=0
   run_containment >>"$run/containment.log" 2>&1 || containment_status=$?
 fi
 if (( containment_status != 0 )); then
   printf 'Containment generator exited %s. See %s/containment.log.\n' "$containment_status" "$run" >>"$run/run.log"
 fi
-vopr_status=$toolchain_status
-if (( vopr_status == 0 )); then
+if (( toolchain_status == 0 )); then
+  step="VOPR campaign"
+  record
+  vopr_status=0
   run_vopr >>"$run/run.log" 2>&1 || vopr_status=$?
 fi
 if (( vopr_status == 75 )); then
@@ -312,15 +331,17 @@ run_media_vectors() (
     "$run/media-record/work" --libraries "$checkout/core"
 )
 
-media_status=$toolchain_status
-if (( media_status == 0 )); then
+if (( toolchain_status == 0 )); then
+  step="Media vectors"
+  record
+  media_status=0
   run_media_vectors >>"$run/media-vectors.log" 2>&1 || media_status=$?
 fi
 if (( media_status != 0 )); then
   printf 'media_record vectors exited %s. See %s/media-vectors.log.\n' "$media_status" "$run" >>"$run/run.log"
 fi
 printf 'Boat exit %s · VOPR exit %s · Laws exit %s · Media vectors exit %s\n' \
-  "$boat_status" "$vopr_status" "$law_status" "$media_status" | tee -a "$run/run.log" >&2
+  "$boat_status" "${vopr_status:-skipped}" "${law_status:-skipped}" "${media_status:-skipped}" | tee -a "$run/run.log" >&2
 
 run_w2() (
   local output compiler runtime bridge
@@ -335,6 +356,8 @@ run_w2() (
     w2-damage "$run/w2" "python3 store_crash_tests.py sweep $((started * 4))"
 )
 
+step="W2 damage sweep"
+record
 w2_status=0
 run_w2 >>"$run/w2.log" 2>&1 || w2_status=$?
 if (( w2_status == 75 )); then
@@ -362,18 +385,33 @@ run_n1() (
   TMPDIR="$work" exec timeout 900 "$node" core/programs/webrtc_sfu/service/n1.mjs --sfu "$work/sfu"
 )
 
-n1_status=$toolchain_status
-if (( n1_status == 0 )); then
+if (( toolchain_status == 0 )); then
+  step="N1 browser_room"
+  record
+  n1_status=0
   run_n1 >>"$run/n1.log" 2>&1 || n1_status=$?
 fi
 if (( n1_status != 0 )); then
   printf 'N1 browser_room exited %s. See %s/n1.log.\n' "$n1_status" "$run" >>"$run/run.log"
 fi
 if (( status == 3 )) && [[ -n "$baseline_path" ]]; then
+  step="Board bisect"
+  record
   python3 "$checkout/bench/awfy/board_bisect.py" "$run/bisect" \
     --baseline "$baseline_path" --board "$run/board/board.json" --alert "$run/bisect/alert.txt" \
     --awfy "$base/peers/awfy" --langarena "$base/peers/langarena" >>"$run/run.log" 2>&1 ||
     printf 'Board bisect unresolved. See %s/run.log.\n' "$run" >&2
 fi
 echo "$run"
+performance_status=$status
+step=$performance_step
+# Keep the performance verdict and promotion independent of the service exit.
+if (( status == 0 )); then
+  if (( bootstrap_status || boat_status || toolchain_status || cgroup_status || containment_status ||
+        (vopr_status && vopr_status != 75) || law_status || media_status ||
+        (w2_status && w2_status != 75) || n1_status )); then
+    echo "Nightly board auxiliary checks failed. See $current and $run." >&2
+    exit 4
+  fi
+fi
 exit "$status"

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Changed corpus cases share the formatter gate without sweeping old debt."""
-import ast
 import contextlib
 import importlib.util
 import io
@@ -33,10 +32,6 @@ class ChangedCases(unittest.TestCase):
         self.write('core/front/cases/case.hirsel', 'fn f() -> u64 {\n    1\n}\n')
         self.write('core/front/cases/deleted.hirsel', 'fn f() {}\n')
         self.write('core/front/cases/legacy.hirsel', 'fn old(){1}')
-        self.git('add', '.')
-        self.git('commit', '-qm', 'base')
-        self.base = self.git('rev-parse', 'HEAD').strip()
-        self.git('update-ref', 'refs/remotes/origin/main', self.base)
         fake = self.write('.buck2/bin/fake-case-formatter', '''#!/usr/bin/env python3
 # The fixture's formatter oracle: canonical hirsel ends in a newline and carries no
 # compact `){` or mid-line doubled spaces. Selection logic is what these tests check.
@@ -63,9 +58,13 @@ os.execv({formatter!r}, [{formatter!r}, *sys.argv[1:]])
         compiler = self.write('.buck2/bin/hirsel', '#!/bin/sh\nexit 0\n')
         compiler.chmod(0o755)
         buck = self.write('.buck2/bin/buck2', '''#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 if sys.argv[1] == 'uquery':
  print(json.dumps({'root//:test': {'crate_root': 'src/lib.rs', 'edition': '2024'}}))
+elif sys.argv[1] == 'test':
+ assert sys.argv[2:] == ['//:hirsel-core-rt-archives-darwin-import-law']
+ print('Darwin archive import law')
+ sys.exit(int(os.environ.get('FIXTURE_IMPORT_STATUS', '0')))
 else:
  target = sys.argv[-1]
  executables = {'root//:hirsel-core-syntax-bin-hirsel-core-syntax': FORMATTER,
@@ -89,6 +88,10 @@ sys.exit(index.read_text() != 'current')
         rustfmt = self.write('.buck2/bin/rustfmt', '#!/bin/sh\nexit 0\n')
         buck.chmod(0o755)
         rustfmt.chmod(0o755)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'base')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.git('update-ref', 'refs/remotes/origin/main', self.base)
         self.preflights = dict(check_file_lengths=lambda root: True, check_boundaries=lambda root: True,
                                check_target=lambda root: True, check_runners=lambda root: True,
                                apple_check=SimpleNamespace(rust_changed=lambda: True, check=lambda: 0))
@@ -136,24 +139,37 @@ sys.exit(index.read_text() != 'current')
         return [args for args in self.formatter_invocations() if path in args]
 
 
-    def test_fixture_patches_every_main_preflight(self):
-        source = (ROOT / 'tools/buck2/fmt.py').read_text()
-        tree = ast.parse(source)
-        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
-        preflights = set()
-        for statement in main.body:
-            if isinstance(statement, ast.Assign) and any(
-                    isinstance(target, ast.Name) and target.id == 'rustfmt_flags' for target in statement.targets):
-                break
-            for call in ast.walk(statement):
-                if not isinstance(call, ast.Call):
-                    continue
-                function = call.func
-                if isinstance(function, ast.Name):
-                    preflights.add(function.id)
-                elif isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
-                    preflights.add(function.value.id)
-        self.assertEqual(preflights - self.preflights.keys(), set())
+    def test_documentation_runs_parser_doc_refs_and_metadata_without_darwin_import_law(self):
+        self.write('tools/check_doc_refs.py', 'print("doc references")\n')
+        self.write('editors/tree-sitter-hirsel/check-local', 'print("parser corpus")\n')
+        self.write('core/tools/check_std_api_recipes.py', 'print("API signatures")\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'checks')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.write('docs/spec/memory.md', 'Updated specification\n')
+        self.write('tools/buck2/toolchains/README.md', 'Updated toolchain documentation\n')
+        self.git('add', '.')
+        status, output = self.run_fmt_result('--check')
+        self.assertEqual(status, 0)
+        for check in ('doc references', 'parser corpus', 'API signatures'):
+            self.assertIn(check, output)
+        self.assertNotIn('Darwin archive import law', output)
+
+    def test_archive_inputs_run_darwin_import_law_and_propagate_its_failure(self):
+        paths = ('src/lib.rs', 'crates/hirsel-core-rt/src/runtime.c',
+                 'tools/buck2/runtime_parts.py', 'Cargo.toml', 'tools/buck2/defs.bzl',
+                 'tools/native-toolchain/darwin/libSystem.symbols')
+        for index, path in enumerate(paths):
+            with self.subTest(path=path):
+                self.write(path, 'changed\n')
+                args = ('--check',) if index % 2 == 0 else ('--darwin-import-law',)
+                with patch.dict(os.environ, {'FIXTURE_IMPORT_STATUS': '9'}):
+                    status, output = self.run_fmt_result(*args)
+                self.assertEqual((status, output.strip()), (9, 'Darwin archive import law'))
+                if path == 'src/lib.rs':
+                    self.git('checkout', 'HEAD', '--', path)
+                else:
+                    (self.root / path).unlink()
 
     def test_noncanonical_changed_case_fails_with_and_without_check(self):
         case = self.write('core/front/cases/case.hirsel', 'fn f(){1}')

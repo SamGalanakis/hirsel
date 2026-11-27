@@ -32,7 +32,7 @@ targets:
       - path: TLS
         buildPhase: resources
     dependencies:
-      - target: GateHost
+      - target: GateHost_${platform}
       - package: SimGate
     settings:
       base:

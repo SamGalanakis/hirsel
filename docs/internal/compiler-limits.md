@@ -1,6 +1,7 @@
 # Compiler resource limits (internal)
 
 Implementer notes for resource refusals ([PROG-6](../spec/programs.md)) and parser stack budgets.
+Release builds' peak memory is bounded as [release compile memory](release-memory.md) states.
 
 ## Core parser nesting
 

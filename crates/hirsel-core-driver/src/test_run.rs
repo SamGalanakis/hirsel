@@ -227,6 +227,34 @@ pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
     crate::host::available_cpus()
 }
 
+/// A published release recipe and what its assembly takes, apart from the
+/// checked product.
+struct ReleaseLaunch {
+    publication: crate::native::recipe_build::Publication,
+    options: NativeOptions,
+    counters: crate::reach::ReachCounters,
+    library: Option<PathBuf>,
+    grant_lines: Vec<String>,
+}
+
+impl ReleaseLaunch {
+    fn assemble(self) -> Result<crate::BuildProduct, NativeStop> {
+        let built = self.publication.assemble_with(
+            &self.options,
+            self.counters,
+            self.library.as_deref(),
+        )?;
+        for line in self.grant_lines {
+            eprintln!("{line}");
+        }
+        Ok(built)
+    }
+
+    fn target(&self) -> &str {
+        &self.options.target
+    }
+}
+
 enum TestLaunch {
     Cached(TestOutcome),
     /// The launch and the executable it runs.
@@ -378,40 +406,8 @@ impl CheckProduct {
                 coverage,
             }));
         }
-        let foreign_recipe = foreign_recipe(options);
-        let built = if options.llvm_release() || foreign_recipe {
-            let bound;
-            let recipe_options = if !foreign_recipe {
-                bound = options.with_bound_exec()?;
-                &*bound
-            } else {
-                options
-            };
-            let store = crate::code_store::CodeStore::cache(&options.cas, "code")?;
-            let publication = self.publish_release(
-                test,
-                &reached,
-                recipe_options,
-                &store,
-                hirsel_core_ids::launch::DEFAULT_N_PLACE,
-            )?;
-            let lines = if foreign_recipe {
-                crate::native::recipe_build::foreign_grant_lines(
-                    publication.recipe(),
-                    publication.root(),
-                )
-                .collect::<Vec<_>>()
-            } else {
-                vec![]
-            };
-            let counters = reached.counters;
-            drop(reached);
-            let library = self.image.as_ref().map(|image| image.store_root());
-            let built = publication.assemble_with(recipe_options, counters, library.as_deref())?;
-            for line in lines {
-                eprintln!("{line}");
-            }
-            built
+        let built = if options.llvm_release() || foreign_recipe(options) {
+            self.publish_reached(test, reached, options)?.assemble()?
         } else {
             self.build_objects(test, &reached, options)?
         };
@@ -442,6 +438,68 @@ impl CheckProduct {
         };
         let spec = LaunchSpec::new(&command, slots, observe, timeout);
         Ok(TestLaunch::Run(spec, executable))
+    }
+
+    /// Publish `test`'s release recipe from its compact reach, which this
+    /// consumes. The result assembles without the checked product, so a
+    /// caller that holds no other use for the product drops it first.
+    fn publish_reached(
+        &self,
+        test: &DefPath,
+        reached: crate::Reachable<'_>,
+        options: &NativeOptions,
+    ) -> Result<ReleaseLaunch, NativeStop> {
+        let foreign_recipe = !options.foreign_grants.is_empty() && !options.recording;
+        let options = if foreign_recipe {
+            options.clone()
+        } else {
+            options.with_bound_exec()?.into_owned()
+        };
+        let store = crate::code_store::CodeStore::cache(&options.cas, "code")?;
+        let publication = self.publish_release(
+            test,
+            &reached,
+            &options,
+            &store,
+            hirsel_core_ids::launch::DEFAULT_N_PLACE,
+        )?;
+        let grant_lines = if foreign_recipe {
+            crate::native::recipe_build::foreign_grant_lines(
+                publication.recipe(),
+                publication.root(),
+            )
+            .collect()
+        } else {
+            vec![]
+        };
+        let counters = reached.counters;
+        drop(reached);
+        Ok(ReleaseLaunch {
+            publication,
+            options,
+            counters,
+            library: self.image.as_ref().map(|image| image.store_root()),
+            grant_lines,
+        })
+    }
+
+    /// The release recipe `--link-only` assembles for `test` under its
+    /// configured `options`, as [`Self::test_launch`] would publish it.
+    fn publish_link_only(
+        &self,
+        test: &DefPath,
+        options: &NativeOptions,
+    ) -> Result<ReleaseLaunch, NativeStop> {
+        if !self.test_entries.contains_key(test) {
+            return Err(NativeStop::Entry(format!(
+                "{test} is not a discovered @test"
+            )));
+        }
+        let mut options = self.granted(test, options);
+        options.store_teardown = self.store_teardown_def().is_some();
+        drop(InheritedSlots::take(&mut options));
+        let reached = self.reachable_recipe(test, &options)?;
+        self.publish_reached(test, reached, &options)
     }
 
     /// `options` reduced to what `test`'s parameters take.

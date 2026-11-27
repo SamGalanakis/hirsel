@@ -1173,9 +1173,9 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         )?;
         let options = native_options.expect("a test request has native options");
         if link_only {
-            return conclude(Outcome::Exit(crate::test_run::link_only(
-                &product, &options, &runs, &tests, json,
-            )));
+            drop(reach);
+            let exit = crate::test_run::link_only(product, &options, &runs, &tests, json);
+            return conclude(Outcome::Exit(exit));
         }
         let law_inventory = law_files
             .as_ref()

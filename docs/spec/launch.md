@@ -502,7 +502,9 @@ objects it lacks.
 
 Admission does not check types or ownership again. A refusal, a disconnect or a host restart
 releases the attempt's reservations and discards its staging. Publication of outside source and
-assembly run under the same kind of limits on time, memory and output.
+assembly run under the same kind of limits on time, memory and output. How an optimised build keeps its peak memory
+bounded by its largest release partition is an implementation matter
+([release compile memory](../internal/release-memory.md)).
 
 **Assembly records.** An **assembly record** is an immutable host record naming one realised
 combination: R, the toolchain fingerprint, and the image digest that assembly produced. Its name

@@ -1,11 +1,13 @@
 //! Build the selected test executables without launching them.
-use super::{Runner, TestLaunch, session::configure};
+use super::{ReleaseLaunch, Runner, TestLaunch, session::configure};
 use crate::cli::{CompilerOption as Opt, Request};
 use crate::package_dir::TestRuns;
 use crate::{CheckProduct, NativeOptions, NativeStop};
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::Target;
 use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 pub(crate) fn requested(invocation: &Request<Opt>) -> io::Result<bool> {
     if !invocation.options.iter().any(|id| *id == Opt::LinkOnly) {
@@ -45,44 +47,25 @@ pub(crate) fn requested(invocation: &Request<Opt>) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Build each selected test. Release tests publish their recipes first; the
+/// checked product is then dropped, so no assembly overlaps the checking
+/// state (docs/internal/release-memory.md, slice 1).
 pub(crate) fn link_only(
-    product: &CheckProduct,
+    product: Arc<CheckProduct>,
     options: &NativeOptions,
     runs: &TestRuns,
     tests: &[DefPath],
     json: bool,
 ) -> i32 {
+    let staged = tests
+        .iter()
+        .map(|test| stage(&product, options, runs, test))
+        .collect::<Vec<_>>();
+    drop(product);
     let mut rows = Vec::new();
     let mut failed = tests.is_empty();
-    for test in tests {
-        let link = || -> Result<(), NativeStop> {
-            let options = configure(product, runs, options, test, false, false, false)?;
-            let TestLaunch::Run(_, executable) = product.test_launch(
-                test,
-                &options,
-                &Runner::Native,
-                None,
-                true,
-                None,
-                None,
-                None,
-            )?
-            else {
-                unreachable!("link-only tests have no pass cache");
-            };
-            match Target::from_triple(&options.target) {
-                Some(Target::Aarch64Darwin) => crate::native_debug::macho_structure(&executable)?,
-                Some(Target::X86_64Linux | Target::Aarch64Linux) => {}
-                Some(Target::Aarch64Ios | Target::Aarch64IosSim) | None => {
-                    return Err(NativeStop::Entry(format!(
-                        "unsupported target {}",
-                        options.target
-                    )));
-                }
-            }
-            Ok(())
-        };
-        let stopped = link().err().map(|error| error.to_string());
+    for (test, staged) in tests.iter().zip(staged) {
+        let stopped = staged.and_then(link).err().map(|error| error.to_string());
         failed |= stopped.is_some();
         if json {
             rows.push(serde_json::json!({
@@ -106,4 +89,58 @@ pub(crate) fn link_only(
     } else {
         i32::from(failed)
     }
+}
+
+/// A test linked while the product was held, or its published release
+/// recipe still to assemble.
+enum Staged {
+    Linked(PathBuf, String),
+    Release(ReleaseLaunch),
+}
+
+fn stage(
+    product: &CheckProduct,
+    options: &NativeOptions,
+    runs: &TestRuns,
+    test: &DefPath,
+) -> Result<Staged, NativeStop> {
+    let options = configure(product, runs, options, test, false, false, false)?;
+    if options.llvm_release() {
+        return product
+            .publish_link_only(test, &options)
+            .map(Staged::Release);
+    }
+    let TestLaunch::Run(_, executable) = product.test_launch(
+        test,
+        &options,
+        &Runner::Native,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )?
+    else {
+        unreachable!("link-only tests have no pass cache");
+    };
+    Ok(Staged::Linked(executable, options.target))
+}
+
+fn link(staged: Staged) -> Result<(), NativeStop> {
+    let (executable, target) = match staged {
+        Staged::Linked(executable, target) => (executable, target),
+        Staged::Release(release) => {
+            let target = release.target().to_owned();
+            let built = release.assemble()?;
+            (std::fs::canonicalize(&built.executable)?, target)
+        }
+    };
+    match Target::from_triple(&target) {
+        Some(Target::Aarch64Darwin) => crate::native_debug::macho_structure(&executable)?,
+        Some(Target::X86_64Linux | Target::Aarch64Linux) => {}
+        Some(Target::Aarch64Ios | Target::Aarch64IosSim) | None => {
+            return Err(NativeStop::Entry(format!("unsupported target {target}")));
+        }
+    }
+    Ok(())
 }

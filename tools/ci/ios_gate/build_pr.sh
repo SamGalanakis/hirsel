@@ -6,7 +6,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 checkout="$1"
 output="$2"
 host="$checkout/host-source"
-app="$checkout/comparison"
+workspace="$checkout/comparison"
+app="$workspace/app"
 llvm="$checkout/tools/buck2/toolchains/llvm-files"
 export LLVM_SYS_231_PREFIX="$llvm"
 export MACOSX_DEPLOYMENT_TARGET=26.0
@@ -38,6 +39,12 @@ ln -s "$checkout/target/aarch64-apple-ios-sim/release/libhirsel_core_rt.a" \
 HIRSEL_REPO="$checkout" python3 "$host/cli/setup-toolchain.py"
 
 mkdir -p "$app"
+cp -R "$host/package" "$workspace/ios"
+cp -R "$checkout/core/programs/store" "$workspace/store"
+cat > "$workspace/hirsel.toml" <<'TOML'
+[workspace]
+members = ["app", "ios", "store"]
+TOML
 cp "$here/pr_counter.hirsel" "$app/main.hirsel"
 cp "$here/counter.hirsel" "$app/counter.hirsel"
 cat > "$app/hirsel.toml" <<'TOML'
@@ -48,8 +55,8 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-ios = { major = 1, path = "../host-source/package" }
-store = { major = 1, path = "../core/programs/store" }
+ios = { major = 1, path = "../ios" }
+store = { major = 1, path = "../store" }
 
 [sources]
 "main.hirsel" = "main"

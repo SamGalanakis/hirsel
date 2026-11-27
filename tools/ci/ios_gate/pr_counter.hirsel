@@ -11,8 +11,8 @@ pub fn main(app: Foreign[ios.Ios], dir: Dir, tasks: Tasks, clock: Clock, random:
     let scene = result.unwrap(ios.attach(app))
     let delta = loop {
         match result.unwrap(ios.next_event(scene, 1000u32)) {
-            Some(Lifecycle(Launched)) => break 1u64,
-            Some(Lifecycle(Active)) => break 0u64,
+            Some(Lifecycle(phase: Launched)) => break 1u64,
+            Some(Lifecycle(phase: Active)) => break 0u64,
             _ => (),
         }
     }

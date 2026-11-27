@@ -24,6 +24,7 @@ mod chan;
 mod conn;
 mod convert;
 use convert::convert;
+mod cleanup;
 mod crc;
 mod field_steps;
 mod metering;
@@ -31,7 +32,6 @@ pub use metering::{StepMeter, run_args, run_args_with_meter, run_entry, run_entr
 mod flat;
 mod footprint;
 mod frame;
-mod rows;
 mod scalar;
 use blocks::{Blk, Blocks};
 use footprint::Footprint;
@@ -4128,164 +4128,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         }
     }
 
-    // ---- cleanup (FAIL-8, FAIL-12): each returns whether a finalizer failed
-    fn drop_value(&mut self, t: &mut Task, at: u64, ty: TypeRef) -> bool {
-        if self.recipes[ty.index()].drop.is_none() {
-            return false;
-        }
-        if self.is_resource(ty) {
-            let blk = self.load(at, 8);
-            return self.drop_resource(t, blk, ty);
-        }
-        // An own row's core finalizer (crate docs, "Slot kernels") gets the value's
-        // address first, with no grant and no cause cell. wf refuses one that may fail,
-        // so it only moves slots; the fields' cleanup does the dropping.
-        if let Some(f) = self.shape(ty).finalizer {
-            let _ = self.call(t, FuncId(f.0), &[at]);
-        }
-        self.drop_fields(t, at, ty)
-    }
-    fn drop_fields(&mut self, t: &mut Task, base: u64, ty: TypeRef) -> bool {
-        let row = match self.fixed(ty).tag {
-            Some(_) => self.case_at(base, ty) as usize,
-            None => 0,
-        };
-        let fields = self.recipes[ty.index()].drop.as_ref().unwrap().fields[row].clone();
-        let mut failed = false;
-        for f in fields {
-            failed |= self.drop_field(t, base + f.offset, &f.ty);
-        }
-        failed
-    }
-
-    fn drop_field(&mut self, t: &mut Task, at: u64, ty: &FieldTy) -> bool {
-        match ty {
-            FieldTy::Scalar(_)
-            | FieldTy::Fn
-            | FieldTy::RegionRef(_)
-            | FieldTy::Locator(_)
-            | FieldTy::Borrow
-            | FieldTy::View(_)
-            | FieldTy::Handle(Handle::Capability) => false,
-            FieldTy::Inline(x) => self.drop_value(t, at, *x),
-            // SEM-9: an inline array is cleaned from index 0 up.
-            FieldTy::Array(e, n) => {
-                let stride = self.stride(e);
-                let mut failed = false;
-                for i in 0..*n {
-                    failed |= self.drop_field(t, at + i * stride, e);
-                }
-                failed
-            }
-            FieldTy::Box(x) => {
-                let p = self.load(at, 8);
-                self.edge(p, ty, "a box");
-                let failed = self.drop_value(t, p, *x);
-                let size = (!self.is_resource(*x)).then(|| self.held(*x));
-                self.free_as(p, charge::boxed(self.logical(*x)), size, "a box");
-                failed
-            }
-            FieldTy::FrozenBytes => {
-                let capacity = self.load(at + 16, 8);
-                if capacity != 0 {
-                    let meta = self.load(at + 8, 8);
-                    let block = if meta & 1 == 0 {
-                        self.load(at, 8)
-                    } else {
-                        meta & !1
-                    };
-                    let size = (meta & 1 != 0).then_some(0);
-                    self.free_as(block, charge::seq(capacity, 1), size, "frozen bytes");
-                }
-                false
-            }
-            FieldTy::Seq(element) | FieldTy::Columns(element) => self.drop_rows(t, at, ty, element),
-            // SEM-5, SEM-9: live entries in insertion order, each key before its
-            // value (`map_entry`); removed entries (state 0) were cleaned by
-            // `map.remove`. Storage exists exactly when the capacity is not 0.
-            FieldTy::Map(k, v) => {
-                let block = self.load(at, 8);
-                let slots = self.load(at + 8, 8);
-                let capacity = self.load(at + 16, 8);
-                let e = map_entry(&self.m.types, &self.recipes, k, v);
-                if capacity != 0 {
-                    self.edge(block, ty, "map storage");
-                }
-                let mut failed = false;
-                for i in 0..slots {
-                    let entry = block + i * e.stride;
-                    if self.load(entry + e.meta, 8) != 0 {
-                        failed |= self.drop_field(t, entry + e.key, k);
-                        failed |= self.drop_field(t, entry + e.value, v);
-                    }
-                }
-                if capacity != 0 {
-                    let key = field_size(&self.m.types, &self.recipes, k).2;
-                    let value = field_size(&self.m.types, &self.recipes, v).2;
-                    self.free_as(
-                        block,
-                        charge::map(capacity, key, value),
-                        None,
-                        "map storage",
-                    );
-                }
-                failed
-            }
-            // The environment names its captures' row; they are cleaned as that
-            // row from offset 8, then the block is freed (crate docs, "Callable
-            // environments").
-            FieldTy::OwnFn => {
-                let environment = self.load(at + 8, 8);
-                if environment == 0 {
-                    return false;
-                }
-                self.edge(environment, ty, "an environment");
-                let row = TypeRef(
-                    u32::try_from(self.load(environment, 8) - ENV_BASE).expect("an environment"),
-                );
-                let failed = self.drop_value(t, environment + 8, row);
-                let size = 8 + self.fixed(row).size.next_multiple_of(8);
-                self.free_as(
-                    environment,
-                    charge::closure_env(self.logical(row)),
-                    Some(size),
-                    "an environment",
-                );
-                failed
-            }
-            FieldTy::Rc(x) | FieldTy::Arc(x) => {
-                let node = self.load(at, 8);
-                self.release(node, *x);
-                false
-            }
-            FieldTy::Shared(x) => {
-                let node = self.load(at, 8);
-                self.release_shared(node, *x);
-                false
-            }
-            FieldTy::Handle(Handle::Causes) => {
-                let head = self.load(at, 8);
-                let cells = self.causes.remove(&head).expect("Causes dropped twice");
-                let mut cell = head;
-                while cell != 0 {
-                    let next = self.load(cell + CELL_NEXT, 8);
-                    let capacity = self.load(cell + CAUSE_CAPACITY, 8);
-                    if capacity != 0 && capacity < CAUSE_KIND_START {
-                        let data = self.load(cell, 8);
-                        self.free(data);
-                    }
-                    self.free(cell);
-                    cell = next;
-                }
-                for (l, n) in cells {
-                    self.refund(l, n);
-                }
-                false
-            }
-            FieldTy::Handle(h) => H::drop_handle(self, t, at, *h),
-            other => panic!("cleanup of {other:?} is not modelled"),
-        }
-    }
+    // ---- cleanup (FAIL-8, FAIL-12): the walk is in `cleanup`
     fn drop_resource(&mut self, t: &mut Task, blk: u64, ty: TypeRef) -> bool {
         let (b, _) = split(blk);
         // Report::trace names a declared u64 field, never carrier/pointer bytes.

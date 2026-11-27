@@ -134,13 +134,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let result = self.value(self.e.module.signatures[signature.index()].results[0]);
         let args = PoolRange::push(&mut self.b.pools.args, self.key_args.iter().copied());
         let results = PoolRange::push(&mut self.b.pools.values, [result]);
+        let fail = self.key_fail(op, n);
         let call = CallId(self.b.calls.len() as u32);
         self.b.calls.push(CallSite {
             callee: Callee::Direct(function),
             signature,
             args,
             results,
-            fail: None,
+            fail,
             cold: false,
         });
         self.inst(Inst::Call { call }, n);
@@ -219,9 +220,8 @@ pub(super) fn ensure(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncI
     .function(ty, op)
 }
 
-/// `op`'s glue at `ty` as a signature-only row of `module`: the glue is an instance
-/// of its own, materialised from `ty`'s closure ([`derive_glue`]), never a body copied
-/// into its callers.
+/// `op`'s glue at `ty` as a signature-only row of `module`: the glue is an instance of its own,
+/// materialised from `ty`'s closure ([`derive_glue`]), never a body copied into its callers.
 pub(super) fn glue_row(module: &mut Module, ty: TypeId, op: KeyOp) -> FuncId {
     Derive::row(module, ty, op)
 }
@@ -247,9 +247,8 @@ pub fn derive_glue(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncId,
 }
 
 impl KeyOp {
-    /// Which of the operation's address parameters, and whether its result, follow
-    /// the argument rows' carriage. A clone writes through `to`, so both its places
-    /// stay addresses.
+    /// Which of the operation's address parameters, and whether its result, follow the argument
+    /// rows' carriage. A clone writes through `to`, so both its places stay addresses.
     pub(super) fn abi(self) -> scalar_abi::SignatureAbi {
         let (params, result) = match self {
             Self::Clone => (vec![false; 2], false),
@@ -628,6 +627,7 @@ impl Derive<'_> {
                 *p = c.read(*p, Ty::Ptr);
             }
         }
+        self.depth_step(&mut c, op, ty);
         if op == KeyOp::Clone {
             self.clone_function(&mut c, ty, ps[0], ps[1])?;
             order_instructions(&mut c.body);

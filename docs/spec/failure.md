@@ -269,6 +269,12 @@ connection does not stop with `Deadlock`.
 
 Termination by the host writes nothing and its status is the host's.
 
+A value's depth alone never brings a walk the engine generates to the stack's end under a
+step bound: clone, `==`, ordering, a map's key hashing and equality, and a codec's encoder
+and decoder take a step at each level of a recursive value
+([MEM-30](budgets.md#mem-30-step-bounds), depth steps), so inside `bound steps n` such a walk
+fails with `OutOfTime` after at most `n` levels, which the bound's scope catches.
+
 ### FAIL-16: Isolation
 
 `isolate(body)`, with `body: scoped fn() -> R`, runs `body` once and returns a failure in
@@ -304,7 +310,9 @@ recovery boundary and undoes nothing:
   ([MEM-30](budgets.md#mem-30-step-bounds)): after the
   same cleanup the reserved cell is refunded, the chain set aside is restored with the failure's causes
   after it, and the failure goes on past `isolate`. A run stop (FAIL-15)
-  is not caught, and nothing resumes at the operation that failed.
+  is not caught, and nothing resumes at the operation that failed. Under a step bound, no
+  input reaches one through the depth of a value a generated walk visits: that walk ends
+  with `OutOfTime` first (FAIL-15).
 
 `body`'s type is not `waits`, so nothing in it waits ([LANG-8](language.md#lang-8-signatures)),
 and it takes no parameter, so it has no `mut` or `take` parameter; a callable that does

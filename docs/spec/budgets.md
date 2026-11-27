@@ -379,8 +379,8 @@ is core's plain record `{ steps: u64 }`.
   User code entered without a call expression takes one step on entry: a finalizer when
   cleanup runs it, and a callable a core function calls back (a callable argument, a codec's
   `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
-  `?`, patterns and `match` run no user code and take none, beyond the work steps of `==`
-  and ordering (below). A call of `list.prefetch` or
+  `?`, patterns and `match` run no user code and take none, beyond the work and depth steps
+  of `==` and ordering (below). A call of `list.prefetch` or
   `inline.prefetch` takes none either, since a hint must not fail
   ([core](core.md#contracts-the-signatures-do-not-state)). Any other core function's call, and a
   foreign function's ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), is one
@@ -457,11 +457,24 @@ is core's plain record `{ steps: u64 }`.
   `check.xxh3_short`, whose input is at most 240 bytes, does work its types bound and takes
   none. Not yet counted, each a named gap: `==` at a type parameter counts only its fixed
   part; a sequence nested in a derived `==` (the bytes of a `List[String]`'s elements, a list
-  in a record) counts its element only; map key hashing and equality; key derivation; the
+  in a record) counts its element only; map key hashing and equality, beyond their depth
+  steps; key derivation; the
   copy of a large `Inline` by assignment; `==` on `Deque` and `Map`; and core-source loops
   outside the table (`string.find` and its kin). A closure written in core source takes a
   step at each entry, as any closure does, so `from_utf8`'s scalar tail over multibyte text
   takes those steps besides its row.
+- **Depth steps.** A walk the engine generates over a value whose depth the value chooses
+  takes a step at each level, so a bound of `n` stops it with `OutOfTime` after at most `n`
+  levels, before the depth can exhaust the stack ([FAIL-15](failure.md#fail-15-run-stops)).
+  At a **recursive** type, one a value of which can hold another value of the same type
+  through any field (a box, a counted node, a list element, a variant payload), each visit
+  of such a value by derived `==`, ordering, and a map's key hashing and equality takes one
+  step on entry, before any of its fields is read; a visit of a value of a type that is not
+  recursive takes none. A clone's work steps (below) bound its depth the same way: a box it copies takes one, and
+  a sequence of `k` owning elements `ceil(k / 4)`, so every level takes at least one. A codec's
+  encoder and decoder are generated code ([SEM-10](semantics.md#sem-10-codecs)), and each
+  value they visit is entered by a call, which takes its step. Drop takes none: it frees in
+  constant stack.
 - **The current bound.** At each point exactly one step bound is current, or none: the
   innermost enclosing `bound steps` scope's, else the task's root step bound, else none.
   Every step taken while a bound is current uses one of it. Entering `bound steps n`

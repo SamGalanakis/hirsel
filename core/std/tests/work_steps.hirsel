@@ -552,6 +552,76 @@ fn repeated_list_clone_refuses() -> bool {
     }
 }
 
+// MEM-30 depth steps. Chain is recursive, so each visit of a Chain by derived ==,
+// ordering and map key hashing takes one step on entry. Two equal chains of k links
+// have k + 1 values each (the links and the Nil), visited in pairs: ceil((s + 1) / 32)
+// = 1 work step for the outer value (s < 32 bytes), then k + 1 depth steps.
+type Chain: key + ordered = Nil | Link(u64, Box[Chain])
+
+fn chain(k: u64) -> Chain {
+    let mut c: Chain = Nil
+    let mut i: u64 = 0
+    while i < k {
+        let prev = take c
+        c = Link(i, box.new(take prev))
+        i += 1
+    }
+    c
+}
+
+// Chains of 100 links: 1 + 101 = 102 steps for == and for <.
+// expect: run depth_steps() = true
+fn depth_steps() -> bool {
+    let a = chain(100)
+    let b = chain(100)
+    let eq = bound steps 102 {
+        a == b
+    }
+    let eq_short = bound steps 101 {
+        a == b
+    }
+    let lt = bound steps 102 {
+        a < b
+    }
+    let lt_short = bound steps 101 {
+        a < b
+    }
+    match (eq, eq_short, lt, lt_short) {
+        (Ok(true), Error(OutOfTime(steps: 101)), Ok(false), Error(OutOfTime(steps: 101))) => true,
+        _ => false,
+    }
+}
+
+// FAIL-15/16: a million links, far past any engine's stack, inside isolate and a bound
+// of 1,000. Each walk takes a step per level, so the bound stops it at about level
+// 1,000 and its scope catches OutOfTime; the stack never runs out (the 3202 pdeep
+// probe, for ==, ordering and a map's key hashing).
+// expect: run deep_walks_stop() = true
+fn deep_walks_stop() -> bool {
+    let a = chain(1000000)
+    let b = chain(1000000)
+    let eq = isolate(fn() -> Result[bool, OutOfTime] {
+        bound steps 1000 {
+            a == b
+        }
+    })
+    let lt = isolate(fn() -> Result[bool, OutOfTime] {
+        bound steps 1000 {
+            a < b
+        }
+    })
+    let k = take a
+    let hashed = bound steps 1000 {
+        let mut m: Map[Chain, u64] = map.new()
+        map.insert(mut m, take k, 1)
+        map.len(m)
+    }
+    match (eq, lt, hashed) {
+        (Ok(Ok(Error(OutOfTime(steps: 1000)))), Ok(Ok(Error(OutOfTime(steps: 1000)))), Error(OutOfTime(steps: 1000))) => true,
+        _ => false,
+    }
+}
+
 // The quanta are set so a step stands for a bounded time whatever the operation. The
 // bound, not a count, is the oracle: int.parse, the slowest per byte, may take at most
 // 8 times as long per step as memmove does. Parsing 4 × 1 MiB takes 262,144 steps;

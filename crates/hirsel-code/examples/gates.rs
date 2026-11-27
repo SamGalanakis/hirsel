@@ -128,6 +128,7 @@ fn main() {
         batch: Config::BATCH,
         row: Box::new(|_| Some(stub as *const () as usize)),
         instance: Box::new(|_| None),
+        prelinked: &[],
     })
     .expect("a loader");
 

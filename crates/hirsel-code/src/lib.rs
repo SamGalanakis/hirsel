@@ -70,7 +70,8 @@ pub struct Config {
     pub abi: ContentHash,
     pub policy: u64,
     pub mask: Mask,
-    /// The length of each band, at most 1 GiB.
+    /// The length of each band, at most 1 GiB. Zero is a loader with no slab, which
+    /// gives prelinked images only.
     pub band_bytes: usize,
     pub installed_bytes: u64,
     pub retired_bytes: u64,
@@ -80,6 +81,19 @@ pub struct Config {
     pub row: Box<dyn Fn(u32) -> Option<usize> + Send + Sync>,
     /// The host image's address of a prelinked instance.
     pub instance: Box<dyn Fn(&ContentHash) -> Option<usize> + Send + Sync>,
+    /// The images compiled into the host image (PACK-5).
+    pub prelinked: &'static [Prelinked],
+}
+
+/// An image that was compiled ahead of time and linked into the host image.
+pub struct Prelinked {
+    /// The module key and the module digest of the release it was built from.
+    pub key: ContentHash,
+    pub digest: ContentHash,
+    /// The address of its text.
+    pub text: usize,
+    /// Each entry's identity, signature and address.
+    pub entries: &'static [(ContentHash, ContentHash, usize)],
 }
 
 impl Config {
@@ -142,7 +156,9 @@ struct Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        host::release(self.base, 2 * self.config.band_bytes);
+        if self.config.band_bytes > 0 {
+            host::release(self.base, 2 * self.config.band_bytes);
+        }
     }
 }
 
@@ -150,7 +166,8 @@ impl Drop for Shared {
 struct Image {
     shared: Arc<Shared>,
     digest: ContentHash,
-    cohort: u64,
+    /// Its cohort; a prelinked image has none.
+    cohort: Option<u64>,
     text: usize,
     bytes: u64,
     /// Each entry's identity, signature and address.
@@ -173,14 +190,15 @@ impl Drop for Image {
         {
             slab.images.remove(&self.digest);
         }
-        let cohort = slab.cohorts.get_mut(&self.cohort).unwrap();
+        let Some(id) = self.cohort else { return };
+        let cohort = slab.cohorts.get_mut(&id).unwrap();
         cohort.live -= 1;
         if self.retired.load(Ordering::Relaxed) {
             cohort.retired += self.bytes;
         }
         let dead = cohort.live == 0 && cohort.state != State::Open;
         if dead {
-            shared.recycle(&mut slab, self.cohort);
+            shared.recycle(&mut slab, id);
         }
     }
 }
@@ -204,9 +222,13 @@ impl Shared {
             hirsel_core_layout::Arch::X86_64 => [0xcc; 4],
             hirsel_core_layout::Arch::Aarch64 => 0xd420_0000u32.to_le_bytes(),
         };
-        for offset in from..to {
-            // SAFETY: the range is in the writable window, which no image occupies.
-            unsafe { (self.text(offset) as *mut u8).write(pattern[offset % 4]) };
+        if to > from {
+            host::write(&mut || {
+                for offset in from..to {
+                    // SAFETY: the range is in the writable window, which no image occupies.
+                    unsafe { (self.text(offset) as *mut u8).write(pattern[offset % 4]) };
+                }
+            });
         }
     }
 
@@ -339,11 +361,15 @@ impl Shared {
                 slab.text.give(code.0, code.1);
                 return None;
             };
-            let mapped = host::protect(self.text(code.0), code.1, Access::Write)
+            let mapped = host::protect(self.text(code.0), code.1, Access::Patch)
                 .and_then(|()| host::protect(self.data(words.0), words.1, Access::Write));
             if mapped.is_err() {
                 // Whatever became writable is left out of the free runs.
                 return None;
+            }
+            if host::KEEPS {
+                // The range may hold a recycled cohort's code.
+                self.trap(code.0, code.0 + code.1);
             }
             slab.window = Some(Window {
                 text: (code.0, code.0 + code.1),
@@ -363,7 +389,9 @@ impl Shared {
         flush: bool,
     ) -> (MutexGuard<'a, Slab>, bool) {
         loop {
-            let cohort = &slab.cohorts[&image.cohort];
+            let Some(cohort) = image.cohort.map(|id| &slab.cohorts[&id]) else {
+                return (slab, true);
+            };
             match cohort.state {
                 State::Published => return (slab, true),
                 State::Failed => return (slab, false),
@@ -390,8 +418,11 @@ impl Loader {
     pub fn new(config: Config) -> Result<Self, Refusal> {
         let page = host::page();
         assert!(config.band_bytes <= 1 << 30 && config.band_bytes.is_multiple_of(page.max(WINDOW)));
-        host::register().map_err(|_| Refusal::Unsupported)?;
-        let base = host::reserve(2 * config.band_bytes).map_err(|_| Refusal::Unsupported)?;
+        let mut base = 0;
+        if config.band_bytes > 0 {
+            host::register().map_err(|_| Refusal::Unsupported)?;
+            base = host::reserve(2 * config.band_bytes).map_err(|_| Refusal::Unsupported)?;
+        }
         let table = Table::new(base, config.band_bytes);
         let slab = Slab {
             text: Runs::new(config.band_bytes),
@@ -487,6 +518,9 @@ impl Loader {
         if header.policy != config.policy {
             return Err(Refusal::Mismatch("policy"));
         }
+        if config.band_bytes == 0 {
+            return self.prelinked(&header.key());
+        }
         let digest = hirsel_mod::digest(bytes);
         // Declared before the lock so that it is dropped after it: an image's drop
         // takes the lock.
@@ -511,6 +545,39 @@ impl Loader {
         if !published {
             return Err(Refusal::Unsupported);
         }
+        Ok(Installed(image))
+    }
+
+    /// The image the host image holds for the module key `key`, or `NotPrelinked`
+    /// (PACK-5). It is counted and interned like an installed image and uses no budget.
+    pub fn prelinked(&self, key: &ContentHash) -> Result<Installed, Refusal> {
+        let config = &self.0.config;
+        let held = config.prelinked.iter().find(|held| held.key == *key);
+        let held = held.ok_or(Refusal::NotPrelinked)?;
+        // Declared before the lock so that it is dropped after it.
+        let image;
+        let mut slab = self.0.slab.lock().unwrap();
+        if slab.quarantined.contains(&held.digest) {
+            return Err(Refusal::Quarantined);
+        }
+        image = match slab.images.get(&held.digest).and_then(Weak::upgrade) {
+            Some(image) => image,
+            None => {
+                let image = Arc::new(Image {
+                    shared: self.0.clone(),
+                    digest: held.digest,
+                    cohort: None,
+                    text: held.text,
+                    bytes: 0,
+                    entries: held.entries.to_vec(),
+                    slots: AtomicU32::new(0),
+                    retired: AtomicBool::new(false),
+                });
+                slab.images.insert(held.digest, Arc::downgrade(&image));
+                image
+            }
+        };
+        drop(slab);
         Ok(Installed(image))
     }
 
@@ -588,10 +655,10 @@ impl Loader {
             return Err(Refusal::Fixup(index));
         }
         // SAFETY: `place` gave this image these writable ranges and nothing else holds them.
-        unsafe {
+        host::write(&mut || unsafe {
             std::ptr::copy_nonoverlapping(text.as_ptr(), t as *mut u8, text.len());
             std::ptr::copy_nonoverlapping(data.as_ptr(), d as *mut u8, data.len());
-        }
+        });
         let row = Owner {
             start: at as u32,
             length: text.len() as u32,
@@ -605,7 +672,7 @@ impl Loader {
         let image = Arc::new(Image {
             shared: self.0.clone(),
             digest,
-            cohort,
+            cohort: Some(cohort),
             text: t,
             bytes,
             entries: module

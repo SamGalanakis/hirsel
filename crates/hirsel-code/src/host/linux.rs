@@ -65,7 +65,7 @@ pub(crate) fn release(at: usize, bytes: usize) {
 pub(crate) fn protect(at: usize, bytes: usize, access: Access) -> io::Result<()> {
     let protection = match access {
         Access::None => libc::PROT_NONE,
-        Access::Write => libc::PROT_READ | libc::PROT_WRITE,
+        Access::Write | Access::Patch => libc::PROT_READ | libc::PROT_WRITE,
         Access::Read => libc::PROT_READ,
         Access::Execute => libc::PROT_READ | libc::PROT_EXEC,
     };
@@ -77,6 +77,14 @@ pub(crate) fn protect(at: usize, bytes: usize, access: Access) -> io::Result<()>
 pub(crate) fn discard(at: usize, bytes: usize) {
     // SAFETY: the range is inside the caller's reservation and holds no live image.
     unsafe { libc::madvise(at as *mut libc::c_void, bytes, libc::MADV_DONTNEED) };
+}
+
+/// Whether a discarded range may still hold its bytes when it is next mapped.
+pub(crate) const KEEPS: bool = false;
+
+/// Run `work`, which writes text runs mapped for `Access::Patch`.
+pub(crate) fn write(work: &mut dyn FnMut()) {
+    work()
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -142,3 +150,19 @@ pub(crate) fn protection(at: usize) -> String {
 /// Whether this host has a slab; the laws of one run only where it does.
 #[cfg(test)]
 pub(crate) const SLAB: bool = true;
+
+/// The protection letters of a published text run and of one being filled, and the
+/// signal a jump into a recycled run raises.
+#[cfg(test)]
+pub(crate) const LIVE: &str = "r-xp";
+#[cfg(test)]
+pub(crate) const OPEN: &str = "rw-p";
+#[cfg(test)]
+pub(crate) const FAULT: i32 = libc::SIGSEGV;
+
+/// The faulting code address a signal handler was given.
+#[cfg(test)]
+pub(crate) fn pc(info: *mut libc::siginfo_t, _context: *mut libc::c_void) -> usize {
+    // SAFETY: the kernel gave the handler this record.
+    unsafe { (*info).si_addr() as usize }
+}

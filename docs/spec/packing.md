@@ -272,15 +272,23 @@ alias can write live code.
 - **macOS arm64.** The text band is one anonymous `MAP_JIT` reservation. Only the pack host
   binary carries the hardened-runtime JIT entitlement; standalone executables are
   unchanged. One dedicated OS **loader thread**, which never runs a task or a fiber, does
-  every write: it opens its per-thread write window, performs PACK-4 steps 1 and 2, closes
-  the window, calls `sys_icache_invalidate` over the range, then performs steps 6 and 7.
-  The window is per thread, so no worker ever sees the band writable. The data band is
-  ordinary anonymous memory published with one `mprotect`. Recycling follows PACK-4.
+  every write to the text band: it opens its per-thread write window, writes, and closes
+  the window; the installing thread waits for it. The publisher then calls
+  `sys_icache_invalidate` over the run and performs steps 6 and 7. The window is per
+  thread, so no worker ever sees the band writable; a text run that is being filled is
+  executable to them, and no address in it has left the loader. The data band is
+  ordinary anonymous memory published with one `mprotect`, placed directly after the text
+  band. Recycling follows PACK-4, except that returned pages may keep their bytes
+  (`MADV_FREE`), so a range is filled with the trap pattern when it is next mapped. A
+  process whose `MAP_JIT` reservation is denied has no slab (`Unsupported`).
 - **iOS, and any host that denies dynamic code.** There is no slab. Every image is
   **prelinked**: compiled ahead of time, signed with the application, and registered in the
   host image's table by module key. `load` of a key in that table returns its `Code[F]`;
   any other key is refused `NotPrelinked`. No evaluator and no bytecode exist on these
-  hosts.
+  hosts. A table row holds the module key, the module digest, the text address and each
+  entry's identity, signature and address. A prelinked image is interned, counted and
+  quarantined like an installed one, uses no budget and has no PC table row. A loader
+  whose band length is zero has no slab on any host and gives prelinked images only.
 
 Callers cannot tell the three apart: all of them give the `Code[F]` of PACK-6.
 

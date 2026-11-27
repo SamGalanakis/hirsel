@@ -1,4 +1,4 @@
-//! A host with no slab yet: no loader is created on it (PACK-4 `Unsupported`).
+//! iOS: no slab. Every image is prelinked into the host image (PACK-5).
 
 use super::Access;
 use std::io;
@@ -8,7 +8,7 @@ pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
     hirsel_core_layout::Target::Aarch64Darwin;
 #[cfg(all(target_os = "ios", not(target_abi = "sim")))]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::Target::Aarch64Ios;
-#[cfg(all(target_os = "ios", target_abi = "sim"))]
+#[cfg(target_abi = "sim")]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
     hirsel_core_layout::Target::Aarch64IosSim;
 
@@ -36,6 +36,12 @@ pub(crate) fn protect(_at: usize, _bytes: usize, _access: Access) -> io::Result<
 
 pub(crate) fn discard(_at: usize, _bytes: usize) {}
 
+pub(crate) const KEEPS: bool = false;
+
+pub(crate) fn write(work: &mut dyn FnMut()) {
+    work()
+}
+
 pub(crate) fn publish(_at: usize, _bytes: usize) -> io::Result<()> {
     none()
 }
@@ -45,6 +51,18 @@ pub(crate) fn publish(_at: usize, _bytes: usize) -> io::Result<()> {
 pub(crate) const SLAB: bool = false;
 
 #[cfg(test)]
+pub(crate) const LIVE: &str = "";
+#[cfg(test)]
+pub(crate) const OPEN: &str = "";
+#[cfg(test)]
+pub(crate) const FAULT: i32 = libc::SIGBUS;
+
+#[cfg(test)]
 pub(crate) fn protection(_at: usize) -> String {
     String::new()
+}
+
+#[cfg(test)]
+pub(crate) fn pc(_info: *mut libc::siginfo_t, _context: *mut libc::c_void) -> usize {
+    0
 }

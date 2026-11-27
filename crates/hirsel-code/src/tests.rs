@@ -124,6 +124,7 @@ fn config() -> Config {
         batch: Config::BATCH,
         row: Box::new(|_| Some(double as *const () as usize)),
         instance: Box::new(|_| None),
+        prelinked: &[],
     }
 }
 
@@ -289,7 +290,7 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     let code = load(&loader, &bytes).unwrap();
     assert_eq!(call(&code, 21), 1042);
     assert_eq!(loader.installed(), size());
-    assert_eq!(host::protection(code.text()), "r-xp");
+    assert_eq!(host::protection(code.text()), host::LIVE);
     assert_eq!(host::protection(loader.0.data(0)), "r--p");
     // The text run's bytes outside the image are the trap pattern.
     let page = loader.0.page;
@@ -386,23 +387,18 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     );
 }
 
-/// What a call to `entry` ends with in a child process: its exit status or its signal.
-fn outcome(entry: Leaf) -> Result<i32, i32> {
-    // SAFETY: the child only calls the entry and exits; the parent only waits for it.
-    unsafe {
-        let child = libc::fork();
-        assert!(child >= 0);
-        if child == 0 {
-            libc::_exit((entry(1) & 0x7f) as i32);
-        }
-        let mut status = 0;
-        assert_eq!(libc::waitpid(child, &mut status, 0), child);
-        if libc::WIFSIGNALED(status) {
-            Err(libc::WTERMSIG(status))
-        } else {
-            Ok(libc::WEXITSTATUS(status))
-        }
-    }
+/// Set in a child process that a law starts to do the one thing that ends a process.
+const CHILD: &str = "HIRSEL_CODE_LAW";
+
+/// Run the law `name` of this test binary again as a child with `CHILD` set to `role`.
+fn child(name: &str, role: &std::ffi::OsStr) -> std::process::ExitStatus {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD, role)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
 }
 
 /// G11: a jump into a dead cohort faults, its pages are returned, and the range runs
@@ -415,13 +411,23 @@ fn a_dead_cohort_faults_and_its_range_is_published_again() {
     let loader = Loader::new(config()).unwrap();
     let first = load(&loader, &image(100).encode()).unwrap();
     let (entry, text) = (first.entry(), first.text());
-    // 2 + 100 while the code is alive.
-    assert_eq!(outcome(entry), Ok(102));
+    assert_eq!(call(&first, 1), 102);
     drop(first);
+    if std::env::var_os(CHILD).is_some() {
+        // The child jumps into the dead cohort, which ends it.
+        // SAFETY: none; the law is that this call faults.
+        unsafe { entry(1) };
+        std::process::exit(0);
+    }
     assert_eq!(loader.installed(), 0);
     assert_eq!(host::protection(text), "---p");
     assert_eq!(host::protection(loader.0.data(0)), "---p");
-    assert_eq!(outcome(entry), Err(libc::SIGSEGV));
+    let name = "tests::a_dead_cohort_faults_and_its_range_is_published_again";
+    let ended = child(name, "jump".as_ref());
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&ended),
+        Some(host::FAULT)
+    );
 
     // Each later cohort takes the next pages of the writable window; when the window
     // is used up the lowest free run, the dead cohort's, opens again.
@@ -431,7 +437,7 @@ fn a_dead_cohort_faults_and_its_range_is_published_again() {
     let (k, code) = again.expect("the dead cohort's range opens again");
     assert_eq!(
         (call(&code, 1), host::protection(text)),
-        (2 + k, "r-xp".into())
+        (2 + k, host::LIVE.into())
     );
 }
 
@@ -461,7 +467,7 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
             std::thread::yield_now();
         }
         // The first install is in an open cohort: writable, not executable.
-        assert_eq!(host::protection(loader.0.text(0)), "rw-p");
+        assert_eq!(host::protection(loader.0.text(0)), host::OPEN);
         let flushed = loader.load::<Leaf>(&late, &IDENTITY, true).unwrap();
         (waiting.join().unwrap(), flushed)
     });
@@ -478,7 +484,7 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
     drop(waiting);
     // A dead image in a live cohort: its page is never written, so it stays as it was
     // and still counts as installed.
-    assert_eq!(host::protection(loader.0.text(0)), "r-xp");
+    assert_eq!(host::protection(loader.0.text(0)), host::LIVE);
     assert_eq!((call(&flushed, 1), loader.installed()), (4, 2 * size()));
     drop(flushed);
     assert_eq!(
@@ -517,7 +523,7 @@ fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
     assert_eq!(slot.activate(1, code(20)), Ok(2));
     assert_eq!(
         (loader.retired(), host::protection(old)),
-        (size(), "r-xp".into())
+        (size(), host::LIVE.into())
     );
     // Retiring a second image would pass the budget of one.
     assert_eq!(slot.activate(2, code(30)), Err(Stop::Capacity));
@@ -549,15 +555,10 @@ static FAULTING: std::sync::atomic::AtomicPtr<Loader> =
 static SAYS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 /// Write what the PC table gives for the faulting address, and end the process.
-extern "C" fn report(_: libc::c_int, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
-    // SAFETY: the law set the loader before it raised the fault, and the kernel gave
-    // the record.
-    let (loader, pc) = unsafe {
-        (
-            &*FAULTING.load(Ordering::Relaxed),
-            (*info).si_addr() as usize,
-        )
-    };
+extern "C" fn report(_: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+    // SAFETY: the law set the loader before it raised the fault.
+    let loader = unsafe { &*FAULTING.load(Ordering::Relaxed) };
+    let pc = host::pc(info, context);
     let mut said = [0xff; 20];
     if let Some(hit) = loader.resolve(pc) {
         said[..16].copy_from_slice(&hit.digest);
@@ -575,7 +576,8 @@ extern "C" fn report(_: libc::c_int, info: *mut libc::siginfo_t, _: *mut libc::c
 }
 
 /// PACK-9: a code address resolves to the image that owns it and its text offset,
-/// across a chunk boundary and from the handler of a fault in loaded code; the fault
+/// across a chunk boundary and from the handler of a fault in loaded code (in a child
+/// process, which loads the same modules); the fault
 /// quarantines the digest; a recycled cohort resolves to nothing.
 #[test]
 fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
@@ -629,30 +631,27 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
     assert_eq!(loader.resolve(wide.text() - 1), None);
     assert_eq!(loader.resolve(&loader as *const Loader as usize), None);
 
-    let mut said = [0u8; 20];
-    // SAFETY: the child installs a handler and calls the entry; the parent reads what
-    // the handler wrote and waits.
-    unsafe {
-        let mut ends = [0; 2];
-        assert_eq!(libc::pipe(ends.as_mut_ptr()), 0);
-        let child = libc::fork();
-        assert!(child >= 0);
-        if child == 0 {
-            FAULTING.store(&loader as *const Loader as *mut Loader, Ordering::Relaxed);
-            SAYS.store(ends[1], Ordering::Relaxed);
+    if let Some(path) = std::env::var_os(CHILD) {
+        // The child runs the undefined instruction; its handler writes what the table
+        // gives for the faulting address into the file and ends the process.
+        let file = std::fs::File::create(path).unwrap();
+        FAULTING.store(&loader as *const Loader as *mut Loader, Ordering::Relaxed);
+        SAYS.store(std::os::fd::IntoRawFd::into_raw_fd(file), Ordering::Relaxed);
+        // SAFETY: the handler is async-signal-safe, and the entry is the law's.
+        unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = report as *const () as usize;
             action.sa_flags = libc::SA_SIGINFO;
             libc::sigaction(libc::SIGILL, &action, std::ptr::null_mut());
             (code.entry())(1);
-            libc::_exit(1);
         }
-        libc::close(ends[1]);
-        assert_eq!(libc::read(ends[0], said.as_mut_ptr().cast(), 20), 20);
-        libc::close(ends[0]);
-        let mut status = 0;
-        assert_eq!(libc::waitpid(child, &mut status, 0), child);
+        std::process::exit(1);
     }
+    let path = std::env::temp_dir().join(format!("hirsel-code-law-{}", std::process::id()));
+    let name = "tests::a_code_address_resolves_to_its_image_and_a_fault_quarantines_it";
+    assert_eq!(child(name, path.as_os_str()).code(), Some(0));
+    let said = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
     assert_eq!(
         (&said[..16], &said[16..]),
         (&short(&code)[..], &at.to_le_bytes()[..])
@@ -665,4 +664,54 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
     drop(code);
     assert_eq!(loader.resolve(pc), None);
     assert_eq!(loader.resolve(wide.text() + (2 << 20)), hit(&wide, 2 << 20));
+}
+
+/// PACK-5: a loader with no slab gives the host image's prelinked code through the
+/// same `Code`, slot and worker, and refuses every key the host image lacks.
+#[test]
+fn a_loader_without_a_slab_gives_prelinked_code_and_refuses_every_other_key() {
+    let (held, other) = (image(5).encode(), image(6).encode());
+    let key = |bytes: &[u8]| Module::parse(bytes).unwrap().header.key();
+    let entries = vec![(IDENTITY, Leaf::DIGEST, double as *const () as usize)];
+    let prelinked = vec![Prelinked {
+        key: key(&held),
+        digest: hirsel_mod::digest(&held),
+        text: double as *const () as usize,
+        entries: entries.leak(),
+    }];
+    let loader = Loader::new(Config {
+        band_bytes: 0,
+        installed_bytes: 0,
+        prelinked: prelinked.leak(),
+        ..config()
+    })
+    .unwrap();
+    // The host image's entry is `double`, not the module's leaf.
+    let code = loader.load::<Leaf>(&held, &IDENTITY, true).unwrap();
+    assert_eq!((call(&code, 21), loader.installed()), (42, 0));
+    assert_eq!(
+        loader.load::<Other>(&held, &IDENTITY, true).err(),
+        Some(Refusal::NoEntry)
+    );
+    assert_eq!(
+        loader.load::<Leaf>(&other, &IDENTITY, true).err(),
+        Some(Refusal::NotPrelinked)
+    );
+    assert_eq!(
+        loader.prelinked(&key(&other)).err(),
+        Some(Refusal::NotPrelinked)
+    );
+
+    let slot = loader.slot::<Leaf>();
+    assert_eq!(slot.activate(0, code.clone()), Ok(1));
+    let mut worker = loader.worker();
+    // SAFETY: the entry is `double`.
+    assert_eq!(worker.dispatch(&slot, |entry| unsafe { entry(4) }), Some(8));
+    assert_eq!(loader.resolve(code.text()), None);
+
+    loader.quarantine(code.digest());
+    assert_eq!(
+        loader.prelinked(&key(&held)).err(),
+        Some(Refusal::Quarantined)
+    );
 }

@@ -2249,7 +2249,8 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
     open_checks(options)?
     let mut restarted = false
     loop {
-        let (take raw, id, take page_record) = read_only_manifest(d)?
+        let (take raw, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
+        let id = store_key_from_rep(store)
         failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
         failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
         let candidate = failure_result_from_rep(journal.capture_walk(d, store_key_to_rep(id), page_record.first_live, restarted))?
@@ -2271,21 +2272,6 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
         let main = view replay.state.tips[0u64]
         return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: pages.share_roots(main.roots), watermark: failure_result_from_rep(catalog.stamp_after(replay.next_node))?, bases: failure_result_from_rep(manifest.capture_tail_bases(replay.state.pins))?)))
     }
-}
-
-fn read_only_manifest(d: Dir) -> Result[(Bytes, StoreId, manifest.PageManifest), Error] waits {
-    if failure_result_from_rep(journal.disk_exists(d, "EXPORT"))? {
-        return Error(ExportDirectory)
-    }
-    let raw = match failure_result_from_rep(manifest.read_page_manifest_bytes(d)) {
-        Ok(take found) => take found,
-        Error(Io(NotFound)) => return Error(NotFound),
-        Error(take problem) => return Error(take problem),
-    }
-    let (id, take page_record) = disk_allocation(scoped fn() -> Result[(StoreId, manifest.PageManifest), Error] {
-        disk_read_page_manifest("MANIFEST", raw)
-    })?
-    Ok((take raw, id, take page_record))
 }
 
 fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), Error] waits {

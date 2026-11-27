@@ -335,6 +335,8 @@ Owner changes from §3.4/§7.2 (every other private declaration keeps its §3.4/
 
 **L7 history boundary.** The root keeps `history_claim_head` and `history_replace_claim` with public `ClaimAuth`. Replacement passes the prepared candidate to history. Stream claim carries opaque encoded H bytes to the existing issue point. History opens the register after Applied and installs settle updates only after Applied. The locator, pack stream, open base and register close their constructors across the module boundary.
 
+**L7 capture boundary.** The root keeps the public operator records and callbacks, and the Cold walk closure (`check_blob`, `check_page`, `check_roots`, `check_reachable`). `PreparedCapture` holds the opaque `capture.PreparedState`. A locked preparation consumes the file obtained for its own directory and keeps it through verification and copy. `last_complete_scrub_round` keeps its public scrub types at the root. The two operator limits land in `maintenance` with L7b.
+
 **L6 journal boundary.** `walk_directory_graph` and its validation callers stay at the root, preserving the Cold walk and its shared stamp map. Cold walk owner is open for pager/maintenance. `scrub_next` and `durable_latch_error` stay with their public root types. The Directory-only `JournalWorker`, `journal_loop`, and `journal_worker` use the split queue and land in L6.
 
 **L3 catalog boundary.** Keep declarations that require public root types in `store`. This includes `index_payload_readers`, `readers`, `RowDecoder`, `PageRows`, `row_value`, `index_decoder`, `typed_bound`, `index_bound`, `byte_cursor`, `index_revision`, `copied_state`, `catalog_positions`, `declare_projector_name` and `complete_declaration`. Catalog operations use `types.Failure` per R2. Internal records use their neutral L1 field types where available. `catalog.DeclarationBase.store` is `types.StoreKey`. The root passes plain capture fields to `catalog.follower_base`.
@@ -351,7 +353,6 @@ A-split public functions and constants (the public declaration stays at the root
 - `default_limits` → `types` (L1)
 - `RECLAIM_FORMAT_VERSION` → `object_writer` (L9)
 - `RECLAIM_TOOL_VERSION` → `object_writer` (L9)
-- `last_complete_scrub_round` → `capture` (L7)
 - `SUBJECT_MAX` → `format` (L1)
 - `stream_record_matches` → `format` (L1)
 - `READER_PIN_MIN` → `pager` (L5)
@@ -899,8 +900,8 @@ Lanes land in order on top of each other. Each lane:
 
 ### L7 — `history` (7a), `capture` (7b)
 - **7a.** History, register, authority and object-cut privates, plus the `store-object-cache.hirsel` privates §3.5 assigns to `history` (`OBJECTS_CACHE_DIR`, `pack_cache_directory`, `pack_cache_read`, `pack_cache_open` and the other cache I/O; `ObjectsCache` itself is in `pager` from L5). `objects_cache` stays public at the root. `EndpointRefusal` and `endpoint_refusal_text` stay at the root. From `store-object-open.hirsel`, only `HistoryOpenBase` moves here; `history_open_with`, `history_load_admitted`, `history_open_existing`, `history_rebase_suffix` and `history_open_register` stay at the root, because open dispatch reaches L8's `stream_open_attached`, which also stays at the root (§3.5). History consumes `pager.JournalReplay` (it lands with `pager`, whose replay code builds it; §3.5) and neutral pack inventory, including the cache and its caller (`store-history-packs.hirsel:104-122`). Keep 3082's hash-verify and refetch behaviour.
-- **7b.** Capture privates, `store-inspect.hirsel` private constants to `maintenance` (L14), and `store-backup-offline.hirsel` privates (`backup_lock`, `copy_backup_journal`). Public `PreparedCapture`, `prepare`, `capture_need`, `BackupError`, `PreparedBackup`, `prepare_backup`, `backup_offline`, `backup_with_writer`, `catalog_entries`, `CheckTotals` and `check_capture` stay at the root. Keep the three live-capture branches (§5.3.2) and the `LOCK` transfer into `PreparedCapture` (§5.3.3). The 3062 shared backing is `capture.SharedState`.
-- **Laws.** `authority_laws`, `bucket_laws`, `bucket_head_vector_laws`, `bucket_order_laws`, `bucket_q5_laws`, `object_cut_laws`, `location_laws`, `store_capture_laws`, `store_backup_laws` (3079, unchanged oracles), `store_crash_laws`; O1; O4 (`capture.SharedState` control).
+- **7b.** Capture privates, `store-inspect.hirsel` private constants to `maintenance` (L14), and `store-backup-offline.hirsel` privates (`backup_lock`, `copy_backup_journal`). Public `PreparedCapture`, `prepare`, `capture_need`, `BackupError`, `PreparedBackup`, `prepare_backup`, `backup_offline`, `backup_with_writer`, `catalog_entries`, `CheckTotals` and `check_capture` stay at the root. Keep the three live-capture branches (§5.3.2) and the `LOCK` transfer into `PreparedCapture` (§5.3.3). The 3062 implementation will add the shared backing as `capture.SharedState`.
+- **Laws.** `authority_laws`, `bucket_laws`, `bucket_head_vector_laws`, `bucket_order_laws`, `bucket_q5_laws`, `object_cut_laws`, `location_laws`, `store_capture_laws`, `store_backup_laws` (3079, unchanged oracles), `store_crash_laws`; O1; O4 (the prepared capture, lock and held-pack state constructor controls).
 
 ### L8 — `host_stream`
 - **Move.** Privates of the ten stream files. `slot_relay` and `SlotRelayInput` move to the root beside the current worker (they own `Sender[JournalMsg]` and build `StreamAnswer`). The public `JournalSlot`, `JournalService`, `StreamPlan` and the rest stay at the root.

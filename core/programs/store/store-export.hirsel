@@ -318,51 +318,8 @@ fn deploy_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
 
 fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Result[(), Error] waits {
     let mut input = failure_result_from_rep(manifest.disk_io(host.open(from, name, Read)))?
-    copy_export_prefix(mut input, to, name, end, 16384)?;
+    failure_result_from_rep(capture.copy_export_prefix(mut input, to, name, end, 16384))?;
     failure_result_from_rep(manifest.disk_io(host.close(take input)))
-}
-
-fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u64], chunk_bytes: u64) -> Result[(), Error] waits {
-    let mut output = failure_result_from_rep(manifest.disk_io(host.open(to, name, Write)))?
-    let mut offset = 0u64
-    let mut chunk: Bytes = list.with_capacity(chunk_bytes)
-    loop {
-        list.clear(mut chunk)
-        if let Some(total) = end {
-            if offset == total {
-                break
-            }
-            if total - offset < list.capacity(chunk) {
-                chunk = list.new()
-                chunk = list.with_capacity(total - offset)
-            }
-        }
-        let read_size = failure_result_from_rep(manifest.disk_io(host.read(mut input, mut chunk)))?
-        if read_size == 0 {
-            if let Some(_) = end {
-                return Error(failure_from_rep(format.disk_fault(name, offset, Truncated)))
-            }
-            break
-        }
-        // A provider may round a buffer's capacity up. Keep only the captured
-        // prefix of the terminal segment.
-        let written = if let Some(total) = end {
-            if read_size > total - offset {
-                total - offset
-            } else {
-                read_size
-            }
-        } else {
-            read_size
-        }
-        match host.write(mut output, list.slice(chunk, 0u64, written)) {
-            Ok(()) => (),
-            Error(e) => return Error(Io(e.error)),
-        }
-        offset += written
-    }
-    failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
-    failure_result_from_rep(manifest.disk_io(host.close(take output)))
 }
 
 fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
@@ -781,12 +738,12 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
     if id.hi != stamp.store_hi || id.lo != stamp.store_lo || page_record.first_live > stamp.terminal || page_record.next_table > stamp.next_table {
         return Error(ExportMismatch)
     }
-    let mut packs = capture_packs(from, id, page_record, false, 0)
-    let counts = deploy_result(capture_lists(mut packs, page_record))?
-    let slots = capture_add(counts.rows, counts.pages)
-    let need_bytes = capture_add(CAPTURE_PATH + CAPTURE_SCRATCH, capture_mul(CAPTURE_LIST_ROW, slots))
+    let mut packs = capture.capture_packs(from, store_key_to_rep(id), page_record, false, 0)
+    let counts = deploy_result(failure_result_from_rep(capture.capture_lists(mut packs, page_record)))?
+    let slots = capture.capture_add(counts.rows, counts.pages)
+    let need_bytes = capture.capture_add(capture.CAPTURE_PATH + capture.CAPTURE_SCRATCH, capture.capture_mul(capture.CAPTURE_LIST_ROW, slots))
     let selected = deploy_result(failure_result_from_rep(types.capacity(bound bytes need_bytes {
-        check_inventory(from, id, page_record, slots)
+        failure_result_from_rep(capture.check_inventory(from, store_key_to_rep(id), page_record, slots))
     })))?
     let inventory = deploy_result(take selected)?
     for pack in inventory {

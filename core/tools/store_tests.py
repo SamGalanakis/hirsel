@@ -95,7 +95,8 @@ DEPENDENT_CONTROLS = ('journal_input_refused', 'holder_table_refused', 'declare_
                       'pack_disk_state_refused', 'pager_state_refused', 'disk_pager_state_refused',
                       'record_retention_refused', 'dir_journal_state_refused',
                       'history_register_refused', 'history_locator_refused', 'history_open_base_refused',
-                      'history_pack_stream_refused', 'prepared_register_head_refused')
+                      'history_pack_stream_refused', 'prepared_register_head_refused',
+                      'prepared_capture_state_refused', 'capture_lock_refused', 'capture_packs_refused')
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
                     'view_tx_write_refused', *DEPENDENT_CONTROLS)
@@ -140,6 +141,9 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             'history_open_base_refused': [('PROG-2', '`store@1/history/HistoryOpenBase` is private or opaque')],
             'history_pack_stream_refused': [('PROG-2', '`store@1/history/HistoryPackStream` is private or opaque')],
             'prepared_register_head_refused': [('PROG-2', '`store@1/history/PreparedRegisterHead` is private or opaque')],
+            'prepared_capture_state_refused': [('PROG-2', '`store@1/capture/PreparedState` is private or opaque')],
+            'capture_lock_refused': [('PROG-2', '`store@1/capture/CaptureLock` is private or opaque')],
+            'capture_packs_refused': [('PROG-2', '`store@1/capture/CapturePacks` is private or opaque')],
             'declare_state_refused': [('PROG-2', '`store@1/catalog/DeclareState` is private or opaque')],
             'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],

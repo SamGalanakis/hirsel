@@ -123,7 +123,8 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
         if host.mono_ns(c) >= deadline {
             return Error(Remote(Retriable(Deadline)))
         }
-        let (take raw, id, take page_record) = read_only_manifest(d)?
+        let (take raw, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
+        let id = store_key_from_rep(store)
         failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(id)))?
         let candidate = failure_result_from_rep(journal.capture_walk(d, store_key_to_rep(id), page_record.first_live, restarted))?
         let Some(take selected) = take candidate else {
@@ -555,7 +556,8 @@ fn read_only_checkpoint(d: Dir, id: StoreId, take page_record: manifest.PageMani
 }
 
 fn log_floor(directory: Dir, store_id: StoreId, ceiling: u64, at_most: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
-    let (take raw, id, take page_record) = read_only_manifest(directory)?
+    let (take raw, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(directory))?
+    let id = store_key_from_rep(store)
     failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(store_id)), store_key_to_rep(id)))?
     if page_record.branches[0u64].version > at_most {
         return Ok(None)

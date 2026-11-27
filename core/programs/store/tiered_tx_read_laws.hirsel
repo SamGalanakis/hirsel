@@ -474,9 +474,9 @@ fn test_l98_tiered_index_round_trip_keeps_account_and_refusal(d: Dir, c: Clock, 
     tx_read_fixture(d, c, r, tasks, floor, false, false)?
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let handles = tx_read_handles(mut db, Open)?
-    let (_, _, take before) = read_only_manifest(d)?
+    let (_, _, take before) = failure_result_from_rep(capture.read_only_manifest(d))?
     set_residency(mut db, handles.ix.id, Tiered)?
-    let (_, _, take tiered) = read_only_manifest(d)?
+    let (_, _, take tiered) = failure_result_from_rep(capture.read_only_manifest(d))?
     if tiered.account_tiered <= before.account_tiered || tiered.account_memory + tiered.account_tiered != before.account_memory + before.account_tiered {
         fail("L98 (b): Memory -> Tiered moves the index's charge between the accounts whole")
     }
@@ -492,7 +492,7 @@ fn test_l98_tiered_index_round_trip_keeps_account_and_refusal(d: Dir, c: Clock, 
         fail("L98 (a'): the refusal is equal after the cache is evicted")
     }
     set_residency(mut reopened, again.ix.id, Memory)?
-    let (_, _, take after) = read_only_manifest(d)?
+    let (_, _, take after) = failure_result_from_rep(capture.read_only_manifest(d))?
     if after.account_memory != before.account_memory || after.account_tiered != before.account_tiered {
         fail("L98 (b): Memory -> Tiered -> Memory keeps the exact account")
     }

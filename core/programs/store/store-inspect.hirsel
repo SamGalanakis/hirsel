@@ -70,15 +70,6 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
     Ok(take out)
 }
 
-// `hirsel store verify --release EXE` and `hirsel store repair` (STORE-SPEC
-// §15.6) run in the release's own process, which binds its extractors. A
-// verify reads a cloned image and writes nothing; a repair runs in place.
-// Rows or entries a walk or build slice reads, and bytes a scrub slice reads.
-// The operator commands own the store, so slices only bound memory.
-const OPERATOR_ROWS: u64 = 1024u64
-
-const OPERATOR_SCRUB_BYTES: u64 = 16777216u64
-
 /// What `verify_release` found. `changed` names each index whose composite
 /// identity this release would change (a Migrate rebuilds it, an Open refuses
 /// `Changed`); `faults` are scrub faults; `findings` come from a report walk
@@ -103,7 +94,7 @@ pub fn verify_release[H](mut db: Db, schema: StaticFn[fn(mut Declare) -> Result[
         Ok(take tour) => {
             let mut scrubbing = take tour
             loop {
-                let report = scrub_step(mut scrubbing, OPERATOR_SCRUB_BYTES)?
+                let report = scrub_step(mut scrubbing, maintenance.OPERATOR_SCRUB_BYTES)?
                 for f in report.faults {
                     failure_result_from_rep(types.capacity(list.try_reserve(mut faults, 1)))?
                     list.push(mut faults, clone(f))
@@ -121,7 +112,7 @@ pub fn verify_release[H](mut db: Db, schema: StaticFn[fn(mut Declare) -> Result[
     let mut findings: List[WalkFinding] = list.new()
     let mut checked = 0u64
     loop {
-        let report = verify_step(mut db, mut walk, OPERATOR_ROWS)?
+        let report = verify_step(mut db, mut walk, maintenance.OPERATOR_ROWS)?
         checked = report.checked
         for f in report.findings {
             failure_result_from_rep(types.capacity(list.try_reserve(mut findings, 1)))?
@@ -148,7 +139,7 @@ pub fn repair_indexes(mut db: Db) -> Result[RepairOutcome, Error] waits {
     let mut walk = begin_verify(Repair)
     let mut findings: List[WalkFinding] = list.new()
     loop {
-        let report = verify_step(mut db, mut walk, OPERATOR_ROWS)?
+        let report = verify_step(mut db, mut walk, maintenance.OPERATOR_ROWS)?
         for f in report.findings {
             failure_result_from_rep(types.capacity(list.try_reserve(mut findings, 1)))?
             list.push(mut findings, WalkFinding(index: clone(f.index), entry: failure_result_from_rep(types.copied(f.entry))?, fault: f.fault))
@@ -158,7 +149,7 @@ pub fn repair_indexes(mut db: Db) -> Result[RepairOutcome, Error] waits {
         }
     }
     let mut built: List[String] = list.new()
-    while let Some(take name) = index_build_step(mut db, OPERATOR_ROWS)? {
+    while let Some(take name) = index_build_step(mut db, maintenance.OPERATOR_ROWS)? {
         let so_far = list.len(built)
         if so_far == 0 || built[so_far - 1] != name {
             failure_result_from_rep(types.capacity(list.try_reserve(mut built, 1)))?

@@ -432,9 +432,9 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
     let restored = disk_test_directory(d)
     result.unwrap(backup_law_seed(tasks, source, c, r, options))
     let (id, take page_record) = read_page_manifest_file(source)?
-    let mut packs = capture_packs(source, id, page_record, false, 0)
-    let counts = capture_lists(mut packs, page_record)?
-    let inventory = check_inventory(source, id, page_record, counts.rows + counts.pages)?
+    let mut packs = capture.capture_packs(source, store_key_to_rep(id), page_record, false, 0)
+    let counts = failure_result_from_rep(capture.capture_lists(mut packs, page_record))?
+    let inventory = failure_result_from_rep(capture.check_inventory(source, store_key_to_rep(id), page_record, counts.rows + counts.pages))?
     let mut listed: Option[u64] = None
     for candidate in inventory {
         if candidate.class == 0 {

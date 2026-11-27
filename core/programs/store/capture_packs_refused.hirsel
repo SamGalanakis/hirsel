@@ -1,0 +1,3 @@
+fn forge_capture_packs(d: Dir, id: store.types.StoreKey) -> store.capture.CapturePacks {
+    store.capture.CapturePacks(dir: d, id, next_pack: 1, next_stamp: 1, hold: true, files: list.new())
+}

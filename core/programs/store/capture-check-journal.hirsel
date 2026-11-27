@@ -1,0 +1,79 @@
+pub type CheckBranch {
+    head: u64,
+    id: u32,
+    name_start: u32,
+    name_width: u8,
+    keyed: bool
+}
+
+pub type CheckJournal {
+    branches: List[CheckBranch],
+    names: Bytes,
+    next_branch: u32,
+    record_bytes: u64,
+    limits: types.LimitsRep
+}
+
+pub fn check_branch_slot(branches: List[CheckBranch], id: u32) -> Option[u64] {
+    let mut lo = 0u64
+    let mut hi = list.len(branches)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if branches[mid].id < id {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo == list.len(branches) || branches[lo].id != id {
+        None
+    } else {
+        Some(lo)
+    }
+}
+
+pub fn check_add_branch(mut state: CheckJournal, id: u32, head: u64, name: String, keyed: bool) {
+    let first: u32 = int.truncate(list.len(state.names))
+    let width: u8 = int.truncate(string.byte_len(name))
+    list.append(mut state.names, string.as_bytes(name))
+    list.push(mut state.branches, CheckBranch(head: head, id: id, name_start: first, name_width: width, keyed: keyed))
+}
+
+pub fn check_journal_fork(mut state: CheckJournal, path: String, at: u64, raw: Bytes) -> Result[(), types.Failure] {
+    let forked = format.journal_decode_fork(path, raw)?
+    let Some(parent) = check_branch_slot(state.branches, forked.parent) else {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    if forked.id < state.next_branch || forked.id == 4294967295 || forked.forked_at != state.branches[parent].head {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    let name_bytes = string.as_bytes(forked.name)
+    for source in state.branches {
+        let first: u64 = int.widen(source.name_start)
+        let width: u64 = int.widen(source.name_width)
+        if list.slice(state.names, first, first + width) == name_bytes {
+            return Error(format.disk_fault(path, at, Malformed))
+        }
+    }
+    let keyed = state.branches[parent].keyed
+    let charge = pages.branch_record_bytes(forked.name) + (if keyed {
+        manifest.KEYED_ROOT_RECORD_BYTES
+    } else {
+        0u64
+    })
+    if charge > state.limits.meta - state.record_bytes {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    let id = forked.id
+    check_add_branch(mut state, id, forked.forked_at, forked.name, keyed)
+    state.record_bytes += charge
+    state.next_branch = id + 1
+    Ok(())
+}
+
+pub fn check_journal_blob(path: String, raw: Bytes, mut at: u64, limit: u64) -> Result[(u64, u64), types.Failure] {
+    let size = capture_blob_width(path, raw, mut at, limit)?
+    let start = at
+    at += size
+    Ok((start, at))
+}

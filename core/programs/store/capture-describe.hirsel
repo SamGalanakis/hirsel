@@ -1,0 +1,174 @@
+pub type DescribeDelta {
+    rows: i64,
+    charge: i64,
+    next: u64,
+    floor: u64
+}
+
+pub type DescribeFold {
+    deltas: List[DescribeDelta],
+    head: u64,
+    value_limit: u64
+}
+
+fn describe_signed(path: String, at: u64, base: i64, add: u64, remove: u64) -> Result[i64, types.Failure] {
+    let amount = if add >= remove {
+        add - remove
+    } else {
+        remove - add
+    }
+    let Some(magnitude): Option[i64] = int.try_narrow(amount) else {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    let delta = if add >= remove {
+        magnitude
+    } else {
+        -magnitude
+    }
+    let Some(value) = int.checked_add(base, delta) else {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    Ok(value)
+}
+
+pub fn describe_adjust(path: String, at: u64, value: u64, delta: i64) -> Result[u64, types.Failure] {
+    let shifted = if delta >= 0 {
+        let magnitude: u64 = int.truncate(delta)
+        int.checked_add(value, magnitude)
+    } else {
+        let signed: u64 = int.truncate(delta)
+        int.checked_sub(value, int.wrapping_neg(signed))
+    }
+    let Some(total) = shifted else {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    Ok(total)
+}
+
+fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, op: CaptureOp) -> Result[(), types.Failure] {
+    let (id, is_put, key_len, value_len, prior, observed_next, floor, dropped) = match op {
+        CaptureTrim(collection_id, boundary, amount) => (collection_id, false, 0u64, 0u64, 0u64, 0u64, boundary, amount),
+        CapturePut(key_at, width, value, before) => {
+            let collection_id: u32 = list.word_be(raw, key_at)
+            // Only a Log uses this field. The suffix of a 12-byte key in an
+            // ordinary table is opaque and may have any u64 bit pattern.
+            let next_seq = if width == 12 && before == 0 {
+                int.saturating_add(format.word_be(raw, key_at + 4), 1)
+            } else {
+                0u64
+            }
+            (collection_id, true, width, value, before, next_seq, 0u64, 0u64)
+        },
+        CaptureDelete(key_at, width, before) => {
+            let collection_id: u32 = list.word_be(raw, key_at)
+            (collection_id, false, width, 0u64, before, 0u64, 0u64, 0u64)
+        },
+    }
+    let i: u64 = int.widen(id)
+    if i == 0 || i >= list.len(folded.deltas) {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    let plus = if is_put {
+        stored_row_charge(key_len, value_len)
+    } else {
+        0u64
+    }
+    let minus = if prior > 0 {
+        stored_row_charge(key_len, prior - 1)
+    } else {
+        dropped
+    }
+    let added = if is_put && prior == 0 {
+        1u64
+    } else {
+        0u64
+    }
+    let removed = if !is_put && prior != 0 {
+        1u64
+    } else {
+        0u64
+    }
+    folded.deltas[i].rows = describe_signed(path, at, folded.deltas[i].rows, added, removed)?
+    folded.deltas[i].charge = describe_signed(path, at, folded.deltas[i].charge, plus, minus)?
+    folded.deltas[i].next = order.max(folded.deltas[i].next, observed_next)
+    folded.deltas[i].floor = order.max(folded.deltas[i].floor, floor)
+    Ok(())
+}
+
+pub fn describe_commit(mut folded: DescribeFold, path: String, at: u64, _kind: u16, raw: Bytes) -> Result[(), types.Failure] {
+    let mut pos = 0u64
+    let branch_id = format.disk_number(path, raw, mut pos, 4)?
+    if branch_id != 0 {
+        return Ok(())
+    }
+    let head = format.disk_number(path, raw, mut pos, 8)?
+    if int.checked_add(folded.head, 1) != Some(head) {
+        return Error(format.disk_fault(path, at, Gap(head)))
+    }
+    let mut ops = capture_data_ops(path, raw)?
+    while let Some(op) = capture_next_op(path, raw, folded.value_limit, mut ops)? {
+        describe_delta(mut folded, path, at + 16 + ops.at, raw, op)?
+    }
+    folded.head = head
+    Ok(())
+}
+
+pub type DescribeName {
+    id: u32,
+    name: String
+}
+
+type DescribeCatalogWalk {
+    names: List[DescribeName]
+}
+
+pub fn describe_owner(names: List[DescribeName], id: u32) -> Result[String, types.Failure] {
+    let mut lo = 0u64
+    let mut hi = list.len(names)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if names[mid].id < id {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo == list.len(names) || names[lo].id != id {
+        return Error(pages.malformed(0))
+    }
+    Ok(string.from(names[lo].name))
+}
+
+fn describe_collect(mut packs: CapturePacks, p: PreparedState) -> Result[DescribeCatalogWalk, types.Failure] waits {
+    let m = view p.manifest
+    let collection_root = m.branches[0].roots.collections
+    let mut walk = DescribeCatalogWalk(names: list.with_capacity(p.names))
+    let mut pages = 0u64
+    capture_walk_pages(mut packs, m.branches[0].roots.catalog, 0, None, mut walk, mut pages, scoped fn(mut source: CapturePacks, mut found: DescribeCatalogWalk, path: String, at: u64, key: Bytes, value: std.page.Cell) -> Result[(), types.Failure] waits {
+        let cat = capture_catalog_cell(mut source, path, at, value)?
+        if cat.id >= m.next_table || ((cat.kind == 2) != (key[0] == 2)) {
+            return Error(format.disk_fault(path, at, Malformed))
+        }
+        let _ = describe_descriptor(mut source, collection_root, cat.id)?
+        if cat.kind != 2 {
+            let name = capture_catalog_name(path, at, key)?
+            list.push(mut found.names, DescribeName(id: cat.id, name: take name))
+        }
+        Ok(())
+    })?
+    list.sort(mut walk.names, fn(a: DescribeName, b: DescribeName) -> Order {
+        order.compare(a.id, b.id)
+    })
+    Ok(take walk)
+}
+
+pub fn describe_descriptor(mut packs: CapturePacks, root: std.page.PagePtr, id: u32) -> Result[Option[Bytes], types.Failure] waits {
+    capture_lookup(mut packs, root, CollectionMap, catalog.prefix(id)?)
+}
+
+pub fn describe_acquire(mut packs: CapturePacks, p: PreparedState) -> Result[DescribeCatalogWalk, types.Failure] waits {
+    let _ = capture_lists(mut packs, p.manifest)?
+    let names = describe_collect(mut packs, p)?
+    capture_pack_classes(mut packs, p.manifest)?
+    Ok(take names)
+}

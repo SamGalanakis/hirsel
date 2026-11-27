@@ -1,0 +1,3 @@
+fn forge_capture_lock(d: Dir, take file: HostFile) -> store.capture.CaptureLock {
+    store.capture.CaptureLock(dir: d, file: take file)
+}

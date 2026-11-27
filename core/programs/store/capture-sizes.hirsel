@@ -1,0 +1,3 @@
+pub fn stored_row_charge(key: u64, value: u64) -> u64 {
+    int.saturating_add(62 + format.round8(key), format.round8(value))
+}

@@ -35,11 +35,11 @@ fn test_l70_tiered_open_at_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     close(take db)?
     // The fixture produced the Cold graph. The three 6-byte values with
     // 12-byte keys each cost 62 + 16 + 8 in the Tiered account.
-    let (_, id, take selected) = read_only_manifest(d)?
+    let (_, id, take selected) = failure_result_from_rep(capture.read_only_manifest(d))?
     let mut page_record = take selected
     page_record.account_tiered = 258
     let memory_bytes = page_record.account_memory
-    failure_result_from_rep(manifest.publish_page_manifest_bytes(d, failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?))?
+    failure_result_from_rep(manifest.publish_page_manifest_bytes(d, failure_result_from_rep(manifest.disk_page_manifest_bytes(id, page_record))?))?
     let below = l70_open_options(floor - 1)?
     if below.cache_bytes != 0 {
         fail("L70: one byte below the floor no Tiered plan is feasible")

@@ -1,0 +1,42 @@
+pub fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u64], chunk_bytes: u64) -> Result[(), types.Failure] waits {
+    let mut output = manifest.disk_io(host.open(to, name, Write))?
+    let mut offset = 0u64
+    let mut chunk: Bytes = list.with_capacity(chunk_bytes)
+    loop {
+        list.clear(mut chunk)
+        if let Some(total) = end {
+            if offset == total {
+                break
+            }
+            if total - offset < list.capacity(chunk) {
+                chunk = list.new()
+                chunk = list.with_capacity(total - offset)
+            }
+        }
+        let read_size = manifest.disk_io(host.read(mut input, mut chunk))?
+        if read_size == 0 {
+            if let Some(_) = end {
+                return Error(format.disk_fault(name, offset, Truncated))
+            }
+            break
+        }
+        // A provider may round a buffer's capacity up. Keep only the captured
+        // prefix of the terminal segment.
+        let written = if let Some(total) = end {
+            if read_size > total - offset {
+                total - offset
+            } else {
+                read_size
+            }
+        } else {
+            read_size
+        }
+        match host.write(mut output, list.slice(chunk, 0u64, written)) {
+            Ok(()) => (),
+            Error(e) => return Error(Io(e.error)),
+        }
+        offset += written
+    }
+    manifest.disk_io(host.sync(mut output))?
+    manifest.disk_io(host.close(take output))
+}

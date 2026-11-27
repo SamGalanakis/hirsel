@@ -9,226 +9,13 @@ pub type CheckTotals: key + send {
 
 pub type CheckError: send = CheckStore(Error) | CheckBudget(Capacity) | CheckRepeats(Capacity)
 
-type CheckPack {
-    seq: u64,
-    // Holds `payload_bytes` until `check_envelope` finishes, then `index` for `check_reachable`
-    // (keeps CheckPack at CAPTURE_LIST_ROW = 48 bytes).
-    payload_bytes: u64,
-    base: u64,
-    // Holds `index` until `check_envelope` finishes, then the verified pack file size.
-    size: u64,
-    head: u64,
-    frames: u32,
-    class: u8
-}
-
-fn check_pack_row(seq: u64, class: u8, frames: u32, size: u64, index_at: u64) -> CheckPack {
-    CheckPack(seq: seq, payload_bytes: size, base: 0, size: index_at, head: 72, frames: frames, class: class)
-}
-
-fn check_inventory(d: Dir, id: StoreId, m: manifest.PageManifest, slots: u64) -> Result[List[CheckPack], Error] waits {
-    let mut inventory: List[CheckPack] = list.with_capacity(slots)
-    let mut packs = capture_packs(d, id, m, false, 0)
-    let mut pages = 0u64
-    for (kind, root) in[(manifest.list_kind_pack(), m.pack_root), (manifest.list_kind_deferred(), m.deferred_frees), (manifest.list_kind_lineage(), m.lineage)] {
-        capture_walk_list(mut packs, root, 2, None, mut inventory, mut pages, fn(mut rows: List[CheckPack], ptr: std.page.PagePtr) {
-            list.push(mut rows, check_pack_row(ptr.pack, 2, 0, 0, 0))
-        }, scoped fn(mut _packs: CapturePacks, mut rows: List[CheckPack], path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] {
-            match kind {
-                PackList => {
-                    let raw = match cell_value {
-                        InlineValue(found) => found,
-                        _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
-                    }
-                    let pack = failure_result_from_rep(manifest.pack_record(path, at, raw))?
-                    list.push(mut rows, check_pack_row(list.word_be(key, 0), pack.class, pack.frames, pack.payload_bytes, pack.index))
-                },
-                _ => (),
-            }
-            Ok(())
-        })?
-    }
-    list.sort(mut inventory, fn(a: CheckPack, b: CheckPack) -> Order {
-        order.compare(a.seq, b.seq)
-    })
-    let mut write = 0u64
-    for read in 0u64 .. list.len(inventory) {
-        if write != 0 && inventory[write - 1].seq == inventory[read].seq {
-            if inventory[write - 1].class != 2 || inventory[read].class != 2 {
-                return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(inventory[read].seq))?, 72, Malformed)))
-            }
-        } else {
-            list.swap(mut inventory, write, read)
-            write += 1
-        }
-    }
-    list.truncate(mut inventory, write)
-    Ok(take inventory)
-}
-
-fn check_open_pack(d: Dir, path: String) -> Result[HostFile, Error] waits {
-    match host.open(d, path, Read) {
-        Ok(take file) => Ok(take file),
-        Error(NotFound) => Error(failure_from_rep(format.disk_fault(path, 0, Absent))),
-        Error(problem) => Error(Io(problem)),
-    }
-}
-
-fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], mut spent: u64) -> Result[(), Error] waits {
-    let path = failure_result_from_rep(manifest.paged_pack_path(pack.seq))?
-    let opened = check_open_pack(p.dir, path)?
-    let mut input = failure_result_from_rep(journal.journal_input(take opened, false))?
-    if let Some(to) = target {
-        format.journal_input_copy_to(mut input, failure_result_from_rep(manifest.disk_io(host.open(to, path, Write)))?)
-    }
-    let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?, 3, Some(pack.seq), optional_store_key_to_rep(Some(p.id))))?
-    let index_at = pack.size
-    let mut scanned = manifest.pack_scan_indexed(pack.class, p.manifest.next_stamp, index_at)
-    let mut at = 72u64
-    while at < format.journal_input_size(input) {
-        let frame = match failure_result_from_rep(manifest.read_pack_frame(mut input, path, header.context, mut scanned, at, false, mut spent)) {
-            Ok(found) => found,
-            Error(Unsupported(kind)) => return Error(failure_from_rep(format.disk_fault(path, at, Kind(kind)))),
-            Error(take problem) => return Error(take problem),
-        }
-        at += 16 + frame.size
-    }
-    if !manifest.pack_scan_finished(scanned, int.widen(pack.frames), pack.payload_bytes, at) {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-    }
-    let copy_to = format.take_journal_copy(take input)
-    if let Some(take finished) = take copy_to {
-        let mut output = take finished
-        failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
-        failure_result_from_rep(manifest.disk_io(host.close(take output)))?
-    }
-    pack.payload_bytes = index_at
-    pack.size = at
-    Ok(())
-}
-
-fn check_pack_slot(packs: List[CheckPack], path: String, ptr: std.page.PagePtr, class: u8, next_stamp: u64) -> Result[u64, Error] {
-    if ptr.stamp == 0 || ptr.stamp >= next_stamp || ptr.offset < 72 {
-        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
-    }
-    let mut lo = 0u64
-    let mut hi = list.len(packs)
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2
-        if packs[mid].seq < ptr.pack {
-            lo = mid + 1
-        } else {
-            hi = mid
-        }
-    }
-    if lo == list.len(packs) || packs[lo].seq != ptr.pack {
-        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
-    }
-    if packs[lo].class != class {
-        let why = if packs[lo].class == 2 {
-            Dangling(ptr.stamp)
-        } else {
-            Malformed
-        }
-        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, why_to_rep(why))))
-    }
-    Ok(lo)
-}
-
-// The envelope pass checked the complete chain. Follow heads from a known
-// boundary to rule out a frame-shaped byte string inside another payload.
-fn check_at_head(mut input: format.JournalInput, mut pack: CheckPack, path: String, ptr: std.page.PagePtr) -> Result[(), Error] waits {
-    if ptr.offset >= pack.size {
-        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
-    }
-    let mut at = if pack.head <= ptr.offset {
-        pack.head
-    } else {
-        72u64
-    }
-    while at < ptr.offset {
-        let head = failure_result_from_rep(manifest.disk_read_frame_head(path, failure_result_from_rep(manifest.journal_prefix(mut input, path, at, 16))?, at))?
-        at += 16 + head.size
-    }
-    if at != ptr.offset {
-        return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp))))
-    }
-    pack.head = at
-    Ok(())
-}
-
-type CheckVisits {
-    visited: Bytes,
-    repeated: Bytes,
-    repeats: u64,
-    pages: u64
-}
-
-fn check_bit(bits: Bytes, stamp: u64) -> bool {
-    let bit: u8 = 1u8 << int.truncate(stamp % 8)
-    bits[stamp / 8] & bit != 0
-}
-
-fn check_set_bit(mut bits: Bytes, stamp: u64) {
-    let bit: u8 = 1u8 << int.truncate(stamp % 8)
-    bits[stamp / 8] = bits[stamp / 8] | bit
-}
-
-fn check_bitmap(size: u64) -> Bytes {
-    let mut bits: Bytes = list.with_capacity(size)
-    list.fill(mut bits, size, 0u8)
-    take bits
-}
-
-type CheckWalk {
-    packs: List[CheckPack],
-    visits: CheckVisits,
-    locations: List[(u64, u64)],
-    locate: bool,
-    dir: Dir,
-    id: StoreId,
-    next_stamp: u64
-}
-
-fn check_arrive(mut walk: CheckWalk, path: String, ptr: std.page.PagePtr, location: u64) -> Result[bool, Error] {
-    let stamp = ptr.stamp
-    let seen = check_bit(walk.visits.visited, stamp)
-    if walk.locate {
-        if check_bit(walk.visits.repeated, stamp) {
-            let mut lo = 0u64
-            let mut hi = list.len(walk.locations)
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2
-                if walk.locations[mid].0 < stamp {
-                    lo = mid + 1
-                } else {
-                    hi = mid
-                }
-            }
-            if seen {
-                let first = walk.locations[lo].1
-                if first != location {
-                    return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
-                }
-            } else {
-                walk.locations[lo] = (stamp, location)
-            }
-        }
-    } else if seen && !check_bit(walk.visits.repeated, stamp) {
-        check_set_bit(mut walk.visits.repeated, stamp)
-        walk.visits.repeats += 1
-    }
-    check_set_bit(mut walk.visits.visited, stamp)
-    Ok(!seen)
-}
-
-fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef, class: u8) -> Result[(), Error] waits {
+fn check_blob(mut walk: capture.CheckWalk, reference: std.page.BlobRef, class: u8) -> Result[(), Error] waits {
     let path = failure_result_from_rep(manifest.paged_pack_path(reference.pack))?
     if reference.len > manifest.BLOB_LIMIT - 8 {
         return Error(failure_from_rep(format.disk_fault(path, reference.offset, Malformed)))
     }
     let ptr = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(8 + reference.len), checksum: reference.checksum, stamp: reference.stamp)
-    let slot = check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp)?
+    let slot = failure_result_from_rep(capture.check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp))?
     if class == 4 {
         let pack = walk.packs[slot]
         let index_at = pack.payload_bytes
@@ -236,29 +23,29 @@ fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef, class: u8) -> Re
         if ptr.offset >= index_at || 16 + width > index_at - ptr.offset {
             return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
-        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 4, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredBlob(reference)))?
+        check_cold_pack_index_row(walk.dir, store_key_from_rep(walk.id), path, ptr.pack, 4, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredBlob(reference)))?
     }
     let location = 4 * (walk.packs[slot].base + ptr.offset) + 3
-    let opened = check_open_pack(walk.dir, path)?
+    let opened = failure_result_from_rep(capture.check_open_pack(walk.dir, path))?
     let mut input = failure_result_from_rep(journal.journal_input(take opened, false))?
-    check_at_head(mut input, mut walk.packs[slot], path, ptr)?
+    failure_result_from_rep(capture.check_at_head(mut input, mut walk.packs[slot], path, ptr))?
     let mut scanned = manifest.pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].payload_bytes)
     let mut spent = 0u64
-    let ctx = format.DiskContext(store: store_key_to_rep(walk.id), role: 3, seq: ptr.pack)
+    let ctx = format.DiskContext(store: walk.id, role: 3, seq: ptr.pack)
     let frame = failure_result_from_rep(manifest.read_pack_frame(mut input, path, ctx, mut scanned, ptr.offset, true, mut spent))?
     if frame.stamp != Some(ptr.stamp) || frame.size != int.widen(ptr.len) || frame.checksum != ptr.checksum {
         return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Checksum)))
     }
-    let _ = check_arrive(mut walk, path, ptr, location)?
+    let _ = failure_result_from_rep(capture.check_arrive(mut walk, path, ptr, location))?
     Ok(())
 }
 
-fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std.page.Domain, expected_level: Option[u8]) -> Result[(), Error] waits {
+fn check_page(mut walk: capture.CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std.page.Domain, expected_level: Option[u8]) -> Result[(), Error] waits {
     if ptr.stamp == 0 {
         return Ok(())
     }
     let path = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
-    let slot = check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp)?
+    let slot = failure_result_from_rep(capture.check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp))?
     if class == 3 {
         let pack = walk.packs[slot]
         let index_at = pack.payload_bytes
@@ -266,7 +53,7 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
         if ptr.offset >= index_at || 16 + width > index_at - ptr.offset {
             return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
-        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 3, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredPage(ptr)))?
+        check_cold_pack_index_row(walk.dir, store_key_from_rep(walk.id), path, ptr.pack, 3, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredPage(ptr)))?
     }
     let tag = match domain {
         Collection => 0u64,
@@ -276,14 +63,14 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
     let location = 4 * (walk.packs[slot].base + ptr.offset) + tag
     let allow_tiered = domain == CollectionMap
     let image = {
-        let file = check_open_pack(walk.dir, path)?
+        let file = failure_result_from_rep(capture.check_open_pack(walk.dir, path))?
         let mut input = failure_result_from_rep(journal.journal_input(take file, false))?
-        check_at_head(mut input, mut walk.packs[slot], path, ptr)?
+        failure_result_from_rep(capture.check_at_head(mut input, mut walk.packs[slot], path, ptr))?
         format.with_journal_file(mut input, scoped fn(mut opened: HostFile) -> Result[std.page.Image, Error] waits {
-            capture_read_page_mode(mut opened, path, walk.id, ptr, domain, expected_level, allow_tiered)
+            failure_result_from_rep(capture.capture_read_page_mode(mut opened, path, walk.id, ptr, domain, expected_level, allow_tiered))
         })?
     }
-    if !check_arrive(mut walk, path, ptr, location)? {
+    if !failure_result_from_rep(capture.check_arrive(mut walk, path, ptr, location))? {
         return Ok(())
     }
     walk.visits.pages += 1
@@ -314,7 +101,7 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
     Ok(())
 }
 
-fn check_roots(mut walk: CheckWalk, roots: pages.LocatedRoots) -> Result[(), Error] waits {
+fn check_roots(mut walk: capture.CheckWalk, roots: pages.LocatedRoots) -> Result[(), Error] waits {
     check_page(mut walk, roots.collections, 0, CollectionMap, None)?
     for root in[roots.streams, roots.catalog] {
         check_page(mut walk, root, 0, Unprefixed, None)?
@@ -325,24 +112,24 @@ fn check_roots(mut walk: CheckWalk, roots: pages.LocatedRoots) -> Result[(), Err
     Ok(())
 }
 
-fn check_reachable(p: PreparedCapture, mut walk: CheckWalk) -> Result[(), Error] waits {
-    let m = view p.manifest
+fn check_reachable(p: PreparedCapture, mut walk: capture.CheckWalk) -> Result[(), Error] waits {
+    let m = capture.prepared_manifest(p.state)
     for root in[m.pack_root, m.deferred_frees, m.lineage] {
         check_page(mut walk, root, 2, Unprefixed, None)?
     }
     if m.deferred_frees.stamp != 0 {
-        let mut packs = capture_packs(p.dir, p.id, p.manifest, false, 0)
+        let mut packs = capture.capture_packs(capture.prepared_dir(p.state), capture.prepared_id(p.state), capture.prepared_manifest(p.state), false, 0)
         let mut pages = 0u64
-        capture_walk_pages(mut packs, m.deferred_frees, 2, None, mut walk, mut pages, scoped fn(mut _packs: CapturePacks, mut current: CheckWalk, path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] waits {
+        failure_result_from_rep(capture.capture_walk_pages(mut packs, m.deferred_frees, 2, None, mut walk, mut pages, scoped fn(mut _packs: capture.CapturePacks, mut current: capture.CheckWalk, path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), types.Failure] waits {
             let InlineValue(raw) = view cell_value else {
-                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
+                return Error(format.disk_fault(path, at, Malformed))
             }
-            let (_, queued) = failure_result_from_rep(manifest.decode_deferred_free(path, at, key, raw, p.manifest))?
+            let (_, queued) = manifest.decode_deferred_free(path, at, key, raw, capture.prepared_manifest(p.state))?
             match queued.target {
-                TieredPage(ptr) => check_page(mut current, ptr, 3, Collection, None),
-                TieredBlob(body) => check_blob(mut current, body, 4),
+                TieredPage(ptr) => failure_result_to_rep(check_page(mut current, ptr, 3, Collection, None)),
+                TieredBlob(body) => failure_result_to_rep(check_blob(mut current, body, 4)),
             }
-        })?
+        }))?
     }
     for holder in m.branches {
         check_roots(mut walk, holder.roots)?
@@ -363,15 +150,15 @@ fn check_emit(take problem: Error, mut summary: CheckTotals, fault: scoped[view]
     }
 }
 
-fn check_mark(p: PreparedCapture, target: Option[Dir], mut summary: CheckTotals, fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[Option[CheckWalk], Error] waits {
-    let mut packs = check_inventory(p.dir, p.id, p.manifest, capture_list_slots(p))?
+fn check_mark(p: PreparedCapture, target: Option[Dir], mut summary: CheckTotals, fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[Option[capture.CheckWalk], Error] waits {
+    let mut packs = failure_result_from_rep(capture.check_inventory(capture.prepared_dir(p.state), capture.prepared_id(p.state), capture.prepared_manifest(p.state), capture.capture_list_slots(p.state)))?
     let mut base = 0u64
     for i in 0u64 .. list.len(packs) {
-        if let Error(take problem) = check_envelope(p, mut packs[i], target, mut summary.scrubbed) {
+        if let Error(take problem) = failure_result_from_rep(capture.check_envelope(p.state, mut packs[i], target, mut summary.scrubbed)) {
             check_emit(take problem, mut summary, fault)?
         }
         packs[i].base = base
-        base = capture_add(base, packs[i].size)
+        base = capture.capture_add(base, packs[i].size)
     }
     if summary.faults != 0 {
         return Ok(None)
@@ -379,9 +166,9 @@ fn check_mark(p: PreparedCapture, target: Option[Dir], mut summary: CheckTotals,
     if base > 4611686018427387903u64 {
         return Error(Full(Allocation(Capacity(requested: 18446744073709551615u64, available: 0))))
     }
-    let width = capture_bitmap_bytes(p)
-    let visits = CheckVisits(visited: check_bitmap(width), repeated: check_bitmap(width), repeats: 0, pages: 0)
-    let mut walk = CheckWalk(packs: take packs, visits: take visits, locations: list.new(), locate: false, dir: p.dir, id: p.id, next_stamp: p.manifest.next_stamp)
+    let width = capture.capture_bitmap_bytes(p.state)
+    let visits = capture.CheckVisits(visited: capture.check_bitmap(width), repeated: capture.check_bitmap(width), repeats: 0, pages: 0)
+    let mut walk = capture.CheckWalk(packs: take packs, visits: take visits, locations: list.new(), locate: false, dir: capture.prepared_dir(p.state), id: capture.prepared_id(p.state), next_stamp: capture.prepared_manifest(p.state).next_stamp)
     match check_reachable(p, mut walk) {
         Ok(()) => Ok(Some(take walk)),
         Error(take problem) => {
@@ -391,27 +178,11 @@ fn check_mark(p: PreparedCapture, target: Option[Dir], mut summary: CheckTotals,
     }
 }
 
-fn check_repeat_slots(visits: CheckVisits) -> List[(u64, u64)] {
-    let mut slots: List[(u64, u64)] = list.with_capacity(visits.repeats)
-    for at in 0u64 .. list.len(visits.repeated) {
-        if visits.repeated[at] == 0 {
-            continue
-        }
-        for bit in 0u64 .. 8 {
-            let stamp = at * 8 + bit
-            if check_bit(visits.repeated, stamp) {
-                list.push(mut slots, (stamp, 0u64))
-            }
-        }
-    }
-    take slots
-}
-
 // The initial scope refunds its scratch after marking. The repeat table is
 // reserved from the enclosing limit before a second scratch scope is taken.
 fn check_prepared(mut p: PreparedCapture, target: Option[Dir], fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[(CheckTotals, u64), CheckError] waits {
     let mut summary = CheckTotals(scrubbed: 0, pages: 0, journal: 0, faults: 0, repeats: 0)
-    let marked = bound bytes capture_check_need(p) {
+    let marked = bound bytes capture.capture_check_need(p.state, p.purpose == Copy) {
         check_mark(p, target, mut summary, fault)
     } ?=> CheckBudget
     let mut thorough = match take marked {
@@ -423,10 +194,10 @@ fn check_prepared(mut p: PreparedCapture, target: Option[Dir], fault: scoped[vie
     }
     if let Some(mut walk) = thorough {
         summary.pages = walk.visits.pages
-        summary.repeats = capture_mul(16, walk.visits.repeats)
-        let scratch = capture_check_scratch(p)
-        let located = bound bytes capture_add(scratch, summary.repeats) {
-            walk.locations = check_repeat_slots(walk.visits)
+        summary.repeats = capture.capture_mul(16, walk.visits.repeats)
+        let scratch = capture.capture_check_scratch(p.state)
+        let located = bound bytes capture.capture_add(scratch, summary.repeats) {
+            walk.locations = capture.check_repeat_slots(walk.visits)
             for i in 0u64 .. list.len(walk.visits.visited) {
                 walk.visits.visited[i] = 0u8
             }
@@ -438,7 +209,7 @@ fn check_prepared(mut p: PreparedCapture, target: Option[Dir], fault: scoped[vie
         }
     }
     let _ = take thorough
-    let journal = bound bytes capture_check_scratch(p) {
+    let journal = bound bytes capture.capture_check_scratch(p.state) {
         check_journal(mut p, mut summary.journal)
     } ?=> CheckBudget
     let head = match take journal {
@@ -453,7 +224,7 @@ fn check_prepared(mut p: PreparedCapture, target: Option[Dir], fault: scoped[vie
 
 pub fn check_capture(take p: PreparedCapture, fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[CheckTotals, CheckError] waits {
     let mut selected = take p
-    if let None = selected.lock {
+    if !capture.prepared_locked(selected.state) {
         return Error(CheckStore(Unsupported(0)))
     }
     let (take summary, _) = check_prepared(mut selected, None, fault)?

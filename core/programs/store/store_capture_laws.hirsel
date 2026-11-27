@@ -87,7 +87,7 @@ fn capture_test_catalog(mut m: manifest.PageManifest, id: StoreId, d: Dir) -> Re
     for i in 1u16 .. 33 {
         list.push(mut schemas, catalog.ValueSchema(number: i, fingerprint: 0, schema: capture_test_fill(4096, 17)))
     }
-    let index_record = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Unique), payload_schemas: list.new(), projection: None, state: Failed(capture_test_fill(4096, 23), capture_test_fill(4096, 29)))), id: 16, owner: 1, epoch: 1, key: list.new(), schemas: take schemas, next: 33, by: list.new(), revision: capture_test_fill(CATALOG_REVISION_MAX, 19))
+    let index_record = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Unique), payload_schemas: list.new(), projection: None, state: Failed(capture_test_fill(4096, 23), capture_test_fill(4096, 29)))), id: 16, owner: 1, epoch: 1, key: list.new(), schemas: take schemas, next: 33, by: list.new(), revision: capture_test_fill(capture.CATALOG_REVISION_MAX, 19))
     let large_value = encode_catalog(index_record)?
     if list.len(large_value) <= journal.JOURNAL_CHUNK_BYTES {
         fail("catalog BLOB fixture did not cross a chunk boundary")
@@ -184,7 +184,7 @@ fn capture_test_reopens(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         close(take db)?
     }
     let prepared = prepare(d, c, Describe)?
-    if list.len(prepared.segments) != 40 {
+    if capture.prepared_segment_count(prepared.state) != 40 {
         fail("reopen fixture did not create 40 live segments")
     }
     let _ = take prepared
@@ -257,16 +257,13 @@ fn describe_suffix_free(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     close(take db)?
     let empty = prepare(d, c, Describe)?
     let before = capture_need(empty)
-    let main_version = empty.manifest.branches[0].version
-    let (seq, segment_end) = {
-        let final_segment = option.unwrap(list.last(empty.segments))
-        (final_segment.seq, final_segment.end)
-    }
-    let initial_segs = list.len(empty.segments)
-    let id = empty.id
+    let main_version = capture.prepared_manifest(empty.state).branches[0].version
+    let (seq, segment_end) = option.unwrap(capture.prepared_terminal(empty.state))
+    let initial_segs = capture.prepared_segment_count(empty.state)
+    let id = capture.prepared_id(empty.state)
     let _ = take empty
     let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
-    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq)
+    let ctx = format.DiskContext(store: id, role: 2, seq: seq)
     let mut file = failure_result_from_rep(manifest.disk_io(host.open(d, path, ReadWrite)))?
     let mut offset = segment_end
     let width = 1048576u64
@@ -289,7 +286,7 @@ fn describe_suffix_free(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
             fail("per-verb need grew with the journal suffix")
         }
     }
-    if after.total - before.total != SEG * (list.len(with_suffix.segments) - initial_segs) {
+    if after.total - before.total != capture.SEG * (capture.prepared_segment_count(with_suffix.state) - initial_segs) {
         fail("Describe need differs by more than the held segments")
     }
     let (summary, _) = capture_test_lines(take with_suffix, true)?

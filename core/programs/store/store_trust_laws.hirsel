@@ -1,7 +1,8 @@
 // The structure and index checks are read-only. Run them while the law still
 // owns the reopened Db, before a write can replace the recovered state.
 fn trust_directory(d: Dir) -> Result[(), Error] waits {
-    let (_, id, take manifest) = read_only_manifest(d)?
+    let (_, store, take manifest) = failure_result_from_rep(capture.read_only_manifest(d))?
+    let id = store_key_from_rep(store)
     let _ = validate_directory_graph(d, id, take manifest, true)?
     Ok(())
 }

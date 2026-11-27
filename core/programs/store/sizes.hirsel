@@ -601,11 +601,7 @@ pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
 }
 
 fn entry(key: Bytes, val: Bytes) -> u64 {
-    stored_row_charge(list.len(key), list.len(val))
-}
-
-fn stored_row_charge(key: u64, value: u64) -> u64 {
-    int.saturating_add(62 + format.round8(key), format.round8(value))
+    capture.stored_row_charge(list.len(key), list.len(val))
 }
 
 // What one table row adds to the resident account (§1.11), for a key that encodes to `key`
@@ -613,5 +609,5 @@ fn stored_row_charge(key: u64, value: u64) -> u64 {
 // before the key and the 2-byte schema tag before the value. An owner sizes
 // `resident_limit` for the rows it bounds with it.
 pub fn resident_row_bytes(key: u64, value: u64) -> u64 {
-    stored_row_charge(int.saturating_add(key, 4), int.saturating_add(value, 2))
+    capture.stored_row_charge(int.saturating_add(key, 4), int.saturating_add(value, 2))
 }

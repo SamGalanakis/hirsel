@@ -1,0 +1,228 @@
+pub type CheckPack {
+    seq: u64,
+    // Holds `payload_bytes` until `check_envelope` finishes, then `index` for `check_reachable`
+    // (keeps CheckPack at CAPTURE_LIST_ROW = 48 bytes).
+    payload_bytes: u64,
+    base: u64,
+    // Holds `index` until `check_envelope` finishes, then the verified pack file size.
+    size: u64,
+    head: u64,
+    frames: u32,
+    class: u8
+}
+
+fn check_pack_row(seq: u64, class: u8, frames: u32, size: u64, index_at: u64) -> CheckPack {
+    CheckPack(seq: seq, payload_bytes: size, base: 0, size: index_at, head: 72, frames: frames, class: class)
+}
+
+pub fn check_inventory(d: Dir, id: types.StoreKey, m: manifest.PageManifest, slots: u64) -> Result[List[CheckPack], types.Failure] waits {
+    let mut inventory: List[CheckPack] = list.with_capacity(slots)
+    let mut packs = capture_packs(d, id, m, false, 0)
+    let mut pages = 0u64
+    for (kind, root) in[(manifest.list_kind_pack(), m.pack_root), (manifest.list_kind_deferred(), m.deferred_frees), (manifest.list_kind_lineage(), m.lineage)] {
+        capture_walk_list(mut packs, root, 2, None, mut inventory, mut pages, fn(mut rows: List[CheckPack], ptr: std.page.PagePtr) {
+            list.push(mut rows, check_pack_row(ptr.pack, 2, 0, 0, 0))
+        }, scoped fn(mut _packs: CapturePacks, mut rows: List[CheckPack], path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), types.Failure] {
+            match kind {
+                PackList => {
+                    let raw = match cell_value {
+                        InlineValue(found) => found,
+                        _ => return Error(format.disk_fault(path, at, Malformed)),
+                    }
+                    let pack = manifest.pack_record(path, at, raw)?
+                    list.push(mut rows, check_pack_row(list.word_be(key, 0), pack.class, pack.frames, pack.payload_bytes, pack.index))
+                },
+                _ => (),
+            }
+            Ok(())
+        })?
+    }
+    list.sort(mut inventory, fn(a: CheckPack, b: CheckPack) -> Order {
+        order.compare(a.seq, b.seq)
+    })
+    let mut write = 0u64
+    for read in 0u64 .. list.len(inventory) {
+        if write != 0 && inventory[write - 1].seq == inventory[read].seq {
+            if inventory[write - 1].class != 2 || inventory[read].class != 2 {
+                return Error(format.disk_fault(manifest.paged_pack_path(inventory[read].seq)?, 72, Malformed))
+            }
+        } else {
+            list.swap(mut inventory, write, read)
+            write += 1
+        }
+    }
+    list.truncate(mut inventory, write)
+    Ok(take inventory)
+}
+
+pub fn check_open_pack(d: Dir, path: String) -> Result[HostFile, types.Failure] waits {
+    match host.open(d, path, Read) {
+        Ok(take file) => Ok(take file),
+        Error(NotFound) => Error(format.disk_fault(path, 0, Absent)),
+        Error(problem) => Error(Io(problem)),
+    }
+}
+
+pub fn check_envelope(p: PreparedState, mut pack: CheckPack, target: Option[Dir], mut spent: u64) -> Result[(), types.Failure] waits {
+    let path = manifest.paged_pack_path(pack.seq)?
+    let opened = check_open_pack(p.dir, path)?
+    let mut input = journal.journal_input(take opened, false)?
+    if let Some(to) = target {
+        format.journal_input_copy_to(mut input, manifest.disk_io(host.open(to, path, Write))?)
+    }
+    let header = manifest.disk_read_header(path, manifest.scrub_prefix(mut input, path, 0, 72, mut spent)?, 3, Some(pack.seq), Some(p.id))?
+    let index_at = pack.size
+    let mut scanned = manifest.pack_scan_indexed(pack.class, p.manifest.next_stamp, index_at)
+    let mut at = 72u64
+    while at < format.journal_input_size(input) {
+        let frame = match manifest.read_pack_frame(mut input, path, header.context, mut scanned, at, false, mut spent) {
+            Ok(found) => found,
+            Error(Unsupported(kind)) => return Error(format.disk_fault(path, at, Kind(kind))),
+            Error(take problem) => return Error(take problem),
+        }
+        at += 16 + frame.size
+    }
+    if !manifest.pack_scan_finished(scanned, int.widen(pack.frames), pack.payload_bytes, at) {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    let copy_to = format.take_journal_copy(take input)
+    if let Some(take finished) = take copy_to {
+        let mut output = take finished
+        manifest.disk_io(host.sync(mut output))?
+        manifest.disk_io(host.close(take output))?
+    }
+    pack.payload_bytes = index_at
+    pack.size = at
+    Ok(())
+}
+
+pub fn check_pack_slot(packs: List[CheckPack], path: String, ptr: std.page.PagePtr, class: u8, next_stamp: u64) -> Result[u64, types.Failure] {
+    if ptr.stamp == 0 || ptr.stamp >= next_stamp || ptr.offset < 72 {
+        return Error(format.disk_fault(path, ptr.offset, Malformed))
+    }
+    let mut lo = 0u64
+    let mut hi = list.len(packs)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if packs[mid].seq < ptr.pack {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo == list.len(packs) || packs[lo].seq != ptr.pack {
+        return Error(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+    }
+    if packs[lo].class != class {
+        let why: types.WhyRep = if packs[lo].class == 2 {
+            Dangling(ptr.stamp)
+        } else {
+            Malformed
+        }
+        return Error(format.disk_fault(path, ptr.offset, why))
+    }
+    Ok(lo)
+}
+
+// The envelope pass checked the complete chain. Follow heads from a known
+// boundary to rule out a frame-shaped byte string inside another payload.
+pub fn check_at_head(mut input: format.JournalInput, mut pack: CheckPack, path: String, ptr: std.page.PagePtr) -> Result[(), types.Failure] waits {
+    if ptr.offset >= pack.size {
+        return Error(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+    }
+    let mut at = if pack.head <= ptr.offset {
+        pack.head
+    } else {
+        72u64
+    }
+    while at < ptr.offset {
+        let head = manifest.disk_read_frame_head(path, manifest.journal_prefix(mut input, path, at, 16)?, at)?
+        at += 16 + head.size
+    }
+    if at != ptr.offset {
+        return Error(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+    }
+    pack.head = at
+    Ok(())
+}
+
+pub type CheckVisits {
+    visited: Bytes,
+    repeated: Bytes,
+    repeats: u64,
+    pages: u64
+}
+
+fn check_bit(bits: Bytes, stamp: u64) -> bool {
+    let bit: u8 = 1u8 << int.truncate(stamp % 8)
+    bits[stamp / 8] & bit != 0
+}
+
+fn check_set_bit(mut bits: Bytes, stamp: u64) {
+    let bit: u8 = 1u8 << int.truncate(stamp % 8)
+    bits[stamp / 8] = bits[stamp / 8] | bit
+}
+
+pub fn check_bitmap(size: u64) -> Bytes {
+    let mut bits: Bytes = list.with_capacity(size)
+    list.fill(mut bits, size, 0u8)
+    take bits
+}
+
+pub type CheckWalk {
+    packs: List[CheckPack],
+    visits: CheckVisits,
+    locations: List[(u64, u64)],
+    locate: bool,
+    dir: Dir,
+    id: types.StoreKey,
+    next_stamp: u64
+}
+
+pub fn check_arrive(mut walk: CheckWalk, path: String, ptr: std.page.PagePtr, location: u64) -> Result[bool, types.Failure] {
+    let stamp = ptr.stamp
+    let seen = check_bit(walk.visits.visited, stamp)
+    if walk.locate {
+        if check_bit(walk.visits.repeated, stamp) {
+            let mut lo = 0u64
+            let mut hi = list.len(walk.locations)
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2
+                if walk.locations[mid].0 < stamp {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            if seen {
+                let first = walk.locations[lo].1
+                if first != location {
+                    return Error(format.disk_fault(path, ptr.offset, Malformed))
+                }
+            } else {
+                walk.locations[lo] = (stamp, location)
+            }
+        }
+    } else if seen && !check_bit(walk.visits.repeated, stamp) {
+        check_set_bit(mut walk.visits.repeated, stamp)
+        walk.visits.repeats += 1
+    }
+    check_set_bit(mut walk.visits.visited, stamp)
+    Ok(!seen)
+}
+
+pub fn check_repeat_slots(visits: CheckVisits) -> List[(u64, u64)] {
+    let mut slots: List[(u64, u64)] = list.with_capacity(visits.repeats)
+    for at in 0u64 .. list.len(visits.repeated) {
+        if visits.repeated[at] == 0 {
+            continue
+        }
+        for bit in 0u64 .. 8 {
+            let stamp = at * 8 + bit
+            if check_bit(visits.repeated, stamp) {
+                list.push(mut slots, (stamp, 0u64))
+            }
+        }
+    }
+    take slots
+}

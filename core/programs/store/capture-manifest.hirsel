@@ -1,0 +1,14 @@
+pub fn read_only_manifest(d: Dir) -> Result[(Bytes, types.StoreKey, manifest.PageManifest), types.Failure] waits {
+    if journal.disk_exists(d, "EXPORT")? {
+        return Error(ExportDirectory)
+    }
+    let raw = match manifest.read_page_manifest_bytes(d) {
+        Ok(take found) => take found,
+        Error(Io(NotFound)) => return Error(NotFound),
+        Error(take problem) => return Error(take problem),
+    }
+    let (id, take page_record) = manifest.disk_allocation(scoped fn() -> Result[(types.StoreKey, manifest.PageManifest), types.Failure] {
+        manifest.disk_read_page_manifest("MANIFEST", raw)
+    })?
+    Ok((take raw, id, take page_record))
+}

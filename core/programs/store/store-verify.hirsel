@@ -580,8 +580,8 @@ fn verify_teardown(db: Db) waits {
             fail("store trust teardown: database is Poisoned")
         }
         if let Some(d) = disk_directory(state) {
-            match read_only_manifest(d) {
-                Ok((_, id, take manifest)) => match validate_directory_graph(d, id, take manifest, true) {
+            match failure_result_from_rep(capture.read_only_manifest(d)) {
+                Ok((_, id, take manifest)) => match validate_directory_graph(d, store_key_from_rep(id), take manifest, true) {
                     Ok(_) => (),
                     Error(Corrupt(fault)) => teardown_fail_corrupt("directory", fault),
                     Error(Poisoned(_)) => fail("store trust teardown (directory): Poisoned"),

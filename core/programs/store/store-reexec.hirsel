@@ -101,7 +101,8 @@ type BaseReplay {
 // when the MANIFEST is already past `base`.
 fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error] waits {
     let d = log_directory(db)?
-    let (_, id, take page_record) = read_only_manifest(d)?
+    let (_, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
+    let id = store_key_from_rep(store)
     let validated = validate_store_manifest(d, id, take page_record)?
     let (take selected, take state) = replay_base_state(take validated)?
     let replay = failure_result_from_rep(pager.journal_replay_manifest(take state, selected))?

@@ -176,7 +176,6 @@ check_journal_commit	store-capture-check-journal.hirsel	capture	store	-	push-up 
 check_journal	store-capture-check-journal.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
 CheckTotals	store-capture-check.hirsel	store	store	-
 CheckError	store-capture-check.hirsel	store	store	-
-CHECK_RETIRED	store-capture-check.hirsel	capture	capture	L7
 CheckPack	store-capture-check.hirsel	capture	capture	L7
 check_pack_row	store-capture-check.hirsel	capture	capture	L7
 check_inventory	store-capture-check.hirsel	capture	capture	L7
@@ -190,12 +189,12 @@ check_set_bit	store-capture-check.hirsel	capture	capture	L7
 check_bitmap	store-capture-check.hirsel	capture	capture	L7
 CheckWalk	store-capture-check.hirsel	capture	capture	L7
 check_arrive	store-capture-check.hirsel	capture	capture	L7
-check_blob	store-capture-check.hirsel	capture	capture	L7
-check_page	store-capture-check.hirsel	capture	capture	L7
-check_roots	store-capture-check.hirsel	capture	capture	L7
-check_reachable	store-capture-check.hirsel	capture	capture	L7
-check_emit	store-capture-check.hirsel	capture	capture	L7
-check_mark	store-capture-check.hirsel	capture	capture	L7
+check_blob	store-capture-check.hirsel	capture	store	-	root Cold walk closure
+check_page	store-capture-check.hirsel	capture	store	-	root Cold walk closure
+check_roots	store-capture-check.hirsel	capture	store	-	root Cold walk closure
+check_reachable	store-capture-check.hirsel	capture	store	-	root Cold walk closure
+check_emit	store-capture-check.hirsel	capture	store	-	public root type in signature or result
+check_mark	store-capture-check.hirsel	capture	store	-	public root type in signature or result
 check_repeat_slots	store-capture-check.hirsel	capture	capture	L7
 check_prepared	store-capture-check.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
 check_capture	store-capture-check.hirsel	store	store	-
@@ -213,11 +212,11 @@ DescribeCatalogWalk	store-capture-describe.hirsel	capture	capture	L7
 describe_owner	store-capture-describe.hirsel	capture	capture	L7
 describe_collect	store-capture-describe.hirsel	capture	capture	L7
 describe_descriptor	store-capture-describe.hirsel	capture	capture	L7
-describe_collection	store-capture-describe.hirsel	capture	capture	L7
+describe_collection	store-capture-describe.hirsel	capture	store	-	public root type in signature or result
 describe_capture	store-capture-describe.hirsel	store	store	-
 describe_acquire	store-capture-describe.hirsel	capture	capture	L7
-describe_suffix	store-capture-describe.hirsel	capture	capture	L7
-describe_lines	store-capture-describe.hirsel	capture	capture	L7
+describe_suffix	store-capture-describe.hirsel	capture	store	-	public root type in signature or result
+describe_lines	store-capture-describe.hirsel	capture	store	-	public root type in signature or result
 CaptureOp	store-capture-journal.hirsel	capture	capture	L7
 CaptureOps	store-capture-journal.hirsel	capture	capture	L7
 capture_data_ops	store-capture-journal.hirsel	capture	capture	L7
@@ -263,7 +262,7 @@ PreparedSegment	store-capture.hirsel	capture	capture	L7
 PreparedCapture	store-capture.hirsel	store	store	-
 capture_add	store-capture.hirsel	capture	capture	L7
 capture_mul	store-capture.hirsel	capture	capture	L7
-capture_need_part	store-capture.hirsel	capture	capture	L7
+capture_need_part	store-capture.hirsel	capture	store	-	public root type in signature or result
 capture_bootstrap	store-capture.hirsel	capture	capture	L7
 capture_list_slots	store-capture.hirsel	capture	capture	L7
 capture_bitmap_bytes	store-capture.hirsel	capture	capture	L7
@@ -483,7 +482,7 @@ ExportSource	store-export.hirsel	transfer	transfer	L13
 ExportInto	store-export.hirsel	transfer	transfer	L13
 ExportCopy	store-export.hirsel	store	store	-
 DeployError	store-export.hirsel	store	store	-
-scratch_result	store-export.hirsel	transfer	capture	L7	pull-down transfer -> capture (used by copy_backup_journal)
+scratch_result	store-export.hirsel	transfer	store	-	public root type in signature or result
 deploy_result	store-export.hirsel	transfer	transfer	L13
 copy_export_file	store-export.hirsel	transfer	transfer	L13
 copy_export_prefix	store-export.hirsel	transfer	capture	L7	pull-down transfer -> capture (used by copy_backup_journal)
@@ -768,8 +767,8 @@ EntryForm	store-inspect.hirsel	store	store	-
 CatalogEntry	store-inspect.hirsel	store	store	-
 snapshot_identity	store-inspect.hirsel	store	store	-
 catalog_entries	store-inspect.hirsel	store	store	-
-OPERATOR_ROWS	store-inspect.hirsel	maintenance	maintenance	L14
-OPERATOR_SCRUB_BYTES	store-inspect.hirsel	maintenance	maintenance	L14
+OPERATOR_ROWS	store-inspect.hirsel	maintenance	maintenance	L7	operator constant moved in L7b
+OPERATOR_SCRUB_BYTES	store-inspect.hirsel	maintenance	maintenance	L7	operator constant moved in L7b
 VerifyOutcome	store-inspect.hirsel	store	store	-
 verify_release	store-inspect.hirsel	store	store	-
 RepairOutcome	store-inspect.hirsel	store	store	-
@@ -1730,7 +1729,7 @@ empty_scrub_history	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root 
 read_scrub_history	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling
 write_scrub_history	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling
 scrub_history	store-scrub-pace.hirsel	store	store	-
-last_complete_scrub_round	store-scrub-pace.hirsel	store	capture	L7	A-split body to capture (used by describe_lines)
+last_complete_scrub_round	store-scrub-pace.hirsel	store	store	-	public root type in signature or result
 record_scrub_round	store-scrub-pace.hirsel	store	store	-
 ceil_millis_ratio	store-scrub-pace.hirsel	manifest	manifest	L4
 scrub_estimated_bytes	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling

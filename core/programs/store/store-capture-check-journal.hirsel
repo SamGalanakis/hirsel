@@ -1,92 +1,12 @@
-type CheckBranch {
-    head: u64,
-    id: u32,
-    name_start: u32,
-    name_width: u8,
-    keyed: bool
-}
-
-type CheckJournal {
-    branches: List[CheckBranch],
-    names: Bytes,
-    next_branch: u32,
-    record_bytes: u64,
-    limits: StoreLimits
-}
-
-fn check_branch_slot(branches: List[CheckBranch], id: u32) -> Option[u64] {
-    let mut lo = 0u64
-    let mut hi = list.len(branches)
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2
-        if branches[mid].id < id {
-            lo = mid + 1
-        } else {
-            hi = mid
-        }
-    }
-    if lo == list.len(branches) || branches[lo].id != id {
-        None
-    } else {
-        Some(lo)
-    }
-}
-
-fn check_add_branch(mut state: CheckJournal, id: u32, head: u64, name: String, keyed: bool) {
-    let first: u32 = int.truncate(list.len(state.names))
-    let width: u8 = int.truncate(string.byte_len(name))
-    list.append(mut state.names, string.as_bytes(name))
-    list.push(mut state.branches, CheckBranch(head: head, id: id, name_start: first, name_width: width, keyed: keyed))
-}
-
-fn check_journal_fork(mut state: CheckJournal, path: String, at: u64, raw: Bytes) -> Result[(), Error] {
-    let forked = failure_result_from_rep(format.journal_decode_fork(path, raw))?
-    let Some(parent) = check_branch_slot(state.branches, forked.parent) else {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-    }
-    if forked.id < state.next_branch || forked.id == 4294967295 || forked.forked_at != state.branches[parent].head {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-    }
-    let name_bytes = string.as_bytes(forked.name)
-    for source in state.branches {
-        let first: u64 = int.widen(source.name_start)
-        let width: u64 = int.widen(source.name_width)
-        if list.slice(state.names, first, first + width) == name_bytes {
-            return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-        }
-    }
-    let keyed = state.branches[parent].keyed
-    let charge = pages.branch_record_bytes(forked.name) + (if keyed {
-        manifest.KEYED_ROOT_RECORD_BYTES
-    } else {
-        0u64
-    })
-    if charge > state.limits.meta - state.record_bytes {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-    }
-    let id = forked.id
-    check_add_branch(mut state, id, forked.forked_at, forked.name, keyed)
-    state.record_bytes += charge
-    state.next_branch = id + 1
-    Ok(())
-}
-
-fn check_journal_blob(path: String, raw: Bytes, mut at: u64, limit: u64) -> Result[(u64, u64), Error] {
-    let size = capture_blob_width(path, raw, mut at, limit)?
-    let start = at
-    at += size
-    Ok((start, at))
-}
-
 fn check_call_fields(path: String, raw: Bytes, mut at: u64) -> Result[RequestDigest, Error] {
-    let (key, end_key) = check_journal_blob(path, raw, mut at, 16777280)?
-    let (args, end_args) = check_journal_blob(path, raw, mut at, 16777280)?
-    let rev = capture_blob_width(path, raw, mut at, 32)?
+    let (key, end_key) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 16777280))?
+    let (args, end_args) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 16777280))?
+    let rev = failure_result_from_rep(capture.capture_blob_width(path, raw, mut at, 32))?
     if rev != 0 && rev != 32 {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     at += rev
-    let code = capture_blob_width(path, raw, mut at, 48)?
+    let code = failure_result_from_rep(capture.capture_blob_width(path, raw, mut at, 48))?
     if !format.call_code_size(code) {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
@@ -110,12 +30,12 @@ fn check_stream_ops(path: String, raw: Bytes, mut at: u64, control: bool) -> Res
     let mut call: Option[StreamKey] = None
     for _ in 0u64 .. op_count {
         let kind = failure_result_from_rep(format.disk_number(path, raw, mut at, 1))?
-        let (key, end_key) = check_journal_blob(path, raw, mut at, 4096)?
+        let (key, end_key) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 4096))?
         if control {
             if kind != 1 || end_key != key {
                 return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
-            let (first, end) = check_journal_blob(path, raw, mut at, 1048576)?
+            let (first, end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 1048576))?
             let _ = decode_stream_control(list.slice(raw, first, end)) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
             continue
         }
@@ -123,7 +43,7 @@ fn check_stream_ops(path: String, raw: Bytes, mut at: u64, control: bool) -> Res
             return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
         if kind != 2 {
-            let (first, end) = check_journal_blob(path, raw, mut at, 1048576)?
+            let (first, end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 1048576))?
             if kind == 3 {
                 if call != None || end - first < 41 || raw[first + 40] != 2 {
                     return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
@@ -143,12 +63,12 @@ fn check_stream_ops(path: String, raw: Bytes, mut at: u64, control: bool) -> Res
         let mut matching = 0u64
         for _ in 0u64 .. op_count {
             let kind = failure_result_from_rep(format.disk_number(path, raw, mut cursor, 1))?
-            let (key, end_key) = check_journal_blob(path, raw, mut cursor, 4096)?
+            let (key, end_key) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut cursor, 4096))?
             if stream_record_matches(list.slice(raw, key, end_key), name) {
                 matching += 1
             }
             if kind != 2 {
-                let _ = check_journal_blob(path, raw, mut cursor, 1048576)?
+                let _ = failure_result_from_rep(capture.check_journal_blob(path, raw, mut cursor, 1048576))?
                 if kind == 3 {
                     let _ = check_call_fields(path, raw, mut cursor)?
                 }
@@ -181,7 +101,7 @@ fn check_keyed_ops(path: String, raw: Bytes, mut at: u64) -> Result[bool, Error]
             _ => return Error(failure_from_rep(format.disk_fault(path, at - 1, Malformed))),
         }
         let kind = failure_result_from_rep(format.disk_number(path, raw, mut at, 1))?
-        let (key, end_key) = check_journal_blob(path, raw, mut at, key_max)?
+        let (key, end_key) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, key_max))?
         if key == end_key {
             return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
         }
@@ -194,13 +114,13 @@ fn check_keyed_ops(path: String, raw: Bytes, mut at: u64) -> Result[bool, Error]
                     5 => 8u64,
                     _ => 0u64,
                 }
-                let _ = check_journal_blob(path, raw, mut at, max_value)?
+                let _ = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, max_value))?
             },
             2 => {
                 deleted = true
             },
             3 if tree == int.widen(format.CLAIMS) && !saw_call => {
-                let (first, end) = check_journal_blob(path, raw, mut at, 41 + CLAIM_DONE_MAX)?
+                let (first, end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 41 + CLAIM_DONE_MAX))?
                 let claim = claim_parse(list.slice(raw, first, end)) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
                 let digest = check_call_fields(path, raw, mut at)?
                 if !claim.replied || claim.digest != digest {
@@ -214,12 +134,12 @@ fn check_keyed_ops(path: String, raw: Bytes, mut at: u64) -> Result[bool, Error]
     Ok(deleted)
 }
 
-fn check_journal_commit(mut state: CheckJournal, path: String, offset: u64, raw: Bytes) -> Result[(), Error] {
+fn check_journal_commit(mut state: capture.CheckJournal, path: String, offset: u64, raw: Bytes) -> Result[(), Error] {
     let mut at = 0u64
     let branch_id: u32 = int.truncate(failure_result_from_rep(format.disk_number(path, raw, mut at, 4))?)
     let head_version = failure_result_from_rep(format.disk_number(path, raw, mut at, 8))?
     let _ = failure_result_from_rep(format.disk_number(path, raw, mut at, 8))?
-    let Some(slot) = check_branch_slot(state.branches, branch_id) else {
+    let Some(slot) = capture.check_branch_slot(state.branches, branch_id) else {
         return Error(failure_from_rep(format.disk_fault(path, offset, Gap(head_version))))
     }
     if int.checked_add(state.branches[slot].head, 1) != Some(head_version) {
@@ -239,8 +159,8 @@ fn check_journal_commit(mut state: CheckJournal, path: String, offset: u64, raw:
         match tag {
             0 => {
                 let op_count = failure_result_from_rep(format.disk_count(path, raw, mut at, 9))?
-                let mut ops = CaptureOps(at: at, left: op_count)
-                while let Some(_) = capture_next_op(path, raw, state.limits.value, mut ops)? {}
+                let mut ops = capture.CaptureOps(at: at, left: op_count)
+                while let Some(_) = failure_result_from_rep(capture.capture_next_op(path, raw, state.limits.value, mut ops))? {}
                 at = ops.at
             },
             1 => check_stream_ops(path, raw, mut at, false)?,
@@ -266,36 +186,36 @@ fn check_journal_commit(mut state: CheckJournal, path: String, offset: u64, raw:
 }
 
 fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[u64, Error] waits {
-    let m = view p.manifest
-    let mut state = CheckJournal(
-        branches: list.with_capacity(capture_branch_slots(limits_from_rep(m.limits))),
-        names: list.with_capacity(m.limits.meta),
-        next_branch: m.next_branch,
-        record_bytes: manifest.page_manifest_size(m) - manifest.MANIFEST_FIXED_BYTES,
-        limits: limits_from_rep(m.limits),
-    )
-    for holder in m.branches {
-        check_add_branch(mut state, holder.id, holder.version, holder.name, list.len(holder.roots.keyed) != 0)
+    let mut state = {
+        let m = capture.prepared_manifest(p.state)
+        let mut state = capture.CheckJournal(
+            branches: list.with_capacity(capture.capture_branch_slots(m.limits)),
+            names: list.with_capacity(m.limits.meta),
+            next_branch: m.next_branch,
+            record_bytes: manifest.page_manifest_size(m) - manifest.MANIFEST_FIXED_BYTES,
+            limits: m.limits,
+        )
+        for holder in m.branches {
+            capture.check_add_branch(mut state, holder.id, holder.version, holder.name, list.len(holder.roots.keyed) != 0)
+        }
+        list.sort(mut state.branches, fn(a: capture.CheckBranch, b: capture.CheckBranch) -> Order {
+            order.compare(a.id, b.id)
+        })
+        take state
     }
-    list.sort(mut state.branches, fn(a: CheckBranch, b: CheckBranch) -> Order {
-        order.compare(a.id, b.id)
-    })
-    for i in 0u64 .. list.len(p.segments) {
-        let seq = p.segments[i].seq
-        let bound_end = p.segments[i].end
-        let start = p.segments[i].start
-        let (end, _) = capture_scan_frames(mut p.segments[i].file, p.id, seq, limits_from_rep(m.limits), bound_end, bound_end, false, KeepEvents, mut state, fn(mut replay: CheckJournal, path: String, at: u64, kind: u16, raw: Bytes) -> Result[(), Error] {
+    for i in 0u64 .. capture.prepared_segment_count(p.state) {
+        let (size, _) = failure_result_from_rep(capture.scan_prepared_segment(mut p.state, i, KeepEvents, mut state, fn(mut replay: capture.CheckJournal, path: String, at: u64, kind: u16, raw: Bytes) -> Result[(), types.Failure] {
             let checked = if kind == 0x0011 {
-                check_journal_commit(mut replay, path, at, raw)
+                failure_result_to_rep(check_journal_commit(mut replay, path, at, raw))
             } else {
-                check_journal_fork(mut replay, path, at, raw)
+                capture.check_journal_fork(mut replay, path, at, raw)
             }
             match take checked {
-                Error(Corrupt(take found)) => Error(failure_from_rep(format.disk_fault(path, at, why_to_rep(found.why)))),
+                Error(Corrupt(take found)) => Error(format.disk_fault(path, at, found.why)),
                 take verdict => take verdict,
             }
-        })?
-        spent = capture_add(spent, end - start)
+        }))?
+        spent = capture.capture_add(spent, size)
     }
     Ok(state.branches[0].head)
 }

@@ -1,0 +1,34 @@
+pub opaque type CaptureLock: send {
+    dir: Dir,
+    file: HostFile
+}
+
+pub fn check_lock(d: Dir, c: Clock) -> Result[CaptureLock, types.Failure] waits {
+    let lock = journal.disk_lock(d, c, 0)?
+    Ok(CaptureLock(dir: d, file: take lock))
+}
+
+pub fn backup_lock(d: Dir) -> Result[CaptureLock, types.Failure] waits {
+    let mut handle = match host.open(d, "LOCK", Read) {
+        Ok(take file) => take file,
+        Error(NotFound) => manifest.disk_io(host.open(d, "LOCK", ReadWrite))?,
+        Error(problem) => return Error(Io(problem)),
+    }
+    if !manifest.disk_io(host.try_lock(mut handle))? {
+        return Error(Held)
+    }
+    Ok(CaptureLock(dir: d, file: take handle))
+}
+
+pub fn copy_backup_journal(mut p: PreparedState, target: Dir) -> Result[(), types.Failure] waits {
+    if !prepared_locked(p) {
+        return Error(Unsupported(0))
+    }
+    manifest.disk_write_synced(target, "MANIFEST", p.raw)?
+    for i in 0u64 .. list.len(p.segments) {
+        let path = manifest.journal_path(p.segments[i].seq, "")?
+        let end = p.segments[i].end
+        copy_export_prefix(mut p.segments[i].file, target, path, Some(end), journal.JOURNAL_CHUNK_BYTES)?
+    }
+    Ok(())
+}

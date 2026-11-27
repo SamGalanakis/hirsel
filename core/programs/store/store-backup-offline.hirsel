@@ -1,56 +1,42 @@
 pub type BackupError: send = BackupDeploy(DeployError) | BackupCheck(CheckError)
 
-fn backup_lock(d: Dir) -> Result[HostFile, Error] waits {
-    let mut handle = match host.open(d, "LOCK", Read) {
-        Ok(take file) => take file,
-        Error(NotFound) => failure_result_from_rep(manifest.disk_io(host.open(d, "LOCK", ReadWrite)))?,
-        Error(problem) => return Error(Io(problem)),
-    }
-    if !failure_result_from_rep(manifest.disk_io(host.try_lock(mut handle)))? {
-        return Error(Held)
-    }
-    Ok(take handle)
-}
-
 pub opaque type PreparedBackup: send {
     capture: PreparedCapture,
     target: Dir
 }
 
 pub fn prepare_backup(from: Dir, target: Dir, c: Clock) -> Result[(PreparedBackup, Need), DeployError] waits {
-    let lock = deploy_result(backup_lock(from))?
+    let lock = deploy_result(failure_result_from_rep(capture.backup_lock(from)))?
     require_empty(target, "backup target")?
-    let selected = deploy_result(prepare_capture(from, c, Copy, Some(take lock)))?
+    let state = deploy_result(failure_result_from_rep(capture.prepare_locked(c, take lock)))?
+    let selected = PreparedCapture(purpose: Copy, state: take state)
     let budget = capture_need(selected)
     Ok((PreparedBackup(capture: take selected, target: target), take budget))
 }
 
 // None hands the operation back to the writer path after dropping LOCK.
 pub fn backup_offline(take p: PreparedBackup, take attempt: Bytes) -> Result[Option[(ExportStamp, u64)], BackupError] waits {
-    let PreparedBackup(capture: take capture, target: target) = take p
-    let mut selected = take capture
+    let PreparedBackup(capture: take prepared, target: target) = take p
+    let mut selected = take prepared
     if list.len(attempt) != 16 {
         return Error(BackupDeploy(ExportMismatch))
     }
-    for kept in selected.manifest.pins {
+    for kept in capture.prepared_manifest(selected.state).pins {
         if kept.owner == ImportPin {
             return Ok(None)
         }
     }
-    let segments = list.len(selected.segments)
-    if segments == 0 {
+    let Some((terminal, end)) = capture.prepared_terminal(selected.state) else {
         return Ok(None)
     }
-    let terminal = selected.segments[segments - 1].seq
-    let end = selected.segments[segments - 1].end
     let (take checked, head) = check_prepared(mut selected, Some(target), fn(found: Fault) -> Result[(), Error] {
         Error(Corrupt(clone(found)))
     }) ?=> BackupCheck
-    let written = bound bytes journal.JOURNAL_CHUNK_BYTES + CAPTURE_SCRATCH {
-        copy_backup_journal(mut selected, target)
+    let written = bound bytes journal.JOURNAL_CHUNK_BYTES + capture.CAPTURE_SCRATCH {
+        scratch_result(failure_result_from_rep(capture.copy_backup_journal(mut selected.state, target)))
     } ?=> |cause| BackupCheck(CheckBudget(cause))
     written ?=> BackupDeploy
-    let stamp = ExportStamp(attempt: take attempt, store_hi: selected.id.hi, store_lo: selected.id.lo, opened: terminal, branch: 0, head: head, next_table: selected.manifest.next_table, activation: 0, terminal: terminal, end: end)
+    let stamp = ExportStamp(attempt: take attempt, store_hi: capture.prepared_id(selected.state).hi, store_lo: capture.prepared_id(selected.state).lo, opened: terminal, branch: 0, head: head, next_table: capture.prepared_manifest(selected.state).next_table, activation: 0, terminal: terminal, end: end)
     let raw = scratch_result(export_bytes(stamp)) ?=> BackupDeploy
     scratch_result(failure_result_from_rep(manifest.disk_write_synced(target, "EXPORT", raw))) ?=> BackupDeploy
     scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(target)))) ?=> BackupDeploy
@@ -75,14 +61,4 @@ pub fn backup_with_writer(tasks: Tasks, from: Dir, target: Dir, c: Clock, r: Ran
     let Exported(stamp: take stamp, ..) = take exported
     deploy_result(take closed)?
     Ok(take stamp)
-}
-
-fn copy_backup_journal(mut p: PreparedCapture, target: Dir) -> Result[(), DeployError] waits {
-    scratch_result(failure_result_from_rep(manifest.disk_write_synced(target, "MANIFEST", p.raw)))?
-    for i in 0u64 .. list.len(p.segments) {
-        let path = scratch_result(failure_result_from_rep(manifest.journal_path(p.segments[i].seq, "")))?
-        let end = p.segments[i].end
-        scratch_result(copy_export_prefix(mut p.segments[i].file, target, path, Some(end), journal.JOURNAL_CHUNK_BYTES))?
-    }
-    Ok(())
 }

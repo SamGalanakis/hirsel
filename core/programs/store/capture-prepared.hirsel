@@ -1,0 +1,393 @@
+pub opaque type PreparedState: send {
+    dir: Dir,
+    raw: Bytes,
+    id: types.StoreKey,
+    manifest: manifest.PageManifest,
+    segments: List[PreparedSegment],
+    lists: CaptureListCount,
+    names: u64,
+    name_bytes: u64,
+    lock: Option[HostFile]
+}
+
+// MEM-24: page.decode keeps the frame buffer. One copied entry has up
+// to 4,096 key bytes and 1,024 inline value bytes.
+const PAGE_DECODED: u64 = 4096 + 1024
+
+const MANIFEST_DECODED: u64 = 2 * types.META_LIMIT + 4096
+
+pub const CAPTURE_PATH: u64 = 65 * (8400 + PAGE_DECODED)
+
+const END_IMAGE: u64 = 1048672
+
+pub const SEG: u64 = 48
+
+pub const CAPTURE_LIST_ROW: u64 = 48
+
+pub const CAPTURE_BRANCH: u64 = 24
+
+pub const PACK_HELD: u64 = 32
+
+pub const NAME_SLOT: u64 = 32
+
+pub const CAPTURE_SCRATCH: u64 = 32768
+
+pub const BOOTSTRAP: u64 = 2 * manifest.PAGE_MANIFEST_FILE_LIMIT + MANIFEST_DECODED + END_IMAGE + journal.JOURNAL_CHUNK_BYTES + types.FRAME_LIMIT + CAPTURE_PATH + CAPTURE_SCRATCH
+
+pub type PreparedSegment: send {
+    seq: u64,
+    file: HostFile,
+    start: u64,
+    end: u64
+}
+
+pub fn capture_add(a: u64, b: u64) -> u64 {
+    int.saturating_add(a, b)
+}
+
+pub fn capture_mul(a: u64, b: u64) -> u64 {
+    match int.checked_mul(a, b) {
+        Some(size) => size,
+        None => 18446744073709551615u64,
+    }
+}
+
+pub fn capture_bootstrap(p: PreparedState) -> u64 {
+    2 * format.round8(list.len(p.raw)) + 2 * p.manifest.limits.meta + 4096 + END_IMAGE + p.manifest.limits.frame + CAPTURE_PATH
+}
+
+pub fn capture_list_slots(p: PreparedState) -> u64 {
+    capture_add(p.lists.rows, p.lists.pages)
+}
+
+pub fn capture_bitmap_bytes(p: PreparedState) -> u64 {
+    let stamp = p.manifest.next_stamp
+    stamp / 8 + (if stamp % 8 == 0 {
+        0u64
+    } else {
+        1u64
+    })
+}
+
+pub fn capture_branch_slots(limits: types.LimitsRep) -> u64 {
+    limits.meta / 143 + 1
+}
+
+pub fn capture_check_scratch(p: PreparedState) -> u64 {
+    // A collections-map path can lead into a second page tree.
+    capture_bootstrap(p) + CAPTURE_PATH + CAPTURE_BRANCH * capture_branch_slots(p.manifest.limits) + journal.JOURNAL_CHUNK_BYTES + CAPTURE_SCRATCH
+}
+
+pub fn capture_check_need(p: PreparedState, copying: bool) -> u64 {
+    let tables = capture_add(capture_mul(CAPTURE_LIST_ROW, capture_list_slots(p)), 2 * capture_bitmap_bytes(p))
+    let total = capture_add(capture_add(capture_check_scratch(p), tables), capture_mul(SEG, list.len(p.segments)))
+    if copying {
+        return capture_add(total, journal.JOURNAL_CHUNK_BYTES)
+    }
+    total
+}
+
+type CaptureSelection {
+    dir: Dir,
+    raw: Bytes,
+    id: types.StoreKey,
+    manifest: manifest.PageManifest,
+    segments: u64,
+    lists: CaptureListCount,
+    names: u64,
+    name_bytes: u64
+}
+
+pub fn capture_same_manifest(d: Dir, raw: Bytes) -> Result[bool, types.Failure] waits {
+    let mut file = match host.open(d, "MANIFEST", Read) {
+        Ok(take opened) => take opened,
+        Error(NotFound) => return Ok(false),
+        Error(problem) => return Error(Io(problem)),
+    }
+    let size = manifest.disk_io(host.stat_file(mut file))?.size
+    if size != list.len(raw) {
+        return Ok(false)
+    }
+    Ok(manifest.read_disk_bytes(mut file, "MANIFEST", 0, size)? == raw)
+}
+
+fn capture_measure_pages(mut packs: CapturePacks, page_record: manifest.PageManifest) -> Result[(CaptureListCount, u64, u64), types.Failure] waits {
+    let lists = capture_lists(mut packs, page_record)?
+    let (names, amount) = capture_count_catalog(mut packs, page_record.branches[0].roots.catalog)?
+    Ok((lists, names, amount))
+}
+
+fn capture_measure(d: Dir, locked: Option[Clock]) -> Result[CaptureSelection, types.Failure] waits {
+    let (take raw, id, take page_record) = read_only_manifest(d)?
+    manifest.require_unarchived_manifest(page_record)?
+    let mut packs = capture_packs(d, id, page_record, false, 0)
+    let measured: Result[(CaptureListCount, u64, u64), types.Failure] = if let Some(_) = locked {
+        match capture_lists(mut packs, page_record) {
+            Ok(tally) => Ok((tally, 0u64, 0u64)),
+            Error(take problem) => Error(take problem),
+        }
+    } else {
+        capture_measure_pages(mut packs, page_record)
+    }
+    let (lists, names, amount) = match take measured {
+        Ok(counted) => counted,
+        Error(Io(NotFound)) => {
+            if !capture_same_manifest(d, raw)? {
+                return Error(Changed("MANIFEST"))
+            }
+            return Error(format.disk_fault("MANIFEST", 72, Absent))
+        },
+        Error(take problem) => return Error(take problem),
+    }
+    let mut segment_count = 0u64
+    let mut ignored: List[PreparedSegment] = list.new()
+    match capture_segment_walk(d, id, page_record.first_live, false, locked, mut segment_count, mut ignored) {
+        Ok(_) => (),
+        Error(take problem) => {
+            if !capture_same_manifest(d, raw)? {
+                return Error(Changed("MANIFEST"))
+            }
+            return Error(take problem)
+        },
+    }
+    Ok(CaptureSelection(dir: d, raw: take raw, id: id, manifest: take page_record, segments: segment_count, lists: lists, names: names, name_bytes: amount))
+}
+
+// In the measurement pass no handle survives an iteration. In the second
+// pass a successor supplies the preceding handle's exact end.
+fn capture_segment_walk(d: Dir, id: types.StoreKey, first: u64, hold: bool, locked: Option[Clock], mut segment_count: u64, mut segments: List[PreparedSegment]) -> Result[bool, types.Failure] waits {
+    let mut seq = first
+    loop {
+        let path = manifest.journal_path(seq, "")?
+        let mut file = match host.open(d, path, Read) {
+            Ok(take opened) => take opened,
+            Error(NotFound) if seq != first => return Ok(true),
+            Error(NotFound) => return Error(format.disk_fault(path, 0, Header)),
+            Error(problem) => return Error(Io(problem)),
+        }
+        if let Some(c) = locked {
+            manifest.journal_wait_shared(mut file, c)?
+            if hold {
+                manifest.disk_io(host.sync(mut file))?
+            }
+        }
+        let header_read = match manifest.read_disk_bytes(mut file, path, 0, 72) {
+            Ok(take amount) => manifest.disk_read_header(path, amount, 2, Some(seq), Some(id)),
+            Error(take problem) => Error(take problem),
+        }
+        let header = match take header_read {
+            Ok(found) => found,
+            Error(Corrupt(take fault)) => {
+                let successor = if let Some(next_seq) = int.checked_add(seq, 1) {
+                    journal.disk_exists(d, manifest.journal_path(next_seq, "")?)?
+                } else {
+                    false
+                }
+                if successor || journal.capture_end(id, seq, journal.capture_end_image(d, seq)?)? != None {
+                    return Error(Corrupt(take fault))
+                }
+                return Ok(true)
+            },
+            Error(take problem) => return Error(take problem),
+        }
+        if hold {
+            let n = list.len(segments)
+            if n == segment_count {
+                return Ok(false)
+            }
+            if n != 0 {
+                segments[n - 1].end = header.prev_end
+            }
+            list.push(mut segments, PreparedSegment(seq: seq, file: take file, start: 72, end: 72))
+        } else {
+            segment_count += 1
+        }
+        let Some(next_seq) = int.checked_add(seq, 1) else {
+            return Ok(true)
+        }
+        seq = next_seq
+    }
+}
+
+fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[PreparedSegment]) -> Result[bool, types.Failure] waits {
+    let d = s.dir
+    let mut segment_count = s.segments
+    if !capture_segment_walk(d, s.id, s.manifest.first_live, true, None, mut segment_count, mut segments)? {
+        return Ok(false)
+    }
+    let n = list.len(segments)
+    if n == 0 {
+        manifest.disk_io(host.sync_dir(d))?
+        return capture_same_manifest(d, s.raw)
+    }
+    let tail = n - 1
+    let seq = segments[tail].seq
+    let image = journal.capture_end_image(d, seq)?
+    let durable_end = match journal.capture_end(s.id, seq, image)? {
+        Some(found) => found,
+        None => 72u64,
+    }
+    let mut free = false
+    loop {
+        if manifest.disk_io(host.try_lock_shared(mut segments[tail].file))? {
+            free = true
+            break
+        }
+        if !journal.capture_lock_free(d)? {
+            break
+        }
+        std.clock.sleep_ns(c, 1000000)
+    }
+    manifest.disk_io(host.sync_dir(d))?
+    if !capture_same_manifest(d, s.raw)? {
+        return Ok(false)
+    }
+    let end = if free {
+        manifest.disk_io(host.sync(mut segments[tail].file))?
+        let size = manifest.disk_io(host.stat_file(mut segments[tail].file))?.size
+        let mut ignored = ()
+        let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), types.Failure] {
+            Ok(())
+        })?
+        manifest.disk_io(host.unlock(mut segments[tail].file))?
+        end
+    } else {
+        durable_end
+    }
+    segments[tail].end = end
+    Ok(true)
+}
+
+pub fn prepare_live(d: Dir, c: Clock) -> Result[PreparedState, types.Failure] waits {
+    prepare_capture(d, c, true, None)
+}
+
+pub fn prepare_locked(c: Clock, take held: CaptureLock) -> Result[PreparedState, types.Failure] waits {
+    let CaptureLock(dir, file: take locked) = take held
+    prepare_capture(dir, c, false, Some(take locked))
+}
+
+fn prepare_capture(d: Dir, c: Clock, live: bool, take lock: Option[HostFile]) -> Result[PreparedState, types.Failure] waits {
+    let locked: Option[Clock] = if live {
+        None
+    } else {
+        Some(c)
+    }
+    loop {
+        let selection = types.capacity(bound bytes BOOTSTRAP {
+            capture_measure(d, locked)
+        })?
+        let s = match take selection {
+            Ok(take found) => take found,
+            Error(Changed(file)) if file == "MANIFEST" => continue,
+            Error(take problem) => return Error(take problem),
+        }
+        let mut segments: List[PreparedSegment] = types.capacity(bound bytes capture_mul(SEG, s.segments) {
+            list.with_capacity(s.segments)
+        })?
+        let selected = types.capacity(bound bytes BOOTSTRAP {
+            if live {
+                capture_segment_bounds(s, c, mut segments)
+            } else {
+                capture_locked_bounds(s, c, mut segments)
+            }
+        })?
+        let stable = match take selected {
+            Ok(stable) => stable,
+            Error(take problem) => {
+                if !capture_same_manifest(d, s.raw)? {
+                    continue
+                }
+                return Error(take problem)
+            },
+        }
+        if !stable {
+            continue
+        }
+        let CaptureSelection(dir: dir, raw: take raw, id: id, manifest: take manifest, lists: lists, names: names, name_bytes: amount, ..) = take s
+        return Ok(PreparedState(dir: dir, raw: take raw, id: id, manifest: take manifest, segments: take segments, lists: lists, names: names, name_bytes: amount, lock: take lock))
+    }
+}
+
+// The caller owns LOCK. Every selected segment was fenced and synced before
+// its HEADER supplied a predecessor bound or its own tail was examined.
+fn capture_locked_bounds(s: CaptureSelection, c: Clock, mut segments: List[PreparedSegment]) -> Result[bool, types.Failure] waits {
+    let mut segment_count = s.segments
+    if !capture_segment_walk(s.dir, s.id, s.manifest.first_live, true, Some(c), mut segment_count, mut segments)? {
+        return Error(format.disk_fault("MANIFEST", 72, Malformed))
+    }
+    manifest.disk_io(host.sync_dir(s.dir))?
+    let n = list.len(segments)
+    if n == 0 {
+        return Ok(true)
+    }
+    let tail = n - 1
+    let seq = segments[tail].seq
+    let durable_end = match journal.disk_end(s.dir, s.id, seq)? {
+        Some(found) => found,
+        None => 72u64,
+    }
+    let size = manifest.disk_io(host.stat_file(mut segments[tail].file))?.size
+    let mut ignored = ()
+    let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), types.Failure] {
+        Ok(())
+    })?
+    segments[tail].end = end
+    Ok(true)
+}
+
+pub fn prepared_dir(p: PreparedState) -> Dir {
+    p.dir
+}
+
+pub fn prepared_id(p: PreparedState) -> types.StoreKey {
+    p.id
+}
+
+pub fn prepared_raw(p: PreparedState) -> View[Bytes] in p {
+    view p.raw
+}
+
+pub fn prepared_manifest(p: PreparedState) -> View[manifest.PageManifest] in p {
+    view p.manifest
+}
+
+pub fn prepared_lists(p: PreparedState) -> CaptureListCount {
+    p.lists
+}
+
+pub fn prepared_names(p: PreparedState) -> u64 {
+    p.names
+}
+
+pub fn prepared_name_bytes(p: PreparedState) -> u64 {
+    p.name_bytes
+}
+
+pub fn prepared_locked(p: PreparedState) -> bool {
+    match p.lock {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn prepared_segment_count(p: PreparedState) -> u64 {
+    list.len(p.segments)
+}
+
+pub fn prepared_terminal(p: PreparedState) -> Option[(u64, u64)] {
+    let count = list.len(p.segments)
+    if count == 0 {
+        return None
+    }
+    let terminal = view p.segments[count - 1]
+    Some((terminal.seq, terminal.end))
+}
+
+pub fn scan_prepared_segment[S](mut p: PreparedState, slot: u64, keep: CapturePayload, mut state: S, consume: scoped[view] fn(mut S, String, u64, u16, Bytes) -> Result[(), types.Failure]) -> Result[(u64, u64), types.Failure] waits {
+    let seq = p.segments[slot].seq
+    let limit = p.segments[slot].end
+    let start = p.segments[slot].start
+    let (end, frames) = capture_scan_frames(mut p.segments[slot].file, p.id, seq, p.manifest.limits, limit, limit, false, keep, mut state, consume)?
+    Ok((end - start, frames))
+}

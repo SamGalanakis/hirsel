@@ -230,6 +230,21 @@ if (( toolchain_status == 0 )); then
     law_status=$?
     printf 'Law execution exited %s.\n' "$law_status" >>"$run/run.log"
   }
+  # Store retention trace (proofs/store/TraceStoreRetention.tla): one fresh run of the
+  # crash sim's trace law, then TLC checks its cuts, publications and pack removals
+  # against StoreRetention (seconds; apart from the bounded exploration in check_proofs.py).
+  # A mismatch or a red law is a Store law red.
+  mkdir -p "$run/laws/store-retention-trace"
+  { taskset -c 8-11 "$checkout/$compiler/hirsel" test core/programs/store --libraries core \
+      --exact store@1/store/test_store_retention_trace --json --test-timeout 300 --store "$run/store-retention-trace" \
+      >"$run/laws/store-retention-trace/tests.json" || true
+    taskset -c 8-11 python3 proofs/store/check_proofs.py --trace-only \
+      --trace-from-tests "$run/laws/store-retention-trace/tests.json"
+  } >>"$run/run.log" 2>&1 || {
+    trace_status=$?
+    printf 'Store retention trace check exited %s.\n' "$trace_status" >>"$run/run.log"
+    law_status=${law_status:-$trace_status}
+  }
 elif [[ -z "$law_status" ]]; then
   law_status=$toolchain_status
 fi

@@ -237,6 +237,7 @@ dirs = ["."]
 "store_crash_sim_laws.hirsel" = "store"
 "store_crash_sim_model.hirsel" = "store"
 "store_crash_sim_corpus.hirsel" = "store"
+"store_retention_trace_laws.hirsel" = "store"
 "store_tiered_backup_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
@@ -568,6 +569,10 @@ limit = 268435456
 [tests.runs."store@1/store/test_store_crash_sim"]
 limit = 536870912
 grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED,HIRSEL_TEST_CSIM_REPLAY"]
+
+[tests.runs."store@1/store/test_store_retention_trace"]
+limit = 536870912
+grants = ["Tasks", "Stdout"]
 
 [tests.runs."store@1/store/test_l69_random_arm"]
 limit = 268435456

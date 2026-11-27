@@ -8,6 +8,7 @@ python3 proofs/store/check_proofs.py                # everything, about 17 minut
 python3 proofs/store/check_proofs.py --save-traces  # also rewrite traces/ from the known holes
 python3 proofs/store/check_proofs.py --deep         # also the fork, export-lease and anchor baselines (the fork bound runs about 25 min)
 python3 proofs/store/check_proofs.py --skip-python  # TLC only
+python3 proofs/store/check_proofs.py --trace-only   # the retention trace checks alone, about 3 s
 ```
 
 TLC is the nightly `tla2tools-nightly.jar` plus `CommunityModules-deps.jar` under
@@ -25,10 +26,11 @@ implementation lane starts.
 | `StoreRetention.tla` | Tiered pack retention: commits, cuts and their publication, pins and forks, Snapshots and their leases, the candidate queue, Tiered-idle cuts, the compaction probe, promotion of a historical Snapshot, demotion Tiered → Memory, anchors (archival retention), AP16 Remove, the export lease and its copy, crash and reopen between any two steps. |
 | `StoreCatchUp.tla` | Export catch-up and install over a Tiered index across a demotion and a rebuild (§3.5a, §13.10a, §13.7 D-D7-5), the holder's own replay and fold, and recovery of a commit prefix at or past the last acknowledged ticket. |
 | `StoreJanitor.tla` | Host-stream retirement: the §12.11.8 release rule that lets `low` pass a batch. |
+| `TraceStoreRetention.tla` | Trace validation: each row of a crash-sim retention trace is one `StoreRetention` action whose result equals what the sim observed (below). |
 | `mutants.txt` | The seeded one-rule mutants and the invariant that must catch each. |
-| `traces/` | TLC counterexamples for the v2.157 holes, written by `--save-traces`, and `idle-predicts-drain-f1.txt`, review 3177 F1's broken idle reading. |
+| `traces/` | TLC counterexamples for the v2.157 holes, written by `--save-traces`, and `idle-predicts-drain-f1.txt`, review 3177 F1's broken idle reading. `retention-trace-green.ndjson` is the crash sim's retention trace; `retention-trace-f1.ndjson` is the same trace hand-edited into F1's behaviour. |
 | `python/` | The §3.9 executable models: `model_v2.py` (journal, checkpoint and damage cuts), `model_v25_packs.py`, `model_v29_refusal.py`, `model_v23_streams.py`, `model_v24_streams.py`, `model_v221_streams.py`, `model_v221_scope.py`, and `model-v2-mutants.txt` (the record of the hand-edited M1–M4 runs §3.9 cites). Each exits non-zero on a failed cut or a surviving mutant. |
-| `check_proofs.py` | Runs the baselines, the known holes, the mutants and the Python models. A check passes only on its expected outcome: "No error has been found", or `Invariant <name> is violated` for the named invariant. |
+| `check_proofs.py` | Runs the retention traces, the baselines, the known holes, the mutants and the Python models. A check passes only on its expected outcome: "No error has been found", or `Invariant <name> is violated` for the named invariant. |
 
 ## Rules under check
 
@@ -119,40 +121,44 @@ run.
 - **Janitor.** One stream and one Place. Elections, TERM, XINDEX and the forced settle are abstracted; a crash forgets the head summary and pins are rebuilt from durable state.
 - **No liveness.** Only safety is checked. A GC liveness property (every delisted pack is eventually removed once its leases end) is not.
 
-## Trace vocabulary (for a later trace-validation lane)
+## Retention traces
 
-A trace-validation wrapper would mirror `proofs/fleet/TraceFleetMove.tla`. It would read an NDJSON
-trace (`ndJsonDeserialize` from CommunityModules `Json` and `IOUtils`, file from `TRACE_FILE`),
-match each line to one action of the module, and compare the line's `state` with the model's
-variables after the step. The store would emit one line per event in this shape, which follows
-SM1's `{seed, index, event: {tag, value}, actions, state}`:
+`test_store_retention_trace` (`core/programs/store/store_retention_trace_laws.hirsel`) runs one
+fixed plan through the Store crash sim (`store_crash_sim_laws.hirsel`) with its recorder on, and
+prints one NDJSON row per observed transition. The plan is one log@1 store: main goes Tiered,
+takes 24 rows into one class-3 pack P, a Snapshot is captured, main goes Tiered → Memory with
+`free_budget = 1`, cuts drain P's rows over four cuts while the Snapshot leases P, a
+Tiered-idle cut retires P, the Snapshot is released, the next cut removes P's file, and a
+crash and reopen follow. `compact_permille = 0`, so only the idle step can retire P. The crash
+sim's own oracles (a)-(d) hold over the run.
 
-```json
-{"seed": 7, "index": 12, "event": {"tag": "StoreCut", "value": {...}}, "actions": [], "state": {...}}
-```
+| Row | Observed, where | Matched by |
+|---|---|---|
+| `cut` | After every cut (each checkpoint in `CS_CUT`, and any step whose call cut, such as `set_residency`): the installed generation's listed class-3/4 packs (`disk_state(db).pages.locations.packs`), the packs its deferred-free rows name (`l87_queue`), main's residency, and the class-3/4 pack files in the store directory on the simulated disk, plus the ones the call removed | `Cut(op, sel, dr, pg)` for some arguments, with `gen'.hres`, `gen'.listed`, the queue's packs and `files'` (present plus removed) equal to the row |
+| `remove` | One per pack file a cut removed, from listing the store directory at the `std.sim.fs` boundary | `RemoveFile(p)`, apart from the cut |
+| `capture` | `CS_CAPTURE` (and eviction from the held list as `drop`): the Snapshot's read inventory generation and its listed class-3/4 packs | `Capture` with `snap'.leased` equal to the row |
+| `drop` | `CS_RELEASE`: the same for the released Snapshot | `DropSnap`, of a Snapshot leasing the row's packs |
+| `reopen` | After a crash and a successful open: the installed lists and the files open left | `Crash`, with the installed lists and `files'` equal to the row |
 
-Packs are named by sequence number, frames by `[pack, row, stamp]` (`row` is the PACK_INDEX row,
-which the emitter derives from the offset), and roots by the set of frames they reach. No emission
-is implemented. This section is the contract for the lane that adds it.
+The rows carry observations only, never the store's idle decision or what it retired: the
+model's `Cut` decides from the observed generations whether a cut may retire a pack, so a
+broken idle decision in the store cannot certify itself. `check_proofs.py` renumbers pack
+sequence numbers 1..n in sequence order and writes the cfg (`NKeys = 1`, one `MaxPack` per
+pack, one `MaxCrash` per reopen row; the queue is compared as the set of packs it names, and
+the optional drain lets one key stand for P's many queued pages). A trace conforms iff TLC
+reports `TraceUnfinished` violated; otherwise the search depth is the first row no action
+admits, and the runner prints it. It also requires the trace to exercise the F1 window: at
+least two cuts draining a held pack, a cut retiring a leased pack, a removal after the drop and
+a reopen, with one cut per generation.
 
-| Tag | `value` | `state` fields compared | Module action |
-|---|---|---|---|
-| `StoreCommit` | `{key, stamp}` | `head` | `StoreRetention!Write` |
-| `StoreCapture` | `{snapshot, leased: [pack]}` | `snap` | `Capture` |
-| `StoreDropSnapshot` | `{snapshot}` | `snap` | `DropSnap` |
-| `StoreCut` | `{op: plain\|pin\|unpin\|toMemory\|toTiered\|archive\|unarchive, selected: pack\|0, idle: bool, fresh: pack\|0, emitted: [stamp], promoted: [{stamp, from, to}], probed: {pack, row, matched}\|null, drained: [frame], retired: [pack]}` | `gen.listed`, `gen.queue`, `gen.pin`, `gen.anchor`, `head`, `cursor[pack].rows` | `Cut(op, sel)` |
-| `StoreRemove` | `{pack}` | `files` | `RemoveFile(p)` |
-| `StoreExportBegin` | `{attempt, lease: [pack], listed: [pack]}` | `export.lease` | `BeginExport` |
-| `StoreExportCopied` | `{attempt, image: [pack]}` | `export.image` | `CopyDone` |
-| `StoreExportRelease` | `{attempt}` | `export.on` | `ReleaseExport` |
-| `StoreOpen` | `{listed: [pack], removed: [pack], replayed: n}` | `files`, `gen` | `Crash` (the reopen half) |
-| `StoreTicket` | `{seq, durable: true}` | `acked` | `StoreCatchUp!Sync` |
-| `StoreIndexStep` | `{index, kind: demote\|chunk, supersede: bool, entries: [{op, key, prior}]}` | `xs`, `x`, `log` | `Demote`, `Build` |
-| `StoreCatchUpRound` | `{attempt, from, to, steps: n, frames: n, result: ok\|Corrupt}` | `child`, `shipped`, `cErr` | `Round` |
-| `StoreInstall` | `{attempt, index_entries: [key]}` | `child` | `EndExport` |
-| `StoreJanitorLow` | `{stream, low, head_seen_at}` | `low`, `obs` | `StoreJanitor!RaiseLow` |
-| `StorePlaceHead` | `{place, live: seq\|0, sealed: [[from, cutoff]]}` | `live`, `sealed` | `Attach`, `Seal`, `Settle`, `Report` |
+`retention-trace-f1.ndjson` is the green trace with the generation-6 cut (the first after
+Tiered → Memory) retiring P while its queue still names P (review 3177 F1: the drain was predicted to empty the queue; it left P's
+pages queued, and the Snapshot keeps the file, so reads stay green). The check refuses it at
+that row, and the `idle_predicts_drain` model admits it, so the edit is F1's behaviour and not
+a malformed trace. A removal is matched on its own: the runner also checks that the green
+trace with P's removal moved before the drop is refused at the `remove` row.
 
-The trace module's invariant is the same as fleet's: every recorded step is admitted by some
-module action from the state the previous line left, and the run's last line is reached
-(`l = Len(TraceLog) + 1`).
+The nightly board's laws stage (`tools/nightly-board.sh`) runs the law once, fresh, and
+`check_proofs.py --trace-only --trace-from-tests` on its report; a red law or a refused trace
+is a Store law red (about 10 s). Removal is observed by listing the directory after each call,
+so it is ordered against the call's publication only by the cut row that precedes it.

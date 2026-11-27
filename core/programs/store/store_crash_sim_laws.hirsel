@@ -48,7 +48,9 @@ type CsimState {
     // allowed-world peaks, for the failure text.
     stats: Inline[u64, 20],
     at: u64,
-    note: String
+    note: String,
+    // The retention trace recorder (store_retention_trace_laws.hirsel).
+    trace: Option[RtTrace]
 }
 
 fn csim_fail(st: CsimState, what: String) -> String {
@@ -347,6 +349,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
                     return csim_error(mut st, "checkpoint", e, None)
                 }
                 csim_collapse(mut st)
+                rt_cut(db, root, mut st)?
             }
             Ok(Go)
         },
@@ -417,14 +420,17 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
             }
             let from_tiered = csim_head_tiered(st, source)
             if list.len(st.held) == 3 {
-                let _ = list.remove(mut st.held, 0)
+                let gone = list.remove(mut st.held, 0)
+                rt_held(gone.snap, "drop", mut st)
             }
+            rt_held(s, "capture", mut st)
             list.push(mut st.held, CsimHeld(snap: take s, rows: map_copy(rows_now), tiered: from_tiered))
             Ok(Go)
         },
         op if op == CS_RELEASE => {
             if list.len(st.held) > 0 {
-                let _ = list.remove(mut st.held, a % list.len(st.held))
+                let gone = list.remove(mut st.held, a % list.len(st.held))
+                rt_held(gone.snap, "drop", mut st)
             }
             Ok(Go)
         },
@@ -534,6 +540,9 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
                         0
                     }
                     csim_collapse(mut st)
+                    if to_tiered {
+                        rt_arm(db, mut st)
+                    }
                     Ok(Go)
                 },
                 Error(e) => {
@@ -670,11 +679,17 @@ fn csim_mount_plan(plan: CsimPlan, world_seed: u64, epoch: u64) -> (std.sim.worl
 }
 
 fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
+    let _ = csim_run(take case, None)?
+    Ok(())
+}
+
+// One crash-sim case; with a recorder, the retention trace it observed.
+fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> Result[Option[RtTrace], String] waits {
     let std.prop.Case(value: take plan, world_seed, tasks, ..) = take case
     let (c, _hand) = provide.clock(0, 0)
     let r = provide.random(world_seed)
     let write_faults = plan.faults.corrupt + plan.faults.misdirect + plan.faults.lost_write > 0
-    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, scripted: false, damage_seen: false, tiered_names: map.new(), damage: string.new(), faulted: false, stats:[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new())
+    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, scripted: false, damage_seen: false, tiered_names: map.new(), damage: string.new(), faulted: false, stats:[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), trace: take trace)
     list.push(mut st.history, csim_empty())
     // A clean setup mount: the store directory and the one table.
     let (clean, clean_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(world_seed), CSIM_ROOM)
@@ -732,7 +747,7 @@ fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
                 trust_opt_out("crash-sim/fault", mut db)
             }
             match csim_recovered(db, rows, mut st)? {
-                true => (),
+                true => rt_reopen(db, root, mut st)?,
                 false => {
                     trust_opt_out("crash-sim/fault", mut db)
                     drop(take db)
@@ -751,6 +766,9 @@ fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
                 st.note = string.from(csim_op_name(step.op))
                 st.stats[step.op] += 1
                 after = csim_step(mut db, tasks, c, r, root, plan.options, rows, mut st, step)?
+                if csim_go(after) {
+                    rt_cut(db, root, mut st)?
+                }
                 st.at += 1
                 if csim_go(after) {
                     after = csim_check_views(db, rows, mut st)?
@@ -843,7 +861,7 @@ fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
     if terminal {
         let _ = std.prop.sometimes("crash sim damage ended the run", true)
     }
-    Ok(())
+    Ok(replace(mut st.trace, None))
 }
 
 fn csim_seed(tasks: Tasks, seed_grant: Env, seed: u64) -> Result[(), ()] waits {

@@ -13,6 +13,12 @@ Checks, in order:
   4. Reachability witnesses: each behaviour the v2.164 fold adds (the idle
      step, lineage cells under a fork row, the optional drain) must occur.
   5. The Python crash and stream models STORE-SPEC §3.9 cites (python/).
+  6. Retention traces (TraceStoreRetention.tla, seconds): the crash sim's
+     trace (traces/retention-trace-green.ndjson, or --trace FILE) conforms to
+     StoreRetention; the hand-edited F1 trace (a cut that retires P while its
+     queue still names P) is refused at its offending cut, and the
+     idle_predicts_drain mutant model admits it. `--trace-only` runs only
+     these (the nightly board's laws stage, with the trace the run printed).
 
 A check passes only on the expected outcome: "pass" needs TLC's "No error has
 been found", a hole or mutant needs "Invariant <name> is violated". State counts
@@ -22,6 +28,7 @@ the repo), as for proofs/fleet.
 """
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -146,6 +153,199 @@ def tlc(module, rules, mutant, bounds, invariants, tmp, track=False):
     return ok, violated, stats, out
 
 
+# ---- retention traces ---------------------------------------------------------
+# retention-trace-f1 is retention-trace-green with the generation-6 cut (the
+# first after Tiered -> Memory) retiring P while its drain left P's rows queued
+# (review 3177 F1), as the idle_predicts_drain reading does; the rows after it
+# follow that store.
+TRACE_GREEN = HERE / "traces" / "retention-trace-green.ndjson"
+TRACE_F1 = HERE / "traces" / "retention-trace-f1.ndjson"
+TRACE_F1_GENERATION = 6
+PACK_FIELDS = ("listed", "queue", "files", "removed", "leased")
+
+
+def load_trace(path):
+    rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    if not rows:
+        raise SystemExit(f"{path}: empty retention trace")
+    return rows
+
+
+def normalize(rows):
+    """Renumber pack sequence numbers 1..n in sequence order (the model's nextPack order)."""
+    seqs = set()
+    for r in rows:
+        for k in PACK_FIELDS:
+            seqs.update(r.get(k, []))
+        if "pack" in r:
+            seqs.add(r["pack"])
+    rank = {s: i + 1 for i, s in enumerate(sorted(seqs))}
+    out = []
+    for r in rows:
+        n = dict(r)
+        for k in PACK_FIELDS:
+            if k in n:
+                n[k] = sorted(rank[s] for s in n[k])
+        if "pack" in n:
+            n["pack"] = rank[n["pack"]]
+        out.append(n)
+    return out, len(seqs)
+
+
+def trace_shape(rows):
+    """What a conforming trace must exercise to say anything about F1. Returns the gaps."""
+    gaps = []
+    gens = [r["generation"] for r in rows if r["kind"] == "cut"]
+    if any(b != a + 1 for a, b in zip(gens, gens[1:])):
+        gaps.append(f"cut rows skip or merge generations {gens}")
+    held, held_cut, delisted_held, removed_after_drop = set(), 0, False, False
+    dropped = set()
+    listed = set()
+    for r in rows:
+        if r["kind"] == "capture":
+            held = set(r["leased"])
+        elif r["kind"] == "drop":
+            dropped |= held
+            held = set()
+        elif r["kind"] == "cut":
+            if set(r["queue"]) & held:
+                held_cut += 1
+            if (listed - set(r["listed"])) & held:
+                delisted_held = True
+            listed = set(r["listed"])
+        elif r["kind"] == "remove" and r["pack"] in dropped:
+            removed_after_drop = True
+    if held_cut < 2:
+        gaps.append("fewer than two cuts drain a held pack's rows")
+    if not delisted_held:
+        gaps.append("no cut retires a pack a held Snapshot leases")
+    if not removed_after_drop:
+        gaps.append("no pack file is removed after its Snapshot drops")
+    if not any(r["kind"] == "reopen" for r in rows):
+        gaps.append("no reopen row")
+    return gaps
+
+
+def early_removal(rows):
+    """The trace with each removal (its cut and remove rows) moved before the drop that allowed it."""
+    out = list(rows)
+    for i, r in enumerate(out):
+        if r["kind"] != "drop":
+            continue
+        j = next((k for k in range(i + 1, len(out)) if out[k]["kind"] == "remove"), None)
+        if j is None:
+            return None
+        out.insert(j, out.pop(i))
+        return out
+    return None
+
+
+def trace_tlc(path, mutant, tmp, rows=None):
+    """(conforms, stuck row index or None, rows, stats) for one raw trace under Mutant."""
+    rows, packs = normalize(rows if rows is not None else load_trace(path))
+    tag = f"trace-{Path(path).stem}-{mutant}"
+    norm = Path(tmp) / f"{tag}.ndjson"
+    norm.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    consts = {"NKeys": "1", "MaxStamp": "2", "MaxPack": str(max(1, packs)),
+              "MaxCrash": str(sum(r["kind"] == "reopen" for r in rows)),
+              "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "Track": "FALSE",
+              "Rules": '"v2164"', "Mutant": f'"{mutant}"'}
+    cfg = Path(tmp) / f"{tag}.cfg"
+    cfg.write_text("SPECIFICATION TraceSpec\nCONSTANTS\n" +
+                   "".join(f"    {k} = {v}\n" for k, v in consts.items()) +
+                   "INVARIANTS\n    TraceUnfinished\n")
+    cmd = ["java", "-Xmx1g", "-XX:+UseParallelGC", "-cp", classpath(), "tlc2.TLC", "-noGenerateSpecTE",
+           "-deadlock", "-workers", "1", "-metadir", str(Path(tmp) / f"meta-{tag}"),
+           "-config", str(cfg), "TraceStoreRetention.tla"]
+    t0 = time.monotonic()
+    res = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True,
+                         env={**os.environ, "TRACE_FILE": str(norm)})
+    out = res.stdout + res.stderr
+    secs = time.monotonic() - t0
+    if "Invariant TraceUnfinished is violated" in out:
+        return True, None, rows, f"{len(rows)} rows, {secs:.1f}s"
+    d = re.search(r"depth of the complete state graph search is (\d+)", out)
+    if "No error has been found" not in out or not d:
+        print(out[-4000:], file=sys.stderr)
+        return False, None, rows, f"TLC did not finish, {secs:.1f}s"
+    return False, int(d.group(1)), rows, f"{len(rows)} rows, {secs:.1f}s"
+
+
+def row_name(rows, stuck):
+    r = rows[stuck - 1]
+    name = f"row {stuck} ({r['kind']} at sim step {r['step']}"
+    if "generation" in r:
+        name += f", generation {r['generation']}"
+    return name + f"): {json.dumps({k: r[k] for k in r if k not in ('kind', 'step', 'generation')})}"
+
+
+TRACE_TEST = "store@1/store/test_store_retention_trace"
+
+
+def trace_from_tests(report, tmp):
+    """The trace a fresh run of the trace law printed, from `hirsel test --json`."""
+    try:
+        tests = json.loads(Path(report).read_text()).get("tests", [])
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"{report}: no test report ({e})")
+    rows = [t for t in tests if t.get("definition") == TRACE_TEST]
+    if len(rows) != 1:
+        raise SystemExit(f"{report}: no {TRACE_TEST} row")
+    row = rows[0]
+    if not row.get("passed"):
+        raise SystemExit(f"{TRACE_TEST} failed (the crash sim's oracles): {row.get('stderr', '')[-2000:]}")
+    if row.get("source") != "executed" or not row.get("stdout", "").strip():
+        raise SystemExit(f"{TRACE_TEST} did not run fresh (source {row.get('source')}): no trace")
+    path = Path(tmp) / "retention-trace-run.ndjson"
+    path.write_text(row["stdout"])
+    return path
+
+
+def green_trace(args, tmp):
+    return trace_from_tests(args.trace_from_tests, tmp) if args.trace_from_tests else args.trace
+
+
+def check_traces(green, tmp, failures):
+    print("== retention traces (TraceStoreRetention: the crash sim against StoreRetention)", flush=True)
+    ok, stuck, rows, stats = trace_tlc(green, "none", tmp)
+    gaps = trace_shape(rows)
+    print(f"  {'PASS' if ok and not gaps else 'FAIL'}  {Path(green).name} conforms: {stats}", flush=True)
+    if not ok:
+        failures.append("trace/green")
+        if stuck:
+            print(f"        no StoreRetention action admits {row_name(rows, stuck)}", flush=True)
+    for gap in gaps:
+        failures.append("trace/green-shape")
+        print(f"        vacuous trace: {gap}", flush=True)
+    ok, stuck, rows, stats = trace_tlc(TRACE_F1, "none", tmp)
+    expected = next(i + 1 for i, r in enumerate(rows)
+                    if r["kind"] == "cut" and r["generation"] == TRACE_F1_GENERATION)
+    hit = not ok and stuck == expected
+    print(f"  {'PASS' if hit else 'FAIL'}  {TRACE_F1.name} refused at its F1 cut: {stats}", flush=True)
+    if stuck:
+        print(f"        no StoreRetention action admits {row_name(rows, stuck)}", flush=True)
+    if not hit:
+        failures.append("trace/f1")
+    ok, stuck, rows, stats = trace_tlc(TRACE_F1, "idle_predicts_drain", tmp)
+    print(f"  {'PASS' if ok else 'FAIL'}  {TRACE_F1.name} admitted by Mutant idle_predicts_drain: {stats}", flush=True)
+    if not ok:
+        failures.append("trace/f1-mutant")
+    # Removal is matched apart from publication: the green trace with its
+    # removal moved before the Snapshot's drop is refused at the remove row.
+    early = early_removal(load_trace(green))
+    if early is None:
+        failures.append("trace/early-removal")
+        print("  FAIL  no drop followed by a removal to reorder", flush=True)
+        return
+    ok, stuck, rows, stats = trace_tlc(Path(tmp) / "early-removal.ndjson", "none", tmp, early)
+    hit = not ok and stuck is not None and rows[stuck - 1]["kind"] == "remove"
+    print(f"  {'PASS' if hit else 'FAIL'}  removal before its drop refused at the remove row: {stats}", flush=True)
+    if stuck:
+        print(f"        no StoreRetention action admits {row_name(rows, stuck)}", flush=True)
+    if not hit:
+        failures.append("trace/early-removal")
+
+
 def trace_text(out):
     lines = out.splitlines()
     start = next((i for i, l in enumerate(lines) if "is violated" in l), None)
@@ -160,11 +360,24 @@ def main():
     ap.add_argument("--save-traces", action="store_true", help="write known-hole counterexamples to traces/")
     ap.add_argument("--deep", action="store_true", help="also run the export-lease and anchor baselines")
     ap.add_argument("--skip-python", action="store_true", help="skip the §3.9 Python models")
+    ap.add_argument("--trace", default=str(TRACE_GREEN), help="crash-sim retention trace that must conform")
+    ap.add_argument("--trace-from-tests", metavar="JSON",
+                    help=f"take the trace from a `hirsel test --json` report of {TRACE_TEST}")
+    ap.add_argument("--trace-only", action="store_true", help="run only the retention trace checks")
     args = ap.parse_args()
     failures = []
     started = time.monotonic()
 
+    if args.trace_only:
+        with tempfile.TemporaryDirectory(prefix="tlc-store-trace-") as tmp:
+            check_traces(green_trace(args, tmp), tmp, failures)
+        print(f"== {'FAILED: ' + ', '.join(failures) if failures else 'all checks passed'} "
+              f"({time.monotonic() - started:.0f}s)", flush=True)
+        return 1 if failures else 0
+
     with tempfile.TemporaryDirectory(prefix="tlc-store-") as tmp:
+        check_traces(green_trace(args, tmp), tmp, failures)
+
         print("== baselines (every invariant holds)", flush=True)
         for name, module, rules, bounds, deep in BASELINES:
             if deep and not args.deep:

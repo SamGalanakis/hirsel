@@ -1,0 +1,17 @@
+{"kind":"cut","step":25,"generation":4,"hres":"T","listed":[5],"queue":[],"files":[5],"removed":[]}
+{"kind":"capture","step":26,"inventory":4,"leased":[5]}
+{"kind":"cut","step":27,"generation":5,"hres":"M","listed":[5],"queue":[5],"files":[5],"removed":[]}
+{"kind":"cut","step":28,"generation":6,"hres":"M","listed":[],"queue":[5],"files":[5],"removed":[]}
+{"kind":"cut","step":28,"generation":7,"hres":"M","listed":[],"queue":[5],"files":[5],"removed":[]}
+{"kind":"cut","step":28,"generation":8,"hres":"M","listed":[],"queue":[5],"files":[5],"removed":[]}
+{"kind":"cut","step":29,"generation":9,"hres":"M","listed":[],"queue":[],"files":[5],"removed":[]}
+{"kind":"cut","step":29,"generation":10,"hres":"M","listed":[],"queue":[],"files":[5],"removed":[]}
+{"kind":"cut","step":29,"generation":11,"hres":"M","listed":[],"queue":[],"files":[5],"removed":[]}
+{"kind":"cut","step":30,"generation":12,"hres":"M","listed":[],"queue":[],"files":[5],"removed":[]}
+{"kind":"cut","step":30,"generation":13,"hres":"M","listed":[],"queue":[],"files":[5],"removed":[]}
+{"kind":"cut","step":30,"generation":14,"hres":"M","listed":[],"queue":[],"files":[5],"removed":[]}
+{"kind":"drop","step":31,"inventory":4,"leased":[5]}
+{"kind":"cut","step":32,"generation":15,"hres":"M","listed":[],"queue":[],"files":[],"removed":[5]}
+{"kind":"remove","step":32,"generation":15,"pack":5}
+{"kind":"reopen","step":34,"generation":15,"listed":[],"queue":[],"files":[]}
+{"kind":"cut","step":34,"generation":16,"hres":"M","listed":[],"queue":[],"files":[],"removed":[]}

@@ -1,0 +1,320 @@
+// Store retention trace (proofs/store/TraceStoreRetention.tla). The crash
+// sim (store_crash_sim_laws.hirsel) runs one fixed log@1 plan with the
+// recorder on and prints one NDJSON row per observed transition:
+//   cut     after every cut: the installed generation's listed class-3/4
+//           packs, the packs its deferred-free rows name, main's residency
+//           (the sim's reference), the class-3/4 pack files on the
+//           simulated disk after the call and the ones the call removed;
+//   remove  one per pack file a cut removed, seen at the std.sim.fs
+//           boundary by listing the store directory;
+//   capture a held Snapshot's read inventory: its generation and the
+//           class-3/4 packs it lists (the lease AP16 Remove honours);
+//   drop    that Snapshot released;
+//   reopen  after a crash and open: the installed lists and the files left.
+// Pack ids are the store's own sequence numbers; the runner renumbers them.
+// The rows carry observations only. The TLA+ trace spec decides from them,
+// through StoreRetention's Cut, whether each cut was allowed, so the
+// store's own idle decision never certifies itself.
+type RtTrace {
+    out: String,
+    // The trace starts at the table's first change to Tiered (the model's Init).
+    armed: bool,
+    // Every class-3/4 pack sequence an observed generation listed.
+    tiered: Map[u64, ()],
+    // The class-3/4 pack files present at the last row.
+    files: List[u64],
+    generation: u64
+}
+
+fn rt_new() -> RtTrace {
+    RtTrace(out: string.new(), armed: false, tiered: map.new(), files: list.new(), generation: 0)
+}
+
+fn rt_push_list(mut out: String, key: String, xs: List[u64]) {
+    string.push(mut out, ",\"")
+    string.push(mut out, key)
+    string.push(mut out, "\":[")
+    for i in 0u64 .. list.len(xs) {
+        if i != 0 {
+            string.push(mut out, ",")
+        }
+        string.push_u64(mut out, xs[i])
+    }
+    string.push(mut out, "]")
+}
+
+fn rt_push_u64(mut out: String, key: String, v: u64) {
+    string.push(mut out, ",\"")
+    string.push(mut out, key)
+    string.push(mut out, "\":")
+    string.push_u64(mut out, v)
+}
+
+fn rt_open_row(mut out: String, kind: String, step: u64) {
+    string.push(mut out, "{\"kind\":\"")
+    string.push(mut out, kind)
+    string.push(mut out, "\"")
+    rt_push_u64(mut out, "step", step)
+}
+
+fn rt_sorted(m: Map[u64, ()]) -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    for (k, _) in m {
+        list.push(mut xs, k)
+    }
+    list.sort(mut xs, order.compare)
+    take xs
+}
+
+fn rt_has(xs: List[u64], v: u64) -> bool {
+    for x in xs {
+        if x == v {
+            return true
+        }
+    }
+    false
+}
+
+// The installed generation's listed class-3/4 packs, in sequence order.
+fn rt_listed(db: Db) -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut inventory) {
+        if pack.class == 3 || pack.class == 4 {
+            list.push(mut xs, seq)
+        }
+    }
+    take xs
+}
+
+// The packs the installed generation's deferred-free rows name.
+fn rt_queue(db: Db) -> Result[List[u64], String] {
+    let rows = l87_queue(db) ?=> |_| "retention trace: the installed queue decodes"
+    let mut packs: Map[u64, ()] = map.new()
+    for (_, row) in rows {
+        let p = match row.target {
+            TieredPage(ptr) => ptr.pack,
+            TieredBlob(body) => body.pack,
+        }
+        map.insert(mut packs, p, ())
+    }
+    Ok(rt_sorted(packs))
+}
+
+// The class-3/4 pack files in the store directory on the simulated disk.
+fn rt_files(root: Dir, tiered: Map[u64, ()]) -> Result[List[u64], String] waits {
+    let d = host.open_dir(root, "s") ?=> |_| "retention trace: open_dir of the store failed"
+    let listing = std.dir.list(d, None) ?=> |_| "retention trace: listing the store failed"
+    let mut xs: List[u64] = list.new()
+    for e in listing {
+        if let Some(rest) = string.strip_prefix(e.name, "p-") {
+            if let Ok(seq) = int.parse_uint(string.from(rest), 10) {
+                if map.contains(tiered, seq) {
+                    list.push(mut xs, seq)
+                }
+            }
+        }
+    }
+    list.sort(mut xs, order.compare)
+    Ok(take xs)
+}
+
+// A held Snapshot's read inventory: its generation and listed class-3/4 packs.
+fn rt_inventory(s: Snapshot) -> (u64, List[u64]) {
+    let mut xs: List[u64] = list.new()
+    let Some(inventory) = view s.roots.collections.paging else {
+        return (0, take xs)
+    }
+    let mut packs = std.omap.range(inventory.packs, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut packs) {
+        if pack.inventory.class == 3 || pack.inventory.class == 4 {
+            list.push(mut xs, seq)
+        }
+    }
+    (inventory.generation, take xs)
+}
+
+fn rt_residency(tiered: u8) -> String {
+    match tiered {
+        0 => "M",
+        1 => "T",
+        _ => "?",
+    }
+}
+
+// Starts the trace once the table is Tiered: the model's Init.
+fn rt_arm(db: Db, mut st: CsimState) {
+    if let Some(mut t) = st.trace {
+        if !t.armed {
+            t.armed = true
+            t.generation = db.checkpointed
+        }
+    }
+}
+
+// After a call that may have cut: one cut row per new generation, then a
+// remove row per class-3/4 file the call deleted.
+fn rt_cut(db: Db, root: Dir, mut st: CsimState) -> Result[(), String] waits {
+    let at = st.at
+    let residency = rt_residency(st.tiered)
+    if let Some(mut t) = st.trace {
+        if t.armed && db.checkpointed != t.generation {
+            rt_cut_row(db, root, at, residency, mut t)?
+        }
+        t.generation = db.checkpointed
+    }
+    Ok(())
+}
+
+fn rt_cut_row(db: Db, root: Dir, at: u64, residency: String, mut t: RtTrace) -> Result[(), String] waits {
+    let listed = rt_listed(db)
+    for seq in listed {
+        map.insert(mut t.tiered, seq, ())
+    }
+    let queue = rt_queue(db)?
+    let files = rt_files(root, t.tiered)?
+    let mut removed: List[u64] = list.new()
+    for p in t.files {
+        if !rt_has(files, p) {
+            list.push(mut removed, p)
+        }
+    }
+    rt_open_row(mut t.out, "cut", at)
+    rt_push_u64(mut t.out, "generation", db.checkpointed)
+    string.push(mut t.out, ",\"hres\":\"")
+    string.push(mut t.out, residency)
+    string.push(mut t.out, "\"")
+    rt_push_list(mut t.out, "listed", listed)
+    rt_push_list(mut t.out, "queue", queue)
+    rt_push_list(mut t.out, "files", files)
+    rt_push_list(mut t.out, "removed", removed)
+    string.push(mut t.out, "}\n")
+    for p in removed {
+        rt_open_row(mut t.out, "remove", at)
+        rt_push_u64(mut t.out, "generation", db.checkpointed)
+        rt_push_u64(mut t.out, "pack", p)
+        string.push(mut t.out, "}\n")
+    }
+    t.files = take files
+    Ok(())
+}
+
+// A held Snapshot was captured (capture) or released (drop).
+fn rt_held(s: Snapshot, kind: String, mut st: CsimState) {
+    let at = st.at
+    if let Some(mut t) = st.trace {
+        if t.armed {
+            let (generation, leased) = rt_inventory(s)
+            rt_open_row(mut t.out, kind, at)
+            rt_push_u64(mut t.out, "inventory", generation)
+            rt_push_list(mut t.out, "leased", leased)
+            string.push(mut t.out, "}\n")
+        }
+    }
+}
+
+// After a crash and a successful open: the installed lists and the files
+// open left (§3.5 step 5 removes every delisted pack).
+fn rt_reopen(db: Db, root: Dir, mut st: CsimState) -> Result[(), String] waits {
+    let at = st.at
+    if let Some(mut t) = st.trace {
+        if t.armed {
+            rt_reopen_row(db, root, at, mut t)?
+        }
+    }
+    Ok(())
+}
+
+fn rt_reopen_row(db: Db, root: Dir, at: u64, mut t: RtTrace) -> Result[(), String] waits {
+    let listed = rt_listed(db)
+    for seq in listed {
+        map.insert(mut t.tiered, seq, ())
+    }
+    let queue = rt_queue(db)?
+    let files = rt_files(root, t.tiered)?
+    rt_open_row(mut t.out, "reopen", at)
+    rt_push_u64(mut t.out, "generation", db.checkpointed)
+    rt_push_list(mut t.out, "listed", listed)
+    rt_push_list(mut t.out, "queue", queue)
+    rt_push_list(mut t.out, "files", files)
+    string.push(mut t.out, "}\n")
+    t.files = take files
+    t.generation = db.checkpointed
+    Ok(())
+}
+
+// ---- the fixed plan ----------------------------------------------------------
+// One log@1 store: main goes Tiered, takes RT_ROWS rows in one class-3 pack
+// P, a Snapshot S is captured, main goes Tiered -> Memory with a one-page
+// drain budget (free_budget 1), cuts drain the old tree out of P across
+// several cuts while S's inventory holds P, a Tiered-idle cut retires P,
+// S is released, a cut removes P's file, and a crash and reopen follow.
+// compact_permille 0 keeps reading probes off, so only the idle step can
+// retire P. Every value stays inline (edit % 4 != 3), so no class-4 pack.
+const RT_ROWS: u64 = 24
+
+fn rt_put(at: u64, key: u64) -> CsimStep {
+    // CS_PUT with b % 3 == 0 writes one row: key (7a + b) % 24, edit
+    // (5a + 3b + at) % 256. Pick the first (a, b) giving this key and an
+    // inline value of the widest inline band.
+    for band in[2u64, 1u64, 0u64] {
+        for third in 0u64 .. 8 {
+            let b = third * 3
+            for a in 0u64 .. 24 {
+                let edit = (a * 5 + b * 3 + at) % 256
+                if (a * 7 + b) % CSIM_KEYS == key && edit % 4 == band {
+                    return CsimStep(op: CS_PUT, a: a, b: b)
+                }
+            }
+        }
+    }
+    fail("retention trace: a put reaches every key")
+}
+
+fn rt_plan() -> CsimPlan {
+    let mut overrides = derived_sizes()
+    overrides.group_commits = Some(1)
+    overrides.pack_bytes = Some(1048576)
+    overrides.checkpoint_bytes = Some(1048576)
+    overrides.resident_limit = Some(182375272)
+    overrides.writer_pin_bytes = Some(34471936)
+    overrides.cache_bytes = Some(52232192)
+    let mut options = result.unwrap(sized_with(Directory, 2147483648, overrides))
+    options.probe_budget = 65536
+    options.compact_permille = 0
+    options.free_budget = 1
+    let mut steps: List[CsimStep] = list.new()
+    list.push(mut steps, CsimStep(op: CS_RESIDENCY, a: 0, b: 0))
+    for k in 0u64 .. RT_ROWS {
+        let at = list.len(steps)
+        list.push(mut steps, rt_put(at, k))
+    }
+    list.push(mut steps, CsimStep(op: CS_CUT, a: 0, b: 0))
+    list.push(mut steps, CsimStep(op: CS_CAPTURE, a: 0, b: 0))
+    list.push(mut steps, CsimStep(op: CS_RESIDENCY, a: 0, b: 0))
+    for _ in 0u64 .. 3 {
+        list.push(mut steps, CsimStep(op: CS_CUT, a: 2, b: 0))
+    }
+    list.push(mut steps, CsimStep(op: CS_RELEASE, a: 0, b: 0))
+    list.push(mut steps, CsimStep(op: CS_CUT, a: 0, b: 0))
+    list.push(mut steps, CsimStep(op: CS_CRASH, a: 0, b: 0))
+    list.push(mut steps, CsimStep(op: CS_CUT, a: 0, b: 0))
+    let weights: Inline[u64, 16] =[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    CsimPlan(options: take options, weights, faults: std.sim.world.WriteFaults(corrupt: 0, misdirect: 0, lost_write: 0), script_permille: 0, steps: take steps)
+}
+
+// The crash sim's oracles (a)-(d) hold over the plan, and its trace goes to
+// stdout. proofs/store/check_proofs.py --only trace checks the trace against
+// StoreRetention; the nightly board's laws stage runs that check.
+@test
+fn test_store_retention_trace(tasks: Tasks, out: Stdout) -> Result[(), ()] waits {
+    let case = std.prop.Case(value: rt_plan(), index: 0, world_seed: std.prop.world_seed(3215, 0), tasks)
+    match csim_run(take case, Some(rt_new())) {
+        Ok(Some(t)) => {
+            let _ = stdout.write(out, t.out)
+            Ok(())
+        },
+        Ok(None) => fail("retention trace: the recorder ran"),
+        Error(take text) => fail(take text),
+    }
+}

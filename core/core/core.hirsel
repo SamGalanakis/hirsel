@@ -392,3 +392,11 @@ pub fn build_stream_in[T: streamable](r: Region, bytes n: u64, w: scoped fn(take
 // a plain literal, a view of a String for Text or of a List for FixedSpan, and a field's
 // operand in a literal may be `emit(f)` with f a scoped callback taking that field's writer (MEM-4).
 pub fn emit[T, in r](take w: Writer[T, in r], x: T) -> Result[Child[T], BuildError]
+
+pub opaque resource type Code[F]
+
+pub opaque type Loader
+
+pub opaque resource type CodeSlot[F]
+
+pub opaque resource type Held

@@ -4,7 +4,7 @@ use super::calls::CallScratch;
 use super::*;
 
 #[derive(Clone, Copy)]
-enum CallFailure {
+pub(super) enum CallFailure {
     Cleanup,
     Handler(BlockId),
 }
@@ -327,7 +327,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         callee: NodeId,
         args: &[NodeId],
-        _want: Option<Want>,
+        dispatch: bool,
         scratch: &mut CallScratch,
     ) -> (TyId, Option<ValueId>) {
         self.call_seq += 1;
@@ -381,6 +381,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Views carry the referent's bytes (FORM #56), including a callable's
         // code/environment pair; invoking one borrows the same callable.
         let ty = self.bare(ty);
+        let Ok(entry) = self.pack_callee(ty, dispatch, callee) else {
+            return (ERROR, None);
+        };
+        let ty = entry.unwrap_or(ty);
         let (result, waits, callable) = match self.t.kind(ty) {
             TyKind::Fn(params, result, waits, callable) => {
                 scratch.params.clear();
@@ -430,6 +434,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         if !self.mapper_mode(n, scratch.params.first().map(|q| q.0)) {
+            return (ERROR, None);
+        }
+        if self.pack_waits_call_refused(waits, entry, dispatch, n) {
             return (ERROR, None);
         }
         if waits {
@@ -542,6 +549,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             result
         };
+        if let Some(entry) = entry {
+            return self.finish_pack_call(entry, dispatch, result, n);
+        }
         let (code, environment) = if callable == Callable::Plain {
             (value, self.konst(Ty::Ptr, 0, n))
         } else {
@@ -564,18 +574,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.dead = true;
         }
         (result, v)
-    }
-
-    /// Call the callable `value` of type `ty` from a built-in form with argument values
-    /// already lowered (MEM-4 writers); its result value.
-    pub(super) fn call_lowered(
-        &mut self,
-        ty: TyId,
-        value: ValueId,
-        vals: &[Option<ValueId>],
-        n: NodeId,
-    ) -> Option<ValueId> {
-        self.call_lowered_with_fail(ty, value, vals, n, CallFailure::Cleanup, Entry::Step)
     }
 
     /// [`Self::call_lowered`] whose callee steps on entry only for `Entry::Step`.
@@ -603,7 +601,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.call_lowered_with_fail(ty, value, &[], n, CallFailure::Handler(fail), Entry::Step)
     }
 
-    fn call_lowered_with_fail(
+    pub(super) fn call_lowered_with_fail(
         &mut self,
         ty: TyId,
         value: ValueId,

@@ -48,6 +48,7 @@ mod bytes;
 mod order;
 use order::order_instructions;
 mod callable_abi;
+use callable_abi::loan;
 mod calls;
 mod cleanup;
 mod clone_glue;
@@ -61,6 +62,7 @@ mod constants;
 mod control;
 mod depth_steps;
 mod exits;
+mod pack_witness;
 use exits::{Frame, FrameKind};
 pub(crate) mod core_ops;
 pub(crate) mod flow;
@@ -905,16 +907,6 @@ fn clone_body_signature() -> Signature {
         vec![],
         None,
     )
-}
-
-/// The loan a by-address parameter of this source mode carries (crate docs of
-/// hirsel-core-ir, "Loans"). `bytes` parameters are `u64` values, never places.
-pub(super) fn loan(mode: Mode) -> Loan {
-    match mode {
-        Mode::Mut => Loan::Mut,
-        Mode::Take => Loan::Take,
-        Mode::View | Mode::Bytes | Mode::Steps => Loan::View,
-    }
 }
 
 fn finalizer_signature() -> Signature {

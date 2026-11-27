@@ -353,11 +353,18 @@ impl<'a> Words<'a> {
                 self.punct(")");
             }
             TyKind::Adt(d, xs) => {
-                self.definition(&self.decls[d.index()].path);
-                if !xs.is_empty() {
+                if self.decls[d.index()].path.is_core("code.TransferableHeld") {
+                    self.definition(&DefPath::core("core.Held"));
                     self.punct("[");
-                    self.list(t, &xs)?;
+                    self.word("send");
                     self.punct("]");
+                } else {
+                    self.definition(&self.decls[d.index()].path);
+                    if !xs.is_empty() {
+                        self.punct("[");
+                        self.list(t, &xs)?;
+                        self.punct("]");
+                    }
                 }
             }
             TyKind::View(x) => {
@@ -429,4 +436,15 @@ impl<'a> Words<'a> {
         }
         Some(())
     }
+}
+
+/// PROG-9 spelling of a closed source type, with positional region names.
+pub(crate) fn closed_type_text(
+    decls: &crate::Rows<TypeDecl>,
+    types: &impl TyRead,
+    ty: TyId,
+) -> Option<String> {
+    let mut words = Words::new(decls, true);
+    words.ty(types, ty)?;
+    words.parameters.is_empty().then_some(words.s)
 }

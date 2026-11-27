@@ -286,14 +286,6 @@ impl TypeDecl {
             _ => &[],
         }
     }
-    pub fn all_fields(&self) -> impl Iterator<Item = &FieldDecl> {
-        let (r, v): (&[FieldDecl], &[CaseDecl]) = match &self.body {
-            DeclBody::Record(f) => (f, &[]),
-            DeclBody::Variant(c) => (&[], c),
-            DeclBody::Alias(_) => (&[], &[]),
-        };
-        r.iter().chain(v.iter().flat_map(|c| c.fields.iter()))
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1115,6 +1107,9 @@ impl Program<'_> {
                 self.types.intern(TyKind::Tuple(xs))
             }
             NodeKind::TypePath => self.named_ty(at, n, &[], generics),
+            NodeKind::TypeArguments if let Some(id) = self.held_send_type(at, &children) => {
+                self.types.intern(TyKind::Adt(id, vec![]))
+            }
             NodeKind::TypeArguments
                 if matches!(
                     self.target(at, children[0]),
@@ -1456,6 +1451,10 @@ impl Program<'_> {
                 }
             }
         }
+        if self.invalid_pack_carrier(decl, &arg_tys, site) {
+            return ERROR;
+        }
+        let d = &self.decls[decl.index()];
         if role == Some(Role::View) {
             return self.types.intern(TyKind::View(arg_tys[0]));
         }
@@ -3019,7 +3018,7 @@ fn write_canonical<const LAYOUT: bool>(
             s.push(')');
         }
         TyKind::Adt(d, xs) => {
-            let _ = decls[d.index()].path.write_to(s);
+            roles::write_adt_path(&decls[d.index()], LAYOUT, s);
             if !xs.is_empty() {
                 s.push('[');
                 list(xs, s);

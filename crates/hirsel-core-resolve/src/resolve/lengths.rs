@@ -31,4 +31,35 @@ impl Resolver<'_, '_> {
         }
         true
     }
+
+    /// PACK-16: `Held[send]` resolves `send` as a builtin bound when the head is `core.Held`.
+    pub(super) fn held_send(&mut self, children: &[NodeId]) -> bool {
+        let [head, bound] = *children else {
+            return false;
+        };
+        let node = self.item.tree.node(bound);
+        if node.kind != NodeKind::TypePath
+            || node.origin.tokens.len() != 1
+            || node.token.map(|t| self.name(t)) != Some(sym::SEND)
+        {
+            return false;
+        }
+        let before = self.out.names.len();
+        self.visit(head);
+        if self.out.names[before..].iter().any(|u| {
+            matches!(
+                u.target,
+                Target::Definition(id) if self.index.definition_path(id).is_core("core.Held")
+            )
+        }) {
+            self.out.names.push(ResolvedUse {
+                node: bound,
+                target: Target::Builtin(sym::SEND),
+                projections: Span::default(),
+            });
+        } else {
+            self.visit(bound);
+        }
+        true
+    }
 }

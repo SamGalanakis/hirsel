@@ -3,6 +3,16 @@
 use super::calls::CallScratch;
 use super::*;
 
+/// The loan a by-address parameter of this source mode carries (crate docs of
+/// hirsel-core-ir, "Loans"). `bytes` parameters are `u64` values, never places.
+pub(super) fn loan(mode: Mode) -> Loan {
+    match mode {
+        Mode::Mut => Loan::Mut,
+        Mode::Take => Loan::Take,
+        Mode::View | Mode::Bytes | Mode::Steps => Loan::View,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct CallableAbi {
     pub(super) signature: SigId,
@@ -83,6 +93,58 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
     }
 
+    // MEM-1 / OWN-3: a marked Region argument still names the same region.
+    // Only root substitution strips the mark; argument checking sees the original
+    // expression and enforces its mode, place and loan rules as usual.
+    pub(super) fn region_argument_path(&self, mut n: NodeId) -> Option<NodeId> {
+        loop {
+            match self.kind(n) {
+                NodeKind::Group | NodeKind::Ascription => n = self.kids(n)[0],
+                NodeKind::Unary if matches!(self.token_text(n), "take" | "mut") => {
+                    n = self.kids(n)[0];
+                }
+                _ => return self.binder_path(n),
+            }
+        }
+    }
+
+    pub(super) fn call_region_roots(
+        &mut self,
+        params: impl IntoIterator<Item = TyId>,
+        args: &[NodeId],
+        roots: &mut Vec<Option<TyId>>,
+    ) {
+        roots.clear();
+        for (i, ty) in params.into_iter().enumerate() {
+            if matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
+                && let Some(&arg) = args.get(i)
+                && let Some(path) = self.region_argument_path(arg)
+            {
+                roots.resize(i + 1, None);
+                roots[i] = Some(self.body_root(path, true));
+            }
+        }
+    }
+
+    /// Call the callable `value` of type `ty` from a built-in form with argument values
+    /// already lowered (MEM-4 writers); its result value.
+    pub(super) fn call_lowered(
+        &mut self,
+        ty: TyId,
+        value: ValueId,
+        vals: &[Option<ValueId>],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        self.call_lowered_with_fail(
+            ty,
+            value,
+            vals,
+            n,
+            closures::CallFailure::Cleanup,
+            closures::Entry::Step,
+        )
+    }
+
     /// Read a source value from its callable argument/result place.
     pub(super) fn read_carried(&mut self, at: AddressId, ty: TyId, n: NodeId) -> Option<ValueId> {
         let rep = match self.rep(ty) {
@@ -111,6 +173,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn checked_function_item(&mut self, f: usize, n: NodeId) -> Option<TyId> {
         let g = &self.p.fns[f];
+        if g.path.0.modules == ["code"]
+            && g.path.package_is("core", "1")
+            && matches!(
+                g.path.0.name.as_str(),
+                "bind" | "load" | "slot" | "activate" | "share" | "dispatch" | "hold" | "take_as"
+            )
+        {
+            self.refuse("PACK-14", n, "this form checks a witness at its direct use");
+            return None;
+        }
         if mentions_error(&self.t, g.callable) {
             self.inherited_refusal = true;
             self.halt();

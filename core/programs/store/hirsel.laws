@@ -113,7 +113,7 @@ store@1/store/bucket_test_soak src=00e18ffcf21707de sig=d786cafa8ce99db5 run=f6f
 store@1/store/cached_prior_conflict_safety src=b0f246decb716f1a sig=e9e6cf603bdcceaf run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/cell_elision_and_inline_boundary src=2ab7000950e05f1a sig=043aef39adff7283 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/cell_log_format_l79_l77_l78 src=b2d48ec93d97551d sig=1b94c1549072e2b8 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/check_detects src=98f411c2fd59d172 sig=3c34fdda12ff73c2 run=a37da3cc591a603a bug=- oracle=- rows=pending
+store@1/store/check_detects src=98f411c2fd59d172 sig=9c5a259aa628e433 run=a37da3cc591a603a bug=- oracle=- rows=pending
 store@1/store/claim_dropped_op_clock_floor_and_skip src=4ba2004a5cd47129 sig=b4f58ff2b259aa4a run=52846919a3decb1f bug=- oracle=- rows=pending
 store@1/store/claim_expires_from_its_reply src=c2955d1d714fd2f8 sig=c647f42e44ed2eb2 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/claim_liveness_before_digest src=5b8102e14feae630 sig=15de1be8b50208e0 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
@@ -482,7 +482,7 @@ store@1/store/test_paged_shrinking_overwrite src=2b507f4b083f1ea8 sig=915570f972
 store@1/store/test_pin_settle src=bec1f49548ead126 sig=c24c7331e81f709d run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_pinned_delete src=39e2f4bbb3acbf7d sig=006213a6655411c3 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_pinned_draft_at_bound src=288537c44a885b0a sig=8e2253e12fafdf7c run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/test_published_value src=e821f1d2cae16513 sig=f636dcb860344a36 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_published_value src=e821f1d2cae16513 sig=0919dd326643b1a6 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_put_validation src=e68778a9be1e47e5 sig=8753339f1e15e29d run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_range_prefix src=b6e16838e54c8c53 sig=1784aa43c12699da run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_read_cover src=9762761bf2798ef5 sig=61f70461f166805e run=aff7b6b8625190d8 bug=- oracle=- rows=pending

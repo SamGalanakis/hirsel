@@ -78,3 +78,12 @@ pub(super) fn results<'a>(inst: &'a Inst, body: &'a Body) -> impl Iterator<Item 
     };
     fixed.into_iter().flatten().chain(variable.iter().copied())
 }
+
+/// Fingerprint a closed ABI signature, independent of type row numbering.
+pub fn abi_signature(module: &Module, signature: &Signature) -> ContentHash {
+    let mut order = ModuleOrder::new(module);
+    let mut out = Write::module(&mut order);
+    out.abi = true;
+    signature.write(&mut out);
+    ContentHash::of_parts(SIGNATURE_DOMAIN, [&out.bytes[..]])
+}

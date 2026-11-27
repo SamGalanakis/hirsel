@@ -6,3 +6,65 @@ pub fn identity[F](s: StaticFn[F]) -> View[Bytes] in s
 pub fn revision[F](s: StaticFn[F]) -> Option[View[Bytes]] in s
 
 pub fn callable[F](s: StaticFn[F]) -> F
+
+pub type LoadError = NotAdmitted | Malformed(String) | Mismatch(String) | Import(u32) | Unbound(Inline[u8, 32]) | Fixup(u32) | NoEntry | Capacity | Quarantined | NotPrelinked | Unsupported
+
+pub type ActivateError = WrongPool | Stale(u64) | Capacity
+
+pub type DispatchError = Empty()
+
+pub type TakeError = TypeMismatch()
+
+pub fn bind[F](f: F) -> Code[F] {
+    target.unsupported("PACK-14 typed entry binding is not built")
+}
+
+pub fn load[F](loader: Loader, key: Inline[u8, 32], entry_id: Inline[u8, 32]) -> Result[Code[F], LoadError] {
+    target.unsupported("PACK-14 admitted entry loading is not built")
+}
+
+pub fn share[F](c: Code[F]) -> Code[F] {
+    target.unsupported("PACK-14 code sharing is not built")
+}
+
+pub fn slot[F](loader: Loader) -> CodeSlot[F] {
+    target.unsupported("PACK-14 slot creation is not built")
+}
+
+pub fn activate[F](mut s: CodeSlot[F], expected: u64, c: Code[F]) -> Result[u64, ActivateError] {
+    target.unsupported("PACK-14 activation is not built")
+}
+
+pub fn dispatch[F](s: CodeSlot[F]) -> Never {
+    target.unsupported("PACK-14 typed dispatch is not built")
+}
+
+fn loaded_identity[S](c: S) -> View[Bytes] in c {
+    target.unsupported("PACK-14 loaded identity is not built")
+}
+
+fn loaded_revision[S](c: S) -> Option[View[Bytes]] in c {
+    target.unsupported("PACK-14 loaded revision is not built")
+}
+
+pub fn hold[T](take value: T) -> Held {
+    target.unsupported("PACK-16 value erasure is not built")
+}
+
+pub fn take_as[T, H](take h: H) -> Result[T, (TakeError, H)] {
+    target.unsupported("PACK-16 typed extraction is not built")
+}
+
+fn export_unbuilt[R](signature: Inline[u8, 32]) -> R {
+    target.unsupported("PACK-14 typed entry adapters are not built")
+}
+
+fn held_unbuilt[R](witness: Inline[u8, 32]) -> R {
+    target.unsupported("PACK-16 payload ownership is not built")
+}
+
+resource type TransferableHeld: send {}
+
+fn hold_send[T: send](take value: T) -> Held[send] {
+    target.unsupported("PACK-16 transferable value erasure is not built")
+}

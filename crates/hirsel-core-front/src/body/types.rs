@@ -302,6 +302,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.t.mk(TyKind::Tuple(xs))
             }
             NodeKind::TypePath => self.named_ty(n, &[]),
+            NodeKind::TypeArguments if let Some(id) = self.p.held_send_type(self.at, c) => {
+                self.t.mk(TyKind::Adt(id, vec![]))
+            }
             NodeKind::TypeArguments
                 if matches!(
                     self.p.target(self.at, c[0]),
@@ -550,6 +553,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         let tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
+        if decl.pack_callable_carrier()
+            && !matches!(
+                self.t.kind(tys[0]),
+                TyKind::Fn(.., Callable::Plain) | TyKind::Param(_) | TyKind::Error
+            )
+        {
+            self.refuse(
+                "PACK-14",
+                path,
+                "a code handle needs a named entry's function type",
+            );
+            return ERROR;
+        }
         if decl.role == Some(Role::View) {
             return self.t.mk(TyKind::View(tys[0]));
         }

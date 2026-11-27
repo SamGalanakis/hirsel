@@ -121,13 +121,10 @@ pub fn flow_tag(operation: &hirsel_core_layout::flow::Op) -> u8 {
 }
 
 /// Fingerprint the closed ABI signature, independent of type row numbering.
+pub use results::abi_signature;
 pub fn signature(module: &Module, function: FuncId) -> ContentHash {
-    let signature = module.functions[function.index()].signature;
-    let mut order = ModuleOrder::new(module);
-    let mut out = Write::module(&mut order);
-    out.abi = true;
-    module.signatures[signature.index()].write(&mut out);
-    ContentHash::of_parts(SIGNATURE_DOMAIN, [&out.bytes[..]])
+    let id = module.functions[function.index()].signature;
+    abi_signature(module, &module.signatures[id.index()])
 }
 
 /// The canonical body and the function rows its code reaches outside the unit.

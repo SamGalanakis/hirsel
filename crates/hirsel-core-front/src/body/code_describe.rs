@@ -336,7 +336,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 }
 
-fn names_region(t: &impl TyRead, ty: TyId) -> bool {
+pub(super) fn names_region(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Region(_) | TyKind::Anchored(..) => true,
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| names_region(t, x)),

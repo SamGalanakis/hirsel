@@ -116,8 +116,8 @@ impl Role {
             "Flow" => Role::Flow,
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
-            "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" | "Foreign" | "Exec" | "Cred" => Role::Capability,
+            "Loader" | "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin"
+            | "Env" | "Process" | "Tasks" | "Foreign" | "Exec" | "Cred" => Role::Capability,
             "Secret" => Role::Secret,
             _ => return None,
         })
@@ -251,5 +251,63 @@ pub(super) fn nominal_bounds(
         // SEM-7: a resource is never compared, whatever it declares.
         Repr::Resource => declared & !(KEY | ORDERED | CODEC),
         Repr::Own => declared,
+    }
+}
+
+impl TypeDecl {
+    pub(crate) fn pack_callable_carrier(&self) -> bool {
+        matches!(self.path.0.name.as_str(), "Code" | "CodeSlot") && is_core_prelude(&self.path, &[])
+    }
+
+    pub fn all_fields(&self) -> impl Iterator<Item = &FieldDecl> {
+        let (r, v): (&[FieldDecl], &[CaseDecl]) = match &self.body {
+            DeclBody::Record(f) => (f, &[]),
+            DeclBody::Variant(c) => (&[], c),
+            DeclBody::Alias(_) => (&[], &[]),
+        };
+        r.iter().chain(v.iter().flat_map(|c| c.fields.iter()))
+    }
+}
+
+impl Program<'_> {
+    pub(crate) fn held_send_type(&self, at: ItemRef, children: &[NodeId]) -> Option<DeclId> {
+        let [_, bound] = *children else {
+            return None;
+        };
+        if self.target(at, bound) != Some(&Target::Builtin(hirsel_core_syntax::sym::SEND)) {
+            return None;
+        }
+        match self.def(&DefPath::core("code.TransferableHeld"))? {
+            Def::Type(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub(super) fn invalid_pack_carrier(&mut self, decl: DeclId, args: &[TyId], site: Site) -> bool {
+        if self.decls[decl.index()].pack_callable_carrier()
+            && args.first().is_some_and(|&arg| {
+                !matches!(
+                    self.types.kind(arg),
+                    TyKind::Fn(.., Callable::Plain) | TyKind::Param(_) | TyKind::Error
+                )
+            })
+        {
+            self.refusals.push(refusal(
+                "PACK-14",
+                site,
+                "a code handle needs a named entry's function type",
+            ));
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub(super) fn write_adt_path(decl: &TypeDecl, layout: bool, s: &mut String) {
+    if !layout && decl.path.is_core("code.TransferableHeld") {
+        s.push_str("Held[send]");
+    } else {
+        let _ = decl.path.write_to(s);
     }
 }

@@ -1433,7 +1433,7 @@ impl<'a> Resolver<'a, '_> {
                     }
                 }
                 NodeKind::Error => {}
-                NodeKind::TypeArguments if self.inline_length(c) => {}
+                NodeKind::TypeArguments if self.held_send(c) || self.inline_length(c) => {}
                 _ => {
                     if let [child] = c {
                         n = *child;

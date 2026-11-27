@@ -754,8 +754,12 @@ type arguments, callable parameters and result, and declared variant payloads or
 record fields (including private ones) in their written order, recursively, expanding
 each distinct S only once. Within a callable, binders and anchors have PROG-9's
 positional spelling. Emit a SEM-10 `u32` node count, then nodes sorted bytewise by S.
-A node is its SEM-10 length-prefixed S text followed by four lists in the visit order
-above (one result or none). Each list is a `u32` count and the children's S texts.
+A node starts with its SEM-10 length-prefixed S text. Next comes a byte and, when
+present, a digest: `1` and the 32-byte full PROG-10 closure of this node's own
+compiled type row (the scalar/unit constant rule above applies), or `0` for a
+node without a standalone row, such as a borrow wrapper or bare callable.
+This binds the native shape of a callback's parameter even when the enclosing row
+stores only a function pointer. Four lists follow in the visit order above (one result or none). Each list is a `u32` count and the children's S texts.
 Native row bytes already bind field names, offsets determined by the ABI, tags and
 hook identities. Using names for graph edges makes recursive backreferences finite
 and independent of discovery order. No image address, load sequence or backend enters the hash.

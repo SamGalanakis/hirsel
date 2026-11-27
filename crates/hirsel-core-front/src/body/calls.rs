@@ -289,7 +289,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(Def::Fn(f)) => *f as usize,
                 Some(Def::Type(d)) => return self.construct_record(n, *d, want),
                 // A constant is a value, so use the ordinary callable type check.
-                None => return self.call_value(n, callee, args, want, scratch),
+                None => return self.call_value(n, callee, args, false, scratch),
             },
             Some(Target::Missing) => {
                 self.halt();
@@ -298,8 +298,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(&Target::ContextualConstructor { name }) => {
                 return self.construct_variant(n, name, args, want);
             }
-            _ => return self.call_value(n, callee, args, want, scratch),
+            _ => return self.call_value(n, callee, args, false, scratch),
         };
+        let source_function = f;
+        let (f, reflect) = self.pack_call_overload(f, want);
+        if p.fns[source_function].path.is_core("code.dispatch")
+            && let Some((&slot, arguments)) = args.split_first()
+        {
+            return self.call_value(n, slot, arguments, true, scratch);
+        }
         let g = &p.fns[f];
         self.diagnostic_callee = Some(DiagnosticCallee::Named(f));
         if mentions_error(&self.t, g.callable) {
@@ -391,6 +398,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if !self.mapper_mode(n, g.params.first().map(|q| q.mode)) {
             return (ERROR, None);
+        }
+        if g.path.is_core("code.bind") {
+            return self.code_bind(f, args[0], want, n);
         }
         if g.path.is_core("code.describe") {
             self.builtin_use(f, n);
@@ -787,7 +797,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !(g.path.is_core("list.prefetch") || g.path.is_core("inline.prefetch")) {
             self.source_step(n);
         }
-        let v = if let Some(insertion) = map_insertion {
+        if !undetermined && let Some(pack) = self.pack_named_call(f, tys, args, result, n) {
+            return pack;
+        }
+        let v = if f != source_function && reflect && !undetermined {
+            self.pack_reflect_call(source_function, f, tys, vals, args[0], result, n)
+        } else if let Some(insertion) = map_insertion {
             self.builtin_use(f, n);
             self.finish_map_insertion(insertion, map_key_at, f, &[tys[0], tys[1]], vals, result, n)
         } else if let Some(replacement) = replacement {
@@ -824,39 +839,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         (result, v)
-    }
-
-    // MEM-1 / OWN-3: a marked Region argument still names the same region.
-    // Only root substitution strips the mark; argument checking sees the original
-    // expression and enforces its mode, place and loan rules as usual.
-    pub(super) fn region_argument_path(&self, mut n: NodeId) -> Option<NodeId> {
-        loop {
-            match self.kind(n) {
-                NodeKind::Group | NodeKind::Ascription => n = self.kids(n)[0],
-                NodeKind::Unary if matches!(self.token_text(n), "take" | "mut") => {
-                    n = self.kids(n)[0];
-                }
-                _ => return self.binder_path(n),
-            }
-        }
-    }
-
-    pub(super) fn call_region_roots(
-        &mut self,
-        params: impl IntoIterator<Item = TyId>,
-        args: &[NodeId],
-        roots: &mut Vec<Option<TyId>>,
-    ) {
-        roots.clear();
-        for (i, ty) in params.into_iter().enumerate() {
-            if matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
-                && let Some(&arg) = args.get(i)
-                && let Some(path) = self.region_argument_path(arg)
-            {
-                roots.resize(i + 1, None);
-                roots[i] = Some(self.body_root(path, true));
-            }
-        }
     }
 
     /// Check argument `e` for a parameter of mode `mode` and type `pt` when its mode

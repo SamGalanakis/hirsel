@@ -103,8 +103,8 @@ commands! {
         Add(AddOption), One: AddAs, AddRoot, AddWorkspace, AddDryRun, PackageStore, Locked, Frozen, HELP, Json;
     "update", "update [ALIAS|ID[@VERSION]] [--dry-run] [--package-store DIR] [--json]", "Refresh dependency bindings and select compatible roots.";
         Update(UpdateOption), One: AddDryRun, PackageStore, Locked, Frozen, HELP, Json;
-    "audit", "audit [DIR] [--package-store DIR] [--json]", "Report the authority reached by dependencies.";
-        Audit(AuditOption), One: PackageStore, HELP, Json;
+    "audit", "audit [DIR] [--frozen] [--package-store DIR] [--json]", "Report the authority reached by dependencies.";
+        Audit(AuditOption), One: PackageStore, Frozen, HELP, Json;
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP, Output;
     "build", "build [package-dir | --recipe HASH] [options]", "Build a native executable or static library from a release recipe.";

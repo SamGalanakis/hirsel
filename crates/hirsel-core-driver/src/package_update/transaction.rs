@@ -64,31 +64,28 @@ impl<'a> Staged<'a> {
     }
 }
 
-pub(super) fn commit(
+pub(crate) fn commit<'a>(
+    command: &str,
     cwd: &Path,
     scope: &File,
     workspace: &Workspace,
-    edits: &[Edit],
+    edits: impl IntoIterator<Item = (&'a File, &'a Captured, &'a Captured)>,
     before_lock: Option<&Captured>,
-    lock: Lock,
+    lock: &Lock,
 ) -> Result<Option<String>, Failure> {
     let mut staged = Vec::new();
-    for edit in edits.iter().filter(|edit| edit.changed()) {
-        staged.push(Staged::new(
-            &edit.dir,
-            MANIFEST,
-            Some(&edit.before),
-            &edit.after.bytes,
-        )?);
+    for (dir, before, after) in edits {
+        staged.push(Staged::new(dir, MANIFEST, Some(before), &after.bytes)?);
     }
     if let Some((bytes, _)) = lock.pending() {
         staged.push(Staged::new(scope, LOCK, before_lock, bytes.as_bytes())?);
     }
-    let current = current_scope(cwd, scope, "update")?;
+    let current = current_scope(cwd, scope, command)?;
     if !workspace.same_manifests(&current) || Lock::capture(&current)?.as_ref() != before_lock {
-        return Err(
-            "a manifest or hirsel.lock changed while hirsel update ran; nothing was written".into(),
-        );
+        return Err(format!(
+            "a manifest or hirsel.lock changed while hirsel {command} ran; nothing was written"
+        )
+        .into());
     }
     let mut published = Vec::new();
     for Staged {
@@ -119,17 +116,14 @@ pub(super) fn commit(
                 }
             }
             return if failed.is_empty() {
-                Err(format!("update rolled back: {error}").into())
+                Err(format!("{command} rolled back: {error}").into())
             } else {
                 Ok(Some(format!(
-                    "update publication failed: {error}\n  rollback failed: {}",
+                    "{command} publication failed: {error}\n  rollback failed: {}",
                     failed.join(", ")
                 )))
             };
         }
-    }
-    if let Some((_, message)) = lock.pending() {
-        eprintln!("hirsel: {message}");
     }
     Ok(None)
 }

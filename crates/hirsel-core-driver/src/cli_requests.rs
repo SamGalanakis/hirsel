@@ -23,6 +23,7 @@ pub enum UpdateOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuditOption {
+    Frozen,
     Json,
     PackageStore(String),
 }

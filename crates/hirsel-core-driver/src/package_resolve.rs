@@ -529,6 +529,28 @@ fn requirements(
     edges
 }
 
+pub(crate) fn registry_inputs(
+    workspace: &Workspace,
+    store: &PackageStore,
+    cached: Libraries,
+    fetched: &mut BTreeSet<String>,
+) -> Result<Libraries, Failure> {
+    let manifest = workspace.directory.join(crate::package_dir::MANIFEST);
+    let graph = Graph {
+        manifest: &manifest,
+        members: &workspace.members,
+        selections: &workspace.selections,
+    };
+    let mut fetch = |request: FetchRequest<'_>| match request {
+        FetchRequest::Bundle(id, root, source) => Ok(store
+            .fetch(&workspace.root, id, root, source, fetched)?
+            .0
+            .entries),
+        FetchRequest::Frames(frames) => store.fetch_frames(frames, fetched),
+    };
+    Ok(acquire(&graph, store, false, cached, &mut fetch)?.0)
+}
+
 mod selection;
 pub(crate) use selection::select;
 
@@ -537,6 +559,15 @@ struct Requirement {
     binding: Binding,
     root: Root,
     packed: bool,
+}
+
+impl Binding {
+    pub(crate) fn accepts(self, root: Root, version: &Version) -> bool {
+        self.root() == Some(root)
+            || matches!(self, Binding::Floor { minor, patch, .. }
+            if version.pre.is_empty() && (version.minor, version.patch) >= (minor, patch)
+                && (version.major != 0 || version.minor == minor))
+    }
 }
 
 impl Requirement {
@@ -553,12 +584,7 @@ impl Requirement {
     }
 
     fn accepts(&self, root: Root, version: &Version) -> bool {
-        root == self.root
-            || self.floor(version.major).is_some_and(|bound| {
-                version.pre.is_empty()
-                    && version >= &bound
-                    && (version.major != 0 || version.minor == bound.minor)
-            })
+        self.binding.accepts(root, version)
     }
 }
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use ureq::http::Uri;
 
 #[cfg(test)]
-mod laws;
+pub(crate) mod laws;
 
 /// An HTTPS origin, with the same authority spelling used in checkpoint origins.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]

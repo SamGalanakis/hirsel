@@ -152,6 +152,7 @@ fn verdict(value: Option<&Verdict>) -> String {
 }
 
 pub(super) struct Report {
+    pub(super) registry: BTreeMap<String, crate::package_add::registry_select::Finding>,
     changes: BTreeMap<Id, Change>,
     written: BTreeMap<String, String>,
     removed: Vec<String>,
@@ -248,6 +249,7 @@ impl Report {
         tested.sort();
         tested.dedup();
         Self {
+            registry: Default::default(),
             changes,
             written,
             removed,
@@ -287,10 +289,13 @@ impl Report {
                 "{}",
                 serde_json::json!({"result":result, "dry_run":dry_run,
                 "rebound":self.rebound, "selections":{"written":self.written, "removed":self.removed},
-                "changed": self.changes.values().collect::<Vec<_>>(),
+                "registry": self.registry, "changed": self.changes.values().collect::<Vec<_>>(),
                 "tested": self.tested, "fetched":self.fetched})
             );
             return;
+        }
+        for (id, finding) in &self.registry {
+            finding.report(id);
         }
         for change in self.changes.values() {
             let old = change.before.as_ref().map_or_else(

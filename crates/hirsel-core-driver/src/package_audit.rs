@@ -206,8 +206,20 @@ pub(crate) fn run(request: Request<AuditOption>) -> Result<i32, Failure> {
     let json = request.options.contains(&AuditOption::Json);
     let workspace =
         Workspace::discover_for(directory, false)?.ok_or("audit requires a package manifest")?;
-    let resolution = Resolution::resolve(workspace, PackageStore::new(path), false)?;
+    let frozen = request.options.contains(&AuditOption::Frozen);
+    let mode = if frozen {
+        crate::package_lock::Mode::Frozen
+    } else {
+        crate::package_lock::Mode::Update
+    };
+    let store = PackageStore::with_transport(path, mode.transport());
+    let mut registry = crate::package_add::registry_select::Registry::new(&store)?;
+    let resolution = Resolution::resolve(workspace, store, frozen)?;
     let selected = resolution.workspace.member.as_ref();
+    let findings = registry.graph(&resolution, selected)?;
+    let affected = findings
+        .values()
+        .any(|f| f.status != "active" || !f.advisories.is_empty());
     let mut checked = check(&resolution, selected)?;
     let mut bindings = bindings(&resolution);
     let mut packages = Vec::new();
@@ -215,9 +227,11 @@ pub(crate) fn run(request: Request<AuditOption>) -> Result<i32, Failure> {
         let (Some(version), Some(bindings)) = (row.version, bindings.remove(&id)) else {
             continue;
         };
-        let Some(card) = checked.cards.remove(&id.compiler_id()) else {
+        let finding = findings.get(&id);
+        let card = checked.cards.remove(&id.compiler_id());
+        if card.is_none() && finding.is_none() {
             continue;
-        };
+        }
         if selected == Some(&id) {
             continue;
         }
@@ -225,7 +239,7 @@ pub(crate) fn run(request: Request<AuditOption>) -> Result<i32, Failure> {
         if json {
             packages.push(serde_json::json!({
                 "id": id.to_string(), "version": version, "root": root, "source": row.source,
-                "bindings": bindings, "tested": row.tested, "card": card_json(&card),
+                "registry": finding, "bindings": bindings, "tested": row.tested, "card": card.as_ref().map(card_json),
             }));
         } else {
             println!(
@@ -245,7 +259,12 @@ pub(crate) fn run(request: Request<AuditOption>) -> Result<i32, Failure> {
             for tested in row.tested {
                 println!("  tested: {tested}");
             }
-            print_card(&card);
+            if let Some(finding) = finding {
+                finding.report(&id);
+            }
+            if let Some(card) = card {
+                print_card(&card);
+            }
         }
     }
     if json {
@@ -254,5 +273,9 @@ pub(crate) fn run(request: Request<AuditOption>) -> Result<i32, Failure> {
     for error in &checked.authority {
         eprintln!("hirsel: {error}");
     }
-    Ok(if checked.authority.is_empty() { 0 } else { 2 })
+    Ok(if !affected && checked.authority.is_empty() {
+        0
+    } else {
+        2
+    })
 }

@@ -18,8 +18,12 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod edit;
 pub(crate) mod git;
+#[cfg(test)]
+mod laws_registry;
 pub(crate) mod options;
 pub(crate) mod paths;
+#[path = "registry_select.rs"]
+pub(crate) mod registry_select;
 
 use options::{Options, Source};
 use paths::{find_member, relative_to, root_relative};
@@ -47,6 +51,8 @@ struct Report {
     cache: &'static str,
     fetched: BTreeSet<String>,
     closure: Vec<ClosureRow>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    registry: BTreeMap<String, crate::package_add::registry_select::Finding>,
     /// The branch and commit taken for a git source given without a reference.
     #[serde(skip)]
     chose: Option<String>,
@@ -75,6 +81,9 @@ impl Report {
                 serde_json::to_string(self).expect("add report contains UTF-8 paths")
             );
             return;
+        }
+        for (id, finding) in &self.registry {
+            finding.report(id);
         }
         let verb = match (self.result, self.dry_run) {
             ("added", true) => "would add",
@@ -270,55 +279,13 @@ pub(crate) fn acquire_any(
                 .map_err(|error| format!("{locator} is not a package archive: {error}"))?;
             (archive, len, locator)
         }
-        Source::Toolchain(_) | Source::Member(_) => {
+        Source::Toolchain(_) | Source::Member(_) | Source::Registry(_) => {
             unreachable!("run_at binds the forms that fetch nothing without acquiring")
         }
     };
     let head = &archive.entries[&archive.head].content.id;
     archive.verify(head, archive.head, &locator.to_string())?;
     Ok((archive, Some(locator), len, Vec::new(), None))
-}
-
-fn check_source(
-    workspace: &Workspace,
-    source: &SourceLocation,
-    fetched: Root,
-) -> Result<(), Failure> {
-    let check = |alias: &str, root: Root, locator: &SourceLocation| -> Result<(), Failure> {
-        if let (SourceLocation::Git(bound), SourceLocation::Git(new)) = (locator, source) {
-            return git::check_moved(alias, bound, root, new, fetched);
-        }
-        if root != fetched && locator == source {
-            let spelling = source.to_string();
-            Err(format!(
-                "{} is already bound to another root\n  bound: {root}\n  fetched: {fetched}\nto take the fetched root, run: hirsel update {alias}",
-                spelling.split_once(':').unwrap().1
-            )
-            .into())
-        } else {
-            Ok(())
-        }
-    };
-    for member in workspace.members.values() {
-        for (alias, id) in &member.aliases {
-            if let Edge::Published(root, Some(locator)) = &member.edges[id] {
-                check(alias, *root, locator)?;
-            }
-        }
-    }
-    if let Some(root) = workspace.captured_manifest(&workspace.root)? {
-        let manifest = Manifest::parse(&root.bytes, &workspace.directory.join(MANIFEST))?;
-        if let Some(shared) = manifest.workspace {
-            for (alias, dependency) in &shared.dependencies {
-                if let Dependency::Published(_, root, Some(locator), _) = dependency
-                    && let Some(locator) = root_relative(locator)
-                {
-                    check(alias, *root, &locator)?;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn stage(
@@ -507,40 +474,6 @@ fn commit(
     Ok(messages)
 }
 
-/// The binding a manifest writes: a member path, a published root, or a toolchain name.
-fn form<'a>(
-    path: Option<&'a str>,
-    root: Option<Root>,
-    source: Option<&'a SourceLocation>,
-) -> edit::Form<'a> {
-    match (path, root) {
-        (Some(path), _) => edit::Form::Member(path),
-        (None, Some(root)) => edit::Form::Published(root, source),
-        (None, None) => edit::Form::Toolchain,
-    }
-}
-
-fn spelling(id: &crate::package_content::Id, edge: &Edge) -> String {
-    match edge {
-        Edge::Published(root, _) => format!("{id} {root}"),
-        Edge::Member => format!("{id} member"),
-        Edge::Toolchain => format!("{id} toolchain"),
-    }
-}
-
-fn alias_taken(
-    manifest: &Path,
-    field: &str,
-    alias: &str,
-    existing: &crate::package_content::Id,
-) -> Failure {
-    format!(
-        "{}: {field}.{alias} already binds {existing}; pass --as to choose another alias",
-        manifest.display()
-    )
-    .into()
-}
-
 pub(crate) fn run(invocation: Request<AddOption>) -> Result<i32, Failure> {
     run_at(invocation, &std::env::current_dir()?, |_| {})
 }
@@ -553,9 +486,53 @@ pub(crate) fn run_at(
     let options = Options::read(invocation)?;
     let scope = lock_scope(cwd)?;
     let workspace = current_scope(cwd, &scope, "add")?;
+    let mut registry = crate::package_add::registry_select::Registry::new(&options.store)?;
+    let mut authority_refusal = None;
+    loop {
+        match add(
+            &options,
+            cwd,
+            &scope,
+            &workspace,
+            &mut registry,
+            &mut checkpoint,
+        ) {
+            Ok(Attempt::Complete(code)) => return Ok(code),
+            Ok(Attempt::Denied(root, error)) if registry.deny(root) => {
+                authority_refusal = Some(error);
+            }
+            Ok(Attempt::Denied(_, error)) => return Err(error),
+            Err(e) => {
+                return Err(
+                    if e.downcast_ref::<crate::package_add::registry_select::NoEligible>()
+                        .is_some()
+                    {
+                        authority_refusal.unwrap_or(e)
+                    } else {
+                        e
+                    },
+                );
+            }
+        }
+    }
+}
+
+enum Attempt {
+    Complete(i32),
+    Denied(Root, Failure),
+}
+
+fn add(
+    options: &Options,
+    cwd: &Path,
+    scope: &File,
+    workspace: &Workspace,
+    registry: &mut crate::package_add::registry_select::Registry,
+    checkpoint: &mut dyn FnMut(Checkpoint),
+) -> Result<Attempt, Failure> {
     let root_manifest = workspace.directory.join(MANIFEST);
     let root_captured = workspace
-        .captured_manifest(&scope)?
+        .captured_manifest(scope)?
         .cloned()
         .ok_or("the workspace changed while hirsel add ran")?;
     let selected = workspace.member.clone();
@@ -593,6 +570,22 @@ pub(crate) fn run_at(
 
     let (mut fetched_early, mut chose) = (Vec::new(), None);
     let (archive, locator, len, local) = match &options.source {
+        Source::Registry(query) => {
+            let chosen = registry.add_candidate(
+                query,
+                options.alias.as_deref(),
+                options.workspace,
+                workspace,
+            )?;
+            let root = chosen.root;
+            let len = chosen.library.encoded.len();
+            let locator = SourceLocation::Registry(chosen.origin);
+            let archive = PackageArchive {
+                head: root,
+                entries: [(root, chosen.library)].into(),
+            };
+            (Some(archive), Some(locator), len, None)
+        }
         Source::Toolchain(id) => {
             if toolchain_major(&id.name) != Some(id.major) {
                 return Err(format!("the toolchain does not provide {id}").into());
@@ -600,7 +593,7 @@ pub(crate) fn run_at(
             (None, None, 0, Some((id.clone(), None)))
         }
         Source::Member(path) => {
-            let (id, found) = find_member(&workspace, cwd, path)?;
+            let (id, found) = find_member(workspace, cwd, path)?;
             (
                 None,
                 None,
@@ -609,7 +602,7 @@ pub(crate) fn run_at(
             )
         }
         _ => {
-            let capture = acquire(&options, &workspace, cwd)?;
+            let capture = acquire(options, workspace, cwd)?;
             fetched_early = capture.fetched;
             chose = capture.chose;
             (Some(capture.archive), capture.locator, capture.len, None)
@@ -623,7 +616,7 @@ pub(crate) fn run_at(
         (None, None) => unreachable!("every source names an archive or a local package"),
     };
     if let (Some(source), Some(root)) = (&locator, root) {
-        check_source(&workspace, source, root)?;
+        edit::check_source(workspace, source, root, &id)?;
     }
 
     // A head with a local name is refused: only a workspace member has one (packages.md section 7).
@@ -646,7 +639,7 @@ pub(crate) fn run_at(
         && let Some(member) = member
         && *name != id
     {
-        return Err(alias_taken(
+        return Err(edit::alias_taken(
             &member.manifest_path,
             "dependencies",
             alias,
@@ -690,7 +683,7 @@ pub(crate) fn run_at(
                 Dependency::Inherited => unreachable!("workspace rows cannot inherit"),
             };
             if *existing != id {
-                return Err(alias_taken(
+                return Err(edit::alias_taken(
                     &root_manifest,
                     "workspace.dependencies",
                     alias,
@@ -713,9 +706,9 @@ pub(crate) fn run_at(
                 member.manifest_path.display(),
                 alias,
                 member.manifest_path.display(),
-                spelling(name, old),
+                edit::spelling(name, old),
                 root_manifest.display(),
-                spelling(&id, &edge),
+                edit::spelling(&id, &edge),
             )
             .into());
         }
@@ -729,7 +722,7 @@ pub(crate) fn run_at(
                     &root_captured.bytes,
                     alias,
                     &id,
-                    &form(path.as_deref(), root, locator.as_ref()),
+                    &edit::form(path.as_deref(), root, locator.as_ref()),
                     root_package,
                 )?
                 .into_bytes()
@@ -738,7 +731,7 @@ pub(crate) fn run_at(
             }
         };
         writes.push(ManifestWrite {
-            directory: &scope,
+            directory: scope,
             relative: PathBuf::new(),
             before: root_captured.clone(),
             proposed,
@@ -812,7 +805,7 @@ pub(crate) fn run_at(
                     &before.bytes,
                     alias,
                     &id,
-                    &form(path.as_deref(), root, declared.as_ref()),
+                    &edit::form(path.as_deref(), root, declared.as_ref()),
                 )?
                 .into_bytes()
                 .into(),
@@ -855,6 +848,7 @@ pub(crate) fn run_at(
         pending: Vec::new(),
         previous_root: previous_root.map(|root| root.to_string()),
         dry_run: options.dry_run,
+        registry: BTreeMap::new(),
         cache: "complete",
         fetched: fetched_early.into_iter().collect(),
         closure: Vec::new(),
@@ -893,32 +887,84 @@ pub(crate) fn run_at(
         &mut report.fetched,
     )
     .map_err(|error| report.with_fetches(error))?;
+    if matches!(options.source, Source::Registry(_)) {
+        let mut findings = registry.graph(&trial, None)?;
+        if let (Some(SourceLocation::Registry(origin)), Some(root)) = (&locator, root) {
+            findings
+                .entry(id.clone())
+                .or_insert(registry.finding(origin, root)?);
+        }
+        crate::package_add::registry_select::require_active(&findings)?;
+        report.registry = findings
+            .into_iter()
+            .map(|(id, f)| (id.to_string(), f))
+            .collect();
+        let checked = crate::package_audit::check(&trial, None)?;
+        if !checked.authority.is_empty() {
+            let error = checked.authority.join("\n").into();
+            if matches!(&options.source, Source::Registry(query) if query.exact.is_none()) {
+                return Ok(Attempt::Denied(
+                    root.expect("named registry binding"),
+                    error,
+                ));
+            }
+            return Err(error);
+        }
+    }
     let manifest_path = writes[0].path();
     if options.dry_run {
         let lock = Lock::compare_captured(&trial, Mode::Update, old_lock.as_ref())?;
         report.print(
-            &options,
+            options,
             &manifest_path,
             len,
             lock.pending().map(|(_, message)| message),
         );
-        return Ok(0);
+        return Ok(Attempt::Complete(0));
     }
 
+    if matches!(options.source, Source::Registry(_)) {
+        let lock = Lock::compare_captured(&trial, Mode::Update, old_lock.as_ref())?;
+        let changes = writes.iter().filter(|w| w.changes());
+        if let Some(failure) = crate::package_update::transaction::commit(
+            "add",
+            cwd,
+            scope,
+            workspace,
+            changes
+                .clone()
+                .map(|w| (w.directory, &w.before, &w.proposed)),
+            old_lock.as_ref(),
+            &lock,
+        )? {
+            return Err(failure.into());
+        }
+        report.committed.extend(changes.map(ManifestWrite::path));
+        if lock.pending().is_some() {
+            report.committed.push(LOCK.into());
+        }
+        report.print(
+            options,
+            &manifest_path,
+            len,
+            lock.pending().map(|(_, message)| message),
+        );
+        return Ok(Attempt::Complete(0));
+    }
     for write in writes.iter().filter(|write| write.changes()) {
         report.pending.push(write.path());
     }
     report.pending.push(LOCK.into());
-    match commit(cwd, &scope, &writes, trial, &mut report, &mut checkpoint) {
+    match commit(cwd, scope, &writes, trial, &mut report, checkpoint) {
         Ok(messages) => {
             let message = messages.join("\nhirsel: ");
             report.print(
-                &options,
+                options,
                 &manifest_path,
                 len,
                 (!messages.is_empty()).then_some(message.as_str()),
             );
-            Ok(0)
+            Ok(Attempt::Complete(0))
         }
         Err(error) if report.committed.is_empty() => Err(report.with_fetches(error)),
         Err(error) => {
@@ -940,9 +986,9 @@ pub(crate) fn run_at(
                 paths(&report.pending)
             );
             if options.json {
-                report.print(&options, &manifest_path, len, None);
+                report.print(options, &manifest_path, len, None);
             }
-            Ok(1)
+            Ok(Attempt::Complete(1))
         }
     }
 }

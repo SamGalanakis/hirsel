@@ -2,7 +2,7 @@ use crate::package_content::{Id, Root};
 use crate::package_manifest::SourceLocation;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
-type Fields = [(&'static str, Option<Value>); 11];
+type Fields = [(&'static str, Option<Value>); 12];
 
 /// What a binding names beside its major.
 pub(crate) enum Form<'a> {
@@ -44,6 +44,13 @@ fn published(id: &Id, form: &Form<'_>) -> Fields {
                 _ => None,
             },
         ),
+        (
+            "registry",
+            match source {
+                Some(SourceLocation::Registry(origin)) => Some(Value::from(origin.to_string())),
+                _ => None,
+            },
+        ),
         ("git", git.map(|git| Value::from(git.url.as_str()))),
         ("rev", git.map(|git| Value::from(git.rev.as_str()))),
         (
@@ -67,6 +74,7 @@ fn inherited() -> Fields {
         ("root", None),
         ("url", None),
         ("archive", None),
+        ("registry", None),
         ("git", None),
         ("rev", None),
         ("ref", None),
@@ -243,4 +251,85 @@ pub(crate) fn selections(
         table.remove("selections");
     }
     Ok(document.to_string())
+}
+
+pub(super) fn check_source(
+    workspace: &super::Workspace,
+    source: &SourceLocation,
+    fetched: Root,
+    selected_id: &crate::package_content::Id,
+) -> Result<(), super::Failure> {
+    use super::{Dependency, Edge, MANIFEST, Manifest, git, root_relative};
+    let check = |alias: &str, root: Root, locator: &SourceLocation| -> Result<(), super::Failure> {
+        if let (SourceLocation::Git(bound), SourceLocation::Git(new)) = (locator, source) {
+            return git::check_moved(alias, bound, root, new, fetched);
+        }
+        if root != fetched && locator == source {
+            let spelling = source.to_string();
+            Err(format!(
+                "{} is already bound to another root\n  bound: {root}\n  fetched: {fetched}\nto take the fetched root, run: hirsel update {alias}",
+                spelling.split_once(':').unwrap().1
+            )
+            .into())
+        } else {
+            Ok(())
+        }
+    };
+    for member in workspace.members.values() {
+        for (alias, id) in &member.aliases {
+            if let Edge::Published(root, Some(locator)) = &member.edges[id]
+                && (!matches!(locator, SourceLocation::Registry(_)) || id == selected_id)
+            {
+                check(alias, *root, locator)?;
+            }
+        }
+    }
+    if let Some(root) = workspace.captured_manifest(&workspace.root)? {
+        let manifest = Manifest::parse(&root.bytes, &workspace.directory.join(MANIFEST))?;
+        if let Some(shared) = manifest.workspace {
+            for (alias, dependency) in &shared.dependencies {
+                if let Dependency::Published(id, root, Some(locator), _) = dependency
+                    && (!matches!(locator, SourceLocation::Registry(_)) || id == selected_id)
+                    && let Some(locator) = root_relative(locator)
+                {
+                    check(alias, *root, &locator)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The binding a manifest writes: a member path, a published root, or a toolchain name.
+pub(super) fn form<'a>(
+    path: Option<&'a str>,
+    root: Option<Root>,
+    source: Option<&'a SourceLocation>,
+) -> Form<'a> {
+    match (path, root) {
+        (Some(path), _) => Form::Member(path),
+        (None, Some(root)) => Form::Published(root, source),
+        (None, None) => Form::Toolchain,
+    }
+}
+
+pub(super) fn spelling(id: &crate::package_content::Id, edge: &super::Edge) -> String {
+    match edge {
+        super::Edge::Published(root, _) => format!("{id} {root}"),
+        super::Edge::Member => format!("{id} member"),
+        super::Edge::Toolchain => format!("{id} toolchain"),
+    }
+}
+
+pub(super) fn alias_taken(
+    manifest: &std::path::Path,
+    field: &str,
+    alias: &str,
+    existing: &crate::package_content::Id,
+) -> super::Failure {
+    format!(
+        "{}: {field}.{alias} already binds {existing}; pass --as to choose another alias",
+        manifest.display()
+    )
+    .into()
 }

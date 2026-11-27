@@ -7,6 +7,7 @@ use crate::package_store::PackageStore;
 use std::path::PathBuf;
 
 pub(crate) enum Source {
+    Registry(crate::package_add::registry_select::Query),
     Archive(String),
     Url(String),
     Git(git::Request),
@@ -31,6 +32,8 @@ impl Source {
             Err("add SOURCE requires an https:// URL, a git+https:// or github: source, a .hpkg path, a sha256: root, NAME@MAJOR, or a member directory".into())
         } else if text.ends_with(".hpkg") {
             Ok(Self::Archive(text))
+        } else if let Some(query) = crate::package_add::registry_select::Query::parse(&text)? {
+            Ok(Self::Registry(query))
         } else if let Some((name, major)) = text.split_once('@')
             && name.starts_with(|c: char| c.is_ascii_lowercase())
             && name
@@ -104,7 +107,7 @@ impl Options {
         if expected.is_some()
             && matches!(
                 source,
-                Source::Store(_) | Source::Toolchain(_) | Source::Member(_)
+                Source::Store(_) | Source::Toolchain(_) | Source::Member(_) | Source::Registry(_)
             )
         {
             return Err("--root applies to a fetched source".into());

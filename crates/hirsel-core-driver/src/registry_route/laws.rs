@@ -47,7 +47,7 @@ fn witnesses() -> [Key<'static>; 2] {
     [("first.test/witness", 7, 4), ("second.test/witness", 8, 4)]
 }
 
-fn route(prefix: &str, authority: &str, preview: bool, legal: u8) -> String {
+pub(crate) fn route(prefix: &str, authority: &str, preview: bool, legal: u8) -> String {
     let keys: Vec<_> = if preview {
         Vec::new()
     } else {
@@ -62,7 +62,7 @@ fn route(prefix: &str, authority: &str, preview: bool, legal: u8) -> String {
     )
 }
 
-fn note(authority: &str, log: Log, size: u64, root: Hash, time: Option<u64>) -> Vec<u8> {
+pub(crate) fn note(authority: &str, log: Log, size: u64, root: Hash, time: Option<u64>) -> Vec<u8> {
     let origin = format!("{authority}/{}", log.prefix());
     let seed = if log == Log::Release { 1 } else { 2 };
     let text = format!("{origin}\n{size}\n{}\n", b64(&root));
@@ -85,11 +85,11 @@ fn note(authority: &str, log: Log, size: u64, root: Hash, time: Option<u64>) -> 
     note.into_bytes()
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     hirsel_core_ids::hex::encode(bytes)
 }
 
-fn auth() -> serde_json::Value {
+pub(crate) fn auth() -> serde_json::Value {
     json!([
         ["ed25519", b64(signer(5).public_key().as_ref())],
         "aa".repeat(32),
@@ -128,7 +128,7 @@ fn retire(root: Root) -> Vec<u8> {
     .unwrap()
 }
 
-fn bundle(rows: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn bundle(rows: &[Vec<u8>]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for row in rows {
         bytes.extend((row.len() as u16).to_be_bytes());
@@ -137,7 +137,7 @@ fn bundle(rows: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
-fn merkle(rows: &[Vec<u8>]) -> Hash {
+pub(crate) fn merkle(rows: &[Vec<u8>]) -> Hash {
     match rows {
         [] => Sha256::digest([]).into(),
         [row] => Sha256::new()
@@ -417,7 +417,7 @@ fn content(name: &str, bindings: BTreeMap<String, (Id, Binding)>) -> (Id, Root, 
     (id, root, bytes)
 }
 
-fn compress(bytes: &[u8], level: i32, checksum: bool) -> Vec<u8> {
+pub(crate) fn compress(bytes: &[u8], level: i32, checksum: bool) -> Vec<u8> {
     let mut context = zstd_safe::CCtx::create();
     context
         .set_parameter(zstd_safe::CParameter::CompressionLevel(level))
@@ -430,7 +430,7 @@ fn compress(bytes: &[u8], level: i32, checksum: bool) -> Vec<u8> {
     frame
 }
 
-fn frame_path(root: Root) -> String {
+pub(crate) fn frame_path(root: Root) -> String {
     format!("/c/{}.zst", hex(&root.0))
 }
 
@@ -608,7 +608,7 @@ struct Wire {
     connections: usize,
 }
 
-struct Server {
+pub(crate) struct Server {
     state: Arc<Mutex<Wire>>,
     proxy: String,
     stop: Option<std::sync::mpsc::Sender<()>>,
@@ -616,7 +616,7 @@ struct Server {
 }
 
 impl Server {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let configs = Arc::new(BTreeMap::from([
             (
                 ALPHA,
@@ -671,7 +671,7 @@ impl Server {
         }
     }
 
-    fn serve(&self, host: &str, path: &str, bytes: Vec<u8>) {
+    pub(crate) fn serve(&self, host: &str, path: &str, bytes: Vec<u8>) {
         self.state
             .lock()
             .unwrap()
@@ -687,7 +687,7 @@ impl Server {
             .insert(format!("{host}{path}"), Response::Redirect(location));
     }
 
-    fn take(&self) -> (Vec<String>, usize) {
+    pub(crate) fn take(&self) -> (Vec<String>, usize) {
         let mut wire = self.state.lock().unwrap();
         (
             std::mem::take(&mut wire.requests),
@@ -695,7 +695,7 @@ impl Server {
         )
     }
 
-    fn route(&self, command: &mut std::process::Command, dir: &Path) {
+    pub(crate) fn route(&self, command: &mut std::process::Command, dir: &Path) {
         let ca = dir.join("ca.pem");
         if !ca.exists() {
             fs::write(&ca, TLS_CA).unwrap();

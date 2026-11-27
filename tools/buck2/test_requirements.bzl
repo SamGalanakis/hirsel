@@ -57,7 +57,8 @@ OPENAT2_TEST_CASES = {
         "provider_tests::temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier",
         "provider_tests::rename_follows_each_sentence_of_core_md",
         "provider_s0_tests::s0_os_callbacks_by_identity_match_the_pointer_calls",
-        "tape::tests::every_s1_kind_recorded_on_the_os_replays_with_no_host",
+        "exec_slots_tests::exec_starts_a_child_while_the_program_holds_more_than_open_max_descriptors",
+        "tape::tests::sync::every_s1_kind_recorded_on_the_os_replays_with_no_host",
         "tape::tests::filesystem_observations_survive_removing_the_recorded_directory",
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [

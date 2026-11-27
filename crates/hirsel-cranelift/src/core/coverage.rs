@@ -5,7 +5,19 @@
 //! on the edge, before the jump. No CoreIR instruction can address a record.
 use super::function::Function;
 use super::*;
-use c::coverage::{RECORD_HEADER, SECTION, Sites};
+use c::coverage::{RECORD_HEADER, Sites};
+
+/// Place a record (or the entry's padding) in the retained coverage section.
+pub fn place_record(data: &mut DataDescription, format: hirsel_core_layout::ObjectFormat) {
+    data.set_align(8);
+    data.set_custom_section(c::coverage::section(format));
+    // Mach-O retains the whole section with no_dead_strip. Setting a symbol
+    // flag before Cranelift defines the data would mark the symbol undefined.
+    data.set_used(match format {
+        hirsel_core_layout::ObjectFormat::Elf => true,
+        hirsel_core_layout::ObjectFormat::MachO => false,
+    });
+}
 
 /// A coverage body's sites and the record its flags live in.
 pub(super) struct Record {
@@ -18,17 +30,14 @@ pub(super) fn declare(
     object: &mut ObjectModule,
     input: &c::Module,
     function: c::FuncId,
+    format: hirsel_core_layout::ObjectFormat,
 ) -> Result<Option<Record>> {
     let Some(sites) = c::coverage::sites(input, function).map_err(error)? else {
         return Ok(None);
     };
     let mut data = DataDescription::new();
     data.define(sites.record().into_boxed_slice());
-    data.set_align(8);
-    data.set_custom_section(SECTION);
-    // Retained against section garbage collection: a body the linker drops
-    // still counts in the denominator (`docs/coverage.md`, "The denominator").
-    data.set_used(true);
+    place_record(&mut data, format);
     let id = object.declare_anonymous_data(true, false).map_err(error)?;
     object.define_data(id, &data).map_err(error)?;
     Ok(Some(Record { sites, data: id }))

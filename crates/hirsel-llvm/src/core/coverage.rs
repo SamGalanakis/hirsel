@@ -7,8 +7,7 @@
 //! branch, beside the terminator. No CoreIR instruction can address a record.
 use super::sink::Name;
 use super::*;
-use hirsel_core_ir::coverage::{RECORD_HEADER, SECTION};
-use hirsel_core_layout::ObjectFormat;
+use hirsel_core_ir::coverage::{RECORD_HEADER, section};
 
 /// The record a body being emitted writes its flags into.
 pub(super) struct Flags {
@@ -39,13 +38,6 @@ pub(super) fn records(
             records.push(None);
             continue;
         };
-        let section = match target.object_format() {
-            ObjectFormat::Elf => SECTION,
-            // The entry bounds the section by its ELF start and stop symbols.
-            ObjectFormat::MachO => {
-                return Err(Error::Unsupported("coverage records on Mach-O".into()));
-            }
-        };
         let record: Name = format!("hirsel_cov.{f}").into();
         let bytes = sites.record();
         sink.global(&Global {
@@ -57,7 +49,7 @@ pub(super) fn records(
             init: Some(Value::Bytes(bytes)),
             align: 8,
             absolute_symbol: false,
-            section: Some(section),
+            section: Some(section(target.object_format())),
         });
         names.push(record.clone());
         records.push(Some(Flags {

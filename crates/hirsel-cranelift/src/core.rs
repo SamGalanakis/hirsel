@@ -23,6 +23,7 @@ mod calls;
 mod case;
 mod contain;
 mod coverage;
+pub use coverage::place_record as place_coverage_record;
 mod debug;
 mod drop;
 mod failure;
@@ -505,6 +506,7 @@ fn emit(
         frontend: FunctionBuilderContext::new(),
     };
     let mut debug_functions = Vec::new();
+    let format = target.object_format();
     let mut fragment = c::coverage::Fragment::default();
     for (index, f) in input.functions.iter().enumerate() {
         if f.body.is_none() {
@@ -517,7 +519,7 @@ fn emit(
         object.clear_context(context);
         context.func.signature = sig.clif.clone();
         let builder = FunctionBuilder::new(&mut context.func, builder_context);
-        let record = coverage::declare(&mut object, input, c::FuncId(index as u32))?;
+        let record = coverage::declare(&mut object, input, c::FuncId(index as u32), format)?;
         function::emit(&mut object, builder, f, sig, &tables, record.as_ref())?;
         if let Some(record) = record {
             fragment.add(input, c::FuncId(index as u32), &record.sites);
@@ -537,7 +539,6 @@ fn emit(
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
     task_entries.emit(&mut object, &tables, observer, &mut scratch)?;
     let _write = observer.enter("object_write");
-    let format = target.object_format();
     let origin = tables.site_constants.borrow().define(&mut object, format)?;
     let mut product = object.finish();
     if let Some(origin) = origin {

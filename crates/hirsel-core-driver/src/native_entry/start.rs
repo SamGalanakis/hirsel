@@ -35,7 +35,7 @@ pub(super) fn emit(
         hirsel_core_layout::Arch::Aarch64 => {}
     }
     if plan.coverage {
-        coverage_open(&mut f)?;
+        coverage_open(&mut f, target.object_format())?;
     }
     if let Some(symbol) = &plan.store_teardown_fn {
         let sig = signature(f.object, &[I64, I64, I64], Some(I8));
@@ -315,27 +315,25 @@ pub(super) fn emit(
 /// thread starts. The entry's own eight zero bytes are a record-free padding
 /// word, so the section and its linker-defined bounds exist in every coverage
 /// executable, also one whose bodies have no sites.
-fn coverage_open(f: &mut Code<'_, '_>) -> Result<()> {
+fn coverage_open(f: &mut Code<'_, '_>, format: hirsel_core_layout::ObjectFormat) -> Result<()> {
     let mut padding = DataDescription::new();
     padding.define(vec![0; 8].into_boxed_slice());
-    padding.set_align(8);
-    padding.set_custom_section(hirsel_core_ir::coverage::SECTION);
-    padding.set_used(true);
+    hirsel_cranelift::core::place_coverage_record(&mut padding, format);
     let id = f
         .object
         .declare_anonymous_data(true, false)
         .map_err(error)?;
     f.object.define_data(id, &padding).map_err(error)?;
-    let mut bound = |name: String| -> Result<Value> {
+    let mut bound = |name: &str| -> Result<Value> {
         let id = f
             .object
-            .declare_data(&name, Linkage::Import, true, false)
+            .declare_data(name, Linkage::Import, true, false)
             .map_err(error)?;
         Ok(f.address(id))
     };
-    let section = hirsel_core_ir::coverage::SECTION;
-    let start = bound(format!("__start_{section}"))?;
-    let stop = bound(format!("__stop_{section}"))?;
+    let [start, stop] = hirsel_core_ir::coverage::bounds(format);
+    let start = bound(start)?;
+    let stop = bound(stop)?;
     let length = f.b.ins().isub(stop, start);
     f.void_call("hirsel_core_coverage_open", &[start, length])
 }

@@ -44,6 +44,26 @@ pub const RECORD_MAGIC: u32 = 0x5643_4948;
 pub const RECORD_HEADER: usize = 40;
 /// The link section that holds every record.
 pub const SECTION: &str = "hirsel_cov";
+/// The section specifier accepted by both native object writers. A dedicated
+/// writable Mach-O segment keeps remapped coverage pages apart from other data.
+pub fn section(format: hirsel_core_layout::ObjectFormat) -> &'static str {
+    match format {
+        hirsel_core_layout::ObjectFormat::Elf => SECTION,
+        hirsel_core_layout::ObjectFormat::MachO => "__HIRSEL_COV,hirsel_cov,regular,no_dead_strip",
+    }
+}
+
+/// The linker-defined first and past-the-end addresses of the records.
+pub fn bounds(format: hirsel_core_layout::ObjectFormat) -> [&'static str; 2] {
+    match format {
+        hirsel_core_layout::ObjectFormat::Elf => ["__start_hirsel_cov", "__stop_hirsel_cov"],
+        hirsel_core_layout::ObjectFormat::MachO => [
+            "section$start$__HIRSEL_COV$hirsel_cov",
+            "section$end$__HIRSEL_COV$hirsel_cov",
+        ],
+    }
+}
+
 /// The name a coverage build's scope enters the native environment under.
 /// It names the map fragment's meaning too, so a fragment built under an
 /// earlier rule is never joined into a later map.

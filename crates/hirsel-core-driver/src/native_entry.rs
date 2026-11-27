@@ -444,6 +444,17 @@ impl<'a> Plan<'a> {
             )?;
         }
         let mut product = object.finish();
+        if self.coverage && self.manifest.is_none() {
+            // Bounds have literal linker names. ObjectModule would otherwise
+            // give them the C symbol prefix on Mach-O.
+            for name in hirsel_core_ir::coverage::bounds(format) {
+                let id = product
+                    .object
+                    .symbol_id(name.as_bytes())
+                    .expect("coverage bound");
+                product.object.symbol_mut(id).name = name.as_bytes().to_vec();
+            }
+        }
         unwind.write(&mut product, format).map_err(error)?;
         crate::native_debug::add_source_note(&mut product.object, source_identity);
         sites::define(&mut product.object, sources)?;

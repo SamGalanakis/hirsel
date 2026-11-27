@@ -4,9 +4,9 @@ Model-checked specifications of Hirsel Store retention (`core/programs/store/STO
 the Python crash and stream models STORE-SPEC §3.9 cites. They are opt-in, not part of pre-push:
 
 ```sh
-python3 proofs/store/check_proofs.py                # everything, about 3 minutes on 8 workers
+python3 proofs/store/check_proofs.py                # everything, about 17 minutes on 8 workers
 python3 proofs/store/check_proofs.py --save-traces  # also rewrite traces/ from the known holes
-python3 proofs/store/check_proofs.py --deep         # also the export-lease and anchor baselines (+10 min; the two run about 4.5 min each)
+python3 proofs/store/check_proofs.py --deep         # also the fork, export-lease and anchor baselines (the fork bound runs about 25 min)
 python3 proofs/store/check_proofs.py --skip-python  # TLC only
 ```
 
@@ -26,7 +26,7 @@ implementation lane starts.
 | `StoreCatchUp.tla` | Export catch-up and install over a Tiered index across a demotion and a rebuild (§3.5a, §13.10a, §13.7 D-D7-5), the holder's own replay and fold, and recovery of a commit prefix at or past the last acknowledged ticket. |
 | `StoreJanitor.tla` | Host-stream retirement: the §12.11.8 release rule that lets `low` pass a batch. |
 | `mutants.txt` | The seeded one-rule mutants and the invariant that must catch each. |
-| `traces/` | TLC counterexamples for the v2.157 holes, written by `--save-traces`. |
+| `traces/` | TLC counterexamples for the v2.157 holes, written by `--save-traces`, and `idle-predicts-drain-f1.txt`, review 3177 F1's broken idle reading. |
 | `python/` | The §3.9 executable models: `model_v2.py` (journal, checkpoint and damage cuts), `model_v25_packs.py`, `model_v29_refusal.py`, `model_v23_streams.py`, `model_v24_streams.py`, `model_v221_streams.py`, `model_v221_scope.py`, and `model-v2-mutants.txt` (the record of the hand-edited M1–M4 runs §3.9 cites). Each exits non-zero on a failed cut or a surviving mutant. |
 | `check_proofs.py` | Runs the baselines, the known holes, the mutants and the Python models. A check passes only on its expected outcome: "No error has been found", or `Invariant <name> is violated` for the named invariant. |
 
@@ -37,11 +37,11 @@ Each TLA+ module takes a `Rules` constant naming the reading of the spec it chec
 - **`StoreRetention`**
   - `v2157`: v2.157 as written. An idle step advances the cursor's row count, and a later reading probe resumes there ("Progress").
   - `v2157_restart`: the only other reading v2.157 admits. A reading probe restarts an idle-advanced cursor at row 0, which "Progress" forbids.
-  - `v2161`: the current text (v2.161, D-TI-1, as amended by v2.164). An idle cut reads nothing, never installs or moves a cursor, and retires the first selected pack whole. Promotion copies a frame of a pack an idle cut retired through the Snapshot's lease. Only a crash or a reselection resets a cursor. v2.164 (review 3177 F2–F3) lets an idle cut take every listed class-3/4 pack, selected or not; the model already lets any listed cursorless pack be selected at any cut, so these rules cover it (lineage cells are not modelled).
+  - `v2164`: the current text (v2.161, D-TI-1, as amended by v2.164, review 3177 F1–F3; STORE-SPEC §13.6 "Tiered-idle cuts", lines 5405–5411 at v2.167). Idle is decided over the installed **and added** queue rows of the generation the cut publishes (F1), so the drain's own cut is never idle. An idle cut reads nothing, never installs or moves a cursor, and takes every listed class-3/4 pack in sequence order, selected or not (F2): with budget 1 it retires the lowest-numbered listed pack whole and deletes that pack's lineage cells (F3). The drain is optional (`dr`: a refused allocation or the free budget), and a cut may drop its probe progress (`pg`: a refused allocation or the mandatory-only retry), which drops the idle step too. A live-head fork (`fork`, `unfork`) is a holder whose row's watermark files kills into holder cells, so cells exist in an idle generation when the child's head is Memory. Promotion copies a frame of a pack an idle cut retired through the Snapshot's lease. Only a crash or a reselection resets a cursor.
   - `count3157`: review 3157's alternative, which v2.161 lists under "Rejected" as sound but costlier. Idle progress is a count apart from the probe cursor, and the first non-idle cut restarts it at row 0, as a third allowed reset. Kept as a second passing baseline, so the rejection's "sound" stays checked.
 - **`StoreCatchUp`**
   - `v2157`: as written. A step ships "the collection rows it changed": for a Tiered index that is X's new root. The child installs it under the overlay its replayed frames built.
-  - `v2161`: the current text (v2.161, D-CU-1; unchanged through v2.164). A demotion step carries X as a superseded id, and `apply_steps` drops the child's overlay of X and installs the empty root (D-D7-5). A build chunk ships its entries, which the child applies against their priors as replay applies a frame. The §13.7 premise is scoped to holder reopen and log@1 followers; the prepare child is the exception.
+  - `v2161`: the current text (v2.161, D-CU-1, as amended by v2.167, review 3177 F4; §3.5a "Advance" and "Replay", §13.10a "Catch-up"). v2.167's amendments match the model as it stands: `apply_steps` drops main's overlay share only (the model has one branch and no `FORK` in the tail), the round's diff skips superseded ids (the model ships a superseded index's entries only as step rows and diffs nothing), and a superseded id whose new root is not empty is `Drift` (the model's only superseding step, the demotion, installs the empty root). A demotion step carries X as a superseded id, and `apply_steps` drops the child's overlay of X and installs the empty root (D-D7-5). A build chunk ships its entries, which the child applies against their priors as replay applies a frame. The §13.7 premise is scoped to holder reopen and log@1 followers; the prepare child is the exception.
 
 ## Invariants
 
@@ -54,6 +54,8 @@ Each TLA+ module takes a `Rules` constant naming the reading of the spec it chec
 | `IdleReachesNoFrame` | §13.6 "Tiered-idle cuts", I-TI | A Tiered-idle generation reaches no class-3/4 frame. |
 | `ProbeClaim` | §13.6 "A probe across cuts" | No participating root of the published generation names a frame behind an unfinished probe's cursor. Probe state can be rebuilt after a crash or a partial probe, because no root depends on it. |
 | `Progress` | §13.6 "Progress" | Only a crash or a `compact_ratio` reselection resets a cursor. `count3157` adds its idle reset. |
+| `CellsListed` | §13.6 "Probe completion and retirement"; "A Tiered-idle cut decides whole packs"; §13.6a T8 step 7 | No lineage cell names a pack that has left the list: a retiring cut, idle or reading, deletes the pack's cells (review 3177 F3). |
+| `IdleProgress` | §13.6 "Progress" (v2.164) | A Tiered-idle cut that keeps its progress and lists a class-3/4 pack retires at least one, selected or not (review 3177 F2). |
 | `NoFalseCorrupt` | §3.5a "Replay"; §13.10a | A catch-up round never refuses a valid store as `Corrupt`. |
 | `InstallExact` | §3.5a; §13.10a (the demotion floor) | A caught-up child holds exactly OLD's X, X's state and the row. No frame below a demotion survives it, and none above it is missed. |
 | `BackfillNoneEmpty` | §1.2 index states; L68 (g) | `Backfilling(None)` holds no entry, at OLD and in the child. |
@@ -68,18 +70,21 @@ Counts are from one run with 8 workers. `check_proofs.py` prints them and never 
 
 | Check | Outcome |
 |---|---|
-| `StoreRetention` v2161 (retention bounds) | no error; 196,378 distinct states, depth 20, about 35 s |
-| `StoreRetention` v2161, export lease on (`--deep`) | no error; 1,403,440 distinct states, depth 22, about 4.5 min |
-| `StoreRetention` v2161, anchors on, one key (`--deep`) | no error; 944,626 distinct states, depth 25, about 4.5 min |
-| `StoreRetention` count3157 (3157's rejected rule) | no error; 258,295 distinct states, depth 23, about 66 s |
+| `StoreRetention` v2164 (retention bounds) | no error; 467,410 distinct states, depth 20, about 6 min |
+| `StoreRetention` v2164, fork row on, one key, no crash (`--deep`, `retention_fork`) | no error; 1,634,153 distinct states, depth 26, about 25 min |
+| `StoreRetention` v2164, fork row on, one key, one crash (run once by hand, not in the runner) | no error; 3,662,469 distinct states, depth 26, about 60 min |
+| `StoreRetention` v2164, export lease on (`--deep`) | not rerun since the v2.164 fold (1,403,440 distinct states under the v2161 model) |
+| `StoreRetention` v2164, anchors on, one key (`--deep`) | not rerun since the v2.164 fold (944,626 distinct states under the v2161 model) |
+| `StoreRetention` count3157 (3157's rejected rule) | no error; 633,996 distinct states, depth 23, about 10 min |
 | `StoreRetention` v2157 | `RetainReachable` violated: the 3160 hole (`traces/tiered-idle-v2157.txt`) |
 | `StoreRetention` v2157_restart | `Progress` violated (`traces/tiered-idle-v2157-restart.txt`) |
 | `StoreCatchUp` v2161 | no error; 577,192 distinct states, depth 15, about 7 s |
 | `StoreCatchUp` v2157 | `SupersedePremise`, `NoFalseCorrupt` and `BackfillNoneEmpty` violated: 3150 F1 (`traces/catchup-f1-*.txt`) |
 | `StoreJanitor` | no error; 229,799 distinct states, depth 19, 2 s |
-| Mutants | 13 of 13 caught under v2.161 rules, each in under 3 s |
+| Mutants | 17 of 17 caught under the current rules, each in under 3 s; `idle_predicts_drain` is review 3177 F1's broken reading (`traces/idle-predicts-drain-f1.txt`) |
+| Reachability witnesses | 11 of 11 reached on `retention_fork` with `Track = TRUE`, each in under 3 s |
 | Python models (§3.9) | 7 of 7 pass; `model_v221_scope.py` takes about 28 s |
-| Whole default run | 168 s |
+| Whole default run | 1,030 s (shared host; the two retention baselines are most of it) |
 
 **The Tiered-idle hole (v2157).** A plain cut writes pack P1 with two frames. Overwrite the second row, then capture Snapshot S.
 A Tiered → Memory cut hands the head's Cold root to the queue. A cut pins S (promotion copies S's
@@ -106,8 +111,9 @@ run.
 
 - **One collection, small bounds.** `StoreRetention` has one Tiered collection of `NKeys` rows, one frame per row, a few stamps and packs, one crash. Pages, offsets, BLOB frames and the class-3/4 split are not modelled: a frame is a stamp at a PACK_INDEX row.
 - **Budgets of 1.** `probe_budget` and `FreeBudget` are 1 row per cut, so a probe spans cuts, which is where both holes live. Larger budgets change only the step count.
-- **Holders.** One pin name stands for every pin and fork: a FORK, the import pin and `ImportPin` follow the same promotion and probe rules. One Snapshot at a time. Anchors are optional (`WithAnchors`), and the export lease too (`WithExport`).
-- **Accounting.** `live` and the deadlists are advisory (D-ZL-1). The model keeps `live` and retires only by a finished probe, so the mutant that retires on zero live shows why. Recount probes, cells, `repair_cuts` and `compact_ratio` arithmetic are abstracted: any listed pack without a cursor may be selected at any cut.
+- **Holders.** One pin name stands for every pin of a Snapshot (the import pin and `ImportPin` follow the same promotion and probe rules), and one live-head fork of main stands for the fork rows (its child's head is frozen at the fork). One Snapshot at a time. Anchors are optional (`WithAnchors`), and the export lease too (`WithExport`).
+- **Accounting.** `live` and the deadlists are advisory (D-ZL-1). The model keeps `live` and retires only by a finished probe or a Tiered-idle cut, so the mutant that retires on zero live shows why. Lineage cells are holder cells of main's chain, one per frame (`k` the holder watermark, the pack, the stamp), filed, dropped and relocated as §13.6 says; origin cells, `m` keys and byte counts are abstracted (a frame's stamp stands for its `m`). Fork ghost rows are abstracted: `unfork` removes the row with the child's head. Recount probes, `repair_cuts` and `compact_ratio` arithmetic are abstracted: any listed pack without a cursor may be selected at any cut.
+- **Reachability witnesses.** `ev` records what the last cut did. Baselines keep only the tag `IdleProgress` reads, so it adds no states. `check_proofs.py` reruns with `Track = TRUE` and requires TLC to violate each `No…` witness in the module, so each new behaviour (an idle retirement, of an unselected pack, of a pack with a cursor, of a pack with cells; an idle generation with a holder and cells; a dropped idle step; the drain emptying the queue at a non-idle cut; a skipped drain; `unfork` queueing roots; a filed and a moved cell) occurs.
 - **Cuts are atomic.** A cut is one action in §13.6a's order. A crash inside a cut is the state before the MANIFEST rename (§3.6), which equals no cut. The pre-rename durability steps are `python/model_v2.py`'s and `model_v29_refusal.py`'s job.
 - **Catch-up.** One row and one Many index, with priors reduced to "present" and "absent". A demotion and a build chunk are the only steps. Rounds apply everything not yet shipped. The pause, ROUND and PREPARED files, `apply_round`'s kept import and the account checks are abstracted. The child's install is checked as a state predicate whenever it is caught up.
 - **Janitor.** One stream and one Place. Elections, TERM, XINDEX and the forced settle are abstracted; a crash forgets the head summary and pins are rebuilt from durable state.

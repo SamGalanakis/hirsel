@@ -2,13 +2,17 @@
 """Runner for the Store retention models (opt-in, not pre-push).
 
 Checks, in order:
-  1. TLC baselines: each module under STORE-SPEC v2.161 (and the retention model
+  1. TLC baselines: each module under the current STORE-SPEC (retention v2.164,
+     catch-up v2.161 as amended by v2.167; and the retention model
      under 3157's rejected count+restart rule), every invariant, no error
-     (`--deep` adds the export-lease and anchor baselines, about 5 minutes each).
+     (`--deep` adds the fork, export-lease and anchor baselines, 5-25 minutes each).
   2. Known holes: STORE-SPEC v2.157 as written must produce each listed
      counterexample (the Tiered-idle partial-probe hole, export catch-up F1).
   3. Mutants: every line of mutants.txt must be caught by its named invariant.
-  4. The Python crash and stream models STORE-SPEC §3.9 cites (python/).
+     The retention mutants include review 3177 F1's broken idle reading.
+  4. Reachability witnesses: each behaviour the v2.164 fold adds (the idle
+     step, lineage cells under a fork row, the optional drain) must occur.
+  5. The Python crash and stream models STORE-SPEC §3.9 cites (python/).
 
 A check passes only on the expected outcome: "pass" needs TLC's "No error has
 been found", a hole or mutant needs "Invariant <name> is violated". State counts
@@ -33,15 +37,21 @@ WORKERS = str(min(8, os.cpu_count() or 1))
 BOUNDS = {
     "retention": {
         "NKeys": "2", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "FALSE",
+        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE",
+    },
+    # The fork row and its lineage cells (review 3177 F3). One key and no crash
+    # keep it tractable; the crash interleavings are the retention bound's.
+    "retention_fork": {
+        "NKeys": "1", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "0",
+        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "TRUE",
     },
     "retention_export": {
         "NKeys": "2", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "TRUE",
+        "WithAnchors": "FALSE", "WithExport": "TRUE", "WithFork": "FALSE",
     },
     "retention_anchor": {
         "NKeys": "1", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "TRUE", "WithExport": "FALSE",
+        "WithAnchors": "TRUE", "WithExport": "FALSE", "WithFork": "FALSE",
     },
     "catchup": {
         "Vals": '{"a", "b", "c"}', "MaxWrites": "4", "MaxDemote": "2", "MaxCrash": "1",
@@ -51,7 +61,7 @@ BOUNDS = {
 
 INVARIANTS = {
     "StoreRetention": ["RetainReachable", "SnapReadable", "ImageComplete", "AckedDurable",
-                       "IdleReachesNoFrame", "ProbeClaim", "Progress"],
+                       "IdleReachesNoFrame", "ProbeClaim", "Progress", "CellsListed", "IdleProgress"],
     "StoreCatchUp": ["NoFalseCorrupt", "InstallExact", "BackfillNoneEmpty", "HolderNoCorrupt",
                      "RecoveredPrefix", "SupersedePremise"],
     "StoreJanitor": ["HeadBatchesKept"],
@@ -60,12 +70,13 @@ INVARIANTS = {
 # (name, module, rules, bounds, deep). Every invariant must hold. Deep baselines
 # (about 5 minutes each on 8 workers) run only with --deep.
 BASELINES = [
-    ("retention-v2161", "StoreRetention", "v2161", "retention", False),
+    ("retention-v2164", "StoreRetention", "v2164", "retention", False),
+    ("retention-v2164-fork", "StoreRetention", "v2164", "retention_fork", True),
     ("retention-count3157", "StoreRetention", "count3157", "retention", False),
     ("catchup-v2161", "StoreCatchUp", "v2161", "catchup", False),
     ("janitor", "StoreJanitor", None, "janitor", False),
-    ("retention-v2161-export", "StoreRetention", "v2161", "retention_export", True),
-    ("retention-v2161-anchor", "StoreRetention", "v2161", "retention_anchor", True),
+    ("retention-v2164-export", "StoreRetention", "v2164", "retention_export", True),
+    ("retention-v2164-anchor", "StoreRetention", "v2164", "retention_anchor", True),
 ]
 
 # (trace name, module, rules, bounds, invariant): v2.157 as written must violate it.
@@ -75,6 +86,17 @@ HOLES = [
     ("catchup-f1-premise", "StoreCatchUp", "v2157", "catchup", "SupersedePremise"),
     ("catchup-f1-corrupt", "StoreCatchUp", "v2157", "catchup", "NoFalseCorrupt"),
     ("catchup-f1-stale-index", "StoreCatchUp", "v2157", "catchup", "BackfillNoneEmpty"),
+]
+
+# (witness invariant, bounds): each must be violated under the current rules, with
+# Track on, so every behaviour the v2.164 fold adds is reachable (not vacuous).
+COVERS = [
+    ("NoIdleRetire", "retention_fork"), ("NoIdleUnselected", "retention_fork"),
+    ("NoIdleCursor", "retention_fork"), ("NoIdleCells", "retention_fork"),
+    ("NoIdleHolderCells", "retention_fork"), ("NoIdleDropped", "retention_fork"),
+    ("NoDrainNotIdle", "retention_fork"), ("NoDrainSkipped", "retention_fork"),
+    ("NoUnforkQueued", "retention_fork"), ("NoCellFiled", "retention_fork"),
+    ("NoCellMoved", "retention_fork"),
 ]
 
 PYTHON_MODELS = [
@@ -91,9 +113,11 @@ def classpath():
     return f"{jar}:{comm}"
 
 
-def write_cfg(path, module, rules, mutant, bounds, invariants):
+def write_cfg(path, module, rules, mutant, bounds, invariants, track):
     lines = ["SPECIFICATION Spec", "CONSTANTS"]
     lines += [f"    {k} = {v}" for k, v in BOUNDS[bounds].items()]
+    if module == "StoreRetention":
+        lines.append(f"    Track = {'TRUE' if track else 'FALSE'}")
     if rules is not None:
         lines.append(f'    Rules = "{rules}"')
     lines.append(f'    Mutant = "{mutant}"')
@@ -102,11 +126,11 @@ def write_cfg(path, module, rules, mutant, bounds, invariants):
     path.write_text("\n".join(lines) + "\n")
 
 
-def tlc(module, rules, mutant, bounds, invariants, tmp):
+def tlc(module, rules, mutant, bounds, invariants, tmp, track=False):
     tag = f"{module}-{rules}-{mutant}-{bounds}-{'-'.join(invariants) if len(invariants) == 1 else 'all'}"
     cfg = Path(tmp) / f"{tag}.cfg"
-    write_cfg(cfg, module, rules, mutant, bounds, invariants)
-    cmd = ["java", "-XX:+UseParallelGC", "-cp", classpath(), "tlc2.TLC", "-noGenerateSpecTE",
+    write_cfg(cfg, module, rules, mutant, bounds, invariants, track)
+    cmd = ["java", "-Xmx2g", "-XX:+UseParallelGC", "-cp", classpath(), "tlc2.TLC", "-noGenerateSpecTE",
            "-deadlock", "-workers", WORKERS, "-metadir", str(Path(tmp) / f"meta-{tag}"),
            "-config", str(cfg), f"{module}.tla"]
     t0 = time.monotonic()
@@ -178,6 +202,14 @@ def main():
             if not hit:
                 failures.append(f"{module}/{mutant}")
         print(f"  {caught}/{seeded} mutants caught", flush=True)
+
+        print("== reachability witnesses (each behaviour of the v2.164 fold occurs)", flush=True)
+        for inv, bounds in COVERS:
+            ok, violated, stats, out = tlc("StoreRetention", "v2164", "none", bounds, [inv], tmp, track=True)
+            hit = inv in violated
+            print(f"  {'REACHED' if hit else 'UNREACHED'}  {inv}; {stats}", flush=True)
+            if not hit:
+                failures.append(f"cover/{inv}")
 
     if not args.skip_python:
         print("== STORE-SPEC §3.9 Python models", flush=True)

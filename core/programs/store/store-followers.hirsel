@@ -16,7 +16,7 @@ type FollowCapture: shareable + send {
     store: StoreId,
     state: Arc[pages.State],
     resident: u64,
-    remote: Option[ObjectFollowHead],
+    remote: Option[host_stream.ObjectFollowHead],
     log_id: u64,
     watermark: u64
 }
@@ -59,7 +59,7 @@ fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result
     follower_response(take answer)?
 }
 
-fn follow_capture(id: StoreId, take state: pages.State, resident: u64, take remote: Option[ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
+fn follow_capture(id: StoreId, take state: pages.State, resident: u64, take remote: Option[host_stream.ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
     let shared = failure_result_from_rep(types.capacity(bound bytes option.unwrap(charge.counted(bytes[pages.State])) {
         arc.new(take state)
     }))?

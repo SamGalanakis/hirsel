@@ -1,0 +1,131 @@
+// Stream follower round and history-order reader (STORE-SPEC §12.11.9).
+// Reads sealed tails directly, reads `reg` only for live tails (or on a
+// sealed-tail 404 via §12.11.8's table), and enforces the strict causal round:
+// batch slices -> GET reg -> GET head.
+pub type FollowSlice {
+    batch_seq: u64,
+    key: String,
+    row: format.BatchRow,
+    slice: Bytes,
+    skip: u64
+}
+
+pub fn stream_follow_fetch_head(mut client: std.object.Client, authority_kind: u8, mut scratch: Bytes, deadline: u64, initial: bool) -> Result[(history.HistoryCapture, Option[format.Attach], std.object.ETag), types.Failure] waits {
+    let outcome = history.history_fetch(mut client, "head", mut scratch, deadline)
+    let tag = match take outcome {
+        Ok(meta) => meta.etag,
+        Error(Remote(NotFound)) => return Error(NotFound),
+        Error(take problem) => return Error(take problem),
+    }
+    let (take capture, take attach) = history.history_decode_head_attach(scratch)?
+    if capture.head.authority_kind != authority_kind {
+        return Error(Unsupported(int.widen(capture.head.authority_kind)))
+    }
+    if initial && authority_kind == 1 {
+        history.history_check_endpoint(mut client, deadline)?
+    }
+    history.history_check_namespace(capture, client)?
+    Ok((take capture, take attach, tag))
+}
+
+pub fn stream_follow_reg_has_row(reg: format.StreamRegister, store: types.StoreKey, epoch: u64) -> bool {
+    for row in reg.rows {
+        if types.same(row.store.hi, row.store.lo, store.hi, store.lo) && row.epoch == epoch {
+            return true
+        }
+    }
+    false
+}
+
+pub fn stream_follow_find_sealed(attach: format.Attach, sid: types.HostStreamIdRep, inc: u64) -> Option[u64] {
+    for i in 0u64 .. list.len(attach.sealed) {
+        let st = attach.sealed[i]
+        if format.stream_same(st.tail.sid, sid) && st.tail.inc == inc {
+            return Some(i)
+        }
+    }
+    None
+}
+
+// Step 1 of a follower round (§12.11.9): reads X's slices in batches from
+// `start_seq` until the first not-yet-created batch, TERM, or retired-404
+// head move, buffering slices without publishing them yet.
+pub fn stream_follow_scan_slices(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, tail: format.StreamRef, store: types.StoreKey, epoch: u64, start_seq: u64, deadline: u64) -> Result[(List[FollowSlice], u64, bool), types.Failure] waits {
+    let mut slices: List[FollowSlice] = list.new()
+    let mut seq = start_seq
+    let mut name = string.with_capacity(48)
+    loop {
+        format.stream_batch_key(mut name, tail.inc, seq)
+        let key = stream_key(lane.dir, name)
+        if let None = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+            if let Some(outcome) = stream_resolve_404(mut client, mut lane, mut buffers, place_prefix, head_witness, key, tail.inc, seq, false, false, deadline)? {
+                match outcome {
+                    TailHeadMoved => return Ok((take slices, seq, true)),
+                    TailSkipTo(low_seq) => {
+                        if low_seq > seq {
+                            seq = low_seq
+                        } else {
+                            seq += 1
+                        }
+                        continue
+                    },
+                    _ => return Ok((take slices, seq, false)),
+                }
+            }
+        }
+        let mut batch_index = match manifest.stream_batch_head(key, buffers.index, tail.sid, tail.inc, seq)? {
+            Rows(take found) => take found,
+            Term(_, _) => return Ok((take slices, seq, false)),
+        }
+        if list.len(buffers.index) < batch_index.byte_len {
+            if let None = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
+                return Error(format.disk_fault(key, 0, Absent))
+            }
+            batch_index = match manifest.stream_batch_head(key, buffers.index, tail.sid, tail.inc, seq)? {
+                Rows(take found) => take found,
+                Term(_, _) => return Error(format.disk_fault(key, 72, Malformed)),
+            }
+        }
+        for row in batch_index.rows {
+            if types.same(row.store.hi, row.store.lo, store.hi, store.lo) && row.epoch == epoch {
+                if row.len == 0 {
+                    return Error(format.disk_fault(key, row.offset, Malformed))
+                }
+                if let None = stream_tail_range(mut client, key, row.offset, row.offset + row.len, mut buffers.slice, deadline)? {
+                    return Error(format.disk_fault(key, row.offset, Absent))
+                }
+                format.stream_slice_check(key, row, buffers.slice)?
+                let skip: u64 = if seq == tail.from_seq {
+                    int.widen(tail.from_frame)
+                } else {
+                    0
+                }
+                let saved = types.copied(buffers.slice)?
+                types.capacity(list.try_reserve(mut slices, 1))?
+                list.push(mut slices, FollowSlice(batch_seq: seq, key: string.from(key), row, slice: take saved, skip))
+                break
+            }
+        }
+        seq += 1
+    }
+}
+
+pub opaque type StreamFollowMaterial {
+    store: types.StoreKey,
+    state: pages.State,
+    resident: u64,
+    remote: ObjectFollowHead,
+    watermark: u64
+}
+
+pub fn stream_follow_make_capture(head: history.HistoryHead, tag: std.object.ETag, take attach: Option[format.Attach], take head_bytes: Bytes, live_next_seq: u64, take replay: pager.JournalReplay) -> Result[StreamFollowMaterial, types.Failure] {
+    let resident = journal.journal_account(replay)?
+    let pager.JournalReplay(state: take state, next_node, ..) = take replay
+    let remote = ObjectFollowHead(current: head, tag, next_node, attach: take attach, head_bytes: take head_bytes, live_next_seq)
+    Ok(StreamFollowMaterial(store: head.store, state: take state, resident, remote: take remote, watermark: catalog.stamp_after(next_node)?))
+}
+
+pub fn stream_follow_parts(take material: StreamFollowMaterial) -> (types.StoreKey, pages.State, u64, ObjectFollowHead, u64) {
+    let StreamFollowMaterial(store, state: take state, resident, remote: take remote, watermark) = take material
+    (store, take state, resident, take remote, watermark)
+}

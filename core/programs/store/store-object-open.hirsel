@@ -147,7 +147,7 @@ fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(
     }
 }
 
-fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: StoreId, options: Options, authority_kind: u8, take authority: Bytes, mut workspace: history.HistoryBuffers, deadline: u64, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
+fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: StoreId, options: Options, authority_kind: u8, take authority: Bytes, mut workspace: history.HistoryBuffers, deadline: u64, mut link: Option[host_stream.SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
     if !options.create || (options.activation != None && options.activation != Some(0u64)) {
         return Error(NotFound)
     }
@@ -180,7 +180,7 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
         Error(Exists(existing)) if existing == "head" => return Error(Lost),
         Error(take problem) => return Error(take problem),
     }
-    history_advance_claim(mut client, mut register, authority, mut workspace, deadline)?
+    failure_result_from_rep(host_stream.history_advance_claim(mut client, mut register, authority, mut workspace, deadline))?
     Ok((take register, take initial, take admitted, take authority))
 }
 
@@ -188,31 +188,20 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
 // (X, 1), the head is created with ATTACH naming that live tail and no step
 // 5a probe (the service probed the endpoint), and X's CLAIM is its first
 // frame in the stream. Open returns once that frame is acked.
-fn history_stream_genesis(mut client: std.object.Client, mut link: SlotLink, id: StoreId, holder: StoreId, authority_kind: u8, authority: Bytes, mut workspace: history.HistoryBuffers, deadline: u64, limits: StoreLimits) -> Result[history.HistoryRegister, Error] waits {
+fn history_stream_genesis(mut client: std.object.Client, mut link: host_stream.SlotLink, id: StoreId, holder: StoreId, authority_kind: u8, authority: Bytes, mut workspace: history.HistoryBuffers, deadline: u64, limits: StoreLimits) -> Result[history.HistoryRegister, Error] waits {
     let place_prefix = std.object.bucket_config(client).prefix
-    let (inc, first_seq) = slot_attach(mut link, id, 1, place_prefix, limits)?
-    let attach = format.Attach(settles: 0, live: Some(format.StreamRef(sid: host_stream_id_to_rep(link.sid), inc, from_seq: first_seq, from_frame: 0)), sealed: list.new())
+    let (inc, first_seq) = failure_result_from_rep(host_stream.slot_attach(mut link, store_key_to_rep(id), 1, place_prefix, limits_to_rep(limits)))?
+    let attach = format.Attach(settles: 0, live: Some(format.StreamRef(sid: host_stream.slot_sid(link), inc, from_seq: first_seq, from_frame: 0)), sealed: list.new())
     let created = failure_result_from_rep(history.history_publish_genesis(mut client, store_key_to_rep(id), store_key_to_rep(holder), authority_kind, authority, mut workspace, deadline, limits_to_rep(limits), Some(take attach)))
     let register = match take created {
         Ok(take granted) => take granted,
         Error(Exists(existing)) if existing == "head" => return Error(Lost),
         Error(take problem) => return Error(take problem),
     }
-    slot_claim_frame(mut workspace.packet, 1, holder)
-    slot_send(link, workspace.packet, 0)?
-    slot_wait(mut link, 0)?
+    host_stream.slot_claim_frame(mut workspace.packet, 1, store_key_to_rep(holder))
+    failure_result_from_rep(host_stream.slot_send(link, workspace.packet, 0))?
+    failure_result_from_rep(host_stream.slot_wait(mut link, 0))?
     Ok(take register)
-}
-
-fn history_advance_claim(mut client: std.object.Client, mut register: history.HistoryRegister, authority: Bytes, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
-    failure_result_from_rep(history.history_claim_packet(mut workspace.packet, history.register_head(register)))?
-    let advanced = failure_result_from_rep(history.history_register_advance(mut client, mut register, authority, mut workspace, deadline))
-    match take advanced {
-        Ok(HistoryApplied(_)) => Ok(()),
-        Error(Fenced(_)) => Error(Lost),
-        Error(take problem) => Error(take problem),
-        _ => Error(Undecided),
-    }
 }
 
 fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, deadline: u64) waits {
@@ -227,7 +216,7 @@ fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, dead
 // With `link`, the head has no ATTACH and the Place is opened streamed
 // (§12.11.5, "No ATTACH"): the replace writes ATTACH naming the slot's
 // stream, and the CLAIM rides the stream as X's first frame there.
-fn history_open_existing[T](mut read_source: history.ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: history.HistoryCapture, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: history.HistoryBuffers, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
+fn history_open_existing[T](mut read_source: history.ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: history.HistoryCapture, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: history.HistoryBuffers, mut link: Option[host_stream.SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
     let pair = first.head.pair
     let mut selected = take first
     let mut admitted: Option[(history.HistoryHead, pager.JournalReplay)] = None
@@ -287,12 +276,12 @@ fn history_open_existing[T](mut read_source: history.ObjectPackRead, c: Clock, r
                     },
                     None => {
                         let place_prefix = std.object.bucket_config(read_source.client).prefix
-                        let (inc, next_seq) = slot_attach(mut attaching, store_key_from_rep(head.store), head.pair.epoch + 1, place_prefix, limits_from_rep(replay.limits))?
+                        let (inc, next_seq) = failure_result_from_rep(host_stream.slot_attach(mut attaching, store_key_to_rep(store_key_from_rep(head.store)), head.pair.epoch + 1, place_prefix, limits_to_rep(limits_from_rep(replay.limits))))?
                         granted = Some((head.pair.epoch + 1, inc, next_seq))
                         (inc, next_seq)
                     },
                 }
-                Some(format.Attach(settles: 0, live: Some(format.StreamRef(sid: host_stream_id_to_rep(attaching.sid), inc, from_seq: next_seq, from_frame: 0)), sealed: list.new()))
+                Some(format.Attach(settles: 0, live: Some(format.StreamRef(sid: host_stream.slot_sid(attaching), inc, from_seq: next_seq, from_frame: 0)), sealed: list.new()))
             },
             None => None,
         }
@@ -301,15 +290,15 @@ fn history_open_existing[T](mut read_source: history.ObjectPackRead, c: Clock, r
             HistoryClaimed(take result) => {
                 let mut register = take result
                 if let Some(mut attaching) = link {
-                    slot_claim_frame(mut workspace.packet, history.register_head(register).pair.epoch, holder)
-                    slot_send(attaching, workspace.packet, 0)?
-                    match slot_wait(mut attaching, 0) {
+                    host_stream.slot_claim_frame(mut workspace.packet, history.register_head(register).pair.epoch, store_key_to_rep(holder))
+                    failure_result_from_rep(host_stream.slot_send(attaching, workspace.packet, 0))?
+                    match failure_result_from_rep(host_stream.slot_wait(mut attaching, 0)) {
                         Ok(()) => (),
                         Error(Fenced(_)) => return Error(Lost),
                         Error(take problem) => return Error(take problem),
                     }
                 } else {
-                    history_advance_claim(mut read_source.client, mut register, authority, mut workspace, read_source.deadline)?
+                    failure_result_from_rep(host_stream.history_advance_claim(mut read_source.client, mut register, authority, mut workspace, read_source.deadline))?
                 }
                 return Ok((take register, take replay, take admitted_state, take authority))
             },
@@ -345,14 +334,14 @@ fn history_rebase_suffix(mut read_source: history.ObjectPackRead, head: history.
 fn history_open_register(mut read_source: history.ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: history.HistoryBuffers, op_ms: u64) -> Result[(history.HistoryRegister, pager.JournalReplay), Error] waits {
     let config = history.object_history_config(std.object.bucket_config(read_source.client), string.from(requested_level))
     let authority = failure_result_from_rep(history.history_config_bytes(config))?
-    let mut unattached: Option[SlotLink] = None
+    let mut unattached: Option[host_stream.SlotLink] = None
     let (take register, take replay, _, _) = history_open_with(mut read_source, c, r, options, config.levels, 1, take authority, mut workspace, op_ms, mut unattached, fn(id: StoreId, initial: pager.JournalReplay) -> Result[(), Error] {
         Ok(())
     })?
     Ok((take register, take replay))
 }
 
-fn history_open_with[T](mut read_source: history.ObjectPackRead, c: Clock, r: Random, options: Options, requested_levels: List[String], authority_kind: u8, take genesis_authority: Bytes, mut workspace: history.HistoryBuffers, op_ms: u64, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
+fn history_open_with[T](mut read_source: history.ObjectPackRead, c: Clock, r: Random, options: Options, requested_levels: List[String], authority_kind: u8, take genesis_authority: Bytes, mut workspace: history.HistoryBuffers, op_ms: u64, mut link: Option[host_stream.SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
     let claim_ms = if options.claim_ms == 0 {
         op_ms
     } else {

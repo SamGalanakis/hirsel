@@ -55,14 +55,17 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     }
     let (take parked, take resume) = deploy_result(take_object_journal_with(mut db, true))?
     let mut lane = take parked
+    let mut report: Option[host_stream.DeferredSlotReport] = None
     let settle_err: Option[Error] = if is_attached && !has_sealed {
         let group_bytes: u64 = int.widen(disk_state(db).options.group_bytes)
         let group_commits: u64 = int.widen(disk_state(db).options.group_commits)
         let last_seq = match view lane.stream {
-            Some(link) => link.last_batch_seq,
+            Some(link) => host_stream.slot_last_batch(link),
             None => 0u64,
         }
-        match stream_settle(mut lane, last_seq, last_seq + 1, false, group_bytes, group_commits) {
+        let (take settled, take outcome) = stream_settle(take lane, last_seq, last_seq + 1, false, group_bytes, group_commits)
+        lane = take settled
+        match take outcome {
             Ok(SettleApplied) => {
                 let fseq = match history.register_attach(lane.register) {
                     Some(a) => match a.live {
@@ -73,13 +76,13 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
                 }
                 object_journal_stream_trim_batches(mut lane, fseq)
                 if let Some(link) = view lane.stream {
-                    slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), history.register_attach(lane.register), last_seq)
+                    report = Some(host_stream.defer_slot_head(link, history.register_head(lane.register).store, history.register_attach(lane.register), last_seq))
                 }
                 None
             },
             Ok(SettleFenced(moved_epoch, cutoff)) => {
                 if let Some(link) = view lane.stream {
-                    slot_report(link, ReportFenced(link.slot, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff))
+                    report = Some(host_stream.defer_slot_report(link, ReportFenced(host_stream.slot_number(link), history.register_head(lane.register).store, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff)))
                 }
                 Some(Fenced(history.register_head(lane.register).pair.epoch))
             },
@@ -91,6 +94,9 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     }
     if let Some(take problem) = take settle_err {
         deploy_result(return_object_journal(take lane, resume))?
+        if let Some(take completion) = take report {
+            host_stream.deliver_slot_report(take completion)
+        }
         return Error(Store(take problem))
     }
     let (lifetime, stop): (Sender[()], Receiver[()]) = channel.new(1)
@@ -105,6 +111,9 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
         other => take other,
     }
     deploy_result(return_object_journal(take lane, resume))?
+    if let Some(take completion) = take report {
+        host_stream.deliver_slot_report(take completion)
+    }
     let job = captured?
     let held = arc.share(job.lease)
     write_disk(mut db.disk, (take lifetime, take held), scoped fn(mut state: DiskState, take grant: (Sender[()], Arc[manifest.ExportLease])) {

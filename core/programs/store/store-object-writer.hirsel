@@ -126,7 +126,7 @@ type ObjectWriterOpen {
     options: Options,
     levels: List[String],
     weak: Option[WeakWriterOpen],
-    link: Option[SlotLink]
+    link: Option[host_stream.SlotLink]
 }
 
 fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, c: Clock, r: Random, options: Options, level_name: String, op_ms: u64, sim: Option[(List[String], LevelSync)], authority_kind: u8, stream: Option[JournalSlot]) -> Result[ObjectWriterOpen, Error] waits {
@@ -209,7 +209,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, 
     })?
     let (take register, take opened, take started, take metadata) = history_open_with(mut read_source, c, r, options, declaration.levels, authority_kind, take genesis_authority, mut workspace, op_ms, mut link, scoped fn(id: StoreId, replay: pager.JournalReplay) -> Result[Db, Error] {
         check_stream_quota(replay.state.tips[0u64].roots.streams, options.streams_max)?
-        let state = copy_follow_state(replay.state)?
+        let state = failure_result_from_rep(host_stream.copy_follow_state(replay.state))?
         let mut prepared = disk_allocation(scoped fn() -> Result[Db, Error] {
             Ok(empty_db(c, id, options))
         })?
@@ -222,7 +222,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, 
         Ok(take prepared)
     })?
     if let Some(mut attaching) = link {
-        if let Some(take answers) = replace(mut attaching.answers, None) {
+        if let Some(take answers) = host_stream.slot_take_answers(mut attaching) {
             let relay_input = SlotRelayInput(answers: take answers, journal: channel.sender(frames))
             timer = match task.try_spawn(tasks, bytes OBJECT_TIMER_GRANT, take relay_input, slot_relay) {
                 Ok(take running) => Some(take running),
@@ -427,7 +427,53 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     prepare_holder_slot(mut db, delta)?
     let (take paused, take resume) = take_object_journal_with(mut db, true)?
     let mut lane = take paused
-    let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, target, pack_bytes, limit)
+    let mut observed: Option[host_stream.DeferredSlotReport] = None
+    let mut completion: Option[host_stream.DeferredSlotReport] = None
+    let is_attached = match history.register_attach(lane.register) {
+        Some(_) => true,
+        None => false,
+    }
+    let settle: Result[(), Error] = if lane.archive_on != 0 && is_attached {
+        let group_bytes: u64 = int.widen(disk_state(db).options.group_bytes)
+        let group_commits: u64 = int.widen(disk_state(db).options.group_commits)
+        let last_seq = match view lane.stream {
+            Some(link) => host_stream.slot_last_batch(link),
+            None => 0u64,
+        }
+        let (take settled, take outcome) = stream_settle(take lane, last_seq, last_seq + 1, false, group_bytes, group_commits)
+        lane = take settled
+        match take outcome {
+            Ok(SettleApplied) => {
+                let fseq = match history.register_attach(lane.register) {
+                    Some(a) => match a.live {
+                        Some(r) => r.from_seq,
+                        None => 0u64,
+                    },
+                    None => 0u64,
+                }
+                object_journal_stream_trim_batches(mut lane, fseq)
+                if let Some(link) = view lane.stream {
+                    observed = Some(host_stream.defer_slot_head(link, history.register_head(lane.register).store, history.register_attach(lane.register), last_seq))
+                }
+                Ok(())
+            },
+            Ok(SettleFenced(moved_epoch, cutoff)) => {
+                let held = history.register_head(lane.register)
+                if let Some(link) = view lane.stream {
+                    completion = Some(host_stream.defer_slot_report(link, ReportFenced(host_stream.slot_number(link), held.store, held.pair.epoch, moved_epoch, cutoff)))
+                }
+                Error(Fenced(held.pair.epoch))
+            },
+            Ok(SettleNotApplied) => Error(Undecided),
+            Error(take problem) => Error(take problem),
+        }
+    } else {
+        Ok(())
+    }
+    let outcome = match take settle {
+        Ok(()) => object_cut_work(mut db, mut lane, take delta, write_seal, target, pack_bytes, limit, mut observed, mut completion),
+        Error(take problem) => Error(take problem),
+    }
     if let Error(problem) = outcome {
         if let Some(_) = history.register_terminal(lane.register) {
             let saved: Error = clone(problem)
@@ -439,45 +485,20 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
         }
     }
     return_object_journal(take lane, resume)?
+    if let Some(take head_report) = take observed {
+        host_stream.deliver_slot_report(take head_report)
+    }
+    if let Some(take completion_report) = take completion {
+        host_stream.deliver_slot_report(take completion_report)
+    }
     take outcome
 }
 
-fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, target: Option[manifest.TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, target: Option[manifest.TargetLimits], pack_bytes: u64, limit: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[Ticket, Error] waits {
     // Under archival (§12.11.11 M6, §13.9), an attached Place settles every
     // sealed tail in order and then its live tail as GROUP entries BEFORE
     // sealing the window's archive segment so the segment names every commit.
     let was_archived = lane.archive_on != 0
-    if was_archived {
-        let is_att = match history.register_attach(lane.register) {
-            Some(_) => true,
-            None => false,
-        }
-        if is_att {
-            let group_bytes: u64 = int.widen(disk_state(db).options.group_bytes)
-            let group_commits: u64 = int.widen(disk_state(db).options.group_commits)
-            let last_seq = match view lane.stream {
-                Some(link) => link.last_batch_seq,
-                None => 0u64,
-            }
-            match stream_settle(mut lane, last_seq, last_seq + 1, false, group_bytes, group_commits)? {
-                SettleApplied => {
-                    let fseq = match history.register_attach(lane.register) {
-                        Some(a) => match a.live {
-                            Some(r) => r.from_seq,
-                            None => 0u64,
-                        },
-                        None => 0u64,
-                    }
-                    object_journal_stream_trim_batches(mut lane, fseq)
-                    if let Some(link) = view lane.stream {
-                        slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), history.register_attach(lane.register), last_seq)
-                    }
-                },
-                SettleFenced(_, _) => return Error(Fenced(history.register_head(lane.register).pair.epoch)),
-                SettleNotApplied => return Error(Undecided),
-            }
-        }
-    }
     let old = history.register_head(lane.register)
     let seq = failure_result_from_rep(history.history_next_id(old.entry.seq))?
     let next_archive_on = match object_state(db).pending_archive_on {
@@ -534,7 +555,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         page_record.sweep = lane.sweep
         page_record.archive_on = next_archive_on
         if was_archived {
-            let _ = history_write_archive_segment(mut lane.client, old, seq, old.pair.epoch, old.authority_kind, mut workspace, now)?
+            let _ = failure_result_from_rep(host_stream.history_write_archive_segment(mut lane.client, old, seq, old.pair.epoch, old.authority_kind, mut workspace, now))?
         }
         let mut candidate_locator = disk_allocation(scoped fn() -> Result[history.HistoryLocator, Error] {
             failure_result_from_rep(history.locator_for_cut(refs))
@@ -564,7 +585,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
                 None
             } else {
                 match lane.stream {
-                    Some(link) => Some(format.Attach(settles: old_attach.settles, live: Some(format.StreamRef(sid: host_stream_id_to_rep(link.sid), inc: link.inc, from_seq: link.last_batch_seq + 1, from_frame: 0)), sealed: list.new())),
+                    Some(link) => Some(format.Attach(settles: old_attach.settles, live: Some(format.StreamRef(sid: host_stream.slot_sid(link), inc: host_stream.slot_inc(link), from_seq: host_stream.slot_last_batch(link) + 1, from_frame: 0)), sealed: list.new())),
                     None => Some(clone(old_attach)),
                 }
             },
@@ -574,9 +595,9 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         match take advanced {
             Ok(HistoryApplied(_)) => {
                 if let Some(link) = lane.stream {
-                    slot_report_head(link, store_key_from_rep(old.store), history.register_attach(lane.register), link.last_batch_seq)
+                    observed = Some(host_stream.defer_slot_head(link, old.store, history.register_attach(lane.register), host_stream.slot_last_batch(link)))
                     if drop_on_cut {
-                        slot_report(link, ReportDetached(link.slot, old.pair.epoch))
+                        completion = Some(host_stream.defer_slot_report(link, ReportDetached(host_stream.slot_number(link), old.store, old.pair.epoch)))
                     }
                 }
                 Ok((take pages, take candidate_locator, generation))

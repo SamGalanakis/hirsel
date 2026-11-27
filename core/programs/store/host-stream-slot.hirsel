@@ -1,0 +1,494 @@
+// What a Place sends on its slot: its attachment with its Place prefix and the
+// connection the service answers on, then each frame as its first chunk and the rest.
+type SlotMsg: cross = SlotAttach(u64, u64, u64, String, Client[journal.SlotAck]) | SlotFrame(u64, u64, Bytes) | SlotMore(Bytes)
+
+// Out-of-band head reports from a Place to the service (§12.11.12), carried on
+// a dedicated shared connection so queued frames on a stalled slot never block
+// settle, cut or fence replies.
+pub type SlotReport: cross = ReportSettled(u32, types.StoreKey, u64, u64, bool, u64, u64, u32) | ReportFenced(u32, types.StoreKey, u64, u64, Option[u64]) | ReportDetached(u32, types.StoreKey, u64) | ReportHead(u32, u64, u64, u64, u64, HeadRanges)
+
+// The doorbell item that wakes the service for its control channel.
+const STREAM_CONTROL_RING: u32 = 0xFFFFFFFF
+
+// Fund two full frame chunks in a slot. Round down so MEM-24's rounded
+// byte charges for both chunks fit even when slot_bytes is unaligned.
+const STREAM_SLOT_CHUNKS: u64 = 2
+
+const STREAM_SLOT_ACKS: u64 = 8
+
+const STREAM_CONNECTION_BASE: u64 = 64
+
+const STREAM_MIN_SLOT_BYTES: u64 = 4096
+
+fn stream_slot_chunk(room: u64) -> u64 {
+    room / STREAM_SLOT_CHUNKS / bytes[u64] * bytes[u64]
+}
+
+// The service's own ring when its stall poll is due (§12.11.13), and the
+// alarm task that rings it.
+const STREAM_POLL_RING: u32 = 0xFFFFFFFE
+
+const STREAM_TIMER_BYTES: u64 = 4096
+
+type ServiceControl: send = NewSlot(Sender[Result[(Client[SlotMsg], u32), types.Failure]]) | NewReservedSlot(Sender[Result[(Client[SlotMsg], u32), types.Failure]]) | JanitorPoll(Sender[List[JanitorAsk]]) | JanitorStill(JanitorAsk, Sender[bool]) | StopService
+
+const STREAM_SERVICE_FIXED: u64 = 262144
+
+pub fn stream_plan_check(plan: ServicePlan, op_ms: u64) -> Result[(), types.Failure] {
+    if string.byte_len(plan.prefix) > 1024 {
+        return Error(Limit(Name))
+    }
+    let limits = plan.limits
+    let batch = plan.batching.max_batch_bytes
+    if batch < types.LIMIT_VALUE_FLOOR + types.LIMIT_FRAME_ROOM + format.stream_batch_overhead(1) || batch > 4294967296 {
+        return Error(Stream(Bound(MaxBatchBytes)))
+    }
+    let slots: u64 = int.widen(limits.max_slots)
+    if slots == 0 || slots > format.STREAM_MAX_SLOTS {
+        return Error(Stream(Bound(MaxSlots)))
+    }
+    if limits.hold_ms / 4 < op_ms {
+        return Error(Stream(Bound(HoldMs)))
+    }
+    if limits.idle_poll_ms == 0 || limits.idle_poll_ms > limits.hold_ms {
+        return Error(Stream(Bound(IdlePollMs)))
+    }
+    if limits.index_every == 0 {
+        return Error(Stream(Bound(IndexEvery)))
+    }
+    if limits.slot_bytes < STREAM_MIN_SLOT_BYTES {
+        return Error(Stream(Bound(SlotBytes)))
+    }
+    if limits.max_pins < 2 {
+        return Error(Stream(Bound(MaxPins)))
+    }
+    Ok(())
+}
+
+// The stream root as a key prefix: the plan's prefix with one `/` after it.
+pub fn stream_root_dir(plan_prefix: String) -> String {
+    let mut dir = string.with_capacity(string.byte_len(plan_prefix) + 1)
+    string.push(mut dir, plan_prefix)
+    if string.byte_len(plan_prefix) != 0 && !string.ends_with(plan_prefix, "/") {
+        string.push_char(mut dir, '/')
+    }
+    take dir
+}
+
+// Keys under one prefix are listed by the other when either is a prefix of
+// the other, so the Place's genesis LIST and the stream's keys would meet.
+pub fn stream_overlaps(place: String, root: String) -> bool {
+    string.starts_with(place, root) || string.starts_with(root, place)
+}
+
+// The Place side of an attached open: its slot and the connection the
+// service answers on (§12.11.12). `inc` is the incarnation that granted it.
+// `root` is the stream root from the bucket's top and `max_rows` the
+// register bound a claimant's hold applies (§12.11.2). `last_batch_seq` tracks
+// the highest batch seq acked for this Place.
+pub opaque type SlotLink: send {
+    data: Client[SlotMsg],
+    bell: Client[u32],
+    reports: Client[SlotReport],
+    slot: u32,
+    sid: types.HostStreamIdRep,
+    chunk: u64,
+    max_batch_bytes: u64,
+    answers: Option[Inbox[journal.SlotAck]],
+    answer_client: Option[Client[journal.SlotAck]],
+    inc: u64,
+    last_batch_seq: u64,
+    commit_batches: List[u64],
+    root: String,
+    max_rows: u64
+}
+
+pub fn slot_ring(link: SlotLink) {
+    let _ = conn.try_send(link.bell, link.slot)
+}
+
+pub fn slot_report(link: SlotLink, take report: SlotReport) {
+    let _ = conn.try_send(link.reports, take report)
+    slot_ring(link)
+}
+
+pub fn slot_report_head(link: SlotLink, store: types.StoreKey, attach: Option[format.Attach], obs_seq: u64) {
+    let ranges = stream_attach_head_ranges(attach, link.sid)
+    slot_report(link, ReportHead(link.slot, store.hi, store.lo, link.inc, obs_seq, ranges))
+}
+
+// The grant (§12.11.5): the service registers (store, epoch, place_prefix) on
+// this slot and names its incarnation and the next_seq batch seq.
+pub fn slot_attach(mut link: SlotLink, store: types.StoreKey, epoch: u64, place_prefix: String, limits: types.LimitsRep) -> Result[(u64, u64), types.Failure] waits {
+    if limits.frame + format.stream_batch_overhead(1) > link.max_batch_bytes {
+        return Error(Stream(Bound(MaxBatchBytes)))
+    }
+    // The service holds the only answer client, so a service that ends
+    // closes the Place's answers.
+    let Some(take answer_client) = replace(mut link.answer_client, None) else {
+        return Error(format.disk_fault("slot", 0, Malformed))
+    }
+    if let Error(_) = conn.send(link.data, SlotAttach(store.hi, store.lo, epoch, string.from(place_prefix), take answer_client)) {
+        return Error(Io(Closed))
+    }
+    slot_ring(link)
+    let Some(answers) = view link.answers else {
+        return Error(format.disk_fault("slot", 0, Malformed))
+    }
+    match conn.receive(answers) {
+        Ok(SlotGranted(inc, next_seq)) => {
+            link.inc = inc
+            if next_seq > 0 && link.last_batch_seq + 1 < next_seq {
+                link.last_batch_seq = next_seq - 1
+            }
+            Ok((inc, next_seq))
+        },
+        Ok(SlotLatched(cause)) => Error(Latched(cause)),
+        Ok(_) => Error(format.disk_fault("slot", 0, Malformed)),
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+// Sends one unsealed frame in chunks of at most half the slot's room.
+pub fn slot_send(link: SlotLink, raw: Bytes, sequence: u64) -> Result[(), types.Failure] waits {
+    let total = list.len(raw)
+    let mut at = 0u64
+    loop {
+        let end = order.min(at + link.chunk, total)
+        let mut piece = manifest.disk_allocation(scoped fn() -> Result[Bytes, types.Failure] {
+            Ok(list.with_capacity(end - at))
+        })?
+        list.append(mut piece, list.slice(raw, at, end))
+        let message = if at == 0 {
+            SlotFrame(total, sequence, take piece)
+        } else {
+            SlotMore(take piece)
+        }
+        match conn.try_send(link.data, take message) {
+            Ok(()) => (),
+            Error(Full(take queued)) => {
+                slot_ring(link)
+                if let Error(_) = conn.send(link.data, take queued) {
+                    return Error(Io(Closed))
+                }
+            },
+            Error(Closed(_)) => return Error(Io(Closed)),
+        }
+        at = end
+        if at >= total {
+            break
+        }
+    }
+    Ok(())
+}
+
+// Waits for the service's decision on the frames sent through `sequence`
+// (used during open before the relay task takes `link.answers`).
+pub fn slot_wait(mut link: SlotLink, sequence: u64) -> Result[(), types.Failure] waits {
+    slot_ring(link)
+    let Some(answers) = view link.answers else {
+        return Error(format.disk_fault("slot", 0, Malformed))
+    }
+    loop {
+        match conn.receive(answers) {
+            Ok(SlotAcked(through, batch_seq)) => {
+                link.last_batch_seq = order.max(link.last_batch_seq, batch_seq)
+                if through >= sequence {
+                    return Ok(())
+                }
+            },
+            Ok(SlotFenced(epoch, _, missing)) => return if missing {
+                Error(Undecided)
+            } else {
+                Error(Fenced(epoch))
+            },
+            Ok(SlotLatched(cause)) => return Error(Latched(cause)),
+            Ok(SlotPollHead) => (),
+            Ok(SlotSettle(_, _, _)) => (),
+            Ok(SlotGranted(_, _)) => return Error(format.disk_fault("slot", 0, Malformed)),
+            Error(_) => return Error(Io(Closed)),
+        }
+    }
+}
+
+// X's CLAIM frame (§12.11.5), unsealed: the service seals it in its batch.
+pub fn slot_claim_frame(mut raw: Bytes, epoch: u64, holder: types.StoreKey) {
+    list.clear(mut raw)
+    list.put_word_le(mut raw, 0x0040u16)
+    list.fill(mut raw, 14, 0u8)
+    list.put_word_le(mut raw, epoch)
+    list.put_word_le(mut raw, holder.hi)
+    list.put_word_le(mut raw, holder.lo)
+}
+
+pub opaque type ServiceSlotHandle: cross {
+    data: Client[SlotMsg],
+    bell: Client[u32],
+    reports: Client[SlotReport],
+    slot: u32,
+    sid: types.HostStreamIdRep,
+    endpoint: String,
+    aws_region: String,
+    bucket: String,
+    root: String,
+    slot_bytes: u64,
+    max_batch_bytes: u64,
+    max_rows: u64
+}
+
+pub opaque type ServiceHandle {
+    task: Task[StreamServiceEnd],
+    control: Sender[ServiceControl],
+    bell: Client[u32],
+    reports: Client[SlotReport],
+    workers: Option[std.object.Workers],
+    sid: types.HostStreamIdRep,
+    endpoint: String,
+    aws_region: String,
+    bucket: String,
+    root: String,
+    slot_bytes: u64,
+    max_batch_bytes: u64,
+    max_rows: u64
+}
+
+type ServiceBatching: cross {
+    max_wait_ms: u64,
+    max_batch_bytes: u64
+}
+
+type ServiceLimits: cross {
+    max_slots: u32,
+    max_pins: u32,
+    hold_ms: u64,
+    idle_poll_ms: u64,
+    index_every: u64,
+    pin_ttl_s: u64,
+    slot_bytes: u64
+}
+
+pub opaque type ServicePlan: cross {
+    sid: types.HostStreamIdRep,
+    prefix: String,
+    batching: ServiceBatching,
+    limits: ServiceLimits
+}
+
+pub fn service_plan(sid: types.HostStreamIdRep, prefix: String, max_wait_ms: u64, max_batch_bytes: u64, max_slots: u32, max_pins: u32, hold_ms: u64, idle_poll_ms: u64, index_every: u64, pin_ttl_s: u64, slot_bytes: u64) -> ServicePlan {
+    ServicePlan(sid, prefix: string.from(prefix), batching: ServiceBatching(max_wait_ms, max_batch_bytes), limits: ServiceLimits(max_slots, max_pins, hold_ms, idle_poll_ms, index_every, pin_ttl_s, slot_bytes))
+}
+
+pub fn validate_slot(slot: ServiceSlotHandle, client: std.object.Client) -> Result[(), types.Failure] {
+    let place = std.object.bucket_config(client)
+    if place.endpoint != slot.endpoint || place.aws_region != slot.aws_region || place.bucket != slot.bucket {
+        return Error(Foreign)
+    }
+    if stream_overlaps(place.prefix, slot.root) {
+        return Error(Stream(Overlap))
+    }
+    Ok(())
+}
+
+pub fn stream_service_size(max_batch_bytes: u64, max_slots: u32, room: u64) -> u64 {
+    let batch = int.saturating_add(max_batch_bytes, format.BINDING_BYTES + 64)
+    let reg = format.REG_LIMIT + 88 + format.BINDING_BYTES + 64
+    let slots: u64 = int.widen(max_slots)
+    let slot_headers = STREAM_CONNECTION_BASE + STREAM_SLOT_CHUNKS * bytes[SlotMsg] + bytes[ServiceSlot]
+    let per_slot = int.saturating_add(room, slot_headers + stream_slot_chunk(room))
+    let fixed = STREAM_CONNECTION_BASE + (slots + 1) * bytes[u32] + STREAM_SERVICE_FIXED + STREAM_TIMER_BYTES
+    let buffers = int.saturating_mul(3, order.max(batch, reg))
+    int.saturating_add(int.saturating_add(buffers, fixed), int.saturating_mul(slots, per_slot))
+}
+
+pub fn stream_service_start(tasks: Tasks, take client: std.object.Client, plan: ServicePlan, budget: u64, c: Clock, kind: u8, holder: types.StoreKey, op_ms: u64) -> Result[ServiceHandle, (std.object.Client, types.Failure)] waits {
+    let home = std.object.bucket_config(client)
+    let mut root = string.with_capacity(string.byte_len(home.prefix) + string.byte_len(plan.prefix) + 1)
+    string.push(mut root, home.prefix)
+    string.push(mut root, stream_root_dir(plan.prefix))
+    let slots: u64 = int.widen(plan.limits.max_slots)
+    let made: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(slots + 1, bytes 0)
+    let (take bell, take rings) = match take made {
+        Ok(take pair) => take pair,
+        Error(e) => return Error((take client, Full(Allocation(e)))),
+    }
+    let made_reports: Result[(Client[SlotReport], Inbox[SlotReport]), Capacity] = conn.new(2 * slots + 4, bytes 0)
+    let (take report_client, take report_inbox) = match take made_reports {
+        Ok(take pair) => take pair,
+        Error(e) => return Error((take client, Full(Allocation(e)))),
+    }
+    let (control_send, control_receive): (Sender[ServiceControl], Receiver[ServiceControl]) = channel.new(slots + 1)
+    let (ready_send, ready_receive): (Sender[Result[(), types.Failure]], Receiver[Result[(), types.Failure]]) = channel.new(1)
+    let (take requests, take workers) = std.object.split(take client)
+    let input = StreamServiceInput(requests: take requests, clock: c, plan: clone(plan), dir: stream_root_dir(plan.prefix), authority_kind: kind, holder: holder, op_ms, control: take control_receive, rings: take rings, reports: take report_inbox, ready: take ready_send, tasks, bell: conn.client(bell))
+    let running = match task.try_spawn(tasks, bytes budget, take input, stream_service_task) {
+        Ok(take handle) => take handle,
+        Error((problem, take back)) => {
+            let StreamServiceInput(requests: take returned, ..) = take back
+            let restored = std.object.attach(take returned, take workers)
+            return Error((take restored, Full(Allocation(problem))))
+        },
+    }
+    let started = match channel.receive(ready_receive) {
+        Ok(take outcome) => take outcome,
+        Error(_) => Error(Io(Closed)),
+    }
+    if let Error(take problem) = started {
+        let ended = task.join(take running)
+        return match take ended {
+            Ok(StreamServiceEnd(requests: take returned, ..)) => {
+                let restored = std.object.attach(take returned, take workers)
+                Error((take restored, take problem))
+            },
+            Error(_) => fail("journal_service: the service task failed at its start"),
+        }
+    }
+    Ok(ServiceHandle(task: take running, control: take control_send, bell: take bell, reports: take report_client, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes, max_batch_bytes: plan.batching.max_batch_bytes, max_rows: 2 * slots))
+}
+
+fn journal_slot_kind(mut s: ServiceHandle, reserved: bool) -> Result[ServiceSlotHandle, types.Failure] waits {
+    let (reply_send, reply_receive): (Sender[Result[(Client[SlotMsg], u32), types.Failure]], Receiver[Result[(Client[SlotMsg], u32), types.Failure]]) = channel.new(1)
+    let req = if reserved {
+        NewReservedSlot(take reply_send)
+    } else {
+        NewSlot(take reply_send)
+    }
+    if let Error(_) = channel.send(s.control, take req) {
+        return Error(Io(Closed))
+    }
+    if let Error(_) = conn.send(s.bell, STREAM_CONTROL_RING) {
+        return Error(Io(Closed))
+    }
+    let (take data, slot) = match channel.receive(reply_receive) {
+        Ok(Ok(take granted)) => take granted,
+        Ok(Error(take e)) => return Error(take e),
+        Error(_) => return Error(Io(Closed)),
+    }
+    Ok(ServiceSlotHandle(data: take data, bell: conn.client(s.bell), reports: conn.client(s.reports), slot, sid: s.sid, endpoint: string.from(s.endpoint), aws_region: string.from(s.aws_region), bucket: string.from(s.bucket), root: string.from(s.root), slot_bytes: s.slot_bytes, max_batch_bytes: s.max_batch_bytes, max_rows: s.max_rows))
+}
+
+pub fn journal_janitor_still(mut s: ServiceHandle, ask: JanitorAsk) -> Result[bool, types.Failure] waits {
+    let (reply_send, reply_receive): (Sender[bool], Receiver[bool]) = channel.new(1)
+    let asked: JanitorAsk = clone(ask)
+    if let Error(_) = channel.send(s.control, JanitorStill(take asked, take reply_send)) {
+        return Error(Io(Closed))
+    }
+    if let Error(_) = conn.send(s.bell, STREAM_CONTROL_RING) {
+        return Error(Io(Closed))
+    }
+    match channel.receive(reply_receive) {
+        Ok(still) => Ok(still),
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+pub fn journal_janitor_asks(mut s: ServiceHandle) -> Result[List[JanitorAsk], types.Failure] waits {
+    let (reply_send, reply_receive): (Sender[List[JanitorAsk]], Receiver[List[JanitorAsk]]) = channel.new(1)
+    if let Error(_) = channel.send(s.control, JanitorPoll(take reply_send)) {
+        return Error(Io(Closed))
+    }
+    if let Error(_) = conn.send(s.bell, STREAM_CONTROL_RING) {
+        return Error(Io(Closed))
+    }
+    match channel.receive(reply_receive) {
+        Ok(take asks) => Ok(take asks),
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+pub fn close_service(take s: ServiceHandle) -> Result[(), types.Failure] waits {
+    let ServiceHandle(task: take running, control: take control, bell: take bell, workers: take workers, ..) = take s
+    let _ = channel.send(control, StopService)
+    let _ = conn.send(bell, STREAM_CONTROL_RING)
+    let ended = match task.join(take running) {
+        Ok(StreamServiceEnd(result: take outcome, ..)) => take outcome,
+        Error(_) => Error(Io(Closed)),
+    }
+    let _ = take workers
+    take ended
+}
+
+pub fn slot_link(slot: ServiceSlotHandle) -> Result[SlotLink, types.Failure] {
+    let made: Result[(Client[journal.SlotAck], Inbox[journal.SlotAck]), Capacity] = conn.new(STREAM_SLOT_ACKS, bytes 0)
+    let (take answer_client, take answers) = types.capacity(take made)?
+    Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), reports: conn.client(slot.reports), slot: slot.slot, sid: slot.sid, chunk: stream_slot_chunk(slot.slot_bytes), max_batch_bytes: slot.max_batch_bytes, answers: Some(take answers), answer_client: Some(take answer_client), inc: 0, last_batch_seq: 0, commit_batches: list.new(), root: string.from(slot.root), max_rows: slot.max_rows))
+}
+
+pub fn journal_slot(mut s: ServiceHandle) -> Result[ServiceSlotHandle, types.Failure] waits {
+    journal_slot_kind(mut s, false)
+}
+
+pub fn journal_reserved_slot(mut s: ServiceHandle) -> Result[ServiceSlotHandle, types.Failure] waits {
+    journal_slot_kind(mut s, true)
+}
+
+pub fn slot_number(link: SlotLink) -> u32 {
+    link.slot
+}
+
+pub fn slot_sid(link: SlotLink) -> types.HostStreamIdRep {
+    link.sid
+}
+
+pub fn slot_inc(link: SlotLink) -> u64 {
+    link.inc
+}
+
+pub fn slot_root(link: SlotLink) -> View[String] in link {
+    view link.root
+}
+
+pub fn slot_max_rows(link: SlotLink) -> u64 {
+    link.max_rows
+}
+
+pub fn slot_last_batch(link: SlotLink) -> u64 {
+    link.last_batch_seq
+}
+
+pub fn slot_take_answers(mut link: SlotLink) -> Option[Inbox[journal.SlotAck]] {
+    replace(mut link.answers, None)
+}
+
+pub fn slot_advance_batch(mut link: SlotLink, batch_seq: u64, record_commit: bool) {
+    link.last_batch_seq = order.max(link.last_batch_seq, batch_seq)
+    if record_commit && batch_seq != 0 {
+        let n = list.len(link.commit_batches)
+        if n == 0 || link.commit_batches[n - 1] != batch_seq {
+            if let Ok(()) = list.try_reserve(mut link.commit_batches, 1) {
+                list.push(mut link.commit_batches, batch_seq)
+            }
+        }
+    }
+}
+
+pub fn slot_trim_batches(mut link: SlotLink, from_seq: u64) {
+    let mut i = 0u64
+    while i < list.len(link.commit_batches) {
+        if link.commit_batches[i] < from_seq {
+            let _ = list.remove(mut link.commit_batches, i)
+        } else {
+            i += 1
+        }
+    }
+}
+
+pub opaque type DeferredSlotReport {
+    reports: Client[SlotReport],
+    bell: Client[u32],
+    slot: u32,
+    report: SlotReport
+}
+
+pub fn defer_slot_report(link: SlotLink, take report: SlotReport) -> DeferredSlotReport {
+    DeferredSlotReport(reports: conn.client(link.reports), bell: conn.client(link.bell), slot: link.slot, report: take report)
+}
+
+pub fn defer_slot_head(link: SlotLink, store: types.StoreKey, attach: Option[format.Attach], obs_seq: u64) -> DeferredSlotReport {
+    defer_slot_report(link, ReportHead(link.slot, store.hi, store.lo, link.inc, obs_seq, stream_attach_head_ranges(attach, link.sid)))
+}
+
+pub fn deliver_slot_report(take deferred: DeferredSlotReport) {
+    let DeferredSlotReport(reports: take reports, bell: take bell, slot, report: take report) = take deferred
+    let _ = conn.try_send(reports, take report)
+    let _ = conn.try_send(bell, slot)
+}

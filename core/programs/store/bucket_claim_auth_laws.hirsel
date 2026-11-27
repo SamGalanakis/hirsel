@@ -214,7 +214,7 @@ fn bucket_claim_auth_race_c_stream_janitor_after_move(c: Clock, r: Random, tasks
     if claim_law_count_puts(report, string.from("race-c-before-janitor"), Some(string.from("race-c-after-janitor")), Some(string.from("pX/head"))) != 0 {
         fail("race (c): stale janitor wrote X's head after B won")
     }
-    let reg_b = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_key(stream_dir(stream_janitor_sid_b()), string.from("reg")))
+    let reg_b = host_stream.stream_key(host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), host_stream.stream_key(host_stream.stream_dir(host_stream_id_to_rep(stream_janitor_sid_b())), string.from("reg")))
     if claim_law_count_puts(report, string.from("race-c-before-janitor"), Some(string.from("race-c-after-janitor")), Some(reg_b)) != 0 {
         fail("race (c): stale janitor wrote a Held row on S_B/reg")
     }
@@ -232,7 +232,7 @@ fn race_c_janitor_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error
     let _ = take x_a
     // Age an orphan Held row on S_A so svc_a emits JanitorOrphanHold with pair_a.
     stream_unhold_raw_hold(s, tasks, 35, x_store, pair_a.epoch, StoreId(hi: 99, lo: 2))?
-    let mut q: std.sim.message.Queue[JanitorAsk] = std.sim.message.new()
+    let mut q: std.sim.message.Queue[host_stream.JanitorAsk] = std.sim.message.new()
     std.sim.message.hold_until(mut q, 1, 1, string.from("janitor"), string.from("b_won"))
     let mut got_ask = false
     for _ in 0u64 .. 16u64 {

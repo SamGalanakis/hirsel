@@ -1,0 +1,106 @@
+// The claim of an attached Place (STORE-SPEC §12.11.5) and the reader of its
+// live tail in history order (§12.11.9). Package-private until the terminal
+// fence lands.
+// What one batch of a live tail held for X at epoch e: not yet created, a
+// batch the hold's cutoff excludes (`seen_rev ≥ rev_hold`), a TERM object
+// ending the incarnation, a 404 whose head moved (restart attempt), a 404
+// retired empty for X (skip to `low_seq`), or a batch read with whether X
+// had frames in it.
+pub type TailBatch = TailAbsent | TailBeyond | TailTerm | TailHeadMoved | TailSkipTo(u64) | TailRead(bool)
+
+pub type TailStop = StopAbsent | StopBeyond | StopTerm | StopHeadMoved
+
+// The reader's buffers: the INDEX range and X's slice.
+pub type TailBuffers {
+    index: Bytes,
+    slice: Bytes
+}
+
+pub fn stream_tail_buffers() -> Result[TailBuffers, types.Failure] {
+    let probe: Bytes = types.capacity(bound bytes (format.STREAM_INDEX_PROBE + 64) {
+        list.with_capacity(format.STREAM_INDEX_PROBE)
+    })?
+    Ok(TailBuffers(index: take probe, slice: list.new()))
+}
+
+// One range GET of `key` into `into`, its bytes [lo, hi) charged before the
+// request. `None` is a 404: the batch is not yet created (§12.11.8).
+pub fn stream_tail_range(mut client: std.object.Client, key: String, lo: u64, hi: u64, mut into: Bytes, deadline: u64) -> Result[Option[()], types.Failure] waits {
+    list.clear(mut into)
+    types.capacity(list.try_reserve(mut into, hi - lo))?
+    let (take outcome, take buffer) = std.object.fetch_range(mut client, key, lo, hi, replace(mut into, list.new()), deadline)
+    into = take buffer
+    match take outcome {
+        Ok(_) => Ok(Some(())),
+        Error(NotFound) => Ok(None),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+// §12.11.8 404 table: a 404 on `(inc, seq)` is never an end of stream by
+// itself. Issues GET `reg` then GET X's `head`, both after the 404, and decides
+// retired-skip, head-moved restart, single re-GET, or not-yet-created stop.
+pub fn stream_resolve_404(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, key: String, inc: u64, seq: u64, in_sealed_range: bool, seen_higher_batch: bool, deadline: u64) -> Result[Option[TailBatch], types.Failure] waits {
+    stream_reg_read(mut lane, mut client, deadline)?
+    let head_key = stream_key(place_prefix, "head")
+    let mut head_scratch: Bytes = list.new()
+    types.capacity(list.try_reserve(mut head_scratch, order.max(65776u64, list.len(head_witness))))?
+    let _ = history.history_fetch(mut client, head_key, mut head_scratch, deadline)?
+    let head_changed = head_scratch != head_witness
+    if format.stream_pair_below(inc, seq, lane.reg.low_inc, lane.reg.low_seq) {
+        if head_changed {
+            return Ok(Some(TailHeadMoved))
+        }
+        if lane.reg.low_inc > inc {
+            return Ok(Some(TailAbsent))
+        }
+        return Ok(Some(TailSkipTo(lane.reg.low_seq)))
+    }
+    let below_covers = match lane.reg.index {
+        Some(idx) => !format.stream_pair_below(idx.covers_inc, idx.covers_seq, inc, seq),
+        None => false,
+    }
+    if in_sealed_range || seen_higher_batch || below_covers {
+        if let Some(()) = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+            return Ok(None)
+        }
+        return Error(format.disk_fault(key, 0, Absent))
+    }
+    Ok(Some(TailAbsent))
+}
+
+// Where a scan of X's live tail stands: the next batch to read, and the last
+// batch with X frames at or after `from`.
+pub type TailScan {
+    next: u64,
+    last_x: Option[u64]
+}
+
+// A claimant's stream side: its register lane, the reader's buffers, the
+// grant on its own slot (asked once), and its hold's token once it wrote one.
+pub type ClaimStream {
+    lane: StreamLane,
+    buffers: TailBuffers,
+    granted: Option[(u64, u64)],
+    token: Option[types.StoreKey]
+}
+
+// Runs `body` with the client's prefix at the bucket's top, where the stream
+// root is named from (§12.11.1), and puts the Place's prefix back.
+pub fn stream_at_root[R, E](mut client: std.object.Client, body: scoped fn(mut std.object.Client) -> Result[R, E] waits) -> Result[R, E] waits {
+    let place = std.object.set_prefix(mut client, string.new())
+    let result = body(mut client)
+    let _ = std.object.set_prefix(mut client, take place)
+    take result
+}
+
+// Rule (e): the claimant marks its own row Abandoned, only when it will
+// never send H for it. A failed mark leaves the row Held for rule (a).
+pub fn stream_claim_abandon(mut client: std.object.Client, mut side: ClaimStream, deadline: u64) waits {
+    let Some(token) = replace(mut side.token, None) else {
+        return
+    }
+    let _ = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[RegWrite, types.Failure] waits {
+        stream_reg_write(mut side.lane, mut c, Abandon(token), deadline)
+    })
+}

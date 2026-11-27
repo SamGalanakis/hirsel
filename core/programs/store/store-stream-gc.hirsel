@@ -10,14 +10,14 @@ fn empty_head_ranges() -> HeadRanges {
 }
 
 // Extracts the `(inc, lo_seq, hi_seq)` intervals of `attach` on stream `sid`.
-fn stream_attach_head_ranges(attach: Option[format.Attach], sid: HostStreamId) -> HeadRanges {
+fn stream_attach_head_ranges(attach: Option[format.Attach], sid: types.HostStreamIdRep) -> HeadRanges {
     let mut out = empty_head_ranges()
     let Some(a) = view attach else {
         return out
     }
     let mut n = 0u64
     if let Some(r) = a.live {
-        if format.stream_same(r.sid, host_stream_id_to_rep(sid)) && n < 9 {
+        if format.stream_same(r.sid, sid) && n < 9 {
             out.items[3 * n] = r.inc
             out.items[3 * n + 1] = r.from_seq
             out.items[3 * n + 2] = 18446744073709551615u64
@@ -25,7 +25,7 @@ fn stream_attach_head_ranges(attach: Option[format.Attach], sid: HostStreamId) -
         }
     }
     for st in a.sealed {
-        if format.stream_same(st.tail.sid, host_stream_id_to_rep(sid)) && n < 9 {
+        if format.stream_same(st.tail.sid, sid) && n < 9 {
             out.items[3 * n] = st.tail.inc
             out.items[3 * n + 1] = st.tail.from_seq
             out.items[3 * n + 2] = st.cutoff
@@ -69,14 +69,14 @@ type HeadSummary: send {
 type StreamGcState {
     entries: List[format.XIndexEntry],
     pins: List[format.StreamPin],
-    heads: Map[StoreId, HeadSummary],
+    heads: Map[types.StoreKey, HeadSummary],
     fences: List[(u64, u64)],
     deleted_inc: u64,
     deleted_seq: u64,
     batches_since_checkpoint: u64
 }
 
-fn stream_gc_new(reg: format.StreamRegister) -> StreamGcState {
+pub fn stream_gc_new(reg: format.StreamRegister) -> StreamGcState {
     let (d_inc, d_seq) = if reg.low_inc == 0 {
         (1u64, 1u64)
     } else {
@@ -87,16 +87,16 @@ fn stream_gc_new(reg: format.StreamRegister) -> StreamGcState {
 
 // Fetches and validates `x-<k>`. A corrupt or missing XINDEX returns `Ok(None)`
 // so callers fall back to INDEX frames from `low` (§12.11.10 quarantine).
-fn stream_xindex_fetch(mut client: std.object.Client, dir: String, sid: HostStreamId, meta: format.RegIndex, deadline: u64) -> Result[Option[format.XIndex], Error] waits {
+pub fn stream_xindex_fetch(mut client: std.object.Client, dir: String, sid: types.HostStreamIdRep, meta: format.RegIndex, deadline: u64) -> Result[Option[format.XIndex], types.Failure] waits {
     let mut name = string.with_capacity(32)
     stream_xindex_key(mut name, meta.k)
     let key = stream_key(dir, name)
     let mut buf: Bytes = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut buf, meta.len)))?
+    types.capacity(list.try_reserve(mut buf, meta.len))?
     let (take outcome, take back) = std.object.fetch(mut client, key, take buf, deadline)
     buf = take back
     match take outcome {
-        Ok(_) => match failure_result_from_rep(manifest.stream_xindex_decode(key, buf, host_stream_id_to_rep(sid), meta)) {
+        Ok(_) => match manifest.stream_xindex_decode(key, buf, sid, meta) {
             Ok(take x_decoded) => Ok(Some(take x_decoded)),
             Error(Corrupt(_)) => Ok(None),
             Error(take problem) => Error(take problem),
@@ -107,7 +107,7 @@ fn stream_xindex_fetch(mut client: std.object.Client, dir: String, sid: HostStre
     }
 }
 
-fn stream_gc_batch_released(heads: Map[StoreId, HeadSummary], store: StoreId, inc: u64, seq: u64) -> bool {
+fn stream_gc_batch_released(heads: Map[types.StoreKey, HeadSummary], store: types.StoreKey, inc: u64, seq: u64) -> bool {
     let Some(summary) = map.get(heads, store) else {
         return false
     }
@@ -117,7 +117,7 @@ fn stream_gc_batch_released(heads: Map[StoreId, HeadSummary], store: StoreId, in
     !stream_head_ranges_contain(summary.ranges, inc, seq)
 }
 
-fn stream_gc_add_entry(mut gc: StreamGcState, store: StoreId, epoch: u64, inc: u64, seq: u64) -> Result[(), Error] {
+fn stream_gc_add_entry(mut gc: StreamGcState, store: types.StoreKey, epoch: u64, inc: u64, seq: u64) -> Result[(), types.Failure] {
     for i in 0u64 .. list.len(gc.entries) {
         if types.same(gc.entries[i].store.hi, gc.entries[i].store.lo, store.hi, store.lo) && gc.entries[i].epoch == epoch {
             let n = list.len(gc.entries[i].batches)
@@ -127,20 +127,20 @@ fn stream_gc_add_entry(mut gc: StreamGcState, store: StoreId, epoch: u64, inc: u
                     return Ok(())
                 }
             }
-            failure_result_from_rep(types.capacity(list.try_reserve(mut gc.entries[i].batches, 1)))?
+            types.capacity(list.try_reserve(mut gc.entries[i].batches, 1))?
             list.push(mut gc.entries[i].batches, (inc, seq))
             return Ok(())
         }
     }
     let mut batches: List[(u64, u64)] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut batches, 1)))?
+    types.capacity(list.try_reserve(mut batches, 1))?
     list.push(mut batches, (inc, seq))
-    failure_result_from_rep(types.capacity(list.try_reserve(mut gc.entries, 1)))?
-    list.push(mut gc.entries, format.XIndexEntry(store: store_key_to_rep(store), epoch, batches: take batches))
+    types.capacity(list.try_reserve(mut gc.entries, 1))?
+    list.push(mut gc.entries, format.XIndexEntry(store: store, epoch, batches: take batches))
     Ok(())
 }
 
-fn stream_gc_ensure_pin(mut gc: StreamGcState, prefixes: Map[StoreId, String], store: StoreId, inc: u64, seq: u64, now: u64) -> Result[(), Error] {
+fn stream_gc_ensure_pin(mut gc: StreamGcState, prefixes: Map[types.StoreKey, String], store: types.StoreKey, inc: u64, seq: u64, now: u64) -> Result[(), types.Failure] {
     for i in 0u64 .. list.len(gc.pins) {
         if types.same(gc.pins[i].store.hi, gc.pins[i].store.lo, store.hi, store.lo) {
             if format.stream_pair_below(inc, seq, gc.pins[i].pin_inc, gc.pins[i].pin_seq) {
@@ -159,28 +159,28 @@ fn stream_gc_ensure_pin(mut gc: StreamGcState, prefixes: Map[StoreId, String], s
         Some(found) => string.from(found),
         None => string.new(),
     }
-    failure_result_from_rep(types.capacity(list.try_reserve(mut gc.pins, 1)))?
-    list.push(mut gc.pins, format.StreamPin(store: store_key_to_rep(store), pin_inc: inc, pin_seq: seq, prefix: take pfx, first_pinned_ns: now))
+    types.capacity(list.try_reserve(mut gc.pins, 1))?
+    list.push(mut gc.pins, format.StreamPin(store: store, pin_inc: inc, pin_seq: seq, prefix: take pfx, first_pinned_ns: now))
     Ok(())
 }
 
-fn stream_gc_record_batch(mut gc: StreamGcState, prefixes: Map[StoreId, String], inc: u64, seq: u64, slices: List[format.BatchSlice], now: u64) -> Result[(), Error] {
+fn stream_gc_record_batch(mut gc: StreamGcState, prefixes: Map[types.StoreKey, String], inc: u64, seq: u64, slices: List[format.BatchSlice], now: u64) -> Result[(), types.Failure] {
     for sl in slices {
-        stream_gc_add_entry(mut gc, store_key_from_rep(sl.store), sl.epoch, inc, seq)?
-        stream_gc_ensure_pin(mut gc, prefixes, store_key_from_rep(sl.store), inc, seq, now)?
+        stream_gc_add_entry(mut gc, sl.store, sl.epoch, inc, seq)?
+        stream_gc_ensure_pin(mut gc, prefixes, sl.store, inc, seq, now)?
     }
     Ok(())
 }
 
 // Recomputes `gc.pins` from unreleased batches in `gc.entries` at or above `low`.
-fn stream_gc_refresh_pins(mut gc: StreamGcState, prefixes: Map[StoreId, String], low_inc: u64, low_seq: u64, now: u64) -> Result[(), Error] {
+fn stream_gc_refresh_pins(mut gc: StreamGcState, prefixes: Map[types.StoreKey, String], low_inc: u64, low_seq: u64, now: u64) -> Result[(), types.Failure] {
     let old_pins = replace(mut gc.pins, list.new())
     for e in gc.entries {
         for (bi, bs) in e.batches {
             if format.stream_pair_below(bi, bs, low_inc, low_seq) {
                 continue
             }
-            if stream_gc_batch_released(gc.heads, store_key_from_rep(e.store), bi, bs) {
+            if stream_gc_batch_released(gc.heads, e.store, bi, bs) {
                 continue
             }
             let mut existed = false
@@ -195,7 +195,7 @@ fn stream_gc_refresh_pins(mut gc: StreamGcState, prefixes: Map[StoreId, String],
                 }
             }
             if !existed {
-                let mut pfx = match map.get(prefixes, store_key_from_rep(e.store)) {
+                let mut pfx = match map.get(prefixes, e.store) {
                     Some(found) => string.from(found),
                     None => string.new(),
                 }
@@ -211,7 +211,7 @@ fn stream_gc_refresh_pins(mut gc: StreamGcState, prefixes: Map[StoreId, String],
                         break
                     }
                 }
-                failure_result_from_rep(types.capacity(list.try_reserve(mut gc.pins, 1)))?
+                types.capacity(list.try_reserve(mut gc.pins, 1))?
                 list.push(mut gc.pins, format.StreamPin(store: e.store, pin_inc: bi, pin_seq: bs, prefix: take pfx, first_pinned_ns: first_ns))
             }
         }
@@ -219,13 +219,13 @@ fn stream_gc_refresh_pins(mut gc: StreamGcState, prefixes: Map[StoreId, String],
     Ok(())
 }
 
-fn stream_gc_record_head(mut gc: StreamGcState, prefixes: Map[StoreId, String], low_inc: u64, low_seq: u64, store: StoreId, obs_inc: u64, obs_seq: u64, ranges: HeadRanges, now: u64) -> Result[(), Error] {
+fn stream_gc_record_head(mut gc: StreamGcState, prefixes: Map[types.StoreKey, String], low_inc: u64, low_seq: u64, store: types.StoreKey, obs_inc: u64, obs_seq: u64, ranges: HeadRanges, now: u64) -> Result[(), types.Failure] {
     if let Some(prev) = map.get(gc.heads, store) {
         if format.stream_pair_below(obs_inc, obs_seq, prev.obs_inc, prev.obs_seq) {
             return Ok(())
         }
     }
-    failure_result_from_rep(types.capacity(map.try_reserve(mut gc.heads, 1)))?
+    types.capacity(map.try_reserve(mut gc.heads, 1))?
     map.insert(mut gc.heads, store, HeadSummary(obs_inc, obs_seq, ranges))
     stream_gc_refresh_pins(mut gc, prefixes, low_inc, low_seq, now)
 }
@@ -233,7 +233,7 @@ fn stream_gc_record_head(mut gc: StreamGcState, prefixes: Map[StoreId, String], 
 // Rebuilds pins and batch entries over `[low, (old_inc, term))` after election
 // (§12.11.7 step 5, §12.11.8): loads `x-<k>` when valid, then scans INDEX of
 // later batches up to the terminal fence.
-fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[StoreId, String], mut client: std.object.Client, lane: StreamLane, old_inc: u64, term: u64, now: u64, deadline: u64) -> Result[(), Error] waits {
+fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[types.StoreKey, String], mut client: std.object.Client, lane: StreamLane, old_inc: u64, term: u64, now: u64, deadline: u64) -> Result[(), types.Failure] waits {
     let mut scan_inc = if lane.reg.low_inc == 0 {
         1u64
     } else {
@@ -248,16 +248,16 @@ fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[StoreId, String], 
         if let Some(take loaded) = stream_xindex_fetch(mut client, lane.dir, lane.sid, meta, deadline)? {
             let format.XIndex(entries: take loaded_entries, pins: take loaded_pins, ..) = take loaded
             for take e in take loaded_entries {
-                failure_result_from_rep(types.capacity(list.try_reserve(mut gc.entries, 1)))?
+                types.capacity(list.try_reserve(mut gc.entries, 1))?
                 list.push(mut gc.entries, take e)
             }
             for take p in take loaded_pins {
                 let format.StreamPin(store: p_store, pin_inc, pin_seq, prefix: take p_prefix, ..) = take p
                 if string.byte_len(p_prefix) != 0 {
                     let _ = map.try_reserve(mut prefixes, 1)
-                    map.insert(mut prefixes, store_key_from_rep(p_store), string.from(p_prefix))
+                    map.insert(mut prefixes, p_store, string.from(p_prefix))
                 }
-                failure_result_from_rep(types.capacity(list.try_reserve(mut gc.pins, 1)))?
+                types.capacity(list.try_reserve(mut gc.pins, 1))?
                 list.push(mut gc.pins, format.StreamPin(store: p_store, pin_inc, pin_seq, prefix: take p_prefix, first_pinned_ns: now))
             }
             scan_inc = meta.covers_inc
@@ -280,10 +280,10 @@ fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[StoreId, String], 
             }
             break
         }
-        let head = failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(lane.sid), scan_inc, scan_seq))?
+        let head = manifest.stream_batch_head(key, buffers.index, lane.sid, scan_inc, scan_seq)?
         match take head {
             Term(_, _) => {
-                failure_result_from_rep(types.capacity(list.try_reserve(mut gc.fences, 1)))?
+                types.capacity(list.try_reserve(mut gc.fences, 1))?
                 list.push(mut gc.fences, (scan_inc, scan_seq))
                 scan_inc += 1
                 scan_seq = 1
@@ -292,22 +292,22 @@ fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[StoreId, String], 
                 let mut batch_index = take first_index
                 if list.len(buffers.index) < batch_index.byte_len {
                     let Some(()) = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? else {
-                        return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
+                        return Error(format.disk_fault(key, 0, Absent))
                     }
-                    let Rows(take full) = failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(lane.sid), scan_inc, scan_seq))? else {
-                        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
+                    let Rows(take full) = manifest.stream_batch_head(key, buffers.index, lane.sid, scan_inc, scan_seq)? else {
+                        return Error(format.disk_fault(key, 72, Malformed))
                     }
                     batch_index = take full
                 }
                 for row in batch_index.rows {
-                    stream_gc_add_entry(mut gc, store_key_from_rep(row.store), row.epoch, scan_inc, scan_seq)?
-                    stream_gc_ensure_pin(mut gc, prefixes, store_key_from_rep(row.store), scan_inc, scan_seq, now)?
+                    stream_gc_add_entry(mut gc, row.store, row.epoch, scan_inc, scan_seq)?
+                    stream_gc_ensure_pin(mut gc, prefixes, row.store, scan_inc, scan_seq, now)?
                 }
                 scan_seq += 1
             },
         }
     }
-    failure_result_from_rep(types.capacity(list.try_reserve(mut gc.fences, 1)))?
+    types.capacity(list.try_reserve(mut gc.fences, 1))?
     list.push(mut gc.fences, (old_inc, term))
     Ok(())
 }
@@ -321,7 +321,7 @@ fn stream_gc_compute_low(gc: StreamGcState, reg: format.StreamRegister, cur_inc:
             if format.stream_pair_below(bi, bs, reg.low_inc, reg.low_seq) {
                 continue
             }
-            if !stream_gc_batch_released(gc.heads, store_key_from_rep(e.store), bi, bs) {
+            if !stream_gc_batch_released(gc.heads, e.store, bi, bs) {
                 if format.stream_pair_below(bi, bs, min_inc, min_seq) {
                     min_inc = bi
                     min_seq = bs
@@ -346,24 +346,24 @@ fn stream_gc_fence_of(fences: List[(u64, u64)], inc: u64) -> Option[u64] {
 }
 
 // Prunes `entries` below `(low_inc, low_seq)` and returns a cloned list for XINDEX.
-fn stream_gc_prune_entries(mut gc: StreamGcState, low_inc: u64, low_seq: u64) -> Result[List[format.XIndexEntry], Error] {
+fn stream_gc_prune_entries(mut gc: StreamGcState, low_inc: u64, low_seq: u64) -> Result[List[format.XIndexEntry], types.Failure] {
     let mut kept: List[format.XIndexEntry] = list.new()
     for take e in replace(mut gc.entries, list.new()) {
         let format.XIndexEntry(store, epoch, batches: take old_batches) = take e
         let mut bs: List[(u64, u64)] = list.new()
         for (bi, bseq) in old_batches {
             if !format.stream_pair_below(bi, bseq, low_inc, low_seq) {
-                failure_result_from_rep(types.capacity(list.try_reserve(mut bs, 1)))?
+                types.capacity(list.try_reserve(mut bs, 1))?
                 list.push(mut bs, (bi, bseq))
             }
         }
         if list.len(bs) != 0 {
-            failure_result_from_rep(types.capacity(list.try_reserve(mut kept, 1)))?
+            types.capacity(list.try_reserve(mut kept, 1))?
             list.push(mut kept, format.XIndexEntry(store, epoch, batches: take bs))
         }
     }
     gc.entries = take kept
-    disk_allocation(scoped fn() -> Result[List[format.XIndexEntry], Error] {
+    manifest.disk_allocation(scoped fn() -> Result[List[format.XIndexEntry], types.Failure] {
         Ok(clone(gc.entries))
     })
 }
@@ -371,7 +371,7 @@ fn stream_gc_prune_entries(mut gc: StreamGcState, low_inc: u64, low_seq: u64) ->
 // Index checkpoint (§12.11.8): creates `x-<k+1>`, CASes `reg` with the new
 // `index` and highest `low` allowed by the release rule, then deletes retired
 // batches, old TERMs, and the previous XINDEX below the new `low`.
-fn stream_gc_checkpoint(mut s: StreamService, deadline: u64) -> Result[(), Error] waits {
+fn stream_gc_checkpoint(mut s: StreamService, deadline: u64) -> Result[(), types.Failure] waits {
     if stream_is_latched(s.lane) || s.lane.seq <= 1 {
         return Ok(())
     }
@@ -390,21 +390,21 @@ fn stream_gc_checkpoint(mut s: StreamService, deadline: u64) -> Result[(), Error
         let mut bs: List[(u64, u64)] = list.new()
         for (bi, bseq) in e.batches {
             if !format.stream_pair_below(bi, bseq, new_low_inc, new_low_seq) {
-                failure_result_from_rep(types.capacity(list.try_reserve(mut bs, 1)))?
+                types.capacity(list.try_reserve(mut bs, 1))?
                 list.push(mut bs, (bi, bseq))
             }
         }
         if list.len(bs) != 0 {
-            failure_result_from_rep(types.capacity(list.try_reserve(mut snap_entries, 1)))?
+            types.capacity(list.try_reserve(mut snap_entries, 1))?
             list.push(mut snap_entries, format.XIndexEntry(store: e.store, epoch: e.epoch, batches: take bs))
         }
     }
-    let snap_pins = disk_allocation(scoped fn() -> Result[List[format.StreamPin], Error] {
+    let snap_pins = manifest.disk_allocation(scoped fn() -> Result[List[format.StreamPin], types.Failure] {
         Ok(clone(s.gc.pins))
     })?
     let xidx = format.XIndex(k: next_k, low_inc: new_low_inc, low_seq: new_low_seq, covers_inc, covers_seq, entries: take snap_entries, pins: take snap_pins)
     let mut xbuf: Bytes = list.new()
-    let reg_idx = failure_result_from_rep(format.stream_xindex_encode(mut xbuf, host_stream_id_to_rep(s.lane.sid), s.lane.inc, s.lane.authority_kind, xidx))?
+    let reg_idx = format.stream_xindex_encode(mut xbuf, s.lane.sid, s.lane.inc, s.lane.authority_kind, xidx)?
     let mut xname = string.with_capacity(32)
     stream_xindex_key(mut xname, next_k)
     let xkey = stream_key(s.lane.dir, xname)
@@ -414,14 +414,14 @@ fn stream_gc_checkpoint(mut s: StreamService, deadline: u64) -> Result[(), Error
         Ok(Applied(_)) => (),
         Ok(Mismatch) => {
             let mut cmp: Bytes = list.new()
-            failure_result_from_rep(types.capacity(list.try_reserve(mut cmp, list.len(xbuf))))?
+            types.capacity(list.try_reserve(mut cmp, list.len(xbuf)))?
             let (take got, take cback) = std.object.fetch(mut s.client, xkey, take cmp, deadline)
             cmp = take cback
             if let Error(_) = got {
                 return Ok(())
             }
             if cmp != xbuf {
-                return Error(failure_from_rep(format.disk_fault(xkey, 0, Malformed)))
+                return Error(format.disk_fault(xkey, 0, Malformed))
             }
         },
         Error(_) => return Ok(()),
@@ -491,12 +491,12 @@ fn stream_gc_delete_below(mut s: StreamService, old_k: u64, next_k: u64, deadlin
 // Pin head poll (§12.11.8): for each pinned Place not currently served on a
 // live slot, GETs its head on the service's read lane to learn whether its
 // `live` and `sealed` entries have moved past its pinned batches.
-fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error] waits {
+fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), types.Failure] waits {
     if stream_is_latched(s.lane) || list.len(s.gc.pins) == 0 {
         return Ok(())
     }
     let now = host.mono_ns(s.clock)
-    let mut targets: List[(StoreId, String)] = list.new()
+    let mut targets: List[(types.StoreKey, String)] = list.new()
     for held_pin in s.gc.pins {
         let mut served = false
         for sl in s.slots {
@@ -513,13 +513,13 @@ fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error]
         let pfx = if string.byte_len(held_pin.prefix) != 0 {
             string.from(held_pin.prefix)
         } else {
-            match map.get(s.prefixes, store_key_from_rep(held_pin.store)) {
+            match map.get(s.prefixes, held_pin.store) {
                 Some(found) => string.from(found),
                 None => continue,
             }
         }
-        failure_result_from_rep(types.capacity(list.try_reserve(mut targets, 1)))?
-        list.push(mut targets, (store_key_from_rep(held_pin.store), take pfx))
+        types.capacity(list.try_reserve(mut targets, 1))?
+        list.push(mut targets, (held_pin.store, take pfx))
     }
     for (store, place_prefix) in targets {
         let obs_inc = s.lane.inc
@@ -530,15 +530,15 @@ fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error]
         }
         let key = stream_key(place_prefix, "head")
         let mut scratch = replace(mut s.lane.compare, list.new())
-        let fetched = stream_at_root(mut s.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
-            let _ = failure_result_from_rep(history.history_fetch(mut c, key, mut scratch, deadline))?
+        let fetched = stream_at_root(mut s.client, scoped fn(mut c: std.object.Client) -> Result[(), types.Failure] waits {
+            let _ = history.history_fetch(mut c, key, mut scratch, deadline)?
             Ok(())
         })
         s.lane.compare = take scratch
         if let Error(_) = fetched {
             continue
         }
-        let Ok((take capture, take attach)) = failure_result_from_rep(history.history_decode_head_attach(s.lane.compare)) else {
+        let Ok((take capture, take attach)) = history.history_decode_head_attach(s.lane.compare) else {
             continue
         }
         // Only the pin's own Store may record ranges or authorize an ask.
@@ -553,7 +553,7 @@ fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error]
         // reserved slot.
         let own_live = match attach {
             Some(a) => match a.live {
-                Some(r) => format.stream_same(r.sid, host_stream_id_to_rep(s.lane.sid)) && r.inc == s.lane.inc,
+                Some(r) => format.stream_same(r.sid, s.lane.sid) && r.inc == s.lane.inc,
                 None => false,
             },
             None => false,

@@ -369,12 +369,12 @@ fn df_l90_f_run(s: BucketSim, tasks: Tasks, r: Random, fsvc: FollowerService, fp
     bucket_law_commit(mut db_a, 2)?
     // Place a raw Held row on S_A/reg for (p1, epoch 1).
     let hold_tok = StoreId(hi: 0xF011, lo: 1)
-    let mut hold_lane = stream_lane(df_sid_a(), 1, 12, StoreId(hi: 0xF012, lo: 1))?
-    hold_lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(df_sid_a()))
+    let mut hold_lane = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(df_sid_a()), 1, 12, store_key_to_rep(StoreId(hi: 0xF012, lo: 1))))?
+    hold_lane.dir = host_stream.stream_key(host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), host_stream.stream_dir(host_stream_id_to_rep(df_sid_a())))
     let mut hc = df_client_host(s.endpoint, s.time, tasks, "spare.test", 205, "", 1)?
     let due_h = std.object.deadline_after_ms(hc, DF_OP_MS)
-    stream_reg_read(mut hold_lane, mut hc, due_h)?
-    let _ = stream_reg_write(mut hold_lane, mut hc, Hold(format.RegRow(store: store_key_to_rep(db_a.store), epoch: 1, token: store_key_to_rep(hold_tok), rev_hold: 0, abandoned: false), 1), due_h)?
+    failure_result_from_rep(host_stream.stream_reg_read(mut hold_lane, mut hc, due_h))?
+    let _ = failure_result_from_rep(host_stream.stream_reg_write(mut hold_lane, mut hc, Hold(format.RegRow(store: store_key_to_rep(db_a.store), epoch: 1, token: store_key_to_rep(hold_tok), rev_hold: 0, abandoned: false), 1), due_h))?
     // While the hold stands, follower `fresh` must return Behind and publish nothing new!
     let due1 = clock.deadline_after_ms(host.mono_ns(s.time), 500)
     match fresh(mut f, due1) {
@@ -393,8 +393,8 @@ fn df_l90_f_run(s: BucketSim, tasks: Tasks, r: Random, fsvc: FollowerService, fp
     }
     // Abandon the hold so A unholds by rule (b), then verify clean round publishes n + 1!
     let due_a = std.object.deadline_after_ms(hc, DF_OP_MS)
-    stream_reg_read(mut hold_lane, mut hc, due_a)?
-    let _ = stream_reg_write(mut hold_lane, mut hc, Abandon(hold_tok), due_a)?
+    failure_result_from_rep(host_stream.stream_reg_read(mut hold_lane, mut hc, due_a))?
+    let _ = failure_result_from_rep(host_stream.stream_reg_write(mut hold_lane, mut hc, Abandon(store_key_to_rep(hold_tok)), due_a))?
     let _ = take hc
     std.clock.sleep_ns(s.time, (DF_IDLE_MS + 100) * 1000000)
     df_marker(s, tasks, "spare.test", string.from("l90-f-clean-start"))?

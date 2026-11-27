@@ -87,12 +87,12 @@ fn stream_unhold_claim_task(take job: UnholdClaimant) -> Result[(), Error] waits
 // without running a full claim, simulating a claimant that crashed after step 3.
 fn stream_unhold_raw_hold(s: BucketSim, tasks: Tasks, seed: u64, store: StoreId, epoch: u64, token: StoreId) -> Result[(), Error] waits {
     let mut client = stream_service_client(s, tasks, seed, "", "us-east-1")?
-    let mut lane = stream_lane(stream_law_sid(), 1, 8, token)?
-    lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(stream_law_sid()))
+    let mut lane = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(stream_law_sid()), 1, 8, store_key_to_rep(token)))?
+    lane.dir = host_stream.stream_key(host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), host_stream.stream_dir(host_stream_id_to_rep(stream_law_sid())))
     let due = std.object.deadline_after_ms(client, UNHOLD_OP_MS)
-    stream_reg_read(mut lane, mut client, due)?
+    failure_result_from_rep(host_stream.stream_reg_read(mut lane, mut client, due))?
     let against = lane.reg.inc
-    let Written = stream_reg_write(mut lane, mut client, Hold(format.RegRow(store: store_key_to_rep(store), epoch, token: store_key_to_rep(token), rev_hold: 0, abandoned: false), against), due)? else {
+    let Written = failure_result_from_rep(host_stream.stream_reg_write(mut lane, mut client, Hold(format.RegRow(store: store_key_to_rep(store), epoch, token: store_key_to_rep(token), rev_hold: 0, abandoned: false), against), due))? else {
         fail("raw hold saw unexpected incarnation move")
     }
     Ok(())

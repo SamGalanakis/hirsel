@@ -96,7 +96,8 @@ DEPENDENT_CONTROLS = ('journal_input_refused', 'holder_table_refused', 'declare_
                       'record_retention_refused', 'dir_journal_state_refused',
                       'history_register_refused', 'history_locator_refused', 'history_open_base_refused',
                       'history_pack_stream_refused', 'prepared_register_head_refused',
-                      'prepared_capture_state_refused', 'capture_lock_refused', 'capture_packs_refused')
+                      'prepared_capture_state_refused', 'capture_lock_refused', 'capture_packs_refused',
+                      'stream_settle_view_refused', 'stream_follow_material_refused')
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
                     'view_tx_write_refused', *DEPENDENT_CONTROLS)
@@ -111,7 +112,7 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             modules=[control], signatures=False)
         if control in DEPENDENT_CONTROLS:
             dependencies = ['core', 'store']
-            if control in ('history_register_refused', 'history_pack_stream_refused'):
+            if control in ('history_register_refused', 'history_pack_stream_refused', 'stream_settle_view_refused'):
                 dependencies.append('std')
             negative['packages'].append({
                 'package': {'name': control, 'version': '1'},
@@ -144,6 +145,8 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             'prepared_capture_state_refused': [('PROG-2', '`store@1/capture/PreparedState` is private or opaque')],
             'capture_lock_refused': [('PROG-2', '`store@1/capture/CaptureLock` is private or opaque')],
             'capture_packs_refused': [('PROG-2', '`store@1/capture/CapturePacks` is private or opaque')],
+            'stream_settle_view_refused': [('PROG-2', '`store@1/host_stream/SettleView` is private or opaque')],
+            'stream_follow_material_refused': [('PROG-2', '`store@1/host_stream/StreamFollowMaterial` is private or opaque')],
             'declare_state_refused': [('PROG-2', '`store@1/catalog/DeclareState` is private or opaque')],
             'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],

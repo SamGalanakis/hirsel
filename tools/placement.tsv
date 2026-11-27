@@ -1235,7 +1235,7 @@ object_export_capture	store-object-export.hirsel	store	store	-
 export_write	store-object-export.hirsel	transfer	transfer	L13
 object_export_file	store-object-export.hirsel	transfer	transfer	L13
 object_export_copy	store-object-export.hirsel	transfer	transfer	L13
-ObjectAuthorityConfig	store-object-follower.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_rewrap)
+ObjectAuthorityConfig	store-object-follower.hirsel	object_writer	store	-	public root type in fields or signature
 object_authority	store-object-follower.hirsel	store	store	-
 sim_authority	store-object-follower.hirsel	store	store	-
 ObjectFollowHead	store-object-follower.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_follow_make_capture)
@@ -1297,7 +1297,7 @@ object_writer_entry_room	store-object-writer.hirsel	object_writer	object_writer	
 object_writer_journal_room	store-object-writer.hirsel	object_writer	object_writer	L9
 ObjectWriterOpen	store-object-writer.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
 prepare_object_writer	store-object-writer.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
-wrap_object_authority	store-object-writer.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_rewrap)
+wrap_object_authority	store-object-writer.hirsel	object_writer	store	-	public root type in fields or signature
 open_object_writer	store-object-writer.hirsel	store	store	-
 claim_of	store-object-writer.hirsel	store	store	-
 object_stream_close	store-object-writer.hirsel	store	store	-
@@ -1818,7 +1818,7 @@ stream_apply_sealed_tail	store-stream-claim.hirsel	host_stream	store	-	push-up h
 stream_load_settled	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
 stream_claim_attempt	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> object_writer (refs at layer 8); push-up object_writer -> store (refs at layer 12)
 stream_claim_hold_scope	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
-stream_claim_final_head	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_claim_final_head	store-stream-claim.hirsel	host_stream	store	-	public root type in fields or signature
 FollowSlice	store-stream-follow.hirsel	host_stream	host_stream	L8
 stream_follow_fetch_head	store-stream-follow.hirsel	host_stream	host_stream	L8
 stream_follow_reg_has_row	store-stream-follow.hirsel	host_stream	host_stream	L8
@@ -2006,9 +2006,9 @@ STREAM_SERVICE_FIXED	store-stream-slot.hirsel	host_stream	host_stream	L8
 stream_plan_check	store-stream-slot.hirsel	host_stream	host_stream	L8
 stream_root_dir	store-stream-slot.hirsel	host_stream	host_stream	L8
 stream_overlaps	store-stream-slot.hirsel	host_stream	host_stream	L8
-stream_authority_parts	store-stream-slot.hirsel	host_stream	host_stream	L8
+stream_authority_parts	store-stream-slot.hirsel	host_stream	store	-	public root type in fields or signature
 journal_service	store-stream-slot.hirsel	store	store	-
-stream_rewrap	store-stream-slot.hirsel	host_stream	host_stream	L8
+stream_rewrap	store-stream-slot.hirsel	host_stream	store	-	public root type in fields or signature
 journal_slot	store-stream-slot.hirsel	store	store	-
 journal_reserved_slot	store-stream-slot.hirsel	host_stream	host_stream	L8
 journal_slot_kind	store-stream-slot.hirsel	host_stream	host_stream	L8

@@ -1,0 +1,11 @@
+pub fn history_group_context(head: history.HistoryHead) -> Result[format.DiskContext, types.Failure] {
+    let seq = history.history_next_id(head.entry.seq)?
+    Ok(format.DiskContext(store: head.store, role: 2, seq))
+}
+
+pub fn history_group_append(mut packet: Bytes, ctx: format.DiskContext, frame: Bytes) -> Result[(), types.Failure] {
+    let at = list.len(packet)
+    list.append(mut packet, frame)
+    let kind: u16 = int.narrow(format.read_le(frame, 0, 2))
+    types.capacity(format.history_seal(mut packet, ctx, at, kind))
+}

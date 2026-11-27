@@ -1,0 +1,10 @@
+pub fn history_advance_claim(mut client: std.object.Client, mut register: history.HistoryRegister, authority: Bytes, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), types.Failure] waits {
+    history.history_claim_packet(mut workspace.packet, history.register_head(register))?
+    let advanced = history.history_register_advance(mut client, mut register, authority, mut workspace, deadline)
+    match take advanced {
+        Ok(HistoryApplied(_)) => Ok(()),
+        Error(Fenced(_)) => Error(Lost),
+        Error(take problem) => Error(take problem),
+        _ => Error(Undecided),
+    }
+}

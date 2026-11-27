@@ -9,7 +9,7 @@ const STREAM_REG_ATTEMPTS: u64 = 8
 
 // Every stream object sits under `s-<sid>/` in the stream root, the prefix of
 // the client the lane holds (§12.11.1).
-fn stream_dir(sid: HostStreamId) -> String {
+pub fn stream_dir(sid: types.HostStreamIdRep) -> String {
     let mut dir = string.with_capacity(36)
     string.push(mut dir, "s-")
     std.hex.push_u64(mut dir, sid.hi)
@@ -18,7 +18,7 @@ fn stream_dir(sid: HostStreamId) -> String {
     take dir
 }
 
-fn stream_key(dir: String, name: String) -> String {
+pub fn stream_key(dir: String, name: String) -> String {
     let mut key = string.with_capacity(string.byte_len(dir) + string.byte_len(name))
     string.push(mut key, dir)
     string.push(mut key, name)
@@ -28,7 +28,7 @@ fn stream_key(dir: String, name: String) -> String {
 // One Place's frames in a created batch whose ack is not yet decided.
 type PendingSlice: send {
     seq: u64,
-    store: StoreId,
+    store: types.StoreKey,
     epoch: u64
 }
 
@@ -36,7 +36,7 @@ type PendingSlice: send {
 // outstanding (§12.11.4).
 type SliceDecision: send {
     seq: u64,
-    store: StoreId,
+    store: types.StoreKey,
     epoch: u64,
     acked: bool
 }
@@ -46,13 +46,13 @@ type SliceDecision: send {
 // wrote. `pending` are the slices of created batches not yet decided, and
 // `stalled` the (store, epoch) pairs a register row stalls. A latched lane
 // writes nothing more (§12.11.10).
-type StreamLane {
+pub type StreamLane {
     dir: String,
-    sid: HostStreamId,
+    sid: types.HostStreamIdRep,
     authority_kind: u8,
     max_rows: u64,
     inc: u64,
-    holder: StoreId,
+    holder: types.StoreKey,
     seq: u64,
     reg: format.StreamRegister,
     tag: std.object.ETag,
@@ -60,53 +60,53 @@ type StreamLane {
     compare: Bytes,
     pending: List[PendingSlice],
     stalled: List[PendingSlice],
-    latched: Option[StreamLatch]
+    latched: Option[status.StreamLatch]
 }
 
-fn stream_lane(sid: HostStreamId, authority_kind: u8, max_rows: u64, holder: StoreId) -> Result[StreamLane, Error] {
+pub fn stream_lane(sid: types.HostStreamIdRep, authority_kind: u8, max_rows: u64, holder: types.StoreKey) -> Result[StreamLane, types.Failure] {
     let room = format.REG_LIMIT + 88 + format.BINDING_BYTES
-    let body: Bytes = failure_result_from_rep(types.capacity(bound bytes (room + 64) {
+    let body: Bytes = types.capacity(bound bytes (room + 64) {
         list.with_capacity(room)
-    }))?
-    let compare: Bytes = failure_result_from_rep(types.capacity(bound bytes (room + 64) {
+    })?
+    let compare: Bytes = types.capacity(bound bytes (room + 64) {
         list.with_capacity(room)
-    }))?
-    let empty = format.StreamRegister(rev: 0, sid: host_stream_id_to_rep(sid), inc: 0, holder: store_key_to_rep(StoreId(hi: 0, lo: 0)), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
+    })?
+    let empty = format.StreamRegister(rev: 0, sid: sid, inc: 0, holder: types.StoreKey(hi: 0, lo: 0), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
     Ok(StreamLane(dir: stream_dir(sid), sid, authority_kind, max_rows, inc: 0, holder, seq: 1, reg: take empty, tag: std.object.ETag(octets:[0; 64], len: 0), body: take body, compare: take compare, pending: list.new(), stalled: list.new(), latched: None))
 }
 
-fn stream_latch(mut lane: StreamLane, cause: StreamLatch) -> Error {
+fn stream_latch(mut lane: StreamLane, cause: status.StreamLatch) -> types.Failure {
     lane.latched = Some(cause)
     Latched(cause)
 }
 
-fn stream_latched(lane: StreamLane) -> Result[(), Error] {
+fn stream_latched(lane: StreamLane) -> Result[(), types.Failure] {
     match lane.latched {
         Some(cause) => Error(Latched(cause)),
         None => Ok(()),
     }
 }
 
-fn stream_reg_fetch_once(mut client: std.object.Client, dir: String, sid: HostStreamId, max_rows: u64, deadline: u64) -> Result[format.StreamRegister, Error] waits {
+pub fn stream_reg_fetch_once(mut client: std.object.Client, dir: String, sid: types.HostStreamIdRep, max_rows: u64, deadline: u64) -> Result[format.StreamRegister, types.Failure] waits {
     let key = stream_key(dir, "reg")
     let room = order.min(format.REG_LIMIT, format.stream_register_bytes(max_rows)) + 88 + format.BINDING_BYTES
-    let mut raw: Bytes = failure_result_from_rep(types.capacity(bound bytes (room + 64) {
+    let mut raw: Bytes = types.capacity(bound bytes (room + 64) {
         list.with_capacity(room)
-    }))?
+    })?
     let (take outcome, take body) = std.object.fetch(mut client, key, replace(mut raw, list.new()), deadline)
     raw = take body
     let meta = match take outcome {
         Ok(found) => found,
-        Error(NotFound) => return Error(failure_from_rep(format.disk_fault("reg", 0, Absent))),
+        Error(NotFound) => return Error(format.disk_fault("reg", 0, Absent)),
         Error(take problem) => return Error(Remote(take problem)),
     }
     if meta.size != list.len(raw) || meta.etag.len == 0 {
-        return Error(failure_from_rep(format.disk_fault("reg", 0, Truncated)))
+        return Error(format.disk_fault("reg", 0, Truncated))
     }
-    failure_result_from_rep(manifest.stream_register_decode(raw, host_stream_id_to_rep(sid), 0))
+    manifest.stream_register_decode(raw, sid, 0)
 }
 
-fn stream_stalled(lane: StreamLane, store: StoreId, epoch: u64) -> bool {
+fn stream_stalled(lane: StreamLane, store: types.StoreKey, epoch: u64) -> bool {
     for p in lane.stalled {
         if types.same(p.store.hi, p.store.lo, store.hi, store.lo) && p.epoch == epoch {
             return true
@@ -117,21 +117,21 @@ fn stream_stalled(lane: StreamLane, store: StoreId, epoch: u64) -> bool {
 
 // An unconditional GET of `reg` (§12.11.3 rule 2). A 404 after creation is
 // `Corrupt(Absent)`; a body below the rev already seen is `Regressed`.
-fn stream_reg_read(mut lane: StreamLane, mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
+pub fn stream_reg_read(mut lane: StreamLane, mut client: std.object.Client, deadline: u64) -> Result[(), types.Failure] waits {
     let key = stream_key(lane.dir, "reg")
     list.clear(mut lane.compare)
     let (take outcome, take buffer) = std.object.fetch(mut client, key, replace(mut lane.compare, list.new()), deadline)
     lane.compare = take buffer
     let meta = match take outcome {
         Ok(take found) => take found,
-        Error(NotFound) => return Error(failure_from_rep(format.disk_fault("reg", 0, Absent))),
-        Error(TooLarge) => return Error(failure_from_rep(format.disk_fault("reg", 0, Malformed))),
+        Error(NotFound) => return Error(format.disk_fault("reg", 0, Absent)),
+        Error(TooLarge) => return Error(format.disk_fault("reg", 0, Malformed)),
         Error(take problem) => return Error(Remote(take problem)),
     }
     if meta.size != list.len(lane.compare) || meta.etag.len == 0 {
         return Error(Remote(Fatal(Malformed)))
     }
-    lane.reg = failure_result_from_rep(manifest.stream_register_decode(lane.compare, host_stream_id_to_rep(lane.sid), lane.reg.rev))?
+    lane.reg = manifest.stream_register_decode(lane.compare, lane.sid, lane.reg.rev)?
     lane.tag = meta.etag
     Ok(())
 }
@@ -144,13 +144,13 @@ fn stream_reg_read(mut lane: StreamLane, mut client: std.object.Client, deadline
 // `ClearEpoch` removes every row for (store, epoch < observed_epoch) (rule c).
 // `ClearDetached` removes every row for (store, epoch <= observed_epoch) once
 // the head at observed_epoch no longer names (S, inc) as live (rule f).
-type RegIntent: send = Hold(format.RegRow, u64) | Abandon(StoreId) | Unhold(List[StoreId]) | ClearEpoch(StoreId, u64) | ClearDetached(StoreId, u64) | Checkpoint(u64, u64, format.RegIndex)
+pub type RegIntent: send = Hold(format.RegRow, u64) | Abandon(types.StoreKey) | Unhold(List[types.StoreKey]) | ClearEpoch(types.StoreKey, u64) | ClearDetached(types.StoreKey, u64) | Checkpoint(u64, u64, format.RegIndex)
 
 // `Moved`: the register's incarnation rose past the one a hold was taken
 // against, so no row was written and the claim takes the no-hold rule.
-type RegWrite = Written | Moved
+pub type RegWrite = Written | Moved
 
-fn stream_hold_rev(reg: format.StreamRegister, token: StoreId) -> Option[u64] {
+pub fn stream_hold_rev(reg: format.StreamRegister, token: types.StoreKey) -> Option[u64] {
     for row in reg.rows {
         if types.same(row.token.hi, row.token.lo, token.hi, token.lo) {
             return Some(row.rev_hold)
@@ -159,7 +159,7 @@ fn stream_hold_rev(reg: format.StreamRegister, token: StoreId) -> Option[u64] {
     None
 }
 
-fn stream_token_in(tokens: List[StoreId], token: StoreId) -> bool {
+fn stream_token_in(tokens: List[types.StoreKey], token: types.StoreKey) -> bool {
     for t in tokens {
         if types.same(t.hi, t.lo, token.hi, token.lo) {
             return true
@@ -172,7 +172,7 @@ fn stream_token_in(tokens: List[StoreId], token: StoreId) -> bool {
 // or gone (an election drops every row); a removal once no token is left.
 fn stream_intent_present(intent: RegIntent, reg: format.StreamRegister) -> bool {
     match intent {
-        Hold(row, _) => match stream_hold_rev(reg, store_key_from_rep(row.token)) {
+        Hold(row, _) => match stream_hold_rev(reg, row.token) {
             Some(_) => true,
             None => false,
         },
@@ -186,7 +186,7 @@ fn stream_intent_present(intent: RegIntent, reg: format.StreamRegister) -> bool 
         },
         Unhold(tokens) => {
             for row in reg.rows {
-                if stream_token_in(tokens, store_key_from_rep(row.token)) {
+                if stream_token_in(tokens, row.token) {
                     return false
                 }
             }
@@ -221,8 +221,8 @@ fn stream_intent_present(intent: RegIntent, reg: format.StreamRegister) -> bool 
 // The body the intent writes over `base`: rev + 1, and only the writer's own
 // row added or marked, or the fixed set / ruled rows removed, so every other
 // row stands (rule 4).
-fn stream_intent_apply(intent: RegIntent, base: format.StreamRegister, max_rows: u64) -> Result[format.StreamRegister, Error] {
-    let mut built = disk_allocation(scoped fn() -> Result[format.StreamRegister, Error] {
+fn stream_intent_apply(intent: RegIntent, base: format.StreamRegister, max_rows: u64) -> Result[format.StreamRegister, types.Failure] {
+    let mut built = manifest.disk_allocation(scoped fn() -> Result[format.StreamRegister, types.Failure] {
         Ok(clone(base))
     })?
     built.rev = base.rev + 1
@@ -232,7 +232,7 @@ fn stream_intent_apply(intent: RegIntent, base: format.StreamRegister, max_rows:
             if rows > max_rows {
                 return Error(Full(Register(Capacity(requested: format.stream_register_bytes(rows), available: format.stream_register_bytes(max_rows)))))
             }
-            failure_result_from_rep(types.capacity(list.try_reserve(mut built.rows, 1)))?
+            types.capacity(list.try_reserve(mut built.rows, 1))?
             list.push(mut built.rows, format.RegRow(store: row.store, epoch: row.epoch, token: row.token, rev_hold: built.rev, abandoned: false))
         },
         Abandon(token) => {
@@ -245,7 +245,7 @@ fn stream_intent_apply(intent: RegIntent, base: format.StreamRegister, max_rows:
         Unhold(tokens) => {
             let mut i = 0u64
             while i < list.len(built.rows) {
-                if stream_token_in(tokens, store_key_from_rep(built.rows[i].token)) {
+                if stream_token_in(tokens, built.rows[i].token) {
                     let _ = list.remove(mut built.rows, i)
                 } else {
                     i += 1
@@ -307,7 +307,7 @@ fn stream_intent_moved(intent: RegIntent, reg: format.StreamRegister, inc: u64) 
     }
 }
 
-fn stream_reg_write(mut lane: StreamLane, mut client: std.object.Client, intent: RegIntent, deadline: u64) -> Result[RegWrite, Error] waits {
+pub fn stream_reg_write(mut lane: StreamLane, mut client: std.object.Client, intent: RegIntent, deadline: u64) -> Result[RegWrite, types.Failure] waits {
     stream_latched(lane)?
     if stream_intent_moved(intent, lane.reg, lane.inc) {
         return Ok(Moved)
@@ -315,7 +315,7 @@ fn stream_reg_write(mut lane: StreamLane, mut client: std.object.Client, intent:
     let key = stream_key(lane.dir, "reg")
     let mut uncertain = false
     let mut candidate = stream_intent_apply(intent, lane.reg, lane.max_rows)?
-    failure_result_from_rep(format.stream_register_encode(mut lane.body, candidate, lane.authority_kind))?
+    format.stream_register_encode(mut lane.body, candidate, lane.authority_kind)?
     let mut pre = lane.tag
     for attempt in 0u64 .. STREAM_REG_ATTEMPTS {
         if std.object.deadline_after_ms(client, 0) >= deadline {
@@ -339,7 +339,7 @@ fn stream_reg_write(mut lane: StreamLane, mut client: std.object.Client, intent:
                 }
                 uncertain = false
                 candidate = stream_intent_apply(intent, lane.reg, lane.max_rows)?
-                failure_result_from_rep(format.stream_register_encode(mut lane.body, candidate, lane.authority_kind))?
+                format.stream_register_encode(mut lane.body, candidate, lane.authority_kind)?
                 pre = lane.tag
             },
             Error(Uncertain(_)) => {
@@ -362,7 +362,7 @@ fn stream_reg_write(mut lane: StreamLane, mut client: std.object.Client, intent:
 // `start_seq` until the first 404 or an existing TERM, then creates
 // `TERM(sid, old_inc, term)` with `Absent`, advancing `term` past any late
 // batch that landed before TERM. Returns the terminal sequence `term`.
-fn stream_fence_incarnation(mut client: std.object.Client, dir: String, sid: HostStreamId, old_inc: u64, authority_kind: u8, start_seq: u64, mut body: Bytes, mut compare: Bytes, deadline: u64) -> Result[u64, Error] waits {
+fn stream_fence_incarnation(mut client: std.object.Client, dir: String, sid: types.HostStreamIdRep, old_inc: u64, authority_kind: u8, start_seq: u64, mut body: Bytes, mut compare: Bytes, deadline: u64) -> Result[u64, types.Failure] waits {
     let mut term = order.max(start_seq, 1)
     let mut name = string.with_capacity(48)
     loop {
@@ -372,7 +372,7 @@ fn stream_fence_incarnation(mut client: std.object.Client, dir: String, sid: Hos
         let Some(()) = probed else {
             break
         }
-        match failure_result_from_rep(manifest.stream_batch_head(key, compare, host_stream_id_to_rep(sid), old_inc, term))? {
+        match manifest.stream_batch_head(key, compare, sid, old_inc, term)? {
             Term(_, _) => return Ok(term),
             Rows(_) => {
                 term += 1
@@ -382,16 +382,16 @@ fn stream_fence_incarnation(mut client: std.object.Client, dir: String, sid: Hos
     loop {
         format.stream_batch_key(mut name, old_inc, term)
         let key = stream_key(dir, name)
-        failure_result_from_rep(format.stream_term_encode(mut body, host_stream_id_to_rep(sid), old_inc, term, authority_kind))?
+        format.stream_term_encode(mut body, sid, old_inc, term, authority_kind)?
         let (take outcome, take buffer) = std.object.store_if_retry(mut client, key, Absent, replace(mut body, list.new()), deadline)
         body = take buffer
         match take outcome {
             Ok(Applied(_)) => return Ok(term),
             Ok(Mismatch) => {
                 let Some(()) = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut compare, deadline)? else {
-                    return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
+                    return Error(format.disk_fault(key, 0, Absent))
                 }
-                match failure_result_from_rep(manifest.stream_batch_head(key, compare, host_stream_id_to_rep(sid), old_inc, term))? {
+                match manifest.stream_batch_head(key, compare, sid, old_inc, term)? {
                     Term(_, _) => return Ok(term),
                     Rows(_) => {
                         term += 1
@@ -426,19 +426,19 @@ fn stream_trigger_holds(trigger: Option[CollectingTrigger], reg: format.StreamRe
 // CASes `{rev + 1, inc + 1, holder, collecting, low, index, rows: []}` without
 // rebuilding over a fresh winner (A4) and verifying `trigger` on Mismatch,
 // then fences `old_inc` with TERM when `old_inc > 0`.
-fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, collecting: bool, trigger: Option[CollectingTrigger], deadline: u64) -> Result[Option[u64], Error] waits {
+fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, collecting: bool, trigger: Option[CollectingTrigger], deadline: u64) -> Result[Option[u64], types.Failure] waits {
     let probe = stream_key(lane.dir, "probe")
     let reg = stream_key(lane.dir, "reg")
     match stream_reg_read(mut lane, mut client, deadline) {
         Ok(()) => (),
-        Error(Corrupt(Fault(why: Absent, ..))) => {
+        Error(Corrupt(types.FaultRep(why: Absent, ..))) => {
             if collecting {
                 return Ok(None)
             }
-            let _ = failure_result_from_rep(format.stream_header(mut lane.body, host_stream_id_to_rep(lane.sid), ROLE_PROBE, 0, 0, lane.authority_kind))?
-            failure_result_from_rep(history.history_create(mut client, probe, mut lane.body, mut lane.compare, deadline))?
-            let first = format.StreamRegister(rev: 1, sid: host_stream_id_to_rep(lane.sid), inc: 0, holder: store_key_to_rep(StoreId(hi: 0, lo: 0)), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
-            failure_result_from_rep(format.stream_register_encode(mut lane.body, first, lane.authority_kind))?
+            let _ = format.stream_header(mut lane.body, lane.sid, ROLE_PROBE, 0, 0, lane.authority_kind)?
+            history.history_create(mut client, probe, mut lane.body, mut lane.compare, deadline)?
+            let first = format.StreamRegister(rev: 1, sid: lane.sid, inc: 0, holder: types.StoreKey(hi: 0, lo: 0), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
+            format.stream_register_encode(mut lane.body, first, lane.authority_kind)?
             let (take created, take buffer) = std.object.store_if_retry(mut client, reg, Absent, replace(mut lane.body, list.new()), deadline)
             lane.body = take buffer
             match take created {
@@ -455,23 +455,23 @@ fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, 
     if !stream_trigger_holds(trigger, lane.reg) {
         return Ok(None)
     }
-    let _ = failure_result_from_rep(format.stream_header(mut lane.body, host_stream_id_to_rep(lane.sid), ROLE_PROBE, 0, 0, lane.authority_kind))?
-    failure_result_from_rep(history.history_check_conditions(mut client, probe, mut lane.body, deadline))?
+    let _ = format.stream_header(mut lane.body, lane.sid, ROLE_PROBE, 0, 0, lane.authority_kind)?
+    history.history_check_conditions(mut client, probe, mut lane.body, deadline)?
     let old_inc = lane.reg.inc
     let mut won = false
     for attempt in 0u64 .. STREAM_REG_ATTEMPTS {
         if std.object.deadline_after_ms(client, 0) >= deadline {
             break
         }
-        let mut elected = disk_allocation(scoped fn() -> Result[format.StreamRegister, Error] {
+        let mut elected = manifest.disk_allocation(scoped fn() -> Result[format.StreamRegister, types.Failure] {
             Ok(clone(lane.reg))
         })?
         elected.rev = lane.reg.rev + 1
         elected.inc = lane.reg.inc + 1
-        elected.holder = store_key_to_rep(lane.holder)
+        elected.holder = lane.holder
         elected.collecting = collecting
         list.clear(mut elected.rows)
-        failure_result_from_rep(format.stream_register_encode(mut lane.body, elected, lane.authority_kind))?
+        format.stream_register_encode(mut lane.body, elected, lane.authority_kind)?
         let (take outcome, take back) = std.object.store_if_retry(mut client, reg, Match(lane.tag), replace(mut lane.body, list.new()), deadline)
         lane.body = take back
         match take outcome {
@@ -520,11 +520,11 @@ fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, 
     Ok(Some(term))
 }
 
-fn stream_elect(mut lane: StreamLane, mut client: std.object.Client, collecting: bool, deadline: u64) -> Result[Option[u64], Error] waits {
+fn stream_elect(mut lane: StreamLane, mut client: std.object.Client, collecting: bool, deadline: u64) -> Result[Option[u64], types.Failure] waits {
     stream_elect_with_check(mut lane, mut client, collecting, None, deadline)
 }
 
-fn stream_start_fresh(mut lane: StreamLane, mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
+pub fn stream_start_fresh(mut lane: StreamLane, mut client: std.object.Client, deadline: u64) -> Result[(), types.Failure] waits {
     let _ = stream_elect(mut lane, mut client, false, deadline)?
     Ok(())
 }
@@ -534,11 +534,11 @@ fn stream_start_fresh(mut lane: StreamLane, mut client: std.object.Client, deadl
 // other bytes are `Corrupt(Malformed)`, which latches `Batch`. A create
 // whose resends run out has an unknown outcome at this seq, so the lane
 // latches `Unreachable` and never writes the seq with other bytes.
-fn stream_batch_put(mut lane: StreamLane, mut client: std.object.Client, slices: List[format.BatchSlice], deadline: u64) -> Result[(), Error] waits {
+fn stream_batch_put(mut lane: StreamLane, mut client: std.object.Client, slices: List[format.BatchSlice], deadline: u64) -> Result[(), types.Failure] waits {
     let size = format.stream_batch_size(slices) + format.BINDING_BYTES
-    failure_result_from_rep(types.capacity(list.try_reserve(mut lane.body, size)))?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut lane.compare, size)))?
-    failure_result_from_rep(format.stream_batch_encode(mut lane.body, host_stream_id_to_rep(lane.sid), lane.inc, lane.seq, lane.authority_kind, lane.reg.rev, slices))?
+    types.capacity(list.try_reserve(mut lane.body, size))?
+    types.capacity(list.try_reserve(mut lane.compare, size))?
+    format.stream_batch_encode(mut lane.body, lane.sid, lane.inc, lane.seq, lane.authority_kind, lane.reg.rev, slices)?
     let mut name = string.with_capacity(48)
     format.stream_batch_key(mut name, lane.inc, lane.seq)
     let key = stream_key(lane.dir, name)
@@ -547,17 +547,17 @@ fn stream_batch_put(mut lane: StreamLane, mut client: std.object.Client, slices:
     match take outcome {
         Ok(Applied(_)) => Ok(()),
         Ok(Mismatch) => {
-            if let Error(_) = failure_result_from_rep(history.history_fetch(mut client, key, mut lane.compare, deadline)) {
+            if let Error(_) = history.history_fetch(mut client, key, mut lane.compare, deadline) {
                 return Error(stream_latch(mut lane, Unreachable))
             }
             if lane.compare == lane.body {
                 return Ok(())
             }
-            match failure_result_from_rep(manifest.stream_batch_head(key, lane.compare, host_stream_id_to_rep(lane.sid), lane.inc, lane.seq)) {
+            match manifest.stream_batch_head(key, lane.compare, lane.sid, lane.inc, lane.seq) {
                 Ok(Term(_, _)) => Error(stream_latch(mut lane, Superseded)),
                 _ => {
                     lane.latched = Some(Batch)
-                    Error(failure_from_rep(format.disk_fault(key, 0, Malformed)))
+                    Error(format.disk_fault(key, 0, Malformed))
                 },
             }
         },
@@ -570,7 +570,7 @@ type AckDecision = Ack | Stall | Superseded
 // The ack rule (§12.11.4) for one Place's frames in a batch whose create
 // completed before `reg` was read: the body must carry the service's own
 // incarnation and no row, Held or Abandoned, for (store, epoch).
-fn stream_ack_rule(reg: format.StreamRegister, inc: u64, holder: StoreId, store: StoreId, epoch: u64) -> AckDecision {
+fn stream_ack_rule(reg: format.StreamRegister, inc: u64, holder: types.StoreKey, store: types.StoreKey, epoch: u64) -> AckDecision {
     if reg.inc != inc || !types.same(reg.holder.hi, reg.holder.lo, holder.hi, holder.lo) {
         return Superseded
     }
@@ -586,7 +586,7 @@ fn stream_ack_rule(reg: format.StreamRegister, inc: u64, holder: StoreId, store:
 // completed (§12.11.4). A failed read decides nothing and keeps them pending;
 // a body with another (inc, holder) latches `Superseded`, and a register
 // missing or corrupt latches `Register`.
-fn stream_decide(mut lane: StreamLane, mut client: std.object.Client, mut decided: List[SliceDecision], deadline: u64) -> Result[(), Error] waits {
+fn stream_decide(mut lane: StreamLane, mut client: std.object.Client, mut decided: List[SliceDecision], deadline: u64) -> Result[(), types.Failure] waits {
     match stream_reg_read(mut lane, mut client, deadline) {
         Ok(()) => (),
         Error(Corrupt(take fault)) => {
@@ -595,8 +595,8 @@ fn stream_decide(mut lane: StreamLane, mut client: std.object.Client, mut decide
         },
         Error(take problem) => return Error(take problem),
     }
-    failure_result_from_rep(types.capacity(list.try_reserve(mut decided, list.len(lane.pending))))?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut lane.stalled, list.len(lane.pending))))?
+    types.capacity(list.try_reserve(mut decided, list.len(lane.pending)))?
+    types.capacity(list.try_reserve(mut lane.stalled, list.len(lane.pending)))?
     let pending = replace(mut lane.pending, list.new())
     for p in pending {
         match stream_ack_rule(lane.reg, lane.inc, lane.holder, p.store, p.epoch) {
@@ -615,7 +615,7 @@ fn stream_decide(mut lane: StreamLane, mut client: std.object.Client, mut decide
 
 // Decides the slices a failed read left pending. The next cycle may create a
 // batch only once this has succeeded, so every earlier batch is decided.
-fn stream_decide_pending(mut lane: StreamLane, mut client: std.object.Client, deadline: u64) -> Result[List[SliceDecision], Error] waits {
+pub fn stream_decide_pending(mut lane: StreamLane, mut client: std.object.Client, deadline: u64) -> Result[List[SliceDecision], types.Failure] waits {
     stream_latched(lane)?
     let mut decided: List[SliceDecision] = list.new()
     stream_decide(mut lane, mut client, mut decided, deadline)?
@@ -627,12 +627,12 @@ fn stream_decide_pending(mut lane: StreamLane, mut client: std.object.Client, de
 // ack rule. `slices` hold no stalled Place (`stream_stalled`). On a failed
 // read the error returns and the slices stay pending for
 // `stream_decide_pending`.
-fn stream_cycle(mut lane: StreamLane, mut client: std.object.Client, slices: List[format.BatchSlice], deadline: u64) -> Result[List[SliceDecision], Error] waits {
+pub fn stream_cycle(mut lane: StreamLane, mut client: std.object.Client, slices: List[format.BatchSlice], deadline: u64) -> Result[List[SliceDecision], types.Failure] waits {
     stream_latched(lane)?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut lane.pending, list.len(slices))))?
+    types.capacity(list.try_reserve(mut lane.pending, list.len(slices)))?
     stream_batch_put(mut lane, mut client, slices, deadline)?
     for s in slices {
-        list.push(mut lane.pending, PendingSlice(seq: lane.seq, store: store_key_from_rep(s.store), epoch: s.epoch))
+        list.push(mut lane.pending, PendingSlice(seq: lane.seq, store: s.store, epoch: s.epoch))
     }
     lane.seq += 1
     let mut decided: List[SliceDecision] = list.new()

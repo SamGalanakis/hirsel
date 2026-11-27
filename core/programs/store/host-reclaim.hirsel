@@ -1,0 +1,6 @@
+pub type HistoryName {
+    kind: u8,
+    seq: u64,
+    epoch: u64,
+    digest: u64
+}

@@ -1,0 +1,3 @@
+fn forge(id: store.types.StoreKey, take state: store.pages.State, take remote: store.host_stream.ObjectFollowHead) -> store.host_stream.StreamFollowMaterial {
+    store.host_stream.StreamFollowMaterial(store: id, state: take state, resident: 0, remote: take remote, watermark: 0)
+}

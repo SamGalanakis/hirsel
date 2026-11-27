@@ -39,7 +39,7 @@ fn stream_janitor_options(create: bool) -> Options {
 // The host's janitor drops an ask that a later claim already settled (its
 // open is refused `Superseded` before any write) or whose cleanup is already
 // done (STORE-SPEC §12.11.6 A4).
-fn stream_janitor_close_unless_stale(tasks: Tasks, mut service: JournalService, take authority: Authority, c: Clock, r: Random, ask: JanitorAsk) -> Result[(), Error] waits {
+fn stream_janitor_close_unless_stale(tasks: Tasks, mut service: JournalService, take authority: Authority, c: Clock, r: Random, ask: host_stream.JanitorAsk) -> Result[(), Error] waits {
     match stream_janitor_close_place(tasks, mut service, take authority, c, r, stream_janitor_options(false), ask) {
         Ok(_) => Ok(()),
         Error(Superseded(_)) => Ok(()),
@@ -106,8 +106,8 @@ fn stream_orphan_no_head_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[()
     // B writes a Held row for (X, x_epoch) on S_A/reg and crashes.
     stream_unhold_raw_hold(s, tasks, 88, x_store, x_epoch, StoreId(hi: 99, lo: 1))?
     // Host C watches S_A/reg every idle_poll_ms while Host A's janitor handles asks.
-    let mut watch_c = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
-    let mut lane_c = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 55, lo: 1))?
+    let mut watch_c = host_stream.stream_foreign_watch(host_stream_id_to_rep(stream_law_sid()), host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut lane_c = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(stream_law_sid()), 1, 8, store_key_to_rep(StoreId(hi: 55, lo: 1))))?
     lane_c.dir = string.from(watch_c.dir)
     let mut client_c = stream_service_client(s, tasks, 89, "", "us-east-1")?
     let mut janitor_ran = false
@@ -115,7 +115,7 @@ fn stream_orphan_no_head_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[()
         std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
         let now = host.mono_ns(s.time)
         let due = std.object.deadline_after_ms(client_c, JANITOR_OP_MS)
-        if let Some(_) = stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due)? {
+        if let Some(_) = failure_result_from_rep(host_stream.stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due))? {
             let _ = take client_c
             let _ = close(take y_c)
             let _ = close_journal_service(take svc_a)
@@ -274,14 +274,14 @@ fn stream_l90c_dead_collecting_run(s: BucketSim, tasks: Tasks, r: Random) -> Res
     close_journal_service(take svc_a)?
     stream_unhold_raw_hold(s, tasks, 85, store_id, epoch, StoreId(hi: 700, lo: 1))?
     // A janitor with needs_pin = false must NEVER trigger an election even after 4 * hold_ms.
-    let mut no_need = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), false, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
-    let mut no_lane = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 601, lo: 1))?
+    let mut no_need = host_stream.stream_foreign_watch(host_stream_id_to_rep(stream_law_sid()), host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), false, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut no_lane = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(stream_law_sid()), 1, 8, store_key_to_rep(StoreId(hi: 601, lo: 1))))?
     no_lane.dir = string.from(no_need.dir)
     let mut no_client = stream_service_client(s, tasks, 86, "", "us-east-1")?
     for _ in 0u64 .. 10u64 {
         let now = host.mono_ns(s.time)
         let due = std.object.deadline_after_ms(no_client, JANITOR_OP_MS)
-        if let Some(_) = stream_foreign_watch_poll(mut no_need, mut no_lane, mut no_client, now, due)? {
+        if let Some(_) = failure_result_from_rep(host_stream.stream_foreign_watch_poll(mut no_need, mut no_lane, mut no_client, now, due))? {
             let _ = take no_client
             let _ = close_journal_service(take svc_c)
             fail("L90-C(2): janitor without a pin on S_A triggered an election")
@@ -290,15 +290,15 @@ fn stream_l90c_dead_collecting_run(s: BucketSim, tasks: Tasks, r: Random) -> Res
     }
     let _ = take no_client
     // Host C needs S_A's pins -> watches S_A/reg across 4 * hold_ms, elects Collecting.
-    let mut watch_c = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
-    let mut lane_c = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 602, lo: 1))?
+    let mut watch_c = host_stream.stream_foreign_watch(host_stream_id_to_rep(stream_law_sid()), host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut lane_c = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(stream_law_sid()), 1, 8, store_key_to_rep(StoreId(hi: 602, lo: 1))))?
     lane_c.dir = string.from(watch_c.dir)
     let mut client_c = stream_service_client(s, tasks, 87, "", "us-east-1")?
-    let mut triggered: Option[CollectingTrigger] = None
+    let mut triggered: Option[host_stream.CollectingTrigger] = None
     for _ in 0u64 .. 20u64 {
         let now = host.mono_ns(s.time)
         let due = std.object.deadline_after_ms(client_c, JANITOR_OP_MS)
-        if let Some(trig) = stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due)? {
+        if let Some(trig) = failure_result_from_rep(host_stream.stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due))? {
             triggered = Some(trig)
             break
         }
@@ -309,7 +309,7 @@ fn stream_l90c_dead_collecting_run(s: BucketSim, tasks: Tasks, r: Random) -> Res
         let _ = close_journal_service(take svc_c)
         fail("L90-C(2): janitor did not trigger after 4 * hold_ms on dead S_A")
     }
-    let Some((take gc_built, take pfx_built)) = stream_collecting_elect(mut lane_c, mut client_c, trig, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS))? else {
+    let Some((take gc_built, take pfx_built)) = failure_result_from_rep(host_stream.stream_collecting_elect(mut lane_c, mut client_c, trig, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS)))? else {
         let _ = take client_c
         let _ = close_journal_service(take svc_c)
         fail("L90-C(2): Collecting election did not win")
@@ -326,9 +326,9 @@ fn stream_l90c_dead_collecting_run(s: BucketSim, tasks: Tasks, r: Random) -> Res
     }
     let cut_x = checkpoint(mut x_c)?
     durable(mut x_c, cut_x)?
-    let mut extra: Map[StoreId, String] = map.new()
-    map.insert(mut extra, store_id, string.from("p1/"))
-    let all_gone = stream_collecting_sweep(mut lane_c, mut gc, mut pfxs, mut client_c, extra, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS))?
+    let mut extra: Map[types.StoreKey, String] = map.new()
+    map.insert(mut extra, store_key_to_rep(store_id), string.from("p1/"))
+    let all_gone = failure_result_from_rep(host_stream.stream_collecting_sweep(mut lane_c, mut gc, mut pfxs, mut client_c, extra, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS)))?
     let _ = take client_c
     if !all_gone {
         let _ = close(take x_c)
@@ -368,15 +368,15 @@ fn stream_l90c_paused_superseded_run(s: BucketSim, tasks: Tasks, r: Random) -> R
     stream_unhold_raw_hold(s, tasks, 85, store_id, epoch, StoreId(hi: 710, lo: 1))?
     let t2 = stream_unhold_commit_ticket(mut a, 2)?
     // Host C's janitor observes the Held row for 4 * hold_ms and elects Collecting inc 2!
-    let mut watch_c = stream_foreign_watch(stream_law_sid(), stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
-    let mut lane_c = stream_lane(stream_law_sid(), 1, 8, StoreId(hi: 610, lo: 1))?
+    let mut watch_c = host_stream.stream_foreign_watch(host_stream_id_to_rep(stream_law_sid()), host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), true, JANITOR_HOLD_MS, JANITOR_IDLE_MS)
+    let mut lane_c = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(stream_law_sid()), 1, 8, store_key_to_rep(StoreId(hi: 610, lo: 1))))?
     lane_c.dir = string.from(watch_c.dir)
     let mut client_c = stream_service_client(s, tasks, 86, "", "us-east-1")?
-    let mut triggered: Option[CollectingTrigger] = None
+    let mut triggered: Option[host_stream.CollectingTrigger] = None
     for _ in 0u64 .. 24u64 {
         let now = host.mono_ns(s.time)
         let due = std.object.deadline_after_ms(client_c, JANITOR_OP_MS)
-        if let Some(trig) = stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due)? {
+        if let Some(trig) = failure_result_from_rep(host_stream.stream_foreign_watch_poll(mut watch_c, mut lane_c, mut client_c, now, due))? {
             triggered = Some(trig)
             break
         }
@@ -386,7 +386,7 @@ fn stream_l90c_paused_superseded_run(s: BucketSim, tasks: Tasks, r: Random) -> R
         let _ = take client_c
         fail("L90-C(3): janitor did not trigger after 4 * hold_ms on paused S_A")
     }
-    let Some(_) = stream_collecting_elect(mut lane_c, mut client_c, trig, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS))? else {
+    let Some(_) = failure_result_from_rep(host_stream.stream_collecting_elect(mut lane_c, mut client_c, trig, host.mono_ns(s.time), std.object.deadline_after_ms(client_c, JANITOR_OP_MS)))? else {
         let _ = take client_c
         fail("L90-C(3): Collecting election did not win")
     }
@@ -419,16 +419,16 @@ type RacingJanitorJob: send {
     tasks: Tasks,
     seed: u64,
     holder: StoreId,
-    trigger: CollectingTrigger
+    trigger: host_stream.CollectingTrigger
 }
 
 fn stream_racing_janitor_task(take job: RacingJanitorJob) -> Result[bool, Error] waits {
     let RacingJanitorJob(endpoint, clock, tasks, seed, holder, trigger) = take job
     let mut client = stream_endpoint_client(endpoint, clock, tasks, seed, "", "us-east-1")?
-    let mut lane = stream_lane(stream_law_sid(), 1, 8, holder)?
-    lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(stream_law_sid()))
+    let mut lane = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(stream_law_sid()), 1, 8, store_key_to_rep(holder)))?
+    lane.dir = host_stream.stream_key(host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), host_stream.stream_dir(host_stream_id_to_rep(stream_law_sid())))
     let due = std.object.deadline_after_ms(client, JANITOR_OP_MS)
-    let res = stream_collecting_elect(mut lane, mut client, trigger, host.mono_ns(clock), due)
+    let res = failure_result_from_rep(host_stream.stream_collecting_elect(mut lane, mut client, trigger, host.mono_ns(clock), due))
     let _ = take client
     match take res {
         Ok(Some(_)) => Ok(true),
@@ -467,8 +467,8 @@ fn stream_l90c_racing_janitors_run(s: BucketSim, tasks: Tasks, r: Random) -> Res
     close_journal_service(take svc_a)?
     let tok = StoreId(hi: 800, lo: 1)
     stream_unhold_raw_hold(s, tasks, 82, StoreId(hi: 1, lo: 1), 1, tok)?
-    let j1 = task.spawn(tasks, bytes 16777216, RacingJanitorJob(endpoint: s.endpoint, clock: s.time, tasks, seed: 210, holder: StoreId(hi: 901, lo: 1), trigger: TriggerServing(tok)), stream_racing_janitor_task)
-    let j2 = task.spawn(tasks, bytes 16777216, RacingJanitorJob(endpoint: s.endpoint, clock: s.time, tasks, seed: 211, holder: StoreId(hi: 902, lo: 1), trigger: TriggerServing(tok)), stream_racing_janitor_task)
+    let j1 = task.spawn(tasks, bytes 16777216, RacingJanitorJob(endpoint: s.endpoint, clock: s.time, tasks, seed: 210, holder: StoreId(hi: 901, lo: 1), trigger: TriggerServing(store_key_to_rep(tok))), stream_racing_janitor_task)
+    let j2 = task.spawn(tasks, bytes 16777216, RacingJanitorJob(endpoint: s.endpoint, clock: s.time, tasks, seed: 211, holder: StoreId(hi: 902, lo: 1), trigger: TriggerServing(store_key_to_rep(tok))), stream_racing_janitor_task)
     let w1 = result.unwrap(task.join(take j1))?
     let w2 = result.unwrap(task.join(take j2))?
     if w1 == w2 {

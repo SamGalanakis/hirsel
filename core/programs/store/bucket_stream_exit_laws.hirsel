@@ -47,7 +47,7 @@ fn exit_backup_rows(parent: Dir, target: Dir, tasks: Tasks, c: Clock, r: Random)
 // entries from the checkpoint in exact segment order, returning the count of
 // consecutive `rows` keys 1..N recovered strictly in history order.
 fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, store: StoreId) -> Result[(u64, u64), Error] {
-    let seg_prefix = stream_key(place_prefix, "a-")
+    let seg_prefix = host_stream.stream_key(place_prefix, "a-")
     let mut seg_key: Option[String] = None
     let mut seg_raw: Bytes = list.new()
     for (k, obj) in report.objects {
@@ -60,11 +60,11 @@ fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, 
         fail("L90-E: archive segment a-* missing after archival cut")
     }
     let short_name = string.from(string.slice(found_key, string.byte_len(place_prefix), string.byte_len(found_key)))
-    let Some(parsed) = history_parse_archive_name(short_name) else {
+    let Some(parsed) = host_stream.history_parse_archive_name(short_name) else {
         fail("L90-E: archive segment key failed history_parse_archive_name")
     }
     let seg_ref = pages.HistoryRef(seq: parsed.seq, epoch: parsed.epoch, len: list.len(seg_raw), digest: parsed.digest)
-    let seg_entries = history_decode_archive_segment(found_key, store, seg_ref, seg_raw)?
+    let seg_entries = failure_result_from_rep(host_stream.history_decode_archive_segment(found_key, store_key_to_rep(store), seg_ref, seg_raw))?
     if list.len(seg_entries) < 2 {
         fail("L90-E: archive segment named fewer than 2 entries")
     }
@@ -78,7 +78,7 @@ fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, 
             fail("L90-E: archive segment entry positions not contiguous/ascending")
         }
         expected_seq += 1
-        let ekey = stream_key(place_prefix, history.history_key("e-", item))
+        let ekey = host_stream.stream_key(place_prefix, history.history_key("e-", item))
         let Some(eobj) = map.get(report.objects, ekey) else {
             fail("L90-E: archive segment names missing entry object")
         }

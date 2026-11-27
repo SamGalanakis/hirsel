@@ -18,7 +18,7 @@ fn janitor_bind_orphan(s: BucketSim, tasks: Tasks, r: Random, mut svc_a: Journal
         let asks = journal_janitor_asks(mut svc_a)?
         for take ask in take asks {
             if let JanitorOrphanHold(store, _, pair) = take ask {
-                return Ok((store, pair))
+                return Ok((store_key_from_rep(store), pair))
             }
         }
     }
@@ -65,16 +65,16 @@ fn janitor_cleanup_done_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(),
     let (store, pair) = janitor_bind_orphan(s, tasks, r, mut svc_a, token)?
     // B's Abandon arrives late; the service's next polls remove the row.
     let mut client = stream_service_client(s, tasks, 90, "", "us-east-1")?
-    let mut lane = stream_lane(stream_law_sid(), 1, 8, token)?
-    lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(stream_law_sid()))
+    let mut lane = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(stream_law_sid()), 1, 8, store_key_to_rep(token)))?
+    lane.dir = host_stream.stream_key(host_stream.stream_root_dir(string.from(STREAM_SERVICE_ROOT)), host_stream.stream_dir(host_stream_id_to_rep(stream_law_sid())))
     let due = std.object.deadline_after_ms(client, JANITOR_OP_MS)
-    stream_reg_read(mut lane, mut client, due)?
-    let _ = stream_reg_write(mut lane, mut client, Abandon(token), due)?
+    failure_result_from_rep(host_stream.stream_reg_read(mut lane, mut client, due))?
+    let _ = failure_result_from_rep(host_stream.stream_reg_write(mut lane, mut client, Abandon(store_key_to_rep(token)), due))?
     std.clock.sleep_ns(s.time, 4 * JANITOR_IDLE_MS * 1000000)
     stream_service_marker(s, tasks, string.from("a2-cleaned-start"))?
     let jclient = stream_service_client(s, tasks, 91, "pX/", "us-east-1")?
     let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
-    match stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false), JanitorOrphanHold(store, string.from("pX/"), pair)) {
+    match stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false), JanitorOrphanHold(store_key_to_rep(store), string.from("pX/"), pair)) {
         Ok(JanitorCleaned) => (),
         Ok(JanitorClosed) => fail("A4 binding: the janitor closed X after its cleanup was done"),
         Error(_) => fail("A4 binding: a finished cleanup was not JanitorCleaned"),
@@ -128,7 +128,7 @@ fn janitor_wrong_store_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), 
     }
     let jclient = stream_service_client(s, tasks, 94, "pX/", "us-east-1")?
     let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
-    match stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false), JanitorOrphanHold(store, string.from("pX/"), pair)) {
+    match stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false), JanitorOrphanHold(store_key_to_rep(store), string.from("pX/"), pair)) {
         Error(Foreign) => (),
         Ok(_) => fail("A4 binding: the janitor acted on another Store's head"),
         Error(_) => fail("A4 binding: another Store's head was not refused Foreign"),

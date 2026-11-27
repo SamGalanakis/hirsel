@@ -19,14 +19,7 @@ fn history_retain(previous: history.HistoryMark, prior: pages.HistoryRef, curren
     })
 }
 
-type HistoryName {
-    kind: u8,
-    seq: u64,
-    epoch: u64,
-    digest: u64
-}
-
-fn history_parse_name(key: String) -> Option[HistoryName] {
+fn history_parse_name(key: String) -> Option[host_stream.HistoryName] {
     let raw = string.as_bytes(key)
     if list.len(raw) != 60 || raw[1] != b'-' || raw[22] != b'-' || raw[43] != b'-' {
         return None
@@ -55,7 +48,7 @@ fn history_parse_name(key: String) -> Option[HistoryName] {
             return None
         }
     }
-    Some(HistoryName(kind, seq, epoch, digest))
+    Some(host_stream.HistoryName(kind, seq, epoch, digest))
 }
 
 type ReclaimPass {

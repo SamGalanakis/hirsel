@@ -1,0 +1,122 @@
+fn report_law_service(take client: std.object.Client, c: Clock, tasks: Tasks) -> Result[(StreamService, Client[SlotReport]), types.Failure] {
+    let holder = types.StoreKey(hi: 3134, lo: 3)
+    let sid = types.HostStreamIdRep(hi: 3134, lo: 0)
+    let lane = stream_lane(sid, 1, 8, holder)?
+    let gc = stream_gc_new(lane.reg)
+    let (_, take control): (Sender[ServiceControl], Receiver[ServiceControl]) = channel.new(1)
+    let rings: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(1, bytes 0)
+    let (take bell, take ring_inbox) = types.capacity(take rings)?
+    let reports: Result[(Client[SlotReport], Inbox[SlotReport]), Capacity] = conn.new(2, bytes 0)
+    let (take report, take report_inbox) = types.capacity(take reports)?
+    let plan = service_plan(sid, "", 0, 1048576, 4, 16, 8000, 1000, 16, 60, 4096)
+    let service = StreamService(lane: take lane, client: take client, clock: c, plan: take plan, op_ms: 2000, slots: list.with_capacity(1), rings: take ring_inbox, reports: take report_inbox, control: take control, waiting: list.new(), tickets: list.new(), prefixes: map.new(), observed_rows: list.new(), active_settles: list.with_capacity(1), stall_polls: list.new(), next_settle_id: 2, last_reg_ns: 0, tasks, bell: take bell, timer: None, poll_at: 0, gc: take gc, janitor_asks: list.new())
+    Ok((take service, take report))
+}
+
+fn report_law_attach(mut service: StreamService, store: types.StoreKey, unsent: Option[journal.SlotAck]) -> Result[(Client[SlotMsg], Inbox[journal.SlotAck]), types.Failure] {
+    let data: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(1, bytes 0)
+    let (take data_client, take data_inbox) = types.capacity(take data)?
+    let answers: Result[(Client[journal.SlotAck], Inbox[journal.SlotAck]), Capacity] = conn.new(1, bytes 0)
+    let (take answer_client, take answer_inbox) = types.capacity(take answers)?
+    let place = SlotPlace(store, epoch: 1, fenced: false, settled_from: 0, answers: take answer_client)
+    list.push(mut service.slots, ServiceSlot(inbox: Some(take data_inbox), place: Some(take place), held: None, unsent))
+    Ok((take data_client, take answer_inbox))
+}
+
+pub fn stream_reap_pending_settle(take client: std.object.Client, c: Clock, tasks: Tasks) -> Result[(), types.Failure] {
+    let store = types.StoreKey(hi: 3134, lo: 3)
+    let (take state, _) = report_law_service(take client, c, tasks)?
+    let mut service = take state
+    let (take data_client, take answer_inbox) = report_law_attach(mut service, store, Some(SlotSettle(1, 0, 1)))?
+    list.push(mut service.active_settles, ActiveSettle(id: 1, slot: 0, store, epoch: 1, tokens: list.new()))
+    let _ = take data_client
+    stream_reap_closed_slots(mut service)
+    if !stream_slot_unused(service.slots[0u64]) || stream_has_active_settle(service, store, 1) {
+        fail("the reaped slot retained its active settle")
+    }
+    let _ = take answer_inbox
+    Ok(())
+}
+
+fn report_law_client(c: Clock, tasks: Tasks, r: Random) -> Result[(std.object.Client, Task[std.sim.s3.Report]), types.Failure] waits {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut addresses: List[Ip] = list.with_capacity(1)
+    list.push(mut addresses, address.ip)
+    std.sim.net.resolve_as(mut network, string.from("bucket.s3.test"), take addresses)
+    let key = result.unwrap(secret.seal(string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")), "kdf"))
+    let derived: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut signing: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut signing, derived[i])
+    }
+    let verify = result.unwrap(secret.narrow(result.unwrap(secret.seal(take signing, "mac")), "verify"))
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: list.new(), holds: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(3134), c, 1048576, 4194304)
+    let credentials = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take key, "")
+    let bucket = std.object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(c), 2000)
+    let client = std.object.start_simulated(endpoint, tasks, take bucket, take credentials, c, r, lanes, deadline) ?=> |problem| Remote(problem)
+    Ok((take client, take server))
+}
+
+@test
+fn bucket_stream_ignore_overwritten_settle_report(c: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    let (take client, take server) = report_law_client(c, tasks, r)?
+    let (take state, take report) = report_law_service(take client, c, tasks)?
+    let mut service = take state
+    let store = types.StoreKey(hi: 3134, lo: 1)
+    let (take data, take answers) = report_law_attach(mut service, store, Some(SlotSettle(1, 0, 1)))?
+    let token = types.StoreKey(hi: 3134, lo: 2)
+    let mut tokens: List[types.StoreKey] = list.with_capacity(1)
+    list.push(mut tokens, token)
+    list.push(mut service.active_settles, ActiveSettle(id: 1, slot: 0, store, epoch: 1, tokens: take tokens))
+    stream_answer(mut service, 0, SlotPollHead)
+    let mut next_tokens: List[types.StoreKey] = list.with_capacity(1)
+    list.push(mut next_tokens, token)
+    list.push(mut service.active_settles, ActiveSettle(id: 2, slot: 0, store, epoch: 1, tokens: take next_tokens))
+    result.unwrap(conn.try_send(report, ReportSettled(0, store, 1, 1, true, 1, 7, 0)))
+    stream_service_reports(mut service)?
+    let Some(place) = view service.slots[0u64].place else {
+        fail("an overwritten settle report removed the attached Place")
+    }
+    if place.settled_from != 0 || list.len(service.active_settles) != 1 || service.active_settles[0u64].id != 2 || service.active_settles[0u64].tokens[0u64] != token {
+        fail("an overwritten settle report altered the cursor or the newer settle")
+    }
+    let _ = (take data, take answers, take report, take server)
+    Ok(())
+}
+
+@test
+fn bucket_stream_ignore_other_store_reports(c: Clock, tasks: Tasks, r: Random) -> Result[(), types.Failure] waits {
+    let (take client, take server) = report_law_client(c, tasks, r)?
+    let (take state, take report) = report_law_service(take client, c, tasks)?
+    let mut service = take state
+    // Keep malformed reports away from the provider. A stale fence must still
+    // leave both slots and the in-flight settle intact.
+    service.lane.latched = Some(Batch)
+    let previous = types.StoreKey(hi: 3134, lo: 1)
+    let current = types.StoreKey(hi: 3134, lo: 2)
+    let (take first_data, take first_answers) = report_law_attach(mut service, current, None)?
+    let (take second_data, take second_answers) = report_law_attach(mut service, current, None)?
+    result.unwrap(conn.try_send(report, ReportFenced(0, previous, 1, 2, None)))
+    result.unwrap(conn.try_send(report, ReportDetached(1, previous, 1)))
+    stream_service_reports(mut service)?
+    let Some(first) = view service.slots[0u64].place else {
+        fail("a fence for the previous Store removed the new attachment")
+    }
+    let Some(second) = view service.slots[1u64].place else {
+        fail("a detach for the previous Store removed the new attachment")
+    }
+    if first.fenced || second.fenced || first.store != current || second.store != current {
+        fail("a report from the previous Store changed the new attachment")
+    }
+    let _ = (take first_data, take first_answers, take second_data, take second_answers, take report, take server)
+    Ok(())
+}
+
+pub fn rewire_law_slot(mut link: SlotLink, take client: Client[journal.SlotAck], take inbox: Inbox[journal.SlotAck]) {
+    link.answer_client = Some(take client)
+    link.answers = Some(take inbox)
+}

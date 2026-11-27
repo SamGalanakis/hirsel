@@ -1,0 +1,22 @@
+pub type ObjectFollowHead: shareable + send {
+    current: history.HistoryHead,
+    tag: std.object.ETag,
+    next_node: u64,
+    attach: Option[format.Attach],
+    head_bytes: Bytes,
+    live_next_seq: u64
+}
+
+pub fn copy_follow_state(previous: pages.State) -> Result[pages.State, types.Failure] {
+    manifest.disk_allocation(scoped fn() -> Result[pages.State, types.Failure] {
+        let mut tips: List[pages.Tip] = list.with_capacity(list.len(previous.tips))
+        let mut pins: List[pages.Pin] = list.with_capacity(list.len(previous.pins))
+        for old_tip in previous.tips {
+            list.push(mut tips, pages.Tip(id: old_tip.id, name: string.from(old_tip.name), parent: old_tip.parent, forked_at: old_tip.forked_at, roots: pages.share_roots(old_tip.roots), head: old_tip.head, at: old_tip.at))
+        }
+        for old_pin in previous.pins {
+            list.push(mut pins, types.capacity(pages.share_pin(old_pin))?)
+        }
+        Ok(pages.State(tips: take tips, pins: take pins, next_branch: previous.next_branch, next_table: previous.next_table))
+    })
+}

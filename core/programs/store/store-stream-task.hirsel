@@ -5,22 +5,22 @@
 type StreamServiceInput: send {
     requests: std.object.Requests,
     clock: Clock,
-    plan: StreamPlan,
+    plan: ServicePlan,
     dir: String,
     authority_kind: u8,
-    holder: StoreId,
+    holder: types.StoreKey,
     op_ms: u64,
     control: Receiver[ServiceControl],
     rings: Inbox[u32],
     reports: Inbox[SlotReport],
-    ready: Sender[Result[(), Error]],
+    ready: Sender[Result[(), types.Failure]],
     tasks: Tasks,
     bell: Client[u32]
 }
 
 type StreamServiceEnd: send {
     requests: std.object.Requests,
-    result: Result[(), Error]
+    result: Result[(), types.Failure]
 }
 
 // One attached Place on a slot: its (store, epoch), whether it was fenced,
@@ -28,7 +28,7 @@ type StreamServiceEnd: send {
 // batch strictly below it is already durable in a GROUP entry on `head`),
 // and its answer client.
 type SlotPlace {
-    store: StoreId,
+    store: types.StoreKey,
     epoch: u64,
     fenced: bool,
     settled_from: u64,
@@ -47,7 +47,7 @@ type ServiceSlot {
 // among those frames (kept per batch seq for cutoff verdicts).
 type StallTicket {
     slot: u64,
-    store: StoreId,
+    store: types.StoreKey,
     epoch: u64,
     batch_seq: u64,
     through: u64
@@ -55,9 +55,9 @@ type StallTicket {
 
 // First-observation monotonic timestamp of a Held row (§12.11.6 rule a).
 type ObservedRow {
-    store: StoreId,
+    store: types.StoreKey,
     epoch: u64,
-    token: StoreId,
+    token: types.StoreKey,
     first_seen_ns: u64
 }
 
@@ -66,15 +66,15 @@ type ObservedRow {
 type ActiveSettle {
     id: u64,
     slot: u64,
-    store: StoreId,
+    store: types.StoreKey,
     epoch: u64,
-    tokens: List[StoreId]
+    tokens: List[types.StoreKey]
 }
 
 // Next stall head-poll deadline (`hold_ms / 4`) for a stalled Place.
 type StallPoll {
     slot: u64,
-    store: StoreId,
+    store: types.StoreKey,
     epoch: u64,
     next_poll_ns: u64
 }
@@ -104,7 +104,7 @@ type StreamService {
     lane: StreamLane,
     client: std.object.Client,
     clock: Clock,
-    plan: StreamPlan,
+    plan: ServicePlan,
     op_ms: u64,
     slots: List[ServiceSlot],
     rings: Inbox[u32],
@@ -114,7 +114,7 @@ type StreamService {
     // slice's last ticket sequence, in `lane.pending` order.
     waiting: List[(u64, u64)],
     tickets: List[StallTicket],
-    prefixes: Map[StoreId, String],
+    prefixes: Map[types.StoreKey, String],
     observed_rows: List[ObservedRow],
     active_settles: List[ActiveSettle],
     stall_polls: List[StallPoll],
@@ -153,7 +153,7 @@ fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits
         },
     }
     let now = host.mono_ns(clock)
-    let mut prefixes: Map[StoreId, String] = map.new()
+    let mut prefixes: Map[types.StoreKey, String] = map.new()
     let mut gc = stream_gc_new(lane.reg)
     if let Some(term) = fenced_term {
         let old_inc = lane.inc - 1
@@ -177,7 +177,7 @@ fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits
     StreamServiceEnd(requests: take returned, result: take result)
 }
 
-fn stream_service_loop(mut s: StreamService) -> Result[(), Error] waits {
+fn stream_service_loop(mut s: StreamService) -> Result[(), types.Failure] waits {
     loop {
         match conn.receive(s.rings) {
             Ok(_) => (),
@@ -192,12 +192,12 @@ fn stream_service_loop(mut s: StreamService) -> Result[(), Error] waits {
 
 // One wake: control, reports, polls, then batches until no slot has a frame.
 // False once the service is stopped.
-fn stream_service_wake(mut s: StreamService) -> Result[bool, Error] waits {
+fn stream_service_wake(mut s: StreamService) -> Result[bool, types.Failure] waits {
+    stream_flush_acks(mut s)
     stream_drain_rings(s)
     if !stream_service_control(mut s)? {
         return Ok(false)
     }
-    stream_flush_acks(mut s)
     stream_service_reports(mut s)?
     stream_service_poll(mut s)?
     loop {
@@ -221,7 +221,7 @@ fn stream_drain_rings(s: StreamService) {
     while let Ok(_) = conn.try_receive(s.rings) {}
 }
 
-fn stream_service_control(mut s: StreamService) -> Result[bool, Error] waits {
+fn stream_service_control(mut s: StreamService) -> Result[bool, types.Failure] waits {
     loop {
         match channel.try_receive(s.control) {
             Ok(NewSlot(take answers)) => {
@@ -249,7 +249,7 @@ fn stream_service_control(mut s: StreamService) -> Result[bool, Error] waits {
 // (one is the janitor's, §12.11.8). Ordinary slots refuse `Full(Pins)` once
 // active pins reach `max_pins` - 1; the reserved janitor slot uses the last
 // slot and is never refused by `max_pins` (A5).
-fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotMsg], u32), Error] {
+fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotMsg], u32), types.Failure] {
     if !reserved {
         let pins_limit: u64 = int.widen(s.plan.limits.max_pins)
         let max_ordinary_pins = pins_limit - 1
@@ -283,14 +283,14 @@ fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotM
         }
     }
     let made: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(STREAM_SLOT_CHUNKS, bytes s.plan.limits.slot_bytes)
-    let (take data, take inbox) = failure_result_from_rep(types.capacity(take made))?
+    let (take data, take inbox) = types.capacity(take made)?
     let slot = ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None)
     if let Some(i) = free {
         stream_retire_slot_settles(mut s, i)
         let _ = replace(mut s.slots[i], take slot)
         return Ok((take data, int.narrow(i)))
     }
-    failure_result_from_rep(types.capacity(list.try_reserve(mut s.slots, 1)))?
+    types.capacity(list.try_reserve(mut s.slots, 1))?
     list.push(mut s.slots, take slot)
     Ok((take data, int.narrow(list.len(s.slots) - 1)))
 }
@@ -401,7 +401,7 @@ fn stream_entry_of(batch: List[BatchEntry], slot: u64) -> Option[u64] {
 // Drains every slot into `batch` while the batch has room. A frame that
 // does not fit stays held on its slot for the next batch, so a full slot
 // blocks only its own Place.
-fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[(), Error] waits {
+fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[(), types.Failure] waits {
     for i in 0u64 .. list.len(s.slots) {
         if let Some(place) = s.slots[i].place {
             if stream_is_latched(s.lane) || place.fenced || stream_stalled(s.lane, place.store, place.epoch) {
@@ -429,7 +429,7 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
             }
             match take message {
                 SlotAttach(hi, lo, epoch, take place_prefix, take answers) => {
-                    let store = StoreId(hi, lo)
+                    let store = types.StoreKey(hi, lo)
                     let _ = map.try_reserve(mut s.prefixes, 1)
                     map.insert(mut s.prefixes, store, take place_prefix)
                     s.slots[i].place = Some(SlotPlace(store, epoch, fenced: false, settled_from: 0, answers: take answers))
@@ -460,8 +460,8 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                     let row = match at {
                         Some(found) => found,
                         None => {
-                            failure_result_from_rep(types.capacity(list.try_reserve(mut batch, 1)))?
-                            list.push(mut batch, BatchEntry(slot: i, through: 0, slice: format.BatchSlice(store: store_key_to_rep(owner), epoch: fence, frames: 0, octets: list.new())))
+                            types.capacity(list.try_reserve(mut batch, 1))?
+                            list.push(mut batch, BatchEntry(slot: i, through: 0, slice: format.BatchSlice(store: owner, epoch: fence, frames: 0, octets: list.new())))
                             list.len(batch) - 1
                         },
                     }
@@ -474,7 +474,7 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
     Ok(())
 }
 
-fn stream_store_in(batch: List[BatchEntry], store: StoreId) -> bool {
+fn stream_store_in(batch: List[BatchEntry], store: types.StoreKey) -> bool {
     for e in batch {
         if types.same(e.slice.store.hi, e.slice.store.lo, store.hi, store.lo) {
             return true
@@ -485,9 +485,9 @@ fn stream_store_in(batch: List[BatchEntry], store: StoreId) -> bool {
 
 // Appends one frame, receiving its remaining chunks, and seals it in its
 // slice under (X, ROLE_BATCH, batch seq) at its offset in the slice.
-fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, width: u64, sequence: u64, take first: Bytes) -> Result[(), Error] waits {
+fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, width: u64, sequence: u64, take first: Bytes) -> Result[(), types.Failure] waits {
     let at = list.len(filling.slice.octets)
-    failure_result_from_rep(types.capacity(list.try_reserve(mut filling.slice.octets, width + format.BINDING_BYTES)))?
+    types.capacity(list.try_reserve(mut filling.slice.octets, width + format.BINDING_BYTES))?
     list.append(mut filling.slice.octets, first)
     while list.len(filling.slice.octets) - at < width {
         let received = match s.slots[i].inbox {
@@ -506,14 +506,14 @@ fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, widt
     }
     let kind: u16 = int.narrow(format.read_le(filling.slice.octets, at, 2))
     let ctx = format.DiskContext(store: filling.slice.store, role: format.ROLE_BATCH, seq: s.lane.seq)
-    failure_result_from_rep(types.capacity(format.history_seal(mut filling.slice.octets, ctx, at, kind)))?
+    types.capacity(format.history_seal(mut filling.slice.octets, ctx, at, kind))?
     filling.slice.frames += 1
     filling.through = sequence
     Ok(())
 }
 
 // Runs the writer cycle on `batch` and answers each Place by the ack rule.
-fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> Result[(), Error] waits {
+fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> Result[(), types.Failure] waits {
     let mut ordered = take batch
     list.sort(mut ordered, scoped fn(a: BatchEntry, b: BatchEntry) -> Order {
         match order.compare(a.slice.store.hi, b.slice.store.hi) {
@@ -522,8 +522,8 @@ fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> R
         }
     })
     let mut slices: List[format.BatchSlice] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut slices, list.len(ordered))))?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut s.waiting, list.len(ordered))))?
+    types.capacity(list.try_reserve(mut slices, list.len(ordered)))?
+    types.capacity(list.try_reserve(mut s.waiting, list.len(ordered)))?
     for take e in take ordered {
         let BatchEntry(slot, through, slice: take slice) = take e
         list.push(mut s.waiting, (slot, through))
@@ -576,7 +576,7 @@ fn stream_service_decided(mut s: StreamService, decided: List[SliceDecision]) {
     }
 }
 
-fn stream_ticket_stall(mut s: StreamService, slot: u64, store: StoreId, epoch: u64, batch_seq: u64, through: u64) {
+fn stream_ticket_stall(mut s: StreamService, slot: u64, store: types.StoreKey, epoch: u64, batch_seq: u64, through: u64) {
     for i in 0u64 .. list.len(s.tickets) {
         if s.tickets[i].slot == slot && types.same(s.tickets[i].store.hi, s.tickets[i].store.lo, store.hi, store.lo) && s.tickets[i].epoch == epoch && s.tickets[i].batch_seq == batch_seq {
             s.tickets[i].through = order.max(s.tickets[i].through, through)
@@ -590,7 +590,7 @@ fn stream_ticket_stall(mut s: StreamService, slot: u64, store: StoreId, epoch: u
 }
 
 // Finds the active non-fenced slot serving (store, epoch).
-fn stream_serving_slot(s: StreamService, store: StoreId, epoch: u64) -> Option[u64] {
+fn stream_serving_slot(s: StreamService, store: types.StoreKey, epoch: u64) -> Option[u64] {
     for i in 0u64 .. list.len(s.slots) {
         if let Some(place) = s.slots[i].place {
             if !place.fenced && types.same(place.store.hi, place.store.lo, store.hi, store.lo) && place.epoch == epoch {

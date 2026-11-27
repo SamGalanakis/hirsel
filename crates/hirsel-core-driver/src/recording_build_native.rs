@@ -1,7 +1,6 @@
 // REPLAY-SPEC v2.3 R10: every executable carries its entry's code revision as
 // the 32-byte symbol `hirsel_code_revision`, which a Run tape's header records
-// and a Replay open compares (the runtime's
-// open_refuses_a_changed_code_revision_arg_limit_or_policy).
+// and a Replay open compares.
 
 /// The recording runtime archive path from the Buck2 test environment.
 fn env_record_runtime() -> PathBuf {
@@ -170,9 +169,10 @@ fn code_revision_of(executable: &Path) -> [u8; 32] {
     use object::{Object, ObjectSection, ObjectSymbol};
     let bytes = std::fs::read(executable).unwrap();
     let file = object::File::parse(&*bytes).unwrap();
+    let name = format!("{}hirsel_code_revision", crate::host::HOST_TARGET.symbol_prefix());
     let symbol = file
         .symbols()
-        .find(|s| s.name() == Ok("hirsel_code_revision"))
+        .find(|s| s.name() == Ok(name.as_str()))
         .expect("the executable defines hirsel_code_revision");
     let section = file
         .section_by_index(symbol.section_index().unwrap())
@@ -919,8 +919,8 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
         .unwrap();
     assert!(name.status.success());
     assert_eq!(
-        String::from_utf8(name.stdout).unwrap().trim(),
-        built.executable.file_name().unwrap().to_str().unwrap()
+        Path::new(String::from_utf8(name.stdout).unwrap().trim()).file_name().unwrap(),
+        built.executable.file_name().unwrap()
     );
     // SAFETY: this is the still-owned child, which wrote the ready marker.
     assert_eq!(

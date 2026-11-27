@@ -219,12 +219,17 @@ fn source_walk_manifest_approvals_and_refusals() {
     let bad_name = root
         .join("nested")
         .join(std::ffi::OsString::from_vec(vec![0xff]));
-    std::fs::write(&bad_name, b"x").unwrap();
-    assert_eq!(
-        invoke_source(&root, &[]).unwrap_err().to_string(),
-        "--source: � is not a UTF-8 name"
-    );
-    std::fs::remove_file(bad_name).unwrap();
+    match std::fs::write(&bad_name, b"x") {
+        Ok(()) => {
+            assert_eq!(
+                invoke_source(&root, &[]).unwrap_err().to_string(),
+                "--source: � is not a UTF-8 name"
+            );
+            std::fs::remove_file(bad_name).unwrap();
+        }
+        // APFS refuses this filename before a source walk can encounter it.
+        Err(error) => assert_eq!(error.raw_os_error(), Some(libc::EILSEQ)),
+    }
 
     let large = directory.path().join("large");
     std::fs::create_dir(&large).unwrap();

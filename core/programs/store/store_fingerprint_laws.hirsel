@@ -1,0 +1,231 @@
+// L103 checks the index declaration against code-independent storage identities.
+fn fingerprint_bytes_payload(key: u64, value: Bytes) -> Result[u64, Capacity] {
+    Ok(key + list.len(value))
+}
+
+fn fingerprint_bytes_keys(key: u64, value: Bytes) -> Result[List[u64], Capacity] {
+    backfill_keys(key, key)
+}
+
+fn fingerprint_list_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let list_codec: std.codec.Codec[List[u8]] = std.codec.of_list()
+    let bulk_codec = std.codec.of_bytes()
+    let (Some(list_rev), Some(bulk_rev)) = (std.codec.revision(list_codec), std.codec.revision(bulk_codec)) else {
+        fail("L103(a): both mechanisms must have revisions")
+    }
+    if list_rev == bulk_rev {
+        fail("L103(a): the element loop and bulk codec must have different revisions")
+    }
+    let mut db = open(tasks, d, c, r, journal_crash_options())?
+    let key = std.codec.key_u64()
+    let mut initial = declare(db, Migrate)?
+    let mut rows = declare_table(mut initial, "rows", key, list_codec)?
+    let initial_cover = covering(mut initial, mut rows, "cover", Many, code.describe(fingerprint_bytes_keys), key, code.describe(fingerprint_bytes_payload), std.codec.of_u64())?
+    let primary_table = finish(mut initial, take rows)?
+    let _ = seal(mut db, take initial)?
+    let outcome = run(mut db, None, primary_table, fn(mut tx, target) -> Result[(), Error] {
+        put(mut tx, target, 5u64, b"abc")
+    })?
+    let Committed(write) = outcome else {
+        return Error(MigrationFault)
+    }
+    durable(mut db, write.ticket)?
+    close(take db)?
+    let reopened_db = open(tasks, d, c, r, journal_crash_options())?
+    let modes: Inline[Mode, 2] =[Open, Follower]
+    for mode in modes {
+        let mut reopened = declare(reopened_db, Open)?
+        reopened.mode = mode
+        let mut current = declare_table(mut reopened, "rows", key, bulk_codec)?
+        let same = covering(mut reopened, mut current, "cover", Many, code.describe(fingerprint_bytes_keys), key, code.describe(fingerprint_bytes_payload), std.codec.of_u64())?
+        if same.id != initial_cover.id {
+            fail("L103(a): reopening must keep the index id")
+        }
+        let at = snapshot(reopened_db)
+        let read_handle = reader(reopened_db, 0)?
+        let mut found = find(read_handle, at, same, Included(5u64), Included(5u64))?
+        let Some((5u64, data)) = next(read_handle, mut found)? else {
+            return Error(MigrationFault)
+        }
+        if data != b"abc" || next(read_handle, mut found)? != None {
+            fail("L103(a): find must still return exactly row 5")
+        }
+        assert_cover_bytes(reopened_db, same.id, 5, 8)?
+    }
+    close(take reopened_db)
+}
+
+type FingerprintDefault: codec {
+    v: u64,
+    w: u64 = 8
+}
+
+fn fingerprint_default_keys(key: u64, value: FingerprintDefault) -> Result[List[u64], Capacity] {
+    backfill_keys(key, key)
+}
+
+fn fingerprint_default_payload(key: u64, value: FingerprintDefault) -> Result[u64, Capacity] {
+    Ok(value.v + value.w)
+}
+
+// Keep the other four inputs unchanged when emulating the previous release.
+fn fingerprint_forge(mut plan: SchemaPlan, catalog_key: Bytes, offset: u64, part: Bytes) -> Result[(), Error] {
+    let mut record = catalog_entry_in(plan.roots.catalog, catalog_key)?
+    if list.len(record.revision) != 160 || list.len(part) != 32 {
+        fail("L103: invalid fixture composite layout")
+    }
+    for i in 0u64 .. 32u64 {
+        record.revision[offset + i] = part[i]
+    }
+    let encoded = encode_catalog(record)?
+    plan.roots = catalog_insert(mut plan.next_node, pages.share_roots(plan.roots), catalog_key, encoded)?
+    plan.changed = true
+    Ok(())
+}
+
+fn fingerprint_old_writer(mut plan: SchemaPlan, primary_table: Table[u64, FingerprintDefault]) -> Result[(), Error] {
+    // Version 3 schema with one non-defaulted u64 field v, at the exact current
+    // definition path. The current full schema stays available at number 1.
+    let writer = option.unwrap(std.hex.decode(b"03010000001e00000073746f72652e73746f72652e46696e6765727072696e7444656661756c74000000000001000000000100000076061300000000"))
+    let mut catalog = catalog_entry_in(plan.roots.catalog, primary_table.catalog_key)?
+    let current = result.unwrap(std.codec.schema(primary_table.readers.codec))
+    let mut schemas: List[ValueSchema] = list.new()
+    list.push(mut schemas, ValueSchema(number: 0, fingerprint: std.codec.fingerprint_of(writer), schema: take writer))
+    list.push(mut schemas, ValueSchema(number: 1, fingerprint: std.codec.fingerprint_of(current), schema: take current))
+    catalog.schemas = take schemas
+    catalog.next = 2
+    let record = encode_catalog(catalog)?
+    plan.roots = catalog_insert(mut plan.next_node, pages.share_roots(plan.roots), primary_table.catalog_key, record)?
+    let mut key = prefix(primary_table.id)?
+    list.put_word_be(mut key, 5u64)
+    let mut row: Bytes = list.new()
+    list.put_word_le(mut row, 0u16)
+    list.put_word_le(mut row, 11u64)
+    let _ = failure_result_from_rep(pages.put_page_row(mut plan.roots.collections, key, row, plan.next_node + 1, mut plan.next_node))?
+    Ok(())
+}
+
+fn fingerprint_default_case(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let value: std.codec.Codec[FingerprintDefault] = std.codec.of()
+    let payload = std.codec.of_u64()
+    if std.codec.fingerprint(value) != std.hex.decode(b"3f7cff681e076365c11929bda1d160ce6393e534a572a1d38064b8241c042267") {
+        fail("L103(b): the declared default must appear in the row fingerprint")
+    }
+    let by = code.describe(fingerprint_default_keys)
+    let project = code.describe(fingerprint_default_payload)
+    let old = option.unwrap(std.hex.decode(b"1115f68fa0d5c7eefa954ba7f2346f54556ef36f57a6b032b07e364cc7172879"))
+    let mut initial = declare(db, Migrate)?
+    initial.versioned = true
+    let mut rows = declare_table(mut initial, "rows", key, value)?
+    let prior_index = covering(mut initial, mut rows, "cover", Many, by, key, project, payload)?
+    let primary_table = finish(mut initial, take rows)?
+    let _ = seal(mut db, take initial)?
+    let outcome = run(mut db, None, primary_table, fn(mut tx, target) -> Result[(), Error] {
+        put(mut tx, target, 5u64, FingerprintDefault(v: 11, w: 7))
+    })?
+    let Committed(_) = outcome else {
+        return Error(MigrationFault)
+    }
+    assert_cover_bytes(db, prior_index.id, 5, 18)?
+    let mut prior = schema_plan(db)
+    fingerprint_old_writer(mut prior, primary_table)?
+    fingerprint_forge(mut prior, prior_index.catalog_key, 64, old)?
+    let _ = publish_schema_plan(mut db, take prior)?
+    let modes: Inline[Mode, 2] =[Open, Follower]
+    for mode in modes {
+        let mut reopened = declare(db, Open)?
+        reopened.mode = mode
+        reopened.versioned = true
+        let mut current = declare_table(mut reopened, "rows", key, value)?
+        match covering(mut reopened, mut current, "cover", Many, by, key, project, payload) {
+            Error(Changed(name)) if name == "cover" => (),
+            _ => fail("L103(b): changed default must refuse Open and Follower"),
+        }
+    }
+    let mut migration = declare(db, Migrate)?
+    migration.versioned = true
+    let mut current = declare_table(mut migration, "rows", key, value)?
+    let after = covering(mut migration, mut current, "cover", Many, by, key, project, payload)?
+    let _ = finish(mut migration, take current)?
+    let _ = seal(mut db, take migration)?
+    if prior_index.id == after.id {
+        fail("L103(b): migration must rebuild the covering index")
+    }
+    assert_cover_bytes(db, after.id, 5, 19)
+}
+
+fn fingerprint_string_keys(key: u64, value: u64) -> Result[List[String], Capacity] {
+    let mut keys: List[String] = list.new()
+    let text = if value == 1 {
+        "a"
+    } else if value == 2 {
+        "a\0"
+    } else {
+        "aa"
+    }
+    list.push(mut keys, string.from(text))
+    Ok(take keys)
+}
+
+fn fingerprint_key_case(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let index_key = std.codec.key_string()
+    let value = std.codec.of_u64()
+    if std.codec.key_fingerprint(index_key) != std.hex.decode(b"2b2a718bbe0a1d5603f193dd95c26cb1401ae281920cdd347a7d59b92387e55c") {
+        fail("L103(d): the declared key rule must appear in the index fingerprint")
+    }
+    let by = code.describe(fingerprint_string_keys)
+    let project = code.describe(cover_sum)
+    let old = option.unwrap(std.hex.decode(b"227d393fde0e3b5ed7179ebe4b7191598bd8f2f56914b4c8d469e64628d33409"))
+    let mut initial = declare(db, Migrate)?
+    initial.versioned = true
+    let mut rows = declare_table(mut initial, "rows", key, value)?
+    let prior_index = covering(mut initial, mut rows, "cover", Many, by, index_key, project, value)?
+    let primary_table = finish(mut initial, take rows)?
+    let _ = seal(mut db, take initial)?
+    if !typed_put(mut db, primary_table, 1, 3) || !typed_put(mut db, primary_table, 2, 2) || !typed_put(mut db, primary_table, 3, 1) {
+        return Error(MigrationFault)
+    }
+    let mut prior = schema_plan(db)
+    fingerprint_forge(mut prior, prior_index.catalog_key, 96, old)?
+    let _ = publish_schema_plan(mut db, take prior)?
+    let modes: Inline[Mode, 2] =[Open, Follower]
+    for mode in modes {
+        let mut reopened = declare(db, Open)?
+        reopened.mode = mode
+        reopened.versioned = true
+        let mut current = declare_table(mut reopened, "rows", key, value)?
+        match covering(mut reopened, mut current, "cover", Many, by, index_key, project, value) {
+            Error(Changed(name)) if name == "cover" => (),
+            _ => fail("L103(d): changed key rule must refuse Open and Follower"),
+        }
+    }
+    let mut migration = declare(db, Migrate)?
+    migration.versioned = true
+    let mut current = declare_table(mut migration, "rows", key, value)?
+    let after = covering(mut migration, mut current, "cover", Many, by, index_key, project, value)?
+    let _ = finish(mut migration, take current)?
+    let _ = seal(mut db, take migration)?
+    if prior_index.id == after.id {
+        fail("L103(d): migration must rebuild the covering index")
+    }
+    let at = snapshot(db)
+    let read_handle = reader(db, 0)?
+    let observed = look(read_handle, at, None, after, fn(tx, ix) -> Result[(), Error] {
+        let mut cursor = entries(tx, ix, Unbounded, Unbounded)?
+        let (Some((a, 3u64, 4u64)), Some((b, 2u64, 4u64)), Some((third, 1u64, 4u64))) = (next_entry(mut cursor)?, next_entry(mut cursor)?, next_entry(mut cursor)?) else {
+            return Error(MigrationFault)
+        }
+        if a != "a" || b != "a\0" || third != "aa" || next_entry(mut cursor)? != None {
+            fail("L103(d): covering entries must follow the current string ordering")
+        }
+        Ok(())
+    })?
+    match take observed {
+        Seen(Seen(value: Ok(()), ..)) => Ok(()),
+        _ => Error(MigrationFault),
+    }
+}

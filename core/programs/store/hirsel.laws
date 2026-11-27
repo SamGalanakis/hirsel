@@ -276,10 +276,10 @@ store@1/store/test_fork_settle src=bfacba733f2069a6 sig=62442ed9e8d84806 run=aff
 store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=37225c5fda3c7d03 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frame_size src=1742c918747de3f6 sig=399c6b7cb15a8d09 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=f43b7266260af9de sig=c3185e19298a8ac2 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_frozen_format_corpus src=f6abedeab5530550 sig=c7fab7af513858b6 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_frozen_format_corpus src=871b1288fb14f577 sig=c7fab7af513858b6 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_index_build_law src=b6e1e694dce79b39 sig=80de8629cc1a1077 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_catch_up_law src=3c90dba367100c4d sig=c3afa6cf6c26de0f run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/test_index_declaration_laws src=02c831dfbbc9db76 sig=17c41bf2fcf9ec7a run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_index_declaration_laws src=fde22278d71133f4 sig=9bf0e8d533e1355e run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_drift_counted src=18b1e571462b35d0 sig=42a75817f3f52603 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_refusal src=83bd4e51f5bc874d sig=30b76c5f8578ec0f run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_span_cursor_parity src=1750ae08a9dd8de5 sig=525d0b6623d4a806 run=a6b003f729117be3 bug=- oracle=- rows=pending

@@ -67,7 +67,7 @@ U64 = outside(builtin("u64"))
 I64 = outside(builtin("i64"))
 STRING = outside(builtin("string"))
 STD = "std@1/tests/codec/"
-STORE = "store@1/store_declare_laws/"
+STORE = "store@1/store/"
 
 
 def default_record(path, default):

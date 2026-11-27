@@ -288,7 +288,7 @@ fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[
 }
 
 // What changed between the release that built the index and this one.
-type Drift = DriftExtractor | DriftProjection | DriftDefault | DriftFrom
+type Drift = DriftExtractor | DriftProjection | DriftDefault | DriftFrom | DriftListFingerprint | DriftDefaultFingerprint | DriftKeyFingerprint
 
 // A u64 on the wire as `{v, w: u64 = 7}`, read back as v + w: a row codec
 // whose default and `via`-style `from` are the parts each drift changes.
@@ -358,7 +358,13 @@ fn drift_release_from(mut d: Declare) -> Result[(), Error] {
     drift_release_with(mut d, drift_codec(DriftFrom))
 }
 
-fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
+fn covering_revision_case(d: Dir, c: Clock, r: Random, tasks: Tasks, drift: Drift) -> Result[(), Error] waits {
+    match drift {
+        DriftListFingerprint => return fingerprint_list_case(disk_test_directory(d), c, r, tasks),
+        DriftDefaultFingerprint => return fingerprint_default_case(c),
+        DriftKeyFingerprint => return fingerprint_key_case(c),
+        _ => (),
+    }
     let mut db = test_db(c, 1073741824)
     let key = std.codec.key_u64()
     let value = drift_codec(DriftExtractor)
@@ -466,12 +472,15 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
 }
 
 @test
-fn test_index_declaration_laws(c: Clock) -> Result[(), Error] waits {
+fn test_index_declaration_laws(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     law_unique_backfill(c)?
-    covering_revision_case(c, DriftExtractor)?
-    covering_revision_case(c, DriftProjection)?
-    covering_revision_case(c, DriftDefault)?
-    covering_revision_case(c, DriftFrom)
+    covering_revision_case(d, c, r, tasks, DriftExtractor)?
+    covering_revision_case(d, c, r, tasks, DriftProjection)?
+    covering_revision_case(d, c, r, tasks, DriftDefault)?
+    covering_revision_case(d, c, r, tasks, DriftFrom)?
+    covering_revision_case(d, c, r, tasks, DriftListFingerprint)?
+    covering_revision_case(d, c, r, tasks, DriftDefaultFingerprint)?
+    covering_revision_case(d, c, r, tasks, DriftKeyFingerprint)
 }
 
 fn conflict_first(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {

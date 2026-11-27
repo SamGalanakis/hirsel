@@ -1,0 +1,116 @@
+type Wire: codec {
+    value: u64
+}
+
+type Row: codec via Wire(to: to_wire, from: from_wire) {
+    wire: Wire,
+    decoded: u64
+}
+
+fn to_wire(row: Row) -> View[Wire] in row {
+    view row.wire
+}
+
+fn decode_value(value: u64) -> u64 {
+    value + 1u64
+}
+
+fn from_wire(take wire: Wire) -> Result[Row, ()] {
+    let decoded = decode_value(wire.value)
+    Ok(Row(wire: take wire, decoded))
+}
+
+fn by(key: u64, row: Row) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, key)
+    Ok(take keys)
+}
+
+fn project(key: u64, row: Row) -> Result[u64, Capacity] {
+    Ok(key + row.decoded)
+}
+
+fn schema(mut d: store.Declare) -> Result[(store.Table[u64, Row], store.Index[u64, u64, Row, u64]), store.Error] {
+    let key = std.codec.key_u64()
+    let value: std.codec.Codec[Row] = std.codec.of()
+    let mut rows = store.declare_table(mut d, "rows", key, value)?
+    let index = store.covering(mut d, mut rows, "cover", Many, code.describe(by), key, code.describe(project), std.codec.of_u64())?
+    let table = store.finish(mut d, take rows)?
+    Ok((table, index))
+}
+
+fn write_rows(mut db: store.Db, table: store.Table[u64, Row], argv: Args) waits {
+    let mut i = 1u64
+    while let Some(key) = args.get(argv, i) {
+        let Some(value) = args.get(argv, i + 1) else {
+            fail("L103(c): missing fixture value")
+        }
+        let k: u64 = result.unwrap(int.parse(key))
+        let v: u64 = result.unwrap(int.parse(value))
+        let outcome = result.unwrap(store.run(mut db, None, (store.copy_env(table), k, v), fn(mut tx, data) -> Result[(), store.Error] {
+            store.put(mut tx, data.0, data.1, Row(wire: Wire(value: data.2), decoded: decode_value(data.2)))
+        }))
+        let Committed(committed) = outcome else {
+            fail("L103(c): write refused")
+        }
+        result.unwrap(store.durable(mut db, committed.ticket))
+        i += 2
+    }
+}
+
+fn report_entries(db: store.Db, index: store.Index[u64, u64, Row, u64], out: Stdout) waits {
+    let handle = result.unwrap(store.reader(db, 0))
+    let observed = result.unwrap(store.look(handle, store.snapshot(db), None, store.copy_env(index), fn(tx, cover) -> Result[List[(u64, u64, u64)], store.Error] {
+        let mut cursor = store.entries(tx, cover, Unbounded, Unbounded)?
+        let mut rows: List[(u64, u64, u64)] = list.new()
+        while let Some(entry) = store.next_entry(mut cursor)? {
+            list.push(mut rows, entry)
+        }
+        Ok(take rows)
+    }))
+    let Seen(store.Seen(value: Ok(take entries), ..)) = take observed else {
+        fail("L103(c): cannot read covering entries")
+    }
+    for (key, primary, payload) in entries {
+        let mut line = string.from("entry ")
+        string.push_u64(mut line, key)
+        string.push(mut line, " ")
+        string.push_u64(mut line, primary)
+        string.push(mut line, " ")
+        string.push_u64(mut line, payload)
+        string.push(mut line, "\n")
+        result.unwrap(stdout.write(out, line))
+    }
+}
+
+pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0))
+    let value: std.codec.Codec[Row] = std.codec.of()
+    result.unwrap(stdout.write(out, std.hex.encode(result.unwrap(std.codec.schema(value)))))
+    result.unwrap(stdout.write(out, "\n"))
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.create = phase == "write"
+    let mut db = result.unwrap(store.open(tasks, d, c, r, options))
+    if phase == "reopen" {
+        match store.bind_declaration(mut db, Open, schema) {
+            Error(Changed(name)) if name == "cover" => (),
+            _ => fail("L103(c): Open must refuse with Changed(cover)"),
+        }
+        result.unwrap(stdout.write(out, "Open Changed(cover)\n"))
+        let source = result.unwrap(store.open_read_only(d, c, options))
+        match store.bind_read_only(source, schema) {
+            Error(Changed(name)) if name == "cover" => (),
+            _ => fail("L103(c): Follower must refuse with Changed(cover)"),
+        }
+        result.unwrap(stdout.write(out, "Follower Changed(cover)\n"))
+    } else if phase != "write" {
+        fail("L103(c): unknown phase")
+    }
+    let (table, index) = result.unwrap(store.bind_declaration(mut db, Migrate, schema))
+    if phase == "write" {
+        write_rows(mut db, table, argv)
+    }
+    report_entries(db, index, out)
+    result.unwrap(store.close(take db))
+    Ok(())
+}

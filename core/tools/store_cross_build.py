@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""T7 cross-build reopen: keep last-green W2 crash-cut and mid-import states
-and verify tonight's build opens each one as a valid prefix with walker+verify
-clean. Keeps only the last green set, bounded on disk.
+"""Check Store across builds, using saved W2 states or a scenario's own
+declaration and index-entry model.
 """
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -15,8 +15,9 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from std_native import ROOT
-from store_crash_tests import bridge_env, compile_damage, count_cuts
+from store_crash_tests import bridge_env, checked, compile_damage, count_cuts, entry_grants
 from store_freeze_corpus import current_format
+from store_tests import inputs
 
 # Disk scenarios cover Directory cuts, migrations, branches, Sums/Many index
 # rebuilds, and prepared-export/mid-import/cutover states (`install`).
@@ -28,6 +29,99 @@ JOURNAL_SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-fork
 SCENARIO_CUT_CAPS = {'install': 24}
 DEFAULT_CUT_CAP = 16
 MAX_DISK_BYTES = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class Scenario:
+    source: str
+    write_args: tuple[str, ...]
+    written: tuple[str, ...]
+    reopened: tuple[str, ...]
+    patch: tuple[str, str] | None = None
+
+
+def via_helper_scenario():
+    rows = ((9, 14), (2, 5), (7, 5))
+
+    def fold(delta):
+        return tuple(f'entry {key} {key} {key + wire + delta}' for key, wire in sorted(rows))
+
+    return Scenario(
+        source='core/tools/store_cross_build_via.hirsel',
+        write_args=tuple(str(n) for row in rows for n in row),
+        written=fold(1),
+        reopened=('Open Changed(cover)', 'Follower Changed(cover)', *fold(11)),
+        patch=('    value + 1u64\n', '    value + 11u64\n'),
+    )
+
+
+SCENARIOS = {'via-helper': via_helper_scenario()}
+
+
+def build_scenario(args, source, build, store):
+    build.mkdir()
+    program = build / 'main.hirsel'
+    program.write_text(source, encoding='utf-8')
+    manifest = build / 'inputs.json'
+    request = inputs(args.root.resolve())
+    request['packages'].append({
+        'package': {'name': 'app', 'version': '1'},
+        'dependencies': [{'name': name, 'version': '1'} for name in ('core', 'std', 'store')],
+        'sources': [{'file': str(program), 'modules': ['main'], 'signatures': False}],
+    })
+    manifest.write_text(json.dumps(request), encoding='utf-8')
+    entry = 'app@1/main/main'
+    executable = build / 'scenario'
+    command = [
+        str(args.compiler.resolve()), 'build', '--inputs', str(manifest), '--source-core', '--source-std',
+        '--entry', entry, '--backend', 'llvm' if args.engine == 'llvm-release' else args.engine,
+        '--runtime', str(args.runtime.resolve()), '--store', str(build / 'objects'),
+        '--limit', str(64 * 1024 * 1024), *entry_grants(manifest, entry, store),
+        '-o', str(executable), '--json',
+    ]
+    if args.engine == 'llvm-release':
+        command.append('--release')
+    if args.cc:
+        command += ['--cc', str(args.cc.resolve())]
+    built = checked(command, engine=args.engine, case=f'{args.name}:build-{build.name}')
+    report = json.loads(built.stdout)
+    if not report.get('accepted') or not report.get('native', {}).get('linked'):
+        raise RuntimeError(built.stdout)
+    return executable
+
+
+def scenario_output(executable, arguments, expected):
+    run = subprocess.run([str(executable), *arguments], capture_output=True, text=True, timeout=300)
+    schema, *lines = run.stdout.splitlines() or ['']
+    if run.returncode or not schema or tuple(lines) != expected:
+        raise RuntimeError(
+            f'{arguments[0]} exited {run.returncode}\n'
+            f'expected {expected!r}\nstdout:\n{run.stdout}\nstderr:\n{run.stderr}'
+        )
+    return bytes.fromhex(schema)
+
+
+def run_scenario(args):
+    scenario = SCENARIOS[args.name]
+    source = (args.root / scenario.source).read_text(encoding='utf-8')
+    next_source = source
+    if scenario.patch is not None:
+        old, new = scenario.patch
+        if old == new or source.count(old) != 1:
+            raise ValueError(f'{args.name}: build B patch must replace one source fragment')
+        next_source = source.replace(old, new)
+    with tempfile.TemporaryDirectory(prefix='store-cross-build-') as tmp:
+        work = Path(tmp)
+        store = work / 'store'
+        store.mkdir()
+        a = build_scenario(args, source, work / 'a', store)
+        prior_schema = scenario_output(a, ('write', *scenario.write_args), scenario.written)
+        b = build_scenario(args, next_source, work / 'b', store)
+        schema = scenario_output(b, ('reopen',), scenario.reopened)
+        if prior_schema != schema:
+            raise RuntimeError(f'{args.name}: the value codec schema changed across builds')
+    print(f'cross-build {args.name}: PASS', flush=True)
+    return 0
 
 
 def select_cuts(total, cap):
@@ -283,6 +377,14 @@ def main():
     p_reopen.add_argument('--saved', type=Path, required=True)
     p_reopen.add_argument('--output', type=Path, required=True)
 
+    p_scenario = sub.add_parser('scenario')
+    p_scenario.add_argument('name', choices=SCENARIOS)
+    p_scenario.add_argument('--root', type=Path, default=ROOT)
+    p_scenario.add_argument('--compiler', type=Path, required=True)
+    p_scenario.add_argument('--runtime', type=Path, required=True)
+    p_scenario.add_argument('--cc', type=Path)
+    p_scenario.add_argument('--engine', choices=['cranelift', 'llvm', 'llvm-release'], default='cranelift')
+
     p_prom = sub.add_parser('promote')
     p_prom.add_argument('--stage', type=Path, required=True)
     p_prom.add_argument('--target', type=Path, required=True)
@@ -293,6 +395,8 @@ def main():
         return run_capture(args)
     if args.command == 'reopen':
         return run_reopen(args)
+    if args.command == 'scenario':
+        return run_scenario(args)
     return promote(args.stage, args.target, args.max_bytes)
 
 

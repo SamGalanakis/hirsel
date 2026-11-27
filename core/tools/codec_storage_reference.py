@@ -108,6 +108,11 @@ def expression(path):
     return values[order.index(arg)], values[order.index(expr)]
 
 
+def range_via_prefix(path):
+    wire = group(nominal("record", path + "DRangeWire", field("lo", U64), field("hi", U64)))[0]
+    return u32(1) + node("via", text(path + "DRange") + outside(wire))
+
+
 def vectors():
     row = nominal(
         "record", STD + "DTomb", field("id", U64),
@@ -120,7 +125,6 @@ def vectors():
     )
     tree_value, list_value = tree(STD)
     arg, expr = expression(STD)
-    wire = group(nominal("record", STD + "DRangeWire", field("lo", U64), field("hi", U64)))[0]
     return {
         "record": group(row)[0],
         "sum": group(shape)[0],
@@ -137,7 +141,7 @@ def vectors():
         "default_8": default_record(STD + "StorageDefault", 8),
         "store_default_7": default_record(STORE + "FingerprintDefault", 7),
         "store_default_8": default_record(STORE + "FingerprintDefault", 8),
-        "via_prefix": u32(1) + node("via", text(STD + "DRange") + outside(wire)),
+        "via_prefix": range_via_prefix(STD),
     }
 
 

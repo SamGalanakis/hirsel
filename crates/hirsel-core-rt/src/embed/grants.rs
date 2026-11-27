@@ -9,6 +9,7 @@ use crate::entry::{
 };
 use hirsel_core_ids::launch::{XDG_FORMS, valid_app};
 use hirsel_core_layout::{Os, Target};
+use hirsel_core_net::{GrantRule, exec};
 use std::{
     collections::BTreeMap,
     ffi::CString,
@@ -93,6 +94,7 @@ pub(crate) struct ResolvedGrants {
     pub(crate) store_dir: OpenedDir,
     pub(crate) extra_dirs: Vec<OpenedDir>,
     pub(crate) net_rules: Vec<String>,
+    pub(crate) exec_grants: Vec<exec::Request>,
     pub(crate) secrets: Vec<ParsedSecret>,
     pub(crate) has_foreign: bool,
 }
@@ -122,6 +124,7 @@ pub(crate) fn resolve_embedded_grants(
     let mut grant_mask: u64 = 0;
     let mut dir_specs: Vec<String> = Vec::new();
     let mut net_rules: Vec<String> = Vec::new();
+    let mut exec_grants = Vec::new();
     let mut secrets: Vec<ParsedSecret> = Vec::new();
     let mut has_foreign = false;
 
@@ -144,13 +147,19 @@ pub(crate) fn resolve_embedded_grants(
         }
         if let Some(rule) = line.strip_prefix("Net=") {
             check_target_net_rule(target, rule)?;
-            net_rules.push(rule.to_owned());
+            net_rules.extend(rule.split(';').map(str::to_owned));
             grant_mask |= 1 << NET;
             continue;
         }
-        if line.starts_with("Exec") {
+        if let Some(request) = line.strip_prefix("Exec=") {
             check_target_exec(target, line)?;
-            return Err(format!("GrantUnsupported({line})"));
+            let request = exec::Request::parse(request)?;
+            if !Path::new(&request.file).is_absolute() {
+                return Err(format!("ExecSource({})", request.file));
+            }
+            exec_grants.push(request);
+            grant_mask |= 1 << EXEC;
+            continue;
         }
         if line.starts_with("Env") {
             return Err(format!("EnvSource({line})"));
@@ -160,11 +169,11 @@ pub(crate) fn resolve_embedded_grants(
                 dir_specs.push(spec.to_owned());
             } else if let Some(rule) = token.strip_prefix("Net=") {
                 check_target_net_rule(target, rule)?;
-                net_rules.push(rule.to_owned());
+                net_rules.extend(rule.split(';').map(str::to_owned));
                 grant_mask |= 1 << NET;
-            } else if token.starts_with("Exec") {
+            } else if token == "Exec" || token.starts_with("Exec=") {
                 check_target_exec(target, token)?;
-                return Err(format!("GrantUnsupported({token})"));
+                return Err(exec::GRANT_SYNTAX.into());
             } else if token.starts_with("Env") {
                 return Err(format!("EnvSource({token})"));
             } else if let Some(rest) = token.strip_prefix("Secret:") {
@@ -220,7 +229,9 @@ pub(crate) fn resolve_embedded_grants(
             }
             EXEC => {
                 check_target_exec(target, "Exec")?;
-                return Err("GrantMissing(Exec)".into());
+                if exec_grants.get(req.index).is_none() {
+                    return Err(format!("GrantMissing(Exec:{name})"));
+                }
             }
             ENV => return Err(format!("GrantMissing(Env:{name})")),
             CRED => return Err(format!("GrantMissing(Cred:{name})")),
@@ -246,6 +257,10 @@ pub(crate) fn resolve_embedded_grants(
             }
             other => return Err(format!("GrantUnsupported(kind={other})")),
         }
+    }
+
+    if exec_grants.len() > parameters.iter().filter(|req| req.kind == EXEC).count() {
+        return Err("GrantOutsideWants(Exec)".into());
     }
 
     // Validate & resolve directory grant paths before creating xdg-* directories.
@@ -312,6 +327,7 @@ pub(crate) fn resolve_embedded_grants(
         },
         extra_dirs,
         net_rules,
+        exec_grants,
         secrets: ordered_secrets,
         has_foreign,
     })
@@ -319,20 +335,26 @@ pub(crate) fn resolve_embedded_grants(
 
 fn check_target_exec(target: Target, grant: &str) -> Result<(), String> {
     match target.os() {
-        Os::Ios => Err(format!("TargetCapabilityUnsupported(ios, {grant})")),
+        Os::Ios => Err(format!(
+            "TargetCapabilityUnsupported(ios, {grant}: iOS apps cannot create processes)"
+        )),
         Os::Linux | Os::Macos => Ok(()),
     }
 }
 
-fn check_target_net_rule(target: Target, rule: &str) -> Result<(), String> {
-    let is_unix = rule.starts_with("unix:")
-        || rule.starts_with("unix-listen:")
-        || rule.starts_with("unix-connect:")
-        || rule.contains("unix");
-    match target.os() {
-        Os::Ios if is_unix => Err(format!("TargetCapabilityUnsupported(ios, Net={rule})")),
-        Os::Ios | Os::Linux | Os::Macos => Ok(()),
+fn check_target_net_rule(target: Target, rules: &str) -> Result<(), String> {
+    let unix_rule = match target.os() {
+        Os::Ios => rules
+            .split(';')
+            .find(|row| matches!(GrantRule::parse(row), Ok(GrantRule::Unix(_)))),
+        Os::Linux | Os::Macos => None,
+    };
+    if let Some(row) = unix_rule {
+        return Err(format!(
+            "TargetCapabilityUnsupported(ios, Net={row}: Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer)"
+        ));
     }
+    Ok(())
 }
 
 fn parse_secret_grant(full: &str, rest: &str) -> Result<ParsedSecret, String> {
@@ -640,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_source_and_ios_target_refusals() {
+    fn secret_source() {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("store");
         let sec = tmp.path().join("token.txt");
@@ -686,42 +708,91 @@ mod tests {
             &["store", "k"],
         );
         assert!(ok.is_ok());
+    }
 
-        // EMB-7: iOS target refuses Exec and unix Net rules.
-        let ios_exec = resolve_embedded_grants(
-            "aarch64-apple-ios",
-            store.as_os_str().as_bytes(),
-            b"",
-            b"Exec=foo\n",
-            &[Requirement {
-                kind: DIR,
+    #[test]
+    fn ios_target_grants() {
+        let store = tempfile::tempdir().unwrap();
+        let resolve = |target, grants: &str, parameters, names| {
+            resolve_embedded_grants(
+                target,
+                store.path().as_os_str().as_bytes(),
+                b"",
+                grants.as_bytes(),
+                parameters,
+                names,
+            )
+        };
+        let exec = "Exec=/profiles.toml child";
+        let rules = [
+            "UnixConnect work peer.sock",
+            "UnixListen work listener.sock",
+            "UnixBind work bound.sock",
+            "UnixSend work target.sock",
+        ];
+        let system = "Tls unix.example.com 443-443 System";
+        let parameters = [
+            Requirement {
+                kind: EXEC,
                 index: 0,
-            }],
-            &["store"],
-        )
-        .err()
-        .unwrap();
-        assert!(
-            ios_exec.contains("TargetCapabilityUnsupported"),
-            "got {ios_exec}"
-        );
+            },
+            Requirement {
+                kind: NET,
+                index: 0,
+            },
+        ];
+        let names = ["child", "net"];
+        let desktop_net = format!("Net=UnixRoot work /tmp;{system};{}", rules.join(";"));
+        for desktop in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+            let grants = format!("{exec}\n{desktop_net}");
+            let resolved = resolve(desktop, &grants, &parameters, &names).unwrap();
+            assert_eq!(resolved.exec_grants.len(), 1);
+            assert_eq!(resolved.exec_grants[0].file, "/profiles.toml");
+            assert_eq!(resolved.exec_grants[0].names, ["child"]);
+            let net = hirsel_core_net::NetGrant::parse(&resolved.net_rules).unwrap();
+            assert_eq!(net.rules.len(), 5);
+            assert_eq!(
+                resolve(desktop, &desktop_net, &parameters, &names)
+                    .err()
+                    .unwrap(),
+                "GrantMissing(Exec:child)"
+            );
+            assert_eq!(
+                resolve(desktop, exec, &[], &[]).err().unwrap(),
+                "GrantOutsideWants(Exec)"
+            );
+            assert_eq!(
+                resolve(desktop, "Exec=profiles.toml child", &parameters, &names)
+                    .err()
+                    .unwrap(),
+                "ExecSource(profiles.toml)"
+            );
+        }
 
-        let ios_unix = resolve_embedded_grants(
-            "aarch64-apple-ios",
-            store.as_os_str().as_bytes(),
-            b"",
-            b"Net=unix:/tmp/a.sock\n",
-            &[Requirement {
-                kind: DIR,
-                index: 0,
-            }],
-            &["store"],
-        )
-        .err()
-        .unwrap();
-        assert!(
-            ios_unix.contains("TargetCapabilityUnsupported"),
-            "got {ios_unix}"
-        );
+        for ios in ["aarch64-apple-ios", "aarch64-apple-ios-sim"] {
+            assert_eq!(
+                resolve(ios, exec, &[], &[]).err().unwrap(),
+                "TargetCapabilityUnsupported(ios, Exec=/profiles.toml child: iOS apps cannot create processes)"
+            );
+            assert_eq!(
+                resolve(ios, "", &parameters, &names).err().unwrap(),
+                "TargetCapabilityUnsupported(ios, Exec: iOS apps cannot create processes)"
+            );
+            for rule in rules {
+                let grant = format!("Net=UnixRoot work /tmp;{system};{rule}");
+                assert_eq!(
+                    resolve(ios, &grant, &[], &[]).err().unwrap(),
+                    format!(
+                        "TargetCapabilityUnsupported(ios, Net={rule}: Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer)"
+                    )
+                );
+            }
+            let resolved = resolve(ios, &format!("Net={system}"), &[], &[]).unwrap();
+            let net = hirsel_core_net::NetGrant::parse(&resolved.net_rules).unwrap();
+            assert!(matches!(
+                net.rules.as_slice(),
+                [GrantRule::Tls(rule)] if rule.trust() == hirsel_core_net::TlsTrust::System
+            ));
+        }
     }
 }

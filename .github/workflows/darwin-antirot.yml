@@ -18,11 +18,6 @@ jobs:
     name: Darwin laws and native proof
     runs-on: ubuntu-24.04
     timeout-minutes: 28
-    outputs:
-      setup: ${{ steps.setup.outcome }}
-      laws: ${{ steps.laws.outcome }}
-      failed-laws: ${{ steps.laws.outputs.failures }}
-      proof: ${{ steps.proof.outcome }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,7 +32,6 @@ jobs:
       - name: Check Linux and Darwin release crate notices
         run: python3 tools/toolchain-dist/notices.py --check-crates
       - name: Darwin laws
-        id: laws
         run: |
           buck=.buck2/bin/buck2
           targets=$("$buck" uquery 'kind("^_darwin_", root//:)')
@@ -51,10 +45,8 @@ jobs:
               failures+=("${target#root//:}")
             fi
           done <<< "$targets"
-          printf 'failures=%s\n' "${failures[*]}" >> "$GITHUB_OUTPUT"
           ((${#failures[@]} == 0))
       - name: Native toolchain proof
-        id: proof
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: .buck2/bin/buck2 test -j4 //tools/buck2/native-toolchain:proof
 
@@ -154,61 +146,3 @@ jobs:
           esac
           python3 core/tools/m1.py --target aarch64-apple-darwin --backend "$BACKEND" \
             --compiler "$prefix/hirsel" --runtime "$runtime" "${only[@]}"
-
-  report:
-    name: File or update failure issues
-    needs: [native, metadata, corpus-toolchain, corpus]
-    if: ${{ failure() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    concurrency:
-      group: hirsel-issue-reporter
-      queue: max
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Report failed checks
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NATIVE_RESULT: ${{ needs.native.result }}
-          NATIVE_SETUP: ${{ needs.native.outputs.setup }}
-          LAWS: ${{ needs.native.outputs.laws }}
-          FAILED_LAWS: ${{ needs.native.outputs.failed-laws }}
-          PROOF: ${{ needs.native.outputs.proof }}
-          METADATA_RESULT: ${{ needs.metadata.result }}
-          CORPUS_TOOLCHAIN_RESULT: ${{ needs.corpus-toolchain.result }}
-          CORPUS_RESULT: ${{ needs.corpus.result }}
-        run: |
-          status=0
-          report() {
-            python3 tools/ci/report_failure.py "$@" || status=1
-          }
-          if [[ "$NATIVE_RESULT" == failure ]]; then
-            if [[ "$NATIVE_SETUP" != success ]]; then
-              report darwin-native-setup 'Preparing the native toolchain on Linux failed.'
-            elif [[ "$LAWS" == failure && -n "$FAILED_LAWS" ]]; then
-              read -r -a failures <<< "$FAILED_LAWS"
-              for law in "${failures[@]}"; do
-                report "$law" "Buck failed the target \`//:$law\` in the Darwin laws step."
-              done
-            elif [[ "$LAWS" != success ]]; then
-              report darwin-laws 'The Darwin laws step failed before it returned individual results.'
-            fi
-            if [[ "$PROOF" == failure ]]; then
-              report native-toolchain:proof 'The native toolchain proof failed on Linux.'
-            fi
-          fi
-          if [[ "$METADATA_RESULT" == failure ]]; then
-            report darwin-check 'The Apple metadata check job failed on Linux.'
-          fi
-          if [[ "$CORPUS_TOOLCHAIN_RESULT" == failure ]]; then
-            report darwin-corpus-toolchain 'Building the toolchain for the Darwin corpus failed on Linux.'
-          fi
-          if [[ "$CORPUS_RESULT" == failure ]]; then
-            report darwin-corpus-cross-link 'Cross-linking the Darwin corpus failed on Linux.'
-          fi
-          exit "$status"

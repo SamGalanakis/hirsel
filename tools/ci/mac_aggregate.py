@@ -3,7 +3,6 @@
 
 import json
 import os
-from pathlib import Path
 import sys
 
 JOBS = {
@@ -61,9 +60,7 @@ def aggregate(jobs):
 
 
 def main():
-    report_path = Path(sys.argv[1])
     failures, rows = aggregate(json.loads(os.environ["NEEDS"]))
-    report_path.write_text(json.dumps(failures))
     lines = ["## Mac CI", *rows, "", *[f"- {key}: {detail}" for key, detail in failures.items()]]
     print("\n".join(lines))
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:

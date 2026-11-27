@@ -295,12 +295,8 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
-    concurrency:
-      group: hirsel-issue-reporter
-      queue: max
     permissions:
       contents: read
-      issues: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -309,22 +305,4 @@ jobs:
         id: aggregate
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: python3 tools/ci/mac_aggregate.py "$RUNNER_TEMP/mac-reds.json"
-      - name: File or update failure issues
-        if: ${{ failure() && steps.aggregate.outcome == 'failure' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.control == 'none') }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - "$RUNNER_TEMP/mac-reds.json" <<'PY'
-          import json
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          failures = json.loads(Path(sys.argv[1]).read_text())
-          status = 0
-          for key, detail in failures.items():
-              result = subprocess.run([sys.executable, "tools/ci/report_failure.py", key, detail])
-              status |= result.returncode
-          raise SystemExit(status)
-          PY
+        run: python3 tools/ci/mac_aggregate.py

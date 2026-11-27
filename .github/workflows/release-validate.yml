@@ -140,25 +140,3 @@ jobs:
               tools/toolchain-dist/check-repro --output /tmp/repro --num-threads 4 \
                 --pgo "${profdata[0]}" --bolt "${fdata[0]}"
             '
-
-  report:
-    if: failure()
-    needs: [linux, installer, darwin, repro]
-    runs-on: ubuntu-24.04
-    permissions:
-      issues: write
-    steps:
-      - name: File a release validation issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.linux.outputs.version }}
-          LINUX: ${{ needs.linux.result }}
-          INSTALLER: ${{ needs.installer.result }}
-          DARWIN: ${{ needs.darwin.result }}
-          REPRO: ${{ needs.repro.result }}
-        run: |
-          gh issue create --repo "$GITHUB_REPOSITORY" \
-            --title "Release validation failed (${RELEASE_TAG:-latest})" \
-            --body "Linux: $LINUX. Served installer: $INSTALLER. macOS: $DARWIN. Reproducibility: $REPRO.
-
-          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

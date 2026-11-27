@@ -469,10 +469,10 @@ For each key a night shows, the driver:
    with the unminimised batch package). `finish()` in `tools/nightly-board.sh` appends that
    file to the board's alert file (`$base/alerts/<date>.txt`), as it does the bisect alert.
 
-There is no GitHub issue filing and no local mode in `tools/ci/report_failure.py`: a red is
-one alert line. A gap control that stops showing its excess adds a `containment gap-silent`
-line. The O2 vacuity floor stays in the run summary. A lane that fixes a red adds the
-minimised program to the containment law corpus (R6) as a law that is red on the parent.
+There is no GitHub issue filing or commenting: a red is one alert line. A gap control that
+stops showing its excess adds a `containment gap-silent` line. The O2 vacuity floor stays in
+the run summary. A lane that fixes a red adds the minimised program to the containment law
+corpus (R6) as a law that is red on the parent.
 
 ## Nightly budget and hook
 
@@ -568,7 +568,7 @@ the new check working on real programs. There are no seeded bugs and no mutants.
 | **C1, vertical thread** | `containment_gen.py`: SplitMix64 stream, typed environment, the template with `clone`, `==`, loops, recursion and nested `isolate` / `bound steps` at both size classes, O3a self-checks, tag stream. `containment_fuzz.py`: one batch through the factored `std_native` path on evaluator and Cranelift dev, with O1, O2 and O3a. Measure the real batch cost and replace the estimates above | `containment_fuzz.py once --seed <s> --builds evaluator,cranelift-dev` at the large size class finds the expected O1 red: a deep `Box` chain cloned with `n` above depth/4 and depth past the stack (E2, while 3227 is open). If 3227 has landed, the gate is the measured cost table plus a green batch with ≥ 80% of records compared exactly | O2 differences in the tolerated rows; any E2-class O1 red still open after 3227 |
 | **C2, all builds and metering** | LLVM dev and LLVM release; O5 through `check_metering`; O4a, O4b and O4c; the Map and task exclusions | `containment_fuzz.py once` over the three native builds and 32 seeds: green, or a red filed under its key, with ≥ 80% of records compared exactly | none of the compile, schema or policy reds |
 | **C3, independent work tally** | the O3b evaluator tally behind `HIRSEL_TEST_WORK_TALLY`; the O3c static cycle check; gap controls | one batch with the tally on: every gap control shows its sanctioned O3b excess (the named MEM-30 gaps are open on main), and any step-free non-drop glue cycle O3c finds is filed under its key | gap controls are reported, not red |
-| **C4, minimise, alert, nightly** | choice-stream and AST reduction, size bisection; dedup keys; one alert line per key; the `run_containment` step in `tools/nightly-board.sh`. Ruled out: issue filing, `report_failure.py --local`, `--containment-status`. Not built: ledger allocation, O4d | the open run-stop reds minimise to one scope each, the signal red in its package, and a short `nightly` run writes one alert line per key | the night's containment reds are findings and never fail the land |
+| **C4, minimise, alert, nightly** | choice-stream and AST reduction, size bisection; dedup keys; one alert line per key; the `run_containment` step in `tools/nightly-board.sh`. Ruled out: issue filing or commenting, a local report mode, `--containment-status`. Not built: ledger allocation, O4d | the open run-stop reds minimise to one scope each, the signal red in its package, and a short `nightly` run writes one alert line per key | the night's containment reds are findings and never fail the land |
 
 C1 to C3 touch only `core/tools/` and `crates/hirsel-core-eval` (behind `HIRSEL_TEST_WORK_TALLY`). C4 is the
 first slice to touch the board script. The board's units are not edited.

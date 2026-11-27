@@ -36,6 +36,7 @@ limit = 67108864
 grants = ["Tasks"]
 
 [tests.sources]
+"ingress_fixture.hirsel" = "moq"
 "laws.hirsel" = "laws"
 "session_laws.hirsel" = "laws"
 "schedule_laws.hirsel" = "laws"

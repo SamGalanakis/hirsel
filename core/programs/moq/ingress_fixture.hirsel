@@ -1,0 +1,180 @@
+pub type IngressRow: key = BOnly | BadType | ShortFin | NoCell | CountedNoCell | Checked | NoSteps | CancelDecode
+
+// Begin a two-byte stream type. The second read either completes type zero or ends at FIN.
+fn partial_type_read(mut d: MixedDriver, link: LinkId, stream: LinkStream, mut buf: Bytes) -> Result[(u64, bool), LinkReadError] {
+    if list.len(buf) == 0 {
+        list.push(mut buf, 0x80)
+        return Ok((1, false))
+    }
+    Ok((0, false))
+}
+
+fn finish_type_read(mut d: MixedDriver, link: LinkId, stream: LinkStream, mut buf: Bytes) -> Result[(u64, bool), LinkReadError] {
+    if stream == LinkStream(2) {
+        list.push(mut buf, 0)
+        return Ok((1, true))
+    }
+    Ok((0, true))
+}
+
+fn short_header_close(mut d: MixedDriver, link: LinkId, code: u64, reason: Bytes) {
+    if reason != b"truncated stream header" {
+        fail("incomplete header at FIN lost its refusal")
+    }
+    mixed_close(mut d, link, code, reason)
+}
+
+fn bad_header_close(mut d: MixedDriver, link: LinkId, code: u64, reason: Bytes) {
+    if reason != b"invalid stream header" {
+        fail("complete invalid header reported truncation")
+    }
+    mixed_close(mut d, link, code, reason)
+}
+
+fn internal_header_close(mut d: MixedDriver, link: LinkId, code: u64, reason: Bytes) {
+    if code != ERR_INTERNAL_ERROR || list.len(reason) != 0 {
+        fail("internal decoder failure exposed on the wire")
+    }
+    mixed_close(mut d, link, code, reason)
+}
+
+fn fixture_increment(n: u64) -> u64 {
+    n + 1
+}
+
+fn overflow_site(causes: Causes) -> Site {
+    for cause in causes {
+        if let Overflow = cause.kind {
+            return cause.site
+        }
+        break
+    }
+    fail("expected checked decoder overflow")
+}
+
+// Establish the checked-operation site before each schedule. Its payer now funds the
+// task's primary cell, so a later FAIL-16 cell replacement stays with that same payer.
+pub fn ingress_overflow_site() -> Site {
+    let Ok(Error(take causes)) = isolate(fn() -> u64 {
+        fixture_increment(0xffffffffffffffffu64)
+    }) else {
+        fail("missing reference site")
+    }
+    overflow_site(causes)
+}
+
+// Use the same pure parse and owner commit as the socket path. Only the callback adds a
+// scratch allocation and an instrumented failure after the header and cursor are complete.
+fn fixture_request(mut a: Session, mut io: LinkIo[MixedDriver], row: IngressRow, expected_site: Site, mut out: List[Event]) {
+    let entered = cell.new(0u64)
+    let budget = if row == CountedNoCell {
+        0u64
+    } else {
+        2048u64
+    }
+    // Complete a valid fetch header in the pending stream before running the faulting callback.
+    a.uni_heads[0].buf = b"\x05\x00"
+    let result = bound bytes budget {
+        let input = view a.uni_heads[0].buf
+        bound steps 512 {
+            isolate(fn() -> Result[(codec.StreamHeader, u64), codec.WireError] {
+                cell.set(entered, cell.get(entered) + 1)
+                let (take header, at) = parse_uni_header(input)?
+                let scratch: Bytes = list.with_capacity(128)
+                if row == NoSteps {
+                    loop {}
+                }
+                let _ = fixture_increment(0xffffffffffffffffu64 - list.len(scratch))
+                Ok((take header, at))
+            })
+        }
+    }
+    match take result {
+        Ok(Ok(take outcome)) => finish_uni_header(mut a, mut io, 0, true, take outcome, mut out),
+        Ok(Error(OutOfTime(steps: 512))) => {
+            if row != NoSteps || list.len(a.uni_heads) != 1 || list.len(out) != 0 {
+                fail("request scope lost its timeout")
+            }
+            close(mut a, mut io, ERR_INTERNAL_ERROR, b"")
+        },
+        _ => fail("request byte scope refused"),
+    }
+    let expected = if row == CountedNoCell {
+        0u64
+    } else {
+        1u64
+    }
+    if cell.get(entered) != expected {
+        fail("decoder entry count differs")
+    }
+    if row == Checked {
+        let Some(take causes) = take_ingress_failure(mut a) else {
+            fail("missing session decoder failure")
+        }
+        if overflow_site(causes) != expected_site {
+            fail("wrong decoder failure site")
+        }
+    }
+}
+
+pub fn ingress_fixture(mut io: LinkIo[MixedDriver], limits: Limits, row: IngressRow, expected_site: Site) {
+    let link = option.unwrap(native_link(mut io.driver, ConnectionHandle(3375)))
+    let mut a = option.unwrap(link_session(io, link, Server, Both, limits))
+    let stream: LinkStream = if row == ShortFin {
+        LinkStream(6)
+    } else {
+        LinkStream(2)
+    }
+    let mut events: List[AddressedEvent] = list.new()
+    list.push(mut events, AddressedEvent(link: link, event: Ready(max_datagram: 1200)))
+    list.push(mut events, AddressedEvent(link: link, event: Opened(stream: stream, bidi: false)))
+    let mut out: List[Event] = list.with_capacity(2)
+    let read = io.ops.read
+    io.ops.read = partial_type_read
+    receive(mut a, mut io, 12, events, mut out)
+    if is_closed(a) || list.len(out) != 0 {
+        fail("partial header did not wait for more bytes")
+    }
+    list.clear(mut events)
+    list.push(mut events, AddressedEvent(link: link, event: Readable(stream)))
+    io.ops.read = finish_type_read
+    let closer = io.ops.close
+    io.ops.close = match row {
+        BadType => bad_header_close,
+        ShortFin => short_header_close,
+        _ => internal_header_close,
+    }
+    let code = if row == Checked || row == NoSteps || row == CountedNoCell {
+        fixture_request(mut a, mut io, row, expected_site, mut out)
+        ERR_INTERNAL_ERROR
+    } else if row == NoCell {
+        result.unwrap(bound bytes 0 {
+            receive(mut a, mut io, 13, events, mut out)
+        })
+        ERR_INTERNAL_ERROR
+    } else {
+        receive(mut a, mut io, 13, events, mut out)
+        ERR_INVALID_STREAM_HEADER
+    }
+    io.ops.read = read
+    io.ops.close = closer
+    if !is_closed(a) || list.len(a.uni_heads) != 0 || early_stream_count(a) != 0 || a.peer_control != None || list.len(a.rx_fetches) != 0 || list.len(a.rx_subgroups) != 0 {
+        fail("partial decoded state remained on session A")
+    }
+    if row == NoSteps {
+        if list.len(out) != 0 {
+            fail("timed-out request published an event")
+        }
+    } else if list.len(out) != 1 {
+        fail("expected only a close event")
+    } else if let Closed(code: actual) = out[0] {
+        if actual != code {
+            fail("wrong session close code")
+        }
+    } else {
+        fail("header refusal did not close only the pending session with the expected code")
+    }
+    if let Some(_) = take_ingress_failure(mut a) {
+        fail("session retained a decoder diagnostic")
+    }
+}

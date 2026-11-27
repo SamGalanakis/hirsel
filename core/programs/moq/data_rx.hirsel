@@ -1,5 +1,11 @@
 // MOQ-3 & MOQ-4: Unidirectional data streams (subgroup, fetch, padding), early stream
 // buffering, datagrams, and moqt-23 §12.1 malformed-track / deduplication checks.
+fn parse_uni_header(input: Bytes) -> Result[(codec.StreamHeader, u64), codec.WireError] {
+    let mut at = 0u64
+    let header = codec.read_stream_header(input, mut at, list.len(input))?
+    Ok((take header, at))
+}
+
 fn uni_head_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: List[Event]) {
     let stream = s.uni_heads[idx].stream
     let (fin, reset) = tx_read_more(s.link, mut io, stream, mut s.uni_heads[idx].buf, 256)
@@ -7,24 +13,41 @@ fn uni_head_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: Li
         let _ = list.remove(mut s.uni_heads, idx)
         return
     }
-    let mut at = 0u64
-    let len = list.len(s.uni_heads[idx].buf)
-    let hdr = match codec.read_stream_header(s.uni_heads[idx].buf, mut at, len) {
-        Ok(take h) => take h,
-        Error(Truncated) => {
+    let decoded = {
+        let input = view s.uni_heads[idx].buf
+        isolate(fn() -> Result[(codec.StreamHeader, u64), codec.WireError] {
+            parse_uni_header(input)
+        })
+    }
+    finish_uni_header(mut s, mut io, idx, fin, take decoded, mut out)
+}
+
+fn finish_uni_header[D](mut s: Session, mut io: LinkIo[D], idx: u64, fin: bool, take outcome: Result[Result[Result[(codec.StreamHeader, u64), codec.WireError], Causes], Capacity], mut out: List[Event]) {
+    let (take hdr, at) = match take outcome {
+        Ok(Ok(Ok(take parsed))) => take parsed,
+        Ok(Error(take causes)) => {
+            s.ingress_failure = Some(take causes)
+            fail_session(mut s, mut io, ERR_INTERNAL_ERROR, b"", mut out)
+            return
+        },
+        Error(_) => {
+            fail_session(mut s, mut io, ERR_INTERNAL_ERROR, b"", mut out)
+            return
+        },
+        Ok(Ok(Error(Truncated))) => {
             if fin {
                 let _ = list.remove(mut s.uni_heads, idx)
                 fail_session(mut s, mut io, ERR_INVALID_STREAM_HEADER, b"truncated stream header", mut out)
             }
             return
         },
-        Error(e) => {
+        Ok(Ok(Error(e))) => {
             let _ = list.remove(mut s.uni_heads, idx)
             fail_session(mut s, mut io, refusal_code(e), b"invalid stream header", mut out)
             return
         },
     }
-    let UniHead(stream: _, buf: take hbuf, fin: _) = list.remove(mut s.uni_heads, idx)
+    let UniHead(stream: stream, buf: take hbuf, fin: _) = list.remove(mut s.uni_heads, idx)
     let mut rest = take hbuf
     list.drop_prefix(mut rest, at)
     match take hdr {

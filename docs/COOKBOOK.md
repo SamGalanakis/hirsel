@@ -118,6 +118,36 @@ fn directory_round_trip(files: Dir) -> Result[(), ()] waits {
 
 Add `dirs = ["."]` in `[tests]` in `hirsel.toml`, then run `hirsel test`.
 
+### Decode a request inside `isolate`
+
+Keep transport reads and writes in the session owner. Lend the decoder immutable input
+and keep its cursor inside the non-waiting body. Return the complete header and consumed
+length together. Only then advance the owner's buffer or publish an event.
+
+```hirsel
+fn length_prefix(input: Bytes) -> Result[Result[Option[(u8, u64)], Causes], Capacity] {
+  isolate(fn() -> Option[(u8, u64)] {
+    if list.len(input) < 1 {
+      return None
+    }
+    Some((input[0], 1u64))
+  })
+}
+```
+
+`Error(capacity)` means entry could not reserve a cause cell and the decoder never ran.
+`Ok(Ok(value))` returns the decoder's own outcome, including an incomplete header or
+protocol refusal. `Ok(Error(causes))` gives the owner the failure kinds and sites after
+the body cleans up. If the failure used the task's primary cause cell, the reserved cell
+replaces it. Dropping the diagnostic refunds the original cell to its payer. Checked
+arithmetic and indexing retain their usual failure semantics.
+
+For a request-local timeout, put `isolate` inside the request's `bound steps` scope and
+fund that scope with an outer `bound bytes`. Exhaustion passes through `isolate` to the
+current step bound. Cancellation reaches the task's joiner. A shared execution stop ends
+both sessions. See the [MoQ receiver](../core/programs/moq/data_rx.hirsel) and
+[FAIL-16](spec/failure.md#fail-16-isolation).
+
 ## 3. HTTP server, parameterized router, and JSON responses
 
 `std.router` matches literal paths and `{name}` captures without overlapping ambiguity.

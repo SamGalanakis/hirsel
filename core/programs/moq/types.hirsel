@@ -375,6 +375,7 @@ pub opaque type Session {
     address_mode: AddressMode,
     limits: Limits,
     phase: SessionPhase,
+    ingress_failure: Option[Causes],
     scope: Option[Scope],
     setup_authority: Bytes,
     setup_path: Bytes,

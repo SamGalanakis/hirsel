@@ -806,3 +806,121 @@ fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
     }
     Ok(())
 }
+
+fn ingress_room() -> u64 {
+    match (bound bytes 0xffffffffffffffffu64 {
+        ()
+    }) {
+        Error(c) => c.available,
+        Ok(()) => fail("payer admitted an unbounded reservation"),
+    }
+}
+
+fn cancellable_decode(take started: Sender[()]) {
+    let _ = isolate(fn() {
+        result.unwrap(channel.try_send(started, ()))
+        loop {
+            task.check_cancel()
+        }
+    })
+    fail("isolate returned after cancellation")
+}
+
+fn cancel_ingress(tasks: Tasks) waits {
+    let (tx, rx): (Sender[()], Receiver[()]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, take tx, cancellable_decode)
+    result.unwrap(channel.receive(rx))
+    if let Error(Cancelled(causes)) = std.task.cancel_join(take h) {
+        for cause in causes {
+            if let Cancelled = cause.kind {
+                return
+            }
+            break
+        }
+    }
+    fail("decoder cancellation did not reach the joiner")
+}
+
+fn deliver_ingress_request(mut client: Peer, mut server: Peer, n: u64) {
+    let name = if n == 1 {
+        b"one"
+    } else {
+        b"two"
+    }
+    let tr = track(ns1(b"peer"), clone(name))
+    let t = 10 * n
+    let _ = peer_subscribe(mut client, t, tr, NoFilter, 10, None)
+    settle_pair(mut client, mut server, t + 1)
+    if peer_accept_subscribes(mut server) != 1 {
+        fail("expected one peer request")
+    }
+    settle_pair(mut client, mut server, t + 2)
+    peer_publish(mut server, t + 3, make_obj(clone(tr), n, 0, 0, Subgroup, 10, clone(name)), true)
+    settle_pair(mut client, mut server, t + 4)
+    let objects = received_objects(client.events)
+    if list.len(client.events) != n || list.len(objects) != n {
+        fail("wrong delivered object count")
+    }
+    let o = objects[n - 1]
+    if o.track != tr || o.group != n || o.subgroup != 0 || o.id != 0 || o.mode != Subgroup || o.publisher_priority != 10 || o.status != Normal || o.properties != b"" || quic.payload_bytes(o.payload) != name {
+        fail("peer received different subgroup data")
+    }
+}
+
+type IngressSnapshot: key {
+    events: u64,
+    requests: u64,
+    subscriptions: u64,
+    available: u64
+}
+
+fn ingress_snapshot(p: Peer) -> IngressSnapshot {
+    let Some(s) = view p.sess else {
+        fail("missing peer session")
+    }
+    if !moq.is_established(s) {
+        fail("live session closed")
+    }
+    IngressSnapshot(events: list.len(p.events), requests: moq.active_requests(s), subscriptions: moq.active_subscriptions(s), available: ingress_room())
+}
+
+fn peer_schedule(tasks: Tasks, row: moq.IngressRow) -> (IngressSnapshot, IngressSnapshot) waits {
+    let expected_site = moq.ingress_overflow_site()
+    let mut client = native_client(3376)
+    let mut server = native_server(3377, moq_limits())
+    establish_native(mut client, mut server, moq_limits(), b"example.com", b"/peer", None)
+    list.clear(mut client.events)
+    deliver_ingress_request(mut client, mut server, 1)
+    let before = ingress_room()
+    match row {
+        BOnly => {},
+        CancelDecode => cancel_ingress(tasks),
+        _ => moq.ingress_fixture(mut client.io, moq_limits(), row, expected_site),
+    }
+    if ingress_room() != before {
+        fail("A changed the live peer payer at quiescence")
+    }
+    let first = ingress_snapshot(client)
+    deliver_ingress_request(mut client, mut server, 2)
+    (first, ingress_snapshot(client))
+}
+
+/// bug: a header decode runs without admission, or its failure interrupts an unrelated subscriber.
+/// oracle: FAIL-16 admits before invocation and refunds on cleanup. Compare B's deliveries,
+/// committed subscriptions and payer after A settles and after B's next completed request.
+@test
+fn two_sessions_preserve_peer(tasks: Tasks) -> Result[(), ()] waits {
+    let control = result.unwrap(bound bytes 33554432 {
+        peer_schedule(tasks, BOnly)
+    })
+    let rows: Inline[moq.IngressRow, 7] =[BadType, ShortFin, NoCell, CountedNoCell, Checked, NoSteps, CancelDecode]
+    for row in rows {
+        let actual = result.unwrap(bound bytes 33554432 {
+            peer_schedule(tasks, row)
+        })
+        if actual != control {
+            fail("B events, committed requests, subscriptions or available bytes differ from the control")
+        }
+    }
+    Ok(())
+}

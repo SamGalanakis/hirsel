@@ -21,14 +21,14 @@ from store_tests import inputs
 
 STORE_DIR = ROOT / 'core/programs/store'
 CORPUS_ROOT = STORE_DIR / 'corpus'
-FORMAT_PATTERN = re.compile(r'^const DISK_FORMAT: u64 = ([0-9]+)$', re.M)
+FORMAT_PATTERN = re.compile(r'^pub const DISK_FORMAT: u64 = ([0-9]+)$', re.M)
 
 
 def current_format(root=ROOT):
-    text = (root / 'core/programs/store/store.hirsel').read_text(encoding='utf-8')
+    text = (root / 'core/programs/store/store-format.hirsel').read_text(encoding='utf-8')
     match = FORMAT_PATTERN.search(text)
     if match is None:
-        raise ValueError('const DISK_FORMAT not found in store.hirsel')
+        raise ValueError('pub const DISK_FORMAT not found in store-format.hirsel')
     return int(match[1])
 
 

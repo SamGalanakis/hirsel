@@ -72,9 +72,27 @@ pub enum EndReason {
     HostStop,
 }
 
-/// Async-signal-safe, lock-free, allocation-free first-stop-wins handoff for
-/// one runtime generation (EMB-3).
-pub struct GenerationEnd {
+/// What a pool run starts each unit with: the program's entry and the
+/// configuration every unit of the execution begins from.
+pub(crate) struct Launch {
+    pub(crate) run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
+    pub(crate) base: crate::entry::OsConfig,
+}
+// SAFETY: the launcher pins the entry and the configuration for the whole run.
+unsafe impl Send for Launch {}
+// SAFETY: as above; both are read-only once set.
+unsafe impl Sync for Launch {}
+
+/// One Place execution (PACK-13): its stop domain, and for a pool run its
+/// entry, base configuration and worst unit status. A task's `Context` names
+/// its execution at the frozen offset `CONTEXT_EXECUTION`.
+///
+/// The stop state is an async-signal-safe, lock-free, allocation-free
+/// first-stop-wins handoff (EMB-3).
+pub struct Execution {
+    pub(crate) launch: std::sync::OnceLock<Launch>,
+    /// The worst status any unit of a pool run has returned.
+    pub(crate) worst: AtomicU8,
     /// 0 = Running, 1 = Recording RunStop, 2 = RunStop published, 3 = HostStop.
     state: AtomicU8,
     /// Fast-path flag checked at scheduling points and `hirsel_core_step_out`.
@@ -86,9 +104,11 @@ pub struct GenerationEnd {
     bytes: [AtomicU8; MAX_STOP_BYTES],
 }
 
-impl GenerationEnd {
+impl Execution {
     pub const fn new(contained: bool) -> Self {
         Self {
+            launch: std::sync::OnceLock::new(),
+            worst: AtomicU8::new(0),
             state: AtomicU8::new(0),
             ended: AtomicBool::new(false),
             contained,
@@ -220,7 +240,7 @@ pub(crate) struct WorkerFaultSlot {
     /// `hirsel_stack::switch`. Null when not running a recoverable fiber.
     pub(crate) idle_ptr: AtomicPtr<*mut u8>,
     /// Active generation end slot for this thread, or null outside a run.
-    pub(crate) generation: AtomicPtr<GenerationEnd>,
+    pub(crate) generation: AtomicPtr<Execution>,
 }
 
 impl WorkerFaultSlot {
@@ -397,17 +417,17 @@ pub(crate) fn maybe_release_slot() {
     release_slot_if_idle();
 }
 
-/// Scoped attachment of a [`GenerationEnd`] to the current thread. Restores the
+/// Scoped attachment of a [`Execution`] to the current thread. Restores the
 /// previous generation pointer on drop and releases the fault slot if idle.
-pub struct GenerationScope {
+pub struct ExecutionScope {
     slot_idx: usize,
-    previous: *mut GenerationEnd,
+    previous: *mut Execution,
 }
 
-impl GenerationScope {
+impl ExecutionScope {
     /// # Safety
     /// `generation` must outlive this scope.
-    pub unsafe fn enter(generation: &GenerationEnd) -> Self {
+    pub unsafe fn enter(generation: &Execution) -> Self {
         let slot_idx = acquire_slot();
         SLOT_DEPTH.set(SLOT_DEPTH.get() + 1);
         let slot = &SLOTS[slot_idx];
@@ -418,7 +438,7 @@ impl GenerationScope {
     }
 }
 
-impl Drop for GenerationScope {
+impl Drop for ExecutionScope {
     fn drop(&mut self) {
         let slot = &SLOTS[self.slot_idx];
         slot.generation.store(self.previous, Ordering::Release);
@@ -447,23 +467,23 @@ pub(crate) fn set_idle_ptr(idle: *const *mut u8) -> *mut *mut u8 {
 
 /// Active generation pointer on this thread, if any.
 #[inline(always)]
-pub(crate) fn current_generation() -> Option<&'static GenerationEnd> {
+pub(crate) fn current_execution() -> Option<&'static Execution> {
     let slot = current_slot()?;
     let ptr = slot.generation.load(Ordering::Acquire);
-    // SAFETY: GenerationScope pins the GenerationEnd for its entire scope.
+    // SAFETY: ExecutionScope pins the Execution for its entire scope.
     (!ptr.is_null()).then(|| unsafe { &*ptr })
 }
 
 /// True when the current thread runs inside a contained (embedded) generation.
 #[inline(always)]
 pub fn is_contained() -> bool {
-    current_generation().is_some_and(GenerationEnd::is_contained)
+    current_execution().is_some_and(Execution::is_contained)
 }
 
 /// True when the current thread's generation has recorded a run stop or host stop.
 #[inline(always)]
 pub fn is_ended() -> bool {
-    current_generation().is_some_and(GenerationEnd::is_ended)
+    current_execution().is_some_and(Execution::is_ended)
 }
 
 /// Record a run stop on the active generation (if any) and wake peer workers.
@@ -472,7 +492,7 @@ pub fn is_ended() -> bool {
 #[cold]
 #[inline(never)]
 pub fn record(stop: Stop) {
-    if let Some(generation) = current_generation() {
+    if let Some(generation) = current_execution() {
         generation.record_stop(stop);
         crate::tasks::wake_all_waiters();
         crate::units::wake_all_for_stop();
@@ -493,7 +513,7 @@ pub fn raise(stop: Stop) -> ! {
     if let Some(slot) = current_slot() {
         let generation = slot.generation.load(Ordering::Acquire);
         if !generation.is_null() {
-            // SAFETY: GenerationScope pins `generation` for this thread's run.
+            // SAFETY: ExecutionScope pins `generation` for this thread's run.
             unsafe { (*generation).record_stop(stop) };
         }
         let idle_ptr = slot.idle_ptr.load(Ordering::Relaxed);
@@ -538,7 +558,7 @@ pub(crate) fn leave_on_ended() -> ! {
         }
     }
     // Outside a fiber, there is no fiber to abandon; fall back to recording.
-    if let Some(stop) = current_generation().and_then(GenerationEnd::stop) {
+    if let Some(stop) = current_execution().and_then(Execution::stop) {
         crate::process::uncontained_stop(stop)
     }
     crate::process::uncontained_stop(Stop::from_static(b"Stopped"))
@@ -551,7 +571,7 @@ pub(crate) fn leave_on_ended() -> ! {
 /// # Safety
 /// `config` and `entry` must remain live until this function returns.
 pub unsafe fn run_contained_worker(
-    generation: &GenerationEnd,
+    generation: &Execution,
     config: &crate::process::Config,
     entry: crate::process::Entry,
 ) -> Result<u8, EndReason> {
@@ -578,7 +598,7 @@ pub unsafe fn run_contained_worker(
             // SAFETY: caller pins generation and config until join completes.
             unsafe {
                 let gen_ref = &*gen_ptr.0;
-                let _scope = GenerationScope::enter(gen_ref);
+                let _scope = ExecutionScope::enter(gen_ref);
                 let _alt = match crate::fiber::Alternate::install() {
                     Ok(alt) => alt,
                     Err(stop) => {

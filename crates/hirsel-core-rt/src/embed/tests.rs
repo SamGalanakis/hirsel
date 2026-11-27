@@ -154,7 +154,7 @@ unsafe extern "C" fn mock_place_entry(
         MockMode::HangPureLoop => {
             // Simulate a pure Hirsel loop hitting `hirsel_core_step_out` every quantum.
             loop {
-                if crate::run_stop::current_generation().is_some_and(|g| g.is_ended()) {
+                if crate::run_stop::current_execution().is_some_and(|g| g.is_ended()) {
                     crate::run_stop::leave_on_ended();
                 }
                 std::hint::spin_loop();
@@ -162,7 +162,7 @@ unsafe extern "C" fn mock_place_entry(
         }
         MockMode::HangParkedWait => {
             // Park until generation end wakes us.
-            while !crate::run_stop::current_generation().is_some_and(|g| g.is_ended()) {
+            while !crate::run_stop::current_execution().is_some_and(|g| g.is_ended()) {
                 thread::sleep(Duration::from_millis(5));
             }
             crate::run_stop::leave_on_ended();

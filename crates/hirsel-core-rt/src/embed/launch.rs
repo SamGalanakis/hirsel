@@ -12,7 +12,7 @@ use crate::{
     os::{OsProvider, hirsel_core_os_directory_ops},
     process::{Config, View},
     provider::{CANCELLED, Outcome, Provider, Request, STEP_PENDING, Step, Wait, deliver},
-    run_stop::{EndReason, GenerationEnd, GenerationScope},
+    run_stop::{EndReason, Execution, ExecutionScope},
 };
 use hirsel_core_ids::launch::Metadata;
 use std::{
@@ -494,7 +494,7 @@ fn build_embed_process(
 
 /// Running worker handle for one embedded place generation.
 pub(crate) struct LaunchedPlace {
-    generation_end: Arc<GenerationEnd>,
+    generation_end: Arc<Execution>,
     stop_trigger: Arc<Mutex<StopState>>,
     bridge: Arc<LifecycleBridge>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -527,7 +527,7 @@ impl LaunchedPlace {
             program.parameters,
             parameter_names,
         )?;
-        let generation_end = Arc::new(GenerationEnd::contained());
+        let generation_end = Arc::new(Execution::contained());
         let exec = crate::host::embed_exec(
             &resolved.exec_grants,
             exec_helper,
@@ -571,7 +571,7 @@ impl LaunchedPlace {
                 };
                 // SAFETY: `gen_for_worker` and `proc_state` live for the entire worker thread.
                 let res = unsafe {
-                    let _scope = GenerationScope::enter(&gen_for_worker);
+                    let _scope = ExecutionScope::enter(&gen_for_worker);
                     if foreign_waits {
                         crate::process::run_config_contained_with_foreign(
                             &proc_state.config,

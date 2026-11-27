@@ -442,9 +442,9 @@
     "lines": 1394
   },
   "crates/hirsel-core-rt/src/units_check.rs": {
-    "lines": 1528,
-    "raise_revision": 2,
-    "reason": "coverage-c2-runner-2577"
+    "lines": 1334,
+    "raise_revision": 3,
+    "reason": "packing-p2-hot-abi-3281"
   },
   "crates/hirsel-core-rt/src/units_lang.rs": {
     "lines": 1369,

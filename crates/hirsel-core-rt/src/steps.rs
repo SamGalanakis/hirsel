@@ -517,13 +517,13 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
     if ctx.step_bounds.is_empty() {
         // EMB-3: unbound tasks in the embed slot check generation end here and
         // reload 65,536 without emitting any scheduling event or ending a slice.
-        if crate::run_stop::is_ended() {
+        if ctx.execution_ended() {
             crate::run_stop::leave_on_ended();
         }
         ctx.steps = initial_unbounded_steps();
         return 0;
     }
-    if crate::run_stop::is_ended() {
+    if ctx.execution_ended() {
         crate::run_stop::leave_on_ended();
     }
     // The window is spent (0) or a step outran it (< 0): end a full slice,

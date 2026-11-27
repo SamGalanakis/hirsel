@@ -55,8 +55,6 @@ pub(super) fn launch_planned(
     // SAFETY: the launch joins every worker before `run` goes out of scope.
     let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) =
         unsafe { std::mem::transmute(run) };
-    let _ = RUN.set(RunFn(run));
-    let _ = BASE.set(Base(*input));
     LIVE.store(k, Ordering::SeqCst);
     enable_pool();
     let p = pool();
@@ -66,7 +64,10 @@ pub(super) fn launch_planned(
         .map_err(|error| format!("untied memory thread: {error}"))?;
     // The run's one generation: every worker enters it on its own thread, so
     // a stop recorded by a unit on any worker ends the whole pool.
-    let generation = crate::run_stop::GenerationEnd::standalone();
+    let generation = crate::run_stop::Execution::standalone();
+    let _ = generation
+        .launch
+        .set(crate::run_stop::Launch { run, base: *input });
     let generation = &generation;
     let start = (std::sync::Mutex::new(None), std::sync::Condvar::new());
     std::thread::scope(|scope| {
@@ -82,7 +83,7 @@ pub(super) fn launch_planned(
                         .unwrap();
                     if go {
                         // SAFETY: the scope joins this worker before `generation` drops.
-                        let _scope = unsafe { crate::run_stop::GenerationScope::enter(generation) };
+                        let _scope = unsafe { crate::run_stop::ExecutionScope::enter(generation) };
                         worker_main(p, ix);
                     }
                 })
@@ -92,7 +93,7 @@ pub(super) fn launch_planned(
         // unit's guarded stack pair before workers dispatch it.
         if result.is_ok() {
             for i in 0..k {
-                create_initial_unit(i as u32);
+                create_initial_unit(i as u32, generation);
             }
         }
         *ready.lock().unwrap() = Some(result.is_ok());
@@ -111,7 +112,7 @@ pub(super) fn launch_planned(
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
         report::print(p);
     }
-    Ok(WORST.load(Ordering::Relaxed))
+    Ok(generation.worst.load(Ordering::Relaxed))
 }
 
 pub(super) fn new_pool(

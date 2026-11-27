@@ -297,6 +297,9 @@ pub(crate) struct Unit {
     pub(crate) alone: std::sync::OnceLock<Arc<crate::tasks::Readies>>,
     pub(crate) alone_depth: Cell<usize>,
     config: crate::entry::OsConfig,
+    /// The execution this unit runs for: its entry, its base configuration
+    /// and the record a stop of it is written to (PACK-13).
+    execution: &'static crate::run_stop::Execution,
     /// A helper unit's body (CONC-15), run in place of main.
     job: Cell<Option<Job>>,
 }
@@ -426,15 +429,6 @@ fn pool_memory() -> Option<&'static dyn SharedMemory> {
     (!p.stop.load(Ordering::Acquire)).then_some(&p.memory as &dyn SharedMemory)
 }
 
-struct RunFn(&'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync));
-static RUN: OnceLock<RunFn> = OnceLock::new();
-struct Base(crate::entry::OsConfig);
-// SAFETY: the launcher pins the configuration for the whole launch.
-unsafe impl Send for Base {}
-unsafe impl Sync for Base {}
-static BASE: OnceLock<Base> = OnceLock::new();
-static WORST: AtomicU8 = AtomicU8::new(0);
-
 fn now() -> u64 {
     sync::monotonic_ns()
 }
@@ -474,7 +468,7 @@ pub(super) unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
                 0
             }
             None => {
-                let run = RUN.get().unwrap().0;
+                let run = u.execution.launch.get().unwrap().run;
                 let status = run(&u.config);
                 status
             }
@@ -870,7 +864,9 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
         u.inside.store(false, Ordering::Release);
         match after {
             After::Done => {
-                WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
+                u.execution
+                    .worst
+                    .fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
                 u.state.store(DONE, Ordering::SeqCst);
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.

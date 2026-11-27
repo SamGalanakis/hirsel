@@ -3,7 +3,7 @@
 use super::spawn::{self, Started};
 use super::wire::{self, Fields, Frame, Inbox};
 use crate::host::exec::{Signal, SpawnError, SpawnInput, Termination};
-use crate::run_stop::{GenerationEnd, Stop};
+use crate::run_stop::{Execution, Stop};
 use crate::tasks::Outside;
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -68,7 +68,7 @@ impl Helper {
     pub(crate) fn start(
         image: &CStr,
         timeout: Duration,
-        generation: Arc<GenerationEnd>,
+        generation: Arc<Execution>,
     ) -> Result<Arc<Self>, String> {
         let path = image.to_string_lossy();
         let fail = |error: io::Error| format!("ExecHelper({path}: {error})");
@@ -248,7 +248,7 @@ fn receive_timeout(socket: &OwnedFd, timeout: Option<Duration>) -> io::Result<()
     Ok(())
 }
 
-fn read(shared: &Shared, mut inbox: Inbox, closing: &AtomicBool, generation: &GenerationEnd) {
+fn read(shared: &Shared, mut inbox: Inbox, closing: &AtomicBool, generation: &Execution) {
     while let Ok(Some(frame)) = inbox.next() {
         if route(shared, &mut inbox, frame).is_err() {
             break;

@@ -410,15 +410,15 @@ unsafe fn run_config(
         &mut RunMain<'_>,
     ) -> std::io::Result<Result<(u8, i32), crate::run_stop::EndReason>>,
 ) -> u8 {
-    let standalone_gen = crate::run_stop::GenerationEnd::standalone();
+    let standalone_gen = crate::run_stop::Execution::standalone();
     // An untied pool attaches its run's generation to every worker thread
     // before any unit runs; a scope entered here would be bound to whichever
     // worker the root unit started on, not to the unit.
-    let _scope = if crate::run_stop::current_generation().is_some() {
+    let _scope = if crate::run_stop::current_execution().is_some() {
         None
     } else {
         // SAFETY: `standalone_gen` lives for the entire duration of `run_config`.
-        Some(unsafe { crate::run_stop::GenerationScope::enter(&standalone_gen) })
+        Some(unsafe { crate::run_stop::ExecutionScope::enter(&standalone_gen) })
     };
     // SAFETY: forwarded caller contract.
     match unsafe { run_config_inner(config, entry, run) } {
@@ -439,24 +439,24 @@ unsafe fn run_config(
 pub(crate) unsafe fn run_config_contained(
     config: &Config,
     entry: Entry,
-    _generation: &crate::run_stop::GenerationEnd,
+    _generation: &crate::run_stop::Execution,
 ) -> Result<u8, crate::run_stop::EndReason> {
-    // SAFETY: caller pinned config, entry, and entered GenerationScope.
+    // SAFETY: caller pinned config, entry, and entered ExecutionScope.
     unsafe { run_config_inner(config, entry, run_plain) }
 }
 
 /// Contained (embedded) entry with checked foreign support (`waits` helper pool).
 ///
 /// # Safety
-/// Caller pinned `config`, `entry`, and entered `GenerationScope`.
+/// Caller pinned `config`, `entry`, and entered `ExecutionScope`.
 #[cfg(not(feature = "standalone"))]
 pub(crate) unsafe fn run_config_contained_with_foreign(
     config: &Config,
     entry: Entry,
     waits: bool,
-    _generation: &crate::run_stop::GenerationEnd,
+    _generation: &crate::run_stop::Execution,
 ) -> Result<u8, crate::run_stop::EndReason> {
-    // SAFETY: caller pinned config, entry, and entered GenerationScope.
+    // SAFETY: caller pinned config, entry, and entered ExecutionScope.
     unsafe {
         run_config_inner(config, entry, |context, main| {
             with_foreign(context, main, waits)

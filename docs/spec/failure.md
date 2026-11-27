@@ -248,7 +248,7 @@ ends its runtime generation, and the stop's name is reported to the embedder:
 | a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
 | a `Latest` root's handles would pass `2^64 − 1` | `LatestHandles` |
-| an engine counter would pass `2^64 − 1`: task ids, host handles and provider operation tokens, temporary names, runs in the process, destination identities ([MEM-4](memory.md#mem-4-sized-destinations)) | `TaskIds`, `HostHandles`, `HostNames`, `ActiveRuns`, `DestinationIds` |
+| an engine counter would pass `2^64 − 1`: task ids, host handles and provider operation tokens, temporary names, runs in the process, destination identities ([MEM-4](memory.md#mem-4-sized-destinations)), step account identities ([PACK-11](packing.md#pack-11-the-context-line)) | `TaskIds`, `HostHandles`, `HostNames`, `ActiveRuns`, `DestinationIds`, `StepIds` |
 | the host refuses memory the engine needs | `HostMemory` |
 | the host refuses the signal stack, a signal action, the clock or the page size | `SignalStack`, `Signal`, `Clock`, `PageSize` |
 | a host provider lacks one of its five callbacks when the run installs it, before `main`, or answers a `wait` or step kind outside the provider ABI | `Provider` |

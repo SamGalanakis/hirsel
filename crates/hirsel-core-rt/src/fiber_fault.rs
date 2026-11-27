@@ -272,7 +272,7 @@ unsafe fn redirect_recoverable_stop(
     let generation = slot.generation.load(Ordering::Acquire);
     let idle_ptr = slot.idle_ptr.load(Ordering::Relaxed);
     if !generation.is_null() && !idle_ptr.is_null() {
-        // SAFETY: GenerationScope pins `generation` and `dispatch_serial` pins `idle_ptr`.
+        // SAFETY: ExecutionScope pins `generation` and `dispatch_serial` pins `idle_ptr`.
         unsafe {
             let resume_sp = (*idle_ptr).addr();
             if resume_sp != 0 && rewrite_ucontext(context, resume_sp) {

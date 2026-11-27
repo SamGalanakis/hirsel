@@ -419,7 +419,7 @@ linked code read these words at the same offsets:
 | 24 | 8 | `stack_limit` | the lowest stack address an activation may enter with ([FAIL-17](failure.md)) |
 | 32 | 16 | `fast_salt` | the two map salt words |
 | 48 | 8 | `heap_heads` | the task heap's size-class free-list heads; null until code pops blocks inline |
-| 56 | 8 | `execution` | the Place execution this task runs for; null for a task of the process's own run |
+| 56 | 8 | `execution` | the record of the execution this task runs for (PACK-13) |
 
 The prepared map hash key follows at 64 and the strong key at 96. A change to any of these
 offsets changes the runtime ABI revision (PACK-2), so a module built for another layout is
@@ -482,6 +482,60 @@ bytes then steps and 1 is steps then bytes. `hirsel_core_contain_leave(context, 
 leaves the scopes that `layers` names, innermost first, four bits each from the low end: 1
 a byte bound, 2 a step bound, 3 an isolate. Both rows are in class `Metered` of the import
 table (PACK-2).
+
+## PACK-13: Executions and run stops
+
+An **execution** is one run of a program's entry: a process's own run, or one generation
+of an embedded runtime ([EMB-3](embed.md#emb-3-embedded-launch)). The runtime keeps one
+record for each. The record holds the entry the execution runs, the configuration every
+unit of the execution starts from, the worst exit status its units have returned, and its
+end: the first run stop recorded on it, or the host's stop request. None of these is a
+process-wide value, so two executions in one process do not read each other's entry,
+configuration, status or end.
+
+Every task's context names its execution's record at offset 56 (PACK-11). A unit belongs
+to the execution that created it, and a helper unit to the execution of the unit that
+spawned it. The record outlives every unit and task of its execution.
+
+**A run stop ends its own execution.** A run stop
+([FAIL-15](failure.md#fail-15-run-stops)) is written to the record of the execution whose
+task raised it, and ends that execution's tasks. A task that reaches a step check after
+its execution has ended leaves without running further. An embedded execution's stop is
+reported to its embedder and the process goes on. A process's own run exits with status
+102, as FAIL-15 says.
+
+A pack host's workers serve one execution: the runtime has one worker pool in a process.
+Loaded code called through `Code[F]` (PACK-6) therefore runs in its caller's execution,
+and a run stop raised while it runs ends its caller too. `isolate` does not contain a run
+stop ([FAIL-16](failure.md)).
+
+**Which rows can stop.** Loaded code reaches the runtime only through the import rows
+(PACK-2). A row of class `pure` or `metered` needs no capability, so a module that holds
+no grant can still call it. Of the stops such a row can reach, none may be one its caller
+can bring about by its arguments alone. The stops these rows reach, and why each is not
+the caller's to cause, are:
+
+| stop | reached from | why code without a grant cannot cause it |
+|---|---|---|
+| `PageSize` | the first use of the task heap in the process | the host's page size is read once and does not depend on any argument |
+| `StepIds` | opening a step account | identities are taken in ranges of 64 from a 64-bit counter; passing it takes 2^58 range refills |
+| `CountOverflow` | a share of a counted value | each holder is a live value of at least one word, so 2^64 holders do not fit in memory |
+| `Stack` | a heap or region call that finds less than 16 KiB of stack left | user activations are refused at the allowance ([FAIL-17](failure.md)), and a 16 MiB task stack keeps at least 512 KiB of engine reserve below the largest frame the ceiling admits |
+| `HostMemory` | the task heap, a region refill, the glue list, `argon2id`, and mounting another task's stack at a checkpoint | the bytes were admitted by a limit ([MEM-21](budgets.md#mem-21-admission)); the host refuses them only when it was given less memory than the root limit promises |
+
+`HostMemory` is the one entry that depends on the host: on a host whose memory is
+provisioned for the root limit it does not occur, and on an overcommitted host a module
+that allocates up to the bytes it was admitted can meet it. A pack host that loads code it
+does not trust provisions its memory for its root limit.
+
+A row of these two classes also reaches the stops that belong to its caller's own state:
+a checkpoint inside a row may run the scheduler, which serves the execution's other tasks
+and its units' connections. Those stops need a task, a unit or a socket, which only a row
+of class `task` or `provider` creates.
+
+A row of any class that can reach a new stop is listed here with its reason, or is changed
+to return a failure. `crates/hirsel-core-rt/audit-stops.py` prints, for each row, the
+functions that raise a stop and that the row reaches in the built runtime.
 
 ## Gates
 

@@ -152,8 +152,10 @@ pub struct Context {
     /// (packing slice P5); nothing reads it before then.
     pub(crate) heap_heads: *const u8,
     /// The Place execution this task runs for, at the frozen offset
-    /// CONTEXT_EXECUTION (PACK-11). Null for a task of the process's own run.
-    pub(crate) execution: *const u8,
+    /// CONTEXT_EXECUTION (PACK-13): the record of the run the creating thread
+    /// served, which outlives every task of that run. Null when the context
+    /// was made outside any run, as a direct runtime test makes one.
+    pub(crate) execution: *const run_stop::Execution,
     pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) map_strong_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) run: *const crate::process::Config,
@@ -240,6 +242,16 @@ impl Context {
         context
     }
 
+    /// True when this task's own execution has recorded a stop (PACK-13).
+    #[inline]
+    pub(crate) fn execution_ended(&self) -> bool {
+        // SAFETY: a run's record outlives every task context made under it.
+        match unsafe { self.execution.as_ref() } {
+            Some(execution) => execution.is_ended(),
+            None => run_stop::is_ended(),
+        }
+    }
+
     pub(crate) fn share_heap(&mut self, heap: std::sync::Arc<task_heap::Heap>) {
         self.heap = std::cell::OnceCell::from(heap);
         self.owns_heap = false;
@@ -258,7 +270,7 @@ impl Context {
             step_bounds: Vec::new(),
             step_ids: steps::Ids::default(),
             heap_heads: std::ptr::null(),
-            execution: std::ptr::null(),
+            execution: run_stop::current_execution().map_or(std::ptr::null(), std::ptr::from_ref),
             #[cfg(feature = "testing")]
             step_observation: None,
             step_slice_tail: steps::SLICE,

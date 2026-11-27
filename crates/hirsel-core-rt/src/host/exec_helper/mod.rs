@@ -111,7 +111,7 @@ pub(crate) fn embed_grants(
     requests: &[hirsel_core_net::exec::Request],
     exec_helper: &[u8],
     start_timeout_ms: u32,
-    generation: &Arc<crate::run_stop::GenerationEnd>,
+    generation: &Arc<crate::run_stop::Execution>,
 ) -> Result<Box<[crate::exec::Grant]>, String> {
     if requests.is_empty() {
         return Ok(Box::default());

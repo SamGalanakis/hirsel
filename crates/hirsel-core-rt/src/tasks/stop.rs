@@ -200,7 +200,7 @@ pub(super) unsafe fn teardown_ended(run: &mut Scheduler, root: *mut Task) -> End
         run.all = std::ptr::null_mut();
     }
     run.stacks.clear_all();
-    crate::run_stop::current_generation()
+    crate::run_stop::current_execution()
         .and_then(|g| g.end_reason())
         .unwrap_or(EndReason::HostStop)
 }

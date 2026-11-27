@@ -10,7 +10,7 @@ use hirsel_core_rt::{
     fiber::{self, RUNTIME_ROOM},
     isa,
     process::{Config, MainResult},
-    run_stop::{EndReason, GenerationEnd, run_contained_worker},
+    run_stop::{EndReason, Execution, run_contained_worker},
     steps::{self, EMBED_QUANTUM},
     tasks::{SchedulerProvider, ValueLayout},
 };
@@ -105,7 +105,7 @@ unsafe extern "C" fn ok_with_growth_entry(
 
 fn verify_clean_restart() -> bool {
     let witness = AtomicUsize::new(0);
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config((&raw const witness).cast_mut().cast());
     let res = unsafe { run_contained_worker(&generation, &cfg, ok_with_growth_entry) };
     res == Ok(0) && witness.load(Ordering::SeqCst) > 0 && generation.end_reason().is_none()
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn embed_fixture_guard_fault(name_buf: *mut u8, cap: usize
         std::hint::black_box(recurse_forever(0));
         0
     }
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     match unsafe { run_contained_worker(&generation, &cfg, blow) } {
         Err(EndReason::RunStop(stop)) => {
@@ -165,7 +165,7 @@ pub unsafe extern "C" fn embed_fixture_refused_growth_fault(name_buf: *mut u8, c
         0
     }
 
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     let res = unsafe { run_contained_worker(&generation, &cfg, grow_under_enomem) };
     unsafe { wrap_disarm_fail_mprotect() };
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn embed_fixture_refused_growth_room(name_buf: *mut u8, ca
         0
     }
 
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     let res = unsafe { run_contained_worker(&generation, &cfg, room_entry) };
     unsafe { wrap_disarm_fail_mprotect() };
@@ -239,7 +239,7 @@ pub unsafe extern "C" fn embed_fixture_refused_growth_room(name_buf: *mut u8, ca
             if base == 0 || len == 0 || unsafe { wrap_saw_whole_munmap(base, len) } == 0 {
                 return -3;
             }
-            let gen2 = GenerationEnd::contained();
+            let gen2 = Execution::contained();
             if unsafe { run_contained_worker(&gen2, &cfg, reuse_lock) } != Ok(0) {
                 return -4;
             }
@@ -278,14 +278,14 @@ pub unsafe extern "C" fn embed_fixture_lock_held_malloc_refusal(
         0
     }
 
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     let res = unsafe { run_contained_worker(&generation, &cfg, locked_alloc) };
     unsafe { wrap_disarm_fail_malloc() };
     match res {
         Err(EndReason::RunStop(stop)) => {
             unsafe { write_name(name_buf, cap, stop.name()) };
-            let gen2 = GenerationEnd::contained();
+            let gen2 = Execution::contained();
             if unsafe { run_contained_worker(&gen2, &cfg, reuse_lock) } != Ok(0) {
                 return -4;
             }
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn embed_fixture_count_overflow(name_buf: *mut u8, cap: us
         }
         0
     }
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     match unsafe { run_contained_worker(&generation, &cfg, overflow) } {
         Err(EndReason::RunStop(stop)) => {
@@ -347,7 +347,7 @@ pub unsafe extern "C" fn embed_fixture_deadlock(name_buf: *mut u8, cap: usize) -
         }
         0
     }
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     match unsafe { run_contained_worker(&generation, &cfg, deadlock) } {
         Err(EndReason::RunStop(stop)) => {
@@ -378,7 +378,7 @@ pub unsafe extern "C" fn embed_fixture_host_stop() -> i32 {
             }
         }
     }
-    let generation = Arc::new(GenerationEnd::contained());
+    let generation = Arc::new(Execution::contained());
     let running = Arc::new(AtomicBool::new(false));
     let gen_w = generation.clone();
     let run_w = running.clone();
@@ -415,7 +415,7 @@ pub unsafe extern "C" fn embed_fixture_replaced_handler(name_buf: *mut u8, cap: 
             return -2;
         }
     }
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     match unsafe { run_contained_worker(&generation, &cfg, ok_entry) } {
         Err(EndReason::RunStop(stop)) => {

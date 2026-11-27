@@ -4,7 +4,7 @@ use crate::{
     Context,
     fiber::{self, ArmError},
     process::{Config, MainResult},
-    run_stop::{EndReason, GenerationEnd, run_contained_worker},
+    run_stop::{EndReason, Execution, run_contained_worker},
 };
 use std::{
     os::unix::process::ExitStatusExt,
@@ -257,7 +257,7 @@ fn chaining_child() {
                 release: Barrier::new(2),
             });
             let sync_w = sync.clone();
-            let generation = Arc::new(GenerationEnd::contained());
+            let generation = Arc::new(Execution::contained());
             let gen_w = generation.clone();
             let worker = std::thread::spawn(move || {
                 let cfg = test_config(Arc::as_ptr(&sync_w).cast_mut().cast());
@@ -315,7 +315,7 @@ fn chaining_child() {
                 fiber::arm_embedded().unwrap();
                 assert_eq!(libc::raise(libc::SIGSEGV), 0);
             }
-            let generation = GenerationEnd::contained();
+            let generation = Execution::contained();
             let cfg = test_config(ptr::null_mut());
             // SAFETY: stack growth must still succeed after SIG_IGN software signal.
             let res = unsafe { run_contained_worker(&generation, &cfg, grow_stack_entry) };
@@ -351,7 +351,7 @@ fn chaining_child() {
                 assert_eq!(libc::sigismember(&after_mask, libc::SIGUSR1), 0);
             }
             // Verify Hirsel's handler stayed installed and still grows fiber stacks!
-            let generation = GenerationEnd::contained();
+            let generation = Execution::contained();
             let cfg = test_config(ptr::null_mut());
             let res = unsafe { run_contained_worker(&generation, &cfg, grow_stack_entry) };
             assert_eq!(res, Ok(0));
@@ -387,7 +387,7 @@ fn replaced_handler_child() {
     unsafe extern "C" fn ok_entry(_: *mut Context, _: *const Config, _: *mut MainResult) -> u8 {
         0
     }
-    let gen1 = GenerationEnd::contained();
+    let gen1 = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     assert_eq!(
         unsafe { run_contained_worker(&gen1, &cfg, ok_entry) },
@@ -403,7 +403,7 @@ fn replaced_handler_child() {
     }
 
     assert_eq!(fiber::arm_embedded(), Err(ArmError::FaultHandlerReplaced));
-    let gen2 = GenerationEnd::contained();
+    let gen2 = Execution::contained();
     match unsafe { run_contained_worker(&gen2, &cfg, ok_entry) } {
         Err(EndReason::RunStop(stop)) => assert_eq!(stop.name(), "FaultHandlerReplaced"),
         other => panic!("expected FaultHandlerReplaced, got {other:?}"),

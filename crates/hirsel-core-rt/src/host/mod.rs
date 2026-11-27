@@ -18,7 +18,7 @@ pub(crate) fn embed_exec(
     _: &[hirsel_core_net::exec::Request],
     _: &[u8],
     _: u32,
-    _: &std::sync::Arc<crate::run_stop::GenerationEnd>,
+    _: &std::sync::Arc<crate::run_stop::Execution>,
 ) -> Result<Box<[crate::exec::Grant]>, String> {
     Ok(Box::default())
 }

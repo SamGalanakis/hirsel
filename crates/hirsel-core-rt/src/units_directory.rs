@@ -159,7 +159,14 @@ pub(crate) fn spawn_job(job: Job) -> Result<(), SpawnErr> {
             enqueue(p, u);
         }
         Ok(Claim::Fresh(id)) => {
-            let unit = new_unit(id);
+            // A helper belongs to the execution that spawns it: the spawning
+            // unit's, or the calling thread's when no unit runs here.
+            // SAFETY: a non-null current unit is this thread's running unit.
+            let execution = match unsafe { cur().as_ref() } {
+                Some(unit) => unit.execution,
+                None => crate::run_stop::current_execution().unwrap(),
+            };
+            let unit = new_unit(id, execution);
             unit.job.set(Some(job));
             publish_unit(unit);
         }
@@ -206,14 +213,14 @@ pub(crate) fn spawn_language_job(job: Job) {
 }
 
 #[cfg(test)]
-pub(super) fn create_unit(id: u32) {
-    publish_unit(new_unit(id));
+pub(super) fn create_unit(id: u32, execution: &crate::run_stop::Execution) {
+    publish_unit(new_unit(id, execution));
 }
 
 /// Create an initial unit with its guarded stack pair already admitted before
 /// any worker dispatches it.
-pub(super) fn create_initial_unit(id: u32) {
-    let unit = Box::leak(new_unit(id));
+pub(super) fn create_initial_unit(id: u32, execution: &crate::run_stop::Execution) {
+    let unit = Box::leak(new_unit(id, execution));
     let p = pool();
     let pair = StackPair::new(p.plan.unit_stack_bytes, p.plan.task_stack_reserve);
     // SAFETY: `unit` has not been published yet; nobody else holds it.
@@ -226,9 +233,12 @@ pub(super) fn create_initial_unit(id: u32) {
 
 // A helper's job is set by its spawner before publication. Keeping the job
 // out of the shared constructor also keeps its vtable out of the root path.
-fn new_unit(id: u32) -> Box<Unit> {
+fn new_unit(id: u32, execution: &crate::run_stop::Execution) -> Box<Unit> {
     let t0 = now();
-    let config = BASE.get().unwrap().0;
+    let config = execution.launch.get().unwrap().base;
+    // SAFETY: the launch joins every worker, and so drops every unit's last
+    // use, before its execution record goes out of scope.
+    let execution: &'static crate::run_stop::Execution = unsafe { &*std::ptr::from_ref(execution) };
     Box::new(Unit {
         id,
         #[cfg(feature = "testing")]
@@ -256,6 +266,7 @@ fn new_unit(id: u32) -> Box<Unit> {
         alone: std::sync::OnceLock::new(),
         alone_depth: Cell::new(0),
         config,
+        execution,
         job: Cell::new(None),
     })
 }

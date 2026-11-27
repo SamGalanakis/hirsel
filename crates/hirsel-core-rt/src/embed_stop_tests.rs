@@ -5,7 +5,7 @@ use crate::{
     Context,
     fiber::{self, RUNTIME_ROOM},
     process::{Config, MainResult},
-    run_stop::{EndReason, GenerationEnd, run_contained_worker},
+    run_stop::{EndReason, Execution, run_contained_worker},
     steps::{self, EMBED_QUANTUM},
     tasks::SchedulerProvider,
 };
@@ -102,7 +102,7 @@ fn host_survives_recoverable_guard_fault_and_restarts() {
     }
 
     fiber::reset_fault_counters();
-    let gen1 = GenerationEnd::contained();
+    let gen1 = Execution::contained();
     let cfg1 = test_config(ptr::null_mut());
     // SAFETY: gen1 and cfg1 live until run_contained_worker returns.
     let res1 = unsafe { run_contained_worker(&gen1, &cfg1, overflow_entry) };
@@ -117,7 +117,7 @@ fn host_survives_recoverable_guard_fault_and_restarts() {
     );
 
     let outcome = AtomicUsize::new(0);
-    let gen2 = GenerationEnd::contained();
+    let gen2 = Execution::contained();
     let cfg2 = test_config((&raw const outcome).cast_mut().cast());
     // SAFETY: gen2, cfg2, and outcome live until run_contained_worker returns.
     let res2 = unsafe { run_contained_worker(&gen2, &cfg2, normal_entry) };
@@ -211,7 +211,7 @@ fn native_foreign_overflow_child() {
         assert_eq!(libc::sigaction(libc::SIGBUS, &act, ptr::null_mut()), 0);
     }
 
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     // SAFETY: generation and cfg live for the call; native overflow must not return.
     let res = unsafe { run_contained_worker(&generation, &cfg, foreign_overflow_entry) };
@@ -294,7 +294,7 @@ fn closed_pipe_sig_dfl_child() {
     }
 
     let mut st = PipeState { fd, err_code: 0 };
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config((&raw mut st).cast());
     // SAFETY: st, generation, cfg live until run_contained_worker finishes.
     let res = unsafe { run_contained_worker(&generation, &cfg, pipe_write_entry) };
@@ -353,7 +353,7 @@ fn host_signal_stack_is_untouched_and_distinct_from_worker() {
         0
     }
 
-    let generation = GenerationEnd::contained();
+    let generation = Execution::contained();
     let cfg = test_config((&raw const worker_sp).cast_mut().cast());
     // SAFETY: generation, cfg, worker_sp live until run_contained_worker finishes.
     let res = unsafe { run_contained_worker(&generation, &cfg, check_worker_ss) };
@@ -407,7 +407,7 @@ fn returned_stops_release_locks_and_allow_restart() {
         0
     }
 
-    let gen1 = GenerationEnd::contained();
+    let gen1 = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     match unsafe { run_contained_worker(&gen1, &cfg, count_overflow_entry) } {
         Err(EndReason::RunStop(stop)) => assert_eq!(stop.name(), "CountOverflow"),
@@ -434,7 +434,7 @@ fn returned_stops_release_locks_and_allow_restart() {
         0
     }
 
-    let gen2 = GenerationEnd::contained();
+    let gen2 = Execution::contained();
     match unsafe { run_contained_worker(&gen2, &cfg, locked_host_memory_entry) } {
         Err(EndReason::RunStop(stop)) => assert_eq!(stop.name(), "HostMemory"),
         other => panic!("expected HostMemory, got {other:?}"),
@@ -450,7 +450,7 @@ fn returned_stops_release_locks_and_allow_restart() {
         *guard += 10;
         0
     }
-    let gen3 = GenerationEnd::contained();
+    let gen3 = Execution::contained();
     assert_eq!(
         unsafe { run_contained_worker(&gen3, &cfg, reuse_lock_entry) },
         Ok(0)
@@ -490,7 +490,7 @@ fn room_check_prevents_guard_hit_and_growth_fault_in_lock() {
     }
 
     fiber::reset_fault_counters();
-    let gen1 = GenerationEnd::contained();
+    let gen1 = Execution::contained();
     let cfg = test_config(ptr::null_mut());
     match unsafe { run_contained_worker(&gen1, &cfg, near_guard_entry) } {
         Err(EndReason::RunStop(stop)) => assert_eq!(stop.name(), "Stack"),
@@ -545,7 +545,7 @@ fn room_check_prevents_guard_hit_and_growth_fault_in_lock() {
         0
     }
 
-    let gen2 = GenerationEnd::contained();
+    let gen2 = Execution::contained();
     assert_eq!(
         unsafe { run_contained_worker(&gen2, &cfg, growth_edge_entry) },
         Ok(0)
@@ -600,7 +600,7 @@ fn busy_pure_code_peer_worker_exits_on_run_stop_and_host_stop() {
 
     // Subcase (a): peer worker raises a run stop (Stack).
     {
-        let generation = Arc::new(GenerationEnd::contained());
+        let generation = Arc::new(Execution::contained());
         let st = Arc::new(LoopState {
             reloads: AtomicUsize::new(0),
             running: AtomicBool::new(false),
@@ -632,7 +632,7 @@ fn busy_pure_code_peer_worker_exits_on_run_stop_and_host_stop() {
 
     // Subcase (b): host requests stop while busy peer is in pure loop.
     {
-        let generation = Arc::new(GenerationEnd::contained());
+        let generation = Arc::new(Execution::contained());
         let st = Arc::new(LoopState {
             reloads: AtomicUsize::new(0),
             running: AtomicBool::new(false),

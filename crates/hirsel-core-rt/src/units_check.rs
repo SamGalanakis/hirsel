@@ -67,8 +67,8 @@
 //! every thread waits with no timeout pending while a goal is unmet (stuck
 //! for ever), or when the bound passes.
 use super::{
-    BASE, Base, POOL, RUN, RunFn, UNTIED_ON, USTATS, create_unit, cur, enable_pool, maybe_yield,
-    park as unit_park, pool, take_xready, wake_id, worker_main,
+    POOL, UNTIED_ON, USTATS, create_unit, cur, enable_pool, maybe_yield, park as unit_park, pool,
+    take_xready, wake_id, worker_main,
 };
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -1178,14 +1178,17 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     static BODY: std::sync::OnceLock<fn(u32) -> u8> = std::sync::OnceLock::new();
     let _ = BODY.set(case.body);
     static DISPATCH: fn(&crate::entry::OsConfig) -> u8 = |_| (BODY.get().unwrap())(this_unit());
-    let _ = RUN.set(RunFn(&DISPATCH));
-    // SAFETY: an all-zero configuration: no arguments, grants or operations.
-    let _ = BASE.set(Base(unsafe { std::mem::zeroed() }));
+    static EXECUTION: crate::run_stop::Execution = crate::run_stop::Execution::standalone();
+    let _ = EXECUTION.launch.set(crate::run_stop::Launch {
+        run: &DISPATCH,
+        // SAFETY: an all-zero configuration: no arguments, grants or operations.
+        base: unsafe { std::mem::zeroed() },
+    });
     enable_pool();
     let p = pool();
     std::mem::forget(p.memory.start(p.plan.memory_stack_bytes).unwrap());
     for id in 0..case.units {
-        create_unit(id);
+        create_unit(id, &EXECUTION);
     }
     // Names for the trace.
     fn addr<T>(x: &T) -> usize {

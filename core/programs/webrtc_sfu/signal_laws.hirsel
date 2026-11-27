@@ -27,8 +27,10 @@ type Sig {
     // version) and those `settle_offers` answered.
     pubs: List[(u32, u64)],
     fenced: List[(u32, u64, u64)],
-    refused: List[(u32, u32)],
+    refused: List[(u32, u32, signal.Request)],
     answered: List[u32],
+    answers: List[(u32, u64, Bytes)],
+    subscribed: List[(u32, u64, u8, Bytes, u64)],
     offers: List[(u32, u64)],
     settled: List[(u32, u64)],
     // Published sent to one peer (to, owner, publication), and every Unpublished.
@@ -88,8 +90,12 @@ fn read_room_out(mut r: Sig) {
             },
             ToPeer(p, take s) => match take s {
                 Published(q, id, _, _) => list.push(mut r.told, (p, int.narrow(q), id)),
-                Refused(c) => list.push(mut r.refused, (p, c)),
-                Answer(_, _) => list.push(mut r.answered, p),
+                Refused(c, req) => list.push(mut r.refused, (p, c, req)),
+                Subscribed(id, section, take mid, epoch) => list.push(mut r.subscribed, (p, id, section, take mid, epoch)),
+                Answer(v, take text) => {
+                    list.push(mut r.answered, p)
+                    list.push(mut r.answers, (p, v, take text))
+                },
                 Offer(v, _) => list.push(mut r.offers, (p, v)),
                 _ => (),
             },
@@ -298,7 +304,7 @@ fn adapter_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     signal.you(mut a, Some(YOU))
     let mut l = law_ledger(2, 2)
     result.unwrap(signal.reserve_room(mut l, room_id(), revoke_limits()))
-    Sig(h: take h, a: take a, l: take l, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), settled: list.new(), told: list.new(), unpublished: list.new(), loss: loss, revoking: list.new())
+    Sig(h: take h, a: take a, l: take l, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), answers: list.new(), subscribed: list.new(), offers: list.new(), settled: list.new(), told: list.new(), unpublished: list.new(), loss: loss, revoking: list.new())
 }
 
 fn seam_on(mut h: Hall, k: u16, limit: u64) {
@@ -553,7 +559,7 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
             }
             enter_room(mut r, PartEnd)
             let mut suspended = false
-            for (p, c) in r.refused {
+            for (p, c, _) in r.refused {
                 if p == 2 && c == signal.code(Suspended) {
                     suspended = true
                 }

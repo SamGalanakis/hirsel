@@ -119,13 +119,18 @@ pub fn room_in[M: codec](mut a: Adapter[M], take input: runner.room_client.RoomI
             }
         },
         Message(p, take m) => {
+            let message = (a.embed.unwrap)(take m)
             if unheaded(mut a) {
-                to_peer(a, p, Refused(code(Suspended)), mut out)
+                let req = match message {
+                    Some(s) => request_of(s),
+                    None => OtherSignal,
+                }
+                to_peer(a, p, Refused(code(Suspended), req), mut out)
                 return
             }
-            match (a.embed.unwrap)(take m) {
+            match take message {
                 Some(take s) => signal(mut a, p, take s, mut out),
-                None => to_peer(a, p, Refused(REFUSED_NOT_TAKEN), mut out),
+                None => to_peer(a, p, Refused(REFUSED_NOT_TAKEN, OtherSignal), mut out),
             }
         },
         PartEnd => {

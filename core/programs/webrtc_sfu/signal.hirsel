@@ -4,7 +4,10 @@
 // turns its answers and `Event.Fenced` into signals. A session is built from an offer on
 // its home unit: the adapter asks for it with a `Build` and is told the outcome by
 // `built`, which the driver calls once the home unit has opened and parked the session.
-pub type Signal: codec + send = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
+pub type Signal: codec + send = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32, Request) | Servers(Bytes, Bytes) | Subscribed(u64, u8, Bytes, u64)
+
+/// The request a refusal answers. Publication operations carry their publication ID.
+pub type Request: key + codec + send = ForJoin | ForOffer(u64) | ForAnswer(u64) | ForSubscribe(u64) | ForTarget(u64) | ForUnsubscribe(u64) | ForPublish(u8) | OtherSignal
 
 /// Per-peer capabilities minted once when a peer joins the room and carried on its
 /// seat for the life of that admission (RTC-8).
@@ -58,7 +61,7 @@ pub type Build: cross {
 pub type Built: cross {
     answer: Bytes,
     recvs: List[u8],
-    sends: List[(u8, sdp.Media)]
+    sends: List[(u8, sdp.Media, sdp.Id)]
 }
 
 /// Codes of `Refused` (RTC-8 Refusals): the `RouterError` tag, from 1, 0 for a
@@ -88,8 +91,10 @@ type Seat {
     stage: Stage,
     home: u16,
     version: u64,
+    offer_digest: Inline[u8, 32],
+    initial_answer: Bytes,
     // Sections the server may send on and those it sends on now (publication id).
-    sends: List[(u8, sdp.Media)],
+    sends: List[(u8, sdp.Media, sdp.Id)],
     subs: List[(u64, u8)],
     // The version of the server's re-offer the peer has not answered (RTC-4).
     offered: Option[u64],
@@ -108,7 +113,7 @@ type Pub {
 }
 
 // What to do with a control call's answer.
-type After = BridgeSeated | BridgeLeft | BridgeSubscribed | Quiet | Admitted(peer.Gen, u64, Bytes, List[u8]) | Discard | Opening | Ended | Fence(u32, peer.Gen) | Announced(peer.Gen, u8) | Subscribed(peer.Gen, u64, u8) | Unsubscribed(peer.Gen, u64) | Changed(peer.Gen)
+type After = BridgeSeated | BridgeLeft | BridgeSubscribed | Quiet | Admitted(peer.Gen, u64, Bytes, List[u8]) | Discard | Opening | Ended | Fence(u32, peer.Gen) | Announced(peer.Gen, u8) | Subscribing(peer.Gen, u64, u8, sdp.Id) | Unsubscribed(peer.Gen, u64) | Changed(peer.Gen, u64)
 
 type Job {
     change: router.Change,
@@ -444,7 +449,7 @@ fn admit_new[M](mut a: Adapter[M], peer: u32, take caller: store.Caller, mut out
         return
     }
     let Some(id) = free_id(a) else {
-        to_peer(a, peer, Refused(code(Limit(int.widen(a.limits.ids)))), mut out)
+        to_peer(a, peer, Refused(code(Limit(int.widen(a.limits.ids))), ForJoin), mut out)
         return
     }
     let mut roster: List[PeerMember] = list.with_capacity(list.len(a.seats))
@@ -466,7 +471,7 @@ fn admit_new[M](mut a: Adapter[M], peer: u32, take caller: store.Caller, mut out
             }
         }
     }
-    list.push(mut a.seats, Seat(peer: peer, caller: take caller, rights: grant, id: id, epoch: a.epoch, stage: Waiting, home: 0, version: 0, sends: list.new(), subs: list.new(), offered: None, ice: take ice))
+    list.push(mut a.seats, Seat(peer: peer, caller: take caller, rights: grant, id: id, epoch: a.epoch, stage: Waiting, home: 0, version: 0, offer_digest:[0; 32], initial_answer: list.new(), sends: list.new(), subs: list.new(), offered: None, ice: take ice))
     // A joining peer learns the publications made before it joined (RTC-8 Joining).
     for p in a.pubs {
         to_peer(a, peer, Published(int.widen(p.peer), p.id, kind_of(p.media), p.encodings), mut out)
@@ -541,6 +546,7 @@ fn rejoin_seat[M](mut a: Adapter[M], i: u64, mut out: List[runner.room_client.Ro
     a.seats[i].epoch = a.epoch
     a.seats[i].stage = Waiting
     a.seats[i].offered = None
+    a.seats[i].initial_answer = list.new()
     list.clear(mut a.seats[i].sends)
     list.clear(mut a.seats[i].subs)
 }
@@ -569,110 +575,6 @@ fn offer_publishes(offer: sdp.Description) -> bool {
         }
     }
     false
-}
-
-fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.room_client.RoomOut[M]]) {
-    let Some(i) = seat_at(a, p) else {
-        to_peer(a, p, Refused(code(NoParticipant)), mut out)
-        return
-    }
-    let g: peer.Gen = Gen(id: a.seats[i].id, epoch: a.seats[i].epoch)
-    match take s {
-        Offer(version, take sdp_text) => {
-            if a.seats[i].stage != Waiting {
-                to_peer(a, p, Refused(code(Exists)), mut out)
-                return
-            }
-            if list.len(sdp_text) > OFFER_MAX {
-                to_peer(a, p, Refused(REFUSED_OFFER_TOO_LARGE), mut out)
-                return
-            }
-            let publish = a.seats[i].rights.publish
-            if !publish {
-                let mut offer = sdp.description()
-                if let Error(e) = sdp.parse(sdp_text, mut offer) {
-                    to_peer(a, p, Refused(code(Peer(Sdp(e)))), mut out)
-                    return
-                }
-                if offer_publishes(offer) {
-                    to_peer(a, p, Refused(REFUSED_PUBLISH_DENIED), mut out)
-                    return
-                }
-            }
-            // The pool homes the session when it takes the build (`home_builds`).
-            let home = 0u16
-            a.seats[i].stage = Building
-            a.seats[i].home = home
-            a.seats[i].version = version
-            let (ufrag, pwd) = match a.seats[i].ice {
-                Some((u, w)) => (copied(u), copied(w)),
-                None => (list.new(), list.new()),
-            }
-            list.push(mut a.builds, Build(who: peer.Participant(gen: g, room: a.room), home: home, peer: p, version: version, offer: take sdp_text, publish: publish, ice_ufrag: take ufrag, ice_pwd: take pwd))
-        },
-        // ICE-Lite (RTC-3): the server learns the browser's path from its checks, so a
-        // remote candidate changes nothing.
-        Candidate(_) => (),
-        EndOfCandidates => (),
-        Subscribe(id, target) => {
-            if a.seats[i].stage != Live {
-                to_peer(a, p, Refused(code(NoParticipant)), mut out)
-                return
-            }
-            let Some(pi) = pub_at(a, id) else {
-                to_peer(a, p, Refused(code(NoPublication)), mut out)
-                return
-            }
-            let media = a.pubs[pi].media
-            let mut section: Option[u8] = None
-            for (k, m) in a.seats[i].sends {
-                if m != media || section != None {
-                    continue
-                }
-                let mut taken = false
-                for (_, used) in a.seats[i].subs {
-                    if used == k {
-                        taken = true
-                    }
-                }
-                if !taken {
-                    section = Some(k)
-                }
-            }
-            let Some(k) = section else {
-                to_peer(a, p, Refused(code(Limit(int.narrow(list.len(a.seats[i].sends))))), mut out)
-                return
-            }
-            list.push(mut a.seats[i].subs, (id, k))
-            list.push(mut a.jobs, Job(change: Subscribe(room: a.room, who: g, p: PublicationId(id), section: k, target: target), after: Subscribed(g, id, k)))
-        },
-        Target(id, target) => {
-            list.push(mut a.jobs, Job(change: Retarget(room: a.room, who: g, p: PublicationId(id), target: target), after: Changed(g)))
-        },
-        // A publication the peer no longer holds, because it was never subscribed or
-        // its owner departed, is already unsubscribed.
-        Unsubscribe(id) => {
-            let mut held = false
-            for (x, _) in a.seats[i].subs {
-                if x == id {
-                    held = true
-                }
-            }
-            if !held {
-                return
-            }
-            list.push(mut a.jobs, Job(change: Unsubscribe(room: a.room, who: g, p: PublicationId(id)), after: Unsubscribed(g, id)))
-        },
-        // The answer to the server's re-offer goes to the session's home unit, which
-        // installs it or, refused, closes the session (`Shut`).
-        Answer(version, take sdp_text) if a.seats[i].offered != None => {
-            a.seats[i].offered = None
-            list.push(mut a.answers, (g, version, take sdp_text))
-        },
-        // A peer that refuses the re-offer rejoins (RTC-4).
-        Refused(_) if a.seats[i].offered != None => rejoin_seat(mut a, i, mut out),
-        _ => to_peer(a, p, Refused(REFUSED_NOT_TAKEN), mut out),
-    }
 }
 
 /// The home unit's outcome for a `Build`: the session is parked there under `who`, or
@@ -718,7 +620,7 @@ pub fn built[M](mut a: Adapter[M], who: peer.Participant, take result: Result[Bu
         },
         Error(e) => {
             a.seats[i].stage = Waiting
-            to_peer(a, p, Refused(code(e)), mut out)
+            to_peer(a, p, Refused(code(e), ForOffer(a.seats[i].version)), mut out)
         },
     }
 }
@@ -838,7 +740,7 @@ fn remote_reserved[M](mut a: Adapter[M], mut l: Ledger, c: router.Change, mut ou
         x.0 != id
     })
     let p = a.seats[si].peer
-    to_peer(a, p, Refused(code(Capacity(e))), mut out)
+    to_peer(a, p, Refused(code(Capacity(e)), ForSubscribe(id)), mut out)
     false
 }
 
@@ -897,6 +799,7 @@ fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer:
             match answer {
                 Ok(_) => {
                     a.seats[i].stage = Live
+                    a.seats[i].initial_answer = copied(sdp_text)
                     to_peer(a, p, Answer(version, sdp_text), mut out)
                     if a.seats[i].rights.publish {
                         for k in recvs {
@@ -908,11 +811,11 @@ fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer:
                     // A refused admission's session was unparked on its home unit.
                     release_session(mut l, a.room, g)
                     a.seats[i].stage = Waiting
-                    to_peer(a, p, Refused(code(e)), mut out)
+                    to_peer(a, p, Refused(code(e), ForOffer(version)), mut out)
                 },
             }
         },
-        Announced(g, _) => {
+        Announced(g, section) => {
             let Some(i) = seat_of(a, g) else {
                 return
             }
@@ -929,10 +832,10 @@ fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer:
                     bridge_subscribe(mut a, id)
                 },
                 Ok(Done) => (),
-                Error(e) => to_peer(a, p, Refused(code(e)), mut out),
+                Error(e) => to_peer(a, p, Refused(code(e), ForPublish(section)), mut out),
             }
         },
-        Subscribed(g, id, _) => {
+        Subscribing(g, id, k, mid) => {
             if let Error(e) = answer {
                 release_remote(mut l, a.room, g, id)
                 if let Some(i) = seat_of(a, g) {
@@ -940,7 +843,18 @@ fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer:
                         x.0 != id
                     })
                     let p = a.seats[i].peer
-                    to_peer(a, p, Refused(code(e)), mut out)
+                    to_peer(a, p, Refused(code(e), ForSubscribe(id)), mut out)
+                }
+            } else if let Some(i) = seat_of(a, g) {
+                let p = a.seats[i].peer
+                if pub_at(a, id) == None {
+                    to_peer(a, p, Refused(code(NoPublication), ForSubscribe(id)), mut out)
+                } else {
+                    let mut name: Bytes = list.with_capacity(int.widen(mid.len))
+                    for n in 0u8 .. mid.len {
+                        list.push(mut name, mid.name[n])
+                    }
+                    to_peer(a, p, Subscribed(id, k, take name, a.seats[i].epoch), mut out)
                 }
             }
         },
@@ -956,15 +870,15 @@ fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer:
             Error(e) => {
                 if let Some(i) = seat_of(a, g) {
                     let p = a.seats[i].peer
-                    to_peer(a, p, Refused(code(e)), mut out)
+                    to_peer(a, p, Refused(code(e), ForUnsubscribe(id)), mut out)
                 }
             },
         },
-        Changed(g) => {
+        Changed(g, id) => {
             if let Error(e) = answer {
                 if let Some(i) = seat_of(a, g) {
                     let p = a.seats[i].peer
-                    to_peer(a, p, Refused(code(e)), mut out)
+                    to_peer(a, p, Refused(code(e), ForTarget(id)), mut out)
                 }
             }
         },

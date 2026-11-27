@@ -36,10 +36,14 @@ let pc: RTCPeerConnection | undefined;
 let service: number | undefined;
 let held: MediaStream | undefined;
 let servers: {username: string; credential: string} | undefined;
+const initialVersion = 1n;
 let answered = false;
+let applyingAnswer = false;
+let offerError: string | undefined;
 let gain: GainNode | undefined;
 let voice: MediaStreamTrack | undefined;
-const subs: {id: bigint; kind: 'audio' | 'video'; mid: string | null}[] = [];
+const subs: {id: bigint; kind: 'audio' | 'video'; mid: string; section: number; generation: string}[] = [];
+const pending = new Map<bigint, {kind: 'audio' | 'video'; error?: string}>();
 const waiters: (() => void)[] = [];
 
 function note(line: string) {
@@ -83,9 +87,16 @@ async function onSignal(from: number, s: Signal, direct: boolean) {
       break;
     }
     case 'Answer': {
-      if (!direct || !pc) break;
-      await pc.setRemoteDescription({type: 'answer', sdp: dec.decode(values[1] as Uint8Array)});
-      answered = true;
+      if (from !== service || !direct || !pc || values[0] !== initialVersion || answered || applyingAnswer) break;
+      applyingAnswer = true;
+      try {
+        await pc.setRemoteDescription({type: 'answer', sdp: dec.decode(values[1] as Uint8Array)});
+        answered = true;
+      } catch (error) {
+        offerError = String(error);
+      } finally {
+        applyingAnswer = false;
+      }
       break;
     }
     case 'Offer': {
@@ -104,10 +115,30 @@ async function onSignal(from: number, s: Signal, direct: boolean) {
       if (!published.some(p => p.id === id)) published.push({peer: Number(values[0]), id, kind: Number(values[2]), encodings: Number(values[3])});
       break;
     }
+    case 'Subscribed': {
+      if (!direct || from !== service) break;
+      const id = values[0] as bigint;
+      const request = pending.get(id);
+      if (request && !request.error && !subs.some(s => s.id === id)) {
+        subs.push({id, kind: request.kind, section: Number(values[1]), mid: dec.decode(values[2] as Uint8Array), generation: String(values[3])});
+      }
+      break;
+    }
+    case 'Refused': {
+      if (!direct || from !== service) break;
+      const request = values[1] as Signal;
+      const id = parts(request)[0] as bigint;
+      const reason = `refused ${request.tag} ${id ?? ''} (code ${values[0]})`;
+      if (request.tag === 'ForSubscribe' && pending.has(id)) pending.get(id)!.error = reason;
+      if (request.tag === 'ForOffer' && id === initialVersion) offerError = reason;
+      note(reason);
+      break;
+    }
     case 'Unpublished': {
       // The owner departed: its publication and our subscription to it are gone, and
       // the section is free for the next subscription (RTC-8 Departures).
       const id = values[0] as bigint;
+      if (pending.has(id)) pending.get(id)!.error = `publication ${id} was withdrawn`;
       const p = published.findIndex(x => x.id === id);
       if (p >= 0) published.splice(p, 1);
       const s = subs.findIndex(x => x.id === id);
@@ -215,12 +246,20 @@ async function start(o: Start) {
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   // The service builds no session from an offer past OFFER_MAX (RTC-8 Offer size).
-  const size = enc.encode(pc.localDescription!.sdp).length;
+  const text = enc.encode(pc.localDescription!.sdp);
+  const size = text.length;
   if (size > OFFER_MAX) {
     throw new Error(`the offer SDP is ${size} bytes; the service takes at most ${OFFER_MAX}: keep each transceiver to Opus and VP8 with rtx (setCodecPreferences), or offer fewer receiving sections`);
   }
-  say({tag: 'Offer', values: [1n, enc.encode(pc.localDescription!.sdp)]}, service);
-  await until(() => answered, 20000, 'the answer');
+  const sendOffer = () => say({tag: 'Offer', values: [initialVersion, text]}, service);
+  sendOffer();
+  const retry = setInterval(() => { if (!answered && !offerError) sendOffer(); }, 2000);
+  try {
+    await until(() => answered || offerError !== undefined, 20000, 'the answer');
+    if (offerError) throw new Error(offerError);
+  } finally {
+    clearInterval(retry);
+  }
   await until(() => pc!.connectionState === 'connected', 20000, 'DTLS');
   return {self: room.self, service};
 }
@@ -228,20 +267,23 @@ async function start(o: Start) {
 // signal.OFFER_MAX: the longest offer SDP the service builds a session from.
 const OFFER_MAX = 32000;
 
-// The receiving sections in the order the service fills them (RTC-8: the first free
-// section the server may send on, of the publication's kind).
-function receiving(kind: 'audio' | 'video'): RTCRtpTransceiver[] {
-  return pc!.getTransceivers().filter(t => t.receiver.track.kind === kind && (t.direction === 'recvonly' || t.currentDirection === 'recvonly' || t.direction === 'sendrecv'));
-}
-
 function layer(encoding: number) {
   return {tag: 'Layer', values: [encoding, 0, 255]};
 }
 
-function subscribe(id: bigint | number, kind: 'audio' | 'video', encoding = 2) {
-  const t = receiving(kind).find(r => !subs.some(s => s.mid !== null && s.mid === r.mid));
-  subs.push({id: BigInt(id), kind, mid: t?.mid ?? null});
-  say({tag: 'Subscribe', values: [BigInt(id), kind === 'video' ? layer(encoding) : layer(0)]}, service);
+async function subscribe(publication: bigint | number, kind: 'audio' | 'video', encoding = 2) {
+  const id = BigInt(publication);
+  if (subs.some(s => s.id === id)) return;
+  const existing = pending.get(id);
+  const request = existing ?? {kind, error: undefined};
+  if (!existing) pending.set(id, request);
+  try {
+    if (!existing) say({tag: 'Subscribe', values: [id, kind === 'video' ? layer(encoding) : layer(0)]}, service);
+    await until(() => request.error !== undefined || subs.some(s => s.id === id), 20000, `subscription to ${id}`);
+    if (request.error) throw new Error(request.error);
+  } finally {
+    if (!existing) pending.delete(id);
+  }
 }
 
 function retarget(id: bigint | number, encoding: number) {
@@ -323,7 +365,9 @@ document.querySelector('#join')?.addEventListener('click', async () => {
     turn: `${location.hostname}:${(document.querySelector('#turn') as HTMLInputElement).value}`});
   setInterval(() => {
     for (const p of published) {
-      if (p.peer !== room.self && !subs.some(s => s.id === p.id)) subscribe(p.id, p.kind === 0 ? 'audio' : 'video');
+      if (p.peer !== room.self && !pending.has(p.id) && !subs.some(s => s.id === p.id)) {
+        void subscribe(p.id, p.kind === 0 ? 'audio' : 'video').catch(error => note(String(error)));
+      }
     }
   }, 500);
 });

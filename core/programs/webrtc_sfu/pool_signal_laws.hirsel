@@ -46,7 +46,7 @@ fn pool_outs(mut t: PoolSig, room: peer.RoomId) {
             ToPeer(p, take s) => match take s {
                 Answer(_, _) => list.push(mut t.answered, (room, p)),
                 Offer(v, _) => list.push(mut t.offers, (room, p, v)),
-                Refused(c) => list.push(mut t.refused, (room, p, c)),
+                Refused(c, _) => list.push(mut t.refused, (room, p, c)),
                 _ => (),
             },
         }

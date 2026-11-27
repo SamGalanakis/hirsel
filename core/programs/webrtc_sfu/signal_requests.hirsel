@@ -1,0 +1,126 @@
+fn request_of(s: Signal) -> Request {
+    match s {
+        Offer(v, _) => ForOffer(v),
+        Answer(v, _) => ForAnswer(v),
+        Subscribe(id, _) => ForSubscribe(id),
+        Target(id, _) => ForTarget(id),
+        Unsubscribe(id) => ForUnsubscribe(id),
+        _ => OtherSignal,
+    }
+}
+
+fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.room_client.RoomOut[M]]) {
+    let req = request_of(s)
+    let Some(i) = seat_at(a, p) else {
+        to_peer(a, p, Refused(code(NoParticipant), req), mut out)
+        return
+    }
+    let g: peer.Gen = Gen(id: a.seats[i].id, epoch: a.seats[i].epoch)
+    match take s {
+        Offer(version, take sdp_text) => {
+            if a.seats[i].stage != Waiting {
+                if version != a.seats[i].version || list.len(sdp_text) > OFFER_MAX || std.sha256.hash(sdp_text) != a.seats[i].offer_digest {
+                    to_peer(a, p, Refused(code(Exists), req), mut out)
+                } else if a.seats[i].stage == Live {
+                    to_peer(a, p, Answer(version, copied(a.seats[i].initial_answer)), mut out)
+                }
+                return
+            }
+            if list.len(sdp_text) > OFFER_MAX {
+                to_peer(a, p, Refused(REFUSED_OFFER_TOO_LARGE, req), mut out)
+                return
+            }
+            let publish = a.seats[i].rights.publish
+            if !publish {
+                let mut offer = sdp.description()
+                if let Error(e) = sdp.parse(sdp_text, mut offer) {
+                    to_peer(a, p, Refused(code(Peer(Sdp(e))), req), mut out)
+                    return
+                }
+                if offer_publishes(offer) {
+                    to_peer(a, p, Refused(REFUSED_PUBLISH_DENIED, req), mut out)
+                    return
+                }
+            }
+            // The pool homes the session when it takes the build (`home_builds`).
+            let home = 0u16
+            a.seats[i].stage = Building
+            a.seats[i].home = home
+            a.seats[i].version = version
+            a.seats[i].offer_digest = std.sha256.hash(sdp_text)
+            let (ufrag, pwd) = match a.seats[i].ice {
+                Some((u, w)) => (copied(u), copied(w)),
+                None => (list.new(), list.new()),
+            }
+            list.push(mut a.builds, Build(who: peer.Participant(gen: g, room: a.room), home: home, peer: p, version: version, offer: take sdp_text, publish: publish, ice_ufrag: take ufrag, ice_pwd: take pwd))
+        },
+        // ICE-Lite (RTC-3): the server learns the browser's path from its checks, so a
+        // remote candidate changes nothing.
+        Candidate(_) => (),
+        EndOfCandidates => (),
+        Subscribe(id, target) => {
+            if a.seats[i].stage != Live {
+                to_peer(a, p, Refused(code(NoParticipant), req), mut out)
+                return
+            }
+            let Some(pi) = pub_at(a, id) else {
+                to_peer(a, p, Refused(code(NoPublication), req), mut out)
+                return
+            }
+            for (held, _) in a.seats[i].subs {
+                if held == id {
+                    to_peer(a, p, Refused(code(Exists), req), mut out)
+                    return
+                }
+            }
+            let media = a.pubs[pi].media
+            let mut section: Option[(u8, sdp.Id)] = None
+            for (k, m, mid) in a.seats[i].sends {
+                if m != media || section != None {
+                    continue
+                }
+                let mut taken = false
+                for (_, used) in a.seats[i].subs {
+                    if used == k {
+                        taken = true
+                    }
+                }
+                if !taken {
+                    section = Some((k, mid))
+                }
+            }
+            let Some((k, mid)) = section else {
+                to_peer(a, p, Refused(code(Limit(int.narrow(list.len(a.seats[i].sends)))), req), mut out)
+                return
+            }
+            list.push(mut a.seats[i].subs, (id, k))
+            list.push(mut a.jobs, Job(change: Subscribe(room: a.room, who: g, p: PublicationId(id), section: k, target: target), after: Subscribing(g, id, k, mid)))
+        },
+        Target(id, target) => {
+            list.push(mut a.jobs, Job(change: Retarget(room: a.room, who: g, p: PublicationId(id), target: target), after: Changed(g, id)))
+        },
+        // A publication the peer no longer holds, because it was never subscribed or
+        // its owner departed, is already unsubscribed.
+        Unsubscribe(id) => {
+            let mut held = false
+            for (x, _) in a.seats[i].subs {
+                if x == id {
+                    held = true
+                }
+            }
+            if !held {
+                return
+            }
+            list.push(mut a.jobs, Job(change: Unsubscribe(room: a.room, who: g, p: PublicationId(id)), after: Unsubscribed(g, id)))
+        },
+        // The answer to the server's re-offer goes to the session's home unit, which
+        // installs it or, refused, closes the session (`Shut`).
+        Answer(version, take sdp_text) if a.seats[i].offered != None => {
+            a.seats[i].offered = None
+            list.push(mut a.answers, (g, version, take sdp_text))
+        },
+        // A peer that refuses the re-offer rejoins (RTC-4).
+        Refused(_, ForOffer(v)) if a.seats[i].offered == Some(v) => rejoin_seat(mut a, i, mut out),
+        _ => to_peer(a, p, Refused(REFUSED_NOT_TAKEN, req), mut out),
+    }
+}

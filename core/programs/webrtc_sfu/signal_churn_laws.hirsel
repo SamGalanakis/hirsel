@@ -33,7 +33,7 @@ fn times(xs: List[u64], v: u64) -> u64 {
 
 fn refused_to(r: Sig, p: u32, from: u64) -> bool {
     for i in from .. list.len(r.refused) {
-        let (q, _) = r.refused[i]
+        let (q, _, _) = r.refused[i]
         if q == p {
             return true
         }
@@ -243,6 +243,104 @@ fn departures_free_subscriber_sections(tasks: Tasks) -> Result[(), router.Router
 fn late_joiner_learns_publications(tasks: Tasks) -> Result[(), router.RouterError] waits {
     let (net, clock, take served) = sim_net(tasks, 16000)
     late_join_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}
+
+/// bug: a dropped initial answer strands the peer, and a duplicate starts or refuses a build.
+/// oracle: exactly one session and publication, one original answer and one identical replay.
+/// Both the SDP bytes and the version distinguish conflicting offers.
+@test
+fn initial_offer_replays_answer(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 16000)
+    let mut r = adapter_room(net, clock, 16000, Continued)
+    join_at(mut r, 2, 5)
+    say_as(mut r, 2, Offer(7, browser_offer()))
+    say_as(mut r, 2, Offer(7, browser_offer()))
+    serve_builds(mut r)
+    say_as(mut r, 2, Offer(7, browser_offer()))
+    if list.len(r.members) != 1 || list.len(r.answers) != 0 || list.len(r.refused) != 0 {
+        fail("an in-flight offer retry duplicated the session or produced an early reply")
+    }
+    until_idle(mut r)
+    say_as(mut r, 2, Offer(7, browser_offer()))
+    say_as(mut r, 2, Offer(7, b"different"))
+    say_as(mut r, 2, Offer(8, browser_offer()))
+    if list.len(r.pubs) != 1 || list.len(r.answers) != 2 || list.len(r.refused) != 2 {
+        fail("expected one publication, the original and replayed answers, and two conflicts")
+    }
+    {
+        let (p, v, first) = r.answers[0]
+        let (q, w, replay) = r.answers[1]
+        if p != 2 || q != p || v != 7 || w != v || list.len(first) == 0 || first != replay {
+            fail("the replay did not deliver the original answer bytes and version to its peer")
+        }
+        for i in 0u64 .. 2 {
+            let (to, code, req) = r.refused[i]
+            if to != 2 || code != signal.code(Exists) || req != ForOffer(7 + i) {
+                fail("a conflicting initial offer was not refused with its version")
+            }
+        }
+    }
+    let Sig(h: take h, ..) = take r
+    close_hall(take h)
+    result.unwrap(task.join(take served))
+    Ok(())
+}
+
+/// bug: clients guess a free section and cannot identify a refused subscribe under churn.
+/// oracle: the SDP offers video receive sections 1 (MID c) and 2 (MID d). After the
+/// first owner leaves, the next publication takes section 1 while its neighbor stays on 2.
+@test
+fn subscribed_reports_reused_section(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 16000)
+    let mut r = subscriber_room(net, clock)
+    let Gen(id: _, epoch: epoch) = seat_of_peer(r, SUBSCRIBER).gen
+    for p in 2u32 .. 4u32 {
+        let number: u64 = int.widen(p)
+        join_at(mut r, p, 4 + number)
+        offer_from(mut r, p)
+        let PublicationId(id) = pub_for(r, p)
+        say_as(mut r, SUBSCRIBER, Subscribe(id, base_layer()))
+    }
+    until_idle(mut r)
+    let PublicationId(old) = pub_for(r, 2)
+    enter_room(mut r, Part(inc_of(1), 8u64, false, false))
+    enter_room(mut r, Left(2))
+    enter_room(mut r, PartEnd)
+    join_at(mut r, 4, 9)
+    offer_from(mut r, 4)
+    let PublicationId(fresh) = pub_for(r, 4)
+    say_as(mut r, SUBSCRIBER, Subscribe(fresh, base_layer()))
+    say_as(mut r, SUBSCRIBER, Subscribe(old, base_layer()))
+    until_idle(mut r)
+    if times(r.unpublished, old) != 1 || list.len(r.subscribed) != 3 || list.len(r.refused) != 1 {
+        fail("the publication churn did not yield three acknowledgments and one refusal")
+    }
+    for i in 0u64 .. 3 {
+        let (to, id, k, mid, generation) = r.subscribed[i]
+        let offset: u32 = int.narrow(i)
+        let PublicationId(expected) = pub_for(r, 2 + offset)
+        let section: u8 = if i == 1 {
+            2
+        } else {
+            1
+        }
+        let expected_mid = if i == 1 {
+            b"d"
+        } else {
+            b"c"
+        }
+        if to != SUBSCRIBER || id != expected || k != section || mid != expected_mid || generation != epoch {
+            fail("acknowledgment named the wrong publication, section, MID or generation")
+        }
+    }
+    let (to, code, req) = r.refused[0]
+    if to != SUBSCRIBER || code != signal.code(NoPublication) || req != ForSubscribe(old) {
+        fail("the refusal did not identify the subscription to the withdrawn publication")
+    }
+    let Sig(h: take h, ..) = take r
+    close_hall(take h)
     result.unwrap(task.join(take served))
     Ok(())
 }

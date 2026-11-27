@@ -490,7 +490,7 @@ that send, for example from a client that only watches. It is answered like any 
 Each such section is answered `sendonly` and gets a down-track when the participant
 subscribes. A section the client sends on is a **publication** only when the seat's join-time
 capability (`PeerRights.publish`) permits publishing (RTC-8). A peer without publish rights
-that offers a sending audio or video section is refused with `Refused(12)`
+that offers a sending audio or video section is refused with `Refused(12, ForOffer(version))`
 (`REFUSED_PUBLISH_DENIED`) before any build or ledger reservation, rather than silently
 downgraded to `inactive`.
 
@@ -1374,7 +1374,8 @@ per peer plus addressed `Message M`. The room's types are the application's, so 
 generic over them:
 
 ```hirsel signatures webrtc_sfu/signal
-pub type Signal: codec + send = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
+pub type Request: key + codec + send = ForJoin | ForOffer(u64) | ForAnswer(u64) | ForSubscribe(u64) | ForTarget(u64) | ForUnsubscribe(u64) | ForPublish(u8) | OtherSignal
+pub type Signal: codec + send = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32, Request) | Servers(Bytes, Bytes) | Subscribed(u64, u8, Bytes, u64)
 pub type PeerRights: key + send { publish: bool }
 pub type PeerMember: key + send { peer: u32, caller: store.Caller, rights: PeerRights }
 pub type PeerJoin: send { peer: u32, caller: store.Caller, roster: List[PeerMember] }
@@ -1409,7 +1410,7 @@ the life of that admission `(incarnation, peer)` (surviving same-incarnation sig
 revocation withdraws the room grant so the seat ends and rejoins afresh). Offer admission and
 publication both read `seat.rights.publish` without re-calling `Embed.admit`: a peer with
 `publish: false` that sends an offer containing any non-rejected `sendonly` or `sendrecv`
-audio or video section is refused immediately with `Refused(12)` (`REFUSED_PUBLISH_DENIED`),
+audio or video section is refused immediately with `Refused(12, ForOffer(version))` (`REFUSED_PUBLISH_DENIED`),
 keeping `stage = Waiting` and reserving zero ledger bytes, so a client sees a typed refusal
 rather than a silently dropped track and may offer receive-only sections on the same seat.
 
@@ -1492,8 +1493,11 @@ head when that Part reports a gap (messages the relay dropped for this member), 
   participant in the room through a new ICE and DTLS handshake on every reconnect of the
   service's room session. The proof keeps an unchanged member's media flowing across a gap
   and still fails closed whenever continuity is not proved.
-- **Refusals.** A `Signal` the router refuses is answered `Refused(code)` to the sender, with
-  the `RouterError` tag as `code`. A malformed `M` never reaches the adapter, because the
+- **Refusals.** A `Signal` the router refuses is answered `Refused(code, request)` to the sender.
+  Subscription, retarget and unsubscribe refusals identify the operation and publication ID.
+  Offer and answer refusals carry the version, admission refusals carry `ForJoin`, and
+  automatic publication failures carry the offered section. `OtherSignal` covers messages
+  without a request identifier. A malformed `M` never reaches the adapter, because the
   room's codec check refuses it first.
 - **Departures.** A publication lives as long as its owner's admission. When an admission
   ends (its `Left`, its absence from the snapshot that ends a loss, or a refused re-offer
@@ -1520,7 +1524,7 @@ head when that Part reports a gap (messages the relay dropped for this member), 
   publications by id, so an id it hears twice is one publication.
 - **Offer size.** An offer travels in one room message, and the adapter builds no session
   from an offer longer than `signal.OFFER_MAX` (32,000 bytes, RTC-1's `TooLarge` bound). It
-  answers such an offer `Refused(11)` before any build. `MESSAGE_MAX` (32,768) is not raised
+  answers such an offer `Refused(11, ForOffer(version))` before any build. `MESSAGE_MAX` (32,768) is not raised
   for SDP. A browser's offer grows with its codecs: Chrome with one audio and three
   video send sections and 8 audio and 8 video receive sections offers about 71 KB, most
   of it the H264, VP9, AV1 and HEVC profiles, FEC and audio codecs the SFU's policy never
@@ -2081,10 +2085,10 @@ over `sim.udp`), unless named otherwise. Each is red on main before its slice.
   read-only viewer (`publish: false`) join with distinct `store.Caller` identities, plus a
   third peer whose admission inspects `PeerJoin.roster`. *Oracle:* RTC-8 by hand. The
   publisher is admitted and publishes; the viewer's sending offer receives
-  `Refused(REFUSED_PUBLISH_DENIED)` (code 12) with zero ledger reservation and no dropped
+  `Refused(REFUSED_PUBLISH_DENIED, ForOffer(version))` (code 12) with zero ledger reservation and no dropped
   track; the viewer's receive-only offer is admitted and receives every RTP packet the
   publisher sends; the roster-aware peer observes the publisher in `PeerJoin.roster` and is
-  likewise refused `Refused(12)`; same-incarnation recovery preserves surviving seats' rights.
+  likewise refused `Refused(12, ForOffer(version))`; same-incarnation recovery preserves surviving seats' rights.
 - **`pool_empty_room_reclaimed`.** One pooled room with `empty_idle_ns = 300 ms`. *Oracle:*
   this section by hand. `Occupied` fires once when the first peer joins (not on the second);
   `Empty` never fires while occupied or before 300 ms; rejoining during the grace period
@@ -2748,20 +2752,28 @@ W12 and W13 in `speaker_laws.hirsel`):
   reports `built`. The adapter then queues `Admit`. Once it returns, `Answer` goes to the
   peer and one `Publish` is queued for each section the peer sends on. Each publication
   goes to the room as `Published(peer, id, kind, encodings)`. A refused build or
-  admission is sent to the peer as `Refused`, and the peer may offer again.
+  admission is sent to the peer as `Refused(code, ForOffer(version))`, and the peer may offer again.
+  The seat keeps the initial offer version and SHA-256 digest. A matching retry while
+  building or admitting shares the in-flight build. Once live, the seat replays the original
+  answer SDP byte for byte. It retains at most `OFFER_MAX` answer bytes for this admission.
+  A different version or SDP on an occupied seat is refused with `Exists` under the incoming version.
 - **Ending an admission.** An admission with no session is fenced at once. One whose
   session is being built is admitted and revoked when the build reports. Otherwise
   `Revoke` is queued, and `Fenced(peer, epoch)` goes to the room when `Event.Fenced`
   says the fence holds, or at once if the router had nothing to fence.
 - **Signals.** A `Candidate` or `EndOfCandidates` changes nothing, because the server is
   ICE-Lite (RTC-3). `Subscribe` takes the peer's first free send section of the
-  publication's kind, and is refused `Limit` when there is none. A section is free again
+  publication's kind, and is refused `Limit` when there is none. On router success the
+  subscriber alone receives `Subscribed(publication_id, section, mid, generation)`. The
+  section is the zero-based SDP media index, the MID is its negotiated token in bytes,
+  and the generation is the subscriber's admission epoch. A pending or active subscription
+  to the same publication is refused with `Exists`. A section is free again
   once its publication's owner departs (RTC-8 Departures). `Unsubscribe` of a publication
   the peer does not hold changes nothing and is not answered. A server-only signal from
-  a peer is answered `Refused(0)`. Otherwise a `Refused` code is the `RouterError` tag,
+  a peer is answered `Refused(0, request)`. Otherwise a `Refused` code is the `RouterError` tag,
   counted from 1 (`signal.code`).
 - **Loss.** `Lost` puts `Suspend` ahead of every waiting call and drops a waiting resume.
-  Every `Message` from then until resume is answered `Refused(Suspended)`. The comparison
+  Every `Message` from then until resume is answered `Refused(Suspended, request)`. The comparison
   runs at the `PartEnd` of the first Part with `snapshot` set. A stale snapshot leaves the
   room suspended. Revokes are queued before the resume, so each fence holds on every unit
   before the room routes again.
@@ -2777,8 +2789,8 @@ W12 and W13 in `speaker_laws.hirsel`):
   `Answer` while a re-offer is in flight goes back through `router.answer_reoffer` to the
   home unit as `Carry.Answer`. Each carry is dropped if its participant is fenced. The
   answer is refused when no re-offer is in flight, when it names another version, or when
-  it does not parse or match the offer (`sdp.accept_answer`). A peer's `Refused` while a
-  re-offer is in flight also refuses it.
+  it does not parse or match the offer (`sdp.accept_answer`). A peer's
+  `Refused(code, ForOffer(version))` also refuses the matching in-flight re-offer.
 - **Refused re-offer.** The home unit changes nothing and raises `Shut` (`Carry.Shut`,
   then `Event.Shut`). The adapter revokes the admission at its epoch, which closes the
   session on every unit, and sends `Fenced` once the fence holds. Until then the session

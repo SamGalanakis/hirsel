@@ -82,7 +82,7 @@ pub fn build(h: Home, r: Random, b: Build) -> Result[(peer.PeerSession, Built), 
     let mut agreed = sdp.negotiated(local)
     sdp.answer(h.policy, None, offer, local, mut reply, mut agreed) ?=> |take e| Peer(Sdp(e))
     let mut recvs: List[u8] = list.new()
-    let mut sends: List[(u8, sdp.Media)] = list.new()
+    let mut sends: List[(u8, sdp.Media, sdp.Id)] = list.new()
     for i in 0u64 .. list.len(agreed.sections) {
         let k = agreed.sections[i].index
         if agreed.sections[i].recv && !b.publish {
@@ -92,7 +92,7 @@ pub fn build(h: Home, r: Random, b: Build) -> Result[(peer.PeerSession, Built), 
             list.push(mut recvs, k)
         }
         if agreed.sections[i].send {
-            list.push(mut sends, (k, agreed.sections[i].media))
+            list.push(mut sends, (k, agreed.sections[i].media, sdp.Id(name: agreed.sections[i].mid, len: agreed.sections[i].mid_len)))
         }
     }
     let mut answer: Bytes = list.new()

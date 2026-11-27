@@ -17,7 +17,7 @@ from pathlib import Path
 
 PROGRAM = Path(__file__).resolve().parent
 ROOT = PROGRAM.parents[3]
-ENTRY = "webrtc_sfu_service@1/main/main"
+ENTRY = "hirsel.ai/webrtc_sfu_service@1/main/main"
 N_PLACE = "1048576"
 
 

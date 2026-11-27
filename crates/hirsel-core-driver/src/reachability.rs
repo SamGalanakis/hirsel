@@ -1,4 +1,5 @@
 //! Build acceptance uses demanded definitions; package check keeps every diagnostic.
+pub(crate) mod authority;
 use super::*;
 use crate::reach::Graph;
 use hirsel_core_ir::Identity;

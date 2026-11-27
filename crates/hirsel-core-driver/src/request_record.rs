@@ -242,6 +242,7 @@ pub(crate) struct Native {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Value {
+    pub(crate) authority: crate::reachability::authority::Facts,
     limits: Limits,
     root: ContentHash,
     /// The check's acceptance; a build's is the reach's.
@@ -371,6 +372,7 @@ impl Value {
             root: product.root,
             check_accepted: product.accepted(),
             files: product.files.len(),
+            authority: product.authority.clone(),
             checked_definitions: product.checked_definitions(),
             source_bytes: product.bytes,
             diagnostics: answer

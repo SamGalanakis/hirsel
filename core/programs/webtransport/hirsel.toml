@@ -5,7 +5,7 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-quic = { package = "quic", major = 1, path = "../quic" }
+quic = { package = "quic", major = 1, path = "../quic", authority = ["Net", "Clock", "Random", "Secret"] }
 
 [sources]
 "h3_wire.hirsel" = "h3_wire"

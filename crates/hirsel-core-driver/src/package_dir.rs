@@ -408,6 +408,15 @@ impl PackageDir {
         use std::collections::BTreeSet;
 
         let selected_member = resolution.workspace.members.get(selected);
+        let mut ceilings = BTreeMap::<&Id, Vec<(String, u16)>>::new();
+        for member in resolution.workspace.members.values() {
+            for (alias, ceiling) in &member.ceilings {
+                ceilings.entry(&member.aliases[alias]).or_default().push((
+                    format!("{}: dependencies.{alias}", member.manifest_path.display()),
+                    *ceiling,
+                ));
+            }
+        }
         let mut toolchain_members = Vec::new();
         let mut seen = BTreeSet::new();
         let mut pending = vec![selected.clone()];
@@ -460,6 +469,9 @@ impl PackageDir {
             };
             let mut package = Self::manifest_from_content(content, selected, root, bindings, tests);
             package.toolchain = supplied;
+            if let Some(rows) = ceilings.remove(&id) {
+                package.namespace.as_mut().unwrap().authority = rows;
+            }
             if &id == selected {
                 main = Some(package);
             } else {
@@ -632,6 +644,7 @@ impl PackageDir {
         PackageManifest {
             namespace: Some(PackageNamespace {
                 version: Some(content.version.to_string()),
+                authority: Vec::new(),
                 root: root.map(|root| ContentHash(root.0)),
                 foreign: content.foreign_stamp(),
                 foreign_inputs: content.foreign.clone(),

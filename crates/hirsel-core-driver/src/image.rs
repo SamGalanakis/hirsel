@@ -4,6 +4,51 @@ use hirsel_core_front::Library;
 use hirsel_core_ids::published::{Map, Publisher, Reader, Sparse, Table};
 use std::sync::OnceLock;
 
+impl CheckRequest {
+    pub(crate) fn use_image(&mut self, image: Arc<CoreImage>) -> io::Result<bool> {
+        self.capture_sources()?;
+        self.inputs.normalise(self.manifest.as_deref());
+        let directory = image.directory()?;
+        let supplied = &directory.inputs.packages;
+        for in_image in supplied {
+            let Some(requested) = self
+                .inputs
+                .packages
+                .iter()
+                .find(|p| p.package == in_image.package)
+            else {
+                return Ok(false);
+            };
+            let Some(stamp) = directory.stamps.get(&in_image.package) else {
+                return Ok(false);
+            };
+            if in_image.dependencies != requested.dependencies || !stamp.matches(requested, self)? {
+                return Ok(false);
+            }
+        }
+        self.inputs.packages.retain_mut(|package| {
+            if !supplied.iter().any(|row| row.package == package.package) {
+                return true;
+            }
+            // Keep this request's native archive captures for assembly.
+            package.sources.clear();
+            package.namespace.is_some()
+        });
+        self.library = LibraryInput::Image(image);
+        Ok(true)
+    }
+
+    pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
+        let mut request = Self::from_app(package_dir::PackageDir::open(dir)?, None, store)?;
+        if !request.use_image(image)? {
+            return Err(io::Error::other(
+                "the image holds packages outside the request",
+            ));
+        }
+        Ok(request)
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum LibraryInput {
     #[default]
@@ -23,6 +68,7 @@ pub(crate) struct ImageDirectory {
     pub compiler: ContentHash,
     pub inputs: CorpusManifest,
     pub stamps: BTreeMap<PackageId, PackageStamp>,
+    pub test_sources: BTreeSet<SourceId>,
     pub index: Arc<NameIndex>,
     pub files: Table<ImageFile>,
     /// Each file's manifest-relative name, if it had one, and its text's row.
@@ -521,6 +567,7 @@ fn source_package_image_uses_the_captured_text_and_name() {
         "renamed.hirsel",
         Some(hirsel_core_resolve::PackageNamespace {
             version: None,
+            authority: Vec::new(),
             root: None,
             foreign: ContentHash::of_bytes(b"changed foreign stamp"),
             published_bindings: BTreeMap::new(),
@@ -608,6 +655,12 @@ impl Driver {
         let mut writer = crate::image_index::Writer::new(reader.clone());
         let outward = product.index.outward();
         let directory = ImageDirectory {
+            test_sources: product
+                .files
+                .iter()
+                .filter(|f| f.test_source)
+                .map(|f| f.file)
+                .collect(),
             compiler: compiler_identity(),
             inputs,
             stamps,

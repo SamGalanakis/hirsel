@@ -5,7 +5,7 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-dtls = { package = "dtls", major = 1, path = "../dtls" }
+dtls = { package = "dtls", major = 1, path = "../dtls", authority = ["Random", "Secret"] }
 rtp = { package = "rtp", major = 1, path = "../rtp" }
 srtp = { package = "srtp", major = 1, path = "../srtp" }
 sframe = { package = "sframe", major = 1, path = "../sframe" }

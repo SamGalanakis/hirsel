@@ -242,3 +242,93 @@ fn package_l42_frozen_makes_no_connection() {
         std::panic::resume_unwind(panic);
     }
 }
+
+/// L41. Make a published package, use it with sufficient ceilings, then narrow
+/// the row while keeping its archive, dependency image, and request records.
+#[test]
+fn package_l41_authority_ceiling() {
+    let law = PackageLaw::new();
+    let source = r#"
+pub fn ping(n: Net, addr: Addr) -> Result[Socket, NetError] waits { host.connect(n, addr, Never) }
+pub fn open(d: Dir) -> Result[HostFile, IoError] waits { std.file.open(d, "x", Read) }
+pub fn fake() -> (Clock, ClockHand) { provide.clock(0, 0) }
+pub fn spawn(e: Exec, l: Launch) -> Result[Spawned, ExecError] waits { exec.spawn(e, l) }
+pub fn run[T](take x: T) {}
+pub fn twice(f: fn(Stdout) -> u64 waits, out: Stdout) -> u64 waits { f(out) + f(out) }
+"#;
+    law.library("lib", "fixture.test/effects", "1.0.0", source, "[dependencies]\nstd = { major = 1 }\n");
+    let packed = law.fixture("lib", "lib.hpkg");
+    let root = packed.split_whitespace().last().unwrap();
+    law.write("w/hirsel.toml", "[workspace]\nmembers = [\"app\", \"middle\", \"consumer\"]\n");
+    law.write("w/lib.hpkg", std::fs::read(law.path("lib.hpkg")).unwrap());
+    let row = |list: &str| format!("effects = {{ package = \"fixture.test/effects\", major = 1, root = \"{root}\", archive = \"../lib.hpkg\"{list} }}\n");
+    law.library("generic", "fixture.test/gen", "1.0.0",
+        "pub fn stamp[T](x: T, c: Clock) -> u64 { host.wall_ms(c) }", "");
+    let generic = law.fixture("generic", "w/gen.hpkg");
+    let generic_root = generic.split_whitespace().last().unwrap();
+    let wide = ", authority = [\"Dir\", \"Net\", \"Clock\", \"Exec\"]";
+    law.library("w/middle", "fixture.test/middle", "1.0.0", "pub fn idle() {}\n", &format!("[dependencies]\n{}", row(wide)));
+    let consumer = |mask: &str| law.library("w/consumer", "fixture.test/consumer", "1.0.0", PACKAGE_MAIN, &format!(
+        "[dependencies]\napp = {{ package = \"fixture.test/app\", major = 1, path = \"../app\", authority = [{mask}] }}\n"));
+    let kinds = "\"Dir\", \"Net\", \"Clock\", \"Exec\"";
+    let all = format!("{kinds}, \"Stdout\"");
+    consumer(&all);
+    law.write("w/app/helpers.hirsel", "pub fn reads(e: Env) -> u64 { env.len(e) }");
+    let app = |list: &str| {
+        let clock = if list.is_empty() { "" } else { ", authority = [\"Clock\"]" };
+        law.library("w/app", "fixture.test/app", "1.0.0", r#"
+fn writer(o: Stdout) -> u64 waits { let _ = stdout.write(o, "x")
+    1u64 }
+resource type Probe { out: Stdout } drop(p) { let _ = stdout.is_terminal(p.out) }
+pub fn consume(out: Stdout) { effects.run(Probe(out: out)) }
+pub fn use_lib(c: Clock, out: Stdout) -> u64 waits { gen.stamp(1u64, c) + effects.twice(fn(o: Stdout) -> u64 waits { writer(o) }, out) }
+pub fn main() -> Result[(), Exit] { Ok(()) }
+"#, &format!("[program]\nmodule = \"app\"\nfunction = \"main\"\nlimit = 67108864\n[tests]\nlimit = 67108864\n[tests.sources]\n\"helpers.hirsel\" = \"helpers\"\n[dependencies]\ngen = {{ package = \"fixture.test/gen\", major = 1, root = \"{generic_root}\", archive = \"../gen.hpkg\"{clock} }}\nmiddle = {{ package = \"fixture.test/middle\", major = 1, path = \"../middle\"{wide} }}\n{}", row(list)));
+    };
+    app(wide);
+    PackageLaw::pass(law.run(&["check", "w/app"]));
+    PackageLaw::pass(law.run(&["build", "w/app", "--output", "wide"]));
+    // The caller supplies both a closure and the type's drop implementation.
+    // Its own ceiling accounts for Stdout even though both dependency ceilings pass.
+    consumer(kinds);
+    let (status, _, error) = law.run(&["check", "w/consumer"]);
+    assert_eq!(status, Some(2), "{error}");
+    assert!(error.contains("dependencies.app: fixture.test/app@1 reaches Stdout"), "{error}");
+    consumer(&all);
+    app("");
+    for command in [&["check", "w/app"][..], &["build", "w/app", "--output", "narrow"][..], &["pack", "w/app", "--output", "forbidden.hpkg"][..]] {
+        let (status, _, stderr) = law.run(command);
+        assert_eq!(status, Some(2), "{stderr}");
+        for want in ["app/hirsel.toml: dependencies.effects: fixture.test/effects@1 reaches Dir, Net, Clock, Exec",
+            "/effects/open -> std@1/file/open -> Open", "/effects/ping -> Connect", "/effects/fake -> ProvideClock", "ExecSpawn",
+            "app/hirsel.toml: dependencies.gen: fixture.test/gen@1 reaches Clock", "/gen/stamp -> WallMs"] {
+            assert!(stderr.contains(want), "missing {want} in {stderr}");
+        }
+    }
+    assert!(!law.path("forbidden.hpkg").exists());
+    assert!(!law.path("narrow").exists());
+
+    for (name, contained) in [("native", false), ("contained", true)] {
+        let foreign = if contained {
+            law.write("contained/empty.wasm", b"\0asm\x01\0\0\0");
+            "containment = \"wasm\"\nmodule = { file = \"empty.wasm\", sha256 = \"93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476\" }"
+        } else {
+            "archives = []"
+        };
+        law.manifest(name, &format!("fixture.test/{name}"), "1.0.0", &format!(
+            "[sources]\n\"api.hirsel\" = \"api\"\n\"bridge.hirsel\" = \"bridge\"\n[foreign.bridge]\nsymbols = \"aa_\"\n{foreign}\n"));
+        law.write(&format!("{name}/api.hirsel"), "pub opaque type Api {}\npub fn ping(f: Foreign[Api]) -> u64 { bridge.ping(f) }");
+        law.write(&format!("{name}/bridge.hirsel"), "pub fn ping(f: Foreign[api.Api]) -> u64");
+        std::fs::create_dir_all(law.path("ffi")).unwrap();
+        let pack = law.fixture(name, &format!("ffi/{name}.hpkg"));
+        let root = pack.split_whitespace().last().unwrap();
+        law.app("ffi", &format!("[dependencies]\nlib = {{ package = \"fixture.test/{name}\", major = 1, root = \"{root}\", archive = \"{name}.hpkg\" }}\n"));
+        let result = law.run(&["check", "ffi"]);
+        if contained {
+            PackageLaw::pass(result);
+        } else {
+            assert_eq!(result.0, Some(2), "{}", result.2);
+            assert!(result.2.contains("fixture.test/native@1 reaches Foreign"), "{}", result.2);
+        }
+    }
+}

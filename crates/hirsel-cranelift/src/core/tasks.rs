@@ -256,24 +256,7 @@ impl Function<'_, '_, '_> {
                 let code = self.b.ins().iconst(types::I8, i64::from(op.code()));
                 let null = self.b.ins().iconst(types::I64, 0);
                 let no_mode = self.b.ins().iconst(types::I8, 0);
-                let operand = match op {
-                    HostOp::Open
-                    | HostOp::Read
-                    | HostOp::Write
-                    | HostOp::OpenDir
-                    | HostOp::Entries
-                    | HostOp::Stat
-                    | HostOp::NextEntries
-                    | HostOp::Mkdir
-                    | HostOp::Mkdtemp
-                    | HostOp::Mkstemp
-                    | HostOp::Remove
-                    | HostOp::RemoveTree
-                    | HostOp::Stdout
-                    | HostOp::Stderr
-                    | HostOp::Random => args[1],
-                    _ => null,
-                };
+                let operand = host::operand(op, &args, null);
                 let mode = if op == HostOp::Open { args[2] } else { no_mode };
                 // C outcome fields: value at 0, error at 8, written at 16, status at 24.
                 let values = match op {
@@ -370,8 +353,11 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretAeadOpen
                     | HostOp::StdinRead
                     | HostOp::StdinSecret
-                    | HostOp::StreamTerminal
-                    | HostOp::StreamSize
+                    | HostOp::StdinTerminal
+                    | HostOp::StdoutTerminal
+                    | HostOp::StderrTerminal
+                    | HostOp::StdoutSize
+                    | HostOp::StderrSize
                     | HostOp::EnvGet
                     | HostOp::EnvLen
                     | HostOp::EnvName

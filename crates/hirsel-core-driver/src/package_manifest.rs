@@ -50,6 +50,7 @@ struct Program {
 
 #[derive(Deserialize)]
 struct DependencyTable {
+    authority: Option<Vec<String>>,
     package: Option<String>,
     major: Option<u32>,
     path: Option<String>,
@@ -195,8 +196,8 @@ pub(crate) fn git_ref_rule(reference: &str) -> bool {
 #[derive(Clone)]
 pub(crate) enum Dependency {
     Toolchain(Id),
-    Member(Id, String),
-    Published(Id, Root, Option<SourceLocation>),
+    Member(Id, String, u16),
+    Published(Id, Root, Option<SourceLocation>, u16),
     Inherited,
 }
 
@@ -668,6 +669,16 @@ fn dependencies(
             ]
             .iter()
             .any(|field| field.is_some());
+            let mut ceiling = 0u16;
+            for name in binding.authority.iter().flatten() {
+                let kind = crate::native::grant_kind(name).ok_or_else(|| {
+                    format!("{field}.authority: {name:?} is not a capability kind")
+                })?;
+                if ceiling & (1 << kind) != 0 {
+                    return Err(format!("{field}.authority: names {name} twice"));
+                }
+                ceiling |= 1 << kind;
+            }
             let edge = match (
                 binding.major,
                 &binding.path,
@@ -676,7 +687,7 @@ fn dependencies(
                 located,
             ) {
                 (None, None, None, Some(true), false)
-                    if allow_inherited && binding.package.is_none() =>
+                    if allow_inherited && binding.package.is_none() && binding.authority.is_none() =>
                 {
                     Dependency::Inherited
                 }
@@ -685,6 +696,9 @@ fn dependencies(
                         package(&binding)?;
                         return Err(bad_form());
                     };
+                    if binding.authority.is_some() {
+                        return Err(format!("{field}.authority: a toolchain binding takes no authority"));
+                    }
                     if binding.package.is_some() {
                         return Err(format!("{field}: a toolchain binding takes no package"));
                     }
@@ -712,7 +726,7 @@ fn dependencies(
                             "{field}: {name} is a toolchain package's name, bound only as {name}"
                         ));
                     }
-                    Dependency::Member(Id { name, major }, path.clone())
+                    Dependency::Member(Id { name, major }, path.clone(), ceiling)
                 }
                 (Some(major), None, Some(_), None, _) => {
                     let name = package(&binding)?;
@@ -725,7 +739,7 @@ fn dependencies(
                         return Err(format!("{field}.package: {name:?} is not a scoped name"));
                     }
                     let (root, source) = published(binding, &field)?;
-                    Dependency::Published(Id { name, major }, root, source)
+                    Dependency::Published(Id { name, major }, root, source, ceiling)
                 }
                 _ => return Err(bad_form()),
             };
@@ -786,7 +800,7 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
             | (
                 Dependency,
                 "package" | "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref"
-                | "dir" | "workspace",
+                | "dir" | "workspace" | "authority",
             )
             | (Selection, "root" | "url" | "archive" | "git" | "rev" | "dir")
             | (Program, "module" | "function" | "limit" | "grants" | "dirs")

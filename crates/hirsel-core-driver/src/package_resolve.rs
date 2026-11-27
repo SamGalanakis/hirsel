@@ -768,6 +768,29 @@ impl Resolution {
         member_root(&self.workspace.members, &mut self.encoded, id)
     }
 
+    pub(crate) fn checked_archive(
+        &mut self,
+        id: &Id,
+        directory: &std::path::Path,
+    ) -> Result<(Bytes, PackageArchive), Failure> {
+        if self
+            .workspace
+            .members
+            .values()
+            .any(|member| !member.ceilings.is_empty())
+        {
+            let app = crate::package_dir::PackageDir::from_resolution(self, id, true)?;
+            let store = crate::store::default_path(directory);
+            let request = crate::CheckRequest::from_app(app, None, &store)?;
+            crate::Driver::default().check_with_product(
+                request,
+                &crate::PackageProduct::default_cache(),
+                &mut crate::Meter::new(false),
+            )?;
+        }
+        Ok(self.make_archive(id)?)
+    }
+
     pub(crate) fn make_archive(&mut self, id: &Id) -> Result<(Bytes, PackageArchive), String> {
         let (bytes, decoded) = assemble(
             &self.published,

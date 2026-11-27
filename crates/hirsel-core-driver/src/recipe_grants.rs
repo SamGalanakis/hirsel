@@ -5,7 +5,7 @@ use super::{EntryParameter, NativeOptions, NativeStop};
 use hirsel_core_ir::release_recipe::{GrantBinding, GrantKind, Recipe};
 use std::collections::BTreeSet;
 
-pub(super) const GRANT_NAMES: [&str; 15] = [
+pub(crate) const GRANT_NAMES: [&str; 15] = [
     "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
     "Args", "Secret", "Foreign", "Exec", "Cred",
 ];

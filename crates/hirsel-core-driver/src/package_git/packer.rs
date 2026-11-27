@@ -445,7 +445,7 @@ impl Graph<'_> {
                 let (expected, edge) = match dependency {
                     Dependency::Inherited => unreachable!(),
                     Dependency::Toolchain(id) => (id, Edge::Toolchain),
-                    Dependency::Member(member, path) => {
+                    Dependency::Member(member, path, _) => {
                         let target = self.snapshot.dir(&root, start, path).ok();
                         let lexical = archive_path(Path::new(&from), path);
                         let not_member = || {
@@ -470,7 +470,7 @@ impl Graph<'_> {
                         targets.push(target);
                         (member, Edge::Member)
                     }
-                    Dependency::Published(id, pin, source) => {
+                    Dependency::Published(id, pin, source, _) => {
                         let source = match source {
                             Some(SourceLocation::Archive(path)) => {
                                 let path = archive_path(Path::new(&from), path).ok_or_else(|| format!(
@@ -576,6 +576,7 @@ impl Graph<'_> {
             members.insert(
                 member_id,
                 Member {
+                    ceilings: BTreeMap::new(),
                     directory: PathBuf::from(draft.relative),
                     manifest_path: draft.manifest_path,
                     package: draft.package,

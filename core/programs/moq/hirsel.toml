@@ -5,8 +5,8 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-quic = { package = "quic", major = 1, path = "../quic" }
-webtransport = { package = "webtransport", major = 1, path = "../webtransport" }
+quic = { package = "quic", major = 1, path = "../quic", authority = ["Net", "Clock", "Random", "Secret"] }
+webtransport = { package = "webtransport", major = 1, path = "../webtransport", authority = ["Random", "Secret"] }
 sframe = { package = "sframe", major = 1, path = "../sframe" }
 
 [sources]

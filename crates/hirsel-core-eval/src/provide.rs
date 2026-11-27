@@ -565,18 +565,18 @@ impl Machine<'_> {
                     .insert(key, (h - CELL_BASE) as usize);
                 ok(key, served)
             }
-            HostOp::StreamTerminal => {
+            HostOp::StdinTerminal | HostOp::StdoutTerminal | HostOp::StderrTerminal => {
                 let terminal = match self.cell(a[0]) {
                     Some(c) => match self.host.world.cells[c] {
                         VirtualCell::Port { size, .. } => size != 0,
                         _ => unreachable!(),
                     },
-                    None => self.host.world.terminals[a[1] as usize],
+                    None => self.host.world.terminals[usize::from(op.terminal_stream().unwrap())],
                 };
                 ok(u64::from(terminal), 0)
             }
             // A port answers its own size; the model world's host streams give none.
-            HostOp::StreamSize => match self.cell(a[0]) {
+            HostOp::StdoutSize | HostOp::StderrSize => match self.cell(a[0]) {
                 Some(c) => match self.host.world.cells[c] {
                     VirtualCell::Port { size, .. } => ok(size, 0),
                     _ => unreachable!(),

@@ -6,11 +6,11 @@ charge = "charge-v1"
 [dependencies]
 std = { major = 1 }
 image_core = { package = "hirsel.ai/image_core", major = 1, path = "../image_core" }
-image_jpeg = { package = "hirsel.ai/image_jpeg", major = 1, path = "../image_jpeg" }
-image_webp = { package = "hirsel.ai/image_webp", major = 1, path = "../image_webp" }
-av1 = { package = "hirsel.ai/av1", major = 1, path = "../av1" }
+image_jpeg = { package = "hirsel.ai/image_jpeg", major = 1, path = "../image_jpeg", authority = ["Foreign"] }
+image_webp = { package = "hirsel.ai/image_webp", major = 1, path = "../image_webp", authority = ["Foreign"] }
+av1 = { package = "hirsel.ai/av1", major = 1, path = "../av1", authority = ["Foreign"] }
 media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
-video_yuv = { package = "hirsel.ai/video_yuv", major = 1, path = "../video_yuv" }
+video_yuv = { package = "hirsel.ai/video_yuv", major = 1, path = "../video_yuv", authority = ["Foreign"] }
 
 [sources]
 "pipeline.hirsel" = "pipeline"

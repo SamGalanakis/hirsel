@@ -22,6 +22,8 @@ pub(crate) struct Member {
     pub(crate) manifest_path: PathBuf,
     pub(crate) package: Package,
     pub(crate) edges: BTreeMap<Id, Edge>,
+    /// Per-consumer policy, outside the content graph and its keys.
+    pub(crate) ceilings: BTreeMap<String, u16>,
     /// Each dependency's alias, after inherited declarations are expanded.
     pub(crate) aliases: BTreeMap<String, Id>,
     pub(crate) content: Content,
@@ -395,7 +397,7 @@ impl Workspace {
             .into());
         }
         let mut edges_by_member = BTreeMap::new();
-        let mut aliases_by_member = BTreeMap::new();
+        let mut policies = BTreeMap::new();
         for (id, (_, relative, manifest, package)) in &drafts {
             if package.inherit_charge
                 && workspace
@@ -411,6 +413,7 @@ impl Workspace {
             }
             let mut edges = BTreeMap::new();
             let mut aliases = BTreeMap::new();
+            let mut ceilings = BTreeMap::new();
             for (name, dependency) in &package.dependencies {
                 let (dependency, from) = match dependency {
                     Dependency::Inherited => (
@@ -430,7 +433,8 @@ impl Workspace {
                 let (expected, edge) = match dependency {
                     Dependency::Inherited => unreachable!(),
                     Dependency::Toolchain(id) => (id, Edge::Toolchain),
-                    Dependency::Member(id, path) => {
+                    Dependency::Member(id, path, ceiling) => {
+                        ceilings.insert(name.clone(), *ceiling);
                         let found = if Path::new(path).is_absolute() {
                             None
                         } else {
@@ -450,7 +454,8 @@ impl Workspace {
                         }
                         (id, Edge::Member)
                     }
-                    Dependency::Published(id, root, source) => {
+                    Dependency::Published(id, root, source, ceiling) => {
+                        ceilings.insert(name.clone(), *ceiling);
                         let source = match source {
                             Some(SourceLocation::Archive(path)) => {
                                 let path = archive_path(from, path).ok_or_else(|| format!(
@@ -477,7 +482,7 @@ impl Workspace {
                 aliases.insert(name.clone(), expected.clone());
             }
             edges_by_member.insert(id.clone(), edges);
-            aliases_by_member.insert(id.clone(), aliases);
+            policies.insert(id.clone(), (aliases, ceilings));
         }
         cycles(&edges_by_member)?;
         let mut members = BTreeMap::new();
@@ -541,7 +546,7 @@ impl Workspace {
                 foreign,
             };
             let edges = edges_by_member.remove(&id).unwrap();
-            let aliases = aliases_by_member.remove(&id).unwrap();
+            let (aliases, ceilings) = policies.remove(&id).unwrap();
             members.insert(
                 id,
                 Member {
@@ -550,6 +555,7 @@ impl Workspace {
                     package,
                     edges,
                     aliases,
+                    ceilings,
                     content,
                     tests,
                 },

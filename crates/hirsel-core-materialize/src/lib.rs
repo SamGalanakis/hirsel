@@ -133,7 +133,8 @@ pub fn children(module: &Module, root: FuncId) -> Vec<Child> {
     children_for_slots(module, &code.slots)
 }
 
-fn children_for_slots(module: &Module, slots: &[hirsel_core_ir::normal::Slot]) -> Vec<Child> {
+/// External instances of an already retained module, using its remapped slots.
+pub fn children_for_slots(module: &Module, slots: &[hirsel_core_ir::normal::Slot]) -> Vec<Child> {
     let mut memo: HashMap<TypeId, Arc<Closure>> = HashMap::default();
     slots
         .iter()

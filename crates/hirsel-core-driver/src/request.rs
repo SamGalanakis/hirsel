@@ -110,7 +110,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         let lock = crate::package_lock::Lock::compare(&resolved, package_mode)?;
         if let Some(selected) = selected {
             let out = pack_out.ok_or("pack requires --output FILE")?;
-            let (bytes, archive) = resolved.make_archive(&selected)?;
+            let (bytes, archive) = resolved.checked_archive(&selected, Path::new(directory))?;
             let output = crate::package_lock::PackOutput::stage(&resolved, &archive, &lock, &out)?;
             lock.commit(&resolved.workspace)?;
             resolved.store.install(&archive)?;

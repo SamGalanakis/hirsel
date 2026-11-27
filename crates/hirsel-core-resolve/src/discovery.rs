@@ -71,6 +71,10 @@ pub struct PackageManifest {
 pub struct PackageNamespace {
     #[serde(default)]
     pub version: Option<String>,
+    /// Workspace rows binding this package, with their diagnostic labels and kind masks.
+    /// Consumer policy never enters package content, images or compiler keys.
+    #[serde(skip)]
+    pub authority: Vec<(String, u16)>,
     pub root: Option<hirsel_core_ids::ContentHash>,
     pub foreign: hirsel_core_ids::ContentHash,
     pub published_bindings: std::collections::BTreeMap<PackageId, hirsel_core_ids::ContentHash>,

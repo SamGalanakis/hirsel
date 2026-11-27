@@ -5,7 +5,7 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { package = "store", major = 1, path = "../store" }
+store = { package = "store", major = 1, path = "../store", authority = ["Dir", "Clock", "Random", "Tasks"] }
 
 [sources]
 "spatial.hirsel" = "spatial"

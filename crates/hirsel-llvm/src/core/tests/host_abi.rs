@@ -64,7 +64,11 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
             &["u64"]
         }
         HostOp::ProvideStdout | HostOp::ProvideStderr => &["u64", "u64"],
-        HostOp::StreamTerminal | HostOp::StreamSize => &["u64", "u8"],
+        HostOp::StdinTerminal
+        | HostOp::StdoutTerminal
+        | HostOp::StderrTerminal
+        | HostOp::StdoutSize
+        | HostOp::StderrSize => &["u64"],
         HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => &["u64", "u64"],
         HostOp::CallPayload => &["u64", "u64", "ptr"],
         HostOp::CallPayloadPrefix => &["u64", "u64", "u64", "ptr"],

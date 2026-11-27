@@ -302,7 +302,7 @@ fn check_source(
         let manifest = Manifest::parse(&root.bytes, &workspace.directory.join(MANIFEST))?;
         if let Some(shared) = manifest.workspace {
             for (alias, dependency) in &shared.dependencies {
-                if let Dependency::Published(_, root, Some(locator)) = dependency
+                if let Dependency::Published(_, root, Some(locator), _) = dependency
                     && let Some(locator) = root_relative(locator)
                 {
                     check(alias, *root, &locator)?;
@@ -631,13 +631,16 @@ pub(crate) fn run_at(
     if let Some(shared) = &shared {
         let entry = shared.dependencies.get(alias);
         let same = match (entry, &edge) {
-            (Some(Dependency::Published(declared, old_root, old_source)), Edge::Published(..)) => {
+            (
+                Some(Dependency::Published(declared, old_root, old_source, _)),
+                Edge::Published(..),
+            ) => {
                 *declared == id
                     && Some(*old_root) == root
                     && old_source.as_ref().and_then(root_relative) == locator
             }
             (Some(Dependency::Toolchain(declared)), Edge::Toolchain)
-            | (Some(Dependency::Member(declared, _)), Edge::Member) => *declared == id,
+            | (Some(Dependency::Member(declared, ..)), Edge::Member) => *declared == id,
             _ => false,
         };
         let own = prior.filter(|dependency| !matches!(dependency, Dependency::Inherited));
@@ -674,7 +677,7 @@ pub(crate) fn run_at(
             if !consumers.is_empty() {
                 let declared = match entry {
                     Dependency::Toolchain(declared)
-                    | Dependency::Member(declared, _)
+                    | Dependency::Member(declared, ..)
                     | Dependency::Published(declared, ..) => declared.to_string(),
                     Dependency::Inherited => alias.to_owned(),
                 };
@@ -732,7 +735,7 @@ pub(crate) fn run_at(
             });
         }
         let replaced = match entry {
-            Some(Dependency::Published(_, old_root, _)) if !same => Some(*old_root),
+            Some(Dependency::Published(_, old_root, ..)) if !same => Some(*old_root),
             _ => None,
         };
         previous_root = replaced.or(own.and(bound_root));

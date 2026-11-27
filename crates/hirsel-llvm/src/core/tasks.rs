@@ -249,8 +249,11 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretAeadOpen
             | HostOp::StdinRead
             | HostOp::StdinSecret
-            | HostOp::StreamTerminal
-            | HostOp::StreamSize
+            | HostOp::StdinTerminal
+            | HostOp::StdoutTerminal
+            | HostOp::StderrTerminal
+            | HostOp::StdoutSize
+            | HostOp::StderrSize
             | HostOp::EnvGet
             | HostOp::EnvLen
             | HostOp::EnvName
@@ -304,6 +307,9 @@ impl FunctionEmitter<'_> {
                         Ty::Scalar(Scalar::U16) => zeroext(Type::Int(16), value.clone()),
                         _ => arg(ty(*t), value.clone()),
                     });
+                }
+                if let Some(stream) = op.terminal_stream() {
+                    operands.push(zeroext(Type::I8, int(stream)));
                 }
                 operands.push(word(at));
                 self.native_call(symbol, &results, &operands)

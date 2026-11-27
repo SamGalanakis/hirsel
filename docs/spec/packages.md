@@ -1441,16 +1441,19 @@ dependency's own code perform, whoever passes it the capability.
 string is refused (`bad authority`, section 9). A list never narrows a parameter: `Dir` covers
 every directory the code is given, and `Foreign` every foreign interface.
 
-**Operations.** Every provider operation of CoreIR (`HostOp`) has exactly one kind or none,
+**Operations.** Every provider operation of CoreIR (`HostOp`) has a fixed set of zero or more kinds,
 fixed by the toolchain in one total table with no default case, so adding an operation without
-deciding its kind does not compile. An operation's kind is the grant kind of the capability
-its authority operand descends from: an operation on a `Dir`, or on a file, entry list or lock
+deciding its kind does not compile. An operation reaches the grant kinds of the capabilities
+its authority operands exercise (for example, signing with a secret and a random provider reaches
+both `Secret` and `Random`): an operation on a `Dir`, or on a file, entry list or lock
 opened from one, is `Dir`; on a `Net`, or a socket, listener, datagram, UDP or TLS stream or
 resolver made from one, `Net`; a clock reading or wait, `Clock`; filling bytes from `Random`,
 `Random`; writing standard output or error, `Stdout` or `Stderr`; reading standard input,
 `Stdin`; reading or narrowing the environment, `Env`; a process stop or trigger, `Process`; a
 secret's sealing, keyed hash, derivation, signature or exchange, `Secret`; a credential fetch,
-`Cred`; and spawning, waiting on, signalling or narrowing a child process, `Exec`. A virtual
+`Cred`; and spawning, waiting on, signalling or narrowing a child process, `Exec`.
+Optional `Until` deadlines on another operation do not add `Clock`; only explicit clock
+operations and `ProvideClock` count as `Clock`. A virtual
 provider's constructor (`Provide*`) counts as the kind it provides, though it only stands in
 for one, so a provider package is listed as reaching what it can impersonate; the card says
 which of its kinds are provided (below). An operation on a cell, port or call that the program
@@ -1475,6 +1478,10 @@ path (`Identity.definition`), not the package that asked for it, so:
 - a call through a function value adds no edge, because the value's definition is charged where
   it was written; a call through the runtime (`Callee::Runtime`) adds the runtime function's
   own operations.
+
+A selected member's declarations in `[tests.sources]` do not serve as roots for its consumers:
+those files are absent from the bound package. Calls from tests still materialize ordinary
+exports and their generic instances, whose operations charge their defining packages.
 
 The analysis runs over the whole checked program at once and has no step budget. A definition
 whose reach it cannot resolve, for any cause, makes `reached` of every package reaching it

@@ -200,15 +200,6 @@ impl CheckRequest {
             entry: None,
         })
     }
-    pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
-        let mut request = Self::from_app(package_dir::PackageDir::open(dir)?, None, store)?;
-        if !request.use_image(image)? {
-            return Err(io::Error::other(
-                "the image holds packages outside the request",
-            ));
-        }
-        Ok(request)
-    }
 
     pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
         Self::directory(dir, libraries, store)
@@ -240,43 +231,11 @@ impl CheckRequest {
             entry: Some(app.entry),
         })
     }
-
-    pub(crate) fn use_image(&mut self, image: Arc<CoreImage>) -> io::Result<bool> {
-        self.capture_sources()?;
-        self.inputs.normalise(self.manifest.as_deref());
-        let directory = image.directory()?;
-        let supplied = &directory.inputs.packages;
-        for in_image in supplied {
-            let Some(requested) = self
-                .inputs
-                .packages
-                .iter()
-                .find(|p| p.package == in_image.package)
-            else {
-                return Ok(false);
-            };
-            let Some(stamp) = directory.stamps.get(&in_image.package) else {
-                return Ok(false);
-            };
-            if in_image.dependencies != requested.dependencies || !stamp.matches(requested, self)? {
-                return Ok(false);
-            }
-        }
-        self.inputs.packages.retain_mut(|package| {
-            if !supplied.iter().any(|row| row.package == package.package) {
-                return true;
-            }
-            // Keep this request's native archive captures for assembly.
-            package.sources.clear();
-            package.namespace.is_some()
-        });
-        self.library = LibraryInput::Image(image);
-        Ok(true)
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileProduct {
+    pub(crate) test_source: bool,
     pub module: ModuleId,
     /// This file's occurrence in the index: sites in it name it.
     pub file: SourceId,
@@ -305,6 +264,7 @@ pub use body::DefinitionProduct;
 mod body;
 #[derive(Clone)]
 pub struct CheckProduct {
+    authority: reachability::authority::Facts,
     pub index: Arc<NameIndex>,
     pub files: Vec<Arc<FileProduct>>,
     unparsed_sources: Vec<(SourceId, Arc<[u8]>)>,
@@ -333,6 +293,7 @@ impl CheckProduct {
     fn empty(index: Arc<NameIndex>) -> Self {
         Self {
             index,
+            authority: BTreeMap::new(),
             files: vec![],
             unparsed_sources: vec![],
             definitions: BTreeMap::new(),
@@ -562,6 +523,7 @@ impl Driver {
                     bytes,
                     hash,
                     name,
+                    s.captured.as_ref().is_some_and(|c| c.test),
                 ));
             }
         }
@@ -600,7 +562,10 @@ impl Driver {
         // A file is read for its bytes alone: the snapshot names each source
         // by its module, digest and manifest-relative name, never by where
         // the checkout lives.
-        let source_stamps: Vec<_> = sources.iter().map(|s| (&s.0, s.1, s.3, &s.4)).collect();
+        let source_stamps: Vec<_> = sources
+            .iter()
+            .map(|s| (&s.0, s.1, s.3, &s.4, s.5))
+            .collect();
         let snapshot = ContentHash::of_bytes(&encode(&(
             environment,
             source_stamps,
@@ -620,10 +585,16 @@ impl Driver {
                     .collect()
             };
             match request_record::lookup(key, record, names)? {
-                Ok(hit) => {
+                Ok(hit)
+                    if reachability::authority::enforce(
+                        &hit.value.authority,
+                        &resolution_inputs,
+                    )? =>
+                {
                     meter.finish("request record/hit");
                     return Ok(Checked::Hit(hit));
                 }
+                Ok(_) => meter.finish("request record/miss: package authority"),
                 Err(miss) => meter.finish(miss.stage()),
             }
         }
@@ -654,7 +625,7 @@ impl Driver {
         let mut modules = Vec::with_capacity(sources.len());
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
-        for (file, (path, mode, bytes, hash, _)) in sources.iter().enumerate() {
+        for (file, (path, mode, bytes, hash, ..)) in sources.iter().enumerate() {
             let derive = request
                 .inputs
                 .packages
@@ -1153,7 +1124,7 @@ impl Driver {
                 .or_default()
                 .push((DefinitionId((base + i) as u32), *d));
         }
-        for (m, (_, _, bytes, source, name)) in modules.into_iter().zip(sources) {
+        for (m, (_, _, bytes, source, name, test_source)) in modules.into_iter().zip(sources) {
             let rows = names.remove(&Some(m.source)).unwrap_or_default();
             publication
                 .files
@@ -1163,6 +1134,7 @@ impl Driver {
                 result.unparsed_sources.push((m.source, bytes));
             }
             result.files.push(Arc::new(FileProduct {
+                test_source,
                 module: m.id,
                 file: m.source,
                 name,
@@ -1179,6 +1151,7 @@ impl Driver {
             layer.finish(&store, layer_record.as_deref())?;
         }
         meter.finish("publish/declared layer");
+        result.authority = reachability::authority::collect(&result, &resolution_inputs)?;
         let result = Arc::new(result);
         meter.finish("publish/commit and Arc move");
         drop(index);

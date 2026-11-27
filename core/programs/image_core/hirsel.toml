@@ -5,7 +5,7 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-media_container = { package = "media_container", major = 1, path = "../media_container" }
+media_container = { package = "media_container", major = 1, path = "../media_container", authority = ["Dir"] }
 
 media_bits = { package = "media_bits", major = 1, path = "../media_bits" }
 

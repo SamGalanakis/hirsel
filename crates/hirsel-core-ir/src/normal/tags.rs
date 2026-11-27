@@ -491,7 +491,7 @@ tags!(HostOp {
     60 => PortReply,
     61 => ProvideDir,
     62 => PortFill,
-    63 => StreamTerminal,
+    63 => StdoutTerminal,
     64 => NetJoin,
     65 => ScramSha256,
     66 => ScramFinalLen,
@@ -582,11 +582,14 @@ tags!(HostOp {
     182 => ScheduleSframeSealer,
     183 => ScheduleSframeOpener,
     184 => ScheduleSframeRatchet,
-    185 => StreamSize,
+    185 => StdoutSize,
     186 => StdinSecret,
     187 => ScheduleNextOpener,
     188 => BootNs,
     189 => ClockAdvanceBoot,
+    190 => StdinTerminal,
+    191 => StderrTerminal,
+    192 => StderrSize,
 });
 
 tags!(RaiseCause {

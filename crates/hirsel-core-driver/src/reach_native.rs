@@ -880,3 +880,24 @@ fn reach_code_descriptor_is_one_per_function() {
         }
     }
 }
+
+/// L41: a missing runtime row propagates through an ordinary direct call,
+/// even when the consumer lists every grant.
+#[test]
+fn package_authority_unresolved() {
+    use crate::reachability::authority::{Graph, Node};
+    use hirsel_core_ir::{Identity, RtOp};
+    let export = Identity::plain(DefPath::from_full("fixture.test/m@1/mod/export").unwrap());
+    let helper = Identity::plain(DefPath::from_full("fixture.test/m@1/mod/helper").unwrap());
+    let package = export.definition.0.package.clone();
+    let mut graph = Graph::default();
+    let mut root = Node::default();
+    root.children.insert(helper.clone());
+    graph.insert(export.clone(), root);
+    let mut missing = Node::default();
+    missing.runtime(RtOp::Closed(u8::MAX));
+    graph.insert(helper, missing);
+    let error = crate::reachability::authority::test_check(&graph, &package, export, 0x7fff).unwrap_err().to_string();
+    assert!(error.contains("what fixture.test/m@1/mod/helper reaches cannot be resolved"), "{error}");
+    assert!(error.contains("runtime"), "{error}");
+}

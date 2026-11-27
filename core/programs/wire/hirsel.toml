@@ -5,9 +5,9 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { package = "store", major = 1, path = "../store" }
-runner = { package = "runner", major = 1, path = "../runner" }
-platform = { package = "platform", major = 1, path = "../platform" }
+store = { package = "store", major = 1, path = "../store", authority = ["Dir", "Clock", "Random", "Tasks"] }
+runner = { package = "runner", major = 1, path = "../runner", authority = ["Dir", "Net", "Clock", "Random", "Stderr", "Process", "Tasks", "Args", "Secret", "Cred"] }
+platform = { package = "platform", major = 1, path = "../platform", authority = ["Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Tasks", "Args", "Secret", "Cred"] }
 
 [sources]
 "echo.hirsel" = "echo"

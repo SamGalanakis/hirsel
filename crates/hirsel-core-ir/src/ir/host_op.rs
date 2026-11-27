@@ -91,7 +91,7 @@ pub enum HostOp {
     UdpFillPackets = hirsel_core_ids::host_op::UDP_FILL_PACKETS as isize,
     ScramSha256 = hirsel_core_ids::host_op::SCRAM as isize,
     ScramVerify = hirsel_core_ids::host_op::SCRAM_VERIFY as isize,
-    StreamTerminal = 96,
+    StdoutTerminal = 96,
     NetJoin = 97,
     ScramFinalLen = 98,
     ExecNarrow = hirsel_core_ids::host_op::EXEC_NARROW as isize,
@@ -166,15 +166,20 @@ pub enum HostOp {
     /// TLS-9: a `Hello`'s server name, a view of its record.
     TlsServerName = 176,
     /// A stream's terminal size, as `cols | rows << 16`, or 0 for none.
-    StreamSize = hirsel_core_ids::host_op::TERM_SIZE as isize,
+    StdoutSize = hirsel_core_ids::host_op::TERM_SIZE as isize,
     /// `stdin.read_secret`: an echo-off line, sealed by the host.
     StdinSecret = hirsel_core_ids::host_op::STDIN_SECRET as isize,
     /// A suspend-inclusive elapsed clock reading.
     BootNs = hirsel_core_ids::host_op::BOOT_NS as isize,
     /// Advance a virtual clock's suspend-inclusive reading.
     ClockAdvanceBoot = hirsel_core_ids::host_op::CLOCK_ADVANCE_BOOT as isize,
+    // These CoreIR rows share a native adapter with their stdout counterparts.
+    StdinTerminal = 256,
+    StderrTerminal = 257,
+    StderrSize = 258,
 }
 
+mod authority;
 mod name;
 mod symbol;
 pub use symbol::host_drop_symbol;
@@ -381,8 +386,11 @@ impl HostOp {
         HostOp::ProvideDir,
         HostOp::PortFill,
         HostOp::UdpFillPackets,
-        HostOp::StreamTerminal,
-        HostOp::StreamSize,
+        HostOp::StdinTerminal,
+        HostOp::StdoutTerminal,
+        HostOp::StderrTerminal,
+        HostOp::StdoutSize,
+        HostOp::StderrSize,
         HostOp::NetJoin,
         HostOp::ScramSha256,
         HostOp::ScramFinalLen,
@@ -587,9 +595,12 @@ impl HostOp {
             HostOp::ProvideProcess => (vec![], outcome),
             HostOp::ProvideRandomTape => (vec![V(p)], outcome),
             HostOp::ProvideStdout | HostOp::ProvideStderr => (vec![V(u64_), V(u64_)], outcome),
-            HostOp::StreamTerminal | HostOp::StreamSize | HostOp::ExecSignal => {
-                (vec![V(u64_), V(u8_)], outcome)
-            }
+            HostOp::StdinTerminal
+            | HostOp::StdoutTerminal
+            | HostOp::StderrTerminal
+            | HostOp::StdoutSize
+            | HostOp::StderrSize => (vec![V(u64_)], outcome),
+            HostOp::ExecSignal => (vec![V(u64_), V(u8_)], outcome),
             HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => {
                 (vec![V(u64_), V(u64_)], outcome)
             }
@@ -726,9 +737,22 @@ impl HostOp {
         }
     }
 
+    /// Stream selector of a terminal query's native adapter.
+    pub const fn terminal_stream(self) -> Option<u8> {
+        match self {
+            Self::StdinTerminal => Some(0),
+            Self::StdoutTerminal | Self::StdoutSize => Some(1),
+            Self::StderrTerminal | Self::StderrSize => Some(2),
+            _ => None,
+        }
+    }
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
-        self as u8
+        match self {
+            Self::StdinTerminal | Self::StderrTerminal => Self::StdoutTerminal as u8,
+            Self::StderrSize => Self::StdoutSize as u8,
+            _ => self as u8,
+        }
     }
     /// C entry of a host operation that has its own adapter.
     pub const fn is_media(self) -> bool {
@@ -876,8 +900,11 @@ impl HostOp {
                     | HostOp::ProvideExec
                     | HostOp::PortFill
                     | HostOp::UdpFillPackets
-                    | HostOp::StreamTerminal
-                    | HostOp::StreamSize
+                    | HostOp::StdinTerminal
+                    | HostOp::StdoutTerminal
+                    | HostOp::StderrTerminal
+                    | HostOp::StdoutSize
+                    | HostOp::StderrSize
             )
     }
 }

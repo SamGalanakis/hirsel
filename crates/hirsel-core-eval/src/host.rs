@@ -36,7 +36,7 @@ impl Machine<'_> {
             return self.stdin_secret(t, a);
         }
         let mode = if op == HostOp::Open { a[2] as u8 } else { 0 };
-        if needs_writable_dir(op as u8, mode) && a[0] & DIR_READ_ONLY != 0 {
+        if needs_writable_dir(op.code(), mode) && a[0] & DIR_READ_ONLY != 0 {
             self.check_cancel(t)?;
             return Ok(vec![0, DENIED, 0, 0]);
         }
@@ -214,8 +214,11 @@ impl Machine<'_> {
             | HostOp::ProvideNet
             | HostOp::ProvideExec
             | HostOp::PortFill
-            | HostOp::StreamTerminal
-            | HostOp::StreamSize
+            | HostOp::StdinTerminal
+            | HostOp::StdoutTerminal
+            | HostOp::StderrTerminal
+            | HostOp::StdoutSize
+            | HostOp::StderrSize
             | HostOp::StdinSecret => {
                 unreachable!()
             }

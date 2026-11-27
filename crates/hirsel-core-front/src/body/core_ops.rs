@@ -33,8 +33,8 @@ pub(crate) use declarations::{assert_declarations, assert_no_ambient_input};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
     Stream(HostOp),
-    StreamTerminal(u8),
-    StreamSize(u8),
+    StreamTerminal(HostOp),
+    StreamSize(HostOp),
     CarrierMove,
     CarrierView,
     StringShorten,
@@ -437,24 +437,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Env(op) => self.runtime_env(op, vals, result, n),
             Kernel::Provide(op) => self.runtime_provide(f, op, vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
-            Kernel::StreamTerminal(stream) => {
-                let kind = self.konst(Ty::Scalar(Scalar::U8), stream.into(), n)?;
-                let [value, ..] = self.runtime_row(
-                    RtOp::Host(HostOp::StreamTerminal),
-                    &[Arg::Value(vals[0]?), Arg::Value(kind)],
-                    n,
-                )?;
+            Kernel::StreamTerminal(op) => {
+                let [value, ..] = self.runtime_row(RtOp::Host(op), &[Arg::Value(vals[0]?)], n)?;
                 self.runtime_nonzero(Ty::Scalar(Scalar::U64), value, n)
             }
-            Kernel::StreamSize(stream) => {
-                let kind = self.konst(Ty::Scalar(Scalar::U8), stream.into(), n)?;
-                let [value, ..] = self.runtime_row(
-                    RtOp::Host(HostOp::StreamSize),
-                    &[Arg::Value(vals[0]?), Arg::Value(kind)],
-                    n,
-                )?;
-                Some(value)
-            }
+            Kernel::StreamSize(op) => self
+                .runtime_row(RtOp::Host(op), &[Arg::Value(vals[0]?)], n)
+                .map(|v| v[0]),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::ReadOnlyDir => {
                 let ty = Ty::Scalar(Scalar::U64);

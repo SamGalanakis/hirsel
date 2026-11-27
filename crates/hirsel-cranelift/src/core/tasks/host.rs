@@ -1,5 +1,26 @@
 use super::*;
 
+pub(super) fn operand(op: HostOp, args: &[Value], null: Value) -> Value {
+    match op {
+        HostOp::Open
+        | HostOp::Read
+        | HostOp::Write
+        | HostOp::OpenDir
+        | HostOp::Entries
+        | HostOp::Stat
+        | HostOp::NextEntries
+        | HostOp::Mkdir
+        | HostOp::Mkdtemp
+        | HostOp::Mkstemp
+        | HostOp::Remove
+        | HostOp::RemoveTree
+        | HostOp::Stdout
+        | HostOp::Stderr
+        | HostOp::Random => args[1],
+        _ => null,
+    }
+}
+
 impl Function<'_, '_, '_> {
     pub(super) fn host_adapter(
         &mut self,
@@ -11,9 +32,13 @@ impl Function<'_, '_, '_> {
         let count = signature.len();
         let mut params = vec![P];
         params.extend(signature);
-        params.push(U);
         let mut operands = vec![self.context];
         operands.extend_from_slice(&args[..count]);
+        if let Some(stream) = op.terminal_stream() {
+            params.push(K);
+            operands.push(self.b.ins().iconst(types::I8, i64::from(stream)));
+        }
+        params.push(U);
         operands.push(site);
         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
         if matches!(op, HostOp::EnvGet | HostOp::EnvName | HostOp::TlsServerName) {

@@ -5,8 +5,8 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { package = "store", major = 1, path = "../store" }
-runner = { package = "runner", major = 1, path = "../runner" }
+store = { package = "store", major = 1, path = "../store", authority = ["Dir", "Clock", "Random", "Tasks"] }
+runner = { package = "runner", major = 1, path = "../runner", authority = ["Dir", "Net", "Clock", "Random", "Stderr", "Process", "Tasks", "Args", "Secret", "Cred"] }
 
 [sources]
 "embed_exec.hirsel" = "main"

@@ -512,8 +512,8 @@ def cli_dev_restores_subscription():
         (server / 'hirsel.toml').write_text(
             '[package]\nname = "local/board"\nversion = "1.0.0"\ncharge = "charge-v1"\n'
             '[dependencies]\nstd = { major = 1 }\n'
-            'store = { package = "store", major = 1, path = "../store" }\n'
-            'runner = { package = "runner", major = 1, path = "../runner" }\n'
+            'store = { package = "store", major = 1, path = "../store", authority = ["Dir", "Clock", "Random", "Tasks"] }\n'
+            'runner = { package = "runner", major = 1, path = "../runner", authority = ["Dir", "Net", "Clock", "Random", "Stderr", "Process", "Tasks", "Args", "Secret", "Cred"] }\n'
             '[sources]\n"main.hirsel" = "main"\n[program]\nmodule = "main"\nfunction = "main"\n')
         for package in ('store', 'runner'):
             original = root / 'core/programs' / package

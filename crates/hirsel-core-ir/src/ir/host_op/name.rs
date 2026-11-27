@@ -161,8 +161,11 @@ impl HostOp {
             HostOp::ProvideExec => "provide_exec",
             HostOp::PortFill => "port_fill",
             HostOp::UdpFillPackets => "udp_fill_packets",
-            HostOp::StreamTerminal => "stream_is_terminal",
-            HostOp::StreamSize => "stream_size",
+            HostOp::StdinTerminal => "stdin_is_terminal",
+            HostOp::StdoutTerminal => "stdout_is_terminal",
+            HostOp::StderrTerminal => "stderr_is_terminal",
+            HostOp::StdoutSize => "stdout_size",
+            HostOp::StderrSize => "stderr_size",
         }
     }
 }

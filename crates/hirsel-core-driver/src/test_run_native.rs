@@ -2396,7 +2396,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
     law.write("work/math/native/arm.a", b"");
 
     law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\", \"math\"]\n");
-    law.app("work/app", "[dependencies]\nmath = { package = \"fixture.test/math\", major = 1, path = \"../math\" }\n");
+    law.app("work/app", "[dependencies]\nmath = { package = \"fixture.test/math\", major = 1, path = \"../math\", authority = [\"Foreign\"] }\n");
     law.write("work/app/main.hirsel", r#"
 pub fn main(f: Foreign[math.Math]) -> Result[(), Exit] {
     if math.ping(f) == 1u64 { Ok(()) } else { Error(Exit(status: 1u8)) }

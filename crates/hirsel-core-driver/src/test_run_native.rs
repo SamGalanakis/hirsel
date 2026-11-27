@@ -1983,7 +1983,7 @@ fn package_l3_frozen_does_not_open_an_archive() {
     law.write(archive, std::fs::read(law.path("vendor/jx.hpkg")).unwrap());
     PackageLaw::pass(law.with_store(&["lock", "app"], "fixtures"));
     PackageLaw::pass(law.with_store(&["check", "app", "--locked"], "third-store"));
-    assert_eq!(std::fs::read(law.path(&format!("third-store/{}", &PACKAGE_X[7..]))).unwrap(), law.encoded(PACKAGE_X));
+    assert_eq!(std::fs::read(law.path(&package_entry("third-store", PACKAGE_X))).unwrap(), law.encoded(PACKAGE_X));
     let fifo = law.path(archive);
     std::fs::remove_file(&fifo).unwrap();
     let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();

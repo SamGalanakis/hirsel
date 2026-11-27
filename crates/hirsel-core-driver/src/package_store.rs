@@ -3,6 +3,7 @@ use crate::package_content::{
 };
 use crate::package_files::{FileId, open_directory, walk};
 use crate::package_manifest::SourceLocation;
+use bytes::BytesMut;
 use rustix::fs::{Mode, OFlags, mkdirat, openat};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -40,41 +41,14 @@ impl PackageStore {
     }
 
     pub(crate) fn read(&self, root: Root) -> io::Result<Entry> {
-        let directory = match open_directory(&self.path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
-            Err(error) => return Err(error),
-        };
-        let path = entry_path(root);
-        let shard = path.parent().unwrap();
-        let name = path.file_name().unwrap();
-        let file = match open_shard(&directory, shard).and_then(|shard| open_entry(&shard, name)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
-            Err(_) => return Ok(Entry::Damaged),
-        };
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > CONTENT_LIMIT as u64 {
-            return Ok(Entry::Damaged);
-        }
-        let length = metadata.len() as usize;
-        // Reserve the EOF probe too, so a complete read cannot trigger another allocation.
-        let mut bytes = Vec::with_capacity(length + 1);
-        if file
-            .take(length as u64 + 1)
-            .read_to_end(&mut bytes)
-            .is_err()
-            || bytes.len() != length
-        {
-            return Ok(Entry::Damaged);
-        }
-        if Root::of(&bytes) != root {
-            return Ok(Entry::Damaged);
-        }
-        let encoded = bytes.into();
-        match Content::decode_as(&encoded, false) {
-            Ok(content) => Ok(Entry::Present(Library { content, encoded })),
-            Err(_) => Ok(Entry::Damaged),
+        self.reader().read(root, 1)
+    }
+
+    pub(crate) fn reader(&self) -> StoreReader<'_> {
+        StoreReader {
+            path: &self.path,
+            directory: None,
+            buffer: BytesMut::new(),
         }
     }
 
@@ -205,6 +179,70 @@ impl PackageStore {
             .map_err(|error| format!("{id}: admitting {source}: {error}\n  cache: partial"))?;
         fetched.insert(spelling);
         Ok((archive, identity))
+    }
+}
+
+/// One resolution round reads from the same directory, before any missing entries are fetched.
+pub(crate) struct StoreReader<'a> {
+    path: &'a Path,
+    directory: Option<File>,
+    buffer: BytesMut,
+}
+
+impl StoreReader<'_> {
+    pub(crate) fn read(&mut self, root: Root, remaining: usize) -> io::Result<Entry> {
+        let directory = match &self.directory {
+            Some(directory) => directory,
+            None => match open_directory(self.path) {
+                Ok(file) => self.directory.insert(file),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
+                Err(error) => return Err(error),
+            },
+        };
+        let path = entry_path(root);
+        let shard = path.parent().unwrap();
+        let name = path.file_name().unwrap();
+        let file = match open_shard(directory, shard).and_then(|shard| open_entry(&shard, name)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
+            Err(_) => return Ok(Entry::Damaged),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > CONTENT_LIMIT as u64 {
+            return Ok(Entry::Damaged);
+        }
+        let length = metadata.len() as usize;
+        let needed = length + 1;
+        let buffer = &mut self.buffer;
+        if buffer.capacity() < needed {
+            // Share allocation across this round. Only the current file is faulted in.
+            let batch = needed.saturating_mul(remaining).min(8 << 20);
+            *buffer = BytesMut::with_capacity(needed.max(batch));
+        }
+        let spare = &mut buffer.spare_capacity_mut()[..needed];
+        crate::host::prefault_capture(spare);
+        let mut read = 0;
+        while read < needed {
+            match rustix::io::read(&file, &mut spare[read..]) {
+                Ok(([], _)) => break,
+                Ok((filled, _)) => read += filled.len(),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(_) => return Ok(Entry::Damaged),
+            }
+        }
+        if read != length {
+            return Ok(Entry::Damaged);
+        }
+        // SAFETY: read initialized exactly the first length bytes, leaving the EOF probe.
+        unsafe { buffer.set_len(length) };
+        let encoded = buffer.split().freeze();
+        if Root::of(&encoded) != root {
+            return Ok(Entry::Damaged);
+        }
+        match Content::decode_as(&encoded, false) {
+            Ok(content) => Ok(Entry::Present(Library { content, encoded })),
+            Err(_) => Ok(Entry::Damaged),
+        }
     }
 }
 

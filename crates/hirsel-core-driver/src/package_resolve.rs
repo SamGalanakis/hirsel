@@ -154,9 +154,9 @@ fn incoming(members: &Members, libraries: &Libraries) -> BTreeSet<(Id, Root)> {
     let transitive = libraries.values().flat_map(|library| {
         library
             .content
-            .edges()
-            .into_iter()
-            .filter_map(|(id, root)| root.map(|root| (id, root)))
+            .bindings
+            .values()
+            .filter_map(|(id, binding)| binding.root().map(|root| (id.clone(), root)))
     });
     direct.chain(transitive).collect()
 }
@@ -167,9 +167,9 @@ fn via(libraries: &Libraries, root: Root) -> Option<&Id> {
         .filter(|library| {
             library
                 .content
-                .edges()
+                .bindings
                 .values()
-                .any(|bound| *bound == Some(root))
+                .any(|(_, binding)| binding.root() == Some(root))
         })
         .map(|library| &library.content.id)
         .min()
@@ -257,7 +257,9 @@ fn acquire(
             .into_iter()
             .map(|(id, root)| graph.destination(&id, root))
             .collect();
-        for node in reached {
+        let mut reader = store.reader();
+        let mut reached = reached.into_iter();
+        while let Some(node) = reached.next() {
             let Node::Published(id, root) = node else {
                 continue;
             };
@@ -275,7 +277,7 @@ fn acquire(
             }
             let entry = match cached.remove(&root) {
                 Some(library) => Entry::Present(library),
-                None => store.read(root)?,
+                None => reader.read(root, reached.len() + 1)?,
             };
             match entry {
                 Entry::Present(library) => {
@@ -360,9 +362,9 @@ fn settle(
         .chain(libraries.values().flat_map(|library| {
             library
                 .content
-                .edges()
-                .into_iter()
-                .filter_map(|(id, root)| root.is_none().then_some(id))
+                .bindings
+                .values()
+                .filter_map(|(id, binding)| binding.root().is_none().then(|| id.clone()))
         }))
         .collect();
     let toolchain = crate::package_content::toolchain_closure(&bound);

@@ -615,3 +615,5 @@ pub(crate) fn child_code_range(_pid: u32, _image: &Path) -> std::ops::Range<u64>
 pub(crate) fn child_memory_hits(_pid: u32, _needle: &[u8]) -> usize {
     panic!("reading a child's memory on macOS needs task_for_pid, which tests are not entitled to")
 }
+
+pub(crate) fn prefault_capture(_bytes: &mut [std::mem::MaybeUninit<u8>]) {}

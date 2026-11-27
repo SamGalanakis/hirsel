@@ -547,3 +547,29 @@ pub(crate) fn child_memory_hits(pid: u32, needle: &[u8]) -> usize {
     assert!(scanned > 1 << 20, "scanned only {scanned} bytes");
     hits
 }
+
+/// Populate private capture pages in one kernel walk before reading files into them.
+pub(crate) fn prefault_capture(bytes: &mut [std::mem::MaybeUninit<u8>]) {
+    if bytes.len() < 64 << 10 {
+        return;
+    }
+    // SAFETY: sysconf reads a process-wide constant and takes no pointers.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page <= 0 {
+        return;
+    }
+    let page = page as usize;
+    let start = bytes.as_mut_ptr().align_offset(page);
+    let length = bytes.len().saturating_sub(start) / page * page;
+    if length > 0 {
+        // SAFETY: only complete pages inside this writable allocation are advised.
+        // Older kernels fault them in during the read as usual.
+        unsafe {
+            libc::madvise(
+                bytes.as_mut_ptr().add(start).cast(),
+                length,
+                libc::MADV_POPULATE_WRITE,
+            )
+        };
+    }
+}

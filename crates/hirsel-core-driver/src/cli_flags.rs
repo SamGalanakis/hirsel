@@ -8,7 +8,7 @@ flags! {
     AddDryRun ["--dry-run"] => "Resolve the change without writing the manifest or lock.";
     PackageStore ["--package-store"] "DIR" => "Select the verified library store.";
     Locked ["--locked"] => "Require a current workspace lock.";
-    Frozen ["--frozen"] => "Require a current workspace lock and use only the package store.";
+    Frozen ["--frozen"] => "Require a current workspace lock, use only the package store and disable compiler network access.";
     Interface ["--interface"] => "Print public declarations.";
     InspectModule ["--module"] "MODULE" => "Restrict --interface to declarations in MODULE (for example json or sim/fs).";
     InspectFilter ["--filter"] "TEXT" => "Restrict --interface to declarations whose path, signature or doc contains TEXT.";

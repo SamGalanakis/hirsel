@@ -601,7 +601,7 @@ fn publish(
     let mut args: Vec<String> = vec![
         "publish".into(),
         tree.package.clone(),
-        "--frozen".into(),
+        crate::package_lock::FROZEN_FLAG.into(),
         "--store".into(),
         path("compiler"),
         "--package-store".into(),

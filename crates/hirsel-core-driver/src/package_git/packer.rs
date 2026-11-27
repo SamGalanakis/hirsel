@@ -28,6 +28,7 @@ pub(crate) struct Acquired {
 
 /// The pack of commit `git.rev`, from this command's session or fetched once.
 fn commit_pack(
+    store: &PackageStore,
     session: &Session,
     budget: &mut Budget,
     git: &GitSource,
@@ -40,7 +41,7 @@ fn commit_pack(
     let pack = match remote {
         Some(remote) => transport::fetch(remote, &git.rev, budget)?,
         None => {
-            let remote = transport::connect(&git.url, budget)?;
+            let remote = transport::connect(&store.transport, &git.url, budget)?;
             transport::fetch(&remote, &git.rev, budget)?
         }
     };
@@ -78,7 +79,7 @@ pub(crate) fn pack_listed(
     let spelling = SourceLocation::Git(git.clone()).to_string();
     let who = expected.map_or_else(String::new, |id| format!("{id}: "));
     let explain = |failure: Failure| failure.explain_after(&who, &spelling);
-    let pack = commit_pack(session, budget, git, remote).map_err(explain)?;
+    let pack = commit_pack(store, session, budget, git, remote).map_err(explain)?;
     if let Some(named) = &git.reference
         && let Some((kind, _)) =
             pack.header(&super::Oid::parse(&git.rev).expect("rev is a commit id"))
@@ -126,12 +127,15 @@ pub(crate) fn pack_listed(
                 budget
                     .fetch()
                     .map_err(|failure| failure.explain(binder, &source_text))?;
-                let bytes = fetch_https(url, &mut |n| {
-                    budget.receive(n).map_err(|failure| failure.to_string())
-                })
-                .map_err(|error| format!("{binder}: fetching {url} failed: {error}"))?;
+                let (archive, _) = fetch_https(
+                    &store.transport,
+                    url,
+                    &mut |n| budget.receive(n).map_err(|failure| failure.to_string()),
+                    &format!("{binder}: "),
+                )?;
+                archive.verify(binder, root, &source_text)?;
                 fetched.push(source_text.clone());
-                decode(binder, root, &source_text, bytes)?.entries
+                archive.entries
             }
             SourceLocation::Git(nested) => {
                 let acquired = pack_commit(store, session, budget, binder, root, nested)?;

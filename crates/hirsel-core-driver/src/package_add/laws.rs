@@ -1,5 +1,6 @@
 use super::{
-    PACKAGE_W, PACKAGE_X, PACKAGE_Y, PACKAGE_Y_SOURCE, PackageLaw, package_bundle, process,
+    PACKAGE_W, PACKAGE_X, PACKAGE_Y, PACKAGE_Y_SOURCE, PackageLaw, package_bundle, package_entry,
+    process,
 };
 use crate::package_add::{Checkpoint, run_at};
 use std::fs;
@@ -133,13 +134,13 @@ fn refusal_keeps_workspace_and_checks_full_closure() {
     law.fixture_json();
     wrap(&law, "app/wrap.hpkg");
     law.app("app", "");
-    fs::create_dir(law.path(&format!("packages/{}", &PACKAGE_W[7..]))).unwrap();
+    fs::create_dir_all(law.path(&package_entry("packages", PACKAGE_W))).unwrap();
     let manifest = fs::read(law.path("app/hirsel.toml")).unwrap();
     let (status, _, stderr) = invoke(&law, "app", &["wrap.hpkg"]);
     assert_eq!(status, Some(2), "{stderr}");
     assert!(stderr.contains("cache: partial"), "{stderr}");
     assert_eq!(
-        fs::read(law.path(&format!("packages/{}", &PACKAGE_X[7..]))).unwrap(),
+        fs::read(law.path(&package_entry("packages", PACKAGE_X))).unwrap(),
         law.encoded(PACKAGE_X)
     );
     assert_eq!(fs::read(law.path("app/hirsel.toml")).unwrap(), manifest);
@@ -181,7 +182,7 @@ fn archive_capture_and_offline_build() {
     assert_eq!(json["dry_run"], true);
     assert_eq!(json["committed"], serde_json::json!([]));
     validate_unchanged();
-    fs::remove_file(law.path(&format!("packages/{}", &PACKAGE_X[7..]))).unwrap();
+    fs::remove_file(law.path(&package_entry("packages", PACKAGE_X))).unwrap();
 
     let status = run_at(direct(&law, "../../vendor/pkg.hpkg"), &cwd, |point| {
         if point == Checkpoint::ArchiveCaptured {
@@ -195,10 +196,10 @@ fn archive_capture_and_offline_build() {
     .unwrap();
     assert_eq!(status, 0);
     assert_eq!(
-        fs::read(law.path(&format!("packages/{}", &PACKAGE_X[7..]))).unwrap(),
+        fs::read(law.path(&package_entry("packages", PACKAGE_X))).unwrap(),
         law.encoded(PACKAGE_X)
     );
-    assert!(!law.path(&format!("packages/{}", &PACKAGE_Y[7..])).exists());
+    assert!(!law.path(&package_entry("packages", PACKAGE_Y)).exists());
     let expected = before.replace("# Standard library", &format!(
         "json = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"../../vendor/pkg.hpkg\" }}\n# Standard library"
     ));
@@ -208,7 +209,7 @@ fn archive_capture_and_offline_build() {
     PackageLaw::pass(law.with_store(&["fetch", "work/apps/ui", "--locked"], "cold-store"));
     PackageLaw::pass(law.with_store(&["build", "work/apps/ui", "--frozen"], "cold-store"));
     assert_eq!(
-        fs::read(law.path(&format!("cold-store/{}", &PACKAGE_X[7..]))).unwrap(),
+        fs::read(law.path(&package_entry("cold-store", PACKAGE_X))).unwrap(),
         law.encoded(PACKAGE_X)
     );
 
@@ -324,7 +325,12 @@ fn https(
                 Response::Oversize => {
                     tls.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
                     let chunks = crate::package_content::ARCHIVE_LIMIT / 65536 + 1;
-                    let bytes = [0; 65536];
+                    let mut bytes = [0; 65536];
+                    let tag = b"hirsel.package-archive.v2";
+                    bytes[0] = tag.len() as u8;
+                    bytes[1..1 + tag.len()].copy_from_slice(tag);
+                    // One frame of 512 MiB plus its archive framing exceeds the body cap.
+                    bytes[1 + tag.len()..][..6].copy_from_slice(&[1, 0x80, 0x80, 0x80, 0x80, 2]);
                     for _ in 0..chunks {
                         if tls
                             .write_all(b"10000\r\n")
@@ -541,17 +547,31 @@ fn archive_memory_limits() {
         children.sort_by_key(|(_, root, _)| *root);
         let mut archive = fs::File::create(law.path("app/memory.hpkg")).unwrap();
         let mut header = Vec::new();
-        wire_text("hirsel.package-archive.v1", &mut header);
+        wire_text("hirsel.package-archive.v2", &mut header);
         number(packages, &mut header);
         archive.write_all(&header).unwrap();
+        let mut encoder = zstd_safe::CCtx::create();
+        encoder
+            .set_parameter(zstd_safe::CParameter::WindowLog(23))
+            .unwrap();
+        let mut content = Vec::new();
+        let mut frame = Vec::new();
         for part in std::iter::once(&head).chain(children.iter().map(|(_, _, part)| part)) {
+            content.clear();
+            content.extend_from_slice(part);
+            content.extend_from_slice(&payload);
+            content.push(0);
+            frame.clear();
+            frame.reserve(zstd_safe::compress_bound(content.len()));
+            encoder.compress2(&mut frame, &content).unwrap();
             header.clear();
-            number(part.len() + payload.len() + 1, &mut header);
+            number(frame.len(), &mut header);
             archive.write_all(&header).unwrap();
-            archive.write_all(part).unwrap();
-            archive.write_all(&payload).unwrap();
-            archive.write_all(&[0]).unwrap();
+            archive.write_all(&frame).unwrap();
         }
+        drop(content);
+        drop(frame);
+        drop(encoder);
         drop(archive);
         drop(payload);
         let output = Command::new(std::env::current_exe().unwrap())
@@ -570,7 +590,10 @@ fn archive_memory_limits() {
             String::from_utf8_lossy(&output.stderr).trim()
         );
         assert_eq!(
-            fs::read_dir(law.path("packages")).unwrap().count(),
+            fs::read_dir(law.path("packages"))
+                .unwrap()
+                .map(|shard| fs::read_dir(shard.unwrap().path()).unwrap().count())
+                .sum::<usize>(),
             packages
         );
         assert!(!law.path("app/hirsel.lock").exists());
@@ -642,7 +665,7 @@ fn store_source_and_post_commit_failure() {
         "{error}"
     );
     law.write(
-        &format!("packages/{}", &PACKAGE_X[7..]),
+        &package_entry("packages", PACKAGE_X),
         law.encoded(PACKAGE_X),
     );
     PackageLaw::refuse(
@@ -660,7 +683,9 @@ fn store_source_and_post_commit_failure() {
     );
     let manifest = fs::read_to_string(law.path("app/hirsel.toml")).unwrap();
     assert!(
-        manifest.contains(&format!("json = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\" }}")),
+        manifest.contains(&format!(
+            "json = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\" }}"
+        )),
         "{manifest}"
     );
     fs::remove_dir(law.path("app/hirsel.lock")).unwrap();
@@ -680,7 +705,13 @@ fn forms_that_fetch_nothing() {
         "work/hirsel.toml",
         "[workspace]\nmembers = [\"apps/ui\", \"libs/a\"]\n",
     );
-    law.library("work/libs/a", "local/a", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "");
+    law.library(
+        "work/libs/a",
+        "local/a",
+        "1.0.0",
+        "pub fn one() -> u64 { 1u64 }\n",
+        "",
+    );
     law.write(
         "work/vendor/hirsel.toml",
         "[package]\nname = \"fixture.test/v\"\nversion = \"1.0.0\"\n",
@@ -807,18 +838,19 @@ fn s6_add_protocol() {
 fn package_l1b_floor_roots() {
     use crate::package_content::{Binding, Content, Root};
 
-    let wfloor: Vec<u8> = "03 11 666978747572652e746573742f77726170 01 00 00 00 09 6368617267652d7631
+    let wfloor: Vec<u8> =
+        "03 11 666978747572652e746573742f77726170 01 00 00 00 09 6368617267652d7631
         01 04 6a736f6e 11 666978747572652e746573742f6a736f6e 01
         02 9158205f94d44b9e04d00980842459973c2ea442a48b183097ad9d46fe13a7f7 00 00
         01 0b 777261702e68697273656c 01 04 77726170
         1d 70756220666e206f6e652829202d3e20753634207b2031753634207d0a 00"
-        .split_whitespace()
-        .flat_map(|group| {
-            (0..group.len())
-                .step_by(2)
-                .map(move |at| u8::from_str_radix(&group[at..at + 2], 16).unwrap())
-        })
-        .collect();
+            .split_whitespace()
+            .flat_map(|group| {
+                (0..group.len())
+                    .step_by(2)
+                    .map(move |at| u8::from_str_radix(&group[at..at + 2], 16).unwrap())
+            })
+            .collect();
     assert_eq!(wfloor.len(), 143);
     assert_eq!(
         Root::of(&wfloor).to_string(),

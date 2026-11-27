@@ -24,11 +24,11 @@ CONSUMERS = runpy.run_path(str(ROOT / 'tools/consumers'))
 
 
 def family(label):
-    return re.sub(r'(?:(?:-cpus-\d+)?-shard-\d+|-(?:openat2|perf)-\d+)$', '', label.split(':')[-1])
+    return re.sub(r'(?:(?:-cpus-\d+)?-shard-\d+|-(?:openat2|perf|namespace)-\d+)$', '', label.split(':')[-1])
 
 
 def graph_for(binaries, config):
-    pattern = '^(' + '|'.join(re.escape(b) for b in binaries) + ')((-cpus-[0-9]+)?-shard-[0-9]+|-inventory|-(openat2|perf)-[0-9]+)?$'
+    pattern = '^(' + '|'.join(re.escape(b) for b in binaries) + ')((-cpus-[0-9]+)?-shard-[0-9]+|-inventory|-(openat2|perf|namespace)-[0-9]+)?$'
     query_config = []
     options = iter(config)
     for option in options:
@@ -90,7 +90,7 @@ def owners(graph, inventories):
     result = CONSUMERS['assignments'](ROOT, graph, inventories, overrides=False)
     # Host requirements are physical ownership, not optional proof overrides.
     for target, attrs in graph.items():
-        if any(label in attrs.get('labels', []) for label in ('requires-openat2', 'requires-perf')):
+        if any(label in attrs.get('labels', []) for label in ('requires-openat2', 'requires-perf', 'requires-namespace')):
             binary = attrs.get('test_binary')
             case = attrs.get('extra_env', {}).get('HIRSEL_TEST_DEDICATED_CASE')
             if case in inventories.get(binary, set()):

@@ -219,7 +219,9 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
         let config = toml::from_str(&format!(
             "url = {url:?}\ntrusted = [{trusted:?}]\n[transfer]\nrecord-bytes = 4096\nblob-bytes = 1024\nwork-bytes = 1024"
         )).unwrap();
-        let remote = Remote::new(config).unwrap().unwrap();
+        let remote = Remote::new(config, &crate::package_store::Transport::online())
+            .unwrap()
+            .unwrap();
         let local = tempfile::tempdir().unwrap();
         let store = Store::cas(local.path()).unwrap();
         let read = remote.object(&store, key).unwrap();
@@ -307,7 +309,7 @@ fn remote_transfer_policy_bounds_both_directions() {
         let config = toml::from_str(&format!(
             "url = {url:?}\ntrusted = [{trusted:?}]\nsigning-key = {signing_key:?}\n[transfer]\nrecord-bytes = {record}\nblob-bytes = {blob}\nwork-bytes = {work}"
         )).unwrap();
-        Remote::new(config)
+        Remote::new(config, &crate::package_store::Transport::online())
     };
     assert!(remote(record_bytes, blob_bytes, blob_bytes - 1).is_err());
 

@@ -1126,7 +1126,7 @@ impl PackageLaw {
     }
 
     fn encoded(&self, root: &str) -> Vec<u8> {
-        std::fs::read(self.path(&format!("fixtures/{}", root.strip_prefix("sha256:").unwrap()))).unwrap()
+        std::fs::read(self.path(&package_entry("fixtures", root))).unwrap()
     }
 
     fn empty_store(&self) {
@@ -1603,25 +1603,6 @@ pub fn main() -> Result[(), Exit] {
     }
 }
 
-fn package_bundle(entries: &[&[u8]]) -> Vec<u8> {
-    fn varint(mut number: usize, output: &mut Vec<u8>) {
-        while number >= 128 {
-            output.push(((number % 128) | 128) as u8);
-            number /= 128;
-        }
-        output.push(number as u8);
-    }
-    let tag = b"hirsel.package-archive.v1";
-    let mut bytes = vec![tag.len() as u8];
-    bytes.extend_from_slice(tag);
-    varint(entries.len(), &mut bytes);
-    for entry in entries {
-        varint(entry.len(), &mut bytes);
-        bytes.extend_from_slice(entry);
-    }
-    bytes
-}
-
 #[test]
 fn package_known_roots() {
     let law = PackageLaw::new();
@@ -1635,7 +1616,7 @@ fn package_known_roots() {
         let stdout = PackageLaw::pass(law.run(&["pack", dir, flag, &archive]));
         let version = if dir == "jx" { "1.0.0" } else { "1.0.1" };
         assert_eq!(stdout, format!("fixture.test/json@1 {version} {root}\n"));
-        let content = std::fs::read(law.path(&format!("packages/{}", &root[7..]))).unwrap();
+        let content = std::fs::read(law.path(&package_entry("packages", root))).unwrap();
         assert_eq!(content.len(), 88);
     }
     // A local name is never published (packages.md section 1): pack writes no archive.
@@ -1841,7 +1822,7 @@ fn package_l6_archive_closure_and_atomic_refusal() {
         PackageLaw::refuse(law.run(&["check", "app"]), refusal);
         law.empty_store();
     }
-    law.write(&format!("packages/{}", &PACKAGE_X[7..]), &x);
+    law.write(&package_entry("packages", PACKAGE_X), &x);
     law.write("app/vendor/wrap.hpkg", package_bundle(&[&w]));
     PackageLaw::refuse(law.run(&["check", "app"]), &missing);
     assert_eq!(std::fs::read_dir(law.path("packages")).unwrap().count(), 1);
@@ -1851,9 +1832,9 @@ fn package_l6_archive_closure_and_atomic_refusal() {
     PackageLaw::pass(law.run(&["check", "app"]));
     assert_eq!(std::fs::read_dir(law.path("packages")).unwrap().count(), 2);
     // Removing a transitive entry must reopen the carrier even when W is warm.
-    std::fs::remove_file(law.path(&format!("packages/{}", &PACKAGE_X[7..]))).unwrap();
+    std::fs::remove_file(law.path(&package_entry("packages", PACKAGE_X))).unwrap();
     PackageLaw::pass(law.run(&["check", "app"]));
-    assert_eq!(std::fs::read(law.path(&format!("packages/{}", &PACKAGE_X[7..]))).unwrap(), x);
+    assert_eq!(std::fs::read(law.path(&package_entry("packages", PACKAGE_X))).unwrap(), x);
 }
 
 #[test]
@@ -1992,7 +1973,7 @@ fn package_l3_frozen_does_not_open_an_archive() {
     law.empty_store();
     let mut damaged = law.encoded(PACKAGE_X);
     damaged[0] ^= 1;
-    let store_path = format!("packages/{}", &PACKAGE_X[7..]);
+    let store_path = package_entry("packages", PACKAGE_X);
     law.write(&store_path, damaged);
     PackageLaw::refuse(law.run(&["check", "app", "--frozen"]), &refusal("is damaged in", &format!("url:{url}")));
     std::fs::remove_file(law.path(&store_path)).unwrap();
@@ -2327,12 +2308,17 @@ fn package_pack_output_cannot_alias_an_input() {
     let law = PackageLaw::new();
     law.library("jx", "fixture.test/json", "1.0.0", PACKAGE_X_SOURCE, "");
     std::fs::hard_link(law.path("jx/json.hirsel"), law.path("linked.hpkg")).unwrap();
-    let store_entry = format!("packages/{}", &PACKAGE_X[7..]);
-    for out in ["jx/hirsel.toml", "linked.hpkg", "jx/hirsel.lock", &store_entry] {
+    let store_entry = package_entry("packages", PACKAGE_X);
+    for out in ["jx/hirsel.toml", "linked.hpkg", "jx/hirsel.lock"] {
         PackageLaw::refuse(law.run(&["pack", "jx", "--output", out]), &format!("--output {out} is an input of this command"));
         assert!(!law.path("jx/hirsel.lock").exists());
         law.empty_store();
     }
+    std::fs::create_dir_all(law.path(&store_entry).parent().unwrap()).unwrap();
+    PackageLaw::refuse(law.run(&["pack", "jx", "--output", &store_entry]),
+        &format!("--output {store_entry} is an input of this command"));
+    assert!(!law.path(&store_entry).exists());
+    assert!(!law.path("jx/hirsel.lock").exists());
     assert_eq!(std::fs::read_to_string(law.path("linked.hpkg")).unwrap(), PACKAGE_X_SOURCE);
 }
 

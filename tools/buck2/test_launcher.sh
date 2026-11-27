@@ -9,6 +9,7 @@ if [ -n "${HIRSEL_TEST_REPORTER:-}" ] && [ -z "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]
   exec python3 "$HIRSEL_TEST_REPORTER" sh "$0" "$@"
 fi
 # The dedicated Exec laws use no network and run on the host without bwrap isolation.
+# Namespace laws enter their own namespace without bwrap as well.
 # Other tests run in a network namespace whose only interface is lo, so only
 # the test reaches the loopback ports it listens on. Programs on a developer
 # host probe new loopback listeners (one connects and sends `GET /` to each),
@@ -24,7 +25,7 @@ only_lo() {
 # HIRSEL_TEST_SMALL_TMPFS=BYTES asks for a tmpfs of that size, mounted in the same
 # bwrap namespace at HIRSEL_TEST_SMALL_TMPFS_DIR, for laws that need a nearly full
 # filesystem. bwrap cannot nest, so such a test runs on the host, never the pool.
-if [ -z "${HIRSEL_TEST_NATIVE_EXEC:-}" ] && { ! only_lo || [ -n "${HIRSEL_TEST_SMALL_TMPFS:-}" ]; }; then
+if [ -z "${HIRSEL_TEST_NATIVE_EXEC:-}${HIRSEL_TEST_OWNS_NETNS:-}" ] && { ! only_lo || [ -n "${HIRSEL_TEST_SMALL_TMPFS:-}" ]; }; then
   # The marker only stops a second entry: the namespace itself decides.
   if [ -n "${HIRSEL_TEST_NETNS_ENTERED:-}" ]; then
     if ! only_lo; then

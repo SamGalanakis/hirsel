@@ -1,5 +1,50 @@
 use super::*;
 
+/// Runtime and linker inputs are explicit, independently produced artifacts.
+#[derive(Clone)]
+pub struct NativeOptions {
+    /// Recording runtime (`build --recording`, `run --record`, `replay`, `test --replay`).
+    pub recording: bool,
+    pub store_teardown: bool,
+    /// Coverage build (`docs/coverage.md`) scope, or none.
+    pub coverage: Option<hirsel_core_ir::coverage::Scope>,
+    pub replay: Option<ReplayPlan>,
+    pub backend: Backend,
+    pub optimize: bool,
+    pub debug_lines: bool,
+    pub target: String,
+    pub runtime: PathBuf,
+    pub link: Link,
+    pub cas: PathBuf,
+    pub output: PathBuf,
+    pub output_kind: OutputKind,
+    pub root_limit: u64,
+    pub instance_limit: usize,
+    pub directories: Vec<String>,
+    pub grant_mask: u64,
+    pub net_rules: Vec<hirsel_core_net::GrantRule>,
+    pub unix_roots: std::collections::BTreeMap<String, String>,
+    pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    /// `Cred` grants, one per named `main` parameter (TLS-7).
+    pub cred_grants: Vec<hirsel_core_net::CredGrant>,
+    pub foreign_grants: BTreeSet<String>,
+    pub(crate) exec_grants: Vec<crate::exec_launch::Binding>,
+    pub env_patterns: Option<hirsel_core_net::EnvPatterns>,
+    /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
+    pub logical_charge_report: Option<PathBuf>,
+    /// The remote cache authorized for this request.
+    pub(crate) remote: Option<Arc<crate::store::remote::Remote>>,
+    /// The toolchain this request already observed for its request record's
+    /// key: the build links with it rather than observing again, so the
+    /// executable is the one the key names.
+    pub(crate) observed: Option<
+        Arc<(
+            crate::tool_inputs::Toolchain,
+            crate::tool_inputs::LinkRecipe,
+        )>,
+    >,
+}
+
 impl NativeOptions {
     pub(crate) fn llvm_release(&self) -> bool {
         matches!(self.backend, Backend::Llvm) && self.optimize
@@ -41,6 +86,7 @@ impl NativeOptions {
             env_patterns: None,
             logical_charge_report: None,
             observed: None,
+            remote: None,
         }
     }
 }

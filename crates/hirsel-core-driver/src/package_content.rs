@@ -13,7 +13,7 @@ pub(crate) const ARCHIVE_LIMIT_MIB: usize = 512;
 pub(crate) const ARCHIVE_LIMIT: usize = ARCHIVE_LIMIT_MIB << 20;
 const FILE_LIMIT: usize = 65_536;
 const PACKAGE_LIMIT: usize = 4096;
-const ARCHIVE_TAG: &str = "hirsel.package-archive.v1";
+mod archive;
 const CHARGE: &str = "charge-v1";
 
 pub(crate) fn toolchain_major(name: &str) -> Option<u32> {
@@ -633,6 +633,28 @@ impl Writer {
     }
 }
 
+fn read_number(
+    start: usize,
+    max: u64,
+    mut byte: impl FnMut() -> Result<u8, String>,
+) -> Result<u64, String> {
+    let mut value = 0u64;
+    for shift in (0..=63).step_by(7) {
+        let byte = byte()?;
+        if shift == 63 && byte > 1 {
+            break;
+        }
+        value |= u64::from(byte & 127) << shift;
+        if byte & 128 == 0 {
+            if (shift != 0 && byte == 0) || value > max {
+                break;
+            }
+            return Ok(value);
+        }
+    }
+    Err(format!("bad number at byte {start}"))
+}
+
 struct Reader<'a> {
     data: &'a [u8],
     offset: usize,
@@ -656,22 +678,7 @@ impl<'a> Reader<'a> {
     }
 
     fn number(&mut self, max: u64) -> Result<u64, String> {
-        let start = self.offset;
-        let mut value = 0u64;
-        for shift in (0..=63).step_by(7) {
-            let byte = self.raw(1)?[0];
-            if shift == 63 && byte > 1 {
-                break;
-            }
-            value |= u64::from(byte & 127) << shift;
-            if byte & 128 == 0 {
-                if (shift != 0 && byte == 0) || value > max {
-                    break;
-                }
-                return Ok(value);
-            }
-        }
-        Err(format!("bad number at byte {start}"))
+        read_number(self.offset, max, || Ok(self.raw(1)?[0]))
     }
 
     fn count(&mut self) -> Result<usize, String> {
@@ -725,99 +732,6 @@ pub(crate) struct PackageArchive {
 }
 
 impl PackageArchive {
-    /// Opens the package archive at `path`; `toolchain` admits a toolchain package's own
-    /// bare name, as [`Content::decode_as`] does.
-    pub(crate) fn open(
-        path: &std::path::Path,
-        toolchain: bool,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        use std::io::Read;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let read = || -> Result<Self, Box<dyn std::error::Error>> {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(path)?;
-            if !file.metadata()?.is_file() {
-                return Err("expected a regular file".into());
-            }
-            let mut bytes = Vec::new();
-            file.take(ARCHIVE_LIMIT as u64 + 1)
-                .read_to_end(&mut bytes)?;
-            let archive = Self::decode_as(bytes.into(), toolchain)?;
-            let id = &archive.entries[&archive.head].content.id;
-            archive.verify(id, archive.head, "archive")?;
-            Ok(archive)
-        };
-        read().map_err(|error| format!("{}: {error}", path.display()).into())
-    }
-
-    pub(crate) fn encode(head: Root, entries: &BTreeMap<Root, Library>) -> Result<Vec<u8>, String> {
-        if entries.len() > PACKAGE_LIMIT {
-            return Err(format!("over the limit of {PACKAGE_LIMIT} packages"));
-        }
-        let mut out = Writer::new(ARCHIVE_LIMIT);
-        out.text(ARCHIVE_TAG);
-        out.number(entries.len());
-        out.frame(&entries[&head].encoded);
-        for (root, library) in entries {
-            if *root != head {
-                out.frame(&library.encoded);
-            }
-        }
-        out.finish()
-    }
-
-    pub(crate) fn decode(bytes: Bytes) -> Result<Self, String> {
-        Self::decode_as(bytes, false)
-    }
-
-    /// Decodes an archive whose head may be a toolchain package (see [`Content::decode_as`]).
-    /// Every other entry is a published library.
-    pub(crate) fn decode_as(bytes: Bytes, toolchain: bool) -> Result<Self, String> {
-        let mut input = Reader::new(&bytes, ARCHIVE_LIMIT)?;
-        if input.text()? != ARCHIVE_TAG {
-            return Err("unknown package archive tag".into());
-        }
-        let count = input.count()?;
-        if count == 0 {
-            return Err("no packages".into());
-        }
-        if count > PACKAGE_LIMIT {
-            return Err(format!("over the limit of {PACKAGE_LIMIT} packages"));
-        }
-        let mut head = None;
-        let mut last = None;
-        let mut entries = BTreeMap::new();
-        for _ in 0..count {
-            let encoded = input.frame()?;
-            let content = Content::decode_as(encoded, toolchain && head.is_none())?;
-            let root = Root::of(encoded);
-            if let Some(head) = head {
-                if root == head {
-                    return Err(format!("archive repeats {root}"));
-                }
-                ordered(last.as_ref(), &root, "packages", &root)?;
-                last = Some(root);
-            } else {
-                head = Some(root);
-            }
-            entries.insert(
-                root,
-                Library {
-                    content,
-                    encoded: bytes.slice_ref(encoded),
-                },
-            );
-        }
-        input.end()?;
-        Ok(Self {
-            head: head.unwrap(),
-            entries,
-        })
-    }
-
     pub(crate) fn verify(&self, expected: &Id, pin: Root, source: &str) -> Result<(), String> {
         if self.head != pin {
             return Err(format!(

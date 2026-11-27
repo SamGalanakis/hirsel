@@ -203,6 +203,8 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
         return Err(over(&format!("{OBJECT_COUNT_LIMIT} objects")));
     }
     let mut pos = 12;
+    let mut hasher = Hasher::new(format);
+    let mut hashed = 0;
     let mut entries: Vec<Entry> = Vec::with_capacity(count.min(1 << 16) as usize);
     let mut total = 0u64;
     let mut state = InflateState::new_boxed(DataFormat::Zlib);
@@ -288,6 +290,8 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
             }
             let step = inflate(&mut state, &input.bytes[pos..], &mut out, MZFlush::None);
             pos += step.bytes_consumed;
+            hasher.update(&input.bytes[hashed..pos]);
+            hashed = pos;
             if delta && result.is_none() {
                 let take = (20 - head.len()).min(step.bytes_written);
                 head.extend_from_slice(&out[..take]);
@@ -332,8 +336,7 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
     if !input.fill(end)? {
         return Err(bad(format!("truncated at {}", input.bytes.len())));
     }
-    let mut hasher = Hasher::new(format);
-    hasher.update(&input.bytes[..pos]);
+    hasher.update(&input.bytes[hashed..pos]);
     let sum = hasher.finish().unwrap_or_else(|collision| collision.0);
     if sum.as_bytes() != &input.bytes[pos..end] {
         return Err(bad("checksum mismatch"));

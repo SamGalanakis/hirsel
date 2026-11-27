@@ -129,6 +129,8 @@ fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
         // never recorded (`Request` is not made for one).
         logical_charge_report: _,
         observed,
+        // The link key incorporates any remote builders whose objects it used.
+        remote: _,
     } = options;
     // The toolchain image holds the link recipe's identity and the runtime
     // archive's bytes, so it alone names what the link reads.

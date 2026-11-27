@@ -79,7 +79,6 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
             conclude(Outcome::Exit(0))
         }
         Invocation::Simple(request) => {
-            crate::store::remote::begin()?;
             if request.positional.is_some() {
                 return Err("primer takes no arguments".into());
             }
@@ -87,7 +86,6 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
             conclude(Outcome::Exit(0))
         }
         Invocation::New(request) => {
-            crate::store::remote::begin()?;
             let directory = request
                 .positional
                 .as_deref()
@@ -103,7 +101,6 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
         }
         Invocation::Fmt(request) => {
             use hirsel_core_syntax::{FormatAction, ParseMode};
-            crate::store::remote::begin()?;
             let action = if request.options.contains(&FmtOption::FmtCheck) {
                 FormatAction::Check
             } else {
@@ -123,7 +120,6 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
             conclude(Outcome::Exit(status))
         }
         Invocation::Explain(request) => {
-            crate::store::remote::begin()?;
             crate::cli_tools::explain(
                 request.positional.as_deref(),
                 request.options.contains(&ExplainOption::ListRules),

@@ -9,6 +9,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) const NAME: &str = "hirsel.lock";
+pub(crate) const FROZEN_FLAG: &str = "--frozen";
 const PREFIX: &str = "# hirsel.lock: written by hirsel; do not edit.\nversion = 2\n";
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -24,7 +25,15 @@ impl Mode {
         match self {
             Self::Update => None,
             Self::Locked => Some("--locked"),
-            Self::Frozen => Some("--frozen"),
+            Self::Frozen => Some(FROZEN_FLAG),
+        }
+    }
+
+    pub(crate) fn transport(self) -> crate::package_store::Transport {
+        use crate::package_store::Transport;
+        match self {
+            Self::Frozen => Transport::offline(),
+            Self::Locked | Self::Update => Transport::online(),
         }
     }
 
@@ -478,16 +487,7 @@ impl PackOutput {
             .map(|id| store.identities_include(id))
             .transpose()?
             .unwrap_or(false);
-        let new_store_alias = output
-            .name
-            .to_str()
-            .and_then(crate::package_content::parse_digest)
-            .map(Root)
-            .is_some_and(|root| archive.entries.contains_key(&root))
-            && store
-                .path()
-                .metadata()
-                .is_ok_and(|dir| FileId::of(&dir) == parent);
+        let new_store_alias = store.output_alias(parent, &output.name, archive);
         if identity.is_some_and(|id| resolution.workspace.input_alias(id))
             || lock.aliases(&resolution.workspace, &output.name, parent, identity)
             || existing_store_alias

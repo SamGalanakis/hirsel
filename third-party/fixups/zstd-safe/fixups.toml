@@ -1,0 +1,2 @@
+# The driver enables std explicitly. The build script only sets it for wasm and Hermit.
+buildscript.run = false

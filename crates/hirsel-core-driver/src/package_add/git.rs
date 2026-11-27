@@ -111,6 +111,7 @@ impl Request {
     /// opened (GIT-10). A commit id is taken as written and nothing is listed.
     pub(super) fn resolve(
         &self,
+        transport: &crate::package_store::Transport,
         budget: &mut Budget,
     ) -> Result<(GitSource, Option<Remote>, Option<String>), Failure> {
         let source = |rev: String, reference: Option<String>| GitSource {
@@ -131,7 +132,7 @@ impl Request {
             }
             Some(short) => vec![format!("refs/tags/{short}"), format!("refs/heads/{short}")],
         };
-        let (remote, listed) = list_refs(&self.url, &candidates, budget)
+        let (remote, listed) = list_refs(transport, &self.url, &candidates, budget)
             .map_err(|failure| failure.explain_after("", &self.url))?;
         let found = |name: &str| listed.iter().find(|entry| entry.name == name);
         let commit = |entry: &Listed| entry.peeled.unwrap_or(entry.id).to_string();

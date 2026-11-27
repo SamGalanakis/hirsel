@@ -13,6 +13,8 @@ allow = [
     "Zlib",
 ]
 
+exceptions = [{ allow = ["BSD-2-Clause"], crate = "zstd-sys@=2.1.3" }]
+
 [bans]
 multiple-versions = "deny"
 multiple-versions-include-dev = true

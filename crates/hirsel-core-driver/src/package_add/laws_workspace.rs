@@ -105,7 +105,7 @@ fn members_share_one_binding() {
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
     PackageLaw::pass(law.with_store(&["fetch", "work/apps/ui", "--locked"], "cold-store"));
     assert_eq!(
-        fs::read(law.path(&format!("cold-store/{}", &PACKAGE_X[7..]))).unwrap(),
+        fs::read(law.path(&package_entry("cold-store", PACKAGE_X))).unwrap(),
         law.encoded(PACKAGE_X)
     );
 

@@ -62,14 +62,13 @@ fn request_failure(error: ureq::Error) -> Failure {
     }
 }
 
-/// The agent every git request uses: the `url` client's roots and proxy, no redirect
-/// following, statuses returned to the caller, and the 60 s stall bound.
-fn agent() -> ureq::Agent {
-    crate::package_store::https_config()
+fn request<B>(builder: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+    builder
+        .config()
+        .https_only(true)
         .max_redirects(0)
         .http_status_as_error(false)
         .build()
-        .new_agent()
 }
 
 /// A response body counted as received against the source's budget and its own limit.
@@ -156,6 +155,7 @@ fn endpoint(url: &str) -> Option<&str> {
 }
 
 pub(crate) struct Remote {
+    agent: ureq::Agent,
     base: String,
     format: Format,
     /// Whether the advertisement named an `object-format`, which only then is sent back.
@@ -164,14 +164,19 @@ pub(crate) struct Remote {
 }
 
 /// Opens a git source: one `info/refs` GET, redirects to `https` info/refs only, at most 3.
-pub(crate) fn connect(git: &str, budget: &mut Budget) -> Result<Remote, Failure> {
-    let agent = agent();
+pub(crate) fn connect(
+    transport: &crate::package_store::Transport,
+    git: &str,
+    budget: &mut Budget,
+) -> Result<Remote, Failure> {
+    let agent = transport
+        .agent()
+        .ok_or_else(|| cause("--frozen does not fetch"))?;
     let mut url = format!("{git}/info/refs?{QUERY}");
     let mut base = git.to_string();
     let mut redirects = 0;
     let response = loop {
-        let response = agent
-            .get(&url)
+        let response = request(agent.get(&url))
             .header("Git-Protocol", "version=2")
             .call()
             .map_err(request_failure)?;
@@ -258,6 +263,7 @@ pub(crate) fn connect(git: &str, budget: &mut Budget) -> Result<Remote, Failure>
         }
     };
     Ok(Remote {
+        agent: agent.clone(),
         base,
         format,
         announced,
@@ -272,17 +278,20 @@ fn post<'a>(
     limit: u64,
     over: fn() -> Failure,
 ) -> Result<Body<'a>, Failure> {
-    let response = agent()
-        .post(format!("{}/git-upload-pack", remote.base))
-        .header("Content-Type", "application/x-git-upload-pack-request")
-        .header("Accept", "application/x-git-upload-pack-result")
-        .header("Git-Protocol", "version=2")
-        .send(&body[..])
-        .map_err(request_failure)?;
+    let response = request(
+        remote
+            .agent
+            .post(format!("{}/git-upload-pack", remote.base)),
+    )
+    .header("Content-Type", "application/x-git-upload-pack-request")
+    .header("Accept", "application/x-git-upload-pack-result")
+    .header("Git-Protocol", "version=2")
+    .send(&body[..])
+    .map_err(request_failure)?;
     open(response, budget, limit, over)
 }
 
-fn request(remote: &Remote, command: &str) -> Vec<u8> {
+fn packet_request(remote: &Remote, command: &str) -> Vec<u8> {
     let mut out = Vec::new();
     pkt::line(&mut out, &format!("command={command}"));
     if remote.announced {
@@ -303,12 +312,13 @@ pub(crate) struct Listed {
 
 /// One `ls-refs` request with `symrefs`, `peel` and a `ref-prefix` per candidate (GIT-10).
 pub(crate) fn list_refs(
+    transport: &crate::package_store::Transport,
     git: &str,
     prefixes: &[String],
     budget: &mut Budget,
 ) -> Result<(Remote, Vec<Listed>), Failure> {
-    let remote = connect(git, budget)?;
-    let mut body = request(&remote, "ls-refs");
+    let remote = connect(transport, git, budget)?;
+    let mut body = packet_request(&remote, "ls-refs");
     pkt::line(&mut body, "symrefs");
     pkt::line(&mut body, "peel");
     for prefix in prefixes {
@@ -384,7 +394,7 @@ pub(crate) fn fetch(remote: &Remote, rev: &str, budget: &mut Budget) -> Result<P
             wanted.name()
         )));
     }
-    let mut body = request(remote, "fetch");
+    let mut body = packet_request(remote, "fetch");
     pkt::line(&mut body, "ofs-delta");
     pkt::line(&mut body, "no-progress");
     if remote.shallow {

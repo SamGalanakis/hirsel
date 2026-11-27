@@ -76,7 +76,7 @@ impl Options {
                     let flag = if option == Opt::Locked {
                         "--locked"
                     } else {
-                        "--frozen"
+                        crate::package_lock::FROZEN_FLAG
                     };
                     return Err(
                         format!("hirsel.toml needs to be updated but {flag} was passed").into(),
@@ -107,7 +107,10 @@ impl Options {
         Ok(Self {
             source,
             expected,
-            store: PackageStore::new(store),
+            store: PackageStore::with_transport(
+                store,
+                crate::package_lock::Mode::Update.transport(),
+            ),
             update,
             workspace,
             dry_run,

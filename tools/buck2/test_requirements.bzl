@@ -12,6 +12,13 @@ PERF_TEST_CASES = {
     ],
 }
 
+# L42 uses strace inside Linux user and network namespaces.
+NAMESPACE_TEST_CASES = {
+    "hirsel-core-driver-unittest": [
+        "native::tests::package_l42_frozen_makes_no_connection",
+    ],
+}
+
 # These laws exercise native Exec child spawning, subreaping, and dumpability
 # checks on the host without bwrap loopback isolation.
 NATIVE_EXEC_TEST_CASES = [

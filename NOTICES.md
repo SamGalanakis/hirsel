@@ -137,6 +137,7 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | io-uring-0.7.16 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/hirsel-exec-helper`, `runtime/*/*/libhirsel_core_rt.a` | `878c26bc5e45fe089ce2ca25689260c152a87ce1d7de2ca86101efeea6973932` |
 | itertools-0.14.0 | MIT OR Apache-2.0 | `hirsel` | `2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285` |
 | itoa-1.0.18 | MIT OR Apache-2.0 | `hirsel` | `8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682` |
+| jobserver-0.1.35 | MIT OR Apache-2.0 | none | `1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3` |
 | leb128fmt-0.1.0 | MIT OR Apache-2.0 | `hirsel` | `09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2` |
 | libc-0.2.190 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/hirsel-exec-helper`, `runtime/*/*/libhirsel_core_rt.a` | `ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78` |
 | libm-0.2.16 | MIT | `hirsel`, `runtime/*/*/hirsel-exec-helper`, `runtime/*/*/libhirsel_core_rt.a` | `b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981` |
@@ -267,6 +268,8 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | x25519-dalek-3.0.0 | BSD-3-Clause | `hirsel`, `runtime/*/*/hirsel-exec-helper`, `runtime/*/*/libhirsel_core_rt.a` | `e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6` |
 | zeroize-1.9.2 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/hirsel-exec-helper`, `runtime/*/*/libhirsel_core_rt.a` | `85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa` |
 | zmij-1.0.23 | MIT | `hirsel` | `29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b` |
+| zstd-safe-7.2.4 | MIT OR Apache-2.0 | `hirsel` | `8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d` |
+| zstd-sys-2.1.3+zstd.1.5.7 | BSD-3-Clause AND BSD-2-Clause | `hirsel` | `f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d` |
 
 ## Native components
 
@@ -1276,6 +1279,12 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    "linked": [
     "hirsel"
    ]
+  },
+  {
+   "checksum": "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3",
+   "crate": "jobserver-0.1.35",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
   },
   {
    "checksum": "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2",
@@ -2351,6 +2360,22 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    "checksum": "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b",
    "crate": "zmij-1.0.23",
    "license": "MIT",
+   "linked": [
+    "hirsel"
+   ]
+  },
+  {
+   "checksum": "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d",
+   "crate": "zstd-safe-7.2.4",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel"
+   ]
+  },
+  {
+   "checksum": "f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d",
+   "crate": "zstd-sys-2.1.3+zstd.1.5.7",
+   "license": "BSD-3-Clause AND BSD-2-Clause",
    "linked": [
     "hirsel"
    ]

@@ -69,7 +69,6 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
     {
         return conclude(Outcome::Exit(operator_cli::replay(invocation)?));
     }
-    crate::store::remote::begin()?;
     let mut package_mode = crate::package_lock::Mode::default();
     let mut package_store = None;
     let mut pack_out = None;
@@ -87,7 +86,11 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             _ => {}
         }
     }
-    let package_store = crate::package_store::PackageStore::new(package_store);
+    let transport = package_mode.transport();
+    let remote = crate::store::remote::for_request(&transport)?;
+    let conclude = |outcome| launch::conclude_with_remote(outcome, remote.as_deref());
+    let package_store =
+        crate::package_store::PackageStore::with_transport(package_store, transport);
     let package_command = matches!(command, "lock" | "fetch" | "pack");
     if package_command {
         let directory = invocation.positional.as_deref().unwrap_or(".");
@@ -582,6 +585,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             output_path.unwrap_or_else(|| output::default_path(output_kind)),
         );
         options.output_kind = output_kind;
+        options.remote = remote.clone();
         options.backend = match recipe.launch.backend {
             RecipeBackend::Cranelift => Backend::Cranelift,
             RecipeBackend::Llvm => Backend::Llvm,
@@ -876,6 +880,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 output_path.unwrap_or(default_output),
             );
             options.output_kind = output_kind;
+            options.remote = remote.clone();
             if release {
                 options.backend = Backend::Llvm;
                 options.optimize = true;
@@ -961,7 +966,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         crate::Checked::Product(product, key) => (product, key),
         crate::Checked::Hit(hit) => {
             let native = prepared.as_ref().and_then(|p| p.as_ref().ok());
-            return answer_hit(
+            return output::answer_hit(
                 &hit,
                 command,
                 json,
@@ -975,6 +980,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 temporary_output,
                 &mut meter,
                 metrics,
+                remote.as_deref(),
             );
         }
     };
@@ -1199,6 +1205,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                             temporary_output,
                             &mut meter,
                             metrics,
+                            remote.as_deref(),
                         );
                     }
                     let recipe = (release_manifest.is_some() || grant_lines)
@@ -1334,86 +1341,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         temporary_output,
         &mut meter,
         metrics,
-    )
-}
-/// Answer a request from its record: render the value for this request,
-/// write a build's stored executable to its output, and finish as a checked
-/// request does.
-#[allow(clippy::too_many_arguments)]
-fn answer_hit(
-    hit: &crate::request_record::Hit,
-    command: &str,
-    json: bool,
-    sources: &crate::SourceFiles,
-    output_path: Option<&Path>,
-    runner: &crate::Runner,
-    run_args: Vec<String>,
-    record_path: Option<&str>,
-    replay_outputs: Option<&str>,
-    profile: Option<&crate::prof_command::Run>,
-    run_output: Option<crate::store::Scratch>,
-    meter: &mut Meter,
-    metrics: Option<PathBuf>,
-) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let rendered = hit.render();
-    let mut stopped = None;
-    let native = match (output_path, &hit.executable) {
-        (Some(path), Some(binary)) => {
-            let product = hit.build(path).expect("a stored executable has its build");
-            match binary.deliver(path) {
-                Ok(()) => Some(product),
-                Err(error) => {
-                    stopped = Some(crate::executable::output_stop(&error));
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
-    meter.finish("request record/deliver");
-    let reachable = rendered
-        .reach
-        .as_ref()
-        .map(
-            |(bodies, declarations, census, first_stops)| ReachableOutput {
-                bodies: *bodies,
-                declarations: *declarations,
-                census: census.clone(),
-                first_stops,
-            },
-        );
-    let output = Output {
-        accepted: rendered.accepted,
-        root: if json {
-            rendered.root.to_string()
-        } else {
-            String::new()
-        },
-        files: rendered.files,
-        checked_definitions: rendered.checked_definitions,
-        rechecked: 0,
-        source_bytes: rendered.source_bytes,
-        diagnostics: rendered.diagnostics,
-        incomplete: rendered.incomplete,
-        resources: rendered.resources,
-        image: None,
-        native,
-        stopped,
-        reachable,
-    };
-    finish(
-        &output,
-        command,
-        json,
-        sources,
-        runner,
-        run_args,
-        record_path,
-        replay_outputs,
-        profile,
-        run_output,
-        meter,
-        metrics,
+        remote.as_deref(),
     )
 }
 /// What a request leaves for its caller: an exit status, the program it

@@ -61,7 +61,8 @@ pub(in crate::launcher) fn lock_roots_allowed(
     {
         None => Ok(()),
         Some((id, root, source)) => Err(Failure::Invalid(format!(
-            "{id} {root} is not one of the group's package roots, and --frozen does not fetch (source {source})"
+            "{id} {root} is not one of the group's package roots, and {} does not fetch (source {source})",
+            crate::package_lock::FROZEN_FLAG
         ))),
     }
 }

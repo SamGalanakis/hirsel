@@ -1,0 +1,10 @@
+# Mirror the bundled build's common, compression and decompression sources.
+# Use the portable implementation on every Buck target.
+buildscript.run = false
+
+[[cxx_library]]
+name = "zstd"
+srcs = ["zstd/lib/common/*.c", "zstd/lib/compress/*.c", "zstd/lib/decompress/*.c"]
+headers = ["zstd/lib/**/*.h"]
+include_paths = ["zstd/lib", "zstd/lib/common"]
+compiler_flags = ["-O3", "-DZSTD_DISABLE_ASM", "-DZSTDLIB_VISIBILITY=", "-DZSTDERRORLIB_VISIBILITY="]

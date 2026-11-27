@@ -15,11 +15,12 @@
 //! launcher, host and operator commands have returned. A dead remote costs one
 //! timeout: a failed request stops every request to it for [`DOWN`], and a
 //! missing name is not asked for again for [`MISSING`]. Uploads run on one
-//! background thread and are drained when the request concludes ([`finish`]).
+//! background thread and are drained when the request concludes ([`Remote::finish_uploads`]).
 use super::signed::{self, Builder, Kind, Signed};
 use super::{Bare, Store};
 use crate::instances::{Location, Records};
 use crate::native_object::{self, Instance};
+use crate::package_store::Transport;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::source::NativeObject;
 use sha2::Digest;
@@ -104,7 +105,6 @@ struct Health {
     missing: HashMap<String, Instant>,
 }
 static HEALTH: Mutex<Option<HashMap<String, Health>>> = Mutex::new(None);
-static SESSION: Mutex<Option<Arc<Remote>>> = Mutex::new(None);
 
 /// What an upload carries: a record of `kind` under `key` in `store`, or
 /// the std side under `key` whole.
@@ -125,24 +125,15 @@ pub(crate) struct Remote {
     uploads: Mutex<Option<(Sender<Offer>, JoinHandle<()>)>>,
 }
 
-/// Open the session of this request from the user's configuration: none
-/// when it configures no remote, or one that would read nothing and write
-/// nothing.
-pub(crate) fn begin() -> Result<(), String> {
-    let session = match configured()? {
-        Some(config) => Remote::new(config)?.map(Arc::new),
-        None => None,
-    };
-    *SESSION.lock().unwrap() = session;
-    Ok(())
-}
-
-/// Close the session, waiting for its uploads.
-pub(crate) fn finish() {
-    let Some(remote) = SESSION.lock().unwrap().take() else {
-        return;
-    };
-    remote.finish_uploads();
+/// Open this request's remote cache when it has transport permission.
+pub(crate) fn for_request(transport: &Transport) -> Result<Option<Arc<Remote>>, String> {
+    if transport.is_offline() {
+        return Ok(None);
+    }
+    match configured()? {
+        Some(config) => Remote::new(config, transport).map(|remote| remote.map(Arc::new)),
+        None => Ok(None),
+    }
 }
 
 /// The session a build reads and writes, when it has one: none for a
@@ -151,15 +142,15 @@ pub(crate) fn for_build(options: &crate::native::NativeOptions) -> Option<Arc<Re
     if options.coverage.is_some() || !options.foreign_grants.is_empty() {
         return None;
     }
-    SESSION.lock().unwrap().clone()
+    options.remote.clone()
 }
 
 /// `key`, a link's key, kept apart from every link over no remote content
 /// when this session used a listed builder's records: a release link's key
 /// names no object, so the host would otherwise run an executable linked
 /// over content it did not produce.
-pub(crate) fn bind(key: ContentHash) -> ContentHash {
-    let used = match SESSION.lock().unwrap().as_ref() {
+pub(crate) fn bind(options: &crate::native::NativeOptions, key: ContentHash) -> ContentHash {
+    let used = match options.remote.as_ref() {
         Some(remote) => remote.used.lock().unwrap().clone(),
         None => return key,
     };
@@ -232,10 +223,19 @@ fn public_key(hex: &str) -> Result<[u8; 32], String> {
     Ok(key)
 }
 
+impl Drop for Remote {
+    fn drop(&mut self) {
+        self.finish_uploads();
+    }
+}
+
 impl Remote {
     /// The remote `config` describes, or none when it would read nothing
     /// and write nothing.
-    pub(crate) fn new(config: Config) -> Result<Option<Self>, String> {
+    pub(crate) fn new(config: Config, transport: &Transport) -> Result<Option<Self>, String> {
+        if transport.is_offline() {
+            return Ok(None);
+        }
         if config.transfer.record_bytes == 0
             || config.transfer.blob_bytes == 0
             || config.transfer.blob_bytes > config.transfer.work_bytes
@@ -264,13 +264,7 @@ impl Remote {
                 "cache.remote url `{url}` is not http:// or https://"
             ));
         }
-        let agent = crate::package_store::https_config()
-            .https_only(false)
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT))
-            .timeout_per_read(Some(READ))
-            .build()
-            .into();
+        let agent = transport.agent().expect("online transport").clone();
         Ok(Some(Self {
             url,
             trusted,
@@ -280,6 +274,15 @@ impl Remote {
             used: Mutex::new(BTreeSet::new()),
             uploads: Mutex::new(None),
         }))
+    }
+
+    fn request<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        request
+            .config()
+            .http_status_as_error(false)
+            .timeout_connect(Some(CONNECT))
+            .timeout_per_read(Some(READ))
+            .build()
     }
 
     /// The object record under `key`, read from `store` or received.
@@ -565,7 +568,10 @@ impl Remote {
         if self.down() {
             return false;
         }
-        match self.agent.head(format!("{}/{path}", self.url)).call() {
+        match self
+            .request(self.agent.head(format!("{}/{path}", self.url)))
+            .call()
+        {
             Ok(response) => response.status().as_u16() == 200,
             Err(_) => {
                 self.trip();
@@ -579,8 +585,7 @@ impl Remote {
             return false;
         }
         let put = self
-            .agent
-            .put(format!("{}/{path}", self.url))
+            .request(self.agent.put(format!("{}/{path}", self.url)))
             .header("Content-Length", len.to_string())
             .send(body);
         match put {
@@ -606,7 +611,10 @@ impl Remote {
         if unavailable {
             return None;
         }
-        match self.agent.get(format!("{}/{path}", self.url)).call() {
+        match self
+            .request(self.agent.get(format!("{}/{path}", self.url)))
+            .call()
+        {
             Ok(response) if response.status().as_u16() == 200 => Some(response),
             Ok(response) if response.status().as_u16() == 404 => {
                 let until = Instant::now() + MISSING;

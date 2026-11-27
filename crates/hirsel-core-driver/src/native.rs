@@ -39,6 +39,7 @@ pub(crate) use link::direct_link;
 pub use object_product::ObjectProduct;
 mod options;
 pub use options::BuildProduct;
+pub use options::NativeOptions;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 
@@ -99,48 +100,6 @@ pub struct ReplayPlan {
     pub diagnose: bool,
 }
 
-/// Runtime and linker inputs are explicit, independently produced artifacts.
-#[derive(Clone)]
-pub struct NativeOptions {
-    /// Recording runtime (`build --recording`, `run --record`, `replay`, `test --replay`).
-    pub recording: bool,
-    pub store_teardown: bool,
-    /// Coverage build (`docs/coverage.md`) scope, or none.
-    pub coverage: Option<hirsel_core_ir::coverage::Scope>,
-    pub replay: Option<ReplayPlan>,
-    pub backend: Backend,
-    pub optimize: bool,
-    pub debug_lines: bool,
-    pub target: String,
-    pub runtime: PathBuf,
-    pub link: Link,
-    pub cas: PathBuf,
-    pub output: PathBuf,
-    pub output_kind: OutputKind,
-    pub root_limit: u64,
-    pub instance_limit: usize,
-    pub directories: Vec<String>,
-    pub grant_mask: u64,
-    pub net_rules: Vec<hirsel_core_net::GrantRule>,
-    pub unix_roots: std::collections::BTreeMap<String, String>,
-    pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
-    /// `Cred` grants, one per named `main` parameter (TLS-7).
-    pub cred_grants: Vec<hirsel_core_net::CredGrant>,
-    pub foreign_grants: BTreeSet<String>,
-    pub(crate) exec_grants: Vec<crate::exec_launch::Binding>,
-    pub env_patterns: Option<hirsel_core_net::EnvPatterns>,
-    /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
-    pub logical_charge_report: Option<PathBuf>,
-    /// The toolchain this request already observed for its request record's
-    /// key: the build links with it rather than observing again, so the
-    /// executable is the one the key names.
-    pub(crate) observed: Option<
-        Arc<(
-            crate::tool_inputs::Toolchain,
-            crate::tool_inputs::LinkRecipe,
-        )>,
-    >,
-}
 pub(crate) const DEFAULT_INSTANCE_LIMIT: usize = 65_536;
 pub(crate) const DEFAULT_ROOT_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -1401,13 +1360,16 @@ fn link_objects(
         options,
         link_mode,
     )?;
-    let link_key = crate::store::remote::bind(match assembly {
-        Some(assembly) => key(
-            "hirsel.recipe-final-link.v5",
-            &(assembly, options.output_kind),
-        )?,
-        None => key("hirsel.core-executable.v11", &(build, entry_plan))?,
-    });
+    let link_key = crate::store::remote::bind(
+        options,
+        match assembly {
+            Some(assembly) => key(
+                "hirsel.recipe-final-link.v5",
+                &(assembly, options.output_kind),
+            )?,
+            None => key("hirsel.core-executable.v11", &(build, entry_plan))?,
+        },
+    );
     let store = Store::cas(&options.cas)?;
     if options.output_kind == OutputKind::Module {
         return module::pack(
@@ -1977,6 +1939,7 @@ pub(crate) mod tests {
             env_patterns: None,
             logical_charge_report: None,
             observed: None,
+            remote: None,
         }
     }
 

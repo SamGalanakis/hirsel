@@ -214,7 +214,7 @@ pub(crate) fn gate(
     let path = |name: &str| state.join(name).to_string_lossy().into_owned();
     let stores = [
         tree.package.clone(),
-        "--frozen".into(),
+        crate::package_lock::FROZEN_FLAG.into(),
         "--store".into(),
         path("compiler"),
         "--package-store".into(),

@@ -14,7 +14,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 
 load("@root//tools/toolchain-dist:product.bzl", "EMBED_RUNTIME_TARGETS", "EXEC_HELPER_TARGETS", "HOSTS", "RUNTIME_TARGETS")
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES")
+load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NAMESPACE_TEST_CASES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
 load("@toolchains//:apple.bzl", "APPLE_TARGETS")
@@ -323,7 +323,8 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         visibility = ["PUBLIC"],
     )
     perf_cases = PERF_TEST_CASES.get(name, [])
-    host_cases = OPENAT2_TEST_CASES.get(name, []) + perf_cases
+    namespace_cases = NAMESPACE_TEST_CASES.get(name, [])
+    host_cases = OPENAT2_TEST_CASES.get(name, []) + perf_cases + namespace_cases
     selection_env = {"HIRSEL_TEST_HOST_CASES": " ".join(host_cases)} if host_cases else {}
     _rust_test(
         name = name + "-shard-1" if host_cases else name,
@@ -346,11 +347,13 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     host_targets = []
     openat2_targets = []
     for index, case in enumerate(host_cases):
-        requirement = "perf" if case in perf_cases else "openat2"
+        requirement = "namespace" if case in namespace_cases else ("perf" if case in perf_cases else "openat2")
         target = "{}-{}-{}".format(name, requirement, index + 1)
         environment = {"HIRSEL_TEST_DEDICATED_CASE": case}
         if case in NATIVE_EXEC_TEST_CASES:
             environment["HIRSEL_TEST_NATIVE_EXEC"] = "1"
+        if requirement == "namespace":
+            environment["HIRSEL_TEST_OWNS_NETNS"] = "1"
         host_targets.append(":" + target)
         if requirement == "openat2":
             openat2_targets.append(":" + target)

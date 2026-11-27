@@ -91,19 +91,38 @@ pub(super) fn store_tool(
 }
 
 pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
+    conclude_with_remote(outcome, None)
+}
+
+pub(super) fn conclude_with_remote(
+    outcome: Outcome,
+    remote: Option<&crate::store::remote::Remote>,
+) -> Result<Outcome, Box<dyn std::error::Error>> {
+    let finish_uploads = || {
+        if let Some(remote) = remote {
+            remote.finish_uploads();
+        }
+    };
     if crate::resident::serving() {
-        // A session answers as its client steps it (`resident::serve_session`).
+        // A test session retains its remote until its client finishes stepping it.
         if !matches!(outcome, Outcome::Test(_)) {
             crate::resident::answer(&outcome);
+            finish_uploads();
         }
-        crate::store::remote::finish();
         return Ok(outcome);
     }
-    crate::store::remote::finish();
     match outcome {
-        Outcome::Exit(code) => std::process::exit(code),
-        Outcome::Test(session) => std::process::exit(session.conclude()),
+        Outcome::Exit(code) => {
+            finish_uploads();
+            std::process::exit(code)
+        }
+        Outcome::Test(session) => {
+            let code = session.conclude();
+            finish_uploads();
+            std::process::exit(code)
+        }
         Outcome::Launch(launch) => {
+            finish_uploads();
             let code = Launch::execute_mode(&launch.argv, &launch.env, &launch.mode)?;
             drop(launch);
             std::process::exit(code)
@@ -127,6 +146,7 @@ pub(super) fn finish(
     mut run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
+    remote: Option<&crate::store::remote::Remote>,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
     if json {
         println!("{}", serde_json::to_string(output)?);
@@ -228,7 +248,7 @@ pub(super) fn finish(
         profile.cleanup();
     }
     drop(run_output);
-    conclude(launch.map_or(Outcome::Exit(exit), Outcome::Launch))
+    conclude_with_remote(launch.map_or(Outcome::Exit(exit), Outcome::Launch), remote)
 }
 
 /// Serve one request in a resident compiler: [`super::main`]'s request, with its
@@ -237,7 +257,6 @@ pub(crate) fn serve(args: Vec<String>) -> Outcome {
     match super::dispatch::run(args) {
         Ok(outcome) => outcome,
         Err(e) => {
-            crate::store::remote::finish(); // No session outlives its request.
             let outcome = Outcome::Exit(report_request_error(e.as_ref()));
             crate::resident::answer(&outcome);
             outcome

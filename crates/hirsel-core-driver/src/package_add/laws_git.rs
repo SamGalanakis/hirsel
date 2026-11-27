@@ -863,14 +863,28 @@ impl Drop for GitServer {
 
 /// The roots a package store holds.
 fn stored(law: &PackageLaw, store: &str) -> BTreeSet<String> {
-    match fs::read_dir(law.path(store)) {
-        Ok(entries) => entries
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(|name| format!("sha256:{name}"))
-            .collect(),
-        Err(_) => BTreeSet::new(),
+    let Ok(shards) = fs::read_dir(law.path(store)) else {
+        return BTreeSet::new();
+    };
+    let mut roots = BTreeSet::new();
+    for shard in shards {
+        let shard = shard.unwrap();
+        let prefix = shard.file_name();
+        let prefix = prefix.to_str().unwrap();
+        assert_eq!(prefix.len(), 2);
+        for entry in fs::read_dir(shard.path()).unwrap() {
+            let suffix = entry.unwrap().file_name();
+            let suffix = suffix.to_str().unwrap();
+            assert_eq!(suffix.len(), 62);
+            let hex = format!("{prefix}{suffix}");
+            assert!(
+                hex.bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            );
+            roots.insert(format!("sha256:{hex}"));
+        }
     }
+    roots
 }
 
 fn roots(list: &[&str]) -> BTreeSet<String> {

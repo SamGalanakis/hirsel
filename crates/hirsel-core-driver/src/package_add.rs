@@ -183,7 +183,7 @@ fn acquire_any(
     workspace: &Workspace,
     cwd: &Path,
 ) -> Result<Acquisition, Failure> {
-    let (bytes, locator) = match &options.source {
+    let (archive, len, locator) = match &options.source {
         Source::Store(root) => {
             let library = match options.store.read(*root)? {
                 Entry::Present(library) => library,
@@ -205,14 +205,13 @@ fn acquire_any(
                 None,
             ));
         }
-        Source::Url(url) => (
-            fetch_https(url, &mut |_| Ok(()))
-                .map_err(|error| format!("fetching {url} failed: {error}"))?,
-            SourceLocation::Url(url.clone()),
-        ),
+        Source::Url(url) => {
+            let (archive, len) = fetch_https(&options.store.transport, url, &mut |_| Ok(()), "")?;
+            (archive, len, SourceLocation::Url(url.clone()))
+        }
         Source::Git(request) => {
             let mut budget = Budget::new(String::new());
-            let (git, remote, chose) = request.resolve(&mut budget)?;
+            let (git, remote, chose) = request.resolve(&options.store.transport, &mut budget)?;
             let (_, acquired) = pack_listed(
                 &options.store,
                 &options.store.session,
@@ -257,15 +256,16 @@ fn acquire_any(
                         error.explain("workspace", "a regular file")
                     )
                 })?;
-            (bytes, SourceLocation::Archive(normalized))
+            let len = bytes.len();
+            let locator = SourceLocation::Archive(normalized);
+            let archive = PackageArchive::decode_as(bytes.into(), false)
+                .map_err(|error| format!("{locator} is not a package archive: {error}"))?;
+            (archive, len, locator)
         }
         Source::Toolchain(_) | Source::Member(_) => {
             unreachable!("run_at binds the forms that fetch nothing without acquiring")
         }
     };
-    let len = bytes.len();
-    let archive = PackageArchive::decode(bytes.into())
-        .map_err(|error| format!("{locator} is not a package archive: {error}"))?;
     let head = &archive.entries[&archive.head].content.id;
     archive.verify(head, archive.head, &locator.to_string())?;
     Ok((archive, Some(locator), len, Vec::new(), None))

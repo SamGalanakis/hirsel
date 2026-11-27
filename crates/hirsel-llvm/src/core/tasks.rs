@@ -1,6 +1,8 @@
 //! Closed FORM runtime rows use their published C shapes. Layout descriptors
 //! carry producer-computed storage, charge and the value's drain recipe.
 use super::storage::zeroext;
+mod held;
+
 use super::*;
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
@@ -893,6 +895,7 @@ impl FunctionEmitter<'_> {
             RtOp::CheckCancel => {
                 self.native_call("hirsel_core_check_cancel", &[K], &[ptr(CONTEXT), u(&at)])
             }
+            op if let Some(out) = self.lower_held_op(op, &args) => out,
             RtOp::ChannelNew { item } => {
                 let descriptor = self.value_descriptors(&[item], false);
                 self.native_call(

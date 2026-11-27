@@ -268,6 +268,8 @@ pub enum Handle {
     Code,
     /// A versioned activation slot (`CodeSlot[F]`, PACK-14).
     CodeSlot,
+    /// A move-only erased payload (PACK-16).
+    Held,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

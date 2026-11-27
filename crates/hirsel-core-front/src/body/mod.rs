@@ -931,7 +931,7 @@ fn field_runs_code(t: &FieldTy, row: &mut impl FnMut(TypeId)) -> bool {
         FieldTy::Map(k, v) => field_runs_code(k, row) || field_runs_code(v, row),
         // An abandoned task or receiver cleans results or items whose type the handle
         // does not name, which may run finalizers (CONC-8).
-        FieldTy::Handle(Handle::Task | Handle::Receiver) => true,
+        FieldTy::Handle(Handle::Task | Handle::Receiver | Handle::Held) => true,
         _ => false,
     }
 }

@@ -258,7 +258,23 @@ impl Glue<'_, '_, '_> {
         let present = self.b.create_block();
         let cap = self.load(carrier, 16);
         let allocated = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
-        self.b.ins().brif(allocated, present, &[], done, &[]);
+        let byte_seq = matches!(field, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8));
+        if byte_seq {
+            let static_check = self.b.create_block();
+            self.b
+                .ins()
+                .brif(allocated, present, &[], static_check, &[]);
+            self.b.switch_to_block(static_check);
+            let static_release = self.b.create_block();
+            self.b.set_cold_block(static_release);
+            let non_null = self.b.ins().icmp_imm_s(IntCC::NotEqual, node, 0);
+            self.b.ins().brif(non_null, static_release, &[], done, &[]);
+            self.b.switch_to_block(static_release);
+            self.call("hirsel_core_release_static_bytes", &[P], &[], &[node])?;
+            self.b.ins().jump(done, &[]);
+        } else {
+            self.b.ins().brif(allocated, present, &[], done, &[]);
+        }
         self.b.switch_to_block(present);
         let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
         let charge = self.round8(bytes);
@@ -482,7 +498,8 @@ impl Glue<'_, '_, '_> {
                     // A runtime holder begins its cleanup and hands it over
                     // (CONC-8, CONC-9, CONC-13); a Latest only at its last handle.
                     FieldTy::Handle(
-                        h @ (hirsel_core_layout::Handle::Receiver
+                        h @ (hirsel_core_layout::Handle::Held
+                        | hirsel_core_layout::Handle::Receiver
                         | hirsel_core_layout::Handle::Task
                         | hirsel_core_layout::Handle::Latest),
                     ) => {
@@ -495,7 +512,9 @@ impl Glue<'_, '_, '_> {
                                 &[node, list, point],
                             )?[0]
                         } else {
-                            let name = if *h == hirsel_core_layout::Handle::Task {
+                            let name = if *h == hirsel_core_layout::Handle::Held {
+                                "hirsel_core_held_release"
+                            } else if *h == hirsel_core_layout::Handle::Task {
                                 "hirsel_core_task_release"
                             } else {
                                 "hirsel_core_receiver_release"
@@ -667,6 +686,46 @@ impl Glue<'_, '_, '_> {
             }
             Plan::Array(..) => {}
         }
+        Ok(())
+    }
+
+    pub(super) fn free_buffer(
+        &mut self,
+        p: Value,
+        cap: Value,
+        logical: u64,
+        byte_seq: bool,
+    ) -> Result<()> {
+        let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
+        let charge = self.round8(bytes);
+        let done = self.b.create_block();
+        let free = self.b.create_block();
+        let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
+        if byte_seq {
+            let static_check = self.b.create_block();
+            self.b.ins().brif(present, free, &[], static_check, &[]);
+            self.b.switch_to_block(static_check);
+            let static_release = self.b.create_block();
+            self.b.set_cold_block(static_release);
+            let non_null = self.b.ins().icmp_imm_s(IntCC::NotEqual, p, 0);
+            self.b.ins().brif(non_null, static_release, &[], done, &[]);
+            self.b.switch_to_block(static_release);
+            self.call("hirsel_core_release_static_bytes", &[P], &[], &[p])?;
+            self.b.ins().jump(done, &[]);
+        } else {
+            self.b.ins().brif(present, free, &[], done, &[]);
+        }
+        self.b.switch_to_block(free);
+        fast::free(
+            &mut self.b,
+            &mut self.calls,
+            self.object,
+            self.ctx,
+            p,
+            charge,
+        )?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
         Ok(())
     }
 }

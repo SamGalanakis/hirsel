@@ -24,6 +24,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         slot: ValueId,
         ty: TyId,
         frozen: bool,
+        owned: bool,
         n: NodeId,
     ) -> Option<ValueId> {
         let id = self.runtime_type(ty, n)?;
@@ -51,7 +52,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(full);
         let data = self.byte_word(base, 1, Ty::Scalar(Scalar::U8), n)?;
         let data = self.pointer(data, n);
-        let payer = if frozen {
+        let (data, payer) = if frozen {
             // MEM-24's reference charge, as the literal's.
             let (seven, mask) = (self.konst(u, 7, n)?, self.konst(u, !7, n)?);
             let up = self.arith("+", uint, Some(length), Some(seven), n)?;
@@ -82,9 +83,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             );
             self.raise_unless(admitted, charge, available, n);
-            block
+            let [data, meta, ..] = self.runtime_row(
+                hirsel_core_ir::RtOp::StaticFrozen,
+                &[Arg::Value(data), Arg::Value(block), Arg::Value(length)],
+                n,
+            )?;
+            (data, meta)
+        } else if owned {
+            let [data, ..] = self.runtime_row(
+                hirsel_core_ir::RtOp::StaticString,
+                &[Arg::Value(data), Arg::Value(length)],
+                n,
+            )?;
+            (data, null)
         } else {
-            null
+            (data, null)
         };
         self.jump(join, &[data, payer], n);
         self.start(join);

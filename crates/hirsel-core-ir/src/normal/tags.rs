@@ -67,6 +67,7 @@ tags!(Handle {
     13 => Media,
     14 => Code,
     15 => CodeSlot,
+    16 => Held,
 });
 
 tags!(Repr {
@@ -431,6 +432,12 @@ tags!(RtOp {
     96 => CodeDispatchEnd,
     97 => CodeIdentity,
     98 => CodeRevision,
+    99 => HeldNew { item },
+    100 => HeldTake { item },
+    101 => ResourceOrigin { item },
+    102 => StaticString,
+    103 => StaticFrozen,
+    104 => ReleaseStaticBytes,
 });
 
 tags!(Wait {

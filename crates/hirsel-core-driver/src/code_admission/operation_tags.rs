@@ -96,6 +96,21 @@ fn runtime_probes() -> Module {
         RtOp::P384VerifyDer,
         RtOp::RsaVerifyPkcs1Sha256,
         RtOp::RsaVerifyPssSha256,
+        RtOp::CodeBind,
+        RtOp::CodeLoad,
+        RtOp::CodeShare,
+        RtOp::CodeSlotNew,
+        RtOp::CodeActivate,
+        RtOp::CodeDispatchBegin,
+        RtOp::CodeDispatchEnd,
+        RtOp::CodeIdentity,
+        RtOp::CodeRevision,
+        RtOp::HeldNew { item: ITEM },
+        RtOp::HeldTake { item: ITEM },
+        RtOp::ResourceOrigin { item: TypeId(1) },
+        RtOp::StaticString,
+        RtOp::StaticFrozen,
+        RtOp::ReleaseStaticBytes,
         RtOp::Closed(0),
     ]
     .into_iter()
@@ -104,7 +119,7 @@ fn runtime_probes() -> Module {
     .collect::<Vec<_>>();
 
     let mut source = String::from(
-        "core v1\ntype t0 = own \"Payload\" { a: u64, b: u64, c: u64 }\nsig g0 = () -> ()\n",
+        "core v1\ntype t0 = own \"Payload\" { a: u64, b: u64, c: u64 }\ntype t1 = resource \"Res\" { id: u64 }\nsig g0 = () -> ()\n",
     );
     let operation_count = operations.len();
     for i in 0..operation_count {

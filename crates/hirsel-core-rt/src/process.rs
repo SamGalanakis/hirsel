@@ -609,6 +609,9 @@ unsafe fn run_config_inner(
                     drop(result.take_text());
                     files.close_all(&mut context);
                     drop(context);
+                    if let Some(execution) = crate::run_stop::current_execution() {
+                        execution.release_pins();
+                    }
                     if let Some(close) = config.close_grants {
                         close(config.state);
                     }

@@ -499,7 +499,6 @@ fn unbuilt_packing_operations_explicitly_refuse_execution_while_static_fn_stays_
     // Unbuilt helpers in core.code explicitly lower to `target.unsupported(...)`.
     for (helper, prefix) in [
         ("code.export_unbuilt", "PACK-14"),
-        ("code.held_unbuilt", "PACK-16"),
         ("code.loaded_identity", "PACK-14"),
         ("code.loaded_revision", "PACK-14"),
     ] {
@@ -544,7 +543,7 @@ fn unbuilt_packing_operations_explicitly_refuse_execution_while_static_fn_stays_
             .any(|s| s.ends_with("export_unbuilt"))
     );
     assert!(
-        calls_of("run_hold")
+        !calls_of("run_hold")
             .iter()
             .any(|s| s.ends_with("held_unbuilt"))
     );

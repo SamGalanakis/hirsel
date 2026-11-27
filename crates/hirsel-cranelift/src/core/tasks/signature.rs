@@ -3,7 +3,7 @@ use super::*;
 impl Function<'_, '_, '_> {
     /// An explicit stack slot of its own, for a descriptor passed by pointer
     /// beside an indirect result that shares the call scratch.
-    pub(super) fn own_slot(&mut self, size: u32) -> Value {
+    pub(in crate::core) fn own_slot(&mut self, size: u32) -> Value {
         let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
             size.max(8).next_multiple_of(8),
@@ -12,7 +12,11 @@ impl Function<'_, '_, '_> {
         self.b.ins().stack_addr(types::I64, slot, 0)
     }
 
-    pub(super) fn descriptor(&mut self, types: &[TypeId], task_input: bool) -> Result<Value> {
+    pub(in crate::core) fn descriptor(
+        &mut self,
+        types: &[TypeId],
+        task_input: bool,
+    ) -> Result<Value> {
         let storage = self.calls.storage(&mut self.b, (types.len() * 32) as u32);
         self.describe(storage, types, task_input)
     }

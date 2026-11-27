@@ -1,6 +1,5 @@
-//! Binding of canonical core declarations to their call-site kernels.
-//! Identity is resolved once when the program's declarations are published.
-//! The operation table lists core functions declared without a body.
+//! Binding of canonical core declarations to their call-site kernels (resolved
+//! once when declarations publish; the table lists bodyless core functions).
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
@@ -12,6 +11,7 @@ mod conn;
 #[cfg(test)]
 mod declarations;
 mod flow;
+mod held;
 mod host;
 mod media;
 mod net_class;
@@ -451,7 +451,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
             Kernel::Media(op) => self.runtime_media(op, f, vals, result, n),
             Kernel::SecretSeal => self.runtime_secret_seal(f, vals, result, n),
-            Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
+            Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), true, n),
             Kernel::Spawn | Kernel::TrySpawn => self.runtime_spawn(
                 types[0],
                 types[1],

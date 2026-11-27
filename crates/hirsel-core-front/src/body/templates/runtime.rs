@@ -28,6 +28,15 @@ impl Substitution<'_> {
                 item: self.ty(item),
             },
             RtOp::Join { r } => RtOp::Join { r: self.ty(r) },
+            RtOp::HeldNew { item } => RtOp::HeldNew {
+                item: self.ty(item),
+            },
+            RtOp::HeldTake { item } => RtOp::HeldTake {
+                item: self.ty(item),
+            },
+            RtOp::ResourceOrigin { item } => RtOp::ResourceOrigin {
+                item: self.ty(item),
+            },
             RtOp::ChannelNew { item } => RtOp::ChannelNew {
                 item: self.ty(item),
             },

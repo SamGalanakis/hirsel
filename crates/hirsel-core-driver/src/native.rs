@@ -170,12 +170,12 @@ fn emit_unit(
     object_key: ContentHash,
     instance: &Identity,
 ) -> Result<hirsel_core_ir::source::NativeObject, String> {
-    // Slots whose needed ranges never meet share a home before any engine sees
-    // the module (hirsel_core_ir::extent). Stored bodies and this object's key are
-    // the unmerged IR; the compiler identity in every key names this step.
+    // Disjoint slots share a home before emission (hirsel_core_ir::extent);
+    // the compiler identity in every cache key names this step.
     let mut shared = module.clone();
     shared.law_observation = options.recording;
     shared.store_teardown = options.store_teardown;
+    shared.pack_module = options.output_kind == OutputKind::Module;
     shared.coverage = options.coverage.clone();
     shared.external_call_sites = !options.foreign_grants.is_empty();
     let Module {
@@ -266,8 +266,8 @@ pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::
     if options.store_teardown {
         environment.extend(encode(&"hirsel.store-teardown.v1")?);
     }
-    if matches!(options.backend, Backend::Llvm) && options.output_kind == OutputKind::Module {
-        environment.extend(encode(&"hirsel.pack-module-llvm.v1")?);
+    if options.output_kind == OutputKind::Module {
+        environment.extend(encode(&"hirsel.pack-module.v1")?);
     }
     Ok(environment)
 }

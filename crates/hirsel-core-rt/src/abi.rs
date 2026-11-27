@@ -861,16 +861,8 @@ pub unsafe extern "C" fn hirsel_core_drop_frozen_bytes(
     context: *const Context,
     carrier: *const u8,
 ) {
-    // SAFETY: all three words are initialized; inline carriers may be unaligned.
-    let capacity = unsafe { carrier.add(16).cast::<u64>().read_unaligned() };
-    let metadata = unsafe { carrier.add(8).cast::<u64>().read_unaligned() };
-    if capacity == 0 || metadata & 1 != 0 {
-        return;
-    }
-    // SAFETY: a nonempty heap carrier owns a live, unique block.
-    let pointer =
-        unsafe { std::ptr::NonNull::new_unchecked(carrier.cast::<*mut u8>().read_unaligned()) };
-    unsafe { crate::block::free_in(&*context, pointer, capacity.next_multiple_of(8)) };
+    // SAFETY: forwarded to `causes::drop_frozen_bytes` with the same preconditions.
+    unsafe { crate::causes::drop_frozen_bytes(context, carrier) };
 }
 
 /// Admit frame storage and publish its backing record for mutating callees.

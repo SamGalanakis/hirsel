@@ -118,13 +118,35 @@ impl FunctionEmitter<'_> {
         let n = self.counter();
         let present = Label::new("buffer_release", n);
         let done = Label::new("buffer_released", n);
+        let byte_seq = matches!(field, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8));
         let terminal = hirsel_core_layout::terminal(&self.module.types, self.recipes, field);
         let status = (!terminal).then(|| {
             let status = self.temp(Type::I8);
             self.store(&Type::I8, &int(0), &status, 0);
             status
         });
-        self.cond(&allocated, present, done);
+        if byte_seq {
+            let static_check = Label::new("buffer_static_check", n);
+            let static_release = Label::new("buffer_static_release", n);
+            self.cond(&allocated, present, static_check);
+            self.block(static_check);
+            let is_null = self.cmp(Predicate::Eq, &Type::Ptr, &buffer, &Value::Null);
+            self.likely(&is_null, done, static_release);
+            self.block(static_release);
+            self.call_declared(
+                "hirsel_core_release_static_bytes",
+                Type::Void,
+                &[ptr(buffer.clone())],
+                FnAttrs::default(),
+                &CallAttrs {
+                    cold: true,
+                    ..CallAttrs::default()
+                },
+            );
+            self.br(done);
+        } else {
+            self.cond(&allocated, present, done);
+        }
         self.block(present);
         let charge = self.collection_charge(&capacity, entries.logical);
         // A List of direct elements: cleaned here from index 0 up (SEM-9), each
@@ -232,6 +254,22 @@ impl FunctionEmitter<'_> {
         }
         self.br(Label::plain("resume"));
         self.block(empty);
+        if matches!(field, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8)) {
+            let static_release = Label::new("buffer_static_release", n);
+            let is_null = self.cmp(Predicate::Eq, &Type::Ptr, &buffer, &Value::Null);
+            self.likely(&is_null, Label::plain("resume"), static_release);
+            self.block(static_release);
+            self.call_declared(
+                "hirsel_core_release_static_bytes",
+                Type::Void,
+                &[ptr(buffer)],
+                FnAttrs::default(),
+                &CallAttrs {
+                    cold: true,
+                    ..CallAttrs::default()
+                },
+            );
+        }
         self.br(Label::plain("resume"));
     }
 }

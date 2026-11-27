@@ -76,7 +76,14 @@ impl Glues {
                             values.insert(r.index());
                             needed.extend([x.index(), r.index()]);
                         }
-                        Callee::Runtime(RtOp::ChannelNew { item } | RtOp::LatestNew { item }) => {
+                        Callee::Runtime(RtOp::ResourceOrigin { item }) => {
+                            needed.insert(item.index());
+                        }
+                        Callee::Runtime(
+                            RtOp::ChannelNew { item }
+                            | RtOp::LatestNew { item }
+                            | RtOp::HeldNew { item },
+                        ) => {
                             descriptors.insert(item.index());
                             values.insert(item.index());
                             needed.insert(item.index());
@@ -949,6 +956,12 @@ impl Glue<'_, '_, '_> {
                 )?[0];
                 self.merge(status);
             }
+            FieldTy::Handle(hirsel_core_layout::Handle::Held) => {
+                let handle = self.load(at, 0);
+                let status =
+                    self.call("hirsel_core_held_drop", &[P, P], &[B], &[self.ctx, handle])?[0];
+                self.merge(status);
+            }
             FieldTy::Handle(hirsel_core_layout::Handle::Code) => {
                 let handle = self.load(at, 0);
                 self.call("hirsel_core_code_drop", &[U], &[], &[handle])?;
@@ -990,29 +1003,9 @@ impl Glue<'_, '_, '_> {
         }
         Ok(())
     }
-    fn free_buffer(&mut self, p: Value, cap: Value, logical: u64) -> Result<()> {
-        let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
-        let charge = self.round8(bytes);
-        let done = self.b.create_block();
-        let free = self.b.create_block();
-        let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
-        self.b.ins().brif(present, free, &[], done, &[]);
-        self.b.switch_to_block(free);
-        fast::free(
-            &mut self.b,
-            &mut self.calls,
-            self.object,
-            self.ctx,
-            p,
-            charge,
-        )?;
-        self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(done);
-        Ok(())
-    }
     /// Seq or Map storage: terminal storage is an inline free; any other is
     /// released by the drain from its buffer recipe (LANG-19). A static
-    /// carrier (capacity 0) owns nothing.
+    /// carrier (capacity 0) owns nothing except a loaded byte literal's CauseData.
     fn release_buffer(&mut self, carrier: Value, t: &FieldTy) -> Result<()> {
         let logical = match t {
             // MEM-24: Columns charge as List of the row.
@@ -1028,8 +1021,9 @@ impl Glue<'_, '_, '_> {
         };
         let p = self.load(carrier, 0);
         let cap = self.load(carrier, 16);
+        let byte_seq = matches!(t, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8));
         if hirsel_core_layout::terminal(&self.tables.input.types, self.tables.layouts, t) {
-            return self.free_buffer(p, cap, logical);
+            return self.free_buffer(p, cap, logical, byte_seq);
         }
         let done = self.b.create_block();
         let free = self.b.create_block();

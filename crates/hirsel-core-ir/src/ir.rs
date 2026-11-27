@@ -16,6 +16,8 @@ pub(crate) use flow::successors;
 mod allocation;
 mod closed;
 mod closure;
+pub(crate) use closure::ClosureKind;
+pub use closure::{Closure, ClosureHook, ClosureRow};
 mod host_op;
 mod marks;
 mod runtime_types;
@@ -1012,6 +1014,21 @@ pub enum RtOp {
     CodeDispatchBegin,
     /// `code.dispatch` exit: release worker borrow or promoted continuation pin (PACK-14).
     CodeDispatchEnd,
+    HeldNew {
+        item: TypeId,
+    },
+    HeldTake {
+        item: TypeId,
+    },
+    ResourceOrigin {
+        item: TypeId,
+    },
+    /// Relocate a loaded image's owned static `String` literal into its `CauseData` R/NX mapping.
+    StaticString,
+    /// Relocate a loaded image's owned static `FrozenBytes` literal into its `CauseData` R/NX mapping.
+    StaticFrozen,
+    /// Release any `CauseData` count owned by a `cap == 0` byte carrier.
+    ReleaseStaticBytes,
     /// `code.identity(c)`: PROG-9 identity bytes view anchored in `c` (PACK-14).
     CodeIdentity,
     /// `code.revision(c)`: optional PROG-9 revision bytes view anchored in `c` (PACK-14).
@@ -1393,6 +1410,9 @@ pub struct Module {
     pub law_observation: bool,
     #[serde(skip)]
     pub store_teardown: bool,
+    /// True when emitting a loadable PACK-2 `.hirsel-mod` unit rather than a linked executable.
+    #[serde(skip)]
+    pub pack_module: bool,
     /// Flag body sites from these packages in a coverage build ([`crate::coverage`]).
     #[serde(skip)]
     pub coverage: Option<crate::coverage::Scope>,
@@ -1510,47 +1530,4 @@ impl Module {
         }
         out
     }
-}
-
-/// A hook of a closure row: its definition and dictionaries, each type argument as a
-/// closure position, and its signature with every declared row and `dest` as a
-/// position.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ClosureHook {
-    pub definition: DefPath,
-    pub dictionaries: Vec<String>,
-    pub arguments: Vec<u32>,
-    pub signature: Signature,
-}
-
-/// A row of a [`Closure`]: the shape with every row it names replaced by that row's
-/// closure position and its hooks unset, and its finalizer, clone body and codec maker
-/// as hooks.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ClosureRow {
-    pub shape: Shape,
-    pub hooks: [Option<ClosureHook>; 4],
-}
-
-/// The rows a root row reaches, independent of any module's numbering: positions are
-/// first-visit order from the root (position 0), over fields, then `held`, then hook
-/// type arguments, then hook signature rows. Two rows of two modules are one type
-/// exactly when their closures are equal; `hash` names it.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Closure {
-    pub rows: Vec<ClosureRow>,
-    pub hash: ContentHash,
-}
-impl Closure {
-    /// The closure of `rows`, hashed over their encoding (the encoding the store
-    /// hashes IR with).
-    pub fn new(rows: Vec<ClosureRow>) -> Self {
-        let hash = crate::normal::closure_hash(&rows);
-        Self { rows, hash }
-    }
-}
-
-pub(crate) enum ClosureKind {
-    Full,
-    Abi,
 }

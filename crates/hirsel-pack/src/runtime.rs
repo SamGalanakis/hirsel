@@ -222,6 +222,19 @@ unsafe fn bind_loaded(entry: usize, descriptor: usize) -> *mut u8 {
     ptr::null_mut()
 }
 
+fn witness_pool(address: usize) -> u64 {
+    let pools = POOLS.lock().unwrap();
+    pools
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find_map(|(id, loader)| {
+            let (lo, hi) = loader.data_band();
+            (lo..hi).contains(&address).then_some(*id)
+        })
+        .unwrap_or(0)
+}
+
 unsafe fn pin_pc(pc: usize) -> Option<RtPin> {
     for loader in all_pools() {
         if let Some(pin) = loader.pin_pc(pc) {
@@ -375,6 +388,7 @@ pub fn current_thread_active_borrows() -> u32 {
 static OPS: CodeOps = CodeOps {
     load_by_key,
     bind_loaded,
+    witness_pool,
     pin_pc,
     code_share,
     code_drop,

@@ -187,13 +187,16 @@ fn plan_field(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64) -> N
         FieldTy::Handle(crate::Handle::Capability) => Node::Empty,
         // A runtime holder hands its cleanup over to the drain; only the handle
         // word is read, and its record keeps the holder's own frame.
-        FieldTy::Handle(crate::Handle::Receiver | crate::Handle::Task | crate::Handle::Latest) => {
-            Node::Leaf {
-                at,
-                live: vec![(at, 8)],
-                yields: Some(false),
-            }
-        }
+        FieldTy::Handle(
+            crate::Handle::Held
+            | crate::Handle::Receiver
+            | crate::Handle::Task
+            | crate::Handle::Latest,
+        ) => Node::Leaf {
+            at,
+            live: vec![(at, 8)],
+            yields: Some(false),
+        },
         FieldTy::Handle(_) | FieldTy::Shared(_) => whole(8),
         // An owned closure hands its environment, when it has one, to the drain
         // under the descriptor the environment names; only that pointer is read.

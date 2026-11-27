@@ -9,7 +9,56 @@
 
 use crate::abi_sites::{SourceFile, SourceTable};
 use std::ptr::{self, NonNull};
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering, fence};
+
+#[derive(Clone, Copy)]
+struct LiteralRange {
+    start: usize,
+    end: usize,
+    owner: *const CauseData,
+}
+
+// SAFETY: `CauseData` is `Send + Sync` and remains live while listed in `LITERAL_RANGES`.
+unsafe impl Send for LiteralRange {}
+// SAFETY: as above.
+unsafe impl Sync for LiteralRange {}
+
+static LIVE_LITERAL_OWNERS: AtomicUsize = AtomicUsize::new(0);
+static LITERAL_RANGES: RwLock<Vec<LiteralRange>> = RwLock::new(Vec::new());
+
+fn register_literal_range(ptr: *const u8, len: usize, owner: *const CauseData) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    let start = ptr.addr();
+    let end = start + len;
+    let mut ranges = LITERAL_RANGES.write().unwrap_or_else(|e| e.into_inner());
+    let at = ranges.partition_point(|r| r.start < start);
+    ranges.insert(at, LiteralRange { start, end, owner });
+    LIVE_LITERAL_OWNERS.fetch_add(1, Ordering::Release);
+}
+
+fn unregister_literal_range(ptr: *const u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    let start = ptr.addr();
+    let mut ranges = LITERAL_RANGES.write().unwrap_or_else(|e| e.into_inner());
+    if let Ok(at) = ranges.binary_search_by_key(&start, |r| r.start) {
+        ranges.remove(at);
+        LIVE_LITERAL_OWNERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn find_literal_owner_slow(addr: usize) -> Option<*const CauseData> {
+    let ranges = LITERAL_RANGES.read().unwrap_or_else(|e| e.into_inner());
+    let idx = ranges.partition_point(|r| r.start <= addr);
+    let range = idx.checked_sub(1).map(|i| ranges[i])?;
+    (addr < range.end).then_some(range.owner)
+}
 
 /// The host/standalone image's cause data owner: zero means process-lifetime
 /// (immortal) backing. Loaded `.hirsel-mod` images bind their import slot for
@@ -225,9 +274,20 @@ impl CauseData {
                 },
                 files_len: file_count,
             };
+            register_literal_range(data.literals_ptr, data.literals_len, raw);
         }
         // SAFETY: `raw` is non-null and initialized with count 1.
         Some(CauseDataRef(unsafe { NonNull::new_unchecked(raw) }))
+    }
+
+    /// Look up the live [`CauseData`] whose independent R/NX literal mapping
+    /// contains `ptr`, or `None` for null / host immortal pointers.
+    #[inline]
+    pub(crate) fn find_literal_owner(ptr: *const u8) -> Option<*const Self> {
+        if ptr.is_null() || LIVE_LITERAL_OWNERS.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        find_literal_owner_slow(ptr.addr())
     }
 
     /// Increment the reference count of `ptr`.
@@ -256,6 +316,7 @@ impl CauseData {
             // SAFETY: this was the final count; no other thread can touch `ptr`.
             unsafe {
                 let boxed = Box::from_raw(ptr.cast_mut());
+                unregister_literal_range(boxed.literals_ptr, boxed.literals_len);
                 if !boxed.mapped.is_null() && boxed.mapped_len != 0 {
                     libc::munmap(boxed.mapped.cast(), boxed.mapped_len);
                 }
@@ -287,4 +348,94 @@ impl CauseData {
     pub fn mapped_addr(&self) -> usize {
         self.mapped.addr()
     }
+}
+
+/// Pair `(data, meta)` returned by [`hirsel_core_static_frozen`].
+#[repr(C)]
+pub struct StaticFrozen {
+    pub data: *mut u8,
+    pub meta: u64,
+}
+
+/// Relocate a loaded image's owned static `String` literal `[ptr, ptr + len)`
+/// into its independent R/NX [`CauseData`] mapping and retain one count.
+/// Host/immortal pointers pass through unchanged.
+///
+/// # Safety
+/// `ptr` points to `len` valid immutable bytes (or is null when `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_static_string(ptr: *const u8, len: usize) -> *mut u8 {
+    if ptr.is_null() || len == 0 {
+        return ptr.cast_mut();
+    }
+    if let Some(hit) = crate::code::locate_literal(ptr.addr(), len) {
+        return hit.relocated.cast_mut();
+    }
+    ptr.cast_mut()
+}
+
+/// Relocate a loaded image's owned static `FrozenBytes` literal `[ptr, ptr + len)`
+/// into its independent R/NX [`CauseData`] mapping and return `(relocated, owner | 1)`.
+/// Host/immortal pointers return `(ptr, FROZEN_STATIC_UNCHARGED)`.
+///
+/// # Safety
+/// `ptr` points to `len` valid immutable bytes (or is null when `len == 0`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_static_frozen(ptr: *const u8, len: usize) -> StaticFrozen {
+    if ptr.is_null() || len == 0 {
+        return StaticFrozen {
+            data: ptr.cast_mut(),
+            meta: hirsel_core_layout::FROZEN_STATIC_UNCHARGED,
+        };
+    }
+    if let Some(hit) = crate::code::locate_literal(ptr.addr(), len) {
+        debug_assert_eq!(hit.owner.addr() & 1, 0);
+        return StaticFrozen {
+            data: hit.relocated.cast_mut(),
+            meta: (hit.owner.addr() as u64) | 1,
+        };
+    }
+    StaticFrozen {
+        data: ptr.cast_mut(),
+        meta: hirsel_core_layout::FROZEN_STATIC_UNCHARGED,
+    }
+}
+
+/// Release one [`CauseData`] count owned by a `cap == 0` byte carrier if `ptr`
+/// points into a loaded release's independent R/NX literal mapping.
+///
+/// # Safety
+/// Caller transfers any single [`CauseData`] count associated with `ptr`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_static_bytes(ptr: *const u8) {
+    if let Some(owner) = CauseData::find_literal_owner(ptr) {
+        // SAFETY: caller transfers one owned count on `owner`.
+        unsafe { CauseData::release(owner) };
+    }
+}
+
+/// Drop one initialized `FrozenBytes` carrier, releasing either its tagged
+/// `CauseData` static-literal count or its heap block charge.
+///
+/// # Safety
+/// The caller owns this live carrier exclusively, in a live task context.
+pub unsafe fn drop_frozen_bytes(context: *const crate::Context, carrier: *const u8) {
+    // SAFETY: all three words are initialized; inline carriers may be unaligned.
+    let capacity = unsafe { carrier.add(16).cast::<u64>().read_unaligned() };
+    let metadata = unsafe { carrier.add(8).cast::<u64>().read_unaligned() };
+    if capacity == 0 {
+        return;
+    }
+    if metadata & 1 != 0 {
+        let owner_addr = (metadata & !1) as usize;
+        if owner_addr != 0 {
+            let owner: *const CauseData = ptr::with_exposed_provenance(owner_addr);
+            // SAFETY: non-zero tagged static metadata owns one CauseData count.
+            unsafe { CauseData::release(owner) };
+        }
+        return;
+    }
+    // SAFETY: a nonempty heap carrier owns a live, unique block.
+    let pointer = unsafe { NonNull::new_unchecked(carrier.cast::<*mut u8>().read_unaligned()) };
+    unsafe { crate::block::free_in(&*context, pointer, capacity.next_multiple_of(8)) };
 }

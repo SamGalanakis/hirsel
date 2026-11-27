@@ -444,6 +444,34 @@ impl Machine<'_> {
                     vec![1]
                 }
             }
+            RtOp::ResourceOrigin { .. } | RtOp::ReleaseStaticBytes => vec![],
+            RtOp::StaticString => vec![a[0]],
+            RtOp::StaticFrozen => vec![a[0], a[1]],
+            RtOp::HeldNew { item } => {
+                if let Err(room) = self.admit(cur, a[2]) {
+                    return Ok(vec![0, room]);
+                }
+                let size = self.held(TypeRef(item.0));
+                let owner = self.block(40 + size, Some(cur.clone()), a[2], None);
+                let hash = self.get(a[1], 32).to_vec();
+                let payload = self.get(a[0], size as usize).to_vec();
+                self.put(owner, &hash);
+                self.store(owner + 32, 8, u64::from(item.0));
+                self.put(owner + 40, &payload);
+                vec![owner, 0]
+            }
+            RtOp::HeldTake { item } => {
+                if self.get(a[0], 32) != self.get(a[1], 32) {
+                    vec![0]
+                } else {
+                    let data = self
+                        .get(a[0] + 40, self.held(TypeRef(item.0)) as usize)
+                        .to_vec();
+                    self.put(a[2], &data);
+                    self.free(a[0]);
+                    vec![1]
+                }
+            }
             RtOp::CodeLoad => vec![11],
             RtOp::CodeSlotNew => vec![0],
             RtOp::CodeActivate => vec![3],
@@ -592,6 +620,13 @@ impl Machine<'_> {
                 self.host.chans[i].receiver = End::Gone;
                 self.chan_freed(i);
                 t.shield -= 1;
+                failed
+            }
+            Handle::Held => {
+                let owner = self.load(at, 8);
+                let row = TypeRef(self.load(owner + 32, 8) as u32);
+                let failed = self.drop_value(t, owner + 40, row);
+                self.free(owner);
                 failed
             }
             Handle::Code | Handle::CodeSlot => false,

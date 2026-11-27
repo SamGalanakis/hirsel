@@ -1847,15 +1847,7 @@ impl BodyParser {
                 "step_leave" => RtOp::StepLeave,
                 "step_catch" => RtOp::StepCatch,
                 "work_steps" => RtOp::WorkSteps,
-                "code_bind" => RtOp::CodeBind,
-                "code_load" => RtOp::CodeLoad,
-                "code_share" => RtOp::CodeShare,
-                "code_slot_new" => RtOp::CodeSlotNew,
-                "code_activate" => RtOp::CodeActivate,
-                "code_dispatch_begin" => RtOp::CodeDispatchBegin,
-                "code_dispatch_end" => RtOp::CodeDispatchEnd,
-                "code_identity" => RtOp::CodeIdentity,
-                "code_revision" => RtOp::CodeRevision,
+                name if let Some(op) = runtime::parse_pack(name, &mut tys)? => op,
                 name if let Some(op) = hirsel_core_layout::flow::Op::ALL
                     .iter()
                     .copied()

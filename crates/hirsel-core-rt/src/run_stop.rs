@@ -83,6 +83,20 @@ unsafe impl Send for Launch {}
 // SAFETY: as above; both are read-only once set.
 unsafe impl Sync for Launch {}
 
+struct PinTable {
+    slots: Vec<Option<crate::code::CodePin>>,
+    free: Vec<u32>,
+}
+
+impl PinTable {
+    const fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
+    }
+}
+
 /// One Place execution (PACK-13): its stop domain, and for a pool run its
 /// entry, base configuration and worst unit status. A task's `Context` names
 /// its execution at the frozen offset `CONTEXT_EXECUTION`.
@@ -104,6 +118,10 @@ pub struct Execution {
     bytes: [AtomicU8; MAX_STOP_BYTES],
     /// The first hardware fault in loaded code (PACK-9).
     pub(crate) code_fault: crate::code::Record,
+    /// Host-owned loaded-code pins (`Held` and `Resource` origin glue leases)
+    /// released on normal drop or execution teardown without running Hirsel
+    /// cleanup at FAIL-15 run stops.
+    pins: std::sync::Mutex<PinTable>,
 }
 
 impl Execution {
@@ -117,7 +135,56 @@ impl Execution {
             len: AtomicU8::new(0),
             bytes: [const { AtomicU8::new(0) }; MAX_STOP_BYTES],
             code_fault: crate::code::Record::new(),
+            pins: std::sync::Mutex::new(PinTable::new()),
         }
+    }
+
+    pub(crate) fn register_pin(&self, pin: crate::code::CodePin) -> u32 {
+        let mut table = self.pins.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = table.free.pop() {
+            table.slots[slot as usize] = Some(pin);
+            slot
+        } else {
+            let slot = u32::try_from(table.slots.len()).expect("pin table overflow");
+            table.slots.push(Some(pin));
+            slot
+        }
+    }
+
+    pub(crate) fn unregister_pin(&self, slot: u32) {
+        let pin = {
+            let mut table = self.pins.lock().unwrap_or_else(|e| e.into_inner());
+            let idx = slot as usize;
+            if idx >= table.slots.len() {
+                None
+            } else {
+                let pin = table.slots[idx].take();
+                if pin.is_some() {
+                    table.free.push(slot);
+                }
+                pin
+            }
+        };
+        drop(pin);
+    }
+
+    /// Drop every still-live loaded-code pin owned by this execution (FAIL-15
+    /// teardown). Drops pins outside the lock and leaves slot indices valid so
+    /// any concurrent unregister safely observes `None`.
+    pub(crate) fn release_pins(&self) {
+        let released: Vec<crate::code::CodePin> = {
+            let mut guard = self.pins.lock().unwrap_or_else(|e| e.into_inner());
+            let table = &mut *guard;
+            let mut out = Vec::new();
+            for (idx, slot) in table.slots.iter_mut().enumerate() {
+                if let Some(pin) = slot.take() {
+                    out.push(pin);
+                    table.free.push(idx as u32);
+                }
+            }
+            out
+        };
+        drop(released);
     }
 
     /// The hardware fault in loaded code that stopped this execution with `Code`, for

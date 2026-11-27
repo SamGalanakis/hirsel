@@ -6,6 +6,8 @@
 
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
+#[path = "held.rs"]
+mod held;
 #[path = "code_ops.rs"]
 mod ops;
 pub use ops::{
@@ -15,7 +17,7 @@ pub use ops::{
     hirsel_core_code_share, hirsel_core_code_slot_drop, hirsel_core_code_slot_new, register_ops,
     worker_park,
 };
-pub(crate) use ops::{pin_pc, promote_worker_borrows};
+pub(crate) use ops::{ExecutionPin, pin_pc, promote_worker_borrows};
 
 /// The image that owns a code address: the first 16 bytes of its module digest and the
 /// address's offset in the image's text.

@@ -126,6 +126,9 @@ impl Node {
             | RtOp::GluePush
             | RtOp::GluePop
             | RtOp::GlueCut
+            | RtOp::HeldNew { .. }
+            | RtOp::HeldTake { .. }
+            | RtOp::ResourceOrigin { .. }
             | RtOp::CodeBind
             | RtOp::CodeLoad
             | RtOp::CodeShare
@@ -135,6 +138,9 @@ impl Node {
             | RtOp::CodeDispatchEnd
             | RtOp::CodeIdentity
             | RtOp::CodeRevision
+            | RtOp::StaticString
+            | RtOp::StaticFrozen
+            | RtOp::ReleaseStaticBytes
             | RtOp::Closed(_) => &[],
         };
         for kind in kinds {

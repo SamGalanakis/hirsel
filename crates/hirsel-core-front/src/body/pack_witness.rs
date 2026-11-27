@@ -317,7 +317,15 @@ impl Cx<'_, '_, '_> {
                     return Some((ERROR, None));
                 }
                 self.builtin_use(f, n);
-                Some((result, self.pack_witness_call(tys[0], false, result, n)))
+                let extract = g.path.0.name == "take_as";
+                let value = self.held_witness(tys[0], n).and_then(|hash| {
+                    if extract {
+                        self.held_take(tys[0], vals[0]?, hash, result, n)
+                    } else {
+                        self.held_new(tys[0], vals[0], hash, result, n)
+                    }
+                });
+                Some((result, value))
             }
             _ => None,
         }
@@ -413,54 +421,33 @@ impl Cx<'_, '_, '_> {
         self.lower_pack_call(callee_val, entry, dispatch, result, n, scratch)
     }
 
-    pub(super) fn pack_witness_call(
-        &mut self,
-        ty: TyId,
-        export: bool,
-        result: TyId,
-        at: NodeId,
-    ) -> Option<ValueId> {
+    fn held_witness(&mut self, ty: TyId, at: NodeId) -> Option<ValueId> {
         if ty == ERROR {
             return None;
         }
-        let (hash, helper) = if export {
-            (
-                self.e.pack_export_hash(self.p, &mut self.t, ty),
-                "code.export_unbuilt",
-            )
-        } else {
-            if !self.holdable(ty) {
-                self.refuse(
-                    "PACK-16",
-                    at,
-                    "Held requires an owned-lifetime payload without an uncounted code reference",
-                );
-                return None;
-            }
-            (
-                self.e.held_type_hash(self.p, &mut self.t, ty),
-                "code.held_unbuilt",
-            )
-        };
-        let Some(hash) = hash else {
+        if !self.holdable(ty) {
             self.refuse(
-                if export { "PACK-14" } else { "PACK-16" },
+                "PACK-16",
+                at,
+                "Held requires an owned-lifetime payload without an uncounted code reference",
+            );
+            return None;
+        }
+        let Some(hash) = self.e.held_type_hash(self.p, &mut self.t, ty) else {
+            self.refuse(
+                "PACK-16",
                 at,
                 "the operation requires a closed type with a compiled witness",
             );
             return None;
         };
-        if self.live() {
-            let data = self.e.static_bytes(&hash.0);
-            let ptr = self.value(Ty::Ptr);
-            self.inst(Inst::ReadStatic { result: ptr, data }, at);
-            let helper = self
-                .p
-                .function_id(&DefPath::core(helper))
-                .expect("core.code witness operation");
-            return self.emit_call(helper, &[result], &[Some(ptr)], result, at);
+        if !self.live() {
+            return None;
         }
-        None
+        let data = self.e.static_bytes(&hash.0);
+        let result = self.value(Ty::Ptr);
+        self.inst(Inst::ReadStatic { result, data }, at);
+        Some(result)
     }
 
     fn holdable(&mut self, root: TyId) -> bool {

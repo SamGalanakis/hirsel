@@ -15,35 +15,6 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl Function<'_, '_, '_> {
-    /// A `Cross` stores the value bytes at `shift`, the span of the value a
-    /// recorder writes (a task entry's `x` when `entry`), then its owner rows.
-    fn cross(&mut self, ty: TypeId, shift: u64, entry: bool) -> Result<Value> {
-        let (words, owners) = task_entry::cross_words(self.input, self.layouts, ty, shift, entry)?;
-        let at = self.own_slot((40 + owners.len() * 32) as u32);
-        let rows = self.b.ins().iadd_imm_s(at, 40);
-        for (j, &n) in words.iter().enumerate() {
-            let value = if j == 1 {
-                rows
-            } else {
-                self.b.ins().iconst(types::I64, n as i64)
-            };
-            self.b
-                .ins()
-                .store(MemFlagsData::trusted(), value, at, (j * 8) as i32);
-        }
-        for (i, row) in owners.iter().enumerate() {
-            for (j, &n) in row.iter().enumerate() {
-                let value = self.b.ins().iconst(types::I64, n as i64);
-                self.b.ins().store(
-                    MemFlagsData::trusted(),
-                    value,
-                    at,
-                    (40 + i * 32 + j * 8) as i32,
-                );
-            }
-        }
-        Ok(at)
-    }
     /// Returns the entry buffer with its code word and the offset of its wrapped input.
     fn task_input(&mut self, x: TypeId, code: Value, value: Value) -> Result<(Value, u64)> {
         let (bytes, align) = place::storage(self.input, self.layouts, PlaceTy::Declared(x))?;
@@ -835,6 +806,14 @@ impl Function<'_, '_, '_> {
                 self.c_call("hirsel_core_cancel", &[P, P], &[], &[self.context, args[0]])?;
                 0
             }
+            RtOp::ResourceOrigin { .. }
+            | RtOp::HeldNew { .. }
+            | RtOp::HeldTake { .. }
+            | RtOp::StaticString
+            | RtOp::StaticFrozen
+            | RtOp::ReleaseStaticBytes => self
+                .lower_held_op(op, &args, &mut outputs)?
+                .expect("held op"),
             RtOp::ChannelNew { item } => {
                 let descriptor = self.descriptor(&[item], false)?;
                 let values = self.c_call(

@@ -4,7 +4,7 @@ use super::*;
 use hirsel_core_layout::{FieldTy, Repr, TypeRef, field_size};
 
 mod deps;
-use deps::cleanup_dependencies;
+use deps::{cleanup_dependencies, holder_drop_symbol, holder_release_symbol, runtime_call_cleanup};
 
 /// Whether ordinary glue cleans `field` in place with nothing below it to
 /// drain: scalars, terminal storage and inline values with no drop.
@@ -288,18 +288,9 @@ pub(super) fn drop_glue(
                 }
                 Inst::Drop { ty, .. } => pending.push((ty.index(), false)),
                 Inst::Release { ty, .. } => pending.push((ty.index(), true)),
-                Inst::Call { call } => match body.calls[call.index()].callee {
-                    Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => {
-                        values.insert(r.index());
-                        pending.push((x.index(), false));
-                        pending.push((r.index(), false));
-                    }
-                    Callee::Runtime(RtOp::ChannelNew { item } | RtOp::LatestNew { item }) => {
-                        values.insert(item.index());
-                        pending.push((item.index(), false))
-                    }
-                    _ => {}
-                },
+                Inst::Call { call } => {
+                    runtime_call_cleanup(body.calls[call.index()].callee, &mut values, &mut pending)
+                }
                 _ => {}
             }
         }
@@ -631,14 +622,12 @@ impl FunctionEmitter<'_> {
                 None
             }
             FieldTy::Handle(
-                hirsel_core_layout::Handle::Task | hirsel_core_layout::Handle::Receiver,
+                h @ (hirsel_core_layout::Handle::Held
+                | hirsel_core_layout::Handle::Task
+                | hirsel_core_layout::Handle::Receiver),
             ) => {
                 let handle = self.load(&Type::Ptr, p, 1);
-                let name = if *field == FieldTy::Handle(hirsel_core_layout::Handle::Task) {
-                    "hirsel_core_task_drop"
-                } else {
-                    "hirsel_core_receiver_drop"
-                };
+                let name = holder_drop_symbol(*h);
                 Some(
                     self.native_call(
                         name,
@@ -962,7 +951,8 @@ impl FunctionEmitter<'_> {
             // A runtime holder begins its cleanup and hands it over (CONC-8,
             // CONC-9, CONC-13); a Latest only at its last handle.
             FieldTy::Handle(
-                h @ (hirsel_core_layout::Handle::Receiver
+                h @ (hirsel_core_layout::Handle::Held
+                | hirsel_core_layout::Handle::Receiver
                 | hirsel_core_layout::Handle::Task
                 | hirsel_core_layout::Handle::Latest),
             ) => {
@@ -977,11 +967,7 @@ impl FunctionEmitter<'_> {
                         &[ptr(handle), ptr(list), word(int(point))],
                     )
                 } else {
-                    let name = if *h == hirsel_core_layout::Handle::Task {
-                        "hirsel_core_task_release"
-                    } else {
-                        "hirsel_core_receiver_release"
-                    };
+                    let name = holder_release_symbol(*h);
                     self.native_call(
                         name,
                         &[bool_],

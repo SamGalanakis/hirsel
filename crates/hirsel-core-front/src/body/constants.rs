@@ -82,9 +82,9 @@ impl Cx<'_, '_, '_> {
         } {
             // A static value reads as its literal does: a String literal is the
             // view of its slot where a view is expected.
-            let v = value.and_then(|slot| self.computed_bytes(slot, ty, frozen, n));
             let viewed = !frozen
                 && want.is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::View(x) if *x == ty));
+            let v = value.and_then(|slot| self.computed_bytes(slot, ty, frozen, !viewed, n));
             if viewed {
                 return (self.t.mk(TyKind::View(ty)), v);
             }

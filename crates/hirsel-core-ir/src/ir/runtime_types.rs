@@ -212,6 +212,12 @@ impl RtOp {
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
             RtOp::IsolateCatch => (vec![], vec![p]),
             RtOp::CodeBind | RtOp::CodeShare => (vec![V(p)], vec![p]),
+            RtOp::HeldNew { item } => (vec![take(item), V(p), V(u64_)], vec![p, u64_]),
+            RtOp::HeldTake { item } => (vec![V(p), V(p), out(item)], vec![bool_]),
+            RtOp::ResourceOrigin { .. } => (vec![V(p)], vec![]),
+            RtOp::StaticString => (vec![V(p), V(u64_)], vec![p]),
+            RtOp::StaticFrozen => (vec![V(p), V(p), V(u64_)], vec![p, p]),
+            RtOp::ReleaseStaticBytes => (vec![V(p)], vec![]),
             RtOp::CodeSlotNew => (vec![V(u64_)], vec![p]),
             RtOp::CodeLoad => (
                 vec![V(u64_), V(p), V(p), V(p), V(u8_), V(p), V(p), V(p)],
@@ -237,6 +243,9 @@ impl RtOp {
             | RtOp::ConnTrySend { item }
             | RtOp::ConnReceive { item }
             | RtOp::ConnTryReceive { item }
+            | RtOp::HeldNew { item }
+            | RtOp::HeldTake { item }
+            | RtOp::ResourceOrigin { item }
             | RtOp::ChannelNew { item }
             | RtOp::Send { item }
             | RtOp::TrySend { item }
@@ -320,7 +329,10 @@ impl RtOp {
             | RtOp::CodeDispatchBegin
             | RtOp::CodeDispatchEnd
             | RtOp::CodeIdentity
-            | RtOp::CodeRevision => vec![],
+            | RtOp::CodeRevision
+            | RtOp::StaticString
+            | RtOp::StaticFrozen
+            | RtOp::ReleaseStaticBytes => vec![],
         }
     }
 

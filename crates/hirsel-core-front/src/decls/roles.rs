@@ -45,6 +45,7 @@ pub enum Role {
     Cell,
     StaticFn,
     Code,
+    Held,
     CodeSlot,
     Socket,
     Flow,
@@ -68,6 +69,9 @@ impl Role {
         // TLS-9: a Hello holds its accepted socket; its drop declines it.
         if path.package_is("core", "1") && path.0.modules == ["tls"] && path.0.name == "Hello" {
             return Some(Role::Socket);
+        }
+        if path.is_core("core.Held") || path.is_core("code.TransferableHeld") {
+            return Some(Role::Held);
         }
         if path.is_core("foreign.Ptr") {
             return Some(Role::ForeignHandle);
@@ -164,6 +168,7 @@ impl Role {
             | Role::Inbox
             | Role::Flow
             | Role::Code
+            | Role::Held
             | Role::CodeSlot
             | Role::Secret
             | Role::Media => Kind::Resource,
@@ -185,6 +190,7 @@ impl Role {
             Self::Socket => Handle::Socket,
             Self::Flow => Handle::Flow,
             Self::Code => Handle::Code,
+            Self::Held => Handle::Held,
             Self::CodeSlot => Handle::CodeSlot,
             Self::Secret => Handle::Secret,
             Self::Media => Handle::Media,
@@ -217,6 +223,13 @@ pub(super) fn nominal_bounds(
         Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => meet() & (KEY | ORDERED),
         Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
         Some(Role::Args) => PLAIN | SHAREABLE | SEND | CROSS,
+        Some(Role::Held) => {
+            if decl.path.is_core("code.TransferableHeld") {
+                SEND
+            } else {
+                0
+            }
+        }
         Some(Role::Causes) => SEND,
         Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
         Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),

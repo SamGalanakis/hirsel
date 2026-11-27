@@ -59,10 +59,6 @@ fn export_unbuilt[R](signature: Inline[u8, 32]) -> R {
     target.unsupported("PACK-14 typed entry adapters are not built")
 }
 
-fn held_unbuilt[R](witness: Inline[u8, 32]) -> R {
-    target.unsupported("PACK-16 payload ownership is not built")
-}
-
 resource type TransferableHeld: send {}
 
 fn hold_send[T: send](take value: T) -> Held[send] {

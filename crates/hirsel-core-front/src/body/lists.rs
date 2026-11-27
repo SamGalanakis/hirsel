@@ -995,12 +995,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(refused_here);
         self.jump(refused, &[plan.charge, available], n);
         self.start(copy);
+        let old_data = self.carrier_word(header, carrier, SeqWord::Data, n);
         let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
         let copy_data = self.new_block(&[]);
         let commit = self.new_block(&[]);
         self.list_branch(nonempty, copy_data, commit, n);
         self.start(copy_data);
-        let old_data = self.carrier_word(header, carrier, SeqWord::Data, n);
         let from = self.address(
             AddressBase::Value(old_data),
             &[],
@@ -1025,7 +1025,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(commit);
         self.set_carrier_word(header, carrier, SeqWord::Data, block, n);
         self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
-        self.jump(success, &[], n);
+        self.release_static_bytes_if_u8(item, old_data, null, success, n)?;
         // Owned storage is replaced by one `grow` (crate docs, "Growth"), which
         // admits like the old block and refunds its charge after the install.
         self.start(like);

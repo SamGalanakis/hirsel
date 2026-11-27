@@ -7,7 +7,10 @@
 mod owner;
 pub use crate::abi_sites::format_cell;
 use owner::PAIR_TAG;
-pub use owner::{CauseData, CauseDataRef, OwnerPair, hirsel_core_cause_owner};
+pub use owner::{
+    CauseData, CauseDataRef, OwnerPair, StaticFrozen, drop_frozen_bytes, hirsel_core_cause_owner,
+    hirsel_core_release_static_bytes, hirsel_core_static_frozen, hirsel_core_static_string,
+};
 
 use crate::{
     Capacity, Context,
@@ -555,6 +558,10 @@ pub unsafe fn record(context: &mut Context, mut cause: Cause) {
     };
     let (literal_owner, literal_retained) = if cause.kind() == FAIL && cause.message.capacity == 0 {
         if cause.message.len == 0 {
+            if let Some(owner) = CauseData::find_literal_owner(cause.message.data) {
+                // SAFETY: a truncated-to-empty loaded static string transfers its CauseData count.
+                unsafe { CauseData::release(owner) };
+            }
             cause.message.data = ptr::null_mut();
             (ptr::null(), false)
         } else if let Some(hit) =
@@ -562,6 +569,9 @@ pub unsafe fn record(context: &mut Context, mut cause: Cause) {
         {
             cause.message.data = hit.relocated.cast_mut();
             (hit.owner, true)
+        } else if let Some(owner) = CauseData::find_literal_owner(cause.message.data) {
+            // Owned loaded static String already holds +1 count on `owner`; move it into the cell.
+            (owner, true)
         } else {
             (ptr::null(), false)
         }
@@ -675,6 +685,7 @@ pub(crate) struct Resource {
     /// storage's recipe, the recipe's cursor, and the logical storage refunded
     /// once the recipe is done. The storage itself never holds a frame word.
     holder: std::mem::MaybeUninit<crate::counted::Holder>,
+    origin: Option<crate::code::ExecutionPin>,
     recipe: Option<crate::counted::Recipe>,
     cursor: u64,
     storage: u64,
@@ -708,6 +719,7 @@ pub unsafe fn resource_new(
         previous: None,
         previous_resource: ptr::null_mut(),
         holder: std::mem::MaybeUninit::uninit(),
+        origin: None,
         recipe: None,
         cursor: 0,
         storage: 0,
@@ -782,6 +794,22 @@ pub unsafe fn resource_free(pointer: std::ptr::NonNull<u8>, storage: u64) {
     }
 }
 
+/// Associate the construction image's recipe with this resource before publishing it.
+///
+/// # Safety
+/// The caller owns a freshly admitted resource and supplies its storage recipe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_resource_origin(
+    pointer: std::ptr::NonNull<u8>,
+    recipe: crate::counted::Recipe,
+) {
+    if let Some(pin) = crate::code::ExecutionPin::pin_pc(None, recipe as usize) {
+        let resource = unsafe { &mut *block::resource_state(pointer) };
+        resource.recipe = Some(recipe);
+        resource.origin = Some(pin);
+    }
+}
+
 /// Begin a resource's cleanup through a drain: `recipe` runs the trace hook
 /// and finalizer as its step 0 and then cleans the fields, resumably; then the
 /// resource is freed with `storage`, its logical field storage (LANG-19).
@@ -796,7 +824,7 @@ pub(crate) unsafe fn resource_begin(
     // SAFETY: the caller transfers the resource and so its native state.
     unsafe {
         let resource = &mut *block::resource(pointer);
-        resource.recipe = Some(recipe);
+        resource.recipe.get_or_insert(recipe);
         resource.cursor = 0;
         resource.storage = storage;
         resource.payload = pointer.as_ptr();

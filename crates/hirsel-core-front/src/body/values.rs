@@ -87,6 +87,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             vals,
             n,
             |cx, to, block| {
+                cx.record_resource_origin(rid, block, n);
                 let holder = cx.address(
                     AddressBase::Address(to),
                     &[Step::CaseField { case: 0, field: 0 }],
@@ -224,7 +225,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             );
             if frozen {
-                ok(self, source, Some(block));
+                let Some((data, meta)) = self.static_frozen_literal(source, block, length, n)
+                else {
+                    return (ty, None);
+                };
+                ok(self, data, Some(meta));
             } else {
                 let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
                 let from = self.address(AddressBase::Value(source), &[], byte, n);
@@ -275,52 +280,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             ty
         };
-        let v = self.static_string(data, ty, n);
+        let v = self.static_string(data, ty, !viewed, n);
         if !viewed {
             self.temp(ty, v);
         }
         (shown, v)
     }
 
-    pub(super) fn static_string(&mut self, data: &[u8], ty: TyId, n: NodeId) -> Option<ValueId> {
-        if !self.live() {
-            return None;
-        }
-        let id = self.runtime_type(ty, n)?;
-        let to = self.new_slot(PlaceTy::Declared(id), n);
-        let u64t = Ty::Scalar(Scalar::U64);
-        let start = if data.is_empty() {
-            self.konst(Ty::Ptr, 0, n)
-        } else {
-            let d = self.e.static_bytes(data);
-            let v = self.value(Ty::Ptr);
-            self.inst(Inst::ReadStatic { result: v, data: d }, n);
-            Some(v)
-        };
-        let (Some(start), Some(length), Some(zero)) = (
-            start,
-            self.konst(u64t, data.len() as u64, n),
-            self.konst(u64t, 0, n),
-        ) else {
-            return None;
-        };
-        for (k, (value, t)) in [(start, Ty::Ptr), (length, u64t), (zero, u64t)]
-            .into_iter()
-            .enumerate()
-        {
-            let Some(offset) = self.konst(u64t, 8 * k as u64, n) else {
-                return None;
-            };
-            let at = self.address(
-                AddressBase::Address(to),
-                &[Step::Byte(offset)],
-                PlaceTy::Value(t),
-                n,
-            );
-            self.inst(Inst::Store { address: at, value }, n);
-        }
-        Some(self.pointer(to, n))
-    }
     pub(super) fn literal(
         &mut self,
         n: NodeId,

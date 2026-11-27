@@ -1,6 +1,49 @@
 //! A module row's closure: the rows a type reaches.
 use super::*;
 
+/// A hook of a closure row: its definition and dictionaries, each type argument as a
+/// closure position, and its signature with every declared row and `dest` as a
+/// position.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ClosureHook {
+    pub definition: DefPath,
+    pub dictionaries: Vec<String>,
+    pub arguments: Vec<u32>,
+    pub signature: Signature,
+}
+
+/// A row of a [`Closure`]: the shape with every row it names replaced by that row's
+/// closure position and its hooks unset, and its finalizer, clone body and codec maker
+/// as hooks.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ClosureRow {
+    pub shape: Shape,
+    pub hooks: [Option<ClosureHook>; 4],
+}
+
+/// The rows a root row reaches, independent of any module's numbering: positions are
+/// first-visit order from the root (position 0), over fields, then `held`, then hook
+/// type arguments, then hook signature rows. Two rows of two modules are one type
+/// exactly when their closures are equal; `hash` names it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Closure {
+    pub rows: Vec<ClosureRow>,
+    pub hash: ContentHash,
+}
+impl Closure {
+    /// The closure of `rows`, hashed over their encoding (the encoding the store
+    /// hashes IR with).
+    pub fn new(rows: Vec<ClosureRow>) -> Self {
+        let hash = crate::normal::closure_hash(&rows);
+        Self { rows, hash }
+    }
+}
+
+pub(crate) enum ClosureKind {
+    Full,
+    Abi,
+}
+
 impl Module {
     /// The closure of row `root` ([`Closure`]).
     pub fn closure(&self, root: TypeId) -> Closure {

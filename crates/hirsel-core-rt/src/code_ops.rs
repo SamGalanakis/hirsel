@@ -63,6 +63,7 @@ pub struct CodeOps {
         out_bytes: *mut u8,
     ) -> u8,
     pub bind_loaded: unsafe fn(entry: usize, descriptor: usize) -> *mut u8,
+    pub witness_pool: fn(usize) -> u64,
     pub pin_pc: unsafe fn(pc: usize) -> Option<CodePin>,
     pub code_share: unsafe fn(code: *mut u8) -> *mut u8,
     pub code_drop: unsafe fn(code: *mut u8),
@@ -102,14 +103,69 @@ fn ops() -> Option<&'static CodeOps> {
     }
 }
 
+pub(super) fn witness_pool(address: usize) -> u64 {
+    ops().map_or(0, |ops| (ops.witness_pool)(address))
+}
+
 /// Pin the loaded image owning `pc`, if `pc` lies in the loaded text band.
 pub(crate) fn pin_pc(pc: usize) -> Option<CodePin> {
-    if super::locate(pc).is_none() {
-        return None;
-    }
     let ops = ops()?;
     // SAFETY: registered pack host callback.
     unsafe { (ops.pin_pc)(pc) }
+}
+
+/// Execution-scoped custody handle for a [`CodePin`] (PACK-16 / FAIL-15).
+///
+/// Normal drop releases the underlying pin immediately from any task in the
+/// execution (including after cross-task `Held[send]` transfer). When the
+/// execution stops abnormally (skipping Hirsel cleanup per FAIL-15),
+/// [`crate::run_stop::Execution::release_pins`] drops every still-live pin.
+pub(crate) struct ExecutionPin {
+    execution: *const crate::run_stop::Execution,
+    slot: u32,
+    fallback: Option<CodePin>,
+}
+
+// SAFETY: `Execution` outlives every task and unit of its execution (PACK-13)
+// and synchronizes pin slots under its mutex; `CodePin` is `Send + Sync`.
+unsafe impl Send for ExecutionPin {}
+// SAFETY: as above.
+unsafe impl Sync for ExecutionPin {}
+
+impl ExecutionPin {
+    pub(crate) fn pin_pc(ctx: Option<&crate::Context>, pc: usize) -> Option<Self> {
+        let pin = pin_pc(pc)?;
+        let execution = ctx
+            .map(|c| c.execution)
+            .filter(|p| !p.is_null())
+            .or_else(|| crate::run_stop::current_execution().map(ptr::from_ref));
+        if let Some(execution) = execution {
+            // SAFETY: `Execution` outlives every task running under it.
+            let slot = unsafe { (*execution).register_pin(pin) };
+            Some(Self {
+                execution,
+                slot,
+                fallback: None,
+            })
+        } else {
+            Some(Self {
+                execution: ptr::null(),
+                slot: 0,
+                fallback: Some(pin),
+            })
+        }
+    }
+}
+
+impl Drop for ExecutionPin {
+    fn drop(&mut self) {
+        if !self.execution.is_null() {
+            // SAFETY: `Execution` outlives every value dropped during the run.
+            unsafe { (*self.execution).unregister_pin(self.slot) };
+        } else {
+            drop(self.fallback.take());
+        }
+    }
 }
 
 /// Promote all active worker borrows belonging to `task` into owning [`CodePin`]s

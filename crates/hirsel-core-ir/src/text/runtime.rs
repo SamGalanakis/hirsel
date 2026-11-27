@@ -1,4 +1,28 @@
-use crate::{RtOp, Wait};
+use crate::{RtOp, TypeId, Wait};
+
+pub(super) fn parse_pack(
+    name: &str,
+    tys: &mut impl FnMut(usize) -> Result<Vec<TypeId>, String>,
+) -> Result<Option<RtOp>, String> {
+    Ok(Some(match name {
+        "code_bind" => RtOp::CodeBind,
+        "code_load" => RtOp::CodeLoad,
+        "code_share" => RtOp::CodeShare,
+        "code_slot_new" => RtOp::CodeSlotNew,
+        "code_activate" => RtOp::CodeActivate,
+        "code_dispatch_begin" => RtOp::CodeDispatchBegin,
+        "code_dispatch_end" => RtOp::CodeDispatchEnd,
+        "code_identity" => RtOp::CodeIdentity,
+        "code_revision" => RtOp::CodeRevision,
+        "held_new" => RtOp::HeldNew { item: tys(1)?[0] },
+        "held_take" => RtOp::HeldTake { item: tys(1)?[0] },
+        "resource_origin" => RtOp::ResourceOrigin { item: tys(1)?[0] },
+        "static_string" => RtOp::StaticString,
+        "static_frozen" => RtOp::StaticFrozen,
+        "release_static_bytes" => RtOp::ReleaseStaticBytes,
+        _ => return Ok(None),
+    }))
+}
 
 pub(super) fn sha(name: &str) -> Option<RtOp> {
     Some(match name {
@@ -16,6 +40,12 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::Join { r } => format!("rt.join[t{}]", r.0),
         RtOp::Cancel => "rt.cancel".into(),
         RtOp::CheckCancel => "rt.check_cancel".into(),
+        RtOp::HeldNew { item } => format!("rt.held_new[t{}]", item.0),
+        RtOp::HeldTake { item } => format!("rt.held_take[t{}]", item.0),
+        RtOp::ResourceOrigin { item } => format!("rt.resource_origin[t{}]", item.0),
+        RtOp::StaticString => "rt.static_string".into(),
+        RtOp::StaticFrozen => "rt.static_frozen".into(),
+        RtOp::ReleaseStaticBytes => "rt.release_static_bytes".into(),
         RtOp::ChannelNew { item } => format!("rt.channel_new[t{}]", item.0),
         RtOp::ChannelSender => "rt.channel_sender".into(),
         RtOp::Send { item } => format!("rt.send[t{}]", item.0),

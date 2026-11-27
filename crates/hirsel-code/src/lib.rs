@@ -444,8 +444,8 @@ impl Loader {
     /// this outside its signal handler, after the pool has stopped.
     pub fn fault(&self, pc: usize) -> Option<(ContentHash, u32)> {
         let hit = self.resolve(pc)?;
+        // No reclaim here: it could retire the image the hit names before it is found.
         let mut slab = self.0.slab.lock().unwrap();
-        self.0.reclaim(&mut slab);
         let at = pc - self.0.base - hit.offset as usize;
         let digest = slab
             .cohorts

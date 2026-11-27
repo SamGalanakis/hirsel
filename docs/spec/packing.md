@@ -338,8 +338,10 @@ entry whose `signature` digest equals the digest of `F`.
 5. **Retired code.** An image that no slot names is **retired**. A pool has a
    **retired-code byte budget** (default 64 MiB). Bytes count against it from the moment
    an image is retired until its cohort is recycled. An `activate` that would retire an
-   image past the budget fails with `Capacity` and changes nothing. There is no limit on
-   how many generations are alive or for how long.
+   image past the budget fails with `Capacity` and changes nothing. The bytes of a
+   dead cohort return at the loader's next reclaim (PACK-4 step 5), so a host that
+   activates without loading calls `reclaim` before it treats `Capacity` as final.
+   There is no limit on how many generations are alive or for how long.
 6. **Installed code.** A pool has an **installed-code byte budget**. A load that would
    exceed it fails with `Capacity`.
 7. **Unload.** When an image's count reaches zero it is handed to the loader, which

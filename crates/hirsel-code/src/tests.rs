@@ -740,9 +740,13 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
     assert_eq!(loader.fault(pc), Some((code.digest(), at)));
     assert_eq!(load(&loader, &bytes).err(), Some(Refusal::Quarantined));
     assert_eq!(loader.fault(&loader as *const Loader as usize), None);
+    // A fault in an image whose last handle is gone, before the loader retires it, is
+    // still that image's.
+    let digest = code.digest();
     drop(code);
+    assert_eq!(loader.fault(pc), Some((digest, at)));
     loader.reclaim();
-    assert_eq!(loader.resolve(pc), None);
+    assert_eq!((loader.resolve(pc), loader.fault(pc)), (None, None));
     assert_eq!(loader.resolve(wide.text() + (2 << 20)), hit(&wide, 2 << 20));
 }
 

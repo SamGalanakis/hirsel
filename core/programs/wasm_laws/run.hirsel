@@ -280,12 +280,15 @@ fn boxes(f: Foreign[laws.Box], out: Stdout) waits {
     number(out, "FW15 released", native.live(f))
 }
 
-fn faults(take parts: (Foreign[laws.Box], Stdout)) -> u64 waits {
-    let (f, out) = take parts
-    for _ in 0u64 .. 1000u64 {
+fn faults(take parts: (Foreign[laws.Box], Stdout, Sender[()])) -> u64 waits {
+    let (f, out, started) = take parts
+    for i in 0u64 .. 1000u64 {
         say(out, primary(isolate(fn() -> i32 {
             native.trap(f, 2)
         })))
+        if i == 0 {
+            result.unwrap(channel.send(started, ()))
+        }
     }
     0
 }
@@ -298,15 +301,14 @@ fn deep(n: u64) -> u64 {
     }
 }
 
-fn dive(take n: u64) -> u64 {
-    deep(n)
-}
-
 fn signals(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
-    let a = task.spawn(tasks, bytes 1048576, (f, out), faults)
-    let b = task.spawn(tasks, bytes 1048576, 1u64, dive)
+    let (started, ready): (Sender[()], Receiver[()]) = channel.new(1)
+    let a = task.spawn(tasks, bytes 1048576, (f, out, started), faults)
+    let _ = result.unwrap(channel.receive(ready))
+    // FAIL-17 ends a child task with JoinError. Exhaust the main task's stack
+    // to observe the process-level status and diagnostic while the guest faults.
+    number(out, "FW28 returned", deep(1))
     let _ = task.join(take a)
-    let _ = task.join(take b)
 }
 
 // One bounded call's result: "ok N" or "out N" for OutOfTime(steps: N).

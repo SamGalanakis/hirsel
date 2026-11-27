@@ -518,7 +518,7 @@ pub(crate) fn child_code_range(pid: u32, image: &Path) -> std::ops::Range<u64> {
 /// How many times `needle` appears in process `pid`'s readable memory. The
 /// scan must cover more than 1 MiB, or it proves nothing.
 #[cfg(test)]
-pub(crate) fn child_memory_hits(pid: u32, needle: &[u8]) -> usize {
+pub(crate) fn child_memory_hits(pid: u32, needle: &[u8]) -> Option<usize> {
     use std::os::unix::fs::FileExt;
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap();
     let mem = File::open(format!("/proc/{pid}/mem"))
@@ -545,7 +545,7 @@ pub(crate) fn child_memory_hits(pid: u32, needle: &[u8]) -> usize {
             .count();
     }
     assert!(scanned > 1 << 20, "scanned only {scanned} bytes");
-    hits
+    Some(hits)
 }
 
 /// Populate private capture pages in one kernel walk before reading files into them.

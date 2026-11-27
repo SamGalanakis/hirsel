@@ -811,12 +811,14 @@ fn the_engine_file_keys_the_std_side_but_not_elf_debug_aliases() {
         assert_eq!((run.status.code(), run.stdout), (Some(0), b"right".to_vec()), "{stand_in}");
         let bytes = std::fs::read(&built.executable).unwrap();
         let image = object::File::parse(&bytes[..]).unwrap();
-        let aliases: Vec<_> = image
-            .symbols()
-            .filter_map(|s| s.name().ok().filter(|n| n.starts_with("__hirsel_debug_")))
-            .collect();
-        let unique: BTreeSet<_> = aliases.iter().collect();
-        assert!(!aliases.is_empty() && unique.len() == aliases.len(), "ELF debug aliases");
+        if image.format() == object::BinaryFormat::Elf {
+            let aliases: Vec<_> = image
+                .symbols()
+                .filter_map(|s| s.name().ok().filter(|n| n.starts_with("__hirsel_debug_")))
+                .collect();
+            let unique: BTreeSet<_> = aliases.iter().collect();
+            assert!(!aliases.is_empty() && unique.len() == aliases.len(), "ELF debug aliases");
+        }
         (key, bytes)
     };
     let (first, second) = (build(0), build(1));

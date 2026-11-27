@@ -78,21 +78,21 @@ fn prog4_published_test_marker_and_edits_keep_reference_restrictions() {
 fn default_check_resolves_frozen_foreign_handles() {
     let law = PackageLaw::new();
     law.write("hirsel.toml", "[workspace]\nmembers = [\"codec\", \"app\"]\n");
-    law.app("app", "[dependencies]\ncodec = { package = \"local/codec\", major = 1, path = \"../codec\" }\n");
+    law.app("app", "[dependencies]\ncodec = { package = \"local/codec\", major = 1, path = \"../codec\", authority = [\"Foreign\"] }\n");
     law.write(
         "app/main.hirsel",
         "pub fn open(f: Foreign[codec.Codec]) waits { codec.open(f) }\n",
     );
     law.manifest("codec", "local/codec", "1.0.0",
-        r#"
+        &format!(r#"
 [sources]
 "codec.hirsel" = "codec"
 "native.hirsel" = "native"
 
 [foreign.native]
 symbols = "fixture_"
-archives = [{ target = "x86_64-unknown-linux-gnu", file = "native.a", sha256 = "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5" }]
-"#,
+archives = [{{ target = "{}", file = "native.a", sha256 = "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5" }}]
+"#, crate::host::HOST_TARGET.triple()),
     );
     law.write(
         "codec/codec.hirsel",

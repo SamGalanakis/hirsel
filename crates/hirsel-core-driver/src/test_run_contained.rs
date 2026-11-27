@@ -123,11 +123,22 @@ fn wasm_import(module: &str, name: &str) -> Vec<u8> {
     wasm_module(&[wasm_types(&[(&[], &[])]), (2, body), wasm_memory(), wasm_exports(&[])])
 }
 
+// Contained native images ship on Linux (foreign.md, W1); Darwin is W2.
+fn can_build_contained_image() -> bool {
+    match crate::host::HOST_TARGET.os() {
+        hirsel_core_layout::Os::Linux => true,
+        hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => false,
+    }
+}
+
 #[test]
 fn contained_modules_are_admitted_before_anything_compiles() {
     use sha2::{Digest, Sha256};
     use std::fs;
 
+    if !can_build_contained_image() {
+        return;
+    }
     const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     const MODULE: &str = "FFI-11: module box.wasm of hirsel.ai/wasm_laws@1/native";
@@ -246,6 +257,9 @@ fn contained_calls_run_in_the_tasks_own_instance() {
     use std::fs;
     use std::process::Command;
 
+    if !can_build_contained_image() {
+        return;
+    }
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/wasm_laws");
     for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "box.wasm"] {
@@ -351,6 +365,9 @@ fn contained_host_memory_refusal_stops_with_host_memory() {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
+    if !can_build_contained_image() {
+        return;
+    }
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/wasm_laws");
     for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "box.wasm"] {
@@ -442,6 +459,9 @@ pub fn main(f: Foreign[laws.Box], tasks: Tasks, argv: Args, out: Stdout) -> Resu
 #[test]
 #[ignore = "explicit native integration target"]
 fn contained_tests_record_and_replay() {
+    if !can_build_contained_image() {
+        return;
+    }
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/wasm_laws");
     for file in ["laws.hirsel", "native.hirsel", "box.wasm"] {
@@ -583,6 +603,9 @@ fn contained_recipes_pin_their_module() {
     use crate::code_store::{CodeStore, ObjectKind};
     use sha2::{Digest, Sha256};
 
+    if !can_build_contained_image() {
+        return;
+    }
     let fixture = |file: &str| std::fs::read(PackageLaw::new().libraries.join("programs/wasm_laws").join(file)).unwrap();
     let original = fixture("box.wasm");
     let at = original.windows(4).position(|w| w == b"bump").unwrap() + 3;

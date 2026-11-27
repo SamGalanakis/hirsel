@@ -215,10 +215,16 @@ fn package_entry(store: &str, root: &str) -> String {
 }
 
 fn package_frame(entry: &[u8]) -> Vec<u8> {
-    // RFC 8878: a single segment with a one-byte size and one raw last block.
-    let size = u8::try_from(entry.len()).unwrap();
-    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x20, size];
-    frame.extend_from_slice(&((u32::from(size) << 3) | 1).to_le_bytes()[..3]);
+    // RFC 8878: one single-segment frame with a raw last block.
+    let size = u32::try_from(entry.len()).unwrap();
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd];
+    if let Ok(small) = u8::try_from(size) {
+        frame.extend([0x20, small]);
+    } else {
+        frame.push(0x60);
+        frame.extend(u16::try_from(size - 256).unwrap().to_le_bytes());
+    }
+    frame.extend_from_slice(&((size << 3) | 1).to_le_bytes()[..3]);
     frame.extend_from_slice(entry);
     frame
 }

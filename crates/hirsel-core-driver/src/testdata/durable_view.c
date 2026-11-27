@@ -1,4 +1,4 @@
-// Logs what each successful fsync or fdatasync makes durable, for a power-cut
+// Logs what each successful durability call makes durable, for a power-cut
 // model of one directory entry. A sync of the directory DURABLE_DIR logs
 // "dir <inode>", the inode its entry DURABLE_NAME names at that moment (0 when
 // absent). A sync of any regular file logs "file <inode>".
@@ -35,6 +35,29 @@ static void record(int fd) {
     close(log);
 }
 
+#ifdef __APPLE__
+__attribute__((used, visibility("hidden"))) int durable_view_full_sync(int fd) {
+    int result = fcntl(fd, F_FULLFSYNC);
+    int saved = errno;
+    if (result == 0) record(fd);
+    errno = saved;
+    return result;
+}
+
+// A tail branch keeps the original variadic arguments for other commands.
+#define STRINGIFY_(value) #value
+#define STRINGIFY(value) STRINGIFY_(value)
+__attribute__((naked)) static int observed_fcntl(int fd, int command, ...) {
+    __asm__("cmp w1, #" STRINGIFY(F_FULLFSYNC) "\n"
+            "b.ne 1f\n"
+            "b _durable_view_full_sync\n"
+            "1: b _fcntl");
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static const struct { int (*replacement)(int, int, ...), (*original)(int, int, ...); }
+    interpose = {observed_fcntl, fcntl};
+#else
 #define WRAP(name)                                         \
     int name(int fd) {                                     \
         int (*real)(int) = dlsym(RTLD_NEXT, #name);        \
@@ -46,3 +69,4 @@ static void record(int fd) {
     }
 WRAP(fsync)
 WRAP(fdatasync)
+#endif

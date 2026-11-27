@@ -127,7 +127,7 @@ fn native_symbol_tiers_follow_the_elf_identity() {
     .unwrap();
     assert!(
         Command::new(bin.join("clang"))
-            .arg("-c")
+            .args(["--target=x86_64-unknown-linux-gnu", "-c"])
             .arg(&source)
             .arg("-o")
             .arg(&object)
@@ -253,6 +253,11 @@ fn native_fiber_boundary_has_no_caller() {
     use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
     use std::path::Path;
 
+    // This law reads ELF FDE extents and the fiber boundary's DWARF rules.
+    match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => (),
+        hirsel_core_layout::ObjectFormat::MachO => return,
+    }
     let directory = tempfile::tempdir().unwrap();
     let app = directory.path();
     let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
@@ -540,6 +545,14 @@ fn llvm_split_parts_share_one_weak_placeholder() {
     use std::path::PathBuf;
     use std::process::Command;
 
+    // The fixture starts with the x86_64 Linux exit syscall in a bare ELF image.
+    match crate::host::HOST_TARGET {
+        Target::X86_64Linux => (),
+        Target::Aarch64Linux
+        | Target::Aarch64Darwin
+        | Target::Aarch64Ios
+        | Target::Aarch64IosSim => return,
+    }
     // A placeholder another object may define over (as a `$revision`
     // carrier is), read by one part and addressed by two others. Exit code:
     // the value read, plus 10 when both addresses are one address.

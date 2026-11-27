@@ -24,6 +24,9 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+pub(crate) const LINUX_LIVE_PROFILING: bool = cfg!(target_os = "linux");
+
 /// Resolve a program path, searching the given PATH for a bare name.
 pub(crate) fn find_program(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
     if program.components().count() > 1 || program.is_absolute() {

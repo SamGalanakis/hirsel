@@ -34,6 +34,8 @@ fn profiler_attach_uses_snapshot_before_sampling_existing_mappings() {
     use std::process::Stdio;
     use std::time::Duration;
 
+    // The live attach sampler and the child's /proc maps are Linux-only.
+    if !crate::host::LINUX_LIVE_PROFILING { return; }
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("hot.c");
     let executable = dir.path().join("hot");
@@ -511,13 +513,14 @@ fn run_logical_charge_report_selects_the_installed_observer() {
     let runtime = |name| std::fs::read(root.join(std::env::var_os(name).unwrap())).unwrap();
     let ordinary = runtime("HIRSEL_CORE_RT_ARCHIVE");
     let observed = runtime("HIRSEL_CORE_RT_OBSERVED_ARCHIVE");
+    let target = crate::host::HOST_TARGET.triple();
     crate::installation::register(
         &prefix,
         "core",
         &product.image,
         [
-            (Flavour::PLAIN, (ordinary.as_slice(), TARGET)),
-            (Flavour::OBSERVED, (observed.as_slice(), TARGET)),
+            (Flavour::PLAIN, (ordinary.as_slice(), target)),
+            (Flavour::OBSERVED, (observed.as_slice(), target)),
         ],
         None,
     )
@@ -776,6 +779,8 @@ pub fn main() -> Result[(), Exit] {
 
 #[test]
 fn live_memory_profile_weights_held_bytes_and_closes_churn_across_workers() {
+    // Live allocation sampling uses Linux perf; exact tape replay is portable.
+    if !crate::host::LINUX_LIVE_PROFILING { return; }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()

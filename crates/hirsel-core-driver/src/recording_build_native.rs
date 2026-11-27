@@ -316,19 +316,22 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
                 assert_eq!(status, Some(0), "{tag} build: {err}");
 
                 let bytes = std::fs::read(&program).unwrap();
-                let elf = object::File::parse(bytes.as_slice()).unwrap();
-                let defines_recording_entry = elf.symbols().any(|symbol| {
-                    symbol.is_definition() && symbol.name() == Ok("hirsel_core_os_run_recording")
-                });
+                let image = object::File::parse(bytes.as_slice()).unwrap();
+                let definitions = || {
+                    image.symbols().filter(|symbol| symbol.is_definition())
+                        .filter_map(|symbol| symbol.name().ok())
+                        .map(|name| match image.format() {
+                            object::BinaryFormat::MachO => name.strip_prefix('_').unwrap_or(name),
+                            _ => name,
+                        })
+                };
+                let defines_recording_entry = definitions().any(|name| name == "hirsel_core_os_run_recording");
                 assert_eq!(
                     defines_recording_entry, recording_on,
                     "RL1 recording entry: {tag}, recipe={use_recipe}"
                 );
                 if !recording_on {
-                    let leaked: Vec<_> = elf
-                        .symbols()
-                        .filter(|symbol| symbol.is_definition())
-                        .filter_map(|symbol| symbol.name().ok())
+                    let leaked: Vec<_> = definitions()
                         .filter(|name| {
                             *name == "hirsel_core_os_replay"
                                 || name.contains("14hirsel_core_rt4tape")
@@ -1628,38 +1631,7 @@ pub fn main(n: Net) -> Result[(), Exit] waits {
     Ok(())
 }
 "#;
-    const RESOLVER: &str = r#"
-#include <netdb.h>
-#include <netinet/in.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-int __wrap_getaddrinfo(const char *name, const char *service,
-                       const struct addrinfo *hints, struct addrinfo **out) {
-    if (getenv("HIRSEL_NET11_OFFLINE")) {
-        (void)write(2, "offline resolver called\n", 24);
-        return EAI_AGAIN;
-    }
-    if (strcmp(name, "DUP.TEST.") != 0 || service ||
-        !hints || hints->ai_socktype != SOCK_STREAM)
-        return EAI_FAIL;
-    static struct sockaddr_in6 v6 = { .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_LOOPBACK_INIT };
-    static struct sockaddr_in v4 = { .sin_family = AF_INET };
-    static struct addrinfo answer[3];
-    v4.sin_addr.s_addr = htonl(0xc0000211);
-    answer[0] = (struct addrinfo){ .ai_family = AF_INET6, .ai_addr = (struct sockaddr *)&v6,
-                                 .ai_addrlen = sizeof(v6), .ai_next = &answer[1] };
-    answer[1] = answer[0];
-    answer[1].ai_next = &answer[2];
-    answer[2] = (struct addrinfo){ .ai_family = AF_INET, .ai_addr = (struct sockaddr *)&v4,
-                                 .ai_addrlen = sizeof(v4) };
-    *out = answer;
-    (void)write(2, "resolver called\n", 16);
-    return 0;
-}
-void __wrap_freeaddrinfo(struct addrinfo *answer) { (void)answer; }
-"#;
+    const RESOLVER: &str = include_str!("testdata/replay_resolver.c");
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -1682,11 +1654,15 @@ void __wrap_freeaddrinfo(struct addrinfo *answer) { (void)answer; }
             .arg(&object),
     )
     .unwrap();
+    let wrap = match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => " -Wl,--wrap=getaddrinfo,--wrap=freeaddrinfo",
+        hirsel_core_layout::ObjectFormat::MachO => "",
+    };
     let linker = appending_driver(
         dir.path(),
         "clang-observe-resolve",
         &format!(
-            "'{}' -Wl,--wrap=getaddrinfo,--wrap=freeaddrinfo",
+            "'{}'{wrap}",
             object.display().to_string().replace('\'', "'\\''"),
         ),
     );
@@ -2295,7 +2271,7 @@ fn scram_partial_send(tasks: Tasks) -> Result[(), ()] waits {
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
     let tests = report["tests"].as_array().unwrap();
     assert_eq!(tests.len(), 1, "{report}");
-    assert_eq!(tests[0]["definition"], "app@1/main/scram_partial_send");
+    assert_eq!(tests[0]["definition"], "local/app@1/main/scram_partial_send");
     assert_eq!(tests[0]["source"], "executed");
     assert_eq!(tests[0]["passed"], true);
 }
@@ -3045,7 +3021,7 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
     )
     .unwrap();
     let token_file = dir.path().join("token");
-    let run = |sts: bool, token: &'static [u8]| -> (usize, Vec<u8>) {
+    let run = |sts: bool, token: &'static [u8]| {
         let (cred, server) = if sts {
             let (port, server) = fake_sts(KEY, token, token_file.clone(), vec![b"jwt"], 1);
             let server = std::thread::spawn(move || assert_eq!(server.join().unwrap(), [b"jwt"]));
@@ -3091,10 +3067,14 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
 
     for sts in [false, true] {
         let (hits, mac) = run(sts, b"IQoJb3JpZ2luX2VjEXAMPLETOKEN");
-        assert_eq!(hits, 1, "the fetched key outside its sealed store (sts: {sts})");
+        if let Some(hits) = hits {
+            assert_eq!(hits, 1, "the fetched key outside its sealed store (sts: {sts})");
+        }
         assert_eq!(hirsel_core_ids::hex::encode(&mac), MAC_OF_X);
         let (hits, _) = run(sts, KEY);
-        assert!(hits >= 2, "the scan missed a key in a program String: {hits} (sts: {sts})");
+        if let Some(hits) = hits {
+            assert!(hits >= 2, "the scan missed a key in a program String: {hits} (sts: {sts})");
+        }
     }
 }
 

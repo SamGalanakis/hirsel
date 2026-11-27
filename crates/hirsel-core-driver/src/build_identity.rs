@@ -156,7 +156,7 @@ mod build_identity {
             // Each binary, and the name of the executable record that holds it.
             let records = law.path("cache/hirsel/cas/keys");
             let run = tests.map(|test| {
-                let test = DefPath::from_full(&format!("app@1/main/{test}")).unwrap();
+                let test = DefPath::from_full(&format!("local/app@1/main/{test}")).unwrap();
                 let name = ContentHash::of_bytes(test.to_string().as_bytes()).to_string();
                 let binary = std::fs::read(out.join(name)).unwrap();
                 let digest = archive_digest(&binary);

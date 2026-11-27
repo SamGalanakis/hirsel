@@ -294,6 +294,7 @@ fn https(
                 }
                 Err(error) => panic!("{error}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(15)))
                 .unwrap();
@@ -767,9 +768,9 @@ fn forms_that_fetch_nothing() {
 }
 
 /// The view of `app/hirsel.lock` a power cut leaves right after `hirsel lock`
-/// returns, from the POSIX contract: an entry update is durable only once a
-/// fsync of its directory follows it, and a file's bytes only once a fsync of
-/// that file does. `testdata/durable_view.c` logs each sync; the durable entry
+/// returns. An entry update is durable only once its directory is synced,
+/// and a file's bytes only once the file is synced.
+/// `testdata/durable_view.c` logs each sync; the durable entry
 /// is the inode the directory named at its last sync.
 #[test]
 fn s6_lock_survives_a_power_cut_after_it_returns() {
@@ -781,11 +782,17 @@ fn s6_lock_survives_a_power_cut_after_it_returns() {
     else {
         unreachable!()
     };
+    let (library, preload, extra) = match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => ("durable_view.so", "LD_PRELOAD", &["-ldl"][..]),
+        hirsel_core_layout::ObjectFormat::MachO => {
+            ("durable_view.dylib", "DYLD_INSERT_LIBRARIES", &[][..])
+        }
+    };
     let built = Command::new(cc)
         .args(["-shared", "-fPIC", "-o"])
-        .arg(law.path("durable_view.so"))
+        .arg(law.path(library))
         .arg(law.path("durable_view.c"))
-        .arg("-ldl")
+        .args(extra)
         .output()
         .unwrap();
     assert!(
@@ -795,7 +802,7 @@ fn s6_lock_survives_a_power_cut_after_it_returns() {
     );
     let log = law.path("durable.log");
     let mut lock = law.command(&["lock", "app"], "packages");
-    lock.env("LD_PRELOAD", law.path("durable_view.so"))
+    lock.env(preload, law.path(library))
         .env("DURABLE_LOG", &log)
         .env("DURABLE_DIR", law.path("app"))
         .env("DURABLE_NAME", "hirsel.lock");

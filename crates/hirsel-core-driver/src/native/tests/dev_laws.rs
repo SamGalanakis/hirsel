@@ -52,10 +52,14 @@ impl Fixture {
         let seed = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(std::env::var_os("HIRSEL_DEV_TEST_CACHE").unwrap());
+        let copy = match crate::host::HOST_TARGET.os() {
+            hirsel_core_layout::Os::Linux => "cp -R --reflink=auto",
+            hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => "cp -R",
+        };
         let seeded = Command::new("/bin/sh")
             .args([
                 "-c",
-                "mkdir -p \"$2\" && cp -R --reflink=auto \"$1\"/. \"$2\" && chmod -R u+w \"$2\"",
+                &format!("mkdir -p \"$2\" && {copy} \"$1\"/. \"$2\" && chmod -R u+w \"$2\""),
                 "seed",
             ])
             .arg(&seed)

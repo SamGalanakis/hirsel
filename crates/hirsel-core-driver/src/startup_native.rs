@@ -100,29 +100,33 @@ fn startup_refusals(backend: Backend) {
          not started: grant `output` is not in the run's configuration\n",
     );
 
-    let launcher_source = dir.path().join("host.c");
-    let launcher = dir.path().join("host");
-    std::fs::write(&launcher_source, include_str!("deny_openat2.c")).unwrap();
-    command(
-        Command::new(options.link.driver())
-            .args(["-std=c11", "-O0"])
-            .arg(&launcher_source)
-            .arg("-o")
-            .arg(&launcher),
-    )
-    .unwrap();
-    options.output = dir.path().join("unavailable-dir");
-    options.directories = vec![effects.display().to_string()];
-    options.grant_mask = 1 << 4;
-    let built = product.build(&entry, &options).unwrap();
-    assert_not_started(
-        &Command::new(&launcher)
-            .arg(built.executable)
-            .output()
-            .unwrap(),
-        "not started: Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
-    );
-    assert_eq!(std::fs::read_dir(&effects).unwrap().count(), 0);
+    // Only Linux exposes openat2 and allows its denial via seccomp.
+    let launcher = match crate::host::HOST_TARGET.os() {
+        hirsel_core_layout::Os::Linux => {
+            let launcher_source = dir.path().join("host.c");
+            let launcher = dir.path().join("host");
+            std::fs::write(&launcher_source, include_str!("deny_openat2.c")).unwrap();
+            command(
+                Command::new(options.link.driver())
+                    .args(["-std=c11", "-O0"])
+                    .arg(&launcher_source)
+                    .arg("-o")
+                    .arg(&launcher),
+            )
+            .unwrap();
+            options.output = dir.path().join("unavailable-dir");
+            options.directories = vec![effects.display().to_string()];
+            options.grant_mask = 1 << 4;
+            let built = product.build(&entry, &options).unwrap();
+            assert_not_started(
+                &Command::new(&launcher).arg(built.executable).output().unwrap(),
+                "not started: Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
+            );
+            assert_eq!(std::fs::read_dir(&effects).unwrap().count(), 0);
+            Some(launcher)
+        }
+        hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => None,
+    };
 
     let source = r#"pub fn main(output: Stdout) -> Result[(), Exit] waits {
         result.unwrap(stdout.write(output, "entered\n"));
@@ -150,10 +154,10 @@ fn startup_refusals(backend: Backend) {
     options.root_limit = 288;
     options.output = dir.path().join("no-dir");
     let built = product.build(&entry, &options).unwrap();
-    let output = Command::new(&launcher)
-        .arg(&built.executable)
-        .output()
-        .unwrap();
+    let output = match &launcher {
+        Some(launcher) => Command::new(launcher).arg(&built.executable).output(),
+        None => Command::new(&built.executable).output(),
+    }.unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(output.stdout, b"entered\n");
     assert!(output.stderr.is_empty());
@@ -175,20 +179,22 @@ fn startup_refusals(backend: Backend) {
 
     // A recording opens its tape beneath the tape's directory, so the same
     // host refuses it by name before main, and writes no tape.
-    options.runtime = env_record_runtime();
-    options.recording = true;
-    options.output = dir.path().join("no-dir-recorded");
-    let built = product.build(&entry, &options).unwrap();
-    let tape = effects.join("run.tape");
-    assert_not_started(
-        &Command::new(&launcher)
-            .arg(built.executable)
-            .env("HIRSEL_RECORD", &tape)
-            .output()
-            .unwrap(),
-        "tape: the tape directory requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
-    );
-    assert_eq!(std::fs::read_dir(effects).unwrap().count(), 0);
+    if let Some(launcher) = launcher {
+        options.runtime = env_record_runtime();
+        options.recording = true;
+        options.output = dir.path().join("no-dir-recorded");
+        let built = product.build(&entry, &options).unwrap();
+        let tape = effects.join("run.tape");
+        assert_not_started(
+            &Command::new(launcher)
+                .arg(built.executable)
+                .env("HIRSEL_RECORD", &tape)
+                .output()
+                .unwrap(),
+            "tape: the tape directory requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
+        );
+        assert_eq!(std::fs::read_dir(effects).unwrap().count(), 0);
+    }
 }
 #[test]
 #[ignore = "explicit native integration target"]

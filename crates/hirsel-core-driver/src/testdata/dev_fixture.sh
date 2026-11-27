@@ -30,7 +30,9 @@ ln -s ../../store "$workspace/libraries/programs/store"
 # The copies keep the inputs' read-only mode under remote execution: replace
 # the manifest rather than write through it.
 manifest="$workspace/runner/hirsel.toml"
-sed '/^\[sources\]$/a "dev_place.hirsel" = "runner"' "$manifest" > "$manifest.new"
+sed '/^\[sources\]$/a\
+"dev_place.hirsel" = "runner"
+' "$manifest" > "$manifest.new"
 printf '\n[program]\nmodule = "runner"\nfunction = "dev_fixture"\n' >> "$manifest.new"
 rm -f "$manifest"; mv "$manifest.new" "$manifest"
 chmod -R u+w "$workspace"

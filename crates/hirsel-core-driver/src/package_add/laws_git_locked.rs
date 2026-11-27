@@ -130,7 +130,7 @@ fn l34_locked_builds_use_the_commit() {
     assert_eq!(server.log(), only_c1);
 
     // 4. W without X: X is refilled from the commit through fixture.test/wrap@1's source.
-    let x = law.path(&format!("s/{}", PACKAGE_X.strip_prefix("sha256:").unwrap()));
+    let x = law.path(&package_entry("s", PACKAGE_X));
     if x.is_dir() {
         fs::remove_dir_all(&x).unwrap();
     } else {

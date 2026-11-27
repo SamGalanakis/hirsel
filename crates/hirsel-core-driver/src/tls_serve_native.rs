@@ -791,11 +791,6 @@ mod tls_serve_laws {
         bytes[bytes.len() - 32..].to_vec()
     }
 
-    /// Every readable mapping of the run, searched for `needle`.
-    fn hits(pid: u32, needle: &[u8]) -> usize {
-        crate::host::child_memory_hits(pid, needle)
-    }
-
     #[test]
     fn tl20_the_key_never_leaves_the_provider() {
         for backend in BACKENDS {
@@ -818,11 +813,12 @@ mod tls_serve_laws {
             assert_eq!(server.until("accept "), "accept none");
             // Echoed and parked on stdin, still holding both halves.
             assert_eq!(server.until("echo "), "echo tls-echo-20");
-            let found = hits(server.child.id(), document);
-            match expected {
-                // The sealed store only: TLS-9 parses in place.
-                Some(n) => assert_eq!(found, n, "the PKCS#8 document outside its sealed store"),
-                None => assert!(found >= 2, "the scan missed the Dir copy: {found}"),
+            if let Some(found) = crate::host::child_memory_hits(server.child.id(), document) {
+                match expected {
+                    // The sealed store only: TLS-9 parses in place.
+                    Some(n) => assert_eq!(found, n, "the PKCS#8 document outside its sealed store"),
+                    None => assert!(found >= 2, "the scan missed the Dir copy: {found}"),
+                }
             }
             client.join().unwrap();
             let lines = server.finish().join("\n");

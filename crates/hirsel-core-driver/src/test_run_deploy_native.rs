@@ -174,9 +174,9 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let tests = json["tests"].as_array().unwrap();
     assert_eq!(tests.len(), 2);
-    assert_eq!(tests[0]["definition"], "app@1/main/granted");
+    assert_eq!(tests[0]["definition"], "local/app@1/main/granted");
     assert_eq!(tests[0]["passed"], false);
-    assert_eq!(tests[1]["definition"], "app@1/main/ungranted");
+    assert_eq!(tests[1]["definition"], "local/app@1/main/ungranted");
     assert_eq!(tests[1]["passed"], true);
     assert!(
         stdout.contains(

@@ -157,7 +157,7 @@ mod tests {
     }
 
     /// Two builds of one source whose links differ, here only in their build
-    /// ID, are one compiler: products are keyed by what the compiler is, not
+    /// ID or Mach-O UUID, are one compiler: products are keyed by what the compiler is, not
     /// by its link (docs/building.md, "Compiler identity").
     #[test]
     fn a_link_id_is_not_the_compiler() {
@@ -168,14 +168,14 @@ mod tests {
         let (a, b) = (dir.path().join("a"), dir.path().join("b"));
         let mut bytes = std::fs::read(&driver).unwrap();
         std::fs::write(&a, &bytes).unwrap();
-        let id = {
+        let (id, sign) = {
             use object::Object as _;
-            object::File::parse(&*bytes)
-                .unwrap()
-                .build_id()
-                .unwrap()
-                .unwrap()
-                .to_vec()
+            let file = object::File::parse(&*bytes).unwrap();
+            if let Some(id) = file.build_id().unwrap() {
+                (id.to_vec(), false)
+            } else {
+                (file.mach_uuid().unwrap().unwrap().to_vec(), true)
+            }
         };
         let at = bytes.windows(id.len()).position(|w| w == id).unwrap();
         bytes[at] ^= 0xff;
@@ -183,6 +183,18 @@ mod tests {
         for path in [&a, &b] {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if sign {
+            let out = Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&b)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         let link = |path| {
             crate::reuse::executable_identity(&mut std::fs::File::open(path).unwrap()).unwrap()

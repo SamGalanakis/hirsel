@@ -921,7 +921,6 @@ name = "hirsel-core-contained"
 version = "0.1.0"
 dependencies = [
  "cranelift-codegen 0.135.10",
- "hirsel-core-layout",
  "hirsel-guard",
  "rustix",
  "sha2 0.11.1",

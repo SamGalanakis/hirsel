@@ -1,6 +1,6 @@
-use crate::release_recipe::{Backend, GrantBinding, GrantKind, Launch};
-use crate::snapshot::Snapshot;
-use crate::{FuncId, StepFree, source, text};
+use super::Snapshot;
+use hirsel_core_ir::release_recipe::{Backend, GrantBinding, GrantKind, Launch};
+use hirsel_core_ir::{FuncId, StepFree, decode, normal, source, text};
 use hirsel_core_layout::{Layout, Target};
 use serde_json::Value;
 
@@ -97,13 +97,12 @@ fn checked_snapshot_preserves_recipes_control_flow_and_sites() {
     let annex = decoded.manifest.definitions[0].as_ref().unwrap();
     assert_eq!(annex.instance.definition.to_string(), "app@1/main/run");
     assert_eq!(annex.source.instructions[0].as_ref().unwrap().column, 5);
-    let normal = crate::normal::encode(&module, FuncId(0));
+    let normal = normal::encode(&module, FuncId(0));
     assert_eq!(annex.body, normal.hash());
-    let canonical =
-        crate::normal::decode(&normal.bytes, &crate::decode::Debit::unlimited()).unwrap();
+    let canonical = normal::decode(&normal.bytes, &decode::Debit::unlimited()).unwrap();
     assert_eq!(
         canonical
-            .identity(FuncId(0), &crate::decode::Debit::unlimited())
+            .identity(FuncId(0), &decode::Debit::unlimited())
             .unwrap(),
         annex.instance
     );

@@ -1,8 +1,7 @@
 use super::*;
 
 /// The canonical encoding and its root's source annex, in canonical order.
-#[cfg(any(test, feature = "snapshot"))]
-pub(crate) fn encode_with_root_annex(
+pub fn encode_with_root_annex(
     module: &Module,
     root: FuncId,
     sources: &SourcePositions<'_>,

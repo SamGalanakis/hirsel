@@ -2,14 +2,14 @@
 //! The wire keeps linked row numbers and pools. FORM text and PROG-10 each
 //! project a different part of this data and can be read by their own tools.
 
-use crate::normal::{self, FunctionAnnex};
-use crate::release_recipe::Launch;
-use crate::source::SourceMap;
-use crate::{FuncId, Identity, Inst, Module};
 use hirsel_core_ids::ContentHash;
+use hirsel_core_ir::normal::{self, FunctionAnnex};
+use hirsel_core_ir::release_recipe::Launch;
+use hirsel_core_ir::source::SourceMap;
+use hirsel_core_ir::{FuncId, Identity, Inst, LayoutQuery, Module, text, wf};
 use hirsel_core_layout::{RecipeRow, Target};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::io::Write;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 enum Format {
@@ -18,7 +18,7 @@ enum Format {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ByteOrder {
+enum ByteOrder {
     Little,
 }
 
@@ -26,70 +26,70 @@ pub enum ByteOrder {
 /// with the snapshot, independently of the PROG-10 normal form.
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Layout {
-    pub target: String,
-    pub byte_order: ByteOrder,
-    pub recipes: Vec<RecipeRow>,
+struct Layout {
+    target: String,
+    byte_order: ByteOrder,
+    recipes: Vec<RecipeRow>,
 }
 
 /// One definition, at the corresponding index of the linked function table.
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Definition {
-    pub instance: Identity,
-    pub code: ContentHash,
+struct Definition {
+    instance: Identity,
+    code: ContentHash,
     /// Hash of this root's PROG-10 canonical encoding.
-    pub body: ContentHash,
+    body: ContentHash,
     /// Sites and hints in the canonical encoding's root body order.
-    pub source: FunctionAnnex,
+    source: FunctionAnnex,
     /// Physical values of raw LayoutConst instructions, in instruction order.
-    pub layout_constants: Vec<(usize, u64)>,
+    layout_constants: Vec<(usize, u64)>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Manifest {
-    pub normal_version: u16,
-    pub text: ContentHash,
+struct Manifest {
+    normal_version: u16,
+    text: ContentHash,
     /// Identifies the layout used by every row in definitions.
-    pub layout: ContentHash,
-    pub definitions: Vec<Option<Definition>>,
+    layout: ContentHash,
+    definitions: Vec<Option<Definition>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Snapshot {
+pub(super) struct Snapshot {
     format: Format,
-    pub roots: Vec<FuncId>,
-    pub module: Module,
-    pub external_call_sites: bool,
-    pub law_observation: bool,
+    roots: Vec<FuncId>,
+    pub(super) module: Module,
+    external_call_sites: bool,
+    law_observation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub store_teardown: bool,
+    store_teardown: bool,
     /// A coverage build's scope (`docs/coverage.md`); absent otherwise, so a
     /// plain snapshot keeps its bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<crate::coverage::Scope>,
+    coverage: Option<hirsel_core_ir::coverage::Scope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coverage_rebound: Option<crate::coverage::Rebound>,
+    coverage_rebound: Option<hirsel_core_ir::coverage::Rebound>,
     /// Configured release launch, when one was supplied. A source extraction has
     /// no configured launch or live grant handles.
-    pub launch: Option<Launch>,
-    pub layout: Layout,
-    pub item_sites: Vec<u64>,
-    pub manifest: Manifest,
+    launch: Option<Launch>,
+    layout: Layout,
+    item_sites: Vec<u64>,
+    manifest: Manifest,
 }
 
 impl Snapshot {
     /// Capture the linked module before the native-only transformations.
-    pub fn capture(
+    pub(super) fn capture(
         module: Module,
         roots: Vec<FuncId>,
         target: Target,
         launch: Option<Launch>,
         sources: &SourceMap,
     ) -> Result<Self, String> {
-        crate::wf::module(&module)?;
+        wf::module(&module)?;
         if roots.is_empty()
             || roots.iter().any(|root| {
                 module
@@ -122,13 +122,12 @@ impl Snapshot {
             .map(|(index, row)| {
                 let instructions = &row.body.as_ref()?.insts;
                 let function = FuncId(index as u32);
-                let (body, source) =
-                    normal::retained::encode_with_root_annex(&module, function, &positions);
+                let (body, source) = normal::encode_with_root_annex(&module, function, &positions);
                 let layout_constants = instructions
                     .iter()
                     .enumerate()
                     .filter_map(|(index, instruction)| match instruction {
-                        Inst::LayoutConst { query, .. } if *query != crate::LayoutQuery::Target => {
+                        Inst::LayoutConst { query, .. } if *query != LayoutQuery::Target => {
                             Some((index, query.native(&module.types, &layout.recipes)))
                         }
                         _ => None,
@@ -146,7 +145,7 @@ impl Snapshot {
         let layout_bytes = serde_json::to_vec(&layout).map_err(|error| error.to_string())?;
         let manifest = Manifest {
             normal_version: normal::VERSION,
-            text: ContentHash::of_bytes(crate::text::print(&module).as_bytes()),
+            text: ContentHash::of_bytes(text::print(&module).as_bytes()),
             layout: ContentHash::of_parts("hirsel.snapshot-layout.v1", [&layout_bytes[..]]),
             definitions,
         };
@@ -166,13 +165,14 @@ impl Snapshot {
         })
     }
 
-    pub fn write(&self, output: impl Write) -> serde_json::Result<()> {
+    pub(super) fn write(&self, output: impl Write) -> serde_json::Result<()> {
         serde_json::to_writer(output, self)
     }
 
     /// Read the structural wire. Compare with the checked input before using an
     /// external snapshot as a proof input. Deserialization alone checks schema.
-    pub fn read(input: impl Read) -> serde_json::Result<Self> {
+    #[cfg(test)]
+    pub(super) fn read(input: impl std::io::Read) -> serde_json::Result<Self> {
         let mut snapshot: Self = serde_json::from_reader(input)?;
         snapshot.module.external_call_sites = snapshot.external_call_sites;
         snapshot.module.law_observation = snapshot.law_observation;
@@ -184,11 +184,11 @@ impl Snapshot {
     }
 
     /// Print decoded IR with the independent FORM printer.
-    pub fn print(&self) -> String {
-        crate::text::print(&self.module)
+    #[cfg(test)]
+    pub(super) fn print(&self) -> String {
+        text::print(&self.module)
     }
 }
 
 #[cfg(test)]
-#[path = "tests/snapshot.rs"]
 mod tests;

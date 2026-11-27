@@ -8,7 +8,7 @@ use hirsel_core_contained::wasmtime::Engine;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::address::{contained_address, foreign_address};
 use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf};
-use hirsel_core_layout::Target;
+use hirsel_core_layout::{Arch, Target, isa::X86_64_BASE};
 use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -49,8 +49,14 @@ fn engine(target: Target) -> Result<&'static Engine, AdmissionError> {
     if let Some(engine) = engines.get(target.triple()) {
         return Ok(engine);
     }
-    let engine = compile::engine(target)
-        .map_err(|error| AdmissionError::Refused(format!("FFI-15: {error}")))?;
+    // SAFETY: These flags select the native backend's baseline for each target.
+    let engine = unsafe {
+        match target.arch() {
+            Arch::X86_64 => compile::engine(target.triple(), X86_64_BASE.cranelift_features()),
+            Arch::Aarch64 => compile::engine(target.triple(), []),
+        }
+    }
+    .map_err(|error| AdmissionError::Refused(format!("FFI-15: {error}")))?;
     let engine = &*Box::leak(Box::new(engine));
     engines.insert(target.triple(), engine);
     Ok(engine)

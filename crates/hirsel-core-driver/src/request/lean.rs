@@ -31,6 +31,7 @@ mod checks;
 mod coreir;
 mod expr;
 mod probe;
+mod snapshot;
 mod stmt;
 mod syntax;
 

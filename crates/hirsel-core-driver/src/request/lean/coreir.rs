@@ -1,5 +1,5 @@
-use super::{CheckProduct, DefPath, R};
-use hirsel_core_ir::{FuncId, Identity, snapshot::Snapshot};
+use super::{CheckProduct, DefPath, R, snapshot::Snapshot};
+use hirsel_core_ir::{FuncId, Identity};
 use hirsel_core_layout::Target;
 use std::collections::BTreeMap;
 

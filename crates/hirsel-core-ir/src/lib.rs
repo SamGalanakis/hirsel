@@ -1139,8 +1139,6 @@ pub mod normal;
 pub mod release_recipe;
 pub mod returnable;
 pub mod roles;
-#[cfg(any(test, feature = "snapshot"))]
-pub mod snapshot;
 pub mod source;
 pub mod static_data;
 pub mod step_contexts;

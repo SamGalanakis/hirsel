@@ -63,7 +63,7 @@ mod results;
 use results::results;
 mod charge;
 pub(crate) mod retained;
-pub use retained::RetainedSites;
+pub use retained::{RetainedSites, encode_with_root_annex};
 pub use retained::{assembly_module, prepare_retained_assembly, retain, retained_annex};
 mod annex;
 pub(crate) mod wire;

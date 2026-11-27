@@ -12,7 +12,6 @@
     "hirsel-core-rt/memcheck": "test-only",
     "hirsel-core-rt/allocation-count": "test-only",
     "hirsel-core-ir/wf": "runtime-option",
-    "hirsel-core-ir/snapshot": "runtime-option",
     "hirsel-core-rt/mimalloc": "runtime-option",
     "hirsel-core-rt/charge-observation": "runtime-option",
     "hirsel-core-rt/prof": "runtime-option",

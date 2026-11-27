@@ -27,6 +27,8 @@ enum Class {
 const CRATES: &[(&str, Class)] = &[
     ("hirsel-guard", Class::LeafUtility),
     ("hirsel-stack", Class::LeafUtility),
+    // Wasmtime artifact utility. The driver supplies the target's ISA baseline.
+    ("hirsel-core-contained", Class::LeafUtility),
     ("hirsel-intern", Class::Data),
     ("hirsel-core-ids", Class::Data),
     ("hirsel-core-diag", Class::Data),
@@ -37,6 +39,8 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-tape-format", Class::Data),
     // The `.hirsel-mod` format and the import row table.
     ("hirsel-mod", Class::Data),
+    // The runtime observation stream format shared by its writer and readers.
+    ("hirsel-observation-format", Class::Data),
     // The `Compiler` service's supervisor: a pack host links it and no compiler.
     ("hirsel-compiler", Class::Implementation),
     // The code loader: a pack host links it to run the modules a worker built.
@@ -49,12 +53,14 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-cranelift", Class::Implementation),
     ("hirsel-llvm", Class::Implementation),
     ("hirsel-llvm-lazy", Class::Implementation),
-    // The reference evaluator: the pure core and the test world, the oracle the
-    // backends and the front run cases are compared against.
+    // The evaluator runs compile-time constants. Its test world is the oracle
+    // for backend and front-end cases.
     ("hirsel-core-eval", Class::Implementation),
     // Native profiles: samples, symbolization and the profile store.
     ("hirsel-prof", Class::Implementation),
     ("hirsel-core-driver", Class::Wiring),
+    // The shipped Exec helper is a composition root for the runtime.
+    ("hirsel-exec-helper", Class::Wiring),
     ("hirsel-core-contract-eval", Class::Tool),
     ("hirsel-core-program-tests", Class::Tool),
 ];
@@ -101,6 +107,8 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-ir"
                 | "hirsel-core-layout"
                 | "hirsel-core-net"
+                | "hirsel-core-contained"
+                | "hirsel-core-eval"
                 | "hirsel-tape-format"
                 | "hirsel-mod"
                 | "hirsel-intern"
@@ -111,7 +119,11 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         ),
         _ if from == "hirsel-core-materialize" => matches!(
             to,
-            "hirsel-core-front" | "hirsel-core-ids" | "hirsel-core-ir" | "hirsel-guard"
+            "hirsel-core-front"
+                | "hirsel-core-ids"
+                | "hirsel-core-ir"
+                | "hirsel-core-layout"
+                | "hirsel-guard"
         ),
         _ if from == "hirsel-core-resolve" => matches!(
             to,

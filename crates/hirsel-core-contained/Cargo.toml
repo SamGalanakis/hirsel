@@ -7,13 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-compile = ["dep:cranelift-codegen", "dep:hirsel-core-layout", "dep:sha2", "dep:wasmparser", "wasmtime/cranelift"]
+compile = ["dep:cranelift-codegen", "dep:sha2", "dep:wasmparser", "wasmtime/cranelift"]
 load = ["dep:rustix", "dep:wasmtime-internal-jit-icache-coherence", "wasmtime/runtime", "wasmtime/async"]
 
 [dependencies]
 wasmtime = { version = "=48.0.10", default-features = false, features = ["std"] }
 cranelift-codegen = { version = "=0.135.10", default-features = false, features = ["x86", "arm64"], optional = true }
-hirsel-core-layout = { path = "../hirsel-core-layout", optional = true }
 sha2 = { version = "0.11", optional = true }
 wasmparser = { version = "=0.254.2", default-features = false, features = ["validate", "features", "simd", "std"], optional = true }
 
